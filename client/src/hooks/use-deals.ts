@@ -127,6 +127,10 @@ export interface Deal {
   billingContactEmail?: string | null;
   billingContactPhone?: string | null;
   billingContactCompany?: string | null;
+  billingContactAddress?: string | null;
+  billingContactCity?: string | null;
+  billingContactState?: string | null;
+  billingContactZip?: string | null;
   ddEstimate: string | null;
   ddEstimateOverridden?: boolean | null;
   bidEstimate: string | null;

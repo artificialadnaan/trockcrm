@@ -14,7 +14,17 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 
-const emptyNewC = { firstName: "", lastName: "", email: "", phone: "", jobTitle: "" };
+const emptyNewC = {
+  firstName: "",
+  lastName: "",
+  email: "",
+  phone: "",
+  jobTitle: "",
+  address: "",
+  city: "",
+  state: "",
+  zip: "",
+};
 type Suggestion = { id: string; firstName: string; lastName: string; email: string | null; companyName: string | null; matchReason?: string; isActive?: boolean };
 
 export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { deal: DealDetail; onDealUpdated: () => void; canEdit: boolean; officeId?: string | null }) {
@@ -34,6 +44,10 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
   const [createError, setCreateError] = useState<string | null>(null);
   const [assignError, setAssignError] = useState<string | null>(null);
+  // Per-field validation errors for state/ZIP. The main CRM contact form rejects these client-side (state is a
+  // 2-char column, zip a 10-char column) — this inline dialog must too, or a full state name / overlong ZIP
+  // sails through to a raw DB write error that blocks creation with no actionable message (Codex P2).
+  const [fieldErrors, setFieldErrors] = useState<{ state?: string; zip?: string }>({});
   // Linked CRM company for the add-contact dialog (chosen via CompanySelector, which also supports adding a
   // new company inline). null = no company. Replaces the old free-text company field.
   const [companyId, setCompanyId] = useState<string | null>(null);
@@ -91,7 +105,7 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
     );
   };
 
-  const closeDialog = () => { setDialogOpen(false); setNewC(emptyNewC); setCompanyId(null); setCompanyName(null); setCompanyPending(false); setCompanyCreating(false); ++companySeq.current; setSuggestions([]); setCreateError(null); };
+  const closeDialog = () => { setDialogOpen(false); setNewC(emptyNewC); setCompanyId(null); setCompanyName(null); setCompanyPending(false); setCompanyCreating(false); ++companySeq.current; setSuggestions([]); setCreateError(null); setFieldErrors({}); };
 
   const buildInput = () => ({
     firstName: newC.firstName.trim(),
@@ -99,10 +113,31 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
     email: newC.email.trim() || null,
     phone: newC.phone.trim() || null,
     jobTitle: newC.jobTitle.trim() || null,
+    address: newC.address.trim() || null,
+    city: newC.city.trim() || null,
+    state: newC.state.trim().toUpperCase() || null,
+    zip: newC.zip.trim() || null,
     companyId: companyId || undefined,
     companyName: companyName ?? undefined,
     category: "client",
   });
+
+  // Mirrors the main contact form's rules so the same values that form accepts pass here (and the same ones it
+  // rejects are rejected here) — state uppercases to exactly two letters, zip is 5 or 5+4 digits. Empty is fine;
+  // both fields are optional.
+  const validate = () => {
+    const errs: { state?: string; zip?: string } = {};
+    const state = newC.state.trim();
+    if (state && !/^[A-Z]{2}$/.test(state.toUpperCase())) {
+      errs.state = "State must be exactly 2 uppercase letters";
+    }
+    const zip = newC.zip.trim();
+    if (zip && !/^\d{5}(-\d{4})?$/.test(zip)) {
+      errs.zip = "ZIP must be 5 digits or 5+4 format (e.g. 75201 or 75201-1234)";
+    }
+    setFieldErrors(errs);
+    return Object.keys(errs).length === 0;
+  };
 
   // The first attempt runs WITH dedup (skipDedupCheck: false) so a look-alike active CRM contact surfaces as a
   // pickable suggestion instead of becoming a silent duplicate. Only "Create anyway" (force) re-runs with the
@@ -110,6 +145,7 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
   // and surfaced. Editing any field clears the stale suggestions so a forced create can't reuse an unreviewed
   // payload.
   const handleCreate = async (force = false) => {
+    if (!validate()) return;
     setCreating(true);
     setCreateError(null);
     try {
@@ -129,27 +165,39 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
     }
   };
 
-  const field = (name: keyof typeof emptyNewC, label: string, type = "text") => (
-    <div>
-      <label className="block text-xs font-medium text-slate-600 mb-1">{label}</label>
-      <input
-        type={type}
-        name={name}
-        value={newC[name]}
-        // Locked while a create is in flight so the user can't edit a payload out from under a pending dedup
-        // check and then force-create unreviewed values (Codex P2).
-        disabled={creating}
-        onChange={(e) => {
-          const value = e.target.value;
-          setNewC((prev) => ({ ...prev, [name]: value }));
-          // A changed payload invalidates the warned-about duplicate set, so drop it (a later Save re-checks).
-          setSuggestions([]);
-          setCreateError(null);
-        }}
-        className="w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm disabled:bg-slate-50"
-      />
-    </div>
-  );
+  const field = (name: keyof typeof emptyNewC, label: string, opts: { type?: string } = {}) => {
+    const error = name === "state" || name === "zip" ? fieldErrors[name] : undefined;
+    return (
+      <div>
+        <label className="block text-xs font-medium text-slate-600 mb-1">{label}</label>
+        <input
+          type={opts.type ?? "text"}
+          name={name}
+          value={newC[name]}
+          // Locked while a create is in flight so the user can't edit a payload out from under a pending dedup
+          // check and then force-create unreviewed values (Codex P2).
+          disabled={creating}
+          onChange={(e) => {
+            const value = e.target.value;
+            setNewC((prev) => ({ ...prev, [name]: value }));
+            // A changed payload invalidates the warned-about duplicate set, so drop it (a later Save re-checks).
+            setSuggestions([]);
+            setCreateError(null);
+            // Drop any stale validation error for the edited field so a fixed value doesn't keep showing red.
+            setFieldErrors((prev) => (prev.state || prev.zip ? { ...prev, [name]: undefined } : prev));
+          }}
+          className={`w-full rounded-md border px-2 py-1.5 text-sm disabled:bg-slate-50 ${error ? "border-red-400" : "border-slate-300"}`}
+        />
+        {error ? <p className="mt-1 text-xs text-red-600">{error}</p> : null}
+      </div>
+    );
+  };
+
+  const billingAddress = [
+    deal.billingContactAddress,
+    [deal.billingContactCity, deal.billingContactState].filter(Boolean).join(", "),
+    deal.billingContactZip,
+  ].filter(Boolean).join(", ");
 
   return (
     <div className="space-y-6">
@@ -162,6 +210,7 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
             {deal.billingContactTitle ? <div className="text-slate-500">{deal.billingContactTitle}</div> : null}
             {deal.billingContactEmail ? <div className="text-slate-500">{deal.billingContactEmail}</div> : null}
             {deal.billingContactPhone ? <div className="text-slate-500">{deal.billingContactPhone}</div> : null}
+            {billingAddress ? <div className="mt-1 text-slate-500">{billingAddress}</div> : null}
           </div>
         ) : (
           <p className="mt-2 text-sm text-amber-700">No billing contact assigned yet — add one before this deal closes.</p>
@@ -200,7 +249,7 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
             <button
               type="button"
               disabled={saving}
-              onClick={() => { setNewC(emptyNewC); setCompanyId(null); setCompanyName(null); setCompanyPending(false); setCompanyCreating(false); ++companySeq.current; setSuggestions([]); setCreateError(null); setDialogOpen(true); }}
+              onClick={() => { setNewC(emptyNewC); setCompanyId(null); setCompanyName(null); setCompanyPending(false); setCompanyCreating(false); ++companySeq.current; setSuggestions([]); setCreateError(null); setFieldErrors({}); setDialogOpen(true); }}
               className="text-xs text-blue-600 hover:underline"
             >
               + Add new contact
@@ -234,16 +283,33 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
       </section>
 
       <Dialog open={dialogOpen} onOpenChange={(open) => { if (!open) closeDialog(); else setDialogOpen(true); }}>
-        <DialogContent>
+        {/* Cap the height and scroll: the billing-address block makes this dialog tall enough to push the
+            footer (Save/Cancel) off short/mobile viewports, and the shared DialogContent only constrains
+            width (Codex P2). */}
+        <DialogContent className="max-h-[85vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>Add new contact</DialogTitle>
           </DialogHeader>
           <div className="space-y-3 py-2">
             {field("firstName", "First name *")}
             {field("lastName", "Last name *")}
-            {field("email", "Email", "email")}
-            {field("phone", "Phone", "tel")}
+            {field("email", "Email", { type: "email" })}
+            {field("phone", "Phone", { type: "tel" })}
             {field("jobTitle", "Job title")}
+            <div className="border-t border-slate-100 pt-3">
+              <p className="text-xs font-semibold text-slate-700">Billing address</p>
+              <div className="mt-2 space-y-3">
+                {field("address", "Street address")}
+                <div className="grid grid-cols-2 gap-3">
+                  {field("city", "City")}
+                  {/* No maxLength cap: the browser truncates before validate() runs, so a pasted full name
+                      like "Texas" would silently become an accepted "TE". Let the full value reach validate()
+                      and reject it there (Codex P2). */}
+                  {field("state", "State")}
+                </div>
+                {field("zip", "ZIP")}
+              </div>
+            </div>
             <div>
               <label className="block text-xs font-medium text-slate-600 mb-1">Company</label>
               {/* Query CRM companies (with inline add-new), same selector the deal/lead forms use — instead of

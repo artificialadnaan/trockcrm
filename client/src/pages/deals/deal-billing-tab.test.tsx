@@ -17,9 +17,11 @@ vi.mock("@/components/files/file-upload-zone", () => ({ FileUploadZone: () => <d
 vi.mock("@/components/companies/company-selector", () => ({ CompanySelector: () => <div data-testid="company-selector" /> }));
 
 const dealNoBilling = { id: "deal-1", billingContactId: null, billingContactName: null,
-  billingContactEmail: null, billingContactPhone: null, billingContactCompany: null, billingContactTitle: null };
+  billingContactEmail: null, billingContactPhone: null, billingContactCompany: null, billingContactTitle: null,
+  billingContactAddress: null, billingContactCity: null, billingContactState: null, billingContactZip: null };
 const dealWithBilling = { ...dealNoBilling, billingContactId: "c-9", billingContactName: "Jane Doe",
-  billingContactEmail: "jane@acme.com", billingContactPhone: "555-1212", billingContactCompany: "Acme AP", billingContactTitle: "AP Lead" };
+  billingContactEmail: "jane@acme.com", billingContactPhone: "555-1212", billingContactCompany: "Acme AP", billingContactTitle: "AP Lead",
+  billingContactAddress: "100 Billing Way", billingContactCity: "Dallas", billingContactState: "TX", billingContactZip: "75201" };
 
 async function render(deal: unknown, onDealUpdated = vi.fn(), canEdit = true, officeId: string | null = null) {
   const container = document.createElement("div");
@@ -60,6 +62,7 @@ describe("DealBillingTab", () => {
     expect(container.textContent).toContain("Jane Doe");
     expect(container.textContent).toContain("jane@acme.com");
     expect(container.textContent).toContain("Acme AP");
+    expect(container.textContent).toContain("100 Billing Way, Dallas, TX, 75201");
   });
 
   it("adding a new contact inline creates it then assigns it to the deal", async () => {
@@ -77,17 +80,101 @@ describe("DealBillingTab", () => {
     expect(document.querySelector("[data-testid='company-selector']")).toBeTruthy();
     const first = document.querySelector("input[name='firstName']") as HTMLInputElement;
     const last = document.querySelector("input[name='lastName']") as HTMLInputElement;
-    await act(async () => { setValue(first, "Pat"); setValue(last, "Payer"); });
+    const address = document.querySelector("input[name='address']") as HTMLInputElement;
+    const city = document.querySelector("input[name='city']") as HTMLInputElement;
+    const state = document.querySelector("input[name='state']") as HTMLInputElement;
+    const zip = document.querySelector("input[name='zip']") as HTMLInputElement;
+    await act(async () => {
+      setValue(first, "Pat"); setValue(last, "Payer");
+      setValue(address, "100 Billing Way"); setValue(city, "Dallas"); setValue(state, "tx"); setValue(zip, "75201");
+    });
     const save = Array.from(document.querySelectorAll("button")).find((b) => b.textContent?.includes("Save")) as HTMLButtonElement;
     await act(async () => { save.click(); });
     await act(async () => { await Promise.resolve(); });
     await act(async () => { await Promise.resolve(); });
-    expect(mocks.apiMock).toHaveBeenCalledWith("/contacts", expect.objectContaining({ method: "POST" }));
+    expect(mocks.apiMock).toHaveBeenCalledWith(
+      "/contacts",
+      expect.objectContaining({
+        method: "POST",
+        json: expect.objectContaining({ address: "100 Billing Way", city: "Dallas", state: "TX", zip: "75201" }),
+      })
+    );
     expect(mocks.apiMock).toHaveBeenCalledWith(
       expect.stringContaining("/deals/deal-1"),
       expect.objectContaining({ method: "PATCH", json: expect.objectContaining({ billingContactId: "c-new" }) }),
     );
     expect(onDealUpdated).toHaveBeenCalled();
+  });
+
+  it("rejects a non-2-letter state before POSTing the contact (matches the DB char(2) column)", async () => {
+    const onDealUpdated = vi.fn();
+    const { container } = await render(dealNoBilling, onDealUpdated);
+    (Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.includes("Add new contact")) as HTMLButtonElement).click();
+    await act(async () => { await Promise.resolve(); });
+    const stateInput = document.querySelector("input[name='state']") as HTMLInputElement;
+    // The state field must NOT cap length: a maxLength would let the browser truncate "Texas" to "Te" before
+    // validate() runs, which then uppercases to an accepted "TE" and defeats this check (Codex P2). maxLength
+    // is -1 (unset) in the DOM.
+    expect(stateInput.maxLength).toBe(-1);
+    await act(async () => {
+      setValue(document.querySelector("input[name='firstName']") as HTMLInputElement, "Pat");
+      setValue(document.querySelector("input[name='lastName']") as HTMLInputElement, "Payer");
+      setValue(stateInput, "Texas"); // full name, not a 2-letter code
+    });
+    mocks.apiMock.mockClear();
+    await act(async () => { (Array.from(document.querySelectorAll("button")).find((b) => b.textContent === "Save") as HTMLButtonElement).click(); });
+    await act(async () => { await Promise.resolve(); });
+    // No contact is created — the dialog rejects the value up front instead of letting the DB error on write.
+    expect(mocks.apiMock).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain("State must be exactly 2 uppercase letters");
+    expect(onDealUpdated).not.toHaveBeenCalled();
+  });
+
+  it("rejects a malformed ZIP before POSTing the contact (matches the DB varchar(10) column)", async () => {
+    const onDealUpdated = vi.fn();
+    const { container } = await render(dealNoBilling, onDealUpdated);
+    (Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.includes("Add new contact")) as HTMLButtonElement).click();
+    await act(async () => { await Promise.resolve(); });
+    await act(async () => {
+      setValue(document.querySelector("input[name='firstName']") as HTMLInputElement, "Pat");
+      setValue(document.querySelector("input[name='lastName']") as HTMLInputElement, "Payer");
+      setValue(document.querySelector("input[name='zip']") as HTMLInputElement, "7520123456789"); // overlong / malformed
+    });
+    mocks.apiMock.mockClear();
+    await act(async () => { (Array.from(document.querySelectorAll("button")).find((b) => b.textContent === "Save") as HTMLButtonElement).click(); });
+    await act(async () => { await Promise.resolve(); });
+    expect(mocks.apiMock).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain("ZIP must be 5 digits or 5+4 format");
+    expect(onDealUpdated).not.toHaveBeenCalled();
+  });
+
+  it("clears a validation error once the offending field is corrected", async () => {
+    const { container } = await render(dealNoBilling);
+    (Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.includes("Add new contact")) as HTMLButtonElement).click();
+    await act(async () => { await Promise.resolve(); });
+    await act(async () => {
+      setValue(document.querySelector("input[name='firstName']") as HTMLInputElement, "Pat");
+      setValue(document.querySelector("input[name='lastName']") as HTMLInputElement, "Payer");
+      setValue(document.querySelector("input[name='state']") as HTMLInputElement, "Texas");
+    });
+    await act(async () => { (Array.from(document.querySelectorAll("button")).find((b) => b.textContent === "Save") as HTMLButtonElement).click(); });
+    await act(async () => { await Promise.resolve(); });
+    expect(document.body.textContent).toContain("State must be exactly 2 uppercase letters");
+    // Editing the field drops the stale error so the user isn't stuck staring at a message they've already fixed.
+    await act(async () => { setValue(document.querySelector("input[name='state']") as HTMLInputElement, "TX"); });
+    expect(document.body.textContent).not.toContain("State must be exactly 2 uppercase letters");
+  });
+
+  it("caps the add-contact dialog height and scrolls so the footer stays reachable on short viewports", async () => {
+    const { container } = await render(dealNoBilling);
+    (Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.includes("Add new contact")) as HTMLButtonElement).click();
+    await act(async () => { await Promise.resolve(); });
+    const content = document.querySelector("[data-slot='dialog-content']") as HTMLElement;
+    expect(content).toBeTruthy();
+    // The billing-address fields make this dialog tall; without a max-height + scroll the Save/Cancel footer
+    // can fall below a short viewport with no way to reach it (Codex P2).
+    expect(content.className).toContain("overflow-y-auto");
+    expect(content.className).toMatch(/max-h-\[/);
   });
 
   it("renders the contract upload zone and lists an existing signed contract", async () => {
