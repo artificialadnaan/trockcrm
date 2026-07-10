@@ -20,14 +20,14 @@ const dealNoBilling = { id: "deal-1", billingContactId: null, billingContactName
 const dealWithBilling = { ...dealNoBilling, billingContactId: "c-9", billingContactName: "Jane Doe",
   billingContactEmail: "jane@acme.com", billingContactPhone: "555-1212", billingContactCompany: "Acme AP", billingContactTitle: "AP Lead" };
 
-async function render(deal: unknown, onDealUpdated = vi.fn()) {
+async function render(deal: unknown, onDealUpdated = vi.fn(), canEdit = true) {
   const container = document.createElement("div");
   document.body.appendChild(container);
   let root: Root | null = null;
   await act(async () => {
     root = createRoot(container);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    root.render(<MemoryRouter><DealBillingTab deal={deal as any} onDealUpdated={onDealUpdated} /></MemoryRouter>);
+    root.render(<MemoryRouter><DealBillingTab deal={deal as any} onDealUpdated={onDealUpdated} canEdit={canEdit} /></MemoryRouter>);
   });
   await act(async () => { await Promise.resolve(); });
   return { container, onDealUpdated };
@@ -116,6 +116,62 @@ describe("DealBillingTab", () => {
     expect(mocks.apiMock).toHaveBeenCalledWith(
       expect.stringContaining("/deals/deal-1"),
       expect.objectContaining({ method: "PATCH", json: expect.objectContaining({ billingContactId: expect.any(String) }) }),
+    );
+    expect(onDealUpdated).toHaveBeenCalled();
+  });
+
+  it("renders read-only (no edit controls) when the viewer cannot edit the deal", async () => {
+    const { container } = await render(dealWithBilling, vi.fn(), false);
+    // The contact card still shows...
+    expect(container.textContent).toContain("Jane Doe");
+    // ...but there is NO search input, NO add button, NO upload zone — and a read-only note.
+    expect(container.querySelector("input")).toBeNull();
+    expect(Array.from(container.querySelectorAll("button")).some((b) => b.textContent?.includes("Add new contact"))).toBe(false);
+    expect(container.querySelector("[data-testid='upload-zone']")).toBeNull();
+    expect(container.textContent).toContain("Only the assigned rep can edit billing");
+  });
+
+  it("surfaces a possible-duplicate suggestion instead of silently creating a duplicate contact", async () => {
+    let createCalls = 0;
+    mocks.apiMock.mockImplementation((url: string, opts?: { method?: string; json?: { skipDedupCheck?: boolean } }) => {
+      if (url === "/contacts" && opts?.method === "POST") {
+        createCalls += 1;
+        // First (dedup-enabled) attempt returns a look-alike; no contact is created.
+        if (!opts?.json?.skipDedupCheck) {
+          return Promise.resolve({ contact: null, dedupWarning: true, suggestions: [{ id: "dup-1", firstName: "Pat", lastName: "Payer", email: null, companyName: "Acme", matchReason: "same name" }] });
+        }
+        return Promise.resolve({ contact: { id: "c-forced" } });
+      }
+      if (url.includes("/deals/deal-1")) return Promise.resolve({ deal: dealWithBilling });
+      return Promise.resolve({ contacts: [] });
+    });
+    const onDealUpdated = vi.fn();
+    const { container } = await render(dealNoBilling, onDealUpdated);
+    const setValue = (el: HTMLInputElement, v: string) => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
+      setter?.call(el, v);
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+    };
+    (Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.includes("Add new contact")) as HTMLButtonElement).click();
+    await act(async () => { await Promise.resolve(); });
+    await act(async () => {
+      setValue(document.querySelector("input[name='firstName']") as HTMLInputElement, "Pat");
+      setValue(document.querySelector("input[name='lastName']") as HTMLInputElement, "Payer");
+    });
+    // First Save runs WITH dedup -> surfaces the suggestion, does NOT assign anything yet.
+    await act(async () => { (Array.from(document.querySelectorAll("button")).find((b) => b.textContent === "Save") as HTMLButtonElement).click(); });
+    await act(async () => { await Promise.resolve(); });
+    expect(createCalls).toBe(1);
+    expect(document.body.textContent).toContain("Pat Payer");        // the suggestion
+    expect(document.body.textContent).toContain("Create anyway");    // Save became "Create anyway"
+    expect(onDealUpdated).not.toHaveBeenCalled();                    // nothing assigned on the dedup warning
+    // Picking the suggestion assigns the EXISTING contact — no duplicate created.
+    await act(async () => { (Array.from(document.querySelectorAll("button")).find((b) => b.textContent?.includes("Pat Payer")) as HTMLButtonElement).click(); });
+    await act(async () => { await Promise.resolve(); });
+    expect(createCalls).toBe(1);                                     // still only the one (dedup) create call
+    expect(mocks.apiMock).toHaveBeenCalledWith(
+      expect.stringContaining("/deals/deal-1"),
+      expect.objectContaining({ method: "PATCH", json: expect.objectContaining({ billingContactId: "dup-1" }) }),
     );
     expect(onDealUpdated).toHaveBeenCalled();
   });

@@ -1097,7 +1097,7 @@ export function DealDetailPage() {
       {activeTab === "team" && (
         <DealTeamTab dealId={deal.id} onCountChange={setTeamCount} />
       )}
-      {activeTab === "billing" && <DealBillingTab deal={deal} onDealUpdated={refetch} />}
+      {activeTab === "billing" && <DealBillingTab deal={deal} onDealUpdated={refetch} canEdit={viewerOwnsDeal || isDirectorOrAdmin} />}
       {activeTab === "estimates" && (
         <DealEstimatesTab
           dealId={deal.id}
