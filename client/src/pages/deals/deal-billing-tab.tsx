@@ -40,6 +40,9 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
   // Company NAME captured alongside the id so the created contact's company_name isn't blank in surfaces that
   // read contacts.company_name without joining companies (email review / assignment queues) (Codex P2).
   const [companyName, setCompanyName] = useState<string | null>(null);
+  // Stale-response guard for the async company-name fetch (mirrors searchSeq): only the latest selection's
+  // fetch may set companyName, so a slow earlier fetch can't overwrite a newer pick's name.
+  const companySeq = useRef(0);
 
   const runSearch = (q: string) => {
     setQuery(q);
@@ -81,7 +84,7 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
     );
   };
 
-  const closeDialog = () => { setDialogOpen(false); setNewC(emptyNewC); setCompanyId(null); setCompanyName(null); setSuggestions([]); setCreateError(null); };
+  const closeDialog = () => { setDialogOpen(false); setNewC(emptyNewC); setCompanyId(null); setCompanyName(null); ++companySeq.current; setSuggestions([]); setCreateError(null); };
 
   const buildInput = () => ({
     firstName: newC.firstName.trim(),
@@ -190,7 +193,7 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
             <button
               type="button"
               disabled={saving}
-              onClick={() => { setNewC(emptyNewC); setCompanyId(null); setCompanyName(null); setSuggestions([]); setCreateError(null); setDialogOpen(true); }}
+              onClick={() => { setNewC(emptyNewC); setCompanyId(null); setCompanyName(null); ++companySeq.current; setSuggestions([]); setCreateError(null); setDialogOpen(true); }}
               className="text-xs text-blue-600 hover:underline"
             >
               + Add new contact
@@ -247,11 +250,16 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
                     setCompanyId(id);
                     setSuggestions([]);
                     setCreateError(null);
-                    // The selector only emits the id, so fetch the chosen company's NAME and pass it through on
-                    // create — otherwise contacts.company_name is left blank for id-only links (Codex P2).
+                    // Clear the previous company's name synchronously so a save-before-this-fetch-resolves can't
+                    // post companyId=new with the OLD companyName. The selector only emits the id, so fetch the
+                    // chosen company's NAME and pass it through on create (otherwise contacts.company_name is left
+                    // blank for id-only links). Gate the async result by a sequence counter (like searchSeq) so a
+                    // slow earlier fetch can't overwrite a newer selection's name (Codex P2).
+                    setCompanyName(null);
+                    const seq = ++companySeq.current;
                     api<{ company: { name: string } }>(`/companies/${id}`, getOfficeRequestOptions(officeId))
-                      .then((r) => setCompanyName(r.company?.name ?? null))
-                      .catch(() => setCompanyName(null));
+                      .then((r) => { if (seq === companySeq.current) setCompanyName(r.company?.name ?? null); })
+                      .catch(() => { if (seq === companySeq.current) setCompanyName(null); });
                   }}
                   officeId={officeId}
                 />
