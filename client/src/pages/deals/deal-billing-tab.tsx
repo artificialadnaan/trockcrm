@@ -43,6 +43,10 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
   // Stale-response guard for the async company-name fetch (mirrors searchSeq): only the latest selection's
   // fetch may set companyName, so a slow earlier fetch can't overwrite a newer pick's name.
   const companySeq = useRef(0);
+  // True while the selected company's name is still being fetched — Save is blocked until it resolves so a
+  // contact can't be created linked by id with a blank company_name (which would also run dedup without the
+  // company) (Codex P2).
+  const [companyPending, setCompanyPending] = useState(false);
 
   const runSearch = (q: string) => {
     setQuery(q);
@@ -84,7 +88,7 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
     );
   };
 
-  const closeDialog = () => { setDialogOpen(false); setNewC(emptyNewC); setCompanyId(null); setCompanyName(null); ++companySeq.current; setSuggestions([]); setCreateError(null); };
+  const closeDialog = () => { setDialogOpen(false); setNewC(emptyNewC); setCompanyId(null); setCompanyName(null); setCompanyPending(false); ++companySeq.current; setSuggestions([]); setCreateError(null); };
 
   const buildInput = () => ({
     firstName: newC.firstName.trim(),
@@ -193,7 +197,7 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
             <button
               type="button"
               disabled={saving}
-              onClick={() => { setNewC(emptyNewC); setCompanyId(null); setCompanyName(null); ++companySeq.current; setSuggestions([]); setCreateError(null); setDialogOpen(true); }}
+              onClick={() => { setNewC(emptyNewC); setCompanyId(null); setCompanyName(null); setCompanyPending(false); ++companySeq.current; setSuggestions([]); setCreateError(null); setDialogOpen(true); }}
               className="text-xs text-blue-600 hover:underline"
             >
               + Add new contact
@@ -250,20 +254,23 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
                     setCompanyId(id);
                     setSuggestions([]);
                     setCreateError(null);
-                    // Clear the previous company's name synchronously so a save-before-this-fetch-resolves can't
-                    // post companyId=new with the OLD companyName. The selector only emits the id, so fetch the
-                    // chosen company's NAME and pass it through on create (otherwise contacts.company_name is left
-                    // blank for id-only links). Gate the async result by a sequence counter (like searchSeq) so a
-                    // slow earlier fetch can't overwrite a newer selection's name (Codex P2).
+                    // Clear the previous company's name synchronously and block Save (companyPending) until the
+                    // new name resolves, so a save-before-this-fetch-resolves can't create a contact linked by id
+                    // with a blank company_name (which would also run the dedup check without the company). The
+                    // selector only emits the id, so fetch the chosen company's NAME. Gate the async result by a
+                    // sequence counter (like searchSeq) so a slow earlier fetch can't overwrite a newer selection's
+                    // name, and only the latest fetch clears companyPending (Codex P2).
                     setCompanyName(null);
+                    setCompanyPending(true);
                     const seq = ++companySeq.current;
                     api<{ company: { name: string } }>(`/companies/${id}`, getOfficeRequestOptions(officeId))
-                      .then((r) => { if (seq === companySeq.current) setCompanyName(r.company?.name ?? null); })
-                      .catch(() => { if (seq === companySeq.current) setCompanyName(null); });
+                      .then((r) => { if (seq === companySeq.current) { setCompanyName(r.company?.name ?? null); setCompanyPending(false); } })
+                      .catch(() => { if (seq === companySeq.current) { setCompanyName(null); setCompanyPending(false); } });
                   }}
                   officeId={officeId}
                 />
               </fieldset>
+              {companyPending ? <p className="mt-1 text-xs text-slate-400">Loading company…</p> : null}
             </div>
           </div>
           {createError ? (
@@ -299,7 +306,7 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
             </button>
             <button
               type="button"
-              disabled={creating || !newC.firstName.trim() || !newC.lastName.trim()}
+              disabled={creating || companyPending || !newC.firstName.trim() || !newC.lastName.trim()}
               onClick={() => handleCreate(suggestions.length > 0)}
               className="rounded-md bg-blue-600 px-3 py-1.5 text-sm text-white hover:bg-blue-700 disabled:opacity-50"
             >
