@@ -129,6 +129,7 @@ describe("DecoratedKanbanCard", () => {
     expect(html).toContain("Billing contact missing");
     expect(html).toContain("bg-red-600");
     expect(html).toContain("border-red-300");
+    expect(html).toContain('aria-label="Open deal Palm Villas: billing contact missing"');
   });
 
   it("does not render billing attention from raw contact state alone", () => {
@@ -136,6 +137,7 @@ describe("DecoratedKanbanCard", () => {
 
     expect(html).not.toContain("Billing contact missing");
     expect(html).not.toContain("bg-red-600");
+    expect(html).toContain('aria-label="Open deal Palm Villas"');
   });
 
   it("shows SLA context for active stages", () => {

@@ -67,6 +67,9 @@ export function DecoratedKanbanCard({
   const now = new Date();
   const effectivelyHeld = isDealValueEffectivelyOnHold(dealForValue, now);
   const billingAttentionRequired = deal.billingAttentionRequired === true;
+  const accessibleName = billingAttentionRequired
+    ? `Open deal ${deal.name}: billing contact missing`
+    : `Open deal ${deal.name}`;
 
   return (
     <button
@@ -76,7 +79,7 @@ export function DecoratedKanbanCard({
         "group relative flex w-full items-start gap-2 overflow-hidden rounded-md border border-slate-200 bg-white p-3 text-left shadow-sm transition-colors hover:border-brand-red/40 hover:bg-brand-red/[0.03] focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-red",
         billingAttentionRequired && "border-red-300"
       )}
-      aria-label={`Open deal ${deal.name}`}
+      aria-label={accessibleName}
     >
       {billingAttentionRequired ? (
         <span className="absolute inset-x-0 top-0 h-1 bg-red-600" aria-hidden="true" />
