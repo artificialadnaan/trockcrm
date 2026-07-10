@@ -111,6 +111,10 @@ export interface Deal {
   sourceLeadId: string | null;
   primaryContactId: string | null;
   billingContactId?: string | null;
+  /** Forward-only marker: when billing is missing on a Won card, drives the red attention alert. */
+  billingContactRequiredAt?: string | null;
+  /** Derived by the Won-board API; never blocks the Bid Board transition. */
+  billingAttentionRequired?: boolean;
   primaryContactName?: string | null;
   primaryContactTitle?: string | null;
   // Contact email/phone — surfaced by getDealDetail for read-only contact context (e.g. the RFP vote form).

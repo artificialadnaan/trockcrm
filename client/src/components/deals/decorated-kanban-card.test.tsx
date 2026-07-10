@@ -123,6 +123,21 @@ function renderDeal(deal: Deal, stageSlug = "estimating") {
 }
 
 describe("DecoratedKanbanCard", () => {
+  it("renders a red billing-contact alert for a Won card requiring attention", () => {
+    const html = renderDeal(makeDeal({ billingAttentionRequired: true }), "won");
+
+    expect(html).toContain("Billing contact missing");
+    expect(html).toContain("bg-red-600");
+    expect(html).toContain("border-red-300");
+  });
+
+  it("does not render billing attention from raw contact state alone", () => {
+    const html = renderDeal(makeDeal({ billingContactId: null, billingAttentionRequired: false }), "won");
+
+    expect(html).not.toContain("Billing contact missing");
+    expect(html).not.toContain("bg-red-600");
+  });
+
   it("shows SLA context for active stages", () => {
     const html = render("opportunity");
 

@@ -182,6 +182,8 @@ describe("getDealsForPipeline", () => {
       updatedAt: "2026-04-21T10:00:00.000Z",
       companyName: null,
       assignedRepName: "Rep One",
+      billingContactRequiredAt: index === 0 ? "2026-07-10T00:00:00.000Z" : null,
+      billingContactId: null,
     }));
     const terminalDeals = Array.from({ length: 8 }).map((_, index) => ({
       id: `deal-won-${index + 1}`,
@@ -202,6 +204,9 @@ describe("getDealsForPipeline", () => {
       updatedAt: "2026-04-21T10:00:00.000Z",
       companyName: null,
       assignedRepName: "Rep Two",
+      billingContactRequiredAt: index === 0 || index === 1 || index === 2 ? "2026-07-10T00:00:00.000Z" : null,
+      billingContactId: index === 1 ? "billing-contact-1" : null,
+      isChangeOrder: index === 2,
     }));
     const tenantChains: any[] = [];
     const tenantDb = {
@@ -246,7 +251,14 @@ describe("getDealsForPipeline", () => {
     const wonCardsChain = findStageCardsChain(tenantChains, "stage-won");
 
     expect(result.pipelineColumns.find((column) => column.stage.slug === "opportunity")?.deals).toHaveLength(8);
+    expect(result.pipelineColumns.find((column) => column.stage.slug === "opportunity")?.deals[0]?.billingAttentionRequired).toBe(false);
     expect(result.pipelineColumns.find((column) => column.stage.slug === "won")?.deals).toHaveLength(8);
+    expect(result.pipelineColumns.find((column) => column.stage.slug === "won")?.deals.slice(0, 4).map((deal) => deal.billingAttentionRequired)).toEqual([
+      true,  // required + missing
+      false, // billing contact present
+      false, // change-order child
+      false, // legacy pre-marker row
+    ]);
     expect(result.terminalStages.find((column) => column.stage.slug === "won")).toEqual({
       stage: expect.objectContaining({ id: "stage-won", slug: "won", name: "Won" }),
       count: 10,
@@ -558,6 +570,10 @@ describe("getDealsForPipeline", () => {
     // in the tier — proving the per-stage valueSource is threaded (not hardcoded to the
     // current/best-estimate chain, where bid_estimate would come first).
     expect(orderByText).toContain("on_hold");
+    // Billing attention comes before the active/value tier, pinning required-but-missing billing cards
+    // to the top of Won without changing counts or values.
+    expect(orderByText).toContain("billing_contact_required_at");
+    expectSqlTermsInOrder(orderByText ?? "", ["billing_contact_required_at", "on_hold"]);
     expectSqlTermsInOrder(orderByText ?? "", ["awarded_amount", "bid_estimate"]);
   });
 

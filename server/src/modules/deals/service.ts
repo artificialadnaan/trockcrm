@@ -922,7 +922,10 @@ function buildDealListColumnOrder(
   }
 }
 
-function buildPipelineStageCardsOrder(effectiveValueSql: ReturnType<typeof dealPipelineValueSql>) {
+function buildPipelineStageCardsOrder(
+  effectiveValueSql: ReturnType<typeof dealPipelineValueSql>,
+  options: { prioritizeBillingAttention?: boolean } = {}
+) {
   // Two-tier order: active, non-zero cards on top; on-hold / $0 cards sink to the
   // bottom of the column. This is sort-only — every card still loads (the preview
   // limit is the board's effective-all 1000), nothing is hidden. The tier uses the
@@ -931,7 +934,24 @@ function buildPipelineStageCardsOrder(effectiveValueSql: ReturnType<typeof dealP
   const tier = aliasedActiveNonZeroDealSortTierSql("deals", effectiveValueSql);
   // Sort before preview limiting so each column shows the actual newest cards,
   // not an arbitrary subset from a tied timestamp group.
-  return [asc(tier), desc(deals.createdAt), desc(deals.id)] as const;
+  return [
+    // This is intentionally a sort-only attention queue: Bid Board may still move a project to Won.
+    // The persisted marker makes it forward-only; pre-release and change-order rows stay normally ordered.
+    ...(options.prioritizeBillingAttention
+      ? [
+          asc(sql`CASE
+            WHEN ${deals.billingContactRequiredAt} IS NOT NULL
+              AND ${deals.billingContactId} IS NULL
+              AND ${deals.isChangeOrder} = false
+            THEN 0
+            ELSE 1
+          END`),
+        ]
+      : []),
+    asc(tier),
+    desc(deals.createdAt),
+    desc(deals.id),
+  ];
 }
 
 function buildStagePageOrder(sort: StagePageSort | undefined, stage: PipelineStageRow) {
@@ -2298,6 +2318,9 @@ export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
       expectedCloseDate: input.expectedCloseDate ?? null,
       salesSourceUserId: input.salesSourceUserId ?? null,
       workflowRoute,
+      // Forward-only: normal CRM-created and lead-converted projects must eventually carry a billing
+      // contact. Historical/migration imports deliberately remain exempt and there is no backfill.
+      billingContactRequiredAt: creationPolicy.origin === "migration" ? null : createdAt,
       createdAt,
       updatedAt: createdAt,
     })
@@ -3364,7 +3387,9 @@ export async function getDealsForPipeline(
       .leftJoin(companies, eq(companies.id, deals.companyId))
       .leftJoin(users, eq(users.id, deals.assignedRepId))
       .where(where)
-      .orderBy(...buildPipelineStageCardsOrder(columnEffectiveValue))
+      .orderBy(...buildPipelineStageCardsOrder(columnEffectiveValue, {
+        prioritizeBillingAttention: isWonTerminalStage,
+      }))
       .limit(pipelineCardsPerStageLimit);
     dealsByStage.set(stage.id, stageDeals);
 
@@ -3384,6 +3409,14 @@ export async function getDealsForPipeline(
       // bid-first while the server-computed stage-aware column total shows DD-first — breaking the
       // bucket==sum-of-cards invariant. The card is IN this stage's column, so stage.slug is authoritative.
       stageSlug: stage.slug,
+      // A non-blocking attention flag for the CRM Won column. The requirement marker is set only at
+      // post-release normal-project creation; a deleted billing contact becomes missing again via the
+      // existing FK SET NULL and correctly resurfaces the alert.
+      billingAttentionRequired:
+        WON_TERMINAL_STAGE_SLUGS.includes(stage.slug as (typeof WON_TERMINAL_STAGE_SLUGS)[number]) &&
+        deal.billingContactRequiredAt != null &&
+        deal.billingContactId == null &&
+        deal.isChangeOrder !== true,
     })),
     totalValue: valueByStage.get(stage.id) ?? 0,
     count: activeCountByStage.get(stage.id) ?? 0,

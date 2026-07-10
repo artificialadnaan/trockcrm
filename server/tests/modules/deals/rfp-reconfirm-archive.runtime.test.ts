@@ -45,7 +45,7 @@ beforeAll(async () => {
     CREATE TABLE deals (
       id uuid PRIMARY KEY,
       deal_number varchar(50), name varchar(500), stage_id uuid, assigned_rep_id uuid,
-      primary_contact_id uuid, billing_contact_id uuid, company_id uuid, property_id uuid, source_lead_id uuid,
+      primary_contact_id uuid, billing_contact_id uuid, billing_contact_required_at timestamptz, company_id uuid, property_id uuid, source_lead_id uuid,
       dd_estimate numeric(14, 2), bid_estimate numeric(14, 2), awarded_amount numeric(14, 2),
       awarded_amount_overridden boolean, dd_estimate_overridden boolean, change_order_total numeric(14, 2),
       description text,

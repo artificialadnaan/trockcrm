@@ -71,9 +71,12 @@ export const deals = pgTable(
     stageId: uuid("stage_id").notNull(),
     assignedRepId: uuid("assigned_rep_id"),
     primaryContactId: uuid("primary_contact_id").references(() => contacts.id),
-    // Who gets billed for this project. Required (for the future Won-stage gate) but nullable at the column
-    // level — the gate lives in app logic, not a DB constraint, so existing/in-flight deals are unaffected.
+    // Who gets billed for this project. The forward-only Won attention queue lives in app logic, not a DB
+    // constraint, so existing/in-flight deals remain unaffected.
     billingContactId: uuid("billing_contact_id").references(() => contacts.id, { onDelete: "set null" }),
+    // Forward-only billing-attention marker. Existing deals intentionally remain NULL; normal projects
+    // created after this feature ships are stamped by createDeal.
+    billingContactRequiredAt: timestamp("billing_contact_required_at", { withTimezone: true }),
     companyId: uuid("company_id").references(() => companies.id),
     propertyId: uuid("property_id").references(() => properties.id),
     sourceLeadId: uuid("source_lead_id").references(() => leads.id).unique(),
