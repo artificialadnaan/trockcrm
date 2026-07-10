@@ -1,6 +1,6 @@
 import React, { Suspense, useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { Image, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
-import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
+import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import * as ImagePicker from "expo-image-picker";
@@ -198,7 +198,6 @@ function Wizard(props: {
 }) {
   const { ownerKey, draftId, step, setStep, cameraSection, setCameraSection, cameraDeficiency, setCameraDeficiency, submitting, setSubmitting, notice, setNotice, voiceEnabled, onSubmitted, fetcher } = props;
   const router = useRouter();
-  const safeAreaInsets = useSafeAreaInsets();
   const [draft, dispatch] = useReducer(scorecardDraftReducer, props.initial);
   // Count of evidence photos still being copied into durable storage. Submit is blocked while > 0 so a
   // capture in flight (durable copy + dispatch not yet done) can't be omitted from a fast submit.
@@ -537,40 +536,32 @@ function Wizard(props: {
       </Modal>
 
       <Modal visible={signingField !== null} animationType="slide" onRequestClose={() => setSigningField(null)}>
-        <View
-          style={[
-            styles.signatureModal,
-            {
-              // Modals can report a zero top inset on some TestFlight/iOS layouts. Keep the
-              // header below the status bar even when that happens.
-              paddingTop: Math.max(safeAreaInsets.top + theme.space.sm, 56),
-              paddingBottom: Math.max(safeAreaInsets.bottom, theme.space.lg),
-            },
-          ]}
-        >
-          <View style={styles.signatureHeader}>
-            <Text style={styles.stepTitle}>{signingField === "superintendentSignature" ? "Superintendent signature" : "Project manager signature"}</Text>
-            <Pressable onPress={() => setSigningField(null)} accessibilityRole="button" accessibilityLabel="Close signature pad">
-              <Text style={styles.signatureClose}>Close</Text>
-            </Pressable>
-          </View>
-          <Text style={styles.hint}>Sign in the box below, then tap Save.</Text>
-          {signingField ? (
-            <View style={styles.signatureCanvas}>
-              <SignatureScreen
-                onOK={(signature) => {
-                  dispatch({ type: "setSignature", field: signingField, value: signature });
-                  setSigningField(null);
-                }}
-                onEmpty={() => setNotice({ tone: "error", text: "Please add a signature before saving." })}
-                descriptionText=""
-                clearText="Clear"
-                confirmText="Save"
-                webStyle={signatureWebStyle}
-              />
+        <SafeAreaProvider>
+          <SafeAreaView style={styles.signatureModal} edges={["top", "bottom"]}>
+            <View style={styles.signatureHeader}>
+              <Text style={styles.stepTitle}>{signingField === "superintendentSignature" ? "Superintendent signature" : "Project manager signature"}</Text>
+              <Pressable onPress={() => setSigningField(null)} accessibilityRole="button" accessibilityLabel="Close signature pad">
+                <Text style={styles.signatureClose}>Close</Text>
+              </Pressable>
             </View>
-          ) : null}
-        </View>
+            <Text style={styles.hint}>Sign in the box below, then tap Save.</Text>
+            {signingField ? (
+              <View style={styles.signatureCanvas}>
+                <SignatureScreen
+                  onOK={(signature) => {
+                    dispatch({ type: "setSignature", field: signingField, value: signature });
+                    setSigningField(null);
+                  }}
+                  onEmpty={() => setNotice({ tone: "error", text: "Please add a signature before saving." })}
+                  descriptionText=""
+                  clearText="Clear"
+                  confirmText="Save"
+                  webStyle={signatureWebStyle}
+                />
+              </View>
+            ) : null}
+          </SafeAreaView>
+        </SafeAreaProvider>
       </Modal>
     </SafeAreaView>
   );
@@ -1019,7 +1010,7 @@ const styles = StyleSheet.create({
   captionModalRoot: { flex: 1, justifyContent: "flex-end", backgroundColor: "rgba(15,23,42,0.35)" },
   captionBackdrop: { ...StyleSheet.absoluteFillObject },
   captionSheet: { gap: theme.space.md, backgroundColor: theme.color.surfaceCard, borderTopLeftRadius: theme.radius.lg, borderTopRightRadius: theme.radius.lg, padding: theme.space.lg },
-  signatureModal: { flex: 1, gap: theme.space.md, backgroundColor: theme.color.surfaceApp, paddingHorizontal: theme.space.lg },
+  signatureModal: { flex: 1, gap: theme.space.md, backgroundColor: theme.color.surfaceApp, padding: theme.space.lg },
   signatureHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: theme.space.md },
   signatureClose: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.brandRed },
   signatureCanvas: { flex: 1, minHeight: 340, overflow: "hidden", borderWidth: 1, borderColor: theme.color.border, borderRadius: theme.radius.md, backgroundColor: theme.color.surfaceCard },
