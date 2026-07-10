@@ -5,6 +5,7 @@ import { createContact } from "@/hooks/use-contacts";
 import { FileUploadZone } from "@/components/files/file-upload-zone";
 import { useFiles } from "@/hooks/use-files";
 import { getOfficeRequestOptions } from "@/lib/office-selection";
+import { CompanySelector } from "@/components/companies/company-selector";
 import {
   Dialog,
   DialogContent,
@@ -13,7 +14,7 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 
-const emptyNewC = { firstName: "", lastName: "", email: "", phone: "", jobTitle: "", companyName: "" };
+const emptyNewC = { firstName: "", lastName: "", email: "", phone: "", jobTitle: "" };
 type Suggestion = { id: string; firstName: string; lastName: string; email: string | null; companyName: string | null; matchReason?: string; isActive?: boolean };
 
 export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { deal: DealDetail; onDealUpdated: () => void; canEdit: boolean; officeId?: string | null }) {
@@ -33,6 +34,9 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
   const [createError, setCreateError] = useState<string | null>(null);
   const [assignError, setAssignError] = useState<string | null>(null);
+  // Linked CRM company for the add-contact dialog (chosen via CompanySelector, which also supports adding a
+  // new company inline). null = no company. Replaces the old free-text company field.
+  const [companyId, setCompanyId] = useState<string | null>(null);
 
   const runSearch = (q: string) => {
     setQuery(q);
@@ -74,7 +78,7 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
     );
   };
 
-  const closeDialog = () => { setDialogOpen(false); setNewC(emptyNewC); setSuggestions([]); setCreateError(null); };
+  const closeDialog = () => { setDialogOpen(false); setNewC(emptyNewC); setCompanyId(null); setSuggestions([]); setCreateError(null); };
 
   const buildInput = () => ({
     firstName: newC.firstName.trim(),
@@ -82,7 +86,7 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
     email: newC.email.trim() || null,
     phone: newC.phone.trim() || null,
     jobTitle: newC.jobTitle.trim() || null,
-    companyName: newC.companyName.trim() || null,
+    companyId: companyId || undefined,
     category: "client",
   });
 
@@ -182,7 +186,7 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
             <button
               type="button"
               disabled={saving}
-              onClick={() => { setNewC(emptyNewC); setSuggestions([]); setCreateError(null); setDialogOpen(true); }}
+              onClick={() => { setNewC(emptyNewC); setCompanyId(null); setSuggestions([]); setCreateError(null); setDialogOpen(true); }}
               className="text-xs text-blue-600 hover:underline"
             >
               + Add new contact
@@ -226,7 +230,12 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
             {field("email", "Email", "email")}
             {field("phone", "Phone", "tel")}
             {field("jobTitle", "Job title")}
-            {field("companyName", "Company")}
+            <div>
+              <label className="block text-xs font-medium text-slate-600 mb-1">Company</label>
+              {/* Query CRM companies (with inline add-new), same selector the deal/lead forms use — instead of
+                  free text — so the contact links to a real company record. */}
+              <CompanySelector value={companyId} onChange={(id) => setCompanyId(id)} officeId={officeId} />
+            </div>
           </div>
           {createError ? (
             <p className="rounded-md border border-red-200 bg-red-50 px-2 py-1.5 text-sm text-red-700">{createError}</p>

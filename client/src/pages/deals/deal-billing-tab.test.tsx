@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock("@/lib/api", () => ({ api: mocks.apiMock }));
 vi.mock("@/hooks/use-files", () => ({ useFiles: (...args: unknown[]) => mocks.filesMock(...args), uploadFile: vi.fn() }));
 vi.mock("@/components/files/file-upload-zone", () => ({ FileUploadZone: () => <div data-testid="upload-zone">Upload signed contract</div> }));
+vi.mock("@/components/companies/company-selector", () => ({ CompanySelector: () => <div data-testid="company-selector" /> }));
 
 const dealNoBilling = { id: "deal-1", billingContactId: null, billingContactName: null,
   billingContactEmail: null, billingContactPhone: null, billingContactCompany: null, billingContactTitle: null };
@@ -72,6 +73,8 @@ describe("DealBillingTab", () => {
     const addBtn = Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.includes("Add new contact")) as HTMLButtonElement;
     await act(async () => { addBtn.click(); });
     await act(async () => { await Promise.resolve(); });
+    // The Company field is now the CRM CompanySelector (search + inline add), not a free-text input.
+    expect(document.querySelector("[data-testid='company-selector']")).toBeTruthy();
     const first = document.querySelector("input[name='firstName']") as HTMLInputElement;
     const last = document.querySelector("input[name='lastName']") as HTMLInputElement;
     await act(async () => { setValue(first, "Pat"); setValue(last, "Payer"); });

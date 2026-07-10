@@ -139,8 +139,8 @@ export function DetailPageShell({
         <div className="min-w-0 space-y-4">
           <Card>
             <div className="border-b border-slate-100">
-              <div className="overflow-x-auto px-3 pt-3">
-                <div className="flex min-w-max items-center gap-1">
+              <div className="px-3 pt-3">
+                <div className="flex flex-wrap items-center gap-1">
                 {tabs.map((tab) => {
                   const label = formatTabLabel(tab);
                   const isActive = tab.id === activeTabId;
