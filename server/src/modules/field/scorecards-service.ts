@@ -3,6 +3,7 @@ import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
 import { deals, fieldScorecards, fieldScorecardItems, fieldScorecardPhotos, files, jobQueue } from "@trock-crm/shared/schema";
 import { generateDownloadUrl, getObjectBuffer, isR2Configured, putObject } from "../../lib/r2-client.js";
+import { generateEvidenceJpeg, isThumbnailableImage } from "../../lib/image-thumbnail.js";
 import { buildScorecardPdfData, renderFieldScorecardPdf } from "./scorecard-pdf.js";
 import {
   FIELD_SCORECARD_SECTION_KEYS,
@@ -86,7 +87,13 @@ const SCORECARD_PDF_DOWNLOAD_EXPIRY_SECONDS = 60 * 60;
 // no-attachment notice — the notification is never lost.
 const SCORECARD_EMAIL_RUN_AFTER_SECONDS = 120;
 const PDF_EVIDENCE_DOWNLOAD_CONCURRENCY = 4;
-const PDF_EVIDENCE_MAX_BYTES = 750_000;
+// Ingest thumbnails are already small stripped JPEGs (~30–80 KB); keep a tight cap on that fetch.
+const PDF_EVIDENCE_THUMB_MAX_BYTES = 750_000;
+// When no thumbnail exists we fetch the ORIGINAL and downscale it. Allow a generous cap here (matching
+// the ingest thumbnailer's source ceiling) so a large valid camera original is preserved as evidence
+// rather than dropped — decode memory is bounded by generateEvidenceJpeg's pixel limit + the batch
+// concurrency above.
+const PDF_EVIDENCE_ORIGINAL_MAX_BYTES = 40 * 1024 * 1024;
 
 /**
  * Deterministic R2 key for a scorecard's PDF. Shared by the enqueue (createFieldScorecard, which stamps it
@@ -376,6 +383,7 @@ export async function finalizeFieldScorecardArtifacts(
         caption: files.description,
         r2Key: files.r2Key,
         thumbnailR2Key: files.thumbnailR2Key,
+        mimeType: files.mimeType,
       })
       .from(fieldScorecardPhotos)
       .innerJoin(files, eq(files.id, fieldScorecardPhotos.fileId))
@@ -390,25 +398,14 @@ export async function finalizeFieldScorecardArtifacts(
   if (!loaded) return;
   const { card, itemRows, photoRows, deal } = loaded;
 
-  // Prefer ingest-generated thumbnails: they preserve visual evidence in the PDF without decoding full
-  // camera originals into memory. A missing/unavailable object leaves an explicit placeholder in the PDF.
-  const loadPhoto = async (photo: typeof photoRows[number]) => {
-    const key = photo.thumbnailR2Key ?? photo.r2Key;
-    let image: Buffer | null = null;
-    if (isR2Configured()) {
-      try {
-        image = (await getObjectBuffer(key, { maxBytes: PDF_EVIDENCE_MAX_BYTES })).buffer;
-      } catch {
-        image = null;
-      }
-    }
-    return {
-      sectionKey: photo.sectionKey,
-      deficiencyKey: photo.deficiencyKey ?? null,
-      caption: photo.caption ?? null,
-      image,
-    };
-  };
+  // Resolve each evidence tile to a small JPEG (thumbnail-first, transcoded-original fallback — see
+  // loadScorecardEvidenceImage). A miss leaves an explicit placeholder in the PDF, never a broken render.
+  const loadPhoto = async (photo: typeof photoRows[number]) => ({
+    sectionKey: photo.sectionKey,
+    deficiencyKey: photo.deficiencyKey ?? null,
+    caption: photo.caption ?? null,
+    image: await loadScorecardEvidenceImage(photo),
+  });
   const photos: Awaited<ReturnType<typeof loadPhoto>>[] = [];
   for (let index = 0; index < photoRows.length; index += PDF_EVIDENCE_DOWNLOAD_CONCURRENCY) {
     const batch = photoRows.slice(index, index + PDF_EVIDENCE_DOWNLOAD_CONCURRENCY);
@@ -449,6 +446,66 @@ export async function finalizeFieldScorecardArtifacts(
       .set({ pdfR2Key: r2Key, pdfR2Bucket: bucket, pdfGeneratedAt: new Date() })
       .where(eq(fieldScorecards.id, scorecardId));
   });
+}
+
+export interface ScorecardEvidenceSource {
+  r2Key: string;
+  thumbnailR2Key: string | null;
+  mimeType: string | null;
+}
+
+export interface ScorecardEvidenceImageDeps {
+  /** Fetch an R2 object's bytes, throwing if it exceeds maxBytes (ObjectTooLargeError). */
+  fetchObject?: (key: string, maxBytes: number) => Promise<Buffer>;
+  /** Downscale/transcode a full-size original into a small JPEG. Throws if it can't be decoded. */
+  transcode?: (buffer: Buffer) => Promise<Buffer>;
+  /** True when sharp can rasterize this mime type (so an original is worth fetching to transcode). */
+  thumbnailable?: (mimeType: string | null | undefined) => boolean;
+  r2Configured?: () => boolean;
+}
+
+/**
+ * Resolve a single scorecard evidence photo to a small JPEG buffer for the PDF, or null (→ an explicit
+ * "Image unavailable" placeholder). PDF-safe fallback so evidence is never silently dropped:
+ *
+ *   1. Prefer the ingest-generated thumbnail — already a small stripped JPEG, no decode needed. Fetched
+ *      under a tight byte cap.
+ *   2. If there's no thumbnail (or it's unreadable), fetch the ORIGINAL under a generous cap and downscale
+ *      it to a small JPEG. This is the reviewer's core fix: previously the original was fetched under the
+ *      thumbnail-sized 750 KB cap, so a large valid JPEG/HEIC/HEIF/WebP/PNG original threw ObjectTooLarge
+ *      and rendered as "Image unavailable". HEIC/HEIF/WebP are only ever dropped when sharp genuinely can't
+ *      decode them (transcode throws), not because of a byte cap.
+ *
+ * Deps are injected so the decision tree is unit-testable without R2/sharp.
+ */
+export async function loadScorecardEvidenceImage(
+  source: ScorecardEvidenceSource,
+  deps: ScorecardEvidenceImageDeps = {},
+): Promise<Buffer | null> {
+  const r2Configured = deps.r2Configured ?? isR2Configured;
+  if (!r2Configured()) return null;
+  const fetchObject = deps.fetchObject ?? (async (key, maxBytes) => (await getObjectBuffer(key, { maxBytes })).buffer);
+  const transcode = deps.transcode ?? generateEvidenceJpeg;
+  const thumbnailable = deps.thumbnailable ?? isThumbnailableImage;
+
+  // 1. Prefer the ingest thumbnail.
+  if (source.thumbnailR2Key) {
+    try {
+      return await fetchObject(source.thumbnailR2Key, PDF_EVIDENCE_THUMB_MAX_BYTES);
+    } catch {
+      // Missing / oversized / unreadable thumbnail — fall through to transcoding the original.
+    }
+  }
+
+  // 2. Transcode the original. Skip non-rasterizable types (unknown mime, PDFs) so we don't pull bytes we
+  //    can't decode; a genuine decode failure below still degrades to the placeholder, never a broken PDF.
+  if (!thumbnailable(source.mimeType)) return null;
+  try {
+    const original = await fetchObject(source.r2Key, PDF_EVIDENCE_ORIGINAL_MAX_BYTES);
+    return await transcode(original);
+  } catch {
+    return null;
+  }
 }
 
 /**

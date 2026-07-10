@@ -97,6 +97,16 @@ describe("handleFieldScorecardEmail", () => {
     expect(sendEmail.mock.calls[0][3].attachments).toBeUndefined();
   });
 
+  it("sends without attachment (CRM link) when the PDF exceeds the safe attachment size — never dead-letters", async () => {
+    const { query } = makeQuery(null);
+    const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "m-big" });
+    // 21 MB > the 20 MB backstop.
+    const getPdf = vi.fn().mockResolvedValue(Buffer.alloc(21 * 1024 * 1024, 0));
+    await handleFieldScorecardEmail(payload(), null, { query, env: PROD, logger: silent, sendEmail, getPdf });
+    expect(sendEmail).toHaveBeenCalledTimes(1); // sent (degraded), NOT thrown → no retry/dead-letter
+    expect(sendEmail.mock.calls[0][3].attachments).toBeUndefined();
+  });
+
   it("degrades (not retries) when the PDF fetch REJECTS — S3 NoSuchKey throws, not null", async () => {
     const { query } = makeQuery(null);
     const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "m3" });

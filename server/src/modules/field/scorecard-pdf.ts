@@ -25,6 +25,14 @@ const EVIDENCE_IMAGE_WIDTH = 238;
 const EVIDENCE_IMAGE_HEIGHT = 188;
 const EVIDENCE_ROW_HEIGHT = 290;
 const EVIDENCE_SUBTITLE_HEIGHT = 44;
+// Cap the evidence tiles embedded in the report. A scorecard can carry up to 100 photos; at ~100 KB per
+// downscaled JPEG that would approach the email provider's ~28 MB attachment ceiling (and produce ~50
+// evidence pages). Beyond the cap the renderer prints a note pointing to the full set in the CRM. The
+// worker applies a hard byte-size backstop on top of this.
+const MAX_EVIDENCE_PHOTOS = 60;
+// Bound each critical-deficiency description on the summary page so one long (up to 4000-char) note can't
+// blow the layout across pages; the same note also appears (bounded) as the evidence-group subtitle.
+const DEFICIENCY_NOTE_MAX_HEIGHT = 54;
 
 const RATING_COLOR: Record<ScorecardRating, string> = {
   elite: "#16A34A",
@@ -153,6 +161,42 @@ export function buildScorecardPdfData(input: ScorecardPdfInput): ScorecardPdfDat
   };
 }
 
+export interface EvidenceGroup {
+  title: string;
+  subtitle: string | null;
+  photos: ScorecardPdfPhoto[];
+}
+
+/**
+ * Bound the number of evidence tiles embedded in the PDF (and therefore attachment size + page count) to
+ * `max`, preserving group order and filling groups in turn. Returns the trimmed groups plus the count of
+ * photos left out — the renderer surfaces that as an "available in the CRM" note. Pure, so the cap policy
+ * is unit-testable without rendering.
+ */
+export function capEvidenceGroups(
+  groups: EvidenceGroup[],
+  max: number,
+): { groups: EvidenceGroup[]; omitted: number } {
+  const capped: EvidenceGroup[] = [];
+  let remaining = Math.max(0, max);
+  let omitted = 0;
+  for (const group of groups) {
+    if (remaining <= 0) {
+      omitted += group.photos.length;
+      continue;
+    }
+    if (group.photos.length <= remaining) {
+      capped.push(group);
+      remaining -= group.photos.length;
+    } else {
+      capped.push({ ...group, photos: group.photos.slice(0, remaining) });
+      omitted += group.photos.length - remaining;
+      remaining = 0;
+    }
+  }
+  return { groups: capped, omitted };
+}
+
 /** Render the scoring-form PDF to a Buffer. No external I/O — deterministic over its input. */
 export async function renderFieldScorecardPdf(data: ScorecardPdfData): Promise<Buffer> {
   const doc = new PDFDocument({ size: [PAGE.width, PAGE.height], margin: PAGE.margin, bufferPages: true, autoFirstPage: true });
@@ -220,7 +264,11 @@ export async function renderFieldScorecardPdf(data: ScorecardPdfData): Promise<B
     for (const deficiency of data.deficiencies) {
       doc.font("Helvetica-Bold").fontSize(10).fillColor(BRAND_BLACK).text(`•  ${deficiency.label}`, PAGE.margin, doc.y, { width: CONTENT_WIDTH });
       if (deficiency.note) {
-        doc.font("Helvetica").fontSize(9).fillColor(BRAND_MUTED).text(deficiency.note, PAGE.margin + 12, doc.y + 1, { width: CONTENT_WIDTH - 12 });
+        doc.font("Helvetica").fontSize(9).fillColor(BRAND_MUTED).text(deficiency.note, PAGE.margin + 12, doc.y + 1, {
+          width: CONTENT_WIDTH - 12,
+          height: DEFICIENCY_NOTE_MAX_HEIGHT,
+          ellipsis: true,
+        });
       }
     }
     doc.moveDown(0.5);
@@ -235,19 +283,17 @@ export async function renderFieldScorecardPdf(data: ScorecardPdfData): Promise<B
 
   if (data.formVersion === 2) {
     doc.moveDown(0.8);
+    // Keep the Signatures heading with at least its first signature — never orphan the heading at a page
+    // foot (drawSignature also guards each block, so both stay on-page).
+    if (doc.y + 78 > PAGE.height - PAGE.margin) doc.addPage();
     heading(doc, "Signatures");
     drawSignature(doc, "Superintendent", data.superintendentSignature);
     drawSignature(doc, "Project manager", data.pmSignature);
   }
 
-  const evidenceGroups: { title: string; subtitle: string | null; photos: ScorecardPdfPhoto[] }[] = [
-    ...data.sections
-      .filter((section) => section.photos.length > 0)
-      .map((section) => ({
-        title: section.title,
-        subtitle: section.note,
-        photos: section.photos,
-      })),
+  const evidenceGroups: EvidenceGroup[] = [
+    // Critical-deficiency evidence leads AND is prioritized by the cap, so the most important photos are
+    // never starved by routine section evidence when a report exceeds MAX_EVIDENCE_PHOTOS.
     ...data.deficiencies
       .filter((deficiency) => deficiency.photos.length > 0)
       .map((deficiency) => ({
@@ -255,8 +301,17 @@ export async function renderFieldScorecardPdf(data: ScorecardPdfData): Promise<B
         subtitle: deficiency.note,
         photos: deficiency.photos,
       })),
+    ...data.sections
+      .filter((section) => section.photos.length > 0)
+      .map((section) => ({
+        title: section.title,
+        subtitle: section.note,
+        photos: section.photos,
+      })),
   ];
-  for (const group of evidenceGroups) drawEvidencePages(doc, data, group);
+  const { groups: cappedEvidence, omitted: omittedEvidence } = capEvidenceGroups(evidenceGroups, MAX_EVIDENCE_PHOTOS);
+  for (const group of cappedEvidence) drawEvidencePages(doc, data, group);
+  if (omittedEvidence > 0) drawEvidenceOverflowNote(doc, data, omittedEvidence);
 
   doc.end();
   return new Promise<Buffer>((resolve, reject) => {
@@ -290,7 +345,9 @@ function drawEvidencePages(
   }
 }
 
-function drawEvidenceHeader(doc: PDFKit.PDFDocument, data: ScorecardPdfData, title: string, page: number): void {
+// Shared branded top strip (logo + wordmark + red rule) for every evidence page. Returns the rule's Y so
+// the caller can lay content out beneath it. Reused by the per-group header and the overflow note.
+function drawEvidenceBrandBar(doc: PDFKit.PDFDocument): number {
   const top = PAGE.margin;
   try {
     doc.image(LOGO_BUFFER, PAGE.margin, top, { fit: [34, 34] });
@@ -299,13 +356,43 @@ function drawEvidenceHeader(doc: PDFKit.PDFDocument, data: ScorecardPdfData, tit
   }
   doc.fillColor(BRAND_RED).font("Helvetica-Bold").fontSize(10).text("T ROCK CONSTRUCTION", PAGE.margin + 44, top + 1);
   doc.fillColor(BRAND_BLACK).font("Helvetica-Bold").fontSize(16).text("Field Scorecard Evidence", PAGE.margin + 44, top + 14);
-  doc.font("Helvetica").fontSize(9).fillColor(BRAND_MUTED).text(`Page ${page}`, PAGE.width - PAGE.margin - 64, top + 15, { width: 64, align: "right" });
   const ruleY = top + 42;
   doc.moveTo(PAGE.margin, ruleY).lineTo(PAGE.width - PAGE.margin, ruleY).lineWidth(2).strokeColor(BRAND_RED).stroke();
+  return ruleY;
+}
+
+function drawEvidenceHeader(doc: PDFKit.PDFDocument, data: ScorecardPdfData, title: string, page: number): void {
+  const ruleY = drawEvidenceBrandBar(doc);
+  doc.font("Helvetica").fontSize(9).fillColor(BRAND_MUTED).text(`Page ${page}`, PAGE.width - PAGE.margin - 64, PAGE.margin + 15, { width: 64, align: "right" });
   doc.y = ruleY + 16;
   doc.fillColor(BRAND_BLACK).font("Helvetica-Bold").fontSize(14).text(title, PAGE.margin, doc.y, { width: CONTENT_WIDTH });
   doc.font("Helvetica").fontSize(9).fillColor(BRAND_MUTED).text(`${data.dealName}  |  Week of ${data.weekOf}`, PAGE.margin, doc.y + 3, { width: CONTENT_WIDTH });
   doc.moveDown(1);
+}
+
+// A branded page noting evidence trimmed by the MAX_EVIDENCE_PHOTOS cap, pointing to the full set in the
+// CRM — so truncation is explicit, never a silent drop.
+function drawEvidenceOverflowNote(doc: PDFKit.PDFDocument, data: ScorecardPdfData, count: number): void {
+  doc.addPage();
+  const ruleY = drawEvidenceBrandBar(doc);
+  doc.y = ruleY + 20;
+  const boxY = doc.y;
+  const boxH = 74;
+  doc.roundedRect(PAGE.margin, boxY, CONTENT_WIDTH, boxH, 8).fillColor("#F8FAFC").fill();
+  doc.font("Helvetica-Bold").fontSize(12).fillColor(BRAND_BLACK).text(
+    `${count} additional evidence photo${count === 1 ? "" : "s"} not shown`,
+    PAGE.margin + 16,
+    boxY + 16,
+    { width: CONTENT_WIDTH - 32 },
+  );
+  doc.font("Helvetica").fontSize(10).fillColor(BRAND_MUTED).text(
+    "This report includes a representative set of evidence. The complete set of photos for this scorecard is available in the CRM.",
+    PAGE.margin + 16,
+    boxY + 36,
+    { width: CONTENT_WIDTH - 32 },
+  );
+  doc.y = boxY + boxH + 12;
+  drawEvidenceFooter(doc, data);
 }
 
 function drawEvidencePhoto(doc: PDFKit.PDFDocument, photo: ScorecardPdfPhoto, x: number, y: number): void {
@@ -356,13 +443,14 @@ function drawSignature(doc: PDFKit.PDFDocument, label: string, signature: string
       doc.font("Helvetica").fontSize(10).fillColor(BRAND_MUTED).text("Signature unavailable", PAGE.margin + 112, y + 18, { width: 180 });
     }
   } else {
-    const typedSignature = signature && !signature.startsWith("data:") ? signature : null;
-    doc.font("Helvetica").fontSize(10).fillColor(BRAND_MUTED).text(typedSignature ?? "—", PAGE.margin + 112, y + 18, { width: 180 });
+    // Legacy typed signatures (a plain name, not a data URL) render as text.
+    doc.font("Helvetica").fontSize(10).fillColor(BRAND_MUTED).text(typedSignatureFallback(signature) ?? "—", PAGE.margin + 112, y + 18, { width: 180 });
   }
   doc.y = y + 52;
 }
 
-function signatureDataUrlToBuffer(signature: string | null): Buffer | null {
+/** A handwritten-signature data URL (png/jpeg) → decoded image bytes to draw; null for anything else. */
+export function signatureDataUrlToBuffer(signature: string | null): Buffer | null {
   if (!signature) return null;
   const match = /^data:image\/(?:png|jpeg|jpg);base64,([A-Za-z0-9+/=\s]+)$/i.exec(signature);
   if (!match) return null;
@@ -371,6 +459,15 @@ function signatureDataUrlToBuffer(signature: string | null): Buffer | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * The legacy typed-signature text to render when there's no drawable image: a plain typed name renders
+ * verbatim, but a data URL (drawn as an image, or an unsupported/undecodable one) must NOT be dumped as
+ * raw text — it falls back to "—" instead.
+ */
+export function typedSignatureFallback(signature: string | null): string | null {
+  return signature && !signature.startsWith("data:") ? signature : null;
 }
 
 function heading(doc: PDFKit.PDFDocument, label: string): void {

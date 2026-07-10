@@ -13,6 +13,12 @@ import { resolveFrontendUrl, TROCK_LOGO_EMAIL_URL } from "./project-number-email
 
 export const FIELD_SCORECARD_EMAIL_JOB = "field_scorecard_email";
 
+// Email providers (Resend) warn/limit around 28 MB, and base64 transfer-encoding inflates a binary
+// attachment by ~33%. Keep the raw PDF under ~20 MB so the encoded attachment stays comfortably under that
+// ceiling; a larger PDF is delivered as a CRM link instead. The server's per-report evidence cap normally
+// keeps the PDF far smaller, so this is a backstop that must never dead-letter a durable submission.
+const SCORECARD_MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
+
 export interface FieldScorecardEmailPayload {
   tenantSchema?: string;
   scorecardId?: string;
@@ -108,10 +114,18 @@ export async function handleFieldScorecardEmail(
     } catch (err) {
       logger.warn("[FieldScorecardEmail] PDF fetch failed - sending without attachment", { scorecardId, pdfR2Key, err });
     }
-    if (buffer) {
-      attachments = [{ filename: scorecardPdfFilename(payload), content: buffer }];
-    } else {
+    if (!buffer) {
       logger.warn("[FieldScorecardEmail] PDF not available in R2 - sending without attachment", { scorecardId, pdfR2Key });
+    } else if (buffer.byteLength > SCORECARD_MAX_ATTACHMENT_BYTES) {
+      // Oversized PDF: deliver the notification with a CRM link rather than attaching (or dead-lettering).
+      logger.warn("[FieldScorecardEmail] PDF exceeds the safe attachment size - sending without attachment (available in the CRM)", {
+        scorecardId,
+        pdfR2Key,
+        bytes: buffer.byteLength,
+        limit: SCORECARD_MAX_ATTACHMENT_BYTES,
+      });
+    } else {
+      attachments = [{ filename: scorecardPdfFilename(payload), content: buffer }];
     }
   } else {
     logger.warn("[FieldScorecardEmail] No PDF key on the job - sending without attachment", { scorecardId });
