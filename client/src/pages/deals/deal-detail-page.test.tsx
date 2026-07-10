@@ -651,7 +651,7 @@ describe("DealDetailPage", () => {
     expect(html).toContain("Estimates");
     expect(html).toContain("Billing");
     expect(html).toContain("flex-wrap"); // tab bar wraps onto rows instead of a horizontal scroll
-    expect(html).toContain("border-b-2 border-brand-red");
+    expect(html).toContain("h-11 w-11");
   });
 
   it("persists manually logged email activities from the Activity tab", async () => {
