@@ -18,19 +18,19 @@ describe("deficiencyLabel", () => {
 });
 
 describe("scorecardSectionRows", () => {
-  it("returns all 7 sections in canonical order with points merged from items", () => {
+  it("returns all 8 V2 sections in canonical order with points merged from items", () => {
     const items: FieldScorecardItemView[] = [
       { sectionKey: "quality", points: 15, note: "minor rework" },
       { sectionKey: "planning_precon", points: 10, note: null },
     ];
     const rows = scorecardSectionRows(items);
     expect(rows.map((r) => r.key)).toEqual([
-      "planning_precon", "jobsite_5s", "schedule", "subcontractor", "quality", "communication", "financial",
+      "planning_precon", "jobsite_5s", "safety", "schedule", "subcontractor", "quality", "communication", "financial",
     ]);
     expect(rows[0]).toMatchObject({ key: "planning_precon", points: 10, maxPoints: 10, note: null });
-    expect(rows[4]).toMatchObject({ key: "quality", points: 15, maxPoints: 20, note: "minor rework" });
+    expect(rows[5]).toMatchObject({ key: "quality", points: 15, maxPoints: 10, note: "minor rework" });
     // A section with no scored item shows 0 / maxPoints and never crashes.
-    expect(rows[1]).toMatchObject({ key: "jobsite_5s", points: 0, maxPoints: 15, note: null });
+    expect(rows[1]).toMatchObject({ key: "jobsite_5s", points: 0, maxPoints: 10, note: null });
   });
 });
 

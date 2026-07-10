@@ -165,16 +165,22 @@ export type FieldScorecardSummary = {
   submittedAt: string;
   officeSlug?: string;
   officeId?: string;
+  formVersion?: 1 | 2;
+  averageScore?: number | null;
 };
 export type FieldScorecardItemView = { sectionKey: ScorecardSectionKey; points: number; note: string | null };
 export type FieldScorecardPhotoView = {
   id: string;
-  sectionKey: ScorecardSectionKey;
+  sectionKey: ScorecardSectionKey | "critical_deficiency";
+  deficiencyKey?: string | null;
   fileId: string;
   url: string | null;
   caption: string | null;
 };
 export type FieldScorecardDetail = FieldScorecardSummary & {
+  criticalDeficiencyNotes?: Record<string, string>;
+  superintendentSignature?: string | null;
+  pmSignature?: string | null;
   items: FieldScorecardItemView[];
   criticalDeficiencies: string[];
   actionItems: string[];

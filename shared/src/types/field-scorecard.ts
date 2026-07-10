@@ -112,6 +112,80 @@ export const FIELD_SCORECARD_SECTIONS: readonly ScorecardSectionDef[] = [
 
 export const FIELD_SCORECARD_TOTAL_POINTS = 100;
 
+// V2 is the field scorecard form introduced July 2026. V1 definitions above remain exported so
+// submitted historical cards can be rendered exactly as they were originally scored.
+export const FIELD_SCORECARD_V2_SECTION_KEYS = [
+  "planning_precon",
+  "jobsite_5s",
+  "safety",
+  "schedule",
+  "subcontractor",
+  "quality",
+  "communication",
+  "financial",
+] as const;
+export type ScorecardV2SectionKey = (typeof FIELD_SCORECARD_V2_SECTION_KEYS)[number];
+
+export interface ScorecardV2SectionDef {
+  key: ScorecardV2SectionKey;
+  title: string;
+}
+
+/** The V2 one-page form: every category is rated 1-10 and the final score is their average. */
+export const FIELD_SCORECARD_V2_SECTIONS: readonly ScorecardV2SectionDef[] = [
+  { key: "planning_precon", title: "Planning & Preconstruction" },
+  { key: "jobsite_5s", title: "Jobsite Organization / 5S" },
+  { key: "safety", title: "Safety" },
+  { key: "schedule", title: "Schedule Performance" },
+  { key: "subcontractor", title: "Subcontractor Performance" },
+  { key: "quality", title: "Quality Control" },
+  { key: "communication", title: "Communication & Documentation" },
+  { key: "financial", title: "Financial Control" },
+];
+
+export const FIELD_SCORECARD_V2_CRITICAL_DEFICIENCIES = [
+  { key: "missed_hold_point", label: "Missed hold point" },
+  { key: "failed_inspection", label: "Failed inspection" },
+  { key: "safety_violation", label: "Safety violation" },
+  { key: "schedule_slipping", label: "Schedule slipping without recovery plan" },
+  { key: "poor_site_organization", label: "Poor site organization" },
+  { key: "unapproved_co", label: "Unapproved change order work" },
+  { key: "poor_sub", label: "Poor subcontractor performance" },
+  { key: "missing_docs", label: "Missing documentation/reporting" },
+] as const;
+export type ScorecardV2CriticalDeficiencyKey =
+  (typeof FIELD_SCORECARD_V2_CRITICAL_DEFICIENCIES)[number]["key"];
+
+export type ScorecardFormVersion = 1 | 2;
+
+export function isScorecardV2SectionKey(key: string): key is ScorecardV2SectionKey {
+  return FIELD_SCORECARD_V2_SECTION_KEYS.includes(key as ScorecardV2SectionKey);
+}
+
+export function isScorecardV2CriticalDeficiencyKey(key: string): key is ScorecardV2CriticalDeficiencyKey {
+  return FIELD_SCORECARD_V2_CRITICAL_DEFICIENCIES.some((deficiency) => deficiency.key === key);
+}
+
+export function computeScorecardV2Average(items: readonly { sectionKey: ScorecardV2SectionKey; points: number }[]): number {
+  return Math.round((items.reduce((sum, item) => sum + item.points, 0) / FIELD_SCORECARD_V2_SECTIONS.length) * 10) / 10;
+}
+
+export function resolveScorecardV2Rating(average: number): ScorecardRating {
+  if (average >= 9) return "elite";
+  if (average >= 8) return "on_standard";
+  if (average >= 7) return "needs_improvement";
+  return "corrective_action";
+}
+
+export function scorecardV2RatingLabel(rating: ScorecardRating): string {
+  return {
+    elite: "Elite Execution",
+    on_standard: "Meets Standard",
+    needs_improvement: "Needs Improvement",
+    corrective_action: "Corrective Action Required",
+  }[rating];
+}
+
 /** "Check all that apply" critical deficiencies from the form. */
 export const FIELD_SCORECARD_CRITICAL_DEFICIENCIES = [
   { key: "missed_hold_point", label: "Missed hold point" },
@@ -205,16 +279,19 @@ export function actionItemsRequired(input: { total: number; deficiencyCount: num
 // ── Wire types (shared by mobile submit, server persist, and CRM read) ──────────
 
 export interface ScorecardSubmissionItem {
-  sectionKey: ScorecardSectionKey;
+  sectionKey: ScorecardSectionKey | ScorecardV2SectionKey;
   points: number;
   note?: string | null;
 }
 export interface ScorecardPhotoInput {
-  sectionKey: ScorecardSectionKey;
+  /** V2 deficiency evidence uses `critical_deficiency` plus `deficiencyKey`. */
+  sectionKey: ScorecardSectionKey | ScorecardV2SectionKey | "critical_deficiency";
+  deficiencyKey?: ScorecardV2CriticalDeficiencyKey | null;
   clientUploadId: string;
 }
 /** POST /field/scorecards body. `clientSubmissionId` makes the offline-retryable submit idempotent. */
 export interface ScorecardSubmissionInput {
+  formVersion?: ScorecardFormVersion;
   clientSubmissionId: string;
   dealId: string;
   weekOf: string; // yyyy-mm-dd
@@ -223,8 +300,11 @@ export interface ScorecardSubmissionInput {
   projectNumber?: string | null;
   items: ScorecardSubmissionItem[];
   criticalDeficiencies: string[];
+  criticalDeficiencyNotes?: Record<string, string>;
   actionItems: string[];
   photos: ScorecardPhotoInput[];
+  superintendentSignature?: string | null;
+  pmSignature?: string | null;
 }
 
 export interface FieldScorecardSummary {
@@ -232,6 +312,8 @@ export interface FieldScorecardSummary {
   dealId: string;
   weekOf: string;
   totalScore: number;
+  formVersion?: ScorecardFormVersion;
+  averageScore?: number | null;
   rating: ScorecardRating;
   ratingLabel: string;
   superintendentName: string | null;
@@ -245,19 +327,23 @@ export interface FieldScorecardSummary {
 }
 export interface FieldScorecardPhotoView {
   id: string;
-  sectionKey: ScorecardSectionKey;
+  sectionKey: ScorecardSectionKey | ScorecardV2SectionKey | "critical_deficiency";
+  deficiencyKey?: string | null;
   fileId: string;
   url: string | null;
   caption: string | null;
 }
 export interface FieldScorecardItemView {
-  sectionKey: ScorecardSectionKey;
+  sectionKey: ScorecardSectionKey | ScorecardV2SectionKey;
   points: number;
   note: string | null;
 }
 export interface FieldScorecardDetail extends FieldScorecardSummary {
   items: FieldScorecardItemView[];
   criticalDeficiencies: string[];
+  criticalDeficiencyNotes?: Record<string, string>;
   actionItems: string[];
   photos: FieldScorecardPhotoView[];
+  superintendentSignature?: string | null;
+  pmSignature?: string | null;
 }

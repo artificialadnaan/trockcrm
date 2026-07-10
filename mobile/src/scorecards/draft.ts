@@ -4,7 +4,6 @@
 
 import {
   FIELD_SCORECARD_SECTION_KEYS,
-  actionItemsRequired,
   resolveScorecardRating,
   type ScorecardCriticalDeficiencyKey,
   type ScorecardRating,
@@ -15,7 +14,8 @@ export interface ScorecardDraftPhoto {
   key: string; // local list key
   uri: string; // durable per-draft copy (survives app-kill), not the raw camera uri
   clientUploadId: string; // stamped at capture; resolved to a fileId server-side on submit
-  sectionKey: ScorecardSectionKey;
+  sectionKey: ScorecardSectionKey | "critical_deficiency";
+  deficiencyKey?: ScorecardCriticalDeficiencyKey;
   caption: string;
   // Capture metadata carried so the gallery upload keeps the shot's real time/location + can apply the
   // resize cap (compressForUpload needs width/height to hit the 4032px ceiling). All optional.
@@ -42,7 +42,11 @@ export interface ScorecardDraft {
   notes: Partial<Record<ScorecardSectionKey, string>>;
   photos: ScorecardDraftPhoto[];
   criticalDeficiencies: ScorecardCriticalDeficiencyKey[];
+  /** Optional so pre-V2 drafts can resume without a migration. */
+  deficiencyNotes?: Partial<Record<ScorecardCriticalDeficiencyKey, string>>;
   actionItems: string[];
+  superintendentSignature?: string;
+  pmSignature?: string;
   createdAt: number;
   updatedAt: number;
 }
@@ -53,11 +57,15 @@ export type DraftAction =
   | { type: "appendNote"; sectionKey: ScorecardSectionKey; text: string }
   | { type: "setHeader"; field: "superintendentName" | "pmName" | "weekOf"; value: string }
   | { type: "toggleDeficiency"; key: ScorecardCriticalDeficiencyKey }
+  | { type: "setDeficiencyNote"; key: ScorecardCriticalDeficiencyKey; note: string }
+  | { type: "appendDeficiencyNote"; key: ScorecardCriticalDeficiencyKey; text: string }
   | { type: "setActionItems"; items: string[] }
+  | { type: "setSignature"; field: "superintendentSignature" | "pmSignature"; value: string }
   | { type: "appendActionItem"; text: string }
   | { type: "addPhoto"; photo: ScorecardDraftPhoto }
   | { type: "removePhoto"; key: string }
-  | { type: "setPhotoCaption"; key: string; caption: string };
+  | { type: "setPhotoCaption"; key: string; caption: string }
+  | { type: "appendPhotoCaption"; key: string; text: string };
 
 export interface ScorecardSubmissionPayload {
   clientSubmissionId: string;
@@ -68,7 +76,11 @@ export interface ScorecardSubmissionPayload {
   items: { sectionKey: ScorecardSectionKey; points: number; note: string | null }[];
   criticalDeficiencies: string[];
   actionItems: string[];
-  photos: { sectionKey: ScorecardSectionKey; clientUploadId: string }[];
+  criticalDeficiencyNotes: Record<string, string>;
+  photos: { sectionKey: ScorecardSectionKey | "critical_deficiency"; deficiencyKey: ScorecardCriticalDeficiencyKey | null; clientUploadId: string }[];
+  formVersion: 2;
+  superintendentSignature: string | null;
+  pmSignature: string | null;
 }
 
 export function createScorecardDraft(input: {
@@ -95,7 +107,10 @@ export function createScorecardDraft(input: {
     notes: {},
     photos: [],
     criticalDeficiencies: [],
+    deficiencyNotes: {},
     actionItems: [],
+    superintendentSignature: "",
+    pmSignature: "",
     createdAt: input.now,
     updatedAt: input.now,
   };
@@ -125,8 +140,17 @@ export function scorecardDraftReducer(draft: ScorecardDraft, action: DraftAction
           : [...draft.criticalDeficiencies, action.key],
       };
     }
+    case "setDeficiencyNote":
+      return { ...draft, deficiencyNotes: { ...(draft.deficiencyNotes ?? {}), [action.key]: action.note } };
+    case "appendDeficiencyNote": {
+      const current = draft.deficiencyNotes?.[action.key] ?? "";
+      const next = current.trim() ? `${current} ${action.text}`.trim() : action.text.trim();
+      return { ...draft, deficiencyNotes: { ...(draft.deficiencyNotes ?? {}), [action.key]: next } };
+    }
     case "setActionItems":
       return { ...draft, actionItems: action.items };
+    case "setSignature":
+      return { ...draft, [action.field]: action.value };
     case "appendActionItem": {
       // Append a dictated transcript as its own action item (from reducer state → no stale-closure
       // clobber, like appendNote). Drop trailing blank lines first so a mid-typed newline doesn't leave a
@@ -146,6 +170,15 @@ export function scorecardDraftReducer(draft: ScorecardDraft, action: DraftAction
         ...draft,
         photos: draft.photos.map((p) => (p.key === action.key ? { ...p, caption: action.caption } : p)),
       };
+    case "appendPhotoCaption":
+      return {
+        ...draft,
+        photos: draft.photos.map((p) => (
+          p.key === action.key
+            ? { ...p, caption: p.caption.trim() ? `${p.caption} ${action.text}`.trim() : action.text.trim() }
+            : p
+        )),
+      };
     default: {
       // Exhaustiveness guard: adding a DraftAction variant without a case here fails to compile.
       const _exhaustive: never = action;
@@ -158,7 +191,13 @@ export function scorecardDraftReducer(draft: ScorecardDraft, action: DraftAction
 // ── selectors ─────────────────────────────────────────────────────────────
 
 export function scorecardDraftTotal(draft: ScorecardDraft): number {
-  return FIELD_SCORECARD_SECTION_KEYS.reduce((sum, k) => sum + (draft.scores[k] ?? 0), 0);
+  return scorecardDraftAverage(draft);
+}
+
+export function scorecardDraftAverage(draft: ScorecardDraft): number {
+  const answered = FIELD_SCORECARD_SECTION_KEYS.filter((k) => typeof draft.scores[k] === "number");
+  if (answered.length === 0) return 0;
+  return Math.round((answered.reduce((sum, k) => sum + (draft.scores[k] ?? 0), 0) / FIELD_SCORECARD_SECTION_KEYS.length) * 10) / 10;
 }
 
 export function scorecardDraftSectionsAnswered(draft: ScorecardDraft): number {
@@ -174,10 +213,8 @@ export function scorecardDraftRating(draft: ScorecardDraft): ScorecardRating {
 }
 
 export function scorecardActionItemsRequired(draft: ScorecardDraft): boolean {
-  return actionItemsRequired({
-    total: scorecardDraftTotal(draft),
-    deficiencyCount: draft.criticalDeficiencies.length,
-  });
+  void draft;
+  return false;
 }
 
 export function scorecardDraftPhotosForSection(
@@ -202,23 +239,26 @@ export interface DraftValidation {
   missingSections: ScorecardSectionKey[];
   needsActionItems: boolean;
   missingWeekOf: boolean; // true when Week Of is blank OR not a real calendar date
+  missingSignatures: boolean;
 }
 export function validateScorecardDraft(draft: ScorecardDraft): DraftValidation {
   const missingSections = FIELD_SCORECARD_SECTION_KEYS.filter((k) => typeof draft.scores[k] !== "number");
-  const hasActionItem = draft.actionItems.some((s) => s.trim().length > 0);
-  const needsActionItems = scorecardActionItemsRequired(draft) && !hasActionItem;
+  const needsActionItems = false;
   const missingWeekOf = !isValidWeekOf(draft.weekOf);
+  const missingSignatures = !(draft.superintendentSignature ?? "").trim() || !(draft.pmSignature ?? "").trim();
   return {
     missingSections,
     needsActionItems,
     missingWeekOf,
-    canSubmit: missingSections.length === 0 && !needsActionItems && !missingWeekOf && draft.dealId.length > 0,
+    missingSignatures,
+    canSubmit: missingSections.length === 0 && !needsActionItems && !missingWeekOf && !missingSignatures && draft.dealId.length > 0,
   };
 }
 
 /** Build the POST /field/scorecards payload. Call only when validateScorecardDraft().canSubmit. */
 export function scorecardDraftToSubmission(draft: ScorecardDraft): ScorecardSubmissionPayload {
   return {
+    formVersion: 2,
     clientSubmissionId: draft.clientSubmissionId,
     dealId: draft.dealId,
     weekOf: draft.weekOf,
@@ -230,7 +270,14 @@ export function scorecardDraftToSubmission(draft: ScorecardDraft): ScorecardSubm
       note: draft.notes[k]?.trim() ? draft.notes[k]!.trim() : null,
     })),
     criticalDeficiencies: [...draft.criticalDeficiencies],
+    criticalDeficiencyNotes: Object.fromEntries(
+      draft.criticalDeficiencies
+        .map((key) => [key, draft.deficiencyNotes?.[key]?.trim() ?? ""])
+        .filter(([, note]) => note.length > 0),
+    ),
     actionItems: draft.actionItems.map((s) => s.trim()).filter((s) => s.length > 0),
-    photos: draft.photos.map((p) => ({ sectionKey: p.sectionKey, clientUploadId: p.clientUploadId })),
+    photos: draft.photos.map((p) => ({ sectionKey: p.sectionKey, deficiencyKey: p.deficiencyKey ?? null, clientUploadId: p.clientUploadId })),
+    superintendentSignature: draft.superintendentSignature?.trim() || null,
+    pmSignature: draft.pmSignature?.trim() || null,
   };
 }

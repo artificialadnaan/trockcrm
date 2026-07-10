@@ -21,6 +21,8 @@ export interface FieldScorecardEmailPayload {
   projectNumber?: string | null;
   weekOf?: string;
   totalScore?: number;
+  formVersion?: 1 | 2;
+  averageScore?: number | null;
   ratingLabel?: string;
   submittedByName?: string | null;
   pdfR2Key?: string | null;
@@ -123,6 +125,8 @@ export async function handleFieldScorecardEmail(
     projectNumber: normalizeText(payload.projectNumber),
     weekOf: normalizeText(payload.weekOf),
     totalScore: typeof payload.totalScore === "number" ? payload.totalScore : null,
+    formVersion: payload.formVersion === 2 ? 2 : 1,
+    averageScore: typeof payload.averageScore === "number" ? payload.averageScore : null,
     ratingLabel: normalizeText(payload.ratingLabel),
     submittedByName: normalizeText(payload.submittedByName),
     hasPdf: !!attachments,
@@ -168,6 +172,8 @@ export function buildFieldScorecardEmail(input: {
   projectNumber: string | null;
   weekOf: string | null;
   totalScore: number | null;
+  formVersion?: 1 | 2;
+  averageScore?: number | null;
   ratingLabel: string | null;
   submittedByName: string | null;
   hasPdf: boolean;
@@ -179,7 +185,11 @@ export function buildFieldScorecardEmail(input: {
   const dealUrl = input.dealId ? `${baseUrl}/deals/${encodeURIComponent(input.dealId)}${officeParam}` : baseUrl;
   const safeDealUrl = escapeHtml(dealUrl);
 
-  const scoreText = input.totalScore != null ? `${input.totalScore}/100` : "—";
+  const scoreText = input.totalScore == null
+    ? "—"
+    : input.formVersion === 2
+      ? (input.averageScore ?? input.totalScore / 10).toFixed(1) + "/10"
+      : String(input.totalScore) + "/100";
   const subject = input.projectNumber
     ? `Field Scorecard: ${input.projectNumber} — ${scoreText}${input.ratingLabel ? ` (${input.ratingLabel})` : ""}`
     : `Field Scorecard: ${input.dealName} — ${scoreText}`;
@@ -279,4 +289,3 @@ export function buildFieldScorecardEmail(input: {
 
   return { subject, html, text, dealUrl };
 }
-

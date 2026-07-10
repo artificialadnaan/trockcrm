@@ -10,6 +10,8 @@ export interface QcScorecardRow {
   regionName: string | null;
   superintendentName: string | null;
   totalScore: number;
+  formVersion: 1 | 2;
+  averageScore: number | null;
   rating: string;
   deficiencyCount: number;
   weekOf: string;

@@ -23,15 +23,14 @@ function newDraft(): ScorecardDraft {
     now: 1000,
   });
 }
-// Score every section to its max (total 100).
+// Score every V2 section to 10/10 and add both required electronic signatures.
 function fullyScored(): ScorecardDraft {
   let d = newDraft();
-  const max: Record<string, number> = {
-    planning_precon: 10, jobsite_5s: 15, schedule: 20, subcontractor: 15, quality: 20, communication: 10, financial: 10,
-  };
   for (const k of FIELD_SCORECARD_SECTION_KEYS) {
-    d = scorecardDraftReducer(d, { type: "setScore", sectionKey: k, points: max[k] });
+    d = scorecardDraftReducer(d, { type: "setScore", sectionKey: k, points: 10 });
   }
+  d = scorecardDraftReducer(d, { type: "setSignature", field: "superintendentSignature", value: "Sam Super" });
+  d = scorecardDraftReducer(d, { type: "setSignature", field: "pmSignature", value: "Pat PM" });
   return d;
 }
 
@@ -48,63 +47,59 @@ describe("createScorecardDraft", () => {
 });
 
 describe("scoring", () => {
-  it("sums answered sections and derives the rating", () => {
+  it("averages all eight categories and derives the rating", () => {
     const d = fullyScored();
-    expect(scorecardDraftTotal(d)).toBe(100);
+    expect(scorecardDraftTotal(d)).toBe(10);
     expect(isScorecardDraftComplete(d)).toBe(true);
     expect(scorecardDraftRating(d)).toBe("elite");
   });
 
-  it("treats an explicit 0 as answered", () => {
+  it("tracks a selected slider value", () => {
     let d = newDraft();
-    d = scorecardDraftReducer(d, { type: "setScore", sectionKey: "planning_precon", points: 0 });
-    expect(d.scores.planning_precon).toBe(0);
-    expect(scorecardDraftTotal(d)).toBe(0);
+    d = scorecardDraftReducer(d, { type: "setScore", sectionKey: "planning_precon", points: 1 });
+    expect(d.scores.planning_precon).toBe(1);
+    expect(scorecardDraftTotal(d)).toBe(0.1);
   });
 
   it("re-scoring a section overwrites, not accumulates", () => {
     let d = newDraft();
-    d = scorecardDraftReducer(d, { type: "setScore", sectionKey: "schedule", points: 20 });
-    d = scorecardDraftReducer(d, { type: "setScore", sectionKey: "schedule", points: 10 });
-    expect(d.scores.schedule).toBe(10);
+    d = scorecardDraftReducer(d, { type: "setScore", sectionKey: "schedule", points: 8 });
+    d = scorecardDraftReducer(d, { type: "setScore", sectionKey: "schedule", points: 9 });
+    expect(d.scores.schedule).toBe(9);
   });
 });
 
-describe("action-item gate", () => {
-  it("requires action items below 85", () => {
+describe("category action items", () => {
+  it("keeps action items optional at the card level", () => {
     let d = fullyScored();
-    d = scorecardDraftReducer(d, { type: "setScore", sectionKey: "schedule", points: 0 }); // 80
-    expect(scorecardActionItemsRequired(d)).toBe(true);
-    expect(validateScorecardDraft(d).needsActionItems).toBe(true);
-    expect(validateScorecardDraft(d).canSubmit).toBe(false);
-
-    d = scorecardDraftReducer(d, { type: "setActionItems", items: ["Re-sequence the pour"] });
+    d = scorecardDraftReducer(d, { type: "setScore", sectionKey: "schedule", points: 4 });
+    expect(scorecardActionItemsRequired(d)).toBe(false);
     expect(validateScorecardDraft(d).needsActionItems).toBe(false);
     expect(validateScorecardDraft(d).canSubmit).toBe(true);
   });
 
-  it("requires action items when a deficiency is flagged even at 100", () => {
+  it("allows deficiency evidence without a global action-item gate", () => {
     let d = fullyScored();
     d = scorecardDraftReducer(d, { type: "toggleDeficiency", key: "failed_inspection" });
-    expect(scorecardActionItemsRequired(d)).toBe(true);
-    expect(validateScorecardDraft(d).canSubmit).toBe(false);
+    expect(scorecardActionItemsRequired(d)).toBe(false);
+    expect(validateScorecardDraft(d).canSubmit).toBe(true);
   });
 
   it("toggleDeficiency adds then removes", () => {
     let d = newDraft();
-    d = scorecardDraftReducer(d, { type: "toggleDeficiency", key: "safety_access" });
-    expect(d.criticalDeficiencies).toEqual(["safety_access"]);
-    d = scorecardDraftReducer(d, { type: "toggleDeficiency", key: "safety_access" });
+    d = scorecardDraftReducer(d, { type: "toggleDeficiency", key: "safety_violation" });
+    expect(d.criticalDeficiencies).toEqual(["safety_violation"]);
+    d = scorecardDraftReducer(d, { type: "toggleDeficiency", key: "safety_violation" });
     expect(d.criticalDeficiencies).toEqual([]);
   });
 });
 
 describe("validation", () => {
-  it("blocks submit until all 7 sections are scored", () => {
+  it("blocks submit until all 8 sections are scored", () => {
     let d = newDraft();
-    d = scorecardDraftReducer(d, { type: "setScore", sectionKey: "schedule", points: 20 });
+    d = scorecardDraftReducer(d, { type: "setScore", sectionKey: "schedule", points: 8 });
     const v = validateScorecardDraft(d);
-    expect(v.missingSections.length).toBe(6);
+    expect(v.missingSections.length).toBe(7);
     expect(v.canSubmit).toBe(false);
   });
 
@@ -195,10 +190,11 @@ describe("scorecardDraftToSubmission", () => {
     const payload = scorecardDraftToSubmission(d);
     expect(payload.clientSubmissionId).toBe("sub-1");
     expect(payload.dealId).toBe("deal-1");
-    expect(payload.items).toHaveLength(7);
+    expect(payload.formVersion).toBe(2);
+    expect(payload.items).toHaveLength(8);
     expect(payload.items[0].sectionKey).toBe("planning_precon"); // canonical order
     expect(payload.items.find((i) => i.sectionKey === "schedule")?.note).toBe("on track");
     expect(payload.actionItems).toEqual(["do X", "do Y"]); // trimmed + blanks dropped
-    expect(payload.photos).toEqual([{ sectionKey: "schedule", clientUploadId: "cu-1" }]);
+    expect(payload.photos).toEqual([{ sectionKey: "schedule", deficiencyKey: null, clientUploadId: "cu-1" }]);
   });
 });
