@@ -33,6 +33,14 @@ async function render(deal: unknown, onDealUpdated = vi.fn(), canEdit = true, of
   return { container, onDealUpdated };
 }
 
+// Set an input's value through the native prototype setter + a bubbling input event — React 19's synthetic
+// onChange does NOT fire from a plain `el.value = ...` assignment.
+function setValue(el: HTMLInputElement, v: string) {
+  const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
+  setter?.call(el, v);
+  el.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
 describe("DealBillingTab", () => {
   beforeEach(() => {
     document.body.innerHTML = "";
@@ -61,11 +69,6 @@ describe("DealBillingTab", () => {
     });
     const onDealUpdated = vi.fn();
     const { container } = await render(dealNoBilling, onDealUpdated);
-    const setValue = (el: HTMLInputElement, v: string) => {
-      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
-      setter?.call(el, v);
-      el.dispatchEvent(new Event("input", { bubbles: true }));
-    };
     const addBtn = Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.includes("Add new contact")) as HTMLButtonElement;
     await act(async () => { addBtn.click(); });
     await act(async () => { await Promise.resolve(); });
@@ -90,8 +93,8 @@ describe("DealBillingTab", () => {
       loading: false, refetch: vi.fn(),
     });
     const { container } = await render(dealWithBilling);
-    expect(container.textContent).toContain("Signed contract");  // section heading
-    expect(container.textContent).toContain("Signed Contract");  // the existing file
+    expect(container.textContent).toContain("Contract");         // section heading (generic contract bucket)
+    expect(container.textContent).toContain("Signed Contract");  // the existing file (mock displayName)
     expect(container.querySelector("[data-testid='upload-zone']")).toBeTruthy();
   });
 
@@ -104,11 +107,7 @@ describe("DealBillingTab", () => {
     const onDealUpdated = vi.fn();
     const { container } = await render(dealNoBilling, onDealUpdated);
     const input = container.querySelector("input") as HTMLInputElement;
-    await act(async () => {
-      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
-      setter?.call(input, "jane");
-      input.dispatchEvent(new Event("input", { bubbles: true }));
-    });
+    await act(async () => { setValue(input, "jane"); });
     await act(async () => { await Promise.resolve(); });
     const option = Array.from(document.querySelectorAll("button")).find((n) => n.textContent?.includes("Jane Doe")) as HTMLElement;
     await act(async () => { option.click(); });
@@ -124,10 +123,11 @@ describe("DealBillingTab", () => {
     const { container } = await render(dealWithBilling, vi.fn(), false);
     // The contact card still shows...
     expect(container.textContent).toContain("Jane Doe");
-    // ...but there is NO search input, NO add button, NO upload zone — and a read-only note.
+    // ...but there are NO billing-contact edit controls (search / add) — just a read-only note. The CONTRACT
+    // upload stays available (file uploads are collaborator-gated server-side, not owner-only) per Codex.
     expect(container.querySelector("input")).toBeNull();
     expect(Array.from(container.querySelectorAll("button")).some((b) => b.textContent?.includes("Add new contact"))).toBe(false);
-    expect(container.querySelector("[data-testid='upload-zone']")).toBeNull();
+    expect(container.querySelector("[data-testid='upload-zone']")).toBeTruthy();
     expect(container.textContent).toContain("Only the assigned rep can edit billing");
   });
 
@@ -150,11 +150,6 @@ describe("DealBillingTab", () => {
     });
     const onDealUpdated = vi.fn();
     const { container } = await render(dealNoBilling, onDealUpdated);
-    const setValue = (el: HTMLInputElement, v: string) => {
-      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
-      setter?.call(el, v);
-      el.dispatchEvent(new Event("input", { bubbles: true }));
-    };
     (Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.includes("Add new contact")) as HTMLButtonElement).click();
     await act(async () => { await Promise.resolve(); });
     await act(async () => {
@@ -187,11 +182,6 @@ describe("DealBillingTab", () => {
       }
       return Promise.resolve({ contacts: [] });
     });
-    const setValue = (el: HTMLInputElement, v: string) => {
-      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
-      setter?.call(el, v);
-      el.dispatchEvent(new Event("input", { bubbles: true }));
-    };
     const { container } = await render(dealNoBilling);
     (Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.includes("Add new contact")) as HTMLButtonElement).click();
     await act(async () => { await Promise.resolve(); });
@@ -216,11 +206,7 @@ describe("DealBillingTab", () => {
     );
     const { container } = await render(dealNoBilling, vi.fn(), true, "office-b");
     const input = container.querySelector("input") as HTMLInputElement;
-    await act(async () => {
-      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
-      setter?.call(input, "jane");
-      input.dispatchEvent(new Event("input", { bubbles: true }));
-    });
+    await act(async () => { setValue(input, "jane"); });
     await act(async () => { await Promise.resolve(); });
     await act(async () => { (Array.from(document.querySelectorAll("button")).find((n) => n.textContent?.includes("Jane Doe")) as HTMLElement).click(); });
     await act(async () => { await Promise.resolve(); });
@@ -228,5 +214,25 @@ describe("DealBillingTab", () => {
       expect.stringContaining("/deals/deal-1"),
       expect.objectContaining({ method: "PATCH", headers: expect.objectContaining({ "x-office-id": "office-b" }) }),
     );
+  });
+
+  it("ignores a stale contact-search response that resolves after a newer query (searchSeq guard)", async () => {
+    let resolveOld: ((v: unknown) => void) | undefined;
+    let resolveNew: ((v: unknown) => void) | undefined;
+    mocks.apiMock.mockImplementation((url: string) => {
+      if (url.includes("q=ann")) return new Promise((r) => { resolveOld = r; });
+      if (url.includes("q=beth")) return new Promise((r) => { resolveNew = r; });
+      return Promise.resolve({ deal: dealWithBilling });
+    });
+    const { container } = await render(dealNoBilling);
+    const input = container.querySelector("input") as HTMLInputElement;
+    await act(async () => { setValue(input, "ann"); });   // older query (still in flight)
+    await act(async () => { setValue(input, "beth"); });  // newer query (still in flight)
+    // Resolve the NEWER query first, then the OLDER one afterwards.
+    await act(async () => { resolveNew?.({ contacts: [{ id: "beth-1", firstName: "Beth", lastName: "New", email: null, companyName: null, category: "client" }] }); await Promise.resolve(); });
+    await act(async () => { resolveOld?.({ contacts: [{ id: "ann-1", firstName: "Ann", lastName: "Stale", email: null, companyName: null, category: "client" }] }); await Promise.resolve(); });
+    // The stale older response must be dropped by the sequence guard; only the newer query's result renders.
+    expect(container.textContent).toContain("Beth New");
+    expect(container.textContent).not.toContain("Ann Stale");
   });
 });

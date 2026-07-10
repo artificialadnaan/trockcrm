@@ -345,7 +345,10 @@ export async function checkForDuplicates(
       isActive: contacts.isActive,
     })
     .from(contacts)
-    .where(and(...conditions, or(...fuzzyConditions)))
+    // Only ACTIVE contacts are offered as "use this instead" suggestions — a soft-deleted/merged record is
+    // not assignable, and returning only-inactive matches would leave the caller unable to create at all
+    // (the exact-email/name HARD-block below still considers inactive, independently).
+    .where(and(...conditions, or(...fuzzyConditions), eq(contacts.isActive, true)))
     .limit(50); // fetch more candidates; JS Levenshtein narrows below
 
   // JS: filter by first-name Levenshtein distance < 3 to catch typos/nicknames

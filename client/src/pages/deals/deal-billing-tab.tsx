@@ -32,19 +32,26 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
   // Possible-duplicate matches returned by the FIRST (dedup-enabled) create attempt.
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
   const [createError, setCreateError] = useState<string | null>(null);
+  const [assignError, setAssignError] = useState<string | null>(null);
 
   const runSearch = (q: string) => {
     setQuery(q);
-    if (q.trim().length < 2) { setResults([]); return; }
+    // Bump the sequence on EVERY keystroke (including clearing below 2 chars) so a slow earlier response can
+    // never repopulate results under a newer/short query.
     const seq = ++searchSeq.current;
+    if (q.trim().length < 2) { setResults([]); return; }
     api<{ contacts: Array<{ id: string; firstName: string; lastName: string; email: string | null; companyName: string | null; category: string }> }>(
       `/contacts/search?q=${encodeURIComponent(q.trim())}&limit=10`,
       getOfficeRequestOptions(officeId),
-    ).then((res) => { if (seq === searchSeq.current) setResults(res.contacts); });
+    ).then(
+      (res) => { if (seq === searchSeq.current) setResults(res.contacts); },
+      () => { if (seq === searchSeq.current) setResults([]); }, // search failed — clear rather than leave stale
+    );
   };
 
   const assign = async (contactId: string) => {
     setSaving(true);
+    setAssignError(null);
     // Send the PATCH to the office the deal was LOADED from (cross-office view via ?officeId=), not the
     // viewer's default active office — otherwise the assignment 404s or updates the wrong tenant's deal.
     return api<{ deal: DealDetail }>(`/deals/${deal.id}`, {
@@ -58,8 +65,11 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
         onDealUpdated();
         setSaving(false);
       },
-      () => {
+      (e) => {
+        // Surface the failure — otherwise (notably right after an inline create closes the dialog) the user is
+        // left with a newly created but UNASSIGNED contact and no indication anything went wrong.
         setSaving(false);
+        setAssignError(e instanceof Error ? e.message : "Could not assign the billing contact — please try again.");
       }
     );
   };
@@ -133,8 +143,11 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
             {deal.billingContactPhone ? <div className="text-slate-500">{deal.billingContactPhone}</div> : null}
           </div>
         ) : (
-          <p className="mt-2 text-sm text-amber-700">No billing contact assigned yet — required before this deal can be marked Won.</p>
+          <p className="mt-2 text-sm text-amber-700">No billing contact assigned yet — this will be required to mark the deal Won.</p>
         )}
+        {assignError ? (
+          <p className="mt-2 rounded-md border border-red-200 bg-red-50 px-2 py-1.5 text-sm text-red-700">{assignError}</p>
+        ) : null}
         {canEdit ? (
           <div className="mt-3 space-y-2">
             <input
@@ -177,21 +190,23 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
       </section>
 
       <section className="rounded-xl border border-slate-200 bg-white p-4">
-        <h3 className="text-sm font-semibold text-slate-800">Signed contract <span className="font-normal text-slate-400">(optional)</span></h3>
+        {/* "Contract", not "Signed contract": the file category is a generic contract bucket (drafts / MSAs /
+            SOWs auto-classify here too), so we don't claim every file is signed. Upload is gated by FILE-
+            collaborator access (server-enforced in files/routes), NOT the owner-only billing PATCH — so a
+            same-office collaborator can add a contract here just like on the Files tab (Codex P3). */}
+        <h3 className="text-sm font-semibold text-slate-800">Contract <span className="font-normal text-slate-400">(optional)</span></h3>
         {contractFiles.length > 0 ? (
           <ul className="mt-2 space-y-1 text-sm">
             {contractFiles.map((f) => (
               <li key={f.id} className="text-slate-700">{f.displayName}</li>
             ))}
           </ul>
-        ) : !canEdit ? (
-          <p className="mt-2 text-sm text-slate-400">No signed contract uploaded.</p>
-        ) : null}
-        {canEdit ? (
-          <div className="mt-3">
-            <FileUploadZone category="contract" dealId={deal.id} compact onUploadComplete={() => refetchFiles()} />
-          </div>
-        ) : null}
+        ) : (
+          <p className="mt-2 text-sm text-slate-400">No contract uploaded.</p>
+        )}
+        <div className="mt-3">
+          <FileUploadZone category="contract" dealId={deal.id} compact onUploadComplete={() => refetchFiles()} />
+        </div>
       </section>
 
       <Dialog open={dialogOpen} onOpenChange={(open) => { if (!open) closeDialog(); else setDialogOpen(true); }}>

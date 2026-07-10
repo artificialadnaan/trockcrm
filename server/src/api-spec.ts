@@ -1035,6 +1035,7 @@ export const apiSpec = {
                   name: { type: "string" },
                   assignedRepId: { type: "string", format: "uuid", description: "Director/admin only." },
                   primaryContactId: { type: "string", format: "uuid" },
+                  billingContactId: { type: "string", format: "uuid", nullable: true },
                   companyId: { type: "string", format: "uuid" },
                   ddEstimate: { type: "string" },
                   bidEstimate: { type: "string" },
