@@ -150,7 +150,7 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
             {deal.billingContactPhone ? <div className="text-slate-500">{deal.billingContactPhone}</div> : null}
           </div>
         ) : (
-          <p className="mt-2 text-sm text-amber-700">No billing contact assigned yet — this will be required to mark the deal Won.</p>
+          <p className="mt-2 text-sm text-amber-700">No billing contact assigned yet — add one before this deal closes.</p>
         )}
         {assignError ? (
           <p className="mt-2 rounded-md border border-red-200 bg-red-50 px-2 py-1.5 text-sm text-red-700">{assignError}</p>
@@ -234,7 +234,7 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
               <label className="block text-xs font-medium text-slate-600 mb-1">Company</label>
               {/* Query CRM companies (with inline add-new), same selector the deal/lead forms use — instead of
                   free text — so the contact links to a real company record. */}
-              <CompanySelector value={companyId} onChange={(id) => setCompanyId(id)} officeId={officeId} />
+              <CompanySelector value={companyId} onChange={(id) => { setCompanyId(id); setSuggestions([]); setCreateError(null); }} officeId={officeId} />
             </div>
           </div>
           {createError ? (
