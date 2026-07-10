@@ -47,6 +47,9 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
   // contact can't be created linked by id with a blank company_name (which would also run dedup without the
   // company) (Codex P2).
   const [companyPending, setCompanyPending] = useState(false);
+  // True while CompanySelector's own inline "Add New Company" POST is in flight — before it calls onChange with
+  // the new id — so Save is blocked and a rep can't submit an unlinked contact mid company-create (Codex P2).
+  const [companyCreating, setCompanyCreating] = useState(false);
 
   const runSearch = (q: string) => {
     setQuery(q);
@@ -88,7 +91,7 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
     );
   };
 
-  const closeDialog = () => { setDialogOpen(false); setNewC(emptyNewC); setCompanyId(null); setCompanyName(null); setCompanyPending(false); ++companySeq.current; setSuggestions([]); setCreateError(null); };
+  const closeDialog = () => { setDialogOpen(false); setNewC(emptyNewC); setCompanyId(null); setCompanyName(null); setCompanyPending(false); setCompanyCreating(false); ++companySeq.current; setSuggestions([]); setCreateError(null); };
 
   const buildInput = () => ({
     firstName: newC.firstName.trim(),
@@ -197,7 +200,7 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
             <button
               type="button"
               disabled={saving}
-              onClick={() => { setNewC(emptyNewC); setCompanyId(null); setCompanyName(null); setCompanyPending(false); ++companySeq.current; setSuggestions([]); setCreateError(null); setDialogOpen(true); }}
+              onClick={() => { setNewC(emptyNewC); setCompanyId(null); setCompanyName(null); setCompanyPending(false); setCompanyCreating(false); ++companySeq.current; setSuggestions([]); setCreateError(null); setDialogOpen(true); }}
               className="text-xs text-blue-600 hover:underline"
             >
               + Add new contact
@@ -268,9 +271,10 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
                       .catch(() => { if (seq === companySeq.current) { setCompanyName(null); setCompanyPending(false); } });
                   }}
                   officeId={officeId}
+                  onBusyChange={setCompanyCreating}
                 />
               </fieldset>
-              {companyPending ? <p className="mt-1 text-xs text-slate-400">Loading company…</p> : null}
+              {companyPending || companyCreating ? <p className="mt-1 text-xs text-slate-400">Loading company…</p> : null}
             </div>
           </div>
           {createError ? (
@@ -306,7 +310,7 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
             </button>
             <button
               type="button"
-              disabled={creating || companyPending || !newC.firstName.trim() || !newC.lastName.trim()}
+              disabled={creating || companyPending || companyCreating || !newC.firstName.trim() || !newC.lastName.trim()}
               onClick={() => handleCreate(suggestions.length > 0)}
               className="rounded-md bg-blue-600 px-3 py-1.5 text-sm text-white hover:bg-blue-700 disabled:opacity-50"
             >
