@@ -106,6 +106,60 @@ describe("DealBillingTab", () => {
     expect(onDealUpdated).toHaveBeenCalled();
   });
 
+  it("rejects a non-2-letter state before POSTing the contact (matches the DB char(2) column)", async () => {
+    const onDealUpdated = vi.fn();
+    const { container } = await render(dealNoBilling, onDealUpdated);
+    (Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.includes("Add new contact")) as HTMLButtonElement).click();
+    await act(async () => { await Promise.resolve(); });
+    await act(async () => {
+      setValue(document.querySelector("input[name='firstName']") as HTMLInputElement, "Pat");
+      setValue(document.querySelector("input[name='lastName']") as HTMLInputElement, "Payer");
+      setValue(document.querySelector("input[name='state']") as HTMLInputElement, "Texas"); // full name, not a 2-letter code
+    });
+    mocks.apiMock.mockClear();
+    await act(async () => { (Array.from(document.querySelectorAll("button")).find((b) => b.textContent === "Save") as HTMLButtonElement).click(); });
+    await act(async () => { await Promise.resolve(); });
+    // No contact is created — the dialog rejects the value up front instead of letting the DB error on write.
+    expect(mocks.apiMock).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain("State must be exactly 2 uppercase letters");
+    expect(onDealUpdated).not.toHaveBeenCalled();
+  });
+
+  it("rejects a malformed ZIP before POSTing the contact (matches the DB varchar(10) column)", async () => {
+    const onDealUpdated = vi.fn();
+    const { container } = await render(dealNoBilling, onDealUpdated);
+    (Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.includes("Add new contact")) as HTMLButtonElement).click();
+    await act(async () => { await Promise.resolve(); });
+    await act(async () => {
+      setValue(document.querySelector("input[name='firstName']") as HTMLInputElement, "Pat");
+      setValue(document.querySelector("input[name='lastName']") as HTMLInputElement, "Payer");
+      setValue(document.querySelector("input[name='zip']") as HTMLInputElement, "7520123456789"); // overlong / malformed
+    });
+    mocks.apiMock.mockClear();
+    await act(async () => { (Array.from(document.querySelectorAll("button")).find((b) => b.textContent === "Save") as HTMLButtonElement).click(); });
+    await act(async () => { await Promise.resolve(); });
+    expect(mocks.apiMock).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain("ZIP must be 5 digits or 5+4 format");
+    expect(onDealUpdated).not.toHaveBeenCalled();
+  });
+
+  it("clears a validation error once the offending field is corrected", async () => {
+    const { container } = await render(dealNoBilling);
+    (Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.includes("Add new contact")) as HTMLButtonElement).click();
+    await act(async () => { await Promise.resolve(); });
+    await act(async () => {
+      setValue(document.querySelector("input[name='firstName']") as HTMLInputElement, "Pat");
+      setValue(document.querySelector("input[name='lastName']") as HTMLInputElement, "Payer");
+      setValue(document.querySelector("input[name='state']") as HTMLInputElement, "Texas");
+    });
+    await act(async () => { (Array.from(document.querySelectorAll("button")).find((b) => b.textContent === "Save") as HTMLButtonElement).click(); });
+    await act(async () => { await Promise.resolve(); });
+    expect(document.body.textContent).toContain("State must be exactly 2 uppercase letters");
+    // Editing the field drops the stale error so the user isn't stuck staring at a message they've already fixed.
+    await act(async () => { setValue(document.querySelector("input[name='state']") as HTMLInputElement, "TX"); });
+    expect(document.body.textContent).not.toContain("State must be exactly 2 uppercase letters");
+  });
+
   it("renders the contract upload zone and lists an existing signed contract", async () => {
     mocks.filesMock.mockReturnValue({
       files: [{ id: "f1", displayName: "Signed Contract", category: "contract", createdAt: "2026-07-01T00:00:00Z" }],
