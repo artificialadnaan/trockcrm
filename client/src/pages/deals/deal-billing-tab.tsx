@@ -14,7 +14,17 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 
-const emptyNewC = { firstName: "", lastName: "", email: "", phone: "", jobTitle: "" };
+const emptyNewC = {
+  firstName: "",
+  lastName: "",
+  email: "",
+  phone: "",
+  jobTitle: "",
+  address: "",
+  city: "",
+  state: "",
+  zip: "",
+};
 type Suggestion = { id: string; firstName: string; lastName: string; email: string | null; companyName: string | null; matchReason?: string; isActive?: boolean };
 
 export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { deal: DealDetail; onDealUpdated: () => void; canEdit: boolean; officeId?: string | null }) {
@@ -99,6 +109,10 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
     email: newC.email.trim() || null,
     phone: newC.phone.trim() || null,
     jobTitle: newC.jobTitle.trim() || null,
+    address: newC.address.trim() || null,
+    city: newC.city.trim() || null,
+    state: newC.state.trim().toUpperCase() || null,
+    zip: newC.zip.trim() || null,
     companyId: companyId || undefined,
     companyName: companyName ?? undefined,
     category: "client",
@@ -151,6 +165,12 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
     </div>
   );
 
+  const billingAddress = [
+    deal.billingContactAddress,
+    [deal.billingContactCity, deal.billingContactState].filter(Boolean).join(", "),
+    deal.billingContactZip,
+  ].filter(Boolean).join(", ");
+
   return (
     <div className="space-y-6">
       <section className="rounded-xl border border-slate-200 bg-white p-4">
@@ -162,6 +182,7 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
             {deal.billingContactTitle ? <div className="text-slate-500">{deal.billingContactTitle}</div> : null}
             {deal.billingContactEmail ? <div className="text-slate-500">{deal.billingContactEmail}</div> : null}
             {deal.billingContactPhone ? <div className="text-slate-500">{deal.billingContactPhone}</div> : null}
+            {billingAddress ? <div className="mt-1 text-slate-500">{billingAddress}</div> : null}
           </div>
         ) : (
           <p className="mt-2 text-sm text-amber-700">No billing contact assigned yet — add one before this deal closes.</p>
@@ -244,6 +265,17 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
             {field("email", "Email", "email")}
             {field("phone", "Phone", "tel")}
             {field("jobTitle", "Job title")}
+            <div className="border-t border-slate-100 pt-3">
+              <p className="text-xs font-semibold text-slate-700">Billing address</p>
+              <div className="mt-2 space-y-3">
+                {field("address", "Street address")}
+                <div className="grid grid-cols-2 gap-3">
+                  {field("city", "City")}
+                  {field("state", "State")}
+                </div>
+                {field("zip", "ZIP")}
+              </div>
+            </div>
             <div>
               <label className="block text-xs font-medium text-slate-600 mb-1">Company</label>
               {/* Query CRM companies (with inline add-new), same selector the deal/lead forms use — instead of

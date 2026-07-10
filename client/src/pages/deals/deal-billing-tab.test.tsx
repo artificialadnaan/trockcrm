@@ -17,9 +17,11 @@ vi.mock("@/components/files/file-upload-zone", () => ({ FileUploadZone: () => <d
 vi.mock("@/components/companies/company-selector", () => ({ CompanySelector: () => <div data-testid="company-selector" /> }));
 
 const dealNoBilling = { id: "deal-1", billingContactId: null, billingContactName: null,
-  billingContactEmail: null, billingContactPhone: null, billingContactCompany: null, billingContactTitle: null };
+  billingContactEmail: null, billingContactPhone: null, billingContactCompany: null, billingContactTitle: null,
+  billingContactAddress: null, billingContactCity: null, billingContactState: null, billingContactZip: null };
 const dealWithBilling = { ...dealNoBilling, billingContactId: "c-9", billingContactName: "Jane Doe",
-  billingContactEmail: "jane@acme.com", billingContactPhone: "555-1212", billingContactCompany: "Acme AP", billingContactTitle: "AP Lead" };
+  billingContactEmail: "jane@acme.com", billingContactPhone: "555-1212", billingContactCompany: "Acme AP", billingContactTitle: "AP Lead",
+  billingContactAddress: "100 Billing Way", billingContactCity: "Dallas", billingContactState: "TX", billingContactZip: "75201" };
 
 async function render(deal: unknown, onDealUpdated = vi.fn(), canEdit = true, officeId: string | null = null) {
   const container = document.createElement("div");
@@ -60,6 +62,7 @@ describe("DealBillingTab", () => {
     expect(container.textContent).toContain("Jane Doe");
     expect(container.textContent).toContain("jane@acme.com");
     expect(container.textContent).toContain("Acme AP");
+    expect(container.textContent).toContain("100 Billing Way, Dallas, TX, 75201");
   });
 
   it("adding a new contact inline creates it then assigns it to the deal", async () => {
@@ -77,12 +80,25 @@ describe("DealBillingTab", () => {
     expect(document.querySelector("[data-testid='company-selector']")).toBeTruthy();
     const first = document.querySelector("input[name='firstName']") as HTMLInputElement;
     const last = document.querySelector("input[name='lastName']") as HTMLInputElement;
-    await act(async () => { setValue(first, "Pat"); setValue(last, "Payer"); });
+    const address = document.querySelector("input[name='address']") as HTMLInputElement;
+    const city = document.querySelector("input[name='city']") as HTMLInputElement;
+    const state = document.querySelector("input[name='state']") as HTMLInputElement;
+    const zip = document.querySelector("input[name='zip']") as HTMLInputElement;
+    await act(async () => {
+      setValue(first, "Pat"); setValue(last, "Payer");
+      setValue(address, "100 Billing Way"); setValue(city, "Dallas"); setValue(state, "tx"); setValue(zip, "75201");
+    });
     const save = Array.from(document.querySelectorAll("button")).find((b) => b.textContent?.includes("Save")) as HTMLButtonElement;
     await act(async () => { save.click(); });
     await act(async () => { await Promise.resolve(); });
     await act(async () => { await Promise.resolve(); });
-    expect(mocks.apiMock).toHaveBeenCalledWith("/contacts", expect.objectContaining({ method: "POST" }));
+    expect(mocks.apiMock).toHaveBeenCalledWith(
+      "/contacts",
+      expect.objectContaining({
+        method: "POST",
+        json: expect.objectContaining({ address: "100 Billing Way", city: "Dallas", state: "TX", zip: "75201" }),
+      })
+    );
     expect(mocks.apiMock).toHaveBeenCalledWith(
       expect.stringContaining("/deals/deal-1"),
       expect.objectContaining({ method: "PATCH", json: expect.objectContaining({ billingContactId: "c-new" }) }),
