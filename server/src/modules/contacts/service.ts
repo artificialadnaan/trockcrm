@@ -785,6 +785,11 @@ export async function deleteContact(tenantDb: TenantDb, contactId: string, userR
     throw new AppError(404, "Contact not found");
   }
 
+  // Soft-delete only flips is_active, so the deals FK ON DELETE SET NULL never fires. Clear this contact as a
+  // deal's BILLING contact so getDealDetail stops surfacing an archived contact and the future Won gate
+  // (billing_contact_id IS NULL) isn't falsely satisfied by a contact users can no longer select (Codex P2).
+  await tenantDb.update(deals).set({ billingContactId: null }).where(eq(deals.billingContactId, contactId));
+
   return result[0];
 }
 

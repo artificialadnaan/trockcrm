@@ -118,6 +118,9 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
         type={type}
         name={name}
         value={newC[name]}
+        // Locked while a create is in flight so the user can't edit a payload out from under a pending dedup
+        // check and then force-create unreviewed values (Codex P2).
+        disabled={creating}
         onChange={(e) => {
           const value = e.target.value;
           setNewC((prev) => ({ ...prev, [name]: value }));
@@ -125,7 +128,7 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
           setSuggestions([]);
           setCreateError(null);
         }}
-        className="w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm"
+        className="w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm disabled:bg-slate-50"
       />
     </div>
   );
@@ -164,7 +167,10 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
                   <li key={c.id}>
                     <button
                       type="button"
-                      className="w-full px-2 py-1.5 text-left text-sm hover:bg-slate-50"
+                      // Disabled while a PATCH is in flight so a second click can't fire a concurrent assign
+                      // whose response could land last and win over the intended one (Codex P2).
+                      disabled={saving}
+                      className="w-full px-2 py-1.5 text-left text-sm hover:bg-slate-50 disabled:opacity-50"
                       onClick={() => assign(c.id)}
                     >
                       {c.firstName} {c.lastName}{c.companyName ? ` — ${c.companyName}` : ""}
