@@ -165,7 +165,7 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
     }
   };
 
-  const field = (name: keyof typeof emptyNewC, label: string, opts: { type?: string; maxLength?: number } = {}) => {
+  const field = (name: keyof typeof emptyNewC, label: string, opts: { type?: string } = {}) => {
     const error = name === "state" || name === "zip" ? fieldErrors[name] : undefined;
     return (
       <div>
@@ -173,7 +173,6 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
         <input
           type={opts.type ?? "text"}
           name={name}
-          maxLength={opts.maxLength}
           value={newC[name]}
           // Locked while a create is in flight so the user can't edit a payload out from under a pending dedup
           // check and then force-create unreviewed values (Codex P2).
@@ -284,7 +283,10 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
       </section>
 
       <Dialog open={dialogOpen} onOpenChange={(open) => { if (!open) closeDialog(); else setDialogOpen(true); }}>
-        <DialogContent>
+        {/* Cap the height and scroll: the billing-address block makes this dialog tall enough to push the
+            footer (Save/Cancel) off short/mobile viewports, and the shared DialogContent only constrains
+            width (Codex P2). */}
+        <DialogContent className="max-h-[85vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>Add new contact</DialogTitle>
           </DialogHeader>
@@ -300,7 +302,10 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
                 {field("address", "Street address")}
                 <div className="grid grid-cols-2 gap-3">
                   {field("city", "City")}
-                  {field("state", "State", { maxLength: 2 })}
+                  {/* No maxLength cap: the browser truncates before validate() runs, so a pasted full name
+                      like "Texas" would silently become an accepted "TE". Let the full value reach validate()
+                      and reject it there (Codex P2). */}
+                  {field("state", "State")}
                 </div>
                 {field("zip", "ZIP")}
               </div>

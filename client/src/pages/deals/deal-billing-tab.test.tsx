@@ -111,10 +111,15 @@ describe("DealBillingTab", () => {
     const { container } = await render(dealNoBilling, onDealUpdated);
     (Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.includes("Add new contact")) as HTMLButtonElement).click();
     await act(async () => { await Promise.resolve(); });
+    const stateInput = document.querySelector("input[name='state']") as HTMLInputElement;
+    // The state field must NOT cap length: a maxLength would let the browser truncate "Texas" to "Te" before
+    // validate() runs, which then uppercases to an accepted "TE" and defeats this check (Codex P2). maxLength
+    // is -1 (unset) in the DOM.
+    expect(stateInput.maxLength).toBe(-1);
     await act(async () => {
       setValue(document.querySelector("input[name='firstName']") as HTMLInputElement, "Pat");
       setValue(document.querySelector("input[name='lastName']") as HTMLInputElement, "Payer");
-      setValue(document.querySelector("input[name='state']") as HTMLInputElement, "Texas"); // full name, not a 2-letter code
+      setValue(stateInput, "Texas"); // full name, not a 2-letter code
     });
     mocks.apiMock.mockClear();
     await act(async () => { (Array.from(document.querySelectorAll("button")).find((b) => b.textContent === "Save") as HTMLButtonElement).click(); });
@@ -158,6 +163,18 @@ describe("DealBillingTab", () => {
     // Editing the field drops the stale error so the user isn't stuck staring at a message they've already fixed.
     await act(async () => { setValue(document.querySelector("input[name='state']") as HTMLInputElement, "TX"); });
     expect(document.body.textContent).not.toContain("State must be exactly 2 uppercase letters");
+  });
+
+  it("caps the add-contact dialog height and scrolls so the footer stays reachable on short viewports", async () => {
+    const { container } = await render(dealNoBilling);
+    (Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.includes("Add new contact")) as HTMLButtonElement).click();
+    await act(async () => { await Promise.resolve(); });
+    const content = document.querySelector("[data-slot='dialog-content']") as HTMLElement;
+    expect(content).toBeTruthy();
+    // The billing-address fields make this dialog tall; without a max-height + scroll the Save/Cancel footer
+    // can fall below a short viewport with no way to reach it (Codex P2).
+    expect(content.className).toContain("overflow-y-auto");
+    expect(content.className).toMatch(/max-h-\[/);
   });
 
   it("renders the contract upload zone and lists an existing signed contract", async () => {
