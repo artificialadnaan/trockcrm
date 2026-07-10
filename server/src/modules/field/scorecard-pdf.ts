@@ -28,8 +28,9 @@ const EVIDENCE_SUBTITLE_HEIGHT = 44;
 // Cap the evidence tiles embedded in the report. A scorecard can carry up to 100 photos; at ~100 KB per
 // downscaled JPEG that would approach the email provider's ~28 MB attachment ceiling (and produce ~50
 // evidence pages). Beyond the cap the renderer prints a note pointing to the full set in the CRM. The
-// worker applies a hard byte-size backstop on top of this.
-const MAX_EVIDENCE_PHOTOS = 60;
+// worker applies a hard byte-size backstop on top of this. Exported so the artifact job pre-caps photos
+// BEFORE downloading their bytes (never fetching/transcoding tiles the renderer would only discard).
+export const MAX_EVIDENCE_PHOTOS = 60;
 // Bound each critical-deficiency description on the summary page so one long (up to 4000-char) note can't
 // blow the layout across pages; the same note also appears (bounded) as the evidence-group subtitle.
 const DEFICIENCY_NOTE_MAX_HEIGHT = 54;
@@ -60,6 +61,9 @@ export interface ScorecardPdfInput {
   criticalDeficiencyNotes?: Record<string, string>;
   actionItems: string[];
   photos?: ScorecardPdfPhoto[];
+  /** Evidence photos already dropped upstream (capped before download) — added to the render-side cap's
+   *  omitted count so the "available in the CRM" note reflects the true total. */
+  omittedEvidenceCount?: number;
 }
 
 export interface ScorecardPdfPhoto {
@@ -102,6 +106,7 @@ export interface ScorecardPdfData {
   sections: ScorecardPdfSection[];
   deficiencies: ScorecardPdfDeficiency[];
   actionItems: string[];
+  omittedEvidenceCount: number;
 }
 
 /**
@@ -158,6 +163,7 @@ export function buildScorecardPdfData(input: ScorecardPdfInput): ScorecardPdfDat
     sections,
     deficiencies,
     actionItems,
+    omittedEvidenceCount: Math.max(0, input.omittedEvidenceCount ?? 0),
   };
 }
 
@@ -311,7 +317,9 @@ export async function renderFieldScorecardPdf(data: ScorecardPdfData): Promise<B
   ];
   const { groups: cappedEvidence, omitted: omittedEvidence } = capEvidenceGroups(evidenceGroups, MAX_EVIDENCE_PHOTOS);
   for (const group of cappedEvidence) drawEvidencePages(doc, data, group);
-  if (omittedEvidence > 0) drawEvidenceOverflowNote(doc, data, omittedEvidence);
+  // Photos dropped here (defensive render-side cap) PLUS any dropped upstream before download.
+  const omittedTotal = omittedEvidence + data.omittedEvidenceCount;
+  if (omittedTotal > 0) drawEvidenceOverflowNote(doc, data, omittedTotal);
 
   doc.end();
   return new Promise<Buffer>((resolve, reject) => {

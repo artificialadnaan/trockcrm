@@ -38,7 +38,7 @@ describe("buildFieldScorecardEmail", () => {
     const email = buildFieldScorecardEmail({
       dealId: "d1", dealName: "Maple", projectNumber: "DFW-10432", weekOf: "2026-06-30",
       totalScore: 82, ratingLabel: "Needs Immediate Improvement", submittedByName: "Sam",
-      hasPdf: true, officeId: "off-1", frontendUrl: "https://trockcrm.com",
+      pdfStatus: "attached", officeId: "off-1", frontendUrl: "https://trockcrm.com",
     });
     expect(email.subject).toContain("DFW-10432");
     expect(email.subject).toContain("82/100");
@@ -47,13 +47,23 @@ describe("buildFieldScorecardEmail", () => {
     expect(email.dealUrl).toBe("https://trockcrm.com/deals/d1?officeId=off-1");
   });
 
-  it("notes the PDF is still generating when there's no attachment", () => {
+  it("notes the PDF is still generating when it's not yet available", () => {
     const email = buildFieldScorecardEmail({
       dealId: "d1", dealName: "Maple", projectNumber: null, weekOf: null, totalScore: null,
-      ratingLabel: null, submittedByName: null, hasPdf: false, frontendUrl: "https://trockcrm.com",
+      ratingLabel: null, submittedByName: null, pdfStatus: "unavailable", frontendUrl: "https://trockcrm.com",
     });
     expect(email.text).toContain("still generating");
     expect(email.subject).toContain("Maple");
+  });
+
+  it("notes an oversized PDF is available in the CRM (not 'still generating')", () => {
+    const email = buildFieldScorecardEmail({
+      dealId: "d1", dealName: "Maple", projectNumber: null, weekOf: null, totalScore: null,
+      ratingLabel: null, submittedByName: null, pdfStatus: "too_large", frontendUrl: "https://trockcrm.com",
+    });
+    expect(email.text).toMatch(/too large/i);
+    expect(email.text).toContain("download it");
+    expect(email.text).not.toMatch(/still generating/i);
   });
 });
 
@@ -104,7 +114,12 @@ describe("handleFieldScorecardEmail", () => {
     const getPdf = vi.fn().mockResolvedValue(Buffer.alloc(21 * 1024 * 1024, 0));
     await handleFieldScorecardEmail(payload(), null, { query, env: PROD, logger: silent, sendEmail, getPdf });
     expect(sendEmail).toHaveBeenCalledTimes(1); // sent (degraded), NOT thrown → no retry/dead-letter
-    expect(sendEmail.mock.calls[0][3].attachments).toBeUndefined();
+    const [, , html, opts] = sendEmail.mock.calls[0];
+    expect(opts.attachments).toBeUndefined();
+    // The PDF EXISTS (too big to attach) — copy must point to the CRM, not claim it's "still generating".
+    expect(html).toMatch(/too large/i);
+    expect(html).not.toMatch(/still generating/i);
+    expect(opts.text).toContain(`/deals/${payload().dealId}`); // CRM deep link present
   });
 
   it("degrades (not retries) when the PDF fetch REJECTS — S3 NoSuchKey throws, not null", async () => {

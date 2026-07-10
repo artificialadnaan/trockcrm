@@ -92,6 +92,20 @@ describe("field scorecard PDF evidence", () => {
   });
 });
 
+describe("buildScorecardPdfData omittedEvidenceCount", () => {
+  const base = {
+    dealName: "X", projectNumber: null, weekOf: "2026-07-06", superintendentName: null, pmName: null,
+    submittedByName: null, submittedAt: "2026-07-10T17:00:00.000Z", totalScore: 80, formVersion: 2 as const,
+    averageScore: 8, rating: "on_standard" as const, items: [], criticalDeficiencyKeys: [], actionItems: [],
+  };
+
+  it("defaults to 0 and passes an upstream (pre-cap) count through, clamping negatives", () => {
+    expect(buildScorecardPdfData(base).omittedEvidenceCount).toBe(0);
+    expect(buildScorecardPdfData({ ...base, omittedEvidenceCount: 7 }).omittedEvidenceCount).toBe(7);
+    expect(buildScorecardPdfData({ ...base, omittedEvidenceCount: -3 }).omittedEvidenceCount).toBe(0);
+  });
+});
+
 describe("capEvidenceGroups", () => {
   it("keeps every photo when under the cap (omitted = 0)", () => {
     const { groups, omitted } = capEvidenceGroups([group("A", 5), group("B", 3)], 60);
