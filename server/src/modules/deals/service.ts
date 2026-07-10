@@ -2376,6 +2376,17 @@ export async function updateDeal(
   userId: string,
   officeId?: string,
 ) {
+  // Validate + row-lock the billing contact BEFORE locking the deal row below. deleteContact/mergeContacts
+  // lock the CONTACT row first and then rewrite deals.billing_contact_id (locking the deal), so if we locked
+  // the deal first and the contact second we'd be an ABBA deadlock against them whenever a deal that already
+  // references the contact is PATCHed while that contact is being deleted/merged. Locking contact->deal here
+  // matches their order and breaks the cycle. The FOR UPDATE is held for the rest of the transaction, so the
+  // TOCTOU guard is unchanged, and updates.billingContactId is set verbatim from input.billingContactId (no
+  // normalization), so validating input.billingContactId here is equivalent to the old post-lock call (Codex P2).
+  if (input.billingContactId !== undefined) {
+    await validateDealBillingContact(tenantDb, input.billingContactId ?? null);
+  }
+
   // Lock the deal row before deriving hold timing so stage changes and hold
   // toggles cannot race on a stale snapshot.
   const lockedDealQuery = tenantDb
@@ -2647,9 +2658,8 @@ export async function updateDeal(
     );
   }
 
-  if (input.billingContactId !== undefined) {
-    await validateDealBillingContact(tenantDb, updates.billingContactId as string | null);
-  }
+  // (Billing contact was validated + row-locked at the top of updateDeal, before the deal lock, to avoid an
+  // ABBA deadlock with deleteContact/mergeContacts — see that block.)
 
   if (existing.isBidBoardOwned) {
     for (const [field, label] of Object.entries(BID_BOARD_OWNED_UPDATE_FIELD_LABELS) as Array<
