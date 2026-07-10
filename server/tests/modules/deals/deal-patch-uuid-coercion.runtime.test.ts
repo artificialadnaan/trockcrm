@@ -28,6 +28,7 @@ const FIELD_TO_COLUMN: Record<string, string> = {
   propertyId: "property_id",
   assignedRepId: "assigned_rep_id",
   primaryContactId: "primary_contact_id",
+  billingContactId: "billing_contact_id",
   sourceLeadId: "source_lead_id",
   projectTypeId: "project_type_id",
   regionId: "region_id",
@@ -50,6 +51,7 @@ beforeAll(async () => {
       property_id uuid,
       assigned_rep_id uuid,
       primary_contact_id uuid,
+      billing_contact_id uuid,
       source_lead_id uuid,
       project_type_id uuid,
       region_id uuid
@@ -140,6 +142,13 @@ describe("deal PATCH empty-string uuid hardening (PGlite)", () => {
     expect(row.property_id).toBeNull();
     expect(row.assigned_rep_id).toBeNull();
     expect(row.region_id).toBeNull();
+  });
+
+  it("omits an empty-string billingContactId but writes a genuine one", async () => {
+    await applyUuidPatch({ billingContactId: "" });
+    expect((await dealRow()).billing_contact_id).toBeNull(); // blank stripped -> not written
+    await applyUuidPatch({ billingContactId: PROP });        // any valid uuid
+    expect((await dealRow()).billing_contact_id).toBe(PROP);
   });
 });
 

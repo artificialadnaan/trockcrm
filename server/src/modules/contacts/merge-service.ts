@@ -141,6 +141,13 @@ export async function mergeContacts(
     .set({ primaryContactId: winnerId })
     .where(eq(deals.primaryContactId, loserId));
 
+  // 5b. Same for deals.billingContactId — otherwise a merged-away billing contact leaves deals pointing at
+  // the soft-deleted loser and Billing shows a stale record instead of the surviving contact (Codex P2).
+  await tenantDb
+    .update(deals)
+    .set({ billingContactId: winnerId })
+    .where(eq(deals.billingContactId, loserId));
+
   // 4b. Transfer emails (update contact_id from loser to winner)
   const emailResult = await tenantDb
     .update(emails)

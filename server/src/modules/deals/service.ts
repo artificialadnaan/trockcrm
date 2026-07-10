@@ -376,6 +376,7 @@ export interface UpdateDealInput {
   name?: string;
   assignedRepId?: string;
   primaryContactId?: string | null;
+  billingContactId?: string | null;
   sourceLeadId?: string | null;
   companyId?: string | null;
   propertyId?: string | null;
@@ -2027,6 +2028,7 @@ export async function getDealDetail(
   // Third alias for the sales source user so a deactivated rep shows a name, not a raw UUID.
   const estimatorUser = alias(users, "estimator_user");
   const salesSourceUser = alias(users, "sales_source_user");
+  const billingContact = alias(contacts, "billing_contact");
   const [detailDeal] = await tenantDb
     .select({
       ...getTableColumns(deals),
@@ -2044,6 +2046,11 @@ export async function getDealDetail(
       primaryContactPhone: contacts.phone,
       primaryContactOwnerUserId: contacts.ownerId,
       primaryContactOwnerUserName: sql<string | null>`(SELECT display_name FROM public.users WHERE id = ${contacts.ownerId})`,
+      billingContactName: sql<string | null>`NULLIF(TRIM(CONCAT_WS(' ', ${billingContact.firstName}, ${billingContact.lastName})), '')`,
+      billingContactTitle: billingContact.jobTitle,
+      billingContactEmail: billingContact.email,
+      billingContactPhone: billingContact.phone,
+      billingContactCompany: sql<string | null>`COALESCE((SELECT name FROM companies WHERE id = ${billingContact.companyId}), ${billingContact.companyName})`,
       projectType: sql<string | null>`COALESCE(${projectTypeConfig.name}, ${deals.projectType})`,
       // The deal's canonical stage slug (deals has no stage_slug column) so the detail header's value
       // resolver (resolveBestEstimate) applies the stage-aware chain — estimating DD-over-bid — and the
@@ -2056,6 +2063,7 @@ export async function getDealDetail(
     .leftJoin(salesSourceUser, eq(salesSourceUser.id, deals.salesSourceUserId))
     .leftJoin(companies, eq(companies.id, deals.companyId))
     .leftJoin(contacts, eq(contacts.id, deals.primaryContactId))
+    .leftJoin(billingContact, eq(billingContact.id, deals.billingContactId))
     .leftJoin(projectTypeConfig, eq(projectTypeConfig.id, deals.projectTypeId))
     .where(eq(deals.id, dealId))
     .limit(1);
@@ -2483,6 +2491,7 @@ export async function updateDeal(
     }
   }
   if (input.primaryContactId !== undefined) updates.primaryContactId = input.primaryContactId;
+  if (input.billingContactId !== undefined) updates.billingContactId = input.billingContactId;
   // A genuine manual change to dd_estimate is a permanent override: mark it so the Procore mirror never
   // overwrites it (mirrors awarded_amount_overridden / migration 0164). Change-detected so a no-op re-save
   // of the same value does NOT freeze sync; the mirror seeds/updates DD until a human edits it. Unlike
@@ -2713,6 +2722,7 @@ export async function updateDeal(
       "name",
       "assignedRepId",
       "primaryContactId",
+      "billingContactId",
       "ddEstimate",
       "bidEstimate",
       "awardedAmount",

@@ -5,6 +5,7 @@ import {
   Briefcase,
   Building2,
   CalendarDays,
+  DollarSign,
   Edit,
   FileText,
   History,
@@ -67,6 +68,7 @@ import { DealTeamTab } from "./deal-team-tab";
 import { DealEstimatesTab } from "./deal-estimates-tab";
 import { DealPunchListTab } from "./deal-punch-list-tab";
 import { DealCloseoutTab } from "./deal-closeout-tab";
+import { DealBillingTab } from "./deal-billing-tab";
 import { DealTimersBanner } from "./deal-timers-banner";
 import { BidDueDateBanner } from "./bid-due-date-banner";
 import { RfpVotePanel } from "./rfp-vote-panel";
@@ -162,7 +164,7 @@ export function buildBidBoardProjectUrl(deal: Pick<DealDetail, "procoreCompanyId
   return `https://us02.procore.com/webclients/host/companies/${deal.procoreCompanyId}/tools/bid-board/project/${deal.procoreBidId}/details`;
 }
 
-type Tab = "overview" | "lead" | "scoping" | "files" | "photos" | "scorecards" | "email" | "activity" | "timeline" | "history" | "team" | "estimates" | "punch_list" | "closeout";
+type Tab = "overview" | "lead" | "scoping" | "files" | "photos" | "scorecards" | "email" | "activity" | "timeline" | "history" | "team" | "billing" | "estimates" | "punch_list" | "closeout";
 
 function formatNullable(value: string | number | null | undefined) {
   if (value == null || value === "") return "Not set";
@@ -338,6 +340,8 @@ function getTabIcon(tab: Tab) {
       return <History className={iconClassName} />;
     case "team":
       return <Users className={iconClassName} />;
+    case "billing":
+      return <DollarSign className={iconClassName} />;
     case "estimates":
       return <ReceiptText className={iconClassName} />;
     case "punch_list":
@@ -556,6 +560,7 @@ export function DealDetailPage() {
     { key: "timeline", label: "Timeline" },
     { key: "history", label: "History" },
     { key: "team", label: teamCount != null ? `Team (${teamCount})` : "Team" },
+    { key: "billing", label: "Billing" },
     { key: "estimates", label: "Estimates" },
     ...(showPunchList ? [{ key: "punch_list" as Tab, label: "Punch List" }] : []),
     ...(showCloseout ? [{ key: "closeout" as Tab, label: "Close-Out" }] : []),
@@ -1092,6 +1097,9 @@ export function DealDetailPage() {
       {activeTab === "team" && (
         <DealTeamTab dealId={deal.id} onCountChange={setTeamCount} />
       )}
+      {/* canEdit is owner-only: the deal PATCH (billingContactId) is gated by assertDealOwnerRouteAccess with
+          no admin/director bypass, so a non-owner admin would get edit controls that 403 (Codex P2). */}
+      {activeTab === "billing" && <DealBillingTab deal={deal} onDealUpdated={refetch} canEdit={viewerOwnsDeal} officeId={detailOfficeId} />}
       {activeTab === "estimates" && (
         <DealEstimatesTab
           dealId={deal.id}
