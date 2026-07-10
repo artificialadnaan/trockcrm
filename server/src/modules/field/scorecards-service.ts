@@ -84,7 +84,9 @@ const SCORECARD_PDF_DOWNLOAD_EXPIRY_SECONDS = 60 * 60;
 // Give the synchronous render + R2 upload (sub-second) a head start over the worker's poll, so the email
 // job normally finds the PDF already stored. If render/upload failed, the worker degrades to a
 // no-attachment notice — the notification is never lost.
-const SCORECARD_EMAIL_RUN_AFTER_SECONDS = 30;
+const SCORECARD_EMAIL_RUN_AFTER_SECONDS = 120;
+const PDF_EVIDENCE_DOWNLOAD_CONCURRENCY = 4;
+const PDF_EVIDENCE_MAX_BYTES = 750_000;
 
 /**
  * Deterministic R2 key for a scorecard's PDF. Shared by the enqueue (createFieldScorecard, which stamps it
@@ -390,12 +392,12 @@ export async function finalizeFieldScorecardArtifacts(
 
   // Prefer ingest-generated thumbnails: they preserve visual evidence in the PDF without decoding full
   // camera originals into memory. A missing/unavailable object leaves an explicit placeholder in the PDF.
-  const photos = await Promise.all(photoRows.map(async (photo) => {
+  const loadPhoto = async (photo: typeof photoRows[number]) => {
     const key = photo.thumbnailR2Key ?? photo.r2Key;
     let image: Buffer | null = null;
     if (isR2Configured()) {
       try {
-        image = (await getObjectBuffer(key, { maxBytes: 2_500_000 })).buffer;
+        image = (await getObjectBuffer(key, { maxBytes: PDF_EVIDENCE_MAX_BYTES })).buffer;
       } catch {
         image = null;
       }
@@ -406,7 +408,12 @@ export async function finalizeFieldScorecardArtifacts(
       caption: photo.caption ?? null,
       image,
     };
-  }));
+  };
+  const photos: Awaited<ReturnType<typeof loadPhoto>>[] = [];
+  for (let index = 0; index < photoRows.length; index += PDF_EVIDENCE_DOWNLOAD_CONCURRENCY) {
+    const batch = photoRows.slice(index, index + PDF_EVIDENCE_DOWNLOAD_CONCURRENCY);
+    photos.push(...await Promise.all(batch.map(loadPhoto)));
+  }
 
   const pdfData = buildScorecardPdfData({
     dealName: deal?.name ?? "Project",

@@ -96,8 +96,8 @@ export async function handleFieldScorecardEmail(
     return;
   }
 
-  // The artifact renderer runs after submission. If the deterministic PDF key is not readable yet, fail
-  // this attempt so the job queue retries instead of sending a permanently attachment-less email.
+  // The server delays this job so the artifact renderer normally wins the initial race. If it still cannot
+  // read the PDF, preserve the notification fallback rather than dead-lettering a durable submission.
   const pdfR2Key = normalizeText(payload.pdfR2Key);
   let attachments: SendSystemEmailAttachment[] | undefined;
   if (pdfR2Key) {
@@ -106,13 +106,12 @@ export async function handleFieldScorecardEmail(
     try {
       buffer = await getPdf(pdfR2Key);
     } catch (err) {
-      logger.warn("[FieldScorecardEmail] PDF fetch failed - retrying email job", { scorecardId, pdfR2Key, err });
-      throw err;
+      logger.warn("[FieldScorecardEmail] PDF fetch failed - sending without attachment", { scorecardId, pdfR2Key, err });
     }
     if (buffer) {
       attachments = [{ filename: scorecardPdfFilename(payload), content: buffer }];
     } else {
-      throw new Error(`Scorecard PDF is not available yet: ${pdfR2Key}`);
+      logger.warn("[FieldScorecardEmail] PDF not available in R2 - sending without attachment", { scorecardId, pdfR2Key });
     }
   } else {
     logger.warn("[FieldScorecardEmail] No PDF key on the job - sending without attachment", { scorecardId });

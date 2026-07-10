@@ -345,6 +345,7 @@ function drawEvidenceFooter(doc: PDFKit.PDFDocument, data: ScorecardPdfData): vo
 }
 
 function drawSignature(doc: PDFKit.PDFDocument, label: string, signature: string | null): void {
+  if (doc.y + 52 > PAGE.height - PAGE.margin) doc.addPage();
   const y = doc.y;
   doc.font("Helvetica").fontSize(10).fillColor(BRAND_BLACK).text(`${label}:`, PAGE.margin, y + 18, { width: 110 });
   const image = signatureDataUrlToBuffer(signature);
