@@ -8,13 +8,17 @@ export interface ParsedScorecardSubmission {
   clientSubmissionId: string;
   dealId: string;
   weekOf: string;
+  formVersion: 1 | 2;
   superintendentName: string | null;
   pmName: string | null;
   projectNumber: string | null;
   items: { sectionKey: string; points: number; note: string | null }[];
   criticalDeficiencies: string[];
+  criticalDeficiencyNotes: Record<string, string>;
   actionItems: string[];
-  photos: { sectionKey: string; clientUploadId: string }[];
+  photos: { sectionKey: string; deficiencyKey: string | null; clientUploadId: string }[];
+  superintendentSignature: string | null;
+  pmSignature: string | null;
 }
 
 function strOrNull(value: unknown): string | null {
@@ -48,8 +52,10 @@ export function parseScorecardSubmission(body: unknown): ParsedScorecardSubmissi
   assertValidUuid(clientSubmissionId, "clientSubmissionId");
   assertValidUuid(dealId, "dealId");
 
+  const formVersion = b.formVersion === 2 ? 2 : 1;
   const weekOf = String(b.weekOf ?? "").trim();
-  assertValidWeekOf(weekOf);
+  // V2 completion determines the week on the server. V1 remains strict for offline retries of old drafts.
+  if (formVersion === 1) assertValidWeekOf(weekOf);
 
   if (!Array.isArray(b.items) || b.items.length === 0) {
     throw new AppError(400, "items are required.");
@@ -73,7 +79,8 @@ export function parseScorecardSubmission(body: unknown): ParsedScorecardSubmissi
         // empty client_upload_id — reject it at the boundary instead of linking unrelated evidence.
         const clientUploadId = typeof p.clientUploadId === "string" ? p.clientUploadId.trim() : "";
         if (!clientUploadId) throw new AppError(400, "Each evidence photo needs a clientUploadId.");
-        return { sectionKey: String(p.sectionKey ?? ""), clientUploadId };
+        const deficiencyKey = strOrNull(p.deficiencyKey);
+        return { sectionKey: String(p.sectionKey ?? ""), deficiencyKey, clientUploadId };
       })
     : [];
   if (photos.length > 100) throw new AppError(400, "Too many evidence photos.");
@@ -84,6 +91,13 @@ export function parseScorecardSubmission(body: unknown): ParsedScorecardSubmissi
   const criticalDeficiencies = Array.isArray(b.criticalDeficiencies)
     ? b.criticalDeficiencies.filter((x): x is string => typeof x === "string")
     : [];
+  const criticalDeficiencyNotes = b.criticalDeficiencyNotes && typeof b.criticalDeficiencyNotes === "object" && !Array.isArray(b.criticalDeficiencyNotes)
+    ? Object.fromEntries(
+        Object.entries(b.criticalDeficiencyNotes as Record<string, unknown>)
+          .filter(([, value]) => typeof value === "string" && value.trim().length > 0)
+          .map(([key, value]) => [key, (value as string).trim().slice(0, 4000)]),
+      )
+    : {};
   const actionItems = Array.isArray(b.actionItems)
     ? b.actionItems.filter((x): x is string => typeof x === "string" && x.trim().length > 0).map((x) => x.trim())
     : [];
@@ -94,12 +108,16 @@ export function parseScorecardSubmission(body: unknown): ParsedScorecardSubmissi
     clientSubmissionId,
     dealId,
     weekOf,
+    formVersion,
     superintendentName: strOrNull(b.superintendentName),
     pmName: strOrNull(b.pmName),
     projectNumber: strOrNull(b.projectNumber),
     items,
     criticalDeficiencies,
+    criticalDeficiencyNotes,
     actionItems,
     photos,
+    superintendentSignature: strOrNull(b.superintendentSignature),
+    pmSignature: strOrNull(b.pmSignature),
   };
 }

@@ -15,6 +15,12 @@ const MAX: Record<string, number> = {
 function fullItems(): { sectionKey: string; points: number }[] {
   return Object.entries(MAX).map(([sectionKey, points]) => ({ sectionKey, points }));
 }
+function v2Items(): { sectionKey: string; points: number }[] {
+  return [
+    "planning_precon", "jobsite_5s", "safety", "schedule",
+    "subcontractor", "quality", "communication", "financial",
+  ].map((sectionKey) => ({ sectionKey, points: 8 }));
+}
 function body(over: Record<string, unknown> = {}) {
   return {
     clientSubmissionId: CSID,
@@ -34,6 +40,21 @@ describe("parseScorecardSubmission", () => {
     expect(parsed.dealId).toBe(DEAL);
     expect(parsed.items).toHaveLength(7);
     expect(parsed.weekOf).toBe("2026-06-30");
+  });
+
+  it("accepts V2 without a client-selected week and keeps signature/evidence ownership", () => {
+    const parsed = parseScorecardSubmission(body({
+      formVersion: 2,
+      weekOf: "",
+      items: v2Items(),
+      superintendentSignature: "Sam Super",
+      pmSignature: "Pat PM",
+      photos: [{ sectionKey: "critical_deficiency", deficiencyKey: "failed_inspection", clientUploadId: "cu-1" }],
+    }));
+    expect(parsed.formVersion).toBe(2);
+    expect(parsed.weekOf).toBe("");
+    expect(parsed.photos[0]).toMatchObject({ sectionKey: "critical_deficiency", deficiencyKey: "failed_inspection" });
+    expect(parsed.superintendentSignature).toBe("Sam Super");
   });
 
   it("rejects a non-uuid clientSubmissionId or dealId", () => {

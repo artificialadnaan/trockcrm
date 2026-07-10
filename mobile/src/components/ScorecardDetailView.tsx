@@ -42,14 +42,17 @@ export function ScorecardDetailView({
   const photoSections = scorecardPhotoSections(scorecard.photos);
   const deficiencies = scorecard.criticalDeficiencies;
   const actionItems = scorecard.actionItems;
+  const isV2 = scorecard.formVersion === 2;
+  const displayScore = isV2 ? (scorecard.averageScore ?? scorecard.totalScore / 10).toFixed(1) : String(scorecard.totalScore);
+  const displayMax = isV2 ? "10" : String(SCORECARD_TOTAL_POINTS);
 
   return (
     <View style={{ gap: theme.space.lg }}>
       {/* Score summary */}
       <View style={styles.summary}>
         <Text style={styles.score}>
-          {scorecard.totalScore}
-          <Text style={styles.scoreMax}> / {SCORECARD_TOTAL_POINTS}</Text>
+          {displayScore}
+          <Text style={styles.scoreMax}> / {displayMax}</Text>
         </Text>
         <RatingBadge rating={scorecard.rating} label={scorecard.ratingLabel} />
       </View>
@@ -77,7 +80,7 @@ export function ScorecardDetailView({
               {row.note ? <Text style={styles.sectionNote}>{row.note}</Text> : null}
             </View>
             <Text style={styles.sectionPoints}>
-              {row.points}/{row.maxPoints}
+              {row.points}/{isV2 ? 10 : row.maxPoints}
             </Text>
           </View>
         ))}
@@ -90,7 +93,10 @@ export function ScorecardDetailView({
           {deficiencies.map((key) => (
             <View key={key} style={styles.bulletRow}>
               <Text style={styles.bulletDot}>•</Text>
-              <Text style={styles.bulletText}>{deficiencyLabel(key)}</Text>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.bulletText}>{deficiencyLabel(key)}</Text>
+                {scorecard.criticalDeficiencyNotes?.[key] ? <Text style={styles.sectionNote}>{scorecard.criticalDeficiencyNotes[key]}</Text> : null}
+              </View>
             </View>
           ))}
         </View>
@@ -106,6 +112,14 @@ export function ScorecardDetailView({
               <Text style={styles.bulletText}>{item}</Text>
             </View>
           ))}
+        </View>
+      ) : null}
+
+      {isV2 ? (
+        <View style={{ gap: theme.space.sm }}>
+          <SectionLabel>Signatures</SectionLabel>
+          <Text style={styles.bulletText}>Superintendent: {scorecard.superintendentSignature || "—"}</Text>
+          <Text style={styles.bulletText}>Project manager: {scorecard.pmSignature || "—"}</Text>
         </View>
       ) : null}
 

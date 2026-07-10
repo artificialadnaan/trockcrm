@@ -1,9 +1,13 @@
 import PDFDocument from "pdfkit";
 import {
   FIELD_SCORECARD_SECTIONS,
+  FIELD_SCORECARD_V2_SECTIONS,
   FIELD_SCORECARD_CRITICAL_DEFICIENCIES,
+  FIELD_SCORECARD_V2_CRITICAL_DEFICIENCIES,
   scorecardRatingLabel,
+  scorecardV2RatingLabel,
   type ScorecardRating,
+  type ScorecardFormVersion,
 } from "@trock-crm/shared/types";
 import { TROCK_LOGO_PNG_BASE64 } from "./pdf-logo.js";
 
@@ -34,6 +38,10 @@ export interface ScorecardPdfInput {
   submittedByName: string | null;
   submittedAt: string; // ISO
   totalScore: number;
+  formVersion?: ScorecardFormVersion;
+  averageScore?: number | null;
+  superintendentSignature?: string | null;
+  pmSignature?: string | null;
   rating: ScorecardRating;
   items: { sectionKey: string; points: number; note: string | null }[];
   criticalDeficiencyKeys: string[];
@@ -56,6 +64,10 @@ export interface ScorecardPdfData {
   submittedByName: string | null;
   submittedAt: string;
   totalScore: number;
+  formVersion: ScorecardFormVersion;
+  averageScore: number | null;
+  superintendentSignature: string | null;
+  pmSignature: string | null;
   rating: ScorecardRating;
   ratingLabel: string;
   sections: ScorecardPdfSection[];
@@ -71,16 +83,18 @@ export interface ScorecardPdfData {
  */
 export function buildScorecardPdfData(input: ScorecardPdfInput): ScorecardPdfData {
   const itemByKey = new Map(input.items.map((it) => [it.sectionKey, it]));
-  const sections: ScorecardPdfSection[] = FIELD_SCORECARD_SECTIONS.map((def) => {
+  const formVersion: ScorecardFormVersion = input.formVersion === 2 ? 2 : 1;
+  const definitions = formVersion === 2 ? FIELD_SCORECARD_V2_SECTIONS : FIELD_SCORECARD_SECTIONS;
+  const sections: ScorecardPdfSection[] = definitions.map((def) => {
     const item = itemByKey.get(def.key);
     return {
       title: def.title,
       points: item?.points ?? 0,
-      maxPoints: def.maxPoints,
+      maxPoints: "maxPoints" in def && typeof def.maxPoints === "number" ? def.maxPoints : 10,
       note: item?.note?.trim() ? item.note.trim() : null,
     };
   });
-  const labelByKey = new Map<string, string>(FIELD_SCORECARD_CRITICAL_DEFICIENCIES.map((d) => [d.key, d.label]));
+  const labelByKey = new Map<string, string>((formVersion === 2 ? FIELD_SCORECARD_V2_CRITICAL_DEFICIENCIES : FIELD_SCORECARD_CRITICAL_DEFICIENCIES).map((d) => [d.key, d.label]));
   const deficiencies = input.criticalDeficiencyKeys
     .map((k) => labelByKey.get(k))
     .filter((l): l is string => typeof l === "string");
@@ -94,8 +108,12 @@ export function buildScorecardPdfData(input: ScorecardPdfInput): ScorecardPdfDat
     submittedByName: input.submittedByName,
     submittedAt: input.submittedAt,
     totalScore: input.totalScore,
+    formVersion,
+    averageScore: input.averageScore ?? null,
+    superintendentSignature: input.superintendentSignature ?? null,
+    pmSignature: input.pmSignature ?? null,
     rating: input.rating,
-    ratingLabel: scorecardRatingLabel(input.rating),
+    ratingLabel: formVersion === 2 ? scorecardV2RatingLabel(input.rating) : scorecardRatingLabel(input.rating),
     sections,
     deficiencies,
     actionItems,
@@ -142,7 +160,10 @@ export async function renderFieldScorecardPdf(data: ScorecardPdfData): Promise<B
   const bannerY = doc.y;
   const bannerH = 50;
   doc.roundedRect(PAGE.margin, bannerY, CONTENT_WIDTH, bannerH, 8).fillColor("#F8FAFC").fill();
-  doc.font("Helvetica-Bold").fontSize(24).fillColor(BRAND_BLACK).text(`${data.totalScore} / 100`, PAGE.margin + 16, bannerY + 14, { width: 220 });
+  const scoreText = data.formVersion === 2
+    ? (data.averageScore ?? data.totalScore / 10).toFixed(1) + " / 10"
+    : String(data.totalScore) + " / 100";
+  doc.font("Helvetica-Bold").fontSize(24).fillColor(BRAND_BLACK).text(scoreText, PAGE.margin + 16, bannerY + 14, { width: 220 });
   doc.font("Helvetica-Bold").fontSize(13).fillColor(RATING_COLOR[data.rating]).text(data.ratingLabel, PAGE.margin + 220, bannerY + 18, { width: CONTENT_WIDTH - 220 - 16, align: "right" });
   doc.y = bannerY + bannerH + 16;
 
@@ -173,6 +194,14 @@ export async function renderFieldScorecardPdf(data: ScorecardPdfData): Promise<B
     heading(doc, "Action Items");
     doc.font("Helvetica").fontSize(10).fillColor(BRAND_BLACK);
     data.actionItems.forEach((a, i) => doc.text(`${i + 1}.  ${a}`, PAGE.margin, doc.y, { width: CONTENT_WIDTH }));
+  }
+
+  if (data.formVersion === 2) {
+    doc.moveDown(0.8);
+    heading(doc, "Signatures");
+    doc.font("Helvetica").fontSize(10).fillColor(BRAND_BLACK).text("Superintendent: " + (data.superintendentSignature || "—"), PAGE.margin, doc.y, { width: CONTENT_WIDTH });
+    doc.moveDown(0.35);
+    doc.text("Project manager: " + (data.pmSignature || "—"), PAGE.margin, doc.y, { width: CONTENT_WIDTH });
   }
 
   doc.end();

@@ -17,7 +17,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { scorecardRatingLabel, type ScorecardRating, type FieldScorecardDetail } from "@trock-crm/shared/types";
+import { scorecardV2RatingLabel, type ScorecardRating, type FieldScorecardDetail } from "@trock-crm/shared/types";
 import { useQcScorecards, type QcScorecardRow } from "@/hooks/use-qc-scorecards";
 import { fetchDealScorecardDetail, downloadDealScorecardPdf } from "@/hooks/use-deal-scorecards";
 import { ScorecardDetailView } from "@/pages/deals/deal-scorecards-tab";
@@ -35,7 +35,10 @@ const SCORE_COLOR: Record<string, string> = {
   corrective_action: "text-brand-red",
 };
 function label(rating: string) {
-  return scorecardRatingLabel(rating as ScorecardRating) ?? rating;
+  return scorecardV2RatingLabel(rating as ScorecardRating) ?? rating;
+}
+function scoreOutOfTen(row: QcScorecardRow): number {
+  return row.formVersion === 2 ? row.averageScore ?? row.totalScore / 10 : row.totalScore / 10;
 }
 function fmtWeek(w: string) {
   const d = new Date(`${w}T00:00:00Z`);
@@ -80,7 +83,7 @@ export default function QcReportsPage() {
   const rows = scorecards;
 
   const stats = useMemo(() => {
-    const avg = rows.length ? Math.round(rows.reduce((s, r) => s + r.totalScore, 0) / rows.length) : null;
+    const avg = rows.length ? Math.round(rows.reduce((s, r) => s + scoreOutOfTen(r), 0) / rows.length * 10) / 10 : null;
     const corrective = rows.filter((r) => r.rating === "corrective_action");
     const flagged = rows.filter((r) => r.deficiencyCount > 0);
     const weekAgo = isoDaysAgo(7);
@@ -109,9 +112,9 @@ export default function QcReportsPage() {
         <StatCard
           label="Avg Score · Period"
           value={stats.avg == null ? "—" : String(stats.avg)}
-          suffix={stats.avg == null ? undefined : "/100"}
+          suffix={stats.avg == null ? undefined : "/10"}
           meta={`across ${rows.length} scorecard${rows.length === 1 ? "" : "s"}`}
-          onClick={() => setDrill({ title: "All scorecards this period", rows: [...rows].sort((a, b) => a.totalScore - b.totalScore) })}
+          onClick={() => setDrill({ title: "All scorecards this period", rows: [...rows].sort((a, b) => scoreOutOfTen(a) - scoreOutOfTen(b)) })}
         />
         <StatCard
           tone="bad"
@@ -317,8 +320,8 @@ function QcTable({ rows, onRowClick, compact }: { rows: QcScorecardRow[]; onRowC
             {!compact && <td className="px-3.5 py-3 text-[13px] text-slate-500">{fmtWeek(r.weekOf)}</td>}
             {!compact && <td className="px-3.5 py-3 text-[13.5px]">{r.superintendentName ?? "—"}</td>}
             <td className={`px-3.5 py-3 text-right text-[19px] font-black tabular-nums ${SCORE_COLOR[r.rating] ?? "text-slate-800"}`}>
-              {r.totalScore}
-              <span className="text-[11px] font-semibold text-slate-300">/100</span>
+              {scoreOutOfTen(r).toFixed(1)}
+              <span className="text-[11px] font-semibold text-slate-300">/10</span>
             </td>
             <td className="px-3.5 py-3 text-center">
               <Badge variant="outline" className={`${RATING_BADGE[r.rating] ?? ""} whitespace-nowrap`}>{label(r.rating)}</Badge>
@@ -407,7 +410,7 @@ function QcDetailSheet({ row, onClose }: { row: QcScorecardRow | null; onClose: 
             <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5">
               <div className="flex items-center gap-4 rounded-xl border border-slate-100 bg-slate-50 p-4">
                 <div className={`text-[38px] font-black leading-none tracking-tight ${SCORE_COLOR[row.rating] ?? "text-slate-800"}`}>
-                  {row.totalScore}<span className="text-[15px] font-semibold text-slate-300">/100</span>
+                  {scoreOutOfTen(row).toFixed(1)}<span className="text-[15px] font-semibold text-slate-300">/10</span>
                 </div>
                 <div>
                   <Badge variant="outline" className={RATING_BADGE[row.rating] ?? ""}>{label(row.rating)}</Badge>

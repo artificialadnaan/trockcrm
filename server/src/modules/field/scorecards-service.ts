@@ -6,17 +6,25 @@ import { generateDownloadUrl, putObject } from "../../lib/r2-client.js";
 import { buildScorecardPdfData, renderFieldScorecardPdf } from "./scorecard-pdf.js";
 import {
   FIELD_SCORECARD_SECTION_KEYS,
+  FIELD_SCORECARD_V2_SECTION_KEYS,
   actionItemsRequired,
   computeScorecardTotal,
+  computeScorecardV2Average,
   isLegalSectionPoints,
   isScorecardCriticalDeficiencyKey,
   isScorecardSectionKey,
+  isScorecardV2CriticalDeficiencyKey,
+  isScorecardV2SectionKey,
   resolveScorecardRating,
+  resolveScorecardV2Rating,
   scorecardRatingLabel,
+  scorecardV2RatingLabel,
   type FieldScorecardDetail,
   type FieldScorecardSummary,
   type ScorecardRating,
   type ScorecardSectionKey,
+  type ScorecardFormVersion,
+  type ScorecardV2SectionKey,
 } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
 import { activeProjectWhere, assertActiveFieldProject, type FieldAccessContext } from "./projects-service.js";
@@ -34,16 +42,20 @@ export interface CreateFieldScorecardInput {
   office: { id: string; slug: string };
   clientSubmissionId: string;
   weekOf: string;
+  formVersion?: ScorecardFormVersion;
   superintendentName?: string | null;
   pmName?: string | null;
   projectNumber?: string | null;
   items: { sectionKey: string; points: number; note?: string | null }[];
   criticalDeficiencies: string[];
+  criticalDeficiencyNotes?: Record<string, string>;
   actionItems: string[];
-  photos: { sectionKey: string; clientUploadId: string }[];
+  photos: { sectionKey: string; deficiencyKey?: string | null; clientUploadId: string }[];
+  superintendentSignature?: string | null;
+  pmSignature?: string | null;
 }
 
-type ValidatedItem = { sectionKey: ScorecardSectionKey; points: number; note: string | null };
+type ValidatedItem = { sectionKey: ScorecardSectionKey | ScorecardV2SectionKey; points: number; note: string | null };
 
 // The subset of columns a summary needs — satisfied by both a Drizzle row and the aliased raw-SQL rows
 // from the gated recent-list query.
@@ -52,6 +64,8 @@ interface ScorecardSummarySource {
   dealId: string;
   weekOf: unknown;
   totalScore: number;
+  formVersion: number | null;
+  averageScore: string | number | null;
   rating: string;
   superintendentName: string | null;
   pmName: string | null;
@@ -59,6 +73,8 @@ interface ScorecardSummarySource {
   criticalDeficiencies: string[] | null;
   submittedByName: string | null;
   submittedAt: unknown;
+  superintendentSignature?: string | null;
+  pmSignature?: string | null;
 }
 
 // job_type string — MUST match the worker's registerJobHandler(FIELD_SCORECARD_EMAIL_JOB, ...). The server
@@ -112,20 +128,29 @@ export async function createFieldScorecard(
     input.dealId,
   );
 
-  const items = validateItems(input.items);
-  const deficiencies = validateDeficiencies(input.criticalDeficiencies);
-  const total = computeScorecardTotal(items);
-  const rating = resolveScorecardRating(total);
+  const formVersion: ScorecardFormVersion = input.formVersion === 2 ? 2 : 1;
+  const items = validateItems(input.items, formVersion);
+  const deficiencies = validateDeficiencies(input.criticalDeficiencies, formVersion);
+  const deficiencyNotes = validateDeficiencyNotes(input.criticalDeficiencyNotes ?? {}, deficiencies, formVersion);
+  const averageScore = formVersion === 2
+    ? computeScorecardV2Average(items as { sectionKey: ScorecardV2SectionKey; points: number }[])
+    : null;
+  // `total_score` remains populated for existing reports. V2 stores average * 10 beside its true average.
+  const total = formVersion === 2 ? Math.round((averageScore ?? 0) * 10) : computeScorecardTotal(items as { sectionKey: ScorecardSectionKey; points: number }[]);
+  const rating = formVersion === 2 ? resolveScorecardV2Rating(averageScore ?? 0) : resolveScorecardRating(total);
 
   const actionItems = input.actionItems.map((s) => s.trim()).filter((s) => s.length > 0);
-  if (actionItemsRequired({ total, deficiencyCount: deficiencies.length }) && actionItems.length === 0) {
+  if (formVersion === 1 && actionItemsRequired({ total, deficiencyCount: deficiencies.length }) && actionItems.length === 0) {
     throw new AppError(
       422,
       "At least one action item is required when the score is below 85 or any critical deficiency is flagged.",
     );
   }
 
-  const photoLinks = await resolvePhotoLinks(tenantDb, input);
+  const photoLinks = await resolvePhotoLinks(tenantDb, input, formVersion, deficiencies);
+  // V2 defines Week Of as the completion date. Ignore the device-provided value so offline drafts cannot
+  // submit under a stale week after being completed later.
+  const weekOf = formVersion === 2 ? new Date().toISOString().slice(0, 10) : input.weekOf;
 
   // ON CONFLICT DO NOTHING keeps the transaction usable if a concurrent retry inserted the same
   // clientSubmissionId first — catching a 23505 here would instead poison the open txn (aborted state).
@@ -134,15 +159,20 @@ export async function createFieldScorecard(
     .values({
       clientSubmissionId: input.clientSubmissionId,
       dealId: input.dealId,
-      weekOf: input.weekOf,
+      weekOf,
       // Snapshot the SERVER-resolved canonical display number (project_number, else non-HubSpot
       // deal_number, else null) — never the client-sent value, which may be stale/spoofed/absent.
       projectNumber: project.projectNumber ?? null,
       superintendentName: input.superintendentName ?? null,
       pmName: input.pmName ?? null,
+      formVersion,
+      averageScore: averageScore == null ? null : String(averageScore),
+      superintendentSignature: normalizeSignature(input.superintendentSignature),
+      pmSignature: normalizeSignature(input.pmSignature),
       totalScore: total,
       rating,
       criticalDeficiencies: deficiencies,
+      criticalDeficiencyNotes: deficiencyNotes,
       actionItems,
       submittedBy: input.userId,
       submittedByName: input.submittedByName ?? null,
@@ -168,7 +198,7 @@ export async function createFieldScorecard(
   if (photoLinks.length > 0) {
     await tenantDb
       .insert(fieldScorecardPhotos)
-      .values(photoLinks.map((p) => ({ scorecardId: card.id, sectionKey: p.sectionKey, fileId: p.fileId })));
+      .values(photoLinks.map((p) => ({ scorecardId: card.id, sectionKey: p.sectionKey, deficiencyKey: p.deficiencyKey ?? null, fileId: p.fileId })));
   }
 
   // Durable outbox: enqueue the email job IN THIS TRANSACTION so it commits atomically with the scorecard.
@@ -184,9 +214,11 @@ export async function createFieldScorecard(
       dealId: input.dealId,
       dealName: project.name,
       projectNumber: project.projectNumber ?? null,
-      weekOf: input.weekOf,
+      weekOf,
       totalScore: total,
-      ratingLabel: scorecardRatingLabel(rating),
+      formVersion,
+      averageScore,
+      ratingLabel: formVersion === 2 ? scorecardV2RatingLabel(rating) : scorecardRatingLabel(rating),
       submittedByName: input.submittedByName ?? null,
       pdfR2Key,
       officeId: input.office.id,
@@ -228,6 +260,8 @@ export async function listRecentFieldScorecards(
       sc.id AS "id",
       sc.deal_id AS "dealId",
       sc.total_score AS "totalScore",
+      sc.form_version AS "formVersion",
+      sc.average_score AS "averageScore",
       sc.rating AS "rating",
       sc.superintendent_name AS "superintendentName",
       sc.pm_name AS "pmName",
@@ -270,7 +304,8 @@ export async function getFieldScorecardDetail(
     .from(fieldScorecardItems)
     .where(eq(fieldScorecardItems.scorecardId, id));
   const itemByKey = new Map(itemRows.map((r) => [r.sectionKey, r]));
-  const items = FIELD_SCORECARD_SECTION_KEYS.filter((k) => itemByKey.has(k)).map((k) => {
+  const sectionKeys = card.formVersion === 2 ? FIELD_SCORECARD_V2_SECTION_KEYS : FIELD_SCORECARD_SECTION_KEYS;
+  const items = sectionKeys.filter((k) => itemByKey.has(k)).map((k) => {
     const r = itemByKey.get(k)!;
     return { sectionKey: k, points: r.points, note: r.note ?? null };
   });
@@ -279,6 +314,7 @@ export async function getFieldScorecardDetail(
     .select({
       id: fieldScorecardPhotos.id,
       sectionKey: fieldScorecardPhotos.sectionKey,
+      deficiencyKey: fieldScorecardPhotos.deficiencyKey,
       fileId: fieldScorecardPhotos.fileId,
       caption: files.description,
     })
@@ -291,7 +327,8 @@ export async function getFieldScorecardDetail(
   const photos = await Promise.all(
     photoRows.map(async (p) => ({
       id: p.id,
-      sectionKey: p.sectionKey as ScorecardSectionKey,
+      sectionKey: p.sectionKey as FieldScorecardDetail["photos"][number]["sectionKey"],
+      deficiencyKey: p.deficiencyKey ?? null,
       fileId: p.fileId,
       url: opts?.resolvePhotoUrl ? await opts.resolvePhotoUrl(p.fileId) : null,
       caption: p.caption ?? null,
@@ -302,8 +339,11 @@ export async function getFieldScorecardDetail(
     ...toSummary(card),
     items,
     criticalDeficiencies: card.criticalDeficiencies ?? [],
+    criticalDeficiencyNotes: card.criticalDeficiencyNotes ?? {},
     actionItems: card.actionItems ?? [],
     photos,
+    superintendentSignature: card.superintendentSignature ?? null,
+    pmSignature: card.pmSignature ?? null,
   };
 }
 
@@ -346,6 +386,10 @@ export async function finalizeFieldScorecardArtifacts(
     submittedByName: card.submittedByName ?? null,
     submittedAt: toIso(card.submittedAt),
     totalScore: card.totalScore,
+    formVersion: card.formVersion === 2 ? 2 : 1,
+    averageScore: card.averageScore == null ? null : Number(card.averageScore),
+    superintendentSignature: card.superintendentSignature ?? null,
+    pmSignature: card.pmSignature ?? null,
     rating: card.rating as ScorecardRating,
     items: itemRows.map((r) => ({ sectionKey: r.sectionKey, points: r.points, note: r.note ?? null })),
     criticalDeficiencyKeys: card.criticalDeficiencies ?? [],
@@ -399,32 +443,38 @@ async function findByClientSubmissionId(tenantDb: TenantDb, clientSubmissionId: 
   return rows[0] ?? null;
 }
 
-function validateItems(rawItems: CreateFieldScorecardInput["items"]): ValidatedItem[] {
-  const seen = new Map<ScorecardSectionKey, ValidatedItem>();
+function validateItems(rawItems: CreateFieldScorecardInput["items"], formVersion: ScorecardFormVersion): ValidatedItem[] {
+  const allowedKeys = formVersion === 2 ? FIELD_SCORECARD_V2_SECTION_KEYS : FIELD_SCORECARD_SECTION_KEYS;
+  const seen = new Map<string, ValidatedItem>();
   for (const it of rawItems) {
-    if (!isScorecardSectionKey(it.sectionKey)) {
+    const validKey = formVersion === 2 ? isScorecardV2SectionKey(it.sectionKey) : isScorecardSectionKey(it.sectionKey);
+    if (!validKey) {
       throw new AppError(422, `Unknown scorecard section: ${it.sectionKey}`);
     }
     if (seen.has(it.sectionKey)) {
       throw new AppError(422, `Duplicate scorecard section: ${it.sectionKey}`);
     }
-    if (!isLegalSectionPoints(it.sectionKey, it.points)) {
+    const legalPoints = formVersion === 2
+      ? Number.isInteger(it.points) && it.points >= 1 && it.points <= 10
+      : isLegalSectionPoints(it.sectionKey as ScorecardSectionKey, it.points);
+    if (!legalPoints) {
       throw new AppError(422, `Invalid point value ${it.points} for section ${it.sectionKey}.`);
     }
-    seen.set(it.sectionKey, { sectionKey: it.sectionKey, points: it.points, note: it.note?.trim() ? it.note.trim() : null });
+    seen.set(it.sectionKey, { sectionKey: it.sectionKey as ValidatedItem["sectionKey"], points: it.points, note: it.note?.trim() ? it.note.trim() : null });
   }
-  const missing = FIELD_SCORECARD_SECTION_KEYS.filter((k) => !seen.has(k));
+  const missing = allowedKeys.filter((k) => !seen.has(k));
   if (missing.length > 0) {
     throw new AppError(422, `Missing scorecard section(s): ${missing.join(", ")}.`);
   }
   // Canonical section order.
-  return FIELD_SCORECARD_SECTION_KEYS.map((k) => seen.get(k)!);
+  return allowedKeys.map((k) => seen.get(k)!);
 }
 
-function validateDeficiencies(keys: string[]): string[] {
+function validateDeficiencies(keys: string[], formVersion: ScorecardFormVersion): string[] {
   const out: string[] = [];
   for (const k of keys) {
-    if (!isScorecardCriticalDeficiencyKey(k)) {
+    const valid = formVersion === 2 ? isScorecardV2CriticalDeficiencyKey(k) : isScorecardCriticalDeficiencyKey(k);
+    if (!valid) {
       throw new AppError(422, `Unknown critical deficiency: ${k}`);
     }
     if (!out.includes(k)) out.push(k);
@@ -432,12 +482,33 @@ function validateDeficiencies(keys: string[]): string[] {
   return out;
 }
 
+function validateDeficiencyNotes(
+  notes: Record<string, string>,
+  deficiencies: string[],
+  formVersion: ScorecardFormVersion,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(notes)) {
+    const valid = formVersion === 2 ? isScorecardV2CriticalDeficiencyKey(key) : isScorecardCriticalDeficiencyKey(key);
+    if (!valid || !deficiencies.includes(key)) {
+      throw new AppError(422, `Critical-deficiency description does not match a selected deficiency: ${key}.`);
+    }
+    const text = value.trim();
+    if (text) out[key] = text.slice(0, 4000);
+  }
+  return out;
+}
+
 async function resolvePhotoLinks(
   tenantDb: TenantDb,
   input: CreateFieldScorecardInput,
-): Promise<{ sectionKey: ScorecardSectionKey; fileId: string }[]> {
+  formVersion: ScorecardFormVersion,
+  deficiencies: string[],
+): Promise<{ sectionKey: string; deficiencyKey: string | null; fileId: string }[]> {
   for (const p of input.photos) {
-    if (!isScorecardSectionKey(p.sectionKey)) {
+    const validSection = formVersion === 2 ? isScorecardV2SectionKey(p.sectionKey) : isScorecardSectionKey(p.sectionKey);
+    const deficiencyEvidence = formVersion === 2 && p.sectionKey === "critical_deficiency" && p.deficiencyKey && deficiencies.includes(p.deficiencyKey);
+    if (!validSection && !deficiencyEvidence) {
       throw new AppError(422, `Unknown scorecard section: ${p.sectionKey}`);
     }
   }
@@ -461,7 +532,7 @@ async function resolvePhotoLinks(
     );
   const byUploadId = new Map(rows.map((r) => [r.clientUploadId, r]));
 
-  const links: { sectionKey: ScorecardSectionKey; fileId: string }[] = [];
+  const links: { sectionKey: string; deficiencyKey: string | null; fileId: string }[] = [];
   const seenFile = new Set<string>();
   for (const p of input.photos) {
     const file = byUploadId.get(p.clientUploadId);
@@ -474,20 +545,23 @@ async function resolvePhotoLinks(
     if (seenFile.has(file.id)) continue; // a photo backs one section; ignore duplicates
     seenFile.add(file.id);
     // Section key already validated in the first loop above.
-    links.push({ sectionKey: p.sectionKey as ScorecardSectionKey, fileId: file.id });
+    links.push({ sectionKey: p.sectionKey, deficiencyKey: p.deficiencyKey ?? null, fileId: file.id });
   }
   return links;
 }
 
 function toSummary(row: ScorecardSummarySource): FieldScorecardSummary {
+  const formVersion: ScorecardFormVersion = row.formVersion === 2 ? 2 : 1;
   const rating = row.rating as ScorecardRating;
   return {
     id: row.id,
     dealId: row.dealId,
     weekOf: typeof row.weekOf === "string" ? row.weekOf : String(row.weekOf),
     totalScore: row.totalScore,
+    formVersion,
+    averageScore: row.averageScore == null ? null : Number(row.averageScore),
     rating,
-    ratingLabel: scorecardRatingLabel(rating),
+    ratingLabel: formVersion === 2 ? scorecardV2RatingLabel(rating) : scorecardRatingLabel(rating),
     superintendentName: row.superintendentName ?? null,
     pmName: row.pmName ?? null,
     projectNumber: row.projectNumber ?? null,
@@ -495,6 +569,13 @@ function toSummary(row: ScorecardSummarySource): FieldScorecardSummary {
     submittedByName: row.submittedByName ?? null,
     submittedAt: toIso(row.submittedAt),
   };
+}
+
+function normalizeSignature(value: string | null | undefined): string | null {
+  const signature = value?.trim() ?? "";
+  if (!signature) return null;
+  if (signature.length > 500_000) throw new AppError(400, "Signature is too large.");
+  return signature;
 }
 
 function toIso(value: unknown): string {

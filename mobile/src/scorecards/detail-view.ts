@@ -45,7 +45,7 @@ export function scorecardSectionRows(items: readonly FieldScorecardItemView[]): 
       key: s.key,
       title: s.title,
       points: item?.points ?? 0,
-      maxPoints: s.maxPoints,
+      maxPoints: 10,
       note: item?.note ?? null,
     };
   });
@@ -63,6 +63,7 @@ export function scorecardPhotoSections(
 ): ScorecardPhotoSection[] {
   const byKey = new Map<ScorecardSectionKey, FieldScorecardPhotoView[]>();
   for (const p of photos) {
+    if (p.sectionKey === "critical_deficiency") continue;
     const list = byKey.get(p.sectionKey) ?? [];
     list.push(p);
     byKey.set(p.sectionKey, list);

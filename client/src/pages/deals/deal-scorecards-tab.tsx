@@ -5,7 +5,9 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
   FIELD_SCORECARD_SECTIONS,
+  FIELD_SCORECARD_V2_SECTIONS,
   FIELD_SCORECARD_CRITICAL_DEFICIENCIES,
+  FIELD_SCORECARD_V2_CRITICAL_DEFICIENCIES,
   type FieldScorecardSummary,
   type FieldScorecardDetail,
   type ScorecardRating,
@@ -21,6 +23,8 @@ const RATING_BADGE: Record<ScorecardRating, string> = {
 const SECTION_TITLE = new Map<string, string>(FIELD_SCORECARD_SECTIONS.map((s) => [s.key, s.title]));
 const SECTION_MAX = new Map<string, number>(FIELD_SCORECARD_SECTIONS.map((s) => [s.key, s.maxPoints]));
 const DEFICIENCY_LABEL = new Map<string, string>(FIELD_SCORECARD_CRITICAL_DEFICIENCIES.map((d) => [d.key, d.label]));
+const V2_SECTION_TITLE = new Map<string, string>(FIELD_SCORECARD_V2_SECTIONS.map((s) => [s.key, s.title]));
+const V2_DEFICIENCY_LABEL = new Map<string, string>(FIELD_SCORECARD_V2_CRITICAL_DEFICIENCIES.map((d) => [d.key, d.label]));
 
 function formatWeek(weekOf: string): string {
   const d = new Date(`${weekOf}T00:00:00Z`);
@@ -144,8 +148,8 @@ function ScorecardRow({ dealId, summary }: { dealId: string; summary: FieldScore
           </div>
           <div className="flex items-center gap-3">
             <span className="text-lg font-bold text-gray-900">
-              {summary.totalScore}
-              <span className="text-xs font-normal text-gray-400">/100</span>
+              {summary.formVersion === 2 ? (summary.averageScore ?? summary.totalScore / 10).toFixed(1) : summary.totalScore}
+              <span className="text-xs font-normal text-gray-400">{summary.formVersion === 2 ? "/10" : "/100"}</span>
             </span>
             <Badge variant="outline" className={RATING_BADGE[summary.rating]}>
               {summary.ratingLabel}
@@ -173,6 +177,9 @@ function ScorecardRow({ dealId, summary }: { dealId: string; summary: FieldScore
 }
 
 export function ScorecardDetailView({ detail }: { detail: FieldScorecardDetail }) {
+  const isV2 = detail.formVersion === 2;
+  const sectionTitle = isV2 ? V2_SECTION_TITLE : SECTION_TITLE;
+  const deficiencyLabel = isV2 ? V2_DEFICIENCY_LABEL : DEFICIENCY_LABEL;
   return (
     <div className="space-y-4">
       <div>
@@ -181,9 +188,9 @@ export function ScorecardDetailView({ detail }: { detail: FieldScorecardDetail }
           {detail.items.map((item) => (
             <div key={item.sectionKey} className="px-3 py-2">
               <div className="flex items-center justify-between">
-                <span className="text-sm text-gray-900">{SECTION_TITLE.get(item.sectionKey) ?? item.sectionKey}</span>
+                <span className="text-sm text-gray-900">{sectionTitle.get(item.sectionKey) ?? item.sectionKey}</span>
                 <span className="text-sm font-semibold text-gray-900">
-                  {item.points} / {SECTION_MAX.get(item.sectionKey) ?? "—"}
+                  {item.points} / {isV2 ? 10 : SECTION_MAX.get(item.sectionKey) ?? "—"}
                 </span>
               </div>
               {item.note && <p className="mt-0.5 text-xs italic text-gray-500">{item.note}</p>}
@@ -197,7 +204,10 @@ export function ScorecardDetailView({ detail }: { detail: FieldScorecardDetail }
           <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-red-600">Critical Deficiencies</h4>
           <ul className="list-inside list-disc space-y-1 text-sm text-gray-900">
             {detail.criticalDeficiencies.map((key) => (
-              <li key={key}>{DEFICIENCY_LABEL.get(key) ?? key}</li>
+              <li key={key}>
+                {deficiencyLabel.get(key) ?? key}
+                {detail.criticalDeficiencyNotes?.[key] ? <span className="ml-1 text-gray-500">— {detail.criticalDeficiencyNotes[key]}</span> : null}
+              </li>
             ))}
           </ul>
         </div>
@@ -211,6 +221,16 @@ export function ScorecardDetailView({ detail }: { detail: FieldScorecardDetail }
               <li key={i}>{a}</li>
             ))}
           </ol>
+        </div>
+      )}
+
+      {isV2 && (
+        <div>
+          <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">Signatures</h4>
+          <div className="space-y-1 text-sm text-gray-900">
+            <p>Superintendent: {detail.superintendentSignature || "—"}</p>
+            <p>Project manager: {detail.pmSignature || "—"}</p>
+          </div>
         </div>
       )}
 

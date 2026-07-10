@@ -4,6 +4,9 @@ import {
   varchar,
   text,
   integer,
+  jsonb,
+  numeric,
+  smallint,
   boolean,
   timestamp,
   date,
@@ -26,9 +29,17 @@ export const fieldScorecards = pgTable(
     projectNumber: text("project_number"),
     superintendentName: text("superintendent_name"),
     pmName: text("pm_name"),
+    /** 1 = original 100-point form; 2 = eight 1-10 categories with an average. */
+    formVersion: smallint("form_version").default(1).notNull(),
+    /** V2's authoritative score. `totalScore` remains average * 10 for legacy rollups. */
+    averageScore: numeric("average_score", { precision: 3, scale: 1 }),
+    superintendentSignature: text("superintendent_signature"),
+    pmSignature: text("pm_signature"),
     totalScore: integer("total_score").notNull(),
     rating: varchar("rating", { length: 40 }).notNull(),
     criticalDeficiencies: text("critical_deficiencies").array().default([]).notNull(),
+    /** V2 supplemental description keyed by critical-deficiency key. */
+    criticalDeficiencyNotes: jsonb("critical_deficiency_notes").$type<Record<string, string>>().default({}).notNull(),
     actionItems: text("action_items").array().default([]).notNull(),
     status: varchar("status", { length: 20 }).default("submitted").notNull(),
     submittedBy: uuid("submitted_by").notNull(),
@@ -69,6 +80,8 @@ export const fieldScorecardPhotos = pgTable(
     id: uuid("id").primaryKey().defaultRandom(),
     scorecardId: uuid("scorecard_id").notNull(),
     sectionKey: varchar("section_key", { length: 40 }).notNull(),
+    /** V2 critical-deficiency evidence is attached to the exact selected deficiency. */
+    deficiencyKey: varchar("deficiency_key", { length: 40 }),
     fileId: uuid("file_id").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },

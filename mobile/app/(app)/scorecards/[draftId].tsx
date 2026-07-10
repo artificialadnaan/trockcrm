@@ -1,9 +1,10 @@
 import React, { Suspense, useCallback, useEffect, useReducer, useRef, useState } from "react";
-import { Image, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Image, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import * as ImagePicker from "expo-image-picker";
+import SignatureScreen from "react-native-signature-canvas";
 import { theme } from "../../../src/theme/theme";
 import { useAuth } from "../../../src/auth/AuthContext";
 import { getTranscriptionConfig, type Fetcher } from "../../../src/api/endpoints";
@@ -35,12 +36,13 @@ import { Banner } from "../../../src/components/Banner";
 import { ScreenHeader } from "../../../src/components/ScreenHeader";
 import { RatingBadge } from "../../../src/components/RatingBadge";
 import { VoiceRecorder } from "../../../src/components/VoiceRecorder";
+import { PhotoCaptionEditor } from "../../../src/components/PhotoCaptionEditor";
 
 const CameraCapture = React.lazy(() => import("../../../src/capture/CameraCapture"));
 
 const SECTION_COUNT = FIELD_SCORECARD_SECTIONS.length;
-const LAST_STEP = 1 + SECTION_COUNT + 2; // setup + sections + deficiencies + actions + review
-// step map: 0 setup · 1..7 sections · 8 deficiencies · 9 actions · 10 review
+// Step 0 is the one-page scorecard. A category opens a focused detail editor at 1..8.
+const LAST_STEP = 0;
 
 function toStr(v: string | string[] | undefined): string {
   return Array.isArray(v) ? v[0] ?? "" : v ?? "";
@@ -88,6 +90,7 @@ export default function ScorecardWizardScreen() {
   const [loaded, setLoaded] = useState<ScorecardDraft | null | "missing">(null);
   const [step, setStep] = useState(0);
   const [cameraSection, setCameraSection] = useState<number | null>(null);
+  const [cameraDeficiency, setCameraDeficiency] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [notice, setNotice] = useState<{ tone: "success" | "error"; text: string } | null>(null);
 
@@ -105,6 +108,7 @@ export default function ScorecardWizardScreen() {
     setLoaded(null);
     setStep(0);
     setCameraSection(null);
+    setCameraDeficiency(null);
     setSubmitting(false);
     setNotice(null);
     // Guard against a slow load from a PREVIOUS draftId/owner resolving last and seeding the wizard with
@@ -152,6 +156,8 @@ export default function ScorecardWizardScreen() {
       setStep={setStep}
       cameraSection={cameraSection}
       setCameraSection={setCameraSection}
+      cameraDeficiency={cameraDeficiency}
+      setCameraDeficiency={setCameraDeficiency}
       submitting={submitting}
       setSubmitting={setSubmitting}
       notice={notice}
@@ -180,6 +186,8 @@ function Wizard(props: {
   setStep: (n: number) => void;
   cameraSection: number | null;
   setCameraSection: (n: number | null) => void;
+  cameraDeficiency: string | null;
+  setCameraDeficiency: (key: string | null) => void;
   submitting: boolean;
   setSubmitting: (b: boolean) => void;
   notice: { tone: "success" | "error"; text: string } | null;
@@ -188,12 +196,15 @@ function Wizard(props: {
   onSubmitted: (dealId: string) => void;
   fetcher: ReturnType<typeof useAuth>["fetcher"];
 }) {
-  const { ownerKey, draftId, step, setStep, cameraSection, setCameraSection, submitting, setSubmitting, notice, setNotice, voiceEnabled, onSubmitted, fetcher } = props;
+  const { ownerKey, draftId, step, setStep, cameraSection, setCameraSection, cameraDeficiency, setCameraDeficiency, submitting, setSubmitting, notice, setNotice, voiceEnabled, onSubmitted, fetcher } = props;
   const router = useRouter();
   const [draft, dispatch] = useReducer(scorecardDraftReducer, props.initial);
   // Count of evidence photos still being copied into durable storage. Submit is blocked while > 0 so a
   // capture in flight (durable copy + dispatch not yet done) can't be omitted from a fast submit.
   const [savingPhotos, setSavingPhotos] = useState(0);
+  const [captionPhotoKey, setCaptionPhotoKey] = useState<string | null>(null);
+  const [captionVoiceBusy, setCaptionVoiceBusy] = useState(false);
+  const [signingField, setSigningField] = useState<"superintendentSignature" | "pmSignature" | null>(null);
   // Serialize autosaves so a slow older write can't land after a newer edit — or after the submit-delete
   // and resurrect a submitted draft. `finalized` stops saves once the draft is submitted + deleted.
   const saveChain = useRef<Promise<unknown>>(Promise.resolve());
@@ -227,6 +238,7 @@ function Wizard(props: {
 
   const total = scorecardDraftTotal(draft);
   const validation = validateScorecardDraft(draft);
+  const captionPhoto = draft.photos.find((photo) => photo.key === captionPhotoKey) ?? null;
 
   const goNext = () => setStep(Math.min(LAST_STEP, step + 1));
   const goBack = () => {
@@ -241,7 +253,7 @@ function Wizard(props: {
       router.back();
       return;
     }
-    setStep(step - 1);
+    setStep(0);
   };
 
   // Remove a photo from the draft AND cancel any already-queued upload for it (a prior offline submit may
@@ -285,7 +297,7 @@ function Wizard(props: {
       setNotice({ tone: "error", text: `A scorecard can hold at most ${MAX_SCORECARD_PHOTOS} photos — remove some to add more.` });
       return;
     }
-    const sectionKey = FIELD_SCORECARD_SECTIONS[cameraSection].key;
+    const sectionKey = cameraSection === -1 ? "critical_deficiency" : FIELD_SCORECARD_SECTIONS[cameraSection].key;
     const clientUploadId = newClientUploadId();
     photoCount.current += 1; // reserve a slot synchronously; released below only if the copy fails
     setSavingPhotos((n) => n + 1); // blocks Submit until the durable copy + dispatch below finish
@@ -302,6 +314,7 @@ function Wizard(props: {
           uri: durableUri,
           clientUploadId,
           sectionKey,
+          deficiencyKey: cameraDeficiency as ScorecardDraftPhoto["deficiencyKey"],
           caption,
           takenAt: exif.takenAt ?? shot.capturedAt,
           latitude: exif.latitude,
@@ -319,7 +332,7 @@ function Wizard(props: {
     }
   }
 
-  async function importForSection(sectionIndex: number) {
+  async function importForSection(sectionIndex: number, deficiencyKey?: string) {
     // Serialize imports: block a second import, or an import fired during a camera save. `savingPhotos` is React
     // state (lags a rapid re-tap), so importInFlight — a synchronous ref flipped BELOW before any await — is what
     // actually bars a double-tap; it's released on every exit. The photo CAP itself is enforced by photoCount
@@ -352,7 +365,7 @@ function Wizard(props: {
         exif: true,
       });
       if (result.canceled) return;
-      const sectionKey = FIELD_SCORECARD_SECTIONS[sectionIndex].key;
+      const sectionKey = sectionIndex === -1 ? "critical_deficiency" : FIELD_SCORECARD_SECTIONS[sectionIndex].key;
       // Defensive: never exceed the remaining slots even if a platform ignores selectionLimit.
       const assets = result.assets.slice(0, remaining);
       if (assets.length === 0) return;
@@ -376,7 +389,7 @@ function Wizard(props: {
             const durableUri = await copyPhotoIntoDraft(ownerKey, draftId, clientUploadId, asset.uri);
             dispatch({
               type: "addPhoto",
-              photo: { key: clientUploadId, uri: durableUri, clientUploadId, sectionKey, caption: "", takenAt: exif.takenAt, latitude: exif.latitude, longitude: exif.longitude, addressSource: exif.addressSource, width: asset.width, height: asset.height },
+              photo: { key: clientUploadId, uri: durableUri, clientUploadId, sectionKey, deficiencyKey: deficiencyKey as ScorecardDraftPhoto["deficiencyKey"], caption: "", takenAt: exif.takenAt, latitude: exif.latitude, longitude: exif.longitude, addressSource: exif.addressSource, width: asset.width, height: asset.height },
             });
           } catch {
             photoCount.current -= 1; // reservation didn't become a committed photo — release the slot
@@ -436,12 +449,7 @@ function Wizard(props: {
     }
   }
 
-  const title =
-    step === 0 ? "Setup"
-    : step <= SECTION_COUNT ? FIELD_SCORECARD_SECTIONS[step - 1].title
-    : step === SECTION_COUNT + 1 ? "Critical deficiencies"
-    : step === SECTION_COUNT + 2 ? "Action items"
-    : "Review & submit";
+  const title = step === 0 ? "Project Scorecard" : FIELD_SCORECARD_SECTIONS[step - 1].title;
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
@@ -455,8 +463,18 @@ function Wizard(props: {
         {notice ? <Banner message={notice.text} tone={notice.tone} /> : null}
 
         {step === 0 ? (
-          <SetupStep draft={draft} dispatch={dispatch} />
-        ) : step <= SECTION_COUNT ? (
+          <OverviewStep
+            draft={draft}
+            dispatch={dispatch}
+            onOpenSection={(index) => setStep(index + 1)}
+            onAddDeficiencyPhoto={(key) => { setCameraDeficiency(key); setCameraSection(-1); }}
+            onImportDeficiencyPhoto={(key) => void importForSection(-1, key)}
+            onEditPhoto={(photo) => setCaptionPhotoKey(photo.key)}
+            onSign={(field) => setSigningField(field)}
+            voiceEnabled={voiceEnabled}
+            photosBusy={savingPhotos > 0}
+          />
+        ) : (
           <SectionStep
             sectionIndex={step - 1}
             draft={draft}
@@ -466,13 +484,8 @@ function Wizard(props: {
             onImport={() => void importForSection(step - 1)}
             photosBusy={savingPhotos > 0}
             onRemovePhoto={removePhotoAndCancelUpload}
+            onEditPhoto={(photo) => setCaptionPhotoKey(photo.key)}
           />
-        ) : step === SECTION_COUNT + 1 ? (
-          <DeficienciesStep draft={draft} dispatch={dispatch} />
-        ) : step === SECTION_COUNT + 2 ? (
-          <ActionsStep draft={draft} dispatch={dispatch} voiceEnabled={voiceEnabled} required={scorecardActionItemsRequired(draft)} />
-        ) : (
-          <ReviewStep draft={draft} onEditStep={(n) => setStep(n)} />
         )}
       </ScrollView>
 
@@ -480,8 +493,8 @@ function Wizard(props: {
         <View style={styles.totalPill}>
           <Text style={styles.totalText}>{total}/100</Text>
         </View>
-        {step < LAST_STEP ? (
-          <Button title="Next →" onPress={goNext} style={{ flex: 1 }} />
+        {step > 0 ? (
+          <Button title="Done" onPress={() => setStep(0)} style={{ flex: 1 }} />
         ) : (
           <Button title={savingPhotos > 0 ? "Saving photo…" : "Submit ✓"} onPress={onSubmit} loading={submitting} disabled={!validation.canSubmit || submitting || savingPhotos > 0} style={{ flex: 1 }} />
         )}
@@ -492,14 +505,205 @@ function Wizard(props: {
           <CameraCapture
             onCapture={(shot, caption) => void onCameraCapture(shot, caption)}
             onClose={() => setCameraSection(null)}
-            count={scorecardDraftPhotosForSection(draft, FIELD_SCORECARD_SECTIONS[cameraSection].key).length}
-            recent={scorecardDraftPhotosForSection(draft, FIELD_SCORECARD_SECTIONS[cameraSection].key).slice(-5).map((p) => p.uri)}
+            count={draft.photos.filter((photo) => cameraSection === -1 ? photo.sectionKey === "critical_deficiency" && photo.deficiencyKey === cameraDeficiency : photo.sectionKey === FIELD_SCORECARD_SECTIONS[cameraSection].key).length}
+            recent={draft.photos.filter((photo) => cameraSection === -1 ? photo.sectionKey === "critical_deficiency" && photo.deficiencyKey === cameraDeficiency : photo.sectionKey === FIELD_SCORECARD_SECTIONS[cameraSection].key).slice(-5).map((p) => p.uri)}
             annotatePerShot
             voiceEnabled={voiceEnabled}
           />
         </Suspense>
       ) : null}
+
+      <Modal visible={captionPhoto !== null} transparent animationType="slide" onRequestClose={() => !captionVoiceBusy && setCaptionPhotoKey(null)}>
+        <KeyboardAvoidingView style={styles.captionModalRoot} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+          <Pressable style={styles.captionBackdrop} onPress={() => !captionVoiceBusy && setCaptionPhotoKey(null)} accessibilityLabel="Close photo description" />
+          {captionPhoto ? (
+            <SafeAreaView edges={["bottom"]} style={styles.captionSheet}>
+              <PhotoCaptionEditor
+                uri={captionPhoto.uri}
+                caption={captionPhoto.caption}
+                onChangeCaption={(caption) => dispatch({ type: "setPhotoCaption", key: captionPhoto.key, caption })}
+                onAppendCaption={(text) => dispatch({ type: "appendPhotoCaption", key: captionPhoto.key, text })}
+                voiceEnabled={voiceEnabled}
+                onBusyChange={setCaptionVoiceBusy}
+                autoFocus
+                label="Description"
+                hint="Optional. This description stays with this photo."
+                footer={<Button title="Done" onPress={() => setCaptionPhotoKey(null)} disabled={captionVoiceBusy} />}
+              />
+            </SafeAreaView>
+          ) : null}
+        </KeyboardAvoidingView>
+      </Modal>
+
+      <Modal visible={signingField !== null} animationType="slide" onRequestClose={() => setSigningField(null)}>
+        <SafeAreaView style={styles.signatureModal}>
+          <View style={styles.signatureHeader}>
+            <Text style={styles.stepTitle}>{signingField === "superintendentSignature" ? "Superintendent signature" : "Project manager signature"}</Text>
+            <Pressable onPress={() => setSigningField(null)} accessibilityRole="button" accessibilityLabel="Close signature pad">
+              <Text style={styles.signatureClose}>Close</Text>
+            </Pressable>
+          </View>
+          <Text style={styles.hint}>Sign in the box below, then tap Save.</Text>
+          {signingField ? (
+            <View style={styles.signatureCanvas}>
+              <SignatureScreen
+                onOK={(signature) => {
+                  dispatch({ type: "setSignature", field: signingField, value: signature });
+                  setSigningField(null);
+                }}
+                onEmpty={() => setNotice({ tone: "error", text: "Please add a signature before saving." })}
+                descriptionText=""
+                clearText="Clear"
+                confirmText="Save"
+                webStyle={signatureWebStyle}
+              />
+            </View>
+          ) : null}
+        </SafeAreaView>
+      </Modal>
     </SafeAreaView>
+  );
+}
+
+function OverviewStep({
+  draft,
+  dispatch,
+  onOpenSection,
+  onAddDeficiencyPhoto,
+  onImportDeficiencyPhoto,
+  onEditPhoto,
+  onSign,
+  voiceEnabled,
+  photosBusy,
+}: {
+  draft: ScorecardDraft;
+  dispatch: React.Dispatch<DraftAction>;
+  onOpenSection: (index: number) => void;
+  onAddDeficiencyPhoto: (key: string) => void;
+  onImportDeficiencyPhoto: (key: string) => void;
+  onEditPhoto: (photo: ScorecardDraftPhoto) => void;
+  onSign: (field: "superintendentSignature" | "pmSignature") => void;
+  voiceEnabled: boolean;
+  photosBusy: boolean;
+}) {
+  const average = scorecardDraftTotal(draft);
+  const answered = Object.keys(draft.scores).length;
+  return (
+    <View style={{ gap: theme.space.lg }}>
+      <View style={styles.scoreWrap}>
+        <Text style={styles.bigScore}>{average.toFixed(1)}<Text style={styles.bigScoreMax}> /10</Text></Text>
+        <RatingBadge rating={scorecardDraftRating(draft)} label={scorecardRatingLabel(scorecardDraftRating(draft))} />
+        <Text style={styles.hint}>{String(answered) + "/" + String(SECTION_COUNT) + " categories rated"}</Text>
+      </View>
+
+      <View style={{ gap: theme.space.md }}>
+        <Field label="Project"><Text style={styles.readonly}>{draft.dealName}</Text></Field>
+        {draft.projectNumber ? <Field label="Project number"><Text style={styles.readonly}>{draft.projectNumber}</Text></Field> : null}
+        <Field label="Superintendent">
+          <TextInput value={draft.superintendentName} onChangeText={(value) => dispatch({ type: "setHeader", field: "superintendentName", value })} placeholder="Name" />
+        </Field>
+        <Field label="Project manager">
+          <TextInput value={draft.pmName} onChangeText={(value) => dispatch({ type: "setHeader", field: "pmName", value })} placeholder="Name" />
+        </Field>
+        <Field label="Week of"><Text style={styles.readonly}>Set automatically when completed</Text></Field>
+      </View>
+
+      <View style={{ gap: theme.space.sm }}>
+        <SectionLabel>Category ratings</SectionLabel>
+        {FIELD_SCORECARD_SECTIONS.map((section, index) => {
+          const score = draft.scores[section.key] ?? 5;
+          const photoCount = scorecardDraftPhotosForSection(draft, section.key).length;
+          return (
+            <View key={section.key} style={styles.categoryCard}>
+              <View style={styles.categoryHeading}>
+                <Text style={styles.categoryTitle}>{section.title}</Text>
+                <Text style={styles.categoryScore}>{String(score) + "/10"}</Text>
+              </View>
+              <ScoreSlider value={score} onChange={(points) => dispatch({ type: "setScore", sectionKey: section.key, points })} />
+              <Pressable onPress={() => onOpenSection(index)} style={styles.categoryAction} accessibilityRole="button">
+                <Text style={styles.categoryActionText}>{photoCount > 0 ? String(photoCount) + (photoCount === 1 ? " photo · Edit action items" : " photos · Edit action items") : "Add action items or photos"}</Text>
+                <Text style={styles.summaryChevron}>›</Text>
+              </Pressable>
+            </View>
+          );
+        })}
+      </View>
+
+      <View style={{ gap: theme.space.sm }}>
+        <SectionLabel>Critical deficiencies</SectionLabel>
+        <Text style={styles.hint}>Select each issue that applies. Attach evidence directly to the selected issue.</Text>
+        {FIELD_SCORECARD_CRITICAL_DEFICIENCIES.map((deficiency) => {
+          const selected = draft.criticalDeficiencies.includes(deficiency.key);
+          const count = draft.photos.filter((photo) => photo.sectionKey === "critical_deficiency" && photo.deficiencyKey === deficiency.key).length;
+          const photos = draft.photos.filter((photo) => photo.sectionKey === "critical_deficiency" && photo.deficiencyKey === deficiency.key);
+          const note = draft.deficiencyNotes?.[deficiency.key] ?? "";
+          return (
+            <View key={deficiency.key} style={[styles.deficiencyCard, selected && styles.deficiencyCardSelected]}>
+              <Pressable
+                onPress={() => dispatch({ type: "toggleDeficiency", key: deficiency.key })}
+                style={styles.deficiencyToggle}
+                accessibilityRole="checkbox"
+                accessibilityState={{ checked: selected }}
+              >
+                <View style={[styles.box, selected && styles.boxOn]}>{selected ? <Text style={styles.boxCheck}>✓</Text> : null}</View>
+                <Text style={styles.checkLabel}>{deficiency.label}</Text>
+              </Pressable>
+              {selected ? (
+                <>
+                  <Field label="Description">
+                    <TextInput
+                      value={note}
+                      onChangeText={(text) => dispatch({ type: "setDeficiencyNote", key: deficiency.key, note: text })}
+                      placeholder="Describe the issue, impact, and correction needed"
+                      multiline
+                      style={{ minHeight: 84, textAlignVertical: "top", paddingTop: 10 }}
+                    />
+                    {voiceEnabled ? <VoiceRecorder onTranscript={(text) => dispatch({ type: "appendDeficiencyNote", key: deficiency.key, text })} /> : null}
+                  </Field>
+                  <View style={styles.deficiencyActions}>
+                    <Button title={count ? String(count) + (count === 1 ? " photo" : " photos") : "Camera"} variant="ghost" onPress={() => onAddDeficiencyPhoto(deficiency.key)} disabled={photosBusy} style={{ flex: 1 }} />
+                    <Button title="Library" variant="ghost" onPress={() => onImportDeficiencyPhoto(deficiency.key)} disabled={photosBusy} style={{ flex: 1 }} />
+                  </View>
+                  {photos.length > 0 ? (
+                    <View style={styles.photoRow}>
+                      {photos.map((photo) => (
+                        <Pressable key={photo.key} onPress={() => onEditPhoto(photo)} accessibilityRole="button" accessibilityLabel="Edit photo description">
+                          <Image source={{ uri: photo.uri }} style={styles.thumb} />
+                        </Pressable>
+                      ))}
+                    </View>
+                  ) : null}
+                </>
+              ) : null}
+            </View>
+          );
+        })}
+      </View>
+
+      <View style={{ gap: theme.space.md }}>
+        <SectionLabel>Signatures</SectionLabel>
+        <Pressable onPress={() => onSign("superintendentSignature")} style={styles.signatureTrigger} accessibilityRole="button">
+          <Text style={styles.signatureTriggerLabel}>Superintendent</Text>
+          <Text style={styles.signatureTriggerValue}>{draft.superintendentSignature ? "Signed · tap to replace" : "Tap to sign"}</Text>
+        </Pressable>
+        <Pressable onPress={() => onSign("pmSignature")} style={styles.signatureTrigger} accessibilityRole="button">
+          <Text style={styles.signatureTriggerLabel}>Project manager</Text>
+          <Text style={styles.signatureTriggerValue}>{draft.pmSignature ? "Signed · tap to replace" : "Tap to sign"}</Text>
+        </Pressable>
+      </View>
+    </View>
+  );
+}
+
+function ScoreSlider({ value, onChange }: { value: number; onChange: (value: number) => void }) {
+  return (
+    <View style={styles.sliderTicks}>
+      {Array.from({ length: 10 }, (_, index) => (
+        <Pressable key={index} onPress={() => onChange(index + 1)} style={[styles.sliderTick, index + 1 <= value && styles.sliderTickActive]}>
+          <Text style={[styles.sliderTickText, index + 1 === value && styles.sliderTickTextSelected]}>{index + 1}</Text>
+        </Pressable>
+      ))}
+    </View>
   );
 }
 
@@ -522,11 +726,12 @@ function SetupStep({ draft, dispatch }: { draft: ScorecardDraft; dispatch: React
 }
 
 function SectionStep({
-  sectionIndex, draft, dispatch, voiceEnabled, onAddPhoto, onImport, photosBusy, onRemovePhoto,
+  sectionIndex, draft, dispatch, voiceEnabled, onAddPhoto, onImport, photosBusy, onRemovePhoto, onEditPhoto,
 }: {
   sectionIndex: number; draft: ScorecardDraft; dispatch: React.Dispatch<DraftAction>;
   voiceEnabled: boolean; onAddPhoto: () => void; onImport: () => void; photosBusy: boolean;
   onRemovePhoto: (photo: ScorecardDraftPhoto) => void;
+  onEditPhoto: (photo: ScorecardDraftPhoto) => void;
 }) {
   const section = FIELD_SCORECARD_SECTIONS[sectionIndex];
   const selected = draft.scores[section.key];
@@ -537,41 +742,39 @@ function SectionStep({
   const photosDisabled = photosBusy || draft.photos.length >= MAX_SCORECARD_PHOTOS;
   return (
     <View style={{ gap: theme.space.md }}>
-      <Text style={styles.hint}>Section {sectionIndex + 1} of {SECTION_COUNT} · worth {section.maxPoints} pts</Text>
-      <View style={{ gap: theme.space.sm }}>
-        {section.options.map((opt) => {
-          const active = selected === opt.points;
-          return (
-            <Pressable
-              key={opt.points}
-              onPress={() => dispatch({ type: "setScore", sectionKey: section.key, points: opt.points })}
-              style={[styles.opt, active && styles.optActive]}
-            >
-              <Text style={[styles.optPts, active && styles.optPtsActive]}>{opt.points}</Text>
-              <Text style={styles.optLabel}>{opt.label}</Text>
-              <View style={[styles.radio, active && styles.radioActive]} />
-            </Pressable>
-          );
-        })}
+      <Text style={styles.hint}>Rate this category, then document any action items or evidence.</Text>
+      <View style={styles.detailScoreBlock}>
+        <Text style={styles.detailScore}>{selected ?? "—"}<Text style={styles.bigScoreMax}> /10</Text></Text>
+        <ScoreSlider value={selected ?? 5} onChange={(points) => dispatch({ type: "setScore", sectionKey: section.key, points })} />
       </View>
-      <Field label="Note (optional)">
-        <TextInput value={note} onChangeText={(v) => dispatch({ type: "setNote", sectionKey: section.key, note: v })} placeholder="Add a note" multiline style={{ minHeight: 56, textAlignVertical: "top", paddingTop: 10 }} />
+      <Field label="Action items">
+        <TextInput value={note} onChangeText={(v) => dispatch({ type: "setNote", sectionKey: section.key, note: v })} placeholder="Describe the action needed" multiline style={{ minHeight: 96, textAlignVertical: "top", paddingTop: 10 }} />
         {voiceEnabled ? (
           <VoiceRecorder onTranscript={(t) => dispatch({ type: "appendNote", sectionKey: section.key, text: t })} />
         ) : null}
       </Field>
       <View style={{ gap: theme.space.sm }}>
-        <SectionLabel>Photos ({photos.length})</SectionLabel>
+        <SectionLabel>Evidence photos ({photos.length})</SectionLabel>
         <View style={styles.photoRow}>
           {photos.map((p) => (
             <View key={p.key} style={styles.thumbWrap}>
-              <Image source={{ uri: p.uri }} style={styles.thumb} />
+              <Pressable
+                onPress={() => onEditPhoto(p)}
+                accessibilityRole="button"
+                accessibilityLabel={p.caption.trim() ? "Photo with description. Edit description." : "Photo. Add description."}
+              >
+                <Image source={{ uri: p.uri }} style={styles.thumb} />
+                <View style={styles.thumbCaption}>
+                  <Text style={styles.thumbCaptionText}>{p.caption.trim() ? "Edit" : "Describe"}</Text>
+                </View>
+              </Pressable>
               <Pressable onPress={() => onRemovePhoto(p)} hitSlop={8} style={styles.thumbX}>
                 <Text style={styles.thumbXText}>✕</Text>
               </Pressable>
             </View>
           ))}
         </View>
+        {photos.length > 0 ? <Text style={styles.photoHint}>Tap a photo to add a description or dictate it.</Text> : null}
         <View style={styles.actions}>
           <Button title="Add photo" variant="ghost" onPress={onAddPhoto} disabled={photosDisabled} style={{ flex: 1 }} />
           <Button title="Import" variant="ghost" onPress={onImport} disabled={photosDisabled} style={{ flex: 1 }} />
@@ -730,6 +933,14 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   );
 }
 
+const signatureWebStyle = `
+  .m-signature-pad { box-shadow: none; border: 0; height: 100%; }
+  .m-signature-pad--body { border: 0; }
+  .m-signature-pad--footer { background: #fff; border-top: 1px solid #e2e8f0; }
+  .button { background: #dc2626; color: #fff; border-radius: 6px; }
+  .button.clear { background: #fff; color: #dc2626; border: 1px solid #dc2626; }
+`;
+
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: theme.color.surfaceApp },
   progressTrack: { height: 4, backgroundColor: theme.color.surfaceMuted },
@@ -755,6 +966,9 @@ const styles = StyleSheet.create({
   thumb: { width: 64, height: 64, borderRadius: theme.radius.sm, backgroundColor: theme.color.surfaceMuted },
   thumbX: { position: "absolute", top: -6, right: -6, backgroundColor: theme.color.brandBlack, borderRadius: 999, width: 20, height: 20, alignItems: "center", justifyContent: "center" },
   thumbXText: { color: "#fff", fontSize: 11, fontFamily: theme.font.bold },
+  thumbCaption: { position: "absolute", left: 0, right: 0, bottom: 0, paddingVertical: 2, backgroundColor: "rgba(17,17,17,0.72)", alignItems: "center" },
+  thumbCaptionText: { color: "#fff", fontFamily: theme.font.semibold, fontSize: 9 },
+  photoHint: { fontFamily: theme.font.body, fontSize: 12, color: theme.color.textMuted },
   actions: { flexDirection: "row", gap: theme.space.md },
   check: { flexDirection: "row", alignItems: "center", gap: theme.space.md, paddingVertical: theme.space.sm, borderBottomWidth: 1, borderBottomColor: theme.color.surfaceMuted },
   box: { width: 22, height: 22, borderRadius: theme.radius.sm, borderWidth: 2, borderColor: theme.color.border, alignItems: "center", justifyContent: "center" },
@@ -774,6 +988,33 @@ const styles = StyleSheet.create({
   summaryCta: { fontFamily: theme.font.bold, fontSize: 13, color: theme.color.brandRed },
   summaryChevron: { fontFamily: theme.font.body, fontSize: 20, lineHeight: 20, color: theme.color.textMuted },
   summaryChevronRed: { fontFamily: theme.font.body, fontSize: 20, lineHeight: 20, color: theme.color.brandRed },
+  categoryCard: { backgroundColor: theme.color.surfaceCard, borderWidth: 1, borderColor: theme.color.border, borderRadius: theme.radius.md, padding: theme.space.md, gap: theme.space.sm },
+  categoryHeading: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: theme.space.md },
+  categoryTitle: { flex: 1, fontFamily: theme.font.semibold, fontSize: 15, color: theme.color.textPrimary },
+  categoryScore: { fontFamily: theme.font.bold, fontSize: 16, color: theme.color.brandRed },
+  categoryAction: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingTop: theme.space.xs },
+  categoryActionText: { fontFamily: theme.font.semibold, fontSize: 13, color: theme.color.brandRed },
+  sliderTicks: { flexDirection: "row", justifyContent: "space-between", gap: 3 },
+  sliderTick: { flex: 1, minHeight: 32, alignItems: "center", justifyContent: "center", borderRadius: theme.radius.sm, backgroundColor: theme.color.surfaceMuted, borderWidth: 1, borderColor: theme.color.border },
+  sliderTickActive: { backgroundColor: "#FEE2E2", borderColor: "#FCA5A5" },
+  sliderTickText: { fontFamily: theme.font.semibold, fontSize: 12, color: theme.color.textMuted },
+  sliderTickTextSelected: { color: theme.color.brandRed, fontFamily: theme.font.bold },
+  detailScoreBlock: { gap: theme.space.md, alignItems: "center", paddingVertical: theme.space.sm },
+  detailScore: { fontFamily: theme.font.bold, fontSize: 36, color: theme.color.textPrimary },
+  deficiencyCard: { borderBottomWidth: 1, borderBottomColor: theme.color.surfaceMuted, paddingVertical: theme.space.sm, gap: theme.space.sm },
+  deficiencyCardSelected: { backgroundColor: "rgba(220,40,40,0.05)", paddingHorizontal: theme.space.sm, borderRadius: theme.radius.sm, borderBottomColor: "transparent" },
+  deficiencyToggle: { flexDirection: "row", alignItems: "center", gap: theme.space.md },
+  deficiencyActions: { flexDirection: "row", gap: theme.space.sm, paddingLeft: 34 },
+  captionModalRoot: { flex: 1, justifyContent: "flex-end", backgroundColor: "rgba(15,23,42,0.35)" },
+  captionBackdrop: { ...StyleSheet.absoluteFillObject },
+  captionSheet: { gap: theme.space.md, backgroundColor: theme.color.surfaceCard, borderTopLeftRadius: theme.radius.lg, borderTopRightRadius: theme.radius.lg, padding: theme.space.lg },
+  signatureModal: { flex: 1, gap: theme.space.md, backgroundColor: theme.color.surfaceApp, padding: theme.space.lg },
+  signatureHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: theme.space.md },
+  signatureClose: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.brandRed },
+  signatureCanvas: { flex: 1, minHeight: 340, overflow: "hidden", borderWidth: 1, borderColor: theme.color.border, borderRadius: theme.radius.md, backgroundColor: theme.color.surfaceCard },
+  signatureTrigger: { gap: 3, borderWidth: 1, borderColor: theme.color.border, borderRadius: theme.radius.md, backgroundColor: theme.color.surfaceCard, padding: theme.space.md },
+  signatureTriggerLabel: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.textPrimary },
+  signatureTriggerValue: { fontFamily: theme.font.body, fontSize: 13, color: theme.color.brandRed },
   footer: {
     flexDirection: "row", alignItems: "center", gap: theme.space.md,
     padding: theme.space.md, borderTopWidth: 1, borderTopColor: theme.color.border, backgroundColor: theme.color.surfaceCard,

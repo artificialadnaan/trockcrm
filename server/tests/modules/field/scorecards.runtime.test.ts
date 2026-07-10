@@ -42,6 +42,12 @@ const MAX: Record<string, number> = {
 function fullItems(overrides: Record<string, number> = {}) {
   return Object.entries(MAX).map(([sectionKey, m]) => ({ sectionKey, points: overrides[sectionKey] ?? m }));
 }
+function v2Items(overrides: Record<string, number> = {}) {
+  return [
+    "planning_precon", "jobsite_5s", "safety", "schedule",
+    "subcontractor", "quality", "communication", "financial",
+  ].map((sectionKey) => ({ sectionKey, points: overrides[sectionKey] ?? 8 }));
+}
 function submission(over: Partial<Parameters<typeof createFieldScorecard>[1]> = {}) {
   return {
     userId: USER,
@@ -119,6 +125,27 @@ beforeEach(async () => {
 });
 
 describe("createFieldScorecard", () => {
+  it("persists the V2 eight-category average and electronic signatures", async () => {
+    const { scorecard } = await createFieldScorecard(
+      tdb,
+      submission({
+        clientSubmissionId: csid(99),
+        formVersion: 2,
+        items: v2Items({ safety: 10, quality: 6 }),
+        superintendentSignature: "Marcus Reed",
+        pmSignature: "Dana Cole",
+      }),
+    );
+    expect(scorecard.formVersion).toBe(2);
+    expect(scorecard.averageScore).toBe(8);
+    expect(scorecard.totalScore).toBe(80);
+    expect(scorecard.ratingLabel).toBe("Meets Standard");
+    const detail = await getFieldScorecardDetail(tdb, scorecard.id, ACCESS);
+    expect(detail.items).toHaveLength(8);
+    expect(detail.superintendentSignature).toBe("Marcus Reed");
+    expect(detail.pmSignature).toBe("Dana Cole");
+  });
+
   it("persists a scorecard with server-computed total and rating", async () => {
     const { scorecard, created } = await createFieldScorecard(
       tdb,
