@@ -1583,6 +1583,34 @@ async function validateDealPrimaryContact(
   }
 }
 
+// Billing contact is GLOBAL scope (any CRM contact, not tied to the deal's company), so unlike the primary
+// contact there is no company-membership check — but the contact must still EXIST and be ACTIVE. The FK
+// permits soft-deleted contacts, so without this a stale/archived id (e.g. a search result deleted or merged
+// between select and save) would persist as the deal's billing contact (Codex P2).
+// Exported for the runtime SQL test (deal-billing-contact-validation.runtime.test.ts).
+export async function validateDealBillingContact(tenantDb: TenantDb, billingContactId?: string | null) {
+  if (!billingContactId) {
+    return;
+  }
+
+  // FOR UPDATE locks the active contact row for the rest of updateDeal's transaction so a concurrent
+  // soft-delete (deleteContact UPDATEs the row) OR merge (mergeContacts locks the loser row first, then
+  // repoints deals) can't slip an inactive/merged-away id through between this check and the deals write —
+  // whoever grabs the row lock first serializes the other. If the delete/merge wins, this SELECT (is_active
+  // = true) finds nothing and throws; if the PATCH wins, the merge's later deals-repoint sees the committed
+  // reference and moves it to the winner (Codex P2 TOCTOU).
+  const [contact] = await tenantDb
+    .select({ id: contacts.id })
+    .from(contacts)
+    .where(and(eq(contacts.id, billingContactId), eq(contacts.isActive, true)))
+    .limit(1)
+    .for("update");
+
+  if (!contact) {
+    throw new AppError(400, "Billing contact not found or is inactive");
+  }
+}
+
 async function assertSourceLeadLineageAvailable(
   tenantDb: TenantDb,
   sourceLeadId: string,
@@ -2348,6 +2376,17 @@ export async function updateDeal(
   userId: string,
   officeId?: string,
 ) {
+  // Validate + row-lock the billing contact BEFORE locking the deal row below. deleteContact/mergeContacts
+  // lock the CONTACT row first and then rewrite deals.billing_contact_id (locking the deal), so if we locked
+  // the deal first and the contact second we'd be an ABBA deadlock against them whenever a deal that already
+  // references the contact is PATCHed while that contact is being deleted/merged. Locking contact->deal here
+  // matches their order and breaks the cycle. The FOR UPDATE is held for the rest of the transaction, so the
+  // TOCTOU guard is unchanged, and updates.billingContactId is set verbatim from input.billingContactId (no
+  // normalization), so validating input.billingContactId here is equivalent to the old post-lock call (Codex P2).
+  if (input.billingContactId !== undefined) {
+    await validateDealBillingContact(tenantDb, input.billingContactId ?? null);
+  }
+
   // Lock the deal row before deriving hold timing so stage changes and hold
   // toggles cannot race on a stale snapshot.
   const lockedDealQuery = tenantDb
@@ -2618,6 +2657,9 @@ export async function updateDeal(
       (updates.primaryContactId ?? existing.primaryContactId ?? null) as string | null
     );
   }
+
+  // (Billing contact was validated + row-locked at the top of updateDeal, before the deal lock, to avoid an
+  // ABBA deadlock with deleteContact/mergeContacts — see that block.)
 
   if (existing.isBidBoardOwned) {
     for (const [field, label] of Object.entries(BID_BOARD_OWNED_UPDATE_FIELD_LABELS) as Array<
