@@ -1097,7 +1097,9 @@ export function DealDetailPage() {
       {activeTab === "team" && (
         <DealTeamTab dealId={deal.id} onCountChange={setTeamCount} />
       )}
-      {activeTab === "billing" && <DealBillingTab deal={deal} onDealUpdated={refetch} canEdit={viewerOwnsDeal || isDirectorOrAdmin} />}
+      {/* canEdit is owner-only: the deal PATCH (billingContactId) is gated by assertDealOwnerRouteAccess with
+          no admin/director bypass, so a non-owner admin would get edit controls that 403 (Codex P2). */}
+      {activeTab === "billing" && <DealBillingTab deal={deal} onDealUpdated={refetch} canEdit={viewerOwnsDeal} officeId={detailOfficeId} />}
       {activeTab === "estimates" && (
         <DealEstimatesTab
           dealId={deal.id}

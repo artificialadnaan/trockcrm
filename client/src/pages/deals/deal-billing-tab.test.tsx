@@ -20,14 +20,14 @@ const dealNoBilling = { id: "deal-1", billingContactId: null, billingContactName
 const dealWithBilling = { ...dealNoBilling, billingContactId: "c-9", billingContactName: "Jane Doe",
   billingContactEmail: "jane@acme.com", billingContactPhone: "555-1212", billingContactCompany: "Acme AP", billingContactTitle: "AP Lead" };
 
-async function render(deal: unknown, onDealUpdated = vi.fn(), canEdit = true) {
+async function render(deal: unknown, onDealUpdated = vi.fn(), canEdit = true, officeId: string | null = null) {
   const container = document.createElement("div");
   document.body.appendChild(container);
   let root: Root | null = null;
   await act(async () => {
     root = createRoot(container);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    root.render(<MemoryRouter><DealBillingTab deal={deal as any} onDealUpdated={onDealUpdated} canEdit={canEdit} /></MemoryRouter>);
+    root.render(<MemoryRouter><DealBillingTab deal={deal as any} onDealUpdated={onDealUpdated} canEdit={canEdit} officeId={officeId} /></MemoryRouter>);
   });
   await act(async () => { await Promise.resolve(); });
   return { container, onDealUpdated };
@@ -138,7 +138,10 @@ describe("DealBillingTab", () => {
         createCalls += 1;
         // First (dedup-enabled) attempt returns a look-alike; no contact is created.
         if (!opts?.json?.skipDedupCheck) {
-          return Promise.resolve({ contact: null, dedupWarning: true, suggestions: [{ id: "dup-1", firstName: "Pat", lastName: "Payer", email: null, companyName: "Acme", matchReason: "same name" }] });
+          return Promise.resolve({ contact: null, dedupWarning: true, suggestions: [
+            { id: "dup-1", firstName: "Pat", lastName: "Payer", email: null, companyName: "Acme", isActive: true, matchReason: "same name" },
+            { id: "dup-2", firstName: "Pat", lastName: "Ghost", email: null, companyName: "Acme", isActive: false, matchReason: "same name" }, // inactive -> filtered out
+          ] });
         }
         return Promise.resolve({ contact: { id: "c-forced" } });
       }
@@ -162,7 +165,8 @@ describe("DealBillingTab", () => {
     await act(async () => { (Array.from(document.querySelectorAll("button")).find((b) => b.textContent === "Save") as HTMLButtonElement).click(); });
     await act(async () => { await Promise.resolve(); });
     expect(createCalls).toBe(1);
-    expect(document.body.textContent).toContain("Pat Payer");        // the suggestion
+    expect(document.body.textContent).toContain("Pat Payer");        // the ACTIVE suggestion
+    expect(document.body.textContent).not.toContain("Pat Ghost");    // inactive suggestion filtered out (#6)
     expect(document.body.textContent).toContain("Create anyway");    // Save became "Create anyway"
     expect(onDealUpdated).not.toHaveBeenCalled();                    // nothing assigned on the dedup warning
     // Picking the suggestion assigns the EXISTING contact — no duplicate created.
@@ -174,5 +178,55 @@ describe("DealBillingTab", () => {
       expect.objectContaining({ method: "PATCH", json: expect.objectContaining({ billingContactId: "dup-1" }) }),
     );
     expect(onDealUpdated).toHaveBeenCalled();
+  });
+
+  it("clears duplicate suggestions when a contact field is edited (no unreviewed force-create)", async () => {
+    mocks.apiMock.mockImplementation((url: string, opts?: { method?: string; json?: { skipDedupCheck?: boolean } }) => {
+      if (url === "/contacts" && opts?.method === "POST" && !opts?.json?.skipDedupCheck) {
+        return Promise.resolve({ contact: null, dedupWarning: true, suggestions: [{ id: "dup-1", firstName: "Pat", lastName: "Payer", email: null, companyName: "Acme", isActive: true, matchReason: "same name" }] });
+      }
+      return Promise.resolve({ contacts: [] });
+    });
+    const setValue = (el: HTMLInputElement, v: string) => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
+      setter?.call(el, v);
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+    };
+    const { container } = await render(dealNoBilling);
+    (Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.includes("Add new contact")) as HTMLButtonElement).click();
+    await act(async () => { await Promise.resolve(); });
+    await act(async () => {
+      setValue(document.querySelector("input[name='firstName']") as HTMLInputElement, "Pat");
+      setValue(document.querySelector("input[name='lastName']") as HTMLInputElement, "Payer");
+    });
+    await act(async () => { (Array.from(document.querySelectorAll("button")).find((b) => b.textContent === "Save") as HTMLButtonElement).click(); });
+    await act(async () => { await Promise.resolve(); });
+    expect(document.body.textContent).toContain("Create anyway");   // dedup warning is up
+    // Editing a field must drop the stale suggestions so the next submit re-checks — no forced create of an unreviewed payload.
+    await act(async () => { setValue(document.querySelector("input[name='firstName']") as HTMLInputElement, "Patrick"); });
+    expect(document.body.textContent).not.toContain("Create anyway");
+    expect(Array.from(document.querySelectorAll("button")).some((b) => b.textContent === "Save")).toBe(true);
+  });
+
+  it("sends billing writes to the LOADED office when viewing cross-office", async () => {
+    mocks.apiMock.mockImplementation((url: string) =>
+      url.includes("/contacts/search")
+        ? Promise.resolve({ contacts: [{ id: "c-9", firstName: "Jane", lastName: "Doe", email: null, companyName: "Acme", category: "client" }] })
+        : Promise.resolve({ deal: dealWithBilling }),
+    );
+    const { container } = await render(dealNoBilling, vi.fn(), true, "office-b");
+    const input = container.querySelector("input") as HTMLInputElement;
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
+      setter?.call(input, "jane");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => { await Promise.resolve(); });
+    await act(async () => { (Array.from(document.querySelectorAll("button")).find((n) => n.textContent?.includes("Jane Doe")) as HTMLElement).click(); });
+    await act(async () => { await Promise.resolve(); });
+    expect(mocks.apiMock).toHaveBeenCalledWith(
+      expect.stringContaining("/deals/deal-1"),
+      expect.objectContaining({ method: "PATCH", headers: expect.objectContaining({ "x-office-id": "office-b" }) }),
+    );
   });
 });

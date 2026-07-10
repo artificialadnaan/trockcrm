@@ -142,6 +142,9 @@ export interface DedupCheckResult {
     lastName: string;
     email: string | null;
     companyName: string | null;
+    // Candidates include soft-deleted contacts (email/name hard-block applies regardless of is_active), so
+    // surface this flag — a "use this instead" consumer must not offer an inactive record (Codex P2).
+    isActive: boolean;
     matchReason: string;
   }>;
 }
@@ -339,6 +342,7 @@ export async function checkForDuplicates(
       lastName: contacts.lastName,
       email: contacts.email,
       companyName: contacts.companyName,
+      isActive: contacts.isActive,
     })
     .from(contacts)
     .where(and(...conditions, or(...fuzzyConditions)))

@@ -1,9 +1,10 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { api } from "@/lib/api";
 import { type DealDetail } from "@/hooks/use-deals";
 import { createContact } from "@/hooks/use-contacts";
 import { FileUploadZone } from "@/components/files/file-upload-zone";
 import { useFiles } from "@/hooks/use-files";
+import { getOfficeRequestOptions } from "@/lib/office-selection";
 import {
   Dialog,
   DialogContent,
@@ -13,14 +14,16 @@ import {
 } from "@/components/ui/dialog";
 
 const emptyNewC = { firstName: "", lastName: "", email: "", phone: "", jobTitle: "", companyName: "" };
-type Suggestion = { id: string; firstName: string; lastName: string; email: string | null; companyName: string | null; matchReason?: string };
+type Suggestion = { id: string; firstName: string; lastName: string; email: string | null; companyName: string | null; matchReason?: string; isActive?: boolean };
 
-export function DealBillingTab({ deal, onDealUpdated, canEdit }: { deal: DealDetail; onDealUpdated: () => void; canEdit: boolean }) {
+export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { deal: DealDetail; onDealUpdated: () => void; canEdit: boolean; officeId?: string | null }) {
   const { files: contractFiles, refetch: refetchFiles } = useFiles({ dealId: deal.id, category: "contract" });
 
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<Array<{ id: string; firstName: string; lastName: string; email: string | null; companyName: string | null }>>([]);
   const [saving, setSaving] = useState(false);
+  // Guards against a slow earlier /contacts/search response landing after a newer query and overwriting it.
+  const searchSeq = useRef(0);
 
   // inline add-contact dialog state
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -28,20 +31,26 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit }: { deal: DealDet
   const [creating, setCreating] = useState(false);
   // Possible-duplicate matches returned by the FIRST (dedup-enabled) create attempt.
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
+  const [createError, setCreateError] = useState<string | null>(null);
 
   const runSearch = (q: string) => {
     setQuery(q);
     if (q.trim().length < 2) { setResults([]); return; }
+    const seq = ++searchSeq.current;
     api<{ contacts: Array<{ id: string; firstName: string; lastName: string; email: string | null; companyName: string | null; category: string }> }>(
-      `/contacts/search?q=${encodeURIComponent(q.trim())}&limit=10`
-    ).then((res) => { setResults(res.contacts); });
+      `/contacts/search?q=${encodeURIComponent(q.trim())}&limit=10`,
+      getOfficeRequestOptions(officeId),
+    ).then((res) => { if (seq === searchSeq.current) setResults(res.contacts); });
   };
 
   const assign = async (contactId: string) => {
     setSaving(true);
+    // Send the PATCH to the office the deal was LOADED from (cross-office view via ?officeId=), not the
+    // viewer's default active office — otherwise the assignment 404s or updates the wrong tenant's deal.
     return api<{ deal: DealDetail }>(`/deals/${deal.id}`, {
       method: "PATCH",
       json: { billingContactId: contactId },
+      ...getOfficeRequestOptions(officeId),
     }).then(
       () => {
         setResults([]);
@@ -55,33 +64,38 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit }: { deal: DealDet
     );
   };
 
-  const closeDialog = () => { setDialogOpen(false); setNewC(emptyNewC); setSuggestions([]); };
+  const closeDialog = () => { setDialogOpen(false); setNewC(emptyNewC); setSuggestions([]); setCreateError(null); };
 
-  // The first attempt runs WITH dedup (skipDedupCheck: false) so a look-alike CRM contact surfaces as a
+  const buildInput = () => ({
+    firstName: newC.firstName.trim(),
+    lastName: newC.lastName.trim(),
+    email: newC.email.trim() || null,
+    phone: newC.phone.trim() || null,
+    jobTitle: newC.jobTitle.trim() || null,
+    companyName: newC.companyName.trim() || null,
+    category: "client",
+  });
+
+  // The first attempt runs WITH dedup (skipDedupCheck: false) so a look-alike active CRM contact surfaces as a
   // pickable suggestion instead of becoming a silent duplicate. Only "Create anyway" (force) re-runs with the
-  // check skipped, after the user has seen the suggestions.
+  // check skipped, after the user has seen the suggestions. A hard duplicate (e.g. exact email) throws — caught
+  // and surfaced. Editing any field clears the stale suggestions so a forced create can't reuse an unreviewed
+  // payload.
   const handleCreate = async (force = false) => {
     setCreating(true);
+    setCreateError(null);
     try {
-      const res = await createContact(
-        {
-          firstName: newC.firstName.trim(),
-          lastName: newC.lastName.trim(),
-          email: newC.email.trim() || null,
-          phone: newC.phone.trim() || null,
-          jobTitle: newC.jobTitle.trim() || null,
-          companyName: newC.companyName.trim() || null,
-          category: "client",
-          skipDedupCheck: force,
-        },
-        {},
-      );
+      const res = await createContact({ ...buildInput(), skipDedupCheck: force }, { officeId });
       if (res.contact) {
         closeDialog();
         await assign(res.contact.id);
       } else if (res.dedupWarning && res.suggestions?.length) {
-        setSuggestions(res.suggestions);
+        // Only offer ACTIVE contacts (the dedup path can surface soft-deleted/merged records); assigning an
+        // inactive one would point the deal at a stale record.
+        setSuggestions((res.suggestions as Suggestion[]).filter((s) => s.isActive !== false));
       }
+    } catch (e) {
+      setCreateError(e instanceof Error ? e.message : "Could not create the contact.");
     } finally {
       setCreating(false);
     }
@@ -94,7 +108,13 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit }: { deal: DealDet
         type={type}
         name={name}
         value={newC[name]}
-        onChange={(e) => setNewC((prev) => ({ ...prev, [name]: e.target.value }))}
+        onChange={(e) => {
+          const value = e.target.value;
+          setNewC((prev) => ({ ...prev, [name]: value }));
+          // A changed payload invalidates the warned-about duplicate set, so drop it (a later Save re-checks).
+          setSuggestions([]);
+          setCreateError(null);
+        }}
         className="w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm"
       />
     </div>
@@ -143,15 +163,15 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit }: { deal: DealDet
             <button
               type="button"
               disabled={saving}
-              onClick={() => { setNewC(emptyNewC); setSuggestions([]); setDialogOpen(true); }}
+              onClick={() => { setNewC(emptyNewC); setSuggestions([]); setCreateError(null); setDialogOpen(true); }}
               className="text-xs text-blue-600 hover:underline"
             >
               + Add new contact
             </button>
           </div>
         ) : (
-          // Read-only: the deal PATCH is owner/leadership-gated, so a non-owner viewer must not get edit
-          // controls that would 403 after they've searched or created a contact (Codex P2).
+          // Read-only: the deal PATCH is owner-gated, so a non-owner viewer must not get edit controls that
+          // would 403 after they've searched or created a contact (Codex P2).
           <p className="mt-3 text-xs text-slate-400">Only the assigned rep can edit billing.</p>
         )}
       </section>
@@ -187,6 +207,9 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit }: { deal: DealDet
             {field("jobTitle", "Job title")}
             {field("companyName", "Company")}
           </div>
+          {createError ? (
+            <p className="rounded-md border border-red-200 bg-red-50 px-2 py-1.5 text-sm text-red-700">{createError}</p>
+          ) : null}
           {suggestions.length > 0 ? (
             <div className="rounded-md border border-amber-200 bg-amber-50 p-2 text-sm">
               <p className="font-medium text-amber-800">A similar contact may already exist — use one of these instead?</p>
