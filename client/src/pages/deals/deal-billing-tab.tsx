@@ -37,6 +37,9 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
   // Linked CRM company for the add-contact dialog (chosen via CompanySelector, which also supports adding a
   // new company inline). null = no company. Replaces the old free-text company field.
   const [companyId, setCompanyId] = useState<string | null>(null);
+  // Company NAME captured alongside the id so the created contact's company_name isn't blank in surfaces that
+  // read contacts.company_name without joining companies (email review / assignment queues) (Codex P2).
+  const [companyName, setCompanyName] = useState<string | null>(null);
 
   const runSearch = (q: string) => {
     setQuery(q);
@@ -78,7 +81,7 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
     );
   };
 
-  const closeDialog = () => { setDialogOpen(false); setNewC(emptyNewC); setCompanyId(null); setSuggestions([]); setCreateError(null); };
+  const closeDialog = () => { setDialogOpen(false); setNewC(emptyNewC); setCompanyId(null); setCompanyName(null); setSuggestions([]); setCreateError(null); };
 
   const buildInput = () => ({
     firstName: newC.firstName.trim(),
@@ -87,6 +90,7 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
     phone: newC.phone.trim() || null,
     jobTitle: newC.jobTitle.trim() || null,
     companyId: companyId || undefined,
+    companyName: companyName ?? undefined,
     category: "client",
   });
 
@@ -186,7 +190,7 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
             <button
               type="button"
               disabled={saving}
-              onClick={() => { setNewC(emptyNewC); setCompanyId(null); setSuggestions([]); setCreateError(null); setDialogOpen(true); }}
+              onClick={() => { setNewC(emptyNewC); setCompanyId(null); setCompanyName(null); setSuggestions([]); setCreateError(null); setDialogOpen(true); }}
               className="text-xs text-blue-600 hover:underline"
             >
               + Add new contact
@@ -233,8 +237,25 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
             <div>
               <label className="block text-xs font-medium text-slate-600 mb-1">Company</label>
               {/* Query CRM companies (with inline add-new), same selector the deal/lead forms use — instead of
-                  free text — so the contact links to a real company record. */}
-              <CompanySelector value={companyId} onChange={(id) => { setCompanyId(id); setSuggestions([]); setCreateError(null); }} officeId={officeId} />
+                  free text — so the contact links to a real company record. Frozen while a create is in flight
+                  (fieldset disables its inner controls) so a late change can't diverge from the submitted
+                  payload; changing it clears any stale dedup warning (Codex P2). */}
+              <fieldset disabled={creating} className="m-0 min-w-0 border-0 p-0">
+                <CompanySelector
+                  value={companyId}
+                  onChange={(id) => {
+                    setCompanyId(id);
+                    setSuggestions([]);
+                    setCreateError(null);
+                    // The selector only emits the id, so fetch the chosen company's NAME and pass it through on
+                    // create — otherwise contacts.company_name is left blank for id-only links (Codex P2).
+                    api<{ company: { name: string } }>(`/companies/${id}`, getOfficeRequestOptions(officeId))
+                      .then((r) => setCompanyName(r.company?.name ?? null))
+                      .catch(() => setCompanyName(null));
+                  }}
+                  officeId={officeId}
+                />
+              </fieldset>
             </div>
           </div>
           {createError ? (

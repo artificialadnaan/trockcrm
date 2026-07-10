@@ -153,8 +153,8 @@ export function DetailPageShell({
                       onClick={() => onTabChange(tab.id)}
                       className={
                         isActive
-                          ? "relative inline-flex h-11 items-center gap-2 border-b-2 border-brand-red px-3 text-sm font-black uppercase tracking-[0.12em] text-brand-red"
-                          : "inline-flex h-11 items-center gap-2 border-b-2 border-transparent px-3 text-sm font-black uppercase tracking-[0.12em] text-slate-500 transition hover:border-slate-200 hover:text-slate-900"
+                          ? "relative inline-flex h-11 shrink-0 items-center gap-2 whitespace-nowrap border-b-2 border-brand-red px-3 text-sm font-black uppercase tracking-[0.12em] text-brand-red"
+                          : "inline-flex h-11 shrink-0 items-center gap-2 whitespace-nowrap border-b-2 border-transparent px-3 text-sm font-black uppercase tracking-[0.12em] text-slate-500 transition hover:border-slate-200 hover:text-slate-900"
                       }
                     >
                       <span className="flex h-5 w-5 items-center justify-center">{tab.icon}</span>
