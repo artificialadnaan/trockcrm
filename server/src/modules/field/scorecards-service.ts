@@ -2,7 +2,7 @@ import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
 import { deals, fieldScorecards, fieldScorecardItems, fieldScorecardPhotos, files, jobQueue } from "@trock-crm/shared/schema";
-import { generateDownloadUrl, putObject } from "../../lib/r2-client.js";
+import { generateDownloadUrl, getObjectBuffer, isR2Configured, putObject } from "../../lib/r2-client.js";
 import { buildScorecardPdfData, renderFieldScorecardPdf } from "./scorecard-pdf.js";
 import {
   FIELD_SCORECARD_SECTION_KEYS,
@@ -367,15 +367,46 @@ export async function finalizeFieldScorecardArtifacts(
       .select()
       .from(fieldScorecardItems)
       .where(eq(fieldScorecardItems.scorecardId, scorecardId));
+    const photoRows = await db
+      .select({
+        sectionKey: fieldScorecardPhotos.sectionKey,
+        deficiencyKey: fieldScorecardPhotos.deficiencyKey,
+        caption: files.description,
+        r2Key: files.r2Key,
+        thumbnailR2Key: files.thumbnailR2Key,
+      })
+      .from(fieldScorecardPhotos)
+      .innerJoin(files, eq(files.id, fieldScorecardPhotos.fileId))
+      .where(eq(fieldScorecardPhotos.scorecardId, scorecardId));
     const [deal] = await db
       .select({ name: deals.name, dealNumber: deals.dealNumber })
       .from(deals)
       .where(eq(deals.id, card.dealId))
       .limit(1);
-    return { card, itemRows, deal: deal ?? null };
+    return { card, itemRows, photoRows, deal: deal ?? null };
   });
   if (!loaded) return;
-  const { card, itemRows, deal } = loaded;
+  const { card, itemRows, photoRows, deal } = loaded;
+
+  // Prefer ingest-generated thumbnails: they preserve visual evidence in the PDF without decoding full
+  // camera originals into memory. A missing/unavailable object leaves an explicit placeholder in the PDF.
+  const photos = await Promise.all(photoRows.map(async (photo) => {
+    const key = photo.thumbnailR2Key ?? photo.r2Key;
+    let image: Buffer | null = null;
+    if (isR2Configured()) {
+      try {
+        image = (await getObjectBuffer(key, { maxBytes: 2_500_000 })).buffer;
+      } catch {
+        image = null;
+      }
+    }
+    return {
+      sectionKey: photo.sectionKey,
+      deficiencyKey: photo.deficiencyKey ?? null,
+      caption: photo.caption ?? null,
+      image,
+    };
+  }));
 
   const pdfData = buildScorecardPdfData({
     dealName: deal?.name ?? "Project",
@@ -393,7 +424,9 @@ export async function finalizeFieldScorecardArtifacts(
     rating: card.rating as ScorecardRating,
     items: itemRows.map((r) => ({ sectionKey: r.sectionKey, points: r.points, note: r.note ?? null })),
     criticalDeficiencyKeys: card.criticalDeficiencies ?? [],
+    criticalDeficiencyNotes: card.criticalDeficiencyNotes ?? {},
     actionItems: card.actionItems ?? [],
+    photos,
   });
   const bucket = process.env.R2_BUCKET_NAME || "trock-crm-files";
   // Same deterministic key the enqueue (createFieldScorecard) stamped into the job payload.
