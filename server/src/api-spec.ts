@@ -51,6 +51,7 @@ export const apiSpec = {
           stageId: { type: "string", format: "uuid", description: "FK to pipeline_stage_config." },
           assignedRepId: { type: "string", format: "uuid" },
           primaryContactId: { type: "string", format: "uuid", nullable: true },
+          billingContactId: { type: "string", format: "uuid", nullable: true },
           companyId: { type: "string", format: "uuid", nullable: true },
           ddEstimate: { type: "string", nullable: true, description: "Due-diligence estimate (numeric string from Postgres).", example: "250000.00" },
           bidEstimate: { type: "string", nullable: true, example: "480000.00" },
