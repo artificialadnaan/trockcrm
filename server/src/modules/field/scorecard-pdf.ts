@@ -356,7 +356,8 @@ function drawSignature(doc: PDFKit.PDFDocument, label: string, signature: string
       doc.font("Helvetica").fontSize(10).fillColor(BRAND_MUTED).text("Signature unavailable", PAGE.margin + 112, y + 18, { width: 180 });
     }
   } else {
-    doc.font("Helvetica").fontSize(10).fillColor(BRAND_MUTED).text("—", PAGE.margin + 112, y + 18, { width: 180 });
+    const typedSignature = signature && !signature.startsWith("data:") ? signature : null;
+    doc.font("Helvetica").fontSize(10).fillColor(BRAND_MUTED).text(typedSignature ?? "—", PAGE.margin + 112, y + 18, { width: 180 });
   }
   doc.y = y + 52;
 }
