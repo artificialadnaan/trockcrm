@@ -5,6 +5,7 @@ import { createContact } from "@/hooks/use-contacts";
 import { FileUploadZone } from "@/components/files/file-upload-zone";
 import { useFiles } from "@/hooks/use-files";
 import { getOfficeRequestOptions } from "@/lib/office-selection";
+import { CompanySelector } from "@/components/companies/company-selector";
 import {
   Dialog,
   DialogContent,
@@ -13,7 +14,7 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 
-const emptyNewC = { firstName: "", lastName: "", email: "", phone: "", jobTitle: "", companyName: "" };
+const emptyNewC = { firstName: "", lastName: "", email: "", phone: "", jobTitle: "" };
 type Suggestion = { id: string; firstName: string; lastName: string; email: string | null; companyName: string | null; matchReason?: string; isActive?: boolean };
 
 export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { deal: DealDetail; onDealUpdated: () => void; canEdit: boolean; officeId?: string | null }) {
@@ -33,6 +34,22 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
   const [createError, setCreateError] = useState<string | null>(null);
   const [assignError, setAssignError] = useState<string | null>(null);
+  // Linked CRM company for the add-contact dialog (chosen via CompanySelector, which also supports adding a
+  // new company inline). null = no company. Replaces the old free-text company field.
+  const [companyId, setCompanyId] = useState<string | null>(null);
+  // Company NAME captured alongside the id so the created contact's company_name isn't blank in surfaces that
+  // read contacts.company_name without joining companies (email review / assignment queues) (Codex P2).
+  const [companyName, setCompanyName] = useState<string | null>(null);
+  // Stale-response guard for the async company-name fetch (mirrors searchSeq): only the latest selection's
+  // fetch may set companyName, so a slow earlier fetch can't overwrite a newer pick's name.
+  const companySeq = useRef(0);
+  // True while the selected company's name is still being fetched — Save is blocked until it resolves so a
+  // contact can't be created linked by id with a blank company_name (which would also run dedup without the
+  // company) (Codex P2).
+  const [companyPending, setCompanyPending] = useState(false);
+  // True while CompanySelector's own inline "Add New Company" POST is in flight — before it calls onChange with
+  // the new id — so Save is blocked and a rep can't submit an unlinked contact mid company-create (Codex P2).
+  const [companyCreating, setCompanyCreating] = useState(false);
 
   const runSearch = (q: string) => {
     setQuery(q);
@@ -74,7 +91,7 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
     );
   };
 
-  const closeDialog = () => { setDialogOpen(false); setNewC(emptyNewC); setSuggestions([]); setCreateError(null); };
+  const closeDialog = () => { setDialogOpen(false); setNewC(emptyNewC); setCompanyId(null); setCompanyName(null); setCompanyPending(false); setCompanyCreating(false); ++companySeq.current; setSuggestions([]); setCreateError(null); };
 
   const buildInput = () => ({
     firstName: newC.firstName.trim(),
@@ -82,7 +99,8 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
     email: newC.email.trim() || null,
     phone: newC.phone.trim() || null,
     jobTitle: newC.jobTitle.trim() || null,
-    companyName: newC.companyName.trim() || null,
+    companyId: companyId || undefined,
+    companyName: companyName ?? undefined,
     category: "client",
   });
 
@@ -146,7 +164,7 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
             {deal.billingContactPhone ? <div className="text-slate-500">{deal.billingContactPhone}</div> : null}
           </div>
         ) : (
-          <p className="mt-2 text-sm text-amber-700">No billing contact assigned yet — this will be required to mark the deal Won.</p>
+          <p className="mt-2 text-sm text-amber-700">No billing contact assigned yet — add one before this deal closes.</p>
         )}
         {assignError ? (
           <p className="mt-2 rounded-md border border-red-200 bg-red-50 px-2 py-1.5 text-sm text-red-700">{assignError}</p>
@@ -182,7 +200,7 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
             <button
               type="button"
               disabled={saving}
-              onClick={() => { setNewC(emptyNewC); setSuggestions([]); setCreateError(null); setDialogOpen(true); }}
+              onClick={() => { setNewC(emptyNewC); setCompanyId(null); setCompanyName(null); setCompanyPending(false); setCompanyCreating(false); ++companySeq.current; setSuggestions([]); setCreateError(null); setDialogOpen(true); }}
               className="text-xs text-blue-600 hover:underline"
             >
               + Add new contact
@@ -226,7 +244,38 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
             {field("email", "Email", "email")}
             {field("phone", "Phone", "tel")}
             {field("jobTitle", "Job title")}
-            {field("companyName", "Company")}
+            <div>
+              <label className="block text-xs font-medium text-slate-600 mb-1">Company</label>
+              {/* Query CRM companies (with inline add-new), same selector the deal/lead forms use — instead of
+                  free text — so the contact links to a real company record. Frozen while a create is in flight
+                  (fieldset disables its inner controls) so a late change can't diverge from the submitted
+                  payload; changing it clears any stale dedup warning (Codex P2). */}
+              <fieldset disabled={creating} className="m-0 min-w-0 border-0 p-0">
+                <CompanySelector
+                  value={companyId}
+                  onChange={(id) => {
+                    setCompanyId(id);
+                    setSuggestions([]);
+                    setCreateError(null);
+                    // Clear the previous company's name synchronously and block Save (companyPending) until the
+                    // new name resolves, so a save-before-this-fetch-resolves can't create a contact linked by id
+                    // with a blank company_name (which would also run the dedup check without the company). The
+                    // selector only emits the id, so fetch the chosen company's NAME. Gate the async result by a
+                    // sequence counter (like searchSeq) so a slow earlier fetch can't overwrite a newer selection's
+                    // name, and only the latest fetch clears companyPending (Codex P2).
+                    setCompanyName(null);
+                    setCompanyPending(true);
+                    const seq = ++companySeq.current;
+                    api<{ company: { name: string } }>(`/companies/${id}`, getOfficeRequestOptions(officeId))
+                      .then((r) => { if (seq === companySeq.current) { setCompanyName(r.company?.name ?? null); setCompanyPending(false); } })
+                      .catch(() => { if (seq === companySeq.current) { setCompanyName(null); setCompanyPending(false); } });
+                  }}
+                  officeId={officeId}
+                  onBusyChange={setCompanyCreating}
+                />
+              </fieldset>
+              {companyPending || companyCreating ? <p className="mt-1 text-xs text-slate-400">Loading company…</p> : null}
+            </div>
           </div>
           {createError ? (
             <p className="rounded-md border border-red-200 bg-red-50 px-2 py-1.5 text-sm text-red-700">{createError}</p>
@@ -261,7 +310,7 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
             </button>
             <button
               type="button"
-              disabled={creating || !newC.firstName.trim() || !newC.lastName.trim()}
+              disabled={creating || companyPending || companyCreating || !newC.firstName.trim() || !newC.lastName.trim()}
               onClick={() => handleCreate(suggestions.length > 0)}
               className="rounded-md bg-blue-600 px-3 py-1.5 text-sm text-white hover:bg-blue-700 disabled:opacity-50"
             >

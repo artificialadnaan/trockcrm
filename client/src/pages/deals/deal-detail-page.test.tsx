@@ -649,7 +649,8 @@ describe("DealDetailPage", () => {
     expect(html).toContain("History");
     expect(html).toContain("Team");
     expect(html).toContain("Estimates");
-    expect(html).toContain("overflow-x-auto");
+    expect(html).toContain("Billing");
+    expect(html).toContain("flex-wrap"); // tab bar wraps onto rows instead of a horizontal scroll
     expect(html).toContain("border-b-2 border-brand-red");
   });
 
