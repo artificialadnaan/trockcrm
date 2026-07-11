@@ -124,27 +124,30 @@ export interface ScorecardTeamMember {
 
 /**
  * Best-effort names to pre-fill the scorecard header from a deal's assigned team. Pure (no I/O) so it's
- * unit-testable and safe to call from the create seam. Picks the FIRST active superintendent /
- * project_manager (the endpoint already returns only active members, oldest-first). Whitespace-only names
- * are treated as absent. Returns undefined for a role with no usable name so the caller can leave the field
- * as-is (never overwrites a name the user already typed).
+ * unit-testable and safe to call from the create seam. Picks the MOST-RECENTLY-created active superintendent
+ * / project_manager (the endpoint returns only active members, oldest-first, so the LAST matching row wins).
+ * This matches the server's email-assignee selection (resolveScorecardTeamEmails picks the newest active row
+ * per role), so the displayed Super/PM name is the same person the completed-scorecard email is sent to.
+ * Whitespace-only names are treated as absent. Returns undefined for a role with no usable name so the caller
+ * can leave the field as-is (never overwrites a name the user already typed).
  */
 export function resolveScorecardTeamNames(members: readonly ScorecardTeamMember[]): {
   superintendentName?: string;
   pmName?: string;
 } {
-  const firstName = (role: string): string | undefined => {
+  const latestName = (role: string): string | undefined => {
+    let latest: string | undefined;
     for (const m of members) {
       if (m.role !== role) continue;
       const name = (m.displayName ?? "").trim();
-      if (name) return name;
+      if (name) latest = name;
     }
-    return undefined;
+    return latest;
   };
   const out: { superintendentName?: string; pmName?: string } = {};
-  const superintendentName = firstName("superintendent");
+  const superintendentName = latestName("superintendent");
   if (superintendentName) out.superintendentName = superintendentName;
-  const pmName = firstName("project_manager");
+  const pmName = latestName("project_manager");
   if (pmName) out.pmName = pmName;
   return out;
 }

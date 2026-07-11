@@ -1423,7 +1423,11 @@ async function resolveRevisionTaskAssignee(
       (member) =>
         member.dealId === deal.id &&
         member.role === "estimator" &&
-        member.isActive
+        member.isActive &&
+        // An estimator MUST be a staff user (routing sets tasks.assigned_to = estimator.userId). Since a team
+        // member can now be a directory contact (user_id NULL), exclude contact-backed rows so one can never
+        // be picked as the estimator and break routing.
+        member.userId !== null
     )
     .sort((left, right) => {
       const leftCreatedAt =

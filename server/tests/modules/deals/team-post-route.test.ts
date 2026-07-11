@@ -17,23 +17,13 @@ const teamMocks = vi.hoisted(() => ({
 const usersMock = vi.hoisted(() => ({ listUsers: vi.fn(async () => [] as any[]) }));
 const contactsMock = vi.hoisted(() => ({ getContactById: vi.fn(async () => null as any) }));
 
-vi.mock("../../../src/modules/deals/service.js", () => ({
+// Spread the REAL service module so every name routes.ts imports (setDealEstimator, setDealSalesSource,
+// validateAssignee, assertSalesSourceIsCrmUser, …) stays defined — only getDealById is intentionally
+// stubbed for this harness. A hand-listed subset silently omits any newly-imported service export and would
+// make the router import throw the moment one is referenced.
+vi.mock("../../../src/modules/deals/service.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../src/modules/deals/service.js")>()),
   getDealById: serviceMocks.getDealById,
-  getDeals: vi.fn(),
-  getDealsForPipeline: vi.fn(),
-  getDealDetail: vi.fn(),
-  getEstimatingBoundaryStage: vi.fn(),
-  getRequiredEstimatingBoundaryStage: vi.fn(),
-  isBidBoardOwnedDownstreamStage: vi.fn(),
-  buildBidBoardOwnershipState: vi.fn(),
-  BID_BOARD_STAGE_READ_ONLY_MESSAGE: "read only",
-  createDeal: vi.fn(),
-  updateDeal: vi.fn(),
-  startProposalDraft: vi.fn(),
-  deleteDeal: vi.fn(),
-  listDealStagePage: vi.fn(),
-  getDealSources: vi.fn(),
-  setDealContractSignedDate: vi.fn(),
 }));
 vi.mock("../../../src/modules/deals/team-service.js", () => teamMocks);
 vi.mock("../../../src/modules/admin/users-service.js", () => usersMock);

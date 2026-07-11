@@ -22,7 +22,7 @@ import { Button, EmptyState, LoadingState, SectionLabel } from "../../../src/com
 import { ScreenHeader } from "../../../src/components/ScreenHeader";
 import { RatingBadge } from "../../../src/components/RatingBadge";
 import { TargetPicker } from "../../../src/components/TargetPicker";
-import type { FieldCaptureTarget, FieldScorecardSummary } from "../../../src/api/types";
+import type { DealTeamResponse, FieldCaptureTarget, FieldScorecardSummary } from "../../../src/api/types";
 
 const SECTION_COUNT = FIELD_SCORECARD_SECTIONS.length;
 
@@ -90,8 +90,13 @@ export default function ScorecardsScreen() {
     // /deals/:id/team endpoint the web uses). ANY failure — network, 403 for a pure field_contractor,
     // or a malformed body — silently leaves the fields empty (today's behavior). It must never block or
     // crash draft creation, and it only seeds BLANK fields, so the names stay fully editable afterwards.
+    // Bound the lookup to ~2s: on a poor connection a hanging /deals/:id/team must NOT block starting a
+    // scorecard, so a timeout (like any error) just proceeds with empty super/PM.
     try {
-      const { members } = await getDealTeam(fetcher, target.id);
+      const { members } = await Promise.race<DealTeamResponse>([
+        getDealTeam(fetcher, target.id),
+        new Promise<DealTeamResponse>((res) => setTimeout(() => res({ members: [] }), 2000)),
+      ]);
       draft = seedScorecardDraftTeam(draft, resolveScorecardTeamNames(members ?? []));
     } catch {
       /* leave super/PM empty */

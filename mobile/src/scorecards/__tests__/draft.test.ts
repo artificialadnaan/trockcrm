@@ -190,12 +190,12 @@ describe("resolveScorecardTeamNames", () => {
     expect(names).toEqual({ superintendentName: "Sam Super", pmName: "Pat PM" });
   });
 
-  it("takes the FIRST usable member per role (endpoint returns active, oldest-first)", () => {
+  it("takes the MOST-RECENT usable member per role (endpoint returns active, oldest-first → last wins, matching the emailed assignee)", () => {
     const names = resolveScorecardTeamNames([
       { role: "superintendent", displayName: "First Super" },
       { role: "superintendent", displayName: "Second Super" },
     ]);
-    expect(names).toEqual({ superintendentName: "First Super" });
+    expect(names).toEqual({ superintendentName: "Second Super" });
   });
 
   it("skips blank/whitespace/null names and omits a role with none", () => {
