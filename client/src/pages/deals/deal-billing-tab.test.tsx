@@ -236,6 +236,9 @@ describe("DealBillingTab", () => {
         }
         return Promise.resolve({ contact: { id: "c-forced" } });
       }
+      // Picking the suggestion routes through pickContact, which fetches the contact; a complete address means
+      // it assigns directly (this dup already has one).
+      if (url === "/contacts/dup-1") return Promise.resolve({ contact: { address: "1 A St", city: "Dallas", state: "TX", zip: "75201" } });
       if (url.includes("/deals/deal-1")) return Promise.resolve({ deal: dealWithBilling });
       return Promise.resolve({ contacts: [] });
     });
@@ -269,6 +272,38 @@ describe("DealBillingTab", () => {
       expect.objectContaining({ method: "PATCH", json: expect.objectContaining({ billingContactId: "dup-1" }) }),
     );
     expect(onDealUpdated).toHaveBeenCalled();
+  });
+
+  it("routes an address-less dedup suggestion through the address prompt (not a direct assign)", async () => {
+    mocks.apiMock.mockImplementation((url: string, opts?: { method?: string; json?: { skipDedupCheck?: boolean } }) => {
+      if (url === "/contacts" && opts?.method === "POST" && !opts?.json?.skipDedupCheck) {
+        return Promise.resolve({ contact: null, dedupWarning: true, suggestions: [{ id: "dup-9", firstName: "Pat", lastName: "Payer", email: null, companyName: "Acme", isActive: true, matchReason: "same name" }] });
+      }
+      if (url === "/contacts/dup-9") return Promise.resolve({ contact: { address: null, city: null, state: null, zip: null } });
+      if (url.includes("/deals/deal-1")) return Promise.resolve({ deal: dealWithBilling });
+      return Promise.resolve({ contacts: [] });
+    });
+    const onDealUpdated = vi.fn();
+    const { container } = await render(dealNoBilling, onDealUpdated);
+    (Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.includes("Add new contact")) as HTMLButtonElement).click();
+    await act(async () => { await Promise.resolve(); });
+    await act(async () => {
+      setValue(document.querySelector("input[name='firstName']") as HTMLInputElement, "Pat");
+      setValue(document.querySelector("input[name='lastName']") as HTMLInputElement, "Payer");
+      setValue(document.querySelector("input[name='address']") as HTMLInputElement, "100 Main St");
+      setValue(document.querySelector("input[name='city']") as HTMLInputElement, "Dallas");
+      setValue(document.querySelector("input[name='state']") as HTMLInputElement, "TX");
+      setValue(document.querySelector("input[name='zip']") as HTMLInputElement, "75201");
+    });
+    await act(async () => { (Array.from(document.querySelectorAll("button")).find((b) => b.textContent === "Save") as HTMLButtonElement).click(); });
+    await act(async () => { await Promise.resolve(); });
+    // Click the dedup suggestion — it has no address, so it must be routed through the address prompt, not
+    // assigned directly (which would hit the server-side 400).
+    await act(async () => { (Array.from(document.querySelectorAll("button")).find((b) => b.textContent?.includes("Pat Payer")) as HTMLButtonElement).click(); });
+    await act(async () => { await Promise.resolve(); });
+    expect(document.body.textContent).toContain("needs a billing address");
+    expect(mocks.apiMock).not.toHaveBeenCalledWith(expect.stringContaining("/deals/deal-1"), expect.objectContaining({ method: "PATCH" }));
+    expect(onDealUpdated).not.toHaveBeenCalled();
   });
 
   it("clears duplicate suggestions when a contact field is edited (no unreviewed force-create)", async () => {

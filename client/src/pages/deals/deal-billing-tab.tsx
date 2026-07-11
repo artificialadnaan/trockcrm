@@ -453,7 +453,9 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
                       type="button"
                       disabled={creating || saving}
                       className="w-full px-1 py-1 text-left hover:bg-amber-100"
-                      onClick={async () => { closeDialog(); await assign(s.id); }}
+                      // Route through pickContact (not assign) so a suggested contact without a complete address
+                      // gets the same address prompt as a searched one — instead of a server-side 400 (Codex P2).
+                      onClick={async () => { closeDialog(); await pickContact(s); }}
                     >
                       {s.firstName} {s.lastName}{s.companyName ? ` — ${s.companyName}` : ""}
                     </button>
