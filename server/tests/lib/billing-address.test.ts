@@ -42,16 +42,22 @@ describe("updateBreaksBillingAddress", () => {
 });
 
 describe("billingAddressToAbsorb", () => {
-  it("returns the loser's full address when the winner is incomplete and the loser is complete", () => {
+  it("absorbs the loser's full address as a UNIT when the winner is incomplete and the loser is complete", () => {
     expect(billingAddressToAbsorb(empty, complete)).toEqual(complete);
     expect(billingAddressToAbsorb(partial, complete)).toEqual(complete);
   });
 
-  it("returns null when the winner is already complete", () => {
-    expect(billingAddressToAbsorb(complete, complete)).toBeNull();
+  it("absorbs nothing when the winner is already complete", () => {
+    expect(billingAddressToAbsorb(complete, complete)).toEqual({});
   });
 
-  it("returns null when the loser is not complete (nothing worth absorbing)", () => {
-    expect(billingAddressToAbsorb(empty, partial)).toBeNull();
+  it("fills the winner's empty fields from a PARTIAL loser instead of discarding it (Codex P2 regression)", () => {
+    // Empty winner, loser has street + city only -> keep those two.
+    expect(billingAddressToAbsorb(empty, partial)).toEqual({ address: "100 Main St", city: "Dallas" });
+    // Winner has street + city, loser has state + zip -> fill the winner's missing state + zip.
+    expect(billingAddressToAbsorb(
+      { address: "1 St", city: "Dallas", state: null, zip: null },
+      { address: null, city: null, state: "TX", zip: "75201" },
+    )).toEqual({ state: "TX", zip: "75201" });
   });
 });

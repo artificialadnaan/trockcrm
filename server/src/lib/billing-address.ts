@@ -52,16 +52,24 @@ export function updateBreaksBillingAddress(existing: BillingAddressInput, update
 }
 
 /**
- * When merging contacts: if the winner's mailing address is incomplete but the loser's is complete, returns the
- * loser's full address to absorb as a UNIT (so a merge can't leave a billing contact with a partial/incomplete
- * address, and the two addresses aren't mixed field-by-field). Otherwise null (keep the winner's).
+ * The mailing-address fields to absorb from `loser` into `winner` when merging contacts.
+ *  - Winner's address incomplete but loser's complete → absorb the loser's FULL address as a unit, so a billing
+ *    contact can't be left with a partial/mixed address.
+ *  - Otherwise → fill only the winner's individually-empty fields from the loser, so a merge never DISCARDS the
+ *    loser's partial address data (this is the general fill-missing-fields behavior).
+ * Returns only the fields to set (an empty object when there's nothing to absorb).
  */
 export function billingAddressToAbsorb(
   winner: BillingAddressInput,
   loser: BillingAddressInput,
-): { address: string | null; city: string | null; state: string | null; zip: string | null } | null {
+): Partial<Record<BillingAddressField, string | null>> {
   if (!isCompleteBillingAddress(winner) && isCompleteBillingAddress(loser)) {
     return { address: loser.address ?? null, city: loser.city ?? null, state: loser.state ?? null, zip: loser.zip ?? null };
   }
-  return null;
+  const fill: Partial<Record<BillingAddressField, string | null>> = {};
+  if (!clean(winner.address) && clean(loser.address)) fill.address = loser.address ?? null;
+  if (!clean(winner.city) && clean(loser.city)) fill.city = loser.city ?? null;
+  if (!clean(winner.state) && clean(loser.state)) fill.state = loser.state ?? null;
+  if (!clean(winner.zip) && clean(loser.zip)) fill.zip = loser.zip ?? null;
+  return fill;
 }

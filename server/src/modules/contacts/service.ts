@@ -754,6 +754,12 @@ export async function updateContact(
   // Forward-only: only a complete -> incomplete change is blocked; an already-incomplete address isn't forced
   // to be cleaned up (Codex P2).
   if (updateBreaksBillingAddress(existing, updates)) {
+    // Lock this contact's row FOR UPDATE so a concurrent deal billing-assignment — which also locks the contact
+    // via validateDealBillingContact before repointing the deal — serializes with this edit. Without it, the
+    // deal could validate a still-complete contact and commit between our reference check and the UPDATE below,
+    // leaving the deal with an incomplete billing contact. Whoever grabs the contact lock first wins; the lock
+    // is held for the rest of this transaction (Codex P2 TOCTOU).
+    await tenantDb.select({ id: contacts.id }).from(contacts).where(eq(contacts.id, contactId)).limit(1).for("update");
     const [billingRef] = await tenantDb
       .select({ id: deals.id })
       .from(deals)
