@@ -177,11 +177,45 @@ describe("appendActionItem", () => {
   });
 });
 
+describe("summary", () => {
+  it("starts as an empty string on a new draft", () => {
+    expect(newDraft().summary).toBe("");
+  });
+
+  it("setSummary replaces the whole value (typing/backspace)", () => {
+    let d = newDraft();
+    d = scorecardDraftReducer(d, { type: "setSummary", value: "first pass" });
+    expect(d.summary).toBe("first pass");
+    d = scorecardDraftReducer(d, { type: "setSummary", value: "" });
+    expect(d.summary).toBe("");
+  });
+
+  it("appendSummary appends a dictated transcript to the current text (dictation-safe — no stale clobber)", () => {
+    let d = newDraft();
+    d = scorecardDraftReducer(d, { type: "setSummary", value: "typed" });
+    d = scorecardDraftReducer(d, { type: "appendSummary", text: "  dictated  " });
+    expect(d.summary).toBe("typed dictated");
+  });
+
+  it("appendSummary starts fresh when the summary is empty", () => {
+    let d = newDraft();
+    d = scorecardDraftReducer(d, { type: "appendSummary", text: "first" });
+    expect(d.summary).toBe("first");
+  });
+
+  it("appendSummary ignores an empty/whitespace transcript", () => {
+    let d = newDraft();
+    d = scorecardDraftReducer(d, { type: "setSummary", value: "keep" });
+    d = scorecardDraftReducer(d, { type: "appendSummary", text: "   " });
+    expect(d.summary).toBe("keep");
+  });
+});
+
 describe("scorecardDraftToSubmission", () => {
-  it("builds the POST payload in canonical section order with trimmed action items + photo refs", () => {
+  it("builds the POST payload in canonical section order with trimmed summary + empty actionItems + photo refs", () => {
     let d = fullyScored();
     d = scorecardDraftReducer(d, { type: "setNote", sectionKey: "schedule", note: "  on track  " });
-    d = scorecardDraftReducer(d, { type: "setActionItems", items: ["  do X  ", "", "do Y"] });
+    d = scorecardDraftReducer(d, { type: "setSummary", value: "  re-pour slab; schedule recovery meeting  " });
     d = scorecardDraftReducer(d, {
       type: "addPhoto",
       photo: { key: "p1", uri: "file://p1", clientUploadId: "cu-1", sectionKey: "schedule", caption: "c" },
@@ -194,7 +228,16 @@ describe("scorecardDraftToSubmission", () => {
     expect(payload.items).toHaveLength(8);
     expect(payload.items[0].sectionKey).toBe("planning_precon"); // canonical order
     expect(payload.items.find((i) => i.sectionKey === "schedule")?.note).toBe("on track");
-    expect(payload.actionItems).toEqual(["do X", "do Y"]); // trimmed + blanks dropped
+    // V2: the free-text Summary box carries the text (trimmed); the discrete list is gone → actionItems empty.
+    expect(payload.summary).toBe("re-pour slab; schedule recovery meeting");
+    expect(payload.actionItems).toEqual([]);
     expect(payload.photos).toEqual([{ sectionKey: "schedule", deficiencyKey: null, clientUploadId: "cu-1" }]);
+  });
+
+  it("sends a null summary when the box is blank/whitespace", () => {
+    let d = fullyScored();
+    expect(scorecardDraftToSubmission(d).summary).toBeNull();
+    d = scorecardDraftReducer(d, { type: "setSummary", value: "   " });
+    expect(scorecardDraftToSubmission(d).summary).toBeNull();
   });
 });

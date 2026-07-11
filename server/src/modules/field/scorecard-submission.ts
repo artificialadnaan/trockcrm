@@ -16,6 +16,7 @@ export interface ParsedScorecardSubmission {
   criticalDeficiencies: string[];
   criticalDeficiencyNotes: Record<string, string>;
   actionItems: string[];
+  summary: string | null;
   photos: { sectionKey: string; deficiencyKey: string | null; clientUploadId: string }[];
   superintendentSignature: string | null;
   pmSignature: string | null;
@@ -101,6 +102,9 @@ export function parseScorecardSubmission(body: unknown): ParsedScorecardSubmissi
   const actionItems = Array.isArray(b.actionItems)
     ? b.actionItems.filter((x): x is string => typeof x === "string" && x.trim().length > 0).map((x) => x.trim())
     : [];
+  // V2 free-text "Summary / Action Items" (voice-dictated on mobile). Trimmed and capped like the
+  // critical-deficiency notes so one long dictation can't blow the PDF layout or the row size.
+  const summary = typeof b.summary === "string" && b.summary.trim().length > 0 ? b.summary.trim().slice(0, 4000) : null;
   if (criticalDeficiencies.length > 30) throw new AppError(400, "Too many critical deficiencies.");
   if (actionItems.length > 50) throw new AppError(400, "Too many action items.");
 
@@ -116,6 +120,7 @@ export function parseScorecardSubmission(body: unknown): ParsedScorecardSubmissi
     criticalDeficiencies,
     criticalDeficiencyNotes,
     actionItems,
+    summary,
     photos,
     superintendentSignature: strOrNull(b.superintendentSignature),
     pmSignature: strOrNull(b.pmSignature),

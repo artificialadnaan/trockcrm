@@ -51,6 +51,7 @@ export interface CreateFieldScorecardInput {
   criticalDeficiencies: string[];
   criticalDeficiencyNotes?: Record<string, string>;
   actionItems: string[];
+  summary?: string | null;
   photos: { sectionKey: string; deficiencyKey?: string | null; clientUploadId: string }[];
   superintendentSignature?: string | null;
   pmSignature?: string | null;
@@ -176,6 +177,9 @@ export async function createFieldScorecard(
       criticalDeficiencies: deficiencies,
       criticalDeficiencyNotes: deficiencyNotes,
       actionItems,
+      // V2 free-text "Summary / Action Items". Trimmed + capped (defence in depth alongside the boundary
+      // parser) so an oversized dictation can't bloat the row or the PDF.
+      summary: normalizeSummary(input.summary),
       submittedBy: input.userId,
       submittedByName: input.submittedByName ?? null,
     })
@@ -343,6 +347,7 @@ export async function getFieldScorecardDetail(
     criticalDeficiencies: card.criticalDeficiencies ?? [],
     criticalDeficiencyNotes: card.criticalDeficiencyNotes ?? {},
     actionItems: card.actionItems ?? [],
+    summary: card.summary ?? null,
     photos,
     superintendentSignature: card.superintendentSignature ?? null,
     pmSignature: card.pmSignature ?? null,
@@ -432,6 +437,7 @@ export async function finalizeFieldScorecardArtifacts(
     criticalDeficiencyKeys: card.criticalDeficiencies ?? [],
     criticalDeficiencyNotes: card.criticalDeficiencyNotes ?? {},
     actionItems: card.actionItems ?? [],
+    summary: card.summary ?? null,
     photos,
     omittedEvidenceCount,
   });
@@ -609,6 +615,13 @@ function toSummary(row: ScorecardSummarySource): FieldScorecardSummary {
     submittedByName: row.submittedByName ?? null,
     submittedAt: toIso(row.submittedAt),
   };
+}
+
+// Cap at 4000 chars (same bound as deficiency notes) — the boundary parser already trims/caps, but the
+// service is the persistence authority and callers other than the HTTP route reach it directly.
+function normalizeSummary(value: string | null | undefined): string | null {
+  const summary = value?.trim() ?? "";
+  return summary ? summary.slice(0, 4000) : null;
 }
 
 function normalizeSignature(value: string | null | undefined): string | null {

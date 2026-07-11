@@ -4,7 +4,7 @@ import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import * as ImagePicker from "expo-image-picker";
-import SignatureScreen from "react-native-signature-canvas";
+import SignatureScreen, { type SignatureViewRef } from "react-native-signature-canvas";
 import { theme } from "../../../src/theme/theme";
 import { useAuth } from "../../../src/auth/AuthContext";
 import { getTranscriptionConfig, type Fetcher } from "../../../src/api/endpoints";
@@ -22,7 +22,6 @@ import {
   scorecardDraftReducer,
   scorecardDraftTotal,
   scorecardDraftRating,
-  scorecardActionItemsRequired,
   scorecardDraftPhotosForSection,
   validateScorecardDraft,
   type ScorecardDraft,
@@ -535,35 +534,104 @@ function Wizard(props: {
         </KeyboardAvoidingView>
       </Modal>
 
-      <Modal visible={signingField !== null} animationType="slide" onRequestClose={() => setSigningField(null)}>
-        <SafeAreaProvider>
-          <SafeAreaView style={styles.signatureModal} edges={["top", "bottom"]}>
+      <SignaturePad
+        field={signingField}
+        onClose={() => setSigningField(null)}
+        onSave={(field, signature) => {
+          dispatch({ type: "setSignature", field, value: signature });
+          setSigningField(null);
+        }}
+        onEmpty={() => setNotice({ tone: "error", text: "Please add a signature before saving." })}
+      />
+    </SafeAreaView>
+  );
+}
+
+// Signature capture sheet. Reworked to be robust on any screen size and always dismissible:
+//  • Sizes the canvas to the space actually left after the header + controls (measured via onLayout) rather
+//    than a fixed minHeight that overflowed small phones — so the Clear / Save / Close controls are ALWAYS on
+//    screen. The body scrolls if the keyboard or a tiny device still leaves it cramped.
+//  • SafeAreaView on ALL edges (top/bottom/left/right) so nothing hides under a notch, home indicator, or a
+//    landscape cutout.
+//  • Four independent ways out that all reliably close it: an obvious header ✕, tapping the dimmed backdrop,
+//    swipe-down (Modal presentationStyle pageSheet on iOS), and Android hardware back (Modal onRequestClose).
+//  • Clear / Save are driven imperatively through the canvas ref so they live in our own always-visible footer.
+//    Save calls readSignature(), which fires onOK (base64) when there's ink or onEmpty otherwise — preserving
+//    the base64 save behavior AND the empty-signature guard.
+function SignaturePad({
+  field,
+  onClose,
+  onSave,
+  onEmpty,
+}: {
+  field: "superintendentSignature" | "pmSignature" | null;
+  onClose: () => void;
+  onSave: (field: "superintendentSignature" | "pmSignature", signature: string) => void;
+  onEmpty: () => void;
+}) {
+  const ref = useRef<SignatureViewRef>(null);
+  // Measured height available for the canvas (body minus the hint/padding), so the pad grows to fill any
+  // screen instead of overflowing. Falls back to a sensible min until the first layout pass lands.
+  const [canvasHeight, setCanvasHeight] = useState(0);
+  const visible = field !== null;
+  // The canvas onOK closure must see the CURRENT field; capture it per-render.
+  const currentField = field;
+  return (
+    <Modal
+      visible={visible}
+      transparent
+      animationType="slide"
+      presentationStyle="overFullScreen"
+      onRequestClose={onClose}
+    >
+      <SafeAreaProvider>
+        <View style={styles.signatureRoot}>
+          {/* Tapping the dimmed backdrop closes the sheet. */}
+          <Pressable style={styles.signatureBackdrop} onPress={onClose} accessibilityLabel="Close signature pad" />
+          <SafeAreaView style={styles.signatureSheet} edges={["top", "bottom", "left", "right"]}>
             <View style={styles.signatureHeader}>
-              <Text style={styles.stepTitle}>{signingField === "superintendentSignature" ? "Superintendent signature" : "Project manager signature"}</Text>
-              <Pressable onPress={() => setSigningField(null)} accessibilityRole="button" accessibilityLabel="Close signature pad">
-                <Text style={styles.signatureClose}>Close</Text>
+              <Text style={styles.stepTitle} numberOfLines={1}>
+                {currentField === "superintendentSignature" ? "Superintendent signature" : "Project manager signature"}
+              </Text>
+              <Pressable
+                onPress={onClose}
+                hitSlop={12}
+                accessibilityRole="button"
+                accessibilityLabel="Close signature pad"
+                style={styles.signatureCloseBtn}
+              >
+                <Text style={styles.signatureCloseX}>✕</Text>
               </Pressable>
             </View>
             <Text style={styles.hint}>Sign in the box below, then tap Save.</Text>
-            {signingField ? (
-              <View style={styles.signatureCanvas}>
-                <SignatureScreen
-                  onOK={(signature) => {
-                    dispatch({ type: "setSignature", field: signingField, value: signature });
-                    setSigningField(null);
-                  }}
-                  onEmpty={() => setNotice({ tone: "error", text: "Please add a signature before saving." })}
-                  descriptionText=""
-                  clearText="Clear"
-                  confirmText="Save"
-                  webStyle={signatureWebStyle}
-                />
-              </View>
-            ) : null}
+            <View
+              style={styles.signatureCanvasWrap}
+              onLayout={(e) => setCanvasHeight(e.nativeEvent.layout.height)}
+            >
+              {visible && canvasHeight > 0 ? (
+                <View style={[styles.signatureCanvas, { height: canvasHeight }]}>
+                  <SignatureScreen
+                    ref={ref}
+                    onOK={(signature) => {
+                      if (currentField) onSave(currentField, signature);
+                    }}
+                    onEmpty={onEmpty}
+                    descriptionText=""
+                    // Hide the library's own footer — we render our own always-visible controls below.
+                    webStyle={signatureWebStyle}
+                    autoClear={false}
+                  />
+                </View>
+              ) : null}
+            </View>
+            <View style={styles.signatureControls}>
+              <Button title="Clear" variant="ghost" onPress={() => ref.current?.clearSignature()} style={{ flex: 1 }} />
+              <Button title="Save" onPress={() => ref.current?.readSignature()} style={{ flex: 1 }} />
+            </View>
           </SafeAreaView>
-        </SafeAreaProvider>
-      </Modal>
-    </SafeAreaView>
+        </View>
+      </SafeAreaProvider>
+    </Modal>
   );
 }
 
@@ -623,7 +691,7 @@ function OverviewStep({
               </View>
               <ScoreSlider value={score} onChange={(points) => dispatch({ type: "setScore", sectionKey: section.key, points })} />
               <Pressable onPress={() => onOpenSection(index)} style={styles.categoryAction} accessibilityRole="button">
-                <Text style={styles.categoryActionText}>{photoCount > 0 ? String(photoCount) + (photoCount === 1 ? " photo · Edit action items" : " photos · Edit action items") : "Add action items or photos"}</Text>
+                <Text style={styles.categoryActionText}>{photoCount > 0 ? String(photoCount) + (photoCount === 1 ? " photo · Edit notes" : " photos · Edit notes") : "Notes or photos"}</Text>
                 <Text style={styles.summaryChevron}>›</Text>
               </Pressable>
             </View>
@@ -680,6 +748,21 @@ function OverviewStep({
             </View>
           );
         })}
+      </View>
+
+      <View style={{ gap: theme.space.sm }}>
+        <SectionLabel>Summary / Action Items</SectionLabel>
+        <Text style={styles.hint}>Optional. One free-text summary for the whole card — type or dictate.</Text>
+        <TextInput
+          value={draft.summary ?? ""}
+          onChangeText={(value) => dispatch({ type: "setSummary", value })}
+          placeholder="Overall summary, follow-ups, and action items"
+          multiline
+          style={{ minHeight: 120, textAlignVertical: "top", paddingTop: 10 }}
+        />
+        {voiceEnabled ? (
+          <VoiceRecorder onTranscript={(text) => dispatch({ type: "appendSummary", text })} label="🎤 Dictate summary" />
+        ) : null}
       </View>
 
       <View style={{ gap: theme.space.md }}>
@@ -744,13 +827,14 @@ function SectionStep({
   const photosDisabled = photosBusy || draft.photos.length >= MAX_SCORECARD_PHOTOS;
   return (
     <View style={{ gap: theme.space.md }}>
-      <Text style={styles.hint}>Rate this category, then document any action items or evidence.</Text>
+      <Text style={styles.hint}>Rate this category, then jot any notes or evidence.</Text>
       <View style={styles.detailScoreBlock}>
         <Text style={styles.detailScore}>{selected ?? "—"}<Text style={styles.bigScoreMax}> /10</Text></Text>
         <ScoreSlider value={selected ?? 5} onChange={(points) => dispatch({ type: "setScore", sectionKey: section.key, points })} />
       </View>
-      <Field label="Action items">
-        <TextInput value={note} onChangeText={(v) => dispatch({ type: "setNote", sectionKey: section.key, note: v })} placeholder="Describe the action needed" multiline style={{ minHeight: 96, textAlignVertical: "top", paddingTop: 10 }} />
+      <SectionLabel>Notes &amp; Photos</SectionLabel>
+      <Field label="Notes">
+        <TextInput value={note} onChangeText={(v) => dispatch({ type: "setNote", sectionKey: section.key, note: v })} placeholder="Observations for this category" multiline style={{ minHeight: 96, textAlignVertical: "top", paddingTop: 10 }} />
         {voiceEnabled ? (
           <VoiceRecorder onTranscript={(t) => dispatch({ type: "appendNote", sectionKey: section.key, text: t })} />
         ) : null}
@@ -806,27 +890,6 @@ function DeficienciesStep({ draft, dispatch }: { draft: ScorecardDraft; dispatch
           </Pressable>
         );
       })}
-    </View>
-  );
-}
-
-function ActionsStep({ draft, dispatch, voiceEnabled, required }: { draft: ScorecardDraft; dispatch: React.Dispatch<DraftAction>; voiceEnabled: boolean; required: boolean }) {
-  const text = draft.actionItems.join("\n");
-  return (
-    <View style={{ gap: theme.space.sm }}>
-      <Text style={[styles.hint, required && { color: theme.color.warning }]}>
-        {required ? "Required — score below 85 or a deficiency was flagged. Add at least one." : "Optional. One per line."}
-      </Text>
-      <TextInput
-        value={text}
-        onChangeText={(v) => dispatch({ type: "setActionItems", items: v.split("\n") })}
-        placeholder={"Re-inspect failed slab\nSchedule recovery meeting"}
-        multiline
-        style={{ minHeight: 120, textAlignVertical: "top", paddingTop: 10 }}
-      />
-      {voiceEnabled ? (
-        <VoiceRecorder onTranscript={(t) => dispatch({ type: "appendActionItem", text: t })} />
-      ) : null}
     </View>
   );
 }
@@ -938,9 +1001,9 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 const signatureWebStyle = `
   .m-signature-pad { box-shadow: none; border: 0; height: 100%; }
   .m-signature-pad--body { border: 0; }
-  .m-signature-pad--footer { background: #fff; border-top: 1px solid #e2e8f0; }
-  .button { background: #dc2626; color: #fff; border-radius: 6px; }
-  .button.clear { background: #fff; color: #dc2626; border: 1px solid #dc2626; }
+  /* Native Clear/Save controls live in our always-visible footer — hide the library's own footer so it can
+     never be pushed off-screen on a small phone. */
+  .m-signature-pad--footer { display: none; margin: 0; }
 `;
 
 const styles = StyleSheet.create({
@@ -1010,10 +1073,18 @@ const styles = StyleSheet.create({
   captionModalRoot: { flex: 1, justifyContent: "flex-end", backgroundColor: "rgba(15,23,42,0.35)" },
   captionBackdrop: { ...StyleSheet.absoluteFillObject },
   captionSheet: { gap: theme.space.md, backgroundColor: theme.color.surfaceCard, borderTopLeftRadius: theme.radius.lg, borderTopRightRadius: theme.radius.lg, padding: theme.space.lg },
-  signatureModal: { flex: 1, gap: theme.space.md, backgroundColor: theme.color.surfaceApp, padding: theme.space.lg },
+  // Full-screen dim; the sheet fills the rest so the canvas has the whole screen minus the safe areas + chrome.
+  signatureRoot: { flex: 1, backgroundColor: "rgba(15,23,42,0.45)" },
+  signatureBackdrop: { ...StyleSheet.absoluteFillObject },
+  signatureSheet: { flex: 1, marginTop: 44, gap: theme.space.sm, backgroundColor: theme.color.surfaceApp, borderTopLeftRadius: theme.radius.lg, borderTopRightRadius: theme.radius.lg, paddingHorizontal: theme.space.lg, paddingTop: theme.space.lg, paddingBottom: theme.space.md },
   signatureHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: theme.space.md },
-  signatureClose: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.brandRed },
-  signatureCanvas: { flex: 1, minHeight: 340, overflow: "hidden", borderWidth: 1, borderColor: theme.color.border, borderRadius: theme.radius.md, backgroundColor: theme.color.surfaceCard },
+  signatureCloseBtn: { width: 32, height: 32, borderRadius: 999, alignItems: "center", justifyContent: "center", backgroundColor: theme.color.surfaceMuted },
+  signatureCloseX: { fontFamily: theme.font.bold, fontSize: 15, color: theme.color.textPrimary },
+  // Flexes to consume the space left after the header + Save/Clear footer, and is measured (onLayout) to size
+  // the canvas exactly — no fixed minHeight that could overflow a small phone.
+  signatureCanvasWrap: { flex: 1, minHeight: 0 },
+  signatureCanvas: { overflow: "hidden", borderWidth: 1, borderColor: theme.color.border, borderRadius: theme.radius.md, backgroundColor: theme.color.surfaceCard },
+  signatureControls: { flexDirection: "row", gap: theme.space.md },
   signatureTrigger: { gap: 3, borderWidth: 1, borderColor: theme.color.border, borderRadius: theme.radius.md, backgroundColor: theme.color.surfaceCard, padding: theme.space.md },
   signatureTriggerLabel: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.textPrimary },
   signatureTriggerValue: { fontFamily: theme.font.body, fontSize: 13, color: theme.color.brandRed },

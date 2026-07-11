@@ -92,6 +92,42 @@ describe("field scorecard PDF evidence", () => {
   });
 });
 
+describe("summary / action items", () => {
+  const base = {
+    dealName: "Maple Street Tower", projectNumber: "DFW-10432", weekOf: "2026-07-06",
+    superintendentName: "Sam Super", pmName: "Pat Manager", submittedByName: "Sam Super",
+    submittedAt: "2026-07-10T17:00:00.000Z", totalScore: 84, formVersion: 2 as const,
+    averageScore: 8.4, rating: "on_standard" as const,
+    items: [{ sectionKey: "quality", points: 8, note: null }],
+    criticalDeficiencyKeys: [] as string[], criticalDeficiencyNotes: {}, actionItems: [] as string[],
+  };
+
+  it("resolves the free-text summary (trimmed) onto the render model", () => {
+    const data = buildScorecardPdfData({ ...base, summary: "  Reinspect framing before drywall.  " });
+    expect(data.summary).toBe("Reinspect framing before drywall.");
+  });
+
+  it("null summary + empty actionItems resolve to null (no summary block)", () => {
+    expect(buildScorecardPdfData(base).summary).toBeNull();
+    expect(buildScorecardPdfData({ ...base, summary: "   " }).summary).toBeNull();
+  });
+
+  it("renders a PDF with a free-text summary", async () => {
+    const longSummary = "Crew must re-sequence the pour and reinspect framing. ".repeat(120); // bounded, not overflow
+    const pdf = await renderFieldScorecardPdf(buildScorecardPdfData({ ...base, summary: longSummary }));
+    expect(pdf.subarray(0, 5).toString("latin1")).toBe("%PDF-");
+    expect(pdf.length).toBeGreaterThan(1_000);
+  });
+
+  it("BACK-COMPAT: renders the legacy actionItems list when a historical row has no summary", async () => {
+    const pdf = await renderFieldScorecardPdf(
+      buildScorecardPdfData({ ...base, summary: null, actionItems: ["Re-inspect slab", "Schedule recovery meeting"] }),
+    );
+    expect(pdf.subarray(0, 5).toString("latin1")).toBe("%PDF-");
+    expect(pdf.length).toBeGreaterThan(1_000);
+  });
+});
+
 describe("buildScorecardPdfData omittedEvidenceCount", () => {
   const base = {
     dealName: "X", projectNumber: null, weekOf: "2026-07-06", superintendentName: null, pmName: null,

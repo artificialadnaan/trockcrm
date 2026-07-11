@@ -82,7 +82,7 @@ describe("submitScorecard (orchestration)", () => {
     return {
       id: "d1", clientSubmissionId: "sub-1", dealId: "deal-1", dealName: "Maple", projectNumber: null,
       weekOf: "2026-06-30", superintendentName: "", pmName: "",
-      scores: {}, notes: {}, photos, criticalDeficiencies: [], actionItems: [], createdAt: 0, updatedAt: 0,
+      scores: {}, notes: {}, photos, criticalDeficiencies: [], summary: "", actionItems: [], createdAt: 0, updatedAt: 0,
     };
   }
 

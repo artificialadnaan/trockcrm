@@ -44,6 +44,12 @@ export interface ScorecardDraft {
   criticalDeficiencies: ScorecardCriticalDeficiencyKey[];
   /** Optional so pre-V2 drafts can resume without a migration. */
   deficiencyNotes?: Partial<Record<ScorecardCriticalDeficiencyKey, string>>;
+  /**
+   * Free-text summary / action items for the whole card — the single box the form now collects
+   * (voice-dictatable), replacing the discrete `actionItems` list. `actionItems` stays on the type for
+   * back-compat (older drafts + the submission's empty-array field) but the new form no longer edits it.
+   */
+  summary: string;
   actionItems: string[];
   superintendentSignature?: string;
   pmSignature?: string;
@@ -60,6 +66,8 @@ export type DraftAction =
   | { type: "setDeficiencyNote"; key: ScorecardCriticalDeficiencyKey; note: string }
   | { type: "appendDeficiencyNote"; key: ScorecardCriticalDeficiencyKey; text: string }
   | { type: "setActionItems"; items: string[] }
+  | { type: "setSummary"; value: string }
+  | { type: "appendSummary"; text: string }
   | { type: "setSignature"; field: "superintendentSignature" | "pmSignature"; value: string }
   | { type: "appendActionItem"; text: string }
   | { type: "addPhoto"; photo: ScorecardDraftPhoto }
@@ -75,6 +83,7 @@ export interface ScorecardSubmissionPayload {
   pmName: string | null;
   items: { sectionKey: ScorecardSectionKey; points: number; note: string | null }[];
   criticalDeficiencies: string[];
+  summary: string | null;
   actionItems: string[];
   criticalDeficiencyNotes: Record<string, string>;
   photos: { sectionKey: ScorecardSectionKey | "critical_deficiency"; deficiencyKey: ScorecardCriticalDeficiencyKey | null; clientUploadId: string }[];
@@ -108,6 +117,7 @@ export function createScorecardDraft(input: {
     photos: [],
     criticalDeficiencies: [],
     deficiencyNotes: {},
+    summary: "",
     actionItems: [],
     superintendentSignature: "",
     pmSignature: "",
@@ -149,6 +159,18 @@ export function scorecardDraftReducer(draft: ScorecardDraft, action: DraftAction
     }
     case "setActionItems":
       return { ...draft, actionItems: action.items };
+    case "setSummary":
+      return { ...draft, summary: action.value };
+    case "appendSummary": {
+      // Append a dictated transcript to the LATEST summary text (from reducer state), so a transcript that
+      // returns after the user kept typing doesn't clobber those edits with a stale-closure value — mirrors
+      // appendNote. Ignore an empty transcript.
+      const t = action.text.trim();
+      if (!t) return draft;
+      const current = draft.summary ?? "";
+      const next = current.trim() ? `${current} ${t}`.trim() : t;
+      return { ...draft, summary: next };
+    }
     case "setSignature":
       return { ...draft, [action.field]: action.value };
     case "appendActionItem": {
@@ -275,7 +297,10 @@ export function scorecardDraftToSubmission(draft: ScorecardDraft): ScorecardSubm
         .map((key) => [key, draft.deficiencyNotes?.[key]?.trim() ?? ""])
         .filter(([, note]) => note.length > 0),
     ),
-    actionItems: draft.actionItems.map((s) => s.trim()).filter((s) => s.length > 0),
+    // V2: the free-text Summary / Action Items box is the sole carrier. `actionItems` is intentionally sent
+    // empty (the discrete list is gone) — the server persists `summary` and keeps actionItems for back-compat.
+    summary: draft.summary?.trim() ? draft.summary.trim() : null,
+    actionItems: [],
     photos: draft.photos.map((p) => ({ sectionKey: p.sectionKey, deficiencyKey: p.deficiencyKey ?? null, clientUploadId: p.clientUploadId })),
     superintendentSignature: draft.superintendentSignature?.trim() || null,
     pmSignature: draft.pmSignature?.trim() || null,

@@ -34,6 +34,9 @@ export const MAX_EVIDENCE_PHOTOS = 60;
 // Bound each critical-deficiency description on the summary page so one long (up to 4000-char) note can't
 // blow the layout across pages; the same note also appears (bounded) as the evidence-group subtitle.
 const DEFICIENCY_NOTE_MAX_HEIGHT = 54;
+// Bound the free-text summary block (up to 4000 chars) so one long voice-dictated note can't run the
+// layout off the page; overflow is ellipsized, mirroring the deficiency-note bound.
+const SUMMARY_MAX_HEIGHT = 180;
 
 const RATING_COLOR: Record<ScorecardRating, string> = {
   elite: "#16A34A",
@@ -60,6 +63,8 @@ export interface ScorecardPdfInput {
   criticalDeficiencyKeys: string[];
   criticalDeficiencyNotes?: Record<string, string>;
   actionItems: string[];
+  /** V2 free-text "Summary / Action Items". When present it replaces the legacy actionItems list. */
+  summary?: string | null;
   photos?: ScorecardPdfPhoto[];
   /** Evidence photos already dropped upstream (capped before download) — added to the render-side cap's
    *  omitted count so the "available in the CRM" note reflects the true total. */
@@ -106,6 +111,8 @@ export interface ScorecardPdfData {
   sections: ScorecardPdfSection[];
   deficiencies: ScorecardPdfDeficiency[];
   actionItems: string[];
+  /** V2 free-text summary; null on historical (V1) rows that used the actionItems list. */
+  summary: string | null;
   omittedEvidenceCount: number;
 }
 
@@ -145,6 +152,7 @@ export function buildScorecardPdfData(input: ScorecardPdfInput): ScorecardPdfDat
     })
     .filter((deficiency): deficiency is ScorecardPdfDeficiency => deficiency !== null);
   const actionItems = input.actionItems.map((s) => s.trim()).filter((s) => s.length > 0);
+  const summary = input.summary?.trim() || null;
   return {
     dealName: input.dealName,
     projectNumber: input.projectNumber,
@@ -163,6 +171,7 @@ export function buildScorecardPdfData(input: ScorecardPdfInput): ScorecardPdfDat
     sections,
     deficiencies,
     actionItems,
+    summary,
     omittedEvidenceCount: Math.max(0, input.omittedEvidenceCount ?? 0),
   };
 }
@@ -280,9 +289,18 @@ export async function renderFieldScorecardPdf(data: ScorecardPdfData): Promise<B
     doc.moveDown(0.5);
   }
 
-  // ── Action items ──
-  if (data.actionItems.length > 0) {
-    heading(doc, "Action Items");
+  // ── Summary / Action items ──
+  // Prefer the V2 free-text summary. BACK-COMPAT: historical (V1) rows have no summary but a discrete
+  // actionItems list — render that instead so old scorecards still show their remediation.
+  if (data.summary) {
+    heading(doc, "Summary / Action Items");
+    doc.font("Helvetica").fontSize(10).fillColor(BRAND_BLACK).text(data.summary, PAGE.margin, doc.y, {
+      width: CONTENT_WIDTH,
+      height: SUMMARY_MAX_HEIGHT,
+      ellipsis: true,
+    });
+  } else if (data.actionItems.length > 0) {
+    heading(doc, "Summary / Action Items");
     doc.font("Helvetica").fontSize(10).fillColor(BRAND_BLACK);
     data.actionItems.forEach((a, i) => doc.text(`${i + 1}.  ${a}`, PAGE.margin, doc.y, { width: CONTENT_WIDTH }));
   }
