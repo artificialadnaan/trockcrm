@@ -141,7 +141,7 @@ export default function ScorecardsScreen() {
           {recent.isLoading ? (
             <LoadingState label="Loading scorecards…" />
           ) : submitted.length === 0 ? (
-            <EmptyState title="No scorecards yet" subtitle="Tap “New scorecard” to score a project." />
+            <EmptyState title="No scorecards yet" subtitle="Tap “Project Scorecard” to score a project." />
           ) : (
             submitted.map((s: FieldScorecardSummary) => (
               <Pressable

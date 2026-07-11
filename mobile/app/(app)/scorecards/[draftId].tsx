@@ -541,7 +541,6 @@ function Wizard(props: {
           dispatch({ type: "setSignature", field, value: signature });
           setSigningField(null);
         }}
-        onEmpty={() => setNotice({ tone: "error", text: "Please add a signature before saving." })}
       />
     </SafeAreaView>
   );
@@ -557,25 +556,31 @@ function Wizard(props: {
 //    and Android hardware back (Modal onRequestClose) — over a full-screen dimmed overlay (overFullScreen).
 //  • Clear / Save are driven imperatively through the canvas ref so they live in our own always-visible footer.
 //    Save calls readSignature(), which fires onOK (base64) when there's ink or onEmpty otherwise — preserving
-//    the base64 save behavior AND the empty-signature guard.
+//    the base64 save behavior. The empty-signature guard renders INSIDE the sheet (a parent Banner would sit
+//    behind this full-screen modal and never be seen).
 function SignaturePad({
   field,
   onClose,
   onSave,
-  onEmpty,
 }: {
   field: "superintendentSignature" | "pmSignature" | null;
   onClose: () => void;
   onSave: (field: "superintendentSignature" | "pmSignature", signature: string) => void;
-  onEmpty: () => void;
 }) {
   const ref = useRef<SignatureViewRef>(null);
   // Measured height available for the canvas (body minus the hint/padding), so the pad grows to fill any
   // screen instead of overflowing. Falls back to a sensible min until the first layout pass lands.
   const [canvasHeight, setCanvasHeight] = useState(0);
+  // Empty-signature warning shown IN the sheet (not via the parent Banner, which is behind this modal).
+  // Raised when Save is tapped on a blank pad; cleared when the user starts drawing or taps Clear, and reset
+  // each time the pad opens for a new field.
+  const [showEmptyWarning, setShowEmptyWarning] = useState(false);
   const visible = field !== null;
   // The canvas onOK closure must see the CURRENT field; capture it per-render.
   const currentField = field;
+  useEffect(() => {
+    setShowEmptyWarning(false);
+  }, [field]);
   return (
     <Modal
       visible={visible}
@@ -604,6 +609,9 @@ function SignaturePad({
               </Pressable>
             </View>
             <Text style={styles.hint}>Sign in the box below, then tap Save.</Text>
+            {showEmptyWarning ? (
+              <Text style={styles.signatureEmptyWarning}>Please add a signature before saving.</Text>
+            ) : null}
             <View
               style={styles.signatureCanvasWrap}
               onLayout={(e) => setCanvasHeight(e.nativeEvent.layout.height)}
@@ -615,7 +623,9 @@ function SignaturePad({
                     onOK={(signature) => {
                       if (currentField) onSave(currentField, signature);
                     }}
-                    onEmpty={onEmpty}
+                    onEmpty={() => setShowEmptyWarning(true)}
+                    // Clear the warning the moment the user starts drawing.
+                    onBegin={() => setShowEmptyWarning(false)}
                     descriptionText=""
                     // Hide the library's own footer — we render our own always-visible controls below.
                     webStyle={signatureWebStyle}
@@ -625,7 +635,15 @@ function SignaturePad({
               ) : null}
             </View>
             <View style={styles.signatureControls}>
-              <Button title="Clear" variant="ghost" onPress={() => ref.current?.clearSignature()} style={{ flex: 1 }} />
+              <Button
+                title="Clear"
+                variant="ghost"
+                onPress={() => {
+                  ref.current?.clearSignature();
+                  setShowEmptyWarning(false);
+                }}
+                style={{ flex: 1 }}
+              />
               <Button title="Save" onPress={() => ref.current?.readSignature()} style={{ flex: 1 }} />
             </View>
           </SafeAreaView>
@@ -1048,6 +1066,7 @@ const styles = StyleSheet.create({
   signatureCanvasWrap: { flex: 1, minHeight: 0 },
   signatureCanvas: { overflow: "hidden", borderWidth: 1, borderColor: theme.color.border, borderRadius: theme.radius.md, backgroundColor: theme.color.surfaceCard },
   signatureControls: { flexDirection: "row", gap: theme.space.md },
+  signatureEmptyWarning: { fontFamily: theme.font.semibold, fontSize: 13, color: theme.color.brandRed },
   signatureTrigger: { gap: 3, borderWidth: 1, borderColor: theme.color.border, borderRadius: theme.radius.md, backgroundColor: theme.color.surfaceCard, padding: theme.space.md },
   signatureTriggerLabel: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.textPrimary },
   signatureTriggerValue: { fontFamily: theme.font.body, fontSize: 13, color: theme.color.brandRed },
