@@ -754,19 +754,27 @@ export async function updateContact(
   // Forward-only: only a complete -> incomplete change is blocked; an already-incomplete address isn't forced
   // to be cleaned up (Codex P2).
   if (updateBreaksBillingAddress(existing, updates)) {
-    // Lock this contact's row FOR UPDATE so a concurrent deal billing-assignment — which also locks the contact
-    // via validateDealBillingContact before repointing the deal — serializes with this edit. Without it, the
-    // deal could validate a still-complete contact and commit between our reference check and the UPDATE below,
-    // leaving the deal with an incomplete billing contact. Whoever grabs the contact lock first wins; the lock
-    // is held for the rest of this transaction (Codex P2 TOCTOU).
-    await tenantDb.select({ id: contacts.id }).from(contacts).where(eq(contacts.id, contactId)).limit(1).for("update");
-    const [billingRef] = await tenantDb
-      .select({ id: deals.id })
-      .from(deals)
-      .where(and(eq(deals.billingContactId, contactId), eq(deals.isActive, true)))
-      .limit(1);
-    if (billingRef) {
-      throw new AppError(400, "This contact is the billing contact on an active deal — keep a complete mailing address (street, city, state, and ZIP).");
+    // The pre-lock check above (against the unlocked getContactById snapshot) is a cheap gate. Now lock the
+    // contact row FOR UPDATE, RE-READ its current address under the lock, and re-decide — `existing` could be
+    // stale, and a concurrent deal billing-assignment locks the same contact via validateDealBillingContact, so
+    // this serializes the two (whoever grabs the lock first wins; the lock is held for the transaction). Only if
+    // the edit still breaks a currently-complete address do we block a contact that's billing on an active deal
+    // (Codex P2 TOCTOU).
+    const [locked] = await tenantDb
+      .select({ address: contacts.address, city: contacts.city, state: contacts.state, zip: contacts.zip })
+      .from(contacts)
+      .where(eq(contacts.id, contactId))
+      .limit(1)
+      .for("update");
+    if (locked && updateBreaksBillingAddress(locked, updates)) {
+      const [billingRef] = await tenantDb
+        .select({ id: deals.id })
+        .from(deals)
+        .where(and(eq(deals.billingContactId, contactId), eq(deals.isActive, true)))
+        .limit(1);
+      if (billingRef) {
+        throw new AppError(400, "This contact is the billing contact on an active deal — keep a complete mailing address (street, city, state, and ZIP).");
+      }
     }
   }
 

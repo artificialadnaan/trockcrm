@@ -114,6 +114,10 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
       () => {
         setResults([]);
         setQuery("");
+        // Clear any lingering error from a prior failed pick/assign so a stale message doesn't sit above a
+        // now-successfully-assigned billing contact (Codex P3).
+        setPickError(null);
+        setAssignError(null);
         onDealUpdated();
         setSaving(false);
       },
