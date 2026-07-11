@@ -41,6 +41,9 @@ export const fieldScorecards = pgTable(
     /** V2 supplemental description keyed by critical-deficiency key. */
     criticalDeficiencyNotes: jsonb("critical_deficiency_notes").$type<Record<string, string>>().default({}).notNull(),
     actionItems: text("action_items").array().default([]).notNull(),
+    /** V2 free-text "Summary / Action Items" (voice-dictated on mobile); replaces the discrete
+     *  actionItems list for new submissions. actionItems stays for historical (V1) rows. */
+    summary: text("summary"),
     status: varchar("status", { length: 20 }).default("submitted").notNull(),
     submittedBy: uuid("submitted_by").notNull(),
     submittedByName: text("submitted_by_name"),

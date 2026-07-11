@@ -302,6 +302,9 @@ export interface ScorecardSubmissionInput {
   criticalDeficiencies: string[];
   criticalDeficiencyNotes?: Record<string, string>;
   actionItems: string[];
+  /** V2 free-text summary / action items (voice-dictated on mobile). Replaces the discrete
+   *  actionItems list for new submissions; actionItems stays for V1 back-compat. */
+  summary?: string | null;
   photos: ScorecardPhotoInput[];
   superintendentSignature?: string | null;
   pmSignature?: string | null;
@@ -343,6 +346,8 @@ export interface FieldScorecardDetail extends FieldScorecardSummary {
   criticalDeficiencies: string[];
   criticalDeficiencyNotes?: Record<string, string>;
   actionItems: string[];
+  /** V2 free-text summary / action items; null on historical (V1) rows that used actionItems. */
+  summary?: string | null;
   photos: FieldScorecardPhotoView[];
   superintendentSignature?: string | null;
   pmSignature?: string | null;
