@@ -553,8 +553,8 @@ function Wizard(props: {
 //    screen. The body scrolls if the keyboard or a tiny device still leaves it cramped.
 //  • SafeAreaView on ALL edges (top/bottom/left/right) so nothing hides under a notch, home indicator, or a
 //    landscape cutout.
-//  • Four independent ways out that all reliably close it: an obvious header ✕, tapping the dimmed backdrop,
-//    swipe-down (Modal presentationStyle pageSheet on iOS), and Android hardware back (Modal onRequestClose).
+//  • Three independent ways out that all reliably close it: an obvious header ✕, tapping the dimmed backdrop,
+//    and Android hardware back (Modal onRequestClose) — over a full-screen dimmed overlay (overFullScreen).
 //  • Clear / Save are driven imperatively through the canvas ref so they live in our own always-visible footer.
 //    Save calls readSignature(), which fires onOK (base64) when there's ink or onEmpty otherwise — preserving
 //    the base64 save behavior AND the empty-signature guard.
@@ -895,8 +895,7 @@ function DeficienciesStep({ draft, dispatch }: { draft: ScorecardDraft; dispatch
 }
 
 function ReviewStep({ draft, onEditStep }: { draft: ScorecardDraft; onEditStep: (step: number) => void }) {
-  // Step indices for the non-section blockers so the review page can send the user straight to them.
-  const ACTION_ITEMS_STEP = SECTION_COUNT + 2;
+  // Step index for the non-section blocker (Week Of) so the review page can send the user straight to it.
   const SETUP_STEP = 0;
   const total = scorecardDraftTotal(draft);
   const rating = scorecardDraftRating(draft);
@@ -936,25 +935,6 @@ function ReviewStep({ draft, onEditStep }: { draft: ScorecardDraft; onEditStep: 
             </Pressable>
           );
         })}
-        {/* Non-section requirements that also block submit — surfaced as tappable rows so the user isn't
-            told "action items required" with no way to get there from the review screen. Only shown once
-            every section is scored: the total (and thus the action-items requirement) is meaningless while
-            scores are missing — the red section rows above are the guidance until then. Mirrors the submit
-            Banner's stage priority. */}
-        {validation.missingSections.length === 0 && validation.needsActionItems ? (
-          <Pressable
-            onPress={() => onEditStep(ACTION_ITEMS_STEP)}
-            accessibilityRole="button"
-            accessibilityLabel="Action items are required. Tap to add one."
-            style={({ pressed }) => [styles.summaryRow, styles.summaryRowMissing, pressed && styles.summaryRowPressed]}
-          >
-            <Text style={[styles.summaryName, styles.summaryNameMissing]} numberOfLines={1}>Action items</Text>
-            <View style={styles.summaryRight}>
-              <Text style={styles.summaryCta}>Add</Text>
-              <Text style={styles.summaryChevronRed}>›</Text>
-            </View>
-          </Pressable>
-        ) : null}
         {validation.missingSections.length === 0 && validation.missingWeekOf ? (
           <Pressable
             onPress={() => onEditStep(SETUP_STEP)}
@@ -977,11 +957,9 @@ function ReviewStep({ draft, onEditStep }: { draft: ScorecardDraft; onEditStep: 
           message={
             validation.missingSections.length > 0
               ? `Score all ${SECTION_COUNT} sections to submit (${validation.missingSections.length} left).`
-              : validation.needsActionItems
-                ? "Add at least one action item to submit."
-                : validation.missingWeekOf
-                  ? "Set the Week Of date to submit."
-                  : "Complete the required fields to submit."
+              : validation.missingWeekOf
+                ? "Set the Week Of date to submit."
+                : "Complete the required fields to submit."
           }
         />
       ) : null}
