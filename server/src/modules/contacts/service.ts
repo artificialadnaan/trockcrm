@@ -4,6 +4,7 @@ import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { activities, companies, contacts, contactDealAssociations, deals, emails, tasks, users } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
+import { updateBreaksBillingAddress } from "../../lib/billing-address.js";
 import { buildContactSearchCondition } from "../search/unified-search.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -746,6 +747,35 @@ export async function updateContact(
 
   if (Object.keys(updates).length === 0) {
     return existing;
+  }
+
+  // Don't let a contact edit strip the address off a contact that's actively the billing contact on a deal —
+  // that would silently leave the deal with an un-invoiceable billing contact, bypassing the assign-time gate.
+  // Forward-only: only a complete -> incomplete change is blocked; an already-incomplete address isn't forced
+  // to be cleaned up (Codex P2).
+  if (updateBreaksBillingAddress(existing, updates)) {
+    // The pre-lock check above (against the unlocked getContactById snapshot) is a cheap gate. Now lock the
+    // contact row FOR UPDATE, RE-READ its current address under the lock, and re-decide — `existing` could be
+    // stale, and a concurrent deal billing-assignment locks the same contact via validateDealBillingContact, so
+    // this serializes the two (whoever grabs the lock first wins; the lock is held for the transaction). Only if
+    // the edit still breaks a currently-complete address do we block a contact that's billing on an active deal
+    // (Codex P2 TOCTOU).
+    const [locked] = await tenantDb
+      .select({ address: contacts.address, city: contacts.city, state: contacts.state, zip: contacts.zip })
+      .from(contacts)
+      .where(eq(contacts.id, contactId))
+      .limit(1)
+      .for("update");
+    if (locked && updateBreaksBillingAddress(locked, updates)) {
+      const [billingRef] = await tenantDb
+        .select({ id: deals.id })
+        .from(deals)
+        .where(and(eq(deals.billingContactId, contactId), eq(deals.isActive, true)))
+        .limit(1);
+      if (billingRef) {
+        throw new AppError(400, "This contact is the billing contact on an active deal — keep a complete mailing address (street, city, state, and ZIP).");
+      }
+    }
   }
 
   const result = await tenantDb

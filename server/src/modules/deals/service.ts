@@ -71,6 +71,7 @@ import { listDealChangeOrders, softDeleteChangeOrderChildren, sumDealChangeOrder
 import { loadRfpVoteDetail, type RfpVoteView } from "./rfp-vote-detail.js";
 import { isServiceRfp } from "./rfp-vote-service.js";
 import { computeRfpVoteState } from "@trock-crm/shared/lib/rfpVoteState";
+import { isCompleteBillingAddress } from "../../lib/billing-address.js";
 import { recordDescriptionHistoryChange } from "./deal-description-history.js";
 import { buildArchivedDescription } from "./archive-description.js";
 import { LOST_STAGE_SLUGS, TERMINAL_STAGE_SLUGS, WON_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
@@ -1608,9 +1609,16 @@ async function validateDealPrimaryContact(
 // permits soft-deleted contacts, so without this a stale/archived id (e.g. a search result deleted or merged
 // between select and save) would persist as the deal's billing contact (Codex P2).
 // Exported for the runtime SQL test (deal-billing-contact-validation.runtime.test.ts).
-export async function validateDealBillingContact(tenantDb: TenantDb, billingContactId?: string | null) {
+// Locks + validates the contact is active (throws otherwise) and RETURNS whether its mailing address is
+// complete. It does NOT throw on an incomplete address — the caller decides whether to enforce that, because
+// the forward-only rule (require a complete address only on a NEW assignment) depends on the deal's CURRENT
+// billing contact, which must be read from the LOCKED deal row to avoid a stale-read race (Codex P2).
+export async function validateDealBillingContact(
+  tenantDb: TenantDb,
+  billingContactId?: string | null,
+): Promise<{ addressComplete: boolean }> {
   if (!billingContactId) {
-    return;
+    return { addressComplete: true };
   }
 
   // FOR UPDATE locks the active contact row for the rest of updateDeal's transaction so a concurrent
@@ -1620,7 +1628,13 @@ export async function validateDealBillingContact(tenantDb: TenantDb, billingCont
   // = true) finds nothing and throws; if the PATCH wins, the merge's later deals-repoint sees the committed
   // reference and moves it to the winner (Codex P2 TOCTOU).
   const [contact] = await tenantDb
-    .select({ id: contacts.id })
+    .select({
+      id: contacts.id,
+      address: contacts.address,
+      city: contacts.city,
+      state: contacts.state,
+      zip: contacts.zip,
+    })
     .from(contacts)
     .where(and(eq(contacts.id, billingContactId), eq(contacts.isActive, true)))
     .limit(1)
@@ -1629,6 +1643,8 @@ export async function validateDealBillingContact(tenantDb: TenantDb, billingCont
   if (!contact) {
     throw new AppError(400, "Billing contact not found or is inactive");
   }
+
+  return { addressComplete: isCompleteBillingAddress(contact) };
 }
 
 async function assertSourceLeadLineageAvailable(
@@ -2411,7 +2427,23 @@ export async function updateDeal(
   // TOCTOU guard is unchanged, and updates.billingContactId is set verbatim from input.billingContactId (no
   // normalization), so validating input.billingContactId here is equivalent to the old post-lock call (Codex P2).
   if (input.billingContactId !== undefined) {
-    await validateDealBillingContact(tenantDb, input.billingContactId ?? null);
+    // Lock + validate the contact FIRST (contact-before-deal order avoids an ABBA deadlock with deleteContact/
+    // mergeContacts) and capture whether its address is complete. THEN lock the deal row so the "is this a NEW
+    // assignment?" decision reads the AUTHORITATIVE current billing contact — a pre-lock read could be stale
+    // under concurrent PATCHes and let an incomplete contact overwrite a freshly-assigned complete one. The
+    // complete-address requirement is forward-only: enforced only on a genuine change, so re-saving a deal that
+    // keeps its existing (legacy, address-less) billing contact stays valid (Codex P2).
+    const { addressComplete } = await validateDealBillingContact(tenantDb, input.billingContactId ?? null);
+    const [currentDeal] = await tenantDb
+      .select({ billingContactId: deals.billingContactId })
+      .from(deals)
+      .where(eq(deals.id, dealId))
+      .limit(1)
+      .for("update");
+    const isNewBillingContact = (input.billingContactId ?? null) !== (currentDeal?.billingContactId ?? null);
+    if (input.billingContactId != null && isNewBillingContact && !addressComplete) {
+      throw new AppError(400, "Billing contact needs a complete mailing address (street, city, state, and ZIP).");
+    }
   }
 
   // Lock the deal row before deriving hold timing so stage changes and hold
