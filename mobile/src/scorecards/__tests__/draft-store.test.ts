@@ -36,7 +36,7 @@ function draft(id: string): ScorecardDraft {
   return {
     id, clientSubmissionId: `sub-${id}`, dealId: "d", dealName: "N", projectNumber: null,
     weekOf: "2026-06-30", superintendentName: "", pmName: "",
-    scores: {}, notes: {}, photos: [], criticalDeficiencies: [], summary: "", actionItems: [], createdAt: 0, updatedAt: 0,
+    scores: {}, notes: {}, photos: [], criticalDeficiencies: [], actionItems: [], createdAt: 0, updatedAt: 0,
   };
 }
 function indexPath(): string {

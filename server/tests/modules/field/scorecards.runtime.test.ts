@@ -146,43 +146,6 @@ describe("createFieldScorecard", () => {
     expect(detail.pmSignature).toBe("Dana Cole");
   });
 
-  it("persists the free-text summary and returns it on the detail read (trimmed + capped)", async () => {
-    const { scorecard } = await createFieldScorecard(
-      tdb,
-      submission({
-        clientSubmissionId: csid(60),
-        formVersion: 2,
-        items: v2Items(),
-        summary: "  Re-sequence the slab pour and reinspect framing before drywall.  ",
-      }),
-    );
-    const stored = await tdb.execute(
-      sql`SELECT summary FROM field_scorecards WHERE id = ${scorecard.id}`,
-    );
-    expect(stored.rows[0].summary).toBe("Re-sequence the slab pour and reinspect framing before drywall.");
-
-    const detail = await getFieldScorecardDetail(tdb, scorecard.id, ACCESS);
-    expect(detail.summary).toBe("Re-sequence the slab pour and reinspect framing before drywall.");
-
-    // An oversized dictation is capped at 4000 chars.
-    const big = await createFieldScorecard(
-      tdb,
-      submission({ clientSubmissionId: csid(61), formVersion: 2, items: v2Items(), summary: "x".repeat(5000) }),
-    );
-    const bigStored = await tdb.execute(sql`SELECT length(summary)::int AS n FROM field_scorecards WHERE id = ${big.scorecard.id}`);
-    expect(bigStored.rows[0].n).toBe(4000);
-  });
-
-  it("leaves summary null when omitted (historical actionItems path is untouched)", async () => {
-    const { scorecard } = await createFieldScorecard(
-      tdb,
-      submission({ clientSubmissionId: csid(62), criticalDeficiencies: ["failed_inspection"], actionItems: ["Fix it"] }),
-    );
-    const detail = await getFieldScorecardDetail(tdb, scorecard.id, ACCESS);
-    expect(detail.summary).toBeNull();
-    expect(detail.actionItems).toEqual(["Fix it"]);
-  });
-
   it("persists a scorecard with server-computed total and rating", async () => {
     const { scorecard, created } = await createFieldScorecard(
       tdb,

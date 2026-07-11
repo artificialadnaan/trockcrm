@@ -750,21 +750,6 @@ function OverviewStep({
         })}
       </View>
 
-      <View style={{ gap: theme.space.sm }}>
-        <SectionLabel>Summary / Action Items</SectionLabel>
-        <Text style={styles.hint}>Optional. One free-text summary for the whole card — type or dictate.</Text>
-        <TextInput
-          value={draft.summary ?? ""}
-          onChangeText={(value) => dispatch({ type: "setSummary", value })}
-          placeholder="Overall summary, follow-ups, and action items"
-          multiline
-          style={{ minHeight: 120, textAlignVertical: "top", paddingTop: 10 }}
-        />
-        {voiceEnabled ? (
-          <VoiceRecorder onTranscript={(text) => dispatch({ type: "appendSummary", text })} label="🎤 Dictate summary" />
-        ) : null}
-      </View>
-
       <View style={{ gap: theme.space.md }}>
         <SectionLabel>Signatures</SectionLabel>
         <Pressable onPress={() => onSign("superintendentSignature")} style={styles.signatureTrigger} accessibilityRole="button">
