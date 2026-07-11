@@ -73,6 +73,30 @@ export async function generateThumbnailBuffer(source: Buffer): Promise<Buffer> {
     .toBuffer();
 }
 
+// Cap on the DECODED raster of an original transcoded for the PDF. A small highly-compressed file can
+// decode to a gigapixel "pixel bomb"; ~50 MP covers any real camera photo (a 48 MP phone shot is
+// 8000x6000) while bounding decode memory when the evidence path runs originals at concurrency. Mirrors
+// the public transcoder's guard (image-transcode.ts).
+const EVIDENCE_DECODE_PIXEL_LIMIT = 50_000_000;
+
+/**
+ * Downscale/transcode a full-size original into a small JPEG for a PDF-embedded evidence tile. Used as
+ * the fallback when a photo has no ingest thumbnail, so a large valid original (JPEG/HEIC/HEIF/WebP/PNG/
+ * TIFF/AVIF/GIF) is preserved as evidence instead of degrading to "Image unavailable". Reuses the
+ * thumbnail dimensions (identical look whether the tile came from a stored thumbnail or a transcode here)
+ * and, like the public transcoder, bounds decoded pixels and flattens transparency onto white so a
+ * transparent PNG/WebP annotation doesn't render as a black box. Throws if sharp can't decode the input —
+ * callers treat a throw as "no image" (placeholder), NEVER as dropping evidence under a byte cap.
+ */
+export async function generateEvidenceJpeg(source: Buffer): Promise<Buffer> {
+  return sharp(source, { failOn: "none", limitInputPixels: EVIDENCE_DECODE_PIXEL_LIMIT })
+    .rotate() // honor EXIF orientation so the evidence isn't sideways
+    .resize({ width: THUMBNAIL_MAX_EDGE, height: THUMBNAIL_MAX_EDGE, fit: "inside", withoutEnlargement: true })
+    .flatten({ background: { r: 255, g: 255, b: 255 } })
+    .jpeg({ quality: THUMBNAIL_QUALITY, mozjpeg: true })
+    .toBuffer();
+}
+
 /**
  * Generate a thumbnail for an already-stored image and persist it to R2, returning its key (or null on
  * any miss — never throws). Pass `sourceBuffer` when the caller already holds the original bytes

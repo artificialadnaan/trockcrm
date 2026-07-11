@@ -13,6 +13,17 @@ import { resolveFrontendUrl, TROCK_LOGO_EMAIL_URL } from "./project-number-email
 
 export const FIELD_SCORECARD_EMAIL_JOB = "field_scorecard_email";
 
+// How the PDF is delivered — drives the email copy. "attached": bytes are on the email. "too_large": the
+// PDF exists and is downloadable in the CRM but was too big to attach. "unavailable": no PDF yet (still
+// generating / render failed) — the CRM will have it once ready.
+export type ScorecardPdfDeliveryStatus = "attached" | "too_large" | "unavailable";
+
+// Email providers (Resend) warn/limit around 28 MB, and base64 transfer-encoding inflates a binary
+// attachment by ~33%. Keep the raw PDF under ~20 MB so the encoded attachment stays comfortably under that
+// ceiling; a larger PDF is delivered as a CRM link instead. The server's per-report evidence cap normally
+// keeps the PDF far smaller, so this is a backstop that must never dead-letter a durable submission.
+const SCORECARD_MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
+
 export interface FieldScorecardEmailPayload {
   tenantSchema?: string;
   scorecardId?: string;
@@ -96,24 +107,37 @@ export async function handleFieldScorecardEmail(
     return;
   }
 
-  // Fetch the rendered PDF (best-effort). A missing key/object degrades to a no-attachment notification.
+  // The server delays this job so the artifact renderer normally wins the initial race. If it still cannot
+  // read the PDF, preserve the notification fallback rather than dead-lettering a durable submission.
   const pdfR2Key = normalizeText(payload.pdfR2Key);
   let attachments: SendSystemEmailAttachment[] | undefined;
+  // Track PDF availability SEPARATELY from whether we attached it: an oversized PDF exists (it's
+  // downloadable in the CRM) even though we don't attach it, and the email copy must say so rather than
+  // "still generating".
+  let pdfStatus: ScorecardPdfDeliveryStatus = "unavailable";
   if (pdfR2Key) {
     const getPdf = deps.getPdf ?? getObjectBuffer;
     let buffer: Buffer | null = null;
     try {
       buffer = await getPdf(pdfR2Key);
     } catch (err) {
-      // A missing / not-yet-readable object makes the S3 client REJECT (NoSuchKey), not return null. Treat
-      // that as "no PDF" and fall through to the no-attachment notice instead of failing the whole job —
-      // the notification still goes out and the PDF remains downloadable via the CRM.
       logger.warn("[FieldScorecardEmail] PDF fetch failed - sending without attachment", { scorecardId, pdfR2Key, err });
     }
-    if (buffer) {
-      attachments = [{ filename: scorecardPdfFilename(payload), content: buffer }];
-    } else {
+    if (!buffer) {
       logger.warn("[FieldScorecardEmail] PDF not available in R2 - sending without attachment", { scorecardId, pdfR2Key });
+    } else if (buffer.byteLength > SCORECARD_MAX_ATTACHMENT_BYTES) {
+      // Oversized PDF: it EXISTS (downloadable in the CRM); deliver the notification with a CRM link rather
+      // than attaching (or dead-lettering).
+      pdfStatus = "too_large";
+      logger.warn("[FieldScorecardEmail] PDF exceeds the safe attachment size - sending without attachment (available in the CRM)", {
+        scorecardId,
+        pdfR2Key,
+        bytes: buffer.byteLength,
+        limit: SCORECARD_MAX_ATTACHMENT_BYTES,
+      });
+    } else {
+      attachments = [{ filename: scorecardPdfFilename(payload), content: buffer }];
+      pdfStatus = "attached";
     }
   } else {
     logger.warn("[FieldScorecardEmail] No PDF key on the job - sending without attachment", { scorecardId });
@@ -129,7 +153,7 @@ export async function handleFieldScorecardEmail(
     averageScore: typeof payload.averageScore === "number" ? payload.averageScore : null,
     ratingLabel: normalizeText(payload.ratingLabel),
     submittedByName: normalizeText(payload.submittedByName),
-    hasPdf: !!attachments,
+    pdfStatus,
     officeId: normalizeText(payload.officeId),
     frontendUrl: resolveFrontendUrl(env),
   });
@@ -176,7 +200,7 @@ export function buildFieldScorecardEmail(input: {
   averageScore?: number | null;
   ratingLabel: string | null;
   submittedByName: string | null;
-  hasPdf: boolean;
+  pdfStatus: ScorecardPdfDeliveryStatus;
   officeId?: string | null;
   frontendUrl: string;
 }) {
@@ -212,9 +236,12 @@ export function buildFieldScorecardEmail(input: {
     )
     .join("");
 
-  const pdfNote = input.hasPdf
-    ? "The full scorecard is attached as a PDF."
-    : "The full scorecard PDF is still generating — open the deal in the CRM to view it.";
+  const pdfNote =
+    input.pdfStatus === "attached"
+      ? "The full scorecard is attached as a PDF."
+      : input.pdfStatus === "too_large"
+        ? "The full scorecard PDF is too large to attach — open the deal in the CRM to download it."
+        : "The full scorecard PDF is still generating — open the deal in the CRM to view it.";
 
   const html = `<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
 <html xmlns="http://www.w3.org/1999/xhtml" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office">

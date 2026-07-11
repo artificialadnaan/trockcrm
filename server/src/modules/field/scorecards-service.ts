@@ -3,7 +3,8 @@ import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
 import { deals, fieldScorecards, fieldScorecardItems, fieldScorecardPhotos, files, jobQueue } from "@trock-crm/shared/schema";
 import { generateDownloadUrl, putObject } from "../../lib/r2-client.js";
-import { buildScorecardPdfData, renderFieldScorecardPdf } from "./scorecard-pdf.js";
+import { buildScorecardPdfData, renderFieldScorecardPdf, MAX_EVIDENCE_PHOTOS } from "./scorecard-pdf.js";
+import { loadScorecardEvidenceImage, prioritizeAndCapEvidencePhotos } from "./scorecard-evidence-image.js";
 import {
   FIELD_SCORECARD_SECTION_KEYS,
   FIELD_SCORECARD_V2_SECTION_KEYS,
@@ -84,7 +85,8 @@ const SCORECARD_PDF_DOWNLOAD_EXPIRY_SECONDS = 60 * 60;
 // Give the synchronous render + R2 upload (sub-second) a head start over the worker's poll, so the email
 // job normally finds the PDF already stored. If render/upload failed, the worker degrades to a
 // no-attachment notice — the notification is never lost.
-const SCORECARD_EMAIL_RUN_AFTER_SECONDS = 30;
+const SCORECARD_EMAIL_RUN_AFTER_SECONDS = 120;
+const PDF_EVIDENCE_DOWNLOAD_CONCURRENCY = 4;
 
 /**
  * Deterministic R2 key for a scorecard's PDF. Shared by the enqueue (createFieldScorecard, which stamps it
@@ -367,15 +369,50 @@ export async function finalizeFieldScorecardArtifacts(
       .select()
       .from(fieldScorecardItems)
       .where(eq(fieldScorecardItems.scorecardId, scorecardId));
+    const photoRows = await db
+      .select({
+        sectionKey: fieldScorecardPhotos.sectionKey,
+        deficiencyKey: fieldScorecardPhotos.deficiencyKey,
+        caption: files.description,
+        r2Key: files.r2Key,
+        thumbnailR2Key: files.thumbnailR2Key,
+        mimeType: files.mimeType,
+      })
+      .from(fieldScorecardPhotos)
+      .innerJoin(files, eq(files.id, fieldScorecardPhotos.fileId))
+      .where(eq(fieldScorecardPhotos.scorecardId, scorecardId))
+      // Deterministic order (link time, then PK tie-breaker) so the downstream MAX_EVIDENCE_PHOTOS cap
+      // always keeps/drops the SAME photos across renders, not an arbitrary Postgres physical-row order.
+      .orderBy(fieldScorecardPhotos.createdAt, fieldScorecardPhotos.id);
     const [deal] = await db
       .select({ name: deals.name, dealNumber: deals.dealNumber })
       .from(deals)
       .where(eq(deals.id, card.dealId))
       .limit(1);
-    return { card, itemRows, deal: deal ?? null };
+    return { card, itemRows, photoRows, deal: deal ?? null };
   });
   if (!loaded) return;
-  const { card, itemRows, deal } = loaded;
+  const { card, itemRows, photoRows, deal } = loaded;
+
+  // Cap + prioritize BEFORE downloading bytes: a scorecard may carry up to 100 photos but the PDF embeds
+  // at most MAX_EVIDENCE_PHOTOS, so fetching/transcoding the rest is wasted R2/CPU (and lengthens the
+  // post-response render, making the email more likely to send without the PDF). Deficiency evidence is
+  // kept first; the omitted count drives the PDF's "available in the CRM" note.
+  const { keep: photosToLoad, omitted: omittedEvidenceCount } = prioritizeAndCapEvidencePhotos(photoRows, MAX_EVIDENCE_PHOTOS);
+
+  // Resolve each kept evidence tile to a small JPEG (thumbnail-first, transcoded-original fallback — see
+  // loadScorecardEvidenceImage). A miss leaves an explicit placeholder in the PDF, never a broken render.
+  const loadPhoto = async (photo: typeof photosToLoad[number]) => ({
+    sectionKey: photo.sectionKey,
+    deficiencyKey: photo.deficiencyKey ?? null,
+    caption: photo.caption ?? null,
+    image: await loadScorecardEvidenceImage(photo),
+  });
+  const photos: Awaited<ReturnType<typeof loadPhoto>>[] = [];
+  for (let index = 0; index < photosToLoad.length; index += PDF_EVIDENCE_DOWNLOAD_CONCURRENCY) {
+    const batch = photosToLoad.slice(index, index + PDF_EVIDENCE_DOWNLOAD_CONCURRENCY);
+    photos.push(...await Promise.all(batch.map(loadPhoto)));
+  }
 
   const pdfData = buildScorecardPdfData({
     dealName: deal?.name ?? "Project",
@@ -393,7 +430,10 @@ export async function finalizeFieldScorecardArtifacts(
     rating: card.rating as ScorecardRating,
     items: itemRows.map((r) => ({ sectionKey: r.sectionKey, points: r.points, note: r.note ?? null })),
     criticalDeficiencyKeys: card.criticalDeficiencies ?? [],
+    criticalDeficiencyNotes: card.criticalDeficiencyNotes ?? {},
     actionItems: card.actionItems ?? [],
+    photos,
+    omittedEvidenceCount,
   });
   const bucket = process.env.R2_BUCKET_NAME || "trock-crm-files";
   // Same deterministic key the enqueue (createFieldScorecard) stamped into the job payload.
