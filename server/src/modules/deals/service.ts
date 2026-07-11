@@ -1609,7 +1609,14 @@ async function validateDealPrimaryContact(
 // permits soft-deleted contacts, so without this a stale/archived id (e.g. a search result deleted or merged
 // between select and save) would persist as the deal's billing contact (Codex P2).
 // Exported for the runtime SQL test (deal-billing-contact-validation.runtime.test.ts).
-export async function validateDealBillingContact(tenantDb: TenantDb, billingContactId?: string | null) {
+// `requireCompleteAddress` (default true) gates the complete-address requirement: updateDeal passes false when
+// the PATCH echoes the deal's EXISTING billing contact (unchanged), so a legacy address-less billing contact
+// isn't retroactively forced to be cleaned up — the requirement is forward-only, only on a NEW assignment.
+export async function validateDealBillingContact(
+  tenantDb: TenantDb,
+  billingContactId?: string | null,
+  opts?: { requireCompleteAddress?: boolean },
+) {
   if (!billingContactId) {
     return;
   }
@@ -1637,11 +1644,11 @@ export async function validateDealBillingContact(tenantDb: TenantDb, billingCont
     throw new AppError(400, "Billing contact not found or is inactive");
   }
 
-  // A billing contact must carry a complete mailing address to be invoiceable. Enforced here — forward-only,
-  // since it only runs when someone assigns a billing contact — so an address-less contact can't satisfy the
-  // deal's billing requirement. Mirrors the client, which forces the address before assigning; the shared
-  // validator keeps both sides on the same rule.
-  if (!isCompleteBillingAddress(contact)) {
+  // A billing contact must carry a complete mailing address to be invoiceable — enforced only when the contact
+  // is being NEWLY assigned (requireCompleteAddress), so re-saving a deal that keeps its existing address-less
+  // billing contact stays forward-only. Mirrors the client, which forces the address before assigning; the
+  // shared validator keeps both sides on the same rule.
+  if (opts?.requireCompleteAddress !== false && !isCompleteBillingAddress(contact)) {
     throw new AppError(400, "Billing contact needs a complete mailing address (street, city, state, and ZIP).");
   }
 }
@@ -2426,7 +2433,18 @@ export async function updateDeal(
   // TOCTOU guard is unchanged, and updates.billingContactId is set verbatim from input.billingContactId (no
   // normalization), so validating input.billingContactId here is equivalent to the old post-lock call (Codex P2).
   if (input.billingContactId !== undefined) {
-    await validateDealBillingContact(tenantDb, input.billingContactId ?? null);
+    // Only require a complete address when the billing contact is actually CHANGING. A non-locking read of the
+    // deal's current billing contact lets a PATCH that echoes the unchanged id (e.g. a full-resource save
+    // editing an unrelated field) skip the address requirement, so a legacy address-less billing contact isn't
+    // retroactively forced to be fixed — forward-only (Codex P2). The active-contact + FOR UPDATE guard below
+    // still runs regardless.
+    const [currentDeal] = await tenantDb
+      .select({ billingContactId: deals.billingContactId })
+      .from(deals)
+      .where(eq(deals.id, dealId))
+      .limit(1);
+    const isNewBillingContact = (input.billingContactId ?? null) !== (currentDeal?.billingContactId ?? null);
+    await validateDealBillingContact(tenantDb, input.billingContactId ?? null, { requireCompleteAddress: isNewBillingContact });
   }
 
   // Lock the deal row before deriving hold timing so stage changes and hold

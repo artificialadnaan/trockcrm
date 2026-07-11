@@ -66,4 +66,12 @@ describe("validateDealBillingContact", () => {
   it("REJECTS an active contact with a PARTIAL address (missing state/ZIP)", async () => {
     await expect(validateDealBillingContact(tdb, PARTIAL)).rejects.toThrow(/complete.*address/i);
   });
+
+  it("skips the address requirement when requireCompleteAddress is false (forward-only: unchanged contact)", async () => {
+    // updateDeal passes false when a PATCH echoes the deal's existing billing contact, so a legacy address-less
+    // billing contact isn't retroactively forced to be cleaned up.
+    await expect(validateDealBillingContact(tdb, NO_ADDRESS, { requireCompleteAddress: false })).resolves.toBeUndefined();
+    // ...but the active-contact guard still runs even when the address isn't required.
+    await expect(validateDealBillingContact(tdb, INACTIVE, { requireCompleteAddress: false })).rejects.toThrow(/not found or is inactive/i);
+  });
 });
