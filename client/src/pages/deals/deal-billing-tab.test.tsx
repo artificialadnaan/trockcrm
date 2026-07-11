@@ -428,6 +428,24 @@ describe("DealBillingTab", () => {
     expect(onDealUpdated).not.toHaveBeenCalled();
   });
 
+  it("rejects a stale/inactive picked contact instead of opening the address prompt", async () => {
+    mocks.apiMock.mockImplementation((url: string) => {
+      if (url.includes("/contacts/search")) return Promise.resolve({ contacts: [{ id: "c-dead", firstName: "Gone", lastName: "Contact", email: null, companyName: null, category: "client" }] });
+      // Deleted/merged after the search loaded — GET still returns the inactive row.
+      if (url === "/contacts/c-dead") return Promise.resolve({ contact: { address: null, city: null, state: null, zip: null, isActive: false } });
+      return Promise.resolve({ deal: dealWithBilling });
+    });
+    const onDealUpdated = vi.fn();
+    const { container } = await render(dealNoBilling, onDealUpdated);
+    await act(async () => { setValue(container.querySelector("input") as HTMLInputElement, "gone"); });
+    await act(async () => { await Promise.resolve(); });
+    await act(async () => { (Array.from(document.querySelectorAll("button")).find((n) => n.textContent?.includes("Gone Contact")) as HTMLElement).click(); });
+    await act(async () => { await Promise.resolve(); });
+    expect(document.body.textContent).toContain("no longer available");
+    expect(document.body.textContent).not.toContain("needs a billing address"); // no prompt opened
+    expect(onDealUpdated).not.toHaveBeenCalled();
+  });
+
   it("ignores a stale contact-search response that resolves after a newer query (searchSeq guard)", async () => {
     let resolveOld: ((v: unknown) => void) | undefined;
     let resolveNew: ((v: unknown) => void) | undefined;

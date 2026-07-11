@@ -1609,16 +1609,16 @@ async function validateDealPrimaryContact(
 // permits soft-deleted contacts, so without this a stale/archived id (e.g. a search result deleted or merged
 // between select and save) would persist as the deal's billing contact (Codex P2).
 // Exported for the runtime SQL test (deal-billing-contact-validation.runtime.test.ts).
-// `requireCompleteAddress` (default true) gates the complete-address requirement: updateDeal passes false when
-// the PATCH echoes the deal's EXISTING billing contact (unchanged), so a legacy address-less billing contact
-// isn't retroactively forced to be cleaned up — the requirement is forward-only, only on a NEW assignment.
+// Locks + validates the contact is active (throws otherwise) and RETURNS whether its mailing address is
+// complete. It does NOT throw on an incomplete address — the caller decides whether to enforce that, because
+// the forward-only rule (require a complete address only on a NEW assignment) depends on the deal's CURRENT
+// billing contact, which must be read from the LOCKED deal row to avoid a stale-read race (Codex P2).
 export async function validateDealBillingContact(
   tenantDb: TenantDb,
   billingContactId?: string | null,
-  opts?: { requireCompleteAddress?: boolean },
-) {
+): Promise<{ addressComplete: boolean }> {
   if (!billingContactId) {
-    return;
+    return { addressComplete: true };
   }
 
   // FOR UPDATE locks the active contact row for the rest of updateDeal's transaction so a concurrent
@@ -1644,13 +1644,7 @@ export async function validateDealBillingContact(
     throw new AppError(400, "Billing contact not found or is inactive");
   }
 
-  // A billing contact must carry a complete mailing address to be invoiceable — enforced only when the contact
-  // is being NEWLY assigned (requireCompleteAddress), so re-saving a deal that keeps its existing address-less
-  // billing contact stays forward-only. Mirrors the client, which forces the address before assigning; the
-  // shared validator keeps both sides on the same rule.
-  if (opts?.requireCompleteAddress !== false && !isCompleteBillingAddress(contact)) {
-    throw new AppError(400, "Billing contact needs a complete mailing address (street, city, state, and ZIP).");
-  }
+  return { addressComplete: isCompleteBillingAddress(contact) };
 }
 
 async function assertSourceLeadLineageAvailable(
@@ -2433,18 +2427,23 @@ export async function updateDeal(
   // TOCTOU guard is unchanged, and updates.billingContactId is set verbatim from input.billingContactId (no
   // normalization), so validating input.billingContactId here is equivalent to the old post-lock call (Codex P2).
   if (input.billingContactId !== undefined) {
-    // Only require a complete address when the billing contact is actually CHANGING. A non-locking read of the
-    // deal's current billing contact lets a PATCH that echoes the unchanged id (e.g. a full-resource save
-    // editing an unrelated field) skip the address requirement, so a legacy address-less billing contact isn't
-    // retroactively forced to be fixed — forward-only (Codex P2). The active-contact + FOR UPDATE guard below
-    // still runs regardless.
+    // Lock + validate the contact FIRST (contact-before-deal order avoids an ABBA deadlock with deleteContact/
+    // mergeContacts) and capture whether its address is complete. THEN lock the deal row so the "is this a NEW
+    // assignment?" decision reads the AUTHORITATIVE current billing contact — a pre-lock read could be stale
+    // under concurrent PATCHes and let an incomplete contact overwrite a freshly-assigned complete one. The
+    // complete-address requirement is forward-only: enforced only on a genuine change, so re-saving a deal that
+    // keeps its existing (legacy, address-less) billing contact stays valid (Codex P2).
+    const { addressComplete } = await validateDealBillingContact(tenantDb, input.billingContactId ?? null);
     const [currentDeal] = await tenantDb
       .select({ billingContactId: deals.billingContactId })
       .from(deals)
       .where(eq(deals.id, dealId))
-      .limit(1);
+      .limit(1)
+      .for("update");
     const isNewBillingContact = (input.billingContactId ?? null) !== (currentDeal?.billingContactId ?? null);
-    await validateDealBillingContact(tenantDb, input.billingContactId ?? null, { requireCompleteAddress: isNewBillingContact });
+    if (input.billingContactId != null && isNewBillingContact && !addressComplete) {
+      throw new AppError(400, "Billing contact needs a complete mailing address (street, city, state, and ZIP).");
+    }
   }
 
   // Lock the deal row before deriving hold timing so stage changes and hold

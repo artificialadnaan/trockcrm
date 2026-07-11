@@ -42,13 +42,13 @@ afterAll(async () => {
 });
 
 describe("validateDealBillingContact", () => {
-  it("resolves when there is no billing contact to validate (null / undefined)", async () => {
-    await expect(validateDealBillingContact(tdb, null)).resolves.toBeUndefined();
-    await expect(validateDealBillingContact(tdb, undefined)).resolves.toBeUndefined();
+  it("reports addressComplete=true when there is no billing contact to validate (null / undefined)", async () => {
+    await expect(validateDealBillingContact(tdb, null)).resolves.toEqual({ addressComplete: true });
+    await expect(validateDealBillingContact(tdb, undefined)).resolves.toEqual({ addressComplete: true });
   });
 
-  it("resolves for an ACTIVE contact with a complete address", async () => {
-    await expect(validateDealBillingContact(tdb, ACTIVE)).resolves.toBeUndefined();
+  it("reports addressComplete=true for an ACTIVE contact with a complete address", async () => {
+    await expect(validateDealBillingContact(tdb, ACTIVE)).resolves.toEqual({ addressComplete: true });
   });
 
   it("REJECTS an inactive / soft-deleted contact (the stale-id guard, Codex P2)", async () => {
@@ -59,19 +59,14 @@ describe("validateDealBillingContact", () => {
     await expect(validateDealBillingContact(tdb, U("f99"))).rejects.toThrow(/not found or is inactive/i);
   });
 
-  it("REJECTS an active contact with NO address (needs a billing address)", async () => {
-    await expect(validateDealBillingContact(tdb, NO_ADDRESS)).rejects.toThrow(/complete.*address/i);
+  // It reports incompleteness rather than throwing — updateDeal decides whether to enforce, based on the LOCKED
+  // deal row (forward-only: only on a new assignment). This keeps the active-contact + FOR UPDATE guard here
+  // (contact-before-deal lock order) while moving the change-detection to after the deal is locked (Codex P2).
+  it("reports addressComplete=false for an active contact with NO address (does not throw)", async () => {
+    await expect(validateDealBillingContact(tdb, NO_ADDRESS)).resolves.toEqual({ addressComplete: false });
   });
 
-  it("REJECTS an active contact with a PARTIAL address (missing state/ZIP)", async () => {
-    await expect(validateDealBillingContact(tdb, PARTIAL)).rejects.toThrow(/complete.*address/i);
-  });
-
-  it("skips the address requirement when requireCompleteAddress is false (forward-only: unchanged contact)", async () => {
-    // updateDeal passes false when a PATCH echoes the deal's existing billing contact, so a legacy address-less
-    // billing contact isn't retroactively forced to be cleaned up.
-    await expect(validateDealBillingContact(tdb, NO_ADDRESS, { requireCompleteAddress: false })).resolves.toBeUndefined();
-    // ...but the active-contact guard still runs even when the address isn't required.
-    await expect(validateDealBillingContact(tdb, INACTIVE, { requireCompleteAddress: false })).rejects.toThrow(/not found or is inactive/i);
+  it("reports addressComplete=false for an active contact with a PARTIAL address (missing state/ZIP)", async () => {
+    await expect(validateDealBillingContact(tdb, PARTIAL)).resolves.toEqual({ addressComplete: false });
   });
 });

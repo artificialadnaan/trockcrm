@@ -134,7 +134,15 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
     setAssignError(null);
     setPickError(null);
     try {
-      const { contact: full } = await api<{ contact: AddrForm }>(`/contacts/${contact.id}`, getOfficeRequestOptions(officeId));
+      const { contact: full } = await api<{ contact: AddrForm & { isActive?: boolean } }>(`/contacts/${contact.id}`, getOfficeRequestOptions(officeId));
+      // A stale search/dedup result can point at a contact that was deleted or merged after the list loaded —
+      // GET /contacts/:id still returns the inactive row. Reject it up front instead of letting the rep fill the
+      // address prompt and PATCH a soft-deleted contact only for the deal assignment to fail (Codex P2).
+      if (full.isActive === false) {
+        setSaving(false);
+        setPickError("That contact is no longer available (it was deleted or merged) — please search again.");
+        return;
+      }
       if (isCompleteBillingAddress(full)) {
         await assign(contact.id); // assign() clears `saving`
         return;
