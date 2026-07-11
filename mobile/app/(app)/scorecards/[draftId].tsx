@@ -488,6 +488,12 @@ function Wizard(props: {
         )}
       </ScrollView>
 
+      {step === 0 && !validation.canSubmit ? (
+        <View style={styles.submitBlockBanner}>
+          <Banner tone="error" message={submitBlockMessage(validation)} />
+        </View>
+      ) : null}
+
       <View style={styles.footer}>
         <View style={styles.totalPill}>
           <Text style={styles.totalText}>{total}/100</Text>
@@ -970,6 +976,15 @@ function ReviewStep({ draft, onEditStep }: { draft: ScorecardDraft; onEditStep: 
   );
 }
 
+// The one-page reason Submit is blocked, surfaced as a banner above the footer button (the multi-step
+// ReviewStep that also computed this is not part of the current single-screen flow).
+function submitBlockMessage(v: ReturnType<typeof validateScorecardDraft>): string {
+  if (v.missingSections.length > 0) return `Score all ${SECTION_COUNT} sections to submit (${v.missingSections.length} left).`;
+  if (v.missingSignatures) return "Add the Superintendent and Project Manager signatures to submit.";
+  if (v.missingWeekOf) return "Set the Week Of date to submit.";
+  return "Complete the required fields to submit.";
+}
+
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <View style={{ gap: theme.space.xs }}>
@@ -1067,6 +1082,7 @@ const styles = StyleSheet.create({
   signatureCanvas: { overflow: "hidden", borderWidth: 1, borderColor: theme.color.border, borderRadius: theme.radius.md, backgroundColor: theme.color.surfaceCard },
   signatureControls: { flexDirection: "row", gap: theme.space.md },
   signatureEmptyWarning: { fontFamily: theme.font.semibold, fontSize: 13, color: theme.color.brandRed },
+  submitBlockBanner: { paddingHorizontal: theme.space.lg, paddingBottom: theme.space.sm },
   signatureTrigger: { gap: 3, borderWidth: 1, borderColor: theme.color.border, borderRadius: theme.radius.md, backgroundColor: theme.color.surfaceCard, padding: theme.space.md },
   signatureTriggerLabel: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.textPrimary },
   signatureTriggerValue: { fontFamily: theme.font.body, fontSize: 13, color: theme.color.brandRed },
