@@ -12,6 +12,7 @@ import {
 } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
+import { billingAddressToAbsorb } from "../../lib/billing-address.js";
 import { transferAssociations } from "./association-service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -184,7 +185,12 @@ export async function mergeContacts(
   if (!winnerContact.mobile && loserContact.mobile) absorb.mobile = loserContact.mobile;
   if (!winnerContact.companyName && loserContact.companyName) absorb.companyName = loserContact.companyName;
   if (!winnerContact.jobTitle && loserContact.jobTitle) absorb.jobTitle = loserContact.jobTitle;
-  if (!winnerContact.address && loserContact.address) absorb.address = loserContact.address;
+  // Absorb the loser's mailing address as a UNIT when the winner's is incomplete but the loser's is complete —
+  // so merging a complete billing contact into an address-less/partial winner leaves the winner (now the deal's
+  // billing contact, per the repoint above) with a full address, not a mixed/incomplete one. Fixes the prior
+  // street-only absorption that dropped city/state/ZIP (Codex P2).
+  const billingAbsorb = billingAddressToAbsorb(winnerContact, loserContact);
+  if (billingAbsorb) Object.assign(absorb, billingAbsorb);
 
   // 7. Sum touchpoint counts and keep most recent last_contacted_at
   absorb.touchpointCount = (winnerContact.touchpointCount ?? 0) + (loserContact.touchpointCount ?? 0);

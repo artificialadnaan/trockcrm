@@ -4,6 +4,7 @@ import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { activities, companies, contacts, contactDealAssociations, deals, emails, tasks, users } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
+import { updateBreaksBillingAddress } from "../../lib/billing-address.js";
 import { buildContactSearchCondition } from "../search/unified-search.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -746,6 +747,21 @@ export async function updateContact(
 
   if (Object.keys(updates).length === 0) {
     return existing;
+  }
+
+  // Don't let a contact edit strip the address off a contact that's actively the billing contact on a deal —
+  // that would silently leave the deal with an un-invoiceable billing contact, bypassing the assign-time gate.
+  // Forward-only: only a complete -> incomplete change is blocked; an already-incomplete address isn't forced
+  // to be cleaned up (Codex P2).
+  if (updateBreaksBillingAddress(existing, updates)) {
+    const [billingRef] = await tenantDb
+      .select({ id: deals.id })
+      .from(deals)
+      .where(and(eq(deals.billingContactId, contactId), eq(deals.isActive, true)))
+      .limit(1);
+    if (billingRef) {
+      throw new AppError(400, "This contact is the billing contact on an active deal — keep a complete mailing address (street, city, state, and ZIP).");
+    }
   }
 
   const result = await tenantDb
