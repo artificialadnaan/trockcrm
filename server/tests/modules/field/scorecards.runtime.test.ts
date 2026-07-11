@@ -8,7 +8,7 @@ import {
   listRecentFieldScorecards,
   getFieldScorecardDetail,
 } from "../../../src/modules/field/scorecards-service.js";
-import { fieldScorecards, fieldScorecardItems, fieldScorecardPhotos } from "@trock-crm/shared/schema";
+import { fieldScorecards, fieldScorecardItems, fieldScorecardPhotos, dealTeamMembers, contacts } from "@trock-crm/shared/schema";
 import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
 
 const DEAL = "11111111-1111-1111-1111-111111111111";
@@ -89,8 +89,11 @@ beforeAll(async () => {
       last_error text, started_processing_at timestamptz, run_after timestamptz NOT NULL DEFAULT now(),
       created_at timestamptz NOT NULL DEFAULT now(), completed_at timestamptz
     );
+    -- createFieldScorecard resolves the deal's superintendent/PM emails from deal_team_members → user/contact
+    -- at enqueue time; these islands let that read run (no members inserted → both emails resolve null).
+    CREATE TABLE public.users (id uuid PRIMARY KEY, display_name text, email text, avatar_url text);
   `);
-  await pg.exec(tenantSchemaSql("public", [fieldScorecards, fieldScorecardItems, fieldScorecardPhotos]));
+  await pg.exec(tenantSchemaSql("public", [fieldScorecards, fieldScorecardItems, fieldScorecardPhotos, dealTeamMembers, contacts]));
   await pg.exec(
     `ALTER TABLE public.field_scorecards ADD CONSTRAINT field_scorecards_csid_uniq UNIQUE (client_submission_id);`,
   );

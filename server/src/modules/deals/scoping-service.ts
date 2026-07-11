@@ -1435,14 +1435,26 @@ async function resolveRevisionTaskAssignee(
         return leftCreatedAt - rightCreatedAt;
       }
 
-      if (left.userId !== right.userId) {
-        return left.userId.localeCompare(right.userId);
+      // userId is nullable since a team member can be a directory contact instead of a staff user; an
+      // estimator is always a staff user, but coalesce defensively so the tie-break stays total.
+      const leftUserId = left.userId ?? "";
+      const rightUserId = right.userId ?? "";
+      if (leftUserId !== rightUserId) {
+        return leftUserId.localeCompare(rightUserId);
       }
 
       return left.id.localeCompare(right.id);
     });
 
-  return estimator?.userId ?? deal.assignedRepId;
+  // Prefer the assigned estimator (a staff user → always has userId), else the deal's assigned rep. Both
+  // sides are nullable at the type level (estimator may be absent; assigned_rep_id is nullable), but this
+  // routing only fires for a deal in estimating, which always has a rep — guard so a genuinely
+  // assignee-less deal fails loudly instead of hitting the tasks.assigned_to NOT NULL at insert time.
+  const assignee = estimator?.userId ?? deal.assignedRepId;
+  if (!assignee) {
+    throw new AppError(409, "Cannot route the estimate revision: the deal has no estimator or assigned rep.");
+  }
+  return assignee;
 }
 
 export async function routeRevisionToEstimating(

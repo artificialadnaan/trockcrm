@@ -131,6 +131,61 @@ describe("handleFieldScorecardEmail", () => {
     expect(sendEmail.mock.calls[0][3].attachments).toBeUndefined();
   });
 
+  it("sends to the deal's superintendent + project-manager emails from the payload (union with the env list)", async () => {
+    const { query } = makeQuery(null);
+    const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "m-team" });
+    const getPdf = vi.fn().mockResolvedValue(Buffer.from("%PDF-fake"));
+    await handleFieldScorecardEmail(
+      payload({ superintendentEmail: "super@trockgc.com", projectManagerEmail: "pm@trockgc.com" }),
+      null,
+      { query, env: PROD, logger: silent, sendEmail, getPdf },
+    );
+    const to = sendEmail.mock.calls[0][0] as string[];
+    // env recipient + both team emails, in that order.
+    expect(to).toEqual(["ops@trock.com", "super@trockgc.com", "pm@trockgc.com"]);
+  });
+
+  it("dedupes a team email that's already in the env recipient list (case-insensitively)", async () => {
+    const { query } = makeQuery(null);
+    const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "m-dupe" });
+    const getPdf = vi.fn().mockResolvedValue(Buffer.from("%PDF-fake"));
+    await handleFieldScorecardEmail(
+      // super duplicates the env recipient (different case); PM is new.
+      payload({ superintendentEmail: "OPS@trock.com", projectManagerEmail: "pm@trockgc.com" }),
+      null,
+      { query, env: PROD, logger: silent, sendEmail, getPdf },
+    );
+    const to = sendEmail.mock.calls[0][0] as string[];
+    expect(to).toEqual(["ops@trock.com", "pm@trockgc.com"]); // the case-insensitive duplicate is dropped
+  });
+
+  it("still sends when the env list is empty but the deal has a super/PM email (union is non-empty)", async () => {
+    const { query } = makeQuery(null);
+    const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "m-noenv" });
+    const getPdf = vi.fn().mockResolvedValue(Buffer.from("%PDF-fake"));
+    // Prod env with NO FIELD_SCORECARD_EMAIL_RECIPIENTS → env list resolves to [].
+    await handleFieldScorecardEmail(
+      payload({ superintendentEmail: "super@trockgc.com", projectManagerEmail: null }),
+      null,
+      { query, env: { NODE_ENV: "production" } as NodeJS.ProcessEnv, logger: silent, sendEmail, getPdf },
+    );
+    expect(sendEmail).toHaveBeenCalledTimes(1);
+    expect(sendEmail.mock.calls[0][0]).toEqual(["super@trockgc.com"]);
+  });
+
+  it("ignores blank/malformed team emails and throws when the union is empty (env unset + no valid team email)", async () => {
+    const { query } = makeQuery(null);
+    const sendEmail = vi.fn();
+    await expect(
+      handleFieldScorecardEmail(
+        payload({ superintendentEmail: "   ", projectManagerEmail: "not-an-email" }),
+        null,
+        { query, env: { NODE_ENV: "production" } as NodeJS.ProcessEnv, logger: silent, sendEmail, getPdf: vi.fn() },
+      ),
+    ).rejects.toThrow(/FIELD_SCORECARD_EMAIL_RECIPIENTS/);
+    expect(sendEmail).not.toHaveBeenCalled();
+  });
+
   it("skips a scorecard that no longer exists", async () => {
     const { query } = makeQuery("notfound");
     const sendEmail = vi.fn();

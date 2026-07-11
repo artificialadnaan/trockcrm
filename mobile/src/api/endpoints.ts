@@ -30,6 +30,7 @@ import type {
   ProjectScorecardsResponse,
   ScorecardDetailResponse,
   ScorecardDownloadResponse,
+  DealTeamResponse,
 } from "./types";
 import type { ScorecardSubmissionPayload } from "../scorecards/draft";
 
@@ -173,3 +174,10 @@ export const getScorecard = (f: Fetcher, id: string) =>
 // (view/[id].tsx) turns that into a "still generating" toast rather than a crash.
 export const getScorecardDownload = (f: Fetcher, id: string) =>
   f<ScorecardDownloadResponse>(`/field/scorecards/${id}/download`);
+
+// The deal's assigned team (same endpoint the web Team tab uses) — used ONLY to best-effort pre-fill a
+// new scorecard's Superintendent/PM names. Not a field-app-scoped route: reachable for CRM-role field
+// users (admin/director/rep/construction) and 403s for a pure field_contractor, which the caller swallows
+// as part of the best-effort pre-fill (the names simply stay empty, as they were before).
+export const getDealTeam = (f: Fetcher, dealId: string) =>
+  f<DealTeamResponse>(`/deals/${dealId}/team`);

@@ -5,9 +5,11 @@ import { useFocusEffect, useRouter } from "expo-router";
 import { useQuery } from "@tanstack/react-query";
 import { theme } from "../../../src/theme/theme";
 import { useAuth } from "../../../src/auth/AuthContext";
-import { getRecentScorecards } from "../../../src/api/endpoints";
+import { getRecentScorecards, getDealTeam } from "../../../src/api/endpoints";
 import {
   createScorecardDraft,
+  resolveScorecardTeamNames,
+  seedScorecardDraftTeam,
   scorecardDraftSectionsAnswered,
   type ScorecardDraft,
 } from "../../../src/scorecards/draft";
@@ -75,7 +77,7 @@ export default function ScorecardsScreen() {
     setPickerOpen(false);
     if (!ownerKey) return;
     const id = newClientUploadId();
-    const draft = createScorecardDraft({
+    let draft = createScorecardDraft({
       id,
       clientSubmissionId: newSubmissionId(),
       dealId: target.id,
@@ -84,6 +86,16 @@ export default function ScorecardsScreen() {
       weekOf: todayIso(),
       now: Date.now(),
     });
+    // Best-effort pre-fill of the Superintendent/PM names from the deal's assigned team (the same
+    // /deals/:id/team endpoint the web uses). ANY failure — network, 403 for a pure field_contractor,
+    // or a malformed body — silently leaves the fields empty (today's behavior). It must never block or
+    // crash draft creation, and it only seeds BLANK fields, so the names stay fully editable afterwards.
+    try {
+      const { members } = await getDealTeam(fetcher, target.id);
+      draft = seedScorecardDraftTeam(draft, resolveScorecardTeamNames(members ?? []));
+    } catch {
+      /* leave super/PM empty */
+    }
     await saveScorecardDraft(ownerKey, draft, Date.now());
     router.push({ pathname: "/(app)/scorecards/[draftId]", params: { draftId: id } });
   }

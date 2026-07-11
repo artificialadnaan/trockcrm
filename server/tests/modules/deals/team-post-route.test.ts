@@ -1,0 +1,183 @@
+import { describe, expect, it, vi, beforeEach } from "vitest";
+
+// Route-handler-direct harness (mirrors read-routes-office-access.test.ts): mock the deals router's
+// service deps, mount the real router, invoke the POST /:id/team handler directly. Locks the one-of
+// (userId XOR contactId) validation + the referenced-entity existence checks the route enforces before
+// it delegates to addTeamMember.
+
+const serviceMocks = vi.hoisted(() => ({
+  getDealById: vi.fn(async () => ({ id: "deal-1", name: "Maple St" })),
+}));
+const teamMocks = vi.hoisted(() => ({
+  addTeamMember: vi.fn(async (_db: any, input: any) => ({ id: "member-1", ...input })),
+  getTeamMembers: vi.fn(),
+  updateTeamMember: vi.fn(),
+  removeTeamMember: vi.fn(),
+}));
+const usersMock = vi.hoisted(() => ({ listUsers: vi.fn(async () => [] as any[]) }));
+const contactsMock = vi.hoisted(() => ({ getContactById: vi.fn(async () => null as any) }));
+
+vi.mock("../../../src/modules/deals/service.js", () => ({
+  getDealById: serviceMocks.getDealById,
+  getDeals: vi.fn(),
+  getDealsForPipeline: vi.fn(),
+  getDealDetail: vi.fn(),
+  getEstimatingBoundaryStage: vi.fn(),
+  getRequiredEstimatingBoundaryStage: vi.fn(),
+  isBidBoardOwnedDownstreamStage: vi.fn(),
+  buildBidBoardOwnershipState: vi.fn(),
+  BID_BOARD_STAGE_READ_ONLY_MESSAGE: "read only",
+  createDeal: vi.fn(),
+  updateDeal: vi.fn(),
+  startProposalDraft: vi.fn(),
+  deleteDeal: vi.fn(),
+  listDealStagePage: vi.fn(),
+  getDealSources: vi.fn(),
+  setDealContractSignedDate: vi.fn(),
+}));
+vi.mock("../../../src/modules/deals/team-service.js", () => teamMocks);
+vi.mock("../../../src/modules/admin/users-service.js", () => usersMock);
+vi.mock("../../../src/modules/contacts/service.js", () => contactsMock);
+vi.mock("../../../src/modules/deals/stage-change.js", () => ({ activateServiceHandoff: vi.fn(), changeDealStage: vi.fn() }));
+vi.mock("../../../src/modules/deals/stage-gate.js", () => ({ preflightStageCheck: vi.fn() }));
+vi.mock("../../../src/modules/contacts/association-service.js", () => ({ getContactsForDeal: vi.fn() }));
+vi.mock("../../../src/modules/deals/estimate-service.js", () => ({
+  getEstimate: vi.fn(), createSection: vi.fn(), updateSection: vi.fn(), deleteSection: vi.fn(),
+  createLineItem: vi.fn(), updateLineItem: vi.fn(), deleteLineItem: vi.fn(),
+}));
+vi.mock("../../../src/modules/deals/punch-list-service.js", () => ({
+  getPunchList: vi.fn(), createPunchListItem: vi.fn(), updatePunchListItem: vi.fn(),
+  deletePunchListItem: vi.fn(), completePunchListItem: vi.fn(),
+}));
+vi.mock("../../../src/modules/deals/timer-service.js", () => ({
+  getTimers: vi.fn(), createTimer: vi.fn(), completeTimer: vi.fn(), cancelTimer: vi.fn(),
+}));
+vi.mock("../../../src/modules/deals/closeout-service.js", () => ({
+  getCloseoutChecklist: vi.fn(), initializeCloseoutChecklist: vi.fn(), toggleChecklistItem: vi.fn(), updateChecklistItem: vi.fn(),
+}));
+vi.mock("../../../src/modules/deals/scoping-service.js", () => ({
+  evaluateDealScopingReadiness: vi.fn(), getOrCreateDealScopingIntake: vi.fn(),
+  linkDealFileToScopingRequirement: vi.fn(), routeRevisionToEstimating: vi.fn(), upsertDealScopingIntake: vi.fn(),
+}));
+vi.mock("../../../src/modules/deals/lineage-resolver.js", () => ({ writeResolvedDealFields: vi.fn() }));
+vi.mock("../../../src/modules/deals/workflow-backfill.js", () => ({ inferDealBidBoardOwnership: vi.fn() }));
+vi.mock("../../../src/lib/collaboration-access.js", () => ({
+  assertDealCollaboratorAccess: vi.fn(), assertDealOwnerAccess: vi.fn(),
+  getCollaborativeReadRole: vi.fn((role: string) => role),
+  normalizeCollaborativeScope: vi.fn((_role: string, scope: any) => scope ?? "mine"),
+}));
+vi.mock("../../../src/events/bus.js", () => ({
+  eventBus: { emitLocal: vi.fn(), on: vi.fn(), emit: vi.fn(), setMaxListeners: vi.fn() },
+}));
+
+const { dealRoutes } = await import("../../../src/modules/deals/routes.js");
+
+function findRouteHandler(method: string, path: string) {
+  const layer = (dealRoutes as any).stack.find(
+    (entry: any) => entry.route?.path === path && entry.route?.methods?.[method],
+  );
+  if (!layer) throw new Error(`Route ${method.toUpperCase()} ${path} not found`);
+  return layer.route.stack.find((entry: any) => entry.method === method).handle;
+}
+
+async function postTeam(body: any) {
+  const handler = findRouteHandler("post", "/:id/team");
+  const req = {
+    params: { id: "deal-1" },
+    query: {},
+    body,
+    tenantDb: {},
+    user: { id: "rep-1", role: "rep", officeId: "office-1", activeOfficeId: "office-1" },
+    commitTransaction: vi.fn(async () => {}),
+  } as any;
+  const res = {
+    statusCode: 200,
+    body: undefined as any,
+    status(code: number) { this.statusCode = code; return this; },
+    json(payload: any) { this.body = payload; return this; },
+    send() { return this; },
+  } as any;
+  let nextErr: any;
+  await handler(req, res, (err?: unknown) => { nextErr = err; });
+  return { res, nextErr };
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  serviceMocks.getDealById.mockResolvedValue({ id: "deal-1", name: "Maple St" } as any);
+  usersMock.listUsers.mockResolvedValue([] as any);
+  contactsMock.getContactById.mockResolvedValue(null as any);
+});
+
+describe("POST /:id/team one-of validation", () => {
+  it("400s when neither userId nor contactId is provided", async () => {
+    const { nextErr } = await postTeam({ role: "superintendent" });
+    expect(nextErr).toMatchObject({ statusCode: 400 });
+    expect(String(nextErr.message)).toMatch(/exactly one of userId or contactId/i);
+    expect(teamMocks.addTeamMember).not.toHaveBeenCalled();
+  });
+
+  it("400s when BOTH userId and contactId are provided", async () => {
+    const { nextErr } = await postTeam({ userId: "u-1", contactId: "c-1", role: "superintendent" });
+    expect(nextErr).toMatchObject({ statusCode: 400 });
+    expect(String(nextErr.message)).toMatch(/exactly one of userId or contactId/i);
+  });
+
+  it("400s for an invalid role", async () => {
+    const { nextErr } = await postTeam({ userId: "u-1", role: "not_a_role" });
+    expect(nextErr).toMatchObject({ statusCode: 400 });
+    expect(String(nextErr.message)).toMatch(/invalid role/i);
+  });
+});
+
+describe("POST /:id/team user assignment", () => {
+  it("assigns an active in-office user", async () => {
+    usersMock.listUsers.mockResolvedValue([{ id: "u-1", isActive: true }] as any);
+    const { res, nextErr } = await postTeam({ userId: "u-1", role: "project_manager" });
+    expect(nextErr).toBeUndefined();
+    expect(res.statusCode).toBe(201);
+    expect(teamMocks.addTeamMember).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ userId: "u-1", contactId: null, role: "project_manager" }),
+    );
+  });
+
+  it("400s when the user is not an active member of the office", async () => {
+    usersMock.listUsers.mockResolvedValue([{ id: "u-1", isActive: false }] as any);
+    const { nextErr } = await postTeam({ userId: "u-1", role: "project_manager" });
+    expect(nextErr).toMatchObject({ statusCode: 400 });
+    expect(teamMocks.addTeamMember).not.toHaveBeenCalled();
+  });
+
+  it("400s when the user is not in the office roster at all", async () => {
+    usersMock.listUsers.mockResolvedValue([{ id: "someone-else", isActive: true }] as any);
+    const { nextErr } = await postTeam({ userId: "u-1", role: "project_manager" });
+    expect(nextErr).toMatchObject({ statusCode: 400 });
+  });
+});
+
+describe("POST /:id/team contact assignment", () => {
+  it("assigns an active directory contact", async () => {
+    contactsMock.getContactById.mockResolvedValue({ id: "c-1", isActive: true } as any);
+    const { res, nextErr } = await postTeam({ contactId: "c-1", role: "superintendent" });
+    expect(nextErr).toBeUndefined();
+    expect(res.statusCode).toBe(201);
+    expect(teamMocks.addTeamMember).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ contactId: "c-1", userId: null, role: "superintendent" }),
+    );
+  });
+
+  it("400s when the contact does not exist", async () => {
+    contactsMock.getContactById.mockResolvedValue(null as any);
+    const { nextErr } = await postTeam({ contactId: "c-1", role: "superintendent" });
+    expect(nextErr).toMatchObject({ statusCode: 400 });
+    expect(teamMocks.addTeamMember).not.toHaveBeenCalled();
+  });
+
+  it("400s when the contact is inactive", async () => {
+    contactsMock.getContactById.mockResolvedValue({ id: "c-1", isActive: false } as any);
+    const { nextErr } = await postTeam({ contactId: "c-1", role: "superintendent" });
+    expect(nextErr).toMatchObject({ statusCode: 400 });
+  });
+});

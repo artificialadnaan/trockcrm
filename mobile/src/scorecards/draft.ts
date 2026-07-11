@@ -116,6 +116,56 @@ export function createScorecardDraft(input: {
   };
 }
 
+/** One member of a deal's assigned team, as far as the scorecard pre-fill cares. */
+export interface ScorecardTeamMember {
+  role: string;
+  displayName: string | null;
+}
+
+/**
+ * Best-effort names to pre-fill the scorecard header from a deal's assigned team. Pure (no I/O) so it's
+ * unit-testable and safe to call from the create seam. Picks the FIRST active superintendent /
+ * project_manager (the endpoint already returns only active members, oldest-first). Whitespace-only names
+ * are treated as absent. Returns undefined for a role with no usable name so the caller can leave the field
+ * as-is (never overwrites a name the user already typed).
+ */
+export function resolveScorecardTeamNames(members: readonly ScorecardTeamMember[]): {
+  superintendentName?: string;
+  pmName?: string;
+} {
+  const firstName = (role: string): string | undefined => {
+    for (const m of members) {
+      if (m.role !== role) continue;
+      const name = (m.displayName ?? "").trim();
+      if (name) return name;
+    }
+    return undefined;
+  };
+  const out: { superintendentName?: string; pmName?: string } = {};
+  const superintendentName = firstName("superintendent");
+  if (superintendentName) out.superintendentName = superintendentName;
+  const pmName = firstName("project_manager");
+  if (pmName) out.pmName = pmName;
+  return out;
+}
+
+/**
+ * Fold resolved team names into a draft, filling ONLY the header fields that are still blank — an
+ * already-typed name (or a value seeded earlier) is never clobbered. Returns the SAME draft reference when
+ * nothing changes, so a no-op seed can't trigger a needless autosave. Pure + editable-preserving: this only
+ * seeds initial text; the fields remain fully editable via the normal setHeader action.
+ */
+export function seedScorecardDraftTeam(
+  draft: ScorecardDraft,
+  names: { superintendentName?: string; pmName?: string },
+): ScorecardDraft {
+  const next: Partial<Pick<ScorecardDraft, "superintendentName" | "pmName">> = {};
+  if (!draft.superintendentName.trim() && names.superintendentName) next.superintendentName = names.superintendentName;
+  if (!draft.pmName.trim() && names.pmName) next.pmName = names.pmName;
+  if (Object.keys(next).length === 0) return draft;
+  return { ...draft, ...next };
+}
+
 export function scorecardDraftReducer(draft: ScorecardDraft, action: DraftAction): ScorecardDraft {
   switch (action.type) {
     case "setScore":
