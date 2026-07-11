@@ -71,6 +71,7 @@ import { listDealChangeOrders, softDeleteChangeOrderChildren, sumDealChangeOrder
 import { loadRfpVoteDetail, type RfpVoteView } from "./rfp-vote-detail.js";
 import { isServiceRfp } from "./rfp-vote-service.js";
 import { computeRfpVoteState } from "@trock-crm/shared/lib/rfpVoteState";
+import { isCompleteBillingAddress } from "../../lib/billing-address.js";
 import { recordDescriptionHistoryChange } from "./deal-description-history.js";
 import { buildArchivedDescription } from "./archive-description.js";
 import { LOST_STAGE_SLUGS, TERMINAL_STAGE_SLUGS, WON_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
@@ -1620,7 +1621,13 @@ export async function validateDealBillingContact(tenantDb: TenantDb, billingCont
   // = true) finds nothing and throws; if the PATCH wins, the merge's later deals-repoint sees the committed
   // reference and moves it to the winner (Codex P2 TOCTOU).
   const [contact] = await tenantDb
-    .select({ id: contacts.id })
+    .select({
+      id: contacts.id,
+      address: contacts.address,
+      city: contacts.city,
+      state: contacts.state,
+      zip: contacts.zip,
+    })
     .from(contacts)
     .where(and(eq(contacts.id, billingContactId), eq(contacts.isActive, true)))
     .limit(1)
@@ -1628,6 +1635,14 @@ export async function validateDealBillingContact(tenantDb: TenantDb, billingCont
 
   if (!contact) {
     throw new AppError(400, "Billing contact not found or is inactive");
+  }
+
+  // A billing contact must carry a complete mailing address to be invoiceable. Enforced here — forward-only,
+  // since it only runs when someone assigns a billing contact — so an address-less contact can't satisfy the
+  // deal's billing requirement. Mirrors the client, which forces the address before assigning; the shared
+  // validator keeps both sides on the same rule.
+  if (!isCompleteBillingAddress(contact)) {
+    throw new AppError(400, "Billing contact needs a complete mailing address (street, city, state, and ZIP).");
   }
 }
 

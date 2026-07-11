@@ -6,6 +6,7 @@ import { FileUploadZone } from "@/components/files/file-upload-zone";
 import { useFiles } from "@/hooks/use-files";
 import { getOfficeRequestOptions } from "@/lib/office-selection";
 import { CompanySelector } from "@/components/companies/company-selector";
+import { getMissingBillingAddressFields, isCompleteBillingAddress, type BillingAddressField } from "@/lib/billing-address";
 import {
   Dialog,
   DialogContent,
@@ -27,6 +28,17 @@ const emptyNewC = {
 };
 type Suggestion = { id: string; firstName: string; lastName: string; email: string | null; companyName: string | null; matchReason?: string; isActive?: boolean };
 
+// A billing contact must have a complete mailing address (the gate the server also enforces). These are the
+// inline messages shown per missing/invalid field — same wording as the CRM contact form.
+const ADDR_REQUIRED_MESSAGE: Record<BillingAddressField, string> = {
+  address: "Street address is required",
+  city: "City is required",
+  state: "State must be exactly 2 uppercase letters",
+  zip: "ZIP must be 5 digits or 5+4 format (e.g. 75201 or 75201-1234)",
+};
+type AddrForm = { address: string; city: string; state: string; zip: string };
+const emptyAddr: AddrForm = { address: "", city: "", state: "", zip: "" };
+
 export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { deal: DealDetail; onDealUpdated: () => void; canEdit: boolean; officeId?: string | null }) {
   const { files: contractFiles, refetch: refetchFiles } = useFiles({ dealId: deal.id, category: "contract" });
 
@@ -44,10 +56,19 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
   const [createError, setCreateError] = useState<string | null>(null);
   const [assignError, setAssignError] = useState<string | null>(null);
-  // Per-field validation errors for state/ZIP. The main CRM contact form rejects these client-side (state is a
-  // 2-char column, zip a 10-char column) — this inline dialog must too, or a full state name / overlong ZIP
-  // sails through to a raw DB write error that blocks creation with no actionable message (Codex P2).
-  const [fieldErrors, setFieldErrors] = useState<{ state?: string; zip?: string }>({});
+  // Per-field validation errors for the add-contact dialog's address block. A billing contact needs a
+  // complete mailing address, so street/city/state/ZIP are all required + format-checked (same rules as the
+  // main CRM contact form), and the server rejects an incomplete one.
+  const [fieldErrors, setFieldErrors] = useState<Partial<Record<BillingAddressField, string>>>({});
+
+  // Pick-flow address completion: when a rep picks an existing contact that has NO complete address, we can't
+  // assign it as billing yet — prompt for the address, save it to the contact, then assign. null = no prompt.
+  const [addrPromptFor, setAddrPromptFor] = useState<{ id: string; name: string } | null>(null);
+  const [addr, setAddr] = useState<AddrForm>(emptyAddr);
+  const [addrErrors, setAddrErrors] = useState<Partial<Record<BillingAddressField, string>>>({});
+  const [addrSaving, setAddrSaving] = useState(false);
+  // Error loading a picked contact's details (the /contacts/:id lookup) or saving its address.
+  const [pickError, setPickError] = useState<string | null>(null);
   // Linked CRM company for the add-contact dialog (chosen via CompanySelector, which also supports adding a
   // new company inline). null = no company. Replaces the old free-text company field.
   const [companyId, setCompanyId] = useState<string | null>(null);
@@ -105,6 +126,57 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
     );
   };
 
+  // Picking an existing contact from search. A billing contact must have a complete mailing address, so we
+  // fetch the picked contact first: if it already has one, assign directly (one click, unchanged); if not,
+  // open the address prompt pre-filled with whatever it has so the rep can complete it before assigning.
+  const pickContact = async (contact: { id: string; firstName: string; lastName: string }) => {
+    setSaving(true);
+    setAssignError(null);
+    setPickError(null);
+    try {
+      const { contact: full } = await api<{ contact: AddrForm }>(`/contacts/${contact.id}`, getOfficeRequestOptions(officeId));
+      if (isCompleteBillingAddress(full)) {
+        await assign(contact.id); // assign() clears `saving`
+        return;
+      }
+      setAddr({ address: full.address ?? "", city: full.city ?? "", state: full.state ?? "", zip: full.zip ?? "" });
+      setAddrErrors({});
+      setAddrPromptFor({ id: contact.id, name: `${contact.firstName} ${contact.lastName}`.trim() });
+      setSaving(false);
+    } catch (e) {
+      setSaving(false);
+      setPickError(e instanceof Error ? e.message : "Could not load that contact — please try again.");
+    }
+  };
+
+  const closeAddrPrompt = () => { setAddrPromptFor(null); setAddr(emptyAddr); setAddrErrors({}); setAddrSaving(false); };
+
+  // Save the completed address onto the picked contact, then assign it as billing. Requires a complete
+  // address (the server enforces the same rule); state is uppercased to match the 2-letter column.
+  const saveAddrAndAssign = async () => {
+    if (!addrPromptFor) return;
+    const missing = getMissingBillingAddressFields(addr);
+    if (missing.length > 0) {
+      setAddrErrors(Object.fromEntries(missing.map((f) => [f, ADDR_REQUIRED_MESSAGE[f]])));
+      return;
+    }
+    setAddrSaving(true);
+    setPickError(null);
+    try {
+      const id = addrPromptFor.id;
+      await api(`/contacts/${id}`, {
+        method: "PATCH",
+        json: { address: addr.address.trim(), city: addr.city.trim(), state: addr.state.trim().toUpperCase(), zip: addr.zip.trim() },
+        ...getOfficeRequestOptions(officeId),
+      });
+      closeAddrPrompt();
+      await assign(id);
+    } catch (e) {
+      setAddrSaving(false);
+      setPickError(e instanceof Error ? e.message : "Could not save the billing address — please try again.");
+    }
+  };
+
   const closeDialog = () => { setDialogOpen(false); setNewC(emptyNewC); setCompanyId(null); setCompanyName(null); setCompanyPending(false); setCompanyCreating(false); ++companySeq.current; setSuggestions([]); setCreateError(null); setFieldErrors({}); };
 
   const buildInput = () => ({
@@ -122,21 +194,13 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
     category: "client",
   });
 
-  // Mirrors the main contact form's rules so the same values that form accepts pass here (and the same ones it
-  // rejects are rejected here) — state uppercases to exactly two letters, zip is 5 or 5+4 digits. Empty is fine;
-  // both fields are optional.
+  // A new billing contact must have a COMPLETE mailing address (street, city, state, ZIP) — the same gate the
+  // server enforces on assign — so all four are required + format-checked here, with the same wording as the
+  // main CRM contact form.
   const validate = () => {
-    const errs: { state?: string; zip?: string } = {};
-    const state = newC.state.trim();
-    if (state && !/^[A-Z]{2}$/.test(state.toUpperCase())) {
-      errs.state = "State must be exactly 2 uppercase letters";
-    }
-    const zip = newC.zip.trim();
-    if (zip && !/^\d{5}(-\d{4})?$/.test(zip)) {
-      errs.zip = "ZIP must be 5 digits or 5+4 format (e.g. 75201 or 75201-1234)";
-    }
-    setFieldErrors(errs);
-    return Object.keys(errs).length === 0;
+    const missing = getMissingBillingAddressFields(newC);
+    setFieldErrors(Object.fromEntries(missing.map((f) => [f, ADDR_REQUIRED_MESSAGE[f]])));
+    return missing.length === 0;
   };
 
   // The first attempt runs WITH dedup (skipDedupCheck: false) so a look-alike active CRM contact surfaces as a
@@ -166,7 +230,7 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
   };
 
   const field = (name: keyof typeof emptyNewC, label: string, opts: { type?: string } = {}) => {
-    const error = name === "state" || name === "zip" ? fieldErrors[name] : undefined;
+    const error = (name === "address" || name === "city" || name === "state" || name === "zip") ? fieldErrors[name] : undefined;
     return (
       <div>
         <label className="block text-xs font-medium text-slate-600 mb-1">{label}</label>
@@ -183,8 +247,38 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
             // A changed payload invalidates the warned-about duplicate set, so drop it (a later Save re-checks).
             setSuggestions([]);
             setCreateError(null);
-            // Drop any stale validation error for the edited field so a fixed value doesn't keep showing red.
-            setFieldErrors((prev) => (prev.state || prev.zip ? { ...prev, [name]: undefined } : prev));
+            // Drop any stale validation error for the edited address field so a fixed value doesn't keep red.
+            setFieldErrors((prev) => {
+              if ((name === "address" || name === "city" || name === "state" || name === "zip") && prev[name]) {
+                return { ...prev, [name]: undefined };
+              }
+              return prev;
+            });
+          }}
+          className={`w-full rounded-md border px-2 py-1.5 text-sm disabled:bg-slate-50 ${error ? "border-red-400" : "border-slate-300"}`}
+        />
+        {error ? <p className="mt-1 text-xs text-red-600">{error}</p> : null}
+      </div>
+    );
+  };
+
+  // Field renderer for the pick-flow "add billing address" prompt (bound to `addr`, separate from the
+  // add-contact dialog's `newC` fields). Input names are prefixed so the two dialogs never collide.
+  const addrField = (name: BillingAddressField, label: string) => {
+    const error = addrErrors[name];
+    return (
+      <div>
+        <label className="block text-xs font-medium text-slate-600 mb-1">{label}</label>
+        <input
+          type="text"
+          name={`addr-${name}`}
+          value={addr[name]}
+          disabled={addrSaving}
+          onChange={(e) => {
+            const value = e.target.value;
+            setAddr((prev) => ({ ...prev, [name]: value }));
+            setAddrErrors((prev) => (prev[name] ? { ...prev, [name]: undefined } : prev));
+            setPickError(null);
           }}
           className={`w-full rounded-md border px-2 py-1.5 text-sm disabled:bg-slate-50 ${error ? "border-red-400" : "border-slate-300"}`}
         />
@@ -218,6 +312,9 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
         {assignError ? (
           <p className="mt-2 rounded-md border border-red-200 bg-red-50 px-2 py-1.5 text-sm text-red-700">{assignError}</p>
         ) : null}
+        {pickError && !addrPromptFor ? (
+          <p className="mt-2 rounded-md border border-red-200 bg-red-50 px-2 py-1.5 text-sm text-red-700">{pickError}</p>
+        ) : null}
         {canEdit ? (
           <div className="mt-3 space-y-2">
             <input
@@ -238,7 +335,7 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
                       // whose response could land last and win over the intended one (Codex P2).
                       disabled={saving}
                       className="w-full px-2 py-1.5 text-left text-sm hover:bg-slate-50 disabled:opacity-50"
-                      onClick={() => assign(c.id)}
+                      onClick={() => pickContact(c)}
                     >
                       {c.firstName} {c.lastName}{c.companyName ? ` — ${c.companyName}` : ""}
                     </button>
@@ -297,17 +394,17 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
             {field("phone", "Phone", { type: "tel" })}
             {field("jobTitle", "Job title")}
             <div className="border-t border-slate-100 pt-3">
-              <p className="text-xs font-semibold text-slate-700">Billing address</p>
+              <p className="text-xs font-semibold text-slate-700">Billing address <span className="font-normal text-slate-400">(required)</span></p>
               <div className="mt-2 space-y-3">
-                {field("address", "Street address")}
+                {field("address", "Street address *")}
                 <div className="grid grid-cols-2 gap-3">
-                  {field("city", "City")}
+                  {field("city", "City *")}
                   {/* No maxLength cap: the browser truncates before validate() runs, so a pasted full name
                       like "Texas" would silently become an accepted "TE". Let the full value reach validate()
                       and reject it there (Codex P2). */}
-                  {field("state", "State")}
+                  {field("state", "State *")}
                 </div>
-                {field("zip", "ZIP")}
+                {field("zip", "ZIP *")}
               </div>
             </div>
             <div>
@@ -381,6 +478,43 @@ export function DealBillingTab({ deal, onDealUpdated, canEdit, officeId }: { dea
               className="rounded-md bg-blue-600 px-3 py-1.5 text-sm text-white hover:bg-blue-700 disabled:opacity-50"
             >
               {suggestions.length > 0 ? "Create anyway" : "Save"}
+            </button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Pick-flow: a chosen contact with no complete address can't be the billing contact until one is added.
+          Prompt for it (pre-filled with whatever the contact has), save it to the contact, then assign. */}
+      <Dialog open={addrPromptFor !== null} onOpenChange={(open) => { if (!open) closeAddrPrompt(); }}>
+        <DialogContent className="max-h-[85vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Add billing address</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3 py-2">
+            <p className="text-sm text-slate-600">
+              <span className="font-semibold">{addrPromptFor?.name || "This contact"}</span> needs a billing address before they can be set as the billing contact.
+            </p>
+            {addrField("address", "Street address *")}
+            <div className="grid grid-cols-2 gap-3">
+              {addrField("city", "City *")}
+              {addrField("state", "State *")}
+            </div>
+            {addrField("zip", "ZIP *")}
+          </div>
+          {pickError ? (
+            <p className="rounded-md border border-red-200 bg-red-50 px-2 py-1.5 text-sm text-red-700">{pickError}</p>
+          ) : null}
+          <DialogFooter>
+            <button type="button" disabled={addrSaving} onClick={closeAddrPrompt} className="rounded-md border border-slate-300 px-3 py-1.5 text-sm">
+              Cancel
+            </button>
+            <button
+              type="button"
+              disabled={addrSaving}
+              onClick={() => void saveAddrAndAssign()}
+              className="rounded-md bg-blue-600 px-3 py-1.5 text-sm text-white hover:bg-blue-700 disabled:opacity-50"
+            >
+              {addrSaving ? "Saving…" : "Save & assign"}
             </button>
           </DialogFooter>
         </DialogContent>

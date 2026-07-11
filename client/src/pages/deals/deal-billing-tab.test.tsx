@@ -189,11 +189,12 @@ describe("DealBillingTab", () => {
   });
 
   it("assigning a searched contact PATCHes the deal with billingContactId", async () => {
-    mocks.apiMock.mockImplementation((url: string) =>
-      url.includes("/contacts/search")
-        ? Promise.resolve({ contacts: [{ id: "c-9", firstName: "Jane", lastName: "Doe", email: "jane@acme.com", companyName: "Acme AP", category: "client" }] })
-        : Promise.resolve({ deal: dealWithBilling }),
-    );
+    mocks.apiMock.mockImplementation((url: string) => {
+      if (url.includes("/contacts/search")) return Promise.resolve({ contacts: [{ id: "c-9", firstName: "Jane", lastName: "Doe", email: "jane@acme.com", companyName: "Acme AP", category: "client" }] });
+      // Pick fetches the contact; a complete address means it assigns directly (no address prompt).
+      if (url === "/contacts/c-9") return Promise.resolve({ contact: { address: "100 Main St", city: "Dallas", state: "TX", zip: "75201" } });
+      return Promise.resolve({ deal: dealWithBilling });
+    });
     const onDealUpdated = vi.fn();
     const { container } = await render(dealNoBilling, onDealUpdated);
     const input = container.querySelector("input") as HTMLInputElement;
@@ -245,6 +246,11 @@ describe("DealBillingTab", () => {
     await act(async () => {
       setValue(document.querySelector("input[name='firstName']") as HTMLInputElement, "Pat");
       setValue(document.querySelector("input[name='lastName']") as HTMLInputElement, "Payer");
+      // A billing contact needs a complete address before Save will create it.
+      setValue(document.querySelector("input[name='address']") as HTMLInputElement, "100 Main St");
+      setValue(document.querySelector("input[name='city']") as HTMLInputElement, "Dallas");
+      setValue(document.querySelector("input[name='state']") as HTMLInputElement, "TX");
+      setValue(document.querySelector("input[name='zip']") as HTMLInputElement, "75201");
     });
     // First Save runs WITH dedup -> surfaces the suggestion, does NOT assign anything yet.
     await act(async () => { (Array.from(document.querySelectorAll("button")).find((b) => b.textContent === "Save") as HTMLButtonElement).click(); });
@@ -278,6 +284,11 @@ describe("DealBillingTab", () => {
     await act(async () => {
       setValue(document.querySelector("input[name='firstName']") as HTMLInputElement, "Pat");
       setValue(document.querySelector("input[name='lastName']") as HTMLInputElement, "Payer");
+      // A billing contact needs a complete address before Save will create it.
+      setValue(document.querySelector("input[name='address']") as HTMLInputElement, "100 Main St");
+      setValue(document.querySelector("input[name='city']") as HTMLInputElement, "Dallas");
+      setValue(document.querySelector("input[name='state']") as HTMLInputElement, "TX");
+      setValue(document.querySelector("input[name='zip']") as HTMLInputElement, "75201");
     });
     await act(async () => { (Array.from(document.querySelectorAll("button")).find((b) => b.textContent === "Save") as HTMLButtonElement).click(); });
     await act(async () => { await Promise.resolve(); });
@@ -289,11 +300,11 @@ describe("DealBillingTab", () => {
   });
 
   it("sends billing writes to the LOADED office when viewing cross-office", async () => {
-    mocks.apiMock.mockImplementation((url: string) =>
-      url.includes("/contacts/search")
-        ? Promise.resolve({ contacts: [{ id: "c-9", firstName: "Jane", lastName: "Doe", email: null, companyName: "Acme", category: "client" }] })
-        : Promise.resolve({ deal: dealWithBilling }),
-    );
+    mocks.apiMock.mockImplementation((url: string) => {
+      if (url.includes("/contacts/search")) return Promise.resolve({ contacts: [{ id: "c-9", firstName: "Jane", lastName: "Doe", email: null, companyName: "Acme", category: "client" }] });
+      if (url === "/contacts/c-9") return Promise.resolve({ contact: { address: "100 Main St", city: "Dallas", state: "TX", zip: "75201" } });
+      return Promise.resolve({ deal: dealWithBilling });
+    });
     const { container } = await render(dealNoBilling, vi.fn(), true, "office-b");
     const input = container.querySelector("input") as HTMLInputElement;
     await act(async () => { setValue(input, "jane"); });
@@ -304,6 +315,82 @@ describe("DealBillingTab", () => {
       expect.stringContaining("/deals/deal-1"),
       expect.objectContaining({ method: "PATCH", headers: expect.objectContaining({ "x-office-id": "office-b" }) }),
     );
+  });
+
+  it("picking a contact with no address prompts for it, saves it to the contact, then assigns", async () => {
+    const patched: Array<{ json: unknown }> = [];
+    mocks.apiMock.mockImplementation((url: string, opts?: { method?: string; json?: unknown }) => {
+      if (url.includes("/contacts/search")) return Promise.resolve({ contacts: [{ id: "c-7", firstName: "Sam", lastName: "Payer", email: null, companyName: null, category: "client" }] });
+      if (url === "/contacts/c-7" && opts?.method === "PATCH") { patched.push({ json: opts.json }); return Promise.resolve({ contact: {} }); }
+      if (url === "/contacts/c-7") return Promise.resolve({ contact: { address: null, city: null, state: null, zip: null } });
+      if (url.includes("/deals/deal-1")) return Promise.resolve({ deal: dealWithBilling });
+      return Promise.resolve({ contacts: [] });
+    });
+    const onDealUpdated = vi.fn();
+    const { container } = await render(dealNoBilling, onDealUpdated);
+    await act(async () => { setValue(container.querySelector("input") as HTMLInputElement, "sam"); });
+    await act(async () => { await Promise.resolve(); });
+    await act(async () => { (Array.from(document.querySelectorAll("button")).find((n) => n.textContent?.includes("Sam Payer")) as HTMLElement).click(); });
+    await act(async () => { await Promise.resolve(); });
+    // The address prompt appears (the contact has no address) and nothing is assigned yet.
+    expect(document.body.textContent).toContain("needs a billing address");
+    expect(onDealUpdated).not.toHaveBeenCalled();
+    await act(async () => {
+      setValue(document.querySelector("input[name='addr-address']") as HTMLInputElement, "200 Bill St");
+      setValue(document.querySelector("input[name='addr-city']") as HTMLInputElement, "Austin");
+      setValue(document.querySelector("input[name='addr-state']") as HTMLInputElement, "tx");
+      setValue(document.querySelector("input[name='addr-zip']") as HTMLInputElement, "78701");
+    });
+    await act(async () => { (Array.from(document.querySelectorAll("button")).find((b) => b.textContent?.includes("Save & assign")) as HTMLButtonElement).click(); });
+    await act(async () => { await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+    // The address is written onto the contact (state uppercased)...
+    expect(patched).toHaveLength(1);
+    expect(patched[0].json).toMatchObject({ address: "200 Bill St", city: "Austin", state: "TX", zip: "78701" });
+    // ...then the contact is assigned as billing.
+    expect(mocks.apiMock).toHaveBeenCalledWith(
+      expect.stringContaining("/deals/deal-1"),
+      expect.objectContaining({ method: "PATCH", json: expect.objectContaining({ billingContactId: "c-7" }) }),
+    );
+    expect(onDealUpdated).toHaveBeenCalled();
+  });
+
+  it("the address prompt requires a complete address before saving (no partial write)", async () => {
+    mocks.apiMock.mockImplementation((url: string, opts?: { method?: string }) => {
+      if (url.includes("/contacts/search")) return Promise.resolve({ contacts: [{ id: "c-7", firstName: "Sam", lastName: "Payer", email: null, companyName: null, category: "client" }] });
+      if (url === "/contacts/c-7" && opts?.method !== "PATCH") return Promise.resolve({ contact: { address: null, city: null, state: null, zip: null } });
+      return Promise.resolve({ contacts: [] });
+    });
+    const { container } = await render(dealNoBilling);
+    await act(async () => { setValue(container.querySelector("input") as HTMLInputElement, "sam"); });
+    await act(async () => { await Promise.resolve(); });
+    await act(async () => { (Array.from(document.querySelectorAll("button")).find((n) => n.textContent?.includes("Sam Payer")) as HTMLElement).click(); });
+    await act(async () => { await Promise.resolve(); });
+    mocks.apiMock.mockClear();
+    // Save & assign with everything blank -> inline errors, no contact PATCH fires.
+    await act(async () => { (Array.from(document.querySelectorAll("button")).find((b) => b.textContent?.includes("Save & assign")) as HTMLButtonElement).click(); });
+    await act(async () => { await Promise.resolve(); });
+    expect(document.body.textContent).toContain("Street address is required");
+    expect(mocks.apiMock).not.toHaveBeenCalled();
+  });
+
+  it("the add-new dialog blocks Save until a complete billing address is entered", async () => {
+    const onDealUpdated = vi.fn();
+    const { container } = await render(dealNoBilling, onDealUpdated);
+    (Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.includes("Add new contact")) as HTMLButtonElement).click();
+    await act(async () => { await Promise.resolve(); });
+    await act(async () => {
+      setValue(document.querySelector("input[name='firstName']") as HTMLInputElement, "Pat");
+      setValue(document.querySelector("input[name='lastName']") as HTMLInputElement, "Payer"); // no address
+    });
+    mocks.apiMock.mockClear();
+    await act(async () => { (Array.from(document.querySelectorAll("button")).find((b) => b.textContent === "Save") as HTMLButtonElement).click(); });
+    await act(async () => { await Promise.resolve(); });
+    // No contact POST — the missing address is called out inline instead.
+    expect(mocks.apiMock).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain("Street address is required");
+    expect(document.body.textContent).toContain("City is required");
+    expect(onDealUpdated).not.toHaveBeenCalled();
   });
 
   it("ignores a stale contact-search response that resolves after a newer query (searchSeq guard)", async () => {
