@@ -295,7 +295,11 @@ export function ReportBuilder({ isOpen, projectId, projectName, creatorName, pho
               </div>
             </div>
 
-            <div className="grid flex-1 grid-cols-2 gap-3 overflow-y-auto px-4 py-4 sm:grid-cols-3 lg:grid-cols-4">
+            {/* auto-rows-max + content-start: this grid is a flex-1 child (definite height), so the default
+                grid-auto-rows:auto sized each row to the caption only — an aspect-square box contributes ~0 to
+                an auto row in a height-constrained grid — collapsing every thumbnail to a clipped sliver. Sizing
+                rows to their content (max-content) and packing from the top restores square cells + scroll. */}
+            <div className="grid flex-1 auto-rows-max content-start grid-cols-2 gap-3 overflow-y-auto px-4 py-4 sm:grid-cols-3 lg:grid-cols-4">
               {filteredPhotos.map((photo) => {
                 const checked = selectedIds.includes(photo.id);
                 return (
