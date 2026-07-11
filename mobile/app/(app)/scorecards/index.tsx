@@ -99,7 +99,21 @@ export default function ScorecardsScreen() {
           <RefreshControl refreshing={recent.isRefetching} onRefresh={() => void recent.refetch()} tintColor={theme.color.brandRed} />
         }
       >
-        <Button title="＋ New scorecard" onPress={() => setPickerOpen(true)} />
+        <View style={{ gap: theme.space.sm }}>
+          <Button title="＋ Project Scorecard" onPress={() => setPickerOpen(true)} />
+          {/* Present now, enabled in a later phase. Kept visible + disabled with a subtle "Coming soon"
+              affordance so field users know it's on the way (not missing). */}
+          <View style={{ gap: 4 }}>
+            <Button
+              title="Leadership Scorecard"
+              variant="ghost"
+              disabled
+              onPress={() => {}}
+              accessibilityLabel="Leadership Scorecard. Coming soon."
+            />
+            <Text style={styles.comingSoon}>Coming soon</Text>
+          </View>
+        </View>
 
         {drafts.length > 0 ? (
           <View style={{ gap: theme.space.sm }}>
@@ -127,7 +141,7 @@ export default function ScorecardsScreen() {
           {recent.isLoading ? (
             <LoadingState label="Loading scorecards…" />
           ) : submitted.length === 0 ? (
-            <EmptyState title="No scorecards yet" subtitle="Tap “New scorecard” to score a project." />
+            <EmptyState title="No scorecards yet" subtitle="Tap “Project Scorecard” to score a project." />
           ) : (
             submitted.map((s: FieldScorecardSummary) => (
               <Pressable
@@ -170,4 +184,10 @@ const styles = StyleSheet.create({
   rowTitle: { fontFamily: theme.font.semibold, fontSize: 15, color: theme.color.textPrimary },
   rowSub: { fontFamily: theme.font.body, fontSize: 13, color: theme.color.textMuted, marginTop: 2 },
   resume: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.brandRed },
+  comingSoon: {
+    alignSelf: "center",
+    fontFamily: theme.font.medium,
+    fontSize: 12,
+    color: theme.color.textMuted,
+  },
 });
