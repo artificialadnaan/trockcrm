@@ -21,7 +21,7 @@ const OTHER_DEAL = "22222222-2222-2222-2222-222222222222";
 const SC_NEWER = "55555555-5555-5555-5555-000000000001"; // DEAL, has pdf
 const SC_OLDER = "55555555-5555-5555-5555-000000000002"; // DEAL, NO pdf
 const SC_OTHER = "55555555-5555-5555-5555-000000000003"; // OTHER_DEAL
-const SC_LEADERSHIP = "55555555-5555-5555-5555-000000000004"; // DEAL, kind='leadership' → excluded (deal tab is project-only)
+const SC_LEADERSHIP = "55555555-5555-5555-5555-000000000004"; // DEAL, kind='leadership' → listed + downloadable, but no project detail view
 const FILE1 = "aaaaaaaa-0000-0000-0000-000000000001";
 const USER = "33333333-3333-3333-3333-333333333333";
 
@@ -56,10 +56,11 @@ beforeAll(async () => {
       submittedAt: new Date("2026-06-30T18:00:00Z"),
     },
     {
-      // A leadership card on THIS deal, submitted newest — only its kind='leadership' keeps it off the deal
-      // tab (which renders the project shape). Proves the kind filter, not the dealId/isActive scoping.
+      // A leadership card on THIS deal, submitted newest — it IS listed + downloadable from the deal tab
+      // (the completed-email fallback points recipients here), carrying kind='leadership' + averageScore so
+      // the web can branch to the PDF instead of the project detail view. formVersion=2 (1-10 average bands).
       id: SC_LEADERSHIP, clientSubmissionId: "66666666-6666-6666-6666-000000000004", dealId: DEAL, weekOf: "2026-07-01",
-      totalScore: 90, rating: "elite", kind: "leadership", submittedBy: USER, submittedByName: "Lena Lead", pdfR2Key: "office_x/deals/DFW-10432/documents/scorecards/lead.pdf",
+      totalScore: 90, formVersion: 2, kind: "leadership", averageScore: "9.0", rating: "elite", submittedBy: USER, submittedByName: "Lena Lead", pdfR2Key: "office_x/deals/DFW-10432/documents/scorecards/lead.pdf",
       submittedAt: new Date("2026-07-01T18:00:00Z"),
     },
   ]);
@@ -77,22 +78,29 @@ afterAll(async () => {
 });
 
 describe("listDealScorecards", () => {
-  it("returns only this deal's active scorecards, newest first, as summaries", async () => {
+  it("returns this deal's active scorecards, newest first, as summaries (BOTH kinds)", async () => {
     const { scorecards } = await listDealScorecards(tdb, DEAL);
-    expect(scorecards.map((s) => s.id)).toEqual([SC_NEWER, SC_OLDER]); // OTHER_DEAL excluded, newest first
-    const newer = scorecards[0];
-    expect(newer.rating).toBe("needs_improvement");
-    expect(newer.ratingLabel).toBe("Needs Immediate Improvement");
-    expect(newer.totalScore).toBe(82);
-    expect(newer.criticalDeficiencyCount).toBe(1);
-    expect(newer.weekOf).toBe("2026-06-30");
+    // OTHER_DEAL excluded; leadership (newest) included; newest first.
+    expect(scorecards.map((s) => s.id)).toEqual([SC_LEADERSHIP, SC_NEWER, SC_OLDER]);
+    const project = scorecards.find((s) => s.id === SC_NEWER)!;
+    expect(project.kind).toBe("project");
+    expect(project.rating).toBe("needs_improvement");
+    expect(project.ratingLabel).toBe("Needs Immediate Improvement");
+    expect(project.totalScore).toBe(82);
+    expect(project.criticalDeficiencyCount).toBe(1);
+    expect(project.weekOf).toBe("2026-06-30");
   });
 
-  it("excludes leadership cards — the deal tab renders project scorecards only (kind filter)", async () => {
+  it("lists leadership cards kind-aware — kind + averageScore so the web can branch to the PDF", async () => {
     const { scorecards } = await listDealScorecards(tdb, DEAL);
-    // SC_LEADERSHIP is on DEAL and is the newest submission; only kind='leadership' keeps it out.
-    expect(scorecards.map((s) => s.id)).not.toContain(SC_LEADERSHIP);
-    expect(scorecards.map((s) => s.id)).toEqual([SC_NEWER, SC_OLDER]);
+    const leadership = scorecards.find((s) => s.id === SC_LEADERSHIP);
+    // SC_LEADERSHIP is on DEAL and is the newest submission — it IS surfaced (deal tab is now kind-aware).
+    expect(leadership).toBeDefined();
+    expect(leadership!.kind).toBe("leadership");
+    expect(leadership!.formVersion).toBe(2);
+    expect(leadership!.averageScore).toBe(9);
+    // Leadership reuses the 1-10 bands' labels, not the /100 project labels.
+    expect(leadership!.ratingLabel).toBe("Elite Execution");
   });
 });
 
@@ -131,5 +139,10 @@ describe("getDealScorecardPdfDownload", () => {
 
   it("404s a scorecard fetched through the wrong deal", async () => {
     await expect(getDealScorecardPdfDownload(tdb, OTHER_DEAL, SC_NEWER)).rejects.toMatchObject({ statusCode: 404 });
+  });
+
+  it("presigns a LEADERSHIP card's pdf — leadership's detail IS its PDF (downloadable from the deal)", async () => {
+    const { url } = await getDealScorecardPdfDownload(tdb, DEAL, SC_LEADERSHIP);
+    expect(url).toContain("lead.pdf");
   });
 });

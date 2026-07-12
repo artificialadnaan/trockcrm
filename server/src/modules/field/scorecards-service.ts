@@ -154,8 +154,12 @@ export async function createFieldScorecard(
   const kind: ScorecardKind = input.kind === "leadership" ? "leadership" : "project";
   const formVersion: ScorecardFormVersion = kind === "leadership" ? 2 : input.formVersion === 2 ? 2 : 1;
   const items = validateItems(input.items, formVersion, kind);
-  // Leadership cards carry no critical deficiencies — validate the (expected-empty) set against the V2
-  // vocabulary so a stray key is still rejected, never silently persisted.
+  // Leadership cards don't support critical deficiencies. Reject a submission that carries any (rather than
+  // silently dropping them) so a client bug can't quietly discard flagged concerns — the parser guards the
+  // HTTP boundary, and this mirrors it for direct service callers. Project cards validate as before.
+  if (kind === "leadership" && (input.criticalDeficiencies.length > 0 || Object.keys(input.criticalDeficiencyNotes ?? {}).length > 0)) {
+    throw new AppError(400, "Leadership scorecards do not support critical deficiencies.");
+  }
   const deficiencies = kind === "leadership" ? [] : validateDeficiencies(input.criticalDeficiencies, formVersion);
   const deficiencyNotes = kind === "leadership"
     ? {}

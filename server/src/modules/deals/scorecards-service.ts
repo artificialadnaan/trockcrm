@@ -4,9 +4,13 @@ import type * as schema from "@trock-crm/shared/schema";
 import { fieldScorecards, fieldScorecardItems, fieldScorecardPhotos, files } from "@trock-crm/shared/schema";
 import {
   FIELD_SCORECARD_SECTION_KEYS,
+  scorecardLeadershipRatingLabel,
   scorecardRatingLabel,
+  scorecardV2RatingLabel,
   type FieldScorecardDetail,
   type FieldScorecardSummary,
+  type ScorecardFormVersion,
+  type ScorecardKind,
   type ScorecardRating,
   type ScorecardSectionKey,
 } from "@trock-crm/shared/types";
@@ -21,10 +25,13 @@ import { generateDownloadUrl } from "../../lib/r2-client.js";
 type TenantDb = NodePgDatabase<typeof schema>;
 const SCORECARD_PDF_DOWNLOAD_EXPIRY_SECONDS = 60 * 60;
 
-// Project cards only. Leadership scorecards share the field_scorecards table (kind = 'leadership') but are
-// scored on a different model and shape (leadership sections, no signatures/deficiencies) — the CRM deal tab
-// renders the project shape, so leadership rows must not surface here. COALESCE treats any legacy NULL/absent
-// kind as a project card (the pre-leadership default), so no legacy row is dropped.
+// The deal-tab LIST + PDF-download surface BOTH kinds — leadership cards share the field_scorecards table
+// (kind = 'leadership') and need a CRM surface (the completed-email fallback tells recipients to open the
+// deal). Each summary row carries its `kind` so the web tab branches: project rows expand into the detail
+// view (project shape); leadership rows offer the PDF (their "detail" is the PDF). The DETAIL read stays
+// project-only via this predicate — it maps items through FIELD_SCORECARD_SECTION_KEYS (a project shape),
+// so a leadership card must 404 there rather than render as a mangled project card. COALESCE treats any
+// legacy NULL/absent kind as a project card (the pre-leadership default).
 const projectKindOnly = sql`COALESCE(${fieldScorecards.kind}, 'project') = 'project'`;
 
 export async function listDealScorecards(
@@ -34,7 +41,7 @@ export async function listDealScorecards(
   const rows = await tenantDb
     .select()
     .from(fieldScorecards)
-    .where(and(eq(fieldScorecards.dealId, dealId), eq(fieldScorecards.isActive, true), projectKindOnly))
+    .where(and(eq(fieldScorecards.dealId, dealId), eq(fieldScorecards.isActive, true)))
     .orderBy(desc(fieldScorecards.submittedAt));
   return { scorecards: rows.map(toSummary) };
 }
@@ -105,6 +112,7 @@ export async function getDealScorecardPdfDownload(
   dealId: string,
   scorecardId: string,
 ): Promise<{ url: string }> {
+  // Both kinds are downloadable from the deal — leadership's "detail" IS its PDF (no project detail view).
   const [card] = await tenantDb
     .select({ pdfR2Key: fieldScorecards.pdfR2Key })
     .from(fieldScorecards)
@@ -113,7 +121,6 @@ export async function getDealScorecardPdfDownload(
         eq(fieldScorecards.id, scorecardId),
         eq(fieldScorecards.dealId, dealId),
         eq(fieldScorecards.isActive, true),
-        projectKindOnly,
       ),
     )
     .limit(1);
@@ -130,6 +137,9 @@ interface ScorecardRow {
   dealId: string;
   weekOf: unknown;
   totalScore: number;
+  formVersion: number | null;
+  kind: string | null;
+  averageScore: string | number | null;
   rating: string;
   superintendentName: string | null;
   pmName: string | null;
@@ -139,15 +149,26 @@ interface ScorecardRow {
   submittedAt: unknown;
 }
 
+/** The rating-band label for the card's kind/version — leadership + V2 reuse the 1-10 bands. */
+function ratingLabelFor(kind: ScorecardKind, formVersion: ScorecardFormVersion, rating: ScorecardRating): string {
+  if (kind === "leadership") return scorecardLeadershipRatingLabel(rating);
+  return formVersion === 2 ? scorecardV2RatingLabel(rating) : scorecardRatingLabel(rating);
+}
+
 function toSummary(row: ScorecardRow): FieldScorecardSummary {
   const rating = row.rating as ScorecardRating;
+  const formVersion: ScorecardFormVersion = row.formVersion === 2 ? 2 : 1;
+  const kind: ScorecardKind = row.kind === "leadership" ? "leadership" : "project";
   return {
     id: row.id,
     dealId: row.dealId,
     weekOf: typeof row.weekOf === "string" ? row.weekOf : String(row.weekOf),
     totalScore: row.totalScore,
+    formVersion,
+    kind,
+    averageScore: row.averageScore == null ? null : Number(row.averageScore),
     rating,
-    ratingLabel: scorecardRatingLabel(rating),
+    ratingLabel: ratingLabelFor(kind, formVersion, rating),
     superintendentName: row.superintendentName ?? null,
     pmName: row.pmName ?? null,
     projectNumber: row.projectNumber ?? null,

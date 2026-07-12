@@ -113,6 +113,13 @@ export function parseScorecardSubmission(body: unknown): ParsedScorecardSubmissi
   if (criticalDeficiencies.length > 30) throw new AppError(400, "Too many critical deficiencies.");
   if (actionItems.length > 50) throw new AppError(400, "Too many action items.");
 
+  // Leadership cards don't support critical deficiencies. Reject a submission that carries any (rather than
+  // silently dropping them) so a client bug can't quietly discard an evaluator's flagged concerns — the
+  // caller must send an empty set for a leadership card.
+  if (kind === "leadership" && (criticalDeficiencies.length > 0 || Object.keys(criticalDeficiencyNotes).length > 0)) {
+    throw new AppError(400, "Leadership scorecards do not support critical deficiencies.");
+  }
+
   // Leadership Project Summary free text (voice-dictatable). Bound it here at the boundary so one runaway
   // dictation can't bloat the row/PDF; the service persists it only for leadership cards.
   const summaryRaw = strOrNull(b.summary);

@@ -89,6 +89,12 @@ function ScorecardRow({ dealId, summary }: { dealId: string; summary: FieldScore
   const [detailLoading, setDetailLoading] = useState(false);
   const [downloading, setDownloading] = useState(false);
 
+  // Leadership cards share these tables but are scored on a different model (4 categories / 10, no
+  // deficiencies/signatures) and have no project-shaped detail view — the server's detail read is
+  // project-only, so the PDF is the view. Render the row NON-expandable, badge it "Leadership", show the
+  // /10 average, and rely on the Download-PDF action (the completed-email fallback sends recipients here).
+  const isLeadership = summary.kind === "leadership";
+
   const toggle = useCallback(async () => {
     const next = !expanded;
     setExpanded(next);
@@ -116,52 +122,73 @@ function ScorecardRow({ dealId, summary }: { dealId: string; summary: FieldScore
     }
   }, [dealId, summary.id]);
 
+  // Leadership + V2 score out of 10 (average bands); legacy V1 project cards out of 100.
+  const useAverage = isLeadership || summary.formVersion === 2;
+  const scoreLabel = useAverage ? (summary.averageScore ?? summary.totalScore / 10).toFixed(1) : String(summary.totalScore);
+  const scoreMax = useAverage ? "/10" : "/100";
+
+  const header = (
+    <>
+      <div className="flex min-w-0 flex-1 flex-col">
+        <div className="flex items-center gap-2">
+          {isLeadership && (
+            <Badge variant="outline" className="border-purple-200 bg-purple-100 text-purple-800">
+              Leadership
+            </Badge>
+          )}
+          <span className="text-sm font-semibold text-gray-900">Week of {formatWeek(summary.weekOf)}</span>
+          {summary.criticalDeficiencyCount > 0 && (
+            <span className="inline-flex items-center gap-1 text-xs font-medium text-red-600">
+              <AlertTriangle className="h-3.5 w-3.5" />
+              {summary.criticalDeficiencyCount}
+            </span>
+          )}
+        </div>
+        <span className="truncate text-xs text-gray-500">
+          {[summary.superintendentName, summary.submittedByName ? `by ${summary.submittedByName}` : null, formatSubmitted(summary.submittedAt)]
+            .filter(Boolean)
+            .join(" · ")}
+        </span>
+      </div>
+      <div className="flex items-center gap-3">
+        <span className="text-lg font-bold text-gray-900">
+          {scoreLabel}
+          <span className="text-xs font-normal text-gray-400">{scoreMax}</span>
+        </span>
+        <Badge variant="outline" className={RATING_BADGE[summary.rating]}>
+          {summary.ratingLabel}
+        </Badge>
+      </div>
+    </>
+  );
+
   return (
     <div className="overflow-hidden rounded-lg border border-gray-200 bg-white">
       <div className="flex items-center gap-3 p-4">
-        <button
-          type="button"
-          onClick={() => void toggle()}
-          aria-expanded={expanded}
-          className="flex flex-1 items-center gap-3 text-left"
-        >
-          {expanded ? (
-            <ChevronDown className="h-4 w-4 shrink-0 text-gray-400" />
-          ) : (
-            <ChevronRight className="h-4 w-4 shrink-0 text-gray-400" />
-          )}
-          <div className="flex min-w-0 flex-1 flex-col">
-            <div className="flex items-center gap-2">
-              <span className="text-sm font-semibold text-gray-900">Week of {formatWeek(summary.weekOf)}</span>
-              {summary.criticalDeficiencyCount > 0 && (
-                <span className="inline-flex items-center gap-1 text-xs font-medium text-red-600">
-                  <AlertTriangle className="h-3.5 w-3.5" />
-                  {summary.criticalDeficiencyCount}
-                </span>
-              )}
-            </div>
-            <span className="truncate text-xs text-gray-500">
-              {[summary.superintendentName, summary.submittedByName ? `by ${summary.submittedByName}` : null, formatSubmitted(summary.submittedAt)]
-                .filter(Boolean)
-                .join(" · ")}
-            </span>
-          </div>
-          <div className="flex items-center gap-3">
-            <span className="text-lg font-bold text-gray-900">
-              {summary.formVersion === 2 ? (summary.averageScore ?? summary.totalScore / 10).toFixed(1) : summary.totalScore}
-              <span className="text-xs font-normal text-gray-400">{summary.formVersion === 2 ? "/10" : "/100"}</span>
-            </span>
-            <Badge variant="outline" className={RATING_BADGE[summary.rating]}>
-              {summary.ratingLabel}
-            </Badge>
-          </div>
-        </button>
+        {isLeadership ? (
+          // No project detail view for leadership — the row itself just carries the summary + PDF action.
+          <div className="flex flex-1 items-center gap-3">{header}</div>
+        ) : (
+          <button
+            type="button"
+            onClick={() => void toggle()}
+            aria-expanded={expanded}
+            className="flex flex-1 items-center gap-3 text-left"
+          >
+            {expanded ? (
+              <ChevronDown className="h-4 w-4 shrink-0 text-gray-400" />
+            ) : (
+              <ChevronRight className="h-4 w-4 shrink-0 text-gray-400" />
+            )}
+            {header}
+          </button>
+        )}
         <Button variant="ghost" size="sm" onClick={() => void download()} disabled={downloading} title="Download PDF">
           {downloading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
         </Button>
       </div>
 
-      {expanded && (
+      {!isLeadership && expanded && (
         <div className="border-t border-gray-100 bg-gray-50 p-4">
           {detailLoading || !detail ? (
             <div className="flex items-center justify-center py-6 text-sm text-gray-500">

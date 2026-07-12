@@ -160,6 +160,24 @@ describe("createFieldScorecard (leadership)", () => {
     ).rejects.toThrow(/point|safety/i);
   });
 
+  it("rejects a leadership submission that carries critical deficiencies (400, not silent-drop)", async () => {
+    await expect(
+      createFieldScorecard(
+        tdb,
+        leadershipSubmission({ clientSubmissionId: csid(20), criticalDeficiencies: ["failed_inspection"] }),
+      ),
+    ).rejects.toMatchObject({ statusCode: 400 });
+    await expect(
+      createFieldScorecard(
+        tdb,
+        leadershipSubmission({ clientSubmissionId: csid(21), criticalDeficiencyNotes: { failed_inspection: "bad slab" } }),
+      ),
+    ).rejects.toMatchObject({ statusCode: 400 });
+    // Nothing was persisted for the rejected submissions.
+    const count = await tdb.execute(sql`SELECT count(*)::int AS n FROM field_scorecards`);
+    expect(count.rows[0].n).toBe(0);
+  });
+
   it("rejects a leadership submission missing a category and rejects a non-summary photo section", async () => {
     await expect(
       createFieldScorecard(tdb, leadershipSubmission({ clientSubmissionId: csid(5), items: leadershipItems().slice(0, 3) })),

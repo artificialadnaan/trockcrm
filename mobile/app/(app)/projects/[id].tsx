@@ -330,26 +330,36 @@ export default function ProjectDetailScreen() {
           ) : scorecards.length === 0 ? (
             <Text style={styles.meta}>No scorecards yet.</Text>
           ) : (
-            scorecards.map((s) => (
-              <Pressable
-                key={s.id}
-                accessibilityRole="button"
-                accessibilityLabel={`Scorecard, week of ${formatShortDate(s.weekOf)}, ${s.totalScore} out of 100, ${s.ratingLabel}`}
-                onPress={() => router.push({ pathname: "/(app)/scorecards/view/[id]", params: { id: s.id } })}
-                style={({ pressed }) => [styles.reportRow, pressed && { opacity: 0.7 }]}
-              >
-                <View style={{ flex: 1, gap: 4 }}>
-                  <Text style={styles.reportTitle} numberOfLines={1}>
-                    Week of {formatShortDate(s.weekOf)}
-                    {s.submittedByName ? ` · ${s.submittedByName}` : ""}
-                    {s.criticalDeficiencyCount > 0
-                      ? ` · ${s.criticalDeficiencyCount} critical ${s.criticalDeficiencyCount === 1 ? "deficiency" : "deficiencies"}`
-                      : ""}
-                  </Text>
-                  <RatingBadge rating={s.rating} label={`${s.totalScore}/100 · ${s.ratingLabel}`} />
-                </View>
-              </Pressable>
-            ))
+            scorecards.map((s) => {
+              // Kind-aware, exactly like the Scorecards submitted list: a leadership card's totalScore is
+              // averageScore*10, so it must render as `X.X/10` (never `90/100`) and be labeled leadership.
+              // The summary DTO carries kind + averageScore; fall back to totalScore/10 defensively so a
+              // missing value never renders "undefined/10". Project rows are unchanged.
+              const isLeadership = s.kind === "leadership";
+              const scoreText = isLeadership
+                ? `${(s.averageScore ?? s.totalScore / 10).toFixed(1)}/10`
+                : `${s.totalScore}/100`;
+              return (
+                <Pressable
+                  key={s.id}
+                  accessibilityRole="button"
+                  accessibilityLabel={`${isLeadership ? "Leadership scorecard" : "Scorecard"}, week of ${formatShortDate(s.weekOf)}, ${scoreText}, ${s.ratingLabel}`}
+                  onPress={() => router.push({ pathname: "/(app)/scorecards/view/[id]", params: { id: s.id } })}
+                  style={({ pressed }) => [styles.reportRow, pressed && { opacity: 0.7 }]}
+                >
+                  <View style={{ flex: 1, gap: 4 }}>
+                    <Text style={styles.reportTitle} numberOfLines={1}>
+                      {isLeadership ? "Leadership · " : ""}Week of {formatShortDate(s.weekOf)}
+                      {s.submittedByName ? ` · ${s.submittedByName}` : ""}
+                      {s.criticalDeficiencyCount > 0
+                        ? ` · ${s.criticalDeficiencyCount} critical ${s.criticalDeficiencyCount === 1 ? "deficiency" : "deficiencies"}`
+                        : ""}
+                    </Text>
+                    <RatingBadge rating={s.rating} label={`${scoreText} · ${s.ratingLabel}`} />
+                  </View>
+                </Pressable>
+              );
+            })
           )}
         </View>
       </ScrollView>

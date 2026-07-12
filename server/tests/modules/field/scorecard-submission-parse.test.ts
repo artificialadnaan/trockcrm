@@ -124,4 +124,24 @@ describe("parseScorecardSubmission", () => {
     expect(parsed.superintendentName).toBeNull();
     expect(parsed.pmName).toBe("Dana");
   });
+
+  it("rejects a leadership submission that carries critical deficiencies (or notes) — 400, not silent-drop", () => {
+    const leadership = {
+      kind: "leadership",
+      items: [
+        { sectionKey: "quality_control", points: 8 },
+        { sectionKey: "safety", points: 8 },
+        { sectionKey: "schedule_adherence", points: 8 },
+        { sectionKey: "site_staff_feedback", points: 8 },
+      ],
+    };
+    expect(() =>
+      parseScorecardSubmission(body({ ...leadership, criticalDeficiencies: ["failed_inspection"] })),
+    ).toThrow(/leadership/i);
+    expect(() =>
+      parseScorecardSubmission(body({ ...leadership, criticalDeficiencies: [], criticalDeficiencyNotes: { failed_inspection: "bad" } })),
+    ).toThrow(/leadership/i);
+    // A clean leadership body (no deficiencies) still parses.
+    expect(() => parseScorecardSubmission(body(leadership))).not.toThrow();
+  });
 });

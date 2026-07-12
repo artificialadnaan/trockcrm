@@ -28,6 +28,7 @@ import {
   scorecardDraftReducer,
   scorecardDraftAverage,
   scorecardDraftRating,
+  scorecardDraftSectionsAnswered,
   scorecardDraftSummaryPhotos,
   validateScorecardDraft,
   type ScorecardDraft,
@@ -379,17 +380,32 @@ function LeadershipForm(props: {
         </View>
 
         <View style={{ gap: theme.space.sm }}>
-          <SectionLabel>Category ratings</SectionLabel>
+          <View style={styles.categoryHeading}>
+            <SectionLabel>Category ratings</SectionLabel>
+            {/* Only truly-scored categories count — matches the submit gate + the saved draft state. */}
+            <Text style={styles.scoredCount}>{scorecardDraftSectionsAnswered(draft)}/{CATEGORY_COUNT} scored</Text>
+          </View>
           {FIELD_SCORECARD_LEADERSHIP_SECTIONS.map((section) => {
-            const score = draft.scores[section.key] ?? 5;
+            // `selected` is UNDEFINED until the evaluator actually rates this category. Never coerce it to a
+            // displayed 5: showing "5/10" for an untouched row (and centering the slider) makes an unrated
+            // category look scored, letting an evaluator submit without actually rating (the average would
+            // stay 0 with Submit disabled and no cue). Mirror the project card: show "—" + a "tap to rate"
+            // hint, and keep the score OUT of draft.scores until a tick is tapped.
+            const selected = draft.scores[section.key];
+            const scored = typeof selected === "number";
             const note = draft.notes[section.key] ?? "";
             return (
               <View key={section.key} style={styles.categoryCard}>
                 <View style={styles.categoryHeading}>
                   <Text style={styles.categoryTitle}>{section.title}</Text>
-                  <Text style={styles.categoryScore}>{String(score) + "/10"}</Text>
+                  <Text style={[styles.categoryScore, !scored && styles.categoryScoreMuted]}>
+                    {scored ? `${selected}/10` : "—/10"}
+                  </Text>
                 </View>
-                <ScoreSlider value={score} onChange={(points) => dispatch({ type: "setScore", sectionKey: section.key, points })} />
+                {/* Center the slider at 5 for an unrated row (visual default only), but pass value={0} so no
+                    tick reads as active until the user taps one — the tap is what writes the score. */}
+                <ScoreSlider value={selected ?? 0} onChange={(points) => dispatch({ type: "setScore", sectionKey: section.key, points })} />
+                {!scored ? <Text style={styles.tapToRate}>Tap a number to rate this category.</Text> : null}
                 <Field label="Comment">
                   <TextInput
                     value={note}
@@ -548,6 +564,9 @@ const styles = StyleSheet.create({
   categoryHeading: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: theme.space.md },
   categoryTitle: { flex: 1, fontFamily: theme.font.semibold, fontSize: 15, color: theme.color.textPrimary },
   categoryScore: { fontFamily: theme.font.bold, fontSize: 16, color: theme.color.brandRed },
+  categoryScoreMuted: { color: theme.color.textMuted },
+  scoredCount: { fontFamily: theme.font.semibold, fontSize: 13, color: theme.color.textMuted },
+  tapToRate: { fontFamily: theme.font.body, fontSize: 12, color: theme.color.textMuted },
   sliderTicks: { flexDirection: "row", justifyContent: "space-between", gap: 3 },
   sliderTick: { flex: 1, minHeight: 32, alignItems: "center", justifyContent: "center", borderRadius: theme.radius.sm, backgroundColor: theme.color.surfaceMuted, borderWidth: 1, borderColor: theme.color.border },
   sliderTickActive: { backgroundColor: "#FEE2E2", borderColor: "#FCA5A5" },
