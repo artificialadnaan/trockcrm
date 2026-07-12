@@ -1,9 +1,11 @@
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
 import { fieldScorecards, fieldScorecardItems, fieldScorecardPhotos, files } from "@trock-crm/shared/schema";
 import {
+  FIELD_SCORECARD_LEADERSHIP_SECTION_KEYS,
   FIELD_SCORECARD_SECTION_KEYS,
+  FIELD_SCORECARD_V2_SECTION_KEYS,
   scorecardLeadershipRatingLabel,
   scorecardRatingLabel,
   scorecardV2RatingLabel,
@@ -12,7 +14,6 @@ import {
   type ScorecardFormVersion,
   type ScorecardKind,
   type ScorecardRating,
-  type ScorecardSectionKey,
 } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
 import { generateDownloadUrl } from "../../lib/r2-client.js";
@@ -25,14 +26,13 @@ import { generateDownloadUrl } from "../../lib/r2-client.js";
 type TenantDb = NodePgDatabase<typeof schema>;
 const SCORECARD_PDF_DOWNLOAD_EXPIRY_SECONDS = 60 * 60;
 
-// The deal-tab LIST + PDF-download surface BOTH kinds — leadership cards share the field_scorecards table
-// (kind = 'leadership') and need a CRM surface (the completed-email fallback tells recipients to open the
-// deal). Each summary row carries its `kind` so the web tab branches: project rows expand into the detail
-// view (project shape); leadership rows offer the PDF (their "detail" is the PDF). The DETAIL read stays
-// project-only via this predicate — it maps items through FIELD_SCORECARD_SECTION_KEYS (a project shape),
-// so a leadership card must 404 there rather than render as a mangled project card. COALESCE treats any
-// legacy NULL/absent kind as a project card (the pre-leadership default).
-const projectKindOnly = sql`COALESCE(${fieldScorecards.kind}, 'project') = 'project'`;
+// The deal-tab LIST, DETAIL, + PDF-download surface BOTH kinds — leadership cards share the field_scorecards
+// table (kind = 'leadership') and need a CRM surface (the completed-email fallback tells PM/Super recipients
+// to open the deal, so the full card must be viewable even when the PDF hasn't landed yet). Each summary row
+// carries its `kind` so the web tab branches, and the DETAIL read below is KIND-AWARE: it maps items through
+// the section vocabulary for the card's kind (project → FIELD_SCORECARD_SECTION_KEYS / V2, leadership →
+// FIELD_SCORECARD_LEADERSHIP_SECTION_KEYS) so a leadership card resolves into its own shape (category scores +
+// comment notes, Project Summary text, project_summary photos) rather than 404ing or rendering mangled.
 
 export async function listDealScorecards(
   tenantDb: TenantDb,
@@ -60,7 +60,6 @@ export async function getDealScorecardDetail(
         eq(fieldScorecards.id, scorecardId),
         eq(fieldScorecards.dealId, dealId),
         eq(fieldScorecards.isActive, true),
-        projectKindOnly,
       ),
     )
     .limit(1);
@@ -71,15 +70,30 @@ export async function getDealScorecardDetail(
     .from(fieldScorecardItems)
     .where(eq(fieldScorecardItems.scorecardId, scorecardId));
   const itemByKey = new Map(itemRows.map((r) => [r.sectionKey, r]));
-  const items = FIELD_SCORECARD_SECTION_KEYS.filter((k) => itemByKey.has(k)).map((k) => {
-    const r = itemByKey.get(k)!;
-    return { sectionKey: k, points: r.points, note: r.note ?? null };
-  });
+  // Branch the section vocabulary on the card's kind so a leadership card maps its 4 categories (and a V2
+  // project its 8 sections), not the V1 7-section set — mirrors getFieldScorecardDetail + the mobile detail.
+  const sectionKeys: readonly string[] =
+    card.kind === "leadership"
+      ? FIELD_SCORECARD_LEADERSHIP_SECTION_KEYS
+      : card.formVersion === 2
+        ? FIELD_SCORECARD_V2_SECTION_KEYS
+        : FIELD_SCORECARD_SECTION_KEYS;
+  const items = sectionKeys
+    .filter((k) => itemByKey.has(k))
+    .map((k) => {
+      const r = itemByKey.get(k)!;
+      return {
+        sectionKey: k as FieldScorecardDetail["items"][number]["sectionKey"],
+        points: r.points,
+        note: r.note ?? null,
+      };
+    });
 
   const photoRows = await tenantDb
     .select({
       id: fieldScorecardPhotos.id,
       sectionKey: fieldScorecardPhotos.sectionKey,
+      deficiencyKey: fieldScorecardPhotos.deficiencyKey,
       fileId: fieldScorecardPhotos.fileId,
       caption: files.description,
     })
@@ -90,7 +104,8 @@ export async function getDealScorecardDetail(
   const photos = await Promise.all(
     photoRows.map(async (p) => ({
       id: p.id,
-      sectionKey: p.sectionKey as ScorecardSectionKey,
+      sectionKey: p.sectionKey as FieldScorecardDetail["photos"][number]["sectionKey"],
+      deficiencyKey: p.deficiencyKey ?? null,
       fileId: p.fileId,
       url: opts?.resolvePhotoUrl ? await opts.resolvePhotoUrl(p.fileId) : null,
       caption: p.caption ?? null,
@@ -101,8 +116,13 @@ export async function getDealScorecardDetail(
     ...toSummary(card),
     items,
     criticalDeficiencies: card.criticalDeficiencies ?? [],
+    criticalDeficiencyNotes: card.criticalDeficiencyNotes ?? {},
     actionItems: card.actionItems ?? [],
     photos,
+    superintendentSignature: card.superintendentSignature ?? null,
+    pmSignature: card.pmSignature ?? null,
+    // Leadership Project Summary free text; null for project cards.
+    summary: card.summary ?? null,
   };
 }
 

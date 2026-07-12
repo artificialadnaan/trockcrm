@@ -6,12 +6,15 @@ import { Badge } from "@/components/ui/badge";
 import {
   FIELD_SCORECARD_SECTIONS,
   FIELD_SCORECARD_V2_SECTIONS,
+  FIELD_SCORECARD_LEADERSHIP_SECTIONS,
+  FIELD_SCORECARD_LEADERSHIP_SUMMARY_SECTION_KEY,
   FIELD_SCORECARD_CRITICAL_DEFICIENCIES,
   FIELD_SCORECARD_V2_CRITICAL_DEFICIENCIES,
   type FieldScorecardSummary,
   type FieldScorecardDetail,
   type ScorecardRating,
 } from "@trock-crm/shared/types";
+import { isApiError } from "@/lib/api";
 import { useDealScorecards, fetchDealScorecardDetail, downloadDealScorecardPdf } from "@/hooks/use-deal-scorecards";
 
 const RATING_BADGE: Record<ScorecardRating, string> = {
@@ -25,6 +28,11 @@ const SECTION_MAX = new Map<string, number>(FIELD_SCORECARD_SECTIONS.map((s) => 
 const DEFICIENCY_LABEL = new Map<string, string>(FIELD_SCORECARD_CRITICAL_DEFICIENCIES.map((d) => [d.key, d.label]));
 const V2_SECTION_TITLE = new Map<string, string>(FIELD_SCORECARD_V2_SECTIONS.map((s) => [s.key, s.title]));
 const V2_DEFICIENCY_LABEL = new Map<string, string>(FIELD_SCORECARD_V2_CRITICAL_DEFICIENCIES.map((d) => [d.key, d.label]));
+const LEADERSHIP_SECTION_TITLE = new Map<string, string>(FIELD_SCORECARD_LEADERSHIP_SECTIONS.map((s) => [s.key, s.title]));
+
+// Copy shown when the Download action fires before the async best-effort PDF has landed (the /download
+// endpoint 404s while pdf_r2_key is still null). The server sends the friendly text in the error message.
+const PDF_NOT_READY_TOAST = "The scorecard PDF is still generating — please try again shortly.";
 
 function formatWeek(weekOf: string): string {
   const d = new Date(`${weekOf}T00:00:00Z`);
@@ -90,18 +98,16 @@ function ScorecardRow({ dealId, summary }: { dealId: string; summary: FieldScore
   const [downloading, setDownloading] = useState(false);
 
   // Leadership cards share these tables but are scored on a different model (4 categories / 10, no
-  // deficiencies/signatures) and have no project-shaped detail view — the server's detail read is
-  // project-only. Rather than dead-end the row on a PDF that can lag/fail, leadership rows expand to a
-  // MINIMAL summary built purely from the list DTO (average/10, rating, week, evaluator) so the card is
-  // always viewable at least at summary level; the PDF stays a best-effort extra (gated on availability).
+  // deficiencies/signatures, a Project Summary + photos). The server detail read is now KIND-AWARE, so
+  // BOTH kinds expand into the fetched full detail view — leadership renders category scores + comment
+  // notes, the Project Summary text, and its evidence photos, so the card is fully viewable in the CRM
+  // even when the best-effort PDF hasn't landed yet (the completed-email fallback points PM/Super here).
   const isLeadership = summary.kind === "leadership";
 
   const toggle = useCallback(async () => {
     const next = !expanded;
     setExpanded(next);
-    // Leadership expands to a summary rendered from data already in hand — no project detail fetch (the
-    // server detail read is project-only and would 404). Only project rows fetch the detail view.
-    if (isLeadership) return;
+    // Both kinds fetch the full detail on first expand (the server read branches on kind).
     if (next && !detail && !detailLoading) {
       setDetailLoading(true);
       try {
@@ -113,14 +119,18 @@ function ScorecardRow({ dealId, summary }: { dealId: string; summary: FieldScore
         setDetailLoading(false);
       }
     }
-  }, [expanded, detail, detailLoading, dealId, summary.id, isLeadership]);
+  }, [expanded, detail, detailLoading, dealId, summary.id]);
 
   const download = useCallback(async () => {
     setDownloading(true);
     try {
       await downloadDealScorecardPdf(dealId, summary.id);
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "The PDF isn’t ready yet");
+      // A best-effort PDF that finished generating moments after the deal loaded is downloadable without a
+      // reload — the action always attempts, and a not-yet-ready 404 becomes a friendly "try again" toast
+      // (the server's own message) instead of a hard error, mirroring the mobile PDF-404 handling.
+      const notReady = isApiError(e) && e.status === 404;
+      toast.error(notReady ? e.message || PDF_NOT_READY_TOAST : e instanceof Error ? e.message : "Couldn’t open the scorecard PDF.");
     } finally {
       setDownloading(false);
     }
@@ -166,15 +176,10 @@ function ScorecardRow({ dealId, summary }: { dealId: string; summary: FieldScore
     </>
   );
 
-  // The stored PDF renders async (best-effort) and can lag or fail, so gate the Download action on the
-  // list DTO's availability signal — otherwise the button 404s while pdf_r2_key is still null.
-  const pdfReady = summary.hasPdf === true;
-
   return (
     <div className="overflow-hidden rounded-lg border border-gray-200 bg-white">
       <div className="flex items-center gap-3 p-4">
-        {/* Both kinds expand: project rows into the fetched detail view, leadership rows into a minimal
-            summary rendered from the list data already in hand. */}
+        {/* Both kinds expand into the fetched full detail view (the server read is kind-aware). */}
         <button
           type="button"
           onClick={() => void toggle()}
@@ -188,73 +193,111 @@ function ScorecardRow({ dealId, summary }: { dealId: string; summary: FieldScore
           )}
           {header}
         </button>
-        {pdfReady ? (
-          <Button variant="ghost" size="sm" onClick={() => void download()} disabled={downloading} title="Download PDF">
-            {downloading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
-          </Button>
-        ) : (
-          // PDF not ready yet: show a disabled generating state instead of a button that would 404.
-          <span
-            className="inline-flex items-center gap-1.5 whitespace-nowrap px-2 text-xs font-medium text-gray-400"
-            title="The scorecard PDF is still generating"
-          >
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            PDF generating…
-          </span>
-        )}
+        {/* The stored PDF renders async (best-effort) and can finish moments after the deal opened, so the
+            action ALWAYS attempts the download rather than staying permanently gated on the initial
+            list-DTO hasPdf snapshot — a not-yet-ready 404 becomes a friendly "try again" toast (see
+            download()), so it works once the key lands without a page reload. */}
+        <Button variant="ghost" size="sm" onClick={() => void download()} disabled={downloading} title="Download PDF">
+          {downloading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+        </Button>
       </div>
 
-      {expanded &&
-        (isLeadership ? (
-          <div className="border-t border-gray-100 bg-gray-50 p-4">
-            <LeadershipSummaryView summary={summary} scoreLabel={scoreLabel} />
-          </div>
-        ) : (
-          <div className="border-t border-gray-100 bg-gray-50 p-4">
-            {detailLoading || !detail ? (
-              <div className="flex items-center justify-center py-6 text-sm text-gray-500">
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Loading detail…
-              </div>
-            ) : (
-              <ScorecardDetailView detail={detail} />
-            )}
-          </div>
-        ))}
+      {expanded && (
+        <div className="border-t border-gray-100 bg-gray-50 p-4">
+          {detailLoading || !detail ? (
+            <div className="flex items-center justify-center py-6 text-sm text-gray-500">
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Loading detail…
+            </div>
+          ) : isLeadership ? (
+            <LeadershipDetailView detail={detail} />
+          ) : (
+            <ScorecardDetailView detail={detail} />
+          )}
+        </div>
+      )}
     </div>
   );
 }
 
-// Minimal leadership summary — no server detail read (that endpoint is project-only). Everything shown here
-// comes from the list DTO already loaded: the /10 average, rating label, the week, and the evaluator.
-function LeadershipSummaryView({
-  summary,
-  scoreLabel,
-}: {
-  summary: FieldScorecardSummary;
-  scoreLabel: string;
-}) {
-  const rows: Array<{ label: string; value: string }> = [
-    { label: "Average", value: `${scoreLabel} / 10` },
-    { label: "Rating", value: summary.ratingLabel },
-    { label: "Week of", value: formatWeek(summary.weekOf) },
-    { label: "Evaluator", value: summary.submittedByName ?? "—" },
+// Full leadership detail — mirrors the mobile LeadershipBody / scorecardLeadershipRows shape: the 4 category
+// scores (each /10) + comment notes, the Project Summary free text, and the Project Summary evidence photos.
+// Plus a meta row (average/10, rating, week, evaluator=submittedByName). Leadership cards carry no critical
+// deficiencies, action items, or signatures, so those sections are omitted. Renders from the kind-aware
+// detail so the full card is viewable in the CRM even before the best-effort PDF lands.
+function LeadershipDetailView({ detail }: { detail: FieldScorecardDetail }) {
+  const average = (detail.averageScore ?? detail.totalScore / 10).toFixed(1);
+  // The 4 canonical leadership categories, in form order; an item absent from the detail shows 0/10.
+  const itemByKey = new Map(detail.items.map((i) => [i.sectionKey, i]));
+  const rows = FIELD_SCORECARD_LEADERSHIP_SECTIONS.map((s) => {
+    const item = itemByKey.get(s.key);
+    return { key: s.key, title: s.title, points: item?.points ?? 0, note: item?.note ?? null };
+  });
+  const summaryPhotos = detail.photos.filter((p) => p.sectionKey === FIELD_SCORECARD_LEADERSHIP_SUMMARY_SECTION_KEY);
+  const meta: Array<{ label: string; value: string }> = [
+    { label: "Average", value: `${average} / 10` },
+    { label: "Rating", value: detail.ratingLabel },
+    { label: "Week of", value: formatWeek(detail.weekOf) },
+    { label: "Evaluator", value: detail.submittedByName ?? "—" },
   ];
+
   return (
     <div className="space-y-4">
       <div>
-        <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">Leadership Summary</h4>
+        <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">Category Scores</h4>
         <div className="divide-y divide-gray-200 rounded-md border border-gray-200 bg-white">
           {rows.map((row) => (
-            <div key={row.label} className="flex items-center justify-between px-3 py-2">
-              <span className="text-sm text-gray-500">{row.label}</span>
-              <span className="text-sm font-semibold text-gray-900">{row.value}</span>
+            <div key={row.key} className="px-3 py-2">
+              <div className="flex items-center justify-between">
+                <span className="text-sm text-gray-900">{LEADERSHIP_SECTION_TITLE.get(row.key) ?? row.title}</span>
+                <span className="text-sm font-semibold text-gray-900">{row.points} / 10</span>
+              </div>
+              {row.note && <p className="mt-0.5 text-xs italic text-gray-500">{row.note}</p>}
             </div>
           ))}
         </div>
       </div>
-      <p className="text-xs text-gray-500">
-        The full leadership scorecard is available as a PDF from the download action above.
-      </p>
+
+      <div>
+        <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">Project Summary</h4>
+        <p className="whitespace-pre-wrap rounded-md border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900">
+          {detail.summary?.trim() || "No summary provided."}
+        </p>
+      </div>
+
+      {summaryPhotos.length > 0 && (
+        <div>
+          <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">
+            Photos ({summaryPhotos.length})
+          </h4>
+          <div className="grid grid-cols-3 gap-2 sm:grid-cols-4">
+            {summaryPhotos.map((p) =>
+              p.url ? (
+                <a key={p.id} href={p.url} target="_blank" rel="noopener noreferrer" className="group block">
+                  <img
+                    src={p.url}
+                    alt={p.caption ?? "Scorecard evidence"}
+                    className="aspect-square w-full rounded-md object-cover ring-1 ring-gray-200 group-hover:ring-gray-400"
+                  />
+                  {p.caption && <p className="mt-0.5 truncate text-[11px] text-gray-500">{p.caption}</p>}
+                </a>
+              ) : (
+                <div key={p.id} className="flex aspect-square items-center justify-center rounded-md bg-gray-100 text-[11px] text-gray-400">
+                  Unavailable
+                </div>
+              ),
+            )}
+          </div>
+        </div>
+      )}
+
+      <div className="divide-y divide-gray-200 rounded-md border border-gray-200 bg-white">
+        {meta.map((row) => (
+          <div key={row.label} className="flex items-center justify-between px-3 py-2">
+            <span className="text-sm text-gray-500">{row.label}</span>
+            <span className="text-sm font-semibold text-gray-900">{row.value}</span>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

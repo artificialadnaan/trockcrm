@@ -21,8 +21,9 @@ const OTHER_DEAL = "22222222-2222-2222-2222-222222222222";
 const SC_NEWER = "55555555-5555-5555-5555-000000000001"; // DEAL, has pdf
 const SC_OLDER = "55555555-5555-5555-5555-000000000002"; // DEAL, NO pdf
 const SC_OTHER = "55555555-5555-5555-5555-000000000003"; // OTHER_DEAL
-const SC_LEADERSHIP = "55555555-5555-5555-5555-000000000004"; // DEAL, kind='leadership' → listed + downloadable, but no project detail view
+const SC_LEADERSHIP = "55555555-5555-5555-5555-000000000004"; // DEAL, kind='leadership' → listed + downloadable + full kind-aware detail
 const FILE1 = "aaaaaaaa-0000-0000-0000-000000000001";
+const FILE2 = "aaaaaaaa-0000-0000-0000-000000000002"; // leadership Project Summary photo
 const USER = "33333333-3333-3333-3333-333333333333";
 
 let pg: PGlite;
@@ -35,7 +36,7 @@ beforeAll(async () => {
     SET search_path TO public;
   `);
   await pg.exec(tenantSchemaSql("public", [fieldScorecards, fieldScorecardItems, fieldScorecardPhotos]));
-  await pg.exec(`INSERT INTO files (id, description) VALUES ('${FILE1}', 'Slab crack');`);
+  await pg.exec(`INSERT INTO files (id, description) VALUES ('${FILE1}', 'Slab crack'), ('${FILE2}', 'Crew briefing');`);
   tdb = drizzle(pg);
 
   await tdb.insert(fieldScorecards).values([
@@ -58,18 +59,25 @@ beforeAll(async () => {
     {
       // A leadership card on THIS deal, submitted newest — it IS listed + downloadable from the deal tab
       // (the completed-email fallback points recipients here), carrying kind='leadership' + averageScore so
-      // the web can branch to the PDF instead of the project detail view. formVersion=2 (1-10 average bands).
+      // the web branches to the full kind-aware leadership detail. formVersion=2 (1-10 average bands).
       id: SC_LEADERSHIP, clientSubmissionId: "66666666-6666-6666-6666-000000000004", dealId: DEAL, weekOf: "2026-07-01",
-      totalScore: 90, formVersion: 2, kind: "leadership", averageScore: "9.0", rating: "elite", submittedBy: USER, submittedByName: "Lena Lead", pdfR2Key: "office_x/deals/DFW-10432/documents/scorecards/lead.pdf",
+      totalScore: 90, formVersion: 2, kind: "leadership", averageScore: "9.0", rating: "elite", summary: "Strong week; crew morale high.",
+      submittedBy: USER, submittedByName: "Lena Lead", pdfR2Key: "office_x/deals/DFW-10432/documents/scorecards/lead.pdf",
       submittedAt: new Date("2026-07-01T18:00:00Z"),
     },
   ]);
   await tdb.insert(fieldScorecardItems).values([
     { scorecardId: SC_NEWER, sectionKey: "schedule", points: 15, note: "Recovery in progress" },
     { scorecardId: SC_NEWER, sectionKey: "quality", points: 20, note: null },
+    // Leadership categories (a subset — the detail returns only the present canonical keys, in order).
+    { scorecardId: SC_LEADERSHIP, sectionKey: "quality_control", points: 10, note: "Zero rework" },
+    { scorecardId: SC_LEADERSHIP, sectionKey: "safety", points: 8, note: null },
+    { scorecardId: SC_LEADERSHIP, sectionKey: "schedule_adherence", points: 9, note: "On track" },
   ]);
   await tdb.insert(fieldScorecardPhotos).values([
     { scorecardId: SC_NEWER, sectionKey: "schedule", fileId: FILE1 },
+    // Leadership photos attach to the Project Summary block.
+    { scorecardId: SC_LEADERSHIP, sectionKey: "project_summary", fileId: FILE2 },
   ]);
 });
 
@@ -128,8 +136,25 @@ describe("getDealScorecardDetail", () => {
     await expect(getDealScorecardDetail(tdb, OTHER_DEAL, SC_NEWER)).rejects.toMatchObject({ statusCode: 404 });
   });
 
-  it("404s a leadership card — the deal tab detail is project-only (kind filter)", async () => {
-    await expect(getDealScorecardDetail(tdb, DEAL, SC_LEADERSHIP)).rejects.toMatchObject({ statusCode: 404 });
+  it("resolves a LEADERSHIP card kind-aware — category items (leadership keys), summary, project_summary photos", async () => {
+    const detail = await getDealScorecardDetail(tdb, DEAL, SC_LEADERSHIP, {
+      resolvePhotoUrl: async (fileId) => `url://${fileId}`,
+    });
+    expect(detail.kind).toBe("leadership");
+    expect(detail.averageScore).toBe(9);
+    expect(detail.ratingLabel).toBe("Elite Execution"); // leadership 1-10 bands
+    // Items map through the LEADERSHIP section vocabulary (present keys, canonical order) — NOT project keys.
+    expect(detail.items.map((i) => i.sectionKey)).toEqual(["quality_control", "safety", "schedule_adherence"]);
+    expect(detail.items.find((i) => i.sectionKey === "quality_control")?.note).toBe("Zero rework");
+    expect(detail.items.find((i) => i.sectionKey === "safety")?.points).toBe(8);
+    // Project Summary free text + its evidence photo (resolved url), like project photos.
+    expect(detail.summary).toBe("Strong week; crew morale high.");
+    expect(detail.photos).toHaveLength(1);
+    expect(detail.photos[0].sectionKey).toBe("project_summary");
+    expect(detail.photos[0].url).toBe(`url://${FILE2}`);
+    expect(detail.photos[0].caption).toBe("Crew briefing");
+    // Leadership cards carry no deficiencies/signatures.
+    expect(detail.criticalDeficiencies).toEqual([]);
   });
 });
 
