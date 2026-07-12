@@ -33,6 +33,10 @@ export interface FieldScorecardEmailPayload {
   weekOf?: string;
   totalScore?: number;
   formVersion?: 1 | 2;
+  // Distinguishes a Leadership Scorecard from a regular Field Scorecard so the email copy names the right card
+  // type (the recipients — PM/Super — otherwise can't tell which they received, especially when the PDF isn't
+  // attached). Absent/unknown ⇒ treated as a project field scorecard.
+  kind?: "project" | "leadership";
   averageScore?: number | null;
   ratingLabel?: string;
   submittedByName?: string | null;
@@ -165,6 +169,7 @@ export async function handleFieldScorecardEmail(
     weekOf: normalizeText(payload.weekOf),
     totalScore: typeof payload.totalScore === "number" ? payload.totalScore : null,
     formVersion: payload.formVersion === 2 ? 2 : 1,
+    kind: payload.kind === "leadership" ? "leadership" : "project",
     averageScore: typeof payload.averageScore === "number" ? payload.averageScore : null,
     ratingLabel: normalizeText(payload.ratingLabel),
     submittedByName: normalizeText(payload.submittedByName),
@@ -233,6 +238,7 @@ export function buildFieldScorecardEmail(input: {
   weekOf: string | null;
   totalScore: number | null;
   formVersion?: 1 | 2;
+  kind?: "project" | "leadership";
   averageScore?: number | null;
   ratingLabel: string | null;
   submittedByName: string | null;
@@ -245,14 +251,17 @@ export function buildFieldScorecardEmail(input: {
   const dealUrl = input.dealId ? `${baseUrl}/deals/${encodeURIComponent(input.dealId)}${officeParam}` : baseUrl;
   const safeDealUrl = escapeHtml(dealUrl);
 
+  // Name the card type so a Leadership Scorecard isn't mislabeled as a regular Field Scorecard in the subject,
+  // header, and text — the recipients (PM/Super) rely on this when the PDF isn't attached.
+  const cardLabel = input.kind === "leadership" ? "Leadership Scorecard" : "Field Scorecard";
   const scoreText = input.totalScore == null
     ? "—"
     : input.formVersion === 2
       ? (input.averageScore ?? input.totalScore / 10).toFixed(1) + "/10"
       : String(input.totalScore) + "/100";
   const subject = input.projectNumber
-    ? `Field Scorecard: ${input.projectNumber} — ${scoreText}${input.ratingLabel ? ` (${input.ratingLabel})` : ""}`
-    : `Field Scorecard: ${input.dealName} — ${scoreText}`;
+    ? `${cardLabel}: ${input.projectNumber} — ${scoreText}${input.ratingLabel ? ` (${input.ratingLabel})` : ""}`
+    : `${cardLabel}: ${input.dealName} — ${scoreText}`;
 
   const rows = [
     ["Project", input.dealName],
@@ -285,7 +294,7 @@ export function buildFieldScorecardEmail(input: {
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta http-equiv="X-UA-Compatible" content="IE=edge" />
-  <title>Field Scorecard</title>
+  <title>${escapeHtml(cardLabel)}</title>
   <!--[if mso]><noscript><xml><o:OfficeDocumentSettings><o:PixelsPerInch>96</o:PixelsPerInch></o:OfficeDocumentSettings></xml></noscript><![endif]-->
 </head>
 <body style="margin:0;padding:0;background-color:#f4f4f5;">
@@ -304,7 +313,7 @@ export function buildFieldScorecardEmail(input: {
           </tr>
           <tr>
             <td align="center" style="padding:4px 24px 0 24px;">
-              <h1 style="margin:0;font-family:Arial,Helvetica,sans-serif;font-size:20px;line-height:26px;color:#111111;font-weight:bold;">Field Scorecard Submitted</h1>
+              <h1 style="margin:0;font-family:Arial,Helvetica,sans-serif;font-size:20px;line-height:26px;color:#111111;font-weight:bold;">${escapeHtml(cardLabel)} Submitted</h1>
             </td>
           </tr>
           <tr>
@@ -345,7 +354,7 @@ export function buildFieldScorecardEmail(input: {
 </html>`;
 
   const text =
-    `Field Scorecard submitted\n\n` +
+    `${cardLabel} submitted\n\n` +
     rows.map(([label, value]) => `${label}: ${value}`).join("\n") +
     `\n\n${pdfNote}` +
     `\n\nView the deal in the CRM: ${dealUrl}`;

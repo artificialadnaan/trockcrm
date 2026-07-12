@@ -238,6 +238,10 @@ function LeadershipDetailView({ detail }: { detail: FieldScorecardDetail }) {
     { label: "Rating", value: detail.ratingLabel },
     { label: "Week of", value: formatWeek(detail.weekOf) },
     { label: "Evaluator", value: detail.submittedByName ?? "—" },
+    // Captured on the form + rendered in the mobile/PDF header; show them here too so the completed-email
+    // fallback ("open the deal in the CRM") lands on a card header with the full PM / Superintendent context.
+    { label: "Project manager", value: detail.pmName ?? "—" },
+    { label: "Superintendent", value: detail.superintendentName ?? "—" },
   ];
 
   return (

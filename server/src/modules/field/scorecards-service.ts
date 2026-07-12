@@ -191,9 +191,11 @@ export async function createFieldScorecard(
   }
 
   const photoLinks = await resolvePhotoLinks(tenantDb, input, formVersion, kind, deficiencies);
-  // V2 (and leadership) define Week Of as the completion date. Ignore the device-provided value so offline
-  // drafts cannot submit under a stale week after being completed later.
-  const weekOf = formVersion === 2 ? new Date().toISOString().slice(0, 10) : input.weekOf;
+  // Week Of is the LOCAL date the field app stamps (todayIso, device-local) — trust it for every kind rather
+  // than recomputing here. The server runs in UTC, so `new Date().toISOString()` stamped the NEXT day for any
+  // evening submit west of UTC (e.g. 8 PM CDT files under tomorrow) — that off-by-one hit every leadership/V2
+  // card, which always took this path. Mirrors the project card, which already persists the client's local weekOf.
+  const weekOf = input.weekOf;
   // Persist the summary for leadership cards only (bounded); project cards never carry one.
   const summary = kind === "leadership" ? (input.summary?.trim() ? input.summary.trim().slice(0, 8000) : null) : null;
 

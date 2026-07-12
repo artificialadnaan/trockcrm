@@ -196,6 +196,29 @@ function LeadershipForm(props: {
   const summaryPhotos = scorecardDraftSummaryPhotos(draft);
   const captionPhoto = draft.photos.find((photo) => photo.key === captionPhotoKey) ?? null;
 
+  // Track whether any INLINE dictation (a category comment or the Project Summary) is still recording or
+  // transcribing. VoiceRecorder dispatches its transcript asynchronously on stop; submitting mid-dictation
+  // builds the payload BEFORE that dispatch, then deletes the draft on success — silently losing the spoken
+  // text. Keyed per recorder (a stable handler each) so one finishing can't clear another that's still busy.
+  const [voiceBusyKeys, setVoiceBusyKeys] = useState<Set<string>>(() => new Set());
+  const voiceBusyHandlers = useRef<Map<string, (busy: boolean) => void>>(new Map());
+  const getVoiceBusyHandler = useCallback((key: string) => {
+    let handler = voiceBusyHandlers.current.get(key);
+    if (!handler) {
+      handler = (busy: boolean) =>
+        setVoiceBusyKeys((prev) => {
+          if (busy === prev.has(key)) return prev;
+          const next = new Set(prev);
+          if (busy) next.add(key);
+          else next.delete(key);
+          return next;
+        });
+      voiceBusyHandlers.current.set(key, handler);
+    }
+    return handler;
+  }, []);
+  const anyVoiceBusy = voiceBusyKeys.size > 0;
+
   const goBack = () => {
     // Leaving the screen unmounts it; a photo copy still in flight would lose its pending dispatch. Block.
     if (savingPhotos > 0) {
@@ -318,6 +341,13 @@ function LeadershipForm(props: {
 
   async function onSubmit() {
     if (submitting) return;
+    // A dictation still recording/transcribing hasn't dispatched its transcript yet; submitting now would drop
+    // that text and then delete the draft. Nudge the user to wait rather than losing the words. (The Submit
+    // button is also disabled while busy — this guards the race where a tap lands as the state flips.)
+    if (anyVoiceBusy) {
+      setNotice({ tone: "error", text: "Finishing dictation — try Submit again in a moment." });
+      return;
+    }
     setSubmitting(true);
     setNotice(null);
     if (pendingRemovalIds.current.size > 0) {
@@ -414,7 +444,7 @@ function LeadershipForm(props: {
                     multiline
                     style={{ minHeight: 72, textAlignVertical: "top", paddingTop: 10 }}
                   />
-                  {voiceEnabled ? <VoiceRecorder onTranscript={(text) => dispatch({ type: "appendNote", sectionKey: section.key, text })} /> : null}
+                  {voiceEnabled ? <VoiceRecorder onTranscript={(text) => dispatch({ type: "appendNote", sectionKey: section.key, text })} onBusyChange={getVoiceBusyHandler(`cat:${section.key}`)} /> : null}
                 </Field>
               </View>
             );
@@ -436,7 +466,7 @@ function LeadershipForm(props: {
               multiline
               style={{ minHeight: 96, textAlignVertical: "top", paddingTop: 10 }}
             />
-            {voiceEnabled ? <VoiceRecorder onTranscript={(text) => dispatch({ type: "appendSummary", text })} /> : null}
+            {voiceEnabled ? <VoiceRecorder onTranscript={(text) => dispatch({ type: "appendSummary", text })} onBusyChange={getVoiceBusyHandler("summary")} /> : null}
           </Field>
 
           <View style={{ gap: theme.space.sm }}>
@@ -474,10 +504,10 @@ function LeadershipForm(props: {
           <Text style={styles.totalText}>{average.toFixed(1)}/10</Text>
         </View>
         <Button
-          title={savingPhotos > 0 ? "Saving photo…" : "Submit ✓"}
+          title={savingPhotos > 0 ? "Saving photo…" : anyVoiceBusy ? "Finishing dictation…" : "Submit ✓"}
           onPress={onSubmit}
           loading={submitting}
-          disabled={!validation.canSubmit || submitting || savingPhotos > 0}
+          disabled={!validation.canSubmit || submitting || savingPhotos > 0 || anyVoiceBusy}
           style={{ flex: 1 }}
         />
       </View>

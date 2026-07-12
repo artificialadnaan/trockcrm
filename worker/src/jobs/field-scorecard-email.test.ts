@@ -47,6 +47,31 @@ describe("buildFieldScorecardEmail", () => {
     expect(email.dealUrl).toBe("https://trockcrm.com/deals/d1?officeId=off-1");
   });
 
+  it("labels a leadership card as a Leadership Scorecard in the subject, header, and text", () => {
+    const email = buildFieldScorecardEmail({
+      dealId: "d1", dealName: "Maple", projectNumber: "DFW-10432", weekOf: "2026-06-30",
+      totalScore: 80, formVersion: 2, averageScore: 8, kind: "leadership",
+      ratingLabel: "Meets Standard", submittedByName: "Sam", pdfStatus: "unavailable",
+      officeId: "off-1", frontendUrl: "https://trockcrm.com",
+    });
+    expect(email.subject).toContain("Leadership Scorecard:");
+    expect(email.subject).toContain("8.0/10");
+    expect(email.html).toContain("Leadership Scorecard Submitted");
+    expect(email.text).toContain("Leadership Scorecard submitted");
+    // A leadership card must not be mislabeled as a plain field scorecard.
+    expect(email.subject).not.toMatch(/^Field Scorecard/);
+  });
+
+  it("defaults to 'Field Scorecard' when kind is absent (project card / legacy payload)", () => {
+    const email = buildFieldScorecardEmail({
+      dealId: "d1", dealName: "Maple", projectNumber: "DFW-10432", weekOf: "2026-06-30",
+      totalScore: 82, ratingLabel: "Needs Immediate Improvement", submittedByName: "Sam",
+      pdfStatus: "attached", officeId: "off-1", frontendUrl: "https://trockcrm.com",
+    });
+    expect(email.subject).toContain("Field Scorecard:");
+    expect(email.html).toContain("Field Scorecard Submitted");
+  });
+
   it("notes the PDF is still generating when it's not yet available", () => {
     const email = buildFieldScorecardEmail({
       dealId: "d1", dealName: "Maple", projectNumber: null, weekOf: null, totalScore: null,
