@@ -8,10 +8,12 @@ import {
   type EvidenceGroup,
   type ScorecardPdfPhoto,
 } from "../../../src/modules/field/scorecard-pdf.js";
+import { TROCK_LOGO_PNG_BASE64 } from "../../../src/modules/field/pdf-logo.js";
 
-// A 1x1 PNG — a real, sharp/pdfkit-decodable image so evidence tiles and handwritten signatures embed.
-const TINY_PNG_DATA_URL =
-  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+// The production logo PNG is already proven PDFKit-safe by the scorecard/evidence headers. Reuse it as a
+// deterministic image fixture so this runtime test verifies actual embedded evidence and data-URL signature
+// rendering rather than a malformed/minimal PNG that PDFKit would replace with a placeholder.
+const TINY_PNG_DATA_URL = `data:image/png;base64,${TROCK_LOGO_PNG_BASE64}`;
 const TINY_PNG = Buffer.from(TINY_PNG_DATA_URL.split(",")[1], "base64");
 
 function photo(over: Partial<ScorecardPdfPhoto> = {}): ScorecardPdfPhoto {

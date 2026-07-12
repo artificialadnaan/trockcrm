@@ -1,4 +1,5 @@
 import sharp from "sharp";
+import heicConvert from "heic-convert";
 import { getObjectBuffer, putObject, isR2Configured } from "./r2-client.js";
 
 /**
@@ -79,6 +80,34 @@ export async function generateThumbnailBuffer(source: Buffer): Promise<Buffer> {
 // the public transcoder's guard (image-transcode.ts).
 const EVIDENCE_DECODE_PIXEL_LIMIT = 50_000_000;
 
+// `sharp`'s prebuilt binaries intentionally omit libheif, but field uploads accept HEIC/HEIF and older
+// scorecards may not have a stored thumbnail. `heic-convert` bundles a libheif/WASM decoder for that
+// narrow fallback. It needs an explicit dimension gate because its decoder materializes an RGBA raster
+// before Sharp can resize it.
+const HEIC_DECODE_PIXEL_LIMIT = EVIDENCE_DECODE_PIXEL_LIMIT;
+
+function isHeicOrHeif(mimeType: string | null | undefined): boolean {
+  const mime = mimeType?.split(";", 1)[0]?.trim().toLowerCase();
+  return mime === "image/heic" || mime === "image/heif";
+}
+
+/** Read a bounded HEIF `ispe` image-spatial-extents box before invoking the WASM decoder. */
+export function readHeifDimensions(source: Buffer): { width: number; height: number } | null {
+  for (let typeOffset = source.indexOf("ispe", 4); typeOffset >= 0; typeOffset = source.indexOf("ispe", typeOffset + 4)) {
+    const boxOffset = typeOffset - 4;
+    if (boxOffset < 0 || boxOffset + 20 > source.length) continue;
+    const boxSize = source.readUInt32BE(boxOffset);
+    // An ispe box contains size, type, version/flags, width, and height. Ordinary camera HEIC/HEIF uses
+    // this compact form; refuse malformed or extended-size metadata rather than allocate unbounded raster.
+    if (boxSize < 20 || boxOffset + boxSize > source.length) continue;
+    const width = source.readUInt32BE(typeOffset + 8);
+    const height = source.readUInt32BE(typeOffset + 12);
+    if (!width || !height || width * height > HEIC_DECODE_PIXEL_LIMIT) continue;
+    return { width, height };
+  }
+  return null;
+}
+
 /**
  * Downscale/transcode a full-size original into a small JPEG for a PDF-embedded evidence tile. Used as
  * the fallback when a photo has no ingest thumbnail, so a large valid original (JPEG/HEIC/HEIF/WebP/PNG/
@@ -88,13 +117,25 @@ const EVIDENCE_DECODE_PIXEL_LIMIT = 50_000_000;
  * transparent PNG/WebP annotation doesn't render as a black box. Throws if sharp can't decode the input —
  * callers treat a throw as "no image" (placeholder), NEVER as dropping evidence under a byte cap.
  */
-export async function generateEvidenceJpeg(source: Buffer): Promise<Buffer> {
-  return sharp(source, { failOn: "none", limitInputPixels: EVIDENCE_DECODE_PIXEL_LIMIT })
+export async function generateEvidenceJpeg(source: Buffer, mimeType?: string | null): Promise<Buffer> {
+  // HEIC/HEIF needs the WASM decoder above Sharp. Convert first, then apply the same orientation, size,
+  // transparency, and JPEG-quality policy as every other evidence type.
+  const rasterSource = isHeicOrHeif(mimeType)
+    ? Buffer.from(await convertHeicToJpeg(source))
+    : source;
+  return sharp(rasterSource, { failOn: "none", limitInputPixels: EVIDENCE_DECODE_PIXEL_LIMIT })
     .rotate() // honor EXIF orientation so the evidence isn't sideways
     .resize({ width: THUMBNAIL_MAX_EDGE, height: THUMBNAIL_MAX_EDGE, fit: "inside", withoutEnlargement: true })
     .flatten({ background: { r: 255, g: 255, b: 255 } })
     .jpeg({ quality: THUMBNAIL_QUALITY, mozjpeg: true })
     .toBuffer();
+}
+
+async function convertHeicToJpeg(source: Buffer): Promise<Uint8Array> {
+  if (!readHeifDimensions(source)) {
+    throw new Error("HEIC/HEIF image is malformed or exceeds the PDF evidence decode limit");
+  }
+  return heicConvert({ buffer: source, format: "JPEG", quality: THUMBNAIL_QUALITY / 100 });
 }
 
 /**

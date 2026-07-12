@@ -13,16 +13,13 @@ const PDF_EVIDENCE_THUMB_MAX_BYTES = 750_000;
 const PDF_EVIDENCE_ORIGINAL_MAX_BYTES = 40 * 1024 * 1024;
 
 /**
- * Formats sharp can actually decode in THIS deployment, so an original is worth fetching to transcode for
- * the PDF: JPEG plus the public transcoder's allowlist (PNG/WebP/GIF/AVIF/TIFF). Deliberately EXCLUDES
- * HEIC/HEIF — the prebuilt sharp has no HEVC decoder (see image-transcode.ts), so a HEIC original can't be
- * rendered. In practice mobile captures are normalized to JPEG before upload (mobile/src/capture/
- * compress.ts), so scorecard evidence reaches R2 as JPEG; this just avoids a doomed fetch+decode for any
- * stray HEIC original (which would degrade to the placeholder either way).
+ * Formats with a PDF-safe conversion path in this deployment: JPEG plus the public transcoder's allowlist
+ * (PNG/WebP/GIF/AVIF/TIFF) and HEIC/HEIF through the bounded libheif/WASM compatibility converter in
+ * image-thumbnail.ts.
  */
 export function isEvidenceTranscodable(mimeType: string | null | undefined): boolean {
   const mime = mimeType?.split(";")[0]?.trim().toLowerCase();
-  if (mime === "image/jpeg" || mime === "image/jpg") return true;
+  if (mime === "image/jpeg" || mime === "image/jpg" || mime === "image/heic" || mime === "image/heif") return true;
   return isTranscodableToJpeg(mimeType);
 }
 
@@ -36,8 +33,8 @@ export interface ScorecardEvidenceImageDeps {
   /** Fetch an R2 object's bytes, throwing if it exceeds maxBytes (ObjectTooLargeError). */
   fetchObject?: (key: string, maxBytes: number) => Promise<Buffer>;
   /** Downscale/transcode a full-size original into a small JPEG. Throws if it can't be decoded. */
-  transcode?: (buffer: Buffer) => Promise<Buffer>;
-  /** True when sharp can rasterize this mime type in this deployment (so an original is worth fetching). */
+  transcode?: (buffer: Buffer, mimeType?: string | null) => Promise<Buffer>;
+  /** True when this mime type has a bounded PDF-safe conversion path in this deployment. */
   transcodable?: (mimeType: string | null | undefined) => boolean;
   r2Configured?: () => boolean;
 }
@@ -49,9 +46,9 @@ export interface ScorecardEvidenceImageDeps {
  *   1. Prefer the ingest-generated thumbnail — already a small stripped JPEG, no decode needed. Fetched
  *      under a tight byte cap.
  *   2. If there's no thumbnail (or it's unreadable), fetch the ORIGINAL under a generous cap and downscale
- *      it to a small JPEG. This is the reviewer's core fix: previously the original was fetched under the
- *      thumbnail-sized 750 KB cap, so a large valid JPEG/WebP/PNG original threw ObjectTooLarge and
- *      rendered as "Image unavailable".
+ *      it to a small JPEG (including HEIC/HEIF through the bounded compatibility converter). This is the
+ *      reviewer's core fix: previously the original was fetched under the thumbnail-sized 750 KB cap, so a
+ *      large valid JPEG/WebP/PNG original threw ObjectTooLarge and rendered as "Image unavailable".
  *
  * Deps are injected so the decision tree is unit-testable without R2/sharp.
  */
@@ -74,12 +71,12 @@ export async function loadScorecardEvidenceImage(
     }
   }
 
-  // 2. Transcode the original. Skip formats sharp can't decode here (unknown mime, HEIC/HEIF, PDFs) so we
-  //    don't pull bytes we can't render; a genuine decode failure below still degrades to the placeholder.
+  // 2. Transcode the original. Skip unknown/document types so we don't pull bytes we can't render; a genuine
+  //    decode failure below still degrades to the explicit placeholder.
   if (!transcodable(source.mimeType)) return null;
   try {
     const original = await fetchObject(source.r2Key, PDF_EVIDENCE_ORIGINAL_MAX_BYTES);
-    return await transcode(original);
+    return await transcode(original, source.mimeType);
   } catch {
     return null;
   }

@@ -117,34 +117,35 @@ describe("loadScorecardEvidenceImage", () => {
     expect(transcode).not.toHaveBeenCalled();
   });
 
-  it("does not fetch a HEIC original — the prebuilt sharp has no HEVC decoder (real predicate)", async () => {
+  it("fetches and routes a HEIC original through the PDF-safe compatibility converter", async () => {
     const fetchObject = vi.fn(async () => Buffer.from("heic-bytes"));
     const transcode = vi.fn(async () => TRANSCODED);
     const out = await loadScorecardEvidenceImage(
       { r2Key: "orig.heic", thumbnailR2Key: null, mimeType: "image/heic" },
       { r2Configured: () => true, fetchObject, transcode },
     );
-    expect(out).toBeNull();
-    expect(fetchObject).not.toHaveBeenCalled();
+    expect(out).toBe(TRANSCODED);
+    expect(fetchObject).toHaveBeenCalledWith("orig.heic", 40 * 1024 * 1024);
+    expect(transcode).toHaveBeenCalledWith(expect.any(Buffer), "image/heic");
   });
 });
 
 describe("isEvidenceTranscodable", () => {
-  it("accepts formats the deployed sharp can decode", () => {
-    for (const mime of ["image/jpeg", "image/jpg", "image/png", "image/webp", "image/gif", "image/avif", "image/tiff"]) {
+  it("accepts formats with a PDF-safe conversion path", () => {
+    for (const mime of ["image/jpeg", "image/jpg", "image/png", "image/webp", "image/gif", "image/avif", "image/tiff", "image/heic", "image/heif"]) {
       expect(isEvidenceTranscodable(mime)).toBe(true);
     }
   });
 
-  it("rejects HEIC/HEIF (no HEVC decoder) and unknown/empty types", () => {
-    for (const mime of ["image/heic", "image/heif", "application/pdf", "", null, undefined]) {
+  it("rejects unknown, document, and empty types", () => {
+    for (const mime of ["application/pdf", "", null, undefined]) {
       expect(isEvidenceTranscodable(mime)).toBe(false);
     }
   });
 
   it("ignores content-type parameters", () => {
     expect(isEvidenceTranscodable("image/jpeg; charset=utf-8")).toBe(true);
-    expect(isEvidenceTranscodable("image/heic; foo=bar")).toBe(false);
+    expect(isEvidenceTranscodable("image/heic; foo=bar")).toBe(true);
   });
 });
 

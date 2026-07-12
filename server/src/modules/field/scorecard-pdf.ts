@@ -209,18 +209,21 @@ export async function renderFieldScorecardPdf(data: ScorecardPdfData): Promise<B
   const chunks: Buffer[] = [];
   doc.on("data", (c) => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)));
 
+  // Summary content can naturally flow onto another page (long action items/notes). Keep the full T-Rock
+  // brand header on those continuation pages, but suppress it for evidence pages because they draw their
+  // own dedicated evidence header.
+  let suppressSummaryPageHeader = false;
+  doc.on("pageAdded", () => {
+    if (!suppressSummaryPageHeader) drawScorecardBrandHeader(doc);
+  });
+  const addEvidencePage = () => {
+    suppressSummaryPageHeader = true;
+    doc.addPage();
+    suppressSummaryPageHeader = false;
+  };
+
   // ── Header: logo + wordmark + title ──
-  const top = PAGE.margin;
-  try {
-    doc.image(LOGO_BUFFER, PAGE.margin, top, { fit: [40, 40] });
-  } catch {
-    /* logo is decorative — a decode failure must not break the render */
-  }
-  doc.fillColor(BRAND_RED).font("Helvetica-Bold").fontSize(11).text("T ROCK CONSTRUCTION", PAGE.margin + 52, top + 2);
-  doc.fillColor(BRAND_BLACK).font("Helvetica-Bold").fontSize(20).text("Field Scorecard", PAGE.margin + 52, top + 16);
-  const ruleY = top + 48;
-  doc.moveTo(PAGE.margin, ruleY).lineTo(PAGE.width - PAGE.margin, ruleY).lineWidth(2).strokeColor(BRAND_RED).stroke();
-  doc.y = ruleY + 14;
+  drawScorecardBrandHeader(doc);
 
   // ── Header meta ──
   const meta: [string, string][] = [
@@ -316,10 +319,10 @@ export async function renderFieldScorecardPdf(data: ScorecardPdfData): Promise<B
       })),
   ];
   const { groups: cappedEvidence, omitted: omittedEvidence } = capEvidenceGroups(evidenceGroups, MAX_EVIDENCE_PHOTOS);
-  for (const group of cappedEvidence) drawEvidencePages(doc, data, group);
+  for (const group of cappedEvidence) drawEvidencePages(doc, data, group, addEvidencePage);
   // Photos dropped here (defensive render-side cap) PLUS any dropped upstream before download.
   const omittedTotal = omittedEvidence + data.omittedEvidenceCount;
-  if (omittedTotal > 0) drawEvidenceOverflowNote(doc, data, omittedTotal);
+  if (omittedTotal > 0) drawEvidenceOverflowNote(doc, data, omittedTotal, addEvidencePage);
 
   doc.end();
   return new Promise<Buffer>((resolve, reject) => {
@@ -328,13 +331,28 @@ export async function renderFieldScorecardPdf(data: ScorecardPdfData): Promise<B
   });
 }
 
+function drawScorecardBrandHeader(doc: PDFKit.PDFDocument): void {
+  const top = PAGE.margin;
+  try {
+    doc.image(LOGO_BUFFER, PAGE.margin, top, { fit: [40, 40] });
+  } catch {
+    /* logo is decorative — a decode failure must not break the render */
+  }
+  doc.fillColor(BRAND_RED).font("Helvetica-Bold").fontSize(11).text("T ROCK CONSTRUCTION", PAGE.margin + 52, top + 2);
+  doc.fillColor(BRAND_BLACK).font("Helvetica-Bold").fontSize(20).text("Field Scorecard", PAGE.margin + 52, top + 16);
+  const ruleY = top + 48;
+  doc.moveTo(PAGE.margin, ruleY).lineTo(PAGE.width - PAGE.margin, ruleY).lineWidth(2).strokeColor(BRAND_RED).stroke();
+  doc.y = ruleY + 14;
+}
+
 function drawEvidencePages(
   doc: PDFKit.PDFDocument,
   data: ScorecardPdfData,
   group: { title: string; subtitle: string | null; photos: ScorecardPdfPhoto[] },
+  addEvidencePage: () => void,
 ): void {
   for (let index = 0; index < group.photos.length; index += 2) {
-    doc.addPage();
+    addEvidencePage();
     drawEvidenceHeader(doc, data, group.title, index / 2 + 1);
     if (index === 0 && group.subtitle) {
       const subtitleY = doc.y;
@@ -380,8 +398,13 @@ function drawEvidenceHeader(doc: PDFKit.PDFDocument, data: ScorecardPdfData, tit
 
 // A branded page noting evidence trimmed by the MAX_EVIDENCE_PHOTOS cap, pointing to the full set in the
 // CRM — so truncation is explicit, never a silent drop.
-function drawEvidenceOverflowNote(doc: PDFKit.PDFDocument, data: ScorecardPdfData, count: number): void {
-  doc.addPage();
+function drawEvidenceOverflowNote(
+  doc: PDFKit.PDFDocument,
+  data: ScorecardPdfData,
+  count: number,
+  addEvidencePage: () => void,
+): void {
+  addEvidencePage();
   const ruleY = drawEvidenceBrandBar(doc);
   doc.y = ruleY + 20;
   const boxY = doc.y;

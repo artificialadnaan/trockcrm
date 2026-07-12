@@ -4,6 +4,7 @@ import {
   deriveThumbnailKey,
   isThumbnailableImage,
   generateThumbnailBuffer,
+  readHeifDimensions,
 } from "../../src/lib/image-thumbnail.js";
 
 /**
@@ -77,5 +78,25 @@ describe("generateThumbnailBuffer", () => {
     const meta = await sharp(await generateThumbnailBuffer(small)).metadata();
     expect(meta.width).toBe(200);
     expect(meta.height).toBe(150);
+  });
+});
+
+describe("readHeifDimensions", () => {
+  function ispe(width: number, height: number): Buffer {
+    const box = Buffer.alloc(20);
+    box.writeUInt32BE(20, 0);
+    box.write("ispe", 4, "ascii");
+    box.writeUInt32BE(width, 12);
+    box.writeUInt32BE(height, 16);
+    return box;
+  }
+
+  it("reads ordinary HEIF dimensions before the WASM decoder allocates a raster", () => {
+    expect(readHeifDimensions(ispe(4032, 3024))).toEqual({ width: 4032, height: 3024 });
+  });
+
+  it("rejects malformed or oversized HEIF dimensions", () => {
+    expect(readHeifDimensions(Buffer.from("not a HEIF"))).toBeNull();
+    expect(readHeifDimensions(ispe(10_000, 10_000))).toBeNull();
   });
 });
