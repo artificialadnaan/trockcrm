@@ -90,8 +90,9 @@ beforeAll(async () => {
       created_at timestamptz NOT NULL DEFAULT now(), completed_at timestamptz
     );
     -- createFieldScorecard resolves the deal's superintendent/PM emails from deal_team_members → user/contact
-    -- at enqueue time; these islands let that read run (no members inserted → both emails resolve null).
-    CREATE TABLE public.users (id uuid PRIMARY KEY, display_name text, email text, avatar_url text);
+    -- at enqueue time; these islands let that read run (no members inserted → both emails resolve null). The
+    -- resolver checks users.is_active, so the island carries it (defaulting active).
+    CREATE TABLE public.users (id uuid PRIMARY KEY, display_name text, email text, avatar_url text, is_active boolean DEFAULT true);
   `);
   await pg.exec(tenantSchemaSql("public", [fieldScorecards, fieldScorecardItems, fieldScorecardPhotos, dealTeamMembers, contacts]));
   await pg.exec(

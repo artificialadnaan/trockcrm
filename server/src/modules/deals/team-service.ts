@@ -126,18 +126,29 @@ export interface ScorecardTeamEmails {
   projectManagerName: string | null;
 }
 
+export interface ScorecardTeamNames {
+  superintendentName: string | null;
+  pmName: string | null;
+}
+
+interface ScorecardTeamRow {
+  role: string;
+  email: string | null;
+  name: string | null;
+}
+
 /**
- * Resolve the CC recipients for a deal's field scorecard email: the deal's assigned superintendent and
- * project_manager, keyed off the ACTIVE deal_team_members rows. Each role's email is resolved from the
- * linked staff user (public.users) or directory contact (tenant contacts) — whichever the member row
- * carries. If a role is assigned more than once, the most-recently-created active row wins (DISTINCT ON).
- * A role with no active member — or a member whose user/contact has no email on file — resolves to null,
- * so the enqueue site simply omits that CC.
+ * The deal's assigned superintendent + project_manager, resolved ONLY from ACTIVE identities. A candidate
+ * team row counts only when its linked identity is itself active — the joined staff user (public.users)
+ * with is_active = TRUE, OR the joined directory contact (tenant contacts) with is_active = TRUE. So a
+ * superintendent/PM whose USER was deactivated, or whose CONTACT was archived, is skipped and the role
+ * resolves to null (the enqueue omits that CC; the prefill leaves the field blank). If a role is assigned
+ * more than once, the most-recently-created row whose identity is STILL active wins (DISTINCT ON).
  */
-export async function resolveScorecardTeamEmails(
+async function resolveActiveScorecardTeamRows(
   tenantDb: TenantDb,
   dealId: string,
-): Promise<ScorecardTeamEmails> {
+): Promise<ScorecardTeamRow[]> {
   const result = await tenantDb.execute(
     sql`
       SELECT DISTINCT ON (dtm.role)
@@ -150,10 +161,27 @@ export async function resolveScorecardTeamEmails(
       WHERE dtm.deal_id = ${dealId}
         AND dtm.is_active = TRUE
         AND dtm.role IN ('superintendent', 'project_manager')
+        -- Skip rows whose linked identity is inactive: a deactivated staff user (public.users.is_active)
+        -- or an archived directory contact (contacts.is_active). DISTINCT ON then lands on the most-recent
+        -- row that is BOTH an active team row AND backed by an active user/contact.
+        AND ((dtm.user_id IS NOT NULL AND u.is_active) OR (dtm.contact_id IS NOT NULL AND c.is_active))
       ORDER BY dtm.role, dtm.created_at DESC
     `
   );
-  const rows = (result.rows ?? []) as Array<{ role: string; email: string | null; name: string | null }>;
+  return (result.rows ?? []) as unknown as ScorecardTeamRow[];
+}
+
+/**
+ * Resolve the CC recipients for a deal's field scorecard email: the deal's assigned superintendent and
+ * project_manager, keyed off the ACTIVE deal_team_members rows AND their ACTIVE user/contact identities.
+ * A role with no active member — or one whose user/contact is deactivated/archived or has no email on
+ * file — resolves to null, so the enqueue site simply omits that CC.
+ */
+export async function resolveScorecardTeamEmails(
+  tenantDb: TenantDb,
+  dealId: string,
+): Promise<ScorecardTeamEmails> {
+  const rows = await resolveActiveScorecardTeamRows(tenantDb, dealId);
   const superintendent = rows.find((r) => r.role === "superintendent");
   const projectManager = rows.find((r) => r.role === "project_manager");
   return {
@@ -161,5 +189,25 @@ export async function resolveScorecardTeamEmails(
     projectManagerEmail: projectManager?.email ?? null,
     superintendentName: superintendent?.name ?? null,
     projectManagerName: projectManager?.name ?? null,
+  };
+}
+
+/**
+ * The deal's assigned superintendent + PM NAMES only (no emails), resolved with the SAME active-identity
+ * + most-recent selection as resolveScorecardTeamEmails — so the field prefill shows the same person the
+ * completed-scorecard email is CC'd to. Blank/whitespace names normalize to null.
+ */
+export async function resolveScorecardTeamNames(
+  tenantDb: TenantDb,
+  dealId: string,
+): Promise<ScorecardTeamNames> {
+  const rows = await resolveActiveScorecardTeamRows(tenantDb, dealId);
+  const pick = (role: string): string | null => {
+    const name = rows.find((r) => r.role === role)?.name?.trim();
+    return name ? name : null;
+  };
+  return {
+    superintendentName: pick("superintendent"),
+    pmName: pick("project_manager"),
   };
 }

@@ -198,8 +198,7 @@ export type ScorecardDetailResponse = { scorecard: FieldScorecardDetail };
 export type ScorecardDownloadResponse = { url: string; expiresAt: string };
 export type CreateScorecardResponse = { scorecard: FieldScorecardSummary };
 
-// Deal-team member as returned by GET /deals/:id/team (the same endpoint the web Team tab uses).
-// Only the fields the scorecard pre-fill needs are typed — `role` is left as `string` so an
-// unfamiliar/added role never fails to parse (the pre-fill only matches the two it cares about).
-export type DealTeamMemberView = { role: string; displayName: string | null };
-export type DealTeamResponse = { members: DealTeamMemberView[] };
+// The deal's assigned Superintendent + PM names, as returned by the FIELD route
+// GET /field/projects/:dealId/team. The server already resolves the two roles from the ACTIVE team rows
+// (with active user/contact identities), so the app just seeds these directly — no client-side role match.
+export type DealTeamResponse = { superintendentName: string | null; pmName: string | null };

@@ -6,6 +6,7 @@ import {
   addTeamMember,
   getTeamMembers,
   resolveScorecardTeamEmails,
+  resolveScorecardTeamNames,
 } from "../../../src/modules/deals/team-service.js";
 import { dealTeamMembers, contacts } from "@trock-crm/shared/schema";
 import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
@@ -22,14 +23,15 @@ let tdb: any;
 
 beforeAll(async () => {
   pg = new PGlite();
-  // Staff-user island — only the columns getTeamMembers / resolveScorecardTeamEmails read.
+  // Staff-user island — only the columns getTeamMembers / resolveScorecardTeamEmails read (incl. is_active,
+  // which the resolver now checks so a deactivated staff user stops receiving scorecard emails).
   await pg.exec(`
-    CREATE TABLE public.users (id uuid PRIMARY KEY, display_name text, email text, avatar_url text);
+    CREATE TABLE public.users (id uuid PRIMARY KEY, display_name text, email text, avatar_url text, is_active boolean DEFAULT true);
   `);
   await pg.exec(tenantSchemaSql("public", [dealTeamMembers, contacts]));
   await pg.exec(`
-    INSERT INTO public.users (id, display_name, email, avatar_url) VALUES
-      ('${USER}', 'Sam Super', 'sam.super@trock.com', 'https://cdn/sam.png');
+    INSERT INTO public.users (id, display_name, email, avatar_url, is_active) VALUES
+      ('${USER}', 'Sam Super', 'sam.super@trock.com', 'https://cdn/sam.png', true);
     INSERT INTO contacts (id, first_name, last_name, email, category, is_active) VALUES
       ('${CONTACT}', 'Dana', 'Cole', 'dana.cole@example.com', 'client', true);
   `);
@@ -150,5 +152,59 @@ describe("resolveScorecardTeamEmails", () => {
     const emails = await resolveScorecardTeamEmails(tdb, DEAL);
     expect(emails.superintendentEmail).toBeNull();
     expect(emails.superintendentName).toBe("No Email");
+  });
+
+  it("skips a member whose staff USER was deactivated (users.is_active = false)", async () => {
+    const goneUser = "33333333-3333-3333-3333-3333333333de";
+    await tdb.execute(sql`
+      INSERT INTO public.users (id, display_name, email, is_active)
+      VALUES (${goneUser}, 'Gone User', 'gone.user@trock.com', false)
+    `);
+    await addTeamMember(tdb, { dealId: DEAL, userId: goneUser, role: "project_manager" });
+    const emails = await resolveScorecardTeamEmails(tdb, DEAL);
+    expect(emails.projectManagerEmail).toBeNull();
+    expect(emails.projectManagerName).toBeNull();
+  });
+
+  it("skips a member whose directory CONTACT was archived (contacts.is_active = false)", async () => {
+    const archived = "44444444-4444-4444-4444-4444444444de";
+    await tdb.execute(sql`
+      INSERT INTO contacts (id, first_name, last_name, email, category, is_active)
+      VALUES (${archived}, 'Archived', 'Contact', 'archived.contact@example.com', 'client', false)
+    `);
+    await addTeamMember(tdb, { dealId: DEAL, contactId: archived, role: "superintendent" });
+    const emails = await resolveScorecardTeamEmails(tdb, DEAL);
+    expect(emails.superintendentEmail).toBeNull();
+    expect(emails.superintendentName).toBeNull();
+  });
+
+  it("falls back to an older ACTIVE assignee when the newer row's identity is deactivated/archived", async () => {
+    const archived = "44444444-4444-4444-4444-4444444444da";
+    await tdb.execute(sql`
+      INSERT INTO contacts (id, first_name, last_name, email, category, is_active)
+      VALUES (${archived}, 'Archived', 'Super', 'archived.super@example.com', 'client', false)
+    `);
+    const older = await addTeamMember(tdb, { dealId: DEAL, userId: USER, role: "superintendent" });
+    await tdb.execute(
+      sql`UPDATE deal_team_members SET created_at = now() - interval '1 day' WHERE id = ${older.id}`,
+    );
+    // Newer row points at an archived contact — DISTINCT ON must skip it (it's filtered out) and land on
+    // the still-active older user.
+    await addTeamMember(tdb, { dealId: DEAL, contactId: archived, role: "superintendent" });
+    const emails = await resolveScorecardTeamEmails(tdb, DEAL);
+    expect(emails.superintendentEmail).toBe("sam.super@trock.com");
+  });
+
+  it("resolves NAMES only from active identities (resolveScorecardTeamNames)", async () => {
+    const archived = "44444444-4444-4444-4444-4444444444db";
+    await tdb.execute(sql`
+      INSERT INTO contacts (id, first_name, last_name, email, category, is_active)
+      VALUES (${archived}, 'Archived', 'Contact', 'x@example.com', 'client', false)
+    `);
+    await addTeamMember(tdb, { dealId: DEAL, userId: USER, role: "superintendent" });
+    await addTeamMember(tdb, { dealId: DEAL, contactId: archived, role: "project_manager" });
+    const names = await resolveScorecardTeamNames(tdb, DEAL);
+    expect(names.superintendentName).toBe("Sam Super");
+    expect(names.pmName).toBeNull();
   });
 });

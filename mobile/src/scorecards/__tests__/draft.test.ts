@@ -180,36 +180,25 @@ describe("appendActionItem", () => {
 });
 
 describe("resolveScorecardTeamNames", () => {
-  it("picks the superintendent + project_manager names, ignoring other roles", () => {
-    const names = resolveScorecardTeamNames([
-      { role: "estimator", displayName: "Ed Estimator" },
-      { role: "superintendent", displayName: "Sam Super" },
-      { role: "project_manager", displayName: "Pat PM" },
-      { role: "foreman", displayName: "Fred Foreman" },
-    ]);
+  it("passes the field route's resolved super + PM names through to the seed", () => {
+    const names = resolveScorecardTeamNames({ superintendentName: "Sam Super", pmName: "Pat PM" });
     expect(names).toEqual({ superintendentName: "Sam Super", pmName: "Pat PM" });
   });
 
-  it("takes the MOST-RECENT usable member per role (endpoint returns active, oldest-first → last wins, matching the emailed assignee)", () => {
-    const names = resolveScorecardTeamNames([
-      { role: "superintendent", displayName: "First Super" },
-      { role: "superintendent", displayName: "Second Super" },
-    ]);
-    expect(names).toEqual({ superintendentName: "Second Super" });
-  });
-
   it("skips blank/whitespace/null names and omits a role with none", () => {
-    const names = resolveScorecardTeamNames([
-      { role: "superintendent", displayName: "   " },
-      { role: "superintendent", displayName: "Real Super" },
-      { role: "project_manager", displayName: null },
-    ]);
-    expect(names).toEqual({ superintendentName: "Real Super" });
+    const names = resolveScorecardTeamNames({ superintendentName: "   ", pmName: null });
+    expect(names.superintendentName).toBeUndefined();
     expect(names.pmName).toBeUndefined();
+
+    const partial = resolveScorecardTeamNames({ superintendentName: "Real Super", pmName: null });
+    expect(partial).toEqual({ superintendentName: "Real Super" });
+    expect(partial.pmName).toBeUndefined();
   });
 
-  it("returns an empty object for an empty team", () => {
-    expect(resolveScorecardTeamNames([])).toEqual({});
+  it("returns an empty object when the team resolves to no names (or is missing)", () => {
+    expect(resolveScorecardTeamNames({ superintendentName: null, pmName: null })).toEqual({});
+    expect(resolveScorecardTeamNames(null)).toEqual({});
+    expect(resolveScorecardTeamNames(undefined)).toEqual({});
   });
 });
 

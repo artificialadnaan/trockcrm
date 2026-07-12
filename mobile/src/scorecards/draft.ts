@@ -116,38 +116,32 @@ export function createScorecardDraft(input: {
   };
 }
 
-/** One member of a deal's assigned team, as far as the scorecard pre-fill cares. */
-export interface ScorecardTeamMember {
-  role: string;
-  displayName: string | null;
+/** The Super/PM names the FIELD team route resolves for a deal (already the newest ACTIVE assignees). */
+export interface ScorecardTeamNames {
+  superintendentName: string | null;
+  pmName: string | null;
 }
 
 /**
- * Best-effort names to pre-fill the scorecard header from a deal's assigned team. Pure (no I/O) so it's
- * unit-testable and safe to call from the create seam. Picks the MOST-RECENTLY-created active superintendent
- * / project_manager (the endpoint returns only active members, oldest-first, so the LAST matching row wins).
- * This matches the server's email-assignee selection (resolveScorecardTeamEmails picks the newest active row
- * per role), so the displayed Super/PM name is the same person the completed-scorecard email is sent to.
- * Whitespace-only names are treated as absent. Returns undefined for a role with no usable name so the caller
- * can leave the field as-is (never overwrites a name the user already typed).
+ * Best-effort names to pre-fill the scorecard header from a deal's assigned team. The FIELD team route
+ * (GET /field/projects/:dealId/team) already resolves the MOST-RECENT active superintendent / project_manager
+ * from ACTIVE user/contact identities — the SAME selection resolveScorecardTeamEmails uses — so the prefilled
+ * name is the same person the completed-scorecard email is sent to. This just normalizes the payload for the
+ * seed: whitespace-only / null names become absent, so the caller leaves the field as-is (never overwrites a
+ * name the user already typed). Pure (no I/O) so it stays unit-testable.
  */
-export function resolveScorecardTeamNames(members: readonly ScorecardTeamMember[]): {
+export function resolveScorecardTeamNames(team: Partial<ScorecardTeamNames> | null | undefined): {
   superintendentName?: string;
   pmName?: string;
 } {
-  const latestName = (role: string): string | undefined => {
-    let latest: string | undefined;
-    for (const m of members) {
-      if (m.role !== role) continue;
-      const name = (m.displayName ?? "").trim();
-      if (name) latest = name;
-    }
-    return latest;
+  const clean = (value: string | null | undefined): string | undefined => {
+    const name = (value ?? "").trim();
+    return name ? name : undefined;
   };
   const out: { superintendentName?: string; pmName?: string } = {};
-  const superintendentName = latestName("superintendent");
+  const superintendentName = clean(team?.superintendentName);
   if (superintendentName) out.superintendentName = superintendentName;
-  const pmName = latestName("project_manager");
+  const pmName = clean(team?.pmName);
   if (pmName) out.pmName = pmName;
   return out;
 }

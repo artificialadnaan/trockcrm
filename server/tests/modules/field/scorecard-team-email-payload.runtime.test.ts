@@ -18,6 +18,9 @@ import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
 const DEAL = "11111111-1111-1111-1111-111111111111";
 const USER = "33333333-3333-3333-3333-333333333333";
 const CONTACT = "44444444-4444-4444-4444-444444444444";
+// A DEACTIVATED staff user + an ARCHIVED directory contact — must be ignored by the resolver.
+const USER_DEACTIVATED = "33333333-3333-3333-3333-3333333333de";
+const CONTACT_ARCHIVED = "44444444-4444-4444-4444-4444444444de";
 const STAGE_ACTIVE = "cccccccc-0000-0000-0000-000000000001";
 
 const MAX: Record<string, number> = {
@@ -73,7 +76,7 @@ beforeAll(async () => {
       id uuid PRIMARY KEY, deal_id uuid, client_upload_id text, uploaded_by uuid,
       description text, is_active boolean DEFAULT true, deleted_at timestamptz, created_at timestamptz DEFAULT now()
     );
-    CREATE TABLE public.users (id uuid PRIMARY KEY, display_name text, email text, avatar_url text);
+    CREATE TABLE public.users (id uuid PRIMARY KEY, display_name text, email text, avatar_url text, is_active boolean DEFAULT true);
     CREATE TABLE public.job_queue (
       id bigserial PRIMARY KEY, job_type varchar(100) NOT NULL, payload jsonb NOT NULL, office_id uuid,
       status text NOT NULL DEFAULT 'pending', attempts int NOT NULL DEFAULT 0, max_attempts int NOT NULL DEFAULT 3,
@@ -92,10 +95,12 @@ beforeAll(async () => {
       ('${STAGE_ACTIVE}','Estimating','estimating',false);
     INSERT INTO deals (id, name, project_number, stage_id, is_active) VALUES
       ('${DEAL}','Maple St','DFW-10432','${STAGE_ACTIVE}', true);
-    INSERT INTO public.users (id, display_name, email) VALUES
-      ('${USER}', 'Sam Super', 'sam.super@trock.com');
+    INSERT INTO public.users (id, display_name, email, is_active) VALUES
+      ('${USER}', 'Sam Super', 'sam.super@trock.com', true),
+      ('${USER_DEACTIVATED}', 'Gone User', 'gone.user@trock.com', false);
     INSERT INTO contacts (id, first_name, last_name, email, category, is_active) VALUES
-      ('${CONTACT}', 'Dana', 'Cole', 'dana.cole@example.com', 'client', true);
+      ('${CONTACT}', 'Dana', 'Cole', 'dana.cole@example.com', 'client', true),
+      ('${CONTACT_ARCHIVED}', 'Archived', 'Contact', 'archived.contact@example.com', 'client', false);
   `);
   tdb = drizzle(pg);
 });
@@ -129,6 +134,36 @@ describe("createFieldScorecard enqueues team emails", () => {
     const payload = await enqueuedPayload();
     expect(payload).toBeTruthy();
     expect(payload.superintendentEmail).toBeNull();
+    expect(payload.projectManagerEmail).toBeNull();
+  });
+
+  it("ignores a deactivated user + an archived contact (role resolves to null → CC omitted)", async () => {
+    // Superintendent's CONTACT is archived (contacts.is_active = false); PM's USER is deactivated
+    // (public.users.is_active = false). Both must be skipped, so neither CC is stamped.
+    await addTeamMember(tdb, { dealId: DEAL, contactId: CONTACT_ARCHIVED, role: "superintendent" });
+    await addTeamMember(tdb, { dealId: DEAL, userId: USER_DEACTIVATED, role: "project_manager" });
+
+    await createFieldScorecard(tdb, submission());
+
+    const payload = await enqueuedPayload();
+    expect(payload).toBeTruthy();
+    expect(payload.superintendentEmail).toBeNull();
+    expect(payload.projectManagerEmail).toBeNull();
+  });
+
+  it("prefers a newer ACTIVE assignee over an older one, but falls back to null (not the deactivated row)", async () => {
+    // Older active superintendent, then a NEWER one whose contact is archived. The newest-row-wins rule
+    // must skip the archived newer row and land on the still-active older one.
+    await addTeamMember(tdb, { dealId: DEAL, userId: USER, role: "superintendent" });
+    await addTeamMember(tdb, { dealId: DEAL, contactId: CONTACT_ARCHIVED, role: "superintendent" });
+    // PM: only a deactivated user assigned → resolves to null.
+    await addTeamMember(tdb, { dealId: DEAL, userId: USER_DEACTIVATED, role: "project_manager" });
+
+    await createFieldScorecard(tdb, submission());
+
+    const payload = await enqueuedPayload();
+    expect(payload).toBeTruthy();
+    expect(payload.superintendentEmail).toBe("sam.super@trock.com");
     expect(payload.projectManagerEmail).toBeNull();
   });
 });

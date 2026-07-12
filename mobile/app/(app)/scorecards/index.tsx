@@ -86,18 +86,18 @@ export default function ScorecardsScreen() {
       weekOf: todayIso(),
       now: Date.now(),
     });
-    // Best-effort pre-fill of the Superintendent/PM names from the deal's assigned team (the same
-    // /deals/:id/team endpoint the web uses). ANY failure — network, 403 for a pure field_contractor,
-    // or a malformed body — silently leaves the fields empty (today's behavior). It must never block or
-    // crash draft creation, and it only seeds BLANK fields, so the names stay fully editable afterwards.
-    // Bound the lookup to ~2s: on a poor connection a hanging /deals/:id/team must NOT block starting a
-    // scorecard, so a timeout (like any error) just proceeds with empty super/PM.
+    // Best-effort pre-fill of the Superintendent/PM names from the deal's assigned team (the FIELD team
+    // route the app can actually reach — the CRM /deals/:id/team route rejects the field surface). ANY
+    // failure — network, timeout, or a non-browsable deal — silently leaves the fields empty (today's
+    // behavior). It must never block or crash draft creation, and it only seeds BLANK fields, so the names
+    // stay fully editable afterwards. Bound the lookup to ~2s: on a poor connection a hanging request must
+    // NOT block starting a scorecard, so a timeout (like any error) just proceeds with empty super/PM.
     try {
-      const { members } = await Promise.race<DealTeamResponse>([
+      const team = await Promise.race<DealTeamResponse>([
         getDealTeam(fetcher, target.id),
-        new Promise<DealTeamResponse>((res) => setTimeout(() => res({ members: [] }), 2000)),
+        new Promise<DealTeamResponse>((res) => setTimeout(() => res({ superintendentName: null, pmName: null }), 2000)),
       ]);
-      draft = seedScorecardDraftTeam(draft, resolveScorecardTeamNames(members ?? []));
+      draft = seedScorecardDraftTeam(draft, resolveScorecardTeamNames(team));
     } catch {
       /* leave super/PM empty */
     }

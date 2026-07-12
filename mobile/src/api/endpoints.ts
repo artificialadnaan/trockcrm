@@ -175,9 +175,10 @@ export const getScorecard = (f: Fetcher, id: string) =>
 export const getScorecardDownload = (f: Fetcher, id: string) =>
   f<ScorecardDownloadResponse>(`/field/scorecards/${id}/download`);
 
-// The deal's assigned team (same endpoint the web Team tab uses) — used ONLY to best-effort pre-fill a
-// new scorecard's Superintendent/PM names. Not a field-app-scoped route: reachable for CRM-role field
-// users (admin/director/rep/construction) and 403s for a pure field_contractor, which the caller swallows
-// as part of the best-effort pre-fill (the names simply stay empty, as they were before).
+// The deal's assigned Superintendent + PM NAMES — used ONLY to best-effort pre-fill a new scorecard's
+// header. FIELD-scoped route (/field/...): T-Rock Cam authenticates with surface:"field", which CRM auth
+// rejects on /deals routes, so the old /deals/:id/team could never be reached from the app — this field
+// route can. Any failure (network, timeout, a non-browsable deal) is swallowed by the caller and the names
+// simply stay empty, as they were before.
 export const getDealTeam = (f: Fetcher, dealId: string) =>
-  f<DealTeamResponse>(`/deals/${dealId}/team`);
+  f<DealTeamResponse>(`/field/projects/${dealId}/team`);
