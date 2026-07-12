@@ -147,6 +147,8 @@ interface ScorecardRow {
   criticalDeficiencies: string[] | null;
   submittedByName: string | null;
   submittedAt: unknown;
+  pdfR2Key: string | null;
+  pdfGeneratedAt: unknown;
 }
 
 /** The rating-band label for the card's kind/version — leadership + V2 reuse the 1-10 bands. */
@@ -175,6 +177,9 @@ function toSummary(row: ScorecardRow): FieldScorecardSummary {
     criticalDeficiencyCount: (row.criticalDeficiencies ?? []).length,
     submittedByName: row.submittedByName ?? null,
     submittedAt: toIso(row.submittedAt),
+    // The stored PDF is rendered best-effort/async, so the key can still be null here. Signal availability
+    // so the CRM tab gates the Download-PDF action (disabled "PDF generating…" until the artifact lands).
+    hasPdf: Boolean(row.pdfR2Key ?? row.pdfGeneratedAt),
   };
 }
 

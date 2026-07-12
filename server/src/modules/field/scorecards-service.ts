@@ -94,6 +94,8 @@ interface ScorecardSummarySource {
   submittedAt: unknown;
   superintendentSignature?: string | null;
   pmSignature?: string | null;
+  pdfR2Key?: string | null;
+  pdfGeneratedAt?: unknown;
 }
 
 // job_type string — MUST match the worker's registerJobHandler(FIELD_SCORECARD_EMAIL_JOB, ...). The server
@@ -323,7 +325,9 @@ export async function listRecentFieldScorecards(
       sc.critical_deficiencies AS "criticalDeficiencies",
       sc.submitted_by_name AS "submittedByName",
       sc.week_of::text AS "weekOf",
-      sc.submitted_at AS "submittedAt"
+      sc.submitted_at AS "submittedAt",
+      sc.pdf_r2_key AS "pdfR2Key",
+      sc.pdf_generated_at AS "pdfGeneratedAt"
     FROM field_scorecards sc
     JOIN deals d ON d.id = sc.deal_id
     LEFT JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
@@ -696,6 +700,9 @@ function toSummary(row: ScorecardSummarySource): FieldScorecardSummary {
     criticalDeficiencyCount: (row.criticalDeficiencies ?? []).length,
     submittedByName: row.submittedByName ?? null,
     submittedAt: toIso(row.submittedAt),
+    // PDF is rendered/uploaded post-response (best-effort/async) — null right after submit until the
+    // artifact lands. Surface availability so downstream (mobile + CRM) can gate the download action.
+    hasPdf: Boolean(row.pdfR2Key ?? row.pdfGeneratedAt),
   };
 }
 

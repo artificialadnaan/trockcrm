@@ -89,6 +89,10 @@ describe("listDealScorecards", () => {
     expect(project.totalScore).toBe(82);
     expect(project.criticalDeficiencyCount).toBe(1);
     expect(project.weekOf).toBe("2026-06-30");
+    // PDF-availability signal: SC_NEWER has a stored pdf_r2_key → hasPdf true; SC_OLDER's key is null (still
+    // generating) → hasPdf false. Gates the CRM Download action so it never 404s on a not-yet-rendered PDF.
+    expect(project.hasPdf).toBe(true);
+    expect(scorecards.find((s) => s.id === SC_OLDER)!.hasPdf).toBe(false);
   });
 
   it("lists leadership cards kind-aware — kind + averageScore so the web can branch to the PDF", async () => {
@@ -101,6 +105,8 @@ describe("listDealScorecards", () => {
     expect(leadership!.averageScore).toBe(9);
     // Leadership reuses the 1-10 bands' labels, not the /100 project labels.
     expect(leadership!.ratingLabel).toBe("Elite Execution");
+    // Leadership card has a stored PDF key → hasPdf true (the CRM row shows the live download action).
+    expect(leadership!.hasPdf).toBe(true);
   });
 });
 

@@ -163,6 +163,8 @@ export type FieldScorecardSummary = {
   criticalDeficiencyCount: number;
   submittedByName: string | null;
   submittedAt: string;
+  /** PDF-availability signal from the server: the artifact renders async, so it may be false right after submit. */
+  hasPdf?: boolean;
   officeSlug?: string;
   officeId?: string;
   formVersion?: 1 | 2;

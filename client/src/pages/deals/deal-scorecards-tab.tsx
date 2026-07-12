@@ -91,13 +91,17 @@ function ScorecardRow({ dealId, summary }: { dealId: string; summary: FieldScore
 
   // Leadership cards share these tables but are scored on a different model (4 categories / 10, no
   // deficiencies/signatures) and have no project-shaped detail view — the server's detail read is
-  // project-only, so the PDF is the view. Render the row NON-expandable, badge it "Leadership", show the
-  // /10 average, and rely on the Download-PDF action (the completed-email fallback sends recipients here).
+  // project-only. Rather than dead-end the row on a PDF that can lag/fail, leadership rows expand to a
+  // MINIMAL summary built purely from the list DTO (average/10, rating, week, evaluator) so the card is
+  // always viewable at least at summary level; the PDF stays a best-effort extra (gated on availability).
   const isLeadership = summary.kind === "leadership";
 
   const toggle = useCallback(async () => {
     const next = !expanded;
     setExpanded(next);
+    // Leadership expands to a summary rendered from data already in hand — no project detail fetch (the
+    // server detail read is project-only and would 404). Only project rows fetch the detail view.
+    if (isLeadership) return;
     if (next && !detail && !detailLoading) {
       setDetailLoading(true);
       try {
@@ -109,7 +113,7 @@ function ScorecardRow({ dealId, summary }: { dealId: string; summary: FieldScore
         setDetailLoading(false);
       }
     }
-  }, [expanded, detail, detailLoading, dealId, summary.id]);
+  }, [expanded, detail, detailLoading, dealId, summary.id, isLeadership]);
 
   const download = useCallback(async () => {
     setDownloading(true);
@@ -162,43 +166,95 @@ function ScorecardRow({ dealId, summary }: { dealId: string; summary: FieldScore
     </>
   );
 
+  // The stored PDF renders async (best-effort) and can lag or fail, so gate the Download action on the
+  // list DTO's availability signal — otherwise the button 404s while pdf_r2_key is still null.
+  const pdfReady = summary.hasPdf === true;
+
   return (
     <div className="overflow-hidden rounded-lg border border-gray-200 bg-white">
       <div className="flex items-center gap-3 p-4">
-        {isLeadership ? (
-          // No project detail view for leadership — the row itself just carries the summary + PDF action.
-          <div className="flex flex-1 items-center gap-3">{header}</div>
+        {/* Both kinds expand: project rows into the fetched detail view, leadership rows into a minimal
+            summary rendered from the list data already in hand. */}
+        <button
+          type="button"
+          onClick={() => void toggle()}
+          aria-expanded={expanded}
+          className="flex flex-1 items-center gap-3 text-left"
+        >
+          {expanded ? (
+            <ChevronDown className="h-4 w-4 shrink-0 text-gray-400" />
+          ) : (
+            <ChevronRight className="h-4 w-4 shrink-0 text-gray-400" />
+          )}
+          {header}
+        </button>
+        {pdfReady ? (
+          <Button variant="ghost" size="sm" onClick={() => void download()} disabled={downloading} title="Download PDF">
+            {downloading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+          </Button>
         ) : (
-          <button
-            type="button"
-            onClick={() => void toggle()}
-            aria-expanded={expanded}
-            className="flex flex-1 items-center gap-3 text-left"
+          // PDF not ready yet: show a disabled generating state instead of a button that would 404.
+          <span
+            className="inline-flex items-center gap-1.5 whitespace-nowrap px-2 text-xs font-medium text-gray-400"
+            title="The scorecard PDF is still generating"
           >
-            {expanded ? (
-              <ChevronDown className="h-4 w-4 shrink-0 text-gray-400" />
-            ) : (
-              <ChevronRight className="h-4 w-4 shrink-0 text-gray-400" />
-            )}
-            {header}
-          </button>
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            PDF generating…
+          </span>
         )}
-        <Button variant="ghost" size="sm" onClick={() => void download()} disabled={downloading} title="Download PDF">
-          {downloading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
-        </Button>
       </div>
 
-      {!isLeadership && expanded && (
-        <div className="border-t border-gray-100 bg-gray-50 p-4">
-          {detailLoading || !detail ? (
-            <div className="flex items-center justify-center py-6 text-sm text-gray-500">
-              <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Loading detail…
+      {expanded &&
+        (isLeadership ? (
+          <div className="border-t border-gray-100 bg-gray-50 p-4">
+            <LeadershipSummaryView summary={summary} scoreLabel={scoreLabel} />
+          </div>
+        ) : (
+          <div className="border-t border-gray-100 bg-gray-50 p-4">
+            {detailLoading || !detail ? (
+              <div className="flex items-center justify-center py-6 text-sm text-gray-500">
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Loading detail…
+              </div>
+            ) : (
+              <ScorecardDetailView detail={detail} />
+            )}
+          </div>
+        ))}
+    </div>
+  );
+}
+
+// Minimal leadership summary — no server detail read (that endpoint is project-only). Everything shown here
+// comes from the list DTO already loaded: the /10 average, rating label, the week, and the evaluator.
+function LeadershipSummaryView({
+  summary,
+  scoreLabel,
+}: {
+  summary: FieldScorecardSummary;
+  scoreLabel: string;
+}) {
+  const rows: Array<{ label: string; value: string }> = [
+    { label: "Average", value: `${scoreLabel} / 10` },
+    { label: "Rating", value: summary.ratingLabel },
+    { label: "Week of", value: formatWeek(summary.weekOf) },
+    { label: "Evaluator", value: summary.submittedByName ?? "—" },
+  ];
+  return (
+    <div className="space-y-4">
+      <div>
+        <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">Leadership Summary</h4>
+        <div className="divide-y divide-gray-200 rounded-md border border-gray-200 bg-white">
+          {rows.map((row) => (
+            <div key={row.label} className="flex items-center justify-between px-3 py-2">
+              <span className="text-sm text-gray-500">{row.label}</span>
+              <span className="text-sm font-semibold text-gray-900">{row.value}</span>
             </div>
-          ) : (
-            <ScorecardDetailView detail={detail} />
-          )}
+          ))}
         </div>
-      )}
+      </div>
+      <p className="text-xs text-gray-500">
+        The full leadership scorecard is available as a PDF from the download action above.
+      </p>
     </div>
   );
 }

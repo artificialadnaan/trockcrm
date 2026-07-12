@@ -395,6 +395,10 @@ export interface FieldScorecardSummary {
   criticalDeficiencyCount: number;
   submittedByName: string | null;
   submittedAt: string;
+  // PDF-availability signal: the field artifact render is best-effort/async and can lag or fail, so the
+  // stored PDF key may still be null when the summary is read. `false` → the Download-PDF action would 404;
+  // the CRM tab renders a disabled "PDF generating…" state instead of a live link.
+  hasPdf: boolean;
   officeSlug?: string;
   officeId?: string;
 }
