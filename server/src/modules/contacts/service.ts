@@ -1,7 +1,7 @@
 import { eq, and, desc, asc, ilike, sql, or, not, isNull, inArray } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
-import { activities, companies, contacts, contactDealAssociations, deals, emails, tasks, users } from "@trock-crm/shared/schema";
+import { activities, companies, contacts, contactDealAssociations, dealTeamMembers, deals, emails, tasks, users } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
 import { updateBreaksBillingAddress } from "../../lib/billing-address.js";
@@ -819,6 +819,15 @@ export async function deleteContact(tenantDb: TenantDb, contactId: string, userR
   // deal's BILLING contact so getDealDetail stops surfacing an archived contact and the future Won gate
   // (billing_contact_id IS NULL) isn't falsely satisfied by a contact users can no longer select (Codex P2).
   await tenantDb.update(deals).set({ billingContactId: null }).where(eq(deals.billingContactId, contactId));
+
+  // Deactivate this contact's active deal-team assignments. getTeamMembers already HIDES rows whose linked
+  // identity is inactive, so leaving them active leaves a phantom assignment admins can't remove from the UI.
+  // Flip is_active here (matching the deals update above + merge-service's dealTeamMembers writes) so the
+  // assignment is truly removed, not just masked; the getTeamMembers identity filter stays as a safety net.
+  await tenantDb
+    .update(dealTeamMembers)
+    .set({ isActive: false, updatedAt: new Date() })
+    .where(and(eq(dealTeamMembers.contactId, contactId), eq(dealTeamMembers.isActive, true)));
 
   return result[0];
 }

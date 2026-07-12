@@ -9,7 +9,8 @@ import {
   resolveScorecardTeamEmails,
   resolveScorecardTeamNames,
 } from "../../../src/modules/deals/team-service.js";
-import { dealTeamMembers, contacts } from "@trock-crm/shared/schema";
+import { deleteContact } from "../../../src/modules/contacts/service.js";
+import { dealTeamMembers, contacts, deals } from "@trock-crm/shared/schema";
 import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
 
 // deal_team_members can point at EITHER a staff user (public.users) OR a directory contact (tenant
@@ -29,7 +30,7 @@ beforeAll(async () => {
   await pg.exec(`
     CREATE TABLE public.users (id uuid PRIMARY KEY, display_name text, email text, avatar_url text, is_active boolean DEFAULT true);
   `);
-  await pg.exec(tenantSchemaSql("public", [dealTeamMembers, contacts]));
+  await pg.exec(tenantSchemaSql("public", [dealTeamMembers, contacts, deals]));
   await pg.exec(`
     INSERT INTO public.users (id, display_name, email, avatar_url, is_active) VALUES
       ('${USER}', 'Sam Super', 'sam.super@trock.com', 'https://cdn/sam.png', true);
@@ -271,5 +272,51 @@ describe("resolveScorecardTeamEmails", () => {
     const names = await resolveScorecardTeamNames(tdb, DEAL);
     expect(names.superintendentName).toBe("Sam Super");
     expect(names.pmName).toBeNull();
+  });
+});
+
+// Soft-deleting a CRM contact must not leave a phantom team assignment behind. getTeamMembers HIDES a row
+// whose linked contact went inactive (the identity filter), so if deleteContact only flipped contacts.is_active
+// the deal_team_members row would stay is_active = true and unremovable from the UI. deleteContact must also
+// deactivate the contact's team rows so the assignment is truly gone. Uses a dedicated contact per test so it
+// never archives the shared CONTACT that the suites above rely on.
+describe("deleteContact deactivates the contact's deal_team_members rows", () => {
+  it("flips is_active = false on the archived contact's active team rows", async () => {
+    const doomed = "44444444-4444-4444-4444-4444deadbeef";
+    await tdb.execute(sql`
+      INSERT INTO contacts (id, first_name, last_name, email, category, is_active)
+      VALUES (${doomed}, 'Doomed', 'Contact', 'doomed@example.com', 'client', true)
+    `);
+    const member = await addTeamMember(tdb, { dealId: DEAL, contactId: doomed, role: "superintendent" });
+
+    await deleteContact(tdb, doomed, "admin");
+
+    // The contact is archived AND its team row is deactivated — not merely hidden by getTeamMembers.
+    const [row] = (await tdb
+      .select()
+      .from(dealTeamMembers)
+      .where(sql`${dealTeamMembers.id} = ${member.id}`)) as any[];
+    expect(row.isActive).toBe(false);
+    // And it's gone from the deal's team list.
+    const listed = (await getTeamMembers(tdb, DEAL)) as any[];
+    expect(listed.find((r) => r.id === member.id)).toBeUndefined();
+  });
+
+  it("leaves ANOTHER contact's team rows untouched when one contact is deleted", async () => {
+    const deletedC = "44444444-4444-4444-4444-4444cafe0001";
+    const keptC = "44444444-4444-4444-4444-4444cafe0002";
+    await tdb.execute(sql`
+      INSERT INTO contacts (id, first_name, last_name, email, category, is_active) VALUES
+        (${deletedC}, 'Del', 'Eted', 'del@example.com', 'client', true),
+        (${keptC}, 'Kept', 'Around', 'kept@example.com', 'client', true)
+    `);
+    const gone = await addTeamMember(tdb, { dealId: DEAL, contactId: deletedC, role: "superintendent" });
+    const kept = await addTeamMember(tdb, { dealId: DEAL, contactId: keptC, role: "project_manager" });
+
+    await deleteContact(tdb, deletedC, "admin");
+
+    const rows = (await tdb.select().from(dealTeamMembers)) as any[];
+    expect(rows.find((r) => r.id === gone.id)?.isActive).toBe(false);
+    expect(rows.find((r) => r.id === kept.id)?.isActive).toBe(true);
   });
 });

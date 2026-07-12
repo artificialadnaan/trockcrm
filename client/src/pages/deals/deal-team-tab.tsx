@@ -90,6 +90,14 @@ const ROLE_LABELS: Record<TeamRole, string> = {
   other: "Other",
 };
 
+// A contact-backed estimator is rejected 400 by the server (an estimator must be a staff user, since
+// revision routing only picks estimator rows whose user_id IS NOT NULL). So the role picker only offers
+// Estimator in USER mode — filter it out in contact mode instead of letting the user fill a doomed form.
+function rolesForMode(mode: "user" | "contact"): TeamRole[] {
+  const roles = Object.keys(ROLE_LABELS) as TeamRole[];
+  return mode === "contact" ? roles.filter((r) => r !== "estimator") : roles;
+}
+
 const ROLE_BADGE_CLASSES: Record<TeamRole, string> = {
   superintendent: "bg-red-100 text-red-700 border-red-200",
   estimator: "bg-blue-100 text-blue-700 border-blue-200",
@@ -367,6 +375,11 @@ function AddMemberDialog({
                     setContactResults([]);
                     setSelectedContact(null);
                     ++searchSeq.current;
+                    // Estimator is user-only; clear it when switching to contact mode so the picker
+                    // and the submitted role stay consistent with what the server will accept.
+                    if (m === "contact") {
+                      setRole((prev) => (prev === "estimator" ? "" : prev));
+                    }
                   }}
                   className={`px-3 py-1 text-sm rounded ${
                     mode === m
@@ -453,7 +466,7 @@ function AddMemberDialog({
                 <SelectValue placeholder="Select role" />
               </SelectTrigger>
               <SelectContent>
-                {(Object.keys(ROLE_LABELS) as TeamRole[]).map((r) => (
+                {rolesForMode(mode).map((r) => (
                   <SelectItem key={r} value={r}>
                     {ROLE_LABELS[r]}
                   </SelectItem>
