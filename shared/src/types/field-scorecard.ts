@@ -186,6 +186,66 @@ export function scorecardV2RatingLabel(rating: ScorecardRating): string {
   }[rating];
 }
 
+// ── Leadership scorecard ────────────────────────────────────────────────────────
+// A distinct scorecard KIND stored in the same tables (discriminated by `kind`). Four
+// categories rated 1-10 with a dictatable comment note (no per-category photos); the score is
+// their average out of 10, using the same rating bands as V2. Photos and a free-text summary
+// attach to the Project Summary (sectionKey `project_summary`). No signatures, no deficiencies.
+export type ScorecardKind = "project" | "leadership";
+
+export const FIELD_SCORECARD_LEADERSHIP_SECTION_KEYS = [
+  "quality_control",
+  "safety",
+  "schedule_adherence",
+  "site_staff_feedback",
+] as const;
+export type ScorecardLeadershipSectionKey =
+  (typeof FIELD_SCORECARD_LEADERSHIP_SECTION_KEYS)[number];
+
+export interface ScorecardLeadershipSectionDef {
+  key: ScorecardLeadershipSectionKey;
+  title: string;
+  maxPoints: number;
+}
+
+/** The 4 leadership categories, each rated 1-10; the final score is their average. */
+export const FIELD_SCORECARD_LEADERSHIP_SECTIONS: readonly ScorecardLeadershipSectionDef[] = [
+  { key: "quality_control", title: "Quality Control", maxPoints: 10 },
+  { key: "safety", title: "Safety", maxPoints: 10 },
+  { key: "schedule_adherence", title: "Schedule Adherence", maxPoints: 10 },
+  { key: "site_staff_feedback", title: "Site Staff Feedback", maxPoints: 10 },
+];
+
+/** Photos and the free-text summary attach to the Project Summary block. */
+export const FIELD_SCORECARD_LEADERSHIP_SUMMARY_SECTION_KEY = "project_summary" as const;
+
+export function isLeadershipSectionKey(key: string): key is ScorecardLeadershipSectionKey {
+  return FIELD_SCORECARD_LEADERSHIP_SECTION_KEYS.includes(key as ScorecardLeadershipSectionKey);
+}
+
+export function computeScorecardLeadershipAverage(
+  items: readonly { sectionKey: ScorecardLeadershipSectionKey; points: number }[],
+): number {
+  return (
+    Math.round(
+      (items.reduce((sum, item) => sum + item.points, 0) /
+        FIELD_SCORECARD_LEADERSHIP_SECTIONS.length) *
+        10,
+    ) / 10
+  );
+}
+
+export function resolveScorecardLeadershipRating(average: number): ScorecardRating {
+  if (average >= 9) return "elite";
+  if (average >= 8) return "on_standard";
+  if (average >= 7) return "needs_improvement";
+  return "corrective_action";
+}
+
+export function scorecardLeadershipRatingLabel(rating: ScorecardRating): string {
+  return scorecardV2RatingLabel(rating);
+}
+
 /** "Check all that apply" critical deficiencies from the form. */
 export const FIELD_SCORECARD_CRITICAL_DEFICIENCIES = [
   { key: "missed_hold_point", label: "Missed hold point" },
@@ -279,19 +339,29 @@ export function actionItemsRequired(input: { total: number; deficiencyCount: num
 // ── Wire types (shared by mobile submit, server persist, and CRM read) ──────────
 
 export interface ScorecardSubmissionItem {
-  sectionKey: ScorecardSectionKey | ScorecardV2SectionKey;
+  sectionKey: ScorecardSectionKey | ScorecardV2SectionKey | ScorecardLeadershipSectionKey;
   points: number;
   note?: string | null;
 }
 export interface ScorecardPhotoInput {
-  /** V2 deficiency evidence uses `critical_deficiency` plus `deficiencyKey`. */
-  sectionKey: ScorecardSectionKey | ScorecardV2SectionKey | "critical_deficiency";
+  /**
+   * V2 deficiency evidence uses `critical_deficiency` plus `deficiencyKey`.
+   * Leadership photos attach to the Project Summary (`project_summary`).
+   */
+  sectionKey:
+    | ScorecardSectionKey
+    | ScorecardV2SectionKey
+    | ScorecardLeadershipSectionKey
+    | "critical_deficiency"
+    | "project_summary";
   deficiencyKey?: ScorecardV2CriticalDeficiencyKey | null;
   clientUploadId: string;
 }
 /** POST /field/scorecards body. `clientSubmissionId` makes the offline-retryable submit idempotent. */
 export interface ScorecardSubmissionInput {
   formVersion?: ScorecardFormVersion;
+  /** Discriminates project (default) vs leadership scorecards; both share the same tables. */
+  kind?: ScorecardKind;
   clientSubmissionId: string;
   dealId: string;
   weekOf: string; // yyyy-mm-dd
@@ -305,6 +375,8 @@ export interface ScorecardSubmissionInput {
   photos: ScorecardPhotoInput[];
   superintendentSignature?: string | null;
   pmSignature?: string | null;
+  /** Leadership Project Summary free text (voice-dictatable). */
+  summary?: string | null;
 }
 
 export interface FieldScorecardSummary {
@@ -313,6 +385,7 @@ export interface FieldScorecardSummary {
   weekOf: string;
   totalScore: number;
   formVersion?: ScorecardFormVersion;
+  kind?: ScorecardKind;
   averageScore?: number | null;
   rating: ScorecardRating;
   ratingLabel: string;
@@ -327,14 +400,19 @@ export interface FieldScorecardSummary {
 }
 export interface FieldScorecardPhotoView {
   id: string;
-  sectionKey: ScorecardSectionKey | ScorecardV2SectionKey | "critical_deficiency";
+  sectionKey:
+    | ScorecardSectionKey
+    | ScorecardV2SectionKey
+    | ScorecardLeadershipSectionKey
+    | "critical_deficiency"
+    | "project_summary";
   deficiencyKey?: string | null;
   fileId: string;
   url: string | null;
   caption: string | null;
 }
 export interface FieldScorecardItemView {
-  sectionKey: ScorecardSectionKey | ScorecardV2SectionKey;
+  sectionKey: ScorecardSectionKey | ScorecardV2SectionKey | ScorecardLeadershipSectionKey;
   points: number;
   note: string | null;
 }
@@ -346,4 +424,6 @@ export interface FieldScorecardDetail extends FieldScorecardSummary {
   photos: FieldScorecardPhotoView[];
   superintendentSignature?: string | null;
   pmSignature?: string | null;
+  /** Leadership Project Summary free text. */
+  summary?: string | null;
 }

@@ -31,8 +31,12 @@ export const fieldScorecards = pgTable(
     pmName: text("pm_name"),
     /** 1 = original 100-point form; 2 = eight 1-10 categories with an average. */
     formVersion: smallint("form_version").default(1).notNull(),
+    /** Discriminates the scorecard KIND sharing these tables: 'project' (default) | 'leadership'. */
+    kind: varchar("kind", { length: 20 }).default("project").notNull(),
     /** V2's authoritative score. `totalScore` remains average * 10 for legacy rollups. */
     averageScore: numeric("average_score", { precision: 3, scale: 1 }),
+    /** Leadership Project Summary free text (voice-dictatable). */
+    summary: text("summary"),
     superintendentSignature: text("superintendent_signature"),
     pmSignature: text("pm_signature"),
     totalScore: integer("total_score").notNull(),
