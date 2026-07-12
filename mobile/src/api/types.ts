@@ -1,5 +1,5 @@
 import type { FieldProject, FieldPhoto, FieldCaptureTarget } from "../projects/field-projects";
-import type { ScorecardSectionKey } from "../scorecards/scoring";
+import type { ScorecardSectionKey, ScorecardLeadershipSectionKey, ScorecardKind } from "../scorecards/scoring";
 
 export type { FieldProject, FieldPhoto, FieldCaptureTarget };
 
@@ -163,15 +163,25 @@ export type FieldScorecardSummary = {
   criticalDeficiencyCount: number;
   submittedByName: string | null;
   submittedAt: string;
+  /** PDF-availability signal from the server: the artifact renders async, so it may be false right after submit. */
+  hasPdf?: boolean;
   officeSlug?: string;
   officeId?: string;
   formVersion?: 1 | 2;
+  /** Discriminates project (default) vs leadership cards — the submitted list scores leadership out of 10. */
+  kind?: ScorecardKind;
   averageScore?: number | null;
 };
-export type FieldScorecardItemView = { sectionKey: ScorecardSectionKey; points: number; note: string | null };
+export type FieldScorecardItemView = {
+  // Leadership cards key items by the 4 leadership sections; project cards by the V2 section keys.
+  sectionKey: ScorecardSectionKey | ScorecardLeadershipSectionKey;
+  points: number;
+  note: string | null;
+};
 export type FieldScorecardPhotoView = {
   id: string;
-  sectionKey: ScorecardSectionKey | "critical_deficiency";
+  // Leadership evidence attaches to the Project Summary (`project_summary`).
+  sectionKey: ScorecardSectionKey | ScorecardLeadershipSectionKey | "critical_deficiency" | "project_summary";
   deficiencyKey?: string | null;
   fileId: string;
   url: string | null;
@@ -185,6 +195,8 @@ export type FieldScorecardDetail = FieldScorecardSummary & {
   criticalDeficiencies: string[];
   actionItems: string[];
   photos: FieldScorecardPhotoView[];
+  /** Leadership Project Summary free text. */
+  summary?: string | null;
 };
 export type RecentScorecardsResponse = { scorecards: FieldScorecardSummary[]; degradedOffices?: string[] };
 export type ProjectScorecardsResponse = {

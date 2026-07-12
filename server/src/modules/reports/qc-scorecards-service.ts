@@ -61,6 +61,10 @@ export async function getQcScorecardsReport(
   // dropdowns stay fully populated) AND the row list. The interactive filters are added ON TOP for the rows.
   const windowConditions = [
     sql`sc.is_active = true`,
+    // Project cards only. Leadership scorecards share this table (kind = 'leadership') but are scored on a
+    // different model and must never pollute the QC report's counts/dropdowns/rows. COALESCE treats any
+    // legacy NULL/absent kind as a project card (the pre-leadership default).
+    sql`COALESCE(sc.kind, 'project') = 'project'`,
     sql`d.is_active = true`,
     // Standard reports guard: keep demo/test projects out of the counts, dropdowns, row list, and cap — the
     // same COALESCE(d.is_test_data, false) = false exclusion every other report surface applies.

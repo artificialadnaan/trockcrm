@@ -6,22 +6,30 @@ import { generateDownloadUrl, putObject } from "../../lib/r2-client.js";
 import { buildScorecardPdfData, renderFieldScorecardPdf, MAX_EVIDENCE_PHOTOS } from "./scorecard-pdf.js";
 import { loadScorecardEvidenceImage, prioritizeAndCapEvidencePhotos } from "./scorecard-evidence-image.js";
 import {
+  FIELD_SCORECARD_LEADERSHIP_SECTION_KEYS,
+  FIELD_SCORECARD_LEADERSHIP_SUMMARY_SECTION_KEY,
   FIELD_SCORECARD_SECTION_KEYS,
   FIELD_SCORECARD_V2_SECTION_KEYS,
   actionItemsRequired,
+  computeScorecardLeadershipAverage,
   computeScorecardTotal,
   computeScorecardV2Average,
+  isLeadershipSectionKey,
   isLegalSectionPoints,
   isScorecardCriticalDeficiencyKey,
   isScorecardSectionKey,
   isScorecardV2CriticalDeficiencyKey,
   isScorecardV2SectionKey,
+  resolveScorecardLeadershipRating,
   resolveScorecardRating,
   resolveScorecardV2Rating,
+  scorecardLeadershipRatingLabel,
   scorecardRatingLabel,
   scorecardV2RatingLabel,
   type FieldScorecardDetail,
   type FieldScorecardSummary,
+  type ScorecardKind,
+  type ScorecardLeadershipSectionKey,
   type ScorecardRating,
   type ScorecardSectionKey,
   type ScorecardFormVersion,
@@ -45,6 +53,8 @@ export interface CreateFieldScorecardInput {
   clientSubmissionId: string;
   weekOf: string;
   formVersion?: ScorecardFormVersion;
+  /** Discriminates project (default) vs leadership scorecards; both share the same tables. */
+  kind?: ScorecardKind;
   superintendentName?: string | null;
   pmName?: string | null;
   projectNumber?: string | null;
@@ -55,9 +65,15 @@ export interface CreateFieldScorecardInput {
   photos: { sectionKey: string; deficiencyKey?: string | null; clientUploadId: string }[];
   superintendentSignature?: string | null;
   pmSignature?: string | null;
+  /** Leadership Project Summary free text (voice-dictatable). */
+  summary?: string | null;
 }
 
-type ValidatedItem = { sectionKey: ScorecardSectionKey | ScorecardV2SectionKey; points: number; note: string | null };
+type ValidatedItem = {
+  sectionKey: ScorecardSectionKey | ScorecardV2SectionKey | ScorecardLeadershipSectionKey;
+  points: number;
+  note: string | null;
+};
 
 // The subset of columns a summary needs — satisfied by both a Drizzle row and the aliased raw-SQL rows
 // from the gated recent-list query.
@@ -67,6 +83,7 @@ interface ScorecardSummarySource {
   weekOf: unknown;
   totalScore: number;
   formVersion: number | null;
+  kind?: string | null;
   averageScore: string | number | null;
   rating: string;
   superintendentName: string | null;
@@ -77,6 +94,8 @@ interface ScorecardSummarySource {
   submittedAt: unknown;
   superintendentSignature?: string | null;
   pmSignature?: string | null;
+  pdfR2Key?: string | null;
+  pdfGeneratedAt?: unknown;
 }
 
 // job_type string — MUST match the worker's registerJobHandler(FIELD_SCORECARD_EMAIL_JOB, ...). The server
@@ -131,18 +150,39 @@ export async function createFieldScorecard(
     input.dealId,
   );
 
-  const formVersion: ScorecardFormVersion = input.formVersion === 2 ? 2 : 1;
-  const items = validateItems(input.items, formVersion);
-  const deficiencies = validateDeficiencies(input.criticalDeficiencies, formVersion);
-  const deficiencyNotes = validateDeficiencyNotes(input.criticalDeficiencyNotes ?? {}, deficiencies, formVersion);
-  const averageScore = formVersion === 2
+  // Leadership is a distinct scorecard KIND in the same tables: 4 categories rated 1-10 (average out of
+  // 10, V2 bands), no deficiencies, no signatures; a free-text summary + photos attach to the Project
+  // Summary. It always uses the V2-style 1-10 average scoring under the hood.
+  const kind: ScorecardKind = input.kind === "leadership" ? "leadership" : "project";
+  const formVersion: ScorecardFormVersion = kind === "leadership" ? 2 : input.formVersion === 2 ? 2 : 1;
+  const items = validateItems(input.items, formVersion, kind);
+  // Leadership cards don't support critical deficiencies. Reject a submission that carries any (rather than
+  // silently dropping them) so a client bug can't quietly discard flagged concerns — the parser guards the
+  // HTTP boundary, and this mirrors it for direct service callers. Project cards validate as before.
+  if (kind === "leadership" && (input.criticalDeficiencies.length > 0 || Object.keys(input.criticalDeficiencyNotes ?? {}).length > 0)) {
+    throw new AppError(400, "Leadership scorecards do not support critical deficiencies.");
+  }
+  const deficiencies = kind === "leadership" ? [] : validateDeficiencies(input.criticalDeficiencies, formVersion);
+  const deficiencyNotes = kind === "leadership"
+    ? {}
+    : validateDeficiencyNotes(input.criticalDeficiencyNotes ?? {}, deficiencies, formVersion);
+  const averageScore = kind === "leadership"
+    ? computeScorecardLeadershipAverage(items as { sectionKey: ScorecardLeadershipSectionKey; points: number }[])
+    : formVersion === 2
     ? computeScorecardV2Average(items as { sectionKey: ScorecardV2SectionKey; points: number }[])
     : null;
-  // `total_score` remains populated for existing reports. V2 stores average * 10 beside its true average.
-  const total = formVersion === 2 ? Math.round((averageScore ?? 0) * 10) : computeScorecardTotal(items as { sectionKey: ScorecardSectionKey; points: number }[]);
-  const rating = formVersion === 2 ? resolveScorecardV2Rating(averageScore ?? 0) : resolveScorecardRating(total);
+  // `total_score` remains populated for existing reports. V2/leadership store average * 10 beside the
+  // true average.
+  const total = averageScore != null
+    ? Math.round(averageScore * 10)
+    : computeScorecardTotal(items as { sectionKey: ScorecardSectionKey; points: number }[]);
+  const rating = kind === "leadership"
+    ? resolveScorecardLeadershipRating(averageScore ?? 0)
+    : formVersion === 2
+    ? resolveScorecardV2Rating(averageScore ?? 0)
+    : resolveScorecardRating(total);
 
-  const actionItems = input.actionItems.map((s) => s.trim()).filter((s) => s.length > 0);
+  const actionItems = kind === "leadership" ? [] : input.actionItems.map((s) => s.trim()).filter((s) => s.length > 0);
   if (formVersion === 1 && actionItemsRequired({ total, deficiencyCount: deficiencies.length }) && actionItems.length === 0) {
     throw new AppError(
       422,
@@ -150,10 +190,14 @@ export async function createFieldScorecard(
     );
   }
 
-  const photoLinks = await resolvePhotoLinks(tenantDb, input, formVersion, deficiencies);
-  // V2 defines Week Of as the completion date. Ignore the device-provided value so offline drafts cannot
-  // submit under a stale week after being completed later.
-  const weekOf = formVersion === 2 ? new Date().toISOString().slice(0, 10) : input.weekOf;
+  const photoLinks = await resolvePhotoLinks(tenantDb, input, formVersion, kind, deficiencies);
+  // Week Of = the completion date, which the field app stamps LOCAL at SUBMIT time (submitScorecard →
+  // todayLocalIso). Trust it rather than recomputing here: the server runs in UTC, so `new Date().toISOString()`
+  // stamped the NEXT day for any evening submit west of UTC (8 PM CDT filed under tomorrow) AND can't see the
+  // device's local day at all. Both kinds present Week Of as "set automatically when completed".
+  const weekOf = input.weekOf;
+  // Persist the summary for leadership cards only (bounded); project cards never carry one.
+  const summary = kind === "leadership" ? (input.summary?.trim() ? input.summary.trim().slice(0, 8000) : null) : null;
 
   // ON CONFLICT DO NOTHING keeps the transaction usable if a concurrent retry inserted the same
   // clientSubmissionId first — catching a 23505 here would instead poison the open txn (aborted state).
@@ -169,9 +213,13 @@ export async function createFieldScorecard(
       superintendentName: input.superintendentName ?? null,
       pmName: input.pmName ?? null,
       formVersion,
+      kind,
+      summary,
       averageScore: averageScore == null ? null : String(averageScore),
-      superintendentSignature: normalizeSignature(input.superintendentSignature),
-      pmSignature: normalizeSignature(input.pmSignature),
+      // Leadership cards collect no signatures. Null them defensively (like deficiencies/action items above)
+      // so a stray client-sent value is never persisted — which also means no detail/PDF read can expose one.
+      superintendentSignature: kind === "leadership" ? null : normalizeSignature(input.superintendentSignature),
+      pmSignature: kind === "leadership" ? null : normalizeSignature(input.pmSignature),
       totalScore: total,
       rating,
       criticalDeficiencies: deficiencies,
@@ -225,8 +273,9 @@ export async function createFieldScorecard(
       weekOf,
       totalScore: total,
       formVersion,
+      kind,
       averageScore,
-      ratingLabel: formVersion === 2 ? scorecardV2RatingLabel(rating) : scorecardRatingLabel(rating),
+      ratingLabel: ratingLabelFor(kind, formVersion, rating),
       submittedByName: input.submittedByName ?? null,
       superintendentEmail: teamEmails.superintendentEmail,
       projectManagerEmail: teamEmails.projectManagerEmail,
@@ -271,6 +320,7 @@ export async function listRecentFieldScorecards(
       sc.deal_id AS "dealId",
       sc.total_score AS "totalScore",
       sc.form_version AS "formVersion",
+      sc.kind AS "kind",
       sc.average_score AS "averageScore",
       sc.rating AS "rating",
       sc.superintendent_name AS "superintendentName",
@@ -279,7 +329,9 @@ export async function listRecentFieldScorecards(
       sc.critical_deficiencies AS "criticalDeficiencies",
       sc.submitted_by_name AS "submittedByName",
       sc.week_of::text AS "weekOf",
-      sc.submitted_at AS "submittedAt"
+      sc.submitted_at AS "submittedAt",
+      sc.pdf_r2_key AS "pdfR2Key",
+      sc.pdf_generated_at AS "pdfGeneratedAt"
     FROM field_scorecards sc
     JOIN deals d ON d.id = sc.deal_id
     LEFT JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
@@ -314,10 +366,14 @@ export async function getFieldScorecardDetail(
     .from(fieldScorecardItems)
     .where(eq(fieldScorecardItems.scorecardId, id));
   const itemByKey = new Map(itemRows.map((r) => [r.sectionKey, r]));
-  const sectionKeys = card.formVersion === 2 ? FIELD_SCORECARD_V2_SECTION_KEYS : FIELD_SCORECARD_SECTION_KEYS;
+  const sectionKeys: readonly string[] = card.kind === "leadership"
+    ? FIELD_SCORECARD_LEADERSHIP_SECTION_KEYS
+    : card.formVersion === 2
+    ? FIELD_SCORECARD_V2_SECTION_KEYS
+    : FIELD_SCORECARD_SECTION_KEYS;
   const items = sectionKeys.filter((k) => itemByKey.has(k)).map((k) => {
     const r = itemByKey.get(k)!;
-    return { sectionKey: k, points: r.points, note: r.note ?? null };
+    return { sectionKey: k as FieldScorecardDetail["items"][number]["sectionKey"], points: r.points, note: r.note ?? null };
   });
 
   const photoRows = await tenantDb
@@ -354,6 +410,7 @@ export async function getFieldScorecardDetail(
     photos,
     superintendentSignature: card.superintendentSignature ?? null,
     pmSignature: card.pmSignature ?? null,
+    summary: card.summary ?? null,
   };
 }
 
@@ -432,6 +489,8 @@ export async function finalizeFieldScorecardArtifacts(
     submittedAt: toIso(card.submittedAt),
     totalScore: card.totalScore,
     formVersion: card.formVersion === 2 ? 2 : 1,
+    kind: card.kind === "leadership" ? "leadership" : "project",
+    summary: card.summary ?? null,
     averageScore: card.averageScore == null ? null : Number(card.averageScore),
     superintendentSignature: card.superintendentSignature ?? null,
     pmSignature: card.pmSignature ?? null,
@@ -491,18 +550,31 @@ async function findByClientSubmissionId(tenantDb: TenantDb, clientSubmissionId: 
   return rows[0] ?? null;
 }
 
-function validateItems(rawItems: CreateFieldScorecardInput["items"], formVersion: ScorecardFormVersion): ValidatedItem[] {
-  const allowedKeys = formVersion === 2 ? FIELD_SCORECARD_V2_SECTION_KEYS : FIELD_SCORECARD_SECTION_KEYS;
+function validateItems(
+  rawItems: CreateFieldScorecardInput["items"],
+  formVersion: ScorecardFormVersion,
+  kind: ScorecardKind,
+): ValidatedItem[] {
+  const allowedKeys: readonly string[] = kind === "leadership"
+    ? FIELD_SCORECARD_LEADERSHIP_SECTION_KEYS
+    : formVersion === 2
+    ? FIELD_SCORECARD_V2_SECTION_KEYS
+    : FIELD_SCORECARD_SECTION_KEYS;
   const seen = new Map<string, ValidatedItem>();
   for (const it of rawItems) {
-    const validKey = formVersion === 2 ? isScorecardV2SectionKey(it.sectionKey) : isScorecardSectionKey(it.sectionKey);
+    const validKey = kind === "leadership"
+      ? isLeadershipSectionKey(it.sectionKey)
+      : formVersion === 2
+      ? isScorecardV2SectionKey(it.sectionKey)
+      : isScorecardSectionKey(it.sectionKey);
     if (!validKey) {
       throw new AppError(422, `Unknown scorecard section: ${it.sectionKey}`);
     }
     if (seen.has(it.sectionKey)) {
       throw new AppError(422, `Duplicate scorecard section: ${it.sectionKey}`);
     }
-    const legalPoints = formVersion === 2
+    // Leadership + V2 categories are each rated 1-10; V1 sections use their fixed option ladder.
+    const legalPoints = kind === "leadership" || formVersion === 2
       ? Number.isInteger(it.points) && it.points >= 1 && it.points <= 10
       : isLegalSectionPoints(it.sectionKey as ScorecardSectionKey, it.points);
     if (!legalPoints) {
@@ -516,6 +588,12 @@ function validateItems(rawItems: CreateFieldScorecardInput["items"], formVersion
   }
   // Canonical section order.
   return allowedKeys.map((k) => seen.get(k)!);
+}
+
+/** The rating-band label for the card's kind/version — leadership reuses the V2 bands + labels. */
+function ratingLabelFor(kind: ScorecardKind, formVersion: ScorecardFormVersion, rating: ScorecardRating): string {
+  if (kind === "leadership") return scorecardLeadershipRatingLabel(rating);
+  return formVersion === 2 ? scorecardV2RatingLabel(rating) : scorecardRatingLabel(rating);
 }
 
 function validateDeficiencies(keys: string[], formVersion: ScorecardFormVersion): string[] {
@@ -551,9 +629,17 @@ async function resolvePhotoLinks(
   tenantDb: TenantDb,
   input: CreateFieldScorecardInput,
   formVersion: ScorecardFormVersion,
+  kind: ScorecardKind,
   deficiencies: string[],
 ): Promise<{ sectionKey: string; deficiencyKey: string | null; fileId: string }[]> {
   for (const p of input.photos) {
+    if (kind === "leadership") {
+      // Leadership photos attach ONLY to the Project Summary — no per-category or deficiency evidence.
+      if (p.sectionKey !== FIELD_SCORECARD_LEADERSHIP_SUMMARY_SECTION_KEY) {
+        throw new AppError(422, `Unknown scorecard section: ${p.sectionKey}`);
+      }
+      continue;
+    }
     const validSection = formVersion === 2 ? isScorecardV2SectionKey(p.sectionKey) : isScorecardSectionKey(p.sectionKey);
     const deficiencyEvidence = formVersion === 2 && p.sectionKey === "critical_deficiency" && p.deficiencyKey && deficiencies.includes(p.deficiencyKey);
     if (!validSection && !deficiencyEvidence) {
@@ -600,6 +686,7 @@ async function resolvePhotoLinks(
 
 function toSummary(row: ScorecardSummarySource): FieldScorecardSummary {
   const formVersion: ScorecardFormVersion = row.formVersion === 2 ? 2 : 1;
+  const kind: ScorecardKind = row.kind === "leadership" ? "leadership" : "project";
   const rating = row.rating as ScorecardRating;
   return {
     id: row.id,
@@ -607,15 +694,19 @@ function toSummary(row: ScorecardSummarySource): FieldScorecardSummary {
     weekOf: typeof row.weekOf === "string" ? row.weekOf : String(row.weekOf),
     totalScore: row.totalScore,
     formVersion,
+    kind,
     averageScore: row.averageScore == null ? null : Number(row.averageScore),
     rating,
-    ratingLabel: formVersion === 2 ? scorecardV2RatingLabel(rating) : scorecardRatingLabel(rating),
+    ratingLabel: ratingLabelFor(kind, formVersion, rating),
     superintendentName: row.superintendentName ?? null,
     pmName: row.pmName ?? null,
     projectNumber: row.projectNumber ?? null,
     criticalDeficiencyCount: (row.criticalDeficiencies ?? []).length,
     submittedByName: row.submittedByName ?? null,
     submittedAt: toIso(row.submittedAt),
+    // PDF is rendered/uploaded post-response (best-effort/async) — null right after submit until the
+    // artifact lands. Surface availability so downstream (mobile + CRM) can gate the download action.
+    hasPdf: Boolean(row.pdfR2Key ?? row.pdfGeneratedAt),
   };
 }
 

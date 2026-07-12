@@ -16,7 +16,7 @@ import {
   classifyDraftPhotoUploads,
   submitScorecard,
 } from "../submit";
-import type { ScorecardDraft, ScorecardDraftPhoto } from "../draft";
+import { todayLocalIso, type ScorecardDraft, type ScorecardDraftPhoto } from "../draft";
 import { enqueueUploads, drainUploadQueue, getQueuedUploads } from "../../capture/upload-queue";
 import { createScorecard } from "../../api/endpoints";
 
@@ -99,6 +99,16 @@ describe("submitScorecard (orchestration)", () => {
     expect(createScorecard).toHaveBeenCalledTimes(1);
     expect((createScorecard as jest.Mock).mock.calls[0][1].clientSubmissionId).toBe("sub-1");
     expect(result).toEqual({ status: "submitted", scorecard: { id: "sc-1", dealId: "deal-1" } });
+  });
+
+  it("stamps Week Of = the LOCAL submit date, overriding a stale draft value", async () => {
+    // A draft seeded on an earlier day (offline, submitted later) must file under the SUBMIT day, not its
+    // creation day — the server no longer re-stamps, so the client owns the completion date.
+    const stale: ScorecardDraft = { ...draftWith([]), weekOf: "2020-01-01" };
+    await submitScorecard(fetcher, "owner-1", stale);
+    const payload = (createScorecard as jest.Mock).mock.calls[0][1];
+    expect(payload.weekOf).not.toBe("2020-01-01"); // the stale draft value is discarded
+    expect(payload.weekOf).toBe(todayLocalIso()); // the local completion date is stamped instead
   });
 
   it("with photos all confirmed: enqueues, drains, then POSTs → submitted", async () => {

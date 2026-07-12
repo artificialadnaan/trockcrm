@@ -25,6 +25,7 @@ const SC_LOST = "55555555-5555-5555-5555-000000000005"; // on a Lost deal → ex
 const SC_ARCHIVED = "55555555-5555-5555-5555-000000000006"; // on an archived (is_active=false) deal → excluded
 const SC_BB_LOST = "55555555-5555-5555-5555-000000000007"; // on a deal whose Bid Board mirror is Lost → excluded
 const SC_TEST = "55555555-5555-5555-5555-000000000008"; // on a test-data deal → excluded from reports
+const SC_LEADERSHIP = "55555555-5555-5555-5555-000000000009"; // kind='leadership' on a LIVE deal → excluded (project-only report)
 
 let pg: PGlite;
 let tdb: any;
@@ -65,6 +66,9 @@ beforeAll(async () => {
     { id: SC_ARCHIVED, clientSubmissionId: "66666666-6666-6666-6666-000000000006", dealId: DEAL_ARCHIVED, weekOf: "2026-06-30", projectNumber: "DFW-8888", superintendentName: "Sam Reyes", totalScore: 88, rating: "on_standard", submittedBy: USER, submittedByName: "Sam Reyes", submittedAt: new Date("2026-06-30T18:00:00Z") },
     { id: SC_BB_LOST, clientSubmissionId: "66666666-6666-6666-6666-000000000007", dealId: DEAL_BB_LOST, weekOf: "2026-06-30", projectNumber: "DFW-7777", superintendentName: "Sam Reyes", totalScore: 65, rating: "corrective_action", submittedBy: USER, submittedByName: "Sam Reyes", submittedAt: new Date("2026-06-30T18:00:00Z") },
     { id: SC_TEST, clientSubmissionId: "66666666-6666-6666-6666-000000000008", dealId: DEAL_TEST, weekOf: "2026-06-30", projectNumber: "DFW-0000", superintendentName: "Demo Tester", totalScore: 99, rating: "elite", submittedBy: USER, submittedByName: "Demo Tester", submittedAt: new Date("2026-06-30T18:00:00Z") },
+    // A leadership card on a fully-live, in-window Dallas deal — only its KIND makes it ineligible for the QC
+    // report (which is project-scorecards only). Proves the kind filter, not any other gate.
+    { id: SC_LEADERSHIP, clientSubmissionId: "66666666-6666-6666-6666-000000000009", dealId: DEAL_D, weekOf: "2026-06-30", projectNumber: "DFW-10432", superintendentName: "Leah Solo", totalScore: 90, rating: "elite", kind: "leadership", submittedBy: USER, submittedByName: "Lena Lead", submittedAt: new Date("2026-06-30T19:00:00Z") },
   ]);
 });
 
@@ -98,6 +102,17 @@ describe("getQcScorecardsReport", () => {
     // DEAL_TEST is active + live-staged but is_test_data — the reports guard keeps it out of rows AND options.
     expect(ids).not.toContain(SC_TEST);
     expect(res.superintendents).not.toContain("Demo Tester");
+  });
+
+  it("excludes leadership cards — the QC report is project scorecards only (kind filter)", async () => {
+    const res = await getQcScorecardsReport(tdb, JUNE);
+    const ids = res.scorecards.map((s) => s.scorecardId);
+    // SC_LEADERSHIP sits on a fully-live in-window deal and is the newest submission — only kind='leadership'
+    // keeps it out. Its superintendent ("Leah Solo", unique to the leadership card) must not leak into the
+    // superintendent options either — the kind filter applies to the option aggregation, not just the rows.
+    expect(ids).not.toContain(SC_LEADERSHIP);
+    expect(res.scorecards.map((s) => s.scorecardId)).toEqual([SC1, SC3, SC2]);
+    expect(res.superintendents).not.toContain("Leah Solo");
   });
 
   it("filters by region name (server-side, before the cap)", async () => {

@@ -10,6 +10,7 @@ import type { CaptureUploadInput } from "../capture/upload";
 import { MAX_UPLOAD_ATTEMPTS, drainUploadQueue, enqueueUploads, getQueuedUploads } from "../capture/upload-queue";
 import {
   scorecardDraftToSubmission,
+  todayLocalIso,
   type ScorecardDraft,
   type ScorecardDraftPhoto,
 } from "./draft";
@@ -84,6 +85,11 @@ export async function submitScorecard(
     if (failed.length > 0) return { status: "photos_failed", failed: failed.length };
     if (pending.length > 0) return { status: "photos_pending", remaining: pending.length };
   }
-  const { scorecard } = await createScorecard(fetcher, scorecardDraftToSubmission(draft));
+  // Stamp Week Of = the completion date, LOCAL, at submit time. Both kinds present it as "set automatically
+  // when completed" (neither exposes an editable field), so a draft started one day and submitted the next
+  // must file under the submit day — not the draft-creation day it was seeded with — and LOCAL avoids the
+  // west-of-UTC off-by-one the old server-side UTC stamp caused. The server trusts this value.
+  const submission = { ...scorecardDraftToSubmission(draft), weekOf: todayLocalIso() };
+  const { scorecard } = await createScorecard(fetcher, submission);
   return { status: "submitted", scorecard };
 }

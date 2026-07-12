@@ -1,11 +1,15 @@
 import PDFDocument from "pdfkit";
 import {
+  FIELD_SCORECARD_LEADERSHIP_SECTIONS,
+  FIELD_SCORECARD_LEADERSHIP_SUMMARY_SECTION_KEY,
   FIELD_SCORECARD_SECTIONS,
   FIELD_SCORECARD_V2_SECTIONS,
   FIELD_SCORECARD_CRITICAL_DEFICIENCIES,
   FIELD_SCORECARD_V2_CRITICAL_DEFICIENCIES,
+  scorecardLeadershipRatingLabel,
   scorecardRatingLabel,
   scorecardV2RatingLabel,
+  type ScorecardKind,
   type ScorecardRating,
   type ScorecardFormVersion,
 } from "@trock-crm/shared/types";
@@ -34,6 +38,9 @@ export const MAX_EVIDENCE_PHOTOS = 60;
 // Bound each critical-deficiency description on the summary page so one long (up to 4000-char) note can't
 // blow the layout across pages; the same note also appears (bounded) as the evidence-group subtitle.
 const DEFICIENCY_NOTE_MAX_HEIGHT = 54;
+// Bound the leadership Project Summary free text on the first page (the full note lives in the CRM) so one
+// long dictation can't push the layout across pages.
+const SUMMARY_MAX_HEIGHT = 220;
 
 const RATING_COLOR: Record<ScorecardRating, string> = {
   elite: "#16A34A",
@@ -52,6 +59,8 @@ export interface ScorecardPdfInput {
   submittedAt: string; // ISO
   totalScore: number;
   formVersion?: ScorecardFormVersion;
+  /** Discriminates the render path: 'project' (default) vs the leadership variant. */
+  kind?: ScorecardKind;
   averageScore?: number | null;
   superintendentSignature?: string | null;
   pmSignature?: string | null;
@@ -60,6 +69,8 @@ export interface ScorecardPdfInput {
   criticalDeficiencyKeys: string[];
   criticalDeficiencyNotes?: Record<string, string>;
   actionItems: string[];
+  /** Leadership Project Summary free text (rendered bounded on the summary page). */
+  summary?: string | null;
   photos?: ScorecardPdfPhoto[];
   /** Evidence photos already dropped upstream (capped before download) — added to the render-side cap's
    *  omitted count so the "available in the CRM" note reflects the true total. */
@@ -98,6 +109,7 @@ export interface ScorecardPdfData {
   submittedAt: string;
   totalScore: number;
   formVersion: ScorecardFormVersion;
+  kind: ScorecardKind;
   averageScore: number | null;
   superintendentSignature: string | null;
   pmSignature: string | null;
@@ -106,6 +118,9 @@ export interface ScorecardPdfData {
   sections: ScorecardPdfSection[];
   deficiencies: ScorecardPdfDeficiency[];
   actionItems: string[];
+  summary: string | null;
+  /** Leadership Project Summary evidence photos (sectionKey `project_summary`). Empty for project cards. */
+  summaryPhotos: ScorecardPdfPhoto[];
   omittedEvidenceCount: number;
 }
 
@@ -118,8 +133,14 @@ export interface ScorecardPdfData {
 export function buildScorecardPdfData(input: ScorecardPdfInput): ScorecardPdfData {
   const itemByKey = new Map(input.items.map((it) => [it.sectionKey, it]));
   const photos = input.photos ?? [];
-  const formVersion: ScorecardFormVersion = input.formVersion === 2 ? 2 : 1;
-  const definitions = formVersion === 2 ? FIELD_SCORECARD_V2_SECTIONS : FIELD_SCORECARD_SECTIONS;
+  const kind: ScorecardKind = input.kind === "leadership" ? "leadership" : "project";
+  // Leadership always uses the V2-style 1-10 average model under the hood.
+  const formVersion: ScorecardFormVersion = kind === "leadership" ? 2 : input.formVersion === 2 ? 2 : 1;
+  const definitions = kind === "leadership"
+    ? FIELD_SCORECARD_LEADERSHIP_SECTIONS
+    : formVersion === 2
+    ? FIELD_SCORECARD_V2_SECTIONS
+    : FIELD_SCORECARD_SECTIONS;
   const sections: ScorecardPdfSection[] = definitions.map((def) => {
     const item = itemByKey.get(def.key);
     return {
@@ -127,24 +148,32 @@ export function buildScorecardPdfData(input: ScorecardPdfInput): ScorecardPdfDat
       points: item?.points ?? 0,
       maxPoints: "maxPoints" in def && typeof def.maxPoints === "number" ? def.maxPoints : 10,
       note: item?.note?.trim() ? item.note.trim() : null,
-      photos: photos.filter((photo) => photo.sectionKey === def.key),
+      // Leadership categories carry no per-category photos; their evidence lives on the Project Summary.
+      photos: kind === "leadership" ? [] : photos.filter((photo) => photo.sectionKey === def.key),
     };
   });
-  const labelByKey = new Map<string, string>((formVersion === 2 ? FIELD_SCORECARD_V2_CRITICAL_DEFICIENCIES : FIELD_SCORECARD_CRITICAL_DEFICIENCIES).map((d) => [d.key, d.label]));
-  const deficiencies = input.criticalDeficiencyKeys
-    .map((key) => {
-      const label = labelByKey.get(key);
-      if (!label) return null;
-      const note = input.criticalDeficiencyNotes?.[key]?.trim() || null;
-      return {
-        key,
-        label,
-        note,
-        photos: photos.filter((photo) => photo.sectionKey === "critical_deficiency" && photo.deficiencyKey === key),
-      };
-    })
-    .filter((deficiency): deficiency is ScorecardPdfDeficiency => deficiency !== null);
-  const actionItems = input.actionItems.map((s) => s.trim()).filter((s) => s.length > 0);
+  // Leadership cards have no critical deficiencies.
+  const deficiencies = kind === "leadership"
+    ? []
+    : (() => {
+        const labelByKey = new Map<string, string>(
+          (formVersion === 2 ? FIELD_SCORECARD_V2_CRITICAL_DEFICIENCIES : FIELD_SCORECARD_CRITICAL_DEFICIENCIES).map((d) => [d.key, d.label]),
+        );
+        return input.criticalDeficiencyKeys
+          .map((key) => {
+            const label = labelByKey.get(key);
+            if (!label) return null;
+            const note = input.criticalDeficiencyNotes?.[key]?.trim() || null;
+            return {
+              key,
+              label,
+              note,
+              photos: photos.filter((photo) => photo.sectionKey === "critical_deficiency" && photo.deficiencyKey === key),
+            };
+          })
+          .filter((deficiency): deficiency is ScorecardPdfDeficiency => deficiency !== null);
+      })();
+  const actionItems = kind === "leadership" ? [] : input.actionItems.map((s) => s.trim()).filter((s) => s.length > 0);
   return {
     dealName: input.dealName,
     projectNumber: input.projectNumber,
@@ -155,14 +184,25 @@ export function buildScorecardPdfData(input: ScorecardPdfInput): ScorecardPdfDat
     submittedAt: input.submittedAt,
     totalScore: input.totalScore,
     formVersion,
+    kind,
     averageScore: input.averageScore ?? null,
-    superintendentSignature: input.superintendentSignature ?? null,
-    pmSignature: input.pmSignature ?? null,
+    // Leadership cards carry no signatures.
+    superintendentSignature: kind === "leadership" ? null : input.superintendentSignature ?? null,
+    pmSignature: kind === "leadership" ? null : input.pmSignature ?? null,
     rating: input.rating,
-    ratingLabel: formVersion === 2 ? scorecardV2RatingLabel(input.rating) : scorecardRatingLabel(input.rating),
+    ratingLabel: kind === "leadership"
+      ? scorecardLeadershipRatingLabel(input.rating)
+      : formVersion === 2
+      ? scorecardV2RatingLabel(input.rating)
+      : scorecardRatingLabel(input.rating),
     sections,
     deficiencies,
     actionItems,
+    summary: kind === "leadership" ? (input.summary?.trim() ? input.summary.trim() : null) : null,
+    // Leadership Project Summary evidence (sectionKey `project_summary`); never populated for project cards.
+    summaryPhotos: kind === "leadership"
+      ? photos.filter((photo) => photo.sectionKey === FIELD_SCORECARD_LEADERSHIP_SUMMARY_SECTION_KEY)
+      : [],
     omittedEvidenceCount: Math.max(0, input.omittedEvidenceCount ?? 0),
   };
 }
@@ -216,21 +256,32 @@ export async function renderFieldScorecardPdf(data: ScorecardPdfData): Promise<B
   } catch {
     /* logo is decorative — a decode failure must not break the render */
   }
+  const isLeadership = data.kind === "leadership";
   doc.fillColor(BRAND_RED).font("Helvetica-Bold").fontSize(11).text("T ROCK CONSTRUCTION", PAGE.margin + 52, top + 2);
-  doc.fillColor(BRAND_BLACK).font("Helvetica-Bold").fontSize(20).text("Field Scorecard", PAGE.margin + 52, top + 16);
+  doc.fillColor(BRAND_BLACK).font("Helvetica-Bold").fontSize(20).text(isLeadership ? "Leadership Scorecard" : "Field Scorecard", PAGE.margin + 52, top + 16);
   const ruleY = top + 48;
   doc.moveTo(PAGE.margin, ruleY).lineTo(PAGE.width - PAGE.margin, ruleY).lineWidth(2).strokeColor(BRAND_RED).stroke();
   doc.y = ruleY + 14;
 
   // ── Header meta ──
-  const meta: [string, string][] = [
-    ["Project", data.dealName],
-    ["Project number", data.projectNumber ?? "—"],
-    ["Week of", data.weekOf],
-    ["Superintendent", data.superintendentName ?? "—"],
-    ["Project manager", data.pmName ?? "—"],
-    ["Submitted", `${data.submittedByName ?? "—"} · ${formatDate(data.submittedAt)}`],
-  ];
+  // Leadership leads with the Evaluator (the submitting user), then the pre-filled PM + Superintendent.
+  const meta: [string, string][] = isLeadership
+    ? [
+        ["Project", data.dealName],
+        ["Project number", data.projectNumber ?? "—"],
+        ["Week of", data.weekOf],
+        ["Evaluator", `${data.submittedByName ?? "—"} · ${formatDate(data.submittedAt)}`],
+        ["Project manager", data.pmName ?? "—"],
+        ["Superintendent", data.superintendentName ?? "—"],
+      ]
+    : [
+        ["Project", data.dealName],
+        ["Project number", data.projectNumber ?? "—"],
+        ["Week of", data.weekOf],
+        ["Superintendent", data.superintendentName ?? "—"],
+        ["Project manager", data.pmName ?? "—"],
+        ["Submitted", `${data.submittedByName ?? "—"} · ${formatDate(data.submittedAt)}`],
+      ];
   for (const [label, value] of meta) {
     const rowY = doc.y;
     doc.font("Helvetica").fontSize(10).fillColor(BRAND_MUTED).text(label, PAGE.margin, rowY, { width: 130 });
@@ -251,7 +302,7 @@ export async function renderFieldScorecardPdf(data: ScorecardPdfData): Promise<B
   doc.y = bannerY + bannerH + 16;
 
   // ── Section scores ──
-  heading(doc, "Section Scores");
+  heading(doc, isLeadership ? "Category Scores" : "Section Scores");
   for (const s of data.sections) {
     const rowY = doc.y;
     doc.font("Helvetica").fontSize(11).fillColor(BRAND_BLACK).text(s.title, PAGE.margin, rowY, { width: CONTENT_WIDTH - 72 });
@@ -287,7 +338,24 @@ export async function renderFieldScorecardPdf(data: ScorecardPdfData): Promise<B
     data.actionItems.forEach((a, i) => doc.text(`${i + 1}.  ${a}`, PAGE.margin, doc.y, { width: CONTENT_WIDTH }));
   }
 
-  if (data.formVersion === 2) {
+  // ── Project Summary (leadership only): the category average + a bounded free-text summary. ──
+  if (isLeadership) {
+    doc.moveDown(0.5);
+    // Keep the heading with at least the first lines of its body — never orphan it at a page foot.
+    if (doc.y + 96 > PAGE.height - PAGE.margin) doc.addPage();
+    heading(doc, "Project Summary");
+    const avgText = (data.averageScore ?? data.totalScore / 10).toFixed(1);
+    doc.font("Helvetica").fontSize(10).fillColor(BRAND_MUTED).text("Category average", PAGE.margin, doc.y, { width: 130, continued: false });
+    doc.font("Helvetica-Bold").fontSize(11).fillColor(BRAND_BLACK).text(`${avgText} / 10  ·  ${data.ratingLabel}`, PAGE.margin + 130, doc.y - 12, { width: CONTENT_WIDTH - 130 });
+    doc.moveDown(0.6);
+    doc.font("Helvetica").fontSize(10).fillColor(BRAND_BLACK).text(
+      data.summary?.trim() || "No summary provided.",
+      PAGE.margin,
+      doc.y,
+      // Bound the free text so one long dictation can't run away; the full note lives in the CRM.
+      { width: CONTENT_WIDTH, height: SUMMARY_MAX_HEIGHT, ellipsis: true },
+    );
+  } else if (data.formVersion === 2) {
     doc.moveDown(0.8);
     // Keep the Signatures heading with at least its first signature — never orphan the heading at a page
     // foot (drawSignature also guards each block, so both stay on-page).
@@ -297,24 +365,29 @@ export async function renderFieldScorecardPdf(data: ScorecardPdfData): Promise<B
     drawSignature(doc, "Project manager", data.pmSignature);
   }
 
-  const evidenceGroups: EvidenceGroup[] = [
-    // Critical-deficiency evidence leads AND is prioritized by the cap, so the most important photos are
-    // never starved by routine section evidence when a report exceeds MAX_EVIDENCE_PHOTOS.
-    ...data.deficiencies
-      .filter((deficiency) => deficiency.photos.length > 0)
-      .map((deficiency) => ({
-        title: `Critical Deficiency: ${deficiency.label}`,
-        subtitle: deficiency.note,
-        photos: deficiency.photos,
-      })),
-    ...data.sections
-      .filter((section) => section.photos.length > 0)
-      .map((section) => ({
-        title: section.title,
-        subtitle: section.note,
-        photos: section.photos,
-      })),
-  ];
+  const evidenceGroups: EvidenceGroup[] = isLeadership
+    ? // Leadership evidence attaches to the Project Summary only.
+      data.summaryPhotos.length > 0
+      ? [{ title: "Project Summary", subtitle: data.summary?.trim() || null, photos: data.summaryPhotos }]
+      : []
+    : [
+        // Critical-deficiency evidence leads AND is prioritized by the cap, so the most important photos are
+        // never starved by routine section evidence when a report exceeds MAX_EVIDENCE_PHOTOS.
+        ...data.deficiencies
+          .filter((deficiency) => deficiency.photos.length > 0)
+          .map((deficiency) => ({
+            title: `Critical Deficiency: ${deficiency.label}`,
+            subtitle: deficiency.note,
+            photos: deficiency.photos,
+          })),
+        ...data.sections
+          .filter((section) => section.photos.length > 0)
+          .map((section) => ({
+            title: section.title,
+            subtitle: section.note,
+            photos: section.photos,
+          })),
+      ];
   const { groups: cappedEvidence, omitted: omittedEvidence } = capEvidenceGroups(evidenceGroups, MAX_EVIDENCE_PHOTOS);
   for (const group of cappedEvidence) drawEvidencePages(doc, data, group);
   // Photos dropped here (defensive render-side cap) PLUS any dropped upstream before download.

@@ -8,6 +8,7 @@ import { useAuth } from "../../../src/auth/AuthContext";
 import { getRecentScorecards, getDealTeam } from "../../../src/api/endpoints";
 import {
   createScorecardDraft,
+  createLeadershipScorecardDraft,
   resolveScorecardTeamNames,
   seedScorecardDraftTeam,
   scorecardDraftSectionsAnswered,
@@ -17,7 +18,7 @@ import { listScorecardDrafts, saveScorecardDraft } from "../../../src/scorecards
 import { newClientUploadId, uploadOwnerKey } from "../../../src/capture/upload-queue";
 import { registerUploadBackgroundTask } from "../../../src/capture/upload-background-task";
 import { newSubmissionId } from "../../../src/scorecards/ids";
-import { FIELD_SCORECARD_SECTIONS } from "../../../src/scorecards/scoring";
+import { FIELD_SCORECARD_SECTIONS, FIELD_SCORECARD_LEADERSHIP_SECTIONS } from "../../../src/scorecards/scoring";
 import { Button, EmptyState, LoadingState, SectionLabel } from "../../../src/components/ui";
 import { ScreenHeader } from "../../../src/components/ScreenHeader";
 import { RatingBadge } from "../../../src/components/RatingBadge";
@@ -25,6 +26,7 @@ import { TargetPicker } from "../../../src/components/TargetPicker";
 import type { DealTeamResponse, FieldCaptureTarget, FieldScorecardSummary } from "../../../src/api/types";
 
 const SECTION_COUNT = FIELD_SCORECARD_SECTIONS.length;
+const LEADERSHIP_SECTION_COUNT = FIELD_SCORECARD_LEADERSHIP_SECTIONS.length;
 
 function todayIso(): string {
   // LOCAL date (not toISOString/UTC) so an evening submit west of UTC doesn't file under tomorrow.
@@ -38,13 +40,30 @@ function shortDate(iso: string): string {
   return Number.isNaN(d.getTime()) ? iso : d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
+/** Resume/open route for a draft — leadership drafts have their own focused screen; project drafts the wizard. */
+function draftPath(draft: ScorecardDraft): {
+  pathname: "/(app)/scorecards/leadership/[draftId]" | "/(app)/scorecards/[draftId]";
+  params: { draftId: string };
+} {
+  return draft.kind === "leadership"
+    ? { pathname: "/(app)/scorecards/leadership/[draftId]", params: { draftId: draft.id } }
+    : { pathname: "/(app)/scorecards/[draftId]", params: { draftId: draft.id } };
+}
+
 export default function ScorecardsScreen() {
   const router = useRouter();
   const { fetcher, user, activeOfficeId } = useAuth();
   const ownerKey = uploadOwnerKey(user?.id, activeOfficeId ?? user?.tenantId ?? undefined);
 
   const [drafts, setDrafts] = useState<ScorecardDraft[]>([]);
-  const [pickerOpen, setPickerOpen] = useState(false);
+  // Which kind of scorecard the deal picker will create when a deal is chosen. Set by the two entry buttons.
+  const [pickerKind, setPickerKind] = useState<"project" | "leadership" | null>(null);
+  const pickerOpen = pickerKind !== null;
+
+  // Auto-recorded Evaluator name for a leadership card = the submitting user's own name. Trimmed; blank if
+  // the user has no name on file. Shown read-only in the form — the server stamps the submitter as the
+  // Evaluator, so this is display only (the value can't diverge from the persisted evaluator).
+  const evaluatorName = [user?.firstName, user?.lastName].filter(Boolean).join(" ").trim();
 
   // Ensure queued scorecard evidence keeps uploading in the background even if the user never opens the
   // Capture tab this session (that's the only other place the task is registered).
@@ -74,10 +93,11 @@ export default function ScorecardsScreen() {
   );
 
   async function startDraft(target: FieldCaptureTarget) {
-    setPickerOpen(false);
+    const kind = pickerKind ?? "project";
+    setPickerKind(null);
     if (!ownerKey) return;
     const id = newClientUploadId();
-    let draft = createScorecardDraft({
+    const base = {
       id,
       clientSubmissionId: newSubmissionId(),
       dealId: target.id,
@@ -85,13 +105,16 @@ export default function ScorecardsScreen() {
       projectNumber: target.recordNumber ?? null,
       weekOf: todayIso(),
       now: Date.now(),
-    });
-    // Best-effort pre-fill of the Superintendent/PM names from the deal's assigned team (the FIELD team
-    // route the app can actually reach — the CRM /deals/:id/team route rejects the field surface). ANY
-    // failure — network, timeout, or a non-browsable deal — silently leaves the fields empty (today's
-    // behavior). It must never block or crash draft creation, and it only seeds BLANK fields, so the names
-    // stay fully editable afterwards. Bound the lookup to ~2s: on a poor connection a hanging request must
-    // NOT block starting a scorecard, so a timeout (like any error) just proceeds with empty super/PM.
+    };
+    // Leadership records the submitting user as the Evaluator (auto, read-only); both kinds share everything else.
+    let draft =
+      kind === "leadership"
+        ? createLeadershipScorecardDraft({ ...base, evaluatorName })
+        : createScorecardDraft(base);
+    // Best-effort pre-fill of the Superintendent/PM names from the deal's assigned team, via the FIELD team
+    // route the app can actually reach (the CRM /deals/:id/team route rejects the field surface). Bounded to
+    // ~2s so a hanging request never blocks starting a scorecard; any failure/timeout leaves the names empty
+    // (still editable). Same prefill for both kinds.
     try {
       const team = await Promise.race<DealTeamResponse>([
         getDealTeam(fetcher, target.id),
@@ -102,7 +125,7 @@ export default function ScorecardsScreen() {
       /* leave super/PM empty */
     }
     await saveScorecardDraft(ownerKey, draft, Date.now());
-    router.push({ pathname: "/(app)/scorecards/[draftId]", params: { draftId: id } });
+    router.push(draftPath(draft));
   }
 
   const submitted = recent.data?.scorecards ?? [];
@@ -117,19 +140,13 @@ export default function ScorecardsScreen() {
         }
       >
         <View style={{ gap: theme.space.sm }}>
-          <Button title="＋ Project Scorecard" onPress={() => setPickerOpen(true)} />
-          {/* Present now, enabled in a later phase. Kept visible + disabled with a subtle "Coming soon"
-              affordance so field users know it's on the way (not missing). */}
-          <View style={{ gap: 4 }}>
-            <Button
-              title="Leadership Scorecard"
-              variant="ghost"
-              disabled
-              onPress={() => {}}
-              accessibilityLabel="Leadership Scorecard. Coming soon."
-            />
-            <Text style={styles.comingSoon}>Coming soon</Text>
-          </View>
+          <Button title="＋ Project Scorecard" onPress={() => setPickerKind("project")} />
+          <Button
+            title="＋ Leadership Scorecard"
+            variant="ghost"
+            onPress={() => setPickerKind("leadership")}
+            accessibilityLabel="New Leadership Scorecard"
+          />
         </View>
 
         {drafts.length > 0 ? (
@@ -138,13 +155,13 @@ export default function ScorecardsScreen() {
             {drafts.map((d) => (
               <Pressable
                 key={d.id}
-                onPress={() => router.push({ pathname: "/(app)/scorecards/[draftId]", params: { draftId: d.id } })}
+                onPress={() => router.push(draftPath(d))}
                 style={({ pressed }) => [styles.row, pressed && { opacity: 0.7 }]}
               >
                 <View style={{ flex: 1 }}>
                   <Text style={styles.rowTitle} numberOfLines={1}>{d.dealName}</Text>
                   <Text style={styles.rowSub}>
-                    Week of {shortDate(d.weekOf)} · {scorecardDraftSectionsAnswered(d)}/{SECTION_COUNT} scored
+                    {d.kind === "leadership" ? "Leadership · " : ""}Week of {shortDate(d.weekOf)} · {scorecardDraftSectionsAnswered(d)}/{d.kind === "leadership" ? LEADERSHIP_SECTION_COUNT : SECTION_COUNT} scored
                   </Text>
                 </View>
                 <Text style={styles.resume}>Resume</Text>
@@ -160,27 +177,36 @@ export default function ScorecardsScreen() {
           ) : submitted.length === 0 ? (
             <EmptyState title="No scorecards yet" subtitle="Tap “Project Scorecard” to score a project." />
           ) : (
-            submitted.map((s: FieldScorecardSummary) => (
-              <Pressable
-                key={s.id}
-                accessibilityRole="button"
-                accessibilityLabel={`Scorecard${s.projectNumber ? ` for ${s.projectNumber}` : ""}, week of ${shortDate(s.weekOf)}, ${s.totalScore} out of 100, ${s.ratingLabel}`}
-                onPress={() => router.push({ pathname: "/(app)/scorecards/view/[id]", params: { id: s.id } })}
-                style={({ pressed }) => [styles.row, pressed && { opacity: 0.7 }]}
-              >
-                <View style={{ flex: 1, gap: 4 }}>
-                  <Text style={styles.rowTitle} numberOfLines={1}>
-                    {s.projectNumber ? `${s.projectNumber} · ` : ""}Week of {shortDate(s.weekOf)}
-                  </Text>
-                  <RatingBadge rating={s.rating} label={`${s.totalScore}/100 · ${s.ratingLabel}`} />
-                </View>
-              </Pressable>
-            ))
+            submitted.map((s: FieldScorecardSummary) => {
+              // Leadership cards are scored by the 4-category average out of 10; project cards keep the
+              // 0–100 total. averageScore is populated for leadership (and V2) cards; fall back to
+              // totalScore/10 defensively so a missing value never renders "undefined/10".
+              const isLeadership = s.kind === "leadership";
+              const scoreText = isLeadership
+                ? `${(s.averageScore ?? s.totalScore / 10).toFixed(1)}/10`
+                : `${s.totalScore}/100`;
+              return (
+                <Pressable
+                  key={s.id}
+                  accessibilityRole="button"
+                  accessibilityLabel={`${isLeadership ? "Leadership scorecard" : "Scorecard"}${s.projectNumber ? ` for ${s.projectNumber}` : ""}, week of ${shortDate(s.weekOf)}, ${scoreText}, ${s.ratingLabel}`}
+                  onPress={() => router.push({ pathname: "/(app)/scorecards/view/[id]", params: { id: s.id } })}
+                  style={({ pressed }) => [styles.row, pressed && { opacity: 0.7 }]}
+                >
+                  <View style={{ flex: 1, gap: 4 }}>
+                    <Text style={styles.rowTitle} numberOfLines={1}>
+                      {isLeadership ? "Leadership · " : ""}{s.projectNumber ? `${s.projectNumber} · ` : ""}Week of {shortDate(s.weekOf)}
+                    </Text>
+                    <RatingBadge rating={s.rating} label={`${scoreText} · ${s.ratingLabel}`} />
+                  </View>
+                </Pressable>
+              );
+            })
           )}
         </View>
       </ScrollView>
 
-      <TargetPicker visible={pickerOpen} dealsOnly onClose={() => setPickerOpen(false)} onSelect={startDraft} />
+      <TargetPicker visible={pickerOpen} dealsOnly onClose={() => setPickerKind(null)} onSelect={startDraft} />
     </SafeAreaView>
   );
 }
@@ -201,10 +227,4 @@ const styles = StyleSheet.create({
   rowTitle: { fontFamily: theme.font.semibold, fontSize: 15, color: theme.color.textPrimary },
   rowSub: { fontFamily: theme.font.body, fontSize: 13, color: theme.color.textMuted, marginTop: 2 },
   resume: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.brandRed },
-  comingSoon: {
-    alignSelf: "center",
-    fontFamily: theme.font.medium,
-    fontSize: 12,
-    color: theme.color.textMuted,
-  },
 });

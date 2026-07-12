@@ -127,6 +127,15 @@ export default function ScorecardWizardScreen() {
     };
   }, [ownerKey, draftId]);
 
+  // A leadership draft belongs to the focused leadership screen (its own section list + Project Summary).
+  // If one is reached here via a deep link / stale route, hand it off rather than rendering it as a project
+  // card. `replace` so Back doesn't bounce between the two screens.
+  useEffect(() => {
+    if (loaded && loaded !== "missing" && loaded.kind === "leadership") {
+      router.replace({ pathname: "/(app)/scorecards/leadership/[draftId]", params: { draftId } });
+    }
+  }, [loaded, draftId, router]);
+
   // Reducer seeded once the draft loads. `key` remounts the reducer host when the draft arrives.
   if (loaded === null) {
     return (

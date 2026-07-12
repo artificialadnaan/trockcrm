@@ -3,9 +3,13 @@
 // drives it via useReducer. Kept pure so it's unit-testable (and the CI-ungated mobile suite still runs it).
 
 import {
+  FIELD_SCORECARD_LEADERSHIP_SECTION_KEYS,
+  FIELD_SCORECARD_LEADERSHIP_SUMMARY_SECTION_KEY,
   FIELD_SCORECARD_SECTION_KEYS,
   resolveScorecardRating,
   type ScorecardCriticalDeficiencyKey,
+  type ScorecardKind,
+  type ScorecardLeadershipSectionKey,
   type ScorecardRating,
   type ScorecardSectionKey,
 } from "./scoring";
@@ -14,7 +18,9 @@ export interface ScorecardDraftPhoto {
   key: string; // local list key
   uri: string; // durable per-draft copy (survives app-kill), not the raw camera uri
   clientUploadId: string; // stamped at capture; resolved to a fileId server-side on submit
-  sectionKey: ScorecardSectionKey | "critical_deficiency";
+  // Project cards attach photos per category (or to a critical_deficiency); leadership cards attach only to
+  // the Project Summary (`project_summary`). One structure serves both so the capture/upload machinery is shared.
+  sectionKey: ScorecardSectionKey | "critical_deficiency" | typeof FIELD_SCORECARD_LEADERSHIP_SUMMARY_SECTION_KEY;
   deficiencyKey?: ScorecardCriticalDeficiencyKey;
   caption: string;
   // Capture metadata carried so the gallery upload keeps the shot's real time/location + can apply the
@@ -32,30 +38,50 @@ export interface ScorecardDraftPhoto {
 export interface ScorecardDraft {
   id: string;
   clientSubmissionId: string; // stable across retries → idempotent submit
+  /**
+   * Discriminates project (default) vs leadership scorecards; both share this draft + all the capture/
+   * submit machinery. Optional so pre-leadership drafts resume without a migration (absent ⇒ 'project').
+   */
+  kind?: ScorecardKind;
   dealId: string;
   dealName: string;
   projectNumber: string | null;
   weekOf: string; // yyyy-mm-dd
   superintendentName: string;
   pmName: string;
-  scores: Partial<Record<ScorecardSectionKey, number>>;
-  notes: Partial<Record<ScorecardSectionKey, string>>;
+  /**
+   * Auto-recorded name of the submitting user (the Evaluator) — leadership only. Seeded from the current
+   * user's name and shown READ-ONLY in the header (the Evaluator is whoever submits: the server stamps
+   * submittedByName from the field user, which IS the evaluator). The project card has no evaluator field.
+   */
+  evaluatorName?: string;
+  // Project cards key scores/notes by the V2 section keys; leadership cards key by the 4 leadership keys.
+  // Both are stored in the same maps (disjoint key sets), so the reducer/photo machinery is shared.
+  scores: Partial<Record<ScorecardSectionKey | ScorecardLeadershipSectionKey, number>>;
+  notes: Partial<Record<ScorecardSectionKey | ScorecardLeadershipSectionKey, string>>;
   photos: ScorecardDraftPhoto[];
   criticalDeficiencies: ScorecardCriticalDeficiencyKey[];
   /** Optional so pre-V2 drafts can resume without a migration. */
   deficiencyNotes?: Partial<Record<ScorecardCriticalDeficiencyKey, string>>;
   actionItems: string[];
+  /** Leadership Project Summary free text (voice-dictatable); project cards don't use it. */
+  summary?: string;
   superintendentSignature?: string;
   pmSignature?: string;
   createdAt: number;
   updatedAt: number;
 }
 
+/** A section key valid for either kind — the reducer's score/note maps hold both disjoint key sets. */
+export type AnyScorecardSectionKey = ScorecardSectionKey | ScorecardLeadershipSectionKey;
+
 export type DraftAction =
-  | { type: "setScore"; sectionKey: ScorecardSectionKey; points: number }
-  | { type: "setNote"; sectionKey: ScorecardSectionKey; note: string }
-  | { type: "appendNote"; sectionKey: ScorecardSectionKey; text: string }
+  | { type: "setScore"; sectionKey: AnyScorecardSectionKey; points: number }
+  | { type: "setNote"; sectionKey: AnyScorecardSectionKey; note: string }
+  | { type: "appendNote"; sectionKey: AnyScorecardSectionKey; text: string }
   | { type: "setHeader"; field: "superintendentName" | "pmName" | "weekOf"; value: string }
+  | { type: "setSummary"; value: string }
+  | { type: "appendSummary"; text: string }
   | { type: "toggleDeficiency"; key: ScorecardCriticalDeficiencyKey }
   | { type: "setDeficiencyNote"; key: ScorecardCriticalDeficiencyKey; note: string }
   | { type: "appendDeficiencyNote"; key: ScorecardCriticalDeficiencyKey; text: string }
@@ -69,18 +95,26 @@ export type DraftAction =
 
 export interface ScorecardSubmissionPayload {
   clientSubmissionId: string;
+  /** Discriminates project (default) vs leadership; both POST to /field/scorecards. Omitted for project. */
+  kind?: ScorecardKind;
   dealId: string;
   weekOf: string;
   superintendentName: string | null;
   pmName: string | null;
-  items: { sectionKey: ScorecardSectionKey; points: number; note: string | null }[];
+  items: { sectionKey: AnyScorecardSectionKey; points: number; note: string | null }[];
   criticalDeficiencies: string[];
   actionItems: string[];
   criticalDeficiencyNotes: Record<string, string>;
-  photos: { sectionKey: ScorecardSectionKey | "critical_deficiency"; deficiencyKey: ScorecardCriticalDeficiencyKey | null; clientUploadId: string }[];
+  photos: {
+    sectionKey: ScorecardSectionKey | "critical_deficiency" | typeof FIELD_SCORECARD_LEADERSHIP_SUMMARY_SECTION_KEY;
+    deficiencyKey: ScorecardCriticalDeficiencyKey | null;
+    clientUploadId: string;
+  }[];
   formVersion: 2;
   superintendentSignature: string | null;
   pmSignature: string | null;
+  /** Leadership Project Summary free text; omitted for project cards. */
+  summary?: string | null;
 }
 
 export function createScorecardDraft(input: {
@@ -120,6 +154,38 @@ export function createScorecardDraft(input: {
 export interface ScorecardTeamNames {
   superintendentName: string | null;
   pmName: string | null;
+}
+
+/**
+ * Create a leadership-kind draft. Reuses the project draft shape (so draft-store / photo capture / submit
+ * are shared) and sets `kind: "leadership"` plus the leadership-only header fields. The Evaluator is the
+ * submitting user — seeded from `evaluatorName` (auto = current user's name) and shown read-only (the
+ * server stamps the submitter as the evaluator); Super/PM are pre-filled from the deal team like the
+ * project card. Summary + summary photos start empty. No signatures.
+ */
+export function createLeadershipScorecardDraft(input: {
+  id: string;
+  clientSubmissionId: string;
+  dealId: string;
+  dealName: string;
+  projectNumber: string | null;
+  weekOf: string;
+  now: number;
+  evaluatorName?: string;
+  superintendentName?: string;
+  pmName?: string;
+}): ScorecardDraft {
+  return {
+    ...createScorecardDraft(input),
+    kind: "leadership",
+    evaluatorName: input.evaluatorName ?? "",
+    summary: "",
+  };
+}
+
+/** True iff this draft is a leadership scorecard (absent kind ⇒ legacy project draft). */
+export function isLeadershipDraft(draft: ScorecardDraft): boolean {
+  return draft.kind === "leadership";
 }
 
 /**
@@ -178,6 +244,15 @@ export function scorecardDraftReducer(draft: ScorecardDraft, action: DraftAction
     }
     case "setHeader":
       return { ...draft, [action.field]: action.value };
+    case "setSummary":
+      return { ...draft, summary: action.value };
+    case "appendSummary": {
+      // Append a dictated transcript to the LATEST summary (from reducer state) so a transcript that lands
+      // after the user kept typing doesn't clobber those edits — mirrors appendNote.
+      const current = draft.summary ?? "";
+      const next = current.trim() ? `${current} ${action.text}`.trim() : action.text.trim();
+      return { ...draft, summary: next };
+    }
     case "toggleDeficiency": {
       const has = draft.criticalDeficiencies.includes(action.key);
       return {
@@ -241,18 +316,24 @@ export function scorecardDraftTotal(draft: ScorecardDraft): number {
   return scorecardDraftAverage(draft);
 }
 
+/** The section keys this draft is scored against — the leadership 4 or the project 8. */
+function draftSectionKeys(draft: ScorecardDraft): readonly AnyScorecardSectionKey[] {
+  return draft.kind === "leadership" ? FIELD_SCORECARD_LEADERSHIP_SECTION_KEYS : FIELD_SCORECARD_SECTION_KEYS;
+}
+
 export function scorecardDraftAverage(draft: ScorecardDraft): number {
-  const answered = FIELD_SCORECARD_SECTION_KEYS.filter((k) => typeof draft.scores[k] === "number");
+  const keys = draftSectionKeys(draft);
+  const answered = keys.filter((k) => typeof draft.scores[k] === "number");
   if (answered.length === 0) return 0;
-  return Math.round((answered.reduce((sum, k) => sum + (draft.scores[k] ?? 0), 0) / FIELD_SCORECARD_SECTION_KEYS.length) * 10) / 10;
+  return Math.round((answered.reduce((sum, k) => sum + (draft.scores[k] ?? 0), 0) / keys.length) * 10) / 10;
 }
 
 export function scorecardDraftSectionsAnswered(draft: ScorecardDraft): number {
-  return FIELD_SCORECARD_SECTION_KEYS.filter((k) => typeof draft.scores[k] === "number").length;
+  return draftSectionKeys(draft).filter((k) => typeof draft.scores[k] === "number").length;
 }
 
 export function isScorecardDraftComplete(draft: ScorecardDraft): boolean {
-  return FIELD_SCORECARD_SECTION_KEYS.every((k) => typeof draft.scores[k] === "number");
+  return draftSectionKeys(draft).every((k) => typeof draft.scores[k] === "number");
 }
 
 export function scorecardDraftRating(draft: ScorecardDraft): ScorecardRating {
@@ -271,6 +352,11 @@ export function scorecardDraftPhotosForSection(
   return draft.photos.filter((p) => p.sectionKey === sectionKey);
 }
 
+/** Leadership Project Summary photos (sectionKey `project_summary`). */
+export function scorecardDraftSummaryPhotos(draft: ScorecardDraft): ScorecardDraftPhoto[] {
+  return draft.photos.filter((p) => p.sectionKey === FIELD_SCORECARD_LEADERSHIP_SUMMARY_SECTION_KEY);
+}
+
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 /** A real YYYY-MM-DD calendar date — mirrors the server (rejects 2026-2-3, 2026-02-30, etc.). */
 export function isValidWeekOf(weekOf: string): boolean {
@@ -281,18 +367,34 @@ export function isValidWeekOf(weekOf: string): boolean {
   return dt.getUTCFullYear() === y && dt.getUTCMonth() === mo - 1 && dt.getUTCDate() === d;
 }
 
+/**
+ * Today's date as a device-LOCAL YYYY-MM-DD (never toISOString/UTC). Used to stamp Week Of = the completion
+ * date at SUBMIT time, so a draft started one day and submitted the next files under the submit day, and an
+ * evening submit west of UTC files under today (not tomorrow). Matches the seeding format in the entry screen.
+ */
+export function todayLocalIso(): string {
+  const d = new Date();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
 export interface DraftValidation {
   canSubmit: boolean;
-  missingSections: ScorecardSectionKey[];
+  missingSections: AnyScorecardSectionKey[];
   needsActionItems: boolean;
   missingWeekOf: boolean; // true when Week Of is blank OR not a real calendar date
   missingSignatures: boolean;
 }
 export function validateScorecardDraft(draft: ScorecardDraft): DraftValidation {
-  const missingSections = FIELD_SCORECARD_SECTION_KEYS.filter((k) => typeof draft.scores[k] !== "number");
+  const leadership = draft.kind === "leadership";
+  const missingSections = draftSectionKeys(draft).filter((k) => typeof draft.scores[k] !== "number");
   const needsActionItems = false;
-  const missingWeekOf = !isValidWeekOf(draft.weekOf);
-  const missingSignatures = !(draft.superintendentSignature ?? "").trim() || !(draft.pmSignature ?? "").trim();
+  // Leadership: no signatures, and Week Of is stamped LOCAL at submit (submitScorecard → todayLocalIso), like
+  // the project V2 card — so no client-side week-of/signature gate. Project path is unchanged.
+  const missingWeekOf = leadership ? false : !isValidWeekOf(draft.weekOf);
+  const missingSignatures = leadership
+    ? false
+    : !(draft.superintendentSignature ?? "").trim() || !(draft.pmSignature ?? "").trim();
   return {
     missingSections,
     needsActionItems,
@@ -304,6 +406,7 @@ export function validateScorecardDraft(draft: ScorecardDraft): DraftValidation {
 
 /** Build the POST /field/scorecards payload. Call only when validateScorecardDraft().canSubmit. */
 export function scorecardDraftToSubmission(draft: ScorecardDraft): ScorecardSubmissionPayload {
+  if (draft.kind === "leadership") return leadershipDraftToSubmission(draft);
   return {
     formVersion: 2,
     clientSubmissionId: draft.clientSubmissionId,
@@ -326,5 +429,37 @@ export function scorecardDraftToSubmission(draft: ScorecardDraft): ScorecardSubm
     photos: draft.photos.map((p) => ({ sectionKey: p.sectionKey, deficiencyKey: p.deficiencyKey ?? null, clientUploadId: p.clientUploadId })),
     superintendentSignature: draft.superintendentSignature?.trim() || null,
     pmSignature: draft.pmSignature?.trim() || null,
+  };
+}
+
+/**
+ * Leadership payload: `kind: "leadership"`, the 4 leadership items in canonical order (with dictated
+ * comment notes), the free-text summary, and only the Project Summary photos (`project_summary`). No
+ * signatures / deficiencies / action items — leadership cards don't collect them. weekOf is sent but the
+ * server stamps the real completion date (like project V2), so a device value can't file under a stale week.
+ */
+function leadershipDraftToSubmission(draft: ScorecardDraft): ScorecardSubmissionPayload {
+  return {
+    formVersion: 2,
+    kind: "leadership",
+    clientSubmissionId: draft.clientSubmissionId,
+    dealId: draft.dealId,
+    weekOf: draft.weekOf,
+    superintendentName: draft.superintendentName.trim() || null,
+    pmName: draft.pmName.trim() || null,
+    items: FIELD_SCORECARD_LEADERSHIP_SECTION_KEYS.map((k) => ({
+      sectionKey: k,
+      points: draft.scores[k] ?? 0,
+      note: draft.notes[k]?.trim() ? draft.notes[k]!.trim() : null,
+    })),
+    criticalDeficiencies: [],
+    criticalDeficiencyNotes: {},
+    actionItems: [],
+    photos: draft.photos
+      .filter((p) => p.sectionKey === FIELD_SCORECARD_LEADERSHIP_SUMMARY_SECTION_KEY)
+      .map((p) => ({ sectionKey: p.sectionKey, deficiencyKey: null, clientUploadId: p.clientUploadId })),
+    superintendentSignature: null,
+    pmSignature: null,
+    summary: draft.summary?.trim() || null,
   };
 }

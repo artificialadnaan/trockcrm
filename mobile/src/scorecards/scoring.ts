@@ -83,3 +83,50 @@ export function isLegalSectionPoints(sectionKey: ScorecardSectionKey, points: nu
 export function computeScorecardAverage(items: readonly { sectionKey: ScorecardSectionKey; points: number }[]): number {
   return Math.round((items.reduce((sum, item) => sum + item.points, 0) / FIELD_SCORECARD_SECTIONS.length) * 10) / 10;
 }
+
+// ── Leadership scorecard ────────────────────────────────────────────────────────
+// Mirrors the leadership definitions in shared/src/types/field-scorecard.ts (Expo isn't in that workspace).
+// A distinct scorecard KIND stored in the same tables (discriminated by `kind`). Four categories rated
+// 1-10 with a dictatable comment note (no per-category photos); the score is their average out of 10,
+// using the same rating bands as the project V2 form. Photos and a free-text summary attach to the Project
+// Summary (sectionKey `project_summary`). No signatures, no deficiencies.
+export type ScorecardKind = "project" | "leadership";
+
+export const FIELD_SCORECARD_LEADERSHIP_SECTION_KEYS = [
+  "quality_control",
+  "safety",
+  "schedule_adherence",
+  "site_staff_feedback",
+] as const;
+export type ScorecardLeadershipSectionKey = (typeof FIELD_SCORECARD_LEADERSHIP_SECTION_KEYS)[number];
+
+export interface ScorecardLeadershipSectionDef {
+  key: ScorecardLeadershipSectionKey;
+  title: string;
+  maxPoints: 10;
+}
+
+/** The 4 leadership categories, each rated 1-10; the final score is their average. */
+export const FIELD_SCORECARD_LEADERSHIP_SECTIONS: readonly ScorecardLeadershipSectionDef[] = [
+  { key: "quality_control", title: "Quality Control", maxPoints: 10 },
+  { key: "safety", title: "Safety", maxPoints: 10 },
+  { key: "schedule_adherence", title: "Schedule Adherence", maxPoints: 10 },
+  { key: "site_staff_feedback", title: "Site Staff Feedback", maxPoints: 10 },
+];
+
+/** Photos and the free-text summary attach to the Project Summary block. */
+export const FIELD_SCORECARD_LEADERSHIP_SUMMARY_SECTION_KEY = "project_summary" as const;
+
+export function isLeadershipSectionKey(key: string): key is ScorecardLeadershipSectionKey {
+  return (FIELD_SCORECARD_LEADERSHIP_SECTION_KEYS as readonly string[]).includes(key);
+}
+
+export function computeScorecardLeadershipAverage(
+  items: readonly { sectionKey: ScorecardLeadershipSectionKey; points: number }[],
+): number {
+  return (
+    Math.round(
+      (items.reduce((sum, item) => sum + item.points, 0) / FIELD_SCORECARD_LEADERSHIP_SECTIONS.length) * 10,
+    ) / 10
+  );
+}
