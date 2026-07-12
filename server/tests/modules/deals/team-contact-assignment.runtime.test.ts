@@ -4,6 +4,7 @@ import { drizzle } from "drizzle-orm/pglite";
 import { sql } from "drizzle-orm";
 import {
   addTeamMember,
+  updateTeamMember,
   getTeamMembers,
   resolveScorecardTeamEmails,
   resolveScorecardTeamNames,
@@ -71,6 +72,44 @@ describe("addTeamMember (user vs contact one-of)", () => {
       addTeamMember(tdb, { dealId: DEAL, userId: USER, contactId: CONTACT, role: "superintendent" }),
     ).rejects.toThrow(/exactly one of userId or contactId/i);
   });
+
+  it("rejects a CONTACT-backed estimator (routing ignores contact estimators → dead row)", async () => {
+    await expect(
+      addTeamMember(tdb, { dealId: DEAL, contactId: CONTACT, role: "estimator" }),
+    ).rejects.toThrow(/Estimator must be a staff user/i);
+  });
+
+  it("allows a STAFF-USER estimator", async () => {
+    const member = await addTeamMember(tdb, { dealId: DEAL, userId: USER, role: "estimator" });
+    expect(member.userId).toBe(USER);
+    expect(member.role).toBe("estimator");
+  });
+});
+
+describe("updateTeamMember (change-to-estimator guard)", () => {
+  it("rejects re-roling a CONTACT-backed member to estimator (400, no update)", async () => {
+    const member = await addTeamMember(tdb, { dealId: DEAL, contactId: CONTACT, role: "superintendent" });
+    await expect(
+      updateTeamMember(tdb, member.id, DEAL, { role: "estimator" }),
+    ).rejects.toThrow(/Estimator must be a staff user/i);
+    // The row must be untouched — still a superintendent.
+    const [row] = (await getTeamMembers(tdb, DEAL)) as any[];
+    expect(row.role).toBe("superintendent");
+  });
+
+  it("allows re-roling a STAFF-USER member to estimator", async () => {
+    const member = await addTeamMember(tdb, { dealId: DEAL, userId: USER, role: "project_manager" });
+    const updated = await updateTeamMember(tdb, member.id, DEAL, { role: "estimator" });
+    expect(updated.role).toBe("estimator");
+    expect(updated.userId).toBe(USER);
+  });
+
+  it("allows re-roling a CONTACT-backed member to a NON-estimator role", async () => {
+    const member = await addTeamMember(tdb, { dealId: DEAL, contactId: CONTACT, role: "superintendent" });
+    const updated = await updateTeamMember(tdb, member.id, DEAL, { role: "project_manager" });
+    expect(updated.role).toBe("project_manager");
+    expect(updated.contactId).toBe(CONTACT);
+  });
 });
 
 describe("getTeamMembers (resolves name/email from user OR contact)", () => {
@@ -100,6 +139,32 @@ describe("getTeamMembers (resolves name/email from user OR contact)", () => {
     expect(new Set(rows.map((r) => r.email))).toEqual(
       new Set(["sam.super@trock.com", "dana.cole@example.com"]),
     );
+  });
+
+  it("excludes a member whose staff USER was deactivated (users.is_active = false)", async () => {
+    const goneUser = "33333333-3333-3333-3333-33333333ffff";
+    await tdb.execute(sql`
+      INSERT INTO public.users (id, display_name, email, is_active)
+      VALUES (${goneUser}, 'Gone User', 'gone.member@trock.com', false)
+    `);
+    await addTeamMember(tdb, { dealId: DEAL, userId: USER, role: "project_manager" }); // active
+    await addTeamMember(tdb, { dealId: DEAL, userId: goneUser, role: "superintendent" }); // deactivated
+    const rows = (await getTeamMembers(tdb, DEAL)) as any[];
+    expect(rows).toHaveLength(1);
+    expect(rows[0].email).toBe("sam.super@trock.com");
+  });
+
+  it("excludes a member whose directory CONTACT was archived (contacts.is_active = false)", async () => {
+    const archived = "44444444-4444-4444-4444-44444444ffff";
+    await tdb.execute(sql`
+      INSERT INTO contacts (id, first_name, last_name, email, category, is_active)
+      VALUES (${archived}, 'Archived', 'Member', 'archived.member@example.com', 'client', false)
+    `);
+    await addTeamMember(tdb, { dealId: DEAL, contactId: CONTACT, role: "superintendent" }); // active
+    await addTeamMember(tdb, { dealId: DEAL, contactId: archived, role: "project_manager" }); // archived
+    const rows = (await getTeamMembers(tdb, DEAL)) as any[];
+    expect(rows).toHaveLength(1);
+    expect(rows[0].email).toBe("dana.cole@example.com");
   });
 });
 

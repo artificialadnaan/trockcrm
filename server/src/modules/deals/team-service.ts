@@ -39,6 +39,10 @@ export async function getTeamMembers(tenantDb: TenantDb, dealId: string) {
       LEFT JOIN public.users u ON dtm.user_id = u.id
       LEFT JOIN contacts c ON dtm.contact_id = c.id
       WHERE dtm.deal_id = ${dealId} AND dtm.is_active = TRUE
+        -- Only surface members whose linked identity is ALSO active: a deactivated staff user
+        -- (public.users.is_active) or an archived directory contact (contacts.is_active) must not show as an
+        -- active team member — consistent with resolveScorecardTeamEmails/Names, which skip inactive identities.
+        AND ((dtm.user_id IS NOT NULL AND u.is_active) OR (dtm.contact_id IS NOT NULL AND c.is_active))
       ORDER BY dtm.created_at
     `
   );
@@ -53,6 +57,12 @@ export async function addTeamMember(tenantDb: TenantDb, input: AddTeamMemberInpu
   // Exactly one of the two identities — mirrors the deal_team_members_user_or_contact_check constraint.
   if (hasUser === hasContact) {
     throw new AppError(400, "Provide exactly one of userId or contactId");
+  }
+  // A contact-backed estimator is a visibly-dead row: revision routing (resolveRevisionTaskAssignee)
+  // only picks estimator rows whose user_id IS NOT NULL, so a contact estimator can never be routed a
+  // revision task. Reject it here too (mirrors the POST /:id/team route) for direct callers of this service.
+  if (hasContact && input.role === "estimator") {
+    throw new AppError(400, "Estimator must be a staff user, not a contact.");
   }
 
   const result = await tenantDb
@@ -88,6 +98,22 @@ export async function updateTeamMember(
       .limit(1);
     if (!existing) throw new AppError(404, "Team member not found");
     return existing;
+  }
+
+  // Guard the CHANGE-TO-estimator path too (not just add): a contact-backed member (contact_id set /
+  // user_id null) re-roled to "estimator" would be a visibly-dead row — revision routing
+  // (resolveRevisionTaskAssignee) only picks estimator rows whose user_id IS NOT NULL, so it could never be
+  // routed a revision task. Mirrors the add-time reject in addTeamMember + the POST route.
+  if (input.role === "estimator") {
+    const [target] = await tenantDb
+      .select({ userId: dealTeamMembers.userId, contactId: dealTeamMembers.contactId })
+      .from(dealTeamMembers)
+      .where(and(eq(dealTeamMembers.id, memberId), eq(dealTeamMembers.dealId, dealId)))
+      .limit(1);
+    if (!target) throw new AppError(404, "Team member not found");
+    if (target.contactId || !target.userId) {
+      throw new AppError(400, "Estimator must be a staff user, not a contact.");
+    }
   }
 
   updates.updatedAt = new Date();

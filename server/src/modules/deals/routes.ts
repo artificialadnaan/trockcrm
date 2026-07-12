@@ -116,6 +116,7 @@ import { inferDealBidBoardOwnership } from "./workflow-backfill.js";
 import { getPendingRfpDeals, cancelPendingRfp } from "./pending-rfp-service.js";
 import { confirmUpload, getFileById, getFileDownloadUrl, getPendingUploadMetadata } from "../files/service.js";
 import { listDealScorecards, getDealScorecardDetail, getDealScorecardPdfDownload } from "./scorecards-service.js";
+import { assertValidUuid } from "../field/photos-service.js";
 import {
   createEstimateSourceDocument,
   enqueueEstimateDocumentOcrJob,
@@ -3930,6 +3931,16 @@ router.post("/:id/team", async (req, res, next) => {
     const hasUser = Boolean(userId);
     const hasContact = Boolean(contactId);
     if (hasUser === hasContact) throw new AppError(400, "Provide exactly one of userId or contactId");
+    // A contact-backed estimator is a visibly-dead row: revision routing (resolveRevisionTaskAssignee)
+    // only ever picks estimator rows whose user_id IS NOT NULL, so a contact estimator can never be routed
+    // a revision task. Reject it up front (contacts remain valid for the other roles, e.g. superintendent).
+    if (hasContact && role === "estimator") {
+      throw new AppError(400, "Estimator must be a staff user, not a contact.");
+    }
+    // Validate the provided identity FORMAT before the DB lookup: a truthy non-UUID id (e.g. "abc") would
+    // otherwise reach a `::uuid` comparison and surface as a generic Postgres 500 instead of a clean 400.
+    if (hasUser) assertValidUuid(userId, "userId");
+    if (hasContact) assertValidUuid(contactId, "contactId");
 
     if (hasUser) {
       // The referenced user must be ACTIVE and reachable from the active office — reuse the same

@@ -62,6 +62,11 @@ vi.mock("../../../src/events/bus.js", () => ({
 
 const { dealRoutes } = await import("../../../src/modules/deals/routes.js");
 
+// Real UUIDs — the route now validates userId/contactId FORMAT before any DB lookup (a non-UUID would
+// otherwise reach a `::uuid` comparison and surface as a generic 500).
+const USER_UUID = "33333333-3333-3333-3333-333333333333";
+const CONTACT_UUID = "44444444-4444-4444-4444-444444444444";
+
 function findRouteHandler(method: string, path: string) {
   const layer = (dealRoutes as any).stack.find(
     (entry: any) => entry.route?.path === path && entry.route?.methods?.[method],
@@ -114,60 +119,95 @@ describe("POST /:id/team one-of validation", () => {
   });
 
   it("400s for an invalid role", async () => {
-    const { nextErr } = await postTeam({ userId: "u-1", role: "not_a_role" });
+    const { nextErr } = await postTeam({ userId: USER_UUID, role: "not_a_role" });
     expect(nextErr).toMatchObject({ statusCode: 400 });
     expect(String(nextErr.message)).toMatch(/invalid role/i);
+  });
+
+  it("400s (not 500) for a truthy non-UUID userId, before any DB lookup", async () => {
+    const { nextErr } = await postTeam({ userId: "abc", role: "project_manager" });
+    expect(nextErr).toMatchObject({ statusCode: 400 });
+    expect(String(nextErr.message)).toMatch(/uuid/i);
+    expect(usersMock.listUsers).not.toHaveBeenCalled();
+    expect(teamMocks.addTeamMember).not.toHaveBeenCalled();
+  });
+
+  it("400s (not 500) for a truthy non-UUID contactId, before the contact lookup", async () => {
+    const { nextErr } = await postTeam({ contactId: "abc", role: "superintendent" });
+    expect(nextErr).toMatchObject({ statusCode: 400 });
+    expect(String(nextErr.message)).toMatch(/uuid/i);
+    expect(contactsMock.getContactById).not.toHaveBeenCalled();
+    expect(teamMocks.addTeamMember).not.toHaveBeenCalled();
+  });
+
+  it("400s for a CONTACT-backed estimator (routing ignores contact estimators)", async () => {
+    const { nextErr } = await postTeam({ contactId: CONTACT_UUID, role: "estimator" });
+    expect(nextErr).toMatchObject({ statusCode: 400 });
+    expect(String(nextErr.message)).toMatch(/Estimator must be a staff user/i);
+    expect(contactsMock.getContactById).not.toHaveBeenCalled();
+    expect(teamMocks.addTeamMember).not.toHaveBeenCalled();
   });
 });
 
 describe("POST /:id/team user assignment", () => {
   it("assigns an active in-office user", async () => {
-    usersMock.listUsers.mockResolvedValue([{ id: "u-1", isActive: true }] as any);
-    const { res, nextErr } = await postTeam({ userId: "u-1", role: "project_manager" });
+    usersMock.listUsers.mockResolvedValue([{ id: USER_UUID, isActive: true }] as any);
+    const { res, nextErr } = await postTeam({ userId: USER_UUID, role: "project_manager" });
     expect(nextErr).toBeUndefined();
     expect(res.statusCode).toBe(201);
     expect(teamMocks.addTeamMember).toHaveBeenCalledWith(
       expect.anything(),
-      expect.objectContaining({ userId: "u-1", contactId: null, role: "project_manager" }),
+      expect.objectContaining({ userId: USER_UUID, contactId: null, role: "project_manager" }),
+    );
+  });
+
+  it("assigns a STAFF-USER estimator (a contact estimator is rejected above)", async () => {
+    usersMock.listUsers.mockResolvedValue([{ id: USER_UUID, isActive: true }] as any);
+    const { res, nextErr } = await postTeam({ userId: USER_UUID, role: "estimator" });
+    expect(nextErr).toBeUndefined();
+    expect(res.statusCode).toBe(201);
+    expect(teamMocks.addTeamMember).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ userId: USER_UUID, role: "estimator" }),
     );
   });
 
   it("400s when the user is not an active member of the office", async () => {
-    usersMock.listUsers.mockResolvedValue([{ id: "u-1", isActive: false }] as any);
-    const { nextErr } = await postTeam({ userId: "u-1", role: "project_manager" });
+    usersMock.listUsers.mockResolvedValue([{ id: USER_UUID, isActive: false }] as any);
+    const { nextErr } = await postTeam({ userId: USER_UUID, role: "project_manager" });
     expect(nextErr).toMatchObject({ statusCode: 400 });
     expect(teamMocks.addTeamMember).not.toHaveBeenCalled();
   });
 
   it("400s when the user is not in the office roster at all", async () => {
-    usersMock.listUsers.mockResolvedValue([{ id: "someone-else", isActive: true }] as any);
-    const { nextErr } = await postTeam({ userId: "u-1", role: "project_manager" });
+    usersMock.listUsers.mockResolvedValue([{ id: "55555555-5555-5555-5555-555555555555", isActive: true }] as any);
+    const { nextErr } = await postTeam({ userId: USER_UUID, role: "project_manager" });
     expect(nextErr).toMatchObject({ statusCode: 400 });
   });
 });
 
 describe("POST /:id/team contact assignment", () => {
   it("assigns an active directory contact", async () => {
-    contactsMock.getContactById.mockResolvedValue({ id: "c-1", isActive: true } as any);
-    const { res, nextErr } = await postTeam({ contactId: "c-1", role: "superintendent" });
+    contactsMock.getContactById.mockResolvedValue({ id: CONTACT_UUID, isActive: true } as any);
+    const { res, nextErr } = await postTeam({ contactId: CONTACT_UUID, role: "superintendent" });
     expect(nextErr).toBeUndefined();
     expect(res.statusCode).toBe(201);
     expect(teamMocks.addTeamMember).toHaveBeenCalledWith(
       expect.anything(),
-      expect.objectContaining({ contactId: "c-1", userId: null, role: "superintendent" }),
+      expect.objectContaining({ contactId: CONTACT_UUID, userId: null, role: "superintendent" }),
     );
   });
 
   it("400s when the contact does not exist", async () => {
     contactsMock.getContactById.mockResolvedValue(null as any);
-    const { nextErr } = await postTeam({ contactId: "c-1", role: "superintendent" });
+    const { nextErr } = await postTeam({ contactId: CONTACT_UUID, role: "superintendent" });
     expect(nextErr).toMatchObject({ statusCode: 400 });
     expect(teamMocks.addTeamMember).not.toHaveBeenCalled();
   });
 
   it("400s when the contact is inactive", async () => {
-    contactsMock.getContactById.mockResolvedValue({ id: "c-1", isActive: false } as any);
-    const { nextErr } = await postTeam({ contactId: "c-1", role: "superintendent" });
+    contactsMock.getContactById.mockResolvedValue({ id: CONTACT_UUID, isActive: false } as any);
+    const { nextErr } = await postTeam({ contactId: CONTACT_UUID, role: "superintendent" });
     expect(nextErr).toMatchObject({ statusCode: 400 });
   });
 });
