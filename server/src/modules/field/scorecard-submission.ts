@@ -1,3 +1,4 @@
+import type { ScorecardKind } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
 import { assertValidUuid } from "./photos-service.js";
 
@@ -9,6 +10,8 @@ export interface ParsedScorecardSubmission {
   dealId: string;
   weekOf: string;
   formVersion: 1 | 2;
+  /** Discriminates the scorecard KIND sharing these tables: 'project' (default) | 'leadership'. */
+  kind: ScorecardKind;
   superintendentName: string | null;
   pmName: string | null;
   projectNumber: string | null;
@@ -19,6 +22,8 @@ export interface ParsedScorecardSubmission {
   photos: { sectionKey: string; deficiencyKey: string | null; clientUploadId: string }[];
   superintendentSignature: string | null;
   pmSignature: string | null;
+  /** Leadership Project Summary free text (voice-dictatable). */
+  summary: string | null;
 }
 
 function strOrNull(value: unknown): string | null {
@@ -52,9 +57,13 @@ export function parseScorecardSubmission(body: unknown): ParsedScorecardSubmissi
   assertValidUuid(clientSubmissionId, "clientSubmissionId");
   assertValidUuid(dealId, "dealId");
 
-  const formVersion = b.formVersion === 2 ? 2 : 1;
+  // Leadership is a distinct scorecard KIND stored in the same tables; anything else defaults to project.
+  const kind: ScorecardKind = b.kind === "leadership" ? "leadership" : "project";
+  // Leadership always uses the V2-style 1-10 average scoring; the client need not send formVersion.
+  const formVersion = kind === "leadership" ? 2 : b.formVersion === 2 ? 2 : 1;
   const weekOf = String(b.weekOf ?? "").trim();
-  // V2 completion determines the week on the server. V1 remains strict for offline retries of old drafts.
+  // V2 (and leadership) completion determines the week on the server. V1 remains strict for offline
+  // retries of old drafts.
   if (formVersion === 1) assertValidWeekOf(weekOf);
 
   if (!Array.isArray(b.items) || b.items.length === 0) {
@@ -104,11 +113,17 @@ export function parseScorecardSubmission(body: unknown): ParsedScorecardSubmissi
   if (criticalDeficiencies.length > 30) throw new AppError(400, "Too many critical deficiencies.");
   if (actionItems.length > 50) throw new AppError(400, "Too many action items.");
 
+  // Leadership Project Summary free text (voice-dictatable). Bound it here at the boundary so one runaway
+  // dictation can't bloat the row/PDF; the service persists it only for leadership cards.
+  const summaryRaw = strOrNull(b.summary);
+  const summary = summaryRaw ? summaryRaw.slice(0, 8000) : null;
+
   return {
     clientSubmissionId,
     dealId,
     weekOf,
     formVersion,
+    kind,
     superintendentName: strOrNull(b.superintendentName),
     pmName: strOrNull(b.pmName),
     projectNumber: strOrNull(b.projectNumber),
@@ -119,5 +134,6 @@ export function parseScorecardSubmission(body: unknown): ParsedScorecardSubmissi
     photos,
     superintendentSignature: strOrNull(b.superintendentSignature),
     pmSignature: strOrNull(b.pmSignature),
+    summary,
   };
 }
