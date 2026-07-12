@@ -5,6 +5,8 @@
 // The Expo bundle can't import @trock-crm/shared; keep the mirror in sync (see scoring-mirror.test.ts).
 import {
   FIELD_SCORECARD_SECTIONS,
+  FIELD_SCORECARD_LEADERSHIP_SECTIONS,
+  FIELD_SCORECARD_LEADERSHIP_SUMMARY_SECTION_KEY,
   FIELD_SCORECARD_CRITICAL_DEFICIENCIES,
   FIELD_SCORECARD_TOTAL_POINTS,
   type ScorecardSectionKey,
@@ -51,10 +53,42 @@ export function scorecardSectionRows(items: readonly FieldScorecardItemView[]): 
   });
 }
 
+export interface ScorecardLeadershipRow {
+  key: string;
+  title: string;
+  points: number;
+  note: string | null;
+}
+
+/**
+ * Merge a leadership card's scored items with the 4 canonical leadership category defs, in canonical order.
+ * Each category is rated 1-10; a missing item shows 0. Mirrors scorecardSectionRows but for the leadership
+ * sections (a distinct, disjoint key set) — the detail view branches on card kind to pick the right one.
+ */
+export function scorecardLeadershipRows(items: readonly FieldScorecardItemView[]): ScorecardLeadershipRow[] {
+  const itemByKey = new Map(items.map((i) => [i.sectionKey, i]));
+  return FIELD_SCORECARD_LEADERSHIP_SECTIONS.map((s) => {
+    const item = itemByKey.get(s.key);
+    return { key: s.key, title: s.title, points: item?.points ?? 0, note: item?.note ?? null };
+  });
+}
+
+/** The Project Summary evidence photos on a leadership card (sectionKey `project_summary`), in order. */
+export function scorecardSummaryPhotos(
+  photos: readonly FieldScorecardPhotoView[],
+): FieldScorecardPhotoView[] {
+  return photos.filter((p) => p.sectionKey === FIELD_SCORECARD_LEADERSHIP_SUMMARY_SECTION_KEY);
+}
+
 export interface ScorecardPhotoSection {
   key: ScorecardSectionKey;
   title: string;
   photos: FieldScorecardPhotoView[];
+}
+
+const PROJECT_SECTION_KEYS = new Set<string>(FIELD_SCORECARD_SECTIONS.map((s) => s.key));
+function isProjectSectionKey(key: string): key is ScorecardSectionKey {
+  return PROJECT_SECTION_KEYS.has(key);
 }
 
 /** Group evidence photos under their section (canonical order); sections with no photos are dropped. */
@@ -63,7 +97,9 @@ export function scorecardPhotoSections(
 ): ScorecardPhotoSection[] {
   const byKey = new Map<ScorecardSectionKey, FieldScorecardPhotoView[]>();
   for (const p of photos) {
-    if (p.sectionKey === "critical_deficiency") continue;
+    // Only project section keys group here; deficiency evidence and leadership `project_summary` photos are
+    // excluded (leadership photos render via scorecardSummaryPhotos instead).
+    if (!isProjectSectionKey(p.sectionKey)) continue;
     const list = byKey.get(p.sectionKey) ?? [];
     list.push(p);
     byKey.set(p.sectionKey, list);

@@ -61,7 +61,8 @@ export default function ScorecardsScreen() {
   const pickerOpen = pickerKind !== null;
 
   // Auto-recorded Evaluator name for a leadership card = the submitting user's own name. Trimmed; blank if
-  // the user has no name on file (the field stays editable so they can type it in).
+  // the user has no name on file. Shown read-only in the form — the server stamps the submitter as the
+  // Evaluator, so this is display only (the value can't diverge from the persisted evaluator).
   const evaluatorName = [user?.firstName, user?.lastName].filter(Boolean).join(" ").trim();
 
   // Ensure queued scorecard evidence keeps uploading in the background even if the user never opens the
@@ -105,7 +106,7 @@ export default function ScorecardsScreen() {
       weekOf: todayIso(),
       now: Date.now(),
     };
-    // Leadership records the submitting user as the Evaluator (auto, editable); both kinds share everything else.
+    // Leadership records the submitting user as the Evaluator (auto, read-only); both kinds share everything else.
     let draft =
       kind === "leadership"
         ? createLeadershipScorecardDraft({ ...base, evaluatorName })
@@ -176,22 +177,31 @@ export default function ScorecardsScreen() {
           ) : submitted.length === 0 ? (
             <EmptyState title="No scorecards yet" subtitle="Tap “Project Scorecard” to score a project." />
           ) : (
-            submitted.map((s: FieldScorecardSummary) => (
-              <Pressable
-                key={s.id}
-                accessibilityRole="button"
-                accessibilityLabel={`Scorecard${s.projectNumber ? ` for ${s.projectNumber}` : ""}, week of ${shortDate(s.weekOf)}, ${s.totalScore} out of 100, ${s.ratingLabel}`}
-                onPress={() => router.push({ pathname: "/(app)/scorecards/view/[id]", params: { id: s.id } })}
-                style={({ pressed }) => [styles.row, pressed && { opacity: 0.7 }]}
-              >
-                <View style={{ flex: 1, gap: 4 }}>
-                  <Text style={styles.rowTitle} numberOfLines={1}>
-                    {s.projectNumber ? `${s.projectNumber} · ` : ""}Week of {shortDate(s.weekOf)}
-                  </Text>
-                  <RatingBadge rating={s.rating} label={`${s.totalScore}/100 · ${s.ratingLabel}`} />
-                </View>
-              </Pressable>
-            ))
+            submitted.map((s: FieldScorecardSummary) => {
+              // Leadership cards are scored by the 4-category average out of 10; project cards keep the
+              // 0–100 total. averageScore is populated for leadership (and V2) cards; fall back to
+              // totalScore/10 defensively so a missing value never renders "undefined/10".
+              const isLeadership = s.kind === "leadership";
+              const scoreText = isLeadership
+                ? `${(s.averageScore ?? s.totalScore / 10).toFixed(1)}/10`
+                : `${s.totalScore}/100`;
+              return (
+                <Pressable
+                  key={s.id}
+                  accessibilityRole="button"
+                  accessibilityLabel={`${isLeadership ? "Leadership scorecard" : "Scorecard"}${s.projectNumber ? ` for ${s.projectNumber}` : ""}, week of ${shortDate(s.weekOf)}, ${scoreText}, ${s.ratingLabel}`}
+                  onPress={() => router.push({ pathname: "/(app)/scorecards/view/[id]", params: { id: s.id } })}
+                  style={({ pressed }) => [styles.row, pressed && { opacity: 0.7 }]}
+                >
+                  <View style={{ flex: 1, gap: 4 }}>
+                    <Text style={styles.rowTitle} numberOfLines={1}>
+                      {isLeadership ? "Leadership · " : ""}{s.projectNumber ? `${s.projectNumber} · ` : ""}Week of {shortDate(s.weekOf)}
+                    </Text>
+                    <RatingBadge rating={s.rating} label={`${scoreText} · ${s.ratingLabel}`} />
+                  </View>
+                </Pressable>
+              );
+            })
           )}
         </View>
       </ScrollView>

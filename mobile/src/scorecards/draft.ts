@@ -50,8 +50,9 @@ export interface ScorecardDraft {
   superintendentName: string;
   pmName: string;
   /**
-   * Auto-recorded name of the submitting user (the Evaluator) — leadership only. Editable in the header,
-   * but seeded from the current user's name; the project card has no evaluator field.
+   * Auto-recorded name of the submitting user (the Evaluator) — leadership only. Seeded from the current
+   * user's name and shown READ-ONLY in the header (the Evaluator is whoever submits: the server stamps
+   * submittedByName from the field user, which IS the evaluator). The project card has no evaluator field.
    */
   evaluatorName?: string;
   // Project cards key scores/notes by the V2 section keys; leadership cards key by the 4 leadership keys.
@@ -78,7 +79,7 @@ export type DraftAction =
   | { type: "setScore"; sectionKey: AnyScorecardSectionKey; points: number }
   | { type: "setNote"; sectionKey: AnyScorecardSectionKey; note: string }
   | { type: "appendNote"; sectionKey: AnyScorecardSectionKey; text: string }
-  | { type: "setHeader"; field: "superintendentName" | "pmName" | "weekOf" | "evaluatorName"; value: string }
+  | { type: "setHeader"; field: "superintendentName" | "pmName" | "weekOf"; value: string }
   | { type: "setSummary"; value: string }
   | { type: "appendSummary"; text: string }
   | { type: "toggleDeficiency"; key: ScorecardCriticalDeficiencyKey }
@@ -158,8 +159,9 @@ export interface ScorecardTeamNames {
 /**
  * Create a leadership-kind draft. Reuses the project draft shape (so draft-store / photo capture / submit
  * are shared) and sets `kind: "leadership"` plus the leadership-only header fields. The Evaluator is the
- * submitting user — seeded from `evaluatorName` (auto = current user's name) and editable; Super/PM are
- * pre-filled from the deal team like the project card. Summary + summary photos start empty. No signatures.
+ * submitting user — seeded from `evaluatorName` (auto = current user's name) and shown read-only (the
+ * server stamps the submitter as the evaluator); Super/PM are pre-filled from the deal team like the
+ * project card. Summary + summary photos start empty. No signatures.
  */
 export function createLeadershipScorecardDraft(input: {
   id: string;

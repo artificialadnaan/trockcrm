@@ -1,4 +1,4 @@
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
 import { fieldScorecards, fieldScorecardItems, fieldScorecardPhotos, files } from "@trock-crm/shared/schema";
@@ -21,6 +21,12 @@ import { generateDownloadUrl } from "../../lib/r2-client.js";
 type TenantDb = NodePgDatabase<typeof schema>;
 const SCORECARD_PDF_DOWNLOAD_EXPIRY_SECONDS = 60 * 60;
 
+// Project cards only. Leadership scorecards share the field_scorecards table (kind = 'leadership') but are
+// scored on a different model and shape (leadership sections, no signatures/deficiencies) — the CRM deal tab
+// renders the project shape, so leadership rows must not surface here. COALESCE treats any legacy NULL/absent
+// kind as a project card (the pre-leadership default), so no legacy row is dropped.
+const projectKindOnly = sql`COALESCE(${fieldScorecards.kind}, 'project') = 'project'`;
+
 export async function listDealScorecards(
   tenantDb: TenantDb,
   dealId: string,
@@ -28,7 +34,7 @@ export async function listDealScorecards(
   const rows = await tenantDb
     .select()
     .from(fieldScorecards)
-    .where(and(eq(fieldScorecards.dealId, dealId), eq(fieldScorecards.isActive, true)))
+    .where(and(eq(fieldScorecards.dealId, dealId), eq(fieldScorecards.isActive, true), projectKindOnly))
     .orderBy(desc(fieldScorecards.submittedAt));
   return { scorecards: rows.map(toSummary) };
 }
@@ -47,6 +53,7 @@ export async function getDealScorecardDetail(
         eq(fieldScorecards.id, scorecardId),
         eq(fieldScorecards.dealId, dealId),
         eq(fieldScorecards.isActive, true),
+        projectKindOnly,
       ),
     )
     .limit(1);
@@ -106,6 +113,7 @@ export async function getDealScorecardPdfDownload(
         eq(fieldScorecards.id, scorecardId),
         eq(fieldScorecards.dealId, dealId),
         eq(fieldScorecards.isActive, true),
+        projectKindOnly,
       ),
     )
     .limit(1);

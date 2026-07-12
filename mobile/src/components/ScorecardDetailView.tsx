@@ -7,8 +7,10 @@ import type { FieldScorecardDetail, FieldScorecardPhotoView } from "../api/types
 import {
   deficiencyLabel,
   formatShortDate,
+  scorecardLeadershipRows,
   scorecardPhotoSections,
   scorecardSectionRows,
+  scorecardSummaryPhotos,
   SCORECARD_TOTAL_POINTS,
 } from "../scorecards/detail-view";
 
@@ -38,10 +40,8 @@ export function ScorecardDetailView({
   const { width } = useWindowDimensions();
   const thumb = Math.floor((width - theme.space.lg * 2 - GRID_GAP * (GRID_COLUMNS - 1)) / GRID_COLUMNS);
 
-  const sections = scorecardSectionRows(scorecard.items);
-  const photoSections = scorecardPhotoSections(scorecard.photos);
-  const deficiencies = scorecard.criticalDeficiencies;
-  const actionItems = scorecard.actionItems;
+  const isLeadership = scorecard.kind === "leadership";
+  // Leadership + V2 both score out of 10 (averageScore); V1 keeps the 0–100 total.
   const isV2 = scorecard.formVersion === 2;
   const displayScore = isV2 ? (scorecard.averageScore ?? scorecard.totalScore / 10).toFixed(1) : String(scorecard.totalScore);
   const displayMax = isV2 ? "10" : String(SCORECARD_TOTAL_POINTS);
@@ -57,20 +57,60 @@ export function ScorecardDetailView({
         <RatingBadge rating={scorecard.rating} label={scorecard.ratingLabel} />
       </View>
 
-      {/* Meta */}
+      {/* Meta. Leadership: the Evaluator IS whoever submitted (server-stamped submittedByName). */}
       <View style={{ gap: 2 }}>
         <Text style={styles.meta}>Week of {formatShortDate(scorecard.weekOf)}</Text>
         {scorecard.projectNumber ? <Text style={styles.meta}>Project {scorecard.projectNumber}</Text> : null}
+        {isLeadership ? (
+          <Text style={styles.meta}>
+            Evaluator: {scorecard.submittedByName || "—"} · {formatShortDate(scorecard.submittedAt)}
+          </Text>
+        ) : null}
         {scorecard.superintendentName ? (
           <Text style={styles.meta}>Superintendent: {scorecard.superintendentName}</Text>
         ) : null}
         {scorecard.pmName ? <Text style={styles.meta}>PM: {scorecard.pmName}</Text> : null}
-        <Text style={styles.meta}>
-          Submitted{scorecard.submittedByName ? ` by ${scorecard.submittedByName}` : ""} · {formatShortDate(scorecard.submittedAt)}
-        </Text>
+        {!isLeadership ? (
+          <Text style={styles.meta}>
+            Submitted{scorecard.submittedByName ? ` by ${scorecard.submittedByName}` : ""} · {formatShortDate(scorecard.submittedAt)}
+          </Text>
+        ) : null}
       </View>
 
-      {/* Section scores — all 7 always render; sections absent from items show 0/maxPoints. */}
+      {isLeadership ? (
+        <LeadershipBody scorecard={scorecard} thumb={thumb} onOpenPhoto={onOpenPhoto} />
+      ) : (
+        <ProjectBody scorecard={scorecard} isV2={isV2} thumb={thumb} onOpenPhoto={onOpenPhoto} />
+      )}
+
+      {/* Download PDF — ALWAYS rendered. The detail response carries no pdf-ready signal (server change
+          out of scope), so there is nothing to pre-hide on. A still-generating PDF 404s and the screen
+          shows a "still generating" toast instead of crashing (scorecardDownloadErrorMessage). */}
+      <Button title="Download PDF" variant="ghost" loading={downloadingPdf} onPress={onDownloadPdf} />
+    </View>
+  );
+}
+
+/** Project (V1/V2) body: section scores, critical deficiencies, action items, signatures (V2), photos. */
+function ProjectBody({
+  scorecard,
+  isV2,
+  thumb,
+  onOpenPhoto,
+}: {
+  scorecard: FieldScorecardDetail;
+  isV2: boolean;
+  thumb: number;
+  onOpenPhoto?: (photo: FieldScorecardPhotoView) => void;
+}) {
+  const sections = scorecardSectionRows(scorecard.items);
+  const photoSections = scorecardPhotoSections(scorecard.photos);
+  const deficiencies = scorecard.criticalDeficiencies;
+  const actionItems = scorecard.actionItems;
+
+  return (
+    <>
+      {/* Section scores — all 8 always render; sections absent from items show 0/maxPoints. */}
       <View style={{ gap: theme.space.sm }}>
         <SectionLabel>Section scores</SectionLabel>
         {sections.map((row) => (
@@ -130,38 +170,98 @@ export function ScorecardDetailView({
           {photoSections.map((section) => (
             <View key={section.key} style={{ gap: theme.space.sm }}>
               <Text style={styles.photoGroup}>{section.title}</Text>
-              <View style={styles.grid}>
-                {section.photos.map((photo) => (
-                  <Pressable
-                    key={photo.id}
-                    onPress={() => onOpenPhoto?.(photo)}
-                    disabled={!photo.url}
-                    accessibilityRole="imagebutton"
-                    accessibilityLabel={photo.caption ?? "Scorecard photo"}
-                    style={[styles.thumb, { width: thumb, height: thumb }]}
-                  >
-                    {photo.url ? (
-                      <Image
-                        testID={`scorecard-photo-image-${photo.id}`}
-                        source={{ uri: photo.url }}
-                        style={styles.image}
-                        resizeMode="cover"
-                      />
-                    ) : (
-                      <View testID={`scorecard-photo-placeholder-${photo.id}`} style={[styles.image, styles.placeholder]} />
-                    )}
-                  </Pressable>
-                ))}
-              </View>
+              <PhotoGrid photos={section.photos} thumb={thumb} onOpenPhoto={onOpenPhoto} />
             </View>
           ))}
         </View>
       ) : null}
+    </>
+  );
+}
 
-      {/* Download PDF — ALWAYS rendered. The detail response carries no pdf-ready signal (server change
-          out of scope), so there is nothing to pre-hide on. A still-generating PDF 404s and the screen
-          shows a "still generating" toast instead of crashing (scorecardDownloadErrorMessage). */}
-      <Button title="Download PDF" variant="ghost" loading={downloadingPdf} onPress={onDownloadPdf} />
+/**
+ * Leadership body: the 4 leadership category scores (+ comment notes), the Project Summary free text, and
+ * the Project Summary evidence photos. Leadership cards carry no signatures or critical deficiencies, so
+ * neither section is rendered.
+ */
+function LeadershipBody({
+  scorecard,
+  thumb,
+  onOpenPhoto,
+}: {
+  scorecard: FieldScorecardDetail;
+  thumb: number;
+  onOpenPhoto?: (photo: FieldScorecardPhotoView) => void;
+}) {
+  const rows = scorecardLeadershipRows(scorecard.items);
+  const summaryPhotos = scorecardSummaryPhotos(scorecard.photos);
+
+  return (
+    <>
+      {/* Category scores — all 4 always render (each rated 1-10); absent items show 0/10. */}
+      <View style={{ gap: theme.space.sm }}>
+        <SectionLabel>Category scores</SectionLabel>
+        {rows.map((row) => (
+          <View key={row.key} style={styles.sectionRow}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.sectionTitle}>{row.title}</Text>
+              {row.note ? <Text style={styles.sectionNote}>{row.note}</Text> : null}
+            </View>
+            <Text style={styles.sectionPoints}>{row.points}/10</Text>
+          </View>
+        ))}
+      </View>
+
+      {/* Project Summary free text. */}
+      <View style={{ gap: theme.space.sm }}>
+        <SectionLabel>Project summary</SectionLabel>
+        <Text style={styles.bulletText}>{scorecard.summary?.trim() || "No summary provided."}</Text>
+      </View>
+
+      {/* Project Summary evidence photos. A null url → placeholder tile (no broken Image). */}
+      {summaryPhotos.length > 0 ? (
+        <View style={{ gap: theme.space.md }}>
+          <SectionLabel>Photos</SectionLabel>
+          <PhotoGrid photos={summaryPhotos} thumb={thumb} onOpenPhoto={onOpenPhoto} />
+        </View>
+      ) : null}
+    </>
+  );
+}
+
+/** Shared evidence-photo grid. A null url renders a placeholder tile rather than a broken <Image>. */
+function PhotoGrid({
+  photos,
+  thumb,
+  onOpenPhoto,
+}: {
+  photos: readonly FieldScorecardPhotoView[];
+  thumb: number;
+  onOpenPhoto?: (photo: FieldScorecardPhotoView) => void;
+}) {
+  return (
+    <View style={styles.grid}>
+      {photos.map((photo) => (
+        <Pressable
+          key={photo.id}
+          onPress={() => onOpenPhoto?.(photo)}
+          disabled={!photo.url}
+          accessibilityRole="imagebutton"
+          accessibilityLabel={photo.caption ?? "Scorecard photo"}
+          style={[styles.thumb, { width: thumb, height: thumb }]}
+        >
+          {photo.url ? (
+            <Image
+              testID={`scorecard-photo-image-${photo.id}`}
+              source={{ uri: photo.url }}
+              style={styles.image}
+              resizeMode="cover"
+            />
+          ) : (
+            <View testID={`scorecard-photo-placeholder-${photo.id}`} style={[styles.image, styles.placeholder]} />
+          )}
+        </Pressable>
+      ))}
     </View>
   );
 }

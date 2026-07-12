@@ -365,7 +365,10 @@ function LeadershipForm(props: {
           <Field label="Project"><Text style={styles.readonly}>{draft.dealName}</Text></Field>
           {draft.projectNumber ? <Field label="Project number"><Text style={styles.readonly}>{draft.projectNumber}</Text></Field> : null}
           <Field label="Evaluator">
-            <TextInput value={draft.evaluatorName ?? ""} onChangeText={(value) => dispatch({ type: "setHeader", field: "evaluatorName", value })} placeholder="Your name" />
+            {/* Display-only: the Evaluator IS whoever submits (the server stamps submittedByName from the
+                field user). Seeded from the current user's name; shown read-only so an edit here can't
+                silently diverge from the server-stamped evaluator. */}
+            <Text style={styles.readonly}>{draft.evaluatorName?.trim() || "You"}</Text>
           </Field>
           <Field label="Project manager">
             <TextInput value={draft.pmName} onChangeText={(value) => dispatch({ type: "setHeader", field: "pmName", value })} placeholder="Name" />

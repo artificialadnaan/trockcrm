@@ -75,7 +75,8 @@ beforeAll(async () => {
       last_error text, started_processing_at timestamptz, run_after timestamptz NOT NULL DEFAULT now(),
       created_at timestamptz NOT NULL DEFAULT now(), completed_at timestamptz
     );
-    CREATE TABLE public.users (id uuid PRIMARY KEY, display_name text, email text, avatar_url text);
+    -- resolveScorecardTeamEmails checks users.is_active, so the island carries it (defaulting active).
+    CREATE TABLE public.users (id uuid PRIMARY KEY, display_name text, email text, avatar_url text, is_active boolean DEFAULT true);
   `);
   await pg.exec(tenantSchemaSql("public", [fieldScorecards, fieldScorecardItems, fieldScorecardPhotos, dealTeamMembers, contacts]));
   await pg.exec(
