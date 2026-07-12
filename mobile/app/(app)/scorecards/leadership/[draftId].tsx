@@ -113,6 +113,15 @@ export default function LeadershipScorecardScreen() {
     };
   }, [ownerKey, draftId]);
 
+  // A project draft belongs to the project wizard (its own steps + signatures). If one is reached here via a
+  // deep link / stale route, hand it off rather than rendering it as a leadership card. `replace` so Back
+  // doesn't bounce between the two screens. Mirrors the project screen's leadership → leadership guard.
+  useEffect(() => {
+    if (loaded && loaded !== "missing" && loaded.kind !== "leadership") {
+      router.replace({ pathname: "/(app)/scorecards/[draftId]", params: { draftId } });
+    }
+  }, [loaded, draftId, router]);
+
   if (loaded === null) {
     return (
       <SafeAreaView style={styles.safe} edges={["top"]}>
@@ -126,6 +135,16 @@ export default function LeadershipScorecardScreen() {
       <SafeAreaView style={styles.safe} edges={["top"]}>
         <ScreenHeader onBack={() => router.back()} title="Leadership Scorecard" />
         <EmptyState title="Draft not found" subtitle="It may have been submitted or deleted." />
+      </SafeAreaView>
+    );
+  }
+  // Project draft opened via the leadership route → handed off by the effect above; show a spinner instead of
+  // briefly mounting the leadership form for it.
+  if (loaded.kind !== "leadership") {
+    return (
+      <SafeAreaView style={styles.safe} edges={["top"]}>
+        <ScreenHeader onBack={() => router.back()} title="Leadership Scorecard" />
+        <LoadingState label="Loading…" />
       </SafeAreaView>
     );
   }
@@ -388,7 +407,18 @@ function LeadershipForm(props: {
     <SafeAreaView style={styles.safe} edges={["top"]}>
       <ScreenHeader onBack={goBack} title={draft.dealName} />
 
-      <ScrollView contentContainerStyle={styles.body} keyboardShouldPersistTaps="handled">
+      {/* Freeze the whole form once submit begins: pointerEvents="none" makes every mutation control (scores,
+          text, dictation, photo add/remove/caption) a no-op so a mid-submit edit can't be silently lost when
+          the draft is deleted on success. `submitting` stays true through photo upload → POST → draft deletion
+          (it only resets on an error return), so the freeze holds for the entire flow; the footer Submit button
+          lives outside this ScrollView and keeps showing progress. anyVoiceBusy already blocks starting a submit
+          mid-dictation. */}
+      <ScrollView
+        contentContainerStyle={styles.body}
+        keyboardShouldPersistTaps="handled"
+        pointerEvents={submitting ? "none" : "auto"}
+        style={submitting ? styles.frozen : undefined}
+      >
         <Text style={styles.stepTitle}>Leadership Scorecard</Text>
         {notice ? <Banner message={notice.text} tone={notice.tone} /> : null}
 
@@ -574,6 +604,7 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: theme.color.surfaceApp },
   body: { padding: theme.space.lg, gap: theme.space.lg, paddingBottom: theme.space.xxl },
+  frozen: { opacity: 0.6 },
   stepTitle: { fontFamily: theme.font.bold, fontSize: 20, color: theme.color.textPrimary },
   hint: { fontFamily: theme.font.body, fontSize: 13, color: theme.color.textMuted },
   fieldLabel: { fontFamily: theme.font.semibold, fontSize: 13, color: theme.color.textPrimary },

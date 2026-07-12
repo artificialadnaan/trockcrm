@@ -216,8 +216,10 @@ export async function createFieldScorecard(
       kind,
       summary,
       averageScore: averageScore == null ? null : String(averageScore),
-      superintendentSignature: normalizeSignature(input.superintendentSignature),
-      pmSignature: normalizeSignature(input.pmSignature),
+      // Leadership cards collect no signatures. Null them defensively (like deficiencies/action items above)
+      // so a stray client-sent value is never persisted — which also means no detail/PDF read can expose one.
+      superintendentSignature: kind === "leadership" ? null : normalizeSignature(input.superintendentSignature),
+      pmSignature: kind === "leadership" ? null : normalizeSignature(input.pmSignature),
       totalScore: total,
       rating,
       criticalDeficiencies: deficiencies,

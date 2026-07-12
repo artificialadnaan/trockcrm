@@ -68,7 +68,7 @@ beforeAll(async () => {
     { id: SC_TEST, clientSubmissionId: "66666666-6666-6666-6666-000000000008", dealId: DEAL_TEST, weekOf: "2026-06-30", projectNumber: "DFW-0000", superintendentName: "Demo Tester", totalScore: 99, rating: "elite", submittedBy: USER, submittedByName: "Demo Tester", submittedAt: new Date("2026-06-30T18:00:00Z") },
     // A leadership card on a fully-live, in-window Dallas deal — only its KIND makes it ineligible for the QC
     // report (which is project-scorecards only). Proves the kind filter, not any other gate.
-    { id: SC_LEADERSHIP, clientSubmissionId: "66666666-6666-6666-6666-000000000009", dealId: DEAL_D, weekOf: "2026-06-30", projectNumber: "DFW-10432", superintendentName: "Sam Reyes", totalScore: 90, rating: "elite", kind: "leadership", submittedBy: USER, submittedByName: "Lena Lead", submittedAt: new Date("2026-06-30T19:00:00Z") },
+    { id: SC_LEADERSHIP, clientSubmissionId: "66666666-6666-6666-6666-000000000009", dealId: DEAL_D, weekOf: "2026-06-30", projectNumber: "DFW-10432", superintendentName: "Leah Solo", totalScore: 90, rating: "elite", kind: "leadership", submittedBy: USER, submittedByName: "Lena Lead", submittedAt: new Date("2026-06-30T19:00:00Z") },
   ]);
 });
 
@@ -108,9 +108,11 @@ describe("getQcScorecardsReport", () => {
     const res = await getQcScorecardsReport(tdb, JUNE);
     const ids = res.scorecards.map((s) => s.scorecardId);
     // SC_LEADERSHIP sits on a fully-live in-window deal and is the newest submission — only kind='leadership'
-    // keeps it out. Its submitter also must not leak into the superintendent options.
+    // keeps it out. Its superintendent ("Leah Solo", unique to the leadership card) must not leak into the
+    // superintendent options either — the kind filter applies to the option aggregation, not just the rows.
     expect(ids).not.toContain(SC_LEADERSHIP);
     expect(res.scorecards.map((s) => s.scorecardId)).toEqual([SC1, SC3, SC2]);
+    expect(res.superintendents).not.toContain("Leah Solo");
   });
 
   it("filters by region name (server-side, before the cap)", async () => {

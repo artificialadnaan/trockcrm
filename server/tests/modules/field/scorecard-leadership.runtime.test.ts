@@ -178,6 +178,21 @@ describe("createFieldScorecard (leadership)", () => {
     expect(count.rows[0].n).toBe(0);
   });
 
+  it("nulls any client-sent signatures on a leadership card (leadership collects none)", async () => {
+    const { scorecard } = await createFieldScorecard(
+      tdb,
+      leadershipSubmission({ clientSubmissionId: csid(30), superintendentSignature: "Sam Super", pmSignature: "Pat PM" }),
+    );
+    const detail = await getFieldScorecardDetail(tdb, scorecard.id, ACCESS);
+    expect(detail.superintendentSignature).toBeNull();
+    expect(detail.pmSignature).toBeNull();
+    const row = await tdb.execute(
+      sql`SELECT superintendent_signature, pm_signature FROM field_scorecards WHERE id = ${scorecard.id}`,
+    );
+    expect(row.rows[0].superintendent_signature).toBeNull();
+    expect(row.rows[0].pm_signature).toBeNull();
+  });
+
   it("rejects a leadership submission missing a category and rejects a non-summary photo section", async () => {
     await expect(
       createFieldScorecard(tdb, leadershipSubmission({ clientSubmissionId: csid(5), items: leadershipItems().slice(0, 3) })),

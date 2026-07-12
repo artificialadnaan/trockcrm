@@ -370,6 +370,12 @@ describe("leadership scorecardDraftToSubmission", () => {
       type: "addPhoto",
       photo: { key: "p1", uri: "file://p1", clientUploadId: "cu-1", sectionKey: "project_summary", caption: "" },
     });
+    // A stray photo tagged to a category (not project_summary) must be dropped — leadership cards carry only
+    // Project Summary evidence.
+    d = scorecardDraftReducer(d, {
+      type: "addPhoto",
+      photo: { key: "p2", uri: "file://p2", clientUploadId: "cu-2", sectionKey: "safety", caption: "" },
+    });
 
     const payload = scorecardDraftToSubmission(d);
     expect(payload.kind).toBe("leadership");
@@ -385,7 +391,9 @@ describe("leadership scorecardDraftToSubmission", () => {
     expect(payload.pmSignature).toBeNull();
     expect(payload.criticalDeficiencies).toEqual([]);
     expect(payload.actionItems).toEqual([]);
+    // Only the project_summary photo survives; the stray category photo (cu-2) is excluded.
     expect(payload.photos).toEqual([{ sectionKey: "project_summary", deficiencyKey: null, clientUploadId: "cu-1" }]);
+    expect(payload.photos.map((p) => p.clientUploadId)).not.toContain("cu-2");
   });
 
   it("nulls a blank summary", () => {
