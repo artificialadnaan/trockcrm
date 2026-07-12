@@ -367,6 +367,17 @@ export function isValidWeekOf(weekOf: string): boolean {
   return dt.getUTCFullYear() === y && dt.getUTCMonth() === mo - 1 && dt.getUTCDate() === d;
 }
 
+/**
+ * Today's date as a device-LOCAL YYYY-MM-DD (never toISOString/UTC). Used to stamp Week Of = the completion
+ * date at SUBMIT time, so a draft started one day and submitted the next files under the submit day, and an
+ * evening submit west of UTC files under today (not tomorrow). Matches the seeding format in the entry screen.
+ */
+export function todayLocalIso(): string {
+  const d = new Date();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
 export interface DraftValidation {
   canSubmit: boolean;
   missingSections: AnyScorecardSectionKey[];
@@ -378,8 +389,8 @@ export function validateScorecardDraft(draft: ScorecardDraft): DraftValidation {
   const leadership = draft.kind === "leadership";
   const missingSections = draftSectionKeys(draft).filter((k) => typeof draft.scores[k] !== "number");
   const needsActionItems = false;
-  // Leadership: no signatures, and the server stamps Week Of at completion (like the project V2 card), so
-  // no client-side week-of/signature gate. Project path is unchanged.
+  // Leadership: no signatures, and Week Of is stamped LOCAL at submit (submitScorecard → todayLocalIso), like
+  // the project V2 card — so no client-side week-of/signature gate. Project path is unchanged.
   const missingWeekOf = leadership ? false : !isValidWeekOf(draft.weekOf);
   const missingSignatures = leadership
     ? false

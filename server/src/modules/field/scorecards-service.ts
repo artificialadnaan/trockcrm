@@ -191,10 +191,10 @@ export async function createFieldScorecard(
   }
 
   const photoLinks = await resolvePhotoLinks(tenantDb, input, formVersion, kind, deficiencies);
-  // Week Of is the LOCAL date the field app stamps (todayIso, device-local) — trust it for every kind rather
-  // than recomputing here. The server runs in UTC, so `new Date().toISOString()` stamped the NEXT day for any
-  // evening submit west of UTC (e.g. 8 PM CDT files under tomorrow) — that off-by-one hit every leadership/V2
-  // card, which always took this path. Mirrors the project card, which already persists the client's local weekOf.
+  // Week Of = the completion date, which the field app stamps LOCAL at SUBMIT time (submitScorecard →
+  // todayLocalIso). Trust it rather than recomputing here: the server runs in UTC, so `new Date().toISOString()`
+  // stamped the NEXT day for any evening submit west of UTC (8 PM CDT filed under tomorrow) AND can't see the
+  // device's local day at all. Both kinds present Week Of as "set automatically when completed".
   const weekOf = input.weekOf;
   // Persist the summary for leadership cards only (bounded); project cards never carry one.
   const summary = kind === "leadership" ? (input.summary?.trim() ? input.summary.trim().slice(0, 8000) : null) : null;
