@@ -62,9 +62,11 @@ export function parseScorecardSubmission(body: unknown): ParsedScorecardSubmissi
   // Leadership always uses the V2-style 1-10 average scoring; the client need not send formVersion.
   const formVersion = kind === "leadership" ? 2 : b.formVersion === 2 ? 2 : 1;
   const weekOf = String(b.weekOf ?? "").trim();
-  // V2 (and leadership) completion determines the week on the server. V1 remains strict for offline
-  // retries of old drafts.
-  if (formVersion === 1) assertValidWeekOf(weekOf);
+  // Validate for EVERY version: the service now persists the client-stamped weekOf as-is for V2/leadership
+  // too (it no longer overwrites it server-side), so a blank or calendar-invalid value (e.g. 2026-02-30 from
+  // a stale/offline/custom client) must be a clean 400 here — not a Postgres date-cast failure that aborts
+  // the insert transaction.
+  assertValidWeekOf(weekOf);
 
   if (!Array.isArray(b.items) || b.items.length === 0) {
     throw new AppError(400, "items are required.");
