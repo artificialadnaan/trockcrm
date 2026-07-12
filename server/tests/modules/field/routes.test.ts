@@ -61,8 +61,13 @@ const projectMocks = vi.hoisted(() => ({
       ),
   ),
   assertAccessibleFieldCaptureTarget: vi.fn(),
+  assertActiveFieldProject: vi.fn(),
   starFieldProject: vi.fn(),
   unstarFieldProject: vi.fn(),
+}));
+
+const teamMocks = vi.hoisted(() => ({
+  resolveScorecardTeamNames: vi.fn(),
 }));
 
 const photoMocks = vi.hoisted(() => ({
@@ -99,6 +104,7 @@ vi.mock("../../../src/modules/field/photos-service.js", () => photoMocks);
 vi.mock("../../../src/modules/field/photo-transcription-service.js", () => transcriptionMocks);
 vi.mock("../../../src/modules/field/photo-tags-service.js", () => tagMocks);
 vi.mock("../../../src/modules/field/photo-reports-service.js", () => reportMocks);
+vi.mock("../../../src/modules/deals/team-service.js", () => teamMocks);
 
 const { fieldRoutes } = await import("../../../src/modules/field/routes.js");
 
@@ -117,6 +123,8 @@ describe("field routes", () => {
     projectMocks.listNearbyFieldCaptureTargets.mockResolvedValue({ targets: [] });
     projectMocks.searchFieldCaptureTargets.mockResolvedValue({ targets: [] });
     projectMocks.assertAccessibleFieldCaptureTarget.mockResolvedValue({ id: "lead-1", type: "lead" });
+    projectMocks.assertActiveFieldProject.mockResolvedValue({ id: "deal-1", name: "Roof" });
+    teamMocks.resolveScorecardTeamNames.mockResolvedValue({ superintendentName: "Sam Super", pmName: "Pat PM" });
     projectMocks.starFieldProject.mockResolvedValue({ starred: true });
     projectMocks.unstarFieldProject.mockResolvedValue({ starred: false });
     projectMocks.listFieldProjectPhotos.mockResolvedValue({ photos: [], pagination: { page: 1, limit: 200, total: 0, totalPages: 0 } });
@@ -525,6 +533,26 @@ describe("field routes", () => {
       { userId: "admin-1", userRole: "admin" },
       expect.objectContaining({ executiveSummary: "Substantial completion reached ahead of schedule." }),
     );
+  });
+
+  it("returns the deal's Super/PM names via the field-scoped team route (reachable by the field surface)", async () => {
+    const res = await invokeRoute("get", "/projects/:dealId/team", { params: { dealId: "deal-1" } });
+
+    // Format-validated, gated to a browsable field project, then resolved in the deal's office.
+    expect(photoMocks.assertValidUuid).toHaveBeenCalledWith("deal-1", "dealId");
+    expect(projectMocks.assertActiveFieldProject).toHaveBeenCalledWith(
+      expect.anything(),
+      { userId: "admin-1", userRole: "admin" },
+      "deal-1",
+    );
+    expect(teamMocks.resolveScorecardTeamNames).toHaveBeenCalledWith(expect.anything(), "deal-1");
+    expect(res.body).toEqual({ superintendentName: "Sam Super", pmName: "Pat PM" });
+  });
+
+  it("returns nulls from the team route when the deal has no active Super/PM assignees", async () => {
+    teamMocks.resolveScorecardTeamNames.mockResolvedValueOnce({ superintendentName: null, pmName: null });
+    const res = await invokeRoute("get", "/projects/:dealId/team", { params: { dealId: "deal-1" } });
+    expect(res.body).toEqual({ superintendentName: null, pmName: null });
   });
 });
 

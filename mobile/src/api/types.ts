@@ -197,3 +197,8 @@ export type ScorecardDetailResponse = { scorecard: FieldScorecardDetail };
 // Matches server getFieldScorecardPdfDownload: { url, expiresAt } — NOT the report { url, filename } shape.
 export type ScorecardDownloadResponse = { url: string; expiresAt: string };
 export type CreateScorecardResponse = { scorecard: FieldScorecardSummary };
+
+// The deal's assigned Superintendent + PM names, as returned by the FIELD route
+// GET /field/projects/:dealId/team. The server already resolves the two roles from the ACTIVE team rows
+// (with active user/contact identities), so the app just seeds these directly — no client-side role match.
+export type DealTeamResponse = { superintendentName: string | null; pmName: string | null };

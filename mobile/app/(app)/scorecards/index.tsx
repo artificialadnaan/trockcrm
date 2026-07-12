@@ -5,9 +5,11 @@ import { useFocusEffect, useRouter } from "expo-router";
 import { useQuery } from "@tanstack/react-query";
 import { theme } from "../../../src/theme/theme";
 import { useAuth } from "../../../src/auth/AuthContext";
-import { getRecentScorecards } from "../../../src/api/endpoints";
+import { getRecentScorecards, getDealTeam } from "../../../src/api/endpoints";
 import {
   createScorecardDraft,
+  resolveScorecardTeamNames,
+  seedScorecardDraftTeam,
   scorecardDraftSectionsAnswered,
   type ScorecardDraft,
 } from "../../../src/scorecards/draft";
@@ -20,7 +22,7 @@ import { Button, EmptyState, LoadingState, SectionLabel } from "../../../src/com
 import { ScreenHeader } from "../../../src/components/ScreenHeader";
 import { RatingBadge } from "../../../src/components/RatingBadge";
 import { TargetPicker } from "../../../src/components/TargetPicker";
-import type { FieldCaptureTarget, FieldScorecardSummary } from "../../../src/api/types";
+import type { DealTeamResponse, FieldCaptureTarget, FieldScorecardSummary } from "../../../src/api/types";
 
 const SECTION_COUNT = FIELD_SCORECARD_SECTIONS.length;
 
@@ -75,7 +77,7 @@ export default function ScorecardsScreen() {
     setPickerOpen(false);
     if (!ownerKey) return;
     const id = newClientUploadId();
-    const draft = createScorecardDraft({
+    let draft = createScorecardDraft({
       id,
       clientSubmissionId: newSubmissionId(),
       dealId: target.id,
@@ -84,6 +86,21 @@ export default function ScorecardsScreen() {
       weekOf: todayIso(),
       now: Date.now(),
     });
+    // Best-effort pre-fill of the Superintendent/PM names from the deal's assigned team (the FIELD team
+    // route the app can actually reach — the CRM /deals/:id/team route rejects the field surface). ANY
+    // failure — network, timeout, or a non-browsable deal — silently leaves the fields empty (today's
+    // behavior). It must never block or crash draft creation, and it only seeds BLANK fields, so the names
+    // stay fully editable afterwards. Bound the lookup to ~2s: on a poor connection a hanging request must
+    // NOT block starting a scorecard, so a timeout (like any error) just proceeds with empty super/PM.
+    try {
+      const team = await Promise.race<DealTeamResponse>([
+        getDealTeam(fetcher, target.id),
+        new Promise<DealTeamResponse>((res) => setTimeout(() => res({ superintendentName: null, pmName: null }), 2000)),
+      ]);
+      draft = seedScorecardDraftTeam(draft, resolveScorecardTeamNames(team));
+    } catch {
+      /* leave super/PM empty */
+    }
     await saveScorecardDraft(ownerKey, draft, Date.now());
     router.push({ pathname: "/(app)/scorecards/[draftId]", params: { draftId: id } });
   }

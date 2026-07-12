@@ -38,6 +38,11 @@ export interface FieldScorecardEmailPayload {
   submittedByName?: string | null;
   pdfR2Key?: string | null;
   officeId?: string | null;
+  // Per-deal team routing: the server resolves the deal's assigned superintendent / project manager to their
+  // user emails at enqueue time and stamps them here. Merged (deduped) into the static env recipients below so
+  // the people responsible for THIS deal are notified even when the env list is unset. null = unassigned/no email.
+  superintendentEmail?: string | null;
+  projectManagerEmail?: string | null;
 }
 
 interface HandlerDeps {
@@ -57,8 +62,10 @@ interface HandlerDeps {
  * Email a submitted Field Scorecard (with its rendered PDF attached) to the configured recipients.
  * Enqueued by the server after it renders + stores the PDF on the created-only submit path.
  *
- * Recipients come from FIELD_SCORECARD_EMAIL_RECIPIENTS (via the shared resolver). If unset in prod, this
- * throws so the job retries then dead-letters — the misconfiguration is loud, not a silent no-op.
+ * Recipients are the deduped union of FIELD_SCORECARD_EMAIL_RECIPIENTS (via the shared resolver) and this
+ * deal's assigned superintendent / project-manager emails carried on the payload. If that union is empty
+ * (env unset AND no super/PM), this throws so the job retries then dead-letters — the misconfiguration is
+ * loud, not a silent no-op. A configured super/PM alone is enough to send even when the env list is empty.
  *
  * Idempotent per scorecard: `field_scorecards.email_sent_at` is checked before sending and stamped after,
  * and the Resend idempotencyKey dedups a re-delivery in the crash window (sent, not yet stamped).
@@ -80,11 +87,19 @@ export async function handleFieldScorecardEmail(
   }
 
   const env = deps.env ?? process.env;
-  const recipients = resolveFieldScorecardRecipients(env);
+  // Final recipient list = the static env recipients + this deal's assigned superintendent / project-manager
+  // emails (from the payload), de-duplicated case-insensitively. A configured super/PM alone is now enough to
+  // send even when the env list is empty; only a TRULY empty union is a loud misconfiguration.
+  const recipients = dedupeEmails([
+    ...resolveFieldScorecardRecipients(env),
+    ...[payload.superintendentEmail, payload.projectManagerEmail]
+      .map((raw) => normalizeText(raw))
+      .filter((email): email is string => email != null && isBasicValidEmail(email)),
+  ]);
   if (recipients.length === 0) {
     const error = new Error("FIELD_SCORECARD_EMAIL_RECIPIENTS is not configured");
     logger.error(
-      "[FieldScorecardEmail] FIELD_SCORECARD_EMAIL_RECIPIENTS is not set - cannot send the scorecard email. Set it (comma-separated) on the worker service; the job retries a few times, then dead-letters.",
+      "[FieldScorecardEmail] No scorecard-email recipients — FIELD_SCORECARD_EMAIL_RECIPIENTS is unset and the deal has no superintendent/project-manager email. Set the env var (comma-separated) or assign the deal team; the job retries a few times, then dead-letters.",
       { scorecardId }
     );
     throw error;
@@ -181,6 +196,27 @@ export async function handleFieldScorecardEmail(
     logger.error("[FieldScorecardEmail] Failed to send scorecard email", { scorecardId, error });
     throw error;
   }
+}
+
+// De-duplicate a recipient list case-insensitively, preserving the first spelling encountered. Mirrors the
+// RFP-decline email's merge so the two features' de-dupe behaviour can't drift.
+function dedupeEmails(emails: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const email of emails) {
+    const key = email.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(email);
+  }
+  return out;
+}
+
+// Basic, deliberately-permissive sanity check on a payload-supplied super/PM address: a single "@" with a
+// non-empty local part and a dotted domain, no whitespace. The env recipients are already parsed/trusted; this
+// only guards the per-deal emails so a malformed/placeholder value can't become a bogus recipient.
+function isBasicValidEmail(email: string): boolean {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 }
 
 function scorecardPdfFilename(payload: FieldScorecardEmailPayload): string {

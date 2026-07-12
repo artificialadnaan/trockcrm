@@ -47,6 +47,7 @@ import { stripBlankUuidPatchFields } from "./uuid-patch-coercion.js";
 import { resolveMineVisibilityFeatures } from "../shared/mine-visibility.js";
 import { preflightStageCheck } from "./stage-gate.js";
 import { getContactsForDeal } from "../contacts/association-service.js";
+import { getContactById } from "../contacts/service.js";
 import {
   getTeamMembers,
   addTeamMember,
@@ -115,6 +116,7 @@ import { inferDealBidBoardOwnership } from "./workflow-backfill.js";
 import { getPendingRfpDeals, cancelPendingRfp } from "./pending-rfp-service.js";
 import { confirmUpload, getFileById, getFileDownloadUrl, getPendingUploadMetadata } from "../files/service.js";
 import { listDealScorecards, getDealScorecardDetail, getDealScorecardPdfDownload } from "./scorecards-service.js";
+import { assertValidUuid } from "../field/photos-service.js";
 import {
   createEstimateSourceDocument,
   enqueueEstimateDocumentOcrJob,
@@ -3921,13 +3923,42 @@ router.post("/:id/team", async (req, res, next) => {
     const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
     if (!deal) throw new AppError(404, "Deal not found");
 
-    const { userId, role, notes } = req.body;
-    if (!userId || !role) throw new AppError(400, "userId and role are required");
+    const { userId, contactId, role, notes } = req.body;
+    if (!role) throw new AppError(400, "role is required");
     if (!DEAL_TEAM_ROLES.includes(role)) throw new AppError(400, "Invalid role");
+    // A member is EITHER a staff user OR a directory contact — exactly one identity. (The DB check
+    // constraint enforces the same one-of; this is the clean, user-facing 400.)
+    const hasUser = Boolean(userId);
+    const hasContact = Boolean(contactId);
+    if (hasUser === hasContact) throw new AppError(400, "Provide exactly one of userId or contactId");
+    // A contact-backed estimator is a visibly-dead row: revision routing (resolveRevisionTaskAssignee)
+    // only ever picks estimator rows whose user_id IS NOT NULL, so a contact estimator can never be routed
+    // a revision task. Reject it up front (contacts remain valid for the other roles, e.g. superintendent).
+    if (hasContact && role === "estimator") {
+      throw new AppError(400, "Estimator must be a staff user, not a contact.");
+    }
+    // Validate the provided identity FORMAT before the DB lookup: a truthy non-UUID id (e.g. "abc") would
+    // otherwise reach a `::uuid` comparison and surface as a generic Postgres 500 instead of a clean 400.
+    if (hasUser) assertValidUuid(userId, "userId");
+    if (hasContact) assertValidUuid(contactId, "contactId");
+
+    if (hasUser) {
+      // The referenced user must be ACTIVE and reachable from the active office — reuse the same
+      // office-scoped roster the assignable-users picker offers, so you can only assign a real teammate.
+      const officeId = req.user!.activeOfficeId ?? req.user!.officeId;
+      const roster = (await listUsers(officeId)) as Array<{ id: string; isActive: boolean }>;
+      const match = roster.find((u) => u.id === userId);
+      if (!match || !match.isActive) throw new AppError(400, "User is not an active member of this office");
+    } else {
+      // The referenced contact must exist and be active in the tenant directory.
+      const contact = await getContactById(req.tenantDb!, contactId);
+      if (!contact || !contact.isActive) throw new AppError(400, "Contact not found or inactive");
+    }
 
     const member = await addTeamMember(req.tenantDb!, {
       dealId: req.params.id,
-      userId,
+      userId: hasUser ? userId : null,
+      contactId: hasContact ? contactId : null,
       role,
       assignedBy: req.user!.id,
       notes,

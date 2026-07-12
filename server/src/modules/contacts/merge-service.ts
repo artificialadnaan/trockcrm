@@ -3,6 +3,7 @@ import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
   contacts,
   contactDealAssociations,
+  dealTeamMembers,
   deals,
   duplicateQueue,
   emails,
@@ -175,6 +176,38 @@ export async function mergeContacts(
     .update(tasks)
     .set({ contactId: winnerId })
     .where(eq(tasks.contactId, loserId));
+
+  // 4f. Repoint contact-backed deal_team_members rows from loser to winner. Mirrors transferAssociations'
+  // conflict handling: the partial unique index deal_team_members_deal_contact_role_uidx forbids two ACTIVE
+  // rows for the same (deal_id, contact_id, role), so where the winner is already an active member of the
+  // same deal+role, deactivate the loser's now-duplicate row instead of repointing it (which would collide);
+  // otherwise repoint. Inactive loser rows can always be repointed (the index only constrains active rows).
+  const loserTeamRows = await tenantDb
+    .select()
+    .from(dealTeamMembers)
+    .where(eq(dealTeamMembers.contactId, loserId));
+  if (loserTeamRows.length > 0) {
+    const winnerActiveRows = await tenantDb
+      .select({ dealId: dealTeamMembers.dealId, role: dealTeamMembers.role })
+      .from(dealTeamMembers)
+      .where(and(eq(dealTeamMembers.contactId, winnerId), eq(dealTeamMembers.isActive, true)));
+    const winnerActiveKeys = new Set(winnerActiveRows.map((r) => `${r.dealId}::${r.role}`));
+    for (const row of loserTeamRows) {
+      const collides = row.isActive && winnerActiveKeys.has(`${row.dealId}::${row.role}`);
+      if (collides) {
+        // Winner already covers this deal+role actively → drop the loser's duplicate instead of repointing.
+        await tenantDb
+          .update(dealTeamMembers)
+          .set({ isActive: false, updatedAt: new Date() })
+          .where(eq(dealTeamMembers.id, row.id));
+      } else {
+        await tenantDb
+          .update(dealTeamMembers)
+          .set({ contactId: winnerId, updatedAt: new Date() })
+          .where(eq(dealTeamMembers.id, row.id));
+      }
+    }
+  }
 
   // 6. Absorb missing fields from loser into winner
   const winnerContact = winnerContact0;

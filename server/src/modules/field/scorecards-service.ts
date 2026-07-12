@@ -30,6 +30,7 @@ import {
 import { AppError } from "../../middleware/error-handler.js";
 import { activeProjectWhere, assertActiveFieldProject, type FieldAccessContext } from "./projects-service.js";
 import { runInOffice, runInOfficeTransaction } from "./cross-office.js";
+import { resolveScorecardTeamEmails } from "../deals/team-service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 type ScorecardRow = typeof fieldScorecards.$inferSelect;
@@ -208,6 +209,11 @@ export async function createFieldScorecard(
   // job still exists and the worker sends a no-attachment fallback — the notification is never dropped.
   // Deterministic key matches what finalizeFieldScorecardArtifacts uploads.
   const pdfR2Key = scorecardPdfR2Key(input.office.slug, project.dealNumber, input.dealId, card.id);
+  // Route the scorecard email to the deal's assigned superintendent + project_manager (resolved from the
+  // active deal_team_members rows → linked user/contact email). Nulls when a role is unassigned or has no
+  // email — the worker just skips that CC. Read inside the submit txn so the recipients commit atomically
+  // with the card + job (durable outbox).
+  const teamEmails = await resolveScorecardTeamEmails(tenantDb, input.dealId);
   await tenantDb.insert(jobQueue).values({
     jobType: FIELD_SCORECARD_EMAIL_JOB,
     payload: {
@@ -222,6 +228,8 @@ export async function createFieldScorecard(
       averageScore,
       ratingLabel: formVersion === 2 ? scorecardV2RatingLabel(rating) : scorecardRatingLabel(rating),
       submittedByName: input.submittedByName ?? null,
+      superintendentEmail: teamEmails.superintendentEmail,
+      projectManagerEmail: teamEmails.projectManagerEmail,
       pdfR2Key,
       officeId: input.office.id,
     },

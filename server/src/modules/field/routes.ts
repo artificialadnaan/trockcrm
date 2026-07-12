@@ -73,6 +73,7 @@ import {
 } from "./cross-office.js";
 import { assertPhotosBelongToDeal, generatePublicToken } from "../public-photo-tokens/service.js";
 import { publicPhotoShareUrl } from "../public-photo-tokens/public-share-url.js";
+import { resolveScorecardTeamNames } from "../deals/team-service.js";
 
 // Default capture-target picker page size (mirrors searchPhotoUploadTargets' internal default), used as
 // the GLOBAL cap when the cross-office picker merges per-office results.
@@ -650,6 +651,34 @@ fieldRoutes.get("/projects/:dealId/reports", requireFieldContractor, async (req,
       "Project not found",
     );
     res.json({ ...value, ...officeTag(office) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// The deal's assigned Superintendent + PM NAMES, for the mobile scorecard header prefill. Field-scoped
+// (surface:"field") so T-Rock Cam can actually reach it — the CRM /deals/:id/team route rejects the field
+// surface. Read-only, resolves the deal's owning office like the other field project routes, and gates on
+// the deal being a browsable field project before returning names. Names come from the ACTIVE
+// superintendent/project_manager team rows with ACTIVE user/contact identities (shared resolver with the
+// scorecard-email CC), so the prefilled name is the same person the completed-scorecard email is sent to.
+fieldRoutes.get("/projects/:dealId/team", requireFieldContractor, async (req, res, next) => {
+  try {
+    const access = { userId: req.fieldUser!.id, userRole: req.fieldUser!.role };
+    const dealId = String(req.params.dealId);
+    assertValidUuid(dealId, "dealId");
+    const { value } = await withResolvedOffice(
+      "deal",
+      dealId,
+      async (officeDb) => {
+        // Gate to a browsable field project first (mirrors the other field project routes), so this can't
+        // leak team names for a deal the field app deliberately hides.
+        await assertActiveFieldProject(officeDb, access, dealId);
+        return resolveScorecardTeamNames(officeDb, dealId);
+      },
+      "Project not found",
+    );
+    res.json({ superintendentName: value.superintendentName, pmName: value.pmName });
   } catch (err) {
     next(err);
   }

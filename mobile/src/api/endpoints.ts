@@ -30,6 +30,7 @@ import type {
   ProjectScorecardsResponse,
   ScorecardDetailResponse,
   ScorecardDownloadResponse,
+  DealTeamResponse,
 } from "./types";
 import type { ScorecardSubmissionPayload } from "../scorecards/draft";
 
@@ -173,3 +174,11 @@ export const getScorecard = (f: Fetcher, id: string) =>
 // (view/[id].tsx) turns that into a "still generating" toast rather than a crash.
 export const getScorecardDownload = (f: Fetcher, id: string) =>
   f<ScorecardDownloadResponse>(`/field/scorecards/${id}/download`);
+
+// The deal's assigned Superintendent + PM NAMES — used ONLY to best-effort pre-fill a new scorecard's
+// header. FIELD-scoped route (/field/...): T-Rock Cam authenticates with surface:"field", which CRM auth
+// rejects on /deals routes, so the old /deals/:id/team could never be reached from the app — this field
+// route can. Any failure (network, timeout, a non-browsable deal) is swallowed by the caller and the names
+// simply stay empty, as they were before.
+export const getDealTeam = (f: Fetcher, dealId: string) =>
+  f<DealTeamResponse>(`/field/projects/${dealId}/team`);

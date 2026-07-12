@@ -8,6 +8,8 @@ import {
   scorecardDraftPhotosForSection,
   validateScorecardDraft,
   scorecardDraftToSubmission,
+  resolveScorecardTeamNames,
+  seedScorecardDraftTeam,
   type ScorecardDraft,
 } from "../draft";
 import { FIELD_SCORECARD_SECTION_KEYS } from "../scoring";
@@ -174,6 +176,59 @@ describe("appendActionItem", () => {
     d = scorecardDraftReducer(d, { type: "setActionItems", items: ["Keep"] });
     d = scorecardDraftReducer(d, { type: "appendActionItem", text: "   " });
     expect(d.actionItems).toEqual(["Keep"]);
+  });
+});
+
+describe("resolveScorecardTeamNames", () => {
+  it("passes the field route's resolved super + PM names through to the seed", () => {
+    const names = resolveScorecardTeamNames({ superintendentName: "Sam Super", pmName: "Pat PM" });
+    expect(names).toEqual({ superintendentName: "Sam Super", pmName: "Pat PM" });
+  });
+
+  it("skips blank/whitespace/null names and omits a role with none", () => {
+    const names = resolveScorecardTeamNames({ superintendentName: "   ", pmName: null });
+    expect(names.superintendentName).toBeUndefined();
+    expect(names.pmName).toBeUndefined();
+
+    const partial = resolveScorecardTeamNames({ superintendentName: "Real Super", pmName: null });
+    expect(partial).toEqual({ superintendentName: "Real Super" });
+    expect(partial.pmName).toBeUndefined();
+  });
+
+  it("returns an empty object when the team resolves to no names (or is missing)", () => {
+    expect(resolveScorecardTeamNames({ superintendentName: null, pmName: null })).toEqual({});
+    expect(resolveScorecardTeamNames(null)).toEqual({});
+    expect(resolveScorecardTeamNames(undefined)).toEqual({});
+  });
+});
+
+describe("seedScorecardDraftTeam", () => {
+  it("fills blank super/PM fields from resolved names, keeping them editable", () => {
+    const d = newDraft();
+    expect(d.superintendentName).toBe("");
+    const seeded = seedScorecardDraftTeam(d, { superintendentName: "Sam Super", pmName: "Pat PM" });
+    expect(seeded.superintendentName).toBe("Sam Super");
+    expect(seeded.pmName).toBe("Pat PM");
+    // Still a normal field — a later setHeader overrides the seed.
+    const edited = scorecardDraftReducer(seeded, { type: "setHeader", field: "pmName", value: "Someone Else" });
+    expect(edited.pmName).toBe("Someone Else");
+  });
+
+  it("never clobbers a name the user already typed", () => {
+    let d = newDraft();
+    d = scorecardDraftReducer(d, { type: "setHeader", field: "superintendentName", value: "Typed Super" });
+    const seeded = seedScorecardDraftTeam(d, { superintendentName: "CRM Super", pmName: "CRM PM" });
+    expect(seeded.superintendentName).toBe("Typed Super"); // preserved
+    expect(seeded.pmName).toBe("CRM PM"); // blank field still seeded
+  });
+
+  it("returns the SAME reference when there is nothing to seed (no needless autosave)", () => {
+    const d = newDraft();
+    expect(seedScorecardDraftTeam(d, {})).toBe(d);
+    // A resolved name that would fill an already-filled field is also a no-op.
+    let filled = scorecardDraftReducer(d, { type: "setHeader", field: "superintendentName", value: "Sam" });
+    filled = scorecardDraftReducer(filled, { type: "setHeader", field: "pmName", value: "Pat" });
+    expect(seedScorecardDraftTeam(filled, { superintendentName: "X", pmName: "Y" })).toBe(filled);
   });
 });
 
