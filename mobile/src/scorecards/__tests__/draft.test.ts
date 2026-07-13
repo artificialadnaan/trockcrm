@@ -48,6 +48,7 @@ describe("createScorecardDraft", () => {
     expect(d.dealId).toBe("deal-1");
     expect(Object.keys(d.scores)).toHaveLength(0);
     expect(d.photos).toEqual([]);
+    expect(d.evidenceUploadAttempted).toBe(false);
     expect(d.criticalDeficiencies).toEqual([]);
     expect(isScorecardDraftComplete(d)).toBe(false);
   });

@@ -369,6 +369,9 @@ function LeadershipForm(props: {
       setNotice({ tone: "error", text: "Finishing dictation — try Submit again in a moment." });
       return;
     }
+    // Freeze before the marker save so a second tap or a photo edit cannot race the captured payload.
+    setSubmitting(true);
+    setNotice(null);
     // A failed/partial upload can leave some evidence confirmed in the gallery while the card itself still
     // needs a retry. Mark this BEFORE draining so the list screen never offers an unsafe discard that would
     // orphan confirmed evidence.
@@ -383,11 +386,10 @@ function LeadershipForm(props: {
         await saveScorecardDraft(ownerKey, draftForSubmit, Date.now());
       } catch {
         setNotice({ tone: "error", text: "Couldn’t prepare evidence for submission. Please try again." });
+        setSubmitting(false);
         return;
       }
     }
-    setSubmitting(true);
-    setNotice(null);
     if (pendingRemovalIds.current.size > 0) {
       try {
         await removeQueuedUploads(ownerKey, [...pendingRemovalIds.current]);

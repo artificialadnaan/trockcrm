@@ -147,6 +147,7 @@ export function createScorecardDraft(input: {
     criticalDeficiencies: [],
     deficiencyNotes: {},
     actionItems: [],
+    evidenceUploadAttempted: false,
     superintendentSignature: "",
     pmSignature: "",
     createdAt: input.now,

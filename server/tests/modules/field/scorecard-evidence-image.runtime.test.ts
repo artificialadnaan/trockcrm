@@ -177,4 +177,17 @@ describe("prioritizeAndCapEvidencePhotos", () => {
     expect(keep).toHaveLength(60);
     expect(omitted).toBe(40);
   });
+
+  it("prioritizes leadership category evidence ahead of Project Summary photos", () => {
+    const rows = [
+      ...Array.from({ length: 60 }, (_, i) => row("project_summary", `summary-${i}`)),
+      row("safety", "safety-1"),
+      row("quality_control", "quality-1"),
+    ];
+    const { keep, omitted } = prioritizeAndCapEvidencePhotos(rows, 60, "leadership");
+    expect(keep.map((item) => item.id)).toContain("safety-1");
+    expect(keep.map((item) => item.id)).toContain("quality-1");
+    expect(keep.filter((item) => item.sectionKey === "project_summary")).toHaveLength(58);
+    expect(omitted).toBe(2);
+  });
 });

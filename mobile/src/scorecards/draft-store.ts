@@ -16,6 +16,17 @@ const ROOT = `${FileSystem.documentDirectory}scorecard-drafts/`;
 // they would clobber each other from stale snapshots. Reads (listScorecardDrafts/loadScorecardDraft) stay
 // lock-free — writeIndex is atomic (tmp + move), so a read always sees a whole index, never a torn one.
 const withDraftLock = createAsyncMutex();
+// Deletion must beat any autosave already queued by an open draft screen.
+const discardedDraftIdsByOwner = new Map<string, Set<string>>();
+
+function discardedDraftIds(ownerKey: string): Set<string> {
+  let ids = discardedDraftIdsByOwner.get(ownerKey);
+  if (!ids) {
+    ids = new Set();
+    discardedDraftIdsByOwner.set(ownerKey, ids);
+  }
+  return ids;
+}
 
 function ownerDir(ownerKey: string): string {
   return `${ROOT}${sanitizeOwnerKey(ownerKey)}/`;
@@ -73,6 +84,7 @@ async function writeIndex(ownerKey: string, drafts: ScorecardDraft[]): Promise<v
 /** Upsert a draft (stamping updatedAt at persist time — the reducer stays pure/time-free). */
 export async function saveScorecardDraft(ownerKey: string, draft: ScorecardDraft, now: number): Promise<void> {
   await withDraftLock(async () => {
+    if (discardedDraftIds(ownerKey).has(draft.id)) return;
     const drafts = await listScorecardDrafts(ownerKey);
     const stamped = { ...draft, updatedAt: now };
     const idx = drafts.findIndex((d) => d.id === draft.id);
@@ -88,6 +100,8 @@ export async function loadScorecardDraft(ownerKey: string, draftId: string): Pro
 }
 
 export async function deleteScorecardDraft(ownerKey: string, draftId: string): Promise<void> {
+  // Set before waiting on the mutex so an already-queued autosave cannot recreate this draft.
+  discardedDraftIds(ownerKey).add(draftId);
   await withDraftLock(async () => {
     const drafts = await listScorecardDrafts(ownerKey);
     await writeIndex(ownerKey, drafts.filter((d) => d.id !== draftId));
