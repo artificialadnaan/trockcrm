@@ -6,6 +6,9 @@ export type EstimatorPipelineTargetKey = (typeof ESTIMATOR_PIPELINE_TARGET_KEYS)
 export const ESTIMATOR_PIPELINE_BUCKETS = ["target", "other", "missing"] as const;
 export type EstimatorPipelineBucket = (typeof ESTIMATOR_PIPELINE_BUCKETS)[number];
 
+export const ESTIMATOR_PIPELINE_COHORTS = ["open", "won"] as const;
+export type EstimatorPipelineCohort = (typeof ESTIMATOR_PIPELINE_COHORTS)[number];
+
 export interface EstimatorPipelineMetric {
   count: number;
   value: number;
@@ -25,28 +28,44 @@ export interface EstimatorPipelineTargetSummary extends EstimatorPipelineMetric 
   estimatorName: string;
   resolved: boolean;
   active: boolean | null;
+  won: EstimatorPipelineMetric;
   stages: EstimatorPipelineStageSummary[];
 }
 
 export interface EstimatorPipelineOtherSummary extends EstimatorPipelineMetric {
+  won: EstimatorPipelineMetric;
   stages: EstimatorPipelineStageSummary[];
 }
 
 export interface EstimatorPipelineMissingSummary extends EstimatorPipelineMetric {
   actionableCount: number;
   actionableValue: number;
+  won: EstimatorPipelineMetric;
   stages: EstimatorPipelineStageSummary[];
+}
+
+export interface EstimatorPipelineWonPeriod {
+  from: string;
+  to: string;
+  label: "Won YTD";
 }
 
 export interface EstimatorPipelineReport {
   generatedAt: string;
   scope: {
     kind: "active_office";
-    cohort: "current_open_pipeline";
+    cohort: "current_open_pipeline_plus_won_ytd";
     note: string;
   };
+  /** @deprecated Use valueBasisLabels.open. Retained for rolling-deploy compatibility. */
   valueBasisLabel: "Best current estimate";
+  valueBasisLabels: {
+    open: "Best current estimate";
+    won: "Awarded-first won value";
+  };
   pipeline: EstimatorPipelineMetric;
+  won: EstimatorPipelineMetric;
+  wonPeriod: EstimatorPipelineWonPeriod;
   stageColumns: EstimatorPipelineStageColumn[];
   estimators: EstimatorPipelineTargetSummary[];
   otherAssigned: EstimatorPipelineOtherSummary;
@@ -76,6 +95,7 @@ export interface EstimatorPipelineEvidenceRecord {
   daysInStage: number | null;
   pipelineValue: number;
   expectedCloseDate: string | null;
+  wonClosedDate: string | null;
   estimatorUserId: string | null;
   estimatorName: string | null;
   estimatorActive: boolean | null;
@@ -87,11 +107,14 @@ export interface EstimatorPipelineEvidenceRecord {
 export interface EstimatorPipelineEvidenceResponse {
   generatedAt: string;
   filter: {
+    cohort: EstimatorPipelineCohort;
     bucket: EstimatorPipelineBucket;
     estimatorKey: EstimatorPipelineTargetKey | null;
     estimatorName: string | null;
     stageSlug: string | null;
     stageLabel: string | null;
+    valueBasisLabel: "Best current estimate" | "Awarded-first won value";
+    period: EstimatorPipelineWonPeriod | null;
   };
   total: EstimatorPipelineMetric;
   pagination: {

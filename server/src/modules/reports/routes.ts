@@ -1,8 +1,10 @@
 import { Router, type Request } from "express";
 import {
   ESTIMATOR_PIPELINE_BUCKETS,
+  ESTIMATOR_PIPELINE_COHORTS,
   ESTIMATOR_PIPELINE_TARGET_KEYS,
   type EstimatorPipelineBucket,
+  type EstimatorPipelineCohort,
   type EstimatorPipelineTargetKey,
 } from "@trock-crm/shared/types";
 import { requireRole, requireDirector } from "../../middleware/rbac.js";
@@ -189,6 +191,11 @@ function readPositiveInteger(value: unknown, label: string, fallback: number, ma
 export function parseEstimatorPipelineEvidenceQuery(
   query: Record<string, unknown>,
 ): EstimatorPipelineEvidenceOptions {
+  const cohortRaw = pickQueryValue(query.cohort) ?? "open";
+  if (!(ESTIMATOR_PIPELINE_COHORTS as readonly string[]).includes(cohortRaw)) {
+    throw new AppError(400, "cohort must be one of open or won");
+  }
+  const cohort = cohortRaw as EstimatorPipelineCohort;
   const bucketRaw = pickQueryValue(query.bucket);
   if (!bucketRaw || !(ESTIMATOR_PIPELINE_BUCKETS as readonly string[]).includes(bucketRaw)) {
     throw new AppError(400, "bucket must be one of target, other, or missing");
@@ -209,8 +216,14 @@ export function parseEstimatorPipelineEvidenceQuery(
   if (stageSlug && !/^[a-z0-9_]{1,100}$/.test(stageSlug)) {
     throw new AppError(400, "stageSlug must be a canonical pipeline stage slug");
   }
+  const asOf = readOptionalIsoDate(query.asOf, "asOf");
+  if (asOf && cohort !== "won") {
+    throw new AppError(400, "asOf is only valid when cohort=won");
+  }
 
   return {
+    cohort,
+    asOf,
     bucket,
     estimatorKey,
     stageSlug,
@@ -1236,8 +1249,9 @@ router.get("/monday-showcase/evidence", requireAnyRole, async (req, res, next) =
   }
 });
 
-// Live current-pipeline attribution for the two configured estimators, plus a reconciled assignment-gap
-// queue. Leadership-only because the evidence is office-wide and estimator edits affect commissions.
+// Live open-pipeline attribution plus a canonical Won-YTD cohort for the two configured estimators, with a
+// reconciled assignment-gap queue. Leadership-only because the evidence is office-wide and estimator edits
+// affect commissions.
 router.get("/estimator-pipeline", requireDirector, async (req, res, next) => {
   try {
     const data = await getEstimatorPipelineReport(req.tenantDb!);

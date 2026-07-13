@@ -1,9 +1,17 @@
-import type { EstimatorPipelineBucket, EstimatorPipelineTargetKey } from "@trock-crm/shared/types";
+import type {
+  EstimatorPipelineBucket,
+  EstimatorPipelineTargetKey,
+  EstimatorPipelineWonPeriod,
+} from "@trock-crm/shared/types";
 
-export interface EstimatorDrillSelection {
+interface EstimatorDrillSelectionBase {
   bucket: EstimatorPipelineBucket;
   estimatorKey?: EstimatorPipelineTargetKey;
-  stageSlug?: string;
   title: string;
   description: string;
 }
+
+export type EstimatorDrillSelection = EstimatorDrillSelectionBase & (
+  | { cohort: "open"; stageSlug?: string; period?: never }
+  | { cohort: "won"; stageSlug?: never; period: EstimatorPipelineWonPeriod }
+);

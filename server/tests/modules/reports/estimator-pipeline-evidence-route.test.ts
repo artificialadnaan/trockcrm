@@ -2,6 +2,14 @@ import { describe, expect, it } from "vitest";
 import { parseEstimatorPipelineEvidenceQuery } from "../../../src/modules/reports/routes.js";
 
 describe("parseEstimatorPipelineEvidenceQuery", () => {
+  it("defaults evidence to the open cohort and validates an explicit cohort", () => {
+    expect(parseEstimatorPipelineEvidenceQuery({ bucket: "missing" }).cohort).toBe("open");
+    expect(parseEstimatorPipelineEvidenceQuery({ bucket: "missing", cohort: "won" }).cohort).toBe("won");
+    expect(() => parseEstimatorPipelineEvidenceQuery({ bucket: "missing", cohort: "lost" })).toThrow(
+      /cohort/,
+    );
+  });
+
   it("requires one of the report's three evidence buckets", () => {
     expect(() => parseEstimatorPipelineEvidenceQuery({})).toThrow(/bucket/);
     expect(() => parseEstimatorPipelineEvidenceQuery({ bucket: "everyone" })).toThrow(/bucket/);
@@ -23,6 +31,8 @@ describe("parseEstimatorPipelineEvidenceQuery", () => {
   it("accepts each configured target and applies pagination defaults", () => {
     for (const estimatorKey of ["sidney_gibson", "alex_koch"] as const) {
       expect(parseEstimatorPipelineEvidenceQuery({ bucket: "target", estimatorKey })).toEqual({
+        cohort: "open",
+        asOf: undefined,
         bucket: "target",
         estimatorKey,
         stageSlug: undefined,
@@ -31,6 +41,8 @@ describe("parseEstimatorPipelineEvidenceQuery", () => {
       });
     }
     expect(parseEstimatorPipelineEvidenceQuery({ bucket: "missing" })).toEqual({
+      cohort: "open",
+      asOf: undefined,
       bucket: "missing",
       estimatorKey: undefined,
       stageSlug: undefined,
@@ -42,22 +54,35 @@ describe("parseEstimatorPipelineEvidenceQuery", () => {
   it("trims a canonical stage slug and parses bounded positive pagination", () => {
     expect(
       parseEstimatorPipelineEvidenceQuery({
+        cohort: "won",
+        asOf: "2026-07-13",
         bucket: "target",
         estimatorKey: "alex_koch",
-        stageSlug: "  service_estimating  ",
+        stageSlug: "  won  ",
         page: ["3", "4"],
         pageSize: "100",
       }),
     ).toEqual({
+      cohort: "won",
+      asOf: "2026-07-13",
       bucket: "target",
       estimatorKey: "alex_koch",
-      stageSlug: "service_estimating",
+      stageSlug: "won",
       page: 3,
       pageSize: 100,
     });
   });
 
   it("rejects malformed stage slugs and invalid pagination", () => {
+    expect(() => parseEstimatorPipelineEvidenceQuery({ bucket: "missing", asOf: "2026-07-13" })).toThrow(
+      /asOf.*cohort=won/,
+    );
+    for (const asOf of ["07-13-2026", "2026-02-30"]) {
+      expect(() => parseEstimatorPipelineEvidenceQuery({ cohort: "won", bucket: "missing", asOf })).toThrow(
+        /asOf/,
+      );
+    }
+
     for (const stageSlug of ["Estimate-Sent", "stage name", "won;drop_table", "x".repeat(101)]) {
       expect(() =>
         parseEstimatorPipelineEvidenceQuery({ bucket: "missing", stageSlug }),

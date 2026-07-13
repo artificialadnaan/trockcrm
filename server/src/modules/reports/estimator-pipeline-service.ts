@@ -8,19 +8,24 @@ import {
   toCanonicalDealStageSlug,
   type EstimatorAssignmentIssue,
   type EstimatorPipelineBucket,
+  type EstimatorPipelineCohort,
   type EstimatorPipelineEvidenceRecord,
   type EstimatorPipelineEvidenceResponse,
   type EstimatorPipelineMetric,
   type EstimatorPipelineReport,
   type EstimatorPipelineStageSummary,
   type EstimatorPipelineTargetKey,
+  type EstimatorPipelineWonPeriod,
   type WorkflowRoute,
 } from "@trock-crm/shared/types";
 import {
   aliasedActiveDealCountFilterSql,
   aliasedBidBoardTerminalSql,
+  aliasedWonHsClosedWonDateSql,
 } from "../shared/deal-value-sql.js";
+import { WON_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
 import { aliasedEffectiveStageAgeDaysSql } from "../deals/deal-filter-predicates.js";
+import { getWtdPeriod } from "../../lib/period.js";
 import { dealValueSqlForBasis } from "./foundations.js";
 
 const { companies, deals, pipelineStageConfig, properties, users } = schema;
@@ -45,7 +50,35 @@ const ACTIONABLE_MISSING_STAGE_SLUGS = new Set([
 
 const UNASSIGNED_LEGACY_KEYS = new Set(["not assigned", "unassigned", "n/a", "na", "none", "tbd"]);
 const openValueSql = () => dealValueSqlForBasis("d", "open_best_estimate");
+const wonValueSql = () => dealValueSqlForBasis("d", "won_awarded_first");
 const effectiveStageSql = () => sql`COALESCE(NULLIF(d.bid_board_stage_slug, ''), psc.slug)`;
+const wonDateSql = () => aliasedWonHsClosedWonDateSql("d");
+const wonStageSlugsSql = () => sql.join(WON_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `);
+const VALUE_BASIS_LABELS = {
+  open: "Best current estimate",
+  won: "Awarded-first won value",
+} as const;
+
+function wonYtdPeriod(now: Date): EstimatorPipelineWonPeriod {
+  const { from, to } = getWtdPeriod("ytd", now);
+  return { from, to, label: "Won YTD" };
+}
+
+function wonYtdPeriodForEvidence(asOf: string | undefined, now: Date): EstimatorPipelineWonPeriod {
+  if (!asOf) return wonYtdPeriod(now);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(asOf)) {
+    throw new Error("Estimator pipeline evidence asOf must be an ISO date");
+  }
+  const anchor = new Date(`${asOf}T12:00:00.000Z`);
+  if (Number.isNaN(anchor.getTime()) || anchor.toISOString().slice(0, 10) !== asOf) {
+    throw new Error("Estimator pipeline evidence asOf must be a valid ISO date");
+  }
+  return wonYtdPeriod(anchor);
+}
+
+function cohortValueSql(cohort: EstimatorPipelineCohort): SQL {
+  return cohort === "won" ? wonValueSql() : openValueSql();
+}
 
 function rowsFromExecute<T>(result: unknown): T[] {
   if (Array.isArray(result)) return result as T[];
@@ -77,15 +110,27 @@ function addMetric(target: EstimatorPipelineMetric, count: number, value: number
  * Current, actionable base-project scope shared byte-for-byte by the overview and evidence queries.
  * The tenant itself is selected by req.tenantDb/X-Office-ID; never filter on the estimator's home office.
  */
-export function estimatorPipelineScopeSql(): SQL {
-  return sql`
+export function estimatorPipelineScopeSql(
+  cohort: EstimatorPipelineCohort = "open",
+  period?: EstimatorPipelineWonPeriod,
+): SQL {
+  const baseScope = sql`
     d.is_active = true
     AND COALESCE(d.is_test_data, false) = false
     AND COALESCE(d.is_change_order, false) = false
     AND ${aliasedActiveDealCountFilterSql("d")}
-    AND psc.is_terminal = false
-    AND NOT ${aliasedBidBoardTerminalSql("d")}
   `;
+  if (cohort === "open") {
+    return sql`${baseScope}
+      AND psc.is_terminal = false
+      AND NOT ${aliasedBidBoardTerminalSql("d")}`;
+  }
+  if (!period) throw new Error("Won estimator pipeline scope requires a YTD period");
+  return sql`${baseScope}
+    AND ${effectiveStageSql()} IN (${wonStageSlugsSql()})
+    AND ${wonDateSql()} IS NOT NULL
+    AND ${wonDateSql()} >= ${period.from}::date
+    AND ${wonDateSql()} <= ${period.to}::date`;
 }
 
 export function buildEstimatorTargetUsersSql(): SQL {
@@ -103,7 +148,10 @@ export function buildEstimatorTargetUsersSql(): SQL {
   `;
 }
 
-export function buildEstimatorPipelineSummarySql(): SQL {
+export function buildEstimatorPipelineSummarySql(
+  cohort: EstimatorPipelineCohort = "open",
+  period?: EstimatorPipelineWonPeriod,
+): SQL {
   return sql`
     SELECT d.estimator_user_id AS estimator_user_id,
            ${effectiveStageSql()} AS stage_slug,
@@ -111,10 +159,10 @@ export function buildEstimatorPipelineSummarySql(): SQL {
            MIN(psc.name) AS stage_label,
            MIN(psc.display_order)::int AS display_order,
            COUNT(*)::int AS project_count,
-           COALESCE(SUM(${openValueSql()}), 0)::numeric AS pipeline_value
+           COALESCE(SUM(${cohortValueSql(cohort)}), 0)::numeric AS pipeline_value
     FROM ${deals} d
     JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
-    WHERE ${estimatorPipelineScopeSql()}
+    WHERE ${estimatorPipelineScopeSql(cohort, period)}
     GROUP BY d.estimator_user_id, ${effectiveStageSql()}, d.workflow_route
     ORDER BY MIN(psc.display_order) ASC, MIN(psc.name) ASC
   `;
@@ -209,24 +257,40 @@ function sortedStages(map: Map<string, EstimatorPipelineStageSummary>): Estimato
   );
 }
 
-export async function getEstimatorPipelineReport(tenantDb: TenantDb): Promise<EstimatorPipelineReport> {
-  const [targets, rawRows] = await Promise.all([
-    resolveTargets(tenantDb),
-    tenantDb.execute(buildEstimatorPipelineSummarySql()).then(rowsFromExecute<SummaryRow>),
-  ]);
+export async function getEstimatorPipelineReport(
+  tenantDb: TenantDb,
+  now: Date = new Date(),
+): Promise<EstimatorPipelineReport> {
+  const wonPeriod = wonYtdPeriod(now);
+  // tenantDb is a single transaction-bound pg client. Run these in sequence so later queries do not spend
+  // their query_timeout budget waiting behind earlier work in the same client queue.
+  const targets = await resolveTargets(tenantDb);
+  const rawRows = rowsFromExecute<SummaryRow>(await tenantDb.execute(buildEstimatorPipelineSummarySql()));
+  const rawWonRows = rowsFromExecute<SummaryRow>(
+    await tenantDb.execute(buildEstimatorPipelineSummarySql("won", wonPeriod)),
+  );
 
   const targetById = new Map(
     targets.flatMap((target) => (target.userId ? [[target.userId, target.key] as const] : [])),
   );
   const targetMetrics = new Map(
-    ESTIMATOR_PIPELINE_TARGET_KEYS.map((key) => [key, { ...emptyMetric(), stages: new Map<string, EstimatorPipelineStageSummary>() }]),
+    ESTIMATOR_PIPELINE_TARGET_KEYS.map((key) => [
+      key,
+      { ...emptyMetric(), won: emptyMetric(), stages: new Map<string, EstimatorPipelineStageSummary>() },
+    ]),
   );
   const pipeline = emptyMetric();
-  const otherAssigned = { ...emptyMetric(), stages: new Map<string, EstimatorPipelineStageSummary>() };
+  const won = emptyMetric();
+  const otherAssigned = {
+    ...emptyMetric(),
+    won: emptyMetric(),
+    stages: new Map<string, EstimatorPipelineStageSummary>(),
+  };
   const missingEstimator = {
     ...emptyMetric(),
     actionableCount: 0,
     actionableValue: 0,
+    won: emptyMetric(),
     stages: new Map<string, EstimatorPipelineStageSummary>(),
   };
   const stageColumns = new Map<string, EstimatorPipelineStageSummary>();
@@ -266,6 +330,25 @@ export async function getEstimatorPipelineReport(tenantDb: TenantDb): Promise<Es
     mergeStage(otherAssigned.stages, stage, count, value);
   }
 
+  for (const row of rawWonRows) {
+    const count = num(row.project_count);
+    const value = money(row.pipeline_value);
+    addMetric(won, count, value);
+
+    if (row.estimator_user_id == null) {
+      addMetric(missingEstimator.won, count, value);
+      continue;
+    }
+
+    const targetKey = targetById.get(String(row.estimator_user_id));
+    if (targetKey) {
+      addMetric(targetMetrics.get(targetKey)!.won, count, value);
+      continue;
+    }
+
+    addMetric(otherAssigned.won, count, value);
+  }
+
   const warnings: string[] = [];
   for (const target of targets) {
     if (!target.resolved) {
@@ -276,14 +359,18 @@ export async function getEstimatorPipelineReport(tenantDb: TenantDb): Promise<Es
   }
 
   return {
-    generatedAt: new Date().toISOString(),
+    generatedAt: now.toISOString(),
     scope: {
       kind: "active_office",
-      cohort: "current_open_pipeline",
-      note: "Current active base projects in the selected office. Test, held, change-order, and terminal projects are excluded.",
+      cohort: "current_open_pipeline_plus_won_ytd",
+      note: "Current open base projects plus year-to-date Won base projects in the selected office. Test, held, change-order, Lost, and soft-deleted projects are excluded.",
     },
-    valueBasisLabel: "Best current estimate",
+    // Keep the original field during the additive API rollout so already-open clients remain compatible.
+    valueBasisLabel: VALUE_BASIS_LABELS.open,
+    valueBasisLabels: VALUE_BASIS_LABELS,
     pipeline,
+    won,
+    wonPeriod,
     stageColumns: sortedStages(stageColumns).map(({ stageSlug, stageLabel, displayOrder }) => ({
       stageSlug,
       stageLabel,
@@ -300,12 +387,14 @@ export async function getEstimatorPipelineReport(tenantDb: TenantDb): Promise<Es
         active: target.active,
         count: metric.count,
         value: metric.value,
+        won: metric.won,
         stages: sortedStages(metric.stages),
       };
     }),
     otherAssigned: {
       count: otherAssigned.count,
       value: otherAssigned.value,
+      won: otherAssigned.won,
       stages: sortedStages(otherAssigned.stages),
     },
     missingEstimator: {
@@ -313,6 +402,7 @@ export async function getEstimatorPipelineReport(tenantDb: TenantDb): Promise<Es
       value: missingEstimator.value,
       actionableCount: missingEstimator.actionableCount,
       actionableValue: missingEstimator.actionableValue,
+      won: missingEstimator.won,
       stages: sortedStages(missingEstimator.stages),
     },
     warnings,
@@ -325,10 +415,13 @@ function targetIdFilterSql(targetIds: string[]): SQL {
 }
 
 export function buildEstimatorPipelineEvidenceSql(input: {
+  cohort?: EstimatorPipelineCohort;
+  period?: EstimatorPipelineWonPeriod;
   bucket: EstimatorPipelineBucket;
   estimatorUserId?: string | null;
   targetEstimatorIds?: string[];
 }): SQL {
+  const cohort = input.cohort ?? "open";
   const bucketFilter =
     input.bucket === "missing"
       ? sql`d.estimator_user_id IS NULL`
@@ -350,8 +443,9 @@ export function buildEstimatorPipelineEvidenceSql(input: {
            psc.display_order::int AS display_order,
            d.workflow_route AS workflow_route,
            ${aliasedEffectiveStageAgeDaysSql("d")}::int AS days_in_stage,
-           COALESCE(${openValueSql()}, 0)::numeric AS pipeline_value,
+           COALESCE(${cohortValueSql(cohort)}, 0)::numeric AS pipeline_value,
            d.expected_close_date AS expected_close_date,
+           d.won_closed_date AS won_closed_date,
            d.estimator_user_id AS estimator_user_id,
            estimator_user.display_name AS estimator_name,
            estimator_user.is_active AS estimator_active,
@@ -363,7 +457,7 @@ export function buildEstimatorPipelineEvidenceSql(input: {
     LEFT JOIN ${users} estimator_user ON estimator_user.id = d.estimator_user_id
     LEFT JOIN ${companies} c ON c.id = d.company_id
     LEFT JOIN ${properties} p ON p.id = d.property_id
-    WHERE ${estimatorPipelineScopeSql()}
+    WHERE ${estimatorPipelineScopeSql(cohort, input.period)}
       AND ${bucketFilter}
     ORDER BY psc.display_order ASC, pipeline_value DESC, d.name ASC
   `;
@@ -385,6 +479,7 @@ interface EvidenceRow {
   days_in_stage: unknown;
   pipeline_value: unknown;
   expected_close_date: unknown;
+  won_closed_date: unknown;
   estimator_user_id: string | null;
   estimator_name: string | null;
   estimator_active: boolean | null;
@@ -422,6 +517,7 @@ function mapEvidenceRow(row: EvidenceRow): EstimatorPipelineEvidenceRecord {
     daysInStage: row.days_in_stage == null ? null : num(row.days_in_stage),
     pipelineValue: money(row.pipeline_value),
     expectedCloseDate: row.expected_close_date == null ? null : String(row.expected_close_date).slice(0, 10),
+    wonClosedDate: row.won_closed_date == null ? null : String(row.won_closed_date).slice(0, 10),
     estimatorUserId: row.estimator_user_id == null ? null : String(row.estimator_user_id),
     estimatorName: row.estimator_name == null ? null : String(row.estimator_name),
     estimatorActive: row.estimator_active == null ? null : Boolean(row.estimator_active),
@@ -432,17 +528,23 @@ function mapEvidenceRow(row: EvidenceRow): EstimatorPipelineEvidenceRecord {
 }
 
 export interface EstimatorPipelineEvidenceOptions {
+  cohort?: EstimatorPipelineCohort;
+  asOf?: string;
   bucket: EstimatorPipelineBucket;
   estimatorKey?: EstimatorPipelineTargetKey;
   stageSlug?: string;
   page?: number;
   pageSize?: number;
+  now?: Date;
 }
 
 export async function getEstimatorPipelineEvidence(
   tenantDb: TenantDb,
   options: EstimatorPipelineEvidenceOptions,
 ): Promise<EstimatorPipelineEvidenceResponse> {
+  const now = options.now ?? new Date();
+  const cohort = options.cohort ?? "open";
+  const period = cohort === "won" ? wonYtdPeriodForEvidence(options.asOf, now) : null;
   const targets = await resolveTargets(tenantDb);
   const selectedTarget = options.estimatorKey
     ? targets.find((target) => target.key === options.estimatorKey) ?? null
@@ -459,6 +561,8 @@ export async function getEstimatorPipelineEvidence(
       : rowsFromExecute<EvidenceRow>(
           await tenantDb.execute(
             buildEstimatorPipelineEvidenceSql({
+              cohort,
+              period: period ?? undefined,
               bucket: options.bucket,
               estimatorUserId: selectedTarget?.userId,
               targetEstimatorIds: targetIds,
@@ -491,13 +595,16 @@ export async function getEstimatorPipelineEvidence(
     : null;
 
   return {
-    generatedAt: new Date().toISOString(),
+    generatedAt: now.toISOString(),
     filter: {
+      cohort,
       bucket: options.bucket,
       estimatorKey: selectedTarget?.key ?? null,
       estimatorName: selectedTarget?.name ?? null,
       stageSlug: options.stageSlug ?? null,
       stageLabel,
+      valueBasisLabel: VALUE_BASIS_LABELS[cohort],
+      period,
     },
     total,
     pagination: { page, pageSize, total: total.count, totalPages },
