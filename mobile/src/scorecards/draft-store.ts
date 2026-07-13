@@ -102,18 +102,22 @@ export async function loadScorecardDraft(ownerKey: string, draftId: string): Pro
 export async function deleteScorecardDraft(ownerKey: string, draftId: string): Promise<void> {
   // Set before waiting on the mutex so an already-queued autosave cannot recreate this draft.
   discardedDraftIds(ownerKey).add(draftId);
-  await withDraftLock(async () => {
-    const drafts = await listScorecardDrafts(ownerKey);
-    await writeIndex(ownerKey, drafts.filter((d) => d.id !== draftId));
-    // Clean up the draft's copied photos UNDER THE SAME LOCK so a concurrent saveScorecardDraft can't
-    // resurrect the index entry while its photo dir is being deleted (which would leave a restored draft
-    // pointing at missing photos). One lock coordinates both the index update and the photo cleanup.
-    try {
-      await FileSystem.deleteAsync(photoDir(ownerKey, draftId), { idempotent: true });
-    } catch {
-      /* best-effort */
-    }
-  });
+  try {
+    await withDraftLock(async () => {
+      const drafts = await listScorecardDrafts(ownerKey);
+      await writeIndex(ownerKey, drafts.filter((d) => d.id !== draftId));
+      // Clean up the draft's copied photos UNDER THE SAME LOCK so a concurrent saveScorecardDraft can't
+      // resurrect the index entry while its photo dir is being deleted.
+      try {
+        await FileSystem.deleteAsync(photoDir(ownerKey, draftId), { idempotent: true });
+      } catch {
+        /* best-effort */
+      }
+    });
+  } catch (error) {
+    discardedDraftIds(ownerKey).delete(draftId);
+    throw error;
+  }
 }
 
 /**

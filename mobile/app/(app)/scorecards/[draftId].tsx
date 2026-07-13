@@ -425,7 +425,6 @@ function Wizard(props: {
     let draftForSubmit = draft;
     if (draft.photos.length > 0 && !draft.evidenceUploadAttempted) {
       draftForSubmit = { ...draft, evidenceUploadAttempted: true };
-      dispatch({ type: "markEvidenceUploadAttempted" });
       try {
         // Flush earlier autosaves, then durably write the safety marker before the first upload can finish.
         // A kill/restart between a partial upload and the next React effect must still block discard.
@@ -436,6 +435,7 @@ function Wizard(props: {
         setSubmitting(false);
         return;
       }
+      dispatch({ type: "markEvidenceUploadAttempted" });
     }
     // Retry-cancel any still-pending photo removals, so the drain in submitScorecard can't upload a
     // just-removed photo. Only clear on success — a failure keeps the ids pending AND blocks submit

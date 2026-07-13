@@ -378,7 +378,6 @@ function LeadershipForm(props: {
     let draftForSubmit = draft;
     if (draft.photos.length > 0 && !draft.evidenceUploadAttempted) {
       draftForSubmit = { ...draft, evidenceUploadAttempted: true };
-      dispatch({ type: "markEvidenceUploadAttempted" });
       try {
         // Flush earlier autosaves, then durably write the safety marker before the first upload can finish.
         // A kill/restart between a partial upload and the next React effect must still block discard.
@@ -389,6 +388,7 @@ function LeadershipForm(props: {
         setSubmitting(false);
         return;
       }
+      dispatch({ type: "markEvidenceUploadAttempted" });
     }
     if (pendingRemovalIds.current.size > 0) {
       try {

@@ -132,7 +132,7 @@ export default function ScorecardsScreen() {
   function confirmDiscard(draft: ScorecardDraft) {
     // Legacy photo drafts may have completed a partial upload before this marker existed. Treat them as
     // unsafe to discard; new drafts persist false until upload actually starts.
-    if (draft.photos.length > 0 && draft.evidenceUploadAttempted !== false) {
+    if (draft.evidenceUploadAttempted || (draft.photos.length > 0 && draft.evidenceUploadAttempted !== false)) {
       Alert.alert(
         "Finish this scorecard instead",
         "Evidence upload already started, so some photos may be in the project gallery. Complete and submit this scorecard rather than discarding it.",
