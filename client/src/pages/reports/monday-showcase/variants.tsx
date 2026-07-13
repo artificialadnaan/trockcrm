@@ -35,36 +35,37 @@ function CoverageCaption({ ladder }: { ladder: ProjectionLadder }) {
 }
 
 /**
- * The B4 "No future close date" card — the M − N complement of the four dated bands. Count = m − n (open
- * deals lacking a future-dated close date), $ = coverage.undatedValue (the open best-estimate of exactly
- * those deals). Together with the four bands this makes the forecast row partition EXACTLY: office M ==
- * Σ band counts (the dated Total = N) + undated (M − N). Clicking drills into the `undated` evidence list,
- * where each row can set a close date inline (the deal then leaves this card and re-bands). Amber marks it
- * a blind spot, distinct from the violet dated bands.
+ * Blind-spot cards split the M − N complement of the four dated bands into stale past dates and dates that
+ * were never submitted. Both remain clickable evidence lists; amber/rose styling keeps them distinct from
+ * the violet dated bands.
  */
-function UndatedCard({
-  coverage,
+function BlindSpotCard({
+  label,
+  value,
+  count,
+  metric,
   request,
   emphasis,
 }: {
-  coverage: ProjectionLadder["coverage"];
+  label: string;
+  value: number;
+  count: number;
+  metric: "no_date" | "stale";
   request: EvidenceRequest;
   emphasis: "office" | "rep";
 }) {
-  // Clamp at 0 so a transient/garbled payload can never render a negative count; usd() already guards $.
-  const undatedCount = Math.max(0, coverage.m - coverage.n);
   const office = emphasis === "office";
   return (
     <DrillNumber request={request} className="block">
       <div className={`rounded-lg border ${office ? "border-amber-300" : "border-amber-200"} border-l-4 border-l-amber-500 bg-amber-50/70 p-2 text-center`}>
         <div className="flex items-center justify-center gap-1">
-          <span className="text-[10px] font-bold uppercase tracking-wide text-amber-700">No date</span>
+          <span className={`text-[10px] font-bold uppercase tracking-wide ${metric === "stale" ? "text-rose-700" : "text-amber-700"}`}>{label}</span>
         </div>
         <div className={`mt-0.5 text-sm tabular-nums text-slate-900 ${office ? "font-black" : "font-bold"}`}>
-          {usd(coverage.undatedValue)}
+          {usd(value)}
         </div>
-        <div className="mt-1 inline-block rounded bg-amber-200 px-1.5 py-0.5 text-[10px] tabular-nums text-amber-800">
-          {int(undatedCount)} undated
+        <div className={`mt-1 inline-block rounded px-1.5 py-0.5 text-[10px] tabular-nums ${metric === "stale" ? "bg-rose-200 text-rose-800" : "bg-amber-200 text-amber-800"}`}>
+          {int(Math.max(0, count))} {metric === "stale" ? "stale" : "no date"}
         </div>
       </div>
     </DrillNumber>
@@ -407,7 +408,7 @@ export function VariantB4ForecastLadder({ data }: { data: MondayShowcaseData }) 
             {usd(officeTotalValue)} projected
           </span>
         </div>
-        <div className="grid grid-cols-6 gap-2">
+        <div className="grid grid-cols-7 gap-2">
           {data.officeProjection.bands.map((b) => (
             <DrillNumber
               key={b.band}
@@ -444,12 +445,21 @@ export function VariantB4ForecastLadder({ data }: { data: MondayShowcaseData }) 
               </div>
             </div>
           </DrillNumber>
-          {/* No future close date (the M − N complement): the open deals NOT in any dated band, so the row
-              partitions exactly — office M == Σ band counts (= dated Total) + undated. Count = m − n, $ =
-              coverage.undatedValue (the SAFE usd). Drills into the undated evidence list (set a date inline). */}
-          <UndatedCard
-            coverage={data.officeProjection.coverage}
-            request={{ metric: "undated", title: "No future close date — office" }}
+          {/* Split the M − N complement so stale dates are not conflated with deals that never had a date. */}
+          <BlindSpotCard
+            label="Stale date"
+            value={data.officeProjection.blindSpots?.stale.value ?? 0}
+            count={data.officeProjection.blindSpots?.stale.count ?? 0}
+            metric="stale"
+            request={{ metric: "stale", title: "Stale close date — office" }}
+            emphasis="office"
+          />
+          <BlindSpotCard
+            label="No date"
+            value={data.officeProjection.blindSpots?.noDate.value ?? data.officeProjection.coverage.undatedValue}
+            count={data.officeProjection.blindSpots?.noDate.count ?? Math.max(0, data.officeProjection.coverage.m - data.officeProjection.coverage.n)}
+            metric="no_date"
+            request={{ metric: "no_date", title: "No close date — office" }}
             emphasis="office"
           />
         </div>
@@ -471,7 +481,7 @@ export function VariantB4ForecastLadder({ data }: { data: MondayShowcaseData }) 
                 · <span className="tabular-nums">{usd(rep.closed.value.amount)}</span>
               </span>
             </div>
-            <div className="grid grid-cols-6 gap-2">
+            <div className="grid grid-cols-7 gap-2">
               {rep.projection.bands.map((b) => (
                 <DrillNumber
                   key={b.band}
@@ -510,9 +520,20 @@ export function VariantB4ForecastLadder({ data }: { data: MondayShowcaseData }) 
               </DrillNumber>
               {/* Per-rep blind spot (M − N): this rep's open deals with no future-dated close date. Sums
                   to the office card by construction (officeProjection = Σ per-rep). */}
-              <UndatedCard
-                coverage={rep.projection.coverage}
-                request={{ metric: "undated", repId: rep.repId, title: `${rep.repName} — No future close date` }}
+              <BlindSpotCard
+                label="Stale date"
+                value={rep.projection.blindSpots?.stale.value ?? 0}
+                count={rep.projection.blindSpots?.stale.count ?? 0}
+                metric="stale"
+                request={{ metric: "stale", repId: rep.repId, title: `${rep.repName} — Stale close date` }}
+                emphasis="rep"
+              />
+              <BlindSpotCard
+                label="No date"
+                value={rep.projection.blindSpots?.noDate.value ?? rep.projection.coverage.undatedValue}
+                count={rep.projection.blindSpots?.noDate.count ?? Math.max(0, rep.projection.coverage.m - rep.projection.coverage.n)}
+                metric="no_date"
+                request={{ metric: "no_date", repId: rep.repId, title: `${rep.repName} — No close date` }}
                 emphasis="rep"
               />
             </div>
