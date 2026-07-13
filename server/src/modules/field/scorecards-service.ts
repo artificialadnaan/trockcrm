@@ -461,9 +461,13 @@ export async function finalizeFieldScorecardArtifacts(
 
   // Cap + prioritize BEFORE downloading bytes: a scorecard may carry up to 100 photos but the PDF embeds
   // at most MAX_EVIDENCE_PHOTOS, so fetching/transcoding the rest is wasted R2/CPU (and lengthens the
-  // post-response render, making the email more likely to send without the PDF). Deficiency evidence is
-  // kept first; the omitted count drives the PDF's "available in the CRM" note.
-  const { keep: photosToLoad, omitted: omittedEvidenceCount } = prioritizeAndCapEvidencePhotos(photoRows, MAX_EVIDENCE_PHOTOS);
+  // post-response render, making the email more likely to send without the PDF). Project cards prioritize
+  // critical deficiencies; leadership cards prioritize category evidence before summary photos.
+  const { keep: photosToLoad, omitted: omittedEvidenceCount } = prioritizeAndCapEvidencePhotos(
+    photoRows,
+    MAX_EVIDENCE_PHOTOS,
+    card.kind === "leadership" ? "leadership" : undefined,
+  );
 
   // Resolve each kept evidence tile to a small JPEG (thumbnail-first, transcoded-original fallback — see
   // loadScorecardEvidenceImage). A miss leaves an explicit placeholder in the PDF, never a broken render.
@@ -634,8 +638,9 @@ async function resolvePhotoLinks(
 ): Promise<{ sectionKey: string; deficiencyKey: string | null; fileId: string }[]> {
   for (const p of input.photos) {
     if (kind === "leadership") {
-      // Leadership photos attach ONLY to the Project Summary — no per-category or deficiency evidence.
-      if (p.sectionKey !== FIELD_SCORECARD_LEADERSHIP_SUMMARY_SECTION_KEY) {
+      // Leadership evidence may attach to any of its four scored categories or the Project Summary. It has
+      // no critical-deficiency bucket, so reject every other key rather than silently stranding evidence.
+      if (p.sectionKey !== FIELD_SCORECARD_LEADERSHIP_SUMMARY_SECTION_KEY && !isLeadershipSectionKey(p.sectionKey)) {
         throw new AppError(422, `Unknown scorecard section: ${p.sectionKey}`);
       }
       continue;

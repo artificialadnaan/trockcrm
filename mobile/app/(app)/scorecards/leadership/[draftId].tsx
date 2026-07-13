@@ -1,9 +1,9 @@
 // Leadership Scorecard form. A focused screen (not the project wizard) that REUSES the shared scorecard
 // machinery — the same draft model, draft-store persistence, ScoreSlider/VoiceRecorder components, the
 // durable photo capture/import queue, and submitScorecard — but renders the leadership shape: an Evaluator
-// (auto-filled, editable) + editable PM/Super header, the 4 categories (1-10 + dictatable comment, no
-// per-category photos), and a Project Summary block (the 4-category average + a dictatable summary + a
-// photos section). No signatures, no deficiencies. The project wizard at ../[draftId].tsx is untouched.
+// (auto-filled, editable) + editable PM/Super header, the 4 categories (1-10 + dictatable comment + evidence
+// photos), and a Project Summary block (the 4-category average + a dictatable summary + optional photos).
+// No signatures, no deficiencies. The project wizard at ../[draftId].tsx is untouched.
 
 import React, { Suspense, useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { Image, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
@@ -23,13 +23,14 @@ import {
   FIELD_SCORECARD_LEADERSHIP_SECTIONS,
   FIELD_SCORECARD_LEADERSHIP_SUMMARY_SECTION_KEY,
   scorecardRatingLabel,
+  type ScorecardLeadershipSectionKey,
 } from "../../../../src/scorecards/scoring";
 import {
   scorecardDraftReducer,
   scorecardDraftAverage,
   scorecardDraftRating,
   scorecardDraftSectionsAnswered,
-  scorecardDraftSummaryPhotos,
+  scorecardDraftPhotosForSection,
   validateScorecardDraft,
   type ScorecardDraft,
   type ScorecardDraftPhoto,
@@ -47,6 +48,7 @@ import { PhotoCaptionEditor } from "../../../../src/components/PhotoCaptionEdito
 const CameraCapture = React.lazy(() => import("../../../../src/capture/CameraCapture"));
 
 const SUMMARY_KEY = FIELD_SCORECARD_LEADERSHIP_SUMMARY_SECTION_KEY;
+type LeadershipPhotoSectionKey = ScorecardLeadershipSectionKey | typeof SUMMARY_KEY;
 const CATEGORY_COUNT = FIELD_SCORECARD_LEADERSHIP_SECTIONS.length;
 // Server cap on total evidence photos (parseScorecardSubmission rejects photos.length > 100). Mirrored here so
 // a multi-select import can't stage a batch that would only fail at submit and force manual removal.
@@ -189,7 +191,7 @@ function LeadershipForm(props: {
   const router = useRouter();
   const [draft, dispatch] = useReducer(scorecardDraftReducer, props.initial);
   const [savingPhotos, setSavingPhotos] = useState(0);
-  const [cameraOpen, setCameraOpen] = useState(false);
+  const [photoSectionKey, setPhotoSectionKey] = useState<LeadershipPhotoSectionKey | null>(null);
   const [captionPhotoKey, setCaptionPhotoKey] = useState<string | null>(null);
   const [captionVoiceBusy, setCaptionVoiceBusy] = useState(false);
   // Serialize autosaves so a slow older write can't land after a newer edit — or after the submit-delete and
@@ -212,7 +214,7 @@ function LeadershipForm(props: {
 
   const average = scorecardDraftAverage(draft);
   const validation = validateScorecardDraft(draft);
-  const summaryPhotos = scorecardDraftSummaryPhotos(draft);
+  const summaryPhotos = scorecardDraftPhotosForSection(draft, SUMMARY_KEY);
   const captionPhoto = draft.photos.find((photo) => photo.key === captionPhotoKey) ?? null;
 
   // Track whether any INLINE dictation (a category comment or the Project Summary) is still recording or
@@ -260,7 +262,7 @@ function LeadershipForm(props: {
       .catch(() => undefined);
   };
 
-  async function onCameraCapture(shot: CapturedShot, caption: string) {
+  async function onCameraCapture(sectionKey: LeadershipPhotoSectionKey, shot: CapturedShot, caption: string) {
     if (importInFlight.current) {
       setNotice({ tone: "error", text: "Still saving imported photos — try again in a moment." });
       return;
@@ -281,7 +283,7 @@ function LeadershipForm(props: {
           key: clientUploadId,
           uri: durableUri,
           clientUploadId,
-          sectionKey: SUMMARY_KEY,
+          sectionKey,
           caption,
           takenAt: exif.takenAt ?? shot.capturedAt,
           latitude: exif.latitude,
@@ -299,7 +301,7 @@ function LeadershipForm(props: {
     }
   }
 
-  async function importPhotos() {
+  async function importPhotos(sectionKey: LeadershipPhotoSectionKey) {
     if (importInFlight.current || savingPhotos > 0) {
       setNotice({ tone: "error", text: "Still saving the last photos — try again in a moment." });
       return;
@@ -341,7 +343,7 @@ function LeadershipForm(props: {
             const durableUri = await copyPhotoIntoDraft(ownerKey, draftId, clientUploadId, asset.uri);
             dispatch({
               type: "addPhoto",
-              photo: { key: clientUploadId, uri: durableUri, clientUploadId, sectionKey: SUMMARY_KEY, caption: "", takenAt: exif.takenAt, latitude: exif.latitude, longitude: exif.longitude, addressSource: exif.addressSource, width: asset.width, height: asset.height },
+              photo: { key: clientUploadId, uri: durableUri, clientUploadId, sectionKey, caption: "", takenAt: exif.takenAt, latitude: exif.latitude, longitude: exif.longitude, addressSource: exif.addressSource, width: asset.width, height: asset.height },
             });
           } catch {
             photoCount.current -= 1;
@@ -367,8 +369,27 @@ function LeadershipForm(props: {
       setNotice({ tone: "error", text: "Finishing dictation — try Submit again in a moment." });
       return;
     }
+    // Freeze before the marker save so a second tap or a photo edit cannot race the captured payload.
     setSubmitting(true);
     setNotice(null);
+    // A failed/partial upload can leave some evidence confirmed in the gallery while the card itself still
+    // needs a retry. Mark this BEFORE draining so the list screen never offers an unsafe discard that would
+    // orphan confirmed evidence.
+    let draftForSubmit = draft;
+    if (draft.photos.length > 0 && !draft.evidenceUploadAttempted) {
+      draftForSubmit = { ...draft, evidenceUploadAttempted: true };
+      try {
+        // Flush earlier autosaves, then durably write the safety marker before the first upload can finish.
+        // A kill/restart between a partial upload and the next React effect must still block discard.
+        await saveChain.current.catch(() => undefined);
+        await saveScorecardDraft(ownerKey, draftForSubmit, Date.now());
+      } catch {
+        setNotice({ tone: "error", text: "Couldn’t prepare evidence for submission. Please try again." });
+        setSubmitting(false);
+        return;
+      }
+      dispatch({ type: "markEvidenceUploadAttempted" });
+    }
     if (pendingRemovalIds.current.size > 0) {
       try {
         await removeQueuedUploads(ownerKey, [...pendingRemovalIds.current]);
@@ -380,7 +401,7 @@ function LeadershipForm(props: {
       }
     }
     try {
-      const result = await submitScorecard(fetcher, ownerKey, draft);
+      const result = await submitScorecard(fetcher, ownerKey, draftForSubmit);
       if (result.status === "photos_failed") {
         setNotice({ tone: "error", text: `${result.failed} photo${result.failed === 1 ? "" : "s"} couldn’t upload after several tries. Remove and re-add ${result.failed === 1 ? "it" : "them"}, then submit.` });
         setSubmitting(false);
@@ -454,6 +475,7 @@ function LeadershipForm(props: {
             const selected = draft.scores[section.key];
             const scored = typeof selected === "number";
             const note = draft.notes[section.key] ?? "";
+            const sectionPhotos = scorecardDraftPhotosForSection(draft, section.key);
             return (
               <View key={section.key} style={styles.categoryCard}>
                 <View style={styles.categoryHeading}>
@@ -476,6 +498,15 @@ function LeadershipForm(props: {
                   />
                   {voiceEnabled ? <VoiceRecorder onTranscript={(text) => dispatch({ type: "appendNote", sectionKey: section.key, text })} onBusyChange={getVoiceBusyHandler(`cat:${section.key}`)} /> : null}
                 </Field>
+                <EvidencePhotos
+                  label={`Evidence photos (${sectionPhotos.length})`}
+                  photos={sectionPhotos}
+                  disabled={photosDisabled}
+                  onEdit={(photo) => setCaptionPhotoKey(photo.key)}
+                  onRemove={removePhotoAndCancelUpload}
+                  onCamera={() => setPhotoSectionKey(section.key)}
+                  onImport={() => void importPhotos(section.key)}
+                />
               </View>
             );
           })}
@@ -499,33 +530,15 @@ function LeadershipForm(props: {
             {voiceEnabled ? <VoiceRecorder onTranscript={(text) => dispatch({ type: "appendSummary", text })} onBusyChange={getVoiceBusyHandler("summary")} /> : null}
           </Field>
 
-          <View style={{ gap: theme.space.sm }}>
-            <SectionLabel>Photos ({summaryPhotos.length})</SectionLabel>
-            <View style={styles.photoRow}>
-              {summaryPhotos.map((p) => (
-                <View key={p.key} style={styles.thumbWrap}>
-                  <Pressable
-                    onPress={() => setCaptionPhotoKey(p.key)}
-                    accessibilityRole="button"
-                    accessibilityLabel={p.caption.trim() ? "Photo with description. Edit description." : "Photo. Add description."}
-                  >
-                    <Image source={{ uri: p.uri }} style={styles.thumb} />
-                    <View style={styles.thumbCaption}>
-                      <Text style={styles.thumbCaptionText}>{p.caption.trim() ? "Edit" : "Describe"}</Text>
-                    </View>
-                  </Pressable>
-                  <Pressable onPress={() => removePhotoAndCancelUpload(p)} hitSlop={8} style={styles.thumbX}>
-                    <Text style={styles.thumbXText}>✕</Text>
-                  </Pressable>
-                </View>
-              ))}
-            </View>
-            {summaryPhotos.length > 0 ? <Text style={styles.photoHint}>Tap a photo to add a description or dictate it.</Text> : null}
-            <View style={styles.actions}>
-              <Button title="Add photo" variant="ghost" onPress={() => setCameraOpen(true)} disabled={photosDisabled} style={{ flex: 1 }} />
-              <Button title="Import" variant="ghost" onPress={() => void importPhotos()} disabled={photosDisabled} style={{ flex: 1 }} />
-            </View>
-          </View>
+          <EvidencePhotos
+            label={`Summary photos (${summaryPhotos.length})`}
+            photos={summaryPhotos}
+            disabled={photosDisabled}
+            onEdit={(photo) => setCaptionPhotoKey(photo.key)}
+            onRemove={removePhotoAndCancelUpload}
+            onCamera={() => setPhotoSectionKey(SUMMARY_KEY)}
+            onImport={() => void importPhotos(SUMMARY_KEY)}
+          />
         </View>
       </ScrollView>
 
@@ -542,13 +555,13 @@ function LeadershipForm(props: {
         />
       </View>
 
-      {cameraOpen ? (
+      {photoSectionKey ? (
         <Suspense fallback={null}>
           <CameraCapture
-            onCapture={(shot, caption) => void onCameraCapture(shot, caption)}
-            onClose={() => setCameraOpen(false)}
-            count={summaryPhotos.length}
-            recent={summaryPhotos.slice(-5).map((p) => p.uri)}
+            onCapture={(shot, caption) => void onCameraCapture(photoSectionKey, shot, caption)}
+            onClose={() => setPhotoSectionKey(null)}
+            count={scorecardDraftPhotosForSection(draft, photoSectionKey).length}
+            recent={scorecardDraftPhotosForSection(draft, photoSectionKey).slice(-5).map((p) => p.uri)}
             annotatePerShot
             voiceEnabled={voiceEnabled}
           />
@@ -597,6 +610,47 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
     <View style={{ gap: theme.space.xs }}>
       <Text style={styles.fieldLabel}>{label}</Text>
       {children}
+    </View>
+  );
+}
+
+function EvidencePhotos(props: {
+  label: string;
+  photos: ScorecardDraftPhoto[];
+  disabled: boolean;
+  onEdit: (photo: ScorecardDraftPhoto) => void;
+  onRemove: (photo: ScorecardDraftPhoto) => void;
+  onCamera: () => void;
+  onImport: () => void;
+}) {
+  const { label, photos, disabled, onEdit, onRemove, onCamera, onImport } = props;
+  return (
+    <View style={{ gap: theme.space.sm }}>
+      <SectionLabel>{label}</SectionLabel>
+      <View style={styles.photoRow}>
+        {photos.map((photo) => (
+          <View key={photo.key} style={styles.thumbWrap}>
+            <Pressable
+              onPress={() => onEdit(photo)}
+              accessibilityRole="button"
+              accessibilityLabel={photo.caption.trim() ? "Photo with description. Edit description." : "Photo. Add description."}
+            >
+              <Image source={{ uri: photo.uri }} style={styles.thumb} />
+              <View style={styles.thumbCaption}>
+                <Text style={styles.thumbCaptionText}>{photo.caption.trim() ? "Edit" : "Describe"}</Text>
+              </View>
+            </Pressable>
+            <Pressable onPress={() => onRemove(photo)} hitSlop={8} style={styles.thumbX} accessibilityLabel="Remove photo">
+              <Text style={styles.thumbXText}>✕</Text>
+            </Pressable>
+          </View>
+        ))}
+      </View>
+      {photos.length > 0 ? <Text style={styles.photoHint}>Tap a photo to add a description or dictate it.</Text> : null}
+      <View style={styles.actions}>
+        <Button title="Add photo" variant="ghost" onPress={onCamera} disabled={disabled} style={{ flex: 1 }} />
+        <Button title="Import" variant="ghost" onPress={onImport} disabled={disabled} style={{ flex: 1 }} />
+      </View>
     </View>
   );
 }

@@ -32,7 +32,7 @@ const SCORECARD_PDF_DOWNLOAD_EXPIRY_SECONDS = 60 * 60;
 // carries its `kind` so the web tab branches, and the DETAIL read below is KIND-AWARE: it maps items through
 // the section vocabulary for the card's kind (project → FIELD_SCORECARD_SECTION_KEYS / V2, leadership →
 // FIELD_SCORECARD_LEADERSHIP_SECTION_KEYS) so a leadership card resolves into its own shape (category scores +
-// comment notes, Project Summary text, project_summary photos) rather than 404ing or rendering mangled.
+// comment notes, Project Summary text, and category/project_summary photos) rather than 404ing or rendering mangled.
 
 export async function listDealScorecards(
   tenantDb: TenantDb,

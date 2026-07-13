@@ -89,16 +89,23 @@ export async function loadScorecardEvidenceImage(
  * Prioritize + cap evidence photos BEFORE downloading their bytes, so the artifact job never fetches or
  * transcodes tiles the renderer would only discard. Critical-deficiency evidence (sectionKey ===
  * "critical_deficiency") is kept first — matching the PDF's deficiency-first ordering — so it's never
- * starved by routine section photos; within each tier the caller's deterministic order is preserved.
+ * starved by routine section photos. Leadership category evidence is kept before Project Summary photos.
+ * Within each tier the caller's deterministic order is preserved.
  * Returns the ≤max rows to load plus how many were dropped (surfaced as the PDF's "available in the CRM"
  * note).
  */
 export function prioritizeAndCapEvidencePhotos<T extends { sectionKey: string }>(
   rows: T[],
   max: number,
+  kind?: "leadership",
 ): { keep: T[]; omitted: number } {
   const limit = Math.max(0, max);
   if (rows.length <= limit) return { keep: rows, omitted: 0 };
+  if (kind === "leadership") {
+    const categoryEvidence = rows.filter((r) => r.sectionKey !== "project_summary");
+    const summaryEvidence = rows.filter((r) => r.sectionKey === "project_summary");
+    return { keep: [...categoryEvidence, ...summaryEvidence].slice(0, limit), omitted: rows.length - limit };
+  }
   const deficiency = rows.filter((r) => r.sectionKey === "critical_deficiency");
   const sections = rows.filter((r) => r.sectionKey !== "critical_deficiency");
   const keep = [...deficiency, ...sections].slice(0, limit);

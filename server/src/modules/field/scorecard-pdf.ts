@@ -148,8 +148,8 @@ export function buildScorecardPdfData(input: ScorecardPdfInput): ScorecardPdfDat
       points: item?.points ?? 0,
       maxPoints: "maxPoints" in def && typeof def.maxPoints === "number" ? def.maxPoints : 10,
       note: item?.note?.trim() ? item.note.trim() : null,
-      // Leadership categories carry no per-category photos; their evidence lives on the Project Summary.
-      photos: kind === "leadership" ? [] : photos.filter((photo) => photo.sectionKey === def.key),
+      // Both scorecard kinds can carry evidence for their scored categories.
+      photos: photos.filter((photo) => photo.sectionKey === def.key),
     };
   });
   // Leadership cards have no critical deficiencies.
@@ -199,7 +199,7 @@ export function buildScorecardPdfData(input: ScorecardPdfInput): ScorecardPdfDat
     deficiencies,
     actionItems,
     summary: kind === "leadership" ? (input.summary?.trim() ? input.summary.trim() : null) : null,
-    // Leadership Project Summary evidence (sectionKey `project_summary`); never populated for project cards.
+    // Leadership Project Summary evidence (sectionKey `project_summary`); category evidence is above.
     summaryPhotos: kind === "leadership"
       ? photos.filter((photo) => photo.sectionKey === FIELD_SCORECARD_LEADERSHIP_SUMMARY_SECTION_KEY)
       : [],
@@ -366,10 +366,14 @@ export async function renderFieldScorecardPdf(data: ScorecardPdfData): Promise<B
   }
 
   const evidenceGroups: EvidenceGroup[] = isLeadership
-    ? // Leadership evidence attaches to the Project Summary only.
-      data.summaryPhotos.length > 0
-      ? [{ title: "Project Summary", subtitle: data.summary?.trim() || null, photos: data.summaryPhotos }]
-      : []
+    ? [
+        ...data.sections
+          .filter((section) => section.photos.length > 0)
+          .map((section) => ({ title: section.title, subtitle: section.note, photos: section.photos })),
+        ...(data.summaryPhotos.length > 0
+          ? [{ title: "Project Summary", subtitle: data.summary?.trim() || null, photos: data.summaryPhotos }]
+          : []),
+      ]
     : [
         // Critical-deficiency evidence leads AND is prioritized by the cap, so the most important photos are
         // never starved by routine section evidence when a report exceeds MAX_EVIDENCE_PHOTOS.

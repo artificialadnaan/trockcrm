@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { buildScorecardPdfData, renderFieldScorecardPdf } from "../../../src/modules/field/scorecard-pdf.js";
 
-// A 1x1 PNG — a real, pdfkit-decodable image so the Project Summary evidence tiles embed.
+// A 1x1 PNG — a real, pdfkit-decodable image so evidence tiles embed.
 const TINY_PNG = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
   "base64",
@@ -52,25 +52,27 @@ describe("leadership scorecard PDF", () => {
     expect(data.ratingLabel).toBe("Meets Standard");
   });
 
-  it("routes project_summary photos into the summary evidence group only (not per-category)", () => {
+  it("routes category and project_summary photos into their corresponding evidence groups", () => {
     const data = buildScorecardPdfData(
       leadershipInput({
         photos: [
+          { sectionKey: "safety", deficiencyKey: null, caption: "PPE station", image: TINY_PNG },
           { sectionKey: "project_summary", deficiencyKey: null, caption: "Site walk", image: null },
           { sectionKey: "project_summary", deficiencyKey: null, caption: "Crew", image: TINY_PNG },
         ],
       }),
     );
     expect(data.summaryPhotos).toHaveLength(2);
-    // Category sections carry no photos in the leadership variant.
-    expect(data.sections.every((s) => s.photos.length === 0)).toBe(true);
+    expect(data.sections.find((section) => section.title === "Safety")?.photos).toHaveLength(1);
+    expect(data.sections.find((section) => section.title === "Quality Control")?.photos).toHaveLength(0);
   });
 
-  it("renders a leadership PDF with summary photos as evidence pages", async () => {
+  it("renders a leadership PDF with category and summary photos as evidence pages", async () => {
     const data = buildScorecardPdfData(
       leadershipInput({
         summary: "Strong leadership week. ".repeat(200), // long dictation → must be bounded, not overflow
         photos: [
+          { sectionKey: "quality_control", deficiencyKey: null, caption: "Clean hold point", image: TINY_PNG },
           { sectionKey: "project_summary", deficiencyKey: null, caption: "Site walk", image: TINY_PNG },
           { sectionKey: "project_summary", deficiencyKey: null, caption: null, image: null },
         ],

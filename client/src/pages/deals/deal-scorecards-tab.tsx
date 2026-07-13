@@ -220,7 +220,7 @@ function ScorecardRow({ dealId, summary }: { dealId: string; summary: FieldScore
 }
 
 // Full leadership detail — mirrors the mobile LeadershipBody / scorecardLeadershipRows shape: the 4 category
-// scores (each /10) + comment notes, the Project Summary free text, and the Project Summary evidence photos.
+// scores (each /10) + comment notes, the Project Summary free text, and category/summary evidence photos.
 // Plus a meta row (average/10, rating, week, evaluator=submittedByName). Leadership cards carry no critical
 // deficiencies, action items, or signatures, so those sections are omitted. Renders from the kind-aware
 // detail so the full card is viewable in the CRM even before the best-effort PDF lands.
@@ -232,7 +232,20 @@ function LeadershipDetailView({ detail }: { detail: FieldScorecardDetail }) {
     const item = itemByKey.get(s.key);
     return { key: s.key, title: s.title, points: item?.points ?? 0, note: item?.note ?? null };
   });
-  const summaryPhotos = detail.photos.filter((p) => p.sectionKey === FIELD_SCORECARD_LEADERSHIP_SUMMARY_SECTION_KEY);
+  const evidenceGroups = [
+    ...FIELD_SCORECARD_LEADERSHIP_SECTIONS
+      .map((section) => ({
+        key: section.key,
+        title: section.title,
+        photos: detail.photos.filter((photo) => photo.sectionKey === section.key),
+      }))
+      .filter((group) => group.photos.length > 0),
+    {
+      key: FIELD_SCORECARD_LEADERSHIP_SUMMARY_SECTION_KEY,
+      title: "Project Summary",
+      photos: detail.photos.filter((photo) => photo.sectionKey === FIELD_SCORECARD_LEADERSHIP_SUMMARY_SECTION_KEY),
+    },
+  ].filter((group) => group.photos.length > 0);
   const meta: Array<{ label: string; value: string }> = [
     { label: "Average", value: `${average} / 10` },
     { label: "Rating", value: detail.ratingLabel },
@@ -268,28 +281,35 @@ function LeadershipDetailView({ detail }: { detail: FieldScorecardDetail }) {
         </p>
       </div>
 
-      {summaryPhotos.length > 0 && (
+      {evidenceGroups.length > 0 && (
         <div>
           <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">
-            Photos ({summaryPhotos.length})
+            Evidence Photos ({detail.photos.length})
           </h4>
-          <div className="grid grid-cols-3 gap-2 sm:grid-cols-4">
-            {summaryPhotos.map((p) =>
-              p.url ? (
-                <a key={p.id} href={p.url} target="_blank" rel="noopener noreferrer" className="group block">
-                  <img
-                    src={p.url}
-                    alt={p.caption ?? "Scorecard evidence"}
-                    className="aspect-square w-full rounded-md object-cover ring-1 ring-gray-200 group-hover:ring-gray-400"
-                  />
-                  {p.caption && <p className="mt-0.5 truncate text-[11px] text-gray-500">{p.caption}</p>}
-                </a>
-              ) : (
-                <div key={p.id} className="flex aspect-square items-center justify-center rounded-md bg-gray-100 text-[11px] text-gray-400">
-                  Unavailable
+          <div className="space-y-3">
+            {evidenceGroups.map((group) => (
+              <div key={group.key}>
+                <h5 className="mb-1 text-xs font-medium text-gray-700">{group.title}</h5>
+                <div className="grid grid-cols-3 gap-2 sm:grid-cols-4">
+                  {group.photos.map((p) =>
+                    p.url ? (
+                      <a key={p.id} href={p.url} target="_blank" rel="noopener noreferrer" className="group block">
+                        <img
+                          src={p.url}
+                          alt={p.caption ?? "Scorecard evidence"}
+                          className="aspect-square w-full rounded-md object-cover ring-1 ring-gray-200 group-hover:ring-gray-400"
+                        />
+                        {p.caption && <p className="mt-0.5 truncate text-[11px] text-gray-500">{p.caption}</p>}
+                      </a>
+                    ) : (
+                      <div key={p.id} className="flex aspect-square items-center justify-center rounded-md bg-gray-100 text-[11px] text-gray-400">
+                        Unavailable
+                      </div>
+                    ),
+                  )}
                 </div>
-              ),
-            )}
+              </div>
+            ))}
           </div>
         </div>
       )}

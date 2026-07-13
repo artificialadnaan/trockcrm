@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from "react";
-import { Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Alert, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect, useRouter } from "expo-router";
 import { useQuery } from "@tanstack/react-query";
@@ -14,8 +14,8 @@ import {
   scorecardDraftSectionsAnswered,
   type ScorecardDraft,
 } from "../../../src/scorecards/draft";
-import { listScorecardDrafts, saveScorecardDraft } from "../../../src/scorecards/draft-store";
-import { newClientUploadId, uploadOwnerKey } from "../../../src/capture/upload-queue";
+import { listScorecardDrafts, saveScorecardDraft, deleteScorecardDraft } from "../../../src/scorecards/draft-store";
+import { newClientUploadId, removeQueuedUploads, uploadOwnerKey } from "../../../src/capture/upload-queue";
 import { registerUploadBackgroundTask } from "../../../src/capture/upload-background-task";
 import { newSubmissionId } from "../../../src/scorecards/ids";
 import { FIELD_SCORECARD_SECTIONS, FIELD_SCORECARD_LEADERSHIP_SECTIONS } from "../../../src/scorecards/scoring";
@@ -56,6 +56,7 @@ export default function ScorecardsScreen() {
   const ownerKey = uploadOwnerKey(user?.id, activeOfficeId ?? user?.tenantId ?? undefined);
 
   const [drafts, setDrafts] = useState<ScorecardDraft[]>([]);
+  const [discardingDraftId, setDiscardingDraftId] = useState<string | null>(null);
   // Which kind of scorecard the deal picker will create when a deal is chosen. Set by the two entry buttons.
   const [pickerKind, setPickerKind] = useState<"project" | "leadership" | null>(null);
   const pickerOpen = pickerKind !== null;
@@ -128,6 +129,46 @@ export default function ScorecardsScreen() {
     router.push(draftPath(draft));
   }
 
+  function confirmDiscard(draft: ScorecardDraft) {
+    // Legacy photo drafts may have completed a partial upload before this marker existed. Treat them as
+    // unsafe to discard; new drafts persist false until upload actually starts.
+    if (draft.evidenceUploadAttempted || (draft.photos.length > 0 && draft.evidenceUploadAttempted !== false)) {
+      Alert.alert(
+        "Finish this scorecard instead",
+        "Evidence upload already started, so some photos may be in the project gallery. Complete and submit this scorecard rather than discarding it.",
+      );
+      return;
+    }
+    Alert.alert(
+      "Discard scorecard?",
+      `This permanently removes the in-progress ${draft.kind === "leadership" ? "Leadership " : ""}Scorecard for ${draft.dealName}.`,
+      [
+        { text: "Keep editing", style: "cancel" },
+        {
+          text: "Discard",
+          style: "destructive",
+          onPress: () => void discardDraft(draft),
+        },
+      ],
+    );
+  }
+
+  async function discardDraft(draft: ScorecardDraft) {
+    if (!ownerKey || discardingDraftId) return;
+    setDiscardingDraftId(draft.id);
+    try {
+      // This path is unavailable once evidence upload starts (see confirmDiscard), so these are only local
+      // copies/queued uploads and cannot leave already-confirmed gallery photos orphaned.
+      await removeQueuedUploads(ownerKey, draft.photos.map((photo) => photo.clientUploadId));
+      await deleteScorecardDraft(ownerKey, draft.id);
+      setDrafts((current) => current.filter((item) => item.id !== draft.id));
+    } catch {
+      Alert.alert("Couldn’t discard scorecard", "Please try again.");
+    } finally {
+      setDiscardingDraftId(null);
+    }
+  }
+
   const submitted = recent.data?.scorecards ?? [];
 
   return (
@@ -153,11 +194,13 @@ export default function ScorecardsScreen() {
           <View style={{ gap: theme.space.sm }}>
             <SectionLabel>In progress</SectionLabel>
             {drafts.map((d) => (
-              <Pressable
-                key={d.id}
-                onPress={() => router.push(draftPath(d))}
-                style={({ pressed }) => [styles.row, pressed && { opacity: 0.7 }]}
-              >
+              <View key={d.id} style={styles.row}>
+                <Pressable
+                  onPress={() => router.push(draftPath(d))}
+                  style={({ pressed }) => [styles.draftResume, pressed && { opacity: 0.7 }]}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Resume ${d.kind === "leadership" ? "Leadership " : ""}Scorecard for ${d.dealName}`}
+                >
                 <View style={{ flex: 1 }}>
                   <Text style={styles.rowTitle} numberOfLines={1}>{d.dealName}</Text>
                   <Text style={styles.rowSub}>
@@ -165,7 +208,15 @@ export default function ScorecardsScreen() {
                   </Text>
                 </View>
                 <Text style={styles.resume}>Resume</Text>
-              </Pressable>
+                </Pressable>
+                <Button
+                  title="Discard"
+                  variant="ghost"
+                  onPress={() => confirmDiscard(d)}
+                  disabled={discardingDraftId !== null}
+                  style={styles.discardButton}
+                />
+              </View>
             ))}
           </View>
         ) : null}
@@ -224,6 +275,8 @@ const styles = StyleSheet.create({
     borderRadius: theme.radius.md,
     padding: theme.space.md,
   },
+  draftResume: { flex: 1, flexDirection: "row", alignItems: "center", gap: theme.space.md },
+  discardButton: { minWidth: 76 },
   rowTitle: { fontFamily: theme.font.semibold, fontSize: 15, color: theme.color.textPrimary },
   rowSub: { fontFamily: theme.font.body, fontSize: 13, color: theme.color.textMuted, marginTop: 2 },
   resume: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.brandRed },

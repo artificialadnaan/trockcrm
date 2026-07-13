@@ -18,9 +18,9 @@ export interface ScorecardDraftPhoto {
   key: string; // local list key
   uri: string; // durable per-draft copy (survives app-kill), not the raw camera uri
   clientUploadId: string; // stamped at capture; resolved to a fileId server-side on submit
-  // Project cards attach photos per category (or to a critical_deficiency); leadership cards attach only to
-  // the Project Summary (`project_summary`). One structure serves both so the capture/upload machinery is shared.
-  sectionKey: ScorecardSectionKey | "critical_deficiency" | typeof FIELD_SCORECARD_LEADERSHIP_SUMMARY_SECTION_KEY;
+  // Project cards attach photos per category (or to a critical_deficiency); leadership cards attach photos to
+  // any leadership category or to the Project Summary (`project_summary`). One structure serves both flows.
+  sectionKey: ScorecardSectionKey | ScorecardLeadershipSectionKey | "critical_deficiency" | typeof FIELD_SCORECARD_LEADERSHIP_SUMMARY_SECTION_KEY;
   deficiencyKey?: ScorecardCriticalDeficiencyKey;
   caption: string;
   // Capture metadata carried so the gallery upload keeps the shot's real time/location + can apply the
@@ -66,6 +66,9 @@ export interface ScorecardDraft {
   actionItems: string[];
   /** Leadership Project Summary free text (voice-dictatable); project cards don't use it. */
   summary?: string;
+  /** Once evidence uploading begins, the draft cannot safely be discarded: some photos may already exist
+   * in the project gallery while the scorecard POST remains retryable. Optional for legacy drafts. */
+  evidenceUploadAttempted?: boolean;
   superintendentSignature?: string;
   pmSignature?: string;
   createdAt: number;
@@ -88,6 +91,7 @@ export type DraftAction =
   | { type: "setActionItems"; items: string[] }
   | { type: "setSignature"; field: "superintendentSignature" | "pmSignature"; value: string }
   | { type: "appendActionItem"; text: string }
+  | { type: "markEvidenceUploadAttempted" }
   | { type: "addPhoto"; photo: ScorecardDraftPhoto }
   | { type: "removePhoto"; key: string }
   | { type: "setPhotoCaption"; key: string; caption: string }
@@ -106,7 +110,7 @@ export interface ScorecardSubmissionPayload {
   actionItems: string[];
   criticalDeficiencyNotes: Record<string, string>;
   photos: {
-    sectionKey: ScorecardSectionKey | "critical_deficiency" | typeof FIELD_SCORECARD_LEADERSHIP_SUMMARY_SECTION_KEY;
+    sectionKey: ScorecardSectionKey | ScorecardLeadershipSectionKey | "critical_deficiency" | typeof FIELD_SCORECARD_LEADERSHIP_SUMMARY_SECTION_KEY;
     deficiencyKey: ScorecardCriticalDeficiencyKey | null;
     clientUploadId: string;
   }[];
@@ -143,6 +147,7 @@ export function createScorecardDraft(input: {
     criticalDeficiencies: [],
     deficiencyNotes: {},
     actionItems: [],
+    evidenceUploadAttempted: false,
     superintendentSignature: "",
     pmSignature: "",
     createdAt: input.now,
@@ -283,6 +288,8 @@ export function scorecardDraftReducer(draft: ScorecardDraft, action: DraftAction
       while (items.length > 0 && items[items.length - 1].trim() === "") items.pop();
       return { ...draft, actionItems: [...items, t] };
     }
+    case "markEvidenceUploadAttempted":
+      return draft.evidenceUploadAttempted ? draft : { ...draft, evidenceUploadAttempted: true };
     case "addPhoto":
       return { ...draft, photos: [...draft.photos, action.photo] };
     case "removePhoto":
@@ -347,7 +354,7 @@ export function scorecardActionItemsRequired(draft: ScorecardDraft): boolean {
 
 export function scorecardDraftPhotosForSection(
   draft: ScorecardDraft,
-  sectionKey: ScorecardSectionKey,
+  sectionKey: ScorecardSectionKey | ScorecardLeadershipSectionKey | typeof FIELD_SCORECARD_LEADERSHIP_SUMMARY_SECTION_KEY,
 ): ScorecardDraftPhoto[] {
   return draft.photos.filter((p) => p.sectionKey === sectionKey);
 }
@@ -434,7 +441,7 @@ export function scorecardDraftToSubmission(draft: ScorecardDraft): ScorecardSubm
 
 /**
  * Leadership payload: `kind: "leadership"`, the 4 leadership items in canonical order (with dictated
- * comment notes), the free-text summary, and only the Project Summary photos (`project_summary`). No
+ * comment notes), the free-text summary, and category/Project Summary photos. No
  * signatures / deficiencies / action items — leadership cards don't collect them. weekOf is sent but the
  * server stamps the real completion date (like project V2), so a device value can't file under a stale week.
  */
@@ -456,7 +463,7 @@ function leadershipDraftToSubmission(draft: ScorecardDraft): ScorecardSubmission
     criticalDeficiencyNotes: {},
     actionItems: [],
     photos: draft.photos
-      .filter((p) => p.sectionKey === FIELD_SCORECARD_LEADERSHIP_SUMMARY_SECTION_KEY)
+      .filter((p) => p.sectionKey === FIELD_SCORECARD_LEADERSHIP_SUMMARY_SECTION_KEY || FIELD_SCORECARD_LEADERSHIP_SECTION_KEYS.includes(p.sectionKey as ScorecardLeadershipSectionKey))
       .map((p) => ({ sectionKey: p.sectionKey, deficiencyKey: null, clientUploadId: p.clientUploadId })),
     superintendentSignature: null,
     pmSignature: null,

@@ -416,8 +416,27 @@ function Wizard(props: {
 
   async function onSubmit() {
     if (submitting) return;
+    // Freeze before the marker save so a second tap or a photo edit cannot race the captured payload.
     setSubmitting(true);
     setNotice(null);
+    // A failed/partial upload can leave some evidence confirmed in the gallery while the card itself still
+    // needs a retry. Mark this BEFORE draining so the list screen never offers an unsafe discard that would
+    // orphan confirmed evidence.
+    let draftForSubmit = draft;
+    if (draft.photos.length > 0 && !draft.evidenceUploadAttempted) {
+      draftForSubmit = { ...draft, evidenceUploadAttempted: true };
+      try {
+        // Flush earlier autosaves, then durably write the safety marker before the first upload can finish.
+        // A kill/restart between a partial upload and the next React effect must still block discard.
+        await saveChain.current.catch(() => undefined);
+        await saveScorecardDraft(ownerKey, draftForSubmit, Date.now());
+      } catch {
+        setNotice({ tone: "error", text: "Couldn’t prepare evidence for submission. Please try again." });
+        setSubmitting(false);
+        return;
+      }
+      dispatch({ type: "markEvidenceUploadAttempted" });
+    }
     // Retry-cancel any still-pending photo removals, so the drain in submitScorecard can't upload a
     // just-removed photo. Only clear on success — a failure keeps the ids pending AND blocks submit
     // (rather than silently shipping stale evidence).
@@ -432,7 +451,7 @@ function Wizard(props: {
       }
     }
     try {
-      const result = await submitScorecard(fetcher, ownerKey, draft);
+      const result = await submitScorecard(fetcher, ownerKey, draftForSubmit);
       if (result.status === "photos_failed") {
         setNotice({ tone: "error", text: `${result.failed} photo${result.failed === 1 ? "" : "s"} couldn’t upload after several tries. Remove and re-add ${result.failed === 1 ? "it" : "them"}, then submit.` });
         setSubmitting(false);
@@ -466,7 +485,12 @@ function Wizard(props: {
         <View style={[styles.progressFill, { width: `${(step / LAST_STEP) * 100}%` }]} />
       </View>
 
-      <ScrollView contentContainerStyle={styles.body} keyboardShouldPersistTaps="handled">
+      <ScrollView
+        contentContainerStyle={styles.body}
+        keyboardShouldPersistTaps="handled"
+        pointerEvents={submitting ? "none" : "auto"}
+        style={submitting ? styles.frozen : undefined}
+      >
         <Text style={styles.stepTitle}>{title}</Text>
         {notice ? <Banner message={notice.text} tone={notice.tone} /> : null}
 
@@ -1016,6 +1040,7 @@ const styles = StyleSheet.create({
   progressTrack: { height: 4, backgroundColor: theme.color.surfaceMuted },
   progressFill: { height: 4, backgroundColor: theme.color.brandRed },
   body: { padding: theme.space.lg, gap: theme.space.md, paddingBottom: theme.space.xxl },
+  frozen: { opacity: 0.6 },
   stepTitle: { fontFamily: theme.font.bold, fontSize: 20, color: theme.color.textPrimary },
   hint: { fontFamily: theme.font.body, fontSize: 13, color: theme.color.textMuted },
   fieldLabel: { fontFamily: theme.font.semibold, fontSize: 13, color: theme.color.textPrimary },

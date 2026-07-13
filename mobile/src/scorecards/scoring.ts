@@ -87,9 +87,9 @@ export function computeScorecardAverage(items: readonly { sectionKey: ScorecardS
 // ── Leadership scorecard ────────────────────────────────────────────────────────
 // Mirrors the leadership definitions in shared/src/types/field-scorecard.ts (Expo isn't in that workspace).
 // A distinct scorecard KIND stored in the same tables (discriminated by `kind`). Four categories rated
-// 1-10 with a dictatable comment note (no per-category photos); the score is their average out of 10,
-// using the same rating bands as the project V2 form. Photos and a free-text summary attach to the Project
-// Summary (sectionKey `project_summary`). No signatures, no deficiencies.
+// 1-10 with a dictatable comment note; the score is their average out of 10, using the same rating bands as
+// the project V2 form. Photos may attach to every category or the Project Summary (sectionKey
+// `project_summary`). No signatures, no deficiencies.
 export type ScorecardKind = "project" | "leadership";
 
 export const FIELD_SCORECARD_LEADERSHIP_SECTION_KEYS = [

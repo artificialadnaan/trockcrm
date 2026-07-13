@@ -10,7 +10,7 @@ import {
   scorecardLeadershipRows,
   scorecardPhotoSections,
   scorecardSectionRows,
-  scorecardSummaryPhotos,
+  scorecardLeadershipPhotoSections,
   SCORECARD_TOTAL_POINTS,
 } from "../scorecards/detail-view";
 
@@ -181,7 +181,7 @@ function ProjectBody({
 
 /**
  * Leadership body: the 4 leadership category scores (+ comment notes), the Project Summary free text, and
- * the Project Summary evidence photos. Leadership cards carry no signatures or critical deficiencies, so
+ * category/Project Summary evidence photos. Leadership cards carry no signatures or critical deficiencies, so
  * neither section is rendered.
  */
 function LeadershipBody({
@@ -194,7 +194,7 @@ function LeadershipBody({
   onOpenPhoto?: (photo: FieldScorecardPhotoView) => void;
 }) {
   const rows = scorecardLeadershipRows(scorecard.items);
-  const summaryPhotos = scorecardSummaryPhotos(scorecard.photos);
+  const photoSections = scorecardLeadershipPhotoSections(scorecard.photos);
 
   return (
     <>
@@ -218,11 +218,16 @@ function LeadershipBody({
         <Text style={styles.bulletText}>{scorecard.summary?.trim() || "No summary provided."}</Text>
       </View>
 
-      {/* Project Summary evidence photos. A null url → placeholder tile (no broken Image). */}
-      {summaryPhotos.length > 0 ? (
+      {/* Category and Project Summary evidence photos. A null url → placeholder tile (no broken Image). */}
+      {photoSections.length > 0 ? (
         <View style={{ gap: theme.space.md }}>
-          <SectionLabel>Photos</SectionLabel>
-          <PhotoGrid photos={summaryPhotos} thumb={thumb} onOpenPhoto={onOpenPhoto} />
+          <SectionLabel>Evidence</SectionLabel>
+          {photoSections.map((section) => (
+            <View key={section.key} style={{ gap: theme.space.sm }}>
+              <Text style={styles.photoGroup}>{section.title}</Text>
+              <PhotoGrid photos={section.photos} thumb={thumb} onOpenPhoto={onOpenPhoto} />
+            </View>
+          ))}
         </View>
       ) : null}
     </>
