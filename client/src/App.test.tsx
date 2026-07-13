@@ -49,6 +49,7 @@ describe("App route guards", () => {
     expect(source).toContain('path="/reports/operations/workflow-bottlenecks" element={( <RequireRole allowedRoles={["admin", "director"]}> <WorkflowBottlenecksPage />');
     expect(source).toContain('path="/reports/operations/project-readiness" element={( <RequireRole allowedRoles={["admin", "director"]}> <ProjectReadinessPage />');
     expect(source).toContain('path="/reports/operations/portfolio-load" element={( <RequireRole allowedRoles={["admin", "director"]}> <PortfolioLoadPage />');
+    expect(source).toContain('path="/reports/operations/estimator-pipeline" element={( <RequireRole allowedRoles={["admin", "director"]}> <EstimatorPipelinePage />');
   });
 
   it("preserves report route guards while export remains page-local", () => {

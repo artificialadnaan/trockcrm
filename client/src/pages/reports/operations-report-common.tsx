@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { Link } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 import { ExportExcelButton } from "@/components/reports/export-excel-button";
 import type { ExcelSheet } from "@/lib/excel-export";
 export { sheetsFromReport } from "@/lib/excel-export";
@@ -41,12 +41,14 @@ export function OperationsReportShell({
   exportSheets?: ExcelSheet[];
   children: ReactNode;
 }) {
+  const { search } = useLocation();
+
   return (
     <main className="min-h-screen bg-slate-50">
       <div className="mx-auto flex w-full max-w-7xl flex-col gap-6 px-4 py-6 sm:px-6 lg:px-8">
         <div className="flex flex-wrap items-end justify-between gap-3">
           <div>
-            <Link to="/reports" className="text-sm font-semibold text-brand-red hover:underline">
+            <Link to={{ pathname: "/reports", search }} className="text-sm font-semibold text-brand-red hover:underline">
               Reports
             </Link>
             <h1 className="mt-2 text-3xl font-black tracking-tight text-slate-950">{title}</h1>

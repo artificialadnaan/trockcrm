@@ -130,6 +130,11 @@ const SharedPrimitivesHarness = lazy(() =>
     default: module.SharedPrimitivesHarness,
   }))
 );
+const EstimatorPipelinePage = lazy(() =>
+  import("@/pages/reports/estimator-pipeline-page").then((module) => ({
+    default: module.EstimatorPipelinePage,
+  }))
+);
 
 const enableSharedPrimitivesHarness = import.meta.env.DEV;
 
@@ -362,6 +367,14 @@ export function App() {
                 element={(
                   <RequireRole allowedRoles={["admin", "director"]}>
                     <PortfolioLoadPage />
+                  </RequireRole>
+                )}
+              />
+              <Route
+                path="/reports/operations/estimator-pipeline"
+                element={(
+                  <RequireRole allowedRoles={["admin", "director"]}>
+                    <EstimatorPipelinePage />
                   </RequireRole>
                 )}
               />

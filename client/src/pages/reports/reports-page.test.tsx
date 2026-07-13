@@ -7,8 +7,8 @@ function normalize(html: string) {
   return html.replace(/\s+/g, " ").trim();
 }
 
-function renderReportsPage() {
-  return normalize(renderToStaticMarkup(<MemoryRouter><ReportsPage /></MemoryRouter>));
+function renderReportsPage(initialEntry = "/reports") {
+  return normalize(renderToStaticMarkup(<MemoryRouter initialEntries={[initialEntry]}><ReportsPage /></MemoryRouter>));
 }
 
 describe("ReportsPage", () => {
@@ -47,9 +47,17 @@ describe("ReportsPage", () => {
     expect(html).toContain("/reports/operations/workflow-bottlenecks");
     expect(html).toContain("/reports/operations/project-readiness");
     expect(html).toContain("/reports/operations/portfolio-load");
+    expect(html).toContain("/reports/operations/estimator-pipeline");
+    expect(html).toContain("Estimator Pipeline");
     expect(html).toContain("/reports/analytics/market-mix");
     expect(html).toContain("/reports/analytics/customer-concentration");
     expect(html).toContain("/reports/analytics/executive-trends");
     expect(html).not.toContain("Coming soon");
+  });
+
+  it("keeps the selected office when opening the estimator pipeline report", () => {
+    const html = renderReportsPage("/reports?officeId=office-dallas");
+
+    expect(html).toContain('href="/reports/operations/estimator-pipeline?officeId=office-dallas"');
   });
 });

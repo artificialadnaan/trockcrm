@@ -2,6 +2,7 @@ import {
   Activity,
   BarChart3,
   BriefcaseBusiness,
+  Calculator,
   CalendarClock,
   ChartNoAxesCombined,
   ClipboardList,
@@ -16,7 +17,7 @@ import {
   Users,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import { Link } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 import { PageHeader } from "@/components/layout/page-header";
 import { Card, CardContent } from "@/components/ui/card";
 import type { UserRole } from "@trock-crm/shared/types";
@@ -105,6 +106,12 @@ const reportCategories: Array<{ category: string; description: string; reports: 
         icon: BriefcaseBusiness,
         path: "/reports/operations/portfolio-load",
       },
+      {
+        name: "Estimator Pipeline",
+        description: "Current estimator workload by pipeline stage, plus projects missing a linked estimator.",
+        icon: Calculator,
+        path: "/reports/operations/estimator-pipeline",
+      },
     ],
   },
   {
@@ -119,6 +126,8 @@ const reportCategories: Array<{ category: string; description: string; reports: 
 ];
 
 export function ReportsPage() {
+  const { search } = useLocation();
+
   return (
     <div className="space-y-6">
       <PageHeader
@@ -177,7 +186,7 @@ export function ReportsPage() {
 
                 return report.path ? (
                   <Card key={report.name} className="border-slate-200 bg-white transition hover:border-brand-red/40 hover:shadow-md">
-                    <Link to={report.path} className="block focus:outline-none focus:ring-2 focus:ring-brand-red focus:ring-offset-2">
+                    <Link to={{ pathname: report.path, search }} className="block focus:outline-none focus:ring-2 focus:ring-brand-red focus:ring-offset-2">
                       {content}
                     </Link>
                   </Card>
