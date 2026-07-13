@@ -6,6 +6,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter, useLocation } from "react-router-dom";
 import type { ButtonHTMLAttributes, ReactNode } from "react";
 import { act, useEffect } from "react";
+import { USD_COMPACT } from "@/components/shared/formatters";
 import type { Deal } from "@/hooks/use-deals";
 import type { AtRiskResult } from "@trock-crm/shared/types";
 import {
@@ -2408,7 +2409,7 @@ describe("DealListPage", () => {
       expect(
         view.container.querySelector('button[aria-label^="Open project Owned At Risk Deal;"]')?.getAttribute("aria-label")
       ).toBe(
-        "Open project Owned At Risk Deal; stage Contract; project owner Brett Jones; time in stage 8d; last updated 2026-04-20; value $200.0K"
+        `Open project Owned At Risk Deal; stage Contract; project owner Brett Jones; time in stage 8d; last updated 2026-04-20; value ${USD_COMPACT(200000)}`
       );
       expect(
         view.container.querySelector('button[aria-label^="Open project Unassigned At Risk Deal;"]')?.getAttribute("aria-label")
