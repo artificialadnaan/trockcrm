@@ -12,6 +12,7 @@ import {
  * canonicalization decisions. Absolute anchors keep a shared mistake from passing via reconciliation alone.
  */
 const U = (suffix: string) => `00000000-0000-0000-0000-${suffix.padStart(12, "0")}`;
+const REPORT_NOW = new Date("2026-07-13T12:00:00.000Z");
 
 const SIDNEY = U("5101");
 const ALEX = U("5102");
@@ -27,6 +28,9 @@ const STAGE = {
   legacyEstimating: U("5703"),
   sent: U("5704"),
   won: U("5705"),
+  legacyWon: U("5706"),
+  lost: U("5707"),
+  transitionalWonMapped: U("5708"),
 };
 
 const DEAL = {
@@ -39,6 +43,10 @@ const DEAL = {
   missingOpportunity: U("d007"),
   missingLegacy: U("d008"),
   missingService: U("d009"),
+  wonSidney: U("d101"),
+  wonAlexBidBoard: U("d102"),
+  wonOtherLegacy: U("d103"),
+  wonMissing: U("d104"),
 };
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -81,6 +89,7 @@ beforeAll(async () => {
       on_hold_accumulated_seconds numeric NOT NULL DEFAULT 0,
       on_hold_accumulated_seconds_at_stage_entry numeric,
       expected_close_date date,
+      won_closed_date date,
       awarded_amount numeric,
       bid_board_total_sales numeric,
       bid_estimate numeric,
@@ -108,7 +117,10 @@ beforeAll(async () => {
       ('${STAGE.estimating}', 'estimating', 'Estimating', 2, false),
       ('${STAGE.legacyEstimating}', 'estimate_in_progress', 'Old Estimating', 2, false),
       ('${STAGE.sent}', 'estimate_sent_to_client', 'Estimate Sent to Client', 4, false),
-      ('${STAGE.won}', 'closed_won', 'Won', 9, true);
+      ('${STAGE.won}', 'won', 'Won', 7, true),
+      ('${STAGE.legacyWon}', 'closed_won', 'Legacy Won', 7, true),
+      ('${STAGE.lost}', 'lost', 'Lost', 8, true),
+      ('${STAGE.transitionalWonMapped}', 'in_production', 'In Production', 6, true);
 
     -- Reportable target-estimator projects. The historical alias must merge into Sidney's canonical
     -- Estimating cell, and an ownerless deal must remain in both the headline and evidence.
@@ -144,13 +156,25 @@ beforeAll(async () => {
       ('${DEAL.missingLegacy}', 'E-402', 'P-402', 'Missing unmapped legacy', '${STAGE.estimating}', '${OWNER}', NULL, 'normal', NULL, '2026-07-08T12:00:00Z', 0.10, NULL, '  Legacy   Person  ', false),
       ('${DEAL.missingService}', 'E-403', 'P-403', 'Missing service estimator', '${STAGE.opportunity}', '${OWNER}', NULL, 'service', 'estimating', '2026-07-09T12:00:00Z', 0.20, 'Not Assigned', NULL, true);
 
+    -- Won YTD is a separate realized cohort. The Sidney row's far-future forecast date proves Won uses the
+    -- awarded-first realized basis rather than the open value helper, which would auto-zero it.
+    INSERT INTO deals (
+      id, deal_number, project_number, name, stage_id, assigned_rep_id, estimator_user_id,
+      workflow_route, bid_board_stage_slug, stage_entered_at, expected_close_date, won_closed_date,
+      awarded_amount, bid_estimate, bid_board_estimator, is_bid_board_owned
+    ) VALUES
+      ('${DEAL.wonSidney}', 'W-101', 'PW-101', 'Sidney Won from boundary', '${STAGE.won}', '${OWNER}', '${SIDNEY}', 'normal', NULL, '2026-01-01T12:00:00Z', '2099-12-31', '2026-01-01', 1000, 1, NULL, false),
+      ('${DEAL.wonAlexBidBoard}', 'W-201', 'PW-201', 'Alex Bid Board Won to boundary', '${STAGE.opportunity}', '${OWNER}', '${ALEX}', 'normal', 'won', '2020-01-01T12:00:00Z', NULL, '2026-07-13', 2000, 2, NULL, true),
+      ('${DEAL.wonOtherLegacy}', 'W-301', 'PW-301', 'Other legacy Won', '${STAGE.legacyWon}', '${OWNER}', '${OTHER_ACTIVE}', 'normal', NULL, '2026-04-15T12:00:00Z', NULL, '2026-04-15', 3000, 3, NULL, false),
+      ('${DEAL.wonMissing}', 'W-401', 'PW-401', 'Missing estimator Won', '${STAGE.won}', '${OWNER}', NULL, 'normal', NULL, '2026-06-01T12:00:00Z', NULL, '2026-06-01', 4000, 4, 'Not Assigned', false);
+
     -- A CRM-owned row may retain an obsolete mirror timestamp. Its displayed age must still use the CRM
     -- stage entry, while the Bid Board-owned Alex row above must use its fresh mirror stage entry.
     UPDATE deals
     SET stage_entered_at = now(), bid_board_stage_entered_at = '2000-01-01T12:00:00Z'
     WHERE id = '${DEAL.sidneyCanonical}';
 
-    -- Every excluded row is worth 999, making scope leaks obvious in either count or value.
+    -- Every open-scope exclusion is worth 999, making leaks obvious in either count or value.
     INSERT INTO deals (
       id, deal_number, name, stage_id, assigned_rep_id, estimator_user_id, stage_entered_at,
       bid_estimate, is_active, is_test_data, is_change_order, on_hold, bid_board_stage_slug
@@ -158,9 +182,25 @@ beforeAll(async () => {
       ('${U("e001")}', 'X-1', 'Inactive project', '${STAGE.estimating}', '${OWNER}', '${SIDNEY}', now(), 999, false, false, false, false, NULL),
       ('${U("e002")}', 'X-2', 'Test project', '${STAGE.estimating}', '${OWNER}', '${SIDNEY}', now(), 999, true, true, false, false, NULL),
       ('${U("e003")}', 'X-3', 'Change order', '${STAGE.estimating}', '${OWNER}', '${SIDNEY}', now(), 999, true, false, true, false, NULL),
-      ('${U("e004")}', 'X-4', 'Held project', '${STAGE.estimating}', '${OWNER}', '${SIDNEY}', now(), 999, true, false, false, true, NULL),
-      ('${U("e005")}', 'X-5', 'CRM terminal project', '${STAGE.won}', '${OWNER}', '${SIDNEY}', now(), 999, true, false, false, false, NULL),
-      ('${U("e006")}', 'X-6', 'Bid Board terminal mirror', '${STAGE.opportunity}', '${OWNER}', '${SIDNEY}', now(), 999, true, false, false, false, 'closed_won');
+      ('${U("e004")}', 'X-4', 'Held project', '${STAGE.estimating}', '${OWNER}', '${SIDNEY}', now(), 999, true, false, false, true, NULL);
+
+    -- Won exclusions cover both YTD boundaries, missing dates, Lost signals, the transitional aliases that
+    -- canonicalize to Won for display but are not genuine Won, and every shared base-project guard.
+    INSERT INTO deals (
+      id, deal_number, name, stage_id, assigned_rep_id, estimator_user_id, workflow_route,
+      bid_board_stage_slug, stage_entered_at, expected_close_date, won_closed_date, awarded_amount,
+      is_bid_board_owned, is_active, is_test_data, is_change_order, on_hold
+    ) VALUES
+      ('${U("e101")}', 'WX-1', 'Won before YTD', '${STAGE.won}', '${OWNER}', '${SIDNEY}', 'normal', NULL, now(), NULL, '2025-12-31', 9999, false, true, false, false, false),
+      ('${U("e102")}', 'WX-2', 'Won after report today', '${STAGE.won}', '${OWNER}', '${SIDNEY}', 'normal', NULL, now(), NULL, '2026-07-14', 9999, false, true, false, false, false),
+      ('${U("e103")}', 'WX-3', 'Won without canonical date', '${STAGE.won}', '${OWNER}', '${SIDNEY}', 'normal', NULL, now(), NULL, NULL, 9999, false, true, false, false, false),
+      ('${U("e104")}', 'WX-4', 'CRM Lost is not Won', '${STAGE.lost}', '${OWNER}', '${SIDNEY}', 'normal', NULL, now(), NULL, '2026-06-15', 9999, false, true, false, false, false),
+      ('${U("e105")}', 'WX-5', 'Bid Board Lost is not Won', '${STAGE.opportunity}', '${OWNER}', '${SIDNEY}', 'normal', 'lost', now(), NULL, '2026-06-15', 9999, true, true, false, false, false),
+      ('${U("e106")}', 'WX-6', 'Transitional mapping is not genuine Won', '${STAGE.transitionalWonMapped}', '${OWNER}', '${SIDNEY}', 'normal', NULL, now(), NULL, '2026-06-15', 9999, false, true, false, false, false),
+      ('${U("e107")}', 'WX-7', 'Soft-deleted Won', '${STAGE.won}', '${OWNER}', '${SIDNEY}', 'normal', NULL, now(), NULL, '2026-06-15', 9999, false, false, false, false, false),
+      ('${U("e108")}', 'WX-8', 'Test Won', '${STAGE.won}', '${OWNER}', '${SIDNEY}', 'normal', NULL, now(), NULL, '2026-06-15', 9999, false, true, true, false, false),
+      ('${U("e109")}', 'WX-9', 'Change-order Won', '${STAGE.won}', '${OWNER}', '${SIDNEY}', 'normal', NULL, now(), NULL, '2026-06-15', 9999, false, true, false, true, false),
+      ('${U("e110")}', 'WX-10', 'Held Won', '${STAGE.won}', '${OWNER}', '${SIDNEY}', 'normal', NULL, now(), NULL, '2026-06-15', 9999, false, true, false, false, true);
   `);
   tenantDb = drizzle(pg);
 });
@@ -174,12 +214,51 @@ function byStage(stages: Array<{ stageSlug: string; count: number; value: number
 }
 
 describe("estimator pipeline summary and evidence", () => {
+  it("serializes report queries on the transaction-bound tenant client", async () => {
+    let callIndex = 0;
+    let activeQueries = 0;
+    let maximumConcurrentQueries = 0;
+    const results = [
+      [
+        { id: SIDNEY, email: "sgibson@trockgc.com", display_name: "Sidney Gibson", is_active: true },
+        { id: ALEX, email: "akoch@trockgc.com", display_name: "Alex Koch", is_active: true },
+      ],
+      [],
+      [],
+    ];
+    const transactionBoundDb = {
+      execute: async () => {
+        const result = results[callIndex++] ?? [];
+        activeQueries += 1;
+        maximumConcurrentQueries = Math.max(maximumConcurrentQueries, activeQueries);
+        await Promise.resolve();
+        activeQueries -= 1;
+        return result;
+      },
+    };
+
+    const report = await getEstimatorPipelineReport(transactionBoundDb as typeof tenantDb, REPORT_NOW);
+
+    expect(callIndex).toBe(3);
+    expect(maximumConcurrentQueries).toBe(1);
+    expect(report.pipeline).toEqual({ count: 0, value: 0 });
+    expect(report.won).toEqual({ count: 0, value: 0 });
+  });
+
   it("partitions the open-project cohort exactly once and merges canonical stage aliases", async () => {
-    const report = await getEstimatorPipelineReport(tenantDb);
+    const report = await getEstimatorPipelineReport(tenantDb, REPORT_NOW);
     const sidney = report.estimators.find((estimator) => estimator.key === "sidney_gibson")!;
     const alex = report.estimators.find((estimator) => estimator.key === "alex_koch")!;
 
     expect(report.pipeline).toEqual({ count: 9, value: 725.4 });
+    expect(report.won).toEqual({ count: 4, value: 10000 });
+    expect(report.wonPeriod).toEqual({ from: "2026-01-01", to: "2026-07-13", label: "Won YTD" });
+    expect(report.valueBasisLabel).toBe("Best current estimate");
+    expect(report.valueBasisLabels).toEqual({
+      open: "Best current estimate",
+      won: "Awarded-first won value",
+    });
+    expect(report.scope.cohort).toBe("current_open_pipeline_plus_won_ytd");
     expect(sidney).toMatchObject({
       estimatorUserId: SIDNEY,
       estimatorName: "Sidney Gibson",
@@ -187,14 +266,25 @@ describe("estimator pipeline summary and evidence", () => {
       active: true,
       count: 3,
       value: 175,
+      won: { count: 1, value: 1000 },
     });
-    expect(alex).toMatchObject({ count: 1, value: 200, estimatorUserId: ALEX });
-    expect(report.otherAssigned).toMatchObject({ count: 2, value: 340 });
+    expect(alex).toMatchObject({
+      count: 1,
+      value: 200,
+      estimatorUserId: ALEX,
+      won: { count: 1, value: 2000 },
+    });
+    expect(report.otherAssigned).toMatchObject({
+      count: 2,
+      value: 340,
+      won: { count: 1, value: 3000 },
+    });
     expect(report.missingEstimator).toMatchObject({
       count: 3,
       value: 10.4,
       actionableCount: 2,
       actionableValue: 0.3,
+      won: { count: 1, value: 4000 },
     });
 
     expect(
@@ -203,6 +293,12 @@ describe("estimator pipeline summary and evidence", () => {
     expect(
       sidney.value + alex.value + report.otherAssigned.value + report.missingEstimator.value,
     ).toBe(report.pipeline.value);
+    expect(
+      sidney.won.count + alex.won.count + report.otherAssigned.won.count + report.missingEstimator.won.count,
+    ).toBe(report.won.count);
+    expect(
+      sidney.won.value + alex.won.value + report.otherAssigned.won.value + report.missingEstimator.won.value,
+    ).toBe(report.won.value);
 
     const columns = byStage(report.stageColumns.map((stage) => ({ ...stage, count: 0, value: 0 })));
     expect(new Set(columns.keys())).toEqual(
@@ -239,7 +335,7 @@ describe("estimator pipeline summary and evidence", () => {
   });
 
   it("reconciles target, other, and missing evidence to their summary buckets", async () => {
-    const report = await getEstimatorPipelineReport(tenantDb);
+    const report = await getEstimatorPipelineReport(tenantDb, REPORT_NOW);
     const sidneySummary = report.estimators.find((estimator) => estimator.key === "sidney_gibson")!;
     const sidney = await getEstimatorPipelineEvidence(tenantDb, {
       bucket: "target",
@@ -266,9 +362,12 @@ describe("estimator pipeline summary and evidence", () => {
     );
 
     expect(sidney.filter).toMatchObject({
+      cohort: "open",
       bucket: "target",
       estimatorKey: "sidney_gibson",
       estimatorName: "Sidney Gibson",
+      valueBasisLabel: "Best current estimate",
+      period: null,
     });
     expect(sidney.records.find((record) => record.dealId === DEAL.sidneyOwnerless)).toMatchObject({
       ownerId: null,
@@ -280,6 +379,7 @@ describe("estimator pipeline summary and evidence", () => {
       companyName: "Acme Construction",
       propertyName: "River Center",
       expectedCloseDate: "2026-08-01",
+      wonClosedDate: null,
       daysInStage: 0,
     });
     expect(alex.records[0]).toMatchObject({
@@ -296,6 +396,116 @@ describe("estimator pipeline summary and evidence", () => {
       assignmentIssue: "inactive_estimator",
     });
     expect(missing.records.map((record) => record.dealNumber).sort()).toEqual(["E-401", "E-402", "E-403"]);
+  });
+
+  it("reconciles genuine CRM and Bid Board Won-YTD evidence without changing the open cohort", async () => {
+    const report = await getEstimatorPipelineReport(tenantDb, REPORT_NOW);
+    const sidneySummary = report.estimators.find((estimator) => estimator.key === "sidney_gibson")!;
+    const alexSummary = report.estimators.find((estimator) => estimator.key === "alex_koch")!;
+    const wonOptions = { cohort: "won" as const, pageSize: 100, now: REPORT_NOW };
+    const sidney = await getEstimatorPipelineEvidence(tenantDb, {
+      ...wonOptions,
+      bucket: "target",
+      estimatorKey: "sidney_gibson",
+    });
+    const alex = await getEstimatorPipelineEvidence(tenantDb, {
+      ...wonOptions,
+      bucket: "target",
+      estimatorKey: "alex_koch",
+    });
+    const other = await getEstimatorPipelineEvidence(tenantDb, { ...wonOptions, bucket: "other" });
+    const missing = await getEstimatorPipelineEvidence(tenantDb, { ...wonOptions, bucket: "missing" });
+
+    expect(sidney.total).toEqual(sidneySummary.won);
+    expect(alex.total).toEqual(alexSummary.won);
+    expect(other.total).toEqual(report.otherAssigned.won);
+    expect(missing.total).toEqual(report.missingEstimator.won);
+    expect(
+      sidney.total.count + alex.total.count + other.total.count + missing.total.count,
+    ).toBe(report.won.count);
+    expect(
+      sidney.total.value + alex.total.value + other.total.value + missing.total.value,
+    ).toBe(report.won.value);
+
+    const records = [...sidney.records, ...alex.records, ...other.records, ...missing.records];
+    expect(records).toHaveLength(4);
+    expect(new Set(records.map((record) => record.dealId)).size).toBe(4);
+    expect(records.map((record) => record.dealNumber).sort()).toEqual(["W-101", "W-201", "W-301", "W-401"]);
+    expect(records.every((record) => record.stageSlug === "won")).toBe(true);
+
+    expect(sidney.filter).toMatchObject({
+      cohort: "won",
+      valueBasisLabel: "Awarded-first won value",
+      period: { from: "2026-01-01", to: "2026-07-13", label: "Won YTD" },
+    });
+    expect(sidney.records[0]).toMatchObject({
+      dealId: DEAL.wonSidney,
+      stageSlug: "won",
+      stageLabel: "Won",
+      expectedCloseDate: "2099-12-31",
+      wonClosedDate: "2026-01-01",
+      pipelineValue: 1000,
+    });
+    expect(alex.records[0]).toMatchObject({
+      dealId: DEAL.wonAlexBidBoard,
+      stageSlug: "won",
+      wonClosedDate: "2026-07-13",
+      pipelineValue: 2000,
+      isBidBoardOwned: true,
+    });
+
+    const carriedEarlierPeriod = await getEstimatorPipelineEvidence(tenantDb, {
+      cohort: "won",
+      asOf: "2026-07-12",
+      bucket: "target",
+      estimatorKey: "alex_koch",
+      pageSize: 100,
+      now: REPORT_NOW,
+    });
+    expect(carriedEarlierPeriod.filter.period).toEqual({
+      from: "2026-01-01",
+      to: "2026-07-12",
+      label: "Won YTD",
+    });
+    expect(carriedEarlierPeriod.total).toEqual({ count: 0, value: 0 });
+    expect(other.records[0]).toMatchObject({
+      dealId: DEAL.wonOtherLegacy,
+      stageSlug: "won",
+      pipelineValue: 3000,
+    });
+    expect(missing.records[0]).toMatchObject({
+      dealId: DEAL.wonMissing,
+      assignmentIssue: "unassigned",
+      pipelineValue: 4000,
+    });
+
+    const wonCell = await getEstimatorPipelineEvidence(tenantDb, {
+      ...wonOptions,
+      bucket: "target",
+      estimatorKey: "sidney_gibson",
+      stageSlug: "won",
+    });
+    expect(wonCell.total).toEqual(sidneySummary.won);
+    expect(wonCell.filter.stageLabel).toBe("Won");
+
+    const excludedNumbers = new Set([
+      "WX-1",
+      "WX-2",
+      "WX-3",
+      "WX-4",
+      "WX-5",
+      "WX-6",
+      "WX-7",
+      "WX-8",
+      "WX-9",
+      "WX-10",
+    ]);
+    expect(records.some((record) => excludedNumbers.has(record.dealNumber ?? ""))).toBe(false);
+    // Won rows never leak back into the current-open total or stage columns.
+    expect(report.pipeline).toEqual({ count: 9, value: 725.4 });
+    expect(report.stageColumns.some((stage) => stage.stageSlug === "won")).toBe(false);
+    // Missing-Won is tracked separately and does not alter the open actionable queue.
+    expect(report.missingEstimator).toMatchObject({ actionableCount: 2, actionableValue: 0.3 });
   });
 
   it("filters after canonicalization, classifies assignment gaps, and paginates filtered rows", async () => {

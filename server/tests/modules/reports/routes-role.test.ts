@@ -161,6 +161,8 @@ describe("report route role guards", () => {
     expect(estimatorPipelineService.getEstimatorPipelineReport).toHaveBeenCalledWith({});
     expect(evidenceResponse.status).toBe(200);
     expect(estimatorPipelineService.getEstimatorPipelineEvidence).toHaveBeenCalledWith({}, {
+      cohort: "open",
+      asOf: undefined,
       bucket: "target",
       estimatorKey: "sidney_gibson",
       stageSlug: "estimating",

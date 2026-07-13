@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type {
   EstimatorPipelineBucket,
+  EstimatorPipelineCohort,
   EstimatorPipelineEvidenceResponse,
   EstimatorPipelineReport,
   EstimatorPipelineTargetKey,
@@ -44,6 +45,8 @@ export function useEstimatorPipelineReport(officeScopeKey?: string | null) {
 }
 
 export interface EstimatorPipelineEvidenceRequest {
+  cohort: EstimatorPipelineCohort;
+  asOf?: string;
   bucket: EstimatorPipelineBucket;
   estimatorKey?: EstimatorPipelineTargetKey;
   stageSlug?: string;
@@ -70,12 +73,14 @@ export function useEstimatorPipelineEvidence(
 
     const controller = new AbortController();
     const params = new URLSearchParams({
+      cohort: request.cohort,
       bucket: request.bucket,
       page: String(request.page),
       pageSize: String(request.pageSize),
     });
     if (request.estimatorKey) params.set("estimatorKey", request.estimatorKey);
     if (request.stageSlug) params.set("stageSlug", request.stageSlug);
+    if (request.asOf) params.set("asOf", request.asOf);
 
     setLoading(true);
     setError(null);
