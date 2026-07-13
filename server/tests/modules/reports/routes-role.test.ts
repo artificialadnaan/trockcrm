@@ -47,9 +47,15 @@ vi.mock("../../../src/modules/reports/monday-showcase-service.js", () => ({
   getMondayShowcaseEvidence: vi.fn(),
 }));
 
+vi.mock("../../../src/modules/reports/estimator-pipeline-service.js", () => ({
+  getEstimatorPipelineReport: vi.fn(),
+  getEstimatorPipelineEvidence: vi.fn(),
+}));
+
 import { errorHandler } from "../../../src/middleware/error-handler.js";
 import * as reportService from "../../../src/modules/reports/service.js";
 import * as mondayShowcaseService from "../../../src/modules/reports/monday-showcase-service.js";
+import * as estimatorPipelineService from "../../../src/modules/reports/estimator-pipeline-service.js";
 import { runReportBuilder } from "../../../src/modules/reports/report-builder-service.js";
 import * as savedReportsService from "../../../src/modules/reports/saved-reports-service.js";
 import { reportRoutes } from "../../../src/modules/reports/routes.js";
@@ -120,6 +126,47 @@ describe("report route role guards", () => {
       {},
       expect.objectContaining({ metric: "won", mode: "to_date" }),
     );
+  });
+
+  it("keeps estimator pipeline summaries and project evidence leadership-only", async () => {
+    const app = buildApp("rep");
+
+    const summaryResponse = await request(app).get("/api/reports/estimator-pipeline");
+    const evidenceResponse = await request(app).get(
+      "/api/reports/estimator-pipeline/evidence?bucket=missing",
+    );
+
+    expect(summaryResponse.status).toBe(403);
+    expect(evidenceResponse.status).toBe(403);
+    expect(estimatorPipelineService.getEstimatorPipelineReport).not.toHaveBeenCalled();
+    expect(estimatorPipelineService.getEstimatorPipelineEvidence).not.toHaveBeenCalled();
+  });
+
+  it("allows directors to load estimator summaries and validated evidence filters", async () => {
+    vi.mocked(estimatorPipelineService.getEstimatorPipelineReport).mockResolvedValueOnce({
+      pipeline: { count: 0, value: 0 },
+    } as any);
+    vi.mocked(estimatorPipelineService.getEstimatorPipelineEvidence).mockResolvedValueOnce({
+      records: [],
+    } as any);
+    const app = buildApp("director");
+
+    const summaryResponse = await request(app).get("/api/reports/estimator-pipeline");
+    const evidenceResponse = await request(app).get(
+      "/api/reports/estimator-pipeline/evidence?bucket=target&estimatorKey=sidney_gibson&stageSlug=estimating&page=2&pageSize=50",
+    );
+
+    expect(summaryResponse.status).toBe(200);
+    expect(summaryResponse.body).toEqual({ data: { pipeline: { count: 0, value: 0 } } });
+    expect(estimatorPipelineService.getEstimatorPipelineReport).toHaveBeenCalledWith({});
+    expect(evidenceResponse.status).toBe(200);
+    expect(estimatorPipelineService.getEstimatorPipelineEvidence).toHaveBeenCalledWith({}, {
+      bucket: "target",
+      estimatorKey: "sidney_gibson",
+      stageSlug: "estimating",
+      page: 2,
+      pageSize: 50,
+    });
   });
 
   it("blocks non-CRM roles from report-builder runs", async () => {

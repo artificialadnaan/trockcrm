@@ -1,4 +1,10 @@
 import { Router, type Request } from "express";
+import {
+  ESTIMATOR_PIPELINE_BUCKETS,
+  ESTIMATOR_PIPELINE_TARGET_KEYS,
+  type EstimatorPipelineBucket,
+  type EstimatorPipelineTargetKey,
+} from "@trock-crm/shared/types";
 import { requireRole, requireDirector } from "../../middleware/rbac.js";
 import { AppError } from "../../middleware/error-handler.js";
 import {
@@ -84,6 +90,11 @@ import { getAtRiskWatchlist } from "./at-risk-service.js";
 import { getRepPackData } from "./rep-pack-service.js";
 import { getRegionReport } from "./region-report-service.js";
 import { getQcScorecardsReport } from "./qc-scorecards-service.js";
+import {
+  getEstimatorPipelineEvidence,
+  getEstimatorPipelineReport,
+  type EstimatorPipelineEvidenceOptions,
+} from "./estimator-pipeline-service.js";
 import { resolveRepScope, weekDates, buildLiveDay, sumDays, resolveReps, USAGE_ROSTER_ROLES, readUsageDaily, buildTeamSummary, isWithinDrilldownWindow, classifyViewsState, readViewEvents, readViewEventsRange, readActionDetail, resolveDayKind, emptyUsageDay } from "../usage/read-service.js";
 import { businessToday, shiftBusinessDate, getWtdPeriod, type WeekMode } from "../../lib/period.js";
 
@@ -160,6 +171,52 @@ function readOptionalIsoDate(value: unknown, label: string) {
     throw new AppError(400, `${label} must be a valid ISO date`);
   }
   return raw;
+}
+
+function readPositiveInteger(value: unknown, label: string, fallback: number, maximum: number): number {
+  if (value === undefined || value === null || value === "") return fallback;
+  const raw = Array.isArray(value) ? value[0] : value;
+  if (typeof raw !== "string" || !/^\d+$/.test(raw)) {
+    throw new AppError(400, `${label} must be a positive integer`);
+  }
+  const parsed = Number(raw);
+  if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > maximum) {
+    throw new AppError(400, `${label} must be between 1 and ${maximum}`);
+  }
+  return parsed;
+}
+
+export function parseEstimatorPipelineEvidenceQuery(
+  query: Record<string, unknown>,
+): EstimatorPipelineEvidenceOptions {
+  const bucketRaw = pickQueryValue(query.bucket);
+  if (!bucketRaw || !(ESTIMATOR_PIPELINE_BUCKETS as readonly string[]).includes(bucketRaw)) {
+    throw new AppError(400, "bucket must be one of target, other, or missing");
+  }
+  const bucket = bucketRaw as EstimatorPipelineBucket;
+  const estimatorKeyRaw = pickQueryValue(query.estimatorKey);
+  let estimatorKey: EstimatorPipelineTargetKey | undefined;
+  if (bucket === "target") {
+    if (!estimatorKeyRaw || !(ESTIMATOR_PIPELINE_TARGET_KEYS as readonly string[]).includes(estimatorKeyRaw)) {
+      throw new AppError(400, "estimatorKey must identify a configured target estimator");
+    }
+    estimatorKey = estimatorKeyRaw as EstimatorPipelineTargetKey;
+  } else if (estimatorKeyRaw !== undefined) {
+    throw new AppError(400, "estimatorKey is only valid when bucket=target");
+  }
+
+  const stageSlug = pickQueryValue(query.stageSlug);
+  if (stageSlug && !/^[a-z0-9_]{1,100}$/.test(stageSlug)) {
+    throw new AppError(400, "stageSlug must be a canonical pipeline stage slug");
+  }
+
+  return {
+    bucket,
+    estimatorKey,
+    stageSlug,
+    page: readPositiveInteger(query.page, "page", 1, 100_000),
+    pageSize: readPositiveInteger(query.pageSize, "pageSize", 25, 100),
+  };
 }
 
 export function parseTier4Filters(query: Record<string, unknown>, user: { role: string; id: string }): AnalyticsTier4Filters {
@@ -1172,6 +1229,29 @@ router.get("/monday-showcase/evidence", requireAnyRole, async (req, res, next) =
     const options = parseShowcaseEvidenceParams(req.query as Record<string, unknown>);
     assertShowcaseEvidenceAccess(options, req.user!.role === "admin" || req.user!.role === "director");
     const data = await getMondayShowcaseEvidence(req.tenantDb!, options);
+    await req.commitTransaction!();
+    res.json({ data });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Live current-pipeline attribution for the two configured estimators, plus a reconciled assignment-gap
+// queue. Leadership-only because the evidence is office-wide and estimator edits affect commissions.
+router.get("/estimator-pipeline", requireDirector, async (req, res, next) => {
+  try {
+    const data = await getEstimatorPipelineReport(req.tenantDb!);
+    await req.commitTransaction!();
+    res.json({ data });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get("/estimator-pipeline/evidence", requireDirector, async (req, res, next) => {
+  try {
+    const options = parseEstimatorPipelineEvidenceQuery(req.query as Record<string, unknown>);
+    const data = await getEstimatorPipelineEvidence(req.tenantDb!, options);
     await req.commitTransaction!();
     res.json({ data });
   } catch (err) {
