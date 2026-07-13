@@ -2235,7 +2235,7 @@ export function createLeadService(
     // Hidden leads should not leave actionable work behind in dashboards or notification queues.
     await tenantDb
       .update(tasks)
-      .set({ status: "dismissed", isOverdue: false })
+      .set({ status: "dismissed", completedAt: archivedAt, isOverdue: false })
       .where(
         and(
           sql`${tasks.entitySnapshot} ->> 'leadId' = ${leadId}`,

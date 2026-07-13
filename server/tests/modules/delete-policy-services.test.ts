@@ -90,7 +90,11 @@ describe("delete policy services", () => {
       decidedBy: "rep-1",
       decisionReason: "Lead archived: Duplicate request",
     });
-    expect(lead.calls[2]).toMatchObject({ status: "dismissed", isOverdue: false });
+    expect(lead.calls[2]).toMatchObject({
+      status: "dismissed",
+      completedAt: new Date("2026-07-13T12:00:00.000Z"),
+      isOverdue: false,
+    });
   });
 
   it("reconciles pending approvals and tasks on a legacy inactive-open archive", async () => {
@@ -114,7 +118,11 @@ describe("delete policy services", () => {
 
     expect(legacy.calls).toHaveLength(2);
     expect(legacy.calls[0]).toMatchObject({ status: "superseded" });
-    expect(legacy.calls[1]).toMatchObject({ status: "dismissed", isOverdue: false });
+    expect(legacy.calls[1]).toMatchObject({
+      status: "dismissed",
+      completedAt: new Date("2026-07-13T12:00:00.000Z"),
+      isOverdue: false,
+    });
   });
 
   it("soft-deletes active companies and returns null for already inactive companies", async () => {
