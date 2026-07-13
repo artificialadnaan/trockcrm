@@ -364,6 +364,12 @@ describe("leadership photos", () => {
     expect(scorecardDraftSummaryPhotos(d).map((p) => p.clientUploadId)).toEqual(["cu-1"]);
     expect(scorecardDraftPhotosForSection(d, "safety").map((p) => p.clientUploadId)).toEqual(["cu-2"]);
   });
+
+  it("marks a draft once evidence upload starts so it cannot be unsafely discarded", () => {
+    const d = scorecardDraftReducer(newLeadershipDraft(), { type: "markEvidenceUploadAttempted" });
+    expect(d.evidenceUploadAttempted).toBe(true);
+    expect(scorecardDraftReducer(d, { type: "markEvidenceUploadAttempted" })).toBe(d);
+  });
 });
 
 describe("leadership scorecardDraftToSubmission", () => {

@@ -66,6 +66,9 @@ export interface ScorecardDraft {
   actionItems: string[];
   /** Leadership Project Summary free text (voice-dictatable); project cards don't use it. */
   summary?: string;
+  /** Once evidence uploading begins, the draft cannot safely be discarded: some photos may already exist
+   * in the project gallery while the scorecard POST remains retryable. Optional for legacy drafts. */
+  evidenceUploadAttempted?: boolean;
   superintendentSignature?: string;
   pmSignature?: string;
   createdAt: number;
@@ -88,6 +91,7 @@ export type DraftAction =
   | { type: "setActionItems"; items: string[] }
   | { type: "setSignature"; field: "superintendentSignature" | "pmSignature"; value: string }
   | { type: "appendActionItem"; text: string }
+  | { type: "markEvidenceUploadAttempted" }
   | { type: "addPhoto"; photo: ScorecardDraftPhoto }
   | { type: "removePhoto"; key: string }
   | { type: "setPhotoCaption"; key: string; caption: string }
@@ -283,6 +287,8 @@ export function scorecardDraftReducer(draft: ScorecardDraft, action: DraftAction
       while (items.length > 0 && items[items.length - 1].trim() === "") items.pop();
       return { ...draft, actionItems: [...items, t] };
     }
+    case "markEvidenceUploadAttempted":
+      return draft.evidenceUploadAttempted ? draft : { ...draft, evidenceUploadAttempted: true };
     case "addPhoto":
       return { ...draft, photos: [...draft.photos, action.photo] };
     case "removePhoto":

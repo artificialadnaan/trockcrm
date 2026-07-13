@@ -130,6 +130,13 @@ export default function ScorecardsScreen() {
   }
 
   function confirmDiscard(draft: ScorecardDraft) {
+    if (draft.evidenceUploadAttempted) {
+      Alert.alert(
+        "Finish this scorecard instead",
+        "Evidence upload already started, so some photos may be in the project gallery. Complete and submit this scorecard rather than discarding it.",
+      );
+      return;
+    }
     Alert.alert(
       "Discard scorecard?",
       `This permanently removes the in-progress ${draft.kind === "leadership" ? "Leadership " : ""}Scorecard for ${draft.dealName}.`,
@@ -148,8 +155,8 @@ export default function ScorecardsScreen() {
     if (!ownerKey || discardingDraftId) return;
     setDiscardingDraftId(draft.id);
     try {
-      // Remove still-queued uploads before deleting the local draft. Uploaded evidence is only linked when a
-      // scorecard is submitted, so this cannot remove evidence from a completed scorecard.
+      // This path is unavailable once evidence upload starts (see confirmDiscard), so these are only local
+      // copies/queued uploads and cannot leave already-confirmed gallery photos orphaned.
       await removeQueuedUploads(ownerKey, draft.photos.map((photo) => photo.clientUploadId));
       await deleteScorecardDraft(ownerKey, draft.id);
       setDrafts((current) => current.filter((item) => item.id !== draft.id));

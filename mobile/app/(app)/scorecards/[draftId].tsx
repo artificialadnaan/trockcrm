@@ -416,6 +416,23 @@ function Wizard(props: {
 
   async function onSubmit() {
     if (submitting) return;
+    // A failed/partial upload can leave some evidence confirmed in the gallery while the card itself still
+    // needs a retry. Mark this BEFORE draining so the list screen never offers an unsafe discard that would
+    // orphan confirmed evidence.
+    let draftForSubmit = draft;
+    if (draft.photos.length > 0 && !draft.evidenceUploadAttempted) {
+      draftForSubmit = { ...draft, evidenceUploadAttempted: true };
+      dispatch({ type: "markEvidenceUploadAttempted" });
+      try {
+        // Flush earlier autosaves, then durably write the safety marker before the first upload can finish.
+        // A kill/restart between a partial upload and the next React effect must still block discard.
+        await saveChain.current.catch(() => undefined);
+        await saveScorecardDraft(ownerKey, draftForSubmit, Date.now());
+      } catch {
+        setNotice({ tone: "error", text: "Couldn’t prepare evidence for submission. Please try again." });
+        return;
+      }
+    }
     setSubmitting(true);
     setNotice(null);
     // Retry-cancel any still-pending photo removals, so the drain in submitScorecard can't upload a
@@ -432,7 +449,7 @@ function Wizard(props: {
       }
     }
     try {
-      const result = await submitScorecard(fetcher, ownerKey, draft);
+      const result = await submitScorecard(fetcher, ownerKey, draftForSubmit);
       if (result.status === "photos_failed") {
         setNotice({ tone: "error", text: `${result.failed} photo${result.failed === 1 ? "" : "s"} couldn’t upload after several tries. Remove and re-add ${result.failed === 1 ? "it" : "them"}, then submit.` });
         setSubmitting(false);
