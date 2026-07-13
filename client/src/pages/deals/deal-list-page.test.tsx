@@ -2350,6 +2350,77 @@ describe("DealListPage", () => {
     expect(html).toContain("3d in stage");
   });
 
+  it("shows explicit stage and project-owner fields in the SLA drilldown list", async () => {
+    mocks.useDealBoardMock.mockReturnValue({
+      board: {
+        columns: [
+          {
+            stage: { id: "stage-contract", name: "Contract", slug: "contract" },
+            count: 3,
+            totalValue: 350000,
+            cards: [
+              makeDeal({
+                id: "deal-owned",
+                name: "Owned At Risk Deal",
+                stageId: "stage-contract",
+                assignedRepName: "Brett Jones",
+                bidEstimate: "200000",
+                atRisk: makeAtRiskResult(),
+              }),
+              makeDeal({
+                id: "deal-unassigned",
+                name: "Unassigned At Risk Deal",
+                stageId: "stage-contract",
+                assignedRepId: null,
+                assignedRepName: null,
+                bidEstimate: "100000",
+                atRisk: makeAtRiskResult(),
+              }),
+              makeDeal({
+                id: "deal-owner-name-missing",
+                name: "Unknown Owner At Risk Deal",
+                stageId: "stage-contract",
+                assignedRepId: "inactive-rep",
+                assignedRepName: null,
+                bidEstimate: "50000",
+                atRisk: makeAtRiskResult(),
+              }),
+            ],
+          },
+        ],
+        terminalStages: [],
+      },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const view = await renderPageDom("/deals?scope=all&filter=at_risk", "director");
+    try {
+      const drilldownText = view.container.textContent ?? "";
+      expect(drilldownText).toContain("Project");
+      expect(drilldownText).toContain("Stage");
+      expect(drilldownText).toContain("Project owner");
+      expect(drilldownText).toContain("Time in stage");
+      expect(drilldownText).toContain("Last updated");
+      expect(drilldownText).toContain("Value");
+
+      expect(
+        view.container.querySelector('button[aria-label^="Open project Owned At Risk Deal;"]')?.getAttribute("aria-label")
+      ).toBe(
+        "Open project Owned At Risk Deal; stage Contract; project owner Brett Jones; time in stage 8d; last updated 2026-04-20; value $200.0K"
+      );
+      expect(
+        view.container.querySelector('button[aria-label^="Open project Unassigned At Risk Deal;"]')?.getAttribute("aria-label")
+      ).toContain("project owner Unassigned");
+      expect(
+        view.container.querySelector('button[aria-label^="Open project Unknown Owner At Risk Deal;"]')?.getAttribute("aria-label")
+      ).toContain("project owner Unknown owner");
+    } finally {
+      await view.cleanup();
+    }
+  });
+
   it("keeps the embedded list visible for stale drill-down views", () => {
     const html = renderPage("/deals?scope=all&filter=stale&period=qtd", "director");
 

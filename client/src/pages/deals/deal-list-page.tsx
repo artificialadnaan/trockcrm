@@ -604,6 +604,12 @@ function stageAgeDaysLabel(deal: Deal) {
   return deal.atRisk ? `${deal.atRisk.effectiveStageAgeDays}d` : "N/A";
 }
 
+function dealOwnerLabel(deal: Deal) {
+  const ownerName = deal.assignedRepName?.trim();
+  if (ownerName) return ownerName;
+  return deal.assignedRepId ? "Unknown owner" : "Unassigned";
+}
+
 export function compareDrilldownDeals(left: DrilldownListRow, right: DrilldownListRow, sort: DealListSortState) {
   // Primary tier: active, non-zero deals on top; on-hold and $0 deals sink to the
   // bottom regardless of the active sort. (on-hold already reads as $0 via
@@ -1444,21 +1450,46 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
                   <p className="mt-1 text-2xl font-black text-slate-950">{drilldownDeals.length}</p>
                 </div>
               </div>
+              <div className="hidden grid-cols-[minmax(0,1.5fr)_minmax(0,1fr)_minmax(0,0.9fr)_minmax(7rem,0.65fr)_minmax(7rem,0.65fr)_minmax(5.5rem,0.55fr)] gap-4 border-b border-slate-100 px-1 py-3 text-[10px] font-black uppercase tracking-[0.16em] text-slate-500 lg:grid">
+                <span>Project</span>
+                <span>Stage</span>
+                <span>Project owner</span>
+                <span>Time in stage</span>
+                <span>Last updated</span>
+                <span className="text-right">Value</span>
+              </div>
               <div className="divide-y divide-slate-100">
                 {paginatedDrilldownDeals.map((deal) => (
                   <button
                     key={deal.id}
                     type="button"
                     onClick={() => navigate(`/deals/${deal.id}`)}
-                    className="grid w-full gap-3 px-1 py-4 text-left transition-colors hover:bg-slate-50 md:grid-cols-[minmax(0,1.4fr)_auto_auto_auto]"
+                    aria-label={`Open project ${deal.name}; stage ${deal.boardStageName}; project owner ${dealOwnerLabel(deal)}; time in stage ${stageAgeDaysLabel(deal)}; last updated ${formatDateInput(new Date(deal.updatedAt))}; value ${USD_COMPACT(moneyValue(deal))}`}
+                    className="grid w-full grid-cols-2 items-start gap-x-4 gap-y-3 px-1 py-4 text-left transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand-red/40 lg:grid-cols-[minmax(0,1.5fr)_minmax(0,1fr)_minmax(0,0.9fr)_minmax(7rem,0.65fr)_minmax(7rem,0.65fr)_minmax(5.5rem,0.55fr)] lg:items-center"
                   >
-                    <div className="min-w-0">
+                    <div className="col-span-2 min-w-0 lg:col-span-1">
                       <p className="truncate text-sm font-black text-slate-950">{deal.name}</p>
-                      <p className="mt-1 text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">{deal.boardStageName}</p>
                     </div>
-                    <p className="text-sm font-semibold text-slate-500">{stageAgeDaysLabel(deal)} in stage</p>
-                    <p className="text-sm font-semibold text-slate-500">{formatDateInput(new Date(deal.updatedAt))}</p>
-                    <p className="text-sm font-black text-slate-950">{USD_COMPACT(moneyValue(deal))}</p>
+                    <div className="min-w-0">
+                      <span className="block text-[10px] font-black uppercase tracking-[0.14em] text-slate-500 lg:hidden">Stage</span>
+                      <p className="mt-1 truncate text-xs font-bold uppercase tracking-[0.1em] text-slate-600 lg:mt-0">{deal.boardStageName}</p>
+                    </div>
+                    <div className="min-w-0">
+                      <span className="block text-[10px] font-black uppercase tracking-[0.14em] text-slate-500 lg:hidden">Project owner</span>
+                      <p className="mt-1 truncate text-sm font-semibold text-slate-700 lg:mt-0">{dealOwnerLabel(deal)}</p>
+                    </div>
+                    <div>
+                      <span className="block text-[10px] font-black uppercase tracking-[0.14em] text-slate-500 lg:hidden">Time in stage</span>
+                      <p className="mt-1 text-sm font-semibold text-slate-500 lg:mt-0">{stageAgeDaysLabel(deal)} in stage</p>
+                    </div>
+                    <div>
+                      <span className="block text-[10px] font-black uppercase tracking-[0.14em] text-slate-500 lg:hidden">Last updated</span>
+                      <p className="mt-1 text-sm font-semibold text-slate-500 lg:mt-0">{formatDateInput(new Date(deal.updatedAt))}</p>
+                    </div>
+                    <div className="col-span-2 lg:col-span-1 lg:text-right">
+                      <span className="block text-[10px] font-black uppercase tracking-[0.14em] text-slate-500 lg:hidden">Value</span>
+                      <p className="mt-1 text-sm font-black text-slate-950 lg:mt-0">{USD_COMPACT(moneyValue(deal))}</p>
+                    </div>
                   </button>
                 ))}
                 {paginatedDrilldownDeals.length === 0 ? (
