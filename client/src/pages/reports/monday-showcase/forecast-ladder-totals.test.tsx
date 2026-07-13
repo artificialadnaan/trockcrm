@@ -142,6 +142,20 @@ const aliceSumValue = fixture.reps[0].projection.bands.reduce((s, b) => s + b.va
 const baileySumValue = fixture.reps[1].projection.bands.reduce((s, b) => s + b.value, 0); // 9499
 
 describe("B4 Forecast Ladder — Total of all timelines column", () => {
+  it("places Total at the far right after Stale date and No date for office and rep rows", () => {
+    render();
+    const ladders = [...container.querySelectorAll<HTMLDivElement>("div.grid.grid-cols-7")]
+      .filter((grid) => grid.children.length === 7);
+
+    expect(ladders).toHaveLength(3); // office, Alice, Bailey
+    for (const ladder of ladders) {
+      const columns = [...ladder.children].map((column) => column.textContent?.trim().toLowerCase() ?? "");
+      expect(columns[4]).toContain("stale date");
+      expect(columns[5]).toContain("no date");
+      expect(columns[6]).toContain("total");
+    }
+  });
+
   it("renders a Total cell on the office box summing $ and dated count across all bands", () => {
     render();
     const text = container.textContent ?? "";
