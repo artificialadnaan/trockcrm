@@ -46,6 +46,15 @@ import {
 import { resolveMineVisibilityFeatures } from "../shared/mine-visibility.js";
 
 const router = Router();
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function requireUuid(value: unknown, fieldName: string): string {
+  const normalized = typeof value === "string" ? value.trim() : "";
+  if (!UUID_PATTERN.test(normalized)) {
+    throw new AppError(400, `${fieldName} must be a valid UUID`);
+  }
+  return normalized;
+}
 
 async function isLeadWatchedByUser(tenantDb: any, leadId: string, userId: string) {
   const features = await resolveMineVisibilityFeatures(tenantDb);
@@ -553,8 +562,13 @@ router.patch("/:id", async (req, res, next) => {
     const isAssignmentTransferOnly = patchKeys.length > 0 && patchKeys.every((field) => field === "assignedRepId" || field === "salesRepId");
     if (isAssignmentTransferOnly) {
       const access = await assertLeadCollaboratorAccess(req.tenantDb!, req.params.id, req.user!);
-      if (req.user!.role !== "admin" && access.assignedRepId !== req.user!.id) {
-        throw new AppError(403, "Only the assigned rep or an admin can transfer this lead");
+      const isDirectorOrAdmin = req.user!.role === "admin" || req.user!.role === "director";
+      if (!isDirectorOrAdmin && access.assignedRepId !== req.user!.id) {
+        throw new AppError(
+          403,
+          "Only the assigned rep, a director, or an admin can reassign this lead",
+          "LEAD_REASSIGNMENT_FORBIDDEN"
+        );
       }
     } else {
       await assertLeadOwnerAccess(req.tenantDb!, req.params.id, req.user!, {
@@ -579,8 +593,16 @@ router.patch("/:id", async (req, res, next) => {
     if (body.salesRepId !== undefined && body.salesRepId !== null && body.assignedRepId === undefined) {
       body.assignedRepId = body.salesRepId;
     }
+    if (isAssignmentTransferOnly && body.assignedRepId !== undefined) {
+      body.assignedRepId = requireUuid(body.assignedRepId, "assignedRepId");
+      // assignedRepId is canonical. Never let an assignment request supply a different conversion fallback;
+      // the service enforces the same invariant for direct/non-HTTP callers.
+      body.salesRepId = body.assignedRepId;
+    }
 
-    if (req.user!.role === "rep" && body.assignedRepId !== undefined) {
+    // Reps cannot assign arbitrary owners while editing lead fields, but the current owner may make the
+    // narrowly-scoped assignment-only transfer authorized above. Do not strip its canonical owner field.
+    if (req.user!.role === "rep" && body.assignedRepId !== undefined && !isAssignmentTransferOnly) {
       delete body.assignedRepId;
     }
 
@@ -672,15 +694,23 @@ router.post("/:id/convert", async (req, res, next) => {
   }
 });
 
-// DELETE /api/leads/:id — owner/admin soft-delete
+// DELETE /api/leads/:id — owner/admin archive (soft-delete)
 router.delete("/:id", async (req, res, next) => {
   try {
     const leadId = req.params.id as string;
     await assertLeadOwnerAccess(req.tenantDb!, leadId, req.user!, {
       allowAdmin: true,
-      message: "Only the assigned rep or an admin can delete this lead",
+      message: "Only the assigned rep or an admin can archive this lead",
     });
-    const lead = await deleteLead(req.tenantDb!, leadId, "admin", req.user!.id);
+    const reason = typeof req.body?.reason === "string" ? req.body.reason.trim() : "";
+    if (!reason) {
+      throw new AppError(400, "A reason is required to archive a lead.", "LEAD_ARCHIVE_REASON_REQUIRED");
+    }
+    const lead = await deleteLead(req.tenantDb!, leadId, {
+      actorRole: req.user!.role,
+      actorId: req.user!.id,
+      reason,
+    });
     if (lead) {
       const auditContext = buildRouteAuditContext(req);
       await logActivity({

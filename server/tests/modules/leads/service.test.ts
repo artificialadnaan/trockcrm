@@ -14,6 +14,7 @@ import {
   projectTypeConfig,
   projectTypeQuestionNodes,
   properties,
+  userOfficeAccess,
   users,
 } from "@trock-crm/shared/schema";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -30,6 +31,8 @@ const pipelineMocks = vi.hoisted(() => ({
 const assignmentTaskMocks = vi.hoisted(() => ({
   createAssignmentTaskIfNeeded: vi.fn(),
 }));
+const REP_ONE_UUID = "00000000-0000-4000-8000-000000000001";
+const REP_TWO_UUID = "00000000-0000-4000-8000-000000000002";
 
 vi.mock("../../../src/modules/pipeline/service.js", () => ({
   getAllStages: pipelineMocks.getAllStages,
@@ -53,6 +56,9 @@ type FakeLeadRow = {
   stageId: string;
   assignedRepId: string;
   salesRepId?: string | null;
+  ownershipSyncStatus?: string | null;
+  ownershipSyncedAt?: Date | null;
+  unassignedReasonCode?: string | null;
   status: "open" | "converted" | "disqualified";
   officeCode?: string | null;
   office?: string | null;
@@ -109,8 +115,10 @@ function createFakeTenantDb(lead: FakeLeadRow) {
         id: "rep-1",
         isActive: true,
         officeId: "office-1",
+        role: "rep",
       },
     ],
+    userOfficeAccess: [] as Array<Record<string, unknown>>,
     projectTypes: [],
     projectTypeQuestionNodes: [
       {
@@ -216,6 +224,9 @@ function createFakeTenantDb(lead: FakeLeadRow) {
         filteredRows = filteredRows.slice(0, limit);
         return this;
       },
+      for() {
+        return this;
+      },
       then(onfulfilled: (value: unknown[]) => unknown) {
         return Promise.resolve(materialize()).then(onfulfilled);
       },
@@ -246,6 +257,9 @@ function createFakeTenantDb(lead: FakeLeadRow) {
           }
           if (table === users || tableName === "users") {
             return createQueryBuilder(state.users as Array<Record<string, unknown>>, fields);
+          }
+          if (table === userOfficeAccess || tableName === "user_office_access") {
+            return createQueryBuilder(state.userOfficeAccess, fields);
           }
           if (table === notificationRecipientGroups || tableName === "notification_recipient_groups") {
             return createQueryBuilder(state.notificationRecipientGroups, fields);
@@ -974,7 +988,7 @@ describe("lead service canonical progression", () => {
                   : table === leadQuestionAnswers
                     ? []
                   : table === users
-                    ? [{ id: "rep-1", isActive: true, officeId: "office-1" }]
+                    ? [{ id: "rep-1", isActive: true, officeId: "office-1", role: "rep" }]
                   : table === notificationRecipientGroups || table === notificationRecipientAssignments
                     ? []
                     : [];
@@ -1673,7 +1687,7 @@ describe("lead service canonical progression", () => {
                   : table === leadQuestionAnswers
                     ? []
                   : table === users
-                    ? [{ id: "rep-1", isActive: true, officeId: "office-1" }]
+                    ? [{ id: "rep-1", isActive: true, officeId: "office-1", role: "rep" }]
                     : [];
 
             return {
@@ -1740,7 +1754,7 @@ describe("lead service canonical progression", () => {
                   : table === leadQuestionAnswers
                     ? []
                   : table === users
-                    ? [{ id: "rep-1", isActive: true, officeId: "office-1" }]
+                    ? [{ id: "rep-1", isActive: true, officeId: "office-1", role: "rep" }]
                     : [];
 
             return {
@@ -2097,6 +2111,186 @@ describe("lead service canonical progression", () => {
     expect(lead.assignedRepId).toBe("rep-1");
   });
 
+  it("preserves a distinct sales rep when the canonical owner patch is a no-op", async () => {
+    const tenantDb = createFakeTenantDb({
+      id: "lead-1",
+      companyId: "company-1",
+      propertyId: "property-1",
+      primaryContactId: null,
+      name: "Palm Villas repaint",
+      stageId: newLeadStage.id,
+      assignedRepId: REP_ONE_UUID,
+      salesRepId: "rep-2",
+      status: "open",
+      projectTypeId: "project-type-commercial",
+      qualificationPayload: {},
+      source: "Referral",
+      description: null,
+      stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
+      convertedAt: null,
+      isActive: true,
+      createdAt: new Date("2026-04-12T15:00:00.000Z"),
+      updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+    });
+    tenantDb.state.users.push({
+      id: REP_ONE_UUID,
+      isActive: true,
+      officeId: "office-1",
+      role: "rep",
+    });
+    const service = createLeadService();
+
+    await expect(
+      service.updateLead(
+        tenantDb as never,
+        "lead-1",
+        { assignedRepId: "not-a-uuid", officeId: "office-1" },
+        "director",
+        "director-1",
+      ),
+    ).rejects.toMatchObject({ statusCode: 400, message: "assignedRepId must be a valid UUID" });
+
+    await expect(
+      service.updateLead(
+        tenantDb as never,
+        "lead-1",
+        { assignedRepId: null as never, officeId: "office-1" },
+        "director",
+        "director-1",
+      ),
+    ).rejects.toMatchObject({ statusCode: 400 });
+
+    const lead = await service.updateLead(
+      tenantDb as never,
+      "lead-1",
+      { assignedRepId: REP_ONE_UUID, officeId: "office-1" },
+      "director",
+      "director-1",
+    );
+
+    expect(lead).toMatchObject({ assignedRepId: REP_ONE_UUID, salesRepId: "rep-2" });
+  });
+
+  it("persists a manual ownership override and assignment task when a lead is reassigned", async () => {
+    const now = new Date("2026-04-15T15:00:00.000Z");
+    const tenantDb = createFakeTenantDb({
+      id: "lead-1",
+      companyId: "company-1",
+      propertyId: "property-1",
+      primaryContactId: null,
+      name: "Palm Villas repaint",
+      stageId: newLeadStage.id,
+      assignedRepId: "rep-1",
+      salesRepId: "rep-1",
+      ownershipSyncStatus: "matched",
+      ownershipSyncedAt: null,
+      unassignedReasonCode: "owner_unmatched",
+      status: "open",
+      projectTypeId: "project-type-commercial",
+      qualificationPayload: {},
+      source: "Referral",
+      description: null,
+      stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
+      convertedAt: null,
+      isActive: true,
+      createdAt: new Date("2026-04-12T15:00:00.000Z"),
+      updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+    });
+    tenantDb.state.users.push({
+      id: REP_TWO_UUID,
+      isActive: true,
+      officeId: "office-1",
+      role: "rep",
+    });
+    const service = createLeadService({ now: () => now });
+
+    const lead = await service.updateLead(
+      tenantDb as never,
+      "lead-1",
+      { assignedRepId: REP_TWO_UUID, officeId: "office-1" },
+      "director",
+      "director-1",
+    );
+
+    expect(lead).toMatchObject({
+      assignedRepId: REP_TWO_UUID,
+      salesRepId: REP_TWO_UUID,
+      ownershipSyncStatus: "manual_override",
+      ownershipSyncedAt: now,
+      unassignedReasonCode: null,
+    });
+    expect(assignmentTaskMocks.createAssignmentTaskIfNeeded).toHaveBeenCalledWith(
+      tenantDb,
+      expect.objectContaining({
+        entityType: "lead",
+        entityId: "lead-1",
+        previousAssignedRepId: "rep-1",
+        nextAssignedRepId: REP_TWO_UUID,
+        actorUserId: "director-1",
+      }),
+    );
+  });
+
+  it("uses the target office role override when validating a lead owner", async () => {
+    const tenantDb = createFakeTenantDb({
+      id: "lead-1",
+      companyId: "company-1",
+      propertyId: "property-1",
+      primaryContactId: null,
+      name: "Palm Villas repaint",
+      stageId: newLeadStage.id,
+      assignedRepId: "rep-1",
+      salesRepId: "rep-1",
+      status: "open",
+      projectTypeId: "project-type-commercial",
+      qualificationPayload: {},
+      source: "Referral",
+      description: null,
+      stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
+      convertedAt: null,
+      isActive: true,
+      createdAt: new Date("2026-04-12T15:00:00.000Z"),
+      updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+    });
+    tenantDb.state.users.push({
+      id: REP_TWO_UUID,
+      isActive: true,
+      officeId: "office-home",
+      role: "rep",
+    });
+    tenantDb.state.userOfficeAccess.push({
+      userId: REP_TWO_UUID,
+      officeId: "office-2",
+      roleOverride: "field_contractor",
+    });
+    const service = createLeadService();
+
+    await expect(
+      service.updateLead(
+        tenantDb as never,
+        "lead-1",
+        { assignedRepId: REP_TWO_UUID, officeId: "office-2" },
+        "director",
+        "director-1",
+      ),
+    ).rejects.toMatchObject({ statusCode: 400 });
+
+    const target = tenantDb.state.users.find((user) => user.id === REP_TWO_UUID);
+    if (!target) throw new Error("target fixture missing");
+    target.role = "field_contractor";
+    tenantDb.state.userOfficeAccess[0]!.roleOverride = "rep";
+
+    await expect(
+      service.updateLead(
+        tenantDb as never,
+        "lead-1",
+        { assignedRepId: REP_TWO_UUID, officeId: "office-2" },
+        "director",
+        "director-1",
+      ),
+    ).resolves.toMatchObject({ assignedRepId: REP_TWO_UUID, salesRepId: REP_TWO_UUID });
+  });
+
   it("skips the bid_due_date V2 mirror when that node is not active during update", async () => {
     const previousFlag = process.env.ENABLE_LEAD_EDIT_V2;
     process.env.ENABLE_LEAD_EDIT_V2 = "true";
@@ -2177,7 +2371,7 @@ describe("lead service canonical progression", () => {
                   : table === leadQuestionAnswers
                     ? []
                   : table === users
-                    ? [{ id: "rep-1", isActive: true, officeId: "office-1" }]
+                    ? [{ id: "rep-1", isActive: true, officeId: "office-1", role: "rep" }]
                   : table === notificationRecipientGroups || table === notificationRecipientAssignments
                     ? []
                     : [];
@@ -2279,7 +2473,7 @@ describe("lead service canonical progression", () => {
                   : table === leadQuestionAnswers
                     ? []
                   : table === users
-                    ? [{ id: "rep-1", isActive: true, officeId: "office-1" }]
+                    ? [{ id: "rep-1", isActive: true, officeId: "office-1", role: "rep" }]
                   : table === notificationRecipientGroups || table === notificationRecipientAssignments
                     ? []
                     : [];

@@ -18,13 +18,14 @@ export interface UseSalesRepsOptions {
   /**
    * Shapes which users the `/users/sales-reps` feed returns:
    *   "deal-reassignment" — active office users in any internal CRM role (owner/estimator pickers).
+   *   "lead-reassignment" — active office users in any internal CRM role (lead owner picker).
    *   "sales-source"      — active office internal CRM users (any role except field_contractor),
    *                         matching the server's assertSalesSourceIsCrmUser gate, so the source picker
    *                         can't offer a choice that 422s on submit (and a plain rep sees the full office
    *                         roster, not just themselves). Same set as deal-reassignment today; kept a
    *                         distinct purpose for intent + future divergence.
    */
-  purpose?: "deal-reassignment" | "sales-source";
+  purpose?: "deal-reassignment" | "lead-reassignment" | "sales-source";
 }
 
 export function useSalesReps(officeId?: string, options: UseSalesRepsOptions = {}) {

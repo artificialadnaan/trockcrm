@@ -57,6 +57,15 @@ describe("user routes", () => {
         officeId: "office-dallas",
         isActive: false,
       },
+      {
+        id: "field-effective-1",
+        displayName: "Field Effective",
+        email: "field-effective@example.com",
+        // listUsers reports the effective role in the requested office, including any grant override.
+        role: "field_contractor",
+        officeId: "office-b",
+        isActive: true,
+      },
     ]);
 
     const route = findGetRoute("/crm-owners");
@@ -139,7 +148,9 @@ describe("user routes", () => {
   // ACCEPT grant-holders — so the route must NOT re-filter them out by primary officeId, or a valid
   // candidate (here `rep-access-only`, primary office-b, granted office-a) is un-pickable in the UI even
   // though the PATCH would accept the id. Inactive rows are still dropped.
-  it("lists active office-accessible reassignment candidates incl. multi-office grant-holders", async () => {
+  it.each(["deal-reassignment", "lead-reassignment"])(
+    "lists active office-accessible candidates for %s incl. multi-office grant-holders",
+    async (purpose) => {
     listUsersMock.mockResolvedValue([
       {
         id: "rep-1",
@@ -175,12 +186,20 @@ describe("user routes", () => {
         officeId: "office-a",
         isActive: false,
       },
+      {
+        id: "field-effective-1",
+        displayName: "Field Effective",
+        email: "field-effective@example.com",
+        role: "field_contractor",
+        officeId: "office-b",
+        isActive: true,
+      },
     ]);
 
     const route = findGetRoute("/sales-reps");
     let body: unknown;
     const req = {
-      query: { purpose: "deal-reassignment" },
+      query: { purpose },
       headers: {},
       user: {
         id: "rep-1",
@@ -211,5 +230,6 @@ describe("user routes", () => {
       { id: "rep-2", displayName: "Next Rep", email: "next@example.com" },
       { id: "rep-access-only", displayName: "Access Only Rep", email: "access-only@example.com" },
     ]);
-  });
+    }
+  );
 });

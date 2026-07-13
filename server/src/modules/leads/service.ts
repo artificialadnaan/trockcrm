@@ -6,6 +6,7 @@ import {
   companies,
   contacts,
   deals,
+  leadDueDiligenceApprovals,
   leadStageHistory,
   leadQuestionAnswers,
   leads,
@@ -13,6 +14,7 @@ import {
   projectTypeConfig,
   properties,
   offices,
+  tasks,
   userOfficeAccess,
   users,
 } from "@trock-crm/shared/schema";
@@ -20,11 +22,13 @@ import type * as schema from "@trock-crm/shared/schema";
 import {
   toCanonicalLeadStageSlug,
   resolveOfficeCodeFromOffice,
+  type UserRole,
   type WorkflowFamily,
 } from "@trock-crm/shared/types";
 import { db } from "../../db.js";
 import { buildLeadSearchCondition, escapeLikePattern } from "../search/unified-search.js";
 import { AppError } from "../../middleware/error-handler.js";
+import { isCrmUserRole } from "../../middleware/field-auth.js";
 import { createAssignmentTaskIfNeeded } from "../assignment-tasks/service.js";
 import { getActiveProjectTypes, getAllStages, getStageById, getStageBySlug } from "../pipeline/service.js";
 import { assertLeadStageTransitionAllowed, LeadStageTransitionError } from "./stage-transition-service.js";
@@ -63,8 +67,18 @@ import {
   type LeadSourceCategory,
 } from "@trock-crm/shared/types";
 import { logActivity, type AuditContext } from "../audit/audit-logger.js";
+import { buildArchivedDescription } from "../deals/archive-description.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function requireUuid(value: unknown, fieldName: string): string {
+  const normalized = typeof value === "string" ? value.trim() : "";
+  if (!UUID_PATTERN.test(normalized)) {
+    throw new AppError(400, `${fieldName} must be a valid UUID`);
+  }
+  return normalized;
+}
 
 export interface LeadFilters {
   search?: string;
@@ -786,10 +800,13 @@ async function validateAssignee(tenantDb: TenantDb, assigneeId: string, officeId
     .limit(1);
 
   if (!user) {
-    throw new AppError(400, "Assigned user not found or inactive");
+    throw new AppError(400, "Assigned user not found, inactive, or unavailable for CRM ownership");
   }
 
   if (!officeId || user.officeId === officeId) {
+    if (!isCrmUserRole(user.role)) {
+      throw new AppError(400, "Assigned user not found, inactive, or unavailable for CRM ownership");
+    }
     return;
   }
 
@@ -801,6 +818,9 @@ async function validateAssignee(tenantDb: TenantDb, assigneeId: string, officeId
 
   if (!access) {
     throw new AppError(400, "Assigned user does not have access to this office");
+  }
+  if (!isCrmUserRole(access.roleOverride ?? user.role)) {
+    throw new AppError(400, "Assigned user not found, inactive, or unavailable for CRM ownership");
   }
 }
 
@@ -1669,12 +1689,31 @@ export function createLeadService(
     userRole: string,
     userId: string
   ) {
+    if (input.assignedRepId !== undefined) {
+      input = { ...input, assignedRepId: requireUuid(input.assignedRepId, "assignedRepId") };
+    }
+    // Ownership transfers are security-sensitive and can be initiated by the current owner. Lock before
+    // reading the owner so two concurrent transfers cannot both authorize against the same stale owner.
+    if (input.assignedRepId !== undefined) {
+      const lockQuery = tenantDb
+        .select({ id: leads.id })
+        .from(leads)
+        .where(eq(leads.id, leadId))
+        .limit(1) as any;
+      if (typeof lockQuery.for === "function") {
+        await lockQuery.for("update");
+      } else {
+        await lockQuery;
+      }
+    }
+
     const existing = await getLeadById(tenantDb, leadId, userRole, userId);
     if (!existing) {
       throw new AppError(404, "Lead not found");
     }
 
-    if (userRole === "rep" && existing.assignedRepId !== userId) {
+    const canEditAnyLead = userRole === "admin" || userRole === "director";
+    if (!canEditAnyLead && existing.assignedRepId !== userId) {
       throw new AppError(403, "You can only edit your own leads");
     }
 
@@ -1735,6 +1774,7 @@ export function createLeadService(
       input.projectTypeId !== undefined ? input.projectTypeId : existing.projectTypeId;
     const nextAssignedRepId =
       input.assignedRepId !== undefined ? input.assignedRepId : existing.assignedRepId;
+    let assignedRepChanged = false;
     let stageChangeAuditRecord:
       | {
           leadId: string;
@@ -1858,9 +1898,20 @@ export function createLeadService(
     if (input.assignedRepId !== undefined) {
       await validateAssignee(tenantDb, input.assignedRepId, input.officeId);
       updates.assignedRepId = input.assignedRepId;
+      assignedRepChanged = input.assignedRepId !== existing.assignedRepId;
+      if (assignedRepChanged) {
+        // A real owner transfer must also move the legacy conversion fallback. Keep this invariant in the
+        // service for direct callers such as the ownership cleanup queue. A no-op owner patch deliberately
+        // leaves a separately designated sales rep untouched.
+        updates.salesRepId = input.assignedRepId;
+        // The import/sync job deliberately preserves manual_override rows. Without this marker, the next
+        // HubSpot ownership pass can silently undo a reassignment made in CRM.
+        updates.ownershipSyncStatus = "manual_override";
+        updates.unassignedReasonCode = null;
+      }
     }
 
-    if (input.salesRepId !== undefined) {
+    if (input.salesRepId !== undefined && input.assignedRepId === undefined) {
       await validateOptionalUserId(tenantDb, input.salesRepId, "salesRepId", input.officeId);
       updates.salesRepId = input.salesRepId;
     }
@@ -1942,6 +1993,9 @@ export function createLeadService(
     }
 
     const updateTime = stageChangedAt ?? deps.now();
+    if (assignedRepChanged) {
+      updates.ownershipSyncedAt = updateTime;
+    }
     updates.updatedAt = updateTime;
 
     const [lead] = await tenantDb
@@ -2044,10 +2098,7 @@ export function createLeadService(
       }
     }
 
-    if (
-      input.assignedRepId !== undefined &&
-      input.assignedRepId !== existing.assignedRepId
-    ) {
+    if (assignedRepChanged) {
       await createAssignmentTaskIfNeeded(tenantDb, {
         entityType: "lead",
         entityId: lead.id,
@@ -2110,27 +2161,87 @@ export function createLeadService(
   async function deleteLead(
     tenantDb: TenantDb,
     leadId: string,
-    userRole: string,
-    userId: string
+    opts: {
+      actorRole: UserRole;
+      actorId?: string | null;
+      reason: string;
+    }
   ) {
-    if (userRole !== "admin") {
-      throw new AppError(403, "Only admins can delete leads");
+    const reason = typeof opts.reason === "string" ? opts.reason.trim() : "";
+    if (!reason) {
+      throw new AppError(400, "A reason is required to archive a lead.", "LEAD_ARCHIVE_REASON_REQUIRED");
     }
 
-    const existing = await getLeadById(tenantDb, leadId, userRole, userId);
+    const lockQuery = tenantDb
+      .select()
+      .from(leads)
+      .where(eq(leads.id, leadId))
+      .limit(1) as any;
+    const rows = typeof lockQuery.for === "function"
+      ? await lockQuery.for("update")
+      : await lockQuery;
+    const existing = rows[0] ?? null;
     if (!existing) {
       throw new AppError(404, "Lead not found");
     }
 
-    if (!existing.isActive) {
+    if (opts.actorRole !== "admin" && (!opts.actorId || existing.assignedRepId !== opts.actorId)) {
+      throw new AppError(
+        403,
+        "Only the assigned rep or an admin can archive this lead",
+        "LEAD_ARCHIVE_FORBIDDEN"
+      );
+    }
+
+    // Converted/disqualified leads are legitimately inactive and are not archive tombstones.
+    if (!existing.isActive && existing.status !== "open") {
       return null;
     }
 
-    const [lead] = await tenantDb
-      .update(leads)
-      .set({ isActive: false, updatedAt: deps.now() })
-      .where(eq(leads.id, leadId))
-      .returning();
+    const archivedAt = deps.now();
+    let lead: typeof existing | null = null;
+    if (existing.isActive) {
+      const archivedDescription = buildArchivedDescription(existing.description, reason, archivedAt);
+      const [updatedLead] = await tenantDb
+        .update(leads)
+        .set({ isActive: false, description: archivedDescription, updatedAt: archivedAt })
+        .where(eq(leads.id, leadId))
+        .returning();
+
+      if (!updatedLead) {
+        throw new AppError(404, "Lead not found");
+      }
+      lead = updatedLead;
+    }
+
+    // Also reconcile legacy inactive-open tombstones created before archive cleanup existed. Retrying an
+    // archive must revoke their pending public token/work without prepending the archive reason a second time.
+    await tenantDb
+      .update(leadDueDiligenceApprovals)
+      .set({
+        status: "superseded",
+        decidedBy: opts.actorId ?? null,
+        decidedAt: archivedAt,
+        decisionReason: `Lead archived: ${reason}`,
+        updatedAt: archivedAt,
+      })
+      .where(
+        and(
+          eq(leadDueDiligenceApprovals.leadId, leadId),
+          eq(leadDueDiligenceApprovals.status, "pending")
+        )
+      );
+
+    // Hidden leads should not leave actionable work behind in dashboards or notification queues.
+    await tenantDb
+      .update(tasks)
+      .set({ status: "dismissed", isOverdue: false })
+      .where(
+        and(
+          sql`${tasks.entitySnapshot} ->> 'leadId' = ${leadId}`,
+          inArray(tasks.status, ["pending", "scheduled", "in_progress", "waiting_on", "blocked"])
+        )
+      );
 
     return lead;
   }
