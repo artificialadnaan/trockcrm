@@ -2,6 +2,7 @@ import {
   deficiencyLabel,
   formatShortDate,
   scorecardDownloadErrorMessage,
+  scorecardLeadershipPhotoSections,
   scorecardPhotoSections,
   scorecardSectionRows,
 } from "../detail-view";
@@ -47,6 +48,19 @@ describe("scorecardPhotoSections", () => {
   });
   it("returns [] when there are no photos", () => {
     expect(scorecardPhotoSections([])).toEqual([]);
+  });
+});
+
+describe("scorecardLeadershipPhotoSections", () => {
+  it("groups category evidence in leadership order and places Project Summary last", () => {
+    const photos: FieldScorecardPhotoView[] = [
+      { id: "p1", sectionKey: "project_summary", fileId: "f1", url: "u1", caption: null },
+      { id: "p2", sectionKey: "safety", fileId: "f2", url: "u2", caption: "PPE station" },
+      { id: "p3", sectionKey: "quality_control", fileId: "f3", url: "u3", caption: null },
+    ];
+    const sections = scorecardLeadershipPhotoSections(photos);
+    expect(sections.map((section) => section.key)).toEqual(["quality_control", "safety", "project_summary"]);
+    expect(sections.map((section) => section.title)).toEqual(["Quality Control", "Safety", "Project Summary"]);
   });
 });
 

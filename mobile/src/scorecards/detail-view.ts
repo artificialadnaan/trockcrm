@@ -9,6 +9,7 @@ import {
   FIELD_SCORECARD_LEADERSHIP_SUMMARY_SECTION_KEY,
   FIELD_SCORECARD_CRITICAL_DEFICIENCIES,
   FIELD_SCORECARD_TOTAL_POINTS,
+  type ScorecardLeadershipSectionKey,
   type ScorecardSectionKey,
 } from "./scoring";
 import type { FieldScorecardItemView, FieldScorecardPhotoView } from "../api/types";
@@ -73,11 +74,30 @@ export function scorecardLeadershipRows(items: readonly FieldScorecardItemView[]
   });
 }
 
-/** The Project Summary evidence photos on a leadership card (sectionKey `project_summary`), in order. */
-export function scorecardSummaryPhotos(
+export interface ScorecardLeadershipPhotoSection {
+  key: ScorecardLeadershipSectionKey | typeof FIELD_SCORECARD_LEADERSHIP_SUMMARY_SECTION_KEY;
+  title: string;
+  photos: FieldScorecardPhotoView[];
+}
+
+/** Group leadership evidence by its scored category, with Project Summary last. */
+export function scorecardLeadershipPhotoSections(
   photos: readonly FieldScorecardPhotoView[],
-): FieldScorecardPhotoView[] {
-  return photos.filter((p) => p.sectionKey === FIELD_SCORECARD_LEADERSHIP_SUMMARY_SECTION_KEY);
+): ScorecardLeadershipPhotoSection[] {
+  const byKey = new Map<string, FieldScorecardPhotoView[]>();
+  for (const photo of photos) {
+    const list = byKey.get(photo.sectionKey) ?? [];
+    list.push(photo);
+    byKey.set(photo.sectionKey, list);
+  }
+  const out: ScorecardLeadershipPhotoSection[] = [];
+  for (const section of FIELD_SCORECARD_LEADERSHIP_SECTIONS) {
+    const list = byKey.get(section.key);
+    if (list?.length) out.push({ key: section.key, title: section.title, photos: list });
+  }
+  const summary = byKey.get(FIELD_SCORECARD_LEADERSHIP_SUMMARY_SECTION_KEY);
+  if (summary?.length) out.push({ key: FIELD_SCORECARD_LEADERSHIP_SUMMARY_SECTION_KEY, title: "Project Summary", photos: summary });
+  return out;
 }
 
 export interface ScorecardPhotoSection {
@@ -97,8 +117,7 @@ export function scorecardPhotoSections(
 ): ScorecardPhotoSection[] {
   const byKey = new Map<ScorecardSectionKey, FieldScorecardPhotoView[]>();
   for (const p of photos) {
-    // Only project section keys group here; deficiency evidence and leadership `project_summary` photos are
-    // excluded (leadership photos render via scorecardSummaryPhotos instead).
+    // Only project section keys group here; deficiency and leadership evidence use their dedicated groups.
     if (!isProjectSectionKey(p.sectionKey)) continue;
     const list = byKey.get(p.sectionKey) ?? [];
     list.push(p);

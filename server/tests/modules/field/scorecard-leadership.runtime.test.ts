@@ -11,7 +11,7 @@ import { fieldScorecards, fieldScorecardItems, fieldScorecardPhotos, dealTeamMem
 import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
 
 // Leadership scorecard: a distinct KIND in the SAME tables — 4 categories rated 1-10 (average out of 10,
-// V2 bands), a free-text summary + Project Summary photos, NO deficiencies/action-items/signatures. These
+// V2 bands), a free-text summary + category/Project Summary photos, NO deficiencies/action-items/signatures. These
 // runtime tests prove the create path persists kind + summary + the 4 items and the same durable email
 // job is enqueued (Phase B routing), and the detail read returns the leadership items in canonical order.
 
@@ -140,20 +140,20 @@ describe("createFieldScorecard (leadership)", () => {
     expect(detail.actionItems).toEqual([]);
   });
 
-  it("attaches Project Summary photos and rejects a below-1 category point", async () => {
+  it("attaches category and Project Summary photos and rejects a below-1 category point", async () => {
     const { scorecard } = await createFieldScorecard(
       tdb,
       leadershipSubmission({
         clientSubmissionId: csid(3),
         photos: [
-          { sectionKey: "project_summary", clientUploadId: "cu-1" },
+          { sectionKey: "safety", clientUploadId: "cu-1" },
           { sectionKey: "project_summary", clientUploadId: "cu-2" },
         ],
       }),
     );
     const detail = await getFieldScorecardDetail(tdb, scorecard.id, ACCESS);
     expect(detail.photos).toHaveLength(2);
-    expect(detail.photos.every((p) => p.sectionKey === "project_summary")).toBe(true);
+    expect(detail.photos.map((p) => p.sectionKey)).toEqual(["safety", "project_summary"]);
 
     await expect(
       createFieldScorecard(tdb, leadershipSubmission({ clientSubmissionId: csid(4), items: leadershipItems({ safety: 0 }) })),
@@ -193,7 +193,7 @@ describe("createFieldScorecard (leadership)", () => {
     expect(row.rows[0].pm_signature).toBeNull();
   });
 
-  it("rejects a leadership submission missing a category and rejects a non-summary photo section", async () => {
+  it("rejects a leadership submission missing a category and rejects a non-leadership photo section", async () => {
     await expect(
       createFieldScorecard(tdb, leadershipSubmission({ clientSubmissionId: csid(5), items: leadershipItems().slice(0, 3) })),
     ).rejects.toThrow(/section/i);
@@ -201,7 +201,7 @@ describe("createFieldScorecard (leadership)", () => {
     await expect(
       createFieldScorecard(
         tdb,
-        leadershipSubmission({ clientSubmissionId: csid(6), photos: [{ sectionKey: "safety", clientUploadId: "cu-1" }] }),
+        leadershipSubmission({ clientSubmissionId: csid(6), photos: [{ sectionKey: "planning_precon", clientUploadId: "cu-1" }] }),
       ),
     ).rejects.toThrow(/section/i);
   });

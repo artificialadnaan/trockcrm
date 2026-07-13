@@ -351,18 +351,23 @@ describe("leadership validation", () => {
 });
 
 describe("leadership photos", () => {
-  it("collects summary photos under project_summary", () => {
+  it("collects category and Project Summary photos under their own keys", () => {
     let d = newLeadershipDraft();
     d = scorecardDraftReducer(d, {
       type: "addPhoto",
       photo: { key: "p1", uri: "file://p1", clientUploadId: "cu-1", sectionKey: "project_summary", caption: "site" },
     });
+    d = scorecardDraftReducer(d, {
+      type: "addPhoto",
+      photo: { key: "p2", uri: "file://p2", clientUploadId: "cu-2", sectionKey: "safety", caption: "PPE station" },
+    });
     expect(scorecardDraftSummaryPhotos(d).map((p) => p.clientUploadId)).toEqual(["cu-1"]);
+    expect(scorecardDraftPhotosForSection(d, "safety").map((p) => p.clientUploadId)).toEqual(["cu-2"]);
   });
 });
 
 describe("leadership scorecardDraftToSubmission", () => {
-  it("emits kind, summary, the 4 leadership items (canonical order), and only project_summary photos", () => {
+  it("emits kind, summary, the 4 leadership items (canonical order), and category/summary photos", () => {
     let d = fullyScoredLeadership(9);
     d = scorecardDraftReducer(d, { type: "setNote", sectionKey: "safety", note: "  strong PPE  " });
     d = scorecardDraftReducer(d, { type: "setSummary", value: "  Great crew  " });
@@ -370,8 +375,6 @@ describe("leadership scorecardDraftToSubmission", () => {
       type: "addPhoto",
       photo: { key: "p1", uri: "file://p1", clientUploadId: "cu-1", sectionKey: "project_summary", caption: "" },
     });
-    // A stray photo tagged to a category (not project_summary) must be dropped — leadership cards carry only
-    // Project Summary evidence.
     d = scorecardDraftReducer(d, {
       type: "addPhoto",
       photo: { key: "p2", uri: "file://p2", clientUploadId: "cu-2", sectionKey: "safety", caption: "" },
@@ -391,9 +394,10 @@ describe("leadership scorecardDraftToSubmission", () => {
     expect(payload.pmSignature).toBeNull();
     expect(payload.criticalDeficiencies).toEqual([]);
     expect(payload.actionItems).toEqual([]);
-    // Only the project_summary photo survives; the stray category photo (cu-2) is excluded.
-    expect(payload.photos).toEqual([{ sectionKey: "project_summary", deficiencyKey: null, clientUploadId: "cu-1" }]);
-    expect(payload.photos.map((p) => p.clientUploadId)).not.toContain("cu-2");
+    expect(payload.photos).toEqual([
+      { sectionKey: "project_summary", deficiencyKey: null, clientUploadId: "cu-1" },
+      { sectionKey: "safety", deficiencyKey: null, clientUploadId: "cu-2" },
+    ]);
   });
 
   it("nulls a blank summary", () => {

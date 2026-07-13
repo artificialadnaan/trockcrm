@@ -188,9 +188,9 @@ export function scorecardV2RatingLabel(rating: ScorecardRating): string {
 
 // ── Leadership scorecard ────────────────────────────────────────────────────────
 // A distinct scorecard KIND stored in the same tables (discriminated by `kind`). Four
-// categories rated 1-10 with a dictatable comment note (no per-category photos); the score is
-// their average out of 10, using the same rating bands as V2. Photos and a free-text summary
-// attach to the Project Summary (sectionKey `project_summary`). No signatures, no deficiencies.
+// categories rated 1-10 with a dictatable comment note; the score is their average out of 10, using the
+// same rating bands as V2. Photos may attach to each category or the Project Summary
+// (sectionKey `project_summary`). No signatures, no deficiencies.
 export type ScorecardKind = "project" | "leadership";
 
 export const FIELD_SCORECARD_LEADERSHIP_SECTION_KEYS = [
@@ -216,7 +216,7 @@ export const FIELD_SCORECARD_LEADERSHIP_SECTIONS: readonly ScorecardLeadershipSe
   { key: "site_staff_feedback", title: "Site Staff Feedback", maxPoints: 10 },
 ];
 
-/** Photos and the free-text summary attach to the Project Summary block. */
+/** The Leadership Project Summary free text and optional summary-only evidence bucket. */
 export const FIELD_SCORECARD_LEADERSHIP_SUMMARY_SECTION_KEY = "project_summary" as const;
 
 export function isLeadershipSectionKey(key: string): key is ScorecardLeadershipSectionKey {
@@ -346,7 +346,7 @@ export interface ScorecardSubmissionItem {
 export interface ScorecardPhotoInput {
   /**
    * V2 deficiency evidence uses `critical_deficiency` plus `deficiencyKey`.
-   * Leadership photos attach to the Project Summary (`project_summary`).
+   * Leadership photos attach to a leadership category or the Project Summary (`project_summary`).
    */
   sectionKey:
     | ScorecardSectionKey

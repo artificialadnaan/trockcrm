@@ -180,7 +180,7 @@ export type FieldScorecardItemView = {
 };
 export type FieldScorecardPhotoView = {
   id: string;
-  // Leadership evidence attaches to the Project Summary (`project_summary`).
+  // Leadership evidence attaches to one of its four categories or the Project Summary (`project_summary`).
   sectionKey: ScorecardSectionKey | ScorecardLeadershipSectionKey | "critical_deficiency" | "project_summary";
   deficiencyKey?: string | null;
   fileId: string;

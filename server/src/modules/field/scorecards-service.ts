@@ -634,8 +634,9 @@ async function resolvePhotoLinks(
 ): Promise<{ sectionKey: string; deficiencyKey: string | null; fileId: string }[]> {
   for (const p of input.photos) {
     if (kind === "leadership") {
-      // Leadership photos attach ONLY to the Project Summary — no per-category or deficiency evidence.
-      if (p.sectionKey !== FIELD_SCORECARD_LEADERSHIP_SUMMARY_SECTION_KEY) {
+      // Leadership evidence may attach to any of its four scored categories or the Project Summary. It has
+      // no critical-deficiency bucket, so reject every other key rather than silently stranding evidence.
+      if (p.sectionKey !== FIELD_SCORECARD_LEADERSHIP_SUMMARY_SECTION_KEY && !isLeadershipSectionKey(p.sectionKey)) {
         throw new AppError(422, `Unknown scorecard section: ${p.sectionKey}`);
       }
       continue;
