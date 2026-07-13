@@ -1227,6 +1227,7 @@ describe("lead service canonical progression", () => {
         expect.objectContaining({
           status: "pending",
           leadId: lead.id,
+          requestedBy: "rep-1",
           detectionSignal: {
             source: "none",
             type: "no_recent_activity",
