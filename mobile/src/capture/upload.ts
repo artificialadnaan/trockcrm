@@ -22,6 +22,13 @@ export type CaptureUploadInput = {
    * upload queue always assigns one.
    */
   clientUploadId: string;
+  /**
+   * Queue-only routing hint. Submitted-scorecard edits can outlive the submitter's access to the scorecard's
+   * former office, so those targeted uploads must omit a stale x-office-id and let the server resolve the
+   * owning office from `target`. Ordinary/new-draft captures stay office-pinned. This field is persisted in
+   * the local queue but is never sent in either upload request body.
+   */
+  routeByTarget?: boolean;
 };
 
 function onlyDefinedTarget(t: CaptureTargetRef): CaptureTargetRef {

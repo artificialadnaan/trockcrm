@@ -24,6 +24,20 @@ export function isDrainable(item: QueuedUpload): boolean {
   return (item.attempts ?? 0) < MAX_UPLOAD_ATTEMPTS;
 }
 
+/** Legacy/unmarked queue items remain office-pinned; only an explicit edit-evidence marker opts out. */
+export function shouldRouteUploadByTarget(item: Pick<CaptureUploadInput, "routeByTarget">): boolean {
+  return item.routeByTarget === true;
+}
+
+/** Select per item so a mixed owner queue never reroutes ordinary/new-draft captures by accident. */
+export function selectUploadFetcher<T>(
+  item: Pick<CaptureUploadInput, "routeByTarget">,
+  officePinnedFetcher: T,
+  targetFetcher?: T,
+): T {
+  return shouldRouteUploadByTarget(item) && targetFetcher !== undefined ? targetFetcher : officePinnedFetcher;
+}
+
 /** Bump the attempt counter (and lastTriedAt) for the given ids — used after a failed drain attempt. */
 export function bumpAttempts(queue: QueuedUpload[], failedIds: Iterable<string>, now: number): QueuedUpload[] {
   const failed = new Set(failedIds);

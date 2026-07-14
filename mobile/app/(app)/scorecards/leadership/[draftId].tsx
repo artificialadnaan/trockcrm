@@ -86,12 +86,19 @@ export default function LeadershipScorecardScreen() {
   const qc = useQueryClient();
   const resolvedOfficeId = routeOfficeId || activeOfficeId || user?.tenantId || null;
   const ownerKey = uploadOwnerKey(user?.id, resolvedOfficeId ?? undefined);
-  // Scope the durable evidence drain and NEW scorecard POST to the draft's office. Scorecard-id edit GET/PUT
-  // calls use the normal auth fetcher so a stale cross-office header cannot block the owning-office resolver.
+  // Scope the default durable evidence drain and NEW scorecard POST to the draft's office. Scorecard-id edit
+  // GET/PUT calls use the headerless fetcher below so a stale office cannot block the owning-office resolver.
   const queueFetcher = useCallback<Fetcher>(
     (path, opts) =>
       apiFetch(path, { ...opts, token: token ?? undefined, officeId: resolvedOfficeId, onUnauthorized: () => void signOut() }),
     [token, resolvedOfficeId, signOut],
+  );
+  // Scorecard-id GET/PUT and marked edit evidence are target-resolved server-side. Never send the persisted
+  // owning-office header here: it can become unauthorized if the original submitter is later re-homed.
+  const scorecardFetcher = useCallback<Fetcher>(
+    (path, opts) =>
+      apiFetch(path, { ...opts, token: token ?? undefined, officeId: null, onUnauthorized: () => void signOut() }),
+    [token, signOut],
   );
 
   const [loaded, setLoaded] = useState<ScorecardDraft | null | "missing">(null);
@@ -184,7 +191,7 @@ export default function LeadershipScorecardScreen() {
         }
         router.back();
       }}
-      fetcher={fetcher}
+      fetcher={scorecardFetcher}
       draftOfficeFetcher={queueFetcher}
     />
   );
@@ -418,6 +425,9 @@ function LeadershipForm(props: {
       const rebased = rebaseScorecardEditDraft(draft, scorecard);
       await saveChain.current.catch(() => undefined);
       await saveScorecardDraft(ownerKey, rebased.draft, Date.now());
+      // Rebase may add/remove retained evidence, so reset the authoritative synchronous cap guard before
+      // exposing the replacement reducer state to camera/import actions.
+      photoCount.current = rebased.draft.photos.length;
       dispatch({ type: "replaceDraft", draft: rebased.draft });
       setHasEditConflict(false);
       setNotice({

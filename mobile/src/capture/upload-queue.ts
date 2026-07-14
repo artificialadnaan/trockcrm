@@ -12,6 +12,7 @@ import {
   partitionResults,
   removeIds,
   sanitizeOwnerKey,
+  selectUploadFetcher,
   type QueuedUpload,
 } from "./upload-queue-core";
 
@@ -279,7 +280,11 @@ let draining = false;
 export async function drainUploadQueue(
   ownerKey: string,
   fetcher: Fetcher,
-  opts: { onProgress?: (summary: DrainSummary) => void } = {},
+  opts: {
+    onProgress?: (summary: DrainSummary) => void;
+    /** Headerless/target-resolving fetcher used only by explicitly marked scorecard-edit evidence. */
+    targetFetcher?: Fetcher;
+  } = {},
 ): Promise<DrainSummary> {
   if (draining) return { succeeded: 0, failed: 0, remaining: await getQueuedCount(ownerKey) };
   draining = true;
@@ -324,7 +329,11 @@ export async function drainUploadQueue(
       const results = await runConcurrentUploads(chunk, UPLOAD_CONCURRENCY, (item) =>
         // Re-check right before the confirm step: if the item was cancelled while this chunk was uploading
         // (user pulled a photo off the card), skip confirm so the removed evidence never links to the deal.
-        uploadCapture(fetcher, item, { shouldConfirm: () => queueHasClientUploadId(ownerKey, item.clientUploadId) }),
+        uploadCapture(
+          selectUploadFetcher(item, fetcher, opts.targetFetcher),
+          item,
+          { shouldConfirm: () => queueHasClientUploadId(ownerKey, item.clientUploadId) },
+        ),
       );
       // A cancelled upload (photo removed mid-flight → confirm skipped) is neither a success nor a failure:
       // it was intentionally dropped + already removed from the index, so exclude it from

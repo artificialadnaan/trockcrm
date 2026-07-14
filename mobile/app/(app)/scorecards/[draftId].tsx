@@ -84,14 +84,22 @@ export default function ScorecardWizardScreen() {
   // AuthContext fetcher omits x-office-id for a primary session, so a re-homed user would otherwise drain
   // an offline draft's photos against their NEW primary office. queueFetcher pins x-office-id to the office
   // the draft was captured under — matching ownerKey + capture.tsx's queueFetcher. It is used for durable
-  // uploads and NEW scorecard POSTs; scorecard-id edit reads/writes use the normal fetcher because the server
-  // resolves their owning office and field auth may reject a stale/re-homed draft office before the route.
+  // uploads and NEW scorecard POSTs; scorecard-id edit reads/writes use the headerless fetcher below because
+  // the server resolves their owning office and field auth may reject a stale/re-homed draft office first.
   const resolvedOfficeId = routeOfficeId || activeOfficeId || user?.tenantId || null;
   const ownerKey = uploadOwnerKey(user?.id, resolvedOfficeId ?? undefined);
   const queueFetcher = useCallback<Fetcher>(
     (path, opts) =>
       apiFetch(path, { ...opts, token: token ?? undefined, officeId: resolvedOfficeId, onUnauthorized: () => void signOut() }),
     [token, resolvedOfficeId, signOut],
+  );
+  // Scorecard-id reads/writes and explicitly marked edit evidence resolve their owning office from the
+  // scorecard/deal id. Force a headerless fetcher here: an edit draft can retain the old office after its
+  // submitter is re-homed, and sending that stale office would be rejected before route resolution.
+  const scorecardFetcher = useCallback<Fetcher>(
+    (path, opts) =>
+      apiFetch(path, { ...opts, token: token ?? undefined, officeId: null, onUnauthorized: () => void signOut() }),
+    [token, signOut],
   );
 
   const [loaded, setLoaded] = useState<ScorecardDraft | null | "missing">(null);
@@ -195,7 +203,7 @@ export default function ScorecardWizardScreen() {
         }
         router.back();
       }}
-      fetcher={fetcher}
+      fetcher={scorecardFetcher}
       draftOfficeFetcher={queueFetcher}
     />
   );
@@ -493,6 +501,9 @@ function Wizard(props: {
       // the next retry still uses the rebased token and retains every local editable field/new photo.
       await saveChain.current.catch(() => undefined);
       await saveScorecardDraft(ownerKey, rebased.draft, Date.now());
+      // Rebase can merge evidence added by the other edit or drop retained evidence it removed. Keep the
+      // synchronous cap guard aligned with the replacement reducer state before the form becomes interactive.
+      photoCount.current = rebased.draft.photos.length;
       dispatch({ type: "replaceDraft", draft: rebased.draft });
       setHasEditConflict(false);
       setNotice({

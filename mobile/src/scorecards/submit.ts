@@ -18,7 +18,11 @@ import {
 import { scorecardDraftToUpdate } from "./edit";
 
 /** Build the field-photo upload input for a scorecard evidence photo — targets the deal and auto-tags. */
-export function scorecardPhotoUploadInput(photo: NewScorecardDraftPhoto, dealId: string): CaptureUploadInput {
+export function scorecardPhotoUploadInput(
+  photo: NewScorecardDraftPhoto,
+  dealId: string,
+  routeByTarget = false,
+): CaptureUploadInput {
   return {
     uri: photo.uri,
     width: photo.width,
@@ -29,6 +33,7 @@ export function scorecardPhotoUploadInput(photo: NewScorecardDraftPhoto, dealId:
     tags: ["scorecard", photo.sectionKey],
     metadata: { takenAt: photo.takenAt, latitude: photo.latitude, longitude: photo.longitude, addressSource: photo.addressSource },
     clientUploadId: photo.clientUploadId,
+    ...(routeByTarget ? { routeByTarget: true } : {}),
   };
 }
 
@@ -67,10 +72,9 @@ export type SubmitScorecardResult =
 
 export type SubmitScorecardOptions = {
   /**
-   * New submissions and evidence uploads are scoped to the durable draft/queue office. Keep that
-   * office-pinned fetcher separate from `scorecardFetcher`: an edit PUT resolves its owning office by
-   * scorecard id server-side, and an old pinned x-office-id can be rejected by field auth after the
-   * submitter is re-homed.
+   * Default queue/new-submission fetcher, scoped to the durable draft office. Submitted-edit evidence is
+   * marked per item and uses `scorecardFetcher` as the target-resolving override; an old pinned x-office-id
+   * can be rejected by field auth after the submitter is re-homed. Unmarked new/offline drafts stay pinned.
    */
   draftOfficeFetcher?: Fetcher;
 };
@@ -91,8 +95,16 @@ export async function submitScorecard(
   // evidence owns a clientUploadId and may enter the durable upload queue.
   const newPhotos = scorecardDraftNewPhotos(draft);
   if (newPhotos.length > 0) {
-    await enqueueUploads(ownerKey, newPhotos.map((p) => scorecardPhotoUploadInput(p, draft.dealId)));
-    await drainUploadQueue(ownerKey, draftOfficeFetcher);
+    const editingSubmitted = Boolean(draft.editingScorecardId);
+    await enqueueUploads(
+      ownerKey,
+      newPhotos.map((p) => scorecardPhotoUploadInput(p, draft.dealId, editingSubmitted)),
+    );
+    await drainUploadQueue(
+      ownerKey,
+      draftOfficeFetcher,
+      editingSubmitted ? { targetFetcher: scorecardFetcher } : undefined,
+    );
     const stillQueued = await getQueuedUploads(ownerKey);
     const { pending, failed } = classifyDraftPhotoUploads(
       newPhotos.map((p) => p.clientUploadId),

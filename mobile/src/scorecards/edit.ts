@@ -193,6 +193,7 @@ export function rebaseScorecardEditDraft(
     return [{ ...photo, uri: latest.uri }];
   });
   let mergedServerPhotoCount = 0;
+  const mergedDeficiencyKeys = new Set<ScorecardCriticalDeficiencyKey>();
   for (const latest of latestDraftPhotos) {
     if (!isExistingScorecardDraftPhoto(latest)) continue;
     const id = latest.existingScorecardPhotoId;
@@ -200,6 +201,26 @@ export function rebaseScorecardEditDraft(
     if (localRetainedIds.has(id) || basePhotoIds.has(id)) continue;
     photos.push(latest);
     mergedServerPhotoCount += 1;
+    // Critical-deficiency evidence is valid only while its deficiency remains selected. If the other edit
+    // introduced both, preserve that dependency with the photo so the rebased PUT cannot fail placement
+    // validation. Existing local selections/notes still win; only newly required flags inherit server notes.
+    if (
+      !draftLeadership &&
+      latest.sectionKey === "critical_deficiency" &&
+      latest.deficiencyKey &&
+      detail.criticalDeficiencies.includes(latest.deficiencyKey)
+    ) {
+      mergedDeficiencyKeys.add(latest.deficiencyKey);
+    }
+  }
+
+  const criticalDeficiencies = [...draft.criticalDeficiencies];
+  const deficiencyNotes = { ...(draft.deficiencyNotes ?? {}) };
+  for (const key of mergedDeficiencyKeys) {
+    if (criticalDeficiencies.includes(key)) continue;
+    criticalDeficiencies.push(key);
+    const latestNote = detail.criticalDeficiencyNotes?.[key]?.trim();
+    if (latestNote) deficiencyNotes[key] = latestNote;
   }
 
   return {
@@ -211,6 +232,8 @@ export function rebaseScorecardEditDraft(
         isExistingScorecardDraftPhoto(photo) ? [photo.existingScorecardPhotoId] : [],
       ),
       photos,
+      criticalDeficiencies,
+      deficiencyNotes,
     },
     removedRetainedPhotoCount,
     mergedServerPhotoCount,

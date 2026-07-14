@@ -9,6 +9,8 @@ import {
   partitionResults,
   removeIds,
   sanitizeOwnerKey,
+  selectUploadFetcher,
+  shouldRouteUploadByTarget,
   uploadOwnerKey,
   type QueuedUpload,
 } from "../upload-queue-core";
@@ -59,6 +61,25 @@ describe("upload-queue-core", () => {
     expect(uploadOwnerKey("u1", null)).toBe("u1:");
     expect(uploadOwnerKey(null, "office-a")).toBe("");
     expect(uploadOwnerKey("u1", "office-a")).not.toBe(uploadOwnerKey("u1", "office-b"));
+  });
+
+  it("routes only explicitly marked edit evidence by target", () => {
+    expect(shouldRouteUploadByTarget(item("legacy"))).toBe(false);
+    expect(shouldRouteUploadByTarget({ ...item("ordinary"), routeByTarget: false })).toBe(false);
+    expect(shouldRouteUploadByTarget({ ...item("edit"), routeByTarget: true })).toBe(true);
+
+    const officePinnedFetcher = { name: "office-pinned" };
+    const targetFetcher = { name: "target-resolved" };
+    expect(selectUploadFetcher(item("legacy"), officePinnedFetcher, targetFetcher)).toBe(officePinnedFetcher);
+    expect(
+      selectUploadFetcher({ ...item("ordinary"), routeByTarget: false }, officePinnedFetcher, targetFetcher),
+    ).toBe(officePinnedFetcher);
+    expect(
+      selectUploadFetcher({ ...item("edit"), routeByTarget: true }, officePinnedFetcher, targetFetcher),
+    ).toBe(targetFetcher);
+    expect(selectUploadFetcher({ ...item("edit-offline"), routeByTarget: true }, officePinnedFetcher)).toBe(
+      officePinnedFetcher,
+    );
   });
 
   it("isDrainable / bumpAttempts implement the terminal retry cap", () => {
@@ -149,4 +170,3 @@ describe("createAsyncMutex", () => {
     });
   });
 });
-

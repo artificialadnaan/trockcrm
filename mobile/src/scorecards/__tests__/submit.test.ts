@@ -31,6 +31,14 @@ describe("scorecardPhotoUploadInput", () => {
     expect(input.caption).toBe("Slab crack");
     expect(input.clientUploadId).toBe("cu-1");
     expect(input.category).toBeNull();
+    expect(input.routeByTarget).toBeUndefined();
+  });
+
+  it("marks only submitted-card edit evidence for server target routing", () => {
+    const photo: ScorecardDraftPhoto = {
+      key: "p1", uri: "file://p1", clientUploadId: "cu-1", sectionKey: "schedule", caption: "",
+    };
+    expect(scorecardPhotoUploadInput(photo, "deal-1", true).routeByTarget).toBe(true);
   });
 
   it("nulls a blank caption", () => {
@@ -127,7 +135,11 @@ describe("submitScorecard (orchestration)", () => {
     (getQueuedUploads as jest.Mock).mockResolvedValue([]); // nothing left queued = all uploaded
     const result = await submitScorecard(fetcher, "owner-1", draftWith([photo("a"), photo("b")]));
     expect(enqueueUploads).toHaveBeenCalledTimes(1);
-    expect(drainUploadQueue).toHaveBeenCalledTimes(1);
+    expect(enqueueUploads).toHaveBeenCalledWith(
+      "owner-1",
+      expect.arrayContaining([expect.not.objectContaining({ routeByTarget: true })]),
+    );
+    expect(drainUploadQueue).toHaveBeenCalledWith("owner-1", fetcher, undefined);
     expect(createScorecard).toHaveBeenCalledTimes(1);
     expect(result.status).toBe("submitted");
   });

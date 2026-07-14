@@ -51,7 +51,7 @@ describe("submitScorecard submitted-card edit", () => {
     (getQueuedUploads as jest.Mock).mockResolvedValue([]);
   });
 
-  it("uses the office-pinned fetcher only for new evidence, then PUTs with the normal fetcher", async () => {
+  it("marks edit evidence for target routing, then PUTs with the headerless scorecard fetcher", async () => {
     const scorecardFetcher = jest.fn() as unknown as Fetcher;
     const officePinnedUploadFetcher = jest.fn() as unknown as Fetcher;
     const draft = editDraft([
@@ -78,9 +78,17 @@ describe("submitScorecard submitted-card edit", () => {
     expect(enqueueUploads).toHaveBeenCalledTimes(1);
     expect(enqueueUploads).toHaveBeenCalledWith(
       "user-1:office-1",
-      [expect.objectContaining({ clientUploadId: "new-upload-1", uri: "file:///new-photo.jpg" })],
+      [expect.objectContaining({
+        clientUploadId: "new-upload-1",
+        uri: "file:///new-photo.jpg",
+        routeByTarget: true,
+      })],
     );
-    expect(drainUploadQueue).toHaveBeenCalledWith("user-1:office-1", officePinnedUploadFetcher);
+    expect(drainUploadQueue).toHaveBeenCalledWith(
+      "user-1:office-1",
+      officePinnedUploadFetcher,
+      { targetFetcher: scorecardFetcher },
+    );
     expect(createScorecard).not.toHaveBeenCalled();
     expect(updateScorecard).toHaveBeenCalledTimes(1);
     expect(updateScorecard).toHaveBeenCalledWith(

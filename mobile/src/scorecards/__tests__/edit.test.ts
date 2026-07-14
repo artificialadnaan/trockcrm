@@ -340,6 +340,53 @@ describe("rebaseScorecardEditDraft", () => {
     )).toEqual(["scorecard-photo-1", "scorecard-photo-3"]);
   });
 
+  it("preserves the selected deficiency and note required by concurrently added deficiency evidence", () => {
+    const baseDetail = detail({
+      criticalDeficiencyCount: 0,
+      criticalDeficiencies: [],
+      criticalDeficiencyNotes: {},
+      photos: [detail().photos[0]],
+    });
+    const local = createScorecardEditDraft(baseDetail, {
+      id: "local-deficiency-edit",
+      clientSubmissionId: "deficiency-edit",
+      now: 1,
+    });
+    const latest = detail({
+      ...baseDetail,
+      updatedAt: "2026-07-14T16:30:00.000Z",
+      criticalDeficiencyCount: 1,
+      criticalDeficiencies: ["safety_violation"],
+      criticalDeficiencyNotes: { safety_violation: "Open edge protection missing" },
+      photos: [
+        baseDetail.photos[0],
+        {
+          id: "scorecard-photo-safety",
+          fileId: "file-safety",
+          sectionKey: "critical_deficiency",
+          deficiencyKey: "safety_violation",
+          url: "https://fresh.example/safety.jpg",
+          caption: "Concurrent safety evidence",
+        },
+      ],
+    });
+
+    const rebased = rebaseScorecardEditDraft(local, latest);
+
+    expect(rebased.draft.criticalDeficiencies).toEqual(["safety_violation"]);
+    expect(rebased.draft.deficiencyNotes).toEqual({
+      safety_violation: "Open edge protection missing",
+    });
+    expect(rebased.draft.photos).toEqual([
+      expect.objectContaining({ existingScorecardPhotoId: "scorecard-photo-1" }),
+      expect.objectContaining({
+        existingScorecardPhotoId: "scorecard-photo-safety",
+        sectionKey: "critical_deficiency",
+        deficiencyKey: "safety_violation",
+      }),
+    ]);
+  });
+
   it("rebases leadership edits without losing local scores, summary, or category evidence", () => {
     const leadershipItems = FIELD_SCORECARD_LEADERSHIP_SECTION_KEYS.map((sectionKey) => ({
       sectionKey,
