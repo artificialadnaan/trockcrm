@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
+import { WON_DEAL_STAGE_SLUGS } from "@trock-crm/shared/types";
 
 const MIGRATION_SQL = readFileSync(
   new URL("../../../../migrations/0184_won_metric_reduction_alerts.sql", import.meta.url),
@@ -24,7 +25,7 @@ afterEach(async () => {
   pg = null;
 });
 
-async function setup(): Promise<PGlite> {
+async function setup(options: { enableDelivery?: boolean } = {}): Promise<PGlite> {
   const db = new PGlite();
   await db.exec(`
     CREATE TYPE public.notification_type AS ENUM ('system');
@@ -94,6 +95,9 @@ async function setup(): Promise<PGlite> {
       FOR EACH ROW EXECUTE FUNCTION public.test_audit_deals();
   `);
   await db.exec(MIGRATION_SQL);
+  if (options.enableDelivery ?? true) {
+    await db.query("SELECT public.enable_won_metric_reduction_alert_delivery()");
+  }
   return db;
 }
 
@@ -154,6 +158,15 @@ describe("migration 0184 — Won metric reduction alerts (runtime, PGlite)", () 
       after: 0,
       delta: -300000,
     });
+    expect(impacts["office.estimator_pipeline.won_ytd"]).toMatchObject({
+      metric: "estimator_pipeline.won_ytd",
+      countBefore: 1,
+      countAfter: 0,
+      countDelta: -1,
+      before: 300000,
+      after: 0,
+      delta: -300000,
+    });
     const auditReference = json(event.rows[0]?.audit_reference);
     expect(auditReference).toMatchObject({ tenantSchema: "office_dallas", action: "Deal placed on hold" });
     expect(auditReference.auditLogIds).toHaveLength(1);
@@ -164,6 +177,68 @@ describe("migration 0184 — Won metric reduction alerts (runtime, PGlite)", () 
     expect(job.rows).toHaveLength(1);
     expect(job.rows[0]?.office_id).toBe(OFFICE);
     expect(json(job.rows[0]?.payload).eventId).toBeTruthy();
+  });
+
+  it("keeps reduction events durable until a handler-capable worker enables delivery", async () => {
+    pg = await setup({ enableDelivery: false });
+    await insertWonDeal(pg);
+
+    await pg.query(`UPDATE office_dallas.deals SET on_hold = true WHERE id = $1`, [DEAL]);
+
+    const beforeEnable = await pg.query(`SELECT id FROM public.job_queue WHERE job_type = 'won_metric_reduction_alert'`);
+    expect(beforeEnable.rows).toHaveLength(0);
+
+    const enabled = await pg.query<{ queued_count: number }>(
+      "SELECT public.enable_won_metric_reduction_alert_delivery() AS queued_count",
+    );
+    expect(Number(enabled.rows[0]?.queued_count)).toBe(1);
+
+    const afterEnable = await pg.query(`SELECT id FROM public.job_queue WHERE job_type = 'won_metric_reduction_alert'`);
+    expect(afterEnable.rows).toHaveLength(1);
+  });
+
+  it("keeps the migration's Won-family eligibility aligned with the shared workflow contract", async () => {
+    pg = await setup();
+
+    for (const stageSlug of WON_DEAL_STAGE_SLUGS) {
+      const result = await pg.query<{ impacts: unknown }>(
+        `SELECT public.won_metric_reduction_impacts(
+           jsonb_build_object(
+             'canonicalStageSlug', $1::text,
+             'isActive', true,
+             'isTestData', false,
+             'onHold', false,
+             'isChangeOrder', false,
+             'wonClosedDate', '2026-07-14',
+             'awardedAmount', 300000
+           ),
+           jsonb_build_object(
+             'canonicalStageSlug', 'estimating',
+             'isActive', true,
+             'isTestData', false,
+             'onHold', false,
+             'isChangeOrder', false,
+             'wonClosedDate', '2026-07-14',
+             'awardedAmount', 300000
+           ),
+           '2026-07-14'::date,
+           'canonicalStageSlug',
+           NULL,
+           ARRAY['won_ytd'],
+           false,
+           false
+         ) AS impacts`,
+        [stageSlug],
+      );
+      expect(json(result.rows[0]?.impacts)["office.won_ytd"]).toMatchObject({
+        countBefore: 1,
+        countAfter: 0,
+        countDelta: -1,
+        before: 300000,
+        after: 0,
+        delta: -300000,
+      });
+    }
   });
 
   it("handles a delete without reading NEW and records the deleted Won contribution", async () => {
@@ -278,6 +353,41 @@ describe("migration 0184 — Won metric reduction alerts (runtime, PGlite)", () 
       kind: "release",
       previousDefinitionHash: "hash-v1",
       definitionHash: "hash-v2",
+    });
+  });
+
+  it("refreshes the same-definition baseline before comparing a later definition change", async () => {
+    pg = await setup();
+    await pg.query(`
+      SELECT public.record_won_metric_definition_snapshot(
+        'office_dallas', 'deals_dashboard.won_ytd', 'v1', 'hash-v1', 3, 300000, 'release-v1'
+      )
+    `);
+    await pg.query(`
+      SELECT public.record_won_metric_definition_snapshot(
+        'office_dallas', 'deals_dashboard.won_ytd', 'v1', 'hash-v1', 4, 400000, 'release-v1'
+      )
+    `);
+    await pg.query(`
+      SELECT public.record_won_metric_definition_snapshot(
+        'office_dallas', 'deals_dashboard.won_ytd', 'v2', 'hash-v2', 3, 350000, 'release-v2'
+      )
+    `);
+
+    const event = await pg.query<{ impacts: unknown }>(`
+      SELECT impacts
+      FROM public.won_metric_reduction_events
+      WHERE event_kind = 'report_definition_change'
+        AND report_metric_key = 'deals_dashboard.won_ytd'
+    `);
+    expect(event.rows).toHaveLength(1);
+    expect(json(event.rows[0]?.impacts)["office.deals_dashboard.won_ytd"]).toMatchObject({
+      countBefore: 4,
+      countAfter: 3,
+      countDelta: -1,
+      before: 400000,
+      after: 350000,
+      delta: -50000,
     });
   });
 

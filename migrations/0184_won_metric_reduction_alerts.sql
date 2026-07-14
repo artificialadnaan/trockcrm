@@ -55,6 +55,83 @@ CREATE TABLE IF NOT EXISTS public.won_metric_reduction_delivery_receipts (
   PRIMARY KEY (event_id, recipient_email)
 );
 
+-- A migration can reach the API before the handler-capable worker. Keep the durable event outbox enabled
+-- immediately, but do not enqueue the new job type until that worker explicitly opens this gate. This avoids
+-- an older worker consuming the unknown job and dead-lettering an alert before the new handler is available.
+CREATE TABLE IF NOT EXISTS public.won_metric_reduction_delivery_gate (
+  singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
+  enabled_at timestamptz
+);
+INSERT INTO public.won_metric_reduction_delivery_gate (singleton, enabled_at)
+VALUES (true, NULL)
+ON CONFLICT (singleton) DO NOTHING;
+
+CREATE OR REPLACE FUNCTION public.enqueue_won_metric_reduction_alert(
+  p_event_id uuid,
+  p_office_id uuid
+)
+RETURNS boolean
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  delivery_enabled boolean := false;
+BEGIN
+  -- This shared lock makes enabling + backfilling atomic with respect to trigger-created events: a
+  -- pre-enable trigger commits before the sweep, while a concurrent/new trigger observes the enabled gate.
+  SELECT enabled_at IS NOT NULL INTO delivery_enabled
+  FROM public.won_metric_reduction_delivery_gate
+  WHERE singleton = true
+  FOR SHARE;
+
+  IF NOT COALESCE(delivery_enabled, false) THEN
+    RETURN false;
+  END IF;
+
+  INSERT INTO public.job_queue (job_type, payload, office_id, status, run_after)
+  SELECT 'won_metric_reduction_alert', jsonb_build_object('eventId', p_event_id), p_office_id, 'pending', now()
+  WHERE NOT EXISTS (
+    SELECT 1
+    FROM public.job_queue queued
+    WHERE queued.job_type = 'won_metric_reduction_alert'
+      AND queued.payload->>'eventId' = p_event_id::text
+  );
+  RETURN FOUND;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.enable_won_metric_reduction_alert_delivery()
+RETURNS integer
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  queued_count integer;
+BEGIN
+  -- Wait for any pre-enable trigger transaction to finish before opening the gate and sweeping durable
+  -- events. Triggers beginning after this lock is held wait, then enqueue normally after the gate opens.
+  PERFORM 1
+  FROM public.won_metric_reduction_delivery_gate
+  WHERE singleton = true
+  FOR UPDATE;
+
+  UPDATE public.won_metric_reduction_delivery_gate
+  SET enabled_at = COALESCE(enabled_at, now())
+  WHERE singleton = true;
+
+  INSERT INTO public.job_queue (job_type, payload, office_id, status, run_after)
+  SELECT 'won_metric_reduction_alert', jsonb_build_object('eventId', event.id), office.id, 'pending', now()
+  FROM public.won_metric_reduction_events event
+  LEFT JOIN public.offices office ON ('office_' || office.slug) = event.tenant_schema
+  WHERE NOT EXISTS (
+    SELECT 1
+    FROM public.job_queue queued
+    WHERE queued.job_type = 'won_metric_reduction_alert'
+      AND queued.payload->>'eventId' = event.id::text
+  );
+  GET DIAGNOSTICS queued_count = ROW_COUNT;
+  RETURN queued_count;
+END;
+$$;
+
 -- Each deployed metric definition keeps its most-recent measured baseline. A future definition/hash change
 -- compares against this baseline and emits a release-cited alert if it lowers the displayed figure. This is
 -- the backstop for incidents such as a new query predicate excluding change orders: no deal audit row exists.
@@ -104,6 +181,13 @@ DECLARE
   new_bid_board_total numeric := COALESCE(NULLIF(p_new->>'bidBoardTotalSales', '')::numeric, 0);
   new_bid numeric := COALESCE(NULLIF(p_new->>'bidEstimate', '')::numeric, 0);
   new_dd numeric := COALESCE(NULLIF(p_new->>'ddEstimate', '')::numeric, 0);
+  -- Keep both before/after eligibility checks on one local copy of the shared six-slug Won family.
+  -- Raw migration SQL cannot import TypeScript; the runtime parity test guards this list against
+  -- shared/src/types/workflow.ts's WON_DEAL_STAGE_SLUGS contract.
+  won_stage_slugs constant text[] := ARRAY[
+    'won', 'sent_to_production', 'service_sent_to_production',
+    'service_scheduled', 'service_complete', 'closed_won'
+  ];
   old_eligible boolean;
   new_eligible boolean;
   old_value numeric := 0;
@@ -126,13 +210,13 @@ BEGIN
     AND NOT COALESCE((p_old->>'isTestData')::boolean, false)
     AND NOT COALESCE((p_old->>'onHold')::boolean, false)
     AND (NOT p_exclude_change_orders OR NOT old_change_order)
-    AND old_stage = ANY (ARRAY['won', 'sent_to_production', 'service_sent_to_production', 'service_scheduled', 'service_complete', 'closed_won']);
+    AND old_stage = ANY (won_stage_slugs);
   new_eligible :=
     COALESCE((p_new->>'isActive')::boolean, false)
     AND NOT COALESCE((p_new->>'isTestData')::boolean, false)
     AND NOT COALESCE((p_new->>'onHold')::boolean, false)
     AND (NOT p_exclude_change_orders OR NOT new_change_order)
-    AND new_stage = ANY (ARRAY['won', 'sent_to_production', 'service_sent_to_production', 'service_scheduled', 'service_complete', 'closed_won']);
+    AND new_stage = ANY (won_stage_slugs);
 
   IF old_eligible THEN
     old_value := CASE
@@ -464,14 +548,7 @@ BEGIN
   ) RETURNING id INTO v_event_id;
 
   SELECT id INTO v_office_id FROM public.offices WHERE ('office_' || slug) = TG_TABLE_SCHEMA LIMIT 1;
-  INSERT INTO public.job_queue (job_type, payload, office_id, status, run_after)
-  VALUES (
-    'won_metric_reduction_alert',
-    jsonb_build_object('eventId', v_event_id),
-    v_office_id,
-    'pending',
-    now()
-  );
+  PERFORM public.enqueue_won_metric_reduction_alert(v_event_id, v_office_id);
   IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
   RETURN NEW;
 END;
@@ -494,6 +571,7 @@ LANGUAGE plpgsql
 AS $$
 DECLARE
   previous public.won_metric_definition_snapshots%ROWTYPE;
+  observed public.won_metric_definition_snapshots%ROWTYPE;
   event_id uuid;
   office_id uuid;
   impacts jsonb;
@@ -501,49 +579,91 @@ BEGIN
   IF p_tenant_schema !~ '^office_[a-z0-9_]+$' THEN
     RAISE EXCEPTION 'Invalid tenant schema for Won metric snapshot';
   END IF;
-  SELECT * INTO previous
-  FROM public.won_metric_definition_snapshots
-  WHERE tenant_schema = p_tenant_schema AND metric_key = p_metric_key
-  FOR UPDATE;
 
-  IF FOUND AND previous.definition_hash IS DISTINCT FROM p_definition_hash
-     AND (p_won_value < previous.won_value OR p_won_count < previous.won_count) THEN
-    impacts := jsonb_build_object(
-      'office.' || p_metric_key,
-      jsonb_build_object(
-        'scope', 'office', 'scopeId', NULL, 'metric', p_metric_key,
-        'countBefore', previous.won_count, 'countAfter', p_won_count, 'countDelta', p_won_count - previous.won_count,
-        'before', previous.won_value, 'after', p_won_value, 'delta', p_won_value - previous.won_value,
-        'unit', 'usd'
-      )
-    );
-    INSERT INTO public.won_metric_reduction_events (
-      tenant_schema, event_kind, action_label, reason_code, impacts, audit_reference, old_snapshot, new_snapshot,
-      report_metric_key, definition_version, definition_hash, release_reference
-    ) VALUES (
-      p_tenant_schema, 'report_definition_change', 'Published Won metric definition changed', 'report_definition_change', impacts,
-      jsonb_build_object('kind', 'release', 'previousDefinitionHash', previous.definition_hash, 'definitionHash', p_definition_hash),
-      jsonb_build_object('wonCount', previous.won_count, 'wonValue', previous.won_value, 'definitionVersion', previous.definition_version),
-      jsonb_build_object('wonCount', p_won_count, 'wonValue', p_won_value, 'definitionVersion', p_definition_version),
-      p_metric_key, p_definition_version, p_definition_hash, p_release_reference
-    ) RETURNING id INTO event_id;
-    SELECT id INTO office_id FROM public.offices WHERE ('office_' || slug) = p_tenant_schema LIMIT 1;
-    INSERT INTO public.job_queue (job_type, payload, office_id, status, run_after)
-    VALUES ('won_metric_reduction_alert', jsonb_build_object('eventId', event_id), office_id, 'pending', now());
-  END IF;
+  LOOP
+    -- Dashboard/report reads normally keep the same definition hash. Probe without a row lock first;
+    -- only definition-change handling takes an explicit lock and evaluates a reduction/event.
+    SELECT * INTO observed
+    FROM public.won_metric_definition_snapshots
+    WHERE tenant_schema = p_tenant_schema AND metric_key = p_metric_key;
 
-  INSERT INTO public.won_metric_definition_snapshots (
-    tenant_schema, metric_key, definition_version, definition_hash, won_count, won_value, release_reference, captured_at
-  ) VALUES (
-    p_tenant_schema, p_metric_key, p_definition_version, p_definition_hash, p_won_count, p_won_value, p_release_reference, now()
-  ) ON CONFLICT (tenant_schema, metric_key) DO UPDATE SET
-    definition_version = EXCLUDED.definition_version,
-    definition_hash = EXCLUDED.definition_hash,
-    won_count = EXCLUDED.won_count,
-    won_value = EXCLUDED.won_value,
-    release_reference = EXCLUDED.release_reference,
-    captured_at = now();
-  RETURN event_id;
+    IF NOT FOUND THEN
+      INSERT INTO public.won_metric_definition_snapshots (
+        tenant_schema, metric_key, definition_version, definition_hash, won_count, won_value, release_reference, captured_at
+      ) VALUES (
+        p_tenant_schema, p_metric_key, p_definition_version, p_definition_hash, p_won_count, p_won_value, p_release_reference, now()
+      ) ON CONFLICT (tenant_schema, metric_key) DO NOTHING;
+      IF FOUND THEN RETURN event_id; END IF;
+      CONTINUE;
+    END IF;
+
+    IF observed.definition_hash IS NOT DISTINCT FROM p_definition_hash THEN
+      -- The steady state is a repeated read of the same published value. Return without taking a row
+      -- lock or write lock; only refresh the baseline when one of its recorded values actually changes.
+      IF observed.definition_version IS NOT DISTINCT FROM p_definition_version
+         AND observed.won_count IS NOT DISTINCT FROM p_won_count
+         AND observed.won_value IS NOT DISTINCT FROM p_won_value
+         AND observed.release_reference IS NOT DISTINCT FROM p_release_reference THEN
+        RETURN event_id;
+      END IF;
+      -- Preserve the latest same-definition baseline, but never overwrite a concurrently published
+      -- definition that appeared after the non-locking probe. If that race occurs, loop into the locked path.
+      UPDATE public.won_metric_definition_snapshots
+      SET definition_version = p_definition_version,
+          definition_hash = p_definition_hash,
+          won_count = p_won_count,
+          won_value = p_won_value,
+          release_reference = p_release_reference,
+          captured_at = now()
+      WHERE tenant_schema = p_tenant_schema
+        AND metric_key = p_metric_key
+        AND definition_hash IS NOT DISTINCT FROM p_definition_hash;
+      IF FOUND THEN RETURN event_id; END IF;
+      CONTINUE;
+    END IF;
+
+    SELECT * INTO previous
+    FROM public.won_metric_definition_snapshots
+    WHERE tenant_schema = p_tenant_schema AND metric_key = p_metric_key
+    FOR UPDATE;
+    IF NOT FOUND THEN CONTINUE; END IF;
+
+    IF previous.definition_hash IS DISTINCT FROM p_definition_hash
+       AND (p_won_value < previous.won_value OR p_won_count < previous.won_count) THEN
+      impacts := jsonb_build_object(
+        'office.' || p_metric_key,
+        jsonb_build_object(
+          'scope', 'office', 'scopeId', NULL, 'metric', p_metric_key,
+          'countBefore', previous.won_count, 'countAfter', p_won_count, 'countDelta', p_won_count - previous.won_count,
+          'before', previous.won_value, 'after', p_won_value, 'delta', p_won_value - previous.won_value,
+          'unit', 'usd'
+        )
+      );
+      INSERT INTO public.won_metric_reduction_events (
+        tenant_schema, event_kind, action_label, reason_code, impacts, audit_reference, old_snapshot, new_snapshot,
+        report_metric_key, definition_version, definition_hash, release_reference
+      ) VALUES (
+        p_tenant_schema, 'report_definition_change', 'Published Won metric definition changed', 'report_definition_change', impacts,
+        jsonb_build_object('kind', 'release', 'previousDefinitionHash', previous.definition_hash, 'definitionHash', p_definition_hash),
+        jsonb_build_object('wonCount', previous.won_count, 'wonValue', previous.won_value, 'definitionVersion', previous.definition_version),
+        jsonb_build_object('wonCount', p_won_count, 'wonValue', p_won_value, 'definitionVersion', p_definition_version),
+        p_metric_key, p_definition_version, p_definition_hash, p_release_reference
+      ) RETURNING id INTO event_id;
+      SELECT id INTO office_id FROM public.offices WHERE ('office_' || slug) = p_tenant_schema LIMIT 1;
+      PERFORM public.enqueue_won_metric_reduction_alert(event_id, office_id);
+    END IF;
+
+    -- The locked re-read is authoritative; write only after it has supplied the comparison baseline.
+    UPDATE public.won_metric_definition_snapshots
+    SET definition_version = p_definition_version,
+        definition_hash = p_definition_hash,
+        won_count = p_won_count,
+        won_value = p_won_value,
+        release_reference = p_release_reference,
+        captured_at = now()
+    WHERE tenant_schema = p_tenant_schema AND metric_key = p_metric_key;
+    RETURN event_id;
+  END LOOP;
 END;
 $$;
 

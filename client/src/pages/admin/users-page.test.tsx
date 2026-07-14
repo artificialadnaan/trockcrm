@@ -83,6 +83,8 @@ describe("UsersPage responsive table", () => {
     const soloRate = container.querySelector<HTMLInputElement>("#user-user-1-capx-rate-solo");
     const mixedRate = container.querySelector<HTMLInputElement>("#user-user-1-capx-rate-mixed");
     const serviceRate = container.querySelector<HTMLInputElement>("#user-user-1-service-source-rate");
+    const roleFilterLabel = [...container.querySelectorAll("label")].find((label) => label.textContent === "Role");
+    const filterGrid = roleFilterLabel?.parentElement?.parentElement;
 
     expect(page.className).toContain("min-w-0");
     expect(scrollBody?.getAttribute("role")).toBe("region");
@@ -90,6 +92,10 @@ describe("UsersPage responsive table", () => {
     expect(scrollBody?.getAttribute("tabindex")).toBe("0");
     expect(table?.className).toContain("min-w-[76rem]");
     expect(container.querySelector("[data-slot=table-container]")).toBeNull();
+    expect(filterGrid?.className).toContain("grid-cols-1");
+    expect(filterGrid?.className).toContain("sm:grid-cols-2");
+    expect(filterGrid?.className).toContain("xl:grid-cols-4");
+    expect(filterGrid?.className).not.toContain("2xl:grid-cols-4");
 
     expect(soloRate?.inputMode).toBe("decimal");
     expect(mixedRate?.inputMode).toBe("decimal");

@@ -33,7 +33,7 @@ The trigger preserves the first material contribution in a transaction and recom
 
 The `won_metric_reduction_alert` worker job sends one email per recipient and creates a best-effort in-app notification for matching active CRM users.
 
-- Default recipients are Takashi (`tyamashita@trockgc.com`) and Adnaan (`adnaan.iqbal@gmail.com`). `WON_METRIC_DECREASE_EMAIL_RECIPIENTS` may replace that list.
+- Non-production fallback recipients are Takashi (`tyamashita@trockgc.com`) and Adnaan (`adnaan@trockgc.com`). Production requires `WON_METRIC_DECREASE_EMAIL_RECIPIENTS`, which must name the approved corporate leadership audience.
 - Each `(event_id, recipient_email)` has a persistent receipt.
 - The worker atomically leases an unsent receipt before sending. A second worker cannot send while that lease is fresh.
 - The Resend idempotency key is stable per event/recipient. A success stamps `sent_at`; a provider failure releases only that worker’s lease and throws so the normal queue retry can reclaim it.
@@ -41,11 +41,13 @@ The `won_metric_reduction_alert` worker job sends one email per recipient and cr
 
 Every email includes the reason, exact action, changed field values, audit citation, release reference when present, before/after impact, and a deep link to the deal or matching Won surface.
 
+The migration starts with queue delivery gated off. It always persists reduction events, but only a worker that has registered the new handler opens the gate and atomically backfills those durable events. That prevents a still-running older worker from dead-lettering the newly introduced job type during a rolling deploy.
+
 ## Deployment order
 
-1. Apply migration `0184_won_metric_reduction_alerts.sql`.
-2. Deploy server and worker code together (the server tolerates the short pre-migration window without the definition-snapshot function).
-3. Optionally set `WON_METRIC_DECREASE_EMAIL_RECIPIENTS` to replace the default audience; do not set an invalid non-empty value.
+1. Deploy the handler-capable worker. It safely retries delivery-gate activation until migration `0184_won_metric_reduction_alerts.sql` exists.
+2. Apply the migration and deploy server code (the server tolerates the short pre-migration window without the definition-snapshot function).
+3. Set `WON_METRIC_DECREASE_EMAIL_RECIPIENTS` in production to the approved leadership recipient list; do not set an invalid or incomplete list.
 4. Load the all-reps, current-YTD main Deals Dashboard and the Estimator Pipeline report once to establish their release-definition baselines.
 5. Confirm the worker is consuming `won_metric_reduction_alert` jobs and verify an alert through a non-production deal update.
 

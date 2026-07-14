@@ -26,6 +26,7 @@ import {
 import { WON_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
 import { aliasedEffectiveStageAgeDaysSql } from "../deals/deal-filter-predicates.js";
 import { getWtdPeriod } from "../../lib/period.js";
+import { isUndefinedFunctionError } from "../../lib/db-errors.js";
 import { dealValueSqlForBasis } from "./foundations.js";
 
 const { companies, deals, pipelineStageConfig, properties, users } = schema;
@@ -114,13 +115,6 @@ function addMetric(target: EstimatorPipelineMetric, count: number, value: number
   target.value = addMoney(target.value, value);
 }
 
-function isMissingDefinitionTracker(error: unknown): boolean {
-  const candidate = error as { code?: unknown; cause?: { code?: unknown } } | null;
-  // Drizzle wraps PostgreSQL errors in some runtime paths; only the explicit PostgreSQL undefined-
-  // function code is a safe compatibility case during migration rollout.
-  return candidate?.code === "42883" || candidate?.cause?.code === "42883";
-}
-
 /**
  * Persist the current result under its explicit metric-definition contract. The migration may be rolled out
  * independently of the API during a deploy, so a missing function is deliberately treated as a no-op only
@@ -143,7 +137,7 @@ async function recordEstimatorWonYtdDefinition(
       )
     `);
   } catch (error) {
-    if (isMissingDefinitionTracker(error)) return;
+    if (isUndefinedFunctionError(error)) return;
     throw error;
   }
 }

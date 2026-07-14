@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   buildWonMetricReductionEmail,
   DEFAULT_WON_METRIC_DECREASE_RECIPIENTS,
+  enableWonMetricReductionAlertDelivery,
   handleWonMetricReductionAlert,
   resolveWonMetricDecreaseRecipients,
   resolveWonMetricImpact,
@@ -132,7 +133,7 @@ function makeQuery(options: { event?: Record<string, unknown>; sentRecipients?: 
 const ENV = {
   NODE_ENV: "test",
   FRONTEND_URL: "https://trockcrm.com",
-  WON_METRIC_DECREASE_EMAIL_RECIPIENTS: ` ${TAKASHI}, invalid, ${ADNAAN}, TAKASHI `,
+  WON_METRIC_DECREASE_EMAIL_RECIPIENTS: ` ${TAKASHI}, invalid, ${ADNAAN}, ${TAKASHI.toUpperCase()} `,
 } as NodeJS.ProcessEnv;
 const silent = { log: vi.fn(), warn: vi.fn(), error: vi.fn() };
 
@@ -141,8 +142,12 @@ describe("resolveWonMetricDecreaseRecipients", () => {
     expect(resolveWonMetricDecreaseRecipients(ENV)).toEqual([TAKASHI, ADNAAN]);
   });
 
-  it("defaults to Takashi and Adnaan when no deployment override is supplied", () => {
+  it("uses the corporate fallback outside production when no deployment override is supplied", () => {
     expect(resolveWonMetricDecreaseRecipients({} as NodeJS.ProcessEnv)).toEqual([...DEFAULT_WON_METRIC_DECREASE_RECIPIENTS]);
+  });
+
+  it("requires an explicit recipient configuration in production", () => {
+    expect(resolveWonMetricDecreaseRecipients({ NODE_ENV: "production" } as NodeJS.ProcessEnv)).toEqual([]);
   });
 });
 
@@ -156,6 +161,53 @@ describe("resolveWonMetricImpact", () => {
       "director.won_ytd_count",
     );
     expect(countOnly.isNegative).toBe(true);
+  });
+
+  it("prefers the canonical office Won YTD impact over an equally-ranked estimator impact", () => {
+    const impact = resolveWonMetricImpact(
+      {
+        "office.estimator_pipeline.won_ytd": {
+          scope: "office",
+          metric: "estimator_pipeline.won_ytd",
+          countBefore: 2,
+          countAfter: 1,
+          countDelta: -1,
+          before: 300000,
+          after: 0,
+          delta: -300000,
+          unit: "usd",
+        },
+        "office.won_ytd": {
+          scope: "office",
+          metric: "won_ytd",
+          countBefore: 3,
+          countAfter: 2,
+          countDelta: -1,
+          before: 400000,
+          after: 100000,
+          delta: -300000,
+          unit: "usd",
+        },
+      },
+      "won_ytd",
+    );
+
+    expect(impact).toMatchObject({ metricKey: "office.won_ytd", before: 400000, after: 100000 });
+  });
+});
+
+describe("enableWonMetricReductionAlertDelivery", () => {
+  it("opens the database gate and reports the number of backfilled events", async () => {
+    const query = vi.fn().mockResolvedValue({ rows: [{ queued_count: "2" }] });
+
+    await expect(enableWonMetricReductionAlertDelivery({ query, logger: silent })).resolves.toBe(2);
+    expect(query).toHaveBeenCalledWith("SELECT public.enable_won_metric_reduction_alert_delivery() AS queued_count");
+  });
+
+  it("tolerates a worker deployed before the delivery-gate migration", async () => {
+    const query = vi.fn().mockRejectedValue(Object.assign(new Error("function does not exist"), { code: "42883" }));
+
+    await expect(enableWonMetricReductionAlertDelivery({ query, logger: silent })).resolves.toBe(0);
   });
 });
 
@@ -342,11 +394,11 @@ describe("buildWonMetricReductionEmail", () => {
       ...BASE_EVENT,
       action_label: "Deal deactivated",
       reason_code: "archived_or_deactivated",
-      report_metric_key: "deals_dashboard.won_ytd",
+      report_metric_key: null,
       impacts: {
-        "office.deals_dashboard.won_ytd": {
+        "office.won_ytd": {
           scope: "office",
-          metric: "deals_dashboard.won_ytd",
+          metric: "won_ytd",
           countBefore: 276,
           countAfter: 275,
           countDelta: -1,
@@ -367,24 +419,72 @@ describe("buildWonMetricReductionEmail", () => {
     );
 
     const [, , html, options] = sendEmail.mock.calls[0]!;
-    const expectedReportUrl = "https://trockcrm.com/deals?filter=won&period=ytd&officeId=" + OFFICE_ID;
+    const expectedReportUrl = "https://trockcrm.com/deals?filter=won&period=ytd&scope=all&officeId=" + OFFICE_ID;
     expect(options.text).toContain(expectedReportUrl);
     expect(html).toContain(expectedReportUrl.replace(/&/g, "&amp;"));
     expect(html).toContain("Open Deals Dashboard");
     expect(html).not.toContain("/deals/" + DEAL_ID + "?");
     const notificationInsert = calls.find((call) => call.sql.includes("INSERT INTO office_dallas.notifications"));
-    expect(notificationInsert?.params[4]).toBe("/deals?filter=won&period=ytd");
+    expect(notificationInsert?.params[4]).toBe("/deals?filter=won&period=ytd&scope=all");
+  });
+
+  it("routes an archived assigned-rep Won impact to the all-reps Deals Dashboard", () => {
+    const impact = resolveWonMetricImpact(
+      {
+        "assigned_rep.44444444-4444-4444-8444-444444444444.won_ytd": {
+          scope: "assigned_rep",
+          scopeId: "44444444-4444-4444-8444-444444444444",
+          metric: "won_ytd",
+          countBefore: 2,
+          countAfter: 1,
+          countDelta: -1,
+          before: 200000,
+          after: 100000,
+          delta: -100000,
+          unit: "usd",
+        },
+      },
+      null,
+    );
+    const email = buildWonMetricReductionEmail({
+      event: {
+        ...BASE_EVENT,
+        dealId: null,
+        reportMetricKey: null,
+        reasonCode: "deal_deleted",
+      },
+      impact,
+      officeId: OFFICE_ID,
+      frontendUrl: "https://trockcrm.com",
+    });
+
+    expect(email.reportUrl).toBe(`https://trockcrm.com/deals?filter=won&period=ytd&scope=all&officeId=${OFFICE_ID}`);
   });
 
   it("uses a report link and release citation when an event is definition-only and has no deal", () => {
-    const impact = resolveWonMetricImpact(BASE_EVENT.impacts, "director.won_ytd");
+    const impact = resolveWonMetricImpact(
+      {
+        "office.estimator_pipeline.won_ytd": {
+          scope: "office",
+          metric: "estimator_pipeline.won_ytd",
+          countBefore: 3,
+          countAfter: 2,
+          countDelta: -1,
+          before: 300000,
+          after: 25000,
+          delta: -275000,
+          unit: "usd",
+        },
+      },
+      "estimator_pipeline.won_ytd",
+    );
     const email = buildWonMetricReductionEmail({
       event: {
         ...BASE_EVENT,
         dealId: null,
         dealName: null,
         dealNumber: null,
-        reportMetricKey: "director.won_ytd",
+        reportMetricKey: "estimator_pipeline.won_ytd",
         definitionVersion: "won-v2",
         releaseReference: "https://github.com/artificialadnaan/trockcrm/pull/916",
         actionLabel: "Estimator Won YTD began excluding change orders",
@@ -437,7 +537,7 @@ describe("buildWonMetricReductionEmail", () => {
     });
 
     expect(email.reportUrl).toBe(
-      `https://trockcrm.com/deals?filter=won&period=ytd&officeId=${OFFICE_ID}`,
+      `https://trockcrm.com/deals?filter=won&period=ytd&scope=all&officeId=${OFFICE_ID}`,
     );
     expect(email.html).toContain("Open Deals Dashboard");
   });

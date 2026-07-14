@@ -41,6 +41,7 @@ import { db } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { isCrmUserRole } from "../../middleware/field-auth.js";
 import { writeAuditLog } from "../../lib/audit-log.js";
+import { isUndefinedFunctionError } from "../../lib/db-errors.js";
 import {
   calculateCommissionForDeal,
   mintEstimatorCommissionForDeal,
@@ -131,13 +132,6 @@ const DEALS_DASHBOARD_WON_YTD_RELEASE_REFERENCE =
 
 function sqlStringList(values: readonly string[]) {
   return sql.join(values.map((value) => sql`${value}`), sql`, `);
-}
-
-function isMissingWonMetricDefinitionTracker(error: unknown): boolean {
-  const candidate = error as { code?: unknown; cause?: { code?: unknown } } | null;
-  // Drizzle wraps PostgreSQL errors in some runtime paths, so inspect its direct cause too. Do not
-  // match on a message: only PostgreSQL's explicit undefined-function code is rollout-compatible.
-  return candidate?.code === "42883" || candidate?.cause?.code === "42883";
 }
 
 function nonTerminalMirroredStageCondition() {
@@ -678,7 +672,7 @@ async function recordDealsDashboardWonYtdDefinition(
     // A rolling deploy can serve this API before migration 0184 has added the function. Only that
     // PostgreSQL "undefined function" compatibility case is safe to ignore; every other failure
     // must remain visible to callers instead of silently disabling reduction alerts.
-    if (isMissingWonMetricDefinitionTracker(error)) return;
+    if (isUndefinedFunctionError(error)) return;
     throw error;
   }
 }

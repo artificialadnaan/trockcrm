@@ -462,7 +462,7 @@ export function UsersPage() {
             </div>
           </div>
 
-          <div className="grid min-w-0 flex-1 grid-cols-1 gap-3 sm:grid-cols-2 2xl:grid-cols-4">
+          <div className="grid min-w-0 flex-1 grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
             <div className="space-y-1">
               <label className="text-xs font-medium uppercase tracking-[0.18em] text-slate-500">Role</label>
               <Select value={roleFilter} onValueChange={(value) => setRoleFilter(value as UserRoleFilter)}>
@@ -629,7 +629,9 @@ export function UsersPage() {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {filteredUsers.map((user) => (
+            {filteredUsers.map((user) => {
+              const commissionStructure = user.commissionStructure ?? "solo";
+              return (
               <TableRow key={user.id} className={!user.isActive ? "opacity-50" : ""}>
                 <TableCell>
                   <Checkbox
@@ -721,7 +723,7 @@ export function UsersPage() {
                     <div>
                       <p className="text-[10px] uppercase tracking-wide text-slate-400">Structure</p>
                       <Select
-                        value={user.commissionStructure ?? "solo"}
+                        value={commissionStructure}
                         onValueChange={(value) => handleStructureChange(user.id, value as "solo" | "mixed")}
                         disabled={updatingId === user.id || bulkUpdating}
                       >
@@ -735,13 +737,13 @@ export function UsersPage() {
                       </Select>
                     </div>
                     <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
-                      <div className={`min-w-0 ${(user.commissionStructure ?? "solo") === "solo" ? "" : "opacity-50"}`}>
+                      <div className={`min-w-0 ${commissionStructure === "solo" ? "" : "opacity-50"}`}>
                         <label
                           htmlFor={`user-${user.id}-capx-rate-solo`}
                           className="block min-h-6 whitespace-normal break-words text-[10px] uppercase leading-3 tracking-wide text-slate-400"
                         >
                           capX Solo %
-                          {(user.commissionStructure ?? "solo") === "solo" ? (
+                          {commissionStructure === "solo" ? (
                             <span className="block text-[9px] normal-case tracking-normal text-slate-500">Active</span>
                           ) : null}
                         </label>
@@ -753,19 +755,19 @@ export function UsersPage() {
                           disabled={updatingId === user.id || bulkUpdating}
                           inputMode="decimal"
                           title={
-                            (user.commissionStructure ?? "solo") === "solo"
+                            commissionStructure === "solo"
                               ? "Active capX rate under the Solo structure."
                               : "Inactive under the current (Mixed) structure — does not affect payouts."
                           }
                         />
                       </div>
-                      <div className={`min-w-0 ${(user.commissionStructure ?? "solo") === "mixed" ? "" : "opacity-50"}`}>
+                      <div className={`min-w-0 ${commissionStructure === "mixed" ? "" : "opacity-50"}`}>
                         <label
                           htmlFor={`user-${user.id}-capx-rate-mixed`}
                           className="block min-h-6 whitespace-normal break-words text-[10px] uppercase leading-3 tracking-wide text-slate-400"
                         >
                           capX Mixed %
-                          {(user.commissionStructure ?? "solo") === "mixed" ? (
+                          {commissionStructure === "mixed" ? (
                             <span className="block text-[9px] normal-case tracking-normal text-slate-500">Active</span>
                           ) : null}
                         </label>
@@ -777,7 +779,7 @@ export function UsersPage() {
                           disabled={updatingId === user.id || bulkUpdating}
                           inputMode="decimal"
                           title={
-                            (user.commissionStructure ?? "solo") === "mixed"
+                            commissionStructure === "mixed"
                               ? "Active capX rate under the Mixed structure."
                               : "Inactive under the current (Solo) structure — does not affect payouts."
                           }
@@ -906,7 +908,8 @@ export function UsersPage() {
                   </div>
                 </TableCell>
               </TableRow>
-            ))}
+              );
+            })}
 
             {filteredUsers.length === 0 && !loading && (
               <TableRow>

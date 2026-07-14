@@ -12,10 +12,10 @@ export const WON_METRIC_REDUCTION_DELIVERY_LEASE_SECONDS = 5 * 60;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-// The requested executive audience is safe by default. Operations can replace this list (for example,
-// while testing a cutover) with WON_METRIC_DECREASE_EMAIL_RECIPIENTS; an invalid non-empty override fails
-// closed rather than silently sending to an unintended address.
-export const DEFAULT_WON_METRIC_DECREASE_RECIPIENTS = ["tyamashita@trockgc.com", "adnaan.iqbal@gmail.com"] as const;
+// Non-production can use this safe corporate fallback. Production must explicitly configure recipients so
+// the required leadership audience is reviewed in deployment configuration instead of silently using a
+// personal mailbox or an incomplete hard-coded list.
+export const DEFAULT_WON_METRIC_DECREASE_RECIPIENTS = ["tyamashita@trockgc.com", "adnaan@trockgc.com"] as const;
 
 type PgQuery = (text: string, params?: unknown[]) => Promise<{ rows: any[] }>;
 type SendEmail = (
@@ -68,6 +68,11 @@ export interface WonMetricImpact {
   unit: string | null;
   isNegative: boolean;
 }
+
+type WonMetricDeliveryGateDeps = {
+  query?: PgQuery;
+  logger?: Pick<Console, "log" | "warn" | "error">;
+};
 
 type EnrichedAuditCitationRow = {
   id: string;
@@ -274,6 +279,7 @@ export async function handleWonMetricReductionAlert(
       tenantSchema: event.tenantSchema,
       recipientEmail,
       event: eventForDelivery,
+      reportMetricKey: impact.metricKey ?? eventForDelivery.reportMetricKey,
       email,
     });
 
@@ -326,6 +332,28 @@ export async function handleWonMetricReductionAlert(
   }
 }
 
+/**
+ * Open the database delivery gate only from a handler-capable worker and backfill durable events created
+ * while the migration was live but an older worker was still running. It is safe to call repeatedly.
+ */
+export async function enableWonMetricReductionAlertDelivery(deps: WonMetricDeliveryGateDeps = {}): Promise<number> {
+  const query = deps.query ?? (pool.query.bind(pool) as PgQuery);
+  const logger = deps.logger ?? console;
+  try {
+    const result = await query("SELECT public.enable_won_metric_reduction_alert_delivery() AS queued_count");
+    const queuedCount = Number(result.rows[0]?.queued_count ?? 0);
+    if (queuedCount > 0) {
+      logger.log("[WonMetricReductionAlert] Enabled delivery and queued durable reduction events", { queuedCount });
+    }
+    return Number.isFinite(queuedCount) ? queuedCount : 0;
+  } catch (error) {
+    // A worker can be deployed ahead of migration 0184. Treat only PostgreSQL's explicit missing-function
+    // error as a temporary compatibility case; retrying this idempotent call later opens the gate.
+    if (isUndefinedFunctionError(error)) return 0;
+    throw error;
+  }
+}
+
 async function releaseDeliveryLease(
   query: PgQuery,
   eventId: string,
@@ -349,7 +377,11 @@ export function resolveWonMetricDecreaseRecipients(env: NodeJS.ProcessEnv): stri
   const seen = new Set<string>();
   const recipients: string[] = [];
   const configured = String(env.WON_METRIC_DECREASE_EMAIL_RECIPIENTS ?? "").trim();
-  const source = configured ? configured.split(",") : DEFAULT_WON_METRIC_DECREASE_RECIPIENTS;
+  const source = configured
+    ? configured.split(",")
+    : env.NODE_ENV === "production"
+      ? []
+      : DEFAULT_WON_METRIC_DECREASE_RECIPIENTS;
   for (const raw of source) {
     const email = raw.trim().toLowerCase();
     if (!EMAIL_RE.test(email) || seen.has(email)) continue;
@@ -380,7 +412,13 @@ export function resolveWonMetricImpact(impacts: unknown, reportMetricKey: string
     if (target && candidateKey.includes(target)) return 80 + candidate.score;
     return metricPriority(candidate.metricKey) + candidate.score;
   };
-  const ranked = [...candidates].sort((a, b) => score(b) - score(a));
+  const ranked = [...candidates].sort((a, b) => {
+    const scoreDifference = score(b) - score(a);
+    if (scoreDifference !== 0) return scoreDifference;
+    // Mutation impacts include both the canonical dashboard and estimator Won-YTD figures. JSON object
+    // ordering is not a contract, so make the executive-facing dashboard figure win a genuine tie.
+    return canonicalWonYtdTieBreak(b.metricKey) - canonicalWonYtdTieBreak(a.metricKey);
+  });
   // Prefer a negative target impact; when the target is absent, a negative event impact still deserves an alert.
   const targetCandidates = target
     ? ranked.filter((candidate) => {
@@ -501,9 +539,10 @@ async function ensureInAppNotification(input: {
   tenantSchema: string;
   recipientEmail: string;
   event: WonMetricReductionEvent;
+  reportMetricKey: string | null;
   email: ReturnType<typeof buildWonMetricReductionEmail>;
 }): Promise<void> {
-  const { query, logger, tenantSchema, recipientEmail, event, email } = input;
+  const { query, logger, tenantSchema, recipientEmail, event, reportMetricKey, email } = input;
   try {
     const users = await query(
       `SELECT id::text AS id
@@ -518,7 +557,7 @@ async function ensureInAppNotification(input: {
     // the normal detail route, so those alerts must lead to the report rather than a dead deal link.
     const link = email.dealUrl && event.dealId
       ? relativeDealLink(event.dealId)
-      : relativeWonMetricReportLink(event.reportMetricKey);
+      : relativeWonMetricReportLink(reportMetricKey);
     for (const user of users.rows) {
       const userId = normalizeUuid(user.id);
       if (!userId) continue;
@@ -898,6 +937,13 @@ function metricPriority(metricKey: string | null): number {
   return 0;
 }
 
+function canonicalWonYtdTieBreak(metricKey: string | null): number {
+  const normalized = normalizeMetricKey(metricKey);
+  if (normalized === "officewonytd") return 2;
+  if (normalized === "officeestimatorpipelinewonytd") return 1;
+  return 0;
+}
+
 function formatChangedFields(value: unknown): string | null {
   const parsed = parseJson(value);
   if (!isRecord(parsed)) return normalizeText(typeof parsed === "string" ? parsed : null);
@@ -968,7 +1014,9 @@ function buildEstimatorReportUrl(frontendUrl: string, officeId?: string | null):
 }
 
 function isDealsDashboardWonMetric(metricKey: string | null | undefined): boolean {
-  return normalizeMetricKey(metricKey).includes("dealsdashboard");
+  const normalized = normalizeMetricKey(metricKey);
+  return normalized.includes("dealsdashboard") ||
+    (normalized.endsWith("wonytd") && !normalized.includes("estimatorpipeline"));
 }
 
 function buildWonMetricReportUrl(
@@ -977,7 +1025,7 @@ function buildWonMetricReportUrl(
   officeId?: string | null,
 ): string {
   if (!isDealsDashboardWonMetric(metricKey)) return buildEstimatorReportUrl(frontendUrl, officeId);
-  const params = new URLSearchParams({ filter: "won", period: "ytd" });
+  const params = new URLSearchParams({ filter: "won", period: "ytd", scope: "all" });
   if (officeId) params.set("officeId", officeId);
   return `${frontendUrl.replace(/\/+$/, "")}/deals?${params.toString()}`;
 }
@@ -987,7 +1035,9 @@ function wonMetricReportLabel(metricKey: string | null | undefined): string {
 }
 
 function relativeWonMetricReportLink(metricKey: string | null | undefined): string {
-  return isDealsDashboardWonMetric(metricKey) ? "/deals?filter=won&period=ytd" : "/reports/operations/estimator-pipeline";
+  return isDealsDashboardWonMetric(metricKey)
+    ? "/deals?filter=won&period=ytd&scope=all"
+    : "/reports/operations/estimator-pipeline";
 }
 
 function relativeDealLink(dealId: string): string {
@@ -1072,4 +1122,10 @@ function isMissingRelationError(error: unknown): boolean {
   const candidate = error as { code?: unknown; message?: unknown };
   if (candidate.code === "42P01" || candidate.code === "3F000") return true;
   return typeof candidate.message === "string" && /(?:relation|schema).*does not exist/i.test(candidate.message);
+}
+
+function isUndefinedFunctionError(error: unknown): boolean {
+  if (typeof error !== "object" || error == null) return false;
+  const candidate = error as { code?: unknown; cause?: { code?: unknown } };
+  return candidate.code === "42883" || candidate.cause?.code === "42883";
 }
