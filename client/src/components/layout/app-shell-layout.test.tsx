@@ -289,7 +289,7 @@ describe("AppShell layout", () => {
     expect(usersPageSource).not.toContain(
       'className="p-6 space-y-6 max-w-5xl mx-auto"',
     );
-    expect(usersPageSource).toContain('className="mx-auto max-w-6xl space-y-6"');
+    expect(usersPageSource).toContain('className="mx-auto min-w-0 max-w-6xl space-y-6"');
     expect(usersPageSource).toContain('placeholder="Search by name or email"');
     expect(usersPageSource).toContain("Make director");
     expect(usersPageSource).toContain("Preview");

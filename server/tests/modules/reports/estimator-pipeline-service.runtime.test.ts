@@ -239,7 +239,7 @@ describe("estimator pipeline summary and evidence", () => {
 
     const report = await getEstimatorPipelineReport(transactionBoundDb as typeof tenantDb, REPORT_NOW);
 
-    expect(callIndex).toBe(3);
+    expect(callIndex).toBe(4);
     expect(maximumConcurrentQueries).toBe(1);
     expect(report.pipeline).toEqual({ count: 0, value: 0 });
     expect(report.won).toEqual({ count: 0, value: 0 });

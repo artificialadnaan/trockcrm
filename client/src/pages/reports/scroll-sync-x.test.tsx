@@ -52,6 +52,14 @@ describe("ScrollSyncX top-aligned synced scrollbar", () => {
     expect(q("scrollsync-top").className).toContain("scrollbar-top-rail");
   });
 
+  it("makes a labelled body region keyboard reachable", () => {
+    act(() => root.render(<ScrollSyncX bodyLabel="Wide records table"><div>x</div></ScrollSyncX>));
+    const body = q("scrollsync-body");
+    expect(body.getAttribute("role")).toBe("region");
+    expect(body.getAttribute("aria-label")).toBe("Wide records table");
+    expect(body.getAttribute("tabindex")).toBe("0");
+  });
+
   it("mirrors body horizontal scroll onto the top rail", () => {
     act(() => root.render(<ScrollSyncX><div>x</div></ScrollSyncX>));
     const top = q("scrollsync-top");

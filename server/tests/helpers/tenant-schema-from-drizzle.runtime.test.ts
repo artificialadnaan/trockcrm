@@ -4,8 +4,8 @@
 // or a `text` column).
 import { PGlite } from "@electric-sql/pglite";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { ACTIVITY_TYPES, AUDIT_ACTIONS } from "@trock-crm/shared/types";
-import { activities, auditLog, files, leads, pipelineStageConfig, usageDaily } from "@trock-crm/shared/schema";
+import { ACTIVITY_TYPES, AUDIT_ACTIONS, NOTIFICATION_TYPES } from "@trock-crm/shared/types";
+import { activities, auditLog, files, leads, notifications, pipelineStageConfig, usageDaily } from "@trock-crm/shared/schema";
 import { tenantSchemaSql } from "./tenant-schema-from-drizzle.js";
 
 const U = (s: string) => `00000000-0000-4000-8000-${s.padStart(12, "0")}`;
@@ -41,6 +41,28 @@ describe("tenantSchemaSql — schema fidelity from Drizzle", () => {
     );
     expect(rows.map((r) => r.enumlabel)).toEqual([...AUDIT_ACTIONS]);
   });
+
+  it("emits notification_type from EVERY shared NOTIFICATION_TYPES value", async () => {
+    const ndb = new PGlite();
+    try {
+      await ndb.exec(tenantSchemaSql("office_dallas", [notifications]));
+      const { rows } = await ndb.query<{ enumlabel: string }>(
+        "SELECT e.enumlabel FROM pg_enum e JOIN pg_type t ON t.oid = e.enumtypid " +
+          "JOIN pg_namespace n ON n.oid = t.typnamespace " +
+          "WHERE t.typname = 'notification_type' AND n.nspname = 'public' ORDER BY e.enumsortorder",
+      );
+      expect(rows.map((r) => r.enumlabel)).toEqual([...NOTIFICATION_TYPES]);
+
+      await expect(
+        ndb.exec(
+          "INSERT INTO office_dallas.notifications (id, user_id, type, title) " +
+            "VALUES ('" + U("0a11") + "', '" + REP + "', 'won_metric_decrease', 'Won metric reduced')",
+        ),
+      ).resolves.toBeDefined();
+    } finally {
+      await ndb.close();
+    }
+  }, 60_000);
 
   it("places a tenant-scoped enum (lead_office) in the tenant schema, not public (Codex/CodeRabbit #715)", async () => {
     // Prod-verified: lead_office lives per office_* schema, while audit_action lives in public. The
