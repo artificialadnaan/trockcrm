@@ -1,6 +1,6 @@
 import React from "react";
 import { fireEvent, render } from "@testing-library/react-native";
-import { ScorecardDetailView } from "../ScorecardDetailView";
+import { isScorecardSignatureImage, ScorecardDetailView } from "../ScorecardDetailView";
 import type { FieldScorecardDetail } from "../../api/types";
 
 const detail: FieldScorecardDetail = {
@@ -76,6 +76,51 @@ describe("ScorecardDetailView", () => {
   it("renders free-text action items verbatim", () => {
     const screen = render(<ScorecardDetailView scorecard={detail} onDownloadPdf={jest.fn()} downloadingPdf={false} />);
     expect(screen.getByText("Schedule re-inspection")).toBeTruthy();
+  });
+
+  it("renders handwritten data-URL signatures as images and legacy typed signatures as text", () => {
+    const handwritten = "data:image/png;base64,AAAA";
+    const screen = render(
+      <ScorecardDetailView
+        scorecard={{
+          ...detail,
+          superintendentSignature: handwritten,
+          pmSignature: "Pat PM (typed legacy signature)",
+        }}
+        onDownloadPdf={jest.fn()}
+        downloadingPdf={false}
+      />,
+    );
+
+    expect(isScorecardSignatureImage(handwritten)).toBe(true);
+    expect(isScorecardSignatureImage("Pat PM (typed legacy signature)")).toBe(false);
+    expect(screen.getByTestId("scorecard-signature-image-superintendent").props.source).toEqual({ uri: handwritten });
+    expect(screen.queryByText(handwritten)).toBeNull();
+    expect(screen.getByText("Pat PM (typed legacy signature)")).toBeTruthy();
+    expect(screen.queryByTestId("scorecard-signature-image-project-manager")).toBeNull();
+  });
+
+  it("does not trust or dump unsupported signature data URLs", () => {
+    const unsupportedImage = "data:image/svg+xml;base64,PHN2Zy8+";
+    const unsupportedData = "data:text/plain;base64,U2lnbmF0dXJl";
+    const screen = render(
+      <ScorecardDetailView
+        scorecard={{
+          ...detail,
+          superintendentSignature: unsupportedImage,
+          pmSignature: unsupportedData,
+        }}
+        onDownloadPdf={jest.fn()}
+        downloadingPdf={false}
+      />,
+    );
+
+    expect(isScorecardSignatureImage(unsupportedImage)).toBe(false);
+    expect(screen.queryByText(unsupportedImage)).toBeNull();
+    expect(screen.queryByText(unsupportedData)).toBeNull();
+    expect(screen.queryByTestId("scorecard-signature-image-superintendent")).toBeNull();
+    expect(screen.queryByTestId("scorecard-signature-image-project-manager")).toBeNull();
+    expect(screen.getAllByText("—")).toHaveLength(2);
   });
 
   it("renders all 8 section rows, 0-filling sections absent from items", () => {

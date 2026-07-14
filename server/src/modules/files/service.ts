@@ -43,6 +43,11 @@ import { inferFileCategory } from "./infer-category.js";
 import { resolvePhotoAddressMetadata } from "./photo-geocoding.js";
 import { BUSINESS_TIMEZONE } from "../../lib/period.js";
 import { buildDealPhotoTimelineConditions, type DealPhotoTimelineFilters } from "./photo-timeline-filters.js";
+import {
+  lockScorecardEditEvidenceUploadForConfirm,
+  markScorecardEditEvidenceUploadConfirmed,
+  type ScorecardEditUploadScope,
+} from "../field/scorecard-evidence-upload.js";
 import crypto from "node:crypto";
 
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -68,6 +73,8 @@ interface PendingUpload {
   description?: string;
   photoCategory?: PhotoCategory | null;
   tags?: string[];
+  /** Server-owned scope for submitted-scorecard edit evidence. Never sourced from generic client fields. */
+  scorecardEditScope?: ScorecardEditUploadScope;
   expiresAt: Date;
   /** Set when this upload is a new version of an existing file */
   parentFileId?: string;
@@ -135,6 +142,8 @@ export interface RequestUploadInput {
   tags?: string[];
   /** Allow the upload to remain unassigned until a later field-app step */
   allowUnassigned?: boolean;
+  /** Internal server-owned scope persisted with the pending token. */
+  scorecardEditScope?: ScorecardEditUploadScope;
 }
 
 export interface ConfirmUploadInput {
@@ -147,6 +156,10 @@ export interface ConfirmUploadInput {
    * and web upload paths omit it.
    */
   clientUploadId?: string;
+  /** Internal scope supplied only by the authorized field scorecard route. */
+  scorecardEditScope?: ScorecardEditUploadScope;
+  /** Authoritative target deal for tokenless/idempotent scoped confirms. */
+  scorecardEditDealId?: string;
   /** EXIF data extracted client-side (optional, server also extracts for images) */
   takenAt?: string;
   geoLat?: number;
@@ -621,6 +634,7 @@ export async function requestUploadUrl(
     description: input.description,
     photoCategory: input.photoCategory,
     tags: input.tags,
+    scorecardEditScope: input.scorecardEditScope,
     expiresAt: new Date(Date.now() + PRESIGNED_URL_EXPIRY_SECONDS * 1000),
   });
 
@@ -646,6 +660,17 @@ export async function confirmUpload(
   // race) — callers must then SKIP upload side effects (audit event, domain_event job) to avoid replaying
   // them for one photo.
 ): Promise<{ file: typeof files.$inferSelect; created: boolean }> {
+  // Validate edit-evidence scope before ANY idempotent return or insert. A live pending token proves what
+  // was minted; the durable registry covers consumed-token retries and rejects an omitted/swapped scope.
+  const pendingForScope = pendingUploads.get(input.uploadToken);
+  const editBinding = await lockScorecardEditEvidenceUploadForConfirm(tenantDb, {
+    userId,
+    dealId: input.scorecardEditDealId ?? pendingForScope?.dealId,
+    scorecardId: input.scorecardEditScope?.scorecardId,
+    clientUploadId: input.clientUploadId,
+    pendingScope: pendingForScope?.scorecardEditScope,
+    pendingUploadFound: Boolean(pendingForScope && pendingForScope.expiresAt >= new Date()),
+  });
   // Idempotency (resilient upload queue): if this client upload already produced a row, return it instead
   // of creating a duplicate. This is decoupled from the single-use in-memory token, so it still dedupes
   // when a resumed/background queue re-runs an upload AFTER the original confirm succeeded (token gone) —
@@ -660,6 +685,7 @@ export async function confirmUpload(
       .limit(1);
     if (existing[0]) {
       pendingUploads.delete(input.uploadToken);
+      await markScorecardEditEvidenceUploadConfirmed(tenantDb, editBinding, existing[0].id);
       return { file: existing[0], created: false };
     }
   }
@@ -773,7 +799,10 @@ export async function confirmUpload(
   // Fix 7: NOW delete the token — DB insert succeeded, no retry needed
   pendingUploads.delete(input.uploadToken);
 
-  if (result[0]) return { file: result[0], created: true };
+  if (result[0]) {
+    await markScorecardEditEvidenceUploadConfirmed(tenantDb, editBinding, result[0].id);
+    return { file: result[0], created: true };
+  }
 
   // onConflictDoNothing skipped the insert (a concurrent confirm with the same clientUploadId won). Find
   // the winner FIRST, then delete OUR freshly-PUT object only if it's actually distinct from the winner's.
@@ -786,6 +815,7 @@ export async function confirmUpload(
       .where(and(eq(files.clientUploadId, input.clientUploadId), eq(files.uploadedBy, userId)))
       .limit(1);
     if (winner[0]) {
+      await markScorecardEditEvidenceUploadConfirmed(tenantDb, editBinding, winner[0].id);
       if (isR2Configured()) {
         if (pending.r2Key !== winner[0].r2Key) await deleteObject(pending.r2Key).catch(() => undefined);
         if (thumbnailR2Key && thumbnailR2Key !== winner[0].thumbnailR2Key) {

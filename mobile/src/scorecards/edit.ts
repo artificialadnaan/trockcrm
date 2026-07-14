@@ -46,6 +46,60 @@ function editableItems(detail: FieldScorecardDetail): {
   return { scores, notes };
 }
 
+/** Compact deterministic digest for persisted concurrency snapshots (two independent 32-bit lanes). */
+function contentDigest(value: string): string {
+  let left = 0x811c9dc5;
+  let right = 0x9e3779b9;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    left = Math.imul(left ^ code, 0x01000193);
+    right = Math.imul(right ^ code, 0x85ebca6b);
+  }
+  const hex = (value32: number) => (value32 >>> 0).toString(16).padStart(8, "0");
+  return `v1:${value.length}:${hex(left)}${hex(right)}`;
+}
+
+/**
+ * Snapshot only scorecard-owned editable content. Gallery captions and presigned URLs are deliberately
+ * excluded: their independent mutation bumps updatedAt, but a canonical caption refresh may safely adopt
+ * that newer token only when every scorecard-owned field still matches the draft's original base snapshot.
+ */
+function editableDetailFingerprint(detail: FieldScorecardDetail): string {
+  const sortedRecord = (record: Record<string, string>) =>
+    Object.fromEntries(Object.entries(record).sort(([left], [right]) => left.localeCompare(right)));
+  const items = detail.items
+    .map((item) => ({ sectionKey: item.sectionKey, points: item.points, note: item.note ?? null }))
+    .sort((left, right) => left.sectionKey.localeCompare(right.sectionKey));
+  const photos = detail.photos
+    .map((photo) => ({
+      id: photo.id,
+      fileId: photo.fileId,
+      sectionKey: photo.sectionKey,
+      deficiencyKey: photo.deficiencyKey ?? null,
+    }))
+    .sort((left, right) => left.id.localeCompare(right.id));
+  return contentDigest(JSON.stringify({
+    superintendentName: detail.superintendentName ?? null,
+    pmName: detail.pmName ?? null,
+    items,
+    criticalDeficiencies: [...detail.criticalDeficiencies].sort(),
+    criticalDeficiencyNotes: sortedRecord(detail.criticalDeficiencyNotes ?? {}),
+    actionItems: detail.actionItems,
+    photos,
+    superintendentSignature: detail.superintendentSignature ?? null,
+    pmSignature: detail.pmSignature ?? null,
+    summary: detail.summary ?? null,
+  }));
+}
+
+function isNewerRevision(candidate: string | undefined, current: string | undefined): candidate is string {
+  if (!candidate) return false;
+  if (!current) return true;
+  const candidateTime = Date.parse(candidate);
+  const currentTime = Date.parse(current);
+  return Number.isFinite(candidateTime) && Number.isFinite(currentTime) && candidateTime > currentTime;
+}
+
 function retainedPhotos(detail: FieldScorecardDetail): ScorecardDraftPhoto[] {
   return detail.photos.flatMap((photo) => {
     const sectionAllowed = detail.kind === "leadership"
@@ -104,6 +158,7 @@ export function createScorecardEditDraft(
     editingScorecardId: detail.id,
     editingOfficeId: detail.officeId ?? null,
     editBaseUpdatedAt: detail.updatedAt,
+    editBaseContentFingerprint: editableDetailFingerprint(detail),
     editBasePhotoIds: photos.flatMap((photo) =>
       isExistingScorecardDraftPhoto(photo) ? [photo.existingScorecardPhotoId] : [],
     ),
@@ -143,10 +198,18 @@ export function refreshScorecardEditPhotoUrls(
     if (caption !== photo.caption) captionChanged = true;
     return { ...photo, uri, caption };
   });
-  if (!changed) return draft;
+  const latestFingerprint = editableDetailFingerprint(detail);
+  const canAdvanceRevision = Boolean(
+    draft.editBaseContentFingerprint &&
+    draft.editBaseContentFingerprint === latestFingerprint,
+  );
+  const revisionChanged = canAdvanceRevision && isNewerRevision(detail.updatedAt, draft.editBaseUpdatedAt);
+  if (!changed && !revisionChanged) return draft;
   return {
     ...draft,
     photos,
+    editBaseUpdatedAt: revisionChanged ? detail.updatedAt : draft.editBaseUpdatedAt,
+    editBaseContentFingerprint: revisionChanged ? latestFingerprint : draft.editBaseContentFingerprint,
     // A retained caption is part of the rendered report even though it is read-only in this editor.
     // Loading a different canonical caption therefore requires fresh project approval; URL rotation alone does not.
     superintendentSignature: draft.kind !== "leadership" && captionChanged ? "" : draft.superintendentSignature,
@@ -249,6 +312,7 @@ export function rebaseScorecardEditDraft(
       ...draft,
       editingOfficeId: detail.officeId ?? draft.editingOfficeId ?? null,
       editBaseUpdatedAt: detail.updatedAt,
+      editBaseContentFingerprint: editableDetailFingerprint(detail),
       editBasePhotoIds: latestDraftPhotos.flatMap((photo) =>
         isExistingScorecardDraftPhoto(photo) ? [photo.existingScorecardPhotoId] : [],
       ),

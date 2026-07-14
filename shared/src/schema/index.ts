@@ -162,6 +162,7 @@ export {
   fieldScorecards,
   fieldScorecardItems,
   fieldScorecardPhotos,
+  fieldScorecardEditUploads,
 } from "./tenant/field-scorecards.js";
 export {
   projects,

@@ -4,12 +4,13 @@
 // itself is the durability unit — on a photos-pending / failed POST the caller keeps the draft and retries
 // (the upload queue keeps retrying the photos in the background).
 
-import { createScorecard, updateScorecard, type Fetcher } from "../api/endpoints";
+import { createScorecard, discardScorecardEditEvidence, updateScorecard, type Fetcher } from "../api/endpoints";
 import type { FieldScorecardSummary } from "../api/types";
 import type { CaptureUploadInput } from "../capture/upload";
 import { MAX_UPLOAD_ATTEMPTS, drainUploadQueue, enqueueUploads, getQueuedUploads } from "../capture/upload-queue";
 import {
   scorecardDraftToSubmission,
+  scorecardDraftEvidenceCleanupIds,
   scorecardDraftNewPhotos,
   todayLocalIso,
   type ScorecardDraft,
@@ -21,7 +22,7 @@ import { scorecardDraftToUpdate } from "./edit";
 export function scorecardPhotoUploadInput(
   photo: NewScorecardDraftPhoto,
   dealId: string,
-  routeByTarget = false,
+  editingScorecardId?: string,
 ): CaptureUploadInput {
   return {
     uri: photo.uri,
@@ -33,7 +34,7 @@ export function scorecardPhotoUploadInput(
     tags: ["scorecard", photo.sectionKey],
     metadata: { takenAt: photo.takenAt, latitude: photo.latitude, longitude: photo.longitude, addressSource: photo.addressSource },
     clientUploadId: photo.clientUploadId,
-    ...(routeByTarget ? { routeByTarget: true } : {}),
+    ...(editingScorecardId ? { scorecardId: editingScorecardId, routeByTarget: true } : {}),
   };
 }
 
@@ -73,11 +74,19 @@ export type SubmitScorecardResult =
 export type SubmitScorecardOptions = {
   /**
    * Default queue/new-submission fetcher, scoped to the durable draft office. Submitted-edit evidence is
-   * marked per item and uses `scorecardFetcher` as the target-resolving override; an old pinned x-office-id
-   * can be rejected by field auth after the submitter is re-homed. Unmarked new/offline drafts stay pinned.
+   * marked with its scorecard id and uses `scorecardFetcher` for the server's owner-authorized scorecard
+   * office resolver; an old pinned x-office-id can be rejected after re-homing. New/offline drafts stay pinned.
    */
   draftOfficeFetcher?: Fetcher;
 };
+
+/** PUT committed, but abandoned-upload reconciliation has not completed; retain the draft and retry. */
+export class ScorecardEditCleanupPendingError extends Error {
+  constructor(public readonly scorecard: FieldScorecardSummary, options?: { cause?: unknown }) {
+    super("Scorecard changes were saved, but evidence cleanup is still pending.", options);
+    this.name = "ScorecardEditCleanupPendingError";
+  }
+}
 
 /**
  * Submit a draft. Uploads its photos through the durable queue first; if any of THIS draft's photos are
@@ -95,15 +104,15 @@ export async function submitScorecard(
   // evidence owns a clientUploadId and may enter the durable upload queue.
   const newPhotos = scorecardDraftNewPhotos(draft);
   if (newPhotos.length > 0) {
-    const editingSubmitted = Boolean(draft.editingScorecardId);
+    const editingScorecardId = draft.editingScorecardId;
     await enqueueUploads(
       ownerKey,
-      newPhotos.map((p) => scorecardPhotoUploadInput(p, draft.dealId, editingSubmitted)),
+      newPhotos.map((p) => scorecardPhotoUploadInput(p, draft.dealId, editingScorecardId)),
     );
     await drainUploadQueue(
       ownerKey,
       draftOfficeFetcher,
-      editingSubmitted ? { targetFetcher: scorecardFetcher } : undefined,
+      editingScorecardId ? { targetFetcher: scorecardFetcher } : undefined,
     );
     const stillQueued = await getQueuedUploads(ownerKey);
     const { pending, failed } = classifyDraftPhotoUploads(
@@ -116,6 +125,19 @@ export async function submitScorecard(
   }
   if (draft.editingScorecardId) {
     const { scorecard } = await updateScorecard(scorecardFetcher, draft.editingScorecardId, scorecardDraftToUpdate(draft));
+    // The append-only ledger may contain an earlier upload the user removed before this successful PUT.
+    // Reconcile every attempted id before reporting success: rows linked by the PUT are terminal-safe,
+    // while confirmed-but-unselected rows are hidden and not left as orphaned gallery evidence. A cleanup
+    // failure intentionally rejects this submit so the screen retains the draft; retry replays the
+    // idempotent PUT and then retries cleanup before local finalization/navigation.
+    const cleanupIds = scorecardDraftEvidenceCleanupIds(draft);
+    if (cleanupIds.length > 0) {
+      try {
+        await discardScorecardEditEvidence(scorecardFetcher, draft.editingScorecardId, cleanupIds);
+      } catch (error) {
+        throw new ScorecardEditCleanupPendingError(scorecard, { cause: error });
+      }
+    }
     return { status: "submitted", scorecard };
   }
   // Stamp Week Of = the completion date, LOCAL, at submit time. Both kinds present it as "set automatically

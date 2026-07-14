@@ -1,4 +1,4 @@
-import { updateScorecard, type Fetcher } from "../endpoints";
+import { discardScorecardEditEvidence, updateScorecard, type Fetcher } from "../endpoints";
 import type { ScorecardUpdatePayload } from "../../scorecards/draft";
 
 describe("updateScorecard", () => {
@@ -51,5 +51,42 @@ describe("updateScorecard", () => {
       },
     ]);
     expect(result).toEqual({ scorecard: { id: "scorecard-9" } });
+  });
+});
+
+describe("discardScorecardEditEvidence", () => {
+  it("POSTs the durable attempted-id ledger to the scorecard-scoped cleanup path", async () => {
+    const fetcher = jest.fn(async () => ({ discarded: 2 })) as unknown as Fetcher;
+    await expect(discardScorecardEditEvidence(fetcher, "scorecard-9", ["cu-1", "cu-2"]))
+      .resolves.toEqual({ discarded: 2 });
+    expect(fetcher).toHaveBeenCalledWith(
+      "/field/scorecards/scorecard-9/discard-edit-evidence",
+      { method: "POST", body: { clientUploadIds: ["cu-1", "cu-2"] } },
+    );
+  });
+
+  it("chunks ledgers larger than 100 and only resolves after every cleanup request succeeds", async () => {
+    const ids = Array.from({ length: 205 }, (_, index) => `cu-${index + 1}`);
+    const fetchMock = jest.fn(async (_path: string, opts?: { body?: { clientUploadIds?: string[] } }) => ({
+      discarded: opts?.body?.clientUploadIds?.length ?? 0,
+    }));
+    const fetcher = fetchMock as unknown as Fetcher;
+
+    await expect(discardScorecardEditEvidence(fetcher, "scorecard-9", ids))
+      .resolves.toEqual({ discarded: 205 });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock.mock.calls.map((call) => call[1]?.body?.clientUploadIds?.length)).toEqual([100, 100, 5]);
+    expect(fetchMock.mock.calls[1]?.[1]?.body?.clientUploadIds?.[0]).toBe("cu-101");
+  });
+
+  it("stops on a failed cleanup chunk so the caller retains the draft for retry", async () => {
+    const ids = Array.from({ length: 205 }, (_, index) => `cu-${index + 1}`);
+    const fetchMock = jest.fn()
+      .mockResolvedValueOnce({ discarded: 100 })
+      .mockRejectedValueOnce(new Error("offline"));
+
+    await expect(discardScorecardEditEvidence(fetchMock as unknown as Fetcher, "scorecard-9", ids))
+      .rejects.toThrow("offline");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });

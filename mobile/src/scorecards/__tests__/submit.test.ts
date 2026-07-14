@@ -31,14 +31,17 @@ describe("scorecardPhotoUploadInput", () => {
     expect(input.caption).toBe("Slab crack");
     expect(input.clientUploadId).toBe("cu-1");
     expect(input.category).toBeNull();
+    expect(input.scorecardId).toBeUndefined();
     expect(input.routeByTarget).toBeUndefined();
   });
 
-  it("marks only submitted-card edit evidence for server target routing", () => {
+  it("persists the scorecard scope only for submitted-card edit evidence", () => {
     const photo: ScorecardDraftPhoto = {
       key: "p1", uri: "file://p1", clientUploadId: "cu-1", sectionKey: "schedule", caption: "",
     };
-    expect(scorecardPhotoUploadInput(photo, "deal-1", true).routeByTarget).toBe(true);
+    expect(scorecardPhotoUploadInput(photo, "deal-1", "scorecard-1")).toEqual(
+      expect.objectContaining({ scorecardId: "scorecard-1", routeByTarget: true }),
+    );
   });
 
   it("nulls a blank caption", () => {

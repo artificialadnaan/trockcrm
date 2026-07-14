@@ -53,6 +53,9 @@ export type NewScorecardDraftPhoto = ScorecardDraftPhotoBase & {
 
 export type ScorecardDraftPhoto = ExistingScorecardDraftPhoto | NewScorecardDraftPhoto;
 
+/** Server-enforced cap for evidence links on either scorecard kind. */
+export const MAX_SCORECARD_PHOTOS = 100;
+
 export interface ScorecardDraft {
   id: string;
   clientSubmissionId: string; // stable across retries → idempotent submit
@@ -80,6 +83,12 @@ export interface ScorecardDraft {
   /** Optimistic-concurrency token returned by the detail endpoint. */
   editBaseUpdatedAt?: string;
   /**
+   * Canonical editable-content snapshot for editBaseUpdatedAt. This excludes mutable gallery captions/URLs,
+   * allowing a caption-only refresh to advance its evidence generation without masking a concurrent form edit.
+   * Optional so drafts created before submitted-card editing shipped still load conservatively.
+   */
+  editBaseContentFingerprint?: string;
+  /**
    * Retained evidence-link ids present at editBaseUpdatedAt. Conflict recovery compares this snapshot with
    * both the local desired links and the latest server links, so it can preserve concurrently-added evidence
    * without resurrecting evidence the local user intentionally removed.
@@ -96,9 +105,15 @@ export interface ScorecardDraft {
   actionItems: string[];
   /** Leadership Project Summary free text (voice-dictatable); project cards don't use it. */
   summary?: string;
-  /** Once evidence uploading begins, the draft cannot safely be discarded: some photos may already exist
-   * in the project gallery while the scorecard POST remains retryable. Optional for legacy drafts. */
+  /** Once evidence uploading begins, the draft cannot be discarded without reconciling gallery uploads:
+   * some photos may already exist while the scorecard POST/PUT remains retryable. Optional for legacy drafts. */
   evidenceUploadAttempted?: boolean;
+  /**
+   * Durable cleanup ledger for every new-photo client id that has entered a submit attempt. Unlike `photos`,
+   * this deliberately retains ids after the user removes a photo from the form, so a submitted-card edit can
+   * safely discard its local changes and ask the server to hide any already-confirmed, still-unlinked uploads.
+   */
+  evidenceUploadAttemptedIds?: string[];
   superintendentSignature?: string;
   pmSignature?: string;
   createdAt: number;
@@ -119,9 +134,12 @@ export type DraftAction =
   | { type: "setDeficiencyNote"; key: ScorecardCriticalDeficiencyKey; note: string }
   | { type: "appendDeficiencyNote"; key: ScorecardCriticalDeficiencyKey; text: string }
   | { type: "setActionItems"; items: string[] }
+  | { type: "addActionItem" }
+  | { type: "setActionItem"; index: number; value: string }
+  | { type: "removeActionItem"; index: number }
   | { type: "setSignature"; field: "superintendentSignature" | "pmSignature"; value: string }
   | { type: "appendActionItem"; text: string }
-  | { type: "markEvidenceUploadAttempted" }
+  | { type: "markEvidenceUploadAttempted"; clientUploadIds?: string[] }
   | { type: "replaceDraft"; draft: ScorecardDraft }
   | { type: "refreshExistingPhotoUrls"; urlsByScorecardPhotoId: Record<string, string> }
   | { type: "addPhoto"; photo: ScorecardDraftPhoto }
@@ -271,6 +289,46 @@ export function scorecardDraftNewPhotos(draft: ScorecardDraft): NewScorecardDraf
 }
 
 /**
+ * Persist the ids that are about to enter the upload queue before the drain starts. The ledger is append-only:
+ * removing a photo from the editable form must not erase the only handle the discard cleanup endpoint can use
+ * to find an upload that may already have confirmed into the project gallery.
+ */
+export function markScorecardEvidenceUploadAttempted(
+  draft: ScorecardDraft,
+  clientUploadIds: readonly string[],
+): ScorecardDraft {
+  // `undefined` on an already-attempted draft means it predates the cleanup ledger. Never manufacture a
+  // partial ledger from only the photos that happen to remain today: an older attempt may already have
+  // confirmed a photo that the user later removed, and treating the partial list as complete would orphan it.
+  const canMaintainCompleteLedger = draft.evidenceUploadAttemptedIds !== undefined || !draft.evidenceUploadAttempted;
+  const attempted = canMaintainCompleteLedger ? [...(draft.evidenceUploadAttemptedIds ?? [])] : [];
+  const seen = new Set(attempted);
+  for (const rawId of clientUploadIds) {
+    const id = rawId.trim();
+    if (!id || seen.has(id)) continue;
+    attempted.push(id);
+    seen.add(id);
+  }
+  const idsChanged = canMaintainCompleteLedger && attempted.length !== (draft.evidenceUploadAttemptedIds?.length ?? 0);
+  if (draft.evidenceUploadAttempted && !idsChanged) return draft;
+  return {
+    ...draft,
+    evidenceUploadAttempted: true,
+    ...(canMaintainCompleteLedger && attempted.length > 0 ? { evidenceUploadAttemptedIds: attempted } : {}),
+  };
+}
+
+/**
+ * Every client id that a submitted-edit discard must reconcile. An absent ledger on an already-attempted
+ * legacy draft is intentionally NOT reconstructed from its current photos: removed uploads would be unknown,
+ * so that draft must remain blocked from discard rather than presenting a partial list as complete.
+ */
+export function scorecardDraftEvidenceCleanupIds(draft: ScorecardDraft): string[] {
+  if (!draft.evidenceUploadAttemptedIds) return [];
+  return [...new Set(draft.evidenceUploadAttemptedIds)].filter((id) => id.trim().length > 0);
+}
+
+/**
  * Best-effort names to pre-fill the scorecard header from a deal's assigned team. The FIELD team route
  * (GET /field/projects/:dealId/team) already resolves the MOST-RECENT active superintendent / project_manager
  * from ACTIVE user/contact identities — the SAME selection resolveScorecardTeamEmails uses — so the prefilled
@@ -353,6 +411,18 @@ export function scorecardDraftReducer(draft: ScorecardDraft, action: DraftAction
     }
     case "setActionItems":
       return { ...draft, actionItems: action.items };
+    case "addActionItem":
+      return { ...draft, actionItems: [...draft.actionItems, ""] };
+    case "setActionItem": {
+      if (action.index < 0 || action.index >= draft.actionItems.length) return draft;
+      const actionItems = [...draft.actionItems];
+      actionItems[action.index] = action.value;
+      return { ...draft, actionItems };
+    }
+    case "removeActionItem":
+      return action.index < 0 || action.index >= draft.actionItems.length
+        ? draft
+        : { ...draft, actionItems: draft.actionItems.filter((_, index) => index !== action.index) };
     case "setSignature":
       return { ...draft, [action.field]: action.value };
     case "appendActionItem": {
@@ -366,7 +436,7 @@ export function scorecardDraftReducer(draft: ScorecardDraft, action: DraftAction
       return { ...draft, actionItems: [...items, t] };
     }
     case "markEvidenceUploadAttempted":
-      return draft.evidenceUploadAttempted ? draft : { ...draft, evidenceUploadAttempted: true };
+      return markScorecardEvidenceUploadAttempted(draft, action.clientUploadIds ?? []);
     case "replaceDraft":
       return action.draft;
     case "refreshExistingPhotoUrls": {
@@ -438,6 +508,12 @@ export function scorecardDraftSectionsAnswered(draft: ScorecardDraft): number {
   return draftSectionKeys(draft).filter((k) => typeof draft.scores[k] === "number").length;
 }
 
+/** Completion percentage for the editor progress bar, based on actually-rated categories. */
+export function scorecardDraftCompletionPercent(draft: ScorecardDraft): number {
+  const keys = draftSectionKeys(draft);
+  return keys.length === 0 ? 0 : (scorecardDraftSectionsAnswered(draft) / keys.length) * 100;
+}
+
 export function isScorecardDraftComplete(draft: ScorecardDraft): boolean {
   return draftSectionKeys(draft).every((k) => typeof draft.scores[k] === "number");
 }
@@ -490,6 +566,8 @@ export interface DraftValidation {
   needsActionItems: boolean;
   missingWeekOf: boolean; // true when Week Of is blank OR not a real calendar date
   missingSignatures: boolean;
+  tooManyPhotos: boolean;
+  photoOverflowCount: number;
 }
 export function validateScorecardDraft(draft: ScorecardDraft): DraftValidation {
   const leadership = draft.kind === "leadership";
@@ -501,12 +579,21 @@ export function validateScorecardDraft(draft: ScorecardDraft): DraftValidation {
   const missingSignatures = leadership
     ? false
     : !(draft.superintendentSignature ?? "").trim() || !(draft.pmSignature ?? "").trim();
+  const photoOverflowCount = Math.max(0, draft.photos.length - MAX_SCORECARD_PHOTOS);
+  const tooManyPhotos = photoOverflowCount > 0;
   return {
     missingSections,
     needsActionItems,
     missingWeekOf,
     missingSignatures,
-    canSubmit: missingSections.length === 0 && !needsActionItems && !missingWeekOf && !missingSignatures && draft.dealId.length > 0,
+    tooManyPhotos,
+    photoOverflowCount,
+    canSubmit: missingSections.length === 0
+      && !needsActionItems
+      && !missingWeekOf
+      && !missingSignatures
+      && !tooManyPhotos
+      && draft.dealId.length > 0,
   };
 }
 

@@ -5,7 +5,7 @@ import { useFocusEffect, useRouter } from "expo-router";
 import { useQuery } from "@tanstack/react-query";
 import { theme } from "../../../src/theme/theme";
 import { useAuth } from "../../../src/auth/AuthContext";
-import { getRecentScorecards, getDealTeam } from "../../../src/api/endpoints";
+import { discardScorecardEditEvidence, getRecentScorecards, getDealTeam } from "../../../src/api/endpoints";
 import {
   createScorecardDraft,
   createLeadershipScorecardDraft,
@@ -13,6 +13,7 @@ import {
   seedScorecardDraftTeam,
   scorecardDraftSectionsAnswered,
   scorecardDraftNewPhotos,
+  scorecardDraftEvidenceCleanupIds,
   isEditingScorecardDraft,
   type ScorecardDraft,
 } from "../../../src/scorecards/draft";
@@ -22,7 +23,7 @@ import {
   deleteScorecardDraft,
   type LocatedScorecardDraft,
 } from "../../../src/scorecards/draft-store";
-import { newClientUploadId, removeQueuedUploads, uploadOwnerKey } from "../../../src/capture/upload-queue";
+import { newClientUploadId, removeQueuedUploadsAndWait, uploadOwnerKey } from "../../../src/capture/upload-queue";
 import { registerUploadBackgroundTask } from "../../../src/capture/upload-background-task";
 import { newSubmissionId } from "../../../src/scorecards/ids";
 import { FIELD_SCORECARD_SECTIONS, FIELD_SCORECARD_LEADERSHIP_SECTIONS } from "../../../src/scorecards/scoring";
@@ -178,23 +179,30 @@ export default function ScorecardsScreen() {
   }
 
   function confirmDiscard(draft: ScorecardDraft, draftOwnerKey: string) {
+    const editingSubmitted = isEditingScorecardDraft(draft);
+    const cleanupIds = scorecardDraftEvidenceCleanupIds(draft);
     // Legacy photo drafts may have completed a partial upload before this marker existed. Treat them as
     // unsafe to discard; new drafts persist false until upload actually starts.
     if (draft.evidenceUploadAttempted || (draft.photos.length > 0 && draft.evidenceUploadAttempted !== false)) {
-      const editingSubmitted = isEditingScorecardDraft(draft);
-      Alert.alert(
-        editingSubmitted ? "Finish these changes instead" : "Finish this scorecard instead",
-        editingSubmitted
-          ? "Evidence upload already started, so some photos may be in the project gallery. Save these scorecard changes rather than discarding them."
-          : "Evidence upload already started, so some photos may be in the project gallery. Complete and submit this scorecard rather than discarding it.",
-      );
-      return;
+      // Submitted edits have an immutable server record that can authorize targeted cleanup. New cards (and
+      // legacy edit drafts with no durable id ledger) still cannot prove which confirmed gallery rows belong
+      // to the abandoned attempt, so keep the conservative block for those cases.
+      if (!editingSubmitted || cleanupIds.length === 0) {
+        Alert.alert(
+          editingSubmitted ? "Finish these changes instead" : "Finish this scorecard instead",
+          editingSubmitted
+            ? "Evidence upload already started, but this older draft cannot identify every uploaded photo safely. Save these scorecard changes rather than discarding them."
+            : "Evidence upload already started, so some photos may be in the project gallery. Complete and submit this scorecard rather than discarding it.",
+        );
+        return;
+      }
     }
-    const editingSubmitted = isEditingScorecardDraft(draft);
     Alert.alert(
       editingSubmitted ? "Discard changes?" : "Discard scorecard?",
       editingSubmitted
-        ? `This removes your local changes to ${draft.dealName}. The submitted scorecard will remain unchanged.`
+        ? cleanupIds.length > 0
+          ? `This removes your local changes to ${draft.dealName}. New photos uploaded only for this edit will also be removed from the project gallery. The submitted scorecard will remain unchanged.`
+          : `This removes your local changes to ${draft.dealName}. The submitted scorecard will remain unchanged.`
         : `This permanently removes the in-progress ${draft.kind === "leadership" ? "Leadership " : ""}Scorecard for ${draft.dealName}.`,
       [
         { text: "Keep editing", style: "cancel" },
@@ -211,9 +219,15 @@ export default function ScorecardsScreen() {
     if (discardingDraftId) return;
     setDiscardingDraftId(draft.id);
     try {
-      // This path is unavailable once evidence upload starts (see confirmDiscard), so these are only local
-      // copies/queued uploads and cannot leave already-confirmed gallery photos orphaned.
-      await removeQueuedUploads(draftOwnerKey, scorecardDraftNewPhotos(draft).map((photo) => photo.clientUploadId));
+      const currentNewIds = scorecardDraftNewPhotos(draft).map((photo) => photo.clientUploadId);
+      const cleanupIds = scorecardDraftEvidenceCleanupIds(draft);
+      const queuedOrAttemptedIds = [...new Set([...currentNewIds, ...cleanupIds])];
+      // Wait for a confirm already in flight before server reconciliation; otherwise it could land just
+      // after cleanup and leave a gallery orphan even though the local edit was deleted.
+      await removeQueuedUploadsAndWait(draftOwnerKey, queuedOrAttemptedIds);
+      if (isEditingScorecardDraft(draft) && cleanupIds.length > 0) {
+        await discardScorecardEditEvidence(fetcher, draft.editingScorecardId!, cleanupIds);
+      }
       await deleteScorecardDraft(draftOwnerKey, draft.id);
       setDrafts((current) => current.filter((item) => item.draft.id !== draft.id));
     } catch {

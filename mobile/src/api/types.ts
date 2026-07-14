@@ -46,6 +46,10 @@ export type UploadUrlRequest = {
   dealId?: string;
   leadId?: string;
   opportunityId?: string;
+  /** Submitted-card edit scope; lets the server resolve + authorize the scorecard's office. */
+  scorecardId?: string;
+  /** Stable queue id; required with scorecardId so the server can persist the exact edit-upload scope. */
+  clientUploadId?: string;
   contentType: string;
   sizeBytes: number;
   category?: string | null;
@@ -66,6 +70,8 @@ export type ConfirmUploadRequest = {
   dealId?: string;
   leadId?: string;
   opportunityId?: string;
+  /** Must match the submitted-card edit scope used to mint the upload URL. */
+  scorecardId?: string;
   uploadToken: string;
   objectKey: string;
   /** Stable idempotency key so a resumed/background re-upload returns the existing photo, never a dup. */

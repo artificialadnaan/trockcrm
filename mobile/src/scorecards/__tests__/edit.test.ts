@@ -11,6 +11,8 @@ import {
   isNewScorecardDraftPhoto,
   scorecardDraftReducer,
   scorecardDraftNewPhotos,
+  validateScorecardDraft,
+  MAX_SCORECARD_PHOTOS,
   type ScorecardDraftPhoto,
 } from "../draft";
 import {
@@ -128,6 +130,8 @@ describe("createScorecardEditDraft", () => {
     ]);
     expect(draft.photos.every(isExistingScorecardDraftPhoto)).toBe(true);
     expect(scorecardDraftNewPhotos(draft)).toEqual([]);
+    expect(draft.editBaseContentFingerprint).toMatch(/^v1:\d+:[a-f0-9]{16}$/);
+    expect(draft.editBaseContentFingerprint!.length).toBeLessThan(40);
   });
 
   it("hydrates leadership fields, category/summary evidence, and no project-only data", () => {
@@ -216,6 +220,7 @@ describe("refreshScorecardEditPhotoUrls", () => {
       ],
     };
     const refreshed = refreshScorecardEditPhotoUrls(edited, detail({
+      updatedAt: "2026-07-14T14:10:00.000Z",
       photos: detail().photos.map((photo) => photo.id === "scorecard-photo-1"
         ? { ...photo, url: "https://fresh.example/photo.jpg", caption: "Stale server caption" }
         : photo),
@@ -229,8 +234,33 @@ describe("refreshScorecardEditPhotoUrls", () => {
     });
     expect(refreshed.superintendentSignature).toBe("");
     expect(refreshed.pmSignature).toBe("");
+    expect(refreshed.editBaseUpdatedAt).toBe("2026-07-14T14:10:00.000Z");
     expect(refreshed.photos[2]).toBe(newPhoto);
     expect(isNewScorecardDraftPhoto(refreshed.photos[2])).toBe(true);
+  });
+
+  it("keeps the old token when a caption refresh also contains a concurrent form edit", () => {
+    const base = createScorecardEditDraft(detail(), { id: "local", clientSubmissionId: "edit", now: 1 });
+    const refreshed = refreshScorecardEditPhotoUrls(base, detail({
+      updatedAt: "2026-07-14T14:15:00.000Z",
+      superintendentName: "Changed in another edit",
+      photos: detail().photos.map((photo) => photo.id === "scorecard-photo-1"
+        ? { ...photo, caption: "Canonical updated description" }
+        : photo),
+    }));
+
+    expect(refreshed.photos[0]).toMatchObject({ caption: "Canonical updated description" });
+    expect(refreshed.editBaseUpdatedAt).toBe("2026-07-14T14:05:00.000Z");
+  });
+
+  it("does not roll the edit token backward from an older cached detail", () => {
+    const base = createScorecardEditDraft(detail(), { id: "local", clientSubmissionId: "edit", now: 1 });
+    const refreshed = refreshScorecardEditPhotoUrls(base, detail({
+      updatedAt: "2026-07-14T14:04:00.000Z",
+      photos: detail().photos.map((photo) => ({ ...photo, url: `https://older.example/${photo.id}.jpg` })),
+    }));
+
+    expect(refreshed.editBaseUpdatedAt).toBe("2026-07-14T14:05:00.000Z");
   });
 
   it("preserves project signatures when only retained URLs rotate", () => {
@@ -528,6 +558,108 @@ describe("rebaseScorecardEditDraft", () => {
     ]);
     expect(rebased.mergedServerPhotoCount).toBe(1);
     expect(rebased.updatedRetainedCaptionCount).toBe(1);
+  });
+
+  it("keeps all project evidence when a concurrent addition pushes a rebase over 100, then blocks save", () => {
+    const base = createScorecardEditDraft(detail(), { id: "local-project-cap", clientSubmissionId: "edit-cap", now: 1 });
+    const localNewPhotos: ScorecardDraftPhoto[] = Array.from(
+      { length: MAX_SCORECARD_PHOTOS - base.photos.length },
+      (_, index) => ({
+        key: `local-project-${index}`,
+        uri: `file:///local-project-${index}.jpg`,
+        clientUploadId: `local-project-upload-${index}`,
+        sectionKey: "quality",
+        caption: "Local evidence",
+      }),
+    );
+    const latest = detail({
+      updatedAt: "2026-07-14T18:00:00.000Z",
+      photos: [
+        ...detail().photos,
+        {
+          id: "concurrent-project-photo",
+          fileId: "concurrent-project-file",
+          sectionKey: "safety",
+          deficiencyKey: null,
+          url: "https://fresh.example/concurrent-project.jpg",
+          caption: "Concurrent project evidence",
+        },
+      ],
+    });
+
+    const rebased = rebaseScorecardEditDraft({ ...base, photos: [...base.photos, ...localNewPhotos] }, latest);
+
+    expect(rebased.draft.photos).toHaveLength(MAX_SCORECARD_PHOTOS + 1);
+    expect(rebased.draft.photos).toEqual(expect.arrayContaining(localNewPhotos));
+    expect(rebased.draft.photos).toEqual(expect.arrayContaining([
+      expect.objectContaining({ existingScorecardPhotoId: "concurrent-project-photo" }),
+    ]));
+    expect(validateScorecardDraft(rebased.draft)).toMatchObject({
+      tooManyPhotos: true,
+      photoOverflowCount: 1,
+      canSubmit: false,
+    });
+  });
+
+  it("keeps all leadership evidence when a concurrent addition pushes a rebase over 100, then blocks save", () => {
+    const leadershipDetail = detail({
+      kind: "leadership",
+      items: FIELD_SCORECARD_LEADERSHIP_SECTION_KEYS.map((sectionKey) => ({ sectionKey, points: 8, note: null })),
+      criticalDeficiencies: [],
+      criticalDeficiencyNotes: {},
+      actionItems: [],
+      photos: [{
+        id: "lead-base-photo",
+        fileId: "lead-base-file",
+        sectionKey: "quality_control",
+        deficiencyKey: null,
+        url: "https://old.example/lead-base.jpg",
+        caption: "Base leadership evidence",
+      }],
+    });
+    const base = createScorecardEditDraft(leadershipDetail, {
+      id: "local-lead-cap",
+      clientSubmissionId: "lead-edit-cap",
+      now: 1,
+    });
+    const localNewPhotos: ScorecardDraftPhoto[] = Array.from(
+      { length: MAX_SCORECARD_PHOTOS - base.photos.length },
+      (_, index) => ({
+        key: `local-lead-${index}`,
+        uri: `file:///local-lead-${index}.jpg`,
+        clientUploadId: `local-lead-upload-${index}`,
+        sectionKey: "safety",
+        caption: "Local leadership evidence",
+      }),
+    );
+    const latest = detail({
+      ...leadershipDetail,
+      updatedAt: "2026-07-14T18:30:00.000Z",
+      photos: [
+        ...leadershipDetail.photos,
+        {
+          id: "concurrent-lead-photo",
+          fileId: "concurrent-lead-file",
+          sectionKey: "project_summary",
+          deficiencyKey: null,
+          url: "https://fresh.example/concurrent-lead.jpg",
+          caption: "Concurrent leadership evidence",
+        },
+      ],
+    });
+
+    const rebased = rebaseScorecardEditDraft({ ...base, photos: [...base.photos, ...localNewPhotos] }, latest);
+
+    expect(rebased.draft.photos).toHaveLength(MAX_SCORECARD_PHOTOS + 1);
+    expect(rebased.draft.photos).toEqual(expect.arrayContaining(localNewPhotos));
+    expect(rebased.draft.photos).toEqual(expect.arrayContaining([
+      expect.objectContaining({ existingScorecardPhotoId: "concurrent-lead-photo" }),
+    ]));
+    expect(validateScorecardDraft(rebased.draft)).toMatchObject({
+      tooManyPhotos: true,
+      photoOverflowCount: 1,
+      canSubmit: false,
+    });
   });
 
   it("refuses to rebase against a different card or a card the current user cannot edit", () => {

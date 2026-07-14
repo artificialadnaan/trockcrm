@@ -2,7 +2,15 @@ import { and, desc, eq, getTableColumns, inArray, isNull, lte, notInArray, sql }
 import { createHash } from "node:crypto";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
-import { deals, fieldScorecards, fieldScorecardItems, fieldScorecardPhotos, files, jobQueue } from "@trock-crm/shared/schema";
+import {
+  deals,
+  fieldScorecardEditUploads,
+  fieldScorecards,
+  fieldScorecardItems,
+  fieldScorecardPhotos,
+  files,
+  jobQueue,
+} from "@trock-crm/shared/schema";
 import { generateDownloadUrl, headObjectStrict, putObject } from "../../lib/r2-client.js";
 import { buildScorecardPdfData, renderFieldScorecardPdf, MAX_EVIDENCE_PHOTOS } from "./scorecard-pdf.js";
 import {
@@ -48,6 +56,7 @@ import { AppError } from "../../middleware/error-handler.js";
 import { activeProjectWhere, assertActiveFieldProject, type FieldAccessContext } from "./projects-service.js";
 import { runInOffice, runInOfficeTransaction } from "./cross-office.js";
 import { resolveScorecardTeamEmails } from "../deals/team-service.js";
+import { markScorecardEditEvidenceLinked } from "./scorecard-evidence-upload.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 type ScorecardRow = typeof fieldScorecards.$inferSelect;
@@ -109,6 +118,15 @@ type ResolvedUpdatePhoto = {
   fileId: string;
   sectionKey: string;
   deficiencyKey: string | null;
+};
+
+type CurrentScorecardPhoto = {
+  id: string;
+  fileId: string;
+  sectionKey: string;
+  deficiencyKey: string | null;
+  isActive: boolean;
+  deletedAt: Date | null;
 };
 
 // The subset of columns a summary needs — satisfied by both a Drizzle row and the aliased raw-SQL rows
@@ -422,17 +440,50 @@ export async function updateFieldScorecard(
       fileId: fieldScorecardPhotos.fileId,
       sectionKey: fieldScorecardPhotos.sectionKey,
       deficiencyKey: fieldScorecardPhotos.deficiencyKey,
+      isActive: files.isActive,
+      deletedAt: files.deletedAt,
     })
     .from(fieldScorecardPhotos)
+    .innerJoin(files, eq(files.id, fieldScorecardPhotos.fileId))
     .where(eq(fieldScorecardPhotos.scorecardId, card.id));
-  const photos = await resolveUpdatePhotoLinks(
+  const visibleCurrentPhotos = currentPhotos.filter((photo) => photo.isActive && photo.deletedAt === null);
+  const editablePhotos = await resolveUpdatePhotoLinks(
     tenantDb,
     input,
     { dealId: card.dealId, kind, formVersion },
     deficiencies,
-    currentPhotos,
+    visibleCurrentPhotos,
     staleExpectedUpdatedAt,
   );
+  // The edit contract is a full replacement of evidence the submitter can currently see. Soft-deleted or
+  // inactive gallery files remain intentionally absent from detail/PDF responses, so they cannot appear in
+  // that replacement payload. Preserve those hidden links server-side so restoring the gallery file also
+  // restores its scorecard association. Critical-deficiency evidence is dependent on its parent deficiency,
+  // however, and is removed when the edit explicitly removes that deficiency.
+  const hiddenPhotosToPreserve: ResolvedUpdatePhoto[] = currentPhotos
+    .filter((photo) => !photo.isActive || photo.deletedAt !== null)
+    .filter(
+      (photo) =>
+        photo.sectionKey !== "critical_deficiency" ||
+        (photo.deficiencyKey !== null && deficiencies.includes(photo.deficiencyKey)),
+    )
+    .map((photo) => ({
+      linkId: photo.id,
+      fileId: photo.fileId,
+      sectionKey: photo.sectionKey,
+      deficiencyKey: photo.deficiencyKey,
+    }));
+  const photos = [...editablePhotos, ...hiddenPhotosToPreserve];
+  // The request parser caps visible payload rows at 100, but unavailable gallery evidence is preserved
+  // server-side and can push the FINAL replacement beyond that limit. Never grow the card silently past
+  // its contract or drop hidden evidence; surface a recoverable conflict before replacing any content.
+  if (photos.length > 100) {
+    throw new AppError(
+      409,
+      "This scorecard would contain more than 100 evidence photos, including unavailable evidence retained from the current report. Restore or remove gallery evidence, then try again.",
+      "SCORECARD_EDIT_PHOTO_LIMIT",
+    );
+  }
 
   const contentUnchanged = scorecardEditableContentEquals({
     card,
@@ -458,6 +509,11 @@ export async function updateFieldScorecard(
     throw scorecardEditConflict();
   }
   if (contentUnchanged) {
+    await markScorecardEditEvidenceLinked(tenantDb, {
+      scorecardId: card.id,
+      userId: input.userId,
+      fileIds: photos.flatMap((photo) => (photo.linkId ? [photo.fileId] : [])),
+    });
     return { scorecard: toSummary(card, project.name, input.userId) };
   }
 
@@ -513,6 +569,13 @@ export async function updateFieldScorecard(
       })),
     );
   }
+  // Consumed markers are intentionally permanent: once evidence was linked successfully, discarding a
+  // later edit must never hide the gallery photo even if that later edit removes the scorecard link.
+  await markScorecardEditEvidenceLinked(tenantDb, {
+    scorecardId: card.id,
+    userId: input.userId,
+    fileIds: photos.map((photo) => photo.fileId),
+  });
 
   // Guarantee a changed token even when an edit happens in the same millisecond as the original insert.
   const nextUpdatedAt = new Date(Math.max(Date.now(), new Date(card.updatedAt).getTime() + 1));
@@ -1189,7 +1252,7 @@ async function resolveUpdatePhotoLinks(
   input: UpdateFieldScorecardInput,
   card: { dealId: string; kind: ScorecardKind; formVersion: ScorecardFormVersion },
   deficiencies: string[],
-  currentPhotos: Array<{ id: string; fileId: string; sectionKey: string; deficiencyKey: string | null }>,
+  currentPhotos: Array<Pick<CurrentScorecardPhoto, "id" | "fileId" | "sectionKey" | "deficiencyKey">>,
   staleExpectedUpdatedAt: boolean,
 ): Promise<ResolvedUpdatePhoto[]> {
   for (const photo of input.photos) {
@@ -1217,12 +1280,26 @@ async function resolveUpdatePhotoLinks(
     : await tenantDb
         .select({ id: files.id, dealId: files.dealId, clientUploadId: files.clientUploadId })
         .from(files)
+        .innerJoin(
+          fieldScorecardEditUploads,
+          and(
+            eq(fieldScorecardEditUploads.fileId, files.id),
+            eq(fieldScorecardEditUploads.clientUploadId, files.clientUploadId),
+          ),
+        )
         .where(
           and(
             inArray(files.clientUploadId, uploadIds),
             eq(files.uploadedBy, input.userId),
             eq(files.isActive, true),
             isNull(files.deletedAt),
+            // A PUT may consume only evidence authorized for this exact submitted card. Uploader + deal
+            // alone is insufficient: the same person can own multiple cards for one project, and accepting
+            // an ordinary/cross-card client id would let one card's cleanup race and hide another's evidence.
+            eq(fieldScorecardEditUploads.scorecardId, input.scorecardId),
+            eq(fieldScorecardEditUploads.dealId, card.dealId),
+            eq(fieldScorecardEditUploads.uploadedBy, input.userId),
+            inArray(fieldScorecardEditUploads.state, ["confirmed", "linked"]),
           ),
         );
   const newFileByUploadId = new Map(newFiles.map((file) => [file.clientUploadId, file]));

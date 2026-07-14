@@ -11,8 +11,14 @@ import {
   type UpdateFieldScorecardInput,
 } from "../../../src/modules/field/scorecards-service.js";
 import {
+  authorizeScorecardEditEvidenceUpload,
+  discardScorecardEditEvidence,
+  lockScorecardEditEvidenceUploadForConfirm,
+} from "../../../src/modules/field/scorecard-evidence-upload.js";
+import {
   contacts,
   dealTeamMembers,
+  fieldScorecardEditUploads,
   fieldScorecardItems,
   fieldScorecardPhotos,
   fieldScorecards,
@@ -107,6 +113,21 @@ function updateInput(
   };
 }
 
+async function bindConfirmedEditUpload(
+  scorecardId: string,
+  clientUploadId = "upload-3",
+  fileId = FILE_3,
+) {
+  await tdb.insert(fieldScorecardEditUploads).values({
+    scorecardId,
+    dealId: DEAL,
+    clientUploadId,
+    uploadedBy: OWNER,
+    fileId,
+    state: "confirmed",
+  });
+}
+
 async function expectAppError(promise: Promise<unknown>, statusCode: number, code?: string) {
   try {
     await promise;
@@ -130,7 +151,8 @@ beforeAll(async () => {
     );
     CREATE TABLE files (
       id uuid PRIMARY KEY, deal_id uuid, client_upload_id text, uploaded_by uuid,
-      description text, is_active boolean DEFAULT true, deleted_at timestamptz,
+      description text, tags text[] DEFAULT ARRAY['scorecard']::text[],
+      is_active boolean DEFAULT true, deleted_at timestamptz, deleted_by_user_id uuid,
       created_at timestamptz DEFAULT now()
     );
     CREATE TABLE public.job_queue (
@@ -147,10 +169,12 @@ beforeAll(async () => {
     fieldScorecards,
     fieldScorecardItems,
     fieldScorecardPhotos,
+    fieldScorecardEditUploads,
     dealTeamMembers,
     contacts,
   ]));
   await pg.exec("ALTER TABLE public.field_scorecards ADD CONSTRAINT field_scorecards_csid_uniq UNIQUE (client_submission_id)");
+  await pg.exec("ALTER TABLE public.field_scorecard_edit_uploads ADD CONSTRAINT field_scorecard_edit_uploads_client_uniq UNIQUE (client_upload_id)");
   await pg.exec(`
     INSERT INTO public.pipeline_stage_config (id, name, slug, is_terminal)
     VALUES ('${STAGE_ACTIVE}', 'Estimating', 'estimating', false);
@@ -169,14 +193,229 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
+  await tdb.execute(sql`DELETE FROM field_scorecard_edit_uploads`);
   await tdb.execute(sql`DELETE FROM field_scorecard_photos`);
   await tdb.execute(sql`DELETE FROM field_scorecard_items`);
   await tdb.execute(sql`DELETE FROM field_scorecards`);
   await tdb.execute(sql`DELETE FROM public.job_queue`);
-  await tdb.execute(sql`UPDATE files SET is_active = true, deleted_at = NULL`);
+  await tdb.execute(sql`DELETE FROM files WHERE id NOT IN (${FILE_1}, ${FILE_2}, ${FILE_3})`);
+  await tdb.execute(sql`
+    UPDATE files
+    SET is_active = true, deleted_at = NULL, deleted_by_user_id = NULL,
+        tags = ARRAY['scorecard']::text[]
+  `);
 });
 
 describe("updateFieldScorecard authorization and visibility", () => {
+  it("durably binds one client upload id to the exact scorecard, deal, and submitter", async () => {
+    const first = await createFieldScorecard(tdb, projectSubmission({ clientSubmissionId: csid(4) }));
+    const second = await createFieldScorecard(tdb, projectSubmission({ clientSubmissionId: csid(5) }));
+    const input = {
+      scorecardId: first.scorecard.id,
+      clientUploadId: "bound-upload-1",
+      userId: OWNER,
+      target: { dealId: DEAL },
+    };
+    await expect(authorizeScorecardEditEvidenceUpload(tdb, input)).resolves.toEqual({
+      scorecardId: first.scorecard.id,
+      clientUploadId: "bound-upload-1",
+    });
+    await expect(authorizeScorecardEditEvidenceUpload(tdb, input)).resolves.toEqual({
+      scorecardId: first.scorecard.id,
+      clientUploadId: "bound-upload-1",
+    });
+    await expectAppError(
+      authorizeScorecardEditEvidenceUpload(tdb, { ...input, scorecardId: second.scorecard.id }),
+      409,
+      "SCORECARD_EDIT_UPLOAD_SCOPE",
+    );
+  });
+
+  it("discards only exact unlinked scorecard uploads for the submitter and leaves linked/unrelated files", async () => {
+    const { scorecard } = await createFieldScorecard(tdb, projectSubmission({
+      clientSubmissionId: csid(9),
+      photos: [{ sectionKey: "quality", clientUploadId: "upload-2" }],
+    }));
+    // Registry ownership is server-only (not a gallery tag): upload-3 confirmed but never linked, while
+    // upload-2 was successfully linked once and is permanently cleanup-safe. upload-1 has no edit binding.
+    await tdb.insert(fieldScorecardEditUploads).values([
+      {
+        scorecardId: scorecard.id,
+        dealId: DEAL,
+        clientUploadId: "upload-2",
+        uploadedBy: OWNER,
+        fileId: FILE_2,
+        state: "linked",
+      },
+      {
+        scorecardId: scorecard.id,
+        dealId: DEAL,
+        clientUploadId: "upload-3",
+        uploadedBy: OWNER,
+        fileId: FILE_3,
+        state: "confirmed",
+      },
+    ]);
+
+    await expect(discardScorecardEditEvidence(tdb, {
+      scorecardId: scorecard.id,
+      userId: OWNER,
+      clientUploadIds: ["upload-1", "upload-2", "upload-3", "upload-3", "unknown"],
+    })).resolves.toEqual({ discarded: 1 });
+
+    const rows = (await tdb.execute(sql`
+      SELECT id, is_active, deleted_at, deleted_by_user_id
+      FROM files
+      ORDER BY id
+    `)).rows as any[];
+    expect(rows).toEqual([
+      expect.objectContaining({ id: FILE_1, is_active: true, deleted_at: null, deleted_by_user_id: null }),
+      expect.objectContaining({ id: FILE_2, is_active: true, deleted_at: null, deleted_by_user_id: null }),
+      expect.objectContaining({ id: FILE_3, is_active: false, deleted_by_user_id: OWNER }),
+    ]);
+    expect(rows[2].deleted_at).toBeTruthy();
+    const bindings = (await tdb.execute(sql`
+      SELECT client_upload_id, state FROM field_scorecard_edit_uploads ORDER BY client_upload_id
+    `)).rows;
+    expect(bindings).toEqual([
+      { client_upload_id: "unknown", state: "discarded" },
+      { client_upload_id: "upload-2", state: "linked" },
+      { client_upload_id: "upload-3", state: "discarded" },
+    ]);
+
+    // Idempotent after app termination/retry: the already-hidden row is simply absent from candidates.
+    await expect(discardScorecardEditEvidence(tdb, {
+      scorecardId: scorecard.id,
+      userId: OWNER,
+      clientUploadIds: ["upload-3"],
+    })).resolves.toEqual({ discarded: 0 });
+  });
+
+  it("durably tombstones an authorized upload so a late/timed-out confirm cannot create an orphan", async () => {
+    const { scorecard } = await createFieldScorecard(tdb, projectSubmission({ clientSubmissionId: csid(7) }));
+    await tdb.insert(fieldScorecardEditUploads).values({
+      scorecardId: scorecard.id,
+      dealId: DEAL,
+      clientUploadId: "late-confirm-1",
+      uploadedBy: OWNER,
+      state: "authorized",
+    });
+
+    await expect(discardScorecardEditEvidence(tdb, {
+      scorecardId: scorecard.id,
+      userId: OWNER,
+      clientUploadIds: ["late-confirm-1"],
+    })).resolves.toEqual({ discarded: 0 });
+    const [binding] = (await tdb.execute(sql`
+      SELECT state FROM field_scorecard_edit_uploads WHERE client_upload_id = 'late-confirm-1'
+    `)).rows as any[];
+    expect(binding.state).toBe("discarded");
+
+    await expectAppError(
+      lockScorecardEditEvidenceUploadForConfirm(tdb, {
+        userId: OWNER,
+        dealId: DEAL,
+        scorecardId: scorecard.id,
+        clientUploadId: "late-confirm-1",
+        pendingScope: { scorecardId: scorecard.id, clientUploadId: "late-confirm-1" },
+        pendingUploadFound: true,
+      }),
+      409,
+      "SCORECARD_EDIT_UPLOAD_DISCARDED",
+    );
+
+    // The ledger also wins if cleanup reaches the server before an in-flight upload-url transaction.
+    await expect(discardScorecardEditEvidence(tdb, {
+      scorecardId: scorecard.id,
+      userId: OWNER,
+      clientUploadIds: ["late-authorization-1"],
+    })).resolves.toEqual({ discarded: 0 });
+    await expectAppError(
+      authorizeScorecardEditEvidenceUpload(tdb, {
+        scorecardId: scorecard.id,
+        clientUploadId: "late-authorization-1",
+        userId: OWNER,
+        target: { dealId: DEAL },
+      }),
+      409,
+      "SCORECARD_EDIT_UPLOAD_DISCARDED",
+    );
+  });
+
+  it("rejects generic-to-scoped, swapped-scorecard, and omitted-scope confirm replays", async () => {
+    const { scorecard } = await createFieldScorecard(tdb, projectSubmission({ clientSubmissionId: csid(6) }));
+    await tdb.insert(fieldScorecardEditUploads).values({
+      scorecardId: scorecard.id,
+      dealId: DEAL,
+      clientUploadId: "scope-check-1",
+      uploadedBy: OWNER,
+      state: "authorized",
+    });
+
+    // A generic upload token cannot be elevated into scorecard evidence at confirm time.
+    await expectAppError(
+      lockScorecardEditEvidenceUploadForConfirm(tdb, {
+        userId: OWNER,
+        dealId: DEAL,
+        scorecardId: scorecard.id,
+        clientUploadId: "scope-check-1",
+        pendingUploadFound: true,
+      }),
+      400,
+      "SCORECARD_EDIT_UPLOAD_SCOPE",
+    );
+    // A token minted for this card cannot be swapped to a different card id.
+    await expectAppError(
+      lockScorecardEditEvidenceUploadForConfirm(tdb, {
+        userId: OWNER,
+        dealId: DEAL,
+        scorecardId: "99999999-9999-9999-9999-999999999999",
+        clientUploadId: "scope-check-1",
+        pendingScope: { scorecardId: scorecard.id, clientUploadId: "scope-check-1" },
+        pendingUploadFound: true,
+      }),
+      400,
+      "SCORECARD_EDIT_UPLOAD_SCOPE",
+    );
+    // Omitting scope is rejected both while the token is live and after it is consumed/restarted.
+    await expectAppError(
+      lockScorecardEditEvidenceUploadForConfirm(tdb, {
+        userId: OWNER,
+        dealId: DEAL,
+        clientUploadId: "scope-check-1",
+        pendingScope: { scorecardId: scorecard.id, clientUploadId: "scope-check-1" },
+        pendingUploadFound: true,
+      }),
+      400,
+      "SCORECARD_EDIT_UPLOAD_SCOPE",
+    );
+    await expectAppError(
+      lockScorecardEditEvidenceUploadForConfirm(tdb, {
+        userId: OWNER,
+        dealId: DEAL,
+        clientUploadId: "scope-check-1",
+        pendingUploadFound: false,
+      }),
+      409,
+      "SCORECARD_EDIT_UPLOAD_SCOPE",
+    );
+  });
+
+  it("does not let another user clean up the submitter's abandoned edit evidence", async () => {
+    const { scorecard } = await createFieldScorecard(tdb, projectSubmission({ clientSubmissionId: csid(8) }));
+    await expectAppError(
+      discardScorecardEditEvidence(tdb, {
+        scorecardId: scorecard.id,
+        userId: OTHER_USER,
+        clientUploadIds: ["upload-3"],
+      }),
+      403,
+      "SCORECARD_EDIT_FORBIDDEN",
+    );
+    const [row] = (await tdb.execute(sql`SELECT is_active FROM files WHERE id = ${FILE_3}`)).rows as any[];
+    expect(row.is_active).toBe(true);
+  });
+
   it("surfaces canEdit only for the exact V2 submitter across all read shapes", async () => {
     const { scorecard } = await createFieldScorecard(tdb, projectSubmission({ clientSubmissionId: csid(10) }));
     expect(scorecard.canEdit).toBe(true);
@@ -226,18 +465,130 @@ describe("updateFieldScorecard authorization and visibility", () => {
     );
   });
 
-  it("hides deleted gallery evidence from submitted-card detail and restores it when visible again", async () => {
+  it("preserves hidden gallery evidence across an unrelated edit and restores its original link", async () => {
     const { scorecard } = await createFieldScorecard(tdb, projectSubmission({
       clientSubmissionId: csid(13),
       photos: [{ sectionKey: "quality", clientUploadId: "upload-1" }],
     }));
-    expect((await getFieldScorecardDetail(tdb, scorecard.id, OWNER_ACCESS)).photos).toHaveLength(1);
+    const originalPhoto = (await getFieldScorecardDetail(tdb, scorecard.id, OWNER_ACCESS)).photos[0]!;
 
     await tdb.execute(sql`UPDATE files SET is_active = false, deleted_at = NOW() WHERE id = ${FILE_1}`);
-    expect((await getFieldScorecardDetail(tdb, scorecard.id, OWNER_ACCESS)).photos).toEqual([]);
+    const hiddenDetail = await getFieldScorecardDetail(tdb, scorecard.id, OWNER_ACCESS);
+    expect(hiddenDetail.photos).toEqual([]);
+
+    await updateFieldScorecard(tdb, updateInput(scorecard.id, hiddenDetail.updatedAt!, { photos: [] }));
+    const hiddenLinks = (await tdb.execute(sql`
+      SELECT id, section_key, deficiency_key
+      FROM field_scorecard_photos
+      WHERE scorecard_id = ${scorecard.id}
+    `)).rows as any[];
+    expect(hiddenLinks).toEqual([{
+      id: originalPhoto.id,
+      section_key: "quality",
+      deficiency_key: null,
+    }]);
 
     await tdb.execute(sql`UPDATE files SET is_active = true, deleted_at = NULL WHERE id = ${FILE_1}`);
-    expect((await getFieldScorecardDetail(tdb, scorecard.id, OWNER_ACCESS)).photos).toHaveLength(1);
+    expect((await getFieldScorecardDetail(tdb, scorecard.id, OWNER_ACCESS)).photos).toEqual([
+      expect.objectContaining({ id: originalPhoto.id, fileId: FILE_1, sectionKey: "quality" }),
+    ]);
+  });
+
+  it("rejects a replacement whose preserved hidden + editable evidence would exceed 100 links", async () => {
+    const { scorecard } = await createFieldScorecard(tdb, projectSubmission({ clientSubmissionId: csid(16) }));
+    await tdb.execute(sql`
+      INSERT INTO files (id, deal_id, client_upload_id, uploaded_by, description, is_active, deleted_at)
+      SELECT
+        ('10000000-0000-0000-0000-' || lpad(n::text, 12, '0'))::uuid,
+        ${DEAL}::uuid,
+        'hidden-cap-' || n::text,
+        ${OWNER}::uuid,
+        'Hidden evidence ' || n::text,
+        false,
+        now()
+      FROM generate_series(1, 101) AS n;
+    `);
+    await tdb.execute(sql`
+      INSERT INTO field_scorecard_photos (scorecard_id, section_key, deficiency_key, file_id)
+      SELECT
+        ${scorecard.id}::uuid,
+        'quality',
+        NULL,
+        ('10000000-0000-0000-0000-' || lpad(n::text, 12, '0'))::uuid
+      FROM generate_series(1, 101) AS n;
+    `);
+
+    await expectAppError(
+      updateFieldScorecard(tdb, updateInput(scorecard.id, scorecard.updatedAt!, { photos: [] })),
+      409,
+      "SCORECARD_EDIT_PHOTO_LIMIT",
+    );
+    const rows = await tdb.execute(sql`
+      SELECT count(*)::int AS count FROM field_scorecard_photos WHERE scorecard_id = ${scorecard.id}
+    `);
+    expect(rows.rows[0]?.count).toBe(101);
+  });
+
+  it("rejects a hidden evidence link id even when the edit token is current", async () => {
+    const { scorecard } = await createFieldScorecard(tdb, projectSubmission({
+      clientSubmissionId: csid(14),
+      photos: [{ sectionKey: "quality", clientUploadId: "upload-1" }],
+    }));
+    const originalPhoto = (await getFieldScorecardDetail(tdb, scorecard.id, OWNER_ACCESS)).photos[0]!;
+
+    await tdb.execute(sql`UPDATE files SET is_active = false, deleted_at = NOW() WHERE id = ${FILE_1}`);
+    const hiddenDetail = await getFieldScorecardDetail(tdb, scorecard.id, OWNER_ACCESS);
+    expect(hiddenDetail.photos).toEqual([]);
+
+    await expectAppError(
+      updateFieldScorecard(tdb, updateInput(scorecard.id, hiddenDetail.updatedAt!, {
+        photos: [{ scorecardPhotoId: originalPhoto.id, sectionKey: "safety", deficiencyKey: null }],
+      })),
+      422,
+    );
+    const links = await tdb.execute(sql`
+      SELECT id FROM field_scorecard_photos WHERE scorecard_id = ${scorecard.id}
+    `);
+    expect(links.rows).toEqual([{ id: originalPhoto.id }]);
+  });
+
+  it("preserves hidden deficiency evidence until its parent deficiency is removed", async () => {
+    const { scorecard } = await createFieldScorecard(tdb, projectSubmission({
+      clientSubmissionId: csid(15),
+      criticalDeficiencies: ["failed_inspection"],
+      criticalDeficiencyNotes: { failed_inspection: "Original failed inspection" },
+      actionItems: ["Correct the failed inspection"],
+      photos: [{
+        sectionKey: "critical_deficiency",
+        deficiencyKey: "failed_inspection",
+        clientUploadId: "upload-1",
+      }],
+    }));
+    const originalPhoto = (await getFieldScorecardDetail(tdb, scorecard.id, OWNER_ACCESS)).photos[0]!;
+    await tdb.execute(sql`UPDATE files SET is_active = false, deleted_at = NOW() WHERE id = ${FILE_1}`);
+
+    const preserved = await updateFieldScorecard(tdb, updateInput(scorecard.id, scorecard.updatedAt!, {
+      criticalDeficiencies: ["failed_inspection"],
+      criticalDeficiencyNotes: { failed_inspection: "Updated failed inspection" },
+      photos: [],
+    }));
+    const preservedLinks = await tdb.execute(sql`
+      SELECT id FROM field_scorecard_photos WHERE scorecard_id = ${scorecard.id}
+    `);
+    expect(preservedLinks.rows).toEqual([{ id: originalPhoto.id }]);
+
+    await updateFieldScorecard(tdb, updateInput(scorecard.id, preserved.scorecard.updatedAt!, {
+      criticalDeficiencies: [],
+      criticalDeficiencyNotes: {},
+      photos: [],
+    }));
+    const prunedLinks = await tdb.execute(sql`
+      SELECT id FROM field_scorecard_photos WHERE scorecard_id = ${scorecard.id}
+    `);
+    expect(prunedLinks.rows).toEqual([]);
+
+    await tdb.execute(sql`UPDATE files SET is_active = true, deleted_at = NULL WHERE id = ${FILE_1}`);
+    expect((await getFieldScorecardDetail(tdb, scorecard.id, OWNER_ACCESS)).photos).toEqual([]);
   });
 });
 
@@ -352,6 +703,7 @@ describe("updateFieldScorecard replacement and concurrency", () => {
 
   it("keeps a stale response-loss replay idempotent when the first edit added evidence", async () => {
     const { scorecard } = await createFieldScorecard(tdb, projectSubmission({ clientSubmissionId: csid(26) }));
+    await bindConfirmedEditUpload(scorecard.id);
     const staleToken = scorecard.updatedAt!;
     const desired = updateInput(scorecard.id, staleToken, {
       photos: [{ clientUploadId: "upload-3", sectionKey: "quality", deficiencyKey: null }],
@@ -367,6 +719,64 @@ describe("updateFieldScorecard replacement and concurrency", () => {
     expect(afterReplay.photos).toEqual(afterFirst.photos);
   });
 
+  it("rejects an ordinary same-project upload id that was not authorized for this submitted edit", async () => {
+    const { scorecard } = await createFieldScorecard(tdb, projectSubmission({ clientSubmissionId: csid(27) }));
+
+    await expectAppError(
+      updateFieldScorecard(tdb, updateInput(scorecard.id, scorecard.updatedAt!, {
+        photos: [{ clientUploadId: "upload-3", sectionKey: "quality", deficiencyKey: null }],
+      })),
+      422,
+    );
+
+    expect((await getFieldScorecardDetail(tdb, scorecard.id, OWNER_ACCESS)).photos).toEqual([]);
+  });
+
+  it("rejects evidence authorized for a different submitted scorecard on the same project", async () => {
+    const { scorecard: target } = await createFieldScorecard(tdb, projectSubmission({ clientSubmissionId: csid(28) }));
+    const { scorecard: other } = await createFieldScorecard(tdb, projectSubmission({ clientSubmissionId: csid(29) }));
+    await bindConfirmedEditUpload(other.id);
+
+    await expectAppError(
+      updateFieldScorecard(tdb, updateInput(target.id, target.updatedAt!, {
+        photos: [{ clientUploadId: "upload-3", sectionKey: "quality", deficiencyKey: null }],
+      })),
+      422,
+    );
+
+    expect((await getFieldScorecardDetail(tdb, target.id, OWNER_ACCESS)).photos).toEqual([]);
+    const [binding] = (await tdb.execute(sql`
+      SELECT scorecard_id, state FROM field_scorecard_edit_uploads WHERE client_upload_id = 'upload-3'
+    `)).rows as any[];
+    expect(binding).toEqual({ scorecard_id: other.id, state: "confirmed" });
+  });
+
+  it.each([
+    ["authorized", 30],
+    ["discarded", 31],
+  ] as const)("rejects %s edit evidence before linking", async (state, submissionNumber) => {
+    const { scorecard } = await createFieldScorecard(
+      tdb,
+      projectSubmission({ clientSubmissionId: csid(submissionNumber) }),
+    );
+    await tdb.insert(fieldScorecardEditUploads).values({
+      scorecardId: scorecard.id,
+      dealId: DEAL,
+      clientUploadId: "upload-3",
+      uploadedBy: OWNER,
+      fileId: state === "discarded" ? FILE_3 : null,
+      state,
+    });
+
+    await expectAppError(
+      updateFieldScorecard(tdb, updateInput(scorecard.id, scorecard.updatedAt!, {
+        photos: [{ clientUploadId: "upload-3", sectionKey: "quality", deficiencyKey: null }],
+      })),
+      422,
+    );
+    expect((await getFieldScorecardDetail(tdb, scorecard.id, OWNER_ACCESS)).photos).toEqual([]);
+  });
+
   it("retains link identity, unlinks omitted evidence, and adds only the new upload", async () => {
     const { scorecard } = await createFieldScorecard(tdb, projectSubmission({
       clientSubmissionId: csid(23),
@@ -378,8 +788,9 @@ describe("updateFieldScorecard replacement and concurrency", () => {
     const before = await getFieldScorecardDetail(tdb, scorecard.id, OWNER_ACCESS);
     const retained = before.photos.find((photo) => photo.fileId === FILE_1)!;
     const removed = before.photos.find((photo) => photo.fileId === FILE_2)!;
+    await bindConfirmedEditUpload(scorecard.id);
 
-    await updateFieldScorecard(tdb, updateInput(scorecard.id, scorecard.updatedAt!, {
+    const saved = await updateFieldScorecard(tdb, updateInput(scorecard.id, scorecard.updatedAt!, {
       photos: [
         { scorecardPhotoId: retained.id, sectionKey: "safety", deficiencyKey: null },
         { clientUploadId: "upload-3", sectionKey: "quality", deficiencyKey: null },
@@ -394,6 +805,25 @@ describe("updateFieldScorecard replacement and concurrency", () => {
     });
     expect(after.photos.some((photo) => photo.id === removed.id || photo.fileId === FILE_2)).toBe(false);
     expect(after.photos.find((photo) => photo.fileId === FILE_3)?.sectionKey).toBe("quality");
+    const [linkedBinding] = (await tdb.execute(sql`
+      SELECT state FROM field_scorecard_edit_uploads WHERE client_upload_id = 'upload-3'
+    `)).rows as any[];
+    expect(linkedBinding.state).toBe("linked");
+
+    // A later edit may remove the scorecard link, but discard cleanup must preserve any gallery file that
+    // was linked successfully at least once.
+    await updateFieldScorecard(tdb, updateInput(scorecard.id, saved.scorecard.updatedAt!, {
+      photos: [{ scorecardPhotoId: after.photos.find((photo) => photo.fileId === FILE_1)!.id, sectionKey: "safety" }],
+    }));
+    await expect(discardScorecardEditEvidence(tdb, {
+      scorecardId: scorecard.id,
+      userId: OWNER,
+      clientUploadIds: ["upload-3"],
+    })).resolves.toEqual({ discarded: 0 });
+    const [onceLinkedFile] = (await tdb.execute(sql`
+      SELECT is_active, deleted_at FROM files WHERE id = ${FILE_3}
+    `)).rows as any[];
+    expect(onceLinkedFile).toEqual({ is_active: true, deleted_at: null });
     const filesRemain = await tdb.execute(sql`SELECT count(*)::int AS count FROM files`);
     expect(filesRemain.rows[0]?.count).toBe(3);
   });

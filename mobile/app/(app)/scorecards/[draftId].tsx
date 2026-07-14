@@ -2,6 +2,7 @@ import React, { Suspense, useCallback, useEffect, useReducer, useRef, useState }
 import { Image, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter } from "expo-router";
+import { usePreventRemove } from "@react-navigation/native";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import * as ImagePicker from "expo-image-picker";
 import SignatureScreen, { type SignatureViewRef } from "react-native-signature-canvas";
@@ -21,19 +22,23 @@ import {
 import {
   scorecardDraftReducer,
   scorecardDraftTotal,
+  scorecardDraftCompletionPercent,
   scorecardDraftRating,
   scorecardDraftPhotosForSection,
   scorecardDraftNewPhotos,
+  markScorecardEvidenceUploadAttempted,
   isEditingScorecardDraft,
   isExistingScorecardDraftPhoto,
   validateScorecardDraft,
+  MAX_SCORECARD_PHOTOS,
   type ScorecardDraft,
   type ScorecardDraftPhoto,
   type DraftAction,
 } from "../../../src/scorecards/draft";
 import { rebaseScorecardEditDraft, scorecardEditRebaseMessage } from "../../../src/scorecards/edit";
+import { scorecardEditorBusyMessage, scorecardPhotoOverflowMessage } from "../../../src/scorecards/editor-state";
 import { loadScorecardDraft, saveScorecardDraft, deleteScorecardDraft, copyPhotoIntoDraft } from "../../../src/scorecards/draft-store";
-import { submitScorecard } from "../../../src/scorecards/submit";
+import { ScorecardEditCleanupPendingError, submitScorecard } from "../../../src/scorecards/submit";
 import { Badge, Button, EmptyState, LoadingState, SectionLabel, TextInput } from "../../../src/components/ui";
 import { Banner } from "../../../src/components/Banner";
 import { ScreenHeader } from "../../../src/components/ScreenHeader";
@@ -44,16 +49,10 @@ import { PhotoCaptionEditor } from "../../../src/components/PhotoCaptionEditor";
 const CameraCapture = React.lazy(() => import("../../../src/capture/CameraCapture"));
 
 const SECTION_COUNT = FIELD_SCORECARD_SECTIONS.length;
-// Step 0 is the one-page scorecard. A category opens a focused detail editor at 1..8.
-const LAST_STEP = 0;
 
 function toStr(v: string | string[] | undefined): string {
   return Array.isArray(v) ? v[0] ?? "" : v ?? "";
 }
-
-// Server cap on total evidence photos (parseScorecardSubmission rejects photos.length > 100). Mirrored here so
-// a multi-select import can't stage a batch that would only fail at submit and force manual removal.
-const MAX_SCORECARD_PHOTOS = 100;
 
 // Merge an already-resolved live GPS fix into a shot's EXIF only when the shot itself has no location. Pure, so
 // a BATCH import can fetch live GPS ONCE and reuse it across every coordless asset (the per-asset getLiveGps in
@@ -238,6 +237,8 @@ function Wizard(props: {
   const [captionVoiceBusy, setCaptionVoiceBusy] = useState(false);
   const [signingField, setSigningField] = useState<"superintendentSignature" | "pmSignature" | null>(null);
   const [hasEditConflict, setHasEditConflict] = useState(false);
+  const [submittedResult, setSubmittedResult] = useState<{ dealId: string; scorecardId?: string } | null>(null);
+  const submittedNavigationStarted = useRef(false);
   // Serialize autosaves so a slow older write can't land after a newer edit — or after the submit-delete
   // and resurrect a submitted draft. `finalized` stops saves once the draft is submitted + deleted.
   const saveChain = useRef<Promise<unknown>>(Promise.resolve());
@@ -263,6 +264,46 @@ function Wizard(props: {
   // for all still-pending ids and only proceeds once it succeeds — a FAILED removal stays in the set (and
   // blocks submit) instead of being cleared, so the drain can never upload evidence the user removed.
   const pendingRemovalIds = useRef<Set<string>>(new Set());
+
+  // Track every inline recorder independently. A transcript arrives asynchronously after recording stops;
+  // leaving or submitting before it lands would discard the spoken text.
+  const [voiceBusyKeys, setVoiceBusyKeys] = useState<Set<string>>(() => new Set());
+  const voiceBusyHandlers = useRef<Map<string, (busy: boolean) => void>>(new Map());
+  const getVoiceBusyHandler = useCallback((key: string) => {
+    let handler = voiceBusyHandlers.current.get(key);
+    if (!handler) {
+      handler = (busy: boolean) =>
+        setVoiceBusyKeys((previous) => {
+          if (busy === previous.has(key)) return previous;
+          const next = new Set(previous);
+          if (busy) next.add(key);
+          else next.delete(key);
+          return next;
+        });
+      voiceBusyHandlers.current.set(key, handler);
+    }
+    return handler;
+  }, []);
+  const anyVoiceBusy = voiceBusyKeys.size > 0;
+  const navigationBusyMessage = scorecardEditorBusyMessage({
+    submitting,
+    savingPhotos: savingPhotos > 0,
+    voiceBusy: anyVoiceBusy || captionVoiceBusy,
+  });
+
+  // Covers hardware Back and iOS swipe-to-dismiss in addition to the visible header Back button.
+  usePreventRemove(Boolean(navigationBusyMessage) && !finalized.current, () => {
+    setNotice({ tone: "error", text: navigationBusyMessage ?? "Please wait before leaving this scorecard." });
+  });
+
+  // Navigate only after a successful save has re-rendered with the removal guard disabled. Calling router.back
+  // directly inside the async submit would race usePreventRemove and could either be blocked or double-pop.
+  useEffect(() => {
+    if (!submittedResult || submittedNavigationStarted.current) return;
+    submittedNavigationStarted.current = true;
+    onSubmitted(submittedResult.dealId, submittedResult.scorecardId);
+  }, [onSubmitted, submittedResult]);
+
   useEffect(() => {
     if (finalized.current) return;
     saveChain.current = saveChain.current
@@ -294,24 +335,18 @@ function Wizard(props: {
   }, [draft.editingScorecardId, fetcher]);
 
   const total = scorecardDraftTotal(draft);
+  const completionPercent = scorecardDraftCompletionPercent(draft);
   const validation = validateScorecardDraft(draft);
   const captionPhoto = draft.photos.find((photo) => photo.key === captionPhotoKey) ?? null;
   const editingSubmitted = isEditingScorecardDraft(draft);
 
-  const goNext = () => setStep(Math.min(LAST_STEP, step + 1));
   const goBack = () => {
-    // Leaving the wizard (step 0 → router.back) unmounts it; if a photo copy is still in flight, its
-    // pending dispatch would be lost (the accepted photo never lands in the draft). Block until it settles.
-    // Step-back keeps the screen mounted, so it's always safe.
-    if (step === 0) {
-      if (savingPhotos > 0) {
-        setNotice({ tone: "error", text: "Saving a photo — one moment…" });
-        return;
-      }
-      router.back();
+    if (navigationBusyMessage) {
+      setNotice({ tone: "error", text: navigationBusyMessage });
       return;
     }
-    setStep(0);
+    if (step === 0) router.back();
+    else setStep(0);
   };
 
   // Remove a photo from the draft AND cancel any already-queued upload for it (a prior offline submit may
@@ -506,9 +541,10 @@ function Wizard(props: {
       photoCount.current = rebased.draft.photos.length;
       dispatch({ type: "replaceDraft", draft: rebased.draft });
       setHasEditConflict(false);
+      const overflowMessage = scorecardPhotoOverflowMessage(rebased.draft.photos.length);
       setNotice({
-        tone: "success",
-        text: scorecardEditRebaseMessage(rebased),
+        tone: overflowMessage ? "error" : "success",
+        text: overflowMessage ?? scorecardEditRebaseMessage(rebased),
       });
     } catch (error) {
       setNotice({
@@ -525,6 +561,18 @@ function Wizard(props: {
 
   async function onSubmit() {
     if (submitting) return;
+    if (savingPhotos > 0) {
+      setNotice({ tone: "error", text: "Saving a photo — try again in a moment." });
+      return;
+    }
+    if (anyVoiceBusy || captionVoiceBusy) {
+      setNotice({ tone: "error", text: "Finishing dictation — try Submit again in a moment." });
+      return;
+    }
+    if (!validation.canSubmit) {
+      setNotice({ tone: "error", text: submitBlockMessage(validation) });
+      return;
+    }
     // Freeze before the marker save so a second tap or a photo edit cannot race the captured payload.
     setSubmitting(true);
     setNotice(null);
@@ -533,11 +581,15 @@ function Wizard(props: {
     // orphan confirmed evidence.
     let draftForSubmit = draft;
     const newPhotos = scorecardDraftNewPhotos(draft);
-    if (newPhotos.length > 0 && !draft.evidenceUploadAttempted) {
-      draftForSubmit = { ...draft, evidenceUploadAttempted: true };
+    const attemptedPhotoIds = newPhotos.map((photo) => photo.clientUploadId);
+    const markedDraft = attemptedPhotoIds.length > 0
+      ? markScorecardEvidenceUploadAttempted(draft, attemptedPhotoIds)
+      : draft;
+    if (markedDraft !== draft) {
+      draftForSubmit = markedDraft;
       try {
-        // Flush earlier autosaves, then durably write the safety marker before the first upload can finish.
-        // A kill/restart between a partial upload and the next React effect must still block discard.
+        // Flush earlier autosaves, then durably write the safety marker + cleanup ledger before the first
+        // upload can finish. This also appends photos added after an earlier attempt.
         await saveChain.current.catch(() => undefined);
         await saveScorecardDraft(ownerKey, draftForSubmit, Date.now());
       } catch {
@@ -545,7 +597,7 @@ function Wizard(props: {
         setSubmitting(false);
         return;
       }
-      dispatch({ type: "markEvidenceUploadAttempted" });
+      dispatch({ type: "markEvidenceUploadAttempted", clientUploadIds: attemptedPhotoIds });
     }
     // Retry-cancel any still-pending photo removals, so the drain in submitScorecard can't upload a
     // just-removed photo. Only clear on success — a failure keeps the ids pending AND blocks submit
@@ -579,8 +631,17 @@ function Wizard(props: {
       finalized.current = true;
       await saveChain.current.catch(() => undefined); // let any in-flight autosave settle (it will skip)
       await deleteScorecardDraft(ownerKey, draftId).catch(() => undefined);
-      onSubmitted(draft.dealId, draft.editingScorecardId);
+      setSubmitting(false);
+      setSubmittedResult({ dealId: draft.dealId, scorecardId: draft.editingScorecardId });
     } catch (error) {
+      if (error instanceof ScorecardEditCleanupPendingError) {
+        setNotice({
+          tone: "error",
+          text: "Changes saved. Photo cleanup is still pending — tap Save changes again to finish.",
+        });
+        setSubmitting(false);
+        return;
+      }
       const status = (error as { status?: number } | null)?.status;
       if (status === 409) setHasEditConflict(true);
       setNotice({
@@ -603,7 +664,7 @@ function Wizard(props: {
     <SafeAreaView style={styles.safe} edges={["top"]}>
       <ScreenHeader onBack={goBack} title={draft.dealName} />
       <View style={styles.progressTrack}>
-        <View style={[styles.progressFill, { width: `${(step / LAST_STEP) * 100}%` }]} />
+        <View style={[styles.progressFill, { width: `${completionPercent}%` }]} />
       </View>
 
       <ScrollView
@@ -633,6 +694,7 @@ function Wizard(props: {
             onToggleDeficiency={toggleDeficiency}
             onSign={(field) => setSigningField(field)}
             voiceEnabled={voiceEnabled}
+            getVoiceBusyHandler={getVoiceBusyHandler}
             photosBusy={savingPhotos > 0}
           />
         ) : (
@@ -641,6 +703,7 @@ function Wizard(props: {
             draft={draft}
             dispatch={dispatch}
             voiceEnabled={voiceEnabled}
+            onVoiceBusyChange={getVoiceBusyHandler(`cat:${FIELD_SCORECARD_SECTIONS[step - 1].key}`)}
             onAddPhoto={() => setCameraSection(step - 1)}
             onImport={() => void importForSection(step - 1)}
             photosBusy={savingPhotos > 0}
@@ -658,12 +721,17 @@ function Wizard(props: {
 
       <View style={styles.footer}>
         <View style={styles.totalPill}>
-          <Text style={styles.totalText}>{total}/100</Text>
+          <Text style={styles.totalText}>{total.toFixed(1)}/10</Text>
         </View>
         {step > 0 ? (
-          <Button title="Done" onPress={() => setStep(0)} style={{ flex: 1 }} />
+          <Button
+            title={savingPhotos > 0 ? "Saving photo…" : anyVoiceBusy ? "Finishing dictation…" : "Done"}
+            onPress={goBack}
+            disabled={Boolean(navigationBusyMessage)}
+            style={{ flex: 1 }}
+          />
         ) : (
-          <Button title={savingPhotos > 0 ? "Saving photo…" : editingSubmitted ? "Save changes" : "Submit ✓"} onPress={onSubmit} loading={submitting} disabled={!validation.canSubmit || submitting || savingPhotos > 0} style={{ flex: 1 }} />
+          <Button title={savingPhotos > 0 ? "Saving photo…" : anyVoiceBusy ? "Finishing dictation…" : editingSubmitted ? "Save changes" : "Submit ✓"} onPress={onSubmit} loading={submitting} disabled={!validation.canSubmit || submitting || savingPhotos > 0 || anyVoiceBusy} style={{ flex: 1 }} />
         )}
       </View>
 
@@ -832,6 +900,7 @@ function OverviewStep({
   onToggleDeficiency,
   onSign,
   voiceEnabled,
+  getVoiceBusyHandler,
   photosBusy,
 }: {
   draft: ScorecardDraft;
@@ -844,6 +913,7 @@ function OverviewStep({
   onToggleDeficiency: (key: ScorecardDraft["criticalDeficiencies"][number]) => void;
   onSign: (field: "superintendentSignature" | "pmSignature") => void;
   voiceEnabled: boolean;
+  getVoiceBusyHandler: (key: string) => (busy: boolean) => void;
   photosBusy: boolean;
 }) {
   const average = scorecardDraftTotal(draft);
@@ -922,7 +992,7 @@ function OverviewStep({
                       multiline
                       style={{ minHeight: 84, textAlignVertical: "top", paddingTop: 10 }}
                     />
-                    {voiceEnabled ? <VoiceRecorder onTranscript={(text) => dispatch({ type: "appendDeficiencyNote", key: deficiency.key, text })} /> : null}
+                    {voiceEnabled ? <VoiceRecorder onTranscript={(text) => dispatch({ type: "appendDeficiencyNote", key: deficiency.key, text })} onBusyChange={getVoiceBusyHandler(`def:${deficiency.key}`)} /> : null}
                   </Field>
                   <View style={styles.deficiencyActions}>
                     <Button title={count ? String(count) + (count === 1 ? " photo" : " photos") : "Camera"} variant="ghost" onPress={() => onAddDeficiencyPhoto(deficiency.key)} disabled={photosBusy} style={{ flex: 1 }} />
@@ -945,6 +1015,35 @@ function OverviewStep({
             </View>
           );
         })}
+      </View>
+
+      <View style={{ gap: theme.space.sm }}>
+        <SectionLabel>Action items</SectionLabel>
+        <Text style={styles.hint}>Add the follow-up work, owner commitments, or corrections captured in this report.</Text>
+        {draft.actionItems.map((item, index) => (
+          <View key={`action-item-${index}`} style={styles.actionItemEditor}>
+            <TextInput
+              value={item}
+              onChangeText={(value) => dispatch({ type: "setActionItem", index, value })}
+              placeholder={`Action item ${index + 1}`}
+              multiline
+              style={styles.actionItemInput}
+            />
+            <Button
+              title="Remove"
+              variant="ghost"
+              onPress={() => dispatch({ type: "removeActionItem", index })}
+              accessibilityLabel={`Remove action item ${index + 1}`}
+            />
+          </View>
+        ))}
+        <Button title="Add action item" variant="ghost" onPress={() => dispatch({ type: "addActionItem" })} />
+        {voiceEnabled ? (
+          <VoiceRecorder
+            onTranscript={(text) => dispatch({ type: "appendActionItem", text })}
+            onBusyChange={getVoiceBusyHandler("action-items")}
+          />
+        ) : null}
       </View>
 
       <View style={{ gap: theme.space.md }}>
@@ -1041,10 +1140,11 @@ function DraftPhotoThumbnail({
 }
 
 function SectionStep({
-  sectionIndex, draft, dispatch, voiceEnabled, onAddPhoto, onImport, photosBusy, onRemovePhoto, onEditPhoto,
+  sectionIndex, draft, dispatch, voiceEnabled, onVoiceBusyChange, onAddPhoto, onImport, photosBusy, onRemovePhoto, onEditPhoto,
 }: {
   sectionIndex: number; draft: ScorecardDraft; dispatch: React.Dispatch<DraftAction>;
-  voiceEnabled: boolean; onAddPhoto: () => void; onImport: () => void; photosBusy: boolean;
+  voiceEnabled: boolean; onVoiceBusyChange: (busy: boolean) => void;
+  onAddPhoto: () => void; onImport: () => void; photosBusy: boolean;
   onRemovePhoto: (photo: ScorecardDraftPhoto) => void;
   onEditPhoto: (photo: ScorecardDraftPhoto) => void;
 }) {
@@ -1066,7 +1166,7 @@ function SectionStep({
       <Field label="Notes">
         <TextInput value={note} onChangeText={(v) => dispatch({ type: "setNote", sectionKey: section.key, note: v })} placeholder="Observations for this category" multiline style={{ minHeight: 96, textAlignVertical: "top", paddingTop: 10 }} />
         {voiceEnabled ? (
-          <VoiceRecorder onTranscript={(t) => dispatch({ type: "appendNote", sectionKey: section.key, text: t })} />
+          <VoiceRecorder onTranscript={(t) => dispatch({ type: "appendNote", sectionKey: section.key, text: t })} onBusyChange={onVoiceBusyChange} />
         ) : null}
       </Field>
       <View style={{ gap: theme.space.sm }}>
@@ -1121,7 +1221,7 @@ function ReviewStep({ draft, onEditStep }: { draft: ScorecardDraft; onEditStep: 
   return (
     <View style={{ gap: theme.space.md }}>
       <View style={styles.scoreWrap}>
-        <Text style={styles.bigScore}>{total}<Text style={styles.bigScoreMax}> /100</Text></Text>
+        <Text style={styles.bigScore}>{total.toFixed(1)}<Text style={styles.bigScoreMax}> /10</Text></Text>
         <RatingBadge rating={rating} label={scorecardRatingLabel(rating)} />
       </View>
       <View style={{ gap: 2 }}>
@@ -1188,6 +1288,10 @@ function ReviewStep({ draft, onEditStep }: { draft: ScorecardDraft; onEditStep: 
 // The one-page reason Submit is blocked, surfaced as a banner above the footer button (the multi-step
 // ReviewStep that also computed this is not part of the current single-screen flow).
 function submitBlockMessage(v: ReturnType<typeof validateScorecardDraft>): string {
+  if (v.tooManyPhotos) {
+    return scorecardPhotoOverflowMessage(MAX_SCORECARD_PHOTOS + v.photoOverflowCount)
+      ?? "Remove extra photos before saving.";
+  }
   if (v.missingSections.length > 0) return `Score all ${SECTION_COUNT} sections to submit (${v.missingSections.length} left).`;
   if (v.missingSignatures) return "Add the Superintendent and Project Manager signatures to submit.";
   if (v.missingWeekOf) return "Set the Week Of date to submit.";
@@ -1276,6 +1380,8 @@ const styles = StyleSheet.create({
   deficiencyCardSelected: { backgroundColor: "rgba(220,40,40,0.05)", paddingHorizontal: theme.space.sm, borderRadius: theme.radius.sm, borderBottomColor: "transparent" },
   deficiencyToggle: { flexDirection: "row", alignItems: "center", gap: theme.space.md },
   deficiencyActions: { flexDirection: "row", gap: theme.space.sm, paddingLeft: 34 },
+  actionItemEditor: { gap: theme.space.sm, padding: theme.space.sm, borderWidth: 1, borderColor: theme.color.border, borderRadius: theme.radius.md, backgroundColor: theme.color.surfaceCard },
+  actionItemInput: { minHeight: 68, textAlignVertical: "top", paddingTop: 10 },
   captionModalRoot: { flex: 1, justifyContent: "flex-end", backgroundColor: "rgba(15,23,42,0.35)" },
   captionBackdrop: { ...StyleSheet.absoluteFillObject },
   captionSheet: { gap: theme.space.md, backgroundColor: theme.color.surfaceCard, borderTopLeftRadius: theme.radius.lg, borderTopRightRadius: theme.radius.lg, padding: theme.space.lg },

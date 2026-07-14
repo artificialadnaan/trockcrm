@@ -9,6 +9,7 @@ import React, { Suspense, useCallback, useEffect, useReducer, useRef, useState }
 import { Image, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter } from "expo-router";
+import { usePreventRemove } from "@react-navigation/native";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import * as ImagePicker from "expo-image-picker";
 import { theme } from "../../../../src/theme/theme";
@@ -32,16 +33,19 @@ import {
   scorecardDraftSectionsAnswered,
   scorecardDraftPhotosForSection,
   scorecardDraftNewPhotos,
+  markScorecardEvidenceUploadAttempted,
   isEditingScorecardDraft,
   isExistingScorecardDraftPhoto,
   validateScorecardDraft,
+  MAX_SCORECARD_PHOTOS,
   type ScorecardDraft,
   type ScorecardDraftPhoto,
   type DraftAction,
 } from "../../../../src/scorecards/draft";
 import { rebaseScorecardEditDraft, scorecardEditRebaseMessage } from "../../../../src/scorecards/edit";
+import { scorecardEditorBusyMessage, scorecardPhotoOverflowMessage } from "../../../../src/scorecards/editor-state";
 import { loadScorecardDraft, saveScorecardDraft, deleteScorecardDraft, copyPhotoIntoDraft } from "../../../../src/scorecards/draft-store";
-import { submitScorecard } from "../../../../src/scorecards/submit";
+import { ScorecardEditCleanupPendingError, submitScorecard } from "../../../../src/scorecards/submit";
 import { Button, EmptyState, LoadingState, SectionLabel, TextInput } from "../../../../src/components/ui";
 import { Banner } from "../../../../src/components/Banner";
 import { ScreenHeader } from "../../../../src/components/ScreenHeader";
@@ -54,9 +58,6 @@ const CameraCapture = React.lazy(() => import("../../../../src/capture/CameraCap
 const SUMMARY_KEY = FIELD_SCORECARD_LEADERSHIP_SUMMARY_SECTION_KEY;
 type LeadershipPhotoSectionKey = ScorecardLeadershipSectionKey | typeof SUMMARY_KEY;
 const CATEGORY_COUNT = FIELD_SCORECARD_LEADERSHIP_SECTIONS.length;
-// Server cap on total evidence photos (parseScorecardSubmission rejects photos.length > 100). Mirrored here so
-// a multi-select import can't stage a batch that would only fail at submit and force manual removal.
-const MAX_SCORECARD_PHOTOS = 100;
 
 function toStr(v: string | string[] | undefined): string {
   return Array.isArray(v) ? v[0] ?? "" : v ?? "";
@@ -218,6 +219,8 @@ function LeadershipForm(props: {
   const [captionPhotoKey, setCaptionPhotoKey] = useState<string | null>(null);
   const [captionVoiceBusy, setCaptionVoiceBusy] = useState(false);
   const [hasEditConflict, setHasEditConflict] = useState(false);
+  const [submittedResult, setSubmittedResult] = useState<{ dealId: string; scorecardId?: string } | null>(null);
+  const submittedNavigationStarted = useRef(false);
   // Serialize autosaves so a slow older write can't land after a newer edit — or after the submit-delete and
   // resurrect a submitted draft. `finalized` stops saves once the draft is submitted + deleted. (Same as wizard.)
   const saveChain = useRef<Promise<unknown>>(Promise.resolve());
@@ -287,11 +290,27 @@ function LeadershipForm(props: {
     return handler;
   }, []);
   const anyVoiceBusy = voiceBusyKeys.size > 0;
+  const navigationBusyMessage = scorecardEditorBusyMessage({
+    submitting,
+    savingPhotos: savingPhotos > 0,
+    voiceBusy: anyVoiceBusy || captionVoiceBusy,
+  });
+
+  // Covers hardware Back and iOS swipe-to-dismiss, not only the visible header control.
+  usePreventRemove(Boolean(navigationBusyMessage) && !finalized.current, () => {
+    setNotice({ tone: "error", text: navigationBusyMessage ?? "Please wait before leaving this scorecard." });
+  });
+
+  // Let the removal guard commit its disabled state before routing away after a successful save.
+  useEffect(() => {
+    if (!submittedResult || submittedNavigationStarted.current) return;
+    submittedNavigationStarted.current = true;
+    onSubmitted(submittedResult.dealId, submittedResult.scorecardId);
+  }, [onSubmitted, submittedResult]);
 
   const goBack = () => {
-    // Leaving the screen unmounts it; a photo copy still in flight would lose its pending dispatch. Block.
-    if (savingPhotos > 0) {
-      setNotice({ tone: "error", text: "Saving a photo — one moment…" });
+    if (navigationBusyMessage) {
+      setNotice({ tone: "error", text: navigationBusyMessage });
       return;
     }
     router.back();
@@ -430,9 +449,10 @@ function LeadershipForm(props: {
       photoCount.current = rebased.draft.photos.length;
       dispatch({ type: "replaceDraft", draft: rebased.draft });
       setHasEditConflict(false);
+      const overflowMessage = scorecardPhotoOverflowMessage(rebased.draft.photos.length);
       setNotice({
-        tone: "success",
-        text: scorecardEditRebaseMessage(rebased),
+        tone: overflowMessage ? "error" : "success",
+        text: overflowMessage ?? scorecardEditRebaseMessage(rebased),
       });
     } catch (error) {
       setNotice({
@@ -449,11 +469,24 @@ function LeadershipForm(props: {
 
   async function onSubmit() {
     if (submitting) return;
+    if (savingPhotos > 0) {
+      setNotice({ tone: "error", text: "Saving a photo — try again in a moment." });
+      return;
+    }
     // A dictation still recording/transcribing hasn't dispatched its transcript yet; submitting now would drop
     // that text and then delete the draft. Nudge the user to wait rather than losing the words. (The Submit
     // button is also disabled while busy — this guards the race where a tap lands as the state flips.)
-    if (anyVoiceBusy) {
+    if (anyVoiceBusy || captionVoiceBusy) {
       setNotice({ tone: "error", text: "Finishing dictation — try Submit again in a moment." });
+      return;
+    }
+    if (!validation.canSubmit) {
+      setNotice({
+        tone: "error",
+        text: validation.tooManyPhotos
+          ? scorecardPhotoOverflowMessage(draft.photos.length) ?? "Remove extra photos before saving."
+          : `Score all ${CATEGORY_COUNT} categories before submitting.`,
+      });
       return;
     }
     // Freeze before the marker save so a second tap or a photo edit cannot race the captured payload.
@@ -464,11 +497,15 @@ function LeadershipForm(props: {
     // orphan confirmed evidence.
     let draftForSubmit = draft;
     const newPhotos = scorecardDraftNewPhotos(draft);
-    if (newPhotos.length > 0 && !draft.evidenceUploadAttempted) {
-      draftForSubmit = { ...draft, evidenceUploadAttempted: true };
+    const attemptedPhotoIds = newPhotos.map((photo) => photo.clientUploadId);
+    const markedDraft = attemptedPhotoIds.length > 0
+      ? markScorecardEvidenceUploadAttempted(draft, attemptedPhotoIds)
+      : draft;
+    if (markedDraft !== draft) {
+      draftForSubmit = markedDraft;
       try {
-        // Flush earlier autosaves, then durably write the safety marker before the first upload can finish.
-        // A kill/restart between a partial upload and the next React effect must still block discard.
+        // Flush earlier autosaves, then durably write the safety marker + cleanup ledger before the first
+        // upload can finish. This also appends photos added after an earlier attempt.
         await saveChain.current.catch(() => undefined);
         await saveScorecardDraft(ownerKey, draftForSubmit, Date.now());
       } catch {
@@ -476,7 +513,7 @@ function LeadershipForm(props: {
         setSubmitting(false);
         return;
       }
-      dispatch({ type: "markEvidenceUploadAttempted" });
+      dispatch({ type: "markEvidenceUploadAttempted", clientUploadIds: attemptedPhotoIds });
     }
     if (pendingRemovalIds.current.size > 0) {
       try {
@@ -503,8 +540,17 @@ function LeadershipForm(props: {
       finalized.current = true;
       await saveChain.current.catch(() => undefined);
       await deleteScorecardDraft(ownerKey, draftId).catch(() => undefined);
-      onSubmitted(draft.dealId, draft.editingScorecardId);
+      setSubmitting(false);
+      setSubmittedResult({ dealId: draft.dealId, scorecardId: draft.editingScorecardId });
     } catch (error) {
+      if (error instanceof ScorecardEditCleanupPendingError) {
+        setNotice({
+          tone: "error",
+          text: "Changes saved. Photo cleanup is still pending — tap Save changes again to finish.",
+        });
+        setSubmitting(false);
+        return;
+      }
       const status = (error as { status?: number } | null)?.status;
       if (status === 409) setHasEditConflict(true);
       setNotice({
@@ -645,15 +691,24 @@ function LeadershipForm(props: {
         </View>
       </ScrollView>
 
+      {validation.tooManyPhotos ? (
+        <View style={styles.submitBlockBanner}>
+          <Banner
+            tone="error"
+            message={scorecardPhotoOverflowMessage(draft.photos.length) ?? "Remove extra photos before saving."}
+          />
+        </View>
+      ) : null}
+
       <View style={styles.footer}>
         <View style={styles.totalPill}>
           <Text style={styles.totalText}>{average.toFixed(1)}/10</Text>
         </View>
         <Button
-          title={savingPhotos > 0 ? "Saving photo…" : anyVoiceBusy ? "Finishing dictation…" : editingSubmitted ? "Save changes" : "Submit ✓"}
+          title={savingPhotos > 0 ? "Saving photo…" : anyVoiceBusy || captionVoiceBusy ? "Finishing dictation…" : editingSubmitted ? "Save changes" : "Submit ✓"}
           onPress={onSubmit}
           loading={submitting}
-          disabled={!validation.canSubmit || submitting || savingPhotos > 0 || anyVoiceBusy}
+          disabled={!validation.canSubmit || submitting || savingPhotos > 0 || anyVoiceBusy || captionVoiceBusy}
           style={{ flex: 1 }}
         />
       </View>
@@ -816,6 +871,7 @@ const styles = StyleSheet.create({
   captionModalRoot: { flex: 1, justifyContent: "flex-end", backgroundColor: "rgba(15,23,42,0.35)" },
   captionBackdrop: { ...StyleSheet.absoluteFillObject },
   captionSheet: { gap: theme.space.md, backgroundColor: theme.color.surfaceCard, borderTopLeftRadius: theme.radius.lg, borderTopRightRadius: theme.radius.lg, padding: theme.space.lg },
+  submitBlockBanner: { paddingHorizontal: theme.space.lg, paddingBottom: theme.space.sm },
   footer: {
     flexDirection: "row", alignItems: "center", gap: theme.space.md,
     padding: theme.space.md, borderTopWidth: 1, borderTopColor: theme.color.border, backgroundColor: theme.color.surfaceCard,

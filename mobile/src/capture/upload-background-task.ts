@@ -37,8 +37,8 @@ TaskManager.defineTask(UPLOAD_QUEUE_TASK, async () => {
     // office happens to be active when the OS grants this background window.
     const fallbackOwnerKey = uploadOwnerKey(session.user.id, session.activeOfficeId ?? session.user.tenantId);
     const owners = await listScorecardDraftOwners(session.user.id, fallbackOwnerKey);
-    // Explicitly target-routed edit evidence must not carry an old owning-office header after the submitter
-    // is re-homed. The queue chooses this fetcher per item; ordinary/new-draft captures remain pinned below.
+    // Explicitly scorecard-scoped edit evidence must not carry an old owning-office header after the submitter
+    // is re-homed. The server resolves + authorizes that scorecard; ordinary/new-draft captures remain pinned.
     const targetFetcher = buildSessionFetcher(session, null);
     await drainBackgroundOwnerQueues(owners, {
       getQueuedCount,

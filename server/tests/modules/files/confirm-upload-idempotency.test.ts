@@ -11,6 +11,10 @@ vi.mock("../../../src/lib/r2-client.js", () => ({
   generateMockUploadUrl: vi.fn(),
   generateMockDownloadUrl: vi.fn(),
 }));
+vi.mock("../../../src/modules/field/scorecard-evidence-upload.js", () => ({
+  lockScorecardEditEvidenceUploadForConfirm: vi.fn(async () => null),
+  markScorecardEditEvidenceUploadConfirmed: vi.fn(async () => undefined),
+}));
 
 const { confirmUpload, getFileByClientUploadId } = await import("../../../src/modules/files/service.js");
 

@@ -16,6 +16,13 @@ import {
 
 const GRID_GAP = 4;
 const GRID_COLUMNS = 3;
+const SIGNATURE_IMAGE_DATA_URL = /^data:image\/(?:png|jpe?g);base64,/i;
+const DATA_URL = /^data:/i;
+
+/** Handwritten signatures are stored as image data URLs; older records may contain a typed name instead. */
+export function isScorecardSignatureImage(value: string | null | undefined): boolean {
+  return SIGNATURE_IMAGE_DATA_URL.test(value?.trim() ?? "");
+}
 
 /**
  * Native render of one submitted scorecard. Presentational only — the route screen (view/[id].tsx)
@@ -176,8 +183,8 @@ function ProjectBody({
       {isV2 ? (
         <View style={{ gap: theme.space.sm }}>
           <SectionLabel>Signatures</SectionLabel>
-          <Text style={styles.bulletText}>Superintendent: {scorecard.superintendentSignature || "—"}</Text>
-          <Text style={styles.bulletText}>Project manager: {scorecard.pmSignature || "—"}</Text>
+          <SignatureValue label="Superintendent" value={scorecard.superintendentSignature} testId="scorecard-signature-image-superintendent" />
+          <SignatureValue label="Project manager" value={scorecard.pmSignature} testId="scorecard-signature-image-project-manager" />
         </View>
       ) : null}
 
@@ -194,6 +201,34 @@ function ProjectBody({
         </View>
       ) : null}
     </>
+  );
+}
+
+function SignatureValue({
+  label,
+  value,
+  testId,
+}: {
+  label: string;
+  value: string | null | undefined;
+  testId: string;
+}) {
+  const signature = value?.trim() ?? "";
+  return (
+    <View style={styles.signatureValue}>
+      <Text style={styles.signatureLabel}>{label}</Text>
+      {isScorecardSignatureImage(signature) ? (
+        <Image
+          testID={testId}
+          accessibilityLabel={`${label} handwritten signature`}
+          source={{ uri: signature }}
+          style={styles.signatureImage}
+          resizeMode="contain"
+        />
+      ) : (
+        <Text style={styles.signatureText}>{signature && !DATA_URL.test(signature) ? signature : "—"}</Text>
+      )}
+    </View>
   );
 }
 
@@ -311,6 +346,10 @@ const styles = StyleSheet.create({
   bulletRow: { flexDirection: "row", gap: theme.space.sm, alignItems: "flex-start" },
   bulletDot: { fontFamily: theme.font.bold, fontSize: 15, color: theme.color.brandRed, lineHeight: 20 },
   bulletText: { flex: 1, fontFamily: theme.font.body, fontSize: 14, color: theme.color.textPrimary, lineHeight: 20 },
+  signatureValue: { gap: theme.space.xs },
+  signatureLabel: { fontFamily: theme.font.semibold, fontSize: 13, color: theme.color.textMuted },
+  signatureText: { fontFamily: theme.font.body, fontSize: 14, color: theme.color.textPrimary, lineHeight: 20 },
+  signatureImage: { width: "100%", maxWidth: 260, height: 84, borderWidth: 1, borderColor: theme.color.border, borderRadius: theme.radius.sm, backgroundColor: theme.color.surfaceCard },
   photoGroup: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.textPrimary },
   grid: { flexDirection: "row", flexWrap: "wrap", gap: GRID_GAP },
   thumb: { borderRadius: theme.radius.sm, overflow: "hidden", backgroundColor: theme.color.surfaceMuted },
