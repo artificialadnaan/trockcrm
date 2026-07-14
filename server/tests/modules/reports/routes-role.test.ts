@@ -52,10 +52,15 @@ vi.mock("../../../src/modules/reports/estimator-pipeline-service.js", () => ({
   getEstimatorPipelineEvidence: vi.fn(),
 }));
 
+vi.mock("../../../src/modules/reports/qc-scorecards-service.js", () => ({
+  getQcScorecardsReport: vi.fn(),
+}));
+
 import { errorHandler } from "../../../src/middleware/error-handler.js";
 import * as reportService from "../../../src/modules/reports/service.js";
 import * as mondayShowcaseService from "../../../src/modules/reports/monday-showcase-service.js";
 import * as estimatorPipelineService from "../../../src/modules/reports/estimator-pipeline-service.js";
+import * as qcScorecardsService from "../../../src/modules/reports/qc-scorecards-service.js";
 import { runReportBuilder } from "../../../src/modules/reports/report-builder-service.js";
 import * as savedReportsService from "../../../src/modules/reports/saved-reports-service.js";
 import { reportRoutes } from "../../../src/modules/reports/routes.js";
@@ -126,6 +131,34 @@ describe("report route role guards", () => {
       {},
       expect.objectContaining({ metric: "won", mode: "to_date" }),
     );
+  });
+
+  it("validates and forwards the QC scorecard kind filter", async () => {
+    const app = buildApp("rep");
+
+    const invalidResponse = await request(app).get("/api/reports/qc-scorecards?kind=safety");
+    expect(invalidResponse.status).toBe(400);
+    expect(invalidResponse.body).toEqual({
+      error: { message: "'kind' must be 'project' or 'leadership'." },
+    });
+    expect(qcScorecardsService.getQcScorecardsReport).not.toHaveBeenCalled();
+
+    vi.mocked(qcScorecardsService.getQcScorecardsReport).mockResolvedValueOnce({
+      scorecards: [],
+      regions: [],
+      superintendents: [],
+      truncated: false,
+    });
+    const validResponse = await request(app).get(
+      "/api/reports/qc-scorecards?from=2026-07-01&to=2026-07-31&kind=leadership",
+    );
+
+    expect(validResponse.status).toBe(200);
+    expect(qcScorecardsService.getQcScorecardsReport).toHaveBeenCalledWith({}, expect.objectContaining({
+      from: "2026-07-01",
+      to: "2026-07-31",
+      kind: "leadership",
+    }));
   });
 
   it("keeps estimator pipeline summaries and project evidence leadership-only", async () => {

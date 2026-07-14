@@ -17,7 +17,14 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { scorecardV2RatingLabel, type ScorecardRating, type FieldScorecardDetail } from "@trock-crm/shared/types";
+import {
+  scorecardLeadershipRatingLabel,
+  scorecardRatingLabel,
+  scorecardV2RatingLabel,
+  type FieldScorecardDetail,
+  type ScorecardKind,
+  type ScorecardRating,
+} from "@trock-crm/shared/types";
 import { useQcScorecards, type QcScorecardRow } from "@/hooks/use-qc-scorecards";
 import { fetchDealScorecardDetail, downloadDealScorecardPdf } from "@/hooks/use-deal-scorecards";
 import { ScorecardDetailView } from "@/pages/deals/deal-scorecards-tab";
@@ -34,8 +41,18 @@ const SCORE_COLOR: Record<string, string> = {
   needs_improvement: "text-amber-600",
   corrective_action: "text-brand-red",
 };
-function label(rating: string) {
+function ratingLabel(row: Pick<QcScorecardRow, "kind" | "formVersion" | "rating">) {
+  const rating = row.rating as ScorecardRating;
+  if (row.kind === "leadership") return scorecardLeadershipRatingLabel(rating) ?? row.rating;
+  return row.formVersion === 2
+    ? scorecardV2RatingLabel(rating) ?? row.rating
+    : scorecardRatingLabel(rating) ?? row.rating;
+}
+function genericRatingLabel(rating: string) {
   return scorecardV2RatingLabel(rating as ScorecardRating) ?? rating;
+}
+function kindLabel(kind: ScorecardKind) {
+  return kind === "leadership" ? "Leadership" : "Project";
 }
 function scoreOutOfTen(row: QcScorecardRow): number {
   return row.formVersion === 2 ? row.averageScore ?? row.totalScore / 10 : row.totalScore / 10;
@@ -63,6 +80,7 @@ export default function QcReportsPage() {
   const [from, setFrom] = useState(isoDaysAgo(56));
   const [to, setTo] = useState(isoDaysAgo(0));
   const [region, setRegion] = useState("");
+  const [kind, setKind] = useState<"" | ScorecardKind>("");
   const [superintendent, setSuperintendent] = useState("");
   const [rating, setRating] = useState("");
   const [flaggedOnly, setFlaggedOnly] = useState(false);
@@ -78,7 +96,7 @@ export default function QcReportsPage() {
   // ALL filters are applied server-side (before the row cap); `regions`/`superintendents` are the
   // window-wide option lists so the dropdowns never empty each other.
   const { scorecards, regions, superintendents, truncated, loading, error, refetch } = useQcScorecards({
-    from, to, region, superintendent, rating, flaggedOnly, search: debouncedSearch,
+    from, to, region, kind: kind || undefined, superintendent, rating, flaggedOnly, search: debouncedSearch,
   });
   const rows = scorecards;
 
@@ -102,9 +120,9 @@ export default function QcReportsPage() {
   return (
     <div className="space-y-6">
       <PageHeader
-        eyebrow="Field QC · Live & Won Projects"
+        eyebrow="Field Scorecards · Live & Won Projects"
         title="QC Reports"
-        description="Weekly Field Scorecards submitted from T-Rock Cam across every active project. Track quality, catch corrective-action jobs early, and pull the signed PDF."
+        description="Project and Leadership Scorecards submitted from T-Rock Cam across every active project. Track performance, catch corrective-action jobs early, and pull the signed PDF."
       />
 
       {/* stat strip — every card drills into its exact rows */}
@@ -142,13 +160,21 @@ export default function QcReportsPage() {
       {/* filter bar */}
       <div className="flex flex-wrap items-center gap-2 rounded-xl border border-slate-200 bg-white p-3">
         <FilterSelect label="Region" value={region} onChange={setRegion} options={regions} allLabel="All regions" />
+        <FilterSelect
+          label="Type"
+          value={kind}
+          onChange={(value) => setKind(value as "" | ScorecardKind)}
+          options={["project", "leadership"]}
+          renderOption={(value) => kindLabel(value as ScorecardKind)}
+          allLabel="All scorecards"
+        />
         <FilterSelect label="Superintendent" value={superintendent} onChange={setSuperintendent} options={superintendents} allLabel="Anyone" />
         <FilterSelect
           label="Rating"
           value={rating}
           onChange={setRating}
           options={["elite", "on_standard", "needs_improvement", "corrective_action"]}
-          renderOption={label}
+          renderOption={genericRatingLabel}
           allLabel="All ratings"
         />
         <div className="flex items-center gap-1.5">
@@ -308,11 +334,21 @@ function QcTable({ rows, onRowClick, compact }: { rows: QcScorecardRow[]; onRowC
             }}
             tabIndex={0}
             role="button"
-            aria-label={`Open scorecard for ${r.projectName}, week of ${fmtWeek(r.weekOf)}`}
+            aria-label={`Open ${kindLabel(r.kind).toLowerCase()} scorecard for ${r.projectName}, week of ${fmtWeek(r.weekOf)}`}
             className={`cursor-pointer border-b border-slate-100 hover:bg-slate-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand-red/40 ${r.deficiencyCount > 0 ? "shadow-[inset_3px_0_0_var(--tw-shadow-color)] shadow-brand-red" : ""}`}
           >
             <td className="px-3.5 py-3">
-              <div className="font-semibold text-slate-950">{r.projectName}</div>
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="font-semibold text-slate-950">{r.projectName}</div>
+                <Badge
+                  variant="outline"
+                  className={r.kind === "leadership"
+                    ? "border-violet-200 bg-violet-50 text-[10px] font-bold uppercase tracking-wide text-violet-700"
+                    : "border-slate-200 bg-slate-50 text-[10px] font-bold uppercase tracking-wide text-slate-600"}
+                >
+                  {kindLabel(r.kind)}
+                </Badge>
+              </div>
               <div className="mt-0.5 text-[11.5px] font-semibold text-slate-400">
                 {[r.projectNumber, r.regionName].filter(Boolean).join(" · ") || "—"}
               </div>
@@ -324,7 +360,7 @@ function QcTable({ rows, onRowClick, compact }: { rows: QcScorecardRow[]; onRowC
               <span className="text-[11px] font-semibold text-slate-300">/10</span>
             </td>
             <td className="px-3.5 py-3 text-center">
-              <Badge variant="outline" className={`${RATING_BADGE[r.rating] ?? ""} whitespace-nowrap`}>{label(r.rating)}</Badge>
+              <Badge variant="outline" className={`${RATING_BADGE[r.rating] ?? ""} whitespace-nowrap`}>{ratingLabel(r)}</Badge>
             </td>
             <td className="px-3.5 py-3 text-center">
               {r.deficiencyCount > 0 ? (
@@ -401,7 +437,7 @@ function QcDetailSheet({ row, onClose }: { row: QcScorecardRow | null; onClose: 
             <SheetHeader className="shrink-0 border-b border-slate-100 px-6 py-5">
               <SheetTitle className="pr-8 leading-snug">{row.projectName}</SheetTitle>
               <div className="text-[12.5px] text-slate-500">
-                {[row.projectNumber, `Week of ${fmtWeek(row.weekOf)}`, row.superintendentName ? `Supt. ${row.superintendentName}` : null].filter(Boolean).join(" · ")}
+                {[kindLabel(row.kind), row.projectNumber, `Week of ${fmtWeek(row.weekOf)}`, row.superintendentName ? `Supt. ${row.superintendentName}` : null].filter(Boolean).join(" · ")}
               </div>
             </SheetHeader>
 
@@ -413,7 +449,7 @@ function QcDetailSheet({ row, onClose }: { row: QcScorecardRow | null; onClose: 
                   {scoreOutOfTen(row).toFixed(1)}<span className="text-[15px] font-semibold text-slate-300">/10</span>
                 </div>
                 <div>
-                  <Badge variant="outline" className={RATING_BADGE[row.rating] ?? ""}>{label(row.rating)}</Badge>
+                  <Badge variant="outline" className={RATING_BADGE[row.rating] ?? ""}>{ratingLabel(row)}</Badge>
                   <div className="mt-1.5 text-[12px] text-slate-500">Submitted by {row.submittedByName ?? "—"} · {fmtDate(row.submittedAt)}</div>
                 </div>
               </div>

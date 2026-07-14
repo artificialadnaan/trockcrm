@@ -6,6 +6,7 @@ import {
   type EstimatorPipelineBucket,
   type EstimatorPipelineCohort,
   type EstimatorPipelineTargetKey,
+  type ScorecardKind,
 } from "@trock-crm/shared/types";
 import { requireRole, requireDirector } from "../../middleware/rbac.js";
 import { AppError } from "../../middleware/error-handler.js";
@@ -377,11 +378,17 @@ router.get("/qc-scorecards", requireAnyRole, async (req, res, next) => {
     const to = rawTo ?? businessToday();
     const from = rawFrom ?? shiftBusinessDate(to, -56);
     if (from > to) throw new AppError(400, "'from' must be on or before 'to'.");
+    const rawKind = readQueryString(req.query.kind);
+    if (rawKind && rawKind !== "project" && rawKind !== "leadership") {
+      throw new AppError(400, "'kind' must be 'project' or 'leadership'.");
+    }
+    const kind = rawKind as ScorecardKind | undefined;
 
     const data = await getQcScorecardsReport(req.tenantDb!, {
       from,
       to,
       region: readQueryString(req.query.region),
+      kind,
       superintendent: readQueryString(req.query.superintendent),
       rating: readQueryString(req.query.rating),
       flaggedOnly: req.query.flaggedOnly === "true",
