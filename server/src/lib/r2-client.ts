@@ -210,6 +210,27 @@ export async function objectExists(r2Key: string): Promise<boolean> {
 export async function headObject(
   r2Key: string
 ): Promise<{ contentType?: string; contentLength?: number } | null> {
+  try {
+    return await headObjectStrict(r2Key);
+  } catch {
+    // Backward-compatible best-effort HEAD used by existing callers.
+    return null;
+  }
+}
+
+export function isR2ObjectNotFoundError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const value = error as { name?: string; $metadata?: { httpStatusCode?: number } };
+  return value.$metadata?.httpStatusCode === 404 || value.name === "NotFound" || value.name === "NoSuchKey";
+}
+
+/**
+ * HEAD that distinguishes a genuinely absent object from an R2/network/auth failure. Repair paths use this
+ * so a storage outage returns a retryable error instead of launching an expensive regeneration stampede.
+ */
+export async function headObjectStrict(
+  r2Key: string
+): Promise<{ contentType?: string; contentLength?: number } | null> {
   const client = getClient();
   const bucket = getBucket();
 
@@ -221,8 +242,9 @@ export async function headObject(
       contentType: resp.ContentType,
       contentLength: resp.ContentLength,
     };
-  } catch {
-    return null;
+  } catch (error) {
+    if (isR2ObjectNotFoundError(error)) return null;
+    throw error;
   }
 }
 

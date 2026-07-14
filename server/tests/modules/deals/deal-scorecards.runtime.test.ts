@@ -11,7 +11,8 @@ vi.mock("../../../src/lib/r2-client.js", () => ({
 import {
   listDealScorecards,
   getDealScorecardDetail,
-  getDealScorecardPdfDownload,
+  getDealScorecardPdfArtifactState,
+  presignDealScorecardPdf,
 } from "../../../src/modules/deals/scorecards-service.js";
 import { fieldScorecards, fieldScorecardItems, fieldScorecardPhotos } from "@trock-crm/shared/schema";
 import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
@@ -25,6 +26,7 @@ const SC_LEADERSHIP = "55555555-5555-5555-5555-000000000004"; // DEAL, kind='lea
 const FILE1 = "aaaaaaaa-0000-0000-0000-000000000001";
 const FILE2 = "aaaaaaaa-0000-0000-0000-000000000002"; // leadership Project Summary photo
 const USER = "33333333-3333-3333-3333-333333333333";
+const CURRENT_PDF_KEY = `office_x/deals/DFW-10432/documents/scorecards/sc1.${"a".repeat(64)}.v2.pdf`;
 
 let pg: PGlite;
 let tdb: any;
@@ -32,7 +34,12 @@ let tdb: any;
 beforeAll(async () => {
   pg = new PGlite();
   await pg.exec(`
-    CREATE TABLE files (id uuid PRIMARY KEY, description text);
+    CREATE TABLE files (
+      id uuid PRIMARY KEY,
+      description text,
+      is_active boolean NOT NULL DEFAULT true,
+      deleted_at timestamptz
+    );
     SET search_path TO public;
   `);
   await pg.exec(tenantSchemaSql("public", [fieldScorecards, fieldScorecardItems, fieldScorecardPhotos]));
@@ -43,7 +50,8 @@ beforeAll(async () => {
     {
       id: SC_NEWER, clientSubmissionId: "66666666-6666-6666-6666-000000000001", dealId: DEAL, weekOf: "2026-06-30", projectNumber: "DFW-10432",
       totalScore: 82, rating: "needs_improvement", criticalDeficiencies: ["failed_inspection"], actionItems: ["Re-pour slab"],
-      submittedBy: USER, submittedByName: "Sam Super", pdfR2Key: "office_x/deals/DFW-10432/documents/scorecards/sc1.pdf",
+      submittedBy: USER, submittedByName: "Sam Super", pdfR2Key: CURRENT_PDF_KEY,
+      pdfRenderVersion: 2,
       submittedAt: new Date("2026-06-30T18:00:00Z"),
     },
     {
@@ -63,6 +71,7 @@ beforeAll(async () => {
       id: SC_LEADERSHIP, clientSubmissionId: "66666666-6666-6666-6666-000000000004", dealId: DEAL, weekOf: "2026-07-01",
       totalScore: 90, formVersion: 2, kind: "leadership", averageScore: "9.0", rating: "elite", summary: "Strong week; crew morale high.",
       submittedBy: USER, submittedByName: "Lena Lead", pdfR2Key: "office_x/deals/DFW-10432/documents/scorecards/lead.pdf",
+      pdfRenderVersion: 1,
       submittedAt: new Date("2026-07-01T18:00:00Z"),
     },
   ]);
@@ -158,22 +167,37 @@ describe("getDealScorecardDetail", () => {
   });
 });
 
-describe("getDealScorecardPdfDownload", () => {
-  it("presigns the stored pdf key", async () => {
-    const { url } = await getDealScorecardPdfDownload(tdb, DEAL, SC_NEWER);
-    expect(url).toContain("sc1.pdf");
+describe("deal scorecard PDF artifact download", () => {
+  it("reports a current artifact and presigns its stored key separately", async () => {
+    const state = await getDealScorecardPdfArtifactState(tdb, DEAL, SC_NEWER);
+    expect(state).toMatchObject({ pdfRenderVersion: 2, linkedPhotoCount: 1, needsRegeneration: false });
+    const { url } = await presignDealScorecardPdf(SC_NEWER, state.pdfR2Key!);
+    expect(url).toContain(CURRENT_PDF_KEY);
   });
 
-  it("404s while the PDF is still generating (no key yet)", async () => {
-    await expect(getDealScorecardPdfDownload(tdb, DEAL, SC_OLDER)).rejects.toMatchObject({ statusCode: 404 });
+  it("marks a missing PDF for on-demand regeneration instead of 404ing inside the read", async () => {
+    const state = await getDealScorecardPdfArtifactState(tdb, DEAL, SC_OLDER);
+    expect(state).toMatchObject({ pdfR2Key: null, linkedPhotoCount: 0, needsRegeneration: true });
   });
 
   it("404s a scorecard fetched through the wrong deal", async () => {
-    await expect(getDealScorecardPdfDownload(tdb, OTHER_DEAL, SC_NEWER)).rejects.toMatchObject({ statusCode: 404 });
+    await expect(getDealScorecardPdfArtifactState(tdb, OTHER_DEAL, SC_NEWER)).rejects.toMatchObject({ statusCode: 404 });
   });
 
-  it("presigns a LEADERSHIP card's pdf — leadership's detail IS its PDF (downloadable from the deal)", async () => {
-    const { url } = await getDealScorecardPdfDownload(tdb, DEAL, SC_LEADERSHIP);
+  it("marks a legacy leadership PDF with linked evidence stale, while keeping its key presignable", async () => {
+    const state = await getDealScorecardPdfArtifactState(tdb, DEAL, SC_LEADERSHIP);
+    expect(state).toMatchObject({ pdfRenderVersion: 1, linkedPhotoCount: 1, needsRegeneration: true });
+    const { url } = await presignDealScorecardPdf(SC_LEADERSHIP, state.pdfR2Key!);
     expect(url).toContain("lead.pdf");
+  });
+
+  it("does not count soft-deleted evidence when deciding what a regenerated PDF may embed", async () => {
+    await pg.exec(`UPDATE files SET is_active = false, deleted_at = NOW() WHERE id = '${FILE1}'`);
+    try {
+      const state = await getDealScorecardPdfArtifactState(tdb, DEAL, SC_NEWER);
+      expect(state).toMatchObject({ linkedPhotoCount: 0, needsRegeneration: false });
+    } finally {
+      await pg.exec(`UPDATE files SET is_active = true, deleted_at = NULL WHERE id = '${FILE1}'`);
+    }
   });
 });

@@ -31,9 +31,11 @@ import {
   createFieldScorecard,
   finalizeFieldScorecardArtifacts,
   getFieldScorecardDetail,
-  getFieldScorecardPdfDownload,
+  getFieldScorecardPdfArtifactState,
+  isStoredScorecardPdfAvailable,
   listFieldScorecardsForProject,
   listRecentFieldScorecards,
+  presignFieldScorecardPdf,
 } from "./scorecards-service.js";
 import { parseScorecardSubmission } from "./scorecard-submission.js";
 import { getFileDownloadUrl } from "../files/service.js";
@@ -993,19 +995,49 @@ fieldRoutes.get("/scorecards/:id", requireFieldContractor, async (req, res, next
   }
 });
 
-// Presigned download for a scorecard's rendered PDF. Resolves the owning office by scorecard id (works
-// off the active x-office-id), gates on project browsability, and 404s while the PDF is still generating.
+// Presigned download for a scorecard's rendered PDF. Resolve + authorize inside the owning-office read,
+// then release that connection before any R2 work. Missing/legacy artifacts are regenerated on demand so
+// pre-evidence PDFs are upgraded the first time someone downloads them.
 fieldRoutes.get("/scorecards/:id/download", requireFieldContractor, async (req, res, next) => {
   try {
     const id = String(req.params.id);
     assertValidUuid(id, "id");
-    const { value } = await withResolvedOffice(
+    const { value: artifact, office } = await withResolvedOffice(
       "scorecard",
       id,
       (officeDb) =>
-        getFieldScorecardPdfDownload(officeDb, id, { userId: req.fieldUser!.id, userRole: req.fieldUser!.role }),
+        getFieldScorecardPdfArtifactState(officeDb, id, {
+          userId: req.fieldUser!.id,
+          userRole: req.fieldUser!.role,
+        }),
       "Scorecard not found",
     );
+    let pdfR2Key = artifact.pdfR2Key;
+    const storedObjectAvailable = artifact.needsRegeneration
+      ? false
+      : await isStoredScorecardPdfAvailable(pdfR2Key);
+    if (artifact.needsRegeneration || !storedObjectAvailable) {
+      try {
+        pdfR2Key = await finalizeFieldScorecardArtifacts(office, req.fieldUser!.id, id);
+      } catch (err) {
+        if (err instanceof AppError) throw err;
+        console.error("[FieldScorecardPDF] On-demand regeneration failed", { scorecardId: id, err });
+        throw new AppError(
+          503,
+          "The scorecard PDF could not be refreshed. Please try again shortly.",
+          "SCORECARD_PDF_REGENERATION_FAILED",
+        );
+      }
+      if (!pdfR2Key || !(await isStoredScorecardPdfAvailable(pdfR2Key))) {
+        throw new AppError(
+          503,
+          "The refreshed scorecard PDF is not available yet. Please try again shortly.",
+          "SCORECARD_PDF_NOT_READY",
+        );
+      }
+    }
+    if (!pdfR2Key) throw new AppError(503, "The scorecard PDF is not available yet. Please try again shortly.");
+    const value = await presignFieldScorecardPdf(id, pdfR2Key);
     res.json(value);
   } catch (err) {
     next(err);

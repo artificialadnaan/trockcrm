@@ -23,6 +23,21 @@ export type ScorecardPdfDeliveryStatus = "attached" | "too_large" | "unavailable
 // ceiling; a larger PDF is delivered as a CRM link instead. The server's per-report evidence cap normally
 // keeps the PDF far smaller, so this is a backstop that must never dead-letter a durable submission.
 const SCORECARD_MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
+// Renderer v2 is the first artifact revision that embeds scorecard evidence. A pre-deploy retry job may
+// still point at a legacy v1 PDF, and a late legacy server in a rolling deploy can overwrite pdf_r2_key
+// without downgrading pdf_render_version. Never email either stale shape; the no-attachment CRM-link
+// fallback is safer and the download route will regenerate the current artifact on demand.
+const MIN_SCORECARD_PDF_RENDER_VERSION_WITH_EVIDENCE = 2;
+
+function isCurrentScorecardPdfArtifactKey(r2Key: string, renderVersion: number): boolean {
+  if (!Number.isInteger(renderVersion) || renderVersion < MIN_SCORECARD_PDF_RENDER_VERSION_WITH_EVIDENCE) {
+    return false;
+  }
+  // The server publishes immutable `${scorecardId}.${sha256}.v${version}.pdf` objects. Requiring the
+  // digest as well as the revision rejects both pre-v2 PDFs and the old same-key v2 publisher, whose
+  // object could be overwritten by an interleaved stale render.
+  return new RegExp(`\\.[a-f0-9]{64}\\.v${renderVersion}\\.pdf$`).test(r2Key);
+}
 
 export interface FieldScorecardEmailPayload {
   tenantSchema?: string;
@@ -114,7 +129,7 @@ export async function handleFieldScorecardEmail(
   // Idempotency: skip if this scorecard's email was already sent. tenantSchema is regex-validated above, so
   // interpolating it as the schema qualifier is safe (identifiers can't be $-parametrized).
   const existing = await query(
-    `SELECT email_sent_at FROM ${tenantSchema}.field_scorecards WHERE id = $1::uuid LIMIT 1`,
+    `SELECT email_sent_at, pdf_r2_key, pdf_render_version FROM ${tenantSchema}.field_scorecards WHERE id = $1::uuid LIMIT 1`,
     [scorecardId]
   );
   if (existing.rows.length === 0) {
@@ -128,7 +143,25 @@ export async function handleFieldScorecardEmail(
 
   // The server delays this job so the artifact renderer normally wins the initial race. If it still cannot
   // read the PDF, preserve the notification fallback rather than dead-lettering a durable submission.
-  const pdfR2Key = normalizeText(payload.pdfR2Key);
+  const payloadPdfR2Key = normalizeText(payload.pdfR2Key);
+  const storedPdfR2Key = normalizeText(existing.rows[0].pdf_r2_key);
+  const rawRenderVersion = existing.rows[0].pdf_render_version;
+  const parsedRenderVersion = typeof rawRenderVersion === "number"
+    ? rawRenderVersion
+    : typeof rawRenderVersion === "string" && rawRenderVersion.trim()
+      ? Number(rawRenderVersion)
+      : Number.NaN;
+  const storedPdfRenderVersion = Number.isInteger(parsedRenderVersion) ? parsedRenderVersion : null;
+  // The row is authoritative: file deletion/restoration invalidates the immutable PDF by clearing this
+  // key, while an on-demand/version upgrade may legitimately replace the queued payload key with a newer
+  // artifact. The key must also match the stamped renderer revision: this rejects both known photo-less
+  // v1 artifacts and a legacy writer that finished late and overwrote only pdf_r2_key after v2 was stamped.
+  // Never fetch a stale payload-only/key-mismatched artifact that may omit or expose outdated evidence.
+  const storedArtifactIsCurrent =
+    storedPdfR2Key != null &&
+    storedPdfRenderVersion != null &&
+    isCurrentScorecardPdfArtifactKey(storedPdfR2Key, storedPdfRenderVersion);
+  const pdfR2Key = storedArtifactIsCurrent ? storedPdfR2Key : null;
   let attachments: SendSystemEmailAttachment[] | undefined;
   // Track PDF availability SEPARATELY from whether we attached it: an oversized PDF exists (it's
   // downloadable in the CRM) even though we don't attach it, and the email copy must say so rather than
@@ -159,7 +192,12 @@ export async function handleFieldScorecardEmail(
       pdfStatus = "attached";
     }
   } else {
-    logger.warn("[FieldScorecardEmail] No PDF key on the job - sending without attachment", { scorecardId });
+    logger.warn("[FieldScorecardEmail] No current PDF key - sending without attachment", {
+      scorecardId,
+      payloadPdfR2Key,
+      storedPdfR2Key,
+      storedPdfRenderVersion,
+    });
   }
 
   const email = buildFieldScorecardEmail({

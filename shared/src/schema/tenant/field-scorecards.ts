@@ -53,6 +53,8 @@ export const fieldScorecards = pgTable(
     pdfR2Key: text("pdf_r2_key"),
     pdfR2Bucket: text("pdf_r2_bucket"),
     pdfGeneratedAt: timestamp("pdf_generated_at", { withTimezone: true }),
+    /** Renderer revision used for the stored PDF artifact. Version 1 covers legacy/unversioned PDFs. */
+    pdfRenderVersion: smallint("pdf_render_version").default(1).notNull(),
     emailSentAt: timestamp("email_sent_at", { withTimezone: true }),
     isActive: boolean("is_active").default(true).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
