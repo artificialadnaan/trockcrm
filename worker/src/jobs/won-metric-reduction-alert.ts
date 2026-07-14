@@ -240,7 +240,7 @@ export async function handleWonMetricReductionAlert(
                   GREATEST(
                     1,
                     CEIL(EXTRACT(EPOCH FROM (claimed_at + make_interval(secs => $3::int) - NOW()))
-                  )::int AS retry_after_seconds
+                  ))::int AS retry_after_seconds
              FROM public.won_metric_reduction_delivery_receipts
             WHERE event_id = $1::uuid
               AND recipient_email = $2
