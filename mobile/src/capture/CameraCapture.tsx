@@ -1,8 +1,12 @@
-import React, { useRef, useState } from "react";
+import { Ionicons } from "@expo/vector-icons";
+import React, { useEffect, useRef, useState } from "react";
 import {
+  AccessibilityInfo,
   ActivityIndicator,
+  type GestureResponderEvent,
   Image,
   KeyboardAvoidingView,
+  type LayoutChangeEvent,
   Modal,
   Platform,
   Pressable,
@@ -34,6 +38,16 @@ const MAX_ZOOM = 1;
 const FINE_ZOOM_STEP = 0.1;
 const ANDROID_FIRST_BUTTON_ZOOM = 0.5;
 const PINCH_ZOOM_SENSITIVITY = 0.35;
+const FOCUS_RETICLE_SIZE = 64;
+const FOCUS_RETICLE_VISIBLE_MS = 900;
+const FOCUS_UNAVAILABLE_VISIBLE_MS = 1800;
+const FOCUS_UNAVAILABLE_MESSAGE = "Tap focus is unavailable on this camera.";
+const CAMERA_CONTROL_MIN_SIZE = 44;
+const CAMERA_TOP_ACTION_GAP = 12;
+const CAMERA_CONTROL_VERTICAL_HIT_SLOP = { top: 4, bottom: 4, left: 0, right: 0 } as const;
+
+type FocusPoint = { x: number; y: number };
+type FocusSurfaceSize = { width: number; height: number };
 
 function clampZoom(value: number) {
   return Number(Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, value)).toFixed(4));
@@ -49,6 +63,19 @@ function nextButtonZoom(current: number, delta: number) {
     return ANDROID_FIRST_BUTTON_ZOOM;
   }
   return clampZoom(current + delta);
+}
+
+function clampReticleCenter(value: number, extent: number) {
+  const half = FOCUS_RETICLE_SIZE / 2;
+  if (extent <= FOCUS_RETICLE_SIZE) return extent / 2;
+  return Math.min(Math.max(value, half), extent - half);
+}
+
+function clampDisplayedFocusPoint(point: FocusPoint, surface: FocusSurfaceSize): FocusPoint {
+  return {
+    x: surface.width > 0 ? clampReticleCenter(point.x, surface.width) : point.x,
+    y: surface.height > 0 ? clampReticleCenter(point.y, surface.height) : point.y,
+  };
 }
 
 /**
@@ -85,7 +112,16 @@ export default function CameraCapture({
   const [busy, setBusy] = useState(false);
   const [ready, setReady] = useState(false);
   const [zoom, setZoom] = useState(MIN_ZOOM);
+  const [flashEnabled, setFlashEnabled] = useState(false);
+  const [focusPoint, setFocusPoint] = useState<FocusPoint | null>(null);
+  const [focusUnavailable, setFocusUnavailable] = useState(false);
   const pinchStartZoomRef = useRef(MIN_ZOOM);
+  const focusReticleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const focusUnavailableTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const focusingRef = useRef(false);
+  const mountedRef = useRef(true);
+  const focusRequestGenerationRef = useRef(0);
+  const focusSurfaceSizeRef = useRef<FocusSurfaceSize>({ width: 0, height: 0 });
   // The just-captured shot awaiting its note (document-as-you-go); null = live camera.
   const [pending, setPending] = useState<CapturedShot | null>(null);
   const [draft, setDraft] = useState("");
@@ -93,6 +129,21 @@ export default function CameraCapture({
   // Skip / Discard can't fire mid-flight and drop the transcript.
   const [voiceBusy, setVoiceBusy] = useState(false);
   const zoomText = displayZoom(zoom);
+  const cameraControlsDisabled = !ready || busy;
+  // Closing must not depend on onCameraReady. A failed or slow camera startup
+  // still needs an escape route; only an in-flight shutter operation blocks it.
+  const closeDisabled = busy;
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      focusRequestGenerationRef.current += 1;
+      focusingRef.current = false;
+      if (focusReticleTimerRef.current) clearTimeout(focusReticleTimerRef.current);
+      if (focusUnavailableTimerRef.current) clearTimeout(focusUnavailableTimerRef.current);
+    };
+  }, []);
 
   function adjustZoom(delta: number) {
     setZoom((current) => nextButtonZoom(current, delta));
@@ -111,6 +162,91 @@ export default function CameraCapture({
   function handlePinchGesture(event: PinchGestureHandlerGestureEvent) {
     const scale = event.nativeEvent.scale || 1;
     setZoom(clampZoom(pinchStartZoomRef.current + (scale - 1) * PINCH_ZOOM_SENSITIVITY));
+  }
+
+  function handleFocusSurfaceLayout(event: LayoutChangeEvent) {
+    const { width, height } = event.nativeEvent.layout;
+    focusSurfaceSizeRef.current = {
+      width: Math.max(0, width),
+      height: Math.max(0, height),
+    };
+  }
+
+  function isCurrentFocusRequest(generation: number) {
+    return mountedRef.current && focusRequestGenerationRef.current === generation;
+  }
+
+  function clearFocusTimers() {
+    if (focusReticleTimerRef.current) {
+      clearTimeout(focusReticleTimerRef.current);
+      focusReticleTimerRef.current = null;
+    }
+    if (focusUnavailableTimerRef.current) {
+      clearTimeout(focusUnavailableTimerRef.current);
+      focusUnavailableTimerRef.current = null;
+    }
+  }
+
+  function invalidateFocusRequest() {
+    focusRequestGenerationRef.current += 1;
+    focusingRef.current = false;
+    clearFocusTimers();
+  }
+
+  function showFocusUnavailable(generation: number) {
+    if (!isCurrentFocusRequest(generation)) return;
+
+    setFocusPoint(null);
+    setFocusUnavailable(true);
+    if (Platform.OS === "ios") {
+      AccessibilityInfo.announceForAccessibility(FOCUS_UNAVAILABLE_MESSAGE);
+    }
+    focusUnavailableTimerRef.current = setTimeout(() => {
+      if (!isCurrentFocusRequest(generation)) return;
+      setFocusUnavailable(false);
+      focusUnavailableTimerRef.current = null;
+    }, FOCUS_UNAVAILABLE_VISIBLE_MS);
+  }
+
+  async function handleTapToFocus(event: GestureResponderEvent) {
+    const camera = cameraRef.current;
+    if (!ready || busy || pending || focusingRef.current || !camera) return;
+
+    const { locationX: x, locationY: y } = event.nativeEvent;
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+
+    const point = { x, y };
+    const generation = focusRequestGenerationRef.current + 1;
+    focusRequestGenerationRef.current = generation;
+    focusingRef.current = true;
+    clearFocusTimers();
+    setFocusPoint(null);
+    setFocusUnavailable(false);
+    try {
+      // This is a small pinned extension to expo-camera 17.0.10. Native iOS converts
+      // this view-space point through AVCaptureVideoPreviewLayer, so aspect-fill
+      // cropping and preview orientation are accounted for before AF/AE metering.
+      const focused = await camera.focusAtPoint(point);
+      if (!isCurrentFocusRequest(generation)) return;
+      if (!focused) {
+        showFocusUnavailable(generation);
+        return;
+      }
+
+      setFocusUnavailable(false);
+      setFocusPoint(clampDisplayedFocusPoint(point, focusSurfaceSizeRef.current));
+      focusReticleTimerRef.current = setTimeout(() => {
+        if (!isCurrentFocusRequest(generation)) return;
+        setFocusPoint(null);
+        focusReticleTimerRef.current = null;
+      }, FOCUS_RETICLE_VISIBLE_MS);
+    } catch {
+      // An older app binary will not have the patched native method yet, and a
+      // fixed-focus device can reject metering. Neither case may interrupt capture.
+      showFocusUnavailable(generation);
+    } finally {
+      if (isCurrentFocusRequest(generation)) focusingRef.current = false;
+    }
   }
 
   async function shoot() {
@@ -170,6 +306,11 @@ export default function CameraCapture({
   // explicit Save & next / Skip / Discard first.
   function handleRequestClose() {
     if (busy || voiceBusy || pending) return;
+    // Closing must remain responsive while native AF/AE is pending. Invalidate
+    // that result before the parent unmounts this modal so it cannot update stale UI.
+    invalidateFocusRequest();
+    setFocusPoint(null);
+    setFocusUnavailable(false);
     onClose();
   }
 
@@ -199,22 +340,88 @@ export default function CameraCapture({
                     ref={cameraRef}
                     style={StyleSheet.absoluteFill}
                     facing="back"
+                    flash={flashEnabled ? "on" : "off"}
                     zoom={zoom}
                     onCameraReady={() => setReady(true)}
                   />
+
+                  {!pending ? (
+                    <Pressable
+                      testID="camera-focus-surface"
+                      style={StyleSheet.absoluteFill}
+                      onPress={(event) => void handleTapToFocus(event)}
+                      onLayout={handleFocusSurfaceLayout}
+                      disabled={cameraControlsDisabled}
+                      accessibilityRole="button"
+                      accessibilityLabel="Camera preview. Tap to focus"
+                      accessibilityHint="Focuses the camera and exposure at the tapped point"
+                      accessibilityState={{ disabled: cameraControlsDisabled }}
+                    >
+                      {focusPoint ? (
+                        <View
+                          testID="camera-focus-reticle"
+                          pointerEvents="none"
+                          style={[
+                            styles.focusReticle,
+                            {
+                              left: focusPoint.x - FOCUS_RETICLE_SIZE / 2,
+                              top: focusPoint.y - FOCUS_RETICLE_SIZE / 2,
+                            },
+                          ]}
+                        />
+                      ) : null}
+                    </Pressable>
+                  ) : null}
 
                 {/* Live capture controls — hidden while a shot is being annotated so the
                     shutter can't double-fire and "Done" can't skip the pending note. The
                     existing top/bottom safe-area handling is untouched. */}
                 {!pending ? (
-                  <SafeAreaView style={styles.overlay} edges={["top", "bottom"]}>
+                  <SafeAreaView pointerEvents="box-none" style={styles.overlay} edges={["top", "bottom"]}>
                     <View style={styles.topBar}>
                       <Text style={styles.counter}>
                         {count} photo{count === 1 ? "" : "s"}
                       </Text>
-                      <Pressable onPress={handleRequestClose} hitSlop={12} accessibilityLabel="Done capturing">
-                        <Text style={styles.done}>Done</Text>
-                      </Pressable>
+                      <View testID="camera-top-actions" style={styles.topActions}>
+                        <Pressable
+                          testID="camera-flash-toggle"
+                          onPress={() => setFlashEnabled((enabled) => !enabled)}
+                          disabled={cameraControlsDisabled}
+                          hitSlop={CAMERA_CONTROL_VERTICAL_HIT_SLOP}
+                          accessibilityRole="switch"
+                          accessibilityLabel="Flash"
+                          accessibilityHint="Turns photo flash on or off"
+                          accessibilityState={{ checked: flashEnabled, disabled: cameraControlsDisabled }}
+                          style={({ pressed }) => [
+                            styles.flashButton,
+                            flashEnabled && styles.flashButtonEnabled,
+                            cameraControlsDisabled && styles.cameraControlDisabled,
+                            pressed && styles.flashButtonPressed,
+                          ]}
+                        >
+                          <Ionicons
+                            name={flashEnabled ? "flash" : "flash-outline"}
+                            size={20}
+                            color={flashEnabled ? "#111318" : theme.color.textInverse}
+                          />
+                        </Pressable>
+                        <Pressable
+                          testID="camera-done-button"
+                          onPress={handleRequestClose}
+                          disabled={closeDisabled}
+                          hitSlop={CAMERA_CONTROL_VERTICAL_HIT_SLOP}
+                          accessibilityRole="button"
+                          accessibilityLabel="Done capturing"
+                          accessibilityState={{ disabled: closeDisabled }}
+                          style={({ pressed }) => [
+                            styles.doneButton,
+                            closeDisabled && styles.cameraControlDisabled,
+                            pressed && styles.flashButtonPressed,
+                          ]}
+                        >
+                          <Text style={styles.done}>Done</Text>
+                        </Pressable>
+                      </View>
                     </View>
 
                     <View pointerEvents="box-none" style={styles.zoomZone}>
@@ -290,6 +497,11 @@ export default function CameraCapture({
                             : "Tap to capture — camera stays open for the next shot"
                           : "Preparing camera…"}
                       </Text>
+                      {focusUnavailable ? (
+                        <Text accessibilityLiveRegion="polite" style={styles.focusUnavailable}>
+                          {FOCUS_UNAVAILABLE_MESSAGE}
+                        </Text>
+                      ) : null}
                     </View>
                   </SafeAreaView>
                 ) : null}
@@ -353,6 +565,23 @@ const styles = StyleSheet.create({
     paddingHorizontal: theme.space.lg,
     paddingVertical: theme.space.sm,
   },
+  topActions: { flexDirection: "row", alignItems: "center", gap: CAMERA_TOP_ACTION_GAP },
+  flashButton: {
+    width: CAMERA_CONTROL_MIN_SIZE,
+    height: CAMERA_CONTROL_MIN_SIZE,
+    borderRadius: CAMERA_CONTROL_MIN_SIZE / 2,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(0,0,0,0.45)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.28)",
+  },
+  cameraControlDisabled: { opacity: 0.45 },
+  flashButtonEnabled: {
+    backgroundColor: "#FFD85A",
+    borderColor: "#FFD85A",
+  },
+  flashButtonPressed: { opacity: 0.72 },
   counter: {
     color: theme.color.textInverse,
     fontFamily: theme.font.semibold,
@@ -367,11 +596,24 @@ const styles = StyleSheet.create({
     color: theme.color.textInverse,
     fontFamily: theme.font.bold,
     fontSize: 17,
+  },
+  doneButton: {
+    minWidth: CAMERA_CONTROL_MIN_SIZE,
+    height: CAMERA_CONTROL_MIN_SIZE,
+    alignItems: "center",
+    justifyContent: "center",
     backgroundColor: "rgba(0,0,0,0.45)",
     paddingHorizontal: theme.space.md,
-    paddingVertical: 4,
     borderRadius: theme.radius.pill,
-    overflow: "hidden",
+  },
+  focusReticle: {
+    position: "absolute",
+    width: FOCUS_RETICLE_SIZE,
+    height: FOCUS_RETICLE_SIZE,
+    borderRadius: 8,
+    borderWidth: 2,
+    borderColor: "#FFD85A",
+    backgroundColor: "transparent",
   },
   zoomZone: {
     flex: 1,
@@ -429,6 +671,12 @@ const styles = StyleSheet.create({
   },
   shutterInner: { width: 60, height: 60, borderRadius: 30, backgroundColor: "#fff" },
   hint: { color: theme.color.textInverse, fontFamily: theme.font.body, fontSize: 13, opacity: 0.85 },
+  focusUnavailable: {
+    color: "#FFD85A",
+    fontFamily: theme.font.semibold,
+    fontSize: 13,
+    textAlign: "center",
+  },
   annotateRoot: { ...StyleSheet.absoluteFillObject, justifyContent: "flex-end" },
   scrim: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(15,17,21,0.55)" },
   annotateSheet: {

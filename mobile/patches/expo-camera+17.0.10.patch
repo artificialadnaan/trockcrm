@@ -1,0 +1,197 @@
+diff --git a/node_modules/expo-camera/build/Camera.types.d.ts b/node_modules/expo-camera/build/Camera.types.d.ts
+index 639cebd..dc96bf4 100644
+--- a/node_modules/expo-camera/build/Camera.types.d.ts
++++ b/node_modules/expo-camera/build/Camera.types.d.ts
+@@ -455,6 +455,7 @@ export interface CameraViewRef {
+     readonly launchModernScanner: () => Promise<void>;
+     readonly resumePreview: () => Promise<void>;
+     readonly pausePreview: () => Promise<void>;
++    readonly focusAtPoint?: (x: number, y: number) => Promise<boolean>;
+ }
+ /**
+  * @hidden
+diff --git a/node_modules/expo-camera/build/CameraView.d.ts b/node_modules/expo-camera/build/CameraView.d.ts
+index 8b68d2e..1905ded 100644
+--- a/node_modules/expo-camera/build/CameraView.d.ts
++++ b/node_modules/expo-camera/build/CameraView.d.ts
+@@ -1,6 +1,6 @@
+ import { type EventSubscription } from 'expo-modules-core';
+ import { type Ref, Component } from 'react';
+-import { CameraCapturedPicture, CameraOrientation, CameraPictureOptions, CameraViewProps, CameraRecordingOptions, CameraViewRef, ScanningOptions, ScanningResult, VideoCodec, AvailableLenses } from './Camera.types';
++import { CameraCapturedPicture, CameraOrientation, CameraPictureOptions, CameraViewProps, CameraRecordingOptions, CameraViewRef, ScanningOptions, ScanningResult, VideoCodec, AvailableLenses, Point } from './Camera.types';
+ import { PictureRef } from './PictureRef';
+ export default class CameraView extends Component<CameraViewProps> {
+     /**
+@@ -48,6 +48,12 @@ export default class CameraView extends Component<CameraViewProps> {
+      * Pauses the camera preview. It is not recommended to use `takePictureAsync` when preview is paused.
+      */
+     pausePreview(): Promise<void>;
++    /**
++     * Focuses and meters exposure at a point in this CameraView's coordinate space.
++     * Returns false when the current binary or camera device cannot focus at a point.
++     * @platform ios
++     */
++    focusAtPoint(point: Point): Promise<boolean>;
+     static ConversionTables: {
+         [prop: string]: unknown;
+         type: Record<keyof import("./Camera.types").CameraType, import("./Camera.types").CameraNativeProps["facing"]>;
+diff --git a/node_modules/expo-camera/build/CameraView.js b/node_modules/expo-camera/build/CameraView.js
+index 0da8747..3f06f97 100644
+--- a/node_modules/expo-camera/build/CameraView.js
++++ b/node_modules/expo-camera/build/CameraView.js
+@@ -109,6 +109,18 @@ export default class CameraView extends Component {
+     async pausePreview() {
+         return this._cameraRef.current?.pausePreview();
+     }
++    /**
++     * Focuses and meters exposure at a point in this CameraView's coordinate space.
++     * Returns false when the current binary or camera device cannot focus at a point.
++     * @platform ios
++     */
++    async focusAtPoint(point) {
++        const camera = this._cameraRef.current;
++        if (typeof camera?.focusAtPoint !== 'function') {
++            return false;
++        }
++        return camera.focusAtPoint(point.x, point.y);
++    }
+     // Values under keys from this object will be transformed to native options
+     static ConversionTables = ConversionTables;
+     static defaultProps = {
+diff --git a/node_modules/expo-camera/ios/CameraViewModule.swift b/node_modules/expo-camera/ios/CameraViewModule.swift
+index 6410204..82dd06c 100644
+--- a/node_modules/expo-camera/ios/CameraViewModule.swift
++++ b/node_modules/expo-camera/ios/CameraViewModule.swift
+@@ -239,6 +239,10 @@ public final class CameraViewModule: Module, ScannerResultHandler {
+         view.pausePreview()
+       }
+ 
++      AsyncFunction("focusAtPoint") { (view, x: Double, y: Double) -> Bool in
++        await view.focusAtPoint(x: x, y: y)
++      }
++
+       AsyncFunction("getAvailablePictureSizes") {
+         return PictureSize.allCases.map {
+           $0.rawValue
+diff --git a/node_modules/expo-camera/ios/Current/CameraSessionManager.swift b/node_modules/expo-camera/ios/Current/CameraSessionManager.swift
+index dc2a548..20e9ec2 100644
+--- a/node_modules/expo-camera/ios/Current/CameraSessionManager.swift
++++ b/node_modules/expo-camera/ios/Current/CameraSessionManager.swift
+@@ -190,6 +190,45 @@ class CameraSessionManager: NSObject {
+     device.unlockForConfiguration()
+   }
+ 
++  /// Applies continuous AF and AE metering at a normalized capture-device point.
++  /// Returns false for fixed-focus cameras so callers can avoid displaying a
++  /// misleading success reticle.
++  func focus(at point: CGPoint) async -> Bool {
++    guard let delegate else {
++      return false
++    }
++
++    return await withCheckedContinuation { continuation in
++      delegate.sessionQueue.async { [weak self] in
++        guard let self,
++              let device = self.captureDeviceInput?.device,
++              device.isFocusPointOfInterestSupported,
++              device.isFocusModeSupported(.continuousAutoFocus) else {
++          continuation.resume(returning: false)
++          return
++        }
++
++        do {
++          try device.lockForConfiguration()
++          defer { device.unlockForConfiguration() }
++
++          device.focusPointOfInterest = point
++          device.focusMode = .continuousAutoFocus
++
++          if device.isExposurePointOfInterestSupported,
++             device.isExposureModeSupported(.continuousAutoExposure) {
++            device.exposurePointOfInterest = point
++            device.exposureMode = .continuousAutoExposure
++          }
++          continuation.resume(returning: true)
++        } catch {
++          log.info("\(#function): \(error.localizedDescription)")
++          continuation.resume(returning: false)
++        }
++      }
++    }
++  }
++
+   func updateZoom() {
+     guard let device = captureDeviceInput?.device, let delegate else {
+       return
+diff --git a/node_modules/expo-camera/ios/Current/CameraView.swift b/node_modules/expo-camera/ios/Current/CameraView.swift
+index b2e7f9e..01bb3bd 100644
+--- a/node_modules/expo-camera/ios/Current/CameraView.swift
++++ b/node_modules/expo-camera/ios/Current/CameraView.swift
+@@ -316,6 +316,23 @@ public class CameraView: ExpoView, EXAppLifecycleListener, EXCameraInterface, Ca
+     previewLayer.connection?.isEnabled = false
+   }
+ 
++  /// Focuses and meters exposure at a point expressed in this view's coordinate
++  /// space. AVCaptureVideoPreviewLayer performs the aspect-fill and orientation
++  /// conversion to the capture device's normalized point-of-interest space.
++  @MainActor
++  func focusAtPoint(x: Double, y: Double) async -> Bool {
++    guard x.isFinite, y.isFinite, bounds.width > 0, bounds.height > 0 else {
++      return false
++    }
++
++    let viewPoint = CGPoint(
++      x: min(max(CGFloat(x), bounds.minX), bounds.maxX),
++      y: min(max(CGFloat(y), bounds.minY), bounds.maxY)
++    )
++    let devicePoint = previewLayer.captureDevicePointConverted(fromLayerPoint: viewPoint)
++    return await sessionManager.focus(at: devicePoint)
++  }
++
+   @objc func orientationChanged() {
+     changePreviewOrientation()
+   }
+diff --git a/node_modules/expo-camera/src/Camera.types.ts b/node_modules/expo-camera/src/Camera.types.ts
+index c9ea132..765d0e9 100644
+--- a/node_modules/expo-camera/src/Camera.types.ts
++++ b/node_modules/expo-camera/src/Camera.types.ts
+@@ -496,6 +496,7 @@ export interface CameraViewRef {
+   readonly launchModernScanner: () => Promise<void>;
+   readonly resumePreview: () => Promise<void>;
+   readonly pausePreview: () => Promise<void>;
++  readonly focusAtPoint?: (x: number, y: number) => Promise<boolean>;
+ }
+ 
+ /**
+diff --git a/node_modules/expo-camera/src/CameraView.tsx b/node_modules/expo-camera/src/CameraView.tsx
+index cf61c1c..c5029d0 100644
+--- a/node_modules/expo-camera/src/CameraView.tsx
++++ b/node_modules/expo-camera/src/CameraView.tsx
+@@ -12,6 +12,7 @@ import {
+   ScanningResult,
+   VideoCodec,
+   AvailableLenses,
++  Point,
+ } from './Camera.types';
+ import ExpoCamera from './ExpoCamera';
+ import CameraManager from './ExpoCameraManager';
+@@ -157,6 +158,19 @@ export default class CameraView extends Component<CameraViewProps> {
+     return this._cameraRef.current?.pausePreview();
+   }
+ 
++  /**
++   * Focuses and meters exposure at a point in this CameraView's coordinate space.
++   * Returns false when the current binary or camera device cannot focus at a point.
++   * @platform ios
++   */
++  async focusAtPoint(point: Point): Promise<boolean> {
++    const camera = this._cameraRef.current;
++    if (typeof camera?.focusAtPoint !== 'function') {
++      return false;
++    }
++    return camera.focusAtPoint(point.x, point.y);
++  }
++
+   // Values under keys from this object will be transformed to native options
+   static ConversionTables = ConversionTables;
+ 
