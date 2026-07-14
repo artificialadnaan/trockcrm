@@ -17,6 +17,11 @@ const DELETE_DEAL = "00000000-0000-0000-0000-000000000015";
 const MIRROR_DEAL = "00000000-0000-0000-0000-000000000016";
 const PARTIAL_REVERSAL_DEAL = "00000000-0000-0000-0000-000000000017";
 const CHANGE_ORDER_DEAL = "00000000-0000-0000-0000-000000000018";
+const ESTIMATOR = "00000000-0000-0000-0000-000000000019";
+const NEXT_ESTIMATOR = "00000000-0000-0000-0000-000000000020";
+const ESTIMATOR_INVOLVED_DEAL = "00000000-0000-0000-0000-000000000021";
+const SHARED_INVOLVEMENT_DEAL = "00000000-0000-0000-0000-000000000022";
+const ESTIMATOR_REASSIGNMENT_DEAL = "00000000-0000-0000-0000-000000000023";
 
 let pg: PGlite | null = null;
 
@@ -63,6 +68,7 @@ async function setup(options: { enableDelivery?: boolean } = {}): Promise<PGlite
       is_change_order boolean NOT NULL DEFAULT false,
       on_hold boolean NOT NULL DEFAULT false,
       assigned_rep_id uuid,
+      estimator_user_id uuid,
       awarded_amount numeric,
       bid_board_total_sales numeric,
       bid_estimate numeric,
@@ -101,12 +107,18 @@ async function setup(options: { enableDelivery?: boolean } = {}): Promise<PGlite
   return db;
 }
 
-async function insertWonDeal(db: PGlite, id = DEAL, value = 300000): Promise<void> {
+async function insertWonDeal(
+  db: PGlite,
+  id = DEAL,
+  value = 300000,
+  options: { assignedRepId?: string | null; estimatorUserId?: string | null } = {},
+): Promise<void> {
+  const { assignedRepId = REP, estimatorUserId = null } = options;
   await db.query(
     `INSERT INTO office_dallas.deals (
-       id, deal_number, name, stage_id, won_closed_date, assigned_rep_id, awarded_amount
-     ) VALUES ($1, 'TR-100', 'Won deal', $2, CURRENT_DATE, $3, $4)`,
-    [id, WON_STAGE, REP, value],
+       id, deal_number, name, stage_id, won_closed_date, assigned_rep_id, estimator_user_id, awarded_amount
+     ) VALUES ($1, 'TR-100', 'Won deal', $2, CURRENT_DATE, $3, $4, $5)`,
+    [id, WON_STAGE, assignedRepId, estimatorUserId, value],
   );
 }
 
@@ -255,6 +267,70 @@ describe("migration 0184 — Won metric reduction alerts (runtime, PGlite)", () 
     expect(row.rows).toHaveLength(1);
     expect(row.rows[0]?.reason_code).toBe("deal_deleted");
     expect(json(row.rows[0]?.impacts)["office.won_ytd"]).toMatchObject({ delta: -125000 });
+  });
+
+  it("includes an estimator in canonical Deals rep impacts and de-duplicates a shared assignee", async () => {
+    pg = await setup();
+    await insertWonDeal(pg, ESTIMATOR_INVOLVED_DEAL, 300000, { estimatorUserId: ESTIMATOR });
+    await pg.query(`UPDATE office_dallas.deals SET on_hold = true WHERE id = $1`, [ESTIMATOR_INVOLVED_DEAL]);
+
+    const estimatorEvent = await pg.query<{ impacts: unknown }>(`
+      SELECT impacts FROM public.won_metric_reduction_events WHERE deal_id = '${ESTIMATOR_INVOLVED_DEAL}'
+    `);
+    const estimatorImpacts = json(estimatorEvent.rows[0]?.impacts);
+    expect(estimatorImpacts[`assigned_rep.${REP}.won_ytd`]).toMatchObject({
+      scope: "assigned_rep",
+      scopeId: REP,
+      countDelta: -1,
+      delta: -300000,
+    });
+    expect(estimatorImpacts[`assigned_rep.${ESTIMATOR}.won_ytd`]).toMatchObject({
+      scope: "assigned_rep",
+      scopeId: ESTIMATOR,
+      countDelta: -1,
+      delta: -300000,
+    });
+
+    await insertWonDeal(pg, SHARED_INVOLVEMENT_DEAL, 125000, {
+      assignedRepId: REP,
+      estimatorUserId: REP,
+    });
+    await pg.query(`UPDATE office_dallas.deals SET assigned_rep_id = NULL WHERE id = $1`, [SHARED_INVOLVEMENT_DEAL]);
+
+    const sharedEvent = await pg.query(`
+      SELECT id FROM public.won_metric_reduction_events WHERE deal_id = '${SHARED_INVOLVEMENT_DEAL}'
+    `);
+    expect(sharedEvent.rows).toHaveLength(0);
+  });
+
+  it("captures estimator reassignment as an involved-rep change", async () => {
+    pg = await setup();
+    await insertWonDeal(pg, ESTIMATOR_REASSIGNMENT_DEAL, 75000, { estimatorUserId: ESTIMATOR });
+
+    await pg.query(`UPDATE office_dallas.deals SET estimator_user_id = $1 WHERE id = $2`, [
+      NEXT_ESTIMATOR,
+      ESTIMATOR_REASSIGNMENT_DEAL,
+    ]);
+
+    const event = await pg.query<{
+      reason_code: string;
+      action_label: string;
+      changed_fields: unknown;
+      impacts: unknown;
+    }>(`
+      SELECT reason_code, action_label, changed_fields, impacts
+      FROM public.won_metric_reduction_events
+      WHERE deal_id = '${ESTIMATOR_REASSIGNMENT_DEAL}'
+    `);
+    expect(event.rows).toHaveLength(1);
+    expect(event.rows[0]?.reason_code).toBe("won_estimator_reassigned");
+    expect(event.rows[0]?.action_label).toBe("Won deal estimator reassigned");
+    expect(json(event.rows[0]?.changed_fields).estimator_user_id).toEqual({ from: ESTIMATOR, to: NEXT_ESTIMATOR });
+    const impacts = json(event.rows[0]?.impacts);
+    expect(impacts["office.won_ytd"]).toBeUndefined();
+    expect(impacts[`assigned_rep.${REP}.won_ytd`]).toBeUndefined();
+    expect(impacts[`assigned_rep.${ESTIMATOR}.won_ytd`]).toMatchObject({ countDelta: -1, delta: -75000 });
+    expect(impacts[`assigned_rep.${NEXT_ESTIMATOR}.won_ytd`]).toMatchObject({ countDelta: 1, delta: 75000 });
   });
 
   it("keeps the transaction's first material baseline so an intermediate reversal cannot produce a false alert", async () => {

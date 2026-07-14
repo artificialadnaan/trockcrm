@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { pool } from "../db.js";
 import { sendSystemEmailWithMetadata, type SendSystemEmailResult } from "../lib/system-email.js";
 import { escapeHtml, isSafeTenantSchema, normalizeText } from "../lib/email-format.js";
+import type { JobHandlerResult } from "../queue.js";
 import { resolveFrontendUrl } from "./project-number-email.js";
 
 /** Job type emitted by the durable Won-metric reduction outbox. */
@@ -69,6 +70,8 @@ export interface WonMetricImpact {
   isNegative: boolean;
 }
 
+type DeferredJobResult = Extract<JobHandlerResult, { status: "pending" }>;
+
 type WonMetricDeliveryGateDeps = {
   query?: PgQuery;
   logger?: Pick<Console, "log" | "warn" | "error">;
@@ -95,7 +98,7 @@ export async function handleWonMetricReductionAlert(
   payload: WonMetricReductionAlertPayload,
   _officeId: string | null,
   deps: HandlerDeps = {},
-): Promise<void> {
+): Promise<JobHandlerResult> {
   const logger = deps.logger ?? console;
   const eventId = normalizeUuid(payload?.eventId);
   if (!eventId) {
@@ -194,6 +197,7 @@ export async function handleWonMetricReductionAlert(
     frontendUrl: resolveFrontendUrl(env),
   });
   const sendEmail = deps.sendEmail ?? sendSystemEmailWithMetadata;
+  let deferredOutcome: DeferredJobResult | null = null;
 
   for (const recipientEmail of recipients) {
     // Atomically acquire the recipient's delivery lease. The conflict branch may only take over an UNSENT,
@@ -230,12 +234,18 @@ export async function handleWonMetricReductionAlert(
       let receiptResult: { rows: any[] };
       try {
         receiptResult = await query(
-          `SELECT sent_at, resend_message_id, claimed_at
+          `SELECT sent_at,
+                  resend_message_id,
+                  claimed_at,
+                  GREATEST(
+                    1,
+                    CEIL(EXTRACT(EPOCH FROM (claimed_at + make_interval(secs => $3::int) - NOW()))
+                  )::int AS retry_after_seconds
              FROM public.won_metric_reduction_delivery_receipts
             WHERE event_id = $1::uuid
               AND recipient_email = $2
             LIMIT 1`,
-          [event.id, recipientEmail],
+          [event.id, recipientEmail, WON_METRIC_REDUCTION_DELIVERY_LEASE_SECONDS],
         );
       } catch (error) {
         if (isMissingRelationError(error)) {
@@ -261,6 +271,15 @@ export async function handleWonMetricReductionAlert(
           recipientEmail,
           claimedAt: receipt?.claimed_at ?? null,
         });
+        // Do not complete the queue job while an UNSENT lease exists. A prior provider failure can leave
+        // that lease live when its best-effort release also fails; returning a controlled defer lets this
+        // job reclaim it as soon as PostgreSQL says the lease is stale.
+        const candidate = deferActiveDeliveryLease(
+          receipt ? deliveryLeaseRetryAfterSeconds(receipt.retry_after_seconds) : 1,
+        );
+        if (deferredOutcome == null || candidate.runAfterSeconds < deferredOutcome.runAfterSeconds) {
+          deferredOutcome = candidate;
+        }
       }
       continue;
     }
@@ -330,6 +349,8 @@ export async function handleWonMetricReductionAlert(
       throw error;
     }
   }
+
+  return deferredOutcome ?? undefined;
 }
 
 /**
@@ -984,6 +1005,10 @@ function formatAuditCitation(value: unknown): string | null {
   const action = normalizeText(parsed.action);
   const auditAction = normalizeText(parsed.auditAction);
   const transactionId = normalizeText(parsed.transactionId) ?? normalizeText(parsed.transaction_id);
+  // Definition-change events store release metadata (hashes and `kind: release`) in this column, not a
+  // CRM audit citation. Avoid manufacturing the misleading fallback "CRM audit record" for any metadata
+  // object that contains none of the fields which can actually identify an audit action.
+  if (!id && !action && !auditAction && !actor && !timestamp && !transactionId) return null;
   const prefix = id ? `Audit #${id}` : action ? `CRM action: ${action}` : "CRM audit record";
   const actionDetail = auditAction && auditAction !== action ? `(${auditAction})` : null;
   const pieces = [
@@ -1013,10 +1038,21 @@ function buildEstimatorReportUrl(frontendUrl: string, officeId?: string | null):
   return `${frontendUrl.replace(/\/+$/, "")}/reports/operations/estimator-pipeline${officeParam}`;
 }
 
-function isDealsDashboardWonMetric(metricKey: string | null | undefined): boolean {
+type DealsDashboardWonPeriod = "week" | "mtd" | "qtd" | "ytd" | null;
+
+function dealsDashboardWonPeriod(metricKey: string | null | undefined): DealsDashboardWonPeriod | undefined {
   const normalized = normalizeMetricKey(metricKey);
-  return normalized.includes("dealsdashboard") ||
-    (normalized.endsWith("wonytd") && !normalized.includes("estimatorpipeline"));
+  if (normalized.includes("estimatorpipeline")) return undefined;
+  if (normalized.endsWith("wonalltime")) return null;
+  if (normalized.endsWith("wonwtd")) return "week";
+  if (normalized.endsWith("wonmtd")) return "mtd";
+  if (normalized.endsWith("wonqtd")) return "qtd";
+  if (normalized.endsWith("wonytd")) return "ytd";
+  return undefined;
+}
+
+function isDealsDashboardWonMetric(metricKey: string | null | undefined): boolean {
+  return dealsDashboardWonPeriod(metricKey) !== undefined;
 }
 
 function buildWonMetricReportUrl(
@@ -1024,8 +1060,11 @@ function buildWonMetricReportUrl(
   metricKey: string | null | undefined,
   officeId?: string | null,
 ): string {
-  if (!isDealsDashboardWonMetric(metricKey)) return buildEstimatorReportUrl(frontendUrl, officeId);
-  const params = new URLSearchParams({ filter: "won", period: "ytd", scope: "all" });
+  const period = dealsDashboardWonPeriod(metricKey);
+  if (period === undefined) return buildEstimatorReportUrl(frontendUrl, officeId);
+  const params = new URLSearchParams({ filter: "won" });
+  if (period) params.set("period", period);
+  params.set("scope", "all");
   if (officeId) params.set("officeId", officeId);
   return `${frontendUrl.replace(/\/+$/, "")}/deals?${params.toString()}`;
 }
@@ -1035,9 +1074,25 @@ function wonMetricReportLabel(metricKey: string | null | undefined): string {
 }
 
 function relativeWonMetricReportLink(metricKey: string | null | undefined): string {
-  return isDealsDashboardWonMetric(metricKey)
-    ? "/deals?filter=won&period=ytd&scope=all"
-    : "/reports/operations/estimator-pipeline";
+  const period = dealsDashboardWonPeriod(metricKey);
+  if (period === undefined) return "/reports/operations/estimator-pipeline";
+  const params = new URLSearchParams({ filter: "won" });
+  if (period) params.set("period", period);
+  params.set("scope", "all");
+  return `/deals?${params.toString()}`;
+}
+
+function deliveryLeaseRetryAfterSeconds(value: unknown): number {
+  const seconds = numericValue(value);
+  return seconds == null ? WON_METRIC_REDUCTION_DELIVERY_LEASE_SECONDS : Math.max(1, Math.ceil(seconds));
+}
+
+function deferActiveDeliveryLease(runAfterSeconds: number): DeferredJobResult {
+  return {
+    status: "pending",
+    error: "Won metric reduction delivery is waiting for an active recipient lease",
+    runAfterSeconds: Math.max(1, Math.ceil(runAfterSeconds)),
+  };
 }
 
 function relativeDealLink(dealId: string): string {

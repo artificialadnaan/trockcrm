@@ -28,11 +28,9 @@ import { runRfpBidBoardCreateDeadLetterSweep } from "./jobs/rfp-bidboard-create.
 import { runRfpVoteInvitationDeadLetterSweep } from "./jobs/rfp-vote-invitation.js";
 import { runReportsExecutionTick } from "./jobs/reports-execution.js";
 import { runRepPerformanceRollup } from "./jobs/rep-performance-rollup.js";
-import { enableWonMetricReductionAlertDelivery } from "./jobs/won-metric-reduction-alert.js";
 
 const POLL_INTERVAL_MS = 2000; // Poll job queue every 2 seconds
 const RFP_DEAD_LETTER_SWEEP_INTERVAL_MS = 60000;
-const WON_METRIC_DELIVERY_GATE_RETRY_INTERVAL_MS = 60000;
 const CALL_RECORDING_TRANSCRIPTION_INTERVAL_MS = parseInt(
   process.env.CALL_RECORDING_TRANSCRIPTION_INTERVAL_MS || "60000",
   10
@@ -43,18 +41,6 @@ async function main() {
 
   // Register job handlers
   registerAllJobs();
-
-  // The migration keeps its new queue type gated until a handler-capable worker reaches this point. Retry
-  // after startup too: this worker may be deployed slightly before migration 0184 during a rolling release.
-  await enableWonMetricReductionAlertDelivery();
-  setInterval(async () => {
-    try {
-      await enableWonMetricReductionAlertDelivery();
-    } catch (err) {
-      console.error("[Worker:won_metric_reduction_alert] Delivery-gate enable failed:", err);
-    }
-  }, WON_METRIC_DELIVERY_GATE_RETRY_INTERVAL_MS);
-  console.log(`[Worker:won_metric_reduction_alert] Delivery-gate retry every ${WON_METRIC_DELIVERY_GATE_RETRY_INTERVAL_MS}ms`);
 
   // Recover stale jobs from previous crashes
   await recoverStaleJobs();

@@ -41,15 +41,22 @@ The `won_metric_reduction_alert` worker job sends one email per recipient and cr
 
 Every email includes the reason, exact action, changed field values, audit citation, release reference when present, before/after impact, and a deep link to the deal or matching Won surface.
 
-The migration starts with queue delivery gated off. It always persists reduction events, but only a worker that has registered the new handler opens the gate and atomically backfills those durable events. That prevents a still-running older worker from dead-lettering the newly introduced job type during a rolling deploy.
+The migration starts with queue delivery gated off. It always persists reduction events, but does not enqueue the new job type until an operator explicitly opens the gate. This keeps an older worker from dead-lettering the newly introduced job type during a rolling deploy. Opening the gate atomically backfills all durable events, so it must happen only after every pre-release worker has been drained and only handler-capable workers can poll the queue.
 
 ## Deployment order
 
-1. Deploy the handler-capable worker. It safely retries delivery-gate activation until migration `0184_won_metric_reduction_alerts.sql` exists.
-2. Apply the migration and deploy server code (the server tolerates the short pre-migration window without the definition-snapshot function).
+1. Deploy the handler-capable worker and apply the migration and server code. Leave the Won-metric delivery gate closed throughout the old/new worker overlap; the server tolerates the short pre-migration window without the definition-snapshot function.
+2. Drain and terminate every pre-release worker replica. Verify that only workers with the `won_metric_reduction_alert` handler are polling `public.job_queue`.
 3. Set `WON_METRIC_DECREASE_EMAIL_RECIPIENTS` in production to the approved leadership recipient list; do not set an invalid or incomplete list.
 4. Load the all-reps, current-YTD main Deals Dashboard and the Estimator Pipeline report once to establish their release-definition baselines.
-5. Confirm the worker is consuming `won_metric_reduction_alert` jobs and verify an alert through a non-production deal update.
+5. Only after step 2, have an operator open the gate and atomically backfill durable events by executing:
+
+   ```sql
+   SELECT public.enable_won_metric_reduction_alert_delivery();
+   ```
+
+   The returned integer is the number of durable events queued for delivery. Do not execute this SQL while an old worker can still poll the queue.
+6. Confirm the handler-capable worker is consuming `won_metric_reduction_alert` jobs and verify an alert through a non-production deal update.
 
 ## Acceptance checks
 

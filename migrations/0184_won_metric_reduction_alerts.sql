@@ -167,8 +167,10 @@ AS $$
 DECLARE
   old_stage text := COALESCE(p_old->>p_stage_key, '');
   new_stage text := COALESCE(p_new->>p_stage_key, '');
-  old_rep text := NULLIF(p_old->>'assignedRepId', '');
-  new_rep text := NULLIF(p_new->>'assignedRepId', '');
+  old_assigned_rep text := NULLIF(p_old->>'assignedRepId', '');
+  new_assigned_rep text := NULLIF(p_new->>'assignedRepId', '');
+  old_estimator_rep text := NULLIF(p_old->>'estimatorUserId', '');
+  new_estimator_rep text := NULLIF(p_new->>'estimatorUserId', '');
   old_change_order boolean := COALESCE((p_old->>'isChangeOrder')::boolean, false);
   new_change_order boolean := COALESCE((p_new->>'isChangeOrder')::boolean, false);
   old_date date := NULLIF(p_old->>'wonClosedDate', '')::date;
@@ -203,6 +205,14 @@ DECLARE
   new_count integer;
   old_period_value numeric;
   new_period_value numeric;
+  involved_rep text;
+  processed_involved_reps text[] := ARRAY[]::text[];
+  old_involved boolean;
+  new_involved boolean;
+  old_involved_count integer;
+  new_involved_count integer;
+  old_involved_value numeric;
+  new_involved_value numeric;
   result jsonb := '{}'::jsonb;
 BEGIN
   old_eligible :=
@@ -263,41 +273,41 @@ BEGIN
       );
     END IF;
 
-    IF p_include_assigned_rep AND old_rep IS NOT DISTINCT FROM new_rep THEN
-      IF old_rep IS NOT NULL AND (old_count <> new_count OR old_period_value <> new_period_value) THEN
-        result := result || jsonb_build_object(
-          'assigned_rep.' || old_rep || '.' || metric_key,
-          jsonb_build_object(
-            'scope', 'assigned_rep', 'scopeId', old_rep, 'metric', metric_key,
-            'countBefore', old_count, 'countAfter', new_count, 'countDelta', new_count - old_count,
-            'before', old_period_value, 'after', new_period_value, 'delta', new_period_value - old_period_value,
-            'unit', 'usd'
-          )
-        );
-      END IF;
-    ELSIF p_include_assigned_rep THEN
-      IF old_rep IS NOT NULL AND (old_count <> 0 OR old_period_value <> 0) THEN
-        result := result || jsonb_build_object(
-          'assigned_rep.' || old_rep || '.' || metric_key,
-          jsonb_build_object(
-            'scope', 'assigned_rep', 'scopeId', old_rep, 'metric', metric_key,
-            'countBefore', old_count, 'countAfter', 0, 'countDelta', -old_count,
-            'before', old_period_value, 'after', 0, 'delta', -old_period_value,
-            'unit', 'usd'
-          )
-        );
-      END IF;
-      IF new_rep IS NOT NULL AND (new_count <> 0 OR new_period_value <> 0) THEN
-        result := result || jsonb_build_object(
-          'assigned_rep.' || new_rep || '.' || metric_key,
-          jsonb_build_object(
-            'scope', 'assigned_rep', 'scopeId', new_rep, 'metric', metric_key,
-            'countBefore', 0, 'countAfter', new_count, 'countDelta', new_count,
-            'before', 0, 'after', new_period_value, 'delta', new_period_value,
-            'unit', 'usd'
-          )
-        );
-      END IF;
+    IF p_include_assigned_rep THEN
+      -- The Deals board's established assigned_rep scope includes every involved rep: the assignee
+      -- and estimator. Keep that key/scope stable while counting a user only once if they hold both roles.
+      processed_involved_reps := ARRAY[]::text[];
+      FOREACH involved_rep IN ARRAY ARRAY[
+        old_assigned_rep, old_estimator_rep, new_assigned_rep, new_estimator_rep
+      ] LOOP
+        IF involved_rep IS NULL OR involved_rep = ANY(processed_involved_reps) THEN CONTINUE; END IF;
+        processed_involved_reps := array_append(processed_involved_reps, involved_rep);
+
+        old_involved :=
+          (old_assigned_rep IS NOT NULL AND involved_rep = old_assigned_rep)
+          OR (old_estimator_rep IS NOT NULL AND involved_rep = old_estimator_rep);
+        new_involved :=
+          (new_assigned_rep IS NOT NULL AND involved_rep = new_assigned_rep)
+          OR (new_estimator_rep IS NOT NULL AND involved_rep = new_estimator_rep);
+        old_involved_count := CASE WHEN old_involved THEN old_count ELSE 0 END;
+        new_involved_count := CASE WHEN new_involved THEN new_count ELSE 0 END;
+        old_involved_value := CASE WHEN old_involved THEN old_period_value ELSE 0 END;
+        new_involved_value := CASE WHEN new_involved THEN new_period_value ELSE 0 END;
+
+        IF old_involved_count <> new_involved_count OR old_involved_value <> new_involved_value THEN
+          result := result || jsonb_build_object(
+            'assigned_rep.' || involved_rep || '.' || metric_key,
+            jsonb_build_object(
+              'scope', 'assigned_rep', 'scopeId', involved_rep, 'metric', metric_key,
+              'countBefore', old_involved_count, 'countAfter', new_involved_count,
+              'countDelta', new_involved_count - old_involved_count,
+              'before', old_involved_value, 'after', new_involved_value,
+              'delta', new_involved_value - old_involved_value,
+              'unit', 'usd'
+            )
+          );
+        END IF;
+      END LOOP;
     END IF;
   END LOOP;
   RETURN result;
@@ -329,7 +339,7 @@ DECLARE
 BEGIN
   FOREACH key IN ARRAY ARRAY[
     'stageId', 'wonClosedDate', 'awardedAmount', 'bidBoardTotalSales', 'bidEstimate', 'ddEstimate',
-    'onHold', 'isActive', 'isTestData', 'isChangeOrder', 'assignedRepId', 'bidBoardStageSlug'
+    'onHold', 'isActive', 'isTestData', 'isChangeOrder', 'assignedRepId', 'estimatorUserId', 'bidBoardStageSlug'
   ] LOOP
     IF p_old->key IS DISTINCT FROM p_new->key THEN
       output_key := CASE key
@@ -344,6 +354,7 @@ BEGIN
         WHEN 'isTestData' THEN 'is_test_data'
         WHEN 'isChangeOrder' THEN 'is_change_order'
         WHEN 'assignedRepId' THEN 'assigned_rep_id'
+        WHEN 'estimatorUserId' THEN 'estimator_user_id'
         WHEN 'bidBoardStageSlug' THEN 'bid_board_stage_slug'
       END;
       result := result || jsonb_build_object(output_key, jsonb_build_object('from', p_old->key, 'to', p_new->key));
@@ -369,6 +380,7 @@ BEGIN
   IF p_old->'isChangeOrder' IS DISTINCT FROM p_new->'isChangeOrder' THEN RETURN 'won_change_order_classification_changed'; END IF;
   IF p_old->'wonClosedDate' IS DISTINCT FROM p_new->'wonClosedDate' THEN RETURN 'won_date_rebucketed'; END IF;
   IF p_old->'assignedRepId' IS DISTINCT FROM p_new->'assignedRepId' THEN RETURN 'won_reassigned'; END IF;
+  IF p_old->'estimatorUserId' IS DISTINCT FROM p_new->'estimatorUserId' THEN RETURN 'won_estimator_reassigned'; END IF;
   IF p_old->'awardedAmount' IS DISTINCT FROM p_new->'awardedAmount'
      OR p_old->'bidBoardTotalSales' IS DISTINCT FROM p_new->'bidBoardTotalSales'
      OR p_old->'bidEstimate' IS DISTINCT FROM p_new->'bidEstimate'
@@ -423,7 +435,7 @@ BEGIN
     'bidBoardStageSlug', OLD.bid_board_stage_slug,
     'wonClosedDate', OLD.won_closed_date,
     'isActive', OLD.is_active, 'isTestData', OLD.is_test_data, 'isChangeOrder', OLD.is_change_order, 'onHold', OLD.on_hold,
-    'assignedRepId', OLD.assigned_rep_id, 'awardedAmount', OLD.awarded_amount,
+    'assignedRepId', OLD.assigned_rep_id, 'estimatorUserId', OLD.estimator_user_id, 'awardedAmount', OLD.awarded_amount,
     'bidBoardTotalSales', OLD.bid_board_total_sales, 'bidEstimate', OLD.bid_estimate, 'ddEstimate', OLD.dd_estimate
   );
   IF TG_OP = 'DELETE' THEN
@@ -439,7 +451,7 @@ BEGIN
       'bidBoardStageSlug', NEW.bid_board_stage_slug,
       'wonClosedDate', NEW.won_closed_date,
       'isActive', NEW.is_active, 'isTestData', NEW.is_test_data, 'isChangeOrder', NEW.is_change_order, 'onHold', NEW.on_hold,
-      'assignedRepId', NEW.assigned_rep_id, 'awardedAmount', NEW.awarded_amount,
+      'assignedRepId', NEW.assigned_rep_id, 'estimatorUserId', NEW.estimator_user_id, 'awardedAmount', NEW.awarded_amount,
       'bidBoardTotalSales', NEW.bid_board_total_sales, 'bidEstimate', NEW.bid_estimate, 'ddEstimate', NEW.dd_estimate
     );
     deal_uuid := NEW.id;
@@ -495,6 +507,7 @@ BEGIN
       WHEN 'won_change_order_classification_changed' THEN 'Change-order classification changed'
       WHEN 'won_date_rebucketed' THEN 'Won closed date changed'
       WHEN 'won_reassigned' THEN 'Won deal reassigned'
+      WHEN 'won_estimator_reassigned' THEN 'Won deal estimator reassigned'
       WHEN 'won_value_reduced' THEN 'Won value changed'
       ELSE 'Won contribution changed'
     END
@@ -675,7 +688,7 @@ BEGIN
     EXECUTE format('DROP TRIGGER IF EXISTS won_metric_reduction_update_trg ON %I.deals', schema_name);
     EXECUTE format('DROP TRIGGER IF EXISTS won_metric_reduction_delete_trg ON %I.deals', schema_name);
     EXECUTE format(
-      'CREATE TRIGGER won_metric_reduction_update_trg AFTER UPDATE OF stage_id, won_closed_date, awarded_amount, bid_board_total_sales, bid_estimate, dd_estimate, on_hold, is_active, is_test_data, is_change_order, assigned_rep_id, bid_board_stage_slug ON %I.deals FOR EACH ROW EXECUTE FUNCTION public.capture_won_metric_reduction()',
+      'CREATE TRIGGER won_metric_reduction_update_trg AFTER UPDATE OF stage_id, won_closed_date, awarded_amount, bid_board_total_sales, bid_estimate, dd_estimate, on_hold, is_active, is_test_data, is_change_order, assigned_rep_id, estimator_user_id, bid_board_stage_slug ON %I.deals FOR EACH ROW EXECUTE FUNCTION public.capture_won_metric_reduction()',
       schema_name
     );
     EXECUTE format(
@@ -690,7 +703,7 @@ END $tenant$;
 DROP TRIGGER IF EXISTS won_metric_reduction_update_trg ON office_dallas.deals;
 DROP TRIGGER IF EXISTS won_metric_reduction_delete_trg ON office_dallas.deals;
 CREATE TRIGGER won_metric_reduction_update_trg
-  AFTER UPDATE OF stage_id, won_closed_date, awarded_amount, bid_board_total_sales, bid_estimate, dd_estimate, on_hold, is_active, is_test_data, is_change_order, assigned_rep_id, bid_board_stage_slug
+  AFTER UPDATE OF stage_id, won_closed_date, awarded_amount, bid_board_total_sales, bid_estimate, dd_estimate, on_hold, is_active, is_test_data, is_change_order, assigned_rep_id, estimator_user_id, bid_board_stage_slug
   ON office_dallas.deals
   FOR EACH ROW EXECUTE FUNCTION public.capture_won_metric_reduction();
 CREATE TRIGGER won_metric_reduction_delete_trg

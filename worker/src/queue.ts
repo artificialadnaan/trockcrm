@@ -14,6 +14,13 @@ export type JobHandlerResult =
   | {
       status: "dead";
       error: string;
+    }
+  | {
+      // A handler can deliberately defer work that is still owned by another durable lease. This is not
+      // a failure: preserve the job as pending without treating the handler invocation as completed.
+      status: "pending";
+      error: string;
+      runAfterSeconds: number;
     };
 
 type JobHandler = (payload: any, officeId: string | null) => Promise<JobHandlerResult>;
@@ -26,6 +33,18 @@ export function registerJobHandler(jobType: string, handler: JobHandler) {
 
 export function deadJob(error: string): Extract<JobHandlerResult, { status: "dead" }> {
   return { status: "dead", error };
+}
+
+/** Return work to the queue at a specific time without recording a terminal completion. */
+export function deferJob(
+  error: string,
+  runAfterSeconds: number,
+): Extract<JobHandlerResult, { status: "pending" }> {
+  return {
+    status: "pending",
+    error,
+    runAfterSeconds: Math.max(1, Math.ceil(Number.isFinite(runAfterSeconds) ? runAfterSeconds : 1)),
+  };
 }
 
 let polling = false;
@@ -230,6 +249,15 @@ async function processJob(job: any): Promise<void> {
     if (result && result.status === "dead") {
       outcome = { status: "dead", error: result.error };
       console.error(`[Worker] Job ${job.id} (${job.job_type}) rejected without retry: ${result.error}`);
+    } else if (result && result.status === "pending") {
+      outcome = {
+        status: "pending",
+        error: result.error,
+        runAfterSeconds: Math.max(1, Math.ceil(result.runAfterSeconds)),
+      };
+      console.log(
+        `[Worker] Job ${job.id} (${job.job_type}) deferred for ${outcome.runAfterSeconds}s: ${result.error}`,
+      );
     } else {
       outcome = { status: "completed" };
     }

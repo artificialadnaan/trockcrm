@@ -11,7 +11,7 @@ vi.mock("../src/db.js", () => ({
   },
 }));
 
-const { deadJob, pollJobs, registerJobHandler, recoverStaleJobs, __resetQueueStateForTest } = await import("../src/queue.js");
+const { deadJob, deferJob, pollJobs, registerJobHandler, recoverStaleJobs, __resetQueueStateForTest } = await import("../src/queue.js");
 
 describe("worker queue", () => {
   beforeEach(() => {
@@ -65,6 +65,36 @@ describe("worker queue", () => {
       "[Worker] Job 41 (unit_test_non_retryable_job) rejected without retry: missing requestedBy"
     );
     expect(client.release).toHaveBeenCalledTimes(1);
+  });
+
+  it("reschedules an explicitly deferred handler result instead of completing it", async () => {
+    const jobType = "unit_test_explicit_defer";
+    registerJobHandler(jobType, async () => deferJob("waiting for another worker lease", 300));
+    const client = {
+      query: vi.fn(async (sql: string) => {
+        if (sql === "BEGIN" || sql === "COMMIT") return { rows: [] };
+        if (sql.includes("SELECT * FROM public.job_queue")) {
+          return {
+            rows: [
+              { id: 42, job_type: jobType, office_id: "office-1", payload: {}, attempts: 0, max_attempts: 5 },
+            ],
+          };
+        }
+        if (sql.includes("UPDATE public.job_queue SET status = 'processing'")) return { rows: [] };
+        throw new Error(`Unexpected client SQL: ${sql}`);
+      }),
+      release: vi.fn(),
+    };
+    connectMock.mockResolvedValue(client);
+    queryMock.mockResolvedValue({ rows: [] });
+
+    await pollJobs();
+
+    expect(queryMock).toHaveBeenCalledWith(
+      expect.stringContaining("SET status = 'pending'"),
+      ["waiting for another worker lease", 300, 42, 1],
+    );
+    expect(queryMock).not.toHaveBeenCalledWith(expect.stringContaining("SET status = 'completed'"), expect.anything());
   });
 
   it("releases the poll connection BEFORE running job handlers (so nested pool.connect can't deadlock)", async () => {

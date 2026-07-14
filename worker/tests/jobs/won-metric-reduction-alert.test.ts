@@ -100,7 +100,7 @@ function makeQuery(options: { event?: Record<string, unknown>; sentRecipients?: 
     }
     if (sql.includes("FROM public.won_metric_reduction_delivery_receipts")) {
       const receipt = receipts.get(String(params[1]));
-      return { rows: receipt ? [receipt] : [] };
+      return { rows: receipt ? [{ ...receipt, retry_after_seconds: 300 }] : [] };
     }
     if (sql.includes("UPDATE public.won_metric_reduction_delivery_receipts")) {
       const recipient = String(params[1]);
@@ -259,20 +259,43 @@ describe("handleWonMetricReductionAlert", () => {
     expect(sendEmail).not.toHaveBeenCalled();
   });
 
-  it("does not send concurrently when another worker owns a fresh unsent lease", async () => {
+  it("defers until a fresh unsent lease expires instead of completing without delivery", async () => {
     const { query, calls } = makeQuery({ activeLeaseRecipients: [TAKASHI] });
     const sendEmail = vi.fn();
     const logger = { log: vi.fn(), warn: vi.fn(), error: vi.fn() };
 
-    await handleWonMetricReductionAlert(
+    const result = await handleWonMetricReductionAlert(
       { eventId: EVENT_ID },
       null,
       { query, sendEmail, env: { ...ENV, WON_METRIC_DECREASE_EMAIL_RECIPIENTS: TAKASHI }, logger },
     );
 
+    expect(result).toEqual({
+      status: "pending",
+      error: "Won metric reduction delivery is waiting for an active recipient lease",
+      runAfterSeconds: 300,
+    });
     expect(sendEmail).not.toHaveBeenCalled();
     expect(calls.some((call) => call.sql.includes("INSERT INTO office_dallas.notifications"))).toBe(false);
     expect(logger.log).toHaveBeenCalledWith(expect.stringContaining("active delivery lease"), expect.objectContaining({ recipientEmail: TAKASHI }));
+    const receiptLookup = calls.find((call) => call.sql.includes("FROM public.won_metric_reduction_delivery_receipts"));
+    expect(receiptLookup?.sql).toContain("retry_after_seconds");
+  });
+
+  it("delivers to other recipients before deferring an event with one active lease", async () => {
+    const { query, receipts } = makeQuery({ activeLeaseRecipients: [TAKASHI] });
+    const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "resend-adnaan" });
+
+    const result = await handleWonMetricReductionAlert(
+      { eventId: EVENT_ID },
+      null,
+      { query, sendEmail, env: ENV, logger: silent },
+    );
+
+    expect(result).toMatchObject({ status: "pending", runAfterSeconds: 300 });
+    expect(sendEmail).toHaveBeenCalledTimes(1);
+    expect(sendEmail).toHaveBeenCalledWith(ADNAAN, expect.any(String), expect.any(String), expect.any(Object));
+    expect(receipts.get(ADNAAN)?.sent_at).not.toBeNull();
   });
 
   it("skips an event whose impacts contain no negative value or count delta", async () => {
@@ -490,7 +513,7 @@ describe("buildWonMetricReductionEmail", () => {
         actionLabel: "Estimator Won YTD began excluding change orders",
         reasonCode: "report_definition_changed",
         changedFields: null,
-        auditReference: null,
+        auditReference: { kind: "release", previousDefinitionHash: "before", definitionHash: "after" },
       },
       impact,
       officeId: OFFICE_ID,
@@ -500,6 +523,54 @@ describe("buildWonMetricReductionEmail", () => {
     expect(email.reportUrl).toContain("/reports/operations/estimator-pipeline?officeId=");
     expect(email.html).toContain("Report Definition Changed");
     expect(email.html).toContain("github.com/artificialadnaan/trockcrm/pull/916");
+    expect(email.text).not.toContain("Audit citation:");
+    expect(email.html).not.toContain("Audit citation");
+  });
+
+  it("routes every canonical Deals Won period to the matching report in email and in-app", async () => {
+    const periods = [
+      ["won_all_time", "https://trockcrm.com/deals?filter=won&scope=all&officeId=" + OFFICE_ID, "/deals?filter=won&scope=all"],
+      ["won_wtd", "https://trockcrm.com/deals?filter=won&period=week&scope=all&officeId=" + OFFICE_ID, "/deals?filter=won&period=week&scope=all"],
+      ["won_mtd", "https://trockcrm.com/deals?filter=won&period=mtd&scope=all&officeId=" + OFFICE_ID, "/deals?filter=won&period=mtd&scope=all"],
+      ["won_qtd", "https://trockcrm.com/deals?filter=won&period=qtd&scope=all&officeId=" + OFFICE_ID, "/deals?filter=won&period=qtd&scope=all"],
+      ["won_ytd", "https://trockcrm.com/deals?filter=won&period=ytd&scope=all&officeId=" + OFFICE_ID, "/deals?filter=won&period=ytd&scope=all"],
+    ] as const;
+
+    for (const [metric, expectedReportUrl, expectedNotificationLink] of periods) {
+      const event = {
+        ...BASE_EVENT,
+        deal_id: null,
+        deal_name: null,
+        deal_number: null,
+        reason_code: "deal_deleted",
+        report_metric_key: `office.${metric}`,
+        impacts: {
+          [`office.${metric}`]: {
+            scope: "office",
+            metric,
+            countBefore: 1,
+            countAfter: 0,
+            countDelta: -1,
+            before: 300000,
+            after: 0,
+            delta: -300000,
+            unit: "usd",
+          },
+        },
+      };
+      const { query, calls } = makeQuery({ event });
+      const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: `resend-${metric}` });
+
+      await handleWonMetricReductionAlert(
+        { eventId: EVENT_ID },
+        null,
+        { query, sendEmail, env: { ...ENV, WON_METRIC_DECREASE_EMAIL_RECIPIENTS: TAKASHI }, logger: silent },
+      );
+
+      expect(sendEmail.mock.calls[0]?.[3].text).toContain(expectedReportUrl);
+      const notificationInsert = calls.find((call) => call.sql.includes("INSERT INTO office_dallas.notifications"));
+      expect(notificationInsert?.params[4]).toBe(expectedNotificationLink);
+    }
   });
 
   it("links a definition-only main Deals Dashboard metric back to its Won YTD view", () => {
