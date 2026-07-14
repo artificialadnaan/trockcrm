@@ -297,6 +297,85 @@ describe("handleWonMetricReductionAlert", () => {
 });
 
 describe("buildWonMetricReductionEmail", () => {
+  it("leads with the reduced project count when Won value increased", () => {
+    const impact = resolveWonMetricImpact(
+      {
+        "office.won_ytd": {
+          scope: "office",
+          metric: "won_ytd",
+          countBefore: 10,
+          countAfter: 9,
+          countDelta: -1,
+          before: 100,
+          after: 200,
+          delta: 100,
+          unit: "usd",
+        },
+      },
+      "won_ytd",
+    );
+    const email = buildWonMetricReductionEmail({
+      event: {
+        dealId: DEAL_ID,
+        dealName: "Tides Park Lane",
+        dealNumber: "DFW-9-15926-ae",
+        reportMetricKey: "won_ytd",
+        definitionVersion: null,
+        releaseReference: null,
+        actionLabel: "Won count changed",
+        reasonCode: "won_contribution_reduced",
+        changedFields: null,
+        auditReference: null,
+      },
+      impact,
+      officeId: OFFICE_ID,
+      frontendUrl: "https://trockcrm.com",
+    });
+
+    expect(email.subject).toBe("Won metric reduced: Won YTD −1");
+    expect(email.subject).not.toContain("+$100");
+    expect(email.text).toContain("Won YTD: $100.00 → $200.00 (+$100.00); projects: 10 → 9 (−1)");
+  });
+
+  it("uses the metric report for an archived deal instead of an inactive detail URL", async () => {
+    const event = {
+      ...BASE_EVENT,
+      action_label: "Deal deactivated",
+      reason_code: "archived_or_deactivated",
+      report_metric_key: "deals_dashboard.won_ytd",
+      impacts: {
+        "office.deals_dashboard.won_ytd": {
+          scope: "office",
+          metric: "deals_dashboard.won_ytd",
+          countBefore: 276,
+          countAfter: 275,
+          countDelta: -1,
+          before: 18_000_000,
+          after: 17_900_000,
+          delta: -100_000,
+          unit: "usd",
+        },
+      },
+    };
+    const { query, calls } = makeQuery({ event });
+    const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "resend-archive" });
+
+    await handleWonMetricReductionAlert(
+      { eventId: EVENT_ID },
+      null,
+      { query, sendEmail, env: { ...ENV, WON_METRIC_DECREASE_EMAIL_RECIPIENTS: TAKASHI }, logger: silent },
+    );
+
+    const [, , html, options] = sendEmail.mock.calls[0]!;
+    const expectedReportUrl = "https://trockcrm.com/deals?filter=won&period=ytd&officeId=" + OFFICE_ID;
+    expect(options.text).toContain(expectedReportUrl);
+    expect(html).toContain(expectedReportUrl.replace(/&/g, "&amp;"));
+    expect(html).toContain("Open Deals Dashboard");
+    expect(html).not.toContain("/deals/" + DEAL_ID + "?");
+    const notificationInsert = calls.find((call) => call.sql.includes("INSERT INTO office_dallas.notifications"));
+    expect(notificationInsert?.params[4]).toBe("/deals?filter=won&period=ytd");
+  });
+
   it("uses a report link and release citation when an event is definition-only and has no deal", () => {
     const impact = resolveWonMetricImpact(BASE_EVENT.impacts, "director.won_ytd");
     const email = buildWonMetricReductionEmail({

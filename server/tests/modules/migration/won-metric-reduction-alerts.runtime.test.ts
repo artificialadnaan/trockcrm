@@ -111,6 +111,18 @@ function json(value: unknown): Record<string, any> {
 }
 
 describe("migration 0184 — Won metric reduction alerts (runtime, PGlite)", () => {
+  it("adds won_metric_decrease to the deployed public notification enum", async () => {
+    pg = await setup();
+
+    const labels = await pg.query<{ enumlabel: string }>(
+      "SELECT e.enumlabel FROM pg_enum e JOIN pg_type t ON t.oid = e.enumtypid " +
+        "JOIN pg_namespace n ON n.oid = t.typnamespace " +
+        "WHERE t.typname = 'notification_type' AND n.nspname = 'public' ORDER BY e.enumsortorder",
+    );
+    expect(labels.rows.map((row) => row.enumlabel)).toContain("won_metric_decrease");
+    await expect(pg.query("SELECT 'won_metric_decrease'::public.notification_type")).resolves.toBeDefined();
+  });
+
   it("persists a reduction outbox event with the exact audit action and queues delivery", async () => {
     pg = await setup();
     await insertWonDeal(pg);

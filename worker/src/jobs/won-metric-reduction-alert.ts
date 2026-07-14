@@ -406,20 +406,22 @@ export function resolveWonMetricImpact(impacts: unknown, reportMetricKey: string
   };
 }
 
+type WonMetricReductionEmailEvent = Pick<
+  WonMetricReductionEvent,
+  | "dealId"
+  | "dealName"
+  | "dealNumber"
+  | "reportMetricKey"
+  | "definitionVersion"
+  | "releaseReference"
+  | "actionLabel"
+  | "reasonCode"
+  | "changedFields"
+  | "auditReference"
+> & { newSnapshot?: unknown };
+
 export function buildWonMetricReductionEmail(input: {
-  event: Pick<
-    WonMetricReductionEvent,
-    | "dealId"
-    | "dealName"
-    | "dealNumber"
-    | "reportMetricKey"
-    | "definitionVersion"
-    | "releaseReference"
-    | "actionLabel"
-    | "reasonCode"
-    | "changedFields"
-    | "auditReference"
-  >;
+  event: WonMetricReductionEmailEvent;
   impact: WonMetricImpact;
   officeId?: string | null;
   frontendUrl: string;
@@ -434,7 +436,9 @@ export function buildWonMetricReductionEmail(input: {
   const releaseReference = input.event.releaseReference;
   const dealName = input.event.dealName ?? "Deal";
   const dealNumber = input.event.dealNumber;
-  const dealUrl = input.event.dealId ? buildDealUrl(input.frontendUrl, input.event.dealId, input.officeId) : null;
+  const dealUrl = canLinkToDeal(input.event)
+    ? buildDealUrl(input.frontendUrl, input.event.dealId!, input.officeId)
+    : null;
   const reportMetricKey = input.impact.metricKey ?? input.event.reportMetricKey;
   const reportUrl = buildWonMetricReportUrl(input.frontendUrl, reportMetricKey, input.officeId);
 
@@ -510,7 +514,11 @@ async function ensureInAppNotification(input: {
     );
     const title = truncate(email.subject.replace(/^Won metric reduced:\s*/i, "Won metric reduced: "), 500);
     const body = truncate(email.text.replace(/\n+/g, " · "), 3_500);
-    const link = event.dealId ? relativeDealLink(event.dealId) : relativeWonMetricReportLink(event.reportMetricKey);
+    // Keep the in-app card aligned with the email CTA. Archived/deleted deals intentionally 404 through
+    // the normal detail route, so those alerts must lead to the report rather than a dead deal link.
+    const link = email.dealUrl && event.dealId
+      ? relativeDealLink(event.dealId)
+      : relativeWonMetricReportLink(event.reportMetricKey);
     for (const user of users.rows) {
       const userId = normalizeUuid(user.id);
       if (!userId) continue;
@@ -825,10 +833,26 @@ function formatImpact(impact: WonMetricImpact, metricLabel: string): string {
 }
 
 function formatImpactDelta(impact: WonMetricImpact): string {
-  const countIsTheOnlyReduction = (impact.delta == null || impact.delta === 0) && (impact.countDelta ?? 0) < 0;
+  // A metric is alert-worthy when EITHER dimension declines. If dollar value is flat or higher while
+  // the number of Won projects falls, lead with the negative project count instead of a misleading +$ badge.
+  const countIsTheReportedReduction = (impact.countDelta ?? 0) < 0 && (impact.delta == null || impact.delta >= 0);
   return formatSigned(
-    countIsTheOnlyReduction ? impact.countDelta ?? 0 : impact.delta ?? impact.countDelta ?? 0,
-    countIsTheOnlyReduction ? false : isCurrencyImpact(impact),
+    countIsTheReportedReduction ? impact.countDelta ?? 0 : impact.delta ?? impact.countDelta ?? 0,
+    countIsTheReportedReduction ? false : isCurrencyImpact(impact),
+  );
+}
+
+function canLinkToDeal(event: WonMetricReductionEmailEvent): boolean {
+  // The normal deal-detail route intentionally hides is_active=false rows. The trigger assigns these reason
+  // codes for soft and hard deletion, so an active-only deal URL would be unusable for the recipient. Also
+  // inspect the snapshot in case a compound update changes stage and activity in the same transaction.
+  const snapshot = parseJson(event.newSnapshot);
+  const deactivatedInSnapshot = isRecord(snapshot) && (snapshot.isActive === false || snapshot.isActive === "false");
+  return (
+    Boolean(event.dealId) &&
+    event.reasonCode !== "archived_or_deactivated" &&
+    event.reasonCode !== "deal_deleted" &&
+    !deactivatedInSnapshot
   );
 }
 

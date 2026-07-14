@@ -388,6 +388,7 @@ export const NOTIFICATION_TYPES = [
   "stage_change",
   "touchpoint_alert",
   "system",
+  "won_metric_decrease",
 ] as const;
 export type NotificationType = (typeof NOTIFICATION_TYPES)[number];
 
