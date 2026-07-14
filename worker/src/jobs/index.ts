@@ -38,6 +38,7 @@ import { handleRfpOverrideApprovedEmail, RFP_OVERRIDE_APPROVED_JOB } from "./rfp
 import { handleRfpVoteInvitation, RFP_VOTE_INVITATION_JOB } from "./rfp-vote-invitation.js";
 import { handleRfpBidBoardCreate, RFP_BIDBOARD_CREATE_JOB } from "./rfp-bidboard-create.js";
 import { handleRfpVoteOutcomeEmail, RFP_VOTE_OUTCOME_JOB } from "./rfp-vote-outcome.js";
+import { handleWonMetricReductionAlert, WON_METRIC_REDUCTION_ALERT_JOB } from "./won-metric-reduction-alert.js";
 
 const SERVER_MODULE_ROOT =
   process.env.NODE_ENV === "production" ? "../../../server/dist/modules" : "../../../server/src/modules";
@@ -136,6 +137,7 @@ export function registerAllJobs() {
   registerJobHandler(RFP_VOTE_INVITATION_JOB, handleRfpVoteInvitation);
   registerJobHandler(RFP_BIDBOARD_CREATE_JOB, handleRfpBidBoardCreate);
   registerJobHandler(RFP_VOTE_OUTCOME_JOB, handleRfpVoteOutcomeEmail);
+  registerJobHandler(WON_METRIC_REDUCTION_ALERT_JOB, handleWonMetricReductionAlert);
 
   registerJobHandler("reports_execution", async () => {
     await runReportsExecutionTick();

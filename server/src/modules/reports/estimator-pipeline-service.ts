@@ -26,6 +26,7 @@ import {
 import { WON_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
 import { aliasedEffectiveStageAgeDaysSql } from "../deals/deal-filter-predicates.js";
 import { getWtdPeriod } from "../../lib/period.js";
+import { isUndefinedFunctionError } from "../../lib/db-errors.js";
 import { dealValueSqlForBasis } from "./foundations.js";
 
 const { companies, deals, pipelineStageConfig, properties, users } = schema;
@@ -58,6 +59,14 @@ const VALUE_BASIS_LABELS = {
   open: "Best current estimate",
   won: "Awarded-first won value",
 } as const;
+
+// This is a published-number contract, not a cosmetic version. Whenever the Won-YTD predicate, date basis,
+// or value basis changes, update both values in the same PR. The database records the last measured contract
+// and emits a release-cited outbox event if a new contract lowers the visible metric without any deal mutation.
+const ESTIMATOR_WON_YTD_DEFINITION_VERSION = "2026-07-14-v1";
+const ESTIMATOR_WON_YTD_DEFINITION_HASH = "estimator-won-ytd-v1";
+const ESTIMATOR_WON_YTD_RELEASE_REFERENCE =
+  "P0 remediation 2026-07-14: Estimator Pipeline Won YTD definition snapshot.";
 
 function wonYtdPeriod(now: Date): EstimatorPipelineWonPeriod {
   const { from, to } = getWtdPeriod("ytd", now);
@@ -107,7 +116,34 @@ function addMetric(target: EstimatorPipelineMetric, count: number, value: number
 }
 
 /**
- * Current, actionable base-project scope shared byte-for-byte by the overview and evidence queries.
+ * Persist the current result under its explicit metric-definition contract. The migration may be rolled out
+ * independently of the API during a deploy, so a missing function is deliberately treated as a no-op only
+ * for that narrow compatibility window. Any other database error must still fail the request/transaction.
+ */
+async function recordEstimatorWonYtdDefinition(
+  tenantDb: TenantDb,
+  won: EstimatorPipelineMetric,
+): Promise<void> {
+  try {
+    await tenantDb.execute(sql`
+      SELECT public.record_won_metric_definition_snapshot(
+        current_schema()::text,
+        ${"estimator_pipeline.won_ytd"},
+        ${ESTIMATOR_WON_YTD_DEFINITION_VERSION},
+        ${ESTIMATOR_WON_YTD_DEFINITION_HASH},
+        ${won.count},
+        ${won.value},
+        ${ESTIMATOR_WON_YTD_RELEASE_REFERENCE}
+      )
+    `);
+  } catch (error) {
+    if (isUndefinedFunctionError(error)) return;
+    throw error;
+  }
+}
+
+/**
+ * The overview and evidence queries share one canonical base-project scope.
  * The tenant itself is selected by req.tenantDb/X-Office-ID; never filter on the estimator's home office.
  */
 export function estimatorPipelineScopeSql(
@@ -357,6 +393,10 @@ export async function getEstimatorPipelineReport(
       warnings.push(`${target.name} is inactive. Existing assignments remain visible and may need reassignment.`);
     }
   }
+
+  // Keep this after the complete Won aggregation: it records exactly the number this response will publish.
+  // The tracker is transaction-safe and emits an outbox job only when a newly-versioned definition lowers it.
+  await recordEstimatorWonYtdDefinition(tenantDb, won);
 
   return {
     generatedAt: now.toISOString(),
