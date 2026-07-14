@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
+import { and, desc, eq, getTableColumns, inArray, isNull, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
 import { deals, fieldScorecards, fieldScorecardItems, fieldScorecardPhotos, files, jobQueue } from "@trock-crm/shared/schema";
@@ -88,6 +88,7 @@ interface ScorecardSummarySource {
   rating: string;
   superintendentName: string | null;
   pmName: string | null;
+  projectName?: string | null;
   projectNumber: string | null;
   criticalDeficiencies: string[] | null;
   submittedByName: string | null;
@@ -288,7 +289,7 @@ export async function createFieldScorecard(
     maxAttempts: 6,
   });
 
-  return { scorecard: toSummary(card), created: true };
+  return { scorecard: toSummary(card, project.name), created: true };
 }
 
 export async function listFieldScorecardsForProject(
@@ -297,13 +298,13 @@ export async function listFieldScorecardsForProject(
   dealId: string,
 ): Promise<{ scorecards: FieldScorecardSummary[] }> {
   // 404s if the deal isn't a browsable field project — same gate the project reads apply.
-  await assertActiveFieldProject(tenantDb, access, dealId);
+  const project = await assertActiveFieldProject(tenantDb, access, dealId);
   const rows = await tenantDb
     .select()
     .from(fieldScorecards)
     .where(and(eq(fieldScorecards.dealId, dealId), eq(fieldScorecards.isActive, true)))
     .orderBy(desc(fieldScorecards.submittedAt));
-  return { scorecards: rows.map(toSummary) };
+  return { scorecards: rows.map((row) => toSummary(row, project.name)) };
 }
 
 export async function listRecentFieldScorecards(
@@ -325,6 +326,7 @@ export async function listRecentFieldScorecards(
       sc.rating AS "rating",
       sc.superintendent_name AS "superintendentName",
       sc.pm_name AS "pmName",
+      d.name AS "projectName",
       sc.project_number AS "projectNumber",
       sc.critical_deficiencies AS "criticalDeficiencies",
       sc.submitted_by_name AS "submittedByName",
@@ -341,7 +343,7 @@ export async function listRecentFieldScorecards(
     LIMIT ${limit}
   `);
   const rows = (((result as any).rows ?? result) as ScorecardSummarySource[]) ?? [];
-  return { scorecards: rows.map(toSummary) };
+  return { scorecards: rows.map((row) => toSummary(row)) };
 }
 
 export async function getFieldScorecardDetail(
@@ -359,7 +361,7 @@ export async function getFieldScorecardDetail(
   if (!card) throw new AppError(404, "Scorecard not found");
   // Gate on the underlying project's browsability — a card whose deal is Lost/terminal/inactive is
   // hidden from the field surface, exactly like the project itself.
-  await assertActiveFieldProject(tenantDb, access, card.dealId);
+  const project = await assertActiveFieldProject(tenantDb, access, card.dealId);
 
   const itemRows = await tenantDb
     .select()
@@ -402,7 +404,7 @@ export async function getFieldScorecardDetail(
   );
 
   return {
-    ...toSummary(card),
+    ...toSummary(card, project.name),
     items,
     criticalDeficiencies: card.criticalDeficiencies ?? [],
     criticalDeficiencyNotes: card.criticalDeficiencyNotes ?? {},
@@ -545,10 +547,17 @@ export async function getFieldScorecardPdfDownload(
 
 // ── internals ───────────────────────────────────────────────────────────────
 
-async function findByClientSubmissionId(tenantDb: TenantDb, clientSubmissionId: string): Promise<ScorecardRow | null> {
+async function findByClientSubmissionId(
+  tenantDb: TenantDb,
+  clientSubmissionId: string,
+): Promise<(ScorecardRow & { projectName: string }) | null> {
   const rows = await tenantDb
-    .select()
+    .select({
+      ...getTableColumns(fieldScorecards),
+      projectName: deals.name,
+    })
     .from(fieldScorecards)
+    .innerJoin(deals, eq(deals.id, fieldScorecards.dealId))
     .where(eq(fieldScorecards.clientSubmissionId, clientSubmissionId))
     .limit(1);
   return rows[0] ?? null;
@@ -689,7 +698,7 @@ async function resolvePhotoLinks(
   return links;
 }
 
-function toSummary(row: ScorecardSummarySource): FieldScorecardSummary {
+function toSummary(row: ScorecardSummarySource, projectName = row.projectName ?? null): FieldScorecardSummary {
   const formVersion: ScorecardFormVersion = row.formVersion === 2 ? 2 : 1;
   const kind: ScorecardKind = row.kind === "leadership" ? "leadership" : "project";
   const rating = row.rating as ScorecardRating;
@@ -705,6 +714,7 @@ function toSummary(row: ScorecardSummarySource): FieldScorecardSummary {
     ratingLabel: ratingLabelFor(kind, formVersion, rating),
     superintendentName: row.superintendentName ?? null,
     pmName: row.pmName ?? null,
+    projectName,
     projectNumber: row.projectNumber ?? null,
     criticalDeficiencyCount: (row.criticalDeficiencies ?? []).length,
     submittedByName: row.submittedByName ?? null,

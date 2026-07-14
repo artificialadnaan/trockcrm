@@ -12,10 +12,17 @@ import {
   type ScorecardLeadershipSectionKey,
   type ScorecardSectionKey,
 } from "./scoring";
-import type { FieldScorecardItemView, FieldScorecardPhotoView } from "../api/types";
+import type { FieldScorecardItemView, FieldScorecardPhotoView, FieldScorecardSummary } from "../api/types";
 
 /** 0–100 max the detail summary is scored against (re-exported for the view header). */
 export const SCORECARD_TOTAL_POINTS = FIELD_SCORECARD_TOTAL_POINTS;
+
+export function scorecardDetailHeaderTitle(
+  scorecard: Pick<FieldScorecardSummary, "kind"> | null | undefined,
+): string {
+  if (!scorecard) return "Scorecard";
+  return scorecard.kind === "leadership" ? "Leadership Scorecard" : "Project Scorecard";
+}
 
 const DEFICIENCY_LABEL: Record<string, string> = Object.fromEntries(
   FIELD_SCORECARD_CRITICAL_DEFICIENCIES.map((d) => [d.key, d.label]),

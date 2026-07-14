@@ -1,11 +1,20 @@
 import {
   deficiencyLabel,
   formatShortDate,
+  scorecardDetailHeaderTitle,
   scorecardDownloadErrorMessage,
   scorecardLeadershipPhotoSections,
   scorecardPhotoSections,
   scorecardSectionRows,
 } from "../detail-view";
+
+describe("scorecardDetailHeaderTitle", () => {
+  it("preserves the form type while detail data loads and after it resolves", () => {
+    expect(scorecardDetailHeaderTitle(undefined)).toBe("Scorecard");
+    expect(scorecardDetailHeaderTitle({ kind: "project" })).toBe("Project Scorecard");
+    expect(scorecardDetailHeaderTitle({ kind: "leadership" })).toBe("Leadership Scorecard");
+  });
+});
 import type { FieldScorecardItemView, FieldScorecardPhotoView } from "../../api/types";
 
 describe("deficiencyLabel", () => {
