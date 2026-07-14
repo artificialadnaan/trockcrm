@@ -3,6 +3,7 @@ import {
   isEvidenceTranscodable,
   loadScorecardEvidenceImage,
   prioritizeAndCapEvidencePhotos,
+  resolveScorecardEvidenceImage,
 } from "../../../src/modules/field/scorecard-evidence-image.js";
 
 // The PDF-safe evidence fallback (reviewer finding #1): prefer the ingest thumbnail, but when it's
@@ -35,18 +36,19 @@ describe("loadScorecardEvidenceImage", () => {
     expect(d.transcode).not.toHaveBeenCalled();
   });
 
-  it("prefers the ingest thumbnail under a tight byte cap and does NOT transcode", async () => {
+  it("prefers the ingest thumbnail under a tight byte cap and normalizes it to a decodable JPEG", async () => {
     const d = deps();
     const out = await loadScorecardEvidenceImage(
       { r2Key: "orig.jpg", thumbnailR2Key: "thumbs/orig.jpg", mimeType: "image/jpeg" },
       d,
     );
-    expect(out).toBe(THUMB);
+    expect(out).toBe(TRANSCODED);
     expect(d.fetchObject).toHaveBeenCalledTimes(1);
     const [key, maxBytes] = d.fetchObject.mock.calls[0];
     expect(key).toBe("thumbs/orig.jpg");
     expect(maxBytes).toBe(750_000); // thumbnail cap, not the original cap
-    expect(d.transcode).not.toHaveBeenCalled();
+    expect(d.transcode).toHaveBeenCalledOnce();
+    expect(d.transcode).toHaveBeenCalledWith(THUMB);
   });
 
   it("falls back to transcoding the ORIGINAL under the generous cap when there is no thumbnail (the core fix)", async () => {
@@ -83,6 +85,28 @@ describe("loadScorecardEvidenceImage", () => {
     expect(fetchObject.mock.calls[1][0]).toBe("orig.webp");
   });
 
+  it("falls back to the original when a non-empty thumbnail cannot be decoded", async () => {
+    const corruptThumbnail = Buffer.from("not-really-a-jpeg");
+    const original = Buffer.from("valid-original");
+    const fetchObject = vi.fn()
+      .mockResolvedValueOnce(corruptThumbnail)
+      .mockResolvedValueOnce(original);
+    const transcode = vi.fn()
+      .mockRejectedValueOnce(new Error("unsupported image format"))
+      .mockResolvedValueOnce(TRANSCODED);
+    const d = deps({ fetchObject, transcode });
+
+    const out = await loadScorecardEvidenceImage(
+      { r2Key: "orig.jpg", thumbnailR2Key: "thumbs/orig.jpg", mimeType: "image/jpeg" },
+      d,
+    );
+
+    expect(out).toBe(TRANSCODED);
+    expect(fetchObject.mock.calls.map(([key]) => key)).toEqual(["thumbs/orig.jpg", "orig.jpg"]);
+    expect(transcode).toHaveBeenNthCalledWith(1, corruptThumbnail);
+    expect(transcode).toHaveBeenNthCalledWith(2, original, "image/jpeg");
+  });
+
   it("transcodes decodable originals (WebP/PNG) when they lack a thumbnail", async () => {
     for (const mimeType of ["image/webp", "image/png"]) {
       const d = deps();
@@ -104,6 +128,39 @@ describe("loadScorecardEvidenceImage", () => {
     expect(out).toBeNull();
   });
 
+  it("distinguishes retryable storage failures from permanent missing/invalid source evidence", async () => {
+    const transient = await resolveScorecardEvidenceImage(
+      { r2Key: "orig.jpg", thumbnailR2Key: null, mimeType: "image/jpeg" },
+      deps({ fetchObject: vi.fn().mockRejectedValue(new Error("R2 timeout")) }),
+    );
+    expect(transient).toEqual({
+      image: null,
+      failure: { reason: "storage_unavailable", retryable: true },
+    });
+
+    const missingError = Object.assign(new Error("NoSuchKey"), {
+      name: "NoSuchKey",
+      $metadata: { httpStatusCode: 404 },
+    });
+    const missing = await resolveScorecardEvidenceImage(
+      { r2Key: "missing.jpg", thumbnailR2Key: null, mimeType: "image/jpeg" },
+      deps({ fetchObject: vi.fn().mockRejectedValue(missingError) }),
+    );
+    expect(missing).toEqual({
+      image: null,
+      failure: { reason: "source_missing", retryable: false },
+    });
+
+    const invalid = await resolveScorecardEvidenceImage(
+      { r2Key: "invalid.jpg", thumbnailR2Key: null, mimeType: "image/jpeg" },
+      deps({ transcode: vi.fn().mockRejectedValue(new Error("bad image")) }),
+    );
+    expect(invalid).toEqual({
+      image: null,
+      failure: { reason: "invalid_image", retryable: false },
+    });
+  });
+
   it("skips fetching a non-decodable original (unknown mime, no thumbnail)", async () => {
     // Uses the REAL transcodable predicate (not injected) — unknown mime is not fetched.
     const fetchObject = vi.fn(async () => Buffer.from("x"));
@@ -117,34 +174,72 @@ describe("loadScorecardEvidenceImage", () => {
     expect(transcode).not.toHaveBeenCalled();
   });
 
-  it("does not fetch a HEIC original — the prebuilt sharp has no HEVC decoder (real predicate)", async () => {
+  it("fetches HEIC/HEIF originals for the bounded compatibility decoder", async () => {
     const fetchObject = vi.fn(async () => Buffer.from("heic-bytes"));
     const transcode = vi.fn(async () => TRANSCODED);
     const out = await loadScorecardEvidenceImage(
       { r2Key: "orig.heic", thumbnailR2Key: null, mimeType: "image/heic" },
       { r2Configured: () => true, fetchObject, transcode },
     );
-    expect(out).toBeNull();
-    expect(fetchObject).not.toHaveBeenCalled();
+    expect(out).toBe(TRANSCODED);
+    expect(fetchObject).toHaveBeenCalledOnce();
+    expect(transcode).toHaveBeenCalledWith(
+      Buffer.from("heic-bytes"),
+      "image/heic",
+      { heicDecodePermit: expect.any(Symbol) },
+    );
+  });
+
+  it("serializes HEIC original fetches process-wide so queued decodes do not retain 40 MB buffers", async () => {
+    const releases: Array<() => void> = [];
+    let activeFetches = 0;
+    let maxActiveFetches = 0;
+    const fetchObject = vi.fn(async () => {
+      activeFetches += 1;
+      maxActiveFetches = Math.max(maxActiveFetches, activeFetches);
+      await new Promise<void>((resolve) => releases.push(resolve));
+      activeFetches -= 1;
+      return Buffer.from("heic-bytes");
+    });
+    const transcode = vi.fn(async () => TRANSCODED);
+    const source = { r2Key: "orig.heic", thumbnailR2Key: null, mimeType: "image/heic" };
+
+    const resolutions = Array.from({ length: 3 }, () =>
+      resolveScorecardEvidenceImage(source, { r2Configured: () => true, fetchObject, transcode }),
+    );
+
+    await vi.waitFor(() => expect(fetchObject).toHaveBeenCalledTimes(1));
+    releases.shift()?.();
+    await vi.waitFor(() => expect(fetchObject).toHaveBeenCalledTimes(2));
+    releases.shift()?.();
+    await vi.waitFor(() => expect(fetchObject).toHaveBeenCalledTimes(3));
+    releases.shift()?.();
+
+    await expect(Promise.all(resolutions)).resolves.toEqual([
+      { image: TRANSCODED, failure: null },
+      { image: TRANSCODED, failure: null },
+      { image: TRANSCODED, failure: null },
+    ]);
+    expect(maxActiveFetches).toBe(1);
   });
 });
 
 describe("isEvidenceTranscodable", () => {
   it("accepts formats the deployed sharp can decode", () => {
-    for (const mime of ["image/jpeg", "image/jpg", "image/png", "image/webp", "image/gif", "image/avif", "image/tiff"]) {
+    for (const mime of ["image/jpeg", "image/jpg", "image/png", "image/webp", "image/gif", "image/avif", "image/tiff", "image/heic", "image/heif"]) {
       expect(isEvidenceTranscodable(mime)).toBe(true);
     }
   });
 
-  it("rejects HEIC/HEIF (no HEVC decoder) and unknown/empty types", () => {
-    for (const mime of ["image/heic", "image/heif", "application/pdf", "", null, undefined]) {
+  it("rejects document and unknown/empty types", () => {
+    for (const mime of ["application/pdf", "", null, undefined]) {
       expect(isEvidenceTranscodable(mime)).toBe(false);
     }
   });
 
   it("ignores content-type parameters", () => {
     expect(isEvidenceTranscodable("image/jpeg; charset=utf-8")).toBe(true);
-    expect(isEvidenceTranscodable("image/heic; foo=bar")).toBe(false);
+    expect(isEvidenceTranscodable("image/heic; foo=bar")).toBe(true);
   });
 });
 

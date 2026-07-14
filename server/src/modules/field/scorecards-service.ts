@@ -1,10 +1,19 @@
-import { and, desc, eq, getTableColumns, inArray, isNull, sql } from "drizzle-orm";
+import { and, desc, eq, getTableColumns, inArray, isNull, lte, sql } from "drizzle-orm";
+import { createHash } from "node:crypto";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
 import { deals, fieldScorecards, fieldScorecardItems, fieldScorecardPhotos, files, jobQueue } from "@trock-crm/shared/schema";
-import { generateDownloadUrl, putObject } from "../../lib/r2-client.js";
+import { generateDownloadUrl, headObjectStrict, putObject } from "../../lib/r2-client.js";
 import { buildScorecardPdfData, renderFieldScorecardPdf, MAX_EVIDENCE_PHOTOS } from "./scorecard-pdf.js";
-import { loadScorecardEvidenceImage, prioritizeAndCapEvidencePhotos } from "./scorecard-evidence-image.js";
+import {
+  CURRENT_SCORECARD_PDF_RENDER_VERSION,
+  coalesceScorecardPdfFinalization,
+  isScorecardPdfObjectMetadataValid,
+  needsScorecardPdfRegeneration,
+  scorecardEvidenceFingerprint,
+  type ScorecardPdfArtifactState,
+} from "./scorecard-pdf-artifact.js";
+import { prioritizeAndCapEvidencePhotos, resolveScorecardEvidenceImage } from "./scorecard-evidence-image.js";
 import {
   FIELD_SCORECARD_LEADERSHIP_SECTION_KEYS,
   FIELD_SCORECARD_LEADERSHIP_SUMMARY_SECTION_KEY,
@@ -110,18 +119,22 @@ const SCORECARD_EMAIL_RUN_AFTER_SECONDS = 120;
 const PDF_EVIDENCE_DOWNLOAD_CONCURRENCY = 4;
 
 /**
- * Deterministic R2 key for a scorecard's PDF. Shared by the enqueue (createFieldScorecard, which stamps it
- * into the job payload IN the submit txn) and the render/upload (finalizeFieldScorecardArtifacts), so the
- * worker fetches exactly what was stored. RAW deal_number (photo-report key convention), else the deal id.
+ * Immutable, content-addressed R2 key for one scorecard PDF render. The renderer revision protects rolling
+ * deploys, while the PDF digest protects concurrent same-revision renders: a stale render may finish and
+ * leave an unreferenced object, but it can never overwrite the object a newer validated render published.
+ * RAW deal_number (photo-report convention), else the deal id.
  */
 export function scorecardPdfR2Key(
   officeSlug: string,
   dealNumber: string | null | undefined,
   dealId: string,
   scorecardId: string,
+  renderVersion: number,
+  pdfDigest: string,
 ): string {
+  if (!/^[a-f0-9]{64}$/.test(pdfDigest)) throw new Error("scorecard PDF digest must be a SHA-256 hex value");
   const segment = dealNumber?.trim() || dealId;
-  return `office_${officeSlug}/deals/${segment}/documents/scorecards/${scorecardId}.pdf`;
+  return `office_${officeSlug}/deals/${segment}/documents/scorecards/${scorecardId}.${pdfDigest}.v${renderVersion}.pdf`;
 }
 
 /**
@@ -256,8 +269,6 @@ export async function createFieldScorecard(
   // Durable outbox: enqueue the email job IN THIS TRANSACTION so it commits atomically with the scorecard.
   // The PDF is rendered + stored post-response (best-effort); if that fails or the process dies first, the
   // job still exists and the worker sends a no-attachment fallback — the notification is never dropped.
-  // Deterministic key matches what finalizeFieldScorecardArtifacts uploads.
-  const pdfR2Key = scorecardPdfR2Key(input.office.slug, project.dealNumber, input.dealId, card.id);
   // Route the scorecard email to the deal's assigned superintendent + project_manager (resolved from the
   // active deal_team_members rows → linked user/contact email). Nulls when a role is unassigned or has no
   // email — the worker just skips that CC. Read inside the submit txn so the recipients commit atomically
@@ -280,7 +291,10 @@ export async function createFieldScorecard(
       submittedByName: input.submittedByName ?? null,
       superintendentEmail: teamEmails.superintendentEmail,
       projectManagerEmail: teamEmails.projectManagerEmail,
-      pdfR2Key,
+      // The immutable artifact key is content-addressed and therefore unknown until after commit/render.
+      // The worker reads field_scorecards.pdf_r2_key as the authority; keep this legacy payload field null
+      // rather than advertising a deterministic key that no render will upload.
+      pdfR2Key: null,
       officeId: input.office.id,
     },
     officeId: input.office.id,
@@ -420,14 +434,29 @@ export async function getFieldScorecardDetail(
  * Render + store the scorecard PDF (best-effort), then record its key. The email job was ALREADY enqueued
  * durably in the submit txn (createFieldScorecard), so this is purely artifact production: called
  * POST-COMMIT so R2 I/O never holds a txn open, and a throw here is harmless (the caller swallows it; the
- * worker sends a no-attachment fallback if the PDF isn't there). Uses the SAME key builder as the enqueue,
- * so the worker fetches exactly what this uploads. Manages its own connections.
+ * worker sends a no-attachment fallback if the PDF isn't there). The content-addressed key is persisted on
+ * the scorecard row after validation; the worker reads that row as its authority. Manages its own connections.
  */
-export async function finalizeFieldScorecardArtifacts(
+export function finalizeFieldScorecardArtifacts(
   office: { id: string; slug: string },
   userId: string,
   scorecardId: string,
-): Promise<void> {
+): Promise<string | null> {
+  return coalesceScorecardPdfFinalization(
+    `${office.slug}:${scorecardId}:${CURRENT_SCORECARD_PDF_RENDER_VERSION}`,
+    () => renderAndStoreFieldScorecardArtifacts(office, userId, scorecardId),
+  );
+}
+
+/**
+ * One uncoalesced publication attempt. Runtime callers use finalizeFieldScorecardArtifacts; this export
+ * exists so the cross-instance regression can run two independent attempts in one test process.
+ */
+export async function renderAndStoreFieldScorecardArtifacts(
+  office: { id: string; slug: string },
+  userId: string,
+  scorecardId: string,
+): Promise<string | null> {
   // 1. READ the scorecard + items + deal on a read-only connection.
   const loaded = await runInOffice(office, async (db) => {
     const [card] = await db.select().from(fieldScorecards).where(eq(fieldScorecards.id, scorecardId)).limit(1);
@@ -438,12 +467,15 @@ export async function finalizeFieldScorecardArtifacts(
       .where(eq(fieldScorecardItems.scorecardId, scorecardId));
     const photoRows = await db
       .select({
+        fileId: files.id,
         sectionKey: fieldScorecardPhotos.sectionKey,
         deficiencyKey: fieldScorecardPhotos.deficiencyKey,
         caption: files.description,
         r2Key: files.r2Key,
         thumbnailR2Key: files.thumbnailR2Key,
         mimeType: files.mimeType,
+        isActive: files.isActive,
+        deletedAt: files.deletedAt,
       })
       .from(fieldScorecardPhotos)
       .innerJoin(files, eq(files.id, fieldScorecardPhotos.fileId))
@@ -458,31 +490,52 @@ export async function finalizeFieldScorecardArtifacts(
       .limit(1);
     return { card, itemRows, photoRows, deal: deal ?? null };
   });
-  if (!loaded) return;
+  if (!loaded) return null;
   const { card, itemRows, photoRows, deal } = loaded;
+  const evidenceFingerprint = scorecardEvidenceFingerprint(photoRows);
+  const activePhotoRows = photoRows.filter((photo) => photo.isActive && photo.deletedAt == null);
 
   // Cap + prioritize BEFORE downloading bytes: a scorecard may carry up to 100 photos but the PDF embeds
   // at most MAX_EVIDENCE_PHOTOS, so fetching/transcoding the rest is wasted R2/CPU (and lengthens the
   // post-response render, making the email more likely to send without the PDF). Project cards prioritize
   // critical deficiencies; leadership cards prioritize category evidence before summary photos.
   const { keep: photosToLoad, omitted: omittedEvidenceCount } = prioritizeAndCapEvidencePhotos(
-    photoRows,
+    activePhotoRows,
     MAX_EVIDENCE_PHOTOS,
     card.kind === "leadership" ? "leadership" : undefined,
   );
 
   // Resolve each kept evidence tile to a small JPEG (thumbnail-first, transcoded-original fallback — see
-  // loadScorecardEvidenceImage). A miss leaves an explicit placeholder in the PDF, never a broken render.
+  // resolveScorecardEvidenceImage). Transient storage failures block the version stamp and remain
+  // retryable. Irrecoverable legacy-source problems (missing/corrupt/unsupported originals) render an
+  // explicit placeholder so one bad object cannot make the entire report permanently unexportable.
   const loadPhoto = async (photo: typeof photosToLoad[number]) => ({
     sectionKey: photo.sectionKey,
     deficiencyKey: photo.deficiencyKey ?? null,
     caption: photo.caption ?? null,
-    image: await loadScorecardEvidenceImage(photo),
+    resolution: await resolveScorecardEvidenceImage(photo),
   });
   const photos: Awaited<ReturnType<typeof loadPhoto>>[] = [];
   for (let index = 0; index < photosToLoad.length; index += PDF_EVIDENCE_DOWNLOAD_CONCURRENCY) {
     const batch = photosToLoad.slice(index, index + PDF_EVIDENCE_DOWNLOAD_CONCURRENCY);
     photos.push(...await Promise.all(batch.map(loadPhoto)));
+  }
+  const retryableFailure = photos.find((photo) => photo.resolution.failure?.retryable);
+  if (retryableFailure) {
+    throw new AppError(
+      503,
+      "Some scorecard evidence images are temporarily unavailable. Please retry the PDF download shortly.",
+      "SCORECARD_EVIDENCE_UNAVAILABLE",
+    );
+  }
+  const permanentFailures = photos
+    .map((photo) => photo.resolution.failure?.reason)
+    .filter((reason): reason is NonNullable<typeof reason> => reason != null);
+  if (permanentFailures.length > 0) {
+    console.warn("[FieldScorecardPDF] Rendering permanent evidence placeholders", {
+      scorecardId,
+      reasons: permanentFailures,
+    });
   }
 
   const pdfData = buildScorecardPdfData({
@@ -505,43 +558,156 @@ export async function finalizeFieldScorecardArtifacts(
     criticalDeficiencyKeys: card.criticalDeficiencies ?? [],
     criticalDeficiencyNotes: card.criticalDeficiencyNotes ?? {},
     actionItems: card.actionItems ?? [],
-    photos,
+    photos: photos.map((photo) => ({
+      sectionKey: photo.sectionKey,
+      deficiencyKey: photo.deficiencyKey,
+      caption: photo.caption,
+      image: photo.resolution.image,
+    })),
     omittedEvidenceCount,
   });
   const bucket = process.env.R2_BUCKET_NAME || "trock-crm-files";
-  // Same deterministic key the enqueue (createFieldScorecard) stamped into the job payload.
-  const r2Key = scorecardPdfR2Key(office.slug, deal?.dealNumber, card.dealId, scorecardId);
 
-  // Render + store the PDF. A throw propagates to the caller's .catch — harmless, the email job is already
-  // enqueued (submit txn) and the worker sends the no-attachment fallback if this key stays empty.
+  // Render first, then derive an immutable key from the actual bytes. This is intentionally done before
+  // the slow R2 PUT but after all evidence bytes are fixed. Two server instances rendering different
+  // evidence generations can no longer write the same object key.
   const pdf = await renderFieldScorecardPdf(pdfData);
+  const pdfDigest = createHash("sha256").update(pdf).digest("hex");
+  const r2Key = scorecardPdfR2Key(
+    office.slug,
+    deal?.dealNumber,
+    card.dealId,
+    scorecardId,
+    CURRENT_SCORECARD_PDF_RENDER_VERSION,
+    pdfDigest,
+  );
+
+  // Store the immutable candidate. A throw propagates to the caller's .catch — harmless, the email job is
+  // already enqueued (submit txn) and the worker sends the no-attachment fallback if the DB key stays empty.
+  // The later fingerprint check decides whether this candidate becomes authoritative; a losing candidate
+  // is only an orphan and cannot corrupt the winner's object.
   await putObject(r2Key, pdf, "application/pdf");
-  await runInOfficeTransaction(office, userId, async (db) => {
-    await db
+  const persistedKey = await runInOfficeTransaction(office, userId, async (db) => {
+    // Lock + recompare every linked file's active state. A delete/restore that committed during R2 work
+    // makes this render stale; one that starts after this lock waits, then invalidates the just-written
+    // artifact in its own transaction. Either interleaving prevents deleted evidence from being resurrected
+    // (and prevents a restored photo from being omitted by a late finalizer).
+    const currentEvidenceRows = await db
+      .select({
+        fileId: files.id,
+        isActive: files.isActive,
+        deletedAt: files.deletedAt,
+        caption: files.description,
+      })
+      .from(fieldScorecardPhotos)
+      .innerJoin(files, eq(files.id, fieldScorecardPhotos.fileId))
+      .where(eq(fieldScorecardPhotos.scorecardId, scorecardId))
+      .for("share");
+    if (scorecardEvidenceFingerprint(currentEvidenceRows) !== evidenceFingerprint) {
+      throw new AppError(
+        503,
+        "Scorecard evidence changed while the PDF was rendering. Please retry the download.",
+        "SCORECARD_EVIDENCE_CHANGED",
+      );
+    }
+
+    const updated = await db
       .update(fieldScorecards)
-      .set({ pdfR2Key: r2Key, pdfR2Bucket: bucket, pdfGeneratedAt: new Date() })
-      .where(eq(fieldScorecards.id, scorecardId));
+      .set({
+        pdfR2Key: r2Key,
+        pdfR2Bucket: bucket,
+        pdfGeneratedAt: new Date(),
+        pdfRenderVersion: CURRENT_SCORECARD_PDF_RENDER_VERSION,
+      })
+      // Monotonic revision write: an older server finishing late during a rolling deploy must never point
+      // the row back at its older version-specific object. <= permits repairing a missing v2 object.
+      .where(
+        and(
+          eq(fieldScorecards.id, scorecardId),
+          eq(fieldScorecards.isActive, true),
+          lte(fieldScorecards.pdfRenderVersion, CURRENT_SCORECARD_PDF_RENDER_VERSION),
+        ),
+      )
+      .returning({ pdfR2Key: fieldScorecards.pdfR2Key });
+    if (updated[0]?.pdfR2Key) return updated[0].pdfR2Key;
+
+    // A newer renderer won the race. Return its key instead of presigning this older, unreferenced object.
+    const [current] = await db
+      .select({ pdfR2Key: fieldScorecards.pdfR2Key })
+      .from(fieldScorecards)
+      .where(and(eq(fieldScorecards.id, scorecardId), eq(fieldScorecards.isActive, true)))
+      .limit(1);
+    return current?.pdfR2Key ?? null;
   });
+  return persistedKey;
 }
 
 /**
- * Presigned download URL for a scorecard's stored PDF. Gated on the underlying project's browsability
- * (same as the detail read). 404s cleanly while the PDF is still generating (no key yet).
+ * Inspect the stored PDF artifact while preserving the field surface's project-browsability gate. The
+ * route deliberately performs regeneration only after this office-scoped read connection is released.
  */
-export async function getFieldScorecardPdfDownload(
+export async function getFieldScorecardPdfArtifactState(
   tenantDb: TenantDb,
   id: string,
   access: FieldAccessContext,
-): Promise<{ url: string; expiresAt: string }> {
+): Promise<ScorecardPdfArtifactState & { needsRegeneration: boolean }> {
   const [card] = await tenantDb
-    .select({ dealId: fieldScorecards.dealId, pdfR2Key: fieldScorecards.pdfR2Key })
+    .select({
+      dealId: fieldScorecards.dealId,
+      pdfR2Key: fieldScorecards.pdfR2Key,
+      pdfRenderVersion: fieldScorecards.pdfRenderVersion,
+      linkedPhotoCount: sql<number>`COUNT(${files.id})::int`,
+    })
     .from(fieldScorecards)
+    .leftJoin(fieldScorecardPhotos, eq(fieldScorecardPhotos.scorecardId, fieldScorecards.id))
+    .leftJoin(
+      files,
+      and(
+        eq(files.id, fieldScorecardPhotos.fileId),
+        eq(files.isActive, true),
+        isNull(files.deletedAt),
+      ),
+    )
     .where(and(eq(fieldScorecards.id, id), eq(fieldScorecards.isActive, true)))
+    .groupBy(
+      fieldScorecards.id,
+      fieldScorecards.dealId,
+      fieldScorecards.pdfR2Key,
+      fieldScorecards.pdfRenderVersion,
+    )
     .limit(1);
   if (!card) throw new AppError(404, "Scorecard not found");
   await assertActiveFieldProject(tenantDb, access, card.dealId);
-  if (!card.pdfR2Key) throw new AppError(404, "The scorecard PDF is still generating — please try again shortly.");
-  const url = await generateDownloadUrl(card.pdfR2Key, SCORECARD_PDF_DOWNLOAD_EXPIRY_SECONDS, `field-scorecard-${id}.pdf`);
+  const state: ScorecardPdfArtifactState = {
+    pdfR2Key: card.pdfR2Key,
+    pdfRenderVersion: card.pdfRenderVersion,
+    linkedPhotoCount: Number(card.linkedPhotoCount),
+  };
+  return { ...state, needsRegeneration: needsScorecardPdfRegeneration(state) };
+}
+
+/** Verify that a stored key still resolves to a non-empty PDF before issuing a presigned URL. */
+export async function isStoredScorecardPdfAvailable(pdfR2Key: string | null): Promise<boolean> {
+  const key = pdfR2Key?.trim();
+  if (!key) return false;
+  try {
+    return isScorecardPdfObjectMetadataValid(await headObjectStrict(key));
+  } catch (err) {
+    console.error("[FieldScorecardPDF] R2 metadata check failed", { pdfR2Key: key, err });
+    throw new AppError(
+      503,
+      "Scorecard PDF storage is temporarily unavailable. Please try again shortly.",
+      "SCORECARD_PDF_STORAGE_UNAVAILABLE",
+    );
+  }
+}
+
+/** Presign a known-current scorecard PDF after any required regeneration has completed. */
+export async function presignFieldScorecardPdf(
+  id: string,
+  pdfR2Key: string,
+): Promise<{ url: string; expiresAt: string }> {
+  const url = await generateDownloadUrl(pdfR2Key, SCORECARD_PDF_DOWNLOAD_EXPIRY_SECONDS, `field-scorecard-${id}.pdf`);
   return { url, expiresAt: new Date(Date.now() + SCORECARD_PDF_DOWNLOAD_EXPIRY_SECONDS * 1000).toISOString() };
 }
 

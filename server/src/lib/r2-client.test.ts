@@ -144,6 +144,19 @@ describe("r2-client", () => {
     expect(commandInstances.map((entry) => entry.type)).toEqual(["head", "head", "head", "head", "get", "delete", "put", "cors"]);
   });
 
+  it("strict HEAD returns null only for a definitive miss and propagates operational failures", async () => {
+    process.env.R2_ACCOUNT_ID = "acct";
+    process.env.R2_ACCESS_KEY_ID = "key";
+    process.env.R2_SECRET_ACCESS_KEY = "secret";
+    const r2 = await importR2();
+    const missing = Object.assign(new Error("missing"), { name: "NotFound", $metadata: { httpStatusCode: 404 } });
+    const unavailable = Object.assign(new Error("service unavailable"), { $metadata: { httpStatusCode: 503 } });
+    sendMock.mockRejectedValueOnce(missing).mockRejectedValueOnce(unavailable);
+
+    await expect(r2.headObjectStrict("missing.pdf")).resolves.toBeNull();
+    await expect(r2.headObjectStrict("current.pdf")).rejects.toThrow("service unavailable");
+  });
+
   it("returns mock urls and throws for real URLs when R2 is missing", async () => {
     const r2 = await importR2();
     expect(r2.generateMockUploadUrl("a b.jpg").uploadUrl).toContain("a%20b.jpg");

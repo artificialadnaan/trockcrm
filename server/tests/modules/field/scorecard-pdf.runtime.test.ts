@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   buildScorecardPdfData,
@@ -9,10 +10,17 @@ import {
   type ScorecardPdfPhoto,
 } from "../../../src/modules/field/scorecard-pdf.js";
 
-// A 1x1 PNG — a real, sharp/pdfkit-decodable image so evidence tiles and handwritten signatures embed.
+// Compact data URL used to exercise the handwritten-signature parsing helpers below. Evidence rendering
+// uses the tracked 32x32 PNG because PDFKit rejects this minimal 1x1 fixture while decoding an image tile.
 const TINY_PNG_DATA_URL =
   "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
 const TINY_PNG = Buffer.from(TINY_PNG_DATA_URL.split(",")[1], "base64");
+const EVIDENCE_PNG = readFileSync(new URL("../../../../client-field/public/favicon-32x32.png", import.meta.url));
+const EVIDENCE_PNG_DATA_URL = `data:image/png;base64,${EVIDENCE_PNG.toString("base64")}`;
+
+function embeddedImageObjectCount(pdf: Buffer): number {
+  return pdf.toString("latin1").match(/\/Subtype\s*\/Image\b/g)?.length ?? 0;
+}
 
 function photo(over: Partial<ScorecardPdfPhoto> = {}): ScorecardPdfPhoto {
   return { sectionKey: "quality", deficiencyKey: null, caption: "Framing detail", image: null, ...over };
@@ -23,6 +31,69 @@ function group(title: string, count: number): EvidenceGroup {
 }
 
 describe("field scorecard PDF evidence", () => {
+  it("embeds non-null evidence bytes as PDF image objects instead of rendering only a placeholder", async () => {
+    const input = {
+      dealName: "Maple Street Tower",
+      projectNumber: "DFW-10432",
+      weekOf: "2026-07-06",
+      superintendentName: "Sam Super",
+      pmName: "Pat Manager",
+      submittedByName: "Sam Super",
+      submittedAt: "2026-07-10T17:00:00.000Z",
+      totalScore: 84,
+      formVersion: 2 as const,
+      averageScore: 8.4,
+      rating: "on_standard" as const,
+      items: [{ sectionKey: "quality", points: 8, note: "Reinspect framing." }],
+      criticalDeficiencyKeys: [] as string[],
+      actionItems: [] as string[],
+    };
+
+    // Both documents have the same branded summary/evidence pages (and therefore the same logo image
+    // objects). The only difference is whether the evidence tile receives decodable image bytes.
+    const placeholderPdf = await renderFieldScorecardPdf(buildScorecardPdfData({
+      ...input,
+      photos: [{ sectionKey: "quality", deficiencyKey: null, caption: "Framing detail", image: null }],
+    }));
+    const evidencePdf = await renderFieldScorecardPdf(buildScorecardPdfData({
+      ...input,
+      photos: [{ sectionKey: "quality", deficiencyKey: null, caption: "Framing detail", image: EVIDENCE_PNG }],
+    }));
+
+    expect(embeddedImageObjectCount(evidencePdf)).toBeGreaterThan(embeddedImageObjectCount(placeholderPdf));
+  });
+
+  it("embeds a decodable handwritten data-URL signature while typed legacy signatures stay text", async () => {
+    const input = {
+      dealName: "Maple Street Tower",
+      projectNumber: "DFW-10432",
+      weekOf: "2026-07-06",
+      superintendentName: "Sam Super",
+      pmName: "Pat Manager",
+      submittedByName: "Sam Super",
+      submittedAt: "2026-07-10T17:00:00.000Z",
+      totalScore: 84,
+      formVersion: 2 as const,
+      averageScore: 8.4,
+      rating: "on_standard" as const,
+      items: [{ sectionKey: "quality", points: 8, note: "Reinspect framing." }],
+      criticalDeficiencyKeys: [] as string[],
+      actionItems: [] as string[],
+      photos: [] as ScorecardPdfPhoto[],
+      pmSignature: "Pat Q. Manager",
+    };
+    const typedOnly = await renderFieldScorecardPdf(buildScorecardPdfData({
+      ...input,
+      superintendentSignature: "Sam Superintendent",
+    }));
+    const handwritten = await renderFieldScorecardPdf(buildScorecardPdfData({
+      ...input,
+      superintendentSignature: EVIDENCE_PNG_DATA_URL,
+    }));
+
+    expect(embeddedImageObjectCount(handwritten)).toBeGreaterThan(embeddedImageObjectCount(typedOnly));
+  });
+
   it("groups section and deficiency photos with their descriptions and renders a PDF", async () => {
     const data = buildScorecardPdfData({
       dealName: "Maple Street Tower",
@@ -69,7 +140,7 @@ describe("field scorecard PDF evidence", () => {
       averageScore: 6.2,
       rating: "corrective_action",
       // Handwritten super signature (data URL → image), legacy typed PM signature (plain text).
-      superintendentSignature: TINY_PNG_DATA_URL,
+      superintendentSignature: EVIDENCE_PNG_DATA_URL,
       pmSignature: "Pat Q. Manager",
       items: [{ sectionKey: "quality", points: 6, note: "Reinspect framing." }],
       criticalDeficiencyKeys: ["failed_inspection"],
@@ -80,7 +151,7 @@ describe("field scorecard PDF evidence", () => {
         sectionKey: "quality" as const,
         deficiencyKey: null,
         caption: i % 2 === 0 ? "Evidence " + i : null,
-        image: i % 3 === 0 ? TINY_PNG : null,
+        image: i % 3 === 0 ? EVIDENCE_PNG : null,
       })),
     });
 

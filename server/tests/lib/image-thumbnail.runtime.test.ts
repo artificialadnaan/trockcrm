@@ -1,9 +1,33 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import sharp from "sharp";
+
+const heicDecoder = vi.hoisted(() => ({
+  output: null as Buffer | null,
+  calls: 0,
+  active: 0,
+  maxActive: 0,
+  releases: [] as Array<() => void>,
+}));
+
+vi.mock("heic-convert", () => ({
+  default: vi.fn(async () => {
+    heicDecoder.calls += 1;
+    heicDecoder.active += 1;
+    heicDecoder.maxActive = Math.max(heicDecoder.maxActive, heicDecoder.active);
+    await new Promise<void>((resolve) => heicDecoder.releases.push(resolve));
+    heicDecoder.active -= 1;
+    if (!heicDecoder.output) throw new Error("HEIC decoder test output was not initialized");
+    return heicDecoder.output;
+  }),
+}));
+
 import {
   deriveThumbnailKey,
+  generateEvidenceJpeg,
   isThumbnailableImage,
   generateThumbnailBuffer,
+  readHeifDimensions,
+  withHeicDecodePermit,
 } from "../../src/lib/image-thumbnail.js";
 
 /**
@@ -77,5 +101,85 @@ describe("generateThumbnailBuffer", () => {
     const meta = await sharp(await generateThumbnailBuffer(small)).metadata();
     expect(meta.width).toBe(200);
     expect(meta.height).toBe(150);
+  });
+});
+
+describe("readHeifDimensions", () => {
+  function heifWithDimensions(width: number, height: number): Buffer {
+    const box = Buffer.alloc(20);
+    box.writeUInt32BE(20, 0);
+    box.write("ispe", 4, "ascii");
+    box.writeUInt32BE(width, 12);
+    box.writeUInt32BE(height, 16);
+    return box;
+  }
+
+  it("reads ordinary HEIF spatial dimensions before the compatibility decoder allocates a raster", () => {
+    expect(readHeifDimensions(heifWithDimensions(4032, 3024))).toEqual({ width: 4032, height: 3024 });
+  });
+
+  it("rejects malformed or over-limit HEIF dimensions", () => {
+    expect(readHeifDimensions(Buffer.from("not-a-heif"))).toBeNull();
+    expect(readHeifDimensions(heifWithDimensions(10_000, 10_000))).toBeNull();
+    expect(readHeifDimensions(Buffer.concat([
+      heifWithDimensions(10_000, 10_000),
+      heifWithDimensions(320, 240),
+    ]))).toBeNull();
+    expect(readHeifDimensions(Buffer.concat([
+      heifWithDimensions(320, 240),
+      heifWithDimensions(10_000, 10_000),
+    ]))).toBeNull();
+  });
+});
+
+describe("HEIC evidence decode concurrency", () => {
+  function heifWithDimensions(width: number, height: number): Buffer {
+    const box = Buffer.alloc(20);
+    box.writeUInt32BE(20, 0);
+    box.write("ispe", 4, "ascii");
+    box.writeUInt32BE(width, 12);
+    box.writeUInt32BE(height, 16);
+    return box;
+  }
+
+  it("allows only one process-wide HEIC raster decode at a time", async () => {
+    heicDecoder.output = await sharp({
+      create: { width: 16, height: 12, channels: 3, background: { r: 40, g: 80, b: 120 } },
+    }).jpeg().toBuffer();
+    heicDecoder.calls = 0;
+    heicDecoder.active = 0;
+    heicDecoder.maxActive = 0;
+    heicDecoder.releases = [];
+
+    const source = heifWithDimensions(4032, 3024);
+    const conversions = Array.from({ length: 3 }, () => generateEvidenceJpeg(source, "image/heic"));
+
+    await vi.waitFor(() => expect(heicDecoder.calls).toBe(1));
+    expect(heicDecoder.active).toBe(1);
+    heicDecoder.releases.shift()?.();
+
+    await vi.waitFor(() => expect(heicDecoder.calls).toBe(2));
+    expect(heicDecoder.active).toBe(1);
+    heicDecoder.releases.shift()?.();
+
+    await vi.waitFor(() => expect(heicDecoder.calls).toBe(3));
+    expect(heicDecoder.active).toBe(1);
+    heicDecoder.releases.shift()?.();
+
+    const outputs = await Promise.all(conversions);
+    expect(heicDecoder.maxActive).toBe(1);
+    for (const output of outputs) {
+      expect((await sharp(output).metadata()).format).toBe("jpeg");
+    }
+  });
+
+  it("releases the process-wide permit when gated work rejects", async () => {
+    await expect(
+      withHeicDecodePermit(async () => {
+        throw new Error("decoder failed");
+      }),
+    ).rejects.toThrow("decoder failed");
+
+    await expect(withHeicDecodePermit(async () => "next decode ran")).resolves.toBe("next decode ran");
   });
 });

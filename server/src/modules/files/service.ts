@@ -1,6 +1,17 @@
-import { eq, and, desc, asc, ilike, sql, or, arrayContains, isNull, isNotNull, type SQL, type AnyColumn } from "drizzle-orm";
+import { eq, and, desc, asc, ilike, sql, or, arrayContains, inArray, isNull, isNotNull, type SQL, type AnyColumn } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
-import { companies, contacts, deals, files, leads, pipelineStageConfig, properties, users } from "@trock-crm/shared/schema";
+import {
+  companies,
+  contacts,
+  deals,
+  fieldScorecardPhotos,
+  fieldScorecards,
+  files,
+  leads,
+  pipelineStageConfig,
+  properties,
+  users,
+} from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import type { FileCategory, PhotoCategory } from "@trock-crm/shared/types";
 import { resolveDealDisplayNumber } from "@trock-crm/shared/types";
@@ -1610,7 +1621,36 @@ export async function updateFile(
     .where(eq(files.id, fileId))
     .returning();
 
+  const evidenceCaptionChanged = input.description !== undefined && input.description !== existing.description;
+  const evidenceVisibilityChanged = input.deletedAt !== undefined && input.deletedAt !== existing.deletedAt;
+  if (evidenceCaptionChanged || evidenceVisibilityChanged) {
+    await invalidateScorecardPdfArtifactsForFile(tenantDb, fileId);
+  }
+
   return result[0];
+}
+
+/**
+ * A PDF is an immutable snapshot, so changing a linked photo's caption or hiding/restoring the photo must
+ * invalidate that snapshot. The next authorized download regenerates it from the current evidence state
+ * instead of serving stale text/embedded bytes (or omitting a restored photo).
+ */
+export async function invalidateScorecardPdfArtifactsForFile(tenantDb: TenantDb, fileId: string): Promise<void> {
+  const linked = await tenantDb
+    .select({ scorecardId: fieldScorecardPhotos.scorecardId })
+    .from(fieldScorecardPhotos)
+    .where(eq(fieldScorecardPhotos.fileId, fileId));
+  const scorecardIds = Array.from(new Set(linked.map((row) => row.scorecardId)));
+  if (scorecardIds.length === 0) return;
+
+  await tenantDb
+    .update(fieldScorecards)
+    .set({
+      pdfR2Key: null,
+      pdfR2Bucket: null,
+      pdfGeneratedAt: null,
+    })
+    .where(inArray(fieldScorecards.id, scorecardIds));
 }
 
 /**
@@ -1663,6 +1703,7 @@ export async function deleteFile(
     .returning();
 
   if (result.length === 0) throw new AppError(404, "File not found");
+  await invalidateScorecardPdfArtifactsForFile(tenantDb, fileId);
   return result[0];
 }
 

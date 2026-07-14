@@ -12,19 +12,31 @@ function payload(overrides: Partial<FieldScorecardEmailPayload> = {}): FieldScor
     totalScore: 82,
     ratingLabel: "Needs Immediate Improvement",
     submittedByName: "Sam Super",
-    pdfR2Key: "office_dallas/deals/DFW-10432/documents/scorecards/sc.pdf",
+    pdfR2Key: `office_dallas/deals/DFW-10432/documents/scorecards/sc.${"a".repeat(64)}.v2.pdf`,
     officeId: "33333333-3333-3333-3333-333333333333",
     ...overrides,
   };
 }
 
-// A query mock that answers the SELECT (email_sent_at) and records the UPDATE.
-function makeQuery(sentAt: string | null | "notfound") {
+// A query mock that answers the SELECT (email_sent_at + current artifact key) and records the UPDATE.
+function makeQuery(
+  sentAt: string | null | "notfound",
+  storedPdfR2Key: string | null = payload().pdfR2Key ?? null,
+  storedPdfRenderVersion = 2,
+) {
   const calls: { sql: string; params: unknown[] }[] = [];
   const query = vi.fn(async (sql: string, params: unknown[]) => {
     calls.push({ sql, params });
     if (/SELECT/i.test(sql)) {
-      return { rows: sentAt === "notfound" ? [] : [{ email_sent_at: sentAt }] };
+      return {
+        rows: sentAt === "notfound"
+          ? []
+          : [{
+              email_sent_at: sentAt,
+              pdf_r2_key: storedPdfR2Key,
+              pdf_render_version: storedPdfRenderVersion,
+            }],
+      };
     }
     return { rows: [] }; // UPDATE
   });
@@ -129,6 +141,18 @@ describe("handleFieldScorecardEmail", () => {
     const getPdf = vi.fn().mockResolvedValue(null);
     await handleFieldScorecardEmail(payload(), null, { query, env: PROD, logger: silent, sendEmail, getPdf });
     expect(sendEmail).toHaveBeenCalledTimes(1);
+    expect(sendEmail.mock.calls[0][3].attachments).toBeUndefined();
+  });
+
+  it("does not fetch or attach an invalidated payload PDF after linked evidence is hidden", async () => {
+    const { query } = makeQuery(null, null);
+    const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "m-invalidated" });
+    const getPdf = vi.fn().mockResolvedValue(Buffer.from("%PDF-stale-with-deleted-evidence"));
+
+    await handleFieldScorecardEmail(payload(), null, { query, env: PROD, logger: silent, sendEmail, getPdf });
+
+    expect(getPdf).not.toHaveBeenCalled();
+    expect(sendEmail).toHaveBeenCalledOnce();
     expect(sendEmail.mock.calls[0][3].attachments).toBeUndefined();
   });
 

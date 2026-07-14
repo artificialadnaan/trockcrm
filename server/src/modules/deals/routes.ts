@@ -115,7 +115,16 @@ import { getResolvedDeal, writeResolvedDealFields } from "./lineage-resolver.js"
 import { inferDealBidBoardOwnership } from "./workflow-backfill.js";
 import { getPendingRfpDeals, cancelPendingRfp } from "./pending-rfp-service.js";
 import { confirmUpload, getFileById, getFileDownloadUrl, getPendingUploadMetadata } from "../files/service.js";
-import { listDealScorecards, getDealScorecardDetail, getDealScorecardPdfDownload } from "./scorecards-service.js";
+import {
+  getDealScorecardDetail,
+  getDealScorecardPdfArtifactState,
+  listDealScorecards,
+  presignDealScorecardPdf,
+} from "./scorecards-service.js";
+import {
+  finalizeFieldScorecardArtifacts,
+  isStoredScorecardPdfAvailable,
+} from "../field/scorecards-service.js";
 import { assertValidUuid } from "../field/photos-service.js";
 import {
   createEstimateSourceDocument,
@@ -2549,12 +2558,46 @@ router.get("/:id/scorecards/:scorecardId", async (req, res, next) => {
   }
 });
 
-// GET /api/deals/:id/scorecards/:scorecardId/download — presigned URL for the scorecard's stored PDF
+// GET /api/deals/:id/scorecards/:scorecardId/download — inspect + authorize in the tenant transaction,
+// release it, regenerate a missing/legacy artifact on demand, then perform the R2 presign.
 router.get("/:id/scorecards/:scorecardId/download", async (req, res, next) => {
   try {
     await assertDealRouteAccess(req, req.params.id);
-    const result = await getDealScorecardPdfDownload(req.tenantDb!, req.params.id, req.params.scorecardId);
+    const artifact = await getDealScorecardPdfArtifactState(req.tenantDb!, req.params.id, req.params.scorecardId);
+    if (!req.officeSlug) throw new AppError(500, "Office context not available");
+    const office = { id: req.user!.activeOfficeId, slug: req.officeSlug };
+    const userId = req.user!.id;
     await req.commitTransaction!();
+    let pdfR2Key = artifact.pdfR2Key;
+    const storedObjectAvailable = artifact.needsRegeneration
+      ? false
+      : await isStoredScorecardPdfAvailable(pdfR2Key);
+    if (artifact.needsRegeneration || !storedObjectAvailable) {
+      try {
+        pdfR2Key = await finalizeFieldScorecardArtifacts(office, userId, req.params.scorecardId);
+      } catch (err) {
+        if (err instanceof AppError) throw err;
+        console.error("[DealScorecardPDF] On-demand regeneration failed", {
+          dealId: req.params.id,
+          scorecardId: req.params.scorecardId,
+          err,
+        });
+        throw new AppError(
+          503,
+          "The scorecard PDF could not be refreshed. Please try again shortly.",
+          "SCORECARD_PDF_REGENERATION_FAILED",
+        );
+      }
+      if (!pdfR2Key || !(await isStoredScorecardPdfAvailable(pdfR2Key))) {
+        throw new AppError(
+          503,
+          "The refreshed scorecard PDF is not available yet. Please try again shortly.",
+          "SCORECARD_PDF_NOT_READY",
+        );
+      }
+    }
+    if (!pdfR2Key) throw new AppError(503, "The scorecard PDF is not available yet. Please try again shortly.");
+    const result = await presignDealScorecardPdf(req.params.scorecardId, pdfR2Key);
     res.json(result);
   } catch (err) {
     next(err);

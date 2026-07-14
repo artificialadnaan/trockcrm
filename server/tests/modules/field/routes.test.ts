@@ -99,14 +99,27 @@ const reportMocks = vi.hoisted(() => ({
   getFieldProjectReportDownload: vi.fn(),
 }));
 
+const scorecardMocks = vi.hoisted(() => ({
+  createFieldScorecard: vi.fn(),
+  finalizeFieldScorecardArtifacts: vi.fn(),
+  getFieldScorecardDetail: vi.fn(),
+  getFieldScorecardPdfArtifactState: vi.fn(),
+  isStoredScorecardPdfAvailable: vi.fn(),
+  listFieldScorecardsForProject: vi.fn(),
+  listRecentFieldScorecards: vi.fn(),
+  presignFieldScorecardPdf: vi.fn(),
+}));
+
 vi.mock("../../../src/modules/field/projects-service.js", () => projectMocks);
 vi.mock("../../../src/modules/field/photos-service.js", () => photoMocks);
 vi.mock("../../../src/modules/field/photo-transcription-service.js", () => transcriptionMocks);
 vi.mock("../../../src/modules/field/photo-tags-service.js", () => tagMocks);
 vi.mock("../../../src/modules/field/photo-reports-service.js", () => reportMocks);
+vi.mock("../../../src/modules/field/scorecards-service.js", () => scorecardMocks);
 vi.mock("../../../src/modules/deals/team-service.js", () => teamMocks);
 
 const { fieldRoutes } = await import("../../../src/modules/field/routes.js");
+const crossOfficeModule = await import("../../../src/modules/field/cross-office.js");
 
 function findRoute(router: any, method: string, path: string) {
   const layer = router.stack.find((entry: any) => entry.route?.path === path && entry.route?.methods?.[method]);
@@ -142,6 +155,18 @@ describe("field routes", () => {
     reportMocks.generateFieldPhotoReport.mockResolvedValue({ report: { id: "report-1", title: "Roof Repair Photo Report" } });
     reportMocks.listFieldProjectReports.mockResolvedValue({ reports: [{ id: "report-1", title: "Roof Repair Photo Report" }] });
     reportMocks.getFieldProjectReportDownload.mockResolvedValue({ url: "https://r2.example/report.pdf", filename: "roof-report.pdf" });
+    scorecardMocks.getFieldScorecardPdfArtifactState.mockResolvedValue({
+      pdfR2Key: "legacy.pdf",
+      pdfRenderVersion: 1,
+      linkedPhotoCount: 1,
+      needsRegeneration: true,
+    });
+    scorecardMocks.isStoredScorecardPdfAvailable.mockResolvedValue(true);
+    scorecardMocks.finalizeFieldScorecardArtifacts.mockResolvedValue("scorecard.v2.pdf");
+    scorecardMocks.presignFieldScorecardPdf.mockResolvedValue({
+      url: "https://r2.example/scorecard.v2.pdf",
+      expiresAt: "2026-07-14T18:00:00.000Z",
+    });
   });
 
   it("returns the authenticated field contractor profile", async () => {
@@ -516,6 +541,77 @@ describe("field routes", () => {
       userId: "admin-1",
       userRole: "admin",
     }, "report-1");
+  });
+
+  it("releases the office read before regenerating a legacy scorecard PDF and presigns the refreshed key", async () => {
+    let officeReadReleased = false;
+    vi.mocked(crossOfficeModule.withResolvedOffice).mockImplementationOnce(async (_kind, _id, run) => {
+      const office = { id: "office-1", slug: "trock" };
+      const value = await run({ execute: vi.fn() } as any, office);
+      officeReadReleased = true;
+      return { value, office };
+    });
+    scorecardMocks.finalizeFieldScorecardArtifacts.mockImplementationOnce(async () => {
+      expect(officeReadReleased).toBe(true);
+      return "scorecard.v2.pdf";
+    });
+
+    const res = await invokeRoute("get", "/scorecards/:id/download", {
+      params: { id: "55555555-5555-5555-5555-000000000001" },
+    });
+
+    expect(scorecardMocks.isStoredScorecardPdfAvailable).toHaveBeenCalledOnce();
+    expect(scorecardMocks.isStoredScorecardPdfAvailable).toHaveBeenCalledWith("scorecard.v2.pdf");
+    expect(scorecardMocks.finalizeFieldScorecardArtifacts).toHaveBeenCalledWith(
+      { id: "office-1", slug: "trock" },
+      "admin-1",
+      "55555555-5555-5555-5555-000000000001",
+    );
+    expect(scorecardMocks.presignFieldScorecardPdf).toHaveBeenCalledWith(
+      "55555555-5555-5555-5555-000000000001",
+      "scorecard.v2.pdf",
+    );
+    expect(res.body).toEqual({
+      url: "https://r2.example/scorecard.v2.pdf",
+      expiresAt: "2026-07-14T18:00:00.000Z",
+    });
+  });
+
+  it("regenerates a current scorecard when its stored R2 object is missing", async () => {
+    scorecardMocks.getFieldScorecardPdfArtifactState.mockResolvedValueOnce({
+      pdfR2Key: "scorecard.v2.pdf",
+      pdfRenderVersion: 2,
+      linkedPhotoCount: 1,
+      needsRegeneration: false,
+    });
+    scorecardMocks.isStoredScorecardPdfAvailable.mockResolvedValueOnce(false);
+
+    await invokeRoute("get", "/scorecards/:id/download", {
+      params: { id: "55555555-5555-5555-5555-000000000001" },
+    });
+
+    expect(scorecardMocks.isStoredScorecardPdfAvailable).toHaveBeenCalledTimes(2);
+    expect(scorecardMocks.isStoredScorecardPdfAvailable).toHaveBeenNthCalledWith(1, "scorecard.v2.pdf");
+    expect(scorecardMocks.isStoredScorecardPdfAvailable).toHaveBeenNthCalledWith(2, "scorecard.v2.pdf");
+    expect(scorecardMocks.finalizeFieldScorecardArtifacts).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns a retryable 503 instead of presigning a missing artifact owned by a newer renderer", async () => {
+    scorecardMocks.getFieldScorecardPdfArtifactState.mockResolvedValueOnce({
+      pdfR2Key: "scorecard.v3.pdf",
+      pdfRenderVersion: 3,
+      linkedPhotoCount: 1,
+      needsRegeneration: false,
+    });
+    scorecardMocks.isStoredScorecardPdfAvailable.mockResolvedValue(false);
+    scorecardMocks.finalizeFieldScorecardArtifacts.mockResolvedValueOnce("scorecard.v3.pdf");
+
+    await expect(
+      invokeRoute("get", "/scorecards/:id/download", {
+        params: { id: "55555555-5555-5555-5555-000000000001" },
+      }),
+    ).rejects.toMatchObject({ statusCode: 503, code: "SCORECARD_PDF_NOT_READY" });
+    expect(scorecardMocks.presignFieldScorecardPdf).not.toHaveBeenCalled();
   });
 
   it("forwards an executive summary from the generate request body to the report service", async () => {

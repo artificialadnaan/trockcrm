@@ -1,4 +1,5 @@
 import sharp from "sharp";
+import heicConvert from "heic-convert";
 import { getObjectBuffer, putObject, isR2Configured } from "./r2-client.js";
 
 /**
@@ -79,6 +80,69 @@ export async function generateThumbnailBuffer(source: Buffer): Promise<Buffer> {
 // the public transcoder's guard (image-transcode.ts).
 const EVIDENCE_DECODE_PIXEL_LIMIT = 50_000_000;
 
+// `sharp`'s prebuilt binaries omit libheif, but field uploads accept HEIC/HEIF and legacy evidence may not
+// have a stored thumbnail. `heic-convert` supplies the narrow WASM compatibility decoder. Validate the
+// source dimensions before decode because the converter materializes a full RGBA raster before resize.
+const HEIC_DECODE_PIXEL_LIMIT = EVIDENCE_DECODE_PIXEL_LIMIT;
+// `heic-convert` expands the complete source into an RGBA raster in the JS/WASM heap before it can be
+// resized. A 48–50 MP phone image is roughly 200 MB at that point, so the ordinary four-wide evidence
+// pipeline must not run four HEIC decodes at once. This FIFO semaphore is module/process-wide (not merely
+// per scorecard), keeping HEIC decode concurrency at one even when several PDF downloads regenerate in
+// parallel. JPEG/WebP/etc. remain on the existing four-wide Sharp path.
+const HEIC_DECODE_CONCURRENCY = 1;
+const HEIC_DECODE_PERMIT = Symbol("scorecard-heic-decode-permit");
+let activeHeicDecodes = 0;
+const heicDecodeWaiters: Array<() => void> = [];
+
+export async function withHeicDecodePermit<T>(decode: (permit: symbol) => Promise<T>): Promise<T> {
+  await new Promise<void>((resolve) => {
+    const grant = () => {
+      activeHeicDecodes += 1;
+      resolve();
+    };
+    if (activeHeicDecodes < HEIC_DECODE_CONCURRENCY) grant();
+    else heicDecodeWaiters.push(grant);
+  });
+
+  try {
+    return await decode(HEIC_DECODE_PERMIT);
+  } finally {
+    activeHeicDecodes -= 1;
+    // `grant` increments synchronously before resolving the next waiter, reserving the permit so a newly
+    // arriving caller cannot slip ahead and temporarily raise active decode count above the limit.
+    heicDecodeWaiters.shift()?.();
+  }
+}
+
+function isHeicOrHeif(mimeType: string | null | undefined): boolean {
+  const mime = mimeType?.split(";", 1)[0]?.trim().toLowerCase();
+  return mime === "image/heic" || mime === "image/heif";
+}
+
+/** Read a bounded HEIF `ispe` image-spatial-extents box before invoking the WASM decoder. */
+export function readHeifDimensions(source: Buffer): { width: number; height: number } | null {
+  let candidate: { width: number; height: number } | null = null;
+  for (let typeOffset = source.indexOf("ispe", 4); typeOffset >= 0; typeOffset = source.indexOf("ispe", typeOffset + 4)) {
+    const boxOffset = typeOffset - 4;
+    if (boxOffset < 0 || boxOffset + 20 > source.length) continue;
+    const boxSize = source.readUInt32BE(boxOffset);
+    if (boxSize < 20 || boxOffset + boxSize > source.length) continue;
+    const width = source.readUInt32BE(typeOffset + 8);
+    const height = source.readUInt32BE(typeOffset + 12);
+    if (!width || !height) continue;
+    // Fail closed if ANY structurally valid image item is oversized. A HEIF may also carry a small
+    // auxiliary thumbnail; accepting either box order would not bound heic-convert's primary-image decode.
+    if (width * height > HEIC_DECODE_PIXEL_LIMIT) return null;
+    candidate ??= { width, height };
+  }
+  return candidate;
+}
+
+export interface EvidenceJpegOptions {
+  /** Opaque permit issued by withHeicDecodePermit when the caller already holds the process-wide gate. */
+  heicDecodePermit?: symbol;
+}
+
 /**
  * Downscale/transcode a full-size original into a small JPEG for a PDF-embedded evidence tile. Used as
  * the fallback when a photo has no ingest thumbnail, so a large valid original (JPEG/HEIC/HEIF/WebP/PNG/
@@ -88,13 +152,34 @@ const EVIDENCE_DECODE_PIXEL_LIMIT = 50_000_000;
  * transparent PNG/WebP annotation doesn't render as a black box. Throws if sharp can't decode the input —
  * callers treat a throw as "no image" (placeholder), NEVER as dropping evidence under a byte cap.
  */
-export async function generateEvidenceJpeg(source: Buffer): Promise<Buffer> {
-  return sharp(source, { failOn: "none", limitInputPixels: EVIDENCE_DECODE_PIXEL_LIMIT })
+export async function generateEvidenceJpeg(
+  source: Buffer,
+  mimeType?: string | null,
+  options: EvidenceJpegOptions = {},
+): Promise<Buffer> {
+  let rasterSource = source;
+  if (isHeicOrHeif(mimeType)) {
+    const convert = () => convertHeicToJpeg(source);
+    // The scorecard resolver acquires the permit before fetching the original so queued conversions do
+    // not retain one 40 MB input buffer apiece. Direct callers remain safe by acquiring it here.
+    const converted = options.heicDecodePermit === HEIC_DECODE_PERMIT
+      ? await convert()
+      : await withHeicDecodePermit(() => convert());
+    rasterSource = Buffer.from(converted);
+  }
+  return sharp(rasterSource, { failOn: "none", limitInputPixels: EVIDENCE_DECODE_PIXEL_LIMIT })
     .rotate() // honor EXIF orientation so the evidence isn't sideways
     .resize({ width: THUMBNAIL_MAX_EDGE, height: THUMBNAIL_MAX_EDGE, fit: "inside", withoutEnlargement: true })
     .flatten({ background: { r: 255, g: 255, b: 255 } })
     .jpeg({ quality: THUMBNAIL_QUALITY, mozjpeg: true })
     .toBuffer();
+}
+
+async function convertHeicToJpeg(source: Buffer): Promise<Uint8Array> {
+  if (!readHeifDimensions(source)) {
+    throw new Error("HEIC/HEIF image is malformed or exceeds the PDF evidence decode limit");
+  }
+  return heicConvert({ buffer: source, format: "JPEG", quality: THUMBNAIL_QUALITY / 100 });
 }
 
 /**

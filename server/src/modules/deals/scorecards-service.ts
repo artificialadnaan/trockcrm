@@ -1,4 +1,4 @@
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, isNull, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
 import { fieldScorecards, fieldScorecardItems, fieldScorecardPhotos, files } from "@trock-crm/shared/schema";
@@ -17,6 +17,10 @@ import {
 } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
 import { generateDownloadUrl } from "../../lib/r2-client.js";
+import {
+  needsScorecardPdfRegeneration,
+  type ScorecardPdfArtifactState,
+} from "../field/scorecard-pdf-artifact.js";
 
 // Tenant-scoped (web CRM) reads of the Field Scorecards a rep submitted from T-Rock Cam. The DEAL ROUTE
 // already gates access (assertDealCollaboratorAccess) before these run, so — unlike the field module's
@@ -126,16 +130,32 @@ export async function getDealScorecardDetail(
   };
 }
 
-/** Presigned URL for a scorecard's stored PDF. 404s while the PDF is still generating (no key yet). */
-export async function getDealScorecardPdfDownload(
+/**
+ * Inspect a deal-scoped scorecard's artifact state. The route has already applied collaborator access and
+ * commits its tenant transaction before it performs any potentially slow R2 reads or regeneration.
+ */
+export async function getDealScorecardPdfArtifactState(
   tenantDb: TenantDb,
   dealId: string,
   scorecardId: string,
-): Promise<{ url: string }> {
+): Promise<ScorecardPdfArtifactState & { needsRegeneration: boolean }> {
   // Both kinds are downloadable from the deal — leadership's "detail" IS its PDF (no project detail view).
   const [card] = await tenantDb
-    .select({ pdfR2Key: fieldScorecards.pdfR2Key })
+    .select({
+      pdfR2Key: fieldScorecards.pdfR2Key,
+      pdfRenderVersion: fieldScorecards.pdfRenderVersion,
+      linkedPhotoCount: sql<number>`COUNT(${files.id})::int`,
+    })
     .from(fieldScorecards)
+    .leftJoin(fieldScorecardPhotos, eq(fieldScorecardPhotos.scorecardId, fieldScorecards.id))
+    .leftJoin(
+      files,
+      and(
+        eq(files.id, fieldScorecardPhotos.fileId),
+        eq(files.isActive, true),
+        isNull(files.deletedAt),
+      ),
+    )
     .where(
       and(
         eq(fieldScorecards.id, scorecardId),
@@ -143,10 +163,20 @@ export async function getDealScorecardPdfDownload(
         eq(fieldScorecards.isActive, true),
       ),
     )
+    .groupBy(fieldScorecards.id, fieldScorecards.pdfR2Key, fieldScorecards.pdfRenderVersion)
     .limit(1);
   if (!card) throw new AppError(404, "Scorecard not found");
-  if (!card.pdfR2Key) throw new AppError(404, "The scorecard PDF is still generating — please try again shortly.");
-  const url = await generateDownloadUrl(card.pdfR2Key, SCORECARD_PDF_DOWNLOAD_EXPIRY_SECONDS, `field-scorecard-${scorecardId}.pdf`);
+  const state: ScorecardPdfArtifactState = {
+    pdfR2Key: card.pdfR2Key,
+    pdfRenderVersion: card.pdfRenderVersion,
+    linkedPhotoCount: Number(card.linkedPhotoCount),
+  };
+  return { ...state, needsRegeneration: needsScorecardPdfRegeneration(state) };
+}
+
+/** Presign a known-current deal scorecard PDF after any required regeneration has completed. */
+export async function presignDealScorecardPdf(scorecardId: string, pdfR2Key: string): Promise<{ url: string }> {
+  const url = await generateDownloadUrl(pdfR2Key, SCORECARD_PDF_DOWNLOAD_EXPIRY_SECONDS, `field-scorecard-${scorecardId}.pdf`);
   return { url };
 }
 

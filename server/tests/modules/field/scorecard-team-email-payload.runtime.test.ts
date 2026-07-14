@@ -127,6 +127,9 @@ describe("createFieldScorecard enqueues team emails", () => {
     expect(payload).toBeTruthy();
     expect(payload.superintendentEmail).toBe("dana.cole@example.com");
     expect(payload.projectManagerEmail).toBe("sam.super@trock.com");
+    // The content-addressed artifact key cannot exist until after render; the worker reads the row's
+    // authoritative pdf_r2_key after its initial delay rather than trusting this enqueue-time payload.
+    expect(payload.pdfR2Key).toBeNull();
   });
 
   it("stamps nulls when no superintendent/project_manager is assigned", async () => {

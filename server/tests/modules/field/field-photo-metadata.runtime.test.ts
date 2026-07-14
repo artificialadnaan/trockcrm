@@ -23,6 +23,9 @@ beforeAll(async () => {
   pg = new PGlite();
   await pg.exec(`SET TimeZone='UTC';`);
   await pg.exec(tenantSchemaSql("public", [files, photoAuditLog]));
+  // Caption edits now look up scorecard links so linked PDF snapshots can be invalidated. This focused
+  // fixture has no scorecards, but it still needs the production relation queried by updateFile().
+  await pg.exec(`CREATE TABLE field_scorecard_photos (scorecard_id uuid NOT NULL, file_id uuid NOT NULL);`);
   tdb = drizzle(pg);
 }, 30000);
 
