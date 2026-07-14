@@ -44,10 +44,42 @@ export interface InsertOpportunityRfpJobInput {
   deal: typeof deals.$inferSelect;
   officeId: string | null;
   eventId: string;
+  /**
+   * Actor that opened this RFP cycle. Passing it explicitly keeps the payload correct even when the caller
+   * enqueues before its `rfp_approval_requested_by` update has been persisted/read back.
+   */
+  requestedByUserId?: string | null;
+}
+
+type ResolvedUserIdentity = { name: string | null; email: string | null };
+
+async function resolveUserIdentity(
+  tenantDb: TenantDb,
+  userId: string | null | undefined
+): Promise<ResolvedUserIdentity | null> {
+  if (!userId) return null;
+  const [user] = await tenantDb
+    .select({
+      email: users.email,
+      displayName: users.displayName,
+      firstName: users.firstName,
+      lastName: users.lastName,
+    })
+    .from(users)
+    .where(eq(users.id, userId))
+    .limit(1);
+  if (!user) return null;
+  return {
+    name:
+      user.displayName?.trim() ||
+      [user.firstName, user.lastName].filter(Boolean).join(" ").trim() ||
+      null,
+    email: user.email?.trim() || null,
+  };
 }
 
 /**
- * Resolves the deal's owner — the "Requested by" person shown on the SyncHub RFP email.
+ * Resolves the deal's owner independently from the person who requested the RFP.
  * Priority: assigned rep (deal owner) → synced HubSpot owner email → deal creator.
  * Returns null fields when nothing resolves (SyncHub then renders "—").
  *
@@ -58,52 +90,46 @@ export async function resolveDealOwner(
   tenantDb: TenantDb,
   deal: Pick<typeof deals.$inferSelect, "assignedRepId" | "hubspotOwnerEmail" | "createdByUserId">
 ): Promise<{ ownerName: string | null; ownerEmail: string | null }> {
-  const lookupUser = async (
-    userId: string | null | undefined
-  ): Promise<{ ownerName: string | null; ownerEmail: string | null } | null> => {
-    if (!userId) return null;
-    const [u] = await tenantDb
-      .select({
-        email: users.email,
-        displayName: users.displayName,
-        firstName: users.firstName,
-        lastName: users.lastName,
-      })
-      .from(users)
-      .where(eq(users.id, userId))
-      .limit(1);
-    if (!u) return null;
-    const name =
-      u.displayName?.trim() ||
-      [u.firstName, u.lastName].filter(Boolean).join(" ").trim() ||
-      null;
-    return { ownerName: name, ownerEmail: u.email ?? null };
-  };
-
-  // 1) Assigned rep — the deal's owner; the canonical requester.
-  const rep = await lookupUser(deal.assignedRepId);
-  if (rep?.ownerEmail) return rep;
+  // 1) Assigned rep — the canonical deal owner.
+  const rep = await resolveUserIdentity(tenantDb, deal.assignedRepId);
+  if (rep?.email) return { ownerName: rep.name, ownerEmail: rep.email };
 
   // 2) Fallback: the synced HubSpot owner email (display name unknown).
   const hubspotOwnerEmail = deal.hubspotOwnerEmail?.trim();
-  if (hubspotOwnerEmail) return { ownerName: rep?.ownerName ?? null, ownerEmail: hubspotOwnerEmail };
+  if (hubspotOwnerEmail) return { ownerName: rep?.name ?? null, ownerEmail: hubspotOwnerEmail };
 
   // 3) Fallback: whoever created the deal.
-  const creator = await lookupUser(deal.createdByUserId);
-  if (creator?.ownerEmail) return creator;
+  const creator = await resolveUserIdentity(tenantDb, deal.createdByUserId);
+  if (creator?.email) return { ownerName: creator.name, ownerEmail: creator.email };
 
-  return { ownerName: rep?.ownerName ?? null, ownerEmail: null };
+  return { ownerName: rep?.name ?? null, ownerEmail: null };
+}
+
+/** Resolves the actual user who opened the RFP cycle, not the assigned deal owner. */
+export async function resolveRfpRequester(
+  tenantDb: TenantDb,
+  requestedByUserId: string | null | undefined
+): Promise<{ requestedByName: string | null; requestedByEmail: string | null }> {
+  const requester = await resolveUserIdentity(tenantDb, requestedByUserId);
+  return {
+    requestedByName: requester?.name ?? null,
+    requestedByEmail: requester?.email ?? null,
+  };
 }
 
 /**
  * Builds the SyncHub RFP payload deal AUTHORITATIVELY from the database, keyed by deal id. Every field the
- * payload/owner needs is read from this function's own `SELECT d.*` (+ company/contact/lead JOINs + a fresh
- * owner resolution) — NEVER from the caller's object — so callers may pass just `{ id }`. This makes the enqueue
+ * payload/identity needs is read from this function's own `SELECT d.*` (+ company/contact/lead JOINs + fresh
+ * owner/requester resolution) — NEVER from the caller's object — so callers may pass just `{ id }`. This makes the enqueue
  * robust against sparse projected rows (e.g. the override-approve path's narrow `.returning({...})`): a full deal
  * and a bare `{ id }` produce an identical payload. (Previously the deal's own columns — projectType, amounts,
  * address, description, estimator, … — were taken from the passed object, so a sparse row yielded an empty payload.)
  */
-async function loadRfpPayloadDeal(tenantDb: TenantDb, deal: { id: string }) {
+async function loadRfpPayloadDeal(
+  tenantDb: TenantDb,
+  deal: { id: string },
+  options: { requestedByUserId?: string | null } = {}
+) {
   const result = await tenantDb.execute(sql`
     SELECT d.*,
            c.name AS "companyName",
@@ -123,7 +149,16 @@ async function loadRfpPayloadDeal(tenantDb: TenantDb, deal: { id: string }) {
   if (!row) {
     // The deal vanished between the caller's write and this read (should not happen inside a tenant txn). Return a
     // well-formed shell so the builder still produces a valid (if empty) payload rather than throwing.
-    return { id: deal.id, name: "", dealNumber: "", rfpApprovalRequestEventId: null, ownerName: null, ownerEmail: null };
+    return {
+      id: deal.id,
+      name: "",
+      dealNumber: "",
+      rfpApprovalRequestEventId: null,
+      ownerName: null,
+      ownerEmail: null,
+      requestedByName: null,
+      requestedByEmail: null,
+    };
   }
 
   // Owner resolved from the DB row's authoritative owner columns (never a caller-passed object, which may be a
@@ -133,6 +168,13 @@ async function loadRfpPayloadDeal(tenantDb: TenantDb, deal: { id: string }) {
     hubspotOwnerEmail: (row.hubspot_owner_email as string | null) ?? null,
     createdByUserId: (row.created_by_user_id as string | null) ?? null,
   });
+  // Most callers read the requester from the durable deal row. The initial delivery enqueue also supplies the
+  // actor explicitly so a pre-persist enqueue cannot accidentally inherit a prior/null database value.
+  const requestedByUserId =
+    options.requestedByUserId !== undefined
+      ? options.requestedByUserId
+      : ((row.rfp_approval_requested_by as string | null) ?? null);
+  const requester = await resolveRfpRequester(tenantDb, requestedByUserId);
 
   return {
     id: row.id as string,
@@ -165,6 +207,8 @@ async function loadRfpPayloadDeal(tenantDb: TenantDb, deal: { id: string }) {
     clientPhone: (row.clientPhone as string | null) ?? null,
     ownerName: owner.ownerName,
     ownerEmail: owner.ownerEmail,
+    requestedByName: requester.requestedByName,
+    requestedByEmail: requester.requestedByEmail,
   };
 }
 
@@ -197,7 +241,9 @@ export async function loadRfpAttachmentsForDeal(tenantDb: TenantDb, dealId: stri
 export async function insertOpportunityRfpRequestJob(
   input: InsertOpportunityRfpJobInput
 ): Promise<{ jobId: number }> {
-  const rfpPayloadDeal = await loadRfpPayloadDeal(input.tenantDb, input.deal);
+  const rfpPayloadDeal = await loadRfpPayloadDeal(input.tenantDb, input.deal, {
+    requestedByUserId: input.requestedByUserId,
+  });
   const attachments = await loadRfpAttachmentsForDeal(input.tenantDb, input.deal.id);
   const jobRows = await input.tenantDb
     .insert(jobQueue)
@@ -251,6 +297,7 @@ export async function enqueueOpportunityRfpIfNeeded(
     },
     officeId: input.officeId,
     eventId,
+    requestedByUserId: input.userId,
   });
 
   return {

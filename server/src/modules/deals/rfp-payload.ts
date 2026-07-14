@@ -18,10 +18,12 @@ export interface RfpPayloadSourceDeal {
   forecastRevenue?: string | number | null;
   estimator?: string | null;
   bidBoardEstimator?: string | null;
-  /** Deal owner / rep — the "Requested by" person. Resolved at enqueue time from
-   *  assigned_rep → user, with fallbacks (see rfp-enqueue resolveDealOwner). */
+  /** Deal owner / assigned rep. Kept separate because a director/admin may request the RFP. */
   ownerName?: string | null;
   ownerEmail?: string | null;
+  /** Actual user who opened this RFP cycle (`rfp_approval_requested_by`). */
+  requestedByName?: string | null;
+  requestedByEmail?: string | null;
   companyName?: string | null;
   contactName?: string | null;
   clientEmail?: string | null;
@@ -49,6 +51,8 @@ export interface NormalizedRfpRequestBody {
     estimator: string | null;
     ownerName: string | null;
     ownerEmail: string | null;
+    requestedByName: string | null;
+    requestedByEmail: string | null;
     companyName: string | null;
     contactName: string | null;
     clientEmail: string | null;
@@ -203,6 +207,8 @@ export function buildNormalizedRfpRequestBody(input: {
       estimator: cleanString(deal.estimator) ?? cleanString(deal.bidBoardEstimator),
       ownerName: cleanString(deal.ownerName),
       ownerEmail: cleanString(deal.ownerEmail),
+      requestedByName: cleanString(deal.requestedByName),
+      requestedByEmail: cleanString(deal.requestedByEmail),
       companyName: cleanString(deal.companyName),
       contactName: cleanString(deal.contactName),
       clientEmail: cleanString(deal.clientEmail),

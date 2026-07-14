@@ -1388,6 +1388,7 @@ router.post("/:id/trigger-rfp", async (req, res, next) => {
       deal: reservedDeal,
       officeId,
       eventId,
+      requestedByUserId: userId,
     });
 
     const eventsToEmit: Array<{ name: string; payload: Record<string, unknown> }> = [];

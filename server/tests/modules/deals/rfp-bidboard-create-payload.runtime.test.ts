@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
-import { enqueueRfpBidBoardCreate } from "../../../src/modules/deals/rfp-enqueue.js";
+import {
+  enqueueRfpBidBoardCreate,
+  insertOpportunityRfpRequestJob,
+} from "../../../src/modules/deals/rfp-enqueue.js";
 
 /**
  * REAL-SQL (PGlite) proof that enqueueRfpBidBoardCreate builds a FULLY-POPULATED create-from-rfp payload from a
@@ -17,6 +20,7 @@ import { enqueueRfpBidBoardCreate } from "../../../src/modules/deals/rfp-enqueue
  */
 const DEAL = "00000000-0000-0000-0000-0000000000d1";
 const OWNER = "00000000-0000-0000-0000-0000000000a1";
+const REQUESTER = "00000000-0000-0000-0000-0000000000a2";
 const COMPANY = "00000000-0000-0000-0000-0000000000c1";
 const CONTACT = "00000000-0000-0000-0000-0000000000b1";
 const LEAD = "00000000-0000-0000-0000-0000000000e1";
@@ -53,6 +57,7 @@ async function setup() {
       property_address text, property_city text, property_state text, property_zip text, property_country text,
       description text, bid_due_date timestamptz, bid_board_due_date date, created_at timestamptz DEFAULT now(),
       rfp_approval_request_event_id uuid, rfp_approval_request_id integer,
+      rfp_approval_requested_by uuid,
       assigned_rep_id uuid, hubspot_owner_email text, created_by_user_id uuid,
       company_id uuid, primary_contact_id uuid, source_lead_id uuid
     );
@@ -65,6 +70,10 @@ async function setup() {
     `INSERT INTO users (id, email, display_name, first_name, last_name) VALUES ($1, 'rep@trockgc.com', 'Rep One', 'Rep', 'One')`,
     [OWNER],
   );
+  await db.query(
+    `INSERT INTO users (id, email, display_name, first_name, last_name) VALUES ($1, 'director@trockgc.com', 'Dana Director', 'Dana', 'Director')`,
+    [REQUESTER],
+  );
   await db.query(`INSERT INTO companies (id, name) VALUES ($1, 'Acme Roofing Co')`, [COMPANY]);
   await db.query(
     `INSERT INTO contacts (id, first_name, last_name, email, phone) VALUES ($1, 'Pat', 'Client', 'pat@client.com', '555-1212')`,
@@ -76,16 +85,16 @@ async function setup() {
        id, name, deal_number, project_number, project_type, workflow_route,
        awarded_amount, description, estimator,
        property_address, property_city, property_state, property_zip, property_country,
-       bid_due_date, rfp_approval_request_event_id, rfp_approval_request_id,
+       bid_due_date, rfp_approval_request_event_id, rfp_approval_request_id, rfp_approval_requested_by,
        assigned_rep_id, company_id, primary_contact_id, source_lead_id
      ) VALUES (
        $1, 'Jason Ranches', 'TR-2001', 'TR-2001', 'roofing', 'normal',
        '125000.00', 'Full roof replacement', 'Colby',
        '100 Main St', 'Dallas', 'TX', '75001', 'US',
-       '2026-08-01T00:00:00Z', $2, NULL,
+       '2026-08-01T00:00:00Z', $2, NULL, $7,
        $3, $4, $5, $6
      )`,
-    [DEAL, EVENT, OWNER, COMPANY, CONTACT, LEAD],
+    [DEAL, EVENT, OWNER, COMPANY, CONTACT, LEAD, REQUESTER],
   );
   return db;
 }
@@ -120,11 +129,52 @@ describe("enqueueRfpBidBoardCreate — DB-authoritative payload from a sparse { 
     // Resolved owner (assigned rep -> users) — NOT null:
     expect(deal.ownerEmail).toBe("rep@trockgc.com");
     expect(deal.ownerName).toBe("Rep One");
+    // Requester is independently resolved from the durable rfp_approval_requested_by column.
+    expect(deal.requestedByName).toBe("Dana Director");
+    expect(deal.requestedByEmail).toBe("director@trockgc.com");
     // JOIN-sourced fields:
     expect(deal.companyName).toBe("Acme Roofing Co");
     expect(deal.contactName).toBe("Pat Client");
     expect(deal.clientEmail).toBe("pat@client.com");
     expect(deal.clientPhone).toBe("555-1212");
+  });
+
+  it("keeps a director requester distinct from the assigned rep for a type-4 service RFP", async () => {
+    pg = await setup();
+    const tdb: any = drizzle(pg as any);
+    await pg.query(
+      `UPDATE deals
+          SET project_type = 'service',
+              workflow_route = 'service',
+              project_number = 'DFW-4-19526-aa',
+              deal_number = 'DFW-4-19526-aa',
+              rfp_approval_requested_by = NULL
+        WHERE id = $1`,
+      [DEAL],
+    );
+
+    // The explicit actor override proves an enqueue that happens before the requester column is persisted still
+    // carries the director, while owner resolution independently retains the assigned rep.
+    await insertOpportunityRfpRequestJob({
+      tenantDb: tdb,
+      officeId: null,
+      deal: { id: DEAL } as any,
+      eventId: EVENT,
+      requestedByUserId: REQUESTER,
+    });
+
+    const jobs = (await pg.query(`SELECT job_type, payload FROM public.job_queue`)).rows as any[];
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0].job_type).toBe("rfp_request_delivery");
+    expect(jobs[0].payload.body.deal).toMatchObject({
+      projectNumber: "DFW-4-19526-aa",
+      projectType: "4",
+      workflowRoute: "service",
+      ownerName: "Rep One",
+      ownerEmail: "rep@trockgc.com",
+      requestedByName: "Dana Director",
+      requestedByEmail: "director@trockgc.com",
+    });
   });
 
   it("[Z8] uses the well-formed 'not found' shell (not DB data) when the deal id doesn't exist", async () => {

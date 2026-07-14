@@ -107,7 +107,7 @@ describe("RFP normalized payload builder", () => {
     });
   });
 
-  it("maps the resolved deal owner into the payload (Requested by)", () => {
+  it("keeps the actual requester separate from the assigned deal owner", () => {
     const payload = buildNormalizedRfpRequestBody({
       sourceEventId: "crm:event-owner",
       deal: {
@@ -116,19 +116,25 @@ describe("RFP normalized payload builder", () => {
         dealNumber: "dfw-2-99999-aa",
         ownerName: "Maria Gonzalez",
         ownerEmail: "maria@trockgc.com",
+        requestedByName: "Dana Director",
+        requestedByEmail: "dana.director@trockgc.com",
       },
     });
     expect(payload.deal.ownerName).toBe("Maria Gonzalez");
     expect(payload.deal.ownerEmail).toBe("maria@trockgc.com");
+    expect(payload.deal.requestedByName).toBe("Dana Director");
+    expect(payload.deal.requestedByEmail).toBe("dana.director@trockgc.com");
   });
 
-  it("emits null owner fields (not undefined) when no owner was resolved", () => {
+  it("emits null owner and requester fields (not undefined) when neither was resolved", () => {
     const payload = buildNormalizedRfpRequestBody({
       sourceEventId: "crm:event-noowner",
       deal: { id: "deal-noowner", name: "No Owner", dealNumber: "dfw-2-88888-aa" },
     });
     expect(payload.deal.ownerName).toBeNull();
     expect(payload.deal.ownerEmail).toBeNull();
+    expect(payload.deal.requestedByName).toBeNull();
+    expect(payload.deal.requestedByEmail).toBeNull();
   });
 
   it("falls back from CRM-native fields to Bid Board mirror fields", () => {

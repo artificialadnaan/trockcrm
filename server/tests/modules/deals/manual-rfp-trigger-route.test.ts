@@ -479,6 +479,12 @@ describe("POST /api/deals/:id/trigger-rfp", () => {
     expect(res.statusCode).toBe(200);
     expect(state.updatesAttempted).toBe(1);
     expect(insertRfpJobMock).toHaveBeenCalledTimes(1);
+    expect(insertRfpJobMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        requestedByUserId: "director-1",
+        deal: expect.objectContaining({ assignedRepId: "rep-2" }),
+      })
+    );
     // Audit trail: the deal records the director (not the owning rep) as the requester.
     expect(state.deal).toMatchObject({
       rfpApprovalStatus: "pending_outbox",

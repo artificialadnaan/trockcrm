@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { resolveDealOwner } from "../../../src/modules/deals/rfp-enqueue.js";
+import { resolveDealOwner, resolveRfpRequester } from "../../../src/modules/deals/rfp-enqueue.js";
 
 /**
  * Minimal drizzle-shaped fake: each `.select(...).from(...).where(...).limit(n)` chain
@@ -23,7 +23,7 @@ function fakeTenantDb(resultsInCallOrder: Array<any[]>) {
 const deal = (over: Record<string, any> = {}) =>
   ({ assignedRepId: null, hubspotOwnerEmail: null, createdByUserId: null, ...over }) as any;
 
-describe("resolveDealOwner — Requested-by priority", () => {
+describe("resolveDealOwner — owner priority", () => {
   it("prefers the assigned rep (name from displayName + email)", async () => {
     const { db, lookupCount } = fakeTenantDb([
       [{ email: "rep@trockgc.com", displayName: "Rep One", firstName: "Rep", lastName: "One" }],
@@ -66,5 +66,28 @@ describe("resolveDealOwner — Requested-by priority", () => {
     const { db } = fakeTenantDb([[]]); // rep lookup returns no row
     const owner = await resolveDealOwner(db, deal({ assignedRepId: "ghost", hubspotOwnerEmail: "h@x.com" }));
     expect(owner).toEqual({ ownerName: null, ownerEmail: "h@x.com" });
+  });
+});
+
+describe("resolveRfpRequester — actual trigger actor", () => {
+  it("resolves the triggering user's display name and email", async () => {
+    const { db } = fakeTenantDb([
+      [{ email: "director@trockgc.com", displayName: "Dana Director", firstName: "Dana", lastName: "Director" }],
+    ]);
+
+    await expect(resolveRfpRequester(db, "director-1")).resolves.toEqual({
+      requestedByName: "Dana Director",
+      requestedByEmail: "director@trockgc.com",
+    });
+  });
+
+  it("does not substitute the deal owner when the trigger actor is unavailable", async () => {
+    const { db, lookupCount } = fakeTenantDb([]);
+
+    await expect(resolveRfpRequester(db, null)).resolves.toEqual({
+      requestedByName: null,
+      requestedByEmail: null,
+    });
+    expect(lookupCount()).toBe(0);
   });
 });
