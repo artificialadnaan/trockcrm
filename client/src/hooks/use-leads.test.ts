@@ -9,7 +9,7 @@ vi.mock("@/lib/api", () => ({
   resolveApiBase: () => "/api",
 }));
 
-const { transitionLeadStage, useLeadBoard, useLeads } = await import("./use-leads");
+const { deleteLead, transitionLeadStage, useLeadBoard, useLeads } = await import("./use-leads");
 
 class FakeNode {
   nodeType = 0;
@@ -376,6 +376,19 @@ describe("transitionLeadStage", () => {
       await flushEffects();
     });
     vi.unstubAllGlobals();
+  });
+});
+
+describe("deleteLead", () => {
+  it("sends the archive reason in the DELETE request body", async () => {
+    vi.mocked(api).mockResolvedValueOnce(undefined);
+
+    await deleteLead("lead-1", "Duplicate request");
+
+    expect(api).toHaveBeenCalledWith("/leads/lead-1", {
+      method: "DELETE",
+      json: { reason: "Duplicate request" },
+    });
   });
 });
 

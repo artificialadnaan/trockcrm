@@ -37,11 +37,9 @@ import {
 import { CompanySelector } from "@/components/companies/company-selector";
 import { OwnerLabel } from "@/components/shared/owner-label";
 import { PropertySelector } from "@/components/properties/property-selector";
-import { RecordAssignmentCard } from "@/components/assignment/record-assignment-card";
 import { LeadStageBadge } from "./lead-stage-badge";
 import { useCompanyContacts } from "@/hooks/use-companies";
 import { createContact } from "@/hooks/use-contacts";
-import { useTaskAssignees } from "@/hooks/use-task-assignees";
 import { useSalesReps } from "@/hooks/use-sales-reps";
 import {
   createLead,
@@ -489,15 +487,9 @@ function SummaryLeadForm({
   lead,
   converted = false,
   showPrimaryAction = true,
-  onSaved,
 }: LeadSummaryFormProps) {
   const navigate = useNavigate();
   const { projectTypes } = useProjectTypes();
-  const { user } = useAuth();
-  const { assignees } = useTaskAssignees();
-  const { salesReps } = useSalesReps();
-  const [assignmentSaving, setAssignmentSaving] = useState(false);
-  const [assignmentError, setAssignmentError] = useState<string | null>(null);
   const propertyLabel =
     [lead.propertyAddress, [lead.propertyCity, lead.propertyState].filter(Boolean).join(", "), lead.propertyZip]
       .filter(Boolean)
@@ -510,35 +502,6 @@ function SummaryLeadForm({
       : lead.sourceCategory ?? lead.source ?? "--";
   const verificationStatus = lead.verificationStatus ?? "not_required";
   const verificationLabel = VERIFICATION_LABELS[verificationStatus];
-  const assignedRepId = lead.assignedRepId ?? lead.salesRepId ?? "";
-  const assignedRepName =
-    lead.assignedRepName ??
-    salesReps.find((rep) => rep.id === assignedRepId)?.displayName ??
-    assignees.find((assignee) => assignee.id === assignedRepId)?.displayName ??
-    null;
-  const canEditAssignment =
-    Boolean(user) &&
-    (user?.role === "admin" ||
-      user?.role === "director" ||
-      (user?.role === "rep" && assignedRepId === user.id));
-
-  async function handleAssignmentSave(nextRepId: string) {
-    if (!nextRepId || nextRepId === assignedRepId) {
-      return;
-    }
-
-    setAssignmentSaving(true);
-    setAssignmentError(null);
-    try {
-      await updateLead(lead.id, { assignedRepId: nextRepId, salesRepId: nextRepId });
-      onSaved?.();
-    } catch (err) {
-      setAssignmentError(err instanceof Error ? err.message : "Could not update sales rep.");
-    } finally {
-      setAssignmentSaving(false);
-    }
-  }
-
   return (
     <Card className="overflow-hidden border-slate-200 shadow-sm">
       <CardHeader className="pb-3">
@@ -593,19 +556,6 @@ function SummaryLeadForm({
             <p className="font-medium">{propertyLabel || "--"}</p>
           )}
         </div>
-
-        <RecordAssignmentCard
-          label="Sales Rep"
-          assignedRepId={assignedRepId}
-          assignedRepName={assignedRepName}
-          reps={salesReps.length > 0 ? salesReps : assignees}
-          canEdit={canEditAssignment}
-          saving={assignmentSaving}
-          onSave={handleAssignmentSave}
-        />
-        {assignmentError ? (
-          <p className="text-xs text-red-600" role="alert">{assignmentError}</p>
-        ) : null}
 
         {lead.description ? (
           <p className="whitespace-pre-wrap text-sm text-muted-foreground">{lead.description}</p>
@@ -761,7 +711,9 @@ function EditableLeadForm({
   // The office picker is a project-number PREFIX only: pickers + create target the rep's HOME (active)
   // office, so choosing DFW vs ATL never changes which companies/properties/contacts/reps are available nor
   // where the lead is created — only the lead number prefix.
-  const { assignees } = useTaskAssignees({ officeId: isCreate ? homeOfficeId : null });
+  const { salesReps: assignees } = useSalesReps(isCreate ? homeOfficeId ?? undefined : undefined, {
+    purpose: "lead-reassignment",
+  });
   const { properties } = useProperties(
     companyId ? { companyId, limit: 500 } : { limit: 0 },
     { officeId: isCreate ? homeOfficeId : null }

@@ -53,13 +53,15 @@ router.get("/sales-reps", async (req, res, next) => {
   try {
     const purpose = typeof req.query.purpose === "string" ? req.query.purpose : undefined;
     const isDealReassignmentPicker = purpose === "deal-reassignment";
+    const isLeadReassignmentPicker = purpose === "lead-reassignment";
+    const isReassignmentPicker = isDealReassignmentPicker || isLeadReassignmentPicker;
     // The sales-source picker needs the active office's CRM roster (any internal role — rep, director like
     // Chase Kelly, admin, construction — matching the assertSalesSourceIsCrmUser gate), NOT the self-only
     // feed a plain rep otherwise gets. Without this a rep creating a service opportunity would see only
     // themselves (then excluded as the owner) → an empty source list.
     const isSalesSourcePicker = purpose === "sales-source";
 
-    if (req.user!.role === "rep" && !isDealReassignmentPicker && !isSalesSourcePicker) {
+    if (req.user!.role === "rep" && !isReassignmentPicker && !isSalesSourcePicker) {
       await req.commitTransaction!();
       res.json({ users: [{ id: req.user!.id, displayName: req.user!.displayName, email: req.user!.email }] });
       return;
@@ -90,10 +92,10 @@ router.get("/sales-reps", async (req, res, next) => {
       users: rows
         .filter((user) => user.isActive)
         .filter((user) => {
-          // Sales-source AND deal-reassignment both restrict to internal CRM users (any role except
+          // Sales-source and record-reassignment pickers restrict to internal CRM users (any role except
           // field_contractor) — matching assertSalesSourceIsCrmUser / the reassignment guard. The generic
           // feed (legacy callers) applies no role filter.
-          if (isSalesSourcePicker || isDealReassignmentPicker) {
+          if (isSalesSourcePicker || isReassignmentPicker) {
             return "role" in user && typeof user.role === "string" ? isCrmUserRole(user.role) : true;
           }
           return true;

@@ -1,5 +1,5 @@
-import { useMemo, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import {
   Building2,
   ClipboardList,
@@ -13,12 +13,30 @@ import {
   Mail,
   MapPin,
   Mic,
+  MoreHorizontal,
   Phone,
+  Trash2,
   User,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { Textarea } from "@/components/ui/textarea";
+import { Label } from "@/components/ui/label";
 import {
   DetailPageShell,
   DetailRailItem,
@@ -38,14 +56,22 @@ import { EntityActivityTab } from "@/components/activities/entity-activity-tab";
 import { LeadEmailTab } from "@/components/email/lead-email-tab";
 import { LeadFileTab } from "@/components/files/lead-file-tab";
 import { LeadPhotosTab } from "./lead-photos-tab";
-import { formatLeadPropertyLine, getLeadStageMetadata, useLeadDetail } from "@/hooks/use-leads";
+import {
+  deleteLead as apiDeleteLead,
+  formatLeadPropertyLine,
+  getLeadStageMetadata,
+  updateLead as apiUpdateLead,
+  useLeadDetail,
+} from "@/hooks/use-leads";
 import type { LeadRecord } from "@/hooks/use-leads";
+import { useSalesReps } from "@/hooks/use-sales-reps";
 import { useAuth } from "@/lib/auth";
 import { usePipelineStages } from "@/hooks/use-pipeline-config";
 import { LEAD_BOARD_STAGE_SLUGS, isBidBoardMirroredStageSlug } from "@/lib/pipeline-ownership";
 import { cn } from "@/lib/utils";
 import { displayNameOrFallback } from "@/lib/display-identifiers";
 import { api } from "@/lib/api";
+import { canArchiveLead } from "./lead-archive-eligibility";
 
 type LeadDetailTab = "timeline" | "questionnaire" | "files" | "photos" | "emails" | "activity" | "recordings";
 
@@ -109,14 +135,21 @@ function ownerInitials(lead: LeadRecord) {
 export function LeadDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const location = useLocation();
   const { user } = useAuth();
-  const { lead, loading, error, refetch } = useLeadDetail(id);
+  const { lead, loading, error, refetch, patchLead } = useLeadDetail(id);
   const { stages } = usePipelineStages();
   const [activeTab, setActiveTab] = useState<LeadDetailTab>("timeline");
   const [isConvertDialogOpen, setIsConvertDialogOpen] = useState(false);
   const [isStageDialogOpen, setIsStageDialogOpen] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
   const [watchPending, setWatchPending] = useState(false);
+  const [archiveOpen, setArchiveOpen] = useState(false);
+  const [archiveReason, setArchiveReason] = useState("");
+  const [archiving, setArchiving] = useState(false);
+  const [archiveError, setArchiveError] = useState<string | null>(null);
+  const leadActionsTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const archiveReasonRef = useRef<HTMLTextAreaElement | null>(null);
 
   const currentStage = useMemo(
     () => stages.find((stage) => stage.id === lead?.stageId) ?? null,
@@ -171,6 +204,7 @@ export function LeadDetailPage() {
 
   const isLeadEditV2 = Boolean(lead.leadQuestionnaire);
   const isHiddenReadOnly = !lead.isActive && lead.status !== "converted";
+  const showArchiveAction = canArchiveLead(lead, user);
   const startQuestionnaireEdit = () => {
     setActiveTab("questionnaire");
     setIsEditing(true);
@@ -202,6 +236,29 @@ export function LeadDetailPage() {
     } finally {
       setWatchPending(false);
     }
+  };
+  const handleArchiveSubmit = async () => {
+    if (archiving || archiveReason.trim().length === 0) return;
+    setArchiving(true);
+    setArchiveError(null);
+    try {
+      await apiDeleteLead(lead.id, archiveReason.trim());
+      toast.success("Lead archived");
+      navigate({ pathname: "/leads", search: location.search });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to archive lead";
+      setArchiveError(message);
+      toast.error(message);
+    } finally {
+      setArchiving(false);
+    }
+  };
+  const closeArchiveDialog = () => {
+    if (archiving) return;
+    setArchiveOpen(false);
+    setArchiveReason("");
+    setArchiveError(null);
+    queueMicrotask(() => leadActionsTriggerRef.current?.focus());
   };
 
   const secondaryAction = isHiddenReadOnly
@@ -351,6 +408,34 @@ export function LeadDetailPage() {
                 Convert to Opportunity
               </Button>
             ) : null}
+            {!isEditing && showArchiveAction ? (
+              <DropdownMenu>
+                <DropdownMenuTrigger
+                  render={
+                    <Button
+                      ref={leadActionsTriggerRef}
+                      variant="outline"
+                      size="icon"
+                      aria-label="More lead actions"
+                    >
+                      <MoreHorizontal className="h-4 w-4" />
+                    </Button>
+                  }
+                />
+                <DropdownMenuContent align="end">
+                  <DropdownMenuItem
+                    onClick={() => {
+                      setArchiveError(null);
+                      setArchiveOpen(true);
+                    }}
+                    variant="destructive"
+                  >
+                    <Trash2 className="mr-2 h-4 w-4" />
+                    Archive Lead
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            ) : null}
           </>
         }
         kpis={buildLeadKpis(lead)}
@@ -369,9 +454,8 @@ export function LeadDetailPage() {
             contextFootnote={contextFootnote}
             converted={isConverted}
             hiddenReadOnly={isHiddenReadOnly}
-            onSaved={() => {
-              void refetch();
-            }}
+            editing={isEditing}
+            onLeadUpdated={patchLead}
           />
         }
       >
@@ -431,6 +515,58 @@ export function LeadDetailPage() {
           }}
         />
       ) : null}
+
+      <Dialog
+        open={archiveOpen}
+        onOpenChange={(open) => {
+          if (open) setArchiveOpen(true);
+          else closeArchiveDialog();
+        }}
+      >
+        <DialogContent
+          className="sm:max-w-[480px]"
+          initialFocus={archiveReasonRef}
+          showCloseButton={!archiving}
+        >
+          <DialogHeader>
+            <DialogTitle>Archive “{lead.name}”?</DialogTitle>
+            <DialogDescription>
+              It will be removed from active lead views and become read-only. Linked company, property,
+              contact, files, photos, timeline, and activity are retained. The reason is saved at the top of
+              the lead description.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2 py-2">
+            <Label htmlFor="lead-archive-reason">Reason</Label>
+            <Textarea
+              ref={archiveReasonRef}
+              id="lead-archive-reason"
+              placeholder="Why are you archiving this lead?"
+              value={archiveReason}
+              onChange={(event) => setArchiveReason(event.target.value)}
+              rows={3}
+              required
+            />
+            {archiveError ? (
+              <p className="text-sm font-medium text-red-600" role="alert">
+                {archiveError}
+              </p>
+            ) : null}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={closeArchiveDialog} disabled={archiving}>
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={handleArchiveSubmit}
+              disabled={archiving || archiveReason.trim().length === 0}
+            >
+              {archiving ? "Archiving…" : "Archive lead"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
@@ -523,7 +659,8 @@ function LeadRightRail({
   contextFootnote,
   converted,
   hiddenReadOnly,
-  onSaved,
+  editing,
+  onLeadUpdated,
 }: {
   lead: LeadRecord;
   leadCompanyName: string | null;
@@ -533,8 +670,71 @@ function LeadRightRail({
   contextFootnote: string | null;
   converted: boolean;
   hiddenReadOnly: boolean;
-  onSaved: () => void;
+  editing: boolean;
+  onLeadUpdated: (updater: (currentLead: LeadRecord) => LeadRecord) => void;
 }) {
+  const { user } = useAuth();
+  const canReassignLead =
+    !hiddenReadOnly &&
+    !converted &&
+    !editing &&
+    Boolean(user) &&
+    (user?.role === "admin" ||
+      user?.role === "director" ||
+      user?.id === lead.assignedRepId);
+  const {
+    salesReps,
+    loading: salesRepsLoading,
+    error: salesRepsError,
+    refetch: refetchSalesReps,
+  } = useSalesReps(undefined, {
+    purpose: "lead-reassignment",
+    enabled: canReassignLead,
+  });
+  const [pendingOwnerId, setPendingOwnerId] = useState(lead.assignedRepId);
+  const [reassigning, setReassigning] = useState(false);
+  const [reassignError, setReassignError] = useState<string | null>(null);
+  const ownerOptions = salesReps.some((rep) => rep.id === lead.assignedRepId)
+    ? salesReps
+    : [
+        {
+          id: lead.assignedRepId,
+          displayName: displayNameOrFallback(lead.assignedRepName ?? lead.assignedRepId, "Current assigned rep"),
+        },
+        ...salesReps,
+      ];
+
+  useEffect(() => {
+    setPendingOwnerId(lead.assignedRepId);
+    setReassignError(null);
+  }, [lead.id, lead.assignedRepId, editing]);
+
+  async function handleReassign() {
+    const nextRepId = pendingOwnerId;
+    if (!nextRepId || nextRepId === lead.assignedRepId || reassigning) return;
+    setReassigning(true);
+    setReassignError(null);
+    try {
+      const result = await apiUpdateLead(lead.id, { assignedRepId: nextRepId });
+      const selectedOwner = ownerOptions.find((owner) => owner.id === nextRepId);
+      // PATCH returns the raw lead row, while the detail hook holds decorated fields (project type,
+      // property, owner labels). Update only the ownership slice so those richer values stay intact.
+      onLeadUpdated((currentLead) => ({
+        ...currentLead,
+        assignedRepId: result.lead.assignedRepId ?? nextRepId,
+        salesRepId: result.lead.salesRepId ?? nextRepId,
+        assignedRepName: selectedOwner?.displayName ?? currentLead.assignedRepName,
+      }));
+      toast.success("Lead owner updated");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to reassign lead";
+      setReassignError(message);
+      toast.error(message);
+    } finally {
+      setReassigning(false);
+    }
+  }
+
   return (
     <div className="space-y-4">
       {hiddenReadOnly ? (
@@ -589,12 +789,87 @@ function LeadRightRail({
             <DetailRailItem
               label="Assigned rep"
               value={
-                <span className="inline-flex items-center gap-2">
-                  <span className="grid h-7 w-7 place-items-center rounded-full bg-slate-900 text-[10px] font-black uppercase text-white">
-                    {ownerInitials(lead)}
+                <div className="space-y-2">
+                  <span className="inline-flex items-center gap-2">
+                    <span className="grid h-7 w-7 place-items-center rounded-full bg-slate-900 text-[10px] font-black uppercase text-white">
+                      {ownerInitials(lead)}
+                    </span>
+                    {displayNameOrFallback(lead.assignedRepName ?? lead.assignedRepId, "Unknown user")}
                   </span>
-                  {displayNameOrFallback(lead.assignedRepName ?? lead.assignedRepId, "Unknown user")}
-                </span>
+                  {canReassignLead ? (
+                    <div className="space-y-1">
+                      <select
+                        aria-label="Reassign lead owner"
+                        aria-busy={salesRepsLoading || reassigning || undefined}
+                        className="h-8 w-full rounded-md border border-slate-200 bg-slate-50 px-2 text-xs font-semibold text-slate-900"
+                        disabled={salesRepsLoading || reassigning || Boolean(salesRepsError) || ownerOptions.length <= 1}
+                        value={pendingOwnerId}
+                        onChange={(event) => {
+                          setPendingOwnerId(event.currentTarget.value);
+                          setReassignError(null);
+                        }}
+                      >
+                        {ownerOptions.map((rep) => (
+                          <option key={rep.id} value={rep.id}>
+                            {rep.displayName}
+                          </option>
+                        ))}
+                      </select>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="h-7 px-2 text-xs"
+                        disabled={
+                          salesRepsLoading ||
+                          reassigning ||
+                          Boolean(salesRepsError) ||
+                          ownerOptions.length <= 1 ||
+                          pendingOwnerId === lead.assignedRepId
+                        }
+                        onClick={() => void handleReassign()}
+                      >
+                        {reassigning ? "Saving owner…" : "Save owner"}
+                      </Button>
+                      {salesRepsLoading ? (
+                        <p className="text-xs font-medium text-slate-500" role="status">
+                          Loading eligible owners…
+                        </p>
+                      ) : null}
+                      {reassigning ? (
+                        <p className="text-xs font-medium text-slate-500" role="status">
+                          Updating owner…
+                        </p>
+                      ) : null}
+                      {reassignError ? (
+                        <p className="text-xs font-medium text-red-600" role="alert">
+                          {reassignError}
+                        </p>
+                      ) : null}
+                      {salesRepsError ? (
+                        <div className="space-y-1">
+                          <p className="text-xs font-medium text-red-600" role="alert">
+                            {salesRepsError}
+                          </p>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="h-7 px-2 text-xs"
+                            onClick={() => void refetchSalesReps()}
+                          >
+                            Retry owner list
+                          </Button>
+                        </div>
+                      ) : null}
+                      {!salesRepsLoading && !salesRepsError && ownerOptions.length <= 1 ? (
+                        <p className="text-xs font-medium text-slate-500">
+                          No other eligible owners in this office.
+                        </p>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </div>
               }
             />
           </DetailRailSection>
@@ -712,7 +987,6 @@ function LeadRightRail({
         lead={toLeadFormShape(lead, leadCompanyName)}
         showPrimaryAction={false}
         converted={converted}
-        onSaved={onSaved}
       />
     </div>
   );
