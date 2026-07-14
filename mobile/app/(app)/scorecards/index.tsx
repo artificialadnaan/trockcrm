@@ -21,9 +21,9 @@ import { newSubmissionId } from "../../../src/scorecards/ids";
 import { FIELD_SCORECARD_SECTIONS, FIELD_SCORECARD_LEADERSHIP_SECTIONS } from "../../../src/scorecards/scoring";
 import { Button, EmptyState, LoadingState, SectionLabel } from "../../../src/components/ui";
 import { ScreenHeader } from "../../../src/components/ScreenHeader";
-import { RatingBadge } from "../../../src/components/RatingBadge";
+import { SubmittedScorecardRow } from "../../../src/components/SubmittedScorecardRow";
 import { TargetPicker } from "../../../src/components/TargetPicker";
-import type { DealTeamResponse, FieldCaptureTarget, FieldScorecardSummary } from "../../../src/api/types";
+import type { DealTeamResponse, FieldCaptureTarget } from "../../../src/api/types";
 
 const SECTION_COUNT = FIELD_SCORECARD_SECTIONS.length;
 const LEADERSHIP_SECTION_COUNT = FIELD_SCORECARD_LEADERSHIP_SECTIONS.length;
@@ -228,31 +228,13 @@ export default function ScorecardsScreen() {
           ) : submitted.length === 0 ? (
             <EmptyState title="No scorecards yet" subtitle="Tap “Project Scorecard” to score a project." />
           ) : (
-            submitted.map((s: FieldScorecardSummary) => {
-              // Leadership cards are scored by the 4-category average out of 10; project cards keep the
-              // 0–100 total. averageScore is populated for leadership (and V2) cards; fall back to
-              // totalScore/10 defensively so a missing value never renders "undefined/10".
-              const isLeadership = s.kind === "leadership";
-              const scoreText = isLeadership
-                ? `${(s.averageScore ?? s.totalScore / 10).toFixed(1)}/10`
-                : `${s.totalScore}/100`;
-              return (
-                <Pressable
-                  key={s.id}
-                  accessibilityRole="button"
-                  accessibilityLabel={`${isLeadership ? "Leadership scorecard" : "Scorecard"}${s.projectNumber ? ` for ${s.projectNumber}` : ""}, week of ${shortDate(s.weekOf)}, ${scoreText}, ${s.ratingLabel}`}
-                  onPress={() => router.push({ pathname: "/(app)/scorecards/view/[id]", params: { id: s.id } })}
-                  style={({ pressed }) => [styles.row, pressed && { opacity: 0.7 }]}
-                >
-                  <View style={{ flex: 1, gap: 4 }}>
-                    <Text style={styles.rowTitle} numberOfLines={1}>
-                      {isLeadership ? "Leadership · " : ""}{s.projectNumber ? `${s.projectNumber} · ` : ""}Week of {shortDate(s.weekOf)}
-                    </Text>
-                    <RatingBadge rating={s.rating} label={`${scoreText} · ${s.ratingLabel}`} />
-                  </View>
-                </Pressable>
-              );
-            })
+            submitted.map((s) => (
+              <SubmittedScorecardRow
+                key={s.id}
+                scorecard={s}
+                onPress={() => router.push({ pathname: "/(app)/scorecards/view/[id]", params: { id: s.id } })}
+              />
+            ))
           )}
         </View>
       </ScrollView>

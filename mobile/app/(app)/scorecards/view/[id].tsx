@@ -6,7 +6,7 @@ import { theme } from "../../../../src/theme/theme";
 import { useAuth } from "../../../../src/auth/AuthContext";
 import { useScorecard } from "../../../../src/query/hooks";
 import { getScorecardDownload } from "../../../../src/api/endpoints";
-import { scorecardDownloadErrorMessage } from "../../../../src/scorecards/detail-view";
+import { scorecardDetailHeaderTitle, scorecardDownloadErrorMessage } from "../../../../src/scorecards/detail-view";
 import { EmptyState, LoadingState } from "../../../../src/components/ui";
 import { Banner } from "../../../../src/components/Banner";
 import { ScreenHeader } from "../../../../src/components/ScreenHeader";
@@ -67,10 +67,11 @@ export default function ScorecardDetailScreen() {
   // (offline, 5xx, transient) is a load error the user should be able to retry, not "removed".
   const isMissing = query.isError && errorStatus === 404;
   const isLoadError = query.isError && !isMissing;
+  const headerTitle = scorecardDetailHeaderTitle(scorecard);
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
-      <ScreenHeader onBack={() => router.back()} title="Scorecard" />
+      <ScreenHeader onBack={() => router.back()} title={headerTitle} />
       <ScrollView
         contentContainerStyle={styles.body}
         refreshControl={

@@ -45,9 +45,21 @@ export function ScorecardDetailView({
   const isV2 = scorecard.formVersion === 2;
   const displayScore = isV2 ? (scorecard.averageScore ?? scorecard.totalScore / 10).toFixed(1) : String(scorecard.totalScore);
   const displayMax = isV2 ? "10" : String(SCORECARD_TOTAL_POINTS);
+  const canonicalProjectName = scorecard.projectName?.trim();
+  const projectName =
+    canonicalProjectName || (scorecard.projectNumber ? `Project ${scorecard.projectNumber}` : "Untitled project");
 
   return (
     <View style={{ gap: theme.space.lg }}>
+      {/* Project identity stays visible in the standalone detail body even when a long header title truncates. */}
+      <View style={{ gap: 2 }}>
+        <Text style={styles.projectName} numberOfLines={2}>
+          {projectName}
+        </Text>
+        {canonicalProjectName && scorecard.projectNumber ? <Text style={styles.meta}>Project {scorecard.projectNumber}</Text> : null}
+        <Text style={styles.meta}>Week of {formatShortDate(scorecard.weekOf)}</Text>
+      </View>
+
       {/* Score summary */}
       <View style={styles.summary}>
         <Text style={styles.score}>
@@ -59,8 +71,6 @@ export function ScorecardDetailView({
 
       {/* Meta. Leadership: the Evaluator IS whoever submitted (server-stamped submittedByName). */}
       <View style={{ gap: 2 }}>
-        <Text style={styles.meta}>Week of {formatShortDate(scorecard.weekOf)}</Text>
-        {scorecard.projectNumber ? <Text style={styles.meta}>Project {scorecard.projectNumber}</Text> : null}
         {isLeadership ? (
           <Text style={styles.meta}>
             Evaluator: {scorecard.submittedByName || "—"} · {formatShortDate(scorecard.submittedAt)}
@@ -272,6 +282,7 @@ function PhotoGrid({
 }
 
 const styles = StyleSheet.create({
+  projectName: { fontFamily: theme.font.bold, fontSize: 20, lineHeight: 25, color: theme.color.textPrimary },
   summary: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: theme.space.md },
   score: { fontFamily: theme.font.bold, fontSize: 34, color: theme.color.textPrimary },
   scoreMax: { fontFamily: theme.font.semibold, fontSize: 18, color: theme.color.textMuted },

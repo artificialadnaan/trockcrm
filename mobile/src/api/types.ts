@@ -159,6 +159,8 @@ export type FieldScorecardSummary = {
   ratingLabel: string;
   superintendentName: string | null;
   pmName: string | null;
+  /** Current canonical deal/job name. Optional while older API deployments roll out. */
+  projectName?: string | null;
   projectNumber: string | null;
   criticalDeficiencyCount: number;
   submittedByName: string | null;
