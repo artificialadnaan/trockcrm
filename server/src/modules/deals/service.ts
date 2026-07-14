@@ -101,6 +101,7 @@ import {
 import { resolveWonClosedDateWriteThrough } from "../shared/won-close-date.js";
 import { buildDealSearchCondition } from "../search/unified-search.js";
 import { isRfpVotingEnabled, isStageEntryDateFilterEnabled } from "../../config/feature-flags.js";
+import { getWtdPeriod } from "../../lib/period.js";
 import {
   buildDealFilterBarConditions,
   buildInvolvedRepCondition,
@@ -119,8 +120,24 @@ const contractSignedDateForReporting = sql`COALESCE(contract_signed_at::date, co
 const DEFAULT_PIPELINE_CARDS_PER_STAGE_LIMIT = 100;
 const MAX_PIPELINE_CARDS_PER_STAGE_LIMIT = 1000;
 
+// This is the published definition of the main Deals board's global Won YTD column. Keep the
+// version and hash in step with any change to its membership, date, or value predicate. The
+// snapshot is intentionally recorded only for the stable all-reps YTD board, never for a
+// user-specific scope or a custom date range.
+const DEALS_DASHBOARD_WON_YTD_DEFINITION_VERSION = "2026-07-14-v1";
+const DEALS_DASHBOARD_WON_YTD_DEFINITION_HASH = "deals-dashboard-won-ytd-v1";
+const DEALS_DASHBOARD_WON_YTD_RELEASE_REFERENCE =
+  "P0 remediation 2026-07-14: Main Deals Dashboard Won YTD definition snapshot.";
+
 function sqlStringList(values: readonly string[]) {
   return sql.join(values.map((value) => sql`${value}`), sql`, `);
+}
+
+function isMissingWonMetricDefinitionTracker(error: unknown): boolean {
+  const candidate = error as { code?: unknown; cause?: { code?: unknown } } | null;
+  // Drizzle wraps PostgreSQL errors in some runtime paths, so inspect its direct cause too. Do not
+  // match on a message: only PostgreSQL's explicit undefined-function code is rollout-compatible.
+  return candidate?.code === "42883" || candidate?.cause?.code === "42883";
 }
 
 function nonTerminalMirroredStageCondition() {
@@ -611,6 +628,59 @@ export function resolvePipelineTerminalDateFilters(input: PipelineTerminalDateFi
       until: parseIsoDateParam(input.lostUntil),
     },
   };
+}
+
+function isGlobalCurrentWonYtdBoardRequest(input: {
+  scope: WorkspaceScope | undefined;
+  assignedRepId: string | undefined;
+  wonPeriodFrom: string | null;
+  wonPeriodTo: string | null;
+  wonSince: string | null;
+  wonUntil: string | null;
+  now: Date;
+}) {
+  const ytd = getWtdPeriod("ytd", input.now);
+
+  // `wonPeriod*` is the board-wide window. The terminal Won filters may be absent (the normal
+  // board view) or repeat the same YTD bounds (a Won drill-down); either form still renders the
+  // exact published metric. Reject narrower/wider custom terminal filters so they cannot overwrite
+  // the stable definition snapshot.
+  const terminalBoundsMatchYtd =
+    (input.wonSince == null || input.wonSince === ytd.from) &&
+    (input.wonUntil == null || input.wonUntil === ytd.to);
+
+  return (
+    input.scope === "all" &&
+    !input.assignedRepId &&
+    input.wonPeriodFrom === ytd.from &&
+    input.wonPeriodTo === ytd.to &&
+    terminalBoundsMatchYtd
+  );
+}
+
+async function recordDealsDashboardWonYtdDefinition(
+  tenantDb: TenantDb,
+  won: { count: number; totalValue: number },
+): Promise<void> {
+  try {
+    await tenantDb.execute(sql`
+      SELECT public.record_won_metric_definition_snapshot(
+        current_schema()::text,
+        ${"deals_dashboard.won_ytd"},
+        ${DEALS_DASHBOARD_WON_YTD_DEFINITION_VERSION},
+        ${DEALS_DASHBOARD_WON_YTD_DEFINITION_HASH},
+        ${won.count},
+        ${won.totalValue},
+        ${DEALS_DASHBOARD_WON_YTD_RELEASE_REFERENCE}
+      )
+    `);
+  } catch (error) {
+    // A rolling deploy can serve this API before migration 0184 has added the function. Only that
+    // PostgreSQL "undefined function" compatibility case is safe to ignore; every other failure
+    // must remain visible to callers instead of silently disabling reduction alerts.
+    if (isMissingWonMetricDefinitionTracker(error)) return;
+    throw error;
+  }
 }
 
 async function assertValidProjectType(value: string | null | undefined): Promise<string> {
@@ -1428,10 +1498,20 @@ async function buildDealWorkspaceScope(
     typeof (input as DealStagePageInput).status === "string" &&
     (input as DealStagePageInput).status !== "" &&
     (input as DealStagePageInput).status !== "any";
+  const isWonTerminalScope =
+    terminalScope &&
+    WON_TERMINAL_STAGE_SLUGS.includes(stage?.slug as (typeof WON_TERMINAL_STAGE_SLUGS)[number]);
   if (!terminalScope) {
     if (!explicitStatus) filters.unshift(sql`d.is_active = true`);
   } else {
     filters.push(...terminalDateConditions);
+    // The Deals Dashboard Won column is a live-record figure: `is_active=false` is a soft-delete
+    // marker and must not reappear after a user drills into that column. Keep the explicit inactive
+    // status path as an administrator diagnostic view, but make every normal Won stage-page load use
+    // the same live-row population as the board's count and value.
+    if (isWonTerminalScope && (input as DealStagePageInput).status !== "inactive") {
+      filters.unshift(sql`d.is_active = true`);
+    }
   }
 
   const mineVisibility =
@@ -3194,7 +3274,10 @@ export async function getDealsForPipeline(
     .where(inArray(pipelineStageConfig.workflowFamily, ["standard_deal", "service_deal"]))
     .orderBy(asc(pipelineStageConfig.displayOrder));
 
-  const terminalFilters = resolvePipelineTerminalDateFilters(filters);
+  // Resolve all period predicates from one clock so an API request spanning the Central-midnight
+  // boundary cannot compare a YTD board window against a different day's definition snapshot.
+  const pipelineNow = filters?.now ?? new Date();
+  const terminalFilters = resolvePipelineTerminalDateFilters({ ...(filters ?? {}), now: pipelineNow });
   const wonPeriodRange = resolvePipelineWonPeriodRange(filters ?? {});
   const canonicalWonStageId = stages.find((stage) => stage.slug === "won" && stage.isActivePipeline)?.id ?? null;
   const canonicalLostStageId = stages.find((stage) => stage.slug === "lost" && stage.isActivePipeline)?.id ?? null;
@@ -3469,6 +3552,24 @@ export async function getDealsForPipeline(
       totalCount: totalCountByStage.get(stage.id) ?? 0,
       totalValue: valueByStage.get(stage.id) ?? 0,
     }));
+
+  const currentWonColumn = pipelineColumns.find((column) =>
+    WON_TERMINAL_STAGE_SLUGS.includes(column.stage.slug as (typeof WON_TERMINAL_STAGE_SLUGS)[number])
+  );
+  if (
+    currentWonColumn &&
+    isGlobalCurrentWonYtdBoardRequest({
+      scope: filters?.scope,
+      assignedRepId: filters?.assignedRepId,
+      wonPeriodFrom,
+      wonPeriodTo,
+      wonSince: wonSignedDateSince,
+      wonUntil: wonSignedDateUntil,
+      now: pipelineNow,
+    })
+  ) {
+    await recordDealsDashboardWonYtdDefinition(tenantDb, currentWonColumn);
+  }
 
   return { pipelineColumns, terminalStages };
 }

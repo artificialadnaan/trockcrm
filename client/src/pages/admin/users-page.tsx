@@ -24,7 +24,7 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 import {
-  Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
+  TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
 import { useAdminUsers } from "@/hooks/use-admin-users";
 import { useAdminOffices } from "@/hooks/use-admin-offices";
@@ -46,6 +46,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { ScrollSyncX } from "@/pages/reports/scroll-sync-x";
 
 function formatDate(value: string | null) {
   if (!value) return null;
@@ -369,7 +370,7 @@ export function UsersPage() {
   };
 
   return (
-    <div className="mx-auto max-w-6xl space-y-6">
+    <div className="mx-auto min-w-0 max-w-6xl space-y-6">
       <PageHeader
         title="Users"
         meta={`${summary.active} active · ${summary.inactive} inactive`}
@@ -445,7 +446,7 @@ export function UsersPage() {
 
       <div className="rounded-xl border bg-white p-4 space-y-4">
         <div className="flex flex-col gap-3 lg:flex-row lg:items-end">
-          <div className="flex-1 space-y-1">
+          <div className="min-w-0 flex-1 space-y-1">
             <label htmlFor="user-search" className="text-xs font-medium uppercase tracking-[0.18em] text-slate-500">
               Search
             </label>
@@ -461,11 +462,11 @@ export function UsersPage() {
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+          <div className="grid min-w-0 flex-1 grid-cols-1 gap-3 sm:grid-cols-2 2xl:grid-cols-4">
             <div className="space-y-1">
               <label className="text-xs font-medium uppercase tracking-[0.18em] text-slate-500">Role</label>
               <Select value={roleFilter} onValueChange={(value) => setRoleFilter(value as UserRoleFilter)}>
-                <SelectTrigger className="h-9 min-w-32">
+                <SelectTrigger className="h-9 w-full min-w-0">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -481,7 +482,7 @@ export function UsersPage() {
             <div className="space-y-1">
               <label className="text-xs font-medium uppercase tracking-[0.18em] text-slate-500">Status</label>
               <Select value={activityFilter} onValueChange={(value) => setActivityFilter(value as UserActivityFilter)}>
-                <SelectTrigger className="h-9 min-w-32">
+                <SelectTrigger className="h-9 w-full min-w-0">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -495,7 +496,7 @@ export function UsersPage() {
             <div className="space-y-1">
               <label className="text-xs font-medium uppercase tracking-[0.18em] text-slate-500">Source</label>
               <Select value={sourceFilter} onValueChange={(value) => setSourceFilter(value as UserSourceFilter)}>
-                <SelectTrigger className="h-9 min-w-32">
+                <SelectTrigger className="h-9 w-full min-w-0">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -511,7 +512,7 @@ export function UsersPage() {
             <div className="space-y-1">
               <label className="text-xs font-medium uppercase tracking-[0.18em] text-slate-500">Login</label>
               <Select value={authFilter} onValueChange={(value) => setAuthFilter(value as UserAuthFilter)}>
-                <SelectTrigger className="h-9 min-w-36">
+                <SelectTrigger className="h-9 w-full min-w-0">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -600,8 +601,12 @@ export function UsersPage() {
         </div>
       )}
 
-      <div className="overflow-x-auto">
-        <Table>
+      <ScrollSyncX
+        className="min-w-0 rounded-xl border border-slate-200 bg-white"
+        bodyClassName="overflow-x-auto overscroll-x-contain"
+        bodyLabel="Users table. Scroll horizontally to view all user details and actions."
+      >
+        <table className="w-full min-w-[76rem] caption-bottom text-sm">
           <TableHeader>
             <TableRow>
               <TableHead className="w-10">
@@ -711,8 +716,8 @@ export function UsersPage() {
                     </SelectContent>
                   </Select>
                 </TableCell>
-                <TableCell>
-                  <div className="min-w-[320px] space-y-2">
+                <TableCell className="whitespace-normal">
+                  <div className="min-w-[25rem] space-y-2">
                     <div>
                       <p className="text-[10px] uppercase tracking-wide text-slate-400">Structure</p>
                       <Select
@@ -729,16 +734,24 @@ export function UsersPage() {
                         </SelectContent>
                       </Select>
                     </div>
-                    <div className="grid grid-cols-3 gap-2">
-                      <div className={(user.commissionStructure ?? "solo") === "solo" ? "" : "opacity-50"}>
-                        <p className="text-[10px] uppercase tracking-wide text-slate-400">
-                          capX Solo %{(user.commissionStructure ?? "solo") === "solo" ? " · active" : ""}
-                        </p>
+                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+                      <div className={`min-w-0 ${(user.commissionStructure ?? "solo") === "solo" ? "" : "opacity-50"}`}>
+                        <label
+                          htmlFor={`user-${user.id}-capx-rate-solo`}
+                          className="block min-h-6 whitespace-normal break-words text-[10px] uppercase leading-3 tracking-wide text-slate-400"
+                        >
+                          capX Solo %
+                          {(user.commissionStructure ?? "solo") === "solo" ? (
+                            <span className="block text-[9px] normal-case tracking-normal text-slate-500">Active</span>
+                          ) : null}
+                        </label>
                         <Input
+                          id={`user-${user.id}-capx-rate-solo`}
                           className="h-8 text-xs"
                           defaultValue={formatRatePercentInput(user.capxRateSolo)}
                           onBlur={(event) => handleCommissionFieldUpdate(user.id, "capxRateSolo", event.target.value)}
                           disabled={updatingId === user.id || bulkUpdating}
+                          inputMode="decimal"
                           title={
                             (user.commissionStructure ?? "solo") === "solo"
                               ? "Active capX rate under the Solo structure."
@@ -746,15 +759,23 @@ export function UsersPage() {
                           }
                         />
                       </div>
-                      <div className={(user.commissionStructure ?? "solo") === "mixed" ? "" : "opacity-50"}>
-                        <p className="text-[10px] uppercase tracking-wide text-slate-400">
-                          capX Mixed %{(user.commissionStructure ?? "solo") === "mixed" ? " · active" : ""}
-                        </p>
+                      <div className={`min-w-0 ${(user.commissionStructure ?? "solo") === "mixed" ? "" : "opacity-50"}`}>
+                        <label
+                          htmlFor={`user-${user.id}-capx-rate-mixed`}
+                          className="block min-h-6 whitespace-normal break-words text-[10px] uppercase leading-3 tracking-wide text-slate-400"
+                        >
+                          capX Mixed %
+                          {(user.commissionStructure ?? "solo") === "mixed" ? (
+                            <span className="block text-[9px] normal-case tracking-normal text-slate-500">Active</span>
+                          ) : null}
+                        </label>
                         <Input
+                          id={`user-${user.id}-capx-rate-mixed`}
                           className="h-8 text-xs"
                           defaultValue={formatRatePercentInput(user.capxRateMixed)}
                           onBlur={(event) => handleCommissionFieldUpdate(user.id, "capxRateMixed", event.target.value)}
                           disabled={updatingId === user.id || bulkUpdating}
+                          inputMode="decimal"
                           title={
                             (user.commissionStructure ?? "solo") === "mixed"
                               ? "Active capX rate under the Mixed structure."
@@ -762,21 +783,24 @@ export function UsersPage() {
                           }
                         />
                       </div>
-                      <div>
-                        <p
-                          className="text-[10px] uppercase tracking-wide text-slate-400"
+                      <div className="min-w-0">
+                        <label
+                          htmlFor={`user-${user.id}-service-source-rate`}
+                          className="block min-h-6 whitespace-normal break-words text-[10px] uppercase leading-3 tracking-wide text-slate-400"
                           title="Stored now; does not affect payouts until service-source commissions ship (PR2)."
                         >
                           Service Src %
-                        </p>
+                        </label>
                         <Input
+                          id={`user-${user.id}-service-source-rate`}
                           className="h-8 text-xs"
                           defaultValue={formatRatePercentInput(user.serviceSourceRate)}
                           onBlur={(event) => handleCommissionFieldUpdate(user.id, "serviceSourceRate", event.target.value)}
                           disabled={updatingId === user.id || bulkUpdating}
+                          inputMode="decimal"
                           title="Stored now; does not affect payouts until service-source commissions ship (PR2)."
                         />
-                        <p className="text-[9px] text-slate-400/80">stored · not paid yet</p>
+                        <p className="whitespace-normal text-[9px] text-slate-400/80">stored · not paid yet</p>
                       </div>
                     </div>
                     <div className="grid grid-cols-2 gap-2">
@@ -892,8 +916,8 @@ export function UsersPage() {
               </TableRow>
             )}
           </TableBody>
-        </Table>
-      </div>
+        </table>
+      </ScrollSyncX>
 
       <div className="rounded-lg border border-blue-200 bg-blue-50 p-4 text-sm text-blue-800">
         <div className="mb-1 flex items-center gap-2 font-medium">
