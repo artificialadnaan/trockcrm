@@ -36,8 +36,9 @@ import {
   listFieldScorecardsForProject,
   listRecentFieldScorecards,
   presignFieldScorecardPdf,
+  updateFieldScorecard,
 } from "./scorecards-service.js";
-import { parseScorecardSubmission } from "./scorecard-submission.js";
+import { parseScorecardSubmission, parseScorecardUpdate } from "./scorecard-submission.js";
 import { getFileDownloadUrl } from "../files/service.js";
 import {
   assertAccessibleFieldCaptureTarget,
@@ -954,13 +955,51 @@ fieldRoutes.get("/scorecards", requireFieldContractor, async (req, res, next) =>
     const limitRaw = parseInt(req.query.limit as string, 10);
     const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 200) : 50;
     const { results, failures } = assertFanOutNotFullyDegraded(
-      await fanOutActiveOffices((officeDb) => listRecentFieldScorecards(officeDb, { limit })),
+      await fanOutActiveOffices((officeDb) =>
+        listRecentFieldScorecards(officeDb, { limit, viewerUserId: req.fieldUser!.id }),
+      ),
     );
     const scorecards = results
       .flatMap(({ office, value }) => value.scorecards.map((s) => ({ ...s, ...officeTag(office) })))
       .sort((a, b) => (b.submittedAt ?? "").localeCompare(a.submittedAt ?? ""))
       .slice(0, limit);
     res.json({ scorecards, degradedOffices: failures.map((failure) => failure.office.slug) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Full replacement of a submitted current-form scorecard's editable content. Unlike a new submission,
+// this write always resolves by SCORECARD id (independent of the cross-office-write feature flag): the row
+// already has one authoritative owning schema. The service enforces exact submittedBy UUID ownership with
+// no admin/director override, derives immutable deal/kind/version/week fields from that row, and applies an
+// optimistic updatedAt token before replacing content.
+fieldRoutes.put("/scorecards/:id", requireFieldContractor, async (req, res, next) => {
+  try {
+    const id = String(req.params.id);
+    assertValidUuid(id, "id");
+    const parsed = parseScorecardUpdate(req.body);
+    const office = await resolveWriteOffice("scorecard", id, "Scorecard not found");
+    const result = await runInOfficeTransaction(office, req.fieldUser!.id, (db) =>
+      updateFieldScorecard(db, {
+        userId: req.fieldUser!.id,
+        userRole: req.fieldUser!.role,
+        scorecardId: id,
+        ...parsed,
+      }),
+    );
+
+    // The edit is durable once the office transaction returns. Regenerate the immutable PDF after the
+    // response just like create: storage/transcode failures must not roll back or hide the successful edit.
+    res.json(result);
+    void finalizeFieldScorecardArtifacts(office, req.fieldUser!.id, id).catch((err) => {
+      console.error("[field-scorecard] PDF finalize failed after edit (edit is saved)", {
+        scorecardId: id,
+        office: office.slug,
+        err,
+      });
+    });
+    return;
   } catch (err) {
     next(err);
   }

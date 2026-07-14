@@ -190,6 +190,10 @@ export type FieldScorecardPhotoView = {
   caption: string | null;
 };
 export type FieldScorecardDetail = FieldScorecardSummary & {
+  /** Server-authoritative owner check: true only for the user who originally submitted this scorecard. */
+  canEdit: boolean;
+  /** Optimistic-concurrency token used when replacing an editable scorecard. */
+  updatedAt: string;
   criticalDeficiencyNotes?: Record<string, string>;
   superintendentSignature?: string | null;
   pmSignature?: string | null;
@@ -211,6 +215,7 @@ export type ScorecardDetailResponse = { scorecard: FieldScorecardDetail };
 // Matches server getFieldScorecardPdfDownload: { url, expiresAt } — NOT the report { url, filename } shape.
 export type ScorecardDownloadResponse = { url: string; expiresAt: string };
 export type CreateScorecardResponse = { scorecard: FieldScorecardSummary };
+export type UpdateScorecardResponse = { scorecard: FieldScorecardSummary };
 
 // The deal's assigned Superintendent + PM names, as returned by the FIELD route
 // GET /field/projects/:dealId/team. The server already resolves the two roles from the ACTIVE team rows

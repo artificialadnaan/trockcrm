@@ -4,19 +4,21 @@
 // itself is the durability unit — on a photos-pending / failed POST the caller keeps the draft and retries
 // (the upload queue keeps retrying the photos in the background).
 
-import { createScorecard, type Fetcher } from "../api/endpoints";
+import { createScorecard, updateScorecard, type Fetcher } from "../api/endpoints";
 import type { FieldScorecardSummary } from "../api/types";
 import type { CaptureUploadInput } from "../capture/upload";
 import { MAX_UPLOAD_ATTEMPTS, drainUploadQueue, enqueueUploads, getQueuedUploads } from "../capture/upload-queue";
 import {
   scorecardDraftToSubmission,
+  scorecardDraftNewPhotos,
   todayLocalIso,
   type ScorecardDraft,
-  type ScorecardDraftPhoto,
+  type NewScorecardDraftPhoto,
 } from "./draft";
+import { scorecardDraftToUpdate } from "./edit";
 
 /** Build the field-photo upload input for a scorecard evidence photo — targets the deal and auto-tags. */
-export function scorecardPhotoUploadInput(photo: ScorecardDraftPhoto, dealId: string): CaptureUploadInput {
+export function scorecardPhotoUploadInput(photo: NewScorecardDraftPhoto, dealId: string): CaptureUploadInput {
   return {
     uri: photo.uri,
     width: photo.width,
@@ -73,17 +75,24 @@ export async function submitScorecard(
   ownerKey: string,
   draft: ScorecardDraft,
 ): Promise<SubmitScorecardResult> {
-  if (draft.photos.length > 0) {
-    await enqueueUploads(ownerKey, draft.photos.map((p) => scorecardPhotoUploadInput(p, draft.dealId)));
+  // Retained server evidence on an edit is referenced by scorecard-photo id. Only newly captured/imported
+  // evidence owns a clientUploadId and may enter the durable upload queue.
+  const newPhotos = scorecardDraftNewPhotos(draft);
+  if (newPhotos.length > 0) {
+    await enqueueUploads(ownerKey, newPhotos.map((p) => scorecardPhotoUploadInput(p, draft.dealId)));
     await drainUploadQueue(ownerKey, fetcher);
     const stillQueued = await getQueuedUploads(ownerKey);
     const { pending, failed } = classifyDraftPhotoUploads(
-      draft.photos.map((p) => p.clientUploadId),
+      newPhotos.map((p) => p.clientUploadId),
       stillQueued.map((q) => ({ clientUploadId: q.clientUploadId, attempts: q.attempts })),
       MAX_UPLOAD_ATTEMPTS,
     );
     if (failed.length > 0) return { status: "photos_failed", failed: failed.length };
     if (pending.length > 0) return { status: "photos_pending", remaining: pending.length };
+  }
+  if (draft.editingScorecardId) {
+    const { scorecard } = await updateScorecard(fetcher, draft.editingScorecardId, scorecardDraftToUpdate(draft));
+    return { status: "submitted", scorecard };
   }
   // Stamp Week Of = the completion date, LOCAL, at submit time. Both kinds present it as "set automatically
   // when completed" (neither exposes an editable field), so a draft started one day and submitted the next

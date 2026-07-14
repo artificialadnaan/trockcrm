@@ -14,10 +14,11 @@ import {
   type ScorecardSectionKey,
 } from "./scoring";
 
-export interface ScorecardDraftPhoto {
+interface ScorecardDraftPhotoBase {
   key: string; // local list key
-  uri: string; // durable per-draft copy (survives app-kill), not the raw camera uri
-  clientUploadId: string; // stamped at capture; resolved to a fileId server-side on submit
+  // New evidence uses a durable per-draft file URI; retained evidence on an edit uses a short-lived
+  // presigned remote URI which is refreshed from the scorecard detail whenever the editor resumes.
+  uri: string;
   // Project cards attach photos per category (or to a critical_deficiency); leadership cards attach photos to
   // any leadership category or to the Project Summary (`project_summary`). One structure serves both flows.
   sectionKey: ScorecardSectionKey | ScorecardLeadershipSectionKey | "critical_deficiency" | typeof FIELD_SCORECARD_LEADERSHIP_SUMMARY_SECTION_KEY;
@@ -34,6 +35,23 @@ export interface ScorecardDraftPhoto {
   width?: number;
   height?: number;
 }
+
+/**
+ * Evidence already linked to the submitted scorecard. It must never enter the durable upload queue: saving
+ * an edit retains it by scorecard-photo id, while removing it only unlinks it from the scorecard.
+ */
+export type ExistingScorecardDraftPhoto = ScorecardDraftPhotoBase & {
+  existingScorecardPhotoId: string;
+  clientUploadId?: never;
+};
+
+/** New evidence captured/imported while composing either a new scorecard or an edit. */
+export type NewScorecardDraftPhoto = ScorecardDraftPhotoBase & {
+  existingScorecardPhotoId?: never;
+  clientUploadId: string; // stamped at capture; resolved to a fileId server-side on submit/save
+};
+
+export type ScorecardDraftPhoto = ExistingScorecardDraftPhoto | NewScorecardDraftPhoto;
 
 export interface ScorecardDraft {
   id: string;
@@ -55,6 +73,12 @@ export interface ScorecardDraft {
    * submittedByName from the field user, which IS the evaluator). The project card has no evaluator field.
    */
   evaluatorName?: string;
+  /** Present only for a persisted local edit of an already-submitted scorecard. */
+  editingScorecardId?: string;
+  /** Owning office for evidence uploads; edits can be opened from the cross-office submitted list. */
+  editingOfficeId?: string | null;
+  /** Optimistic-concurrency token returned by the detail endpoint. */
+  editBaseUpdatedAt?: string;
   // Project cards key scores/notes by the V2 section keys; leadership cards key by the 4 leadership keys.
   // Both are stored in the same maps (disjoint key sets), so the reducer/photo machinery is shared.
   scores: Partial<Record<ScorecardSectionKey | ScorecardLeadershipSectionKey, number>>;
@@ -119,6 +143,33 @@ export interface ScorecardSubmissionPayload {
   pmSignature: string | null;
   /** Leadership Project Summary free text; omitted for project cards. */
   summary?: string | null;
+}
+
+export type ScorecardUpdatePhotoInput =
+  | {
+      sectionKey: ScorecardDraftPhoto["sectionKey"];
+      deficiencyKey: ScorecardCriticalDeficiencyKey | null;
+      scorecardPhotoId: string;
+    }
+  | {
+      sectionKey: ScorecardDraftPhoto["sectionKey"];
+      deficiencyKey: ScorecardCriticalDeficiencyKey | null;
+      clientUploadId: string;
+    };
+
+/** Full replacement body for PUT /field/scorecards/:id. Identity, kind, week, and submitter stay immutable. */
+export interface ScorecardUpdatePayload {
+  expectedUpdatedAt: string;
+  superintendentName: string | null;
+  pmName: string | null;
+  items: { sectionKey: AnyScorecardSectionKey; points: number; note: string | null }[];
+  criticalDeficiencies: string[];
+  criticalDeficiencyNotes: Record<string, string>;
+  actionItems: string[];
+  superintendentSignature: string | null;
+  pmSignature: string | null;
+  summary: string | null;
+  photos: ScorecardUpdatePhotoInput[];
 }
 
 export function createScorecardDraft(input: {
@@ -191,6 +242,24 @@ export function createLeadershipScorecardDraft(input: {
 /** True iff this draft is a leadership scorecard (absent kind ⇒ legacy project draft). */
 export function isLeadershipDraft(draft: ScorecardDraft): boolean {
   return draft.kind === "leadership";
+}
+
+export function isEditingScorecardDraft(draft: ScorecardDraft): boolean {
+  return Boolean(draft.editingScorecardId && draft.editBaseUpdatedAt);
+}
+
+export function isExistingScorecardDraftPhoto(
+  photo: ScorecardDraftPhoto,
+): photo is ExistingScorecardDraftPhoto {
+  return typeof photo.existingScorecardPhotoId === "string" && photo.existingScorecardPhotoId.length > 0;
+}
+
+export function isNewScorecardDraftPhoto(photo: ScorecardDraftPhoto): photo is NewScorecardDraftPhoto {
+  return !isExistingScorecardDraftPhoto(photo);
+}
+
+export function scorecardDraftNewPhotos(draft: ScorecardDraft): NewScorecardDraftPhoto[] {
+  return draft.photos.filter(isNewScorecardDraftPhoto);
 }
 
 /**
@@ -433,7 +502,9 @@ export function scorecardDraftToSubmission(draft: ScorecardDraft): ScorecardSubm
         .filter(([, note]) => note.length > 0),
     ),
     actionItems: draft.actionItems.map((s) => s.trim()).filter((s) => s.length > 0),
-    photos: draft.photos.map((p) => ({ sectionKey: p.sectionKey, deficiencyKey: p.deficiencyKey ?? null, clientUploadId: p.clientUploadId })),
+    photos: draft.photos
+      .filter(isNewScorecardDraftPhoto)
+      .map((p) => ({ sectionKey: p.sectionKey, deficiencyKey: p.deficiencyKey ?? null, clientUploadId: p.clientUploadId })),
     superintendentSignature: draft.superintendentSignature?.trim() || null,
     pmSignature: draft.pmSignature?.trim() || null,
   };
@@ -463,6 +534,7 @@ function leadershipDraftToSubmission(draft: ScorecardDraft): ScorecardSubmission
     criticalDeficiencyNotes: {},
     actionItems: [],
     photos: draft.photos
+      .filter(isNewScorecardDraftPhoto)
       .filter((p) => p.sectionKey === FIELD_SCORECARD_LEADERSHIP_SUMMARY_SECTION_KEY || FIELD_SCORECARD_LEADERSHIP_SECTION_KEYS.includes(p.sectionKey as ScorecardLeadershipSectionKey))
       .map((p) => ({ sectionKey: p.sectionKey, deficiencyKey: null, clientUploadId: p.clientUploadId })),
     superintendentSignature: null,

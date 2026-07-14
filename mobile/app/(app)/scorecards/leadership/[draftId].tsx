@@ -13,7 +13,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import * as ImagePicker from "expo-image-picker";
 import { theme } from "../../../../src/theme/theme";
 import { useAuth } from "../../../../src/auth/AuthContext";
-import { getTranscriptionConfig, type Fetcher } from "../../../../src/api/endpoints";
+import { getScorecard, getTranscriptionConfig, type Fetcher } from "../../../../src/api/endpoints";
 import { apiFetch } from "../../../../src/api/client";
 import { uploadOwnerKey, newClientUploadId, removeQueuedUploads } from "../../../../src/capture/upload-queue";
 import { qk } from "../../../../src/query/keys";
@@ -31,11 +31,15 @@ import {
   scorecardDraftRating,
   scorecardDraftSectionsAnswered,
   scorecardDraftPhotosForSection,
+  scorecardDraftNewPhotos,
+  isEditingScorecardDraft,
+  isExistingScorecardDraftPhoto,
   validateScorecardDraft,
   type ScorecardDraft,
   type ScorecardDraftPhoto,
   type DraftAction,
 } from "../../../../src/scorecards/draft";
+import { refreshScorecardEditPhotoUrls } from "../../../../src/scorecards/edit";
 import { loadScorecardDraft, saveScorecardDraft, deleteScorecardDraft, copyPhotoIntoDraft } from "../../../../src/scorecards/draft-store";
 import { submitScorecard } from "../../../../src/scorecards/submit";
 import { Button, EmptyState, LoadingState, SectionLabel, TextInput } from "../../../../src/components/ui";
@@ -75,10 +79,12 @@ async function withLiveGpsFallback(exif: ReturnType<typeof extractExifMetadata>)
 
 export default function LeadershipScorecardScreen() {
   const router = useRouter();
-  const draftId = toStr(useLocalSearchParams<{ draftId: string }>().draftId);
+  const params = useLocalSearchParams<{ draftId: string; officeId?: string }>();
+  const draftId = toStr(params.draftId);
+  const routeOfficeId = toStr(params.officeId);
   const { fetcher, user, activeOfficeId, token, signOut } = useAuth();
   const qc = useQueryClient();
-  const resolvedOfficeId = activeOfficeId ?? user?.tenantId ?? null;
+  const resolvedOfficeId = routeOfficeId || activeOfficeId || user?.tenantId || null;
   const ownerKey = uploadOwnerKey(user?.id, resolvedOfficeId ?? undefined);
   const queueFetcher = useCallback<Fetcher>(
     (path, opts) =>
@@ -104,8 +110,22 @@ export default function LeadershipScorecardScreen() {
     setNotice(null);
     let cancelled = false;
     void loadScorecardDraft(ownerKey, draftId)
-      .then((d) => {
-        if (!cancelled) setLoaded(d ?? "missing");
+      .then(async (d) => {
+        if (!d) {
+          if (!cancelled) setLoaded("missing");
+          return;
+        }
+        if (d.editingScorecardId) {
+          try {
+            const { scorecard } = await getScorecard(fetcher, d.editingScorecardId);
+            const refreshed = refreshScorecardEditPhotoUrls(d, scorecard);
+            if (refreshed !== d) await saveScorecardDraft(ownerKey, refreshed, Date.now());
+            d = refreshed;
+          } catch {
+            /* retain the persisted edit + last-known thumbnails while offline */
+          }
+        }
+        if (!cancelled) setLoaded(d);
       })
       .catch(() => {
         if (!cancelled) setLoaded("missing");
@@ -113,16 +133,19 @@ export default function LeadershipScorecardScreen() {
     return () => {
       cancelled = true;
     };
-  }, [ownerKey, draftId]);
+  }, [ownerKey, draftId, fetcher]);
 
   // A project draft belongs to the project wizard (its own steps + signatures). If one is reached here via a
   // deep link / stale route, hand it off rather than rendering it as a leadership card. `replace` so Back
   // doesn't bounce between the two screens. Mirrors the project screen's leadership → leadership guard.
   useEffect(() => {
     if (loaded && loaded !== "missing" && loaded.kind !== "leadership") {
-      router.replace({ pathname: "/(app)/scorecards/[draftId]", params: { draftId } });
+      router.replace({
+        pathname: "/(app)/scorecards/[draftId]",
+        params: { draftId, ...(routeOfficeId ? { officeId: routeOfficeId } : {}) },
+      });
     }
-  }, [loaded, draftId, router]);
+  }, [loaded, draftId, routeOfficeId, router]);
 
   if (loaded === null) {
     return (
@@ -162,11 +185,12 @@ export default function LeadershipScorecardScreen() {
       notice={notice}
       setNotice={setNotice}
       voiceEnabled={voiceEnabled}
-      onSubmitted={(dealId) => {
+      onSubmitted={(dealId, scorecardId) => {
         if (user) {
           void qc.invalidateQueries({ queryKey: ["scorecards-recent", user.id] });
           void qc.invalidateQueries({ queryKey: qk.projectPhotos(user.id, dealId) });
           void qc.invalidateQueries({ queryKey: qk.projectScorecards(user.id, dealId) });
+          if (scorecardId) void qc.invalidateQueries({ queryKey: qk.scorecard(user.id, scorecardId) });
         }
         router.back();
       }}
@@ -184,7 +208,7 @@ function LeadershipForm(props: {
   notice: { tone: "success" | "error"; text: string } | null;
   setNotice: (n: { tone: "success" | "error"; text: string } | null) => void;
   voiceEnabled: boolean;
-  onSubmitted: (dealId: string) => void;
+  onSubmitted: (dealId: string, scorecardId?: string) => void;
   fetcher: ReturnType<typeof useAuth>["fetcher"];
 }) {
   const { ownerKey, draftId, submitting, setSubmitting, notice, setNotice, voiceEnabled, onSubmitted, fetcher } = props;
@@ -216,6 +240,7 @@ function LeadershipForm(props: {
   const validation = validateScorecardDraft(draft);
   const summaryPhotos = scorecardDraftPhotosForSection(draft, SUMMARY_KEY);
   const captionPhoto = draft.photos.find((photo) => photo.key === captionPhotoKey) ?? null;
+  const editingSubmitted = isEditingScorecardDraft(draft);
 
   // Track whether any INLINE dictation (a category comment or the Project Summary) is still recording or
   // transcribing. VoiceRecorder dispatches its transcript asynchronously on stop; submitting mid-dictation
@@ -255,11 +280,17 @@ function LeadershipForm(props: {
       photoCount.current -= 1;
     }
     dispatch({ type: "removePhoto", key: photo.key });
+    if (isExistingScorecardDraftPhoto(photo)) return;
     const id = photo.clientUploadId;
     pendingRemovalIds.current.add(id);
     void removeQueuedUploads(ownerKey, [id])
       .then(() => pendingRemovalIds.current.delete(id))
       .catch(() => undefined);
+  };
+
+  const openPhotoCaption = (photo: ScorecardDraftPhoto) => {
+    if (isExistingScorecardDraftPhoto(photo)) return;
+    setCaptionPhotoKey(photo.key);
   };
 
   async function onCameraCapture(sectionKey: LeadershipPhotoSectionKey, shot: CapturedShot, caption: string) {
@@ -376,7 +407,8 @@ function LeadershipForm(props: {
     // needs a retry. Mark this BEFORE draining so the list screen never offers an unsafe discard that would
     // orphan confirmed evidence.
     let draftForSubmit = draft;
-    if (draft.photos.length > 0 && !draft.evidenceUploadAttempted) {
+    const newPhotos = scorecardDraftNewPhotos(draft);
+    if (newPhotos.length > 0 && !draft.evidenceUploadAttempted) {
       draftForSubmit = { ...draft, evidenceUploadAttempted: true };
       try {
         // Flush earlier autosaves, then durably write the safety marker before the first upload can finish.
@@ -415,9 +447,17 @@ function LeadershipForm(props: {
       finalized.current = true;
       await saveChain.current.catch(() => undefined);
       await deleteScorecardDraft(ownerKey, draftId).catch(() => undefined);
-      onSubmitted(draft.dealId);
-    } catch {
-      setNotice({ tone: "error", text: "Couldn’t submit the scorecard. Your work is saved — try again." });
+      onSubmitted(draft.dealId, draft.editingScorecardId);
+    } catch (error) {
+      const status = (error as { status?: number } | null)?.status;
+      setNotice({
+        tone: "error",
+        text: status === 409
+          ? "This scorecard changed in another session. The submitted scorecard was not changed, and your local edits are still saved. Reopen the latest scorecard before trying again."
+          : editingSubmitted
+            ? "Couldn’t save the scorecard changes. Your work is saved — try again."
+            : "Couldn’t submit the scorecard. Your work is saved — try again.",
+      });
       setSubmitting(false);
     }
   }
@@ -440,7 +480,7 @@ function LeadershipForm(props: {
         pointerEvents={submitting ? "none" : "auto"}
         style={submitting ? styles.frozen : undefined}
       >
-        <Text style={styles.stepTitle}>Leadership Scorecard</Text>
+        <Text style={styles.stepTitle}>{editingSubmitted ? "Editing submitted scorecard" : "Leadership Scorecard"}</Text>
         {notice ? <Banner message={notice.text} tone={notice.tone} /> : null}
 
         <View style={{ gap: theme.space.md }}>
@@ -502,7 +542,7 @@ function LeadershipForm(props: {
                   label={`Evidence photos (${sectionPhotos.length})`}
                   photos={sectionPhotos}
                   disabled={photosDisabled}
-                  onEdit={(photo) => setCaptionPhotoKey(photo.key)}
+                  onEdit={openPhotoCaption}
                   onRemove={removePhotoAndCancelUpload}
                   onCamera={() => setPhotoSectionKey(section.key)}
                   onImport={() => void importPhotos(section.key)}
@@ -534,7 +574,7 @@ function LeadershipForm(props: {
             label={`Summary photos (${summaryPhotos.length})`}
             photos={summaryPhotos}
             disabled={photosDisabled}
-            onEdit={(photo) => setCaptionPhotoKey(photo.key)}
+            onEdit={openPhotoCaption}
             onRemove={removePhotoAndCancelUpload}
             onCamera={() => setPhotoSectionKey(SUMMARY_KEY)}
             onImport={() => void importPhotos(SUMMARY_KEY)}
@@ -547,7 +587,7 @@ function LeadershipForm(props: {
           <Text style={styles.totalText}>{average.toFixed(1)}/10</Text>
         </View>
         <Button
-          title={savingPhotos > 0 ? "Saving photo…" : anyVoiceBusy ? "Finishing dictation…" : "Submit ✓"}
+          title={savingPhotos > 0 ? "Saving photo…" : anyVoiceBusy ? "Finishing dictation…" : editingSubmitted ? "Save changes" : "Submit ✓"}
           onPress={onSubmit}
           loading={submitting}
           disabled={!validation.canSubmit || submitting || savingPhotos > 0 || anyVoiceBusy}
@@ -628,25 +668,42 @@ function EvidencePhotos(props: {
     <View style={{ gap: theme.space.sm }}>
       <SectionLabel>{label}</SectionLabel>
       <View style={styles.photoRow}>
-        {photos.map((photo) => (
-          <View key={photo.key} style={styles.thumbWrap}>
-            <Pressable
-              onPress={() => onEdit(photo)}
-              accessibilityRole="button"
-              accessibilityLabel={photo.caption.trim() ? "Photo with description. Edit description." : "Photo. Add description."}
-            >
-              <Image source={{ uri: photo.uri }} style={styles.thumb} />
-              <View style={styles.thumbCaption}>
-                <Text style={styles.thumbCaptionText}>{photo.caption.trim() ? "Edit" : "Describe"}</Text>
-              </View>
-            </Pressable>
-            <Pressable onPress={() => onRemove(photo)} hitSlop={8} style={styles.thumbX} accessibilityLabel="Remove photo">
-              <Text style={styles.thumbXText}>✕</Text>
-            </Pressable>
-          </View>
-        ))}
+        {photos.map((photo) => {
+          const retained = isExistingScorecardDraftPhoto(photo);
+          const image = photo.uri
+            ? <Image source={{ uri: photo.uri }} style={styles.thumb} />
+            : <View style={styles.thumb} />;
+          return (
+            <View key={photo.key} style={styles.thumbWrap}>
+              {retained ? (
+                <View accessibilityRole="image" accessibilityLabel={photo.caption || "Submitted evidence photo"}>
+                  {image}
+                  <View style={styles.thumbCaption}>
+                    <Text style={styles.thumbCaptionText}>Submitted</Text>
+                  </View>
+                </View>
+              ) : (
+                <Pressable
+                  onPress={() => onEdit(photo)}
+                  accessibilityRole="button"
+                  accessibilityLabel={photo.caption.trim() ? "Photo with description. Edit description." : "Photo. Add description."}
+                >
+                  {image}
+                  <View style={styles.thumbCaption}>
+                    <Text style={styles.thumbCaptionText}>{photo.caption.trim() ? "Edit" : "Describe"}</Text>
+                  </View>
+                </Pressable>
+              )}
+              <Pressable onPress={() => onRemove(photo)} hitSlop={8} style={styles.thumbX} accessibilityLabel="Remove photo">
+                <Text style={styles.thumbXText}>✕</Text>
+              </Pressable>
+            </View>
+          );
+        })}
       </View>
-      {photos.length > 0 ? <Text style={styles.photoHint}>Tap a photo to add a description or dictate it.</Text> : null}
+      {photos.some((photo) => !isExistingScorecardDraftPhoto(photo)) ? (
+        <Text style={styles.photoHint}>Tap a new photo to add a description or dictate it.</Text>
+      ) : null}
       <View style={styles.actions}>
         <Button title="Add photo" variant="ghost" onPress={onCamera} disabled={disabled} style={{ flex: 1 }} />
         <Button title="Import" variant="ghost" onPress={onImport} disabled={disabled} style={{ flex: 1 }} />

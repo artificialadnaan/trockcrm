@@ -1,4 +1,4 @@
-import { and, desc, eq, getTableColumns, inArray, isNull, lte, sql } from "drizzle-orm";
+import { and, desc, eq, getTableColumns, inArray, isNull, lte, notInArray, sql } from "drizzle-orm";
 import { createHash } from "node:crypto";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
@@ -78,10 +78,37 @@ export interface CreateFieldScorecardInput {
   summary?: string | null;
 }
 
+export interface UpdateFieldScorecardInput {
+  userId: string;
+  userRole: FieldAccessContext["userRole"];
+  scorecardId: string;
+  expectedUpdatedAt: string;
+  superintendentName?: string | null;
+  pmName?: string | null;
+  items: { sectionKey: string; points: number; note?: string | null }[];
+  criticalDeficiencies: string[];
+  criticalDeficiencyNotes?: Record<string, string>;
+  actionItems: string[];
+  photos: Array<
+    | { scorecardPhotoId: string; clientUploadId?: never; sectionKey: string; deficiencyKey?: string | null }
+    | { scorecardPhotoId?: never; clientUploadId: string; sectionKey: string; deficiencyKey?: string | null }
+  >;
+  superintendentSignature?: string | null;
+  pmSignature?: string | null;
+  summary?: string | null;
+}
+
 type ValidatedItem = {
   sectionKey: ScorecardSectionKey | ScorecardV2SectionKey | ScorecardLeadershipSectionKey;
   points: number;
   note: string | null;
+};
+
+type ResolvedUpdatePhoto = {
+  linkId: string | null;
+  fileId: string;
+  sectionKey: string;
+  deficiencyKey: string | null;
 };
 
 // The subset of columns a summary needs — satisfied by both a Drizzle row and the aliased raw-SQL rows
@@ -100,8 +127,11 @@ interface ScorecardSummarySource {
   projectName?: string | null;
   projectNumber: string | null;
   criticalDeficiencies: string[] | null;
+  status?: string;
   submittedByName: string | null;
+  submittedBy?: string;
   submittedAt: unknown;
+  updatedAt?: unknown;
   superintendentSignature?: string | null;
   pmSignature?: string | null;
   pdfR2Key?: string | null;
@@ -153,7 +183,7 @@ export async function createFieldScorecard(
   // Idempotency runs FIRST so a retry of an already-submitted card still succeeds even if the deal has
   // since dropped off the field surface (e.g. moved to Lost after the original submit).
   const priorCard = await findByClientSubmissionId(tenantDb, input.clientSubmissionId);
-  if (priorCard) return { scorecard: toSummary(priorCard), created: false };
+  if (priorCard) return { scorecard: toSummary(priorCard, priorCard.projectName, input.userId), created: false };
 
   // Only browsable field projects (active pipeline OR Won-family, never Lost/terminal/inactive) may be
   // scored — same gate the field project reads use. Runs in the resolved office; an off-office deal isn't
@@ -247,7 +277,7 @@ export async function createFieldScorecard(
 
   if (inserted.length === 0) {
     const raced = await findByClientSubmissionId(tenantDb, input.clientSubmissionId);
-    if (raced) return { scorecard: toSummary(raced), created: false };
+    if (raced) return { scorecard: toSummary(raced, raced.projectName, input.userId), created: false };
     throw new AppError(409, "Could not save the scorecard — please try again.");
   }
   const card = inserted[0];
@@ -303,7 +333,234 @@ export async function createFieldScorecard(
     maxAttempts: 6,
   });
 
-  return { scorecard: toSummary(card, project.name), created: true };
+  return { scorecard: toSummary(card, project.name, input.userId), created: true };
+}
+
+/**
+ * Replace the editable content of an already-submitted current-form scorecard. Ownership is the immutable
+ * submitted_by UUID: no role (including admin/director) overrides it. The stored deal, completion week,
+ * form kind/version, submitter, and submission time remain authoritative and cannot be changed by the body.
+ *
+ * The route runs this inside the scorecard's owning-office transaction. The row lock plus updatedAt token
+ * prevents two devices from silently overwriting one another; a response-loss retry whose desired content
+ * already equals the current row succeeds without advancing updatedAt again.
+ */
+export async function updateFieldScorecard(
+  tenantDb: TenantDb,
+  input: UpdateFieldScorecardInput,
+): Promise<{ scorecard: FieldScorecardSummary }> {
+  const [card] = await tenantDb
+    .select()
+    .from(fieldScorecards)
+    .where(and(eq(fieldScorecards.id, input.scorecardId), eq(fieldScorecards.isActive, true)))
+    .limit(1)
+    .for("update");
+  if (!card) throw new AppError(404, "Scorecard not found");
+  if (card.submittedBy !== input.userId) {
+    throw new AppError(403, "Only the person who submitted this scorecard can edit it.", "SCORECARD_EDIT_FORBIDDEN");
+  }
+  if (card.status !== "submitted" || card.formVersion !== 2) {
+    throw new AppError(422, "Only submitted current-form scorecards can be edited.", "SCORECARD_EDIT_UNSUPPORTED");
+  }
+
+  const expectedDate = new Date(input.expectedUpdatedAt);
+  if (!Number.isFinite(expectedDate.getTime())) {
+    throw new AppError(400, "expectedUpdatedAt must be a valid timestamp.");
+  }
+  const expectedUpdatedAt = expectedDate.toISOString();
+  const currentUpdatedAt = toIso(card.updatedAt);
+  const project = await assertActiveFieldProject(
+    tenantDb,
+    { userId: input.userId, userRole: input.userRole },
+    card.dealId,
+  );
+  const superintendentName = input.superintendentName?.trim() || null;
+  const pmName = input.pmName?.trim() || null;
+
+  const kind: ScorecardKind = card.kind === "leadership" ? "leadership" : "project";
+  const formVersion: ScorecardFormVersion = 2;
+  const items = validateItems(input.items, formVersion, kind);
+  if (
+    kind === "leadership" &&
+    (input.criticalDeficiencies.length > 0 || Object.keys(input.criticalDeficiencyNotes ?? {}).length > 0)
+  ) {
+    throw new AppError(400, "Leadership scorecards do not support critical deficiencies.");
+  }
+  const deficiencies = kind === "leadership" ? [] : validateDeficiencies(input.criticalDeficiencies, formVersion);
+  const deficiencyNotes = kind === "leadership"
+    ? {}
+    : validateDeficiencyNotes(input.criticalDeficiencyNotes ?? {}, deficiencies, formVersion);
+  const averageScore = kind === "leadership"
+    ? computeScorecardLeadershipAverage(items as { sectionKey: ScorecardLeadershipSectionKey; points: number }[])
+    : computeScorecardV2Average(items as { sectionKey: ScorecardV2SectionKey; points: number }[]);
+  const total = Math.round(averageScore * 10);
+  const rating = kind === "leadership"
+    ? resolveScorecardLeadershipRating(averageScore)
+    : resolveScorecardV2Rating(averageScore);
+  const actionItems = kind === "leadership"
+    ? []
+    : input.actionItems.map((value) => value.trim()).filter((value) => value.length > 0);
+  const summary = kind === "leadership"
+    ? input.summary?.trim()
+      ? input.summary.trim().slice(0, 8000)
+      : null
+    : null;
+  const superintendentSignature = kind === "leadership" ? null : normalizeSignature(input.superintendentSignature);
+  const pmSignature = kind === "leadership" ? null : normalizeSignature(input.pmSignature);
+  if (kind === "project" && (!superintendentSignature || !pmSignature)) {
+    throw new AppError(422, "Fresh superintendent and project manager signatures are required to save an edited scorecard.");
+  }
+
+  const currentItems = await tenantDb
+    .select()
+    .from(fieldScorecardItems)
+    .where(eq(fieldScorecardItems.scorecardId, card.id));
+  const currentPhotos = await tenantDb
+    .select({
+      id: fieldScorecardPhotos.id,
+      fileId: fieldScorecardPhotos.fileId,
+      sectionKey: fieldScorecardPhotos.sectionKey,
+      deficiencyKey: fieldScorecardPhotos.deficiencyKey,
+    })
+    .from(fieldScorecardPhotos)
+    .where(eq(fieldScorecardPhotos.scorecardId, card.id));
+  const photos = await resolveUpdatePhotoLinks(
+    tenantDb,
+    input,
+    { dealId: card.dealId, kind, formVersion },
+    deficiencies,
+    currentPhotos,
+  );
+
+  const contentUnchanged = scorecardEditableContentEquals({
+    card,
+    currentItems,
+    currentPhotos,
+    desired: {
+      superintendentName,
+      pmName,
+      items,
+      criticalDeficiencies: deficiencies,
+      criticalDeficiencyNotes: deficiencyNotes,
+      actionItems,
+      photos,
+      superintendentSignature,
+      pmSignature,
+      summary,
+      totalScore: total,
+      averageScore,
+      rating,
+    },
+  });
+  if (expectedUpdatedAt !== currentUpdatedAt && !contentUnchanged) {
+    throw new AppError(
+      409,
+      "This scorecard changed after you opened it. Reload it before saving your edits.",
+      "SCORECARD_EDIT_CONFLICT",
+    );
+  }
+  if (contentUnchanged) {
+    return { scorecard: toSummary(card, project.name, input.userId) };
+  }
+
+  // Item identity is internal (the API addresses sections by their canonical keys), so a two-statement
+  // replacement is simpler and safer than a partial merge while still remaining atomic in this transaction.
+  await tenantDb.delete(fieldScorecardItems).where(eq(fieldScorecardItems.scorecardId, card.id));
+  await tenantDb.insert(fieldScorecardItems).values(
+    items.map((item) => ({
+      scorecardId: card.id,
+      sectionKey: item.sectionKey,
+      points: item.points,
+      note: item.note,
+    })),
+  );
+
+  // Preserve retained scorecard-photo link ids (the mobile edit form uses them on the next save), while
+  // removing omitted links and inserting newly uploaded evidence. Gallery files themselves are never deleted.
+  const retainedLinkIds = photos.flatMap((photo) => (photo.linkId ? [photo.linkId] : []));
+  if (retainedLinkIds.length === 0) {
+    await tenantDb.delete(fieldScorecardPhotos).where(eq(fieldScorecardPhotos.scorecardId, card.id));
+  } else {
+    await tenantDb
+      .delete(fieldScorecardPhotos)
+      .where(
+        and(
+          eq(fieldScorecardPhotos.scorecardId, card.id),
+          notInArray(fieldScorecardPhotos.id, retainedLinkIds),
+        ),
+      );
+  }
+  const currentPhotoById = new Map(currentPhotos.map((photo) => [photo.id, photo]));
+  for (const photo of photos) {
+    if (!photo.linkId) continue;
+    const current = currentPhotoById.get(photo.linkId);
+    if (
+      current &&
+      (current.sectionKey !== photo.sectionKey || (current.deficiencyKey ?? null) !== photo.deficiencyKey)
+    ) {
+      await tenantDb
+        .update(fieldScorecardPhotos)
+        .set({ sectionKey: photo.sectionKey, deficiencyKey: photo.deficiencyKey })
+        .where(and(eq(fieldScorecardPhotos.id, photo.linkId), eq(fieldScorecardPhotos.scorecardId, card.id)));
+    }
+  }
+  const addedPhotos = photos.filter((photo) => !photo.linkId);
+  if (addedPhotos.length > 0) {
+    await tenantDb.insert(fieldScorecardPhotos).values(
+      addedPhotos.map((photo) => ({
+        scorecardId: card.id,
+        fileId: photo.fileId,
+        sectionKey: photo.sectionKey,
+        deficiencyKey: photo.deficiencyKey,
+      })),
+    );
+  }
+
+  // Guarantee a changed token even when an edit happens in the same millisecond as the original insert.
+  const nextUpdatedAt = new Date(Math.max(Date.now(), new Date(card.updatedAt).getTime() + 1));
+  const [updatedCard] = await tenantDb
+    .update(fieldScorecards)
+    .set({
+      superintendentName,
+      pmName,
+      summary,
+      averageScore: String(averageScore),
+      superintendentSignature,
+      pmSignature,
+      totalScore: total,
+      rating,
+      criticalDeficiencies: deficiencies,
+      criticalDeficiencyNotes: deficiencyNotes,
+      actionItems,
+      // The prior PDF is an immutable snapshot. Clearing its pointer makes every download surface regenerate
+      // from the edited content; the route also starts a best-effort render after this transaction commits.
+      pdfR2Key: null,
+      pdfR2Bucket: null,
+      pdfGeneratedAt: null,
+      updatedAt: nextUpdatedAt,
+    })
+    .where(and(eq(fieldScorecards.id, card.id), eq(fieldScorecards.submittedBy, input.userId)))
+    .returning();
+  if (!updatedCard) {
+    throw new AppError(409, "The scorecard could not be updated. Please reload and try again.", "SCORECARD_EDIT_CONFLICT");
+  }
+
+  // Do not create a second notification. If the original durable email is still waiting to run, keep its
+  // score text aligned with the newly edited PDF. A job already processing/completed keeps its original
+  // submission notification semantics.
+  await tenantDb.execute(sql`
+    UPDATE public.job_queue
+    SET payload = payload || jsonb_build_object(
+      'totalScore', ${total}::integer,
+      'averageScore', ${averageScore}::numeric,
+      'ratingLabel', ${ratingLabelFor(kind, formVersion, rating)}::text
+    )
+    WHERE job_type = ${FIELD_SCORECARD_EMAIL_JOB}
+      AND status IN ('pending', 'dead')
+      AND payload->>'scorecardId' = ${card.id}
+  `);
+
+  return { scorecard: toSummary(updatedCard, project.name, input.userId) };
 }
 
 export async function listFieldScorecardsForProject(
@@ -318,12 +575,12 @@ export async function listFieldScorecardsForProject(
     .from(fieldScorecards)
     .where(and(eq(fieldScorecards.dealId, dealId), eq(fieldScorecards.isActive, true)))
     .orderBy(desc(fieldScorecards.submittedAt));
-  return { scorecards: rows.map((row) => toSummary(row, project.name)) };
+  return { scorecards: rows.map((row) => toSummary(row, project.name, access.userId)) };
 }
 
 export async function listRecentFieldScorecards(
   tenantDb: TenantDb,
-  opts?: { limit?: number },
+  opts?: { limit?: number; viewerUserId?: string },
 ): Promise<{ scorecards: FieldScorecardSummary[] }> {
   const limit = Math.min(Math.max(opts?.limit ?? 50, 1), 200);
   // Join back to the deal + stage so the landing list only surfaces cards for still-browsable projects
@@ -343,9 +600,12 @@ export async function listRecentFieldScorecards(
       d.name AS "projectName",
       sc.project_number AS "projectNumber",
       sc.critical_deficiencies AS "criticalDeficiencies",
+      sc.status AS "status",
       sc.submitted_by_name AS "submittedByName",
+      sc.submitted_by AS "submittedBy",
       sc.week_of::text AS "weekOf",
       sc.submitted_at AS "submittedAt",
+      sc.updated_at AS "updatedAt",
       sc.pdf_r2_key AS "pdfR2Key",
       sc.pdf_generated_at AS "pdfGeneratedAt"
     FROM field_scorecards sc
@@ -357,7 +617,7 @@ export async function listRecentFieldScorecards(
     LIMIT ${limit}
   `);
   const rows = (((result as any).rows ?? result) as ScorecardSummarySource[]) ?? [];
-  return { scorecards: rows.map((row) => toSummary(row)) };
+  return { scorecards: rows.map((row) => toSummary(row, undefined, opts?.viewerUserId)) };
 }
 
 export async function getFieldScorecardDetail(
@@ -418,7 +678,7 @@ export async function getFieldScorecardDetail(
   );
 
   return {
-    ...toSummary(card, project.name),
+    ...toSummary(card, project.name, access.userId),
     items,
     criticalDeficiencies: card.criticalDeficiencies ?? [],
     criticalDeficiencyNotes: card.criticalDeficiencyNotes ?? {},
@@ -437,13 +697,24 @@ export async function getFieldScorecardDetail(
  * worker sends a no-attachment fallback if the PDF isn't there). The content-addressed key is persisted on
  * the scorecard row after validation; the worker reads that row as its authority. Manages its own connections.
  */
-export function finalizeFieldScorecardArtifacts(
+export async function finalizeFieldScorecardArtifacts(
   office: { id: string; slug: string },
   userId: string,
   scorecardId: string,
 ): Promise<string | null> {
+  // Include the editable-content generation in the process-local single-flight key. An edit that commits
+  // while an older render is running must start a fresh render instead of coalescing onto the stale promise.
+  const contentGeneration = await runInOffice(office, async (db) => {
+    const [card] = await db
+      .select({ updatedAt: fieldScorecards.updatedAt })
+      .from(fieldScorecards)
+      .where(and(eq(fieldScorecards.id, scorecardId), eq(fieldScorecards.isActive, true)))
+      .limit(1);
+    return card ? toIso(card.updatedAt) : null;
+  });
+  if (!contentGeneration) return null;
   return coalesceScorecardPdfFinalization(
-    `${office.slug}:${scorecardId}:${CURRENT_SCORECARD_PDF_RENDER_VERSION}`,
+    `${office.slug}:${scorecardId}:${CURRENT_SCORECARD_PDF_RENDER_VERSION}:${contentGeneration}`,
     () => renderAndStoreFieldScorecardArtifacts(office, userId, scorecardId),
   );
 }
@@ -588,6 +859,23 @@ export async function renderAndStoreFieldScorecardArtifacts(
   // is only an orphan and cannot corrupt the winner's object.
   await putObject(r2Key, pdf, "application/pdf");
   const persistedKey = await runInOfficeTransaction(office, userId, async (db) => {
+    // Lock the scorecard generation as well as its evidence. An edit can change scores, notes, summary, or
+    // signatures without changing a single linked file; evidence-only fingerprinting would otherwise let
+    // this pre-edit PDF become authoritative after the edit cleared the artifact pointer.
+    const [currentCardGeneration] = await db
+      .select({ updatedAt: fieldScorecards.updatedAt })
+      .from(fieldScorecards)
+      .where(and(eq(fieldScorecards.id, scorecardId), eq(fieldScorecards.isActive, true)))
+      .limit(1)
+      .for("share");
+    if (!currentCardGeneration || toIso(currentCardGeneration.updatedAt) !== toIso(card.updatedAt)) {
+      throw new AppError(
+        503,
+        "Scorecard content changed while the PDF was rendering. Please retry the download.",
+        "SCORECARD_CONTENT_CHANGED",
+      );
+    }
+
     // Lock + recompare every linked file's active state. A delete/restore that committed during R2 work
     // makes this render stale; one that starts after this lock waits, then invalidates the just-written
     // artifact in its own transaction. Either interleaving prevents deleted evidence from being resurrected
@@ -625,6 +913,9 @@ export async function renderAndStoreFieldScorecardArtifacts(
         and(
           eq(fieldScorecards.id, scorecardId),
           eq(fieldScorecards.isActive, true),
+          // node-postgres timestamps are millisecond Date objects while Postgres may retain microseconds.
+          // Compare at the API token's precision, under the share lock above.
+          sql`date_trunc('milliseconds', ${fieldScorecards.updatedAt}) = ${toIso(card.updatedAt)}::timestamptz`,
           lte(fieldScorecards.pdfRenderVersion, CURRENT_SCORECARD_PDF_RENDER_VERSION),
         ),
       )
@@ -812,19 +1103,7 @@ async function resolvePhotoLinks(
   deficiencies: string[],
 ): Promise<{ sectionKey: string; deficiencyKey: string | null; fileId: string }[]> {
   for (const p of input.photos) {
-    if (kind === "leadership") {
-      // Leadership evidence may attach to any of its four scored categories or the Project Summary. It has
-      // no critical-deficiency bucket, so reject every other key rather than silently stranding evidence.
-      if (p.sectionKey !== FIELD_SCORECARD_LEADERSHIP_SUMMARY_SECTION_KEY && !isLeadershipSectionKey(p.sectionKey)) {
-        throw new AppError(422, `Unknown scorecard section: ${p.sectionKey}`);
-      }
-      continue;
-    }
-    const validSection = formVersion === 2 ? isScorecardV2SectionKey(p.sectionKey) : isScorecardSectionKey(p.sectionKey);
-    const deficiencyEvidence = formVersion === 2 && p.sectionKey === "critical_deficiency" && p.deficiencyKey && deficiencies.includes(p.deficiencyKey);
-    if (!validSection && !deficiencyEvidence) {
-      throw new AppError(422, `Unknown scorecard section: ${p.sectionKey}`);
-    }
+    validatePhotoPlacement(p, formVersion, kind, deficiencies);
   }
   const uploadIds = [...new Set(input.photos.map((p) => p.clientUploadId))];
   if (uploadIds.length === 0) return [];
@@ -864,7 +1143,197 @@ async function resolvePhotoLinks(
   return links;
 }
 
-function toSummary(row: ScorecardSummarySource, projectName = row.projectName ?? null): FieldScorecardSummary {
+function validatePhotoPlacement(
+  photo: { sectionKey: string; deficiencyKey?: string | null },
+  formVersion: ScorecardFormVersion,
+  kind: ScorecardKind,
+  deficiencies: string[],
+): void {
+  if (kind === "leadership") {
+    // Leadership evidence may attach to any of its four scored categories or the Project Summary. It has
+    // no critical-deficiency bucket, so reject every other key rather than silently stranding evidence.
+    if (
+      photo.sectionKey !== FIELD_SCORECARD_LEADERSHIP_SUMMARY_SECTION_KEY &&
+      !isLeadershipSectionKey(photo.sectionKey)
+    ) {
+      throw new AppError(422, `Unknown scorecard section: ${photo.sectionKey}`);
+    }
+    if (photo.deficiencyKey) {
+      throw new AppError(422, "Leadership scorecard evidence cannot reference a critical deficiency.");
+    }
+    return;
+  }
+  const validSection = formVersion === 2
+    ? isScorecardV2SectionKey(photo.sectionKey)
+    : isScorecardSectionKey(photo.sectionKey);
+  const deficiencyEvidence =
+    formVersion === 2 &&
+    photo.sectionKey === "critical_deficiency" &&
+    Boolean(photo.deficiencyKey) &&
+    deficiencies.includes(photo.deficiencyKey!);
+  if (!validSection && !deficiencyEvidence) {
+    throw new AppError(422, `Unknown scorecard section: ${photo.sectionKey}`);
+  }
+  if (validSection && photo.deficiencyKey) {
+    throw new AppError(422, `Section evidence cannot reference a critical deficiency: ${photo.sectionKey}`);
+  }
+}
+
+async function resolveUpdatePhotoLinks(
+  tenantDb: TenantDb,
+  input: UpdateFieldScorecardInput,
+  card: { dealId: string; kind: ScorecardKind; formVersion: ScorecardFormVersion },
+  deficiencies: string[],
+  currentPhotos: Array<{ id: string; fileId: string; sectionKey: string; deficiencyKey: string | null }>,
+): Promise<ResolvedUpdatePhoto[]> {
+  for (const photo of input.photos) {
+    const hasLinkId = typeof photo.scorecardPhotoId === "string" && photo.scorecardPhotoId.trim().length > 0;
+    const hasUploadId = typeof photo.clientUploadId === "string" && photo.clientUploadId.trim().length > 0;
+    if ((hasLinkId ? 1 : 0) + (hasUploadId ? 1 : 0) !== 1) {
+      throw new AppError(400, "Each evidence photo needs exactly one scorecardPhotoId or clientUploadId.");
+    }
+    validatePhotoPlacement(photo, card.formVersion, card.kind, deficiencies);
+  }
+
+  const currentById = new Map(currentPhotos.map((photo) => [photo.id, photo]));
+  const currentByFileId = new Map(currentPhotos.map((photo) => [photo.fileId, photo]));
+  const uploadIds = Array.from(
+    new Set(
+      input.photos.flatMap((photo) =>
+        typeof photo.clientUploadId === "string" && photo.clientUploadId.trim()
+          ? [photo.clientUploadId.trim()]
+          : [],
+      ),
+    ),
+  );
+  const newFiles = uploadIds.length === 0
+    ? []
+    : await tenantDb
+        .select({ id: files.id, dealId: files.dealId, clientUploadId: files.clientUploadId })
+        .from(files)
+        .where(
+          and(
+            inArray(files.clientUploadId, uploadIds),
+            eq(files.uploadedBy, input.userId),
+            eq(files.isActive, true),
+            isNull(files.deletedAt),
+          ),
+        );
+  const newFileByUploadId = new Map(newFiles.map((file) => [file.clientUploadId, file]));
+
+  const resolved: ResolvedUpdatePhoto[] = [];
+  const seenFileIds = new Set<string>();
+  for (const photo of input.photos) {
+    let fileId: string;
+    let linkId: string | null;
+    if (typeof photo.scorecardPhotoId === "string" && photo.scorecardPhotoId.trim()) {
+      const existing = currentById.get(photo.scorecardPhotoId.trim());
+      if (!existing) {
+        throw new AppError(422, "Existing evidence photo does not belong to this scorecard.");
+      }
+      fileId = existing.fileId;
+      linkId = existing.id;
+    } else {
+      const clientUploadId = typeof photo.clientUploadId === "string" ? photo.clientUploadId.trim() : "";
+      const file = newFileByUploadId.get(clientUploadId);
+      if (!file) {
+        throw new AppError(422, `Evidence photo not found (or no longer available) for upload ${clientUploadId}.`);
+      }
+      if (file.dealId !== card.dealId) {
+        throw new AppError(422, `Evidence photo ${clientUploadId} does not belong to this deal.`);
+      }
+      fileId = file.id;
+      // A retry after a response loss still carries the new upload's client id. If that file is already
+      // linked by the successful first request, retain its link id rather than attempting a duplicate insert.
+      linkId = currentByFileId.get(file.id)?.id ?? null;
+    }
+    if (seenFileIds.has(fileId)) {
+      throw new AppError(422, "The same evidence photo cannot be attached more than once.");
+    }
+    seenFileIds.add(fileId);
+    resolved.push({
+      linkId,
+      fileId,
+      sectionKey: photo.sectionKey,
+      deficiencyKey: photo.deficiencyKey ?? null,
+    });
+  }
+  return resolved;
+}
+
+function scorecardEditableContentEquals(input: {
+  card: ScorecardRow;
+  currentItems: Array<{ sectionKey: string; points: number; note: string | null }>;
+  currentPhotos: Array<{ id: string; fileId: string; sectionKey: string; deficiencyKey: string | null }>;
+  desired: {
+    superintendentName: string | null;
+    pmName: string | null;
+    items: ValidatedItem[];
+    criticalDeficiencies: string[];
+    criticalDeficiencyNotes: Record<string, string>;
+    actionItems: string[];
+    photos: ResolvedUpdatePhoto[];
+    superintendentSignature: string | null;
+    pmSignature: string | null;
+    summary: string | null;
+    totalScore: number;
+    averageScore: number;
+    rating: ScorecardRating;
+  };
+}): boolean {
+  const sortedRecord = (record: Record<string, string>) =>
+    Object.fromEntries(Object.entries(record).sort(([left], [right]) => left.localeCompare(right)));
+  const itemShape = (items: Array<{ sectionKey: string; points: number; note: string | null }>) =>
+    items
+      .map((item) => ({ sectionKey: item.sectionKey, points: item.points, note: item.note ?? null }))
+      .sort((left, right) => left.sectionKey.localeCompare(right.sectionKey));
+  const photoShape = (photos: Array<{ fileId: string; sectionKey: string; deficiencyKey: string | null }>) =>
+    photos
+      .map((photo) => ({
+        fileId: photo.fileId,
+        sectionKey: photo.sectionKey,
+        deficiencyKey: photo.deficiencyKey ?? null,
+      }))
+      .sort((left, right) => left.fileId.localeCompare(right.fileId));
+
+  const current = {
+    superintendentName: input.card.superintendentName ?? null,
+    pmName: input.card.pmName ?? null,
+    items: itemShape(input.currentItems),
+    criticalDeficiencies: [...(input.card.criticalDeficiencies ?? [])].sort(),
+    criticalDeficiencyNotes: sortedRecord(input.card.criticalDeficiencyNotes ?? {}),
+    actionItems: input.card.actionItems ?? [],
+    photos: photoShape(input.currentPhotos),
+    superintendentSignature: input.card.superintendentSignature ?? null,
+    pmSignature: input.card.pmSignature ?? null,
+    summary: input.card.summary ?? null,
+    totalScore: input.card.totalScore,
+    averageScore: input.card.averageScore == null ? null : Number(input.card.averageScore),
+    rating: input.card.rating,
+  };
+  const desired = {
+    superintendentName: input.desired.superintendentName,
+    pmName: input.desired.pmName,
+    items: itemShape(input.desired.items),
+    criticalDeficiencies: [...input.desired.criticalDeficiencies].sort(),
+    criticalDeficiencyNotes: sortedRecord(input.desired.criticalDeficiencyNotes),
+    actionItems: input.desired.actionItems,
+    photos: photoShape(input.desired.photos),
+    superintendentSignature: input.desired.superintendentSignature,
+    pmSignature: input.desired.pmSignature,
+    summary: input.desired.summary,
+    totalScore: input.desired.totalScore,
+    averageScore: input.desired.averageScore,
+    rating: input.desired.rating,
+  };
+  return JSON.stringify(current) === JSON.stringify(desired);
+}
+
+function toSummary(
+  row: ScorecardSummarySource,
+  projectName = row.projectName ?? null,
+  viewerUserId?: string,
+): FieldScorecardSummary {
   const formVersion: ScorecardFormVersion = row.formVersion === 2 ? 2 : 1;
   const kind: ScorecardKind = row.kind === "leadership" ? "leadership" : "project";
   const rating = row.rating as ScorecardRating;
@@ -885,6 +1354,12 @@ function toSummary(row: ScorecardSummarySource, projectName = row.projectName ??
     criticalDeficiencyCount: (row.criticalDeficiencies ?? []).length,
     submittedByName: row.submittedByName ?? null,
     submittedAt: toIso(row.submittedAt),
+    updatedAt: toIso(row.updatedAt ?? row.submittedAt),
+    canEdit:
+      Boolean(viewerUserId) &&
+      row.submittedBy === viewerUserId &&
+      formVersion === 2 &&
+      (row.status ?? "submitted") === "submitted",
     // PDF is rendered/uploaded post-response (best-effort/async) — null right after submit until the
     // artifact lands. Surface availability so downstream (mobile + CRM) can gate the download action.
     hasPdf: Boolean(row.pdfR2Key ?? row.pdfGeneratedAt),

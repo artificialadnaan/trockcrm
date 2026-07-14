@@ -31,11 +31,15 @@ export function ScorecardDetailView({
   onDownloadPdf,
   downloadingPdf,
   onOpenPhoto,
+  onEditScorecard,
+  startingEdit = false,
 }: {
   scorecard: FieldScorecardDetail;
   onDownloadPdf: () => void;
   downloadingPdf: boolean;
   onOpenPhoto?: (photo: FieldScorecardPhotoView) => void;
+  onEditScorecard?: () => void;
+  startingEdit?: boolean;
 }) {
   const { width } = useWindowDimensions();
   const thumb = Math.floor((width - theme.space.lg * 2 - GRID_GAP * (GRID_COLUMNS - 1)) / GRID_COLUMNS);
@@ -92,6 +96,10 @@ export function ScorecardDetailView({
       ) : (
         <ProjectBody scorecard={scorecard} isV2={isV2} thumb={thumb} onOpenPhoto={onOpenPhoto} />
       )}
+
+      {onEditScorecard ? (
+        <Button title="Edit scorecard" onPress={onEditScorecard} loading={startingEdit} disabled={startingEdit} />
+      ) : null}
 
       {/* Download PDF — ALWAYS rendered. The detail response carries no pdf-ready signal (server change
           out of scope), so there is nothing to pre-hide on. A still-generating PDF 404s and the screen

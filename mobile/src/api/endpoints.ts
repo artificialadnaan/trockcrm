@@ -26,13 +26,14 @@ import type {
   ReportDownloadResponse,
   ShareLinkResponse,
   CreateScorecardResponse,
+  UpdateScorecardResponse,
   RecentScorecardsResponse,
   ProjectScorecardsResponse,
   ScorecardDetailResponse,
   ScorecardDownloadResponse,
   DealTeamResponse,
 } from "./types";
-import type { ScorecardSubmissionPayload } from "../scorecards/draft";
+import type { ScorecardSubmissionPayload, ScorecardUpdatePayload } from "../scorecards/draft";
 
 /**
  * A `Fetcher` is `apiFetch` already bound to the current token / officeId /
@@ -159,6 +160,9 @@ export const getReportDownload = (f: Fetcher, reportId: string) =>
 // ── Field Scorecards ────────────────────────────────────────────────────────
 export const createScorecard = (f: Fetcher, body: ScorecardSubmissionPayload) =>
   f<CreateScorecardResponse>("/field/scorecards", { method: "POST", body });
+
+export const updateScorecard = (f: Fetcher, id: string, body: ScorecardUpdatePayload) =>
+  f<UpdateScorecardResponse>(`/field/scorecards/${id}`, { method: "PUT", body });
 
 // Recent submitted cards across accessible offices — the Scorecard tab landing.
 export const getRecentScorecards = (f: Fetcher, limit = 50) =>

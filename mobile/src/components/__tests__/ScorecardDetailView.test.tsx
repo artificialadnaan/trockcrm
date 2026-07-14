@@ -5,6 +5,8 @@ import type { FieldScorecardDetail } from "../../api/types";
 
 const detail: FieldScorecardDetail = {
   id: "sc-1",
+  canEdit: false,
+  updatedAt: "2026-07-06T15:00:00.000Z",
   dealId: "deal-1",
   weekOf: "2026-07-06",
   totalScore: 82,
@@ -50,6 +52,25 @@ describe("ScorecardDetailView", () => {
     const screen = render(<ScorecardDetailView scorecard={detail} onDownloadPdf={onDownloadPdf} downloadingPdf={false} />);
     fireEvent.press(screen.getByText("Download PDF"));
     expect(onDownloadPdf).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows the edit action only when the owner callback is supplied", () => {
+    const onEditScorecard = jest.fn();
+    const editable = render(
+      <ScorecardDetailView
+        scorecard={{ ...detail, canEdit: true }}
+        onDownloadPdf={jest.fn()}
+        downloadingPdf={false}
+        onEditScorecard={onEditScorecard}
+      />,
+    );
+    fireEvent.press(editable.getByText("Edit scorecard"));
+    expect(onEditScorecard).toHaveBeenCalledTimes(1);
+
+    const readOnly = render(
+      <ScorecardDetailView scorecard={detail} onDownloadPdf={jest.fn()} downloadingPdf={false} />,
+    );
+    expect(readOnly.queryByText("Edit scorecard")).toBeNull();
   });
 
   it("renders free-text action items verbatim", () => {

@@ -12,6 +12,8 @@ import {
   resolveScorecardTeamNames,
   seedScorecardDraftTeam,
   scorecardDraftSectionsAnswered,
+  scorecardDraftNewPhotos,
+  isEditingScorecardDraft,
   type ScorecardDraft,
 } from "../../../src/scorecards/draft";
 import { listScorecardDrafts, saveScorecardDraft, deleteScorecardDraft } from "../../../src/scorecards/draft-store";
@@ -43,11 +45,15 @@ function shortDate(iso: string): string {
 /** Resume/open route for a draft — leadership drafts have their own focused screen; project drafts the wizard. */
 function draftPath(draft: ScorecardDraft): {
   pathname: "/(app)/scorecards/leadership/[draftId]" | "/(app)/scorecards/[draftId]";
-  params: { draftId: string };
+  params: { draftId: string; officeId?: string };
 } {
+  const params = {
+    draftId: draft.id,
+    ...(draft.editingOfficeId ? { officeId: draft.editingOfficeId } : {}),
+  };
   return draft.kind === "leadership"
-    ? { pathname: "/(app)/scorecards/leadership/[draftId]", params: { draftId: draft.id } }
-    : { pathname: "/(app)/scorecards/[draftId]", params: { draftId: draft.id } };
+    ? { pathname: "/(app)/scorecards/leadership/[draftId]", params }
+    : { pathname: "/(app)/scorecards/[draftId]", params };
 }
 
 export default function ScorecardsScreen() {
@@ -133,19 +139,25 @@ export default function ScorecardsScreen() {
     // Legacy photo drafts may have completed a partial upload before this marker existed. Treat them as
     // unsafe to discard; new drafts persist false until upload actually starts.
     if (draft.evidenceUploadAttempted || (draft.photos.length > 0 && draft.evidenceUploadAttempted !== false)) {
+      const editingSubmitted = isEditingScorecardDraft(draft);
       Alert.alert(
-        "Finish this scorecard instead",
-        "Evidence upload already started, so some photos may be in the project gallery. Complete and submit this scorecard rather than discarding it.",
+        editingSubmitted ? "Finish these changes instead" : "Finish this scorecard instead",
+        editingSubmitted
+          ? "Evidence upload already started, so some photos may be in the project gallery. Save these scorecard changes rather than discarding them."
+          : "Evidence upload already started, so some photos may be in the project gallery. Complete and submit this scorecard rather than discarding it.",
       );
       return;
     }
+    const editingSubmitted = isEditingScorecardDraft(draft);
     Alert.alert(
-      "Discard scorecard?",
-      `This permanently removes the in-progress ${draft.kind === "leadership" ? "Leadership " : ""}Scorecard for ${draft.dealName}.`,
+      editingSubmitted ? "Discard changes?" : "Discard scorecard?",
+      editingSubmitted
+        ? `This removes your local changes to ${draft.dealName}. The submitted scorecard will remain unchanged.`
+        : `This permanently removes the in-progress ${draft.kind === "leadership" ? "Leadership " : ""}Scorecard for ${draft.dealName}.`,
       [
         { text: "Keep editing", style: "cancel" },
         {
-          text: "Discard",
+          text: editingSubmitted ? "Discard changes" : "Discard",
           style: "destructive",
           onPress: () => void discardDraft(draft),
         },
@@ -159,7 +171,7 @@ export default function ScorecardsScreen() {
     try {
       // This path is unavailable once evidence upload starts (see confirmDiscard), so these are only local
       // copies/queued uploads and cannot leave already-confirmed gallery photos orphaned.
-      await removeQueuedUploads(ownerKey, draft.photos.map((photo) => photo.clientUploadId));
+      await removeQueuedUploads(ownerKey, scorecardDraftNewPhotos(draft).map((photo) => photo.clientUploadId));
       await deleteScorecardDraft(ownerKey, draft.id);
       setDrafts((current) => current.filter((item) => item.id !== draft.id));
     } catch {
@@ -199,18 +211,18 @@ export default function ScorecardsScreen() {
                   onPress={() => router.push(draftPath(d))}
                   style={({ pressed }) => [styles.draftResume, pressed && { opacity: 0.7 }]}
                   accessibilityRole="button"
-                  accessibilityLabel={`Resume ${d.kind === "leadership" ? "Leadership " : ""}Scorecard for ${d.dealName}`}
+                  accessibilityLabel={`${isEditingScorecardDraft(d) ? "Resume editing submitted" : "Resume"} ${d.kind === "leadership" ? "Leadership " : ""}Scorecard for ${d.dealName}`}
                 >
                 <View style={{ flex: 1 }}>
                   <Text style={styles.rowTitle} numberOfLines={1}>{d.dealName}</Text>
                   <Text style={styles.rowSub}>
-                    {d.kind === "leadership" ? "Leadership · " : ""}Week of {shortDate(d.weekOf)} · {scorecardDraftSectionsAnswered(d)}/{d.kind === "leadership" ? LEADERSHIP_SECTION_COUNT : SECTION_COUNT} scored
+                    {isEditingScorecardDraft(d) ? "Editing submitted · " : ""}{d.kind === "leadership" ? "Leadership · " : ""}Week of {shortDate(d.weekOf)} · {scorecardDraftSectionsAnswered(d)}/{d.kind === "leadership" ? LEADERSHIP_SECTION_COUNT : SECTION_COUNT} scored
                   </Text>
                 </View>
-                <Text style={styles.resume}>Resume</Text>
+                <Text style={styles.resume}>{isEditingScorecardDraft(d) ? "Resume edit" : "Resume"}</Text>
                 </Pressable>
                 <Button
-                  title="Discard"
+                  title={isEditingScorecardDraft(d) ? "Discard changes" : "Discard"}
                   variant="ghost"
                   onPress={() => confirmDiscard(d)}
                   disabled={discardingDraftId !== null}
