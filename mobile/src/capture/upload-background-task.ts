@@ -3,6 +3,7 @@ import * as TaskManager from "expo-task-manager";
 import { apiFetch } from "../api/client";
 import type { Fetcher } from "../api/endpoints";
 import { isTokenExpired, loadSession, type Session } from "../auth/session";
+import { listScorecardDraftOwners } from "../scorecards/draft-store";
 import { drainUploadQueue, getQueuedCount, uploadOwnerKey } from "./upload-queue";
 
 /**
@@ -16,12 +17,11 @@ import { drainUploadQueue, getQueuedCount, uploadOwnerKey } from "./upload-queue
 export const UPLOAD_QUEUE_TASK = "trockcam-upload-queue-drain";
 
 /** A React-free authenticated fetcher bound to a loaded session (for the background context). */
-function buildSessionFetcher(session: Session): Fetcher {
+function buildSessionFetcher(session: Session, officeId: string | null): Fetcher {
   // Send the RESOLVED office (activeOfficeId ?? tenantId) as x-office-id rather than relying on the server's
   // primary-office default — this matches the queue's owner-key office, so a primary-office queue uploads
   // to the office it was captured under (and a stale/rehomed primary fails loudly rather than silently
   // landing in the wrong office). No onUnauthorized: a background 401 must not tear down the UI's session.
-  const officeId = session.activeOfficeId ?? session.user.tenantId;
   return (path, opts) => apiFetch(path, { ...opts, token: session.token, officeId });
 }
 
@@ -31,13 +31,15 @@ TaskManager.defineTask(UPLOAD_QUEUE_TASK, async () => {
   try {
     const session = await loadSession();
     if (!session || isTokenExpired(session.token)) return BackgroundTask.BackgroundTaskResult.Success;
-    // Drain only THIS user+office's queue. The fetcher binds session.activeOfficeId, so the owner key MUST
-    // include the resolved office (activeOfficeId ?? tenantId) too — otherwise a queue captured under a
-    // different office could drain under the current one. Matches the capture screen's namespacing.
-    const ownerKey = uploadOwnerKey(session.user.id, session.activeOfficeId ?? session.user.tenantId);
-    if ((await getQueuedCount(ownerKey)) === 0) return BackgroundTask.BackgroundTaskResult.Success;
-    const fetcher = buildSessionFetcher(session);
-    await drainUploadQueue(ownerKey, fetcher);
+    // Always include the active namespace, plus any owning-office namespaces registered by cross-office
+    // scorecard edits. Each queue gets a fetcher pinned to ITS office so evidence cannot land in whichever
+    // office happens to be active when the OS grants this background window.
+    const fallbackOwnerKey = uploadOwnerKey(session.user.id, session.activeOfficeId ?? session.user.tenantId);
+    const owners = await listScorecardDraftOwners(session.user.id, fallbackOwnerKey);
+    for (const owner of owners) {
+      if ((await getQueuedCount(owner.ownerKey)) === 0) continue;
+      await drainUploadQueue(owner.ownerKey, buildSessionFetcher(session, owner.officeId));
+    }
     return BackgroundTask.BackgroundTaskResult.Success;
   } catch {
     return BackgroundTask.BackgroundTaskResult.Failed;

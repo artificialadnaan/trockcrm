@@ -101,6 +101,18 @@ describe("submitScorecard (orchestration)", () => {
     expect(result).toEqual({ status: "submitted", scorecard: { id: "sc-1", dealId: "deal-1" } });
   });
 
+  it("POSTs a new or recovered draft through its office-pinned fetcher", async () => {
+    const neutralScorecardFetcher = jest.fn();
+    const draftOfficeFetcher = jest.fn();
+
+    await submitScorecard(neutralScorecardFetcher as any, "owner-1", draftWith([]), {
+      draftOfficeFetcher: draftOfficeFetcher as any,
+    });
+
+    expect(createScorecard).toHaveBeenCalledWith(draftOfficeFetcher, expect.any(Object));
+    expect(createScorecard).not.toHaveBeenCalledWith(neutralScorecardFetcher, expect.any(Object));
+  });
+
   it("stamps Week Of = the LOCAL submit date, overriding a stale draft value", async () => {
     // A draft seeded on an earlier day (offline, submitted later) must file under the SUBMIT day, not its
     // creation day — the server no longer re-stamps, so the client owns the completion date.

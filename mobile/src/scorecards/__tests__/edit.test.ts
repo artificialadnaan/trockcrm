@@ -1,12 +1,15 @@
 import type { FieldScorecardDetail } from "../../api/types";
 import {
   createScorecardEditDraft,
+  rebaseScorecardEditDraft,
   refreshScorecardEditPhotoUrls,
+  scorecardEditRebaseMessage,
   scorecardDraftToUpdate,
 } from "../edit";
 import {
   isExistingScorecardDraftPhoto,
   isNewScorecardDraftPhoto,
+  scorecardDraftReducer,
   scorecardDraftNewPhotos,
   type ScorecardDraftPhoto,
 } from "../draft";
@@ -86,6 +89,7 @@ describe("createScorecardEditDraft", () => {
       editingScorecardId: "scorecard-1",
       editingOfficeId: "office-1",
       editBaseUpdatedAt: "2026-07-14T14:05:00.000Z",
+      editBasePhotoIds: ["scorecard-photo-1", "scorecard-photo-2"],
       dealId: "deal-1",
       dealName: "Riverwalk Apartments",
       projectNumber: "DFW-1-10000-aa",
@@ -228,6 +232,222 @@ describe("refreshScorecardEditPhotoUrls", () => {
   it("does nothing when the detail belongs to a different submitted card", () => {
     const draft = createScorecardEditDraft(detail(), { id: "local", clientSubmissionId: "edit", now: 1 });
     expect(refreshScorecardEditPhotoUrls(draft, detail({ id: "other-scorecard" }))).toBe(draft);
+  });
+});
+
+describe("rebaseScorecardEditDraft", () => {
+  it("advances the revision while preserving local fields, signatures, placements, and new evidence", () => {
+    const base = createScorecardEditDraft(detail(), {
+      id: "local-edit-1",
+      clientSubmissionId: "edit-attempt-1",
+      now: 1234,
+    });
+    const localNewPhoto: ScorecardDraftPhoto = {
+      key: "new-photo",
+      uri: "file:///local/new-photo.jpg",
+      clientUploadId: "new-upload-1",
+      sectionKey: "safety",
+      caption: "Local evidence",
+    };
+    const local = {
+      ...base,
+      superintendentName: "Locally edited superintendent",
+      scores: { ...base.scores, safety: 10 },
+      superintendentSignature: "fresh-super-signature",
+      pmSignature: "fresh-pm-signature",
+      photos: [
+        { ...base.photos[0], sectionKey: "schedule" as const, caption: "Local retained caption" },
+        base.photos[1],
+        localNewPhoto,
+      ],
+      evidenceUploadAttempted: true,
+    };
+    const latest = detail({
+      updatedAt: "2026-07-14T15:00:00.000Z",
+      officeId: "office-2",
+      // The other session retained photo 1, removed photo 2, and added a different server photo.
+      photos: [
+        { ...detail().photos[0], url: "https://fresh.example/retained.jpg" },
+        {
+          id: "scorecard-photo-from-other-session",
+          fileId: "file-other",
+          sectionKey: "quality",
+          deficiencyKey: null,
+          url: "https://fresh.example/other.jpg",
+          caption: "Other session evidence",
+        },
+      ],
+    });
+
+    const rebased = rebaseScorecardEditDraft(local, latest);
+
+    expect(rebased.removedRetainedPhotoCount).toBe(1);
+    expect(rebased.mergedServerPhotoCount).toBe(1);
+    expect(rebased.draft).toMatchObject({
+      editBaseUpdatedAt: "2026-07-14T15:00:00.000Z",
+      editBasePhotoIds: ["scorecard-photo-1", "scorecard-photo-from-other-session"],
+      editingOfficeId: "office-2",
+      superintendentName: "Locally edited superintendent",
+      scores: expect.objectContaining({ safety: 10 }),
+      superintendentSignature: "fresh-super-signature",
+      pmSignature: "fresh-pm-signature",
+      evidenceUploadAttempted: true,
+    });
+    expect(rebased.draft.photos).toEqual([
+      expect.objectContaining({
+        existingScorecardPhotoId: "scorecard-photo-1",
+        uri: "https://fresh.example/retained.jpg",
+        sectionKey: "schedule",
+        caption: "Local retained caption",
+      }),
+      localNewPhoto,
+      expect.objectContaining({
+        existingScorecardPhotoId: "scorecard-photo-from-other-session",
+        uri: "https://fresh.example/other.jpg",
+        sectionKey: "quality",
+        caption: "Other session evidence",
+      }),
+    ]);
+    expect(scorecardEditRebaseMessage(rebased)).toBe(
+      "Latest revision loaded. Your local changes and new photos were kept. 1 photo added in the other edit was also preserved. 1 submitted photo removed in the other edit can’t be reattached automatically. Review, then tap Save changes again.",
+    );
+  });
+
+  it("does not resurrect a base photo intentionally removed locally, but preserves a concurrent addition", () => {
+    const base = createScorecardEditDraft(detail(), { id: "local", clientSubmissionId: "edit", now: 1 });
+    const local = { ...base, photos: [base.photos[0]] }; // user intentionally removed base photo 2
+    const latest = detail({
+      updatedAt: "2026-07-14T16:00:00.000Z",
+      photos: [
+        ...detail().photos,
+        {
+          id: "scorecard-photo-3",
+          fileId: "file-3",
+          sectionKey: "safety",
+          deficiencyKey: null,
+          url: "https://fresh.example/three.jpg",
+          caption: "Concurrent evidence",
+        },
+      ],
+    });
+
+    const rebased = rebaseScorecardEditDraft(local, latest);
+
+    expect(rebased.removedRetainedPhotoCount).toBe(0);
+    expect(rebased.mergedServerPhotoCount).toBe(1);
+    expect(rebased.draft.photos.map((photo) =>
+      isExistingScorecardDraftPhoto(photo) ? photo.existingScorecardPhotoId : "new",
+    )).toEqual(["scorecard-photo-1", "scorecard-photo-3"]);
+  });
+
+  it("rebases leadership edits without losing local scores, summary, or category evidence", () => {
+    const leadershipItems = FIELD_SCORECARD_LEADERSHIP_SECTION_KEYS.map((sectionKey) => ({
+      sectionKey,
+      points: 8,
+      note: `${sectionKey} server note`,
+    }));
+    const baseDetail = detail({
+      kind: "leadership",
+      items: leadershipItems,
+      summary: "Original summary",
+      photos: [{
+        id: "lead-photo-1",
+        fileId: "lead-file-1",
+        sectionKey: "quality_control",
+        deficiencyKey: null,
+        url: "https://old.example/lead.jpg",
+        caption: "Original caption",
+      }],
+    });
+    const base = createScorecardEditDraft(baseDetail, {
+      id: "local-leadership",
+      clientSubmissionId: "leadership-edit",
+      now: 1,
+    });
+    const newPhoto: ScorecardDraftPhoto = {
+      key: "new-lead-photo",
+      uri: "file:///local/lead.jpg",
+      clientUploadId: "new-lead-upload",
+      sectionKey: "safety",
+      caption: "New local evidence",
+    };
+    const local = {
+      ...base,
+      scores: { ...base.scores, safety: 10 },
+      notes: { ...base.notes, safety: "Local safety note" },
+      summary: "Locally revised summary",
+      photos: [{ ...base.photos[0], caption: "Local category caption" }, newPhoto],
+    };
+    const latest = detail({
+      ...baseDetail,
+      updatedAt: "2026-07-14T17:00:00.000Z",
+      photos: [
+        { ...baseDetail.photos[0], url: "https://fresh.example/lead.jpg" },
+        {
+          id: "lead-photo-2",
+          fileId: "lead-file-2",
+          sectionKey: "project_summary",
+          deficiencyKey: null,
+          url: "https://fresh.example/summary.jpg",
+          caption: "Concurrent summary evidence",
+        },
+      ],
+    });
+
+    const rebased = rebaseScorecardEditDraft(local, latest);
+
+    expect(rebased.draft.kind).toBe("leadership");
+    expect(rebased.draft.editBaseUpdatedAt).toBe("2026-07-14T17:00:00.000Z");
+    expect(rebased.draft.scores.safety).toBe(10);
+    expect(rebased.draft.notes.safety).toBe("Local safety note");
+    expect(rebased.draft.summary).toBe("Locally revised summary");
+    expect(rebased.draft.photos).toEqual([
+      expect.objectContaining({
+        existingScorecardPhotoId: "lead-photo-1",
+        uri: "https://fresh.example/lead.jpg",
+        caption: "Local category caption",
+      }),
+      newPhoto,
+      expect.objectContaining({
+        existingScorecardPhotoId: "lead-photo-2",
+        sectionKey: "project_summary",
+        caption: "Concurrent summary evidence",
+      }),
+    ]);
+    expect(rebased.mergedServerPhotoCount).toBe(1);
+  });
+
+  it("refuses to rebase against a different card or a card the current user cannot edit", () => {
+    const draft = createScorecardEditDraft(detail(), { id: "local", clientSubmissionId: "edit", now: 1 });
+    expect(() => rebaseScorecardEditDraft(draft, detail({ id: "different-card" }))).toThrow(
+      "The latest scorecard does not match this local edit.",
+    );
+    expect(() => rebaseScorecardEditDraft(draft, detail({ canEdit: false }))).toThrow(
+      "Only the submitter can edit this scorecard.",
+    );
+  });
+});
+
+describe("edit reducer refresh/replacement actions", () => {
+  it("refreshes only retained URLs, without clobbering a new local photo", () => {
+    const base = createScorecardEditDraft(detail(), { id: "local", clientSubmissionId: "edit", now: 1 });
+    const newPhoto: ScorecardDraftPhoto = {
+      key: "new-photo",
+      uri: "file:///local.jpg",
+      clientUploadId: "new-upload",
+      sectionKey: "safety",
+      caption: "Local",
+    };
+    const draft = { ...base, photos: [...base.photos, newPhoto] };
+
+    const refreshed = scorecardDraftReducer(draft, {
+      type: "refreshExistingPhotoUrls",
+      urlsByScorecardPhotoId: { "scorecard-photo-1": "https://fresh.example/one.jpg" },
+    });
+
+    expect(refreshed.photos[0]).toMatchObject({ uri: "https://fresh.example/one.jpg" });
+    expect(refreshed.photos[1]).toBe(base.photos[1]);
+    expect(refreshed.photos[2]).toBe(newPhoto);
   });
 });
 

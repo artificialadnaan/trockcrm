@@ -27,7 +27,13 @@ jest.mock("expo-file-system/legacy", () => {
 });
 
 import * as FileSystem from "expo-file-system/legacy";
-import { saveScorecardDraft, listScorecardDrafts, deleteScorecardDraft } from "../draft-store";
+import {
+  saveScorecardDraft,
+  listScorecardDrafts,
+  listScorecardDraftOwners,
+  listScorecardDraftsForUser,
+  deleteScorecardDraft,
+} from "../draft-store";
 import type { ScorecardDraft } from "../draft";
 
 const fs = FileSystem as unknown as { __store: Map<string, string>; __reset: () => void };
@@ -121,5 +127,46 @@ describe("draft-store: serialization (no read-modify-write clobber)", () => {
     await deleteScorecardDraft("u1", "a");
     await saveScorecardDraft("u1", draft("a"), 2);
     expect(await listScorecardDrafts("u1")).toEqual([]);
+  });
+});
+
+describe("draft-store: cross-office recovery", () => {
+  it("registers every office namespace and always includes the active fallback", async () => {
+    await saveScorecardDraft("recover-user:office-b", draft("cross-office"), 10);
+
+    await expect(listScorecardDraftOwners("recover-user", "recover-user:office-a")).resolves.toEqual([
+      { ownerKey: "recover-user:office-a", officeId: "office-a" },
+      { ownerKey: "recover-user:office-b", officeId: "office-b" },
+    ]);
+  });
+
+  it("aggregates drafts across office namespaces with the key needed to resume or discard them", async () => {
+    await saveScorecardDraft("aggregate-user:office-a", draft("primary"), 10);
+    await saveScorecardDraft("aggregate-user:office-b", draft("cross-office"), 20);
+
+    const located = await listScorecardDraftsForUser("aggregate-user", "aggregate-user:office-a");
+    expect(located.map(({ ownerKey, officeId, draft: item }) => ({ ownerKey, officeId, id: item.id }))).toEqual([
+      { ownerKey: "aggregate-user:office-a", officeId: "office-a", id: "primary" },
+      { ownerKey: "aggregate-user:office-b", officeId: "office-b", id: "cross-office" },
+    ]);
+  });
+
+  it("keeps another user's registered office namespaces isolated", async () => {
+    await saveScorecardDraft("isolation-user-a:office-a", draft("a"), 10);
+    await saveScorecardDraft("isolation-user-b:office-b", draft("b"), 20);
+
+    const located = await listScorecardDraftsForUser("isolation-user-a", "isolation-user-a:office-a");
+    expect(located.map((entry) => entry.draft.id)).toEqual(["a"]);
+  });
+
+  it("ignores corrupt registry entries whose owner key and office do not match", async () => {
+    fs.__store.set("file:///doc/scorecard-drafts/owners.json", JSON.stringify([
+      { userId: "registry-user", ownerKey: "another-user:office-b", officeId: "office-b" },
+      { userId: "registry-user", ownerKey: "registry-user:office-c", officeId: "wrong-office" },
+    ]));
+
+    await expect(listScorecardDraftOwners("registry-user", "registry-user:office-a")).resolves.toEqual([
+      { ownerKey: "registry-user:office-a", officeId: "office-a" },
+    ]);
   });
 });

@@ -31,7 +31,7 @@ import {
   type ScorecardDraftPhoto,
   type DraftAction,
 } from "../../../src/scorecards/draft";
-import { refreshScorecardEditPhotoUrls } from "../../../src/scorecards/edit";
+import { rebaseScorecardEditDraft, scorecardEditRebaseMessage } from "../../../src/scorecards/edit";
 import { loadScorecardDraft, saveScorecardDraft, deleteScorecardDraft, copyPhotoIntoDraft } from "../../../src/scorecards/draft-store";
 import { submitScorecard } from "../../../src/scorecards/submit";
 import { Badge, Button, EmptyState, LoadingState, SectionLabel, TextInput } from "../../../src/components/ui";
@@ -83,7 +83,9 @@ export default function ScorecardWizardScreen() {
   // Bind the queue owner + its drain fetcher to the RESOLVED office (activeOfficeId ?? primary). The
   // AuthContext fetcher omits x-office-id for a primary session, so a re-homed user would otherwise drain
   // an offline draft's photos against their NEW primary office. queueFetcher pins x-office-id to the office
-  // the draft was captured under — matching ownerKey + capture.tsx's queueFetcher.
+  // the draft was captured under — matching ownerKey + capture.tsx's queueFetcher. It is used for durable
+  // uploads and NEW scorecard POSTs; scorecard-id edit reads/writes use the normal fetcher because the server
+  // resolves their owning office and field auth may reject a stale/re-homed draft office before the route.
   const resolvedOfficeId = routeOfficeId || activeOfficeId || user?.tenantId || null;
   const ownerKey = uploadOwnerKey(user?.id, resolvedOfficeId ?? undefined);
   const queueFetcher = useCallback<Fetcher>(
@@ -119,25 +121,11 @@ export default function ScorecardWizardScreen() {
     // Guard against a slow load from a PREVIOUS draftId/owner resolving last and seeding the wizard with
     // the wrong draft — ignore any resolution after this effect has been superseded.
     let cancelled = false;
+    // Hydrate the persisted draft immediately. The reducer host refreshes short-lived retained-photo URLs in
+    // the background after it renders, so an offline GET can never hold a usable local edit behind a 30s spinner.
     void loadScorecardDraft(ownerKey, draftId)
-      .then(async (d) => {
-        if (!d) {
-          if (!cancelled) setLoaded("missing");
-          return;
-        }
-        // Retained evidence URLs expire. Refresh them when online, but never make a local edit unavailable
-        // merely because the device is offline — the final PUT remains the server-side ownership gate.
-        if (d.editingScorecardId) {
-          try {
-            const { scorecard } = await getScorecard(fetcher, d.editingScorecardId);
-            const refreshed = refreshScorecardEditPhotoUrls(d, scorecard);
-            if (refreshed !== d) await saveScorecardDraft(ownerKey, refreshed, Date.now());
-            d = refreshed;
-          } catch {
-            /* retain the persisted edit + last-known thumbnails while offline */
-          }
-        }
-        if (!cancelled) setLoaded(d);
+      .then((d) => {
+        if (!cancelled) setLoaded(d ?? "missing");
       })
       .catch(() => {
         // A read failure must not leave the screen stuck on "Loading…" forever — resolve to the
@@ -147,7 +135,7 @@ export default function ScorecardWizardScreen() {
     return () => {
       cancelled = true;
     };
-  }, [ownerKey, draftId, fetcher]);
+  }, [ownerKey, draftId]);
 
   // A leadership draft belongs to the focused leadership screen (its own section list + Project Summary).
   // If one is reached here via a deep link / stale route, hand it off rather than rendering it as a project
@@ -207,7 +195,8 @@ export default function ScorecardWizardScreen() {
         }
         router.back();
       }}
-      fetcher={queueFetcher}
+      fetcher={fetcher}
+      draftOfficeFetcher={queueFetcher}
     />
   );
 }
@@ -229,8 +218,9 @@ function Wizard(props: {
   voiceEnabled: boolean;
   onSubmitted: (dealId: string, scorecardId?: string) => void;
   fetcher: ReturnType<typeof useAuth>["fetcher"];
+  draftOfficeFetcher: Fetcher;
 }) {
-  const { ownerKey, draftId, step, setStep, cameraSection, setCameraSection, cameraDeficiency, setCameraDeficiency, submitting, setSubmitting, notice, setNotice, voiceEnabled, onSubmitted, fetcher } = props;
+  const { ownerKey, draftId, step, setStep, cameraSection, setCameraSection, cameraDeficiency, setCameraDeficiency, submitting, setSubmitting, notice, setNotice, voiceEnabled, onSubmitted, fetcher, draftOfficeFetcher } = props;
   const router = useRouter();
   const [draft, dispatch] = useReducer(scorecardDraftReducer, props.initial);
   // Count of evidence photos still being copied into durable storage. Submit is blocked while > 0 so a
@@ -239,10 +229,12 @@ function Wizard(props: {
   const [captionPhotoKey, setCaptionPhotoKey] = useState<string | null>(null);
   const [captionVoiceBusy, setCaptionVoiceBusy] = useState(false);
   const [signingField, setSigningField] = useState<"superintendentSignature" | "pmSignature" | null>(null);
+  const [hasEditConflict, setHasEditConflict] = useState(false);
   // Serialize autosaves so a slow older write can't land after a newer edit — or after the submit-delete
   // and resurrect a submitted draft. `finalized` stops saves once the draft is submitted + deleted.
   const saveChain = useRef<Promise<unknown>>(Promise.resolve());
   const finalized = useRef(false);
+  const conflictRecoveryInFlight = useRef(false);
   // Synchronous lock for photo imports: `savingPhotos` is React state and doesn't update before a second rapid
   // Import tap re-reads it, so a ref bails the second tap before it opens the picker (see importForSection). It
   // also blocks a camera capture during an import's picker window (before the savingPhotos marker is set).
@@ -269,6 +261,29 @@ function Wizard(props: {
       .then(() => (finalized.current ? undefined : saveScorecardDraft(ownerKey, draft, Date.now())))
       .catch(() => undefined);
   }, [draft, ownerKey]);
+
+  // A local edit must open from disk even while offline. Refresh only the expiring display URLs after the
+  // reducer is mounted; the targeted reducer action cannot overwrite scores, notes, signatures, placements,
+  // captions, newly captured evidence, or the optimistic-concurrency token if the user edits while this GET runs.
+  useEffect(() => {
+    const scorecardId = draft.editingScorecardId;
+    if (!scorecardId) return;
+    let cancelled = false;
+    void getScorecard(fetcher, scorecardId)
+      .then(({ scorecard }) => {
+        if (cancelled) return;
+        dispatch({
+          type: "refreshExistingPhotoUrls",
+          urlsByScorecardPhotoId: Object.fromEntries(
+            scorecard.photos.map((photo) => [photo.id, photo.url ?? ""]),
+          ),
+        });
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [draft.editingScorecardId, fetcher]);
 
   const total = scorecardDraftTotal(draft);
   const validation = validateScorecardDraft(draft);
@@ -465,6 +480,38 @@ function Wizard(props: {
     }
   }
 
+  async function recoverEditConflict() {
+    const scorecardId = draft.editingScorecardId;
+    if (!scorecardId || submitting || conflictRecoveryInFlight.current) return;
+    conflictRecoveryInFlight.current = true;
+    setSubmitting(true);
+    setNotice(null);
+    try {
+      const { scorecard } = await getScorecard(fetcher, scorecardId);
+      const rebased = rebaseScorecardEditDraft(draft, scorecard);
+      // Persist the new revision token before exposing the form again. If the app is killed after this point,
+      // the next retry still uses the rebased token and retains every local editable field/new photo.
+      await saveChain.current.catch(() => undefined);
+      await saveScorecardDraft(ownerKey, rebased.draft, Date.now());
+      dispatch({ type: "replaceDraft", draft: rebased.draft });
+      setHasEditConflict(false);
+      setNotice({
+        tone: "success",
+        text: scorecardEditRebaseMessage(rebased),
+      });
+    } catch (error) {
+      setNotice({
+        tone: "error",
+        text: error instanceof Error
+          ? `Couldn’t load the latest scorecard: ${error.message}`
+          : "Couldn’t load the latest scorecard. Try again when you’re online.",
+      });
+    } finally {
+      conflictRecoveryInFlight.current = false;
+      setSubmitting(false);
+    }
+  }
+
   async function onSubmit() {
     if (submitting) return;
     // Freeze before the marker save so a second tap or a photo edit cannot race the captured payload.
@@ -503,7 +550,7 @@ function Wizard(props: {
       }
     }
     try {
-      const result = await submitScorecard(fetcher, ownerKey, draftForSubmit);
+      const result = await submitScorecard(fetcher, ownerKey, draftForSubmit, { draftOfficeFetcher });
       if (result.status === "photos_failed") {
         setNotice({ tone: "error", text: `${result.failed} photo${result.failed === 1 ? "" : "s"} couldn’t upload after several tries. Remove and re-add ${result.failed === 1 ? "it" : "them"}, then submit.` });
         setSubmitting(false);
@@ -524,10 +571,11 @@ function Wizard(props: {
       onSubmitted(draft.dealId, draft.editingScorecardId);
     } catch (error) {
       const status = (error as { status?: number } | null)?.status;
+      if (status === 409) setHasEditConflict(true);
       setNotice({
         tone: "error",
         text: status === 409
-          ? "This scorecard changed in another session. The submitted scorecard was not changed, and your local edits are still saved. Reopen the latest scorecard before trying again."
+          ? "This scorecard changed in another session. Your local work is safe. Reload the latest revision to retry with your changes."
           : editingSubmitted
             ? "Couldn’t save the scorecard changes. Your work is saved — try again."
             : "Couldn’t submit the scorecard. Your work is saved — try again.",
@@ -554,7 +602,13 @@ function Wizard(props: {
         style={submitting ? styles.frozen : undefined}
       >
         <Text style={styles.stepTitle}>{title}</Text>
-        {notice ? <Banner message={notice.text} tone={notice.tone} /> : null}
+        {notice ? (
+          <Banner
+            message={notice.text}
+            tone={notice.tone}
+            action={hasEditConflict ? { label: "Retry with my changes", onPress: () => void recoverEditConflict() } : undefined}
+          />
+        ) : null}
 
         {step === 0 ? (
           <OverviewStep

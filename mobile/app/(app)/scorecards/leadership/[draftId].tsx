@@ -39,7 +39,7 @@ import {
   type ScorecardDraftPhoto,
   type DraftAction,
 } from "../../../../src/scorecards/draft";
-import { refreshScorecardEditPhotoUrls } from "../../../../src/scorecards/edit";
+import { rebaseScorecardEditDraft, scorecardEditRebaseMessage } from "../../../../src/scorecards/edit";
 import { loadScorecardDraft, saveScorecardDraft, deleteScorecardDraft, copyPhotoIntoDraft } from "../../../../src/scorecards/draft-store";
 import { submitScorecard } from "../../../../src/scorecards/submit";
 import { Button, EmptyState, LoadingState, SectionLabel, TextInput } from "../../../../src/components/ui";
@@ -86,6 +86,8 @@ export default function LeadershipScorecardScreen() {
   const qc = useQueryClient();
   const resolvedOfficeId = routeOfficeId || activeOfficeId || user?.tenantId || null;
   const ownerKey = uploadOwnerKey(user?.id, resolvedOfficeId ?? undefined);
+  // Scope the durable evidence drain and NEW scorecard POST to the draft's office. Scorecard-id edit GET/PUT
+  // calls use the normal auth fetcher so a stale cross-office header cannot block the owning-office resolver.
   const queueFetcher = useCallback<Fetcher>(
     (path, opts) =>
       apiFetch(path, { ...opts, token: token ?? undefined, officeId: resolvedOfficeId, onUnauthorized: () => void signOut() }),
@@ -109,23 +111,11 @@ export default function LeadershipScorecardScreen() {
     setSubmitting(false);
     setNotice(null);
     let cancelled = false;
+    // Render the persisted edit first. Retained-photo URLs refresh from inside the mounted reducer, so an
+    // offline request cannot make local scores, notes, summary, or evidence wait behind the API timeout.
     void loadScorecardDraft(ownerKey, draftId)
-      .then(async (d) => {
-        if (!d) {
-          if (!cancelled) setLoaded("missing");
-          return;
-        }
-        if (d.editingScorecardId) {
-          try {
-            const { scorecard } = await getScorecard(fetcher, d.editingScorecardId);
-            const refreshed = refreshScorecardEditPhotoUrls(d, scorecard);
-            if (refreshed !== d) await saveScorecardDraft(ownerKey, refreshed, Date.now());
-            d = refreshed;
-          } catch {
-            /* retain the persisted edit + last-known thumbnails while offline */
-          }
-        }
-        if (!cancelled) setLoaded(d);
+      .then((d) => {
+        if (!cancelled) setLoaded(d ?? "missing");
       })
       .catch(() => {
         if (!cancelled) setLoaded("missing");
@@ -133,7 +123,7 @@ export default function LeadershipScorecardScreen() {
     return () => {
       cancelled = true;
     };
-  }, [ownerKey, draftId, fetcher]);
+  }, [ownerKey, draftId]);
 
   // A project draft belongs to the project wizard (its own steps + signatures). If one is reached here via a
   // deep link / stale route, hand it off rather than rendering it as a leadership card. `replace` so Back
@@ -194,7 +184,8 @@ export default function LeadershipScorecardScreen() {
         }
         router.back();
       }}
-      fetcher={queueFetcher}
+      fetcher={fetcher}
+      draftOfficeFetcher={queueFetcher}
     />
   );
 }
@@ -210,18 +201,21 @@ function LeadershipForm(props: {
   voiceEnabled: boolean;
   onSubmitted: (dealId: string, scorecardId?: string) => void;
   fetcher: ReturnType<typeof useAuth>["fetcher"];
+  draftOfficeFetcher: Fetcher;
 }) {
-  const { ownerKey, draftId, submitting, setSubmitting, notice, setNotice, voiceEnabled, onSubmitted, fetcher } = props;
+  const { ownerKey, draftId, submitting, setSubmitting, notice, setNotice, voiceEnabled, onSubmitted, fetcher, draftOfficeFetcher } = props;
   const router = useRouter();
   const [draft, dispatch] = useReducer(scorecardDraftReducer, props.initial);
   const [savingPhotos, setSavingPhotos] = useState(0);
   const [photoSectionKey, setPhotoSectionKey] = useState<LeadershipPhotoSectionKey | null>(null);
   const [captionPhotoKey, setCaptionPhotoKey] = useState<string | null>(null);
   const [captionVoiceBusy, setCaptionVoiceBusy] = useState(false);
+  const [hasEditConflict, setHasEditConflict] = useState(false);
   // Serialize autosaves so a slow older write can't land after a newer edit — or after the submit-delete and
   // resurrect a submitted draft. `finalized` stops saves once the draft is submitted + deleted. (Same as wizard.)
   const saveChain = useRef<Promise<unknown>>(Promise.resolve());
   const finalized = useRef(false);
+  const conflictRecoveryInFlight = useRef(false);
   const importInFlight = useRef(false);
   // Authoritative synchronous photo count (committed + reservations still copying) — the 100-cap is enforced
   // against THIS ref, never draft.photos.length (reducer state lags a rapid next capture/import by a render).
@@ -235,6 +229,28 @@ function LeadershipForm(props: {
       .then(() => (finalized.current ? undefined : saveScorecardDraft(ownerKey, draft, Date.now())))
       .catch(() => undefined);
   }, [draft, ownerKey]);
+
+  // Show the disk-backed edit immediately, then refresh only retained-photo display URLs in the background.
+  // The targeted action cannot clobber locally edited category scores/comments, summary, or new evidence.
+  useEffect(() => {
+    const scorecardId = draft.editingScorecardId;
+    if (!scorecardId) return;
+    let cancelled = false;
+    void getScorecard(fetcher, scorecardId)
+      .then(({ scorecard }) => {
+        if (cancelled) return;
+        dispatch({
+          type: "refreshExistingPhotoUrls",
+          urlsByScorecardPhotoId: Object.fromEntries(
+            scorecard.photos.map((photo) => [photo.id, photo.url ?? ""]),
+          ),
+        });
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [draft.editingScorecardId, fetcher]);
 
   const average = scorecardDraftAverage(draft);
   const validation = validateScorecardDraft(draft);
@@ -391,6 +407,36 @@ function LeadershipForm(props: {
     }
   }
 
+  async function recoverEditConflict() {
+    const scorecardId = draft.editingScorecardId;
+    if (!scorecardId || submitting || conflictRecoveryInFlight.current) return;
+    conflictRecoveryInFlight.current = true;
+    setSubmitting(true);
+    setNotice(null);
+    try {
+      const { scorecard } = await getScorecard(fetcher, scorecardId);
+      const rebased = rebaseScorecardEditDraft(draft, scorecard);
+      await saveChain.current.catch(() => undefined);
+      await saveScorecardDraft(ownerKey, rebased.draft, Date.now());
+      dispatch({ type: "replaceDraft", draft: rebased.draft });
+      setHasEditConflict(false);
+      setNotice({
+        tone: "success",
+        text: scorecardEditRebaseMessage(rebased),
+      });
+    } catch (error) {
+      setNotice({
+        tone: "error",
+        text: error instanceof Error
+          ? `Couldn’t load the latest scorecard: ${error.message}`
+          : "Couldn’t load the latest scorecard. Try again when you’re online.",
+      });
+    } finally {
+      conflictRecoveryInFlight.current = false;
+      setSubmitting(false);
+    }
+  }
+
   async function onSubmit() {
     if (submitting) return;
     // A dictation still recording/transcribing hasn't dispatched its transcript yet; submitting now would drop
@@ -433,7 +479,7 @@ function LeadershipForm(props: {
       }
     }
     try {
-      const result = await submitScorecard(fetcher, ownerKey, draftForSubmit);
+      const result = await submitScorecard(fetcher, ownerKey, draftForSubmit, { draftOfficeFetcher });
       if (result.status === "photos_failed") {
         setNotice({ tone: "error", text: `${result.failed} photo${result.failed === 1 ? "" : "s"} couldn’t upload after several tries. Remove and re-add ${result.failed === 1 ? "it" : "them"}, then submit.` });
         setSubmitting(false);
@@ -450,10 +496,11 @@ function LeadershipForm(props: {
       onSubmitted(draft.dealId, draft.editingScorecardId);
     } catch (error) {
       const status = (error as { status?: number } | null)?.status;
+      if (status === 409) setHasEditConflict(true);
       setNotice({
         tone: "error",
         text: status === 409
-          ? "This scorecard changed in another session. The submitted scorecard was not changed, and your local edits are still saved. Reopen the latest scorecard before trying again."
+          ? "This scorecard changed in another session. Your local work is safe. Reload the latest revision to retry with your changes."
           : editingSubmitted
             ? "Couldn’t save the scorecard changes. Your work is saved — try again."
             : "Couldn’t submit the scorecard. Your work is saved — try again.",
@@ -481,7 +528,13 @@ function LeadershipForm(props: {
         style={submitting ? styles.frozen : undefined}
       >
         <Text style={styles.stepTitle}>{editingSubmitted ? "Editing submitted scorecard" : "Leadership Scorecard"}</Text>
-        {notice ? <Banner message={notice.text} tone={notice.tone} /> : null}
+        {notice ? (
+          <Banner
+            message={notice.text}
+            tone={notice.tone}
+            action={hasEditConflict ? { label: "Retry with my changes", onPress: () => void recoverEditConflict() } : undefined}
+          />
+        ) : null}
 
         <View style={{ gap: theme.space.md }}>
           <Field label="Project"><Text style={styles.readonly}>{draft.dealName}</Text></Field>

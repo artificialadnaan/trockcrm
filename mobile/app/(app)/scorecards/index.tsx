@@ -16,7 +16,12 @@ import {
   isEditingScorecardDraft,
   type ScorecardDraft,
 } from "../../../src/scorecards/draft";
-import { listScorecardDrafts, saveScorecardDraft, deleteScorecardDraft } from "../../../src/scorecards/draft-store";
+import {
+  listScorecardDraftsForUser,
+  saveScorecardDraft,
+  deleteScorecardDraft,
+  type LocatedScorecardDraft,
+} from "../../../src/scorecards/draft-store";
 import { newClientUploadId, removeQueuedUploads, uploadOwnerKey } from "../../../src/capture/upload-queue";
 import { registerUploadBackgroundTask } from "../../../src/capture/upload-background-task";
 import { newSubmissionId } from "../../../src/scorecards/ids";
@@ -43,13 +48,14 @@ function shortDate(iso: string): string {
 }
 
 /** Resume/open route for a draft — leadership drafts have their own focused screen; project drafts the wizard. */
-function draftPath(draft: ScorecardDraft): {
+function draftPath(draft: ScorecardDraft, locatedOfficeId?: string | null): {
   pathname: "/(app)/scorecards/leadership/[draftId]" | "/(app)/scorecards/[draftId]";
   params: { draftId: string; officeId?: string };
 } {
+  const officeId = draft.editingOfficeId ?? locatedOfficeId ?? undefined;
   const params = {
     draftId: draft.id,
-    ...(draft.editingOfficeId ? { officeId: draft.editingOfficeId } : {}),
+    ...(officeId ? { officeId } : {}),
   };
   return draft.kind === "leadership"
     ? { pathname: "/(app)/scorecards/leadership/[draftId]", params }
@@ -61,7 +67,7 @@ export default function ScorecardsScreen() {
   const { fetcher, user, activeOfficeId } = useAuth();
   const ownerKey = uploadOwnerKey(user?.id, activeOfficeId ?? user?.tenantId ?? undefined);
 
-  const [drafts, setDrafts] = useState<ScorecardDraft[]>([]);
+  const [drafts, setDrafts] = useState<LocatedScorecardDraft[]>([]);
   const [discardingDraftId, setDiscardingDraftId] = useState<string | null>(null);
   // Which kind of scorecard the deal picker will create when a deal is chosen. Set by the two entry buttons.
   const [pickerKind, setPickerKind] = useState<"project" | "leadership" | null>(null);
@@ -85,11 +91,11 @@ export default function ScorecardsScreen() {
   });
 
   const reloadDrafts = useCallback(() => {
-    if (!ownerKey) return;
-    void listScorecardDrafts(ownerKey).then((list) =>
-      setDrafts([...list].sort((a, b) => b.updatedAt - a.updatedAt)),
+    if (!ownerKey || !user) return;
+    void listScorecardDraftsForUser(user.id, ownerKey).then((list) =>
+      setDrafts([...list].sort((a, b) => b.draft.updatedAt - a.draft.updatedAt)),
     );
-  }, [ownerKey]);
+  }, [ownerKey, user]);
 
   useFocusEffect(
     useCallback(() => {
@@ -135,7 +141,7 @@ export default function ScorecardsScreen() {
     router.push(draftPath(draft));
   }
 
-  function confirmDiscard(draft: ScorecardDraft) {
+  function confirmDiscard(draft: ScorecardDraft, draftOwnerKey: string) {
     // Legacy photo drafts may have completed a partial upload before this marker existed. Treat them as
     // unsafe to discard; new drafts persist false until upload actually starts.
     if (draft.evidenceUploadAttempted || (draft.photos.length > 0 && draft.evidenceUploadAttempted !== false)) {
@@ -159,21 +165,21 @@ export default function ScorecardsScreen() {
         {
           text: editingSubmitted ? "Discard changes" : "Discard",
           style: "destructive",
-          onPress: () => void discardDraft(draft),
+          onPress: () => void discardDraft(draft, draftOwnerKey),
         },
       ],
     );
   }
 
-  async function discardDraft(draft: ScorecardDraft) {
-    if (!ownerKey || discardingDraftId) return;
+  async function discardDraft(draft: ScorecardDraft, draftOwnerKey: string) {
+    if (discardingDraftId) return;
     setDiscardingDraftId(draft.id);
     try {
       // This path is unavailable once evidence upload starts (see confirmDiscard), so these are only local
       // copies/queued uploads and cannot leave already-confirmed gallery photos orphaned.
-      await removeQueuedUploads(ownerKey, scorecardDraftNewPhotos(draft).map((photo) => photo.clientUploadId));
-      await deleteScorecardDraft(ownerKey, draft.id);
-      setDrafts((current) => current.filter((item) => item.id !== draft.id));
+      await removeQueuedUploads(draftOwnerKey, scorecardDraftNewPhotos(draft).map((photo) => photo.clientUploadId));
+      await deleteScorecardDraft(draftOwnerKey, draft.id);
+      setDrafts((current) => current.filter((item) => item.draft.id !== draft.id));
     } catch {
       Alert.alert("Couldn’t discard scorecard", "Please try again.");
     } finally {
@@ -205,10 +211,10 @@ export default function ScorecardsScreen() {
         {drafts.length > 0 ? (
           <View style={{ gap: theme.space.sm }}>
             <SectionLabel>In progress</SectionLabel>
-            {drafts.map((d) => (
-              <View key={d.id} style={styles.row}>
+            {drafts.map(({ draft: d, ownerKey: draftOwnerKey, officeId: draftOfficeId }) => (
+              <View key={`${draftOwnerKey}:${d.id}`} style={styles.row}>
                 <Pressable
-                  onPress={() => router.push(draftPath(d))}
+                  onPress={() => router.push(draftPath(d, draftOfficeId))}
                   style={({ pressed }) => [styles.draftResume, pressed && { opacity: 0.7 }]}
                   accessibilityRole="button"
                   accessibilityLabel={`${isEditingScorecardDraft(d) ? "Resume editing submitted" : "Resume"} ${d.kind === "leadership" ? "Leadership " : ""}Scorecard for ${d.dealName}`}
@@ -224,7 +230,7 @@ export default function ScorecardsScreen() {
                 <Button
                   title={isEditingScorecardDraft(d) ? "Discard changes" : "Discard"}
                   variant="ghost"
-                  onPress={() => confirmDiscard(d)}
+                  onPress={() => confirmDiscard(d, draftOwnerKey)}
                   disabled={discardingDraftId !== null}
                   style={styles.discardButton}
                 />

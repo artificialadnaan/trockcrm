@@ -88,6 +88,7 @@ export function createScorecardEditDraft(
       .map((key) => [key, detail.criticalDeficiencyNotes?.[key]?.trim() ?? ""])
       .filter(([, note]) => note.length > 0),
   ) as Partial<Record<ScorecardCriticalDeficiencyKey, string>>;
+  const photos = retainedPhotos(detail);
 
   return {
     id: input.id,
@@ -103,9 +104,12 @@ export function createScorecardEditDraft(
     editingScorecardId: detail.id,
     editingOfficeId: detail.officeId ?? null,
     editBaseUpdatedAt: detail.updatedAt,
+    editBasePhotoIds: photos.flatMap((photo) =>
+      isExistingScorecardDraftPhoto(photo) ? [photo.existingScorecardPhotoId] : [],
+    ),
     scores,
     notes,
-    photos: retainedPhotos(detail),
+    photos,
     criticalDeficiencies,
     deficiencyNotes,
     actionItems: detail.kind === "leadership" ? [] : [...detail.actionItems],
@@ -137,6 +141,99 @@ export function refreshScorecardEditPhotoUrls(
     return { ...photo, uri };
   });
   return changed ? { ...draft, photos } : draft;
+}
+
+/**
+ * Advance a conflicted local edit onto the latest server revision without replacing the user's editable
+ * fields. New local evidence is always retained. Existing evidence links are retained only while that exact
+ * link still exists on the latest scorecard; another session may have removed a link, and sending its stale id
+ * again would make every retry conflict. Evidence added by the other session is merged in, while a link
+ * present in the base snapshot but omitted locally remains omitted (an intentional local removal).
+ *
+ * Server field values are not merged: choosing "Retry with my changes" is an explicit full-replacement
+ * decision, and the user gets another review/save step after this rebase rather than an automatic PUT.
+ */
+export function rebaseScorecardEditDraft(
+  draft: ScorecardDraft,
+  detail: FieldScorecardDetail,
+): { draft: ScorecardDraft; removedRetainedPhotoCount: number; mergedServerPhotoCount: number } {
+  if (!draft.editingScorecardId || draft.editingScorecardId !== detail.id) {
+    throw new Error("The latest scorecard does not match this local edit.");
+  }
+  if (!detail.canEdit) throw new Error("Only the submitter can edit this scorecard.");
+  if (detail.formVersion !== 2) throw new Error("Historical scorecards cannot be edited in T-Rock Cam.");
+  const draftLeadership = draft.kind === "leadership";
+  const detailLeadership = detail.kind === "leadership";
+  if (draft.dealId !== detail.dealId || draftLeadership !== detailLeadership) {
+    throw new Error("The latest scorecard does not match this local edit.");
+  }
+
+  const latestDraftPhotos = retainedPhotos(detail);
+  const latestPhotos = new Map(
+    latestDraftPhotos.flatMap((photo) =>
+      isExistingScorecardDraftPhoto(photo) ? [[photo.existingScorecardPhotoId, photo] as const] : [],
+    ),
+  );
+  const localRetainedIds = new Set(
+    draft.photos.flatMap((photo) =>
+      isExistingScorecardDraftPhoto(photo) ? [photo.existingScorecardPhotoId] : [],
+    ),
+  );
+  // Legacy local edits created before this snapshot field existed use their currently-retained links as the
+  // base. This errs toward preserving unknown latest links rather than deleting server evidence silently.
+  const basePhotoIds = new Set(draft.editBasePhotoIds ?? [...localRetainedIds]);
+  let removedRetainedPhotoCount = 0;
+  const photos: ScorecardDraftPhoto[] = draft.photos.flatMap((photo): ScorecardDraftPhoto[] => {
+    if (!isExistingScorecardDraftPhoto(photo)) return [photo];
+    const latest = latestPhotos.get(photo.existingScorecardPhotoId);
+    if (!latest) {
+      removedRetainedPhotoCount += 1;
+      return [];
+    }
+    return [{ ...photo, uri: latest.uri }];
+  });
+  let mergedServerPhotoCount = 0;
+  for (const latest of latestDraftPhotos) {
+    if (!isExistingScorecardDraftPhoto(latest)) continue;
+    const id = latest.existingScorecardPhotoId;
+    // Already retained locally, or present in the base and intentionally removed locally.
+    if (localRetainedIds.has(id) || basePhotoIds.has(id)) continue;
+    photos.push(latest);
+    mergedServerPhotoCount += 1;
+  }
+
+  return {
+    draft: {
+      ...draft,
+      editingOfficeId: detail.officeId ?? draft.editingOfficeId ?? null,
+      editBaseUpdatedAt: detail.updatedAt,
+      editBasePhotoIds: latestDraftPhotos.flatMap((photo) =>
+        isExistingScorecardDraftPhoto(photo) ? [photo.existingScorecardPhotoId] : [],
+      ),
+      photos,
+    },
+    removedRetainedPhotoCount,
+    mergedServerPhotoCount,
+  };
+}
+
+export function scorecardEditRebaseMessage(result: {
+  removedRetainedPhotoCount: number;
+  mergedServerPhotoCount: number;
+}): string {
+  const parts = ["Latest revision loaded. Your local changes and new photos were kept."];
+  if (result.mergedServerPhotoCount > 0) {
+    parts.push(
+      `${result.mergedServerPhotoCount} photo${result.mergedServerPhotoCount === 1 ? "" : "s"} added in the other edit ${result.mergedServerPhotoCount === 1 ? "was" : "were"} also preserved.`,
+    );
+  }
+  if (result.removedRetainedPhotoCount > 0) {
+    parts.push(
+      `${result.removedRetainedPhotoCount} submitted photo${result.removedRetainedPhotoCount === 1 ? "" : "s"} removed in the other edit can’t be reattached automatically.`,
+    );
+  }
+  parts.push("Review, then tap Save changes again.");
+  return parts.join(" ");
 }
 
 function canonicalItems(draft: ScorecardDraft): ScorecardUpdatePayload["items"] {

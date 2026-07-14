@@ -79,6 +79,12 @@ export interface ScorecardDraft {
   editingOfficeId?: string | null;
   /** Optimistic-concurrency token returned by the detail endpoint. */
   editBaseUpdatedAt?: string;
+  /**
+   * Retained evidence-link ids present at editBaseUpdatedAt. Conflict recovery compares this snapshot with
+   * both the local desired links and the latest server links, so it can preserve concurrently-added evidence
+   * without resurrecting evidence the local user intentionally removed.
+   */
+  editBasePhotoIds?: string[];
   // Project cards key scores/notes by the V2 section keys; leadership cards key by the 4 leadership keys.
   // Both are stored in the same maps (disjoint key sets), so the reducer/photo machinery is shared.
   scores: Partial<Record<ScorecardSectionKey | ScorecardLeadershipSectionKey, number>>;
@@ -116,6 +122,8 @@ export type DraftAction =
   | { type: "setSignature"; field: "superintendentSignature" | "pmSignature"; value: string }
   | { type: "appendActionItem"; text: string }
   | { type: "markEvidenceUploadAttempted" }
+  | { type: "replaceDraft"; draft: ScorecardDraft }
+  | { type: "refreshExistingPhotoUrls"; urlsByScorecardPhotoId: Record<string, string> }
   | { type: "addPhoto"; photo: ScorecardDraftPhoto }
   | { type: "removePhoto"; key: string }
   | { type: "setPhotoCaption"; key: string; caption: string }
@@ -359,6 +367,19 @@ export function scorecardDraftReducer(draft: ScorecardDraft, action: DraftAction
     }
     case "markEvidenceUploadAttempted":
       return draft.evidenceUploadAttempted ? draft : { ...draft, evidenceUploadAttempted: true };
+    case "replaceDraft":
+      return action.draft;
+    case "refreshExistingPhotoUrls": {
+      let changed = false;
+      const photos = draft.photos.map((photo) => {
+        if (!isExistingScorecardDraftPhoto(photo)) return photo;
+        const uri = action.urlsByScorecardPhotoId[photo.existingScorecardPhotoId];
+        if (uri === undefined || uri === photo.uri) return photo;
+        changed = true;
+        return { ...photo, uri };
+      });
+      return changed ? { ...draft, photos } : draft;
+    }
     case "addPhoto":
       return { ...draft, photos: [...draft.photos, action.photo] };
     case "removePhoto":

@@ -65,22 +65,34 @@ export type SubmitScorecardResult =
   | { status: "photos_pending"; remaining: number }
   | { status: "photos_failed"; failed: number };
 
+export type SubmitScorecardOptions = {
+  /**
+   * New submissions and evidence uploads are scoped to the durable draft/queue office. Keep that
+   * office-pinned fetcher separate from `scorecardFetcher`: an edit PUT resolves its owning office by
+   * scorecard id server-side, and an old pinned x-office-id can be rejected by field auth after the
+   * submitter is re-homed.
+   */
+  draftOfficeFetcher?: Fetcher;
+};
+
 /**
  * Submit a draft. Uploads its photos through the durable queue first; if any of THIS draft's photos are
  * still queued afterward (offline / mid-retry), returns `photos_pending` and the caller keeps the draft so
  * the queue can finish + the user can retry. Once all photos are confirmed, POSTs the scorecard.
  */
 export async function submitScorecard(
-  fetcher: Fetcher,
+  scorecardFetcher: Fetcher,
   ownerKey: string,
   draft: ScorecardDraft,
+  options: SubmitScorecardOptions = {},
 ): Promise<SubmitScorecardResult> {
+  const draftOfficeFetcher = options.draftOfficeFetcher ?? scorecardFetcher;
   // Retained server evidence on an edit is referenced by scorecard-photo id. Only newly captured/imported
   // evidence owns a clientUploadId and may enter the durable upload queue.
   const newPhotos = scorecardDraftNewPhotos(draft);
   if (newPhotos.length > 0) {
     await enqueueUploads(ownerKey, newPhotos.map((p) => scorecardPhotoUploadInput(p, draft.dealId)));
-    await drainUploadQueue(ownerKey, fetcher);
+    await drainUploadQueue(ownerKey, draftOfficeFetcher);
     const stillQueued = await getQueuedUploads(ownerKey);
     const { pending, failed } = classifyDraftPhotoUploads(
       newPhotos.map((p) => p.clientUploadId),
@@ -91,7 +103,7 @@ export async function submitScorecard(
     if (pending.length > 0) return { status: "photos_pending", remaining: pending.length };
   }
   if (draft.editingScorecardId) {
-    const { scorecard } = await updateScorecard(fetcher, draft.editingScorecardId, scorecardDraftToUpdate(draft));
+    const { scorecard } = await updateScorecard(scorecardFetcher, draft.editingScorecardId, scorecardDraftToUpdate(draft));
     return { status: "submitted", scorecard };
   }
   // Stamp Week Of = the completion date, LOCAL, at submit time. Both kinds present it as "set automatically
@@ -99,6 +111,6 @@ export async function submitScorecard(
   // must file under the submit day — not the draft-creation day it was seeded with — and LOCAL avoids the
   // west-of-UTC off-by-one the old server-side UTC stamp caused. The server trusts this value.
   const submission = { ...scorecardDraftToSubmission(draft), weekOf: todayLocalIso() };
-  const { scorecard } = await createScorecard(fetcher, submission);
+  const { scorecard } = await createScorecard(draftOfficeFetcher, submission);
   return { status: "submitted", scorecard };
 }

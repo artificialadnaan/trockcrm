@@ -12,7 +12,7 @@ jest.mock("../../api/endpoints", () => ({
   })),
 }));
 
-import { createScorecard, updateScorecard } from "../../api/endpoints";
+import { createScorecard, updateScorecard, type Fetcher } from "../../api/endpoints";
 import { drainUploadQueue, enqueueUploads, getQueuedUploads } from "../../capture/upload-queue";
 import { FIELD_SCORECARD_SECTION_KEYS } from "../scoring";
 import { submitScorecard } from "../submit";
@@ -51,7 +51,9 @@ describe("submitScorecard submitted-card edit", () => {
     (getQueuedUploads as jest.Mock).mockResolvedValue([]);
   });
 
-  it("uploads only new evidence, PUTs retained evidence, and preserves the original week", async () => {
+  it("uses the office-pinned fetcher only for new evidence, then PUTs with the normal fetcher", async () => {
+    const scorecardFetcher = jest.fn() as unknown as Fetcher;
+    const officePinnedUploadFetcher = jest.fn() as unknown as Fetcher;
     const draft = editDraft([
         {
           key: "submitted:photo-1",
@@ -69,18 +71,20 @@ describe("submitScorecard submitted-card edit", () => {
         },
       ]);
 
-    const result = await submitScorecard((() => undefined) as never, "user-1:office-1", draft);
+    const result = await submitScorecard(scorecardFetcher, "user-1:office-1", draft, {
+      draftOfficeFetcher: officePinnedUploadFetcher,
+    });
 
     expect(enqueueUploads).toHaveBeenCalledTimes(1);
     expect(enqueueUploads).toHaveBeenCalledWith(
       "user-1:office-1",
       [expect.objectContaining({ clientUploadId: "new-upload-1", uri: "file:///new-photo.jpg" })],
     );
-    expect(drainUploadQueue).toHaveBeenCalledTimes(1);
+    expect(drainUploadQueue).toHaveBeenCalledWith("user-1:office-1", officePinnedUploadFetcher);
     expect(createScorecard).not.toHaveBeenCalled();
     expect(updateScorecard).toHaveBeenCalledTimes(1);
     expect(updateScorecard).toHaveBeenCalledWith(
-      expect.any(Function),
+      scorecardFetcher,
       "scorecard-1",
       expect.objectContaining({
         expectedUpdatedAt: "2026-07-14T15:30:00.000Z",

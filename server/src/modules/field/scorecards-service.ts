@@ -369,6 +369,7 @@ export async function updateFieldScorecard(
   }
   const expectedUpdatedAt = expectedDate.toISOString();
   const currentUpdatedAt = toIso(card.updatedAt);
+  const staleExpectedUpdatedAt = expectedUpdatedAt !== currentUpdatedAt;
   const project = await assertActiveFieldProject(
     tenantDb,
     { userId: input.userId, userRole: input.userRole },
@@ -430,6 +431,7 @@ export async function updateFieldScorecard(
     { dealId: card.dealId, kind, formVersion },
     deficiencies,
     currentPhotos,
+    staleExpectedUpdatedAt,
   );
 
   const contentUnchanged = scorecardEditableContentEquals({
@@ -452,12 +454,8 @@ export async function updateFieldScorecard(
       rating,
     },
   });
-  if (expectedUpdatedAt !== currentUpdatedAt && !contentUnchanged) {
-    throw new AppError(
-      409,
-      "This scorecard changed after you opened it. Reload it before saving your edits.",
-      "SCORECARD_EDIT_CONFLICT",
-    );
+  if (staleExpectedUpdatedAt && !contentUnchanged) {
+    throw scorecardEditConflict();
   }
   if (contentUnchanged) {
     return { scorecard: toSummary(card, project.name, input.userId) };
@@ -859,27 +857,23 @@ export async function renderAndStoreFieldScorecardArtifacts(
   // is only an orphan and cannot corrupt the winner's object.
   await putObject(r2Key, pdf, "application/pdf");
   const persistedKey = await runInOfficeTransaction(office, userId, async (db) => {
-    // Lock the scorecard generation as well as its evidence. An edit can change scores, notes, summary, or
-    // signatures without changing a single linked file; evidence-only fingerprinting would otherwise let
-    // this pre-edit PDF become authoritative after the edit cleared the artifact pointer.
+    // Check the scorecard generation without taking a row lock. The final guarded UPDATE below is the
+    // publication CAS. Taking FOR SHARE here and later upgrading to UPDATE deadlocks two cross-instance
+    // finalizers that publish the same generation; it also inverts the file-metadata path's file -> card
+    // lock order. A plain read lets us fail fast while the CAS still closes a change after this statement.
     const [currentCardGeneration] = await db
       .select({ updatedAt: fieldScorecards.updatedAt })
       .from(fieldScorecards)
       .where(and(eq(fieldScorecards.id, scorecardId), eq(fieldScorecards.isActive, true)))
-      .limit(1)
-      .for("share");
+      .limit(1);
     if (!currentCardGeneration || toIso(currentCardGeneration.updatedAt) !== toIso(card.updatedAt)) {
-      throw new AppError(
-        503,
-        "Scorecard content changed while the PDF was rendering. Please retry the download.",
-        "SCORECARD_CONTENT_CHANGED",
-      );
+      throw scorecardContentChangedError();
     }
 
-    // Lock + recompare every linked file's active state. A delete/restore that committed during R2 work
-    // makes this render stale; one that starts after this lock waits, then invalidates the just-written
-    // artifact in its own transaction. Either interleaving prevents deleted evidence from being resurrected
-    // (and prevents a restored photo from being omitted by a late finalizer).
+    // Lock + recompare every linked FILE's active state, but deliberately do not lock the scorecard-photo
+    // link rows. Scorecard edits serialize on the card row and advance updated_at, so the CAS below detects
+    // link changes. Restricting this lock to files preserves the existing file -> card order used by caption
+    // and visibility invalidation and avoids an edit's card -> link order forming another ABBA deadlock.
     const currentEvidenceRows = await db
       .select({
         fileId: files.id,
@@ -890,7 +884,7 @@ export async function renderAndStoreFieldScorecardArtifacts(
       .from(fieldScorecardPhotos)
       .innerJoin(files, eq(files.id, fieldScorecardPhotos.fileId))
       .where(eq(fieldScorecardPhotos.scorecardId, scorecardId))
-      .for("share");
+      .for("share", { of: files });
     if (scorecardEvidenceFingerprint(currentEvidenceRows) !== evidenceFingerprint) {
       throw new AppError(
         503,
@@ -914,7 +908,7 @@ export async function renderAndStoreFieldScorecardArtifacts(
           eq(fieldScorecards.id, scorecardId),
           eq(fieldScorecards.isActive, true),
           // node-postgres timestamps are millisecond Date objects while Postgres may retain microseconds.
-          // Compare at the API token's precision, under the share lock above.
+          // Compare at the API token's precision inside this atomic guarded UPDATE.
           sql`date_trunc('milliseconds', ${fieldScorecards.updatedAt}) = ${toIso(card.updatedAt)}::timestamptz`,
           lte(fieldScorecards.pdfRenderVersion, CURRENT_SCORECARD_PDF_RENDER_VERSION),
         ),
@@ -922,12 +916,16 @@ export async function renderAndStoreFieldScorecardArtifacts(
       .returning({ pdfR2Key: fieldScorecards.pdfR2Key });
     if (updated[0]?.pdfR2Key) return updated[0].pdfR2Key;
 
-    // A newer renderer won the race. Return its key instead of presigning this older, unreferenced object.
+    // Distinguish a content edit that won the race from a newer renderer revision. The former must never
+    // return a stale/currently-unrelated key; the latter may safely return its authoritative artifact.
     const [current] = await db
-      .select({ pdfR2Key: fieldScorecards.pdfR2Key })
+      .select({ updatedAt: fieldScorecards.updatedAt, pdfR2Key: fieldScorecards.pdfR2Key })
       .from(fieldScorecards)
       .where(and(eq(fieldScorecards.id, scorecardId), eq(fieldScorecards.isActive, true)))
       .limit(1);
+    if (!current || toIso(current.updatedAt) !== toIso(card.updatedAt)) {
+      throw scorecardContentChangedError();
+    }
     return current?.pdfR2Key ?? null;
   });
   return persistedKey;
@@ -1185,6 +1183,7 @@ async function resolveUpdatePhotoLinks(
   card: { dealId: string; kind: ScorecardKind; formVersion: ScorecardFormVersion },
   deficiencies: string[],
   currentPhotos: Array<{ id: string; fileId: string; sectionKey: string; deficiencyKey: string | null }>,
+  staleExpectedUpdatedAt: boolean,
 ): Promise<ResolvedUpdatePhoto[]> {
   for (const photo of input.photos) {
     const hasLinkId = typeof photo.scorecardPhotoId === "string" && photo.scorecardPhotoId.trim().length > 0;
@@ -1229,6 +1228,9 @@ async function resolveUpdatePhotoLinks(
     if (typeof photo.scorecardPhotoId === "string" && photo.scorecardPhotoId.trim()) {
       const existing = currentById.get(photo.scorecardPhotoId.trim());
       if (!existing) {
+        // A retained link that disappeared after this client loaded is a concurrency conflict, not a
+        // permanently-invalid request. Preserve the 422 for a current token (bad/cross-card link id).
+        if (staleExpectedUpdatedAt) throw scorecardEditConflict();
         throw new AppError(422, "Existing evidence photo does not belong to this scorecard.");
       }
       fileId = existing.fileId;
@@ -1237,6 +1239,9 @@ async function resolveUpdatePhotoLinks(
       const clientUploadId = typeof photo.clientUploadId === "string" ? photo.clientUploadId.trim() : "";
       const file = newFileByUploadId.get(clientUploadId);
       if (!file) {
+        // With a stale token, availability may have changed after the edit form was opened (or after a
+        // response-loss retry added the link). The client must reload instead of retrying the same 422.
+        if (staleExpectedUpdatedAt) throw scorecardEditConflict();
         throw new AppError(422, `Evidence photo not found (or no longer available) for upload ${clientUploadId}.`);
       }
       if (file.dealId !== card.dealId) {
@@ -1371,6 +1376,22 @@ function normalizeSignature(value: string | null | undefined): string | null {
   if (!signature) return null;
   if (signature.length > 500_000) throw new AppError(400, "Signature is too large.");
   return signature;
+}
+
+function scorecardEditConflict(): AppError {
+  return new AppError(
+    409,
+    "This scorecard changed after you opened it. Reload it before saving your edits.",
+    "SCORECARD_EDIT_CONFLICT",
+  );
+}
+
+function scorecardContentChangedError(): AppError {
+  return new AppError(
+    503,
+    "Scorecard content changed while the PDF was rendering. Please retry the download.",
+    "SCORECARD_CONTENT_CHANGED",
+  );
 }
 
 function toIso(value: unknown): string {

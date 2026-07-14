@@ -308,6 +308,50 @@ describe("updateFieldScorecard replacement and concurrency", () => {
     expect(replay.scorecard.totalScore).toBe(100);
   });
 
+  it("returns a conflict when a stale edit references evidence another session removed", async () => {
+    const { scorecard } = await createFieldScorecard(tdb, projectSubmission({
+      clientSubmissionId: csid(25),
+      photos: [{ sectionKey: "quality", clientUploadId: "upload-1" }],
+    }));
+    const staleToken = scorecard.updatedAt!;
+    const before = await getFieldScorecardDetail(tdb, scorecard.id, OWNER_ACCESS);
+    const removedPhoto = before.photos[0]!;
+
+    // The winning session removes the link and advances the optimistic-concurrency token.
+    await updateFieldScorecard(tdb, updateInput(scorecard.id, staleToken, { photos: [] }));
+
+    // This was a valid retained link when the losing session opened the form. Its disappearance is a
+    // concurrency conflict, not a permanently invalid 422 that the mobile client would retry forever.
+    await expectAppError(
+      updateFieldScorecard(tdb, updateInput(scorecard.id, staleToken, {
+        photos: [{ scorecardPhotoId: removedPhoto.id, sectionKey: "quality", deficiencyKey: null }],
+      })),
+      409,
+      "SCORECARD_EDIT_CONFLICT",
+    );
+
+    const after = await getFieldScorecardDetail(tdb, scorecard.id, OWNER_ACCESS);
+    expect(after.photos).toEqual([]);
+    expect(after.totalScore).toBe(100);
+  });
+
+  it("keeps a stale response-loss replay idempotent when the first edit added evidence", async () => {
+    const { scorecard } = await createFieldScorecard(tdb, projectSubmission({ clientSubmissionId: csid(26) }));
+    const staleToken = scorecard.updatedAt!;
+    const desired = updateInput(scorecard.id, staleToken, {
+      photos: [{ clientUploadId: "upload-3", sectionKey: "quality", deficiencyKey: null }],
+    });
+
+    const first = await updateFieldScorecard(tdb, desired);
+    const afterFirst = await getFieldScorecardDetail(tdb, scorecard.id, OWNER_ACCESS);
+    expect(afterFirst.photos).toHaveLength(1);
+
+    const replay = await updateFieldScorecard(tdb, desired);
+    const afterReplay = await getFieldScorecardDetail(tdb, scorecard.id, OWNER_ACCESS);
+    expect(replay.scorecard.updatedAt).toBe(first.scorecard.updatedAt);
+    expect(afterReplay.photos).toEqual(afterFirst.photos);
+  });
+
   it("retains link identity, unlinks omitted evidence, and adds only the new upload", async () => {
     const { scorecard } = await createFieldScorecard(tdb, projectSubmission({
       clientSubmissionId: csid(23),
