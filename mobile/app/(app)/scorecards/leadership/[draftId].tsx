@@ -757,7 +757,13 @@ function EvidencePhotos(props: {
                   </View>
                 </Pressable>
               )}
-              <Pressable onPress={() => onRemove(photo)} hitSlop={8} style={styles.thumbX} accessibilityLabel="Remove photo">
+              <Pressable
+                onPress={() => onRemove(photo)}
+                hitSlop={8}
+                style={styles.thumbX}
+                accessibilityRole="button"
+                accessibilityLabel="Remove photo"
+              >
                 <Text style={styles.thumbXText}>✕</Text>
               </Pressable>
             </View>

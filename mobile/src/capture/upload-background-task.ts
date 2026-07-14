@@ -4,6 +4,7 @@ import { apiFetch } from "../api/client";
 import type { Fetcher } from "../api/endpoints";
 import { isTokenExpired, loadSession, type Session } from "../auth/session";
 import { listScorecardDraftOwners } from "../scorecards/draft-store";
+import { drainBackgroundOwnerQueues } from "./upload-background-core";
 import { drainUploadQueue, getQueuedCount, uploadOwnerKey } from "./upload-queue";
 
 /**
@@ -39,10 +40,11 @@ TaskManager.defineTask(UPLOAD_QUEUE_TASK, async () => {
     // Explicitly target-routed edit evidence must not carry an old owning-office header after the submitter
     // is re-homed. The queue chooses this fetcher per item; ordinary/new-draft captures remain pinned below.
     const targetFetcher = buildSessionFetcher(session, null);
-    for (const owner of owners) {
-      if ((await getQueuedCount(owner.ownerKey)) === 0) continue;
-      await drainUploadQueue(owner.ownerKey, buildSessionFetcher(session, owner.officeId), { targetFetcher });
-    }
+    await drainBackgroundOwnerQueues(owners, {
+      getQueuedCount,
+      drainOwner: (owner) =>
+        drainUploadQueue(owner.ownerKey, buildSessionFetcher(session, owner.officeId), { targetFetcher }),
+    });
     return BackgroundTask.BackgroundTaskResult.Success;
   } catch {
     return BackgroundTask.BackgroundTaskResult.Failed;

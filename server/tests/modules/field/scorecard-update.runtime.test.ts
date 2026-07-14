@@ -173,6 +173,7 @@ beforeEach(async () => {
   await tdb.execute(sql`DELETE FROM field_scorecard_items`);
   await tdb.execute(sql`DELETE FROM field_scorecards`);
   await tdb.execute(sql`DELETE FROM public.job_queue`);
+  await tdb.execute(sql`UPDATE files SET is_active = true, deleted_at = NULL`);
 });
 
 describe("updateFieldScorecard authorization and visibility", () => {
@@ -223,6 +224,20 @@ describe("updateFieldScorecard authorization and visibility", () => {
       422,
       "SCORECARD_EDIT_UNSUPPORTED",
     );
+  });
+
+  it("hides deleted gallery evidence from submitted-card detail and restores it when visible again", async () => {
+    const { scorecard } = await createFieldScorecard(tdb, projectSubmission({
+      clientSubmissionId: csid(13),
+      photos: [{ sectionKey: "quality", clientUploadId: "upload-1" }],
+    }));
+    expect((await getFieldScorecardDetail(tdb, scorecard.id, OWNER_ACCESS)).photos).toHaveLength(1);
+
+    await tdb.execute(sql`UPDATE files SET is_active = false, deleted_at = NOW() WHERE id = ${FILE_1}`);
+    expect((await getFieldScorecardDetail(tdb, scorecard.id, OWNER_ACCESS)).photos).toEqual([]);
+
+    await tdb.execute(sql`UPDATE files SET is_active = true, deleted_at = NULL WHERE id = ${FILE_1}`);
+    expect((await getFieldScorecardDetail(tdb, scorecard.id, OWNER_ACCESS)).photos).toHaveLength(1);
   });
 });
 

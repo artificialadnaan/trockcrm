@@ -659,7 +659,14 @@ export async function getFieldScorecardDetail(
       caption: files.description,
     })
     .from(fieldScorecardPhotos)
-    .leftJoin(files, eq(files.id, fieldScorecardPhotos.fileId))
+    .innerJoin(
+      files,
+      and(
+        eq(files.id, fieldScorecardPhotos.fileId),
+        eq(files.isActive, true),
+        isNull(files.deletedAt),
+      ),
+    )
     .where(eq(fieldScorecardPhotos.scorecardId, id));
 
   // Resolve presigned URLs concurrently (order preserved by Promise.all) so detail latency doesn't scale

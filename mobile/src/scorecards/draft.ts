@@ -384,12 +384,20 @@ export function scorecardDraftReducer(draft: ScorecardDraft, action: DraftAction
       return { ...draft, photos: [...draft.photos, action.photo] };
     case "removePhoto":
       return { ...draft, photos: draft.photos.filter((p) => p.key !== action.key) };
-    case "setPhotoCaption":
+    case "setPhotoCaption": {
+      // A retained scorecard photo's caption is shared project-gallery file metadata, not scorecard-link
+      // content. Submitted-card edits keep it read-only; only a newly captured/imported photo can change it
+      // before upload persists the caption through the existing photo pipeline.
+      const target = draft.photos.find((photo) => photo.key === action.key);
+      if (!target || isExistingScorecardDraftPhoto(target)) return draft;
       return {
         ...draft,
         photos: draft.photos.map((p) => (p.key === action.key ? { ...p, caption: action.caption } : p)),
       };
-    case "appendPhotoCaption":
+    }
+    case "appendPhotoCaption": {
+      const target = draft.photos.find((photo) => photo.key === action.key);
+      if (!target || isExistingScorecardDraftPhoto(target)) return draft;
       return {
         ...draft,
         photos: draft.photos.map((p) => (
@@ -398,6 +406,7 @@ export function scorecardDraftReducer(draft: ScorecardDraft, action: DraftAction
             : p
         )),
       };
+    }
     default: {
       // Exhaustiveness guard: adding a DraftAction variant without a case here fails to compile.
       const _exhaustive: never = action;

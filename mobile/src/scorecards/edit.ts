@@ -123,7 +123,7 @@ export function createScorecardEditDraft(
   };
 }
 
-/** Refresh only retained-photo display data; never overwrite the user's locally edited scorecard fields. */
+/** Refresh canonical retained-photo display data; never overwrite locally editable scorecard fields/placement. */
 export function refreshScorecardEditPhotoUrls(
   draft: ScorecardDraft,
   detail: FieldScorecardDetail,
@@ -131,16 +131,27 @@ export function refreshScorecardEditPhotoUrls(
   if (draft.editingScorecardId !== detail.id) return draft;
   const byId = new Map(detail.photos.map((photo) => [photo.id, photo]));
   let changed = false;
+  let captionChanged = false;
   const photos = draft.photos.map((photo) => {
     if (!isExistingScorecardDraftPhoto(photo)) return photo;
     const current = byId.get(photo.existingScorecardPhotoId);
     if (!current) return photo;
     const uri = current.url ?? "";
-    if (uri === photo.uri) return photo;
+    const caption = current.caption ?? "";
+    if (uri === photo.uri && caption === photo.caption) return photo;
     changed = true;
-    return { ...photo, uri };
+    if (caption !== photo.caption) captionChanged = true;
+    return { ...photo, uri, caption };
   });
-  return changed ? { ...draft, photos } : draft;
+  if (!changed) return draft;
+  return {
+    ...draft,
+    photos,
+    // A retained caption is part of the rendered report even though it is read-only in this editor.
+    // Loading a different canonical caption therefore requires fresh project approval; URL rotation alone does not.
+    superintendentSignature: draft.kind !== "leadership" && captionChanged ? "" : draft.superintendentSignature,
+    pmSignature: draft.kind !== "leadership" && captionChanged ? "" : draft.pmSignature,
+  };
 }
 
 /**
@@ -156,7 +167,12 @@ export function refreshScorecardEditPhotoUrls(
 export function rebaseScorecardEditDraft(
   draft: ScorecardDraft,
   detail: FieldScorecardDetail,
-): { draft: ScorecardDraft; removedRetainedPhotoCount: number; mergedServerPhotoCount: number } {
+): {
+  draft: ScorecardDraft;
+  removedRetainedPhotoCount: number;
+  mergedServerPhotoCount: number;
+  updatedRetainedCaptionCount: number;
+} {
   if (!draft.editingScorecardId || draft.editingScorecardId !== detail.id) {
     throw new Error("The latest scorecard does not match this local edit.");
   }
@@ -183,6 +199,7 @@ export function rebaseScorecardEditDraft(
   // base. This errs toward preserving unknown latest links rather than deleting server evidence silently.
   const basePhotoIds = new Set(draft.editBasePhotoIds ?? [...localRetainedIds]);
   let removedRetainedPhotoCount = 0;
+  let updatedRetainedCaptionCount = 0;
   const photos: ScorecardDraftPhoto[] = draft.photos.flatMap((photo): ScorecardDraftPhoto[] => {
     if (!isExistingScorecardDraftPhoto(photo)) return [photo];
     const latest = latestPhotos.get(photo.existingScorecardPhotoId);
@@ -190,7 +207,8 @@ export function rebaseScorecardEditDraft(
       removedRetainedPhotoCount += 1;
       return [];
     }
-    return [{ ...photo, uri: latest.uri }];
+    if (photo.caption !== latest.caption) updatedRetainedCaptionCount += 1;
+    return [{ ...photo, uri: latest.uri, caption: latest.caption }];
   });
   let mergedServerPhotoCount = 0;
   const mergedDeficiencyKeys = new Set<ScorecardCriticalDeficiencyKey>();
@@ -222,6 +240,9 @@ export function rebaseScorecardEditDraft(
     const latestNote = detail.criticalDeficiencyNotes?.[key]?.trim();
     if (latestNote) deficiencyNotes[key] = latestNote;
   }
+  const evidenceChanged = removedRetainedPhotoCount > 0 ||
+    mergedServerPhotoCount > 0 ||
+    updatedRetainedCaptionCount > 0;
 
   return {
     draft: {
@@ -234,15 +255,21 @@ export function rebaseScorecardEditDraft(
       photos,
       criticalDeficiencies,
       deficiencyNotes,
+      // Project signatures approve the exact report content. If rebase changes submitted evidence, require
+      // both people to review/sign the merged result again; URL-only refreshes and leadership edits do not.
+      superintendentSignature: !draftLeadership && evidenceChanged ? "" : draft.superintendentSignature,
+      pmSignature: !draftLeadership && evidenceChanged ? "" : draft.pmSignature,
     },
     removedRetainedPhotoCount,
     mergedServerPhotoCount,
+    updatedRetainedCaptionCount,
   };
 }
 
 export function scorecardEditRebaseMessage(result: {
   removedRetainedPhotoCount: number;
   mergedServerPhotoCount: number;
+  updatedRetainedCaptionCount: number;
 }): string {
   const parts = ["Latest revision loaded. Your local changes and new photos were kept."];
   if (result.mergedServerPhotoCount > 0) {
@@ -253,6 +280,11 @@ export function scorecardEditRebaseMessage(result: {
   if (result.removedRetainedPhotoCount > 0) {
     parts.push(
       `${result.removedRetainedPhotoCount} submitted photo${result.removedRetainedPhotoCount === 1 ? "" : "s"} removed in the other edit can’t be reattached automatically.`,
+    );
+  }
+  if (result.updatedRetainedCaptionCount > 0) {
+    parts.push(
+      `${result.updatedRetainedCaptionCount} submitted photo description${result.updatedRetainedCaptionCount === 1 ? "" : "s"} ${result.updatedRetainedCaptionCount === 1 ? "was" : "were"} refreshed from the latest report.`,
     );
   }
   parts.push("Review, then tap Save changes again.");

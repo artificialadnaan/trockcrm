@@ -385,6 +385,8 @@ export interface ScorecardSubmissionInput {
  * Existing evidence is addressed by the scorecard-photo link id returned by the detail endpoint, never by
  * an arbitrary file id. Newly captured evidence keeps using the upload queue's client id. The server
  * requires exactly one of these references and re-authorizes either form against the submitted card.
+ * Caption is intentionally absent: retained captions are shared project-gallery file metadata and remain
+ * read-only here; a new photo's caption is persisted by its upload before this replacement references it.
  */
 export type ScorecardUpdatePhotoInput =
   | {

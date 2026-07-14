@@ -1632,8 +1632,8 @@ export async function updateFile(
 
 /**
  * A PDF is an immutable snapshot, so changing a linked photo's caption or hiding/restoring the photo must
- * invalidate that snapshot. The next authorized download regenerates it from the current evidence state
- * instead of serving stale text/embedded bytes (or omitting a restored photo).
+ * invalidate that snapshot. It also advances the submitted-card edit token: otherwise an editor opened
+ * before the evidence change could save with signatures approving the prior caption/visibility state.
  */
 export async function invalidateScorecardPdfArtifactsForFile(tenantDb: TenantDb, fileId: string): Promise<void> {
   const linked = await tenantDb
@@ -1649,6 +1649,10 @@ export async function invalidateScorecardPdfArtifactsForFile(tenantDb: TenantDb,
       pdfR2Key: null,
       pdfR2Bucket: null,
       pdfGeneratedAt: null,
+      // Guarantee a different optimistic-concurrency generation even when evidence changes in the same
+      // millisecond as the prior scorecard write. This also prevents PDF finalizers from coalescing across
+      // two evidence generations that otherwise share the same updated_at key.
+      updatedAt: sql`GREATEST(${fieldScorecards.updatedAt} + interval '1 millisecond', NOW())`,
     })
     .where(inArray(fieldScorecards.id, scorecardIds));
 }

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Alert, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect, useRouter } from "expo-router";
@@ -69,6 +69,13 @@ export default function ScorecardsScreen() {
 
   const [drafts, setDrafts] = useState<LocatedScorecardDraft[]>([]);
   const [discardingDraftId, setDiscardingDraftId] = useState<string | null>(null);
+  // Local draft reads are asynchronous and can outlive a focus session or signed-in identity. A monotonically
+  // increasing generation plus current identity/focus refs prevent an older request from repopulating the list
+  // after blur, sign-out, office switch, or a newer reload.
+  const draftLoadGeneration = useRef(0);
+  const draftsFocused = useRef(false);
+  const draftIdentity = useRef<{ userId: string | null; ownerKey: string }>({ userId: null, ownerKey: "" });
+  draftIdentity.current = { userId: user?.id ?? null, ownerKey };
   // Which kind of scorecard the deal picker will create when a deal is chosen. Set by the two entry buttons.
   const [pickerKind, setPickerKind] = useState<"project" | "leadership" | null>(null);
   const pickerOpen = pickerKind !== null;
@@ -90,17 +97,46 @@ export default function ScorecardsScreen() {
     enabled: !!user,
   });
 
+  // Never retain the previous account/office's local rows while authentication is being cleared or swapped.
+  // This also invalidates an in-flight read before the focus effect starts the replacement identity's load.
+  useEffect(() => {
+    draftLoadGeneration.current += 1;
+    setDrafts([]);
+  }, [ownerKey, user?.id]);
+
   const reloadDrafts = useCallback(() => {
-    if (!ownerKey || !user) return;
-    void listScorecardDraftsForUser(user.id, ownerKey).then((list) =>
-      setDrafts([...list].sort((a, b) => b.draft.updatedAt - a.draft.updatedAt)),
-    );
-  }, [ownerKey, user]);
+    const requestedUserId = user?.id ?? null;
+    const requestedOwnerKey = ownerKey;
+    const generation = ++draftLoadGeneration.current;
+    if (!requestedOwnerKey || !requestedUserId) {
+      setDrafts([]);
+      return;
+    }
+    void listScorecardDraftsForUser(requestedUserId, requestedOwnerKey)
+      .then((list) => {
+        const currentIdentity = draftIdentity.current;
+        if (
+          !draftsFocused.current ||
+          generation !== draftLoadGeneration.current ||
+          currentIdentity.userId !== requestedUserId ||
+          currentIdentity.ownerKey !== requestedOwnerKey
+        ) {
+          return;
+        }
+        setDrafts([...list].sort((a, b) => b.draft.updatedAt - a.draft.updatedAt));
+      })
+      .catch(() => undefined);
+  }, [ownerKey, user?.id]);
 
   useFocusEffect(
     useCallback(() => {
+      draftsFocused.current = true;
       reloadDrafts();
       void recent.refetch();
+      return () => {
+        draftsFocused.current = false;
+        draftLoadGeneration.current += 1;
+      };
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [reloadDrafts]),
   );
