@@ -279,7 +279,9 @@ describe("handleWonMetricReductionAlert", () => {
     expect(calls.some((call) => call.sql.includes("INSERT INTO office_dallas.notifications"))).toBe(false);
     expect(logger.log).toHaveBeenCalledWith(expect.stringContaining("active delivery lease"), expect.objectContaining({ recipientEmail: TAKASHI }));
     const receiptLookup = calls.find((call) => call.sql.includes("FROM public.won_metric_reduction_delivery_receipts"));
-    expect(receiptLookup?.sql).toContain("retry_after_seconds");
+    // Regression: the GREATEST(...) call must be closed before ::int, otherwise PostgreSQL fails with
+    // "syntax error at or near AS" and the alert email is never sent (prod job 27265).
+    expect(receiptLookup?.sql).toContain("))::int AS retry_after_seconds");
   });
 
   it("delivers to other recipients before deferring an event with one active lease", async () => {
