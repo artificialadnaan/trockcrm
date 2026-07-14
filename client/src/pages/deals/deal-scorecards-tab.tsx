@@ -224,7 +224,7 @@ function ScorecardRow({ dealId, summary }: { dealId: string; summary: FieldScore
 // Plus a meta row (average/10, rating, week, evaluator=submittedByName). Leadership cards carry no critical
 // deficiencies, action items, or signatures, so those sections are omitted. Renders from the kind-aware
 // detail so the full card is viewable in the CRM even before the best-effort PDF lands.
-function LeadershipDetailView({ detail }: { detail: FieldScorecardDetail }) {
+export function LeadershipDetailView({ detail }: { detail: FieldScorecardDetail }) {
   const average = (detail.averageScore ?? detail.totalScore / 10).toFixed(1);
   // The 4 canonical leadership categories, in form order; an item absent from the detail shows 0/10.
   const itemByKey = new Map(detail.items.map((i) => [i.sectionKey, i]));

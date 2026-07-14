@@ -7,17 +7,27 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   useQcScorecards: vi.fn(),
+  fetchDealScorecardDetail: vi.fn(),
+  leadershipDetailView: vi.fn(),
+  scorecardDetailView: vi.fn(),
 }));
 
 vi.mock("@/hooks/use-qc-scorecards", () => ({
   useQcScorecards: mocks.useQcScorecards,
 }));
 vi.mock("@/hooks/use-deal-scorecards", () => ({
-  fetchDealScorecardDetail: vi.fn(),
+  fetchDealScorecardDetail: mocks.fetchDealScorecardDetail,
   downloadDealScorecardPdf: vi.fn(),
 }));
 vi.mock("@/pages/deals/deal-scorecards-tab", () => ({
-  ScorecardDetailView: () => null,
+  LeadershipDetailView: (props: unknown) => {
+    mocks.leadershipDetailView(props);
+    return null;
+  },
+  ScorecardDetailView: (props: unknown) => {
+    mocks.scorecardDetailView(props);
+    return null;
+  },
 }));
 vi.mock("sonner", () => ({ toast: { error: vi.fn() } }));
 
@@ -32,6 +42,12 @@ beforeEach(() => {
   document.body.appendChild(container);
   root = createRoot(container);
   mocks.useQcScorecards.mockReset();
+  mocks.fetchDealScorecardDetail.mockReset();
+  mocks.leadershipDetailView.mockReset();
+  mocks.scorecardDetailView.mockReset();
+  mocks.fetchDealScorecardDetail.mockImplementation((_dealId: string, scorecardId: string) =>
+    Promise.resolve({ scorecardId }),
+  );
   mocks.useQcScorecards.mockReturnValue({
     scorecards: [
       {
@@ -113,5 +129,53 @@ describe("QcReportsPage", () => {
       "Project",
       "Leadership",
     ]);
+  });
+
+  it.each([
+    {
+      kind: "leadership",
+      projectName: "Leadership Job",
+      expectedRenderer: "leadershipDetailView",
+      unexpectedRenderer: "scorecardDetailView",
+    },
+    {
+      kind: "project",
+      projectName: "Project Job",
+      expectedRenderer: "scorecardDetailView",
+      unexpectedRenderer: "leadershipDetailView",
+    },
+  ] as const)("renders the $kind detail view when its row is opened", async ({
+    kind,
+    projectName,
+    expectedRenderer,
+    unexpectedRenderer,
+  }) => {
+    await act(async () => {
+      root.render(
+        <MemoryRouter initialEntries={["/projects/qc-reports?officeId=office-dallas"]}>
+          <QcReportsPage />
+        </MemoryRouter>,
+      );
+    });
+
+    const row = container.querySelector(`[aria-label^="Open ${kind} scorecard for ${projectName},"]`);
+    expect(row).toBeTruthy();
+
+    await act(async () => {
+      row!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(mocks.fetchDealScorecardDetail).toHaveBeenCalledWith(
+      kind === "leadership" ? "deal-1" : "deal-2",
+      kind === "leadership" ? "leadership-1" : "project-1",
+    );
+    expect(mocks[expectedRenderer]).toHaveBeenCalledWith(expect.objectContaining({
+      detail: expect.objectContaining({
+        scorecardId: kind === "leadership" ? "leadership-1" : "project-1",
+      }),
+    }));
+    expect(mocks[unexpectedRenderer]).not.toHaveBeenCalled();
   });
 });

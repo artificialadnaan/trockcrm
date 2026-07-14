@@ -27,7 +27,7 @@ import {
 } from "@trock-crm/shared/types";
 import { useQcScorecards, type QcScorecardRow } from "@/hooks/use-qc-scorecards";
 import { fetchDealScorecardDetail, downloadDealScorecardPdf } from "@/hooks/use-deal-scorecards";
-import { ScorecardDetailView } from "@/pages/deals/deal-scorecards-tab";
+import { LeadershipDetailView, ScorecardDetailView } from "@/pages/deals/deal-scorecards-tab";
 
 const RATING_BADGE: Record<string, string> = {
   elite: "bg-emerald-50 text-emerald-700 border-emerald-200",
@@ -465,7 +465,9 @@ function QcDetailSheet({ row, onClose }: { row: QcScorecardRow | null; onClose: 
                     <Button variant="outline" size="sm" className="mt-3" onClick={() => setReloadKey((k) => k + 1)}>Try again</Button>
                   </div>
                 ) : detail ? (
-                  <ScorecardDetailView detail={detail} />
+                  row.kind === "leadership"
+                    ? <LeadershipDetailView detail={detail} />
+                    : <ScorecardDetailView detail={detail} />
                 ) : null}
               </div>
             </div>
