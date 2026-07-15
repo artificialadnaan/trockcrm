@@ -461,6 +461,8 @@ export interface FieldScorecardPhotoView {
     | "project_summary";
   deficiencyKey?: string | null;
   fileId: string;
+  /** Durable mobile upload identity, when this evidence originated in the submitted-card editor. */
+  clientUploadId?: string | null;
   url: string | null;
   caption: string | null;
 }

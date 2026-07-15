@@ -101,6 +101,12 @@ export interface ScorecardDraft {
    */
   editBaseCriticalDeficiencies?: ScorecardCriticalDeficiencyKey[];
   editBaseCriticalDeficiencyNotes?: Partial<Record<ScorecardCriticalDeficiencyKey, string>>;
+  /**
+   * Project deficiency keys explicitly changed during this local edit. Value-only three-way comparison
+   * cannot distinguish untouched state from a deliberate change that returned to the original value after
+   * a PUT response was lost. Optional keeps pre-feature drafts on the conservative legacy fallback.
+   */
+  editTouchedCriticalDeficiencies?: ScorecardCriticalDeficiencyKey[];
   // Project cards key scores/notes by the V2 section keys; leadership cards key by the 4 leadership keys.
   // Both are stored in the same maps (disjoint key sets), so the reducer/photo machinery is shared.
   scores: Partial<Record<ScorecardSectionKey | ScorecardLeadershipSectionKey, number>>;
@@ -296,6 +302,22 @@ export function scorecardDraftNewPhotos(draft: ScorecardDraft): NewScorecardDraf
 }
 
 /**
+ * Captions are persisted by the upload request, not by scorecard POST/PUT. Once a photo has entered an
+ * attempt, changing its local caption could appear to save after a lost response while leaving the gallery
+ * description unchanged. Keep attempted (and all legacy-attempted) evidence explicitly read-only; removing
+ * and re-adding the photo creates a fresh upload when a different description is required.
+ */
+export function isScorecardDraftPhotoCaptionEditable(
+  draft: ScorecardDraft,
+  photo: ScorecardDraftPhoto,
+): photo is NewScorecardDraftPhoto {
+  if (!isNewScorecardDraftPhoto(photo)) return false;
+  if (!draft.evidenceUploadAttempted) return true;
+  if (!draft.evidenceUploadAttemptedIds) return false;
+  return !draft.evidenceUploadAttemptedIds.includes(photo.clientUploadId);
+}
+
+/**
  * Persist the ids that are about to enter the upload queue before the drain starts. The ledger is append-only:
  * removing a photo from the editable form must not erase the only handle the discard cleanup endpoint can use
  * to find an upload that may already have confirmed into the project gallery.
@@ -376,60 +398,86 @@ export function seedScorecardDraftTeam(
   return { ...draft, ...next };
 }
 
+function touchedDeficiencyPatch(
+  draft: ScorecardDraft,
+  key: ScorecardCriticalDeficiencyKey,
+): Pick<ScorecardDraft, "editTouchedCriticalDeficiencies"> | Record<string, never> {
+  if (!draft.editingScorecardId || draft.editTouchedCriticalDeficiencies === undefined) return {};
+  if (draft.editTouchedCriticalDeficiencies.includes(key)) {
+    return { editTouchedCriticalDeficiencies: draft.editTouchedCriticalDeficiencies };
+  }
+  return { editTouchedCriticalDeficiencies: [...draft.editTouchedCriticalDeficiencies, key] };
+}
+
+/** Project signatures approve the exact report content; any local report mutation requires fresh approval. */
+function reportMutation(draft: ScorecardDraft, patch: Partial<ScorecardDraft>): ScorecardDraft {
+  const next = { ...draft, ...patch };
+  return draft.kind === "leadership"
+    ? next
+    : { ...next, superintendentSignature: "", pmSignature: "" };
+}
+
 export function scorecardDraftReducer(draft: ScorecardDraft, action: DraftAction): ScorecardDraft {
   switch (action.type) {
     case "setScore":
-      return { ...draft, scores: { ...draft.scores, [action.sectionKey]: action.points } };
+      return reportMutation(draft, { scores: { ...draft.scores, [action.sectionKey]: action.points } });
     case "setNote":
-      return { ...draft, notes: { ...draft.notes, [action.sectionKey]: action.note } };
+      return reportMutation(draft, { notes: { ...draft.notes, [action.sectionKey]: action.note } });
     case "appendNote": {
       // Append to the LATEST note (from reducer state), so a dictation transcript that returns after the
       // user kept typing doesn't clobber those edits with a stale-closure value.
       const current = draft.notes[action.sectionKey] ?? "";
       const next = current ? `${current} ${action.text}` : action.text;
-      return { ...draft, notes: { ...draft.notes, [action.sectionKey]: next } };
+      return reportMutation(draft, { notes: { ...draft.notes, [action.sectionKey]: next } });
     }
     case "setHeader":
-      return { ...draft, [action.field]: action.value };
+      return reportMutation(draft, { [action.field]: action.value });
     case "setSummary":
-      return { ...draft, summary: action.value };
+      return reportMutation(draft, { summary: action.value });
     case "appendSummary": {
       // Append a dictated transcript to the LATEST summary (from reducer state) so a transcript that lands
       // after the user kept typing doesn't clobber those edits — mirrors appendNote.
       const current = draft.summary ?? "";
       const next = current.trim() ? `${current} ${action.text}`.trim() : action.text.trim();
-      return { ...draft, summary: next };
+      return reportMutation(draft, { summary: next });
     }
     case "toggleDeficiency": {
       const has = draft.criticalDeficiencies.includes(action.key);
-      return {
-        ...draft,
+      return reportMutation(draft, {
         criticalDeficiencies: has
           ? draft.criticalDeficiencies.filter((k) => k !== action.key)
           : [...draft.criticalDeficiencies, action.key],
-      };
+        ...touchedDeficiencyPatch(draft, action.key),
+      });
     }
-    case "setDeficiencyNote":
-      return { ...draft, deficiencyNotes: { ...(draft.deficiencyNotes ?? {}), [action.key]: action.note } };
+    case "setDeficiencyNote": {
+      return reportMutation(draft, {
+        deficiencyNotes: { ...(draft.deficiencyNotes ?? {}), [action.key]: action.note },
+        ...touchedDeficiencyPatch(draft, action.key),
+      });
+    }
     case "appendDeficiencyNote": {
       const current = draft.deficiencyNotes?.[action.key] ?? "";
       const next = current.trim() ? `${current} ${action.text}`.trim() : action.text.trim();
-      return { ...draft, deficiencyNotes: { ...(draft.deficiencyNotes ?? {}), [action.key]: next } };
+      return reportMutation(draft, {
+        deficiencyNotes: { ...(draft.deficiencyNotes ?? {}), [action.key]: next },
+        ...touchedDeficiencyPatch(draft, action.key),
+      });
     }
     case "setActionItems":
-      return { ...draft, actionItems: action.items };
+      return reportMutation(draft, { actionItems: action.items });
     case "addActionItem":
-      return { ...draft, actionItems: [...draft.actionItems, ""] };
+      return reportMutation(draft, { actionItems: [...draft.actionItems, ""] });
     case "setActionItem": {
       if (action.index < 0 || action.index >= draft.actionItems.length) return draft;
       const actionItems = [...draft.actionItems];
       actionItems[action.index] = action.value;
-      return { ...draft, actionItems };
+      return reportMutation(draft, { actionItems });
     }
     case "removeActionItem":
       return action.index < 0 || action.index >= draft.actionItems.length
         ? draft
-        : { ...draft, actionItems: draft.actionItems.filter((_, index) => index !== action.index) };
+        : reportMutation(draft, { actionItems: draft.actionItems.filter((_, index) => index !== action.index) });
     case "setSignature":
       return { ...draft, [action.field]: action.value };
     case "appendActionItem": {
@@ -440,7 +488,7 @@ export function scorecardDraftReducer(draft: ScorecardDraft, action: DraftAction
       if (!t) return draft;
       const items = [...draft.actionItems];
       while (items.length > 0 && items[items.length - 1].trim() === "") items.pop();
-      return { ...draft, actionItems: [...items, t] };
+      return reportMutation(draft, { actionItems: [...items, t] });
     }
     case "markEvidenceUploadAttempted":
       return markScorecardEvidenceUploadAttempted(draft, action.clientUploadIds ?? []);
@@ -458,31 +506,29 @@ export function scorecardDraftReducer(draft: ScorecardDraft, action: DraftAction
       return changed ? { ...draft, photos } : draft;
     }
     case "addPhoto":
-      return { ...draft, photos: [...draft.photos, action.photo] };
+      return reportMutation(draft, { photos: [...draft.photos, action.photo] });
     case "removePhoto":
-      return { ...draft, photos: draft.photos.filter((p) => p.key !== action.key) };
+      return reportMutation(draft, { photos: draft.photos.filter((p) => p.key !== action.key) });
     case "setPhotoCaption": {
       // A retained scorecard photo's caption is shared project-gallery file metadata, not scorecard-link
       // content. Submitted-card edits keep it read-only; only a newly captured/imported photo can change it
       // before upload persists the caption through the existing photo pipeline.
       const target = draft.photos.find((photo) => photo.key === action.key);
-      if (!target || isExistingScorecardDraftPhoto(target)) return draft;
-      return {
-        ...draft,
+      if (!target || !isScorecardDraftPhotoCaptionEditable(draft, target)) return draft;
+      return reportMutation(draft, {
         photos: draft.photos.map((p) => (p.key === action.key ? { ...p, caption: action.caption } : p)),
-      };
+      });
     }
     case "appendPhotoCaption": {
       const target = draft.photos.find((photo) => photo.key === action.key);
-      if (!target || isExistingScorecardDraftPhoto(target)) return draft;
-      return {
-        ...draft,
+      if (!target || !isScorecardDraftPhotoCaptionEditable(draft, target)) return draft;
+      return reportMutation(draft, {
         photos: draft.photos.map((p) => (
           p.key === action.key
             ? { ...p, caption: p.caption.trim() ? `${p.caption} ${action.text}`.trim() : action.text.trim() }
             : p
         )),
-      };
+      });
     }
     default: {
       // Exhaustiveness guard: adding a DraftAction variant without a case here fails to compile.

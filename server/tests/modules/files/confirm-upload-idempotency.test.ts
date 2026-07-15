@@ -80,13 +80,32 @@ function confirmTenantDb(input: {
 
 const seededTokens: string[] = [];
 
+function uploadRequestDb() {
+  const query = (rows: Record<string, unknown>[]) => {
+    const chain = {
+      from: () => chain,
+      where: () => chain,
+      limit: async () => rows,
+      then: <TResult1 = Record<string, unknown>[], TResult2 = never>(
+        onfulfilled?: ((value: Record<string, unknown>[]) => TResult1 | PromiseLike<TResult1>) | null,
+        onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
+      ) => Promise.resolve(rows).then(onfulfilled, onrejected),
+    };
+    return chain;
+  };
+  return {
+    select: (shape: Record<string, unknown>) => query("count" in shape ? [{ count: 0 }] : [{ dealNumber: "TEST-1" }]),
+    execute: async () => undefined,
+  };
+}
+
 async function seedScopedToken(clientUploadId: string) {
-  const request = await requestUploadUrl({} as never, "test", "user-1", {
+  const request = await requestUploadUrl(uploadRequestDb() as never, "test", "user-1", {
     originalFilename: "edit-evidence.pdf",
     mimeType: "application/pdf",
     fileSizeBytes: 123,
     category: "other",
-    contactId: "contact-1",
+    dealId: "deal-1",
     scorecardEditScope: { scorecardId: "card-1", clientUploadId },
   });
   seededTokens.push(request.uploadToken);
@@ -190,6 +209,54 @@ describe("confirmUpload idempotency (resilient upload queue)", () => {
 
     expect(result).toEqual({ file: existing, created: false });
     expect(evidenceMocks.markConfirmed).toHaveBeenCalledWith(expect.anything(), binding, "file-1");
+  });
+
+  it("derives a live scoped confirm's deal from its pending token", async () => {
+    const token = await seedScopedToken("cid-live-exact");
+    const existing = {
+      id: "file-live-exact",
+      clientUploadId: "cid-live-exact",
+      uploadedBy: "user-1",
+      dealId: "deal-1",
+      r2Key: "office_test/deals/TEST-1/other/existing.pdf",
+    };
+    const binding = editBinding({
+      clientUploadId: "cid-live-exact",
+      fileId: "file-live-exact",
+      state: "confirmed",
+    });
+    evidenceMocks.lockForConfirm.mockResolvedValue(binding);
+
+    await expect(confirmUpload(tenantDb(existing) as never, "user-1", {
+      uploadToken: token,
+      clientUploadId: "cid-live-exact",
+      scorecardEditScope: { scorecardId: "card-1", clientUploadId: "cid-live-exact" },
+    })).resolves.toEqual({ file: existing, created: false });
+
+    expect(evidenceMocks.lockForConfirm).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      dealId: "deal-1",
+      pendingUploadFound: true,
+    }));
+    expect(evidenceMocks.markConfirmed).toHaveBeenCalledWith(expect.anything(), binding, "file-live-exact");
+    expect(getPendingUploadMetadata(token)).toBeNull();
+  });
+
+  it("rejects an explicit scorecard deal that conflicts with the live pending token", async () => {
+    const token = await seedScopedToken("cid-deal-mismatch");
+
+    await expect(confirmUpload({} as never, "user-1", {
+      uploadToken: token,
+      clientUploadId: "cid-deal-mismatch",
+      scorecardEditScope: { scorecardId: "card-1", clientUploadId: "cid-deal-mismatch" },
+      scorecardEditDealId: "deal-2",
+    })).rejects.toMatchObject({
+      statusCode: 400,
+      code: "SCORECARD_EDIT_UPLOAD_SCOPE",
+    });
+
+    expect(evidenceMocks.lockForConfirm).not.toHaveBeenCalled();
+    expect(evidenceMocks.markConfirmed).not.toHaveBeenCalled();
+    expect(getPendingUploadMetadata(token)).toMatchObject({ dealId: "deal-1" });
   });
 
   it("retains a live token when binding confirmation fails on an existing-row retry", async () => {

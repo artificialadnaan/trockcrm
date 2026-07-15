@@ -719,6 +719,7 @@ export async function getFieldScorecardDetail(
       sectionKey: fieldScorecardPhotos.sectionKey,
       deficiencyKey: fieldScorecardPhotos.deficiencyKey,
       fileId: fieldScorecardPhotos.fileId,
+      clientUploadId: files.clientUploadId,
       caption: files.description,
     })
     .from(fieldScorecardPhotos)
@@ -740,6 +741,7 @@ export async function getFieldScorecardDetail(
       sectionKey: p.sectionKey as FieldScorecardDetail["photos"][number]["sectionKey"],
       deficiencyKey: p.deficiencyKey ?? null,
       fileId: p.fileId,
+      clientUploadId: p.clientUploadId || null,
       url: opts?.resolvePhotoUrl ? await opts.resolvePhotoUrl(p.fileId) : null,
       caption: p.caption ?? null,
     })),

@@ -36,6 +36,7 @@ import {
   markScorecardEvidenceUploadAttempted,
   isEditingScorecardDraft,
   isExistingScorecardDraftPhoto,
+  isScorecardDraftPhotoCaptionEditable,
   validateScorecardDraft,
   MAX_SCORECARD_PHOTOS,
   type ScorecardDraft,
@@ -45,7 +46,7 @@ import {
 import { rebaseScorecardEditDraft, scorecardEditRebaseMessage } from "../../../../src/scorecards/edit";
 import { scorecardEditorBusyMessage, scorecardEditorSubmitError, scorecardPhotoOverflowMessage } from "../../../../src/scorecards/editor-state";
 import { loadScorecardDraft, saveScorecardDraft, deleteScorecardDraft, copyPhotoIntoDraft } from "../../../../src/scorecards/draft-store";
-import { ScorecardEditCleanupPendingError, submitScorecard } from "../../../../src/scorecards/submit";
+import { submitScorecard } from "../../../../src/scorecards/submit";
 import { Button, EmptyState, LoadingState, SectionLabel, TextInput } from "../../../../src/components/ui";
 import { Banner } from "../../../../src/components/Banner";
 import { ScreenHeader } from "../../../../src/components/ScreenHeader";
@@ -331,7 +332,7 @@ function LeadershipForm(props: {
   };
 
   const openPhotoCaption = (photo: ScorecardDraftPhoto) => {
-    if (isExistingScorecardDraftPhoto(photo)) return;
+    if (!isScorecardDraftPhotoCaptionEditable(draft, photo)) return;
     setCaptionPhotoKey(photo.key);
   };
 
@@ -543,14 +544,6 @@ function LeadershipForm(props: {
       setSubmitting(false);
       setSubmittedResult({ dealId: draft.dealId, scorecardId: draft.editingScorecardId });
     } catch (error) {
-      if (error instanceof ScorecardEditCleanupPendingError) {
-        setNotice({
-          tone: "error",
-          text: "Changes saved. Photo cleanup is still pending — tap Save changes again to finish.",
-        });
-        setSubmitting(false);
-        return;
-      }
       const submitError = scorecardEditorSubmitError(error, editingSubmitted);
       setHasEditConflict(submitError.hasEditConflict);
       setNotice({
@@ -647,6 +640,7 @@ function LeadershipForm(props: {
                   label={`Evidence photos (${sectionPhotos.length})`}
                   photos={sectionPhotos}
                   disabled={photosDisabled}
+                  isCaptionEditable={(photo) => isScorecardDraftPhotoCaptionEditable(draft, photo)}
                   onEdit={openPhotoCaption}
                   onRemove={removePhotoAndCancelUpload}
                   onCamera={() => setPhotoSectionKey(section.key)}
@@ -679,6 +673,7 @@ function LeadershipForm(props: {
             label={`Summary photos (${summaryPhotos.length})`}
             photos={summaryPhotos}
             disabled={photosDisabled}
+            isCaptionEditable={(photo) => isScorecardDraftPhotoCaptionEditable(draft, photo)}
             onEdit={openPhotoCaption}
             onRemove={removePhotoAndCancelUpload}
             onCamera={() => setPhotoSectionKey(SUMMARY_KEY)}
@@ -772,28 +767,35 @@ function EvidencePhotos(props: {
   label: string;
   photos: ScorecardDraftPhoto[];
   disabled: boolean;
+  isCaptionEditable: (photo: ScorecardDraftPhoto) => boolean;
   onEdit: (photo: ScorecardDraftPhoto) => void;
   onRemove: (photo: ScorecardDraftPhoto) => void;
   onCamera: () => void;
   onImport: () => void;
 }) {
-  const { label, photos, disabled, onEdit, onRemove, onCamera, onImport } = props;
+  const { label, photos, disabled, isCaptionEditable, onEdit, onRemove, onCamera, onImport } = props;
   return (
     <View style={{ gap: theme.space.sm }}>
       <SectionLabel>{label}</SectionLabel>
       <View style={styles.photoRow}>
         {photos.map((photo) => {
           const retained = isExistingScorecardDraftPhoto(photo);
+          const captionEditable = isCaptionEditable(photo);
           const image = photo.uri
             ? <Image source={{ uri: photo.uri }} style={styles.thumb} />
             : <View style={styles.thumb} />;
           return (
             <View key={photo.key} style={styles.thumbWrap}>
-              {retained ? (
-                <View accessibilityRole="image" accessibilityLabel={photo.caption || "Submitted evidence photo"}>
+              {!captionEditable ? (
+                <View
+                  accessibilityRole="image"
+                  accessibilityLabel={retained
+                    ? photo.caption || "Submitted evidence photo"
+                    : `${photo.caption || "Evidence photo"}. Description locked after upload attempt.`}
+                >
                   {image}
                   <View style={styles.thumbCaption}>
-                    <Text style={styles.thumbCaptionText}>Submitted</Text>
+                    <Text style={styles.thumbCaptionText}>{retained ? "Submitted" : "Description locked"}</Text>
                   </View>
                 </View>
               ) : (
@@ -821,8 +823,11 @@ function EvidencePhotos(props: {
           );
         })}
       </View>
-      {photos.some((photo) => !isExistingScorecardDraftPhoto(photo)) ? (
+      {photos.some(isCaptionEditable) ? (
         <Text style={styles.photoHint}>Tap a new photo to add a description or dictate it.</Text>
+      ) : null}
+      {photos.some((photo) => !isExistingScorecardDraftPhoto(photo) && !isCaptionEditable(photo)) ? (
+        <Text style={styles.photoHint}>Uploaded descriptions are locked. Remove and re-add a photo to change its description.</Text>
       ) : null}
       <View style={styles.actions}>
         <Button title="Add photo" variant="ghost" onPress={onCamera} disabled={disabled} style={{ flex: 1 }} />

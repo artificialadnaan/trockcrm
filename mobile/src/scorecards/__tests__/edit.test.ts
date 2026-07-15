@@ -94,6 +94,7 @@ describe("createScorecardEditDraft", () => {
       editBasePhotoIds: ["scorecard-photo-1", "scorecard-photo-2"],
       editBaseCriticalDeficiencies: ["failed_inspection"],
       editBaseCriticalDeficiencyNotes: { failed_inspection: "Reinspect stair rail" },
+      editTouchedCriticalDeficiencies: [],
       dealId: "deal-1",
       dealName: "Riverwalk Apartments",
       projectNumber: "DFW-1-10000-aa",
@@ -255,14 +256,44 @@ describe("refreshScorecardEditPhotoUrls", () => {
     expect(refreshed.editBaseUpdatedAt).toBe("2026-07-14T14:05:00.000Z");
   });
 
-  it("does not roll the edit token backward from an older cached detail", () => {
+  it("treats an older cached detail as a complete no-op", () => {
     const base = createScorecardEditDraft(detail(), { id: "local", clientSubmissionId: "edit", now: 1 });
-    const refreshed = refreshScorecardEditPhotoUrls(base, detail({
+    const signed = {
+      ...base,
+      superintendentSignature: "fresh-super-signature",
+      pmSignature: "fresh-pm-signature",
+    };
+    const refreshed = refreshScorecardEditPhotoUrls(signed, detail({
       updatedAt: "2026-07-14T14:04:00.000Z",
-      photos: detail().photos.map((photo) => ({ ...photo, url: `https://older.example/${photo.id}.jpg` })),
+      criticalDeficiencyNotes: { failed_inspection: "Stale note must not be loaded" },
+      photos: detail().photos.map((photo) => ({
+        ...photo,
+        url: `https://older.example/${photo.id}.jpg`,
+        caption: "Stale caption must not be loaded",
+      })),
     }));
 
-    expect(refreshed.editBaseUpdatedAt).toBe("2026-07-14T14:05:00.000Z");
+    expect(refreshed).toBe(signed);
+    expect(refreshed.photos[0]).toMatchObject({
+      uri: "https://old.example/photo.jpg",
+      caption: "Existing evidence",
+    });
+    expect(refreshed.superintendentSignature).toBe("fresh-super-signature");
+    expect(refreshed.pmSignature).toBe("fresh-pm-signature");
+  });
+
+  it("also ignores a malformed detail revision once a valid edit token is loaded", () => {
+    const base = createScorecardEditDraft(detail(), { id: "local", clientSubmissionId: "edit", now: 1 });
+    const refreshed = refreshScorecardEditPhotoUrls(base, detail({
+      updatedAt: "not-a-revision",
+      photos: detail().photos.map((photo) => ({
+        ...photo,
+        url: `https://malformed.example/${photo.id}.jpg`,
+        caption: "Malformed generation caption",
+      })),
+    }));
+
+    expect(refreshed).toBe(base);
   });
 
   it("hydrates missing deficiency snapshots when a safe revision refresh advances", () => {
@@ -303,6 +334,219 @@ describe("refreshScorecardEditPhotoUrls", () => {
 });
 
 describe("rebaseScorecardEditDraft", () => {
+  it.each([
+    ["Project", "project" as const],
+    ["Leadership", "leadership" as const],
+  ])("canonicalizes a response-loss upload before rebasing a %s card", (_label, kind) => {
+    const leadership = kind === "leadership";
+    const source = detail(leadership ? {
+      kind: "leadership",
+      items: FIELD_SCORECARD_LEADERSHIP_SECTION_KEYS.map((sectionKey) => ({ sectionKey, points: 8, note: null })),
+      criticalDeficiencies: [],
+      criticalDeficiencyNotes: {},
+      actionItems: [],
+      photos: [],
+      summary: "Leadership summary",
+    } : {});
+    const base = createScorecardEditDraft(source, {
+      id: `response-loss-${kind}`,
+      clientSubmissionId: `response-loss-${kind}-edit`,
+      now: 1,
+    });
+    const sectionKey = leadership ? "safety" as const : "quality" as const;
+    const localNewPhoto: ScorecardDraftPhoto = {
+      key: "local-response-loss-photo",
+      uri: "file:///local/response-loss.jpg",
+      clientUploadId: "response-loss-upload-1",
+      sectionKey,
+      caption: "Local caption from the committed request",
+    };
+    const local = {
+      ...base,
+      photos: [...base.photos, localNewPhoto],
+      evidenceUploadAttempted: true,
+      evidenceUploadAttemptedIds: ["response-loss-upload-1"],
+      notes: { ...base.notes, [sectionKey]: "Later local note" },
+    };
+    const latest = detail({
+      ...(leadership ? {
+        kind: "leadership",
+        items: source.items,
+        criticalDeficiencies: [],
+        criticalDeficiencyNotes: {},
+        actionItems: [],
+        summary: "Leadership summary",
+      } : {}),
+      updatedAt: "2026-07-14T17:00:00.000Z",
+      photos: [
+        ...source.photos,
+        {
+          id: "response-loss-link-1",
+          fileId: "response-loss-file-1",
+          clientUploadId: "response-loss-upload-1",
+          sectionKey,
+          deficiencyKey: null,
+          url: "https://fresh.example/response-loss.jpg",
+          caption: "Canonical uploaded caption",
+        },
+      ],
+    });
+
+    const rebased = rebaseScorecardEditDraft(local, latest);
+    const matchingPhotos = rebased.draft.photos.filter((photo) =>
+      isExistingScorecardDraftPhoto(photo)
+        ? photo.existingScorecardPhotoId === "response-loss-link-1"
+        : photo.clientUploadId === "response-loss-upload-1",
+    );
+
+    expect(matchingPhotos).toEqual([expect.objectContaining({
+      existingScorecardPhotoId: "response-loss-link-1",
+      sectionKey,
+      uri: "https://fresh.example/response-loss.jpg",
+      caption: "Canonical uploaded caption",
+    })]);
+    expect(rebased.mergedServerPhotoCount).toBe(0);
+    expect(rebased.draft.notes[sectionKey]).toBe("Later local note");
+    expect(scorecardDraftToUpdate(rebased.draft).photos.filter((photo) =>
+      ("scorecardPhotoId" in photo && photo.scorecardPhotoId === "response-loss-link-1") ||
+      ("clientUploadId" in photo && photo.clientUploadId === "response-loss-upload-1")
+    )).toEqual([expect.objectContaining({ scorecardPhotoId: "response-loss-link-1" })]);
+  });
+
+  it.each([
+    ["Project", "project" as const],
+    ["Leadership", "leadership" as const],
+  ])("does not resurrect a response-loss upload removed from a %s card", (_label, kind) => {
+    const leadership = kind === "leadership";
+    const source = detail(leadership ? {
+      kind: "leadership",
+      items: FIELD_SCORECARD_LEADERSHIP_SECTION_KEYS.map((sectionKey) => ({ sectionKey, points: 8, note: null })),
+      criticalDeficiencies: [],
+      criticalDeficiencyNotes: {},
+      actionItems: [],
+      photos: [],
+      summary: "Leadership summary",
+    } : {});
+    const base = createScorecardEditDraft(source, {
+      id: `response-loss-remove-${kind}`,
+      clientSubmissionId: `response-loss-remove-${kind}-edit`,
+      now: 1,
+    });
+    // The upload was part of a PUT that committed, but after the response was lost the user removed it.
+    const local = {
+      ...base,
+      evidenceUploadAttempted: true,
+      evidenceUploadAttemptedIds: ["removed-after-response-loss"],
+    };
+    const latest = detail({
+      ...(leadership ? {
+        kind: "leadership",
+        items: source.items,
+        criticalDeficiencies: [],
+        criticalDeficiencyNotes: {},
+        actionItems: [],
+        summary: "Leadership summary",
+      } : {}),
+      updatedAt: "2026-07-14T17:05:00.000Z",
+      photos: [
+        ...source.photos,
+        {
+          id: "removed-response-loss-link",
+          fileId: "removed-response-loss-file",
+          clientUploadId: "removed-after-response-loss",
+          sectionKey: leadership ? "safety" : "quality",
+          deficiencyKey: null,
+          url: "https://fresh.example/removed-response-loss.jpg",
+          caption: "Removed local evidence",
+        },
+      ],
+    });
+
+    const rebased = rebaseScorecardEditDraft(local, latest);
+
+    expect(rebased.mergedServerPhotoCount).toBe(0);
+    expect(rebased.draft.photos.some((photo) =>
+      isExistingScorecardDraftPhoto(photo)
+        ? photo.existingScorecardPhotoId === "removed-response-loss-link"
+        : photo.clientUploadId === "removed-after-response-loss",
+    )).toBe(false);
+    expect(scorecardDraftToUpdate(rebased.draft).photos.some((photo) =>
+      ("scorecardPhotoId" in photo && photo.scorecardPhotoId === "removed-response-loss-link") ||
+      ("clientUploadId" in photo && photo.clientUploadId === "removed-after-response-loss")
+    )).toBe(false);
+  });
+
+  it("keeps a deficiency removal made after a successful PUT response was lost", () => {
+    const source = detail({
+      criticalDeficiencyCount: 0,
+      criticalDeficiencies: [],
+      criticalDeficiencyNotes: {},
+      photos: [detail().photos[0]],
+    });
+    const base = createScorecardEditDraft(source, {
+      id: "response-loss-deficiency-remove",
+      clientSubmissionId: "response-loss-deficiency-remove-edit",
+      now: 1,
+    });
+    const committedUnsigned = scorecardDraftReducer(
+      scorecardDraftReducer(base, { type: "toggleDeficiency", key: "safety_violation" }),
+      { type: "setDeficiencyNote", key: "safety_violation", note: "Guardrail missing" },
+    );
+    const committed = {
+      ...committedUnsigned,
+      superintendentSignature: "signed-before-response-loss",
+      pmSignature: "pm-signed-before-response-loss",
+    };
+    // The first PUT committed `committed`, its response was lost, then the user deliberately undid it.
+    const localAfterLoss = scorecardDraftReducer(committed, {
+      type: "toggleDeficiency",
+      key: "safety_violation",
+    });
+    const latest = detail({
+      ...source,
+      updatedAt: "2026-07-14T17:10:00.000Z",
+      criticalDeficiencyCount: 1,
+      criticalDeficiencies: ["safety_violation"],
+      criticalDeficiencyNotes: { safety_violation: "Guardrail missing" },
+    });
+
+    const rebased = rebaseScorecardEditDraft(localAfterLoss, latest);
+
+    expect(localAfterLoss.editTouchedCriticalDeficiencies).toContain("safety_violation");
+    expect(localAfterLoss.superintendentSignature).toBe("");
+    expect(localAfterLoss.pmSignature).toBe("");
+    expect(rebased.draft.criticalDeficiencies).toEqual([]);
+    expect(rebased.draft.deficiencyNotes).toEqual({});
+    expect(rebased.draft.editTouchedCriticalDeficiencies).toContain("safety_violation");
+  });
+
+  it("keeps a deficiency note deliberately reverted after a successful PUT response was lost", () => {
+    const base = createScorecardEditDraft(detail(), {
+      id: "response-loss-deficiency-note",
+      clientSubmissionId: "response-loss-deficiency-note-edit",
+      now: 1,
+    });
+    const committed = scorecardDraftReducer(base, {
+      type: "setDeficiencyNote",
+      key: "failed_inspection",
+      note: "Interim committed note",
+    });
+    const localAfterLoss = scorecardDraftReducer(committed, {
+      type: "setDeficiencyNote",
+      key: "failed_inspection",
+      note: "Reinspect stair rail",
+    });
+    const latest = detail({
+      updatedAt: "2026-07-14T17:20:00.000Z",
+      criticalDeficiencyNotes: { failed_inspection: "Interim committed note" },
+    });
+
+    const rebased = rebaseScorecardEditDraft(localAfterLoss, latest);
+
+    expect(rebased.draft.criticalDeficiencies).toEqual(["failed_inspection"]);
+    expect(rebased.draft.deficiencyNotes).toEqual({ failed_inspection: "Reinspect stair rail" });
+  });
+
   it("advances the revision while preserving local fields/placements/new evidence and re-requiring signatures", () => {
     const base = createScorecardEditDraft(detail(), {
       id: "local-edit-1",

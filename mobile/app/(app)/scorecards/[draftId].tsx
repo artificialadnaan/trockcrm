@@ -29,6 +29,7 @@ import {
   markScorecardEvidenceUploadAttempted,
   isEditingScorecardDraft,
   isExistingScorecardDraftPhoto,
+  isScorecardDraftPhotoCaptionEditable,
   validateScorecardDraft,
   MAX_SCORECARD_PHOTOS,
   type ScorecardDraft,
@@ -38,7 +39,7 @@ import {
 import { rebaseScorecardEditDraft, scorecardEditRebaseMessage } from "../../../src/scorecards/edit";
 import { scorecardEditorBusyMessage, scorecardEditorSubmitError, scorecardPhotoOverflowMessage } from "../../../src/scorecards/editor-state";
 import { loadScorecardDraft, saveScorecardDraft, deleteScorecardDraft, copyPhotoIntoDraft } from "../../../src/scorecards/draft-store";
-import { ScorecardEditCleanupPendingError, submitScorecard } from "../../../src/scorecards/submit";
+import { submitScorecard } from "../../../src/scorecards/submit";
 import { Badge, Button, EmptyState, LoadingState, SectionLabel, TextInput } from "../../../src/components/ui";
 import { Banner } from "../../../src/components/Banner";
 import { ScreenHeader } from "../../../src/components/ScreenHeader";
@@ -377,7 +378,7 @@ function Wizard(props: {
   };
 
   const openPhotoCaption = (photo: ScorecardDraftPhoto) => {
-    if (isExistingScorecardDraftPhoto(photo)) return; // submitted captions are read-only in this contract
+    if (!isScorecardDraftPhotoCaptionEditable(draft, photo)) return;
     setCaptionPhotoKey(photo.key);
   };
 
@@ -634,14 +635,6 @@ function Wizard(props: {
       setSubmitting(false);
       setSubmittedResult({ dealId: draft.dealId, scorecardId: draft.editingScorecardId });
     } catch (error) {
-      if (error instanceof ScorecardEditCleanupPendingError) {
-        setNotice({
-          tone: "error",
-          text: "Changes saved. Photo cleanup is still pending — tap Save changes again to finish.",
-        });
-        setSubmitting(false);
-        return;
-      }
       const submitError = scorecardEditorSubmitError(error, editingSubmitted);
       setHasEditConflict(submitError.hasEditConflict);
       setNotice({
@@ -1000,6 +993,7 @@ function OverviewStep({
                         <DraftPhotoThumbnail
                           key={photo.key}
                           photo={photo}
+                          captionEditable={isScorecardDraftPhotoCaptionEditable(draft, photo)}
                           onEdit={onEditPhoto}
                           onRemove={onRemovePhoto}
                         />
@@ -1090,10 +1084,12 @@ function SetupStep({ draft, dispatch }: { draft: ScorecardDraft; dispatch: React
 /** Retained submitted evidence can be removed, but its file-level caption is read-only in the edit contract. */
 function DraftPhotoThumbnail({
   photo,
+  captionEditable,
   onEdit,
   onRemove,
 }: {
   photo: ScorecardDraftPhoto;
+  captionEditable: boolean;
   onEdit: (photo: ScorecardDraftPhoto) => void;
   onRemove: (photo: ScorecardDraftPhoto) => void;
 }) {
@@ -1103,11 +1099,16 @@ function DraftPhotoThumbnail({
     : <View style={styles.thumb} />;
   return (
     <View style={styles.thumbWrap}>
-      {retained ? (
-        <View accessibilityRole="image" accessibilityLabel={photo.caption || "Submitted evidence photo"}>
+      {!captionEditable ? (
+        <View
+          accessibilityRole="image"
+          accessibilityLabel={retained
+            ? photo.caption || "Submitted evidence photo"
+            : `${photo.caption || "Evidence photo"}. Description locked after upload attempt.`}
+        >
           {image}
           <View style={styles.thumbCaption}>
-            <Text style={styles.thumbCaptionText}>Submitted</Text>
+            <Text style={styles.thumbCaptionText}>{retained ? "Submitted" : "Description locked"}</Text>
           </View>
         </View>
       ) : (
@@ -1169,11 +1170,20 @@ function SectionStep({
         <SectionLabel>Evidence photos ({photos.length})</SectionLabel>
         <View style={styles.photoRow}>
           {photos.map((p) => (
-            <DraftPhotoThumbnail key={p.key} photo={p} onEdit={onEditPhoto} onRemove={onRemovePhoto} />
+            <DraftPhotoThumbnail
+              key={p.key}
+              photo={p}
+              captionEditable={isScorecardDraftPhotoCaptionEditable(draft, p)}
+              onEdit={onEditPhoto}
+              onRemove={onRemovePhoto}
+            />
           ))}
         </View>
-        {photos.some((photo) => !isExistingScorecardDraftPhoto(photo)) ? (
+        {photos.some((photo) => isScorecardDraftPhotoCaptionEditable(draft, photo)) ? (
           <Text style={styles.photoHint}>Tap a new photo to add a description or dictate it.</Text>
+        ) : null}
+        {photos.some((photo) => !isExistingScorecardDraftPhoto(photo) && !isScorecardDraftPhotoCaptionEditable(draft, photo)) ? (
+          <Text style={styles.photoHint}>Uploaded descriptions are locked. Remove and re-add a photo to change its description.</Text>
         ) : null}
         <View style={styles.actions}>
           <Button title="Add photo" variant="ghost" onPress={onAddPhoto} disabled={photosDisabled} style={{ flex: 1 }} />

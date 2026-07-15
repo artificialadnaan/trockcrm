@@ -712,6 +712,7 @@ describe("updateFieldScorecard replacement and concurrency", () => {
     const first = await updateFieldScorecard(tdb, desired);
     const afterFirst = await getFieldScorecardDetail(tdb, scorecard.id, OWNER_ACCESS);
     expect(afterFirst.photos).toHaveLength(1);
+    expect(afterFirst.photos[0]).toMatchObject({ clientUploadId: "upload-3" });
 
     const replay = await updateFieldScorecard(tdb, desired);
     const afterReplay = await getFieldScorecardDetail(tdb, scorecard.id, OWNER_ACCESS);

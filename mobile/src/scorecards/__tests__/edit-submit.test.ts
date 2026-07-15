@@ -22,7 +22,7 @@ import {
   removeQueuedUploadsAndWait,
 } from "../../capture/upload-queue";
 import { FIELD_SCORECARD_LEADERSHIP_SECTION_KEYS, FIELD_SCORECARD_SECTION_KEYS } from "../scoring";
-import { ScorecardEditCleanupPendingError, submitScorecard } from "../submit";
+import { submitScorecard } from "../submit";
 import type { ScorecardDraft, ScorecardDraftPhoto } from "../draft";
 
 describe("submitScorecard submitted-card edit", () => {
@@ -115,11 +115,9 @@ describe("submitScorecard submitted-card edit", () => {
       }),
     );
     expect((updateScorecard as jest.Mock).mock.calls[0][2]).not.toHaveProperty("weekOf");
-    expect(discardScorecardEditEvidence).toHaveBeenCalledWith(
-      scorecardFetcher,
-      "scorecard-1",
-      ["new-upload-1"],
-    );
+    // The append-only ledger includes the currently selected upload. It must be linked by the PUT, never
+    // pre-discarded as abandoned evidence.
+    expect(discardScorecardEditEvidence).not.toHaveBeenCalled();
     expect(draft.weekOf).toBe("2026-07-01");
     expect(result).toEqual({
       status: "submitted",
@@ -163,44 +161,99 @@ describe("submitScorecard submitted-card edit", () => {
     expect(createScorecard).not.toHaveBeenCalled();
   });
 
-  it("does not report success until removed uploads are reconciled, then retries idempotently", async () => {
-    const draft = {
+  it.each([
+    ["Project", undefined],
+    ["Leadership", "leadership" as const],
+  ])("reconciles only removed attempts before uploading and saving a %s card", async (_label, kind) => {
+    const draft: ScorecardDraft = {
       ...editDraft([{
-        key: "submitted:photo-1",
-        uri: "https://example.test/submitted.jpg",
-        existingScorecardPhotoId: "photo-1",
-        sectionKey: "quality" as const,
-        caption: "Retained evidence",
+        key: "selected-new-photo",
+        uri: "file:///selected-new-photo.jpg",
+        clientUploadId: "selected-upload",
+        sectionKey: "safety" as const,
+        caption: "Selected evidence",
       }]),
+      kind,
+      scores: kind === "leadership"
+        ? Object.fromEntries(FIELD_SCORECARD_LEADERSHIP_SECTION_KEYS.map((key) => [key, 8]))
+        : Object.fromEntries(FIELD_SCORECARD_SECTION_KEYS.map((key) => [key, 8])),
+      summary: kind === "leadership" ? "Leadership summary" : undefined,
       // This photo confirmed during an earlier failed attempt, then the user removed it from the form.
-      evidenceUploadAttemptedIds: ["removed-confirmed-upload"],
+      evidenceUploadAttemptedIds: ["removed-confirmed-upload", "selected-upload"],
     };
     const scorecardFetcher = jest.fn() as unknown as Fetcher;
-    (discardScorecardEditEvidence as jest.Mock)
-      .mockRejectedValueOnce(new Error("cleanup offline"))
-      .mockResolvedValueOnce({ discarded: 1 });
 
-    await expect(submitScorecard(scorecardFetcher, "user-1:office-1", draft))
-      .rejects.toBeInstanceOf(ScorecardEditCleanupPendingError);
+    await expect(submitScorecard(scorecardFetcher, "user-1:office-1", draft)).resolves.toMatchObject({
+      status: "submitted",
+    });
     expect(removeQueuedUploadsAndWait).toHaveBeenCalledWith(
       "user-1:office-1",
       ["removed-confirmed-upload"],
     );
-    expect((removeQueuedUploadsAndWait as jest.Mock).mock.invocationCallOrder[0]).toBeLessThan(
-      (updateScorecard as jest.Mock).mock.invocationCallOrder[0],
-    );
-    expect(updateScorecard).toHaveBeenCalledTimes(1);
     expect(discardScorecardEditEvidence).toHaveBeenCalledWith(
       scorecardFetcher,
       "scorecard-1",
       ["removed-confirmed-upload"],
     );
+    expect(discardScorecardEditEvidence).not.toHaveBeenCalledWith(
+      scorecardFetcher,
+      "scorecard-1",
+      expect.arrayContaining(["selected-upload"]),
+    );
+    expect(enqueueUploads).toHaveBeenCalledTimes(1);
+    expect(updateScorecard).toHaveBeenCalledTimes(1);
+    expect((removeQueuedUploadsAndWait as jest.Mock).mock.invocationCallOrder[0]).toBeLessThan(
+      (discardScorecardEditEvidence as jest.Mock).mock.invocationCallOrder[0],
+    );
+    expect((discardScorecardEditEvidence as jest.Mock).mock.invocationCallOrder[0]).toBeLessThan(
+      (enqueueUploads as jest.Mock).mock.invocationCallOrder[0],
+    );
+    expect((enqueueUploads as jest.Mock).mock.invocationCallOrder[0]).toBeLessThan(
+      (drainUploadQueue as jest.Mock).mock.invocationCallOrder[0],
+    );
+    expect((drainUploadQueue as jest.Mock).mock.invocationCallOrder[0]).toBeLessThan(
+      (updateScorecard as jest.Mock).mock.invocationCallOrder[0],
+    );
+  });
 
-    await expect(submitScorecard(scorecardFetcher, "user-1:office-1", draft)).resolves.toMatchObject({
-      status: "submitted",
-    });
-    expect(updateScorecard).toHaveBeenCalledTimes(2);
-    expect(discardScorecardEditEvidence).toHaveBeenCalledTimes(2);
+  it.each([
+    ["Project", undefined],
+    ["Leadership", "leadership" as const],
+  ])("does not upload or PUT a %s card when removed-evidence cleanup fails", async (_label, kind) => {
+    const draft: ScorecardDraft = {
+      ...editDraft([{
+        key: "selected-new-photo",
+        uri: "file:///selected-new-photo.jpg",
+        clientUploadId: "selected-upload",
+        sectionKey: "safety" as const,
+        caption: "Selected evidence",
+      }]),
+      kind,
+      scores: kind === "leadership"
+        ? Object.fromEntries(FIELD_SCORECARD_LEADERSHIP_SECTION_KEYS.map((key) => [key, 8]))
+        : Object.fromEntries(FIELD_SCORECARD_SECTION_KEYS.map((key) => [key, 8])),
+      summary: kind === "leadership" ? "Leadership summary" : undefined,
+      evidenceUploadAttemptedIds: ["removed-confirmed-upload", "selected-upload"],
+    };
+    (discardScorecardEditEvidence as jest.Mock).mockRejectedValueOnce(new Error("cleanup offline"));
+
+    await expect(submitScorecard((() => undefined) as never, "user-1:office-1", draft))
+      .rejects.toThrow("cleanup offline");
+
+    expect(removeQueuedUploadsAndWait).toHaveBeenCalledWith(
+      "user-1:office-1",
+      ["removed-confirmed-upload"],
+    );
+    expect(discardScorecardEditEvidence).toHaveBeenCalledTimes(1);
+    expect(discardScorecardEditEvidence).toHaveBeenCalledWith(
+      expect.anything(),
+      "scorecard-1",
+      ["removed-confirmed-upload"],
+    );
+    expect(enqueueUploads).not.toHaveBeenCalled();
+    expect(drainUploadQueue).not.toHaveBeenCalled();
+    expect(updateScorecard).not.toHaveBeenCalled();
+    expect(draft.editBaseUpdatedAt).toBe("2026-07-14T15:30:00.000Z");
   });
 
   it.each([
@@ -235,10 +288,10 @@ describe("submitScorecard submitted-card edit", () => {
     releaseWait();
     await expect(submission).resolves.toMatchObject({ status: "submitted" });
     expect((removeQueuedUploadsAndWait as jest.Mock).mock.invocationCallOrder[0]).toBeLessThan(
-      (updateScorecard as jest.Mock).mock.invocationCallOrder[0],
-    );
-    expect((updateScorecard as jest.Mock).mock.invocationCallOrder[0]).toBeLessThan(
       (discardScorecardEditEvidence as jest.Mock).mock.invocationCallOrder[0],
+    );
+    expect((discardScorecardEditEvidence as jest.Mock).mock.invocationCallOrder[0]).toBeLessThan(
+      (updateScorecard as jest.Mock).mock.invocationCallOrder[0],
     );
   });
 

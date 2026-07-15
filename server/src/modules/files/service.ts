@@ -704,14 +704,31 @@ export async function confirmUpload(
   // Validate edit-evidence scope before ANY idempotent return or insert. A live pending token proves what
   // was minted; the durable registry covers consumed-token retries and rejects an omitted/swapped scope.
   const pendingForScope = pendingUploads.get(input.uploadToken);
-  const scorecardEditDealId = input.scorecardEditDealId ?? pendingForScope?.dealId;
+  const pendingUploadFound = Boolean(pendingForScope && pendingForScope.expiresAt >= new Date());
+  const livePendingForScope = pendingUploadFound ? pendingForScope : undefined;
+  // A live token is the server-owned authority for the file row that will be inserted below. Never authorize
+  // its scorecard binding against a different caller-supplied deal and then persist `pending.dealId`: that
+  // would split one confirmation across two projects. The explicit deal is used only for consumed-token
+  // idempotent retries, where the durable binding + existing file remain the authority.
+  if (
+    livePendingForScope &&
+    input.scorecardEditDealId !== undefined &&
+    input.scorecardEditDealId !== livePendingForScope.dealId
+  ) {
+    throw new AppError(
+      400,
+      "Upload token does not match this scorecard evidence upload.",
+      "SCORECARD_EDIT_UPLOAD_SCOPE",
+    );
+  }
+  const scorecardEditDealId = livePendingForScope?.dealId ?? input.scorecardEditDealId;
   const editBinding = await lockScorecardEditEvidenceUploadForConfirm(tenantDb, {
     userId,
     dealId: scorecardEditDealId,
     scorecardId: input.scorecardEditScope?.scorecardId,
     clientUploadId: input.clientUploadId,
-    pendingScope: pendingForScope?.scorecardEditScope,
-    pendingUploadFound: Boolean(pendingForScope && pendingForScope.expiresAt >= new Date()),
+    pendingScope: livePendingForScope?.scorecardEditScope,
+    pendingUploadFound,
   });
   // Idempotency (resilient upload queue): if this client upload already produced a row, return it instead
   // of creating a duplicate. This is decoupled from the single-use in-memory token, so it still dedupes

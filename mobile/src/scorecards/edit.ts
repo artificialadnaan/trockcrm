@@ -100,6 +100,15 @@ function isNewerRevision(candidate: string | undefined, current: string | undefi
   return Number.isFinite(candidateTime) && Number.isFinite(currentTime) && candidateTime > currentTime;
 }
 
+/** Treat an older (or malformed) server generation as stale when the draft already has a valid revision. */
+function isStaleRevision(candidate: string | undefined, current: string | undefined): boolean {
+  if (!current) return false;
+  const currentTime = Date.parse(current);
+  if (!Number.isFinite(currentTime)) return false;
+  const candidateTime = candidate ? Date.parse(candidate) : Number.NaN;
+  return !Number.isFinite(candidateTime) || candidateTime < currentTime;
+}
+
 function retainedPhotos(detail: FieldScorecardDetail): ScorecardDraftPhoto[] {
   return detail.photos.flatMap((photo) => {
     const sectionAllowed = detail.kind === "leadership"
@@ -194,6 +203,7 @@ export function createScorecardEditDraft(
       : {
           editBaseCriticalDeficiencies: [...criticalDeficiencies],
           editBaseCriticalDeficiencyNotes: { ...deficiencyNotes },
+          editTouchedCriticalDeficiencies: [],
         }),
     scores,
     notes,
@@ -217,6 +227,10 @@ export function refreshScorecardEditPhotoUrls(
   detail: FieldScorecardDetail,
 ): ScorecardDraft {
   if (draft.editingScorecardId !== detail.id) return draft;
+  // Cross-office/cached requests can resolve out of order. An older generation is a complete no-op: mixing
+  // its captions/URLs with a newer optimistic-concurrency token would regress visible report state and could
+  // wrongly invalidate freshly collected signatures even though the current revision was already loaded.
+  if (isStaleRevision(detail.updatedAt, draft.editBaseUpdatedAt)) return draft;
   const byId = new Map(detail.photos.map((photo) => [photo.id, photo]));
   let changed = false;
   let captionChanged = false;
@@ -308,6 +322,8 @@ export function rebaseScorecardEditDraft(
     draft.editBaseCriticalDeficiencyNotes !== undefined;
   const baseDeficiencySet = new Set(draft.editBaseCriticalDeficiencies ?? []);
   const baseDeficiencyNotes = draft.editBaseCriticalDeficiencyNotes ?? {};
+  const touchedDeficiencySet = new Set(draft.editTouchedCriticalDeficiencies ?? []);
+  const hasTouchedDeficiencySnapshot = draft.editTouchedCriticalDeficiencies !== undefined;
   const criticalDeficiencies: ScorecardCriticalDeficiencyKey[] = [];
   const deficiencyNotes = { ...(draft.deficiencyNotes ?? {}) };
   let mergedServerDeficiencyCount = 0;
@@ -327,7 +343,11 @@ export function rebaseScorecardEditDraft(
       // draft omitted the selection. Selection and note form one three-way state: either local edit wins;
       // when both stayed at the base, adopt a remote selection or note change. Pre-snapshot drafts stay
       // local-biased because their original state is unknowable.
-      const localChanged = localHas !== baseHas || localNote !== baseNote || localHasNewEvidence;
+      const localChanged =
+        (hasTouchedDeficiencySnapshot && touchedDeficiencySet.has(key)) ||
+        localHas !== baseHas ||
+        localNote !== baseNote ||
+        localHasNewEvidence;
       const remoteChanged = latestHas !== baseHas || latestNote !== baseNote;
       let nextHas = localHas;
       const adoptRemote = hasDeficiencyBaseSnapshot && !localChanged && remoteChanged;
@@ -358,6 +378,19 @@ export function rebaseScorecardEditDraft(
     Boolean(photo.deficiencyKey && finalDeficiencySet.has(photo.deficiencyKey));
 
   const latestDraftPhotos = retainedPhotos(detail);
+  const latestPhotoByClientUploadId = new Map(
+    detail.photos.flatMap((photo) => {
+      const clientUploadId = photo.clientUploadId?.trim();
+      return clientUploadId ? [[clientUploadId, photo] as const] : [];
+    }),
+  );
+  const latestClientUploadIdByPhotoId = new Map(
+    detail.photos.flatMap((photo) => {
+      const clientUploadId = photo.clientUploadId?.trim();
+      return clientUploadId ? [[photo.id, clientUploadId] as const] : [];
+    }),
+  );
+  const attemptedClientUploadIds = new Set(draft.evidenceUploadAttemptedIds ?? []);
   const latestPhotos = new Map(
     latestDraftPhotos.flatMap((photo) =>
       isExistingScorecardDraftPhoto(photo) ? [[photo.existingScorecardPhotoId, photo] as const] : [],
@@ -373,8 +406,26 @@ export function rebaseScorecardEditDraft(
   const basePhotoIds = new Set(draft.editBasePhotoIds ?? [...localRetainedIds]);
   let removedRetainedPhotoCount = 0;
   let updatedRetainedCaptionCount = 0;
+  const responseLossCanonicalPhotoIds = new Set<string>();
   const photos: ScorecardDraftPhoto[] = draft.photos.flatMap((photo): ScorecardDraftPhoto[] => {
-    if (!isExistingScorecardDraftPhoto(photo)) return [photo];
+    if (!isExistingScorecardDraftPhoto(photo)) {
+      // A PUT can commit and lose its response. The local draft then still calls the evidence "new" by
+      // clientUploadId while the latest detail calls the same file retained by scorecard-photo id. Collapse
+      // those two identities before merging remote additions so the next PUT never sends the file twice.
+      const canonicalDetail = latestPhotoByClientUploadId.get(photo.clientUploadId);
+      const canonical = canonicalDetail ? latestPhotos.get(canonicalDetail.id) : undefined;
+      if (!canonical) return [photo];
+      responseLossCanonicalPhotoIds.add(canonical.existingScorecardPhotoId);
+      if (photo.caption !== canonical.caption) updatedRetainedCaptionCount += 1;
+      const { clientUploadId: _clientUploadId, ...localPhoto } = photo;
+      return [{
+        ...localPhoto,
+        key: `submitted:${canonical.existingScorecardPhotoId}`,
+        uri: canonical.uri,
+        caption: canonical.caption,
+        existingScorecardPhotoId: canonical.existingScorecardPhotoId,
+      }];
+    }
     const latest = latestPhotos.get(photo.existingScorecardPhotoId);
     if (!latest || !photoPlacementAllowed(photo)) {
       removedRetainedPhotoCount += 1;
@@ -388,7 +439,12 @@ export function rebaseScorecardEditDraft(
     if (!isExistingScorecardDraftPhoto(latest)) continue;
     const id = latest.existingScorecardPhotoId;
     // Already retained locally, or present in the base and intentionally removed locally.
-    if (localRetainedIds.has(id) || basePhotoIds.has(id)) continue;
+    if (localRetainedIds.has(id) || basePhotoIds.has(id) || responseLossCanonicalPhotoIds.has(id)) continue;
+    // The latest link may be the successful result of this edit's response-lost PUT. If its attempted upload
+    // id is no longer in the local form, the user removed it after that attempt; treat it as local intent,
+    // not as evidence independently added by another session.
+    const latestClientUploadId = latestClientUploadIdByPhotoId.get(id);
+    if (latestClientUploadId && attemptedClientUploadIds.has(latestClientUploadId)) continue;
     // A locally removed deficiency wins its three-way merge. Do not silently resurrect it merely because the
     // remote edit also added evidence; that evidence will be omitted with the intentionally removed flag.
     if (!photoPlacementAllowed(latest)) continue;

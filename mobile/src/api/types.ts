@@ -195,6 +195,8 @@ export type FieldScorecardPhotoView = {
   sectionKey: ScorecardSectionKey | ScorecardLeadershipSectionKey | "critical_deficiency" | "project_summary";
   deficiencyKey?: string | null;
   fileId: string;
+  /** Durable upload identity used to reconcile a PUT that committed after its response was lost. */
+  clientUploadId?: string | null;
   url: string | null;
   caption: string | null;
 };

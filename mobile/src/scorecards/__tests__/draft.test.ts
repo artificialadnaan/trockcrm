@@ -2,6 +2,7 @@ import {
   createScorecardDraft,
   createLeadershipScorecardDraft,
   isLeadershipDraft,
+  isScorecardDraftPhotoCaptionEditable,
   scorecardDraftReducer,
   scorecardDraftTotal,
   scorecardDraftAverage,
@@ -18,6 +19,7 @@ import {
   resolveScorecardTeamNames,
   seedScorecardDraftTeam,
   MAX_SCORECARD_PHOTOS,
+  type DraftAction,
   type ScorecardDraft,
 } from "../draft";
 import { FIELD_SCORECARD_SECTION_KEYS, FIELD_SCORECARD_LEADERSHIP_SECTION_KEYS } from "../scoring";
@@ -42,6 +44,16 @@ function fullyScored(): ScorecardDraft {
   d = scorecardDraftReducer(d, { type: "setSignature", field: "superintendentSignature", value: "Sam Super" });
   d = scorecardDraftReducer(d, { type: "setSignature", field: "pmSignature", value: "Pat PM" });
   return d;
+}
+
+function signProject(draft: ScorecardDraft): ScorecardDraft {
+  let signed = scorecardDraftReducer(draft, {
+    type: "setSignature",
+    field: "superintendentSignature",
+    value: "Sam Super",
+  });
+  signed = scorecardDraftReducer(signed, { type: "setSignature", field: "pmSignature", value: "Pat PM" });
+  return signed;
 }
 
 describe("createScorecardDraft", () => {
@@ -79,6 +91,37 @@ describe("scoring", () => {
     expect(d.scores.schedule).toBe(9);
   });
 
+  it.each([
+    ["score", { type: "setScore", sectionKey: "schedule", points: 7 }],
+    ["note", { type: "setNote", sectionKey: "schedule", note: "Changed" }],
+    ["header", { type: "setHeader", field: "pmName", value: "Changed PM" }],
+    ["deficiency", { type: "toggleDeficiency", key: "safety_violation" }],
+    ["action item", { type: "setActionItems", items: ["Changed action"] }],
+    ["photo", {
+      type: "addPhoto",
+      photo: { key: "changed-photo", uri: "file://changed", clientUploadId: "changed-upload", sectionKey: "quality", caption: "" },
+    }],
+  ] satisfies [string, DraftAction][]) ("clears both Project signatures after a %s mutation", (_label, action) => {
+    const changed = scorecardDraftReducer(fullyScored(), action);
+    expect(changed.superintendentSignature).toBe("");
+    expect(changed.pmSignature).toBe("");
+  });
+
+  it("preserves the other approval while collecting the second signature", () => {
+    const superintendentSigned = scorecardDraftReducer(newDraft(), {
+      type: "setSignature",
+      field: "superintendentSignature",
+      value: "Sam Super",
+    });
+    const bothSigned = scorecardDraftReducer(superintendentSigned, {
+      type: "setSignature",
+      field: "pmSignature",
+      value: "Pat PM",
+    });
+    expect(bothSigned.superintendentSignature).toBe("Sam Super");
+    expect(bothSigned.pmSignature).toBe("Pat PM");
+  });
+
   it("reports progress from rated categories without dividing by a navigation step", () => {
     let d = newDraft();
     expect(scorecardDraftCompletionPercent(d)).toBe(0);
@@ -94,14 +137,14 @@ describe("category action items", () => {
     d = scorecardDraftReducer(d, { type: "setScore", sectionKey: "schedule", points: 4 });
     expect(scorecardActionItemsRequired(d)).toBe(false);
     expect(validateScorecardDraft(d).needsActionItems).toBe(false);
-    expect(validateScorecardDraft(d).canSubmit).toBe(true);
+    expect(validateScorecardDraft(signProject(d)).canSubmit).toBe(true);
   });
 
   it("allows deficiency evidence without a global action-item gate", () => {
     let d = fullyScored();
     d = scorecardDraftReducer(d, { type: "toggleDeficiency", key: "failed_inspection" });
     expect(scorecardActionItemsRequired(d)).toBe(false);
-    expect(validateScorecardDraft(d).canSubmit).toBe(true);
+    expect(validateScorecardDraft(signProject(d)).canSubmit).toBe(true);
   });
 
   it("toggleDeficiency adds then removes", () => {
@@ -137,7 +180,7 @@ describe("validation", () => {
     }
     d = scorecardDraftReducer(d, { type: "setHeader", field: "weekOf", value: "2026-06-30" });
     expect(validateScorecardDraft(d).missingWeekOf).toBe(false);
-    expect(validateScorecardDraft(d).canSubmit).toBe(true);
+    expect(validateScorecardDraft(signProject(d)).canSubmit).toBe(true);
   });
 
   it("preserves an over-cap conflict result but visibly blocks submission until photos are removed", () => {
@@ -427,6 +470,25 @@ describe("leadership photos", () => {
     const d = scorecardDraftReducer(newLeadershipDraft(), { type: "markEvidenceUploadAttempted" });
     expect(d.evidenceUploadAttempted).toBe(true);
     expect(scorecardDraftReducer(d, { type: "markEvidenceUploadAttempted" })).toBe(d);
+  });
+
+  it("makes an attempted photo description explicitly read-only while leaving later photos editable", () => {
+    let d = scorecardDraftReducer(newLeadershipDraft(), {
+      type: "addPhoto",
+      photo: { key: "p1", uri: "file://p1", clientUploadId: "cu-1", sectionKey: "safety", caption: "Original" },
+    });
+    const first = d.photos[0]!;
+    expect(isScorecardDraftPhotoCaptionEditable(d, first)).toBe(true);
+
+    d = scorecardDraftReducer(d, { type: "markEvidenceUploadAttempted", clientUploadIds: ["cu-1"] });
+    expect(isScorecardDraftPhotoCaptionEditable(d, d.photos[0]!)).toBe(false);
+    expect(scorecardDraftReducer(d, { type: "setPhotoCaption", key: "p1", caption: "Must not drift" })).toBe(d);
+
+    d = scorecardDraftReducer(d, {
+      type: "addPhoto",
+      photo: { key: "p2", uri: "file://p2", clientUploadId: "cu-2", sectionKey: "safety", caption: "Later" },
+    });
+    expect(isScorecardDraftPhotoCaptionEditable(d, d.photos[1]!)).toBe(true);
   });
 
   it("does not manufacture a partial cleanup ledger for a legacy attempted draft", () => {

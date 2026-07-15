@@ -66,4 +66,26 @@ describe("scorecard editor guards", () => {
       message: "Couldn’t save the scorecard changes. Your work is saved — try again.",
     });
   });
+
+  it("uses the actionable photo-limit fallback when the server message is generic", () => {
+    expect(scorecardEditorSubmitError({
+      status: 409,
+      code: "SCORECARD_EDIT_PHOTO_LIMIT",
+      message: "Request failed (409)",
+    }, true)).toEqual({
+      hasEditConflict: false,
+      message: "This scorecard contains too many evidence photos. Remove photos and try again.",
+    });
+  });
+
+  it("uses the correct generic fallback for edit saves and new submissions", () => {
+    expect(scorecardEditorSubmitError({ status: 503 }, true)).toEqual({
+      hasEditConflict: false,
+      message: "Couldn’t save the scorecard changes. Your work is saved — try again.",
+    });
+    expect(scorecardEditorSubmitError(new Error("offline"), false)).toEqual({
+      hasEditConflict: false,
+      message: "Couldn’t submit the scorecard. Your work is saved — try again.",
+    });
+  });
 });
