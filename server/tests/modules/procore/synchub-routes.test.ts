@@ -438,6 +438,34 @@ describe("syncHubRoutes", () => {
     expect(queries.some((entry) => entry.sql.includes("INSERT INTO office_dallas.deals"))).toBe(false);
   });
 
+  it("keeps an exact stable identity authoritative when another legacy row shares its Procore ID", async () => {
+    const { client, queries } = createClient({
+      existingDealIdBySyncHubBidBoardId: "terraces-deal-1",
+      existingDealsByProcoreBid: [
+        { id: "terraces-deal-1", synchub_bid_board_id: "562949955888058" },
+        { id: "legacy-duplicate-deal", synchub_bid_board_id: null },
+      ],
+    });
+    dbMocks.connect.mockResolvedValue(client);
+
+    const response = await request(createApp())
+      .post("/api/integrations/synchub/opportunities")
+      .set("x-synchub-secret", "test-secret")
+      .send({
+        office_slug: "dallas",
+        bid_board_id: "562949955888058",
+        procore_bid_id: 4181948,
+        name: "Terraces at Highbury Court",
+        stage_slug: "bid_sent",
+      });
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ status: "updated", deal_id: "terraces-deal-1" });
+    const updateQuery = queries.find((entry) => entry.sql.includes("UPDATE office_dallas.deals"));
+    expect(updateQuery?.params).toContain("terraces-deal-1");
+    expect(queries.some((entry) => entry.sql.includes("INSERT INTO office_dallas.deals"))).toBe(false);
+  });
+
   it("preserves the persisted workflow route on mirrored updates even when payload differs", async () => {
     const { client, queries } = createClient({
       workflowRoute: "normal",

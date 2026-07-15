@@ -370,13 +370,20 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
           FOR UPDATE`,
         [procore_bid_id]
       );
-      if (existingResult.rows.length > 1) {
+      const exactStableIdentityMatch = existingDealIdBySyncHubBidBoardId
+        ? existingResult.rows.find((row) => row.id === existingDealIdBySyncHubBidBoardId)
+        : null;
+      if (existingDealIdBySyncHubBidBoardId && existingResult.rows.length > 0 && !exactStableIdentityMatch) {
+        throw new AppError(409, "Bid Board identity conflicts with the supplied Procore Bid ID");
+      }
+      if (!existingDealIdBySyncHubBidBoardId && existingResult.rows.length > 1) {
         // procore_bid_id predates the durable SyncHub identity and was never unique. Never choose
         // an arbitrary legacy duplicate: an operator must reconcile it before it can be backfilled.
         throw new AppError(409, "Procore Bid ID is mapped to multiple CRM deals");
       }
-      existingDealIdByProcoreBid = existingResult.rows[0]?.id ?? null;
-      existingSyncHubBidBoardIdByProcoreBid = existingResult.rows[0]?.synchub_bid_board_id ?? null;
+      const selectedProcoreMatch = exactStableIdentityMatch ?? existingResult.rows[0] ?? null;
+      existingDealIdByProcoreBid = selectedProcoreMatch?.id ?? null;
+      existingSyncHubBidBoardIdByProcoreBid = selectedProcoreMatch?.synchub_bid_board_id ?? null;
     }
 
     if (
