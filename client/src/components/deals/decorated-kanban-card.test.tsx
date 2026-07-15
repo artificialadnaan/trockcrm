@@ -147,6 +147,18 @@ describe("DecoratedKanbanCard", () => {
     expect(html).toContain('data-testid="decorated-kanban-card-description"');
     // The name still renders above it.
     expect(html).toContain("Milo at Mountain Park");
+    // The button's aria-label overrides descendant text, so the description must be folded into the
+    // accessible name for screen-reader users to tell similar cards apart.
+    expect(html).toContain('aria-label="Open deal Milo at Mountain Park. Reroof + gutters, 3 buildings"');
+  });
+
+  it("folds the description into the accessible name after the billing alert", () => {
+    const html = renderDeal(
+      makeDeal({ name: "Milo at Mountain Park", description: "Reroof + gutters", billingAttentionRequired: true }),
+      "won"
+    );
+
+    expect(html).toContain('aria-label="Open deal Milo at Mountain Park: billing contact missing. Reroof + gutters"');
   });
 
   it("omits the description block entirely when the deal has no description", () => {

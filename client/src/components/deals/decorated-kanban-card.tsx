@@ -70,9 +70,13 @@ export function DecoratedKanbanCard({
   const now = new Date();
   const effectivelyHeld = isDealValueEffectivelyOnHold(dealForValue, now);
   const billingAttentionRequired = deal.billingAttentionRequired === true;
+  // The button's aria-label overrides its descendant text, so fold the description into the accessible
+  // name — otherwise screen-reader users can't use it to tell similar cards apart (the whole point of
+  // showing it). Appended after any billing alert; omitted when there is no description.
+  const descriptionSuffix = description ? `. ${description}` : "";
   const accessibleName = billingAttentionRequired
-    ? `Open deal ${deal.name}: billing contact missing`
-    : `Open deal ${deal.name}`;
+    ? `Open deal ${deal.name}: billing contact missing${descriptionSuffix}`
+    : `Open deal ${deal.name}${descriptionSuffix}`;
 
   return (
     <button
