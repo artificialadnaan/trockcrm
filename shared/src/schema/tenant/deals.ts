@@ -129,6 +129,9 @@ export const deals = pgTable(
     procoreProjectId: bigint("procore_project_id", { mode: "number" }),
     procoreCompanyId: text("procore_company_id"),
     procoreBidId: bigint("procore_bid_id", { mode: "number" }),
+    // Stable SyncHub-side identity. Unlike a project name, this remains safe when distinct
+    // projects at the same property share a display name.
+    synchubBidBoardId: text("synchub_bid_board_id"),
     procoreImageCategoryId: bigint("procore_image_category_id", { mode: "number" }),
     procorePhotoLinkId: bigint("procore_photo_link_id", { mode: "number" }),
     procorePhotoLinkStatus: varchar("procore_photo_link_status", { length: 50 }),

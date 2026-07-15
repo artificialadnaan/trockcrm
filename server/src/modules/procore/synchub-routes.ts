@@ -66,6 +66,12 @@ function targetWorkflowFamilyForStage(stageSlug: string, workflowRoute: Workflow
   return workflowFamilyForRoute(workflowRoute);
 }
 
+function normalizeSyncHubBidBoardId(value: unknown): string | null {
+  if (typeof value !== "string" && typeof value !== "number") return null;
+  const normalized = String(value).trim();
+  return normalized || null;
+}
+
 function buildMirrorDealUpdateQuery(args: {
   schemaName: string;
   includeHoldColumns: boolean;
@@ -93,6 +99,7 @@ function buildMirrorDealUpdateQuery(args: {
     lostCompetitor: unknown;
     lostAt: unknown;
     procoreBidId: unknown;
+    synchubBidBoardId: unknown;
     readOnlySyncedAt: unknown;
     updatedAt: unknown;
     onHoldStartedAt?: unknown;
@@ -150,6 +157,7 @@ function buildMirrorDealUpdateQuery(args: {
     `lost_competitor = ${bind(args.updates.lostCompetitor)}`,
     `lost_at = ${bind(args.updates.lostAt)}`,
     `procore_bid_id = COALESCE(${bind(args.updates.procoreBidId)}, procore_bid_id)`,
+    `synchub_bid_board_id = ${bind(args.updates.synchubBidBoardId)}`,
     `read_only_synced_at = ${bind(args.updates.readOnlySyncedAt)}`,
     `updated_at = ${bind(args.updates.updatedAt)}`,
     `workflow_route = ${bind(args.updates.workflowRoute)}`,
@@ -231,7 +239,7 @@ function requireSyncHubSecret(
  * Payload shape (sent by SyncHub):
  * {
  *   office_slug: string;           // e.g. "dallas"
- *   bid_board_id: string;          // SyncHub internal ID for dedup
+ *   bid_board_id: string;          // Stable SyncHub identity for idempotency
  *   procore_bid_id?: number;       // Procore bid ID (if available)
  *   name: string;                  // Project name
  *   stage_slug: string;            // CRM stage slug (e.g. "dd", "estimating")
@@ -282,7 +290,8 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
     } = req.body;
 
     const rawStageInput = stage_slug ?? stage_label ?? stage_name;
-    if (!office_slug || !bid_board_id || !name || !rawStageInput) {
+    const syncHubBidBoardId = normalizeSyncHubBidBoardId(bid_board_id);
+    if (!office_slug || !syncHubBidBoardId || !name || !rawStageInput) {
       throw new AppError(400, "office_slug, bid_board_id, name, and stage_slug are required");
     }
 
@@ -330,29 +339,46 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
 
     await client.query("BEGIN");
 
-    // Idempotency: match by procore_bid_id first (most reliable), then by
-    // source + name as fallback to catch replays where bid_id wasn't set.
-    let existingDealId: string | null = null;
+    // `bid_board_id` is the durable identity for a SyncHub project. Names are deliberately
+    // excluded: distinct projects at the same property routinely share a display name.
+    // Serialize this identity before lookup/insert so concurrent webhooks cannot create twins.
+    await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [
+      `synchub_bid_board:${schemaName}:${syncHubBidBoardId}`,
+    ]);
+    const bySyncHubBidBoardIdResult = await client.query(
+      `SELECT id FROM ${schemaName}.deals WHERE synchub_bid_board_id = $1 LIMIT 1`,
+      [syncHubBidBoardId]
+    );
+    const existingDealIdBySyncHubBidBoardId = bySyncHubBidBoardIdResult.rows[0]?.id ?? null;
+
+    let existingDealIdByProcoreBid: string | null = null;
+    let existingSyncHubBidBoardIdByProcoreBid: string | null = null;
     if (procore_bid_id != null) {
       const existingResult = await client.query(
-        `SELECT id FROM ${schemaName}.deals WHERE procore_bid_id = $1 LIMIT 1`,
+        `SELECT id, synchub_bid_board_id FROM ${schemaName}.deals WHERE procore_bid_id = $1 LIMIT 1`,
         [procore_bid_id]
       );
-      existingDealId = existingResult.rows[0]?.id ?? null;
+      existingDealIdByProcoreBid = existingResult.rows[0]?.id ?? null;
+      existingSyncHubBidBoardIdByProcoreBid = existingResult.rows[0]?.synchub_bid_board_id ?? null;
     }
 
-    // Fallback dedup: keep service/normal routes isolated even when names match.
-    if (!existingDealId) {
-      const nameMatchResult = await client.query(
-        `SELECT id FROM ${schemaName}.deals
-         WHERE source = $1
-           AND LOWER(TRIM(name)) = LOWER(TRIM($2))
-           AND workflow_route = $3
-         LIMIT 1`,
-        [source, name, workflow_route]
-      );
-      existingDealId = nameMatchResult.rows[0]?.id ?? null;
+    if (
+      existingDealIdBySyncHubBidBoardId &&
+      existingDealIdByProcoreBid &&
+      existingDealIdBySyncHubBidBoardId !== existingDealIdByProcoreBid
+    ) {
+      throw new AppError(409, "Bid Board identity conflicts with the supplied Procore Bid ID");
     }
+    if (
+      existingSyncHubBidBoardIdByProcoreBid &&
+      existingSyncHubBidBoardIdByProcoreBid !== syncHubBidBoardId
+    ) {
+      // Procore-Bid fallback can backfill legacy NULL SyncHub IDs, but it must never
+      // replace a different established identity.
+      throw new AppError(409, "Bid Board identity conflicts with the existing Procore Bid mapping");
+    }
+
+    const existingDealId = existingDealIdBySyncHubBidBoardId ?? existingDealIdByProcoreBid;
 
     if (existingDealId) {
       // Mirror (update) path writes deal_stage_history explicitly below, so suppress the
@@ -362,7 +388,7 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
       await client.query("SELECT set_config('app.skip_stage_history_trigger', '1', true)");
       // Fetch current deal state for stage comparison and mirror updates
       const currentDealResult = await client.query(
-        `SELECT id, name, deal_number, project_number,
+        `SELECT id, name, deal_number, project_number, synchub_bid_board_id,
                 stage_id, stage_entered_at, on_hold, on_hold_started_at,
                 on_hold_accumulated_seconds, on_hold_accumulated_seconds_at_stage_entry,
                 workflow_route, is_bid_board_owned,
@@ -587,6 +613,7 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
           lostCompetitor: mirrorResult.updates.lostCompetitor ?? null,
           lostAt: mirrorResult.updates.lostAt ?? null,
           procoreBidId: procore_bid_id ?? null,
+          synchubBidBoardId: syncHubBidBoardId,
           readOnlySyncedAt: mirrorResult.updates.readOnlySyncedAt,
           updatedAt: mirrorResult.updates.updatedAt,
           onHoldStartedAt: mirrorResult.updates.onHoldStartedAt ?? null,
@@ -604,6 +631,7 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
         bidBoardStageSlug: { from: currentDeal.bid_board_stage_slug ?? null, to: mirrorResult.updates.bidBoardStageSlug },
         bidBoardStageFamily: { from: currentDeal.bid_board_stage_family ?? null, to: mirrorResult.updates.bidBoardStageFamily },
         bidBoardStageStatus: { from: currentDeal.bid_board_stage_status ?? null, to: mirrorResult.updates.bidBoardStageStatus },
+        synchubBidBoardId: { from: currentDeal.synchub_bid_board_id ?? null, to: syncHubBidBoardId },
         readOnlySyncedAt: { from: null, to: mirrorResult.updates.readOnlySyncedAt },
       };
       const optionalWebhookFields = [
@@ -638,7 +666,7 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
           secondaryIdSnapshot: currentDeal.project_number ?? currentDeal.deal_number ?? null,
         },
         fieldChanges: webhookFieldChanges,
-        metadata: { procoreBidId: procore_bid_id ?? null, bidBoardId: bid_board_id },
+        metadata: { procoreBidId: procore_bid_id ?? null, bidBoardId: syncHubBidBoardId },
       });
 
       await client.query("COMMIT");
@@ -756,7 +784,7 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
         bid_board_loss_outcome, bid_board_mirror_source_entered_at, bid_board_mirror_source_exited_at,
         read_only_synced_at, stage_entered_at, estimating_substage, proposal_status, proposal_notes,
         actual_close_date, lost_reason_id, lost_notes, lost_competitor, lost_at,
-        created_at, updated_at, won_closed_date)
+        created_at, updated_at, won_closed_date, synchub_bid_board_id)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, true, $15,
                CASE WHEN $15 = 'service' THEN 'service' ELSE 'normal' END,
                true, $16, $17, $18, $19, $20,
@@ -765,7 +793,7 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
                  ELSE NULL
                END,
                $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33,
-               $34, $35, $36)
+               $34, $35, $36, $37)
        RETURNING id, name, deal_number, project_number`,
       [
         dealNumber,
@@ -804,6 +832,7 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
         createdAt,
         createdAt,
         mirrorResult.updates.wonClosedDate ?? null,
+        syncHubBidBoardId,
       ]
     );
 
@@ -830,10 +859,11 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
         ddEstimate: { from: null, to: mirrorResult.updates.ddEstimate ?? null },
         awardedAmount: { from: null, to: mirrorResult.updates.awardedAmount ?? null },
         workflowRoute: { from: null, to: workflow_route },
+        synchubBidBoardId: { from: null, to: syncHubBidBoardId },
         bidBoardStageSlug: { from: null, to: mirrorResult.updates.bidBoardStageSlug },
         readOnlySyncedAt: { from: null, to: mirrorResult.updates.readOnlySyncedAt },
       },
-      metadata: { procoreBidId: procore_bid_id ?? null, bidBoardId: bid_board_id },
+      metadata: { procoreBidId: procore_bid_id ?? null, bidBoardId: syncHubBidBoardId },
     });
 
     // Write to job_queue so worker can fire deal.created notification
