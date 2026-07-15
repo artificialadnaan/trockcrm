@@ -54,7 +54,7 @@ beforeAll(async () => {
       next_step_due_at timestamptz, next_milestone_at timestamptz, support_needed_type text,
       support_needed_notes text, forecast_updated_at timestamptz, forecast_updated_by uuid,
       email_count integer, last_email_at timestamptz, procore_project_id bigint,
-      procore_company_id text, procore_bid_id bigint, procore_image_category_id bigint,
+      procore_company_id text, procore_bid_id bigint, synchub_bid_board_id text, procore_image_category_id bigint,
       procore_photo_link_id bigint, procore_photo_link_status varchar(50),
       procore_last_synced_at timestamptz, is_bid_board_owned boolean, bid_board_stage_slug varchar(100),
       bid_board_stage_family varchar(50), bid_board_stage_status varchar(50),

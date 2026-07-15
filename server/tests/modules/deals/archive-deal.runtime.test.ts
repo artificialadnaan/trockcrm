@@ -23,7 +23,7 @@ beforeAll(async () => {
   await pg.exec(`SET TimeZone='UTC';`);
   await pg.exec(`
     CREATE TABLE pipeline_stage_config (id uuid PRIMARY KEY, name text, slug text UNIQUE, is_terminal boolean NOT NULL DEFAULT false);
-    -- Full 138-column deals table so tenantDb.select().from(deals) doesn't miss any columns.
+    -- Full deals table so tenantDb.select().from(deals) doesn't miss any columns.
     CREATE TABLE deals (
       id uuid PRIMARY KEY,
       deal_number varchar(50), name varchar(500), stage_id uuid, assigned_rep_id uuid,
@@ -40,7 +40,7 @@ beforeAll(async () => {
       next_step_due_at timestamptz, next_milestone_at timestamptz, support_needed_type text,
       support_needed_notes text, forecast_updated_at timestamptz, forecast_updated_by uuid,
       email_count integer, last_email_at timestamptz, procore_project_id bigint,
-      procore_company_id text, procore_bid_id bigint, procore_image_category_id bigint,
+      procore_company_id text, procore_bid_id bigint, synchub_bid_board_id text, procore_image_category_id bigint,
       procore_photo_link_id bigint, procore_photo_link_status varchar(50),
       procore_last_synced_at timestamptz, is_bid_board_owned boolean, bid_board_stage_slug varchar(100),
       bid_board_stage_family varchar(50), bid_board_stage_status varchar(50),

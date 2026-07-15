@@ -345,6 +345,14 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
     await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [
       `synchub_bid_board:${schemaName}:${syncHubBidBoardId}`,
     ]);
+    if (procore_bid_id != null) {
+      // Different Bid Board identities can legitimately arrive with the same legacy Procore key.
+      // Lock that fallback key as well so the second transaction observes the first transaction's
+      // backfill/insert and returns a conflict instead of silently replacing the stable identity.
+      await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [
+        `synchub_procore_bid:${schemaName}:${procore_bid_id}`,
+      ]);
+    }
     const bySyncHubBidBoardIdResult = await client.query(
       `SELECT id FROM ${schemaName}.deals WHERE synchub_bid_board_id = $1 LIMIT 1`,
       [syncHubBidBoardId]
@@ -355,9 +363,18 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
     let existingSyncHubBidBoardIdByProcoreBid: string | null = null;
     if (procore_bid_id != null) {
       const existingResult = await client.query(
-        `SELECT id, synchub_bid_board_id FROM ${schemaName}.deals WHERE procore_bid_id = $1 LIMIT 1`,
+        `SELECT id, synchub_bid_board_id
+           FROM ${schemaName}.deals
+          WHERE procore_bid_id = $1
+          ORDER BY id
+          FOR UPDATE`,
         [procore_bid_id]
       );
+      if (existingResult.rows.length > 1) {
+        // procore_bid_id predates the durable SyncHub identity and was never unique. Never choose
+        // an arbitrary legacy duplicate: an operator must reconcile it before it can be backfilled.
+        throw new AppError(409, "Procore Bid ID is mapped to multiple CRM deals");
+      }
       existingDealIdByProcoreBid = existingResult.rows[0]?.id ?? null;
       existingSyncHubBidBoardIdByProcoreBid = existingResult.rows[0]?.synchub_bid_board_id ?? null;
     }

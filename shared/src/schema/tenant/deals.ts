@@ -275,6 +275,9 @@ export const deals = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => [
+    uniqueIndex("deals_synchub_bid_board_id_uidx")
+      .on(table.synchubBidBoardId)
+      .where(sql`${table.synchubBidBoardId} IS NOT NULL`),
     // Project number is unique among NON-change-order deals only. CO children intentionally share the
     // parent's project_number, so they are exempted here (and from the live DB index in the migration).
     uniqueIndex("deals_project_number_uidx")
