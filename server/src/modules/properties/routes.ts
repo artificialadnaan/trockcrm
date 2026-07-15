@@ -5,18 +5,20 @@ import { requestAuditContext, writeSoftDeleteAuditLog } from "../../lib/soft-del
 import { redactDealList, shouldIncludeHubspotId } from "../deals/redact.js";
 import { createProperty, deleteProperty, getPropertyDetail, listProperties, updateProperty } from "./service.js";
 import { parseMoneyBound } from "./query-params.js";
+import { randomUUID } from "node:crypto";
 import {
   PROPERTY_IMAGE_MAX_BYTES,
   buildPropertyImageR2Key,
   clearPropertyImageKeys,
   isAcceptablePropertyImageMime,
+  isHeicImageMime,
   propertyExists,
   resolvePropertyImageExtension,
   setPropertyImageKeys,
   type PropertyImageKeys,
 } from "./property-image-service.js";
 import { deleteObject, isR2Configured, putObject } from "../../lib/r2-client.js";
-import { generateAndStoreThumbnail } from "../../lib/image-thumbnail.js";
+import { generateAndStoreThumbnail, generateEvidenceJpeg } from "../../lib/image-thumbnail.js";
 
 const router = Router();
 
@@ -166,14 +168,30 @@ router.post("/:id/image", express.raw({ type: () => true, limit: PROPERTY_IMAGE_
       throw new AppError(404, "Property not found");
     }
 
-    const extension = resolvePropertyImageExtension(decodeOriginalFilename(req.headers["x-original-filename"]), mimeType);
-    const imageR2Key = buildPropertyImageR2Key(propertyId, extension, Date.now());
+    // HEIC/HEIF can't render in most browsers, so transcode to JPEG up front and store THAT as the
+    // original — otherwise the enlarged view (and the avatar, if the thumbnail step also can't decode)
+    // would be a broken <img>. Reuses the existing heic-convert-backed transcoder (EXIF-rotated).
+    let uploadBuffer = body;
+    let uploadMime = mimeType;
+    if (isHeicImageMime(mimeType)) {
+      try {
+        uploadBuffer = await generateEvidenceJpeg(body, mimeType);
+        uploadMime = "image/jpeg";
+      } catch {
+        throw new AppError(400, "Could not process this HEIC photo. Please upload a JPEG or PNG.");
+      }
+    }
+
+    const extension = resolvePropertyImageExtension(decodeOriginalFilename(req.headers["x-original-filename"]), uploadMime);
+    // A random suffix (not just the timestamp) makes each upload key globally unique, so two near-
+    // simultaneous replacements can't share a key and have one's cleanup delete the other's live object.
+    const imageR2Key = buildPropertyImageR2Key(propertyId, extension, `${Date.now()}-${randomUUID()}`);
 
     let imageThumbnailR2Key: string | null = null;
     if (isR2Configured()) {
-      await putObject(imageR2Key, body, mimeType);
+      await putObject(imageR2Key, uploadBuffer, uploadMime);
       // Best-effort thumbnail; a null result just means the avatar renders from the full-size original.
-      imageThumbnailR2Key = await generateAndStoreThumbnail(imageR2Key, mimeType, body);
+      imageThumbnailR2Key = await generateAndStoreThumbnail(imageR2Key, uploadMime, uploadBuffer);
     }
 
     const updated = await setPropertyImageKeys(req.tenantDb!, propertyId, { imageR2Key, imageThumbnailR2Key });

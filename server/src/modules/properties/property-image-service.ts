@@ -29,6 +29,28 @@ export function isAcceptablePropertyImageMime(mimeType: string | null | undefine
   return base.startsWith("image/");
 }
 
+/**
+ * HEIC/HEIF originals can't render in most browsers, so the route transcodes them to JPEG before storing.
+ * (Detected here so the route doesn't ship a raw .heic that would show as a broken <img>.)
+ */
+export function isHeicImageMime(mimeType: string | null | undefined): boolean {
+  if (!mimeType) return false;
+  const base = mimeType.split(";")[0]!.trim().toLowerCase();
+  return base === "image/heic" || base === "image/heif";
+}
+
+/**
+ * Strip the internal R2 keys from any full property row before it is serialized to a client. Raw keys are
+ * storage object names and must never leave the server (only presigned URLs do), so every endpoint that
+ * returns a whole `properties` row (`.returning()` / `select()`) redacts them.
+ */
+export function redactPropertyImageKeys<T extends Partial<PropertyImageKeys>>(
+  row: T,
+): Omit<T, "imageR2Key" | "imageThumbnailR2Key"> {
+  const { imageR2Key: _imageR2Key, imageThumbnailR2Key: _imageThumbnailR2Key, ...rest } = row;
+  return rest;
+}
+
 /** Lowercase, dot-less, sanitized file extension for the stored object — from the mime first, else name. */
 export function resolvePropertyImageExtension(
   originalFilename: string | null | undefined,

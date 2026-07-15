@@ -3,6 +3,8 @@ import {
   buildPropertyImageR2Key,
   buildPropertyImageUrls,
   isAcceptablePropertyImageMime,
+  isHeicImageMime,
+  redactPropertyImageKeys,
   resolvePropertyImageExtension,
 } from "../../../src/modules/properties/property-image-service.js";
 
@@ -21,6 +23,32 @@ describe("isAcceptablePropertyImageMime", () => {
     expect(isAcceptablePropertyImageMime("text/html")).toBe(false);
     expect(isAcceptablePropertyImageMime(null)).toBe(false);
     expect(isAcceptablePropertyImageMime(undefined)).toBe(false);
+  });
+});
+
+describe("isHeicImageMime", () => {
+  it("detects HEIC/HEIF (which must be transcoded before storage)", () => {
+    expect(isHeicImageMime("image/heic")).toBe(true);
+    expect(isHeicImageMime("image/heif")).toBe(true);
+    expect(isHeicImageMime("IMAGE/HEIC; charset=binary")).toBe(true);
+    expect(isHeicImageMime("image/jpeg")).toBe(false);
+    expect(isHeicImageMime("image/png")).toBe(false);
+    expect(isHeicImageMime(null)).toBe(false);
+  });
+});
+
+describe("redactPropertyImageKeys", () => {
+  it("strips the raw R2 keys while preserving every other field", () => {
+    const row = {
+      id: "p1",
+      name: "Milo",
+      imageR2Key: "properties/p1/cover-1.jpg",
+      imageThumbnailR2Key: "properties/p1/cover-1_thumb.jpg",
+    };
+    const redacted = redactPropertyImageKeys(row);
+    expect(redacted).toEqual({ id: "p1", name: "Milo" });
+    expect("imageR2Key" in redacted).toBe(false);
+    expect("imageThumbnailR2Key" in redacted).toBe(false);
   });
 });
 

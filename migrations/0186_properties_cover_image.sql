@@ -24,3 +24,12 @@ BEGIN
   END LOOP;
 END
 $tenant$;
+
+-- New tenants: the office provisioner replays this block (office_dallas -> new schema) when an office is
+-- created after this deploy, so a fresh `properties` table gets these columns too. Without it, property
+-- detail + image routes in a new office would fail on the missing columns.
+-- TENANT_SCHEMA_START
+ALTER TABLE office_dallas.properties
+  ADD COLUMN IF NOT EXISTS image_r2_key text,
+  ADD COLUMN IF NOT EXISTS image_thumbnail_r2_key text;
+-- TENANT_SCHEMA_END
