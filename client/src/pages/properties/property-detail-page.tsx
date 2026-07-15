@@ -35,6 +35,7 @@ import {
 } from "@/components/layout/detail-page-shell";
 import { DealStageBadge } from "@/components/deals/deal-stage-badge";
 import { LeadStageBadge } from "@/components/leads/lead-stage-badge";
+import { PropertyImageAvatar, PropertyPhotoButton } from "@/components/properties/property-image";
 import {
   formatPropertyLabel,
   usePropertyDetail,
@@ -145,7 +146,7 @@ function getInitials(value: string) {
 export function PropertyDetailPage() {
   const { id } = useParams<{ id: string }>();
   const location = useLocation();
-  const { property, leads, deals, loading, error } = usePropertyDetail(id);
+  const { property, leads, deals, loading, error, refetch } = usePropertyDetail(id);
   const [activeTab, setActiveTab] = useState<PropertyTab>("overview");
 
   if (loading) {
@@ -245,7 +246,13 @@ export function PropertyDetailPage() {
       parentLabel="Properties"
       parentHref="/properties"
       currentLabel={property.name}
-      iconSlot={<Building2 className="h-9 w-9" />}
+      iconSlot={
+        <PropertyImageAvatar
+          imageThumbnailUrl={property.imageThumbnailUrl}
+          imageUrl={property.imageUrl}
+          name={property.name}
+        />
+      }
       typeBadge={
         <span className="rounded-full bg-slate-100 px-2 py-1 text-[10px] font-black uppercase tracking-[0.16em] text-slate-700">
           {propertyTypeBadge}
@@ -288,6 +295,7 @@ export function PropertyDetailPage() {
             <Edit className="h-4 w-4" />
             Edit
           </Link>
+          <PropertyPhotoButton property={property} onChange={refetch} />
           {companyCamUrl ? (
             <a
               href={companyCamUrl}

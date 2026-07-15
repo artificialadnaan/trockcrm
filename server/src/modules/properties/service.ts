@@ -14,6 +14,8 @@ import {
   aliasedTerminalAwareEffectiveDealValueSql,
   aliasedTerminalDealBySlugSql,
 } from "../shared/deal-value-sql.js";
+import { generateDownloadUrl, isR2Configured } from "../../lib/r2-client.js";
+import { buildPropertyImageUrls } from "./property-image-service.js";
 
 // Property linked-value is a MIXED set (a property's active deals span open + realized won/lost), so the
 // value is terminal-aware: a realized won/lost deal keeps its value (stored-on_hold only) while an OPEN deal
@@ -689,6 +691,8 @@ export async function getPropertyDetail(tenantDb: TenantDb, propertyId: string) 
       companycamId: properties.companycamId,
       companycamProjectId: properties.companycamProjectId,
       hubspotPropertyId: properties.hubspotPropertyId,
+      imageR2Key: properties.imageR2Key,
+      imageThumbnailR2Key: properties.imageThumbnailR2Key,
       isActive: properties.isActive,
       createdAt: properties.createdAt,
       updatedAt: properties.updatedAt,
@@ -745,9 +749,13 @@ export async function getPropertyDetail(tenantDb: TenantDb, propertyId: string) 
   });
   const linkedValue = linkedValueRows[0]?.linkedValue ?? "0";
 
+  // Presign the cover-photo keys into short-lived inline URLs for the client; raw keys are never exposed.
+  const { imageR2Key, imageThumbnailR2Key, ...propertyWithoutImageKeys } = property;
+  const imageUrls = await buildPropertyImageUrls({ imageR2Key, imageThumbnailR2Key }, presignPropertyImage);
+
   return {
     property: {
-      ...property,
+      ...propertyWithoutImageKeys,
       ...relationshipCounts,
       lastActivityAt: buildPropertyLastActivityAt({
         persistedLastActivityAt: coerceTimestamp(property.lastActivityAt),
@@ -758,8 +766,25 @@ export async function getPropertyDetail(tenantDb: TenantDb, propertyId: string) 
       linkedValue,
       activePipelineValue: linkedValue,
       photosCount: Number(photoCountRows[0]?.photos_count ?? 0),
+      imageUrl: imageUrls.imageUrl,
+      imageThumbnailUrl: imageUrls.imageThumbnailUrl,
     },
     leads: relatedLeads,
     deals: relatedDeals,
   };
 }
+
+/**
+ * Presign a property cover-photo key for inline `<img>` display, or null when R2 isn't configured (tests /
+ * local without storage) so the detail payload stays valid — the client just shows the fallback icon.
+ */
+async function presignPropertyImage(r2Key: string): Promise<string | null> {
+  if (!isR2Configured()) return null;
+  try {
+    return await generateDownloadUrl(r2Key, PROPERTY_IMAGE_URL_TTL_SECONDS, undefined, "inline");
+  } catch {
+    return null;
+  }
+}
+
+const PROPERTY_IMAGE_URL_TTL_SECONDS = 3600;
