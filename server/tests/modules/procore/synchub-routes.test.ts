@@ -11,6 +11,7 @@ vi.mock("../../../src/db.js", () => ({
     connect: dbMocks.connect,
   },
   isBrokenConnectionError: () => false,
+  releasePooledClient: vi.fn(),
 }));
 
 const { syncHubRoutes } = await import("../../../src/modules/procore/synchub-routes.js");
@@ -26,7 +27,10 @@ function createApp() {
 
 type ClientOptions = {
   workflowRoute?: "normal" | "service";
+  existingDealIdBySyncHubBidBoardId?: string | null;
   existingDealIdByProcoreBid?: string | null;
+  existingSyncHubBidBoardIdByProcoreBid?: string | null;
+  existingDealsByProcoreBid?: Array<{ id: string; synchub_bid_board_id: string | null }>;
   existingDealIdByName?: string | null;
   currentStageEnteredAt?: Date;
   requestStageFamily?: string | null;
@@ -60,8 +64,25 @@ function createClient(options: ClientOptions = {}) {
       if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") {
         return { rows: [] };
       }
-      if (sql.includes("SELECT id FROM office_dallas.deals WHERE procore_bid_id")) {
-        return { rows: options.existingDealIdByProcoreBid ? [{ id: options.existingDealIdByProcoreBid }] : [] };
+      if (sql.includes("SELECT pg_advisory_xact_lock(hashtext($1))")) {
+        return { rows: [] };
+      }
+      if (sql.includes("SELECT id FROM office_dallas.deals WHERE synchub_bid_board_id")) {
+        return {
+          rows: options.existingDealIdBySyncHubBidBoardId
+            ? [{ id: options.existingDealIdBySyncHubBidBoardId }]
+            : [],
+        };
+      }
+      if (sql.includes("FROM office_dallas.deals") && sql.includes("WHERE procore_bid_id = $1")) {
+        return {
+          rows: options.existingDealsByProcoreBid ?? (options.existingDealIdByProcoreBid
+            ? [{
+                id: options.existingDealIdByProcoreBid,
+                synchub_bid_board_id: options.existingSyncHubBidBoardIdByProcoreBid ?? null,
+              }]
+            : []),
+        };
       }
       if (sql.includes("LOWER(TRIM(name)) = LOWER(TRIM($2))")) {
         return { rows: options.existingDealIdByName ? [{ id: options.existingDealIdByName }] : [] };
@@ -70,7 +91,7 @@ function createClient(options: ClientOptions = {}) {
         return {
           rows: [
             {
-              id: options.existingDealIdByProcoreBid ?? options.existingDealIdByName ?? "deal-1",
+              id: options.existingDealIdBySyncHubBidBoardId ?? options.existingDealIdByProcoreBid ?? options.existingDealIdByName ?? "deal-1",
               name: "Palm Villas",
               deal_number: "DFW-1-11426-aa",
               project_number: null,
@@ -148,6 +169,23 @@ function createClient(options: ClientOptions = {}) {
       }
       if (sql.includes("INSERT INTO office_dallas.deal_stage_history")) {
         return { rows: [] };
+      }
+      if (sql.includes("FROM office_dallas.deals") && sql.includes("WHERE deal_number LIKE $1")) {
+        return { rows: [] };
+      }
+      if (sql.includes("INSERT INTO public.deal_number_daily_sequences")) {
+        return { rows: [] };
+      }
+      if (sql.includes("SELECT last_suffix") && sql.includes("public.deal_number_daily_sequences")) {
+        return { rows: [{ last_suffix: "" }] };
+      }
+      if (sql.includes("UPDATE public.deal_number_daily_sequences")) {
+        return { rows: [] };
+      }
+      if (sql.includes("INSERT INTO office_dallas.deals")) {
+        return {
+          rows: [{ id: "new-deal-1", name: "Palm Villas", deal_number: "DFW-1-11426-ab", project_number: null }],
+        };
       }
       if (sql.includes("INSERT INTO public.job_queue")) {
         return { rows: [] };
@@ -232,11 +270,12 @@ describe("syncHubRoutes", () => {
     ]));
   });
 
-  it("scopes fallback dedupe by workflow route so service and normal deals with the same name do not collide", async () => {
+  it("keeps DFW-4-16326-af and DFW-1-17326-ad separate when their names match", async () => {
     const { client, queries } = createClient({
-      workflowRoute: "service",
-      existingDealIdByProcoreBid: null,
-      existingDealIdByName: "deal-service-1",
+      // If the route ever restores a name-only fallback, this mock will make it update
+      // DFW-4-16326-af and this assertion will fail. DFW-1-17326-ad has a distinct
+      // Bid Board identity and must instead create a new CRM deal.
+      existingDealIdByName: "DFW-4-16326-af",
     });
     dbMocks.connect.mockResolvedValue(client);
 
@@ -246,18 +285,185 @@ describe("syncHubRoutes", () => {
       .set("x-synchub-secret", "test-secret")
       .send({
         office_slug: "dallas",
-        bid_board_id: "bb-service-1",
-        name: "Palm Villas",
+        bid_board_id: "562949955888058",
+        bid_board_project_number: "DFW-1-17326-ad",
+        name: "Terraces at Highbury Court",
         stage_slug: "bid_sent",
         stage_status: "under_review",
         proposal_status: "under_review",
-        workflow_route: "service",
+      });
+
+    expect(response.status).toBe(201);
+    expect(response.body).toMatchObject({ status: "created", deal_id: "new-deal-1" });
+    expect(queries.some((entry) => entry.sql.includes("LOWER(TRIM(name))"))).toBe(false);
+    const identityQuery = queries.find((entry) => entry.sql.includes("synchub_bid_board_id = $1"));
+    expect(identityQuery?.params).toEqual(["562949955888058"]);
+    const insertQuery = queries.find((entry) => entry.sql.includes("INSERT INTO office_dallas.deals"));
+    expect(insertQuery?.sql).toContain("synchub_bid_board_id");
+    expect(insertQuery?.params).toContain("562949955888058");
+  });
+
+  it("updates an exact SyncHub Bid Board identity even when no Procore Bid ID is available", async () => {
+    const { client, queries } = createClient({
+      existingDealIdBySyncHubBidBoardId: "terraces-deal-1",
+    });
+    dbMocks.connect.mockResolvedValue(client);
+
+    const app = createApp();
+    const response = await request(app)
+      .post("/api/integrations/synchub/opportunities")
+      .set("x-synchub-secret", "test-secret")
+      .send({
+        office_slug: "dallas",
+        bid_board_id: "562949955888058",
+        name: "Terraces at Highbury Court",
+        stage_slug: "bid_sent",
       });
 
     expect(response.status).toBe(200);
-    const dedupeQuery = queries.find((entry) => entry.sql.includes("LOWER(TRIM(name)) = LOWER(TRIM($2))"));
-    expect(dedupeQuery?.sql).toContain("workflow_route = $3");
-    expect(dedupeQuery?.params).toEqual(["bid_board", "Palm Villas", "service"]);
+    expect(response.body).toMatchObject({ status: "updated", deal_id: "terraces-deal-1" });
+    const identityQuery = queries.find((entry) => entry.sql.includes("synchub_bid_board_id = $1"));
+    expect(identityQuery?.params).toEqual(["562949955888058"]);
+  });
+
+  it("rejects conflicting exact identities instead of merging two deals", async () => {
+    const { client, queries } = createClient({
+      existingDealIdBySyncHubBidBoardId: "terraces-deal-1",
+      existingDealIdByProcoreBid: "different-deal-2",
+    });
+    dbMocks.connect.mockResolvedValue(client);
+
+    const app = createApp();
+    const response = await request(app)
+      .post("/api/integrations/synchub/opportunities")
+      .set("x-synchub-secret", "test-secret")
+      .send({
+        office_slug: "dallas",
+        bid_board_id: "562949955888058",
+        procore_bid_id: 4181948,
+        name: "Terraces at Highbury Court",
+        stage_slug: "bid_sent",
+      });
+
+    expect(response.status).toBe(409);
+    expect(queries.some((entry) => entry.sql.includes("UPDATE office_dallas.deals"))).toBe(false);
+    expect(queries.some((entry) => entry.sql.includes("INSERT INTO office_dallas.deals"))).toBe(false);
+  });
+
+  it("does not overwrite an established SyncHub identity through a Procore Bid fallback", async () => {
+    const { client, queries } = createClient({
+      existingDealIdByProcoreBid: "terraces-deal-1",
+      existingSyncHubBidBoardIdByProcoreBid: "562949955852986",
+    });
+    dbMocks.connect.mockResolvedValue(client);
+
+    const app = createApp();
+    const response = await request(app)
+      .post("/api/integrations/synchub/opportunities")
+      .set("x-synchub-secret", "test-secret")
+      .send({
+        office_slug: "dallas",
+        bid_board_id: "562949955888058",
+        procore_bid_id: 4181948,
+        name: "Terraces at Highbury Court",
+        stage_slug: "bid_sent",
+      });
+
+    expect(response.status).toBe(409);
+    expect(queries.some((entry) => entry.sql.includes("UPDATE office_dallas.deals"))).toBe(false);
+    expect(queries.some((entry) => entry.sql.includes("INSERT INTO office_dallas.deals"))).toBe(false);
+  });
+
+  it("serializes and row-locks the legacy Procore fallback before backfilling it", async () => {
+    const { client, queries } = createClient({
+      existingDealIdByProcoreBid: "terraces-deal-1",
+    });
+    dbMocks.connect.mockResolvedValue(client);
+
+    const response = await request(createApp())
+      .post("/api/integrations/synchub/opportunities")
+      .set("x-synchub-secret", "test-secret")
+      .send({
+        office_slug: "dallas",
+        bid_board_id: "562949955888058",
+        procore_bid_id: 4181948,
+        name: "Terraces at Highbury Court",
+        stage_slug: "bid_sent",
+      });
+
+    expect(response.status).toBe(200);
+    const stableLockIndex = queries.findIndex(
+      (entry) => entry.params?.[0] === "synchub_bid_board:office_dallas:562949955888058"
+    );
+    const procoreLockIndex = queries.findIndex(
+      (entry) => entry.params?.[0] === "synchub_procore_bid:office_dallas:4181948"
+    );
+    const fallbackIndex = queries.findIndex(
+      (entry) => entry.sql.includes("WHERE procore_bid_id = $1")
+    );
+    expect(stableLockIndex).toBeGreaterThan(-1);
+    expect(procoreLockIndex).toBeGreaterThan(stableLockIndex);
+    expect(fallbackIndex).toBeGreaterThan(procoreLockIndex);
+    expect(queries[fallbackIndex]?.sql).toContain("FOR UPDATE");
+    const updateQuery = queries.find((entry) => entry.sql.includes("UPDATE office_dallas.deals"));
+    expect(updateQuery?.sql).toContain("synchub_bid_board_id");
+    expect(updateQuery?.params).toContain("562949955888058");
+  });
+
+  it("rejects an ambiguous legacy Procore fallback instead of choosing an arbitrary deal", async () => {
+    const { client, queries } = createClient({
+      existingDealsByProcoreBid: [
+        { id: "terraces-deal-1", synchub_bid_board_id: null },
+        { id: "terraces-deal-2", synchub_bid_board_id: null },
+      ],
+    });
+    dbMocks.connect.mockResolvedValue(client);
+
+    const response = await request(createApp())
+      .post("/api/integrations/synchub/opportunities")
+      .set("x-synchub-secret", "test-secret")
+      .send({
+        office_slug: "dallas",
+        bid_board_id: "562949955888058",
+        procore_bid_id: 4181948,
+        name: "Terraces at Highbury Court",
+        stage_slug: "bid_sent",
+      });
+
+    expect(response.status).toBe(409);
+    expect(response.body).toMatchObject({
+      error: { message: "Procore Bid ID is mapped to multiple CRM deals" },
+    });
+    expect(queries.some((entry) => entry.sql.includes("UPDATE office_dallas.deals"))).toBe(false);
+    expect(queries.some((entry) => entry.sql.includes("INSERT INTO office_dallas.deals"))).toBe(false);
+  });
+
+  it("keeps an exact stable identity authoritative when another legacy row shares its Procore ID", async () => {
+    const { client, queries } = createClient({
+      existingDealIdBySyncHubBidBoardId: "terraces-deal-1",
+      existingDealsByProcoreBid: [
+        { id: "terraces-deal-1", synchub_bid_board_id: "562949955888058" },
+        { id: "legacy-duplicate-deal", synchub_bid_board_id: null },
+      ],
+    });
+    dbMocks.connect.mockResolvedValue(client);
+
+    const response = await request(createApp())
+      .post("/api/integrations/synchub/opportunities")
+      .set("x-synchub-secret", "test-secret")
+      .send({
+        office_slug: "dallas",
+        bid_board_id: "562949955888058",
+        procore_bid_id: 4181948,
+        name: "Terraces at Highbury Court",
+        stage_slug: "bid_sent",
+      });
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ status: "updated", deal_id: "terraces-deal-1" });
+    const updateQuery = queries.find((entry) => entry.sql.includes("UPDATE office_dallas.deals"));
+    expect(updateQuery?.params).toContain("terraces-deal-1");
+    expect(queries.some((entry) => entry.sql.includes("INSERT INTO office_dallas.deals"))).toBe(false);
   });
 
   it("preserves the persisted workflow route on mirrored updates even when payload differs", async () => {

@@ -129,6 +129,9 @@ export const deals = pgTable(
     procoreProjectId: bigint("procore_project_id", { mode: "number" }),
     procoreCompanyId: text("procore_company_id"),
     procoreBidId: bigint("procore_bid_id", { mode: "number" }),
+    // Stable SyncHub-side identity. Unlike a project name, this remains safe when distinct
+    // projects at the same property share a display name.
+    synchubBidBoardId: text("synchub_bid_board_id"),
     procoreImageCategoryId: bigint("procore_image_category_id", { mode: "number" }),
     procorePhotoLinkId: bigint("procore_photo_link_id", { mode: "number" }),
     procorePhotoLinkStatus: varchar("procore_photo_link_status", { length: 50 }),
@@ -272,6 +275,9 @@ export const deals = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => [
+    uniqueIndex("deals_synchub_bid_board_id_uidx")
+      .on(table.synchubBidBoardId)
+      .where(sql`${table.synchubBidBoardId} IS NOT NULL`),
     // Project number is unique among NON-change-order deals only. CO children intentionally share the
     // parent's project_number, so they are exempted here (and from the live DB index in the migration).
     uniqueIndex("deals_project_number_uidx")
