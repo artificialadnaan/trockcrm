@@ -58,6 +58,9 @@ export function DecoratedKanbanCard({
   const showSla = !isTerminalStage(stageSlug) && slaDays !== null;
   const isOverSla = showSla && slaDays > 0 && days > slaDays;
   const location = locationLine(deal);
+  // Surface the deal description on the card so users can tell deals apart without drilling in (it is
+  // already shown in the list view). Trimmed + clamped so long text can't inflate the card height.
+  const description = deal.description?.trim() ?? "";
   const ownerColor = getOwnerInitialColor(deal.assignedRepId ?? deal.assignedRepName);
   // The column slug is authoritative (a board row may omit deal.stageSlug). Stamp it ONCE and use the
   // same object for the value AND the badge, so the won-aware hold check and the value can't disagree
@@ -122,6 +125,16 @@ export function DecoratedKanbanCard({
         <ChangeOrderBadge isChangeOrder={deal.isChangeOrder} compact />
 
         <p className="line-clamp-2 text-sm font-black leading-5 text-slate-950">{deal.name}</p>
+
+        {description ? (
+          <p
+            className="line-clamp-2 text-xs font-medium leading-4 text-slate-500"
+            title={description}
+            data-testid="decorated-kanban-card-description"
+          >
+            {description}
+          </p>
+        ) : null}
 
         <div className="flex items-center gap-2 text-xs text-slate-500">
           <span
