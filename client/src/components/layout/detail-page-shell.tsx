@@ -153,23 +153,18 @@ export function DetailPageShell({
                       onClick={() => onTabChange(tab.id)}
                       className={
                         isActive
-                          ? "group relative grid h-11 w-11 shrink-0 place-items-center rounded-md border border-brand-red bg-red-50 text-brand-red shadow-sm transition focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-red focus-visible:ring-offset-2"
-                          : "group relative grid h-11 w-11 shrink-0 place-items-center rounded-md border border-slate-200 bg-white text-slate-500 shadow-sm transition hover:border-slate-300 hover:bg-slate-50 hover:text-slate-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-red focus-visible:ring-offset-2"
+                          ? "relative inline-flex h-11 shrink-0 items-center gap-2 px-3 text-sm font-black uppercase tracking-[0.12em] text-brand-red focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-red focus-visible:ring-offset-2"
+                          : "relative inline-flex h-11 shrink-0 items-center gap-2 px-3 text-sm font-black uppercase tracking-[0.12em] text-slate-500 transition hover:text-slate-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-red focus-visible:ring-offset-2"
                       }
-                      title={label}
                     >
                       <span className="flex h-5 w-5 items-center justify-center">{tab.icon}</span>
+                      <span>{label}</span>
                       {tab.count !== undefined ? (
-                        <span className={isActive ? "absolute -right-1.5 -top-1.5 min-w-5 rounded-full border border-white bg-brand-red px-1 py-0.5 text-center text-[10px] font-black leading-none text-white" : "absolute -right-1.5 -top-1.5 min-w-5 rounded-full border border-white bg-slate-500 px-1 py-0.5 text-center text-[10px] font-black leading-none text-white"}>
+                        <span className={isActive ? "rounded-full bg-red-50 px-2 py-0.5 text-xs text-brand-red" : "rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-500"}>
                           {tab.count}
                         </span>
                       ) : null}
-                      <span
-                        role="tooltip"
-                        className="pointer-events-none absolute left-1/2 top-full z-10 mt-2 -translate-x-1/2 whitespace-nowrap rounded-md bg-slate-950 px-2 py-1 text-[10px] font-black uppercase tracking-[0.12em] text-white opacity-0 shadow-lg transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100"
-                      >
-                        {label}
-                      </span>
+                      {isActive ? <span className="absolute inset-x-2 bottom-0 h-0.5 rounded-full bg-brand-red" /> : null}
                     </button>
                   );
                 })}
