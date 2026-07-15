@@ -52,6 +52,47 @@ import crypto from "node:crypto";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
+type ScorecardEditUploadBinding = Awaited<ReturnType<typeof lockScorecardEditEvidenceUploadForConfirm>>;
+
+/**
+ * Generic uploads may dedupe by uploader + client id alone. Submitted-scorecard edit evidence is stricter:
+ * an existing file is a valid retry only after this exact durable binding already confirmed that exact
+ * file. Otherwise an ordinary upload (or another card's upload) could be adopted by the edit ledger and
+ * later hidden by edit cleanup.
+ */
+function assertExistingFileMatchesScorecardEditBinding(
+  binding: ScorecardEditUploadBinding,
+  file: Pick<typeof files.$inferSelect, "id" | "clientUploadId" | "uploadedBy" | "dealId">,
+  input: {
+    userId: string;
+    dealId?: string;
+    clientUploadId?: string;
+    scorecardEditScope?: ScorecardEditUploadScope;
+  },
+): void {
+  if (!binding) return;
+  const scope = input.scorecardEditScope;
+  if (
+    !scope ||
+    binding.scorecardId !== scope.scorecardId ||
+    binding.clientUploadId !== scope.clientUploadId ||
+    binding.clientUploadId !== input.clientUploadId ||
+    binding.uploadedBy !== input.userId ||
+    binding.dealId !== input.dealId ||
+    (binding.state !== "confirmed" && binding.state !== "linked") ||
+    binding.fileId !== file.id ||
+    file.clientUploadId !== binding.clientUploadId ||
+    file.uploadedBy !== binding.uploadedBy ||
+    file.dealId !== binding.dealId
+  ) {
+    throw new AppError(
+      409,
+      "This evidence upload id belongs to another file. Add the photo again to continue.",
+      "SCORECARD_EDIT_UPLOAD_SCOPE",
+    );
+  }
+}
+
 // ─── Pending Uploads (Fix 2: bind confirm-upload to upload-url grant) ───────
 
 interface PendingUpload {
@@ -663,9 +704,10 @@ export async function confirmUpload(
   // Validate edit-evidence scope before ANY idempotent return or insert. A live pending token proves what
   // was minted; the durable registry covers consumed-token retries and rejects an omitted/swapped scope.
   const pendingForScope = pendingUploads.get(input.uploadToken);
+  const scorecardEditDealId = input.scorecardEditDealId ?? pendingForScope?.dealId;
   const editBinding = await lockScorecardEditEvidenceUploadForConfirm(tenantDb, {
     userId,
-    dealId: input.scorecardEditDealId ?? pendingForScope?.dealId,
+    dealId: scorecardEditDealId,
     scorecardId: input.scorecardEditScope?.scorecardId,
     clientUploadId: input.clientUploadId,
     pendingScope: pendingForScope?.scorecardEditScope,
@@ -684,6 +726,12 @@ export async function confirmUpload(
       .where(and(eq(files.clientUploadId, input.clientUploadId), eq(files.uploadedBy, userId)))
       .limit(1);
     if (existing[0]) {
+      assertExistingFileMatchesScorecardEditBinding(editBinding, existing[0], {
+        userId,
+        dealId: scorecardEditDealId,
+        clientUploadId: input.clientUploadId,
+        scorecardEditScope: input.scorecardEditScope,
+      });
       pendingUploads.delete(input.uploadToken);
       await markScorecardEditEvidenceUploadConfirmed(tenantDb, editBinding, existing[0].id);
       return { file: existing[0], created: false };
@@ -815,6 +863,12 @@ export async function confirmUpload(
       .where(and(eq(files.clientUploadId, input.clientUploadId), eq(files.uploadedBy, userId)))
       .limit(1);
     if (winner[0]) {
+      assertExistingFileMatchesScorecardEditBinding(editBinding, winner[0], {
+        userId,
+        dealId: scorecardEditDealId,
+        clientUploadId: input.clientUploadId,
+        scorecardEditScope: input.scorecardEditScope,
+      });
       await markScorecardEditEvidenceUploadConfirmed(tenantDb, editBinding, winner[0].id);
       if (isR2Configured()) {
         if (pending.r2Key !== winner[0].r2Key) await deleteObject(pending.r2Key).catch(() => undefined);

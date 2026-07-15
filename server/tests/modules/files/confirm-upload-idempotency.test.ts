@@ -1,4 +1,9 @@
-import { describe, it, expect, vi } from "vitest";
+import { beforeEach, describe, it, expect, vi } from "vitest";
+
+const evidenceMocks = vi.hoisted(() => ({
+  lockForConfirm: vi.fn(),
+  markConfirmed: vi.fn(),
+}));
 
 // confirmUpload pulls in the r2-client + db modules at import; stub them so the service loads without a
 // real DB/R2 (these idempotency paths never touch R2 — they short-circuit before the token/R2 checks).
@@ -12,8 +17,8 @@ vi.mock("../../../src/lib/r2-client.js", () => ({
   generateMockDownloadUrl: vi.fn(),
 }));
 vi.mock("../../../src/modules/field/scorecard-evidence-upload.js", () => ({
-  lockScorecardEditEvidenceUploadForConfirm: vi.fn(async () => null),
-  markScorecardEditEvidenceUploadConfirmed: vi.fn(async () => undefined),
+  lockScorecardEditEvidenceUploadForConfirm: evidenceMocks.lockForConfirm,
+  markScorecardEditEvidenceUploadConfirmed: evidenceMocks.markConfirmed,
 }));
 
 const { confirmUpload, getFileByClientUploadId } = await import("../../../src/modules/files/service.js");
@@ -35,7 +40,27 @@ function tenantDb(existing: Record<string, unknown> | null) {
   };
 }
 
+function editBinding(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "binding-1",
+    scorecardId: "card-1",
+    dealId: "deal-1",
+    clientUploadId: "cid-1",
+    uploadedBy: "user-1",
+    fileId: null,
+    state: "authorized",
+    createdAt: new Date("2026-07-15T00:00:00Z"),
+    updatedAt: new Date("2026-07-15T00:00:00Z"),
+    ...overrides,
+  };
+}
+
 describe("confirmUpload idempotency (resilient upload queue)", () => {
+  beforeEach(() => {
+    evidenceMocks.lockForConfirm.mockReset().mockResolvedValue(null);
+    evidenceMocks.markConfirmed.mockReset().mockResolvedValue(undefined);
+  });
+
   it("returns the existing row for a known clientUploadId instead of inserting a duplicate", async () => {
     const existing = { id: "file-1", clientUploadId: "cid-1", r2Key: "office_dallas/deals/1/photo/x.jpg" };
     const result = await confirmUpload(tenantDb(existing) as never, "user-1", {
@@ -44,6 +69,70 @@ describe("confirmUpload idempotency (resilient upload queue)", () => {
     });
     // Deduped → returns the existing row with created=false so the caller skips replaying side effects.
     expect(result).toEqual({ file: existing, created: false });
+  });
+
+  it("rejects an ordinary same-user client id instead of adopting it as scorecard edit evidence", async () => {
+    const existing = {
+      id: "ordinary-file",
+      clientUploadId: "cid-1",
+      uploadedBy: "user-1",
+      dealId: "deal-1",
+      r2Key: "office_dallas/deals/1/photo/ordinary.jpg",
+    };
+    evidenceMocks.lockForConfirm.mockResolvedValue(editBinding());
+
+    await expect(confirmUpload(tenantDb(existing) as never, "user-1", {
+      uploadToken: "scorecard-token",
+      clientUploadId: "cid-1",
+      scorecardEditScope: { scorecardId: "card-1", clientUploadId: "cid-1" },
+      scorecardEditDealId: "deal-1",
+    })).rejects.toMatchObject({ statusCode: 409, code: "SCORECARD_EDIT_UPLOAD_SCOPE" });
+    expect(evidenceMocks.markConfirmed).not.toHaveBeenCalled();
+  });
+
+  it("rejects an existing file recorded by a different scorecard binding", async () => {
+    const existing = {
+      id: "file-1",
+      clientUploadId: "cid-1",
+      uploadedBy: "user-1",
+      dealId: "deal-1",
+      r2Key: "office_dallas/deals/1/photo/x.jpg",
+    };
+    evidenceMocks.lockForConfirm.mockResolvedValue(editBinding({
+      scorecardId: "card-2",
+      fileId: "file-1",
+      state: "confirmed",
+    }));
+
+    await expect(confirmUpload(tenantDb(existing) as never, "user-1", {
+      uploadToken: "tok-gone",
+      clientUploadId: "cid-1",
+      scorecardEditScope: { scorecardId: "card-1", clientUploadId: "cid-1" },
+      scorecardEditDealId: "deal-1",
+    })).rejects.toMatchObject({ statusCode: 409, code: "SCORECARD_EDIT_UPLOAD_SCOPE" });
+    expect(evidenceMocks.markConfirmed).not.toHaveBeenCalled();
+  });
+
+  it("preserves a retry for the exact confirmed scorecard binding and file", async () => {
+    const existing = {
+      id: "file-1",
+      clientUploadId: "cid-1",
+      uploadedBy: "user-1",
+      dealId: "deal-1",
+      r2Key: "office_dallas/deals/1/photo/x.jpg",
+    };
+    const binding = editBinding({ fileId: "file-1", state: "confirmed" });
+    evidenceMocks.lockForConfirm.mockResolvedValue(binding);
+
+    const result = await confirmUpload(tenantDb(existing) as never, "user-1", {
+      uploadToken: "tok-gone",
+      clientUploadId: "cid-1",
+      scorecardEditScope: { scorecardId: "card-1", clientUploadId: "cid-1" },
+      scorecardEditDealId: "deal-1",
+    });
+
+    expect(result).toEqual({ file: existing, created: false });
+    expect(evidenceMocks.markConfirmed).toHaveBeenCalledWith(expect.anything(), binding, "file-1");
   });
 
   it("getFileByClientUploadId returns the row, or null for an empty id/uploader", async () => {
