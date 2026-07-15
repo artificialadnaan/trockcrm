@@ -22,6 +22,18 @@ export type CaptureUploadInput = {
    * upload queue always assigns one.
    */
   clientUploadId: string;
+  /**
+   * Present only for new evidence added while editing an already-submitted scorecard. The backend uses
+   * this immutable record id to resolve the owning office and re-check exact submitter ownership.
+   */
+  scorecardId?: string;
+  /**
+   * Queue-only routing hint. Submitted-scorecard edits can outlive the submitter's access to the scorecard's
+   * former office, so those targeted uploads must omit a stale x-office-id and let the server resolve the
+   * owning office from `scorecardId`. Ordinary/new-draft captures stay office-pinned. This field is persisted
+   * in the local queue but is never sent in either upload request body.
+   */
+  routeByTarget?: boolean;
 };
 
 function onlyDefinedTarget(t: CaptureTargetRef): CaptureTargetRef {
@@ -58,9 +70,12 @@ export async function uploadCapture(
 ): Promise<FieldPhoto> {
   const compressed = await compressForUpload(input.uri, input.width, input.height);
   const target = onlyDefinedTarget(input.target);
+  const scorecardScope = input.scorecardId ? { scorecardId: input.scorecardId } : {};
 
   const upload = await createUploadUrl(f, {
     ...target,
+    ...scorecardScope,
+    clientUploadId: input.clientUploadId,
     contentType: compressed.contentType,
     sizeBytes: compressed.sizeBytes,
     category: input.category,
@@ -83,6 +98,7 @@ export async function uploadCapture(
 
   const { photo } = await confirmUpload(f, {
     ...target,
+    ...scorecardScope,
     objectKey: upload.objectKey,
     uploadToken: upload.uploadToken,
     clientUploadId: input.clientUploadId,
@@ -92,6 +108,8 @@ export async function uploadCapture(
     takenAt: input.metadata.takenAt,
   });
 
+  // Cleanup authorization lives in a server-owned registry, never in user-editable gallery tags. Keep the
+  // normal best-effort tag re-sync for every photo, including submitted-scorecard edit evidence.
   if (input.tags.length > 0) {
     try {
       await replacePhotoTags(f, photo.id, input.tags);

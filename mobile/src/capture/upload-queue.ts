@@ -12,6 +12,7 @@ import {
   partitionResults,
   removeIds,
   sanitizeOwnerKey,
+  selectUploadFetcher,
   type QueuedUpload,
 } from "./upload-queue-core";
 
@@ -58,6 +59,10 @@ const withQueueLock = createAsyncMutex();
 // of appending it. Both sets are consumed by the enqueue write → bounded, no leak.
 const enqueueing = new Set<string>();
 const cancelledMidEnqueue = new Set<string>();
+// A discard removes queue rows first, then waits for any worker that had already selected one of those ids.
+// Without this small registry, confirm-upload could still be in flight while the server cleanup runs, land
+// just after cleanup returns, and recreate the exact orphan the discard path is designed to prevent.
+const activeUploadPromises = new Map<string, Promise<unknown>>();
 
 // ── Disk-backed index + file lifecycle ─────────────────────────────────────────
 
@@ -170,6 +175,20 @@ export async function removeQueuedUploads(ownerKey: string, clientUploadIds: str
 }
 
 /**
+ * Cancel queued ids and wait for already-started workers to settle. A worker still waiting in a selected
+ * chunk will observe the missing queue row in `shouldConfirm` and cannot create a gallery record; a worker
+ * whose confirm was already in flight is awaited so the caller's subsequent server reconciliation sees it.
+ */
+export async function removeQueuedUploadsAndWait(ownerKey: string, clientUploadIds: string[]): Promise<void> {
+  await removeQueuedUploads(ownerKey, clientUploadIds);
+  const ids = new Set(clientUploadIds);
+  const active = [...activeUploadPromises.entries()]
+    .filter(([id]) => ids.has(id))
+    .map(([, promise]) => promise);
+  if (active.length > 0) await Promise.allSettled(active);
+}
+
+/**
  * Best-effort: stamp GPS coordinates onto a still-queued item — the DURABLE analogue of the old in-memory
  * back-patch. Used when a camera session's GPS fix lands after shots were already streamed coordless (so a
  * shot can be persisted immediately, before the fix, without losing geotags). Only fills a coordinate-LESS
@@ -279,7 +298,11 @@ let draining = false;
 export async function drainUploadQueue(
   ownerKey: string,
   fetcher: Fetcher,
-  opts: { onProgress?: (summary: DrainSummary) => void } = {},
+  opts: {
+    onProgress?: (summary: DrainSummary) => void;
+    /** Normal-session fetcher used only by explicitly scorecard-scoped submitted-edit evidence. */
+    targetFetcher?: Fetcher;
+  } = {},
 ): Promise<DrainSummary> {
   if (draining) return { succeeded: 0, failed: 0, remaining: await getQueuedCount(ownerKey) };
   draining = true;
@@ -321,11 +344,22 @@ export async function drainUploadQueue(
           .filter((item): item is QueuedUpload => !!item && isDrainable(item));
       });
       if (chunk.length === 0) continue;
-      const results = await runConcurrentUploads(chunk, UPLOAD_CONCURRENCY, (item) =>
+      const results = await runConcurrentUploads(chunk, UPLOAD_CONCURRENCY, (item) => {
         // Re-check right before the confirm step: if the item was cancelled while this chunk was uploading
         // (user pulled a photo off the card), skip confirm so the removed evidence never links to the deal.
-        uploadCapture(fetcher, item, { shouldConfirm: () => queueHasClientUploadId(ownerKey, item.clientUploadId) }),
-      );
+        const promise = uploadCapture(
+          selectUploadFetcher(item, fetcher, opts.targetFetcher),
+          item,
+          { shouldConfirm: () => queueHasClientUploadId(ownerKey, item.clientUploadId) },
+        );
+        activeUploadPromises.set(item.clientUploadId, promise);
+        void promise.finally(() => {
+          if (activeUploadPromises.get(item.clientUploadId) === promise) {
+            activeUploadPromises.delete(item.clientUploadId);
+          }
+        }).catch(() => undefined);
+        return promise;
+      });
       // A cancelled upload (photo removed mid-flight → confirm skipped) is neither a success nor a failure:
       // it was intentionally dropped + already removed from the index, so exclude it from
       // partitionResults/recordFailedAttempts rather than counting it as failed or bumping its attempts.

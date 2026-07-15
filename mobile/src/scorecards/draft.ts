@@ -14,10 +14,11 @@ import {
   type ScorecardSectionKey,
 } from "./scoring";
 
-export interface ScorecardDraftPhoto {
+interface ScorecardDraftPhotoBase {
   key: string; // local list key
-  uri: string; // durable per-draft copy (survives app-kill), not the raw camera uri
-  clientUploadId: string; // stamped at capture; resolved to a fileId server-side on submit
+  // New evidence uses a durable per-draft file URI; retained evidence on an edit uses a short-lived
+  // presigned remote URI which is refreshed from the scorecard detail whenever the editor resumes.
+  uri: string;
   // Project cards attach photos per category (or to a critical_deficiency); leadership cards attach photos to
   // any leadership category or to the Project Summary (`project_summary`). One structure serves both flows.
   sectionKey: ScorecardSectionKey | ScorecardLeadershipSectionKey | "critical_deficiency" | typeof FIELD_SCORECARD_LEADERSHIP_SUMMARY_SECTION_KEY;
@@ -34,6 +35,26 @@ export interface ScorecardDraftPhoto {
   width?: number;
   height?: number;
 }
+
+/**
+ * Evidence already linked to the submitted scorecard. It must never enter the durable upload queue: saving
+ * an edit retains it by scorecard-photo id, while removing it only unlinks it from the scorecard.
+ */
+export type ExistingScorecardDraftPhoto = ScorecardDraftPhotoBase & {
+  existingScorecardPhotoId: string;
+  clientUploadId?: never;
+};
+
+/** New evidence captured/imported while composing either a new scorecard or an edit. */
+export type NewScorecardDraftPhoto = ScorecardDraftPhotoBase & {
+  existingScorecardPhotoId?: never;
+  clientUploadId: string; // stamped at capture; resolved to a fileId server-side on submit/save
+};
+
+export type ScorecardDraftPhoto = ExistingScorecardDraftPhoto | NewScorecardDraftPhoto;
+
+/** Server-enforced cap for evidence links on either scorecard kind. */
+export const MAX_SCORECARD_PHOTOS = 100;
 
 export interface ScorecardDraft {
   id: string;
@@ -55,6 +76,37 @@ export interface ScorecardDraft {
    * submittedByName from the field user, which IS the evaluator). The project card has no evaluator field.
    */
   evaluatorName?: string;
+  /** Present only for a persisted local edit of an already-submitted scorecard. */
+  editingScorecardId?: string;
+  /** Owning office for evidence uploads; edits can be opened from the cross-office submitted list. */
+  editingOfficeId?: string | null;
+  /** Optimistic-concurrency token returned by the detail endpoint. */
+  editBaseUpdatedAt?: string;
+  /**
+   * Canonical editable-content snapshot for editBaseUpdatedAt. This excludes mutable gallery captions/URLs,
+   * allowing a caption-only refresh to advance its evidence generation without masking a concurrent form edit.
+   * Optional so drafts created before submitted-card editing shipped still load conservatively.
+   */
+  editBaseContentFingerprint?: string;
+  /**
+   * Retained evidence-link ids present at editBaseUpdatedAt. Conflict recovery compares this snapshot with
+   * both the local desired links and the latest server links, so it can preserve concurrently-added evidence
+   * without resurrecting evidence the local user intentionally removed.
+   */
+  editBasePhotoIds?: string[];
+  /**
+   * Critical-deficiency state present at editBaseUpdatedAt. Conflict recovery uses these as the base leg of a
+   * three-way merge so local selection/note edits win, while genuine remote changes can still be surfaced for
+   * review. Both are optional for pre-snapshot drafts, which rebase conservatively with local state winning.
+   */
+  editBaseCriticalDeficiencies?: ScorecardCriticalDeficiencyKey[];
+  editBaseCriticalDeficiencyNotes?: Partial<Record<ScorecardCriticalDeficiencyKey, string>>;
+  /**
+   * Project deficiency keys explicitly changed during this local edit. Value-only three-way comparison
+   * cannot distinguish untouched state from a deliberate change that returned to the original value after
+   * a PUT response was lost. Optional keeps pre-feature drafts on the conservative legacy fallback.
+   */
+  editTouchedCriticalDeficiencies?: ScorecardCriticalDeficiencyKey[];
   // Project cards key scores/notes by the V2 section keys; leadership cards key by the 4 leadership keys.
   // Both are stored in the same maps (disjoint key sets), so the reducer/photo machinery is shared.
   scores: Partial<Record<ScorecardSectionKey | ScorecardLeadershipSectionKey, number>>;
@@ -66,9 +118,15 @@ export interface ScorecardDraft {
   actionItems: string[];
   /** Leadership Project Summary free text (voice-dictatable); project cards don't use it. */
   summary?: string;
-  /** Once evidence uploading begins, the draft cannot safely be discarded: some photos may already exist
-   * in the project gallery while the scorecard POST remains retryable. Optional for legacy drafts. */
+  /** Once evidence uploading begins, the draft cannot be discarded without reconciling gallery uploads:
+   * some photos may already exist while the scorecard POST/PUT remains retryable. Optional for legacy drafts. */
   evidenceUploadAttempted?: boolean;
+  /**
+   * Durable cleanup ledger for every new-photo client id that has entered a submit attempt. Unlike `photos`,
+   * this deliberately retains ids after the user removes a photo from the form, so a submitted-card edit can
+   * safely discard its local changes and ask the server to hide any already-confirmed, still-unlinked uploads.
+   */
+  evidenceUploadAttemptedIds?: string[];
   superintendentSignature?: string;
   pmSignature?: string;
   createdAt: number;
@@ -89,9 +147,14 @@ export type DraftAction =
   | { type: "setDeficiencyNote"; key: ScorecardCriticalDeficiencyKey; note: string }
   | { type: "appendDeficiencyNote"; key: ScorecardCriticalDeficiencyKey; text: string }
   | { type: "setActionItems"; items: string[] }
+  | { type: "addActionItem" }
+  | { type: "setActionItem"; index: number; value: string }
+  | { type: "removeActionItem"; index: number }
   | { type: "setSignature"; field: "superintendentSignature" | "pmSignature"; value: string }
   | { type: "appendActionItem"; text: string }
-  | { type: "markEvidenceUploadAttempted" }
+  | { type: "markEvidenceUploadAttempted"; clientUploadIds?: string[] }
+  | { type: "replaceDraft"; draft: ScorecardDraft }
+  | { type: "refreshExistingPhotoUrls"; urlsByScorecardPhotoId: Record<string, string> }
   | { type: "addPhoto"; photo: ScorecardDraftPhoto }
   | { type: "removePhoto"; key: string }
   | { type: "setPhotoCaption"; key: string; caption: string }
@@ -119,6 +182,33 @@ export interface ScorecardSubmissionPayload {
   pmSignature: string | null;
   /** Leadership Project Summary free text; omitted for project cards. */
   summary?: string | null;
+}
+
+export type ScorecardUpdatePhotoInput =
+  | {
+      sectionKey: ScorecardDraftPhoto["sectionKey"];
+      deficiencyKey: ScorecardCriticalDeficiencyKey | null;
+      scorecardPhotoId: string;
+    }
+  | {
+      sectionKey: ScorecardDraftPhoto["sectionKey"];
+      deficiencyKey: ScorecardCriticalDeficiencyKey | null;
+      clientUploadId: string;
+    };
+
+/** Full replacement body for PUT /field/scorecards/:id. Identity, kind, week, and submitter stay immutable. */
+export interface ScorecardUpdatePayload {
+  expectedUpdatedAt: string;
+  superintendentName: string | null;
+  pmName: string | null;
+  items: { sectionKey: AnyScorecardSectionKey; points: number; note: string | null }[];
+  criticalDeficiencies: string[];
+  criticalDeficiencyNotes: Record<string, string>;
+  actionItems: string[];
+  superintendentSignature: string | null;
+  pmSignature: string | null;
+  summary: string | null;
+  photos: ScorecardUpdatePhotoInput[];
 }
 
 export function createScorecardDraft(input: {
@@ -193,6 +283,80 @@ export function isLeadershipDraft(draft: ScorecardDraft): boolean {
   return draft.kind === "leadership";
 }
 
+export function isEditingScorecardDraft(draft: ScorecardDraft): boolean {
+  return Boolean(draft.editingScorecardId && draft.editBaseUpdatedAt);
+}
+
+export function isExistingScorecardDraftPhoto(
+  photo: ScorecardDraftPhoto,
+): photo is ExistingScorecardDraftPhoto {
+  return typeof photo.existingScorecardPhotoId === "string" && photo.existingScorecardPhotoId.length > 0;
+}
+
+export function isNewScorecardDraftPhoto(photo: ScorecardDraftPhoto): photo is NewScorecardDraftPhoto {
+  return !isExistingScorecardDraftPhoto(photo);
+}
+
+export function scorecardDraftNewPhotos(draft: ScorecardDraft): NewScorecardDraftPhoto[] {
+  return draft.photos.filter(isNewScorecardDraftPhoto);
+}
+
+/**
+ * Captions are persisted by the upload request, not by scorecard POST/PUT. Once a photo has entered an
+ * attempt, changing its local caption could appear to save after a lost response while leaving the gallery
+ * description unchanged. Keep attempted (and all legacy-attempted) evidence explicitly read-only; removing
+ * and re-adding the photo creates a fresh upload when a different description is required.
+ */
+export function isScorecardDraftPhotoCaptionEditable(
+  draft: ScorecardDraft,
+  photo: ScorecardDraftPhoto,
+): photo is NewScorecardDraftPhoto {
+  if (!isNewScorecardDraftPhoto(photo)) return false;
+  if (!draft.evidenceUploadAttempted) return true;
+  if (!draft.evidenceUploadAttemptedIds) return false;
+  return !draft.evidenceUploadAttemptedIds.includes(photo.clientUploadId);
+}
+
+/**
+ * Persist the ids that are about to enter the upload queue before the drain starts. The ledger is append-only:
+ * removing a photo from the editable form must not erase the only handle the discard cleanup endpoint can use
+ * to find an upload that may already have confirmed into the project gallery.
+ */
+export function markScorecardEvidenceUploadAttempted(
+  draft: ScorecardDraft,
+  clientUploadIds: readonly string[],
+): ScorecardDraft {
+  // `undefined` on an already-attempted draft means it predates the cleanup ledger. Never manufacture a
+  // partial ledger from only the photos that happen to remain today: an older attempt may already have
+  // confirmed a photo that the user later removed, and treating the partial list as complete would orphan it.
+  const canMaintainCompleteLedger = draft.evidenceUploadAttemptedIds !== undefined || !draft.evidenceUploadAttempted;
+  const attempted = canMaintainCompleteLedger ? [...(draft.evidenceUploadAttemptedIds ?? [])] : [];
+  const seen = new Set(attempted);
+  for (const rawId of clientUploadIds) {
+    const id = rawId.trim();
+    if (!id || seen.has(id)) continue;
+    attempted.push(id);
+    seen.add(id);
+  }
+  const idsChanged = canMaintainCompleteLedger && attempted.length !== (draft.evidenceUploadAttemptedIds?.length ?? 0);
+  if (draft.evidenceUploadAttempted && !idsChanged) return draft;
+  return {
+    ...draft,
+    evidenceUploadAttempted: true,
+    ...(canMaintainCompleteLedger && attempted.length > 0 ? { evidenceUploadAttemptedIds: attempted } : {}),
+  };
+}
+
+/**
+ * Every client id that a submitted-edit discard must reconcile. An absent ledger on an already-attempted
+ * legacy draft is intentionally NOT reconstructed from its current photos: removed uploads would be unknown,
+ * so that draft must remain blocked from discard rather than presenting a partial list as complete.
+ */
+export function scorecardDraftEvidenceCleanupIds(draft: ScorecardDraft): string[] {
+  if (!draft.evidenceUploadAttemptedIds) return [];
+  return [...new Set(draft.evidenceUploadAttemptedIds)].filter((id) => id.trim().length > 0);
+}
+
 /**
  * Best-effort names to pre-fill the scorecard header from a deal's assigned team. The FIELD team route
  * (GET /field/projects/:dealId/team) already resolves the MOST-RECENT active superintendent / project_manager
@@ -234,48 +398,86 @@ export function seedScorecardDraftTeam(
   return { ...draft, ...next };
 }
 
+function touchedDeficiencyPatch(
+  draft: ScorecardDraft,
+  key: ScorecardCriticalDeficiencyKey,
+): Pick<ScorecardDraft, "editTouchedCriticalDeficiencies"> | Record<string, never> {
+  if (!draft.editingScorecardId || draft.editTouchedCriticalDeficiencies === undefined) return {};
+  if (draft.editTouchedCriticalDeficiencies.includes(key)) {
+    return { editTouchedCriticalDeficiencies: draft.editTouchedCriticalDeficiencies };
+  }
+  return { editTouchedCriticalDeficiencies: [...draft.editTouchedCriticalDeficiencies, key] };
+}
+
+/** Project signatures approve the exact report content; any local report mutation requires fresh approval. */
+function reportMutation(draft: ScorecardDraft, patch: Partial<ScorecardDraft>): ScorecardDraft {
+  const next = { ...draft, ...patch };
+  return draft.kind === "leadership"
+    ? next
+    : { ...next, superintendentSignature: "", pmSignature: "" };
+}
+
 export function scorecardDraftReducer(draft: ScorecardDraft, action: DraftAction): ScorecardDraft {
   switch (action.type) {
     case "setScore":
-      return { ...draft, scores: { ...draft.scores, [action.sectionKey]: action.points } };
+      return reportMutation(draft, { scores: { ...draft.scores, [action.sectionKey]: action.points } });
     case "setNote":
-      return { ...draft, notes: { ...draft.notes, [action.sectionKey]: action.note } };
+      return reportMutation(draft, { notes: { ...draft.notes, [action.sectionKey]: action.note } });
     case "appendNote": {
       // Append to the LATEST note (from reducer state), so a dictation transcript that returns after the
       // user kept typing doesn't clobber those edits with a stale-closure value.
       const current = draft.notes[action.sectionKey] ?? "";
       const next = current ? `${current} ${action.text}` : action.text;
-      return { ...draft, notes: { ...draft.notes, [action.sectionKey]: next } };
+      return reportMutation(draft, { notes: { ...draft.notes, [action.sectionKey]: next } });
     }
     case "setHeader":
-      return { ...draft, [action.field]: action.value };
+      return reportMutation(draft, { [action.field]: action.value });
     case "setSummary":
-      return { ...draft, summary: action.value };
+      return reportMutation(draft, { summary: action.value });
     case "appendSummary": {
       // Append a dictated transcript to the LATEST summary (from reducer state) so a transcript that lands
       // after the user kept typing doesn't clobber those edits — mirrors appendNote.
       const current = draft.summary ?? "";
       const next = current.trim() ? `${current} ${action.text}`.trim() : action.text.trim();
-      return { ...draft, summary: next };
+      return reportMutation(draft, { summary: next });
     }
     case "toggleDeficiency": {
       const has = draft.criticalDeficiencies.includes(action.key);
-      return {
-        ...draft,
+      return reportMutation(draft, {
         criticalDeficiencies: has
           ? draft.criticalDeficiencies.filter((k) => k !== action.key)
           : [...draft.criticalDeficiencies, action.key],
-      };
+        ...touchedDeficiencyPatch(draft, action.key),
+      });
     }
-    case "setDeficiencyNote":
-      return { ...draft, deficiencyNotes: { ...(draft.deficiencyNotes ?? {}), [action.key]: action.note } };
+    case "setDeficiencyNote": {
+      return reportMutation(draft, {
+        deficiencyNotes: { ...(draft.deficiencyNotes ?? {}), [action.key]: action.note },
+        ...touchedDeficiencyPatch(draft, action.key),
+      });
+    }
     case "appendDeficiencyNote": {
       const current = draft.deficiencyNotes?.[action.key] ?? "";
       const next = current.trim() ? `${current} ${action.text}`.trim() : action.text.trim();
-      return { ...draft, deficiencyNotes: { ...(draft.deficiencyNotes ?? {}), [action.key]: next } };
+      return reportMutation(draft, {
+        deficiencyNotes: { ...(draft.deficiencyNotes ?? {}), [action.key]: next },
+        ...touchedDeficiencyPatch(draft, action.key),
+      });
     }
     case "setActionItems":
-      return { ...draft, actionItems: action.items };
+      return reportMutation(draft, { actionItems: action.items });
+    case "addActionItem":
+      return reportMutation(draft, { actionItems: [...draft.actionItems, ""] });
+    case "setActionItem": {
+      if (action.index < 0 || action.index >= draft.actionItems.length) return draft;
+      const actionItems = [...draft.actionItems];
+      actionItems[action.index] = action.value;
+      return reportMutation(draft, { actionItems });
+    }
+    case "removeActionItem":
+      return action.index < 0 || action.index >= draft.actionItems.length
+        ? draft
+        : reportMutation(draft, { actionItems: draft.actionItems.filter((_, index) => index !== action.index) });
     case "setSignature":
       return { ...draft, [action.field]: action.value };
     case "appendActionItem": {
@@ -286,28 +488,48 @@ export function scorecardDraftReducer(draft: ScorecardDraft, action: DraftAction
       if (!t) return draft;
       const items = [...draft.actionItems];
       while (items.length > 0 && items[items.length - 1].trim() === "") items.pop();
-      return { ...draft, actionItems: [...items, t] };
+      return reportMutation(draft, { actionItems: [...items, t] });
     }
     case "markEvidenceUploadAttempted":
-      return draft.evidenceUploadAttempted ? draft : { ...draft, evidenceUploadAttempted: true };
+      return markScorecardEvidenceUploadAttempted(draft, action.clientUploadIds ?? []);
+    case "replaceDraft":
+      return action.draft;
+    case "refreshExistingPhotoUrls": {
+      let changed = false;
+      const photos = draft.photos.map((photo) => {
+        if (!isExistingScorecardDraftPhoto(photo)) return photo;
+        const uri = action.urlsByScorecardPhotoId[photo.existingScorecardPhotoId];
+        if (uri === undefined || uri === photo.uri) return photo;
+        changed = true;
+        return { ...photo, uri };
+      });
+      return changed ? { ...draft, photos } : draft;
+    }
     case "addPhoto":
-      return { ...draft, photos: [...draft.photos, action.photo] };
+      return reportMutation(draft, { photos: [...draft.photos, action.photo] });
     case "removePhoto":
-      return { ...draft, photos: draft.photos.filter((p) => p.key !== action.key) };
-    case "setPhotoCaption":
-      return {
-        ...draft,
+      return reportMutation(draft, { photos: draft.photos.filter((p) => p.key !== action.key) });
+    case "setPhotoCaption": {
+      // A retained scorecard photo's caption is shared project-gallery file metadata, not scorecard-link
+      // content. Submitted-card edits keep it read-only; only a newly captured/imported photo can change it
+      // before upload persists the caption through the existing photo pipeline.
+      const target = draft.photos.find((photo) => photo.key === action.key);
+      if (!target || !isScorecardDraftPhotoCaptionEditable(draft, target)) return draft;
+      return reportMutation(draft, {
         photos: draft.photos.map((p) => (p.key === action.key ? { ...p, caption: action.caption } : p)),
-      };
-    case "appendPhotoCaption":
-      return {
-        ...draft,
+      });
+    }
+    case "appendPhotoCaption": {
+      const target = draft.photos.find((photo) => photo.key === action.key);
+      if (!target || !isScorecardDraftPhotoCaptionEditable(draft, target)) return draft;
+      return reportMutation(draft, {
         photos: draft.photos.map((p) => (
           p.key === action.key
             ? { ...p, caption: p.caption.trim() ? `${p.caption} ${action.text}`.trim() : action.text.trim() }
             : p
         )),
-      };
+      });
+    }
     default: {
       // Exhaustiveness guard: adding a DraftAction variant without a case here fails to compile.
       const _exhaustive: never = action;
@@ -337,6 +559,12 @@ export function scorecardDraftAverage(draft: ScorecardDraft): number {
 
 export function scorecardDraftSectionsAnswered(draft: ScorecardDraft): number {
   return draftSectionKeys(draft).filter((k) => typeof draft.scores[k] === "number").length;
+}
+
+/** Completion percentage for the editor progress bar, based on actually-rated categories. */
+export function scorecardDraftCompletionPercent(draft: ScorecardDraft): number {
+  const keys = draftSectionKeys(draft);
+  return keys.length === 0 ? 0 : (scorecardDraftSectionsAnswered(draft) / keys.length) * 100;
 }
 
 export function isScorecardDraftComplete(draft: ScorecardDraft): boolean {
@@ -391,6 +619,8 @@ export interface DraftValidation {
   needsActionItems: boolean;
   missingWeekOf: boolean; // true when Week Of is blank OR not a real calendar date
   missingSignatures: boolean;
+  tooManyPhotos: boolean;
+  photoOverflowCount: number;
 }
 export function validateScorecardDraft(draft: ScorecardDraft): DraftValidation {
   const leadership = draft.kind === "leadership";
@@ -402,12 +632,21 @@ export function validateScorecardDraft(draft: ScorecardDraft): DraftValidation {
   const missingSignatures = leadership
     ? false
     : !(draft.superintendentSignature ?? "").trim() || !(draft.pmSignature ?? "").trim();
+  const photoOverflowCount = Math.max(0, draft.photos.length - MAX_SCORECARD_PHOTOS);
+  const tooManyPhotos = photoOverflowCount > 0;
   return {
     missingSections,
     needsActionItems,
     missingWeekOf,
     missingSignatures,
-    canSubmit: missingSections.length === 0 && !needsActionItems && !missingWeekOf && !missingSignatures && draft.dealId.length > 0,
+    tooManyPhotos,
+    photoOverflowCount,
+    canSubmit: missingSections.length === 0
+      && !needsActionItems
+      && !missingWeekOf
+      && !missingSignatures
+      && !tooManyPhotos
+      && draft.dealId.length > 0,
   };
 }
 
@@ -433,7 +672,9 @@ export function scorecardDraftToSubmission(draft: ScorecardDraft): ScorecardSubm
         .filter(([, note]) => note.length > 0),
     ),
     actionItems: draft.actionItems.map((s) => s.trim()).filter((s) => s.length > 0),
-    photos: draft.photos.map((p) => ({ sectionKey: p.sectionKey, deficiencyKey: p.deficiencyKey ?? null, clientUploadId: p.clientUploadId })),
+    photos: draft.photos
+      .filter(isNewScorecardDraftPhoto)
+      .map((p) => ({ sectionKey: p.sectionKey, deficiencyKey: p.deficiencyKey ?? null, clientUploadId: p.clientUploadId })),
     superintendentSignature: draft.superintendentSignature?.trim() || null,
     pmSignature: draft.pmSignature?.trim() || null,
   };
@@ -463,6 +704,7 @@ function leadershipDraftToSubmission(draft: ScorecardDraft): ScorecardSubmission
     criticalDeficiencyNotes: {},
     actionItems: [],
     photos: draft.photos
+      .filter(isNewScorecardDraftPhoto)
       .filter((p) => p.sectionKey === FIELD_SCORECARD_LEADERSHIP_SUMMARY_SECTION_KEY || FIELD_SCORECARD_LEADERSHIP_SECTION_KEYS.includes(p.sectionKey as ScorecardLeadershipSectionKey))
       .map((p) => ({ sectionKey: p.sectionKey, deficiencyKey: null, clientUploadId: p.clientUploadId })),
     superintendentSignature: null,

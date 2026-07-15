@@ -5,6 +5,7 @@ jest.mock("../../capture/upload-queue", () => ({
   enqueueUploads: jest.fn(async () => []),
   drainUploadQueue: jest.fn(async () => ({ succeeded: 0, failed: 0, remaining: 0 })),
   getQueuedUploads: jest.fn(async () => []),
+  removeQueuedUploadsAndWait: jest.fn(async () => undefined),
 }));
 jest.mock("../../api/endpoints", () => ({
   createScorecard: jest.fn(async () => ({ scorecard: { id: "sc-1", dealId: "deal-1" } })),
@@ -31,6 +32,17 @@ describe("scorecardPhotoUploadInput", () => {
     expect(input.caption).toBe("Slab crack");
     expect(input.clientUploadId).toBe("cu-1");
     expect(input.category).toBeNull();
+    expect(input.scorecardId).toBeUndefined();
+    expect(input.routeByTarget).toBeUndefined();
+  });
+
+  it("persists the scorecard scope only for submitted-card edit evidence", () => {
+    const photo: ScorecardDraftPhoto = {
+      key: "p1", uri: "file://p1", clientUploadId: "cu-1", sectionKey: "schedule", caption: "",
+    };
+    expect(scorecardPhotoUploadInput(photo, "deal-1", "scorecard-1")).toEqual(
+      expect.objectContaining({ scorecardId: "scorecard-1", routeByTarget: true }),
+    );
   });
 
   it("nulls a blank caption", () => {
@@ -101,6 +113,18 @@ describe("submitScorecard (orchestration)", () => {
     expect(result).toEqual({ status: "submitted", scorecard: { id: "sc-1", dealId: "deal-1" } });
   });
 
+  it("POSTs a new or recovered draft through its office-pinned fetcher", async () => {
+    const neutralScorecardFetcher = jest.fn();
+    const draftOfficeFetcher = jest.fn();
+
+    await submitScorecard(neutralScorecardFetcher as any, "owner-1", draftWith([]), {
+      draftOfficeFetcher: draftOfficeFetcher as any,
+    });
+
+    expect(createScorecard).toHaveBeenCalledWith(draftOfficeFetcher, expect.any(Object));
+    expect(createScorecard).not.toHaveBeenCalledWith(neutralScorecardFetcher, expect.any(Object));
+  });
+
   it("stamps Week Of = the LOCAL submit date, overriding a stale draft value", async () => {
     // A draft seeded on an earlier day (offline, submitted later) must file under the SUBMIT day, not its
     // creation day — the server no longer re-stamps, so the client owns the completion date.
@@ -115,7 +139,11 @@ describe("submitScorecard (orchestration)", () => {
     (getQueuedUploads as jest.Mock).mockResolvedValue([]); // nothing left queued = all uploaded
     const result = await submitScorecard(fetcher, "owner-1", draftWith([photo("a"), photo("b")]));
     expect(enqueueUploads).toHaveBeenCalledTimes(1);
-    expect(drainUploadQueue).toHaveBeenCalledTimes(1);
+    expect(enqueueUploads).toHaveBeenCalledWith(
+      "owner-1",
+      expect.arrayContaining([expect.not.objectContaining({ routeByTarget: true })]),
+    );
+    expect(drainUploadQueue).toHaveBeenCalledWith("owner-1", fetcher, undefined);
     expect(createScorecard).toHaveBeenCalledTimes(1);
     expect(result.status).toBe("submitted");
   });

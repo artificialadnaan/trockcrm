@@ -26,6 +26,23 @@ export interface ParsedScorecardSubmission {
   summary: string | null;
 }
 
+export interface ParsedScorecardUpdate {
+  expectedUpdatedAt: string;
+  superintendentName: string | null;
+  pmName: string | null;
+  items: { sectionKey: string; points: number; note: string | null }[];
+  criticalDeficiencies: string[];
+  criticalDeficiencyNotes: Record<string, string>;
+  actionItems: string[];
+  photos: Array<
+    | { scorecardPhotoId: string; clientUploadId?: never; sectionKey: string; deficiencyKey: string | null }
+    | { scorecardPhotoId?: never; clientUploadId: string; sectionKey: string; deficiencyKey: string | null }
+  >;
+  superintendentSignature: string | null;
+  pmSignature: string | null;
+  summary: string | null;
+}
+
 function strOrNull(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
@@ -144,5 +161,87 @@ export function parseScorecardSubmission(body: unknown): ParsedScorecardSubmissi
     superintendentSignature: strOrNull(b.superintendentSignature),
     pmSignature: strOrNull(b.pmSignature),
     summary,
+  };
+}
+
+/** Parse the full editable content accepted by PUT /field/scorecards/:id. Record identity and form shape
+ * are deliberately absent: the service derives deal/kind/version/week/creator from the stored card. */
+export function parseScorecardUpdate(body: unknown): ParsedScorecardUpdate {
+  if (!body || typeof body !== "object") throw new AppError(400, "Missing scorecard body.");
+  const b = body as Record<string, unknown>;
+
+  const expectedUpdatedAtRaw = typeof b.expectedUpdatedAt === "string" ? b.expectedUpdatedAt.trim() : "";
+  const expectedUpdatedAtDate = expectedUpdatedAtRaw ? new Date(expectedUpdatedAtRaw) : null;
+  if (!expectedUpdatedAtDate || !Number.isFinite(expectedUpdatedAtDate.getTime())) {
+    throw new AppError(400, "expectedUpdatedAt must be a valid timestamp.");
+  }
+  // Normalize equivalent timestamp spellings to the same token emitted by the API.
+  const expectedUpdatedAt = expectedUpdatedAtDate.toISOString();
+
+  if (!Array.isArray(b.items) || b.items.length === 0) {
+    throw new AppError(400, "items are required.");
+  }
+  if (b.items.length > 30) throw new AppError(400, "Too many scorecard items.");
+  const items = b.items.map((raw) => {
+    const it = (raw ?? {}) as Record<string, unknown>;
+    if (typeof it.points !== "number" || !Number.isInteger(it.points)) {
+      throw new AppError(400, "Each scorecard item needs an explicit integer points value.");
+    }
+    return { sectionKey: String(it.sectionKey ?? ""), points: it.points, note: strOrNull(it.note) };
+  });
+
+  const photos: ParsedScorecardUpdate["photos"] = Array.isArray(b.photos)
+    ? b.photos.map((raw) => {
+        const photo = (raw ?? {}) as Record<string, unknown>;
+        const scorecardPhotoId = typeof photo.scorecardPhotoId === "string" ? photo.scorecardPhotoId.trim() : "";
+        const clientUploadId = typeof photo.clientUploadId === "string" ? photo.clientUploadId.trim() : "";
+        if ((scorecardPhotoId ? 1 : 0) + (clientUploadId ? 1 : 0) !== 1) {
+          throw new AppError(400, "Each evidence photo needs exactly one scorecardPhotoId or clientUploadId.");
+        }
+        const common = {
+          sectionKey: String(photo.sectionKey ?? ""),
+          deficiencyKey: strOrNull(photo.deficiencyKey),
+        };
+        if (scorecardPhotoId) {
+          assertValidUuid(scorecardPhotoId, "scorecardPhotoId");
+          return { ...common, scorecardPhotoId };
+        }
+        return { ...common, clientUploadId };
+      })
+    : [];
+  if (photos.length > 100) throw new AppError(400, "Too many evidence photos.");
+
+  const criticalDeficiencies = Array.isArray(b.criticalDeficiencies)
+    ? b.criticalDeficiencies.filter((x): x is string => typeof x === "string")
+    : [];
+  const criticalDeficiencyNotes =
+    b.criticalDeficiencyNotes && typeof b.criticalDeficiencyNotes === "object" && !Array.isArray(b.criticalDeficiencyNotes)
+      ? Object.fromEntries(
+          Object.entries(b.criticalDeficiencyNotes as Record<string, unknown>)
+            .filter(([, value]) => typeof value === "string" && value.trim().length > 0)
+            .map(([key, value]) => [key, (value as string).trim().slice(0, 4000)]),
+        )
+      : {};
+  const actionItems = Array.isArray(b.actionItems)
+    ? b.actionItems
+        .filter((x): x is string => typeof x === "string" && x.trim().length > 0)
+        .map((x) => x.trim())
+    : [];
+  if (criticalDeficiencies.length > 30) throw new AppError(400, "Too many critical deficiencies.");
+  if (actionItems.length > 50) throw new AppError(400, "Too many action items.");
+
+  const summaryRaw = strOrNull(b.summary);
+  return {
+    expectedUpdatedAt,
+    superintendentName: strOrNull(b.superintendentName),
+    pmName: strOrNull(b.pmName),
+    items,
+    criticalDeficiencies,
+    criticalDeficiencyNotes,
+    actionItems,
+    photos,
+    superintendentSignature: strOrNull(b.superintendentSignature),
+    pmSignature: strOrNull(b.pmSignature),
+    summary: summaryRaw ? summaryRaw.slice(0, 8000) : null,
   };
 }

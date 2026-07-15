@@ -1,21 +1,29 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Alert, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect, useRouter } from "expo-router";
 import { useQuery } from "@tanstack/react-query";
 import { theme } from "../../../src/theme/theme";
 import { useAuth } from "../../../src/auth/AuthContext";
-import { getRecentScorecards, getDealTeam } from "../../../src/api/endpoints";
+import { discardScorecardEditEvidence, getRecentScorecards, getDealTeam } from "../../../src/api/endpoints";
 import {
   createScorecardDraft,
   createLeadershipScorecardDraft,
   resolveScorecardTeamNames,
   seedScorecardDraftTeam,
   scorecardDraftSectionsAnswered,
+  scorecardDraftNewPhotos,
+  scorecardDraftEvidenceCleanupIds,
+  isEditingScorecardDraft,
   type ScorecardDraft,
 } from "../../../src/scorecards/draft";
-import { listScorecardDrafts, saveScorecardDraft, deleteScorecardDraft } from "../../../src/scorecards/draft-store";
-import { newClientUploadId, removeQueuedUploads, uploadOwnerKey } from "../../../src/capture/upload-queue";
+import {
+  listScorecardDraftsForUser,
+  saveScorecardDraft,
+  deleteScorecardDraft,
+  type LocatedScorecardDraft,
+} from "../../../src/scorecards/draft-store";
+import { newClientUploadId, removeQueuedUploadsAndWait, uploadOwnerKey } from "../../../src/capture/upload-queue";
 import { registerUploadBackgroundTask } from "../../../src/capture/upload-background-task";
 import { newSubmissionId } from "../../../src/scorecards/ids";
 import { FIELD_SCORECARD_SECTIONS, FIELD_SCORECARD_LEADERSHIP_SECTIONS } from "../../../src/scorecards/scoring";
@@ -41,13 +49,18 @@ function shortDate(iso: string): string {
 }
 
 /** Resume/open route for a draft — leadership drafts have their own focused screen; project drafts the wizard. */
-function draftPath(draft: ScorecardDraft): {
+function draftPath(draft: ScorecardDraft, locatedOfficeId?: string | null): {
   pathname: "/(app)/scorecards/leadership/[draftId]" | "/(app)/scorecards/[draftId]";
-  params: { draftId: string };
+  params: { draftId: string; officeId?: string };
 } {
+  const officeId = draft.editingOfficeId ?? locatedOfficeId ?? undefined;
+  const params = {
+    draftId: draft.id,
+    ...(officeId ? { officeId } : {}),
+  };
   return draft.kind === "leadership"
-    ? { pathname: "/(app)/scorecards/leadership/[draftId]", params: { draftId: draft.id } }
-    : { pathname: "/(app)/scorecards/[draftId]", params: { draftId: draft.id } };
+    ? { pathname: "/(app)/scorecards/leadership/[draftId]", params }
+    : { pathname: "/(app)/scorecards/[draftId]", params };
 }
 
 export default function ScorecardsScreen() {
@@ -55,8 +68,15 @@ export default function ScorecardsScreen() {
   const { fetcher, user, activeOfficeId } = useAuth();
   const ownerKey = uploadOwnerKey(user?.id, activeOfficeId ?? user?.tenantId ?? undefined);
 
-  const [drafts, setDrafts] = useState<ScorecardDraft[]>([]);
+  const [drafts, setDrafts] = useState<LocatedScorecardDraft[]>([]);
   const [discardingDraftId, setDiscardingDraftId] = useState<string | null>(null);
+  // Local draft reads are asynchronous and can outlive a focus session or signed-in identity. A monotonically
+  // increasing generation plus current identity/focus refs prevent an older request from repopulating the list
+  // after blur, sign-out, office switch, or a newer reload.
+  const draftLoadGeneration = useRef(0);
+  const draftsFocused = useRef(false);
+  const draftIdentity = useRef<{ userId: string | null; ownerKey: string }>({ userId: null, ownerKey: "" });
+  draftIdentity.current = { userId: user?.id ?? null, ownerKey };
   // Which kind of scorecard the deal picker will create when a deal is chosen. Set by the two entry buttons.
   const [pickerKind, setPickerKind] = useState<"project" | "leadership" | null>(null);
   const pickerOpen = pickerKind !== null;
@@ -78,17 +98,46 @@ export default function ScorecardsScreen() {
     enabled: !!user,
   });
 
+  // Never retain the previous account/office's local rows while authentication is being cleared or swapped.
+  // This also invalidates an in-flight read before the focus effect starts the replacement identity's load.
+  useEffect(() => {
+    draftLoadGeneration.current += 1;
+    setDrafts([]);
+  }, [ownerKey, user?.id]);
+
   const reloadDrafts = useCallback(() => {
-    if (!ownerKey) return;
-    void listScorecardDrafts(ownerKey).then((list) =>
-      setDrafts([...list].sort((a, b) => b.updatedAt - a.updatedAt)),
-    );
-  }, [ownerKey]);
+    const requestedUserId = user?.id ?? null;
+    const requestedOwnerKey = ownerKey;
+    const generation = ++draftLoadGeneration.current;
+    if (!requestedOwnerKey || !requestedUserId) {
+      setDrafts([]);
+      return;
+    }
+    void listScorecardDraftsForUser(requestedUserId, requestedOwnerKey)
+      .then((list) => {
+        const currentIdentity = draftIdentity.current;
+        if (
+          !draftsFocused.current ||
+          generation !== draftLoadGeneration.current ||
+          currentIdentity.userId !== requestedUserId ||
+          currentIdentity.ownerKey !== requestedOwnerKey
+        ) {
+          return;
+        }
+        setDrafts([...list].sort((a, b) => b.draft.updatedAt - a.draft.updatedAt));
+      })
+      .catch(() => undefined);
+  }, [ownerKey, user?.id]);
 
   useFocusEffect(
     useCallback(() => {
+      draftsFocused.current = true;
       reloadDrafts();
       void recent.refetch();
+      return () => {
+        draftsFocused.current = false;
+        draftLoadGeneration.current += 1;
+      };
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [reloadDrafts]),
   );
@@ -129,39 +178,58 @@ export default function ScorecardsScreen() {
     router.push(draftPath(draft));
   }
 
-  function confirmDiscard(draft: ScorecardDraft) {
+  function confirmDiscard(draft: ScorecardDraft, draftOwnerKey: string) {
+    const editingSubmitted = isEditingScorecardDraft(draft);
+    const cleanupIds = scorecardDraftEvidenceCleanupIds(draft);
     // Legacy photo drafts may have completed a partial upload before this marker existed. Treat them as
     // unsafe to discard; new drafts persist false until upload actually starts.
     if (draft.evidenceUploadAttempted || (draft.photos.length > 0 && draft.evidenceUploadAttempted !== false)) {
-      Alert.alert(
-        "Finish this scorecard instead",
-        "Evidence upload already started, so some photos may be in the project gallery. Complete and submit this scorecard rather than discarding it.",
-      );
-      return;
+      // Submitted edits have an immutable server record that can authorize targeted cleanup. New cards (and
+      // legacy edit drafts with no durable id ledger) still cannot prove which confirmed gallery rows belong
+      // to the abandoned attempt, so keep the conservative block for those cases.
+      if (!editingSubmitted || cleanupIds.length === 0) {
+        Alert.alert(
+          editingSubmitted ? "Finish these changes instead" : "Finish this scorecard instead",
+          editingSubmitted
+            ? "Evidence upload already started, but this older draft cannot identify every uploaded photo safely. Save these scorecard changes rather than discarding them."
+            : "Evidence upload already started, so some photos may be in the project gallery. Complete and submit this scorecard rather than discarding it.",
+        );
+        return;
+      }
     }
     Alert.alert(
-      "Discard scorecard?",
-      `This permanently removes the in-progress ${draft.kind === "leadership" ? "Leadership " : ""}Scorecard for ${draft.dealName}.`,
+      editingSubmitted ? "Discard changes?" : "Discard scorecard?",
+      editingSubmitted
+        ? cleanupIds.length > 0
+          ? `This removes your local changes to ${draft.dealName}. New photos uploaded only for this edit will also be removed from the project gallery. The submitted scorecard will remain unchanged.`
+          : `This removes your local changes to ${draft.dealName}. The submitted scorecard will remain unchanged.`
+        : `This permanently removes the in-progress ${draft.kind === "leadership" ? "Leadership " : ""}Scorecard for ${draft.dealName}.`,
       [
         { text: "Keep editing", style: "cancel" },
         {
-          text: "Discard",
+          text: editingSubmitted ? "Discard changes" : "Discard",
           style: "destructive",
-          onPress: () => void discardDraft(draft),
+          onPress: () => void discardDraft(draft, draftOwnerKey),
         },
       ],
     );
   }
 
-  async function discardDraft(draft: ScorecardDraft) {
-    if (!ownerKey || discardingDraftId) return;
+  async function discardDraft(draft: ScorecardDraft, draftOwnerKey: string) {
+    if (discardingDraftId) return;
     setDiscardingDraftId(draft.id);
     try {
-      // This path is unavailable once evidence upload starts (see confirmDiscard), so these are only local
-      // copies/queued uploads and cannot leave already-confirmed gallery photos orphaned.
-      await removeQueuedUploads(ownerKey, draft.photos.map((photo) => photo.clientUploadId));
-      await deleteScorecardDraft(ownerKey, draft.id);
-      setDrafts((current) => current.filter((item) => item.id !== draft.id));
+      const currentNewIds = scorecardDraftNewPhotos(draft).map((photo) => photo.clientUploadId);
+      const cleanupIds = scorecardDraftEvidenceCleanupIds(draft);
+      const queuedOrAttemptedIds = [...new Set([...currentNewIds, ...cleanupIds])];
+      // Wait for a confirm already in flight before server reconciliation; otherwise it could land just
+      // after cleanup and leave a gallery orphan even though the local edit was deleted.
+      await removeQueuedUploadsAndWait(draftOwnerKey, queuedOrAttemptedIds);
+      if (isEditingScorecardDraft(draft) && cleanupIds.length > 0) {
+        await discardScorecardEditEvidence(fetcher, draft.editingScorecardId!, cleanupIds);
+      }
+      await deleteScorecardDraft(draftOwnerKey, draft.id);
+      setDrafts((current) => current.filter((item) => item.draft.id !== draft.id));
     } catch {
       Alert.alert("Couldn’t discard scorecard", "Please try again.");
     } finally {
@@ -193,26 +261,26 @@ export default function ScorecardsScreen() {
         {drafts.length > 0 ? (
           <View style={{ gap: theme.space.sm }}>
             <SectionLabel>In progress</SectionLabel>
-            {drafts.map((d) => (
-              <View key={d.id} style={styles.row}>
+            {drafts.map(({ draft: d, ownerKey: draftOwnerKey, officeId: draftOfficeId }) => (
+              <View key={`${draftOwnerKey}:${d.id}`} style={styles.row}>
                 <Pressable
-                  onPress={() => router.push(draftPath(d))}
+                  onPress={() => router.push(draftPath(d, draftOfficeId))}
                   style={({ pressed }) => [styles.draftResume, pressed && { opacity: 0.7 }]}
                   accessibilityRole="button"
-                  accessibilityLabel={`Resume ${d.kind === "leadership" ? "Leadership " : ""}Scorecard for ${d.dealName}`}
+                  accessibilityLabel={`${isEditingScorecardDraft(d) ? "Resume editing submitted" : "Resume"} ${d.kind === "leadership" ? "Leadership " : ""}Scorecard for ${d.dealName}`}
                 >
                 <View style={{ flex: 1 }}>
                   <Text style={styles.rowTitle} numberOfLines={1}>{d.dealName}</Text>
                   <Text style={styles.rowSub}>
-                    {d.kind === "leadership" ? "Leadership · " : ""}Week of {shortDate(d.weekOf)} · {scorecardDraftSectionsAnswered(d)}/{d.kind === "leadership" ? LEADERSHIP_SECTION_COUNT : SECTION_COUNT} scored
+                    {isEditingScorecardDraft(d) ? "Editing submitted · " : ""}{d.kind === "leadership" ? "Leadership · " : ""}Week of {shortDate(d.weekOf)} · {scorecardDraftSectionsAnswered(d)}/{d.kind === "leadership" ? LEADERSHIP_SECTION_COUNT : SECTION_COUNT} scored
                   </Text>
                 </View>
-                <Text style={styles.resume}>Resume</Text>
+                <Text style={styles.resume}>{isEditingScorecardDraft(d) ? "Resume edit" : "Resume"}</Text>
                 </Pressable>
                 <Button
-                  title="Discard"
+                  title={isEditingScorecardDraft(d) ? "Discard changes" : "Discard"}
                   variant="ghost"
-                  onPress={() => confirmDiscard(d)}
+                  onPress={() => confirmDiscard(d, draftOwnerKey)}
                   disabled={discardingDraftId !== null}
                   style={styles.discardButton}
                 />

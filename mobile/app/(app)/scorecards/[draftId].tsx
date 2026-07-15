@@ -2,12 +2,13 @@ import React, { Suspense, useCallback, useEffect, useReducer, useRef, useState }
 import { Image, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter } from "expo-router";
+import { usePreventRemove } from "@react-navigation/native";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import * as ImagePicker from "expo-image-picker";
 import SignatureScreen, { type SignatureViewRef } from "react-native-signature-canvas";
 import { theme } from "../../../src/theme/theme";
 import { useAuth } from "../../../src/auth/AuthContext";
-import { getTranscriptionConfig, type Fetcher } from "../../../src/api/endpoints";
+import { getScorecard, getTranscriptionConfig, type Fetcher } from "../../../src/api/endpoints";
 import { apiFetch } from "../../../src/api/client";
 import { uploadOwnerKey, newClientUploadId, removeQueuedUploads } from "../../../src/capture/upload-queue";
 import { qk } from "../../../src/query/keys";
@@ -21,13 +22,22 @@ import {
 import {
   scorecardDraftReducer,
   scorecardDraftTotal,
+  scorecardDraftCompletionPercent,
   scorecardDraftRating,
   scorecardDraftPhotosForSection,
+  scorecardDraftNewPhotos,
+  markScorecardEvidenceUploadAttempted,
+  isEditingScorecardDraft,
+  isExistingScorecardDraftPhoto,
+  isScorecardDraftPhotoCaptionEditable,
   validateScorecardDraft,
+  MAX_SCORECARD_PHOTOS,
   type ScorecardDraft,
   type ScorecardDraftPhoto,
   type DraftAction,
 } from "../../../src/scorecards/draft";
+import { rebaseScorecardEditDraft, scorecardEditRebaseMessage } from "../../../src/scorecards/edit";
+import { scorecardEditorBusyMessage, scorecardEditorSubmitError, scorecardPhotoOverflowMessage } from "../../../src/scorecards/editor-state";
 import { loadScorecardDraft, saveScorecardDraft, deleteScorecardDraft, copyPhotoIntoDraft } from "../../../src/scorecards/draft-store";
 import { submitScorecard } from "../../../src/scorecards/submit";
 import { Badge, Button, EmptyState, LoadingState, SectionLabel, TextInput } from "../../../src/components/ui";
@@ -40,16 +50,10 @@ import { PhotoCaptionEditor } from "../../../src/components/PhotoCaptionEditor";
 const CameraCapture = React.lazy(() => import("../../../src/capture/CameraCapture"));
 
 const SECTION_COUNT = FIELD_SCORECARD_SECTIONS.length;
-// Step 0 is the one-page scorecard. A category opens a focused detail editor at 1..8.
-const LAST_STEP = 0;
 
 function toStr(v: string | string[] | undefined): string {
   return Array.isArray(v) ? v[0] ?? "" : v ?? "";
 }
-
-// Server cap on total evidence photos (parseScorecardSubmission rejects photos.length > 100). Mirrored here so
-// a multi-select import can't stage a batch that would only fail at submit and force manual removal.
-const MAX_SCORECARD_PHOTOS = 100;
 
 // Merge an already-resolved live GPS fix into a shot's EXIF only when the shot itself has no location. Pure, so
 // a BATCH import can fetch live GPS ONCE and reuse it across every coordless asset (the per-asset getLiveGps in
@@ -71,19 +75,31 @@ async function withLiveGpsFallback(exif: ReturnType<typeof extractExifMetadata>)
 
 export default function ScorecardWizardScreen() {
   const router = useRouter();
-  const draftId = toStr(useLocalSearchParams<{ draftId: string }>().draftId);
+  const params = useLocalSearchParams<{ draftId: string; officeId?: string }>();
+  const draftId = toStr(params.draftId);
+  const routeOfficeId = toStr(params.officeId);
   const { fetcher, user, activeOfficeId, token, signOut } = useAuth();
   const qc = useQueryClient();
   // Bind the queue owner + its drain fetcher to the RESOLVED office (activeOfficeId ?? primary). The
   // AuthContext fetcher omits x-office-id for a primary session, so a re-homed user would otherwise drain
   // an offline draft's photos against their NEW primary office. queueFetcher pins x-office-id to the office
-  // the draft was captured under — matching ownerKey + capture.tsx's queueFetcher.
-  const resolvedOfficeId = activeOfficeId ?? user?.tenantId ?? null;
+  // the draft was captured under — matching ownerKey + capture.tsx's queueFetcher. It is used for durable
+  // uploads and NEW scorecard POSTs; scorecard-id edit reads/writes use the headerless fetcher below because
+  // the server resolves their owning office and field auth may reject a stale/re-homed draft office first.
+  const resolvedOfficeId = routeOfficeId || activeOfficeId || user?.tenantId || null;
   const ownerKey = uploadOwnerKey(user?.id, resolvedOfficeId ?? undefined);
   const queueFetcher = useCallback<Fetcher>(
     (path, opts) =>
       apiFetch(path, { ...opts, token: token ?? undefined, officeId: resolvedOfficeId, onUnauthorized: () => void signOut() }),
     [token, resolvedOfficeId, signOut],
+  );
+  // Scorecard-id reads/writes and explicitly marked edit evidence resolve their owning office from the
+  // scorecard/deal id. Force a headerless fetcher here: an edit draft can retain the old office after its
+  // submitter is re-homed, and sending that stale office would be rejected before route resolution.
+  const scorecardFetcher = useCallback<Fetcher>(
+    (path, opts) =>
+      apiFetch(path, { ...opts, token: token ?? undefined, officeId: null, onUnauthorized: () => void signOut() }),
+    [token, signOut],
   );
 
   const [loaded, setLoaded] = useState<ScorecardDraft | null | "missing">(null);
@@ -113,6 +129,8 @@ export default function ScorecardWizardScreen() {
     // Guard against a slow load from a PREVIOUS draftId/owner resolving last and seeding the wizard with
     // the wrong draft — ignore any resolution after this effect has been superseded.
     let cancelled = false;
+    // Hydrate the persisted draft immediately. The reducer host refreshes short-lived retained-photo URLs in
+    // the background after it renders, so an offline GET can never hold a usable local edit behind a 30s spinner.
     void loadScorecardDraft(ownerKey, draftId)
       .then((d) => {
         if (!cancelled) setLoaded(d ?? "missing");
@@ -132,9 +150,12 @@ export default function ScorecardWizardScreen() {
   // card. `replace` so Back doesn't bounce between the two screens.
   useEffect(() => {
     if (loaded && loaded !== "missing" && loaded.kind === "leadership") {
-      router.replace({ pathname: "/(app)/scorecards/leadership/[draftId]", params: { draftId } });
+      router.replace({
+        pathname: "/(app)/scorecards/leadership/[draftId]",
+        params: { draftId, ...(routeOfficeId ? { officeId: routeOfficeId } : {}) },
+      });
     }
-  }, [loaded, draftId, router]);
+  }, [loaded, draftId, routeOfficeId, router]);
 
   // Reducer seeded once the draft loads. `key` remounts the reducer host when the draft arrives.
   if (loaded === null) {
@@ -171,17 +192,19 @@ export default function ScorecardWizardScreen() {
       notice={notice}
       setNotice={setNotice}
       voiceEnabled={voiceEnabled}
-      onSubmitted={(dealId) => {
+      onSubmitted={(dealId, scorecardId) => {
         if (user) {
           void qc.invalidateQueries({ queryKey: ["scorecards-recent", user.id] });
           // Evidence photos were just uploaded into the deal gallery — refresh it too.
           void qc.invalidateQueries({ queryKey: qk.projectPhotos(user.id, dealId) });
           // …and the project-detail Scorecards section, so the new card appears without a manual refresh.
           void qc.invalidateQueries({ queryKey: qk.projectScorecards(user.id, dealId) });
+          if (scorecardId) void qc.invalidateQueries({ queryKey: qk.scorecard(user.id, scorecardId) });
         }
         router.back();
       }}
-      fetcher={queueFetcher}
+      fetcher={scorecardFetcher}
+      draftOfficeFetcher={queueFetcher}
     />
   );
 }
@@ -201,10 +224,11 @@ function Wizard(props: {
   notice: { tone: "success" | "error"; text: string } | null;
   setNotice: (n: { tone: "success" | "error"; text: string } | null) => void;
   voiceEnabled: boolean;
-  onSubmitted: (dealId: string) => void;
+  onSubmitted: (dealId: string, scorecardId?: string) => void;
   fetcher: ReturnType<typeof useAuth>["fetcher"];
+  draftOfficeFetcher: Fetcher;
 }) {
-  const { ownerKey, draftId, step, setStep, cameraSection, setCameraSection, cameraDeficiency, setCameraDeficiency, submitting, setSubmitting, notice, setNotice, voiceEnabled, onSubmitted, fetcher } = props;
+  const { ownerKey, draftId, step, setStep, cameraSection, setCameraSection, cameraDeficiency, setCameraDeficiency, submitting, setSubmitting, notice, setNotice, voiceEnabled, onSubmitted, fetcher, draftOfficeFetcher } = props;
   const router = useRouter();
   const [draft, dispatch] = useReducer(scorecardDraftReducer, props.initial);
   // Count of evidence photos still being copied into durable storage. Submit is blocked while > 0 so a
@@ -213,10 +237,14 @@ function Wizard(props: {
   const [captionPhotoKey, setCaptionPhotoKey] = useState<string | null>(null);
   const [captionVoiceBusy, setCaptionVoiceBusy] = useState(false);
   const [signingField, setSigningField] = useState<"superintendentSignature" | "pmSignature" | null>(null);
+  const [hasEditConflict, setHasEditConflict] = useState(false);
+  const [submittedResult, setSubmittedResult] = useState<{ dealId: string; scorecardId?: string } | null>(null);
+  const submittedNavigationStarted = useRef(false);
   // Serialize autosaves so a slow older write can't land after a newer edit — or after the submit-delete
   // and resurrect a submitted draft. `finalized` stops saves once the draft is submitted + deleted.
   const saveChain = useRef<Promise<unknown>>(Promise.resolve());
   const finalized = useRef(false);
+  const conflictRecoveryInFlight = useRef(false);
   // Synchronous lock for photo imports: `savingPhotos` is React state and doesn't update before a second rapid
   // Import tap re-reads it, so a ref bails the second tap before it opens the picker (see importForSection). It
   // also blocks a camera capture during an import's picker window (before the savingPhotos marker is set).
@@ -237,6 +265,46 @@ function Wizard(props: {
   // for all still-pending ids and only proceeds once it succeeds — a FAILED removal stays in the set (and
   // blocks submit) instead of being cleared, so the drain can never upload evidence the user removed.
   const pendingRemovalIds = useRef<Set<string>>(new Set());
+
+  // Track every inline recorder independently. A transcript arrives asynchronously after recording stops;
+  // leaving or submitting before it lands would discard the spoken text.
+  const [voiceBusyKeys, setVoiceBusyKeys] = useState<Set<string>>(() => new Set());
+  const voiceBusyHandlers = useRef<Map<string, (busy: boolean) => void>>(new Map());
+  const getVoiceBusyHandler = useCallback((key: string) => {
+    let handler = voiceBusyHandlers.current.get(key);
+    if (!handler) {
+      handler = (busy: boolean) =>
+        setVoiceBusyKeys((previous) => {
+          if (busy === previous.has(key)) return previous;
+          const next = new Set(previous);
+          if (busy) next.add(key);
+          else next.delete(key);
+          return next;
+        });
+      voiceBusyHandlers.current.set(key, handler);
+    }
+    return handler;
+  }, []);
+  const anyVoiceBusy = voiceBusyKeys.size > 0;
+  const navigationBusyMessage = scorecardEditorBusyMessage({
+    submitting,
+    savingPhotos: savingPhotos > 0,
+    voiceBusy: anyVoiceBusy || captionVoiceBusy,
+  });
+
+  // Covers hardware Back and iOS swipe-to-dismiss in addition to the visible header Back button.
+  usePreventRemove(Boolean(navigationBusyMessage) && !finalized.current, () => {
+    setNotice({ tone: "error", text: navigationBusyMessage ?? "Please wait before leaving this scorecard." });
+  });
+
+  // Navigate only after a successful save has re-rendered with the removal guard disabled. Calling router.back
+  // directly inside the async submit would race usePreventRemove and could either be blocked or double-pop.
+  useEffect(() => {
+    if (!submittedResult || submittedNavigationStarted.current) return;
+    submittedNavigationStarted.current = true;
+    onSubmitted(submittedResult.dealId, submittedResult.scorecardId);
+  }, [onSubmitted, submittedResult]);
+
   useEffect(() => {
     if (finalized.current) return;
     saveChain.current = saveChain.current
@@ -244,24 +312,42 @@ function Wizard(props: {
       .catch(() => undefined);
   }, [draft, ownerKey]);
 
+  // A local edit must open from disk even while offline. Refresh only the expiring display URLs after the
+  // reducer is mounted; the targeted reducer action cannot overwrite scores, notes, signatures, placements,
+  // captions, newly captured evidence, or the optimistic-concurrency token if the user edits while this GET runs.
+  useEffect(() => {
+    const scorecardId = draft.editingScorecardId;
+    if (!scorecardId) return;
+    let cancelled = false;
+    void getScorecard(fetcher, scorecardId)
+      .then(({ scorecard }) => {
+        if (cancelled) return;
+        dispatch({
+          type: "refreshExistingPhotoUrls",
+          urlsByScorecardPhotoId: Object.fromEntries(
+            scorecard.photos.map((photo) => [photo.id, photo.url ?? ""]),
+          ),
+        });
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [draft.editingScorecardId, fetcher]);
+
   const total = scorecardDraftTotal(draft);
+  const completionPercent = scorecardDraftCompletionPercent(draft);
   const validation = validateScorecardDraft(draft);
   const captionPhoto = draft.photos.find((photo) => photo.key === captionPhotoKey) ?? null;
+  const editingSubmitted = isEditingScorecardDraft(draft);
 
-  const goNext = () => setStep(Math.min(LAST_STEP, step + 1));
   const goBack = () => {
-    // Leaving the wizard (step 0 → router.back) unmounts it; if a photo copy is still in flight, its
-    // pending dispatch would be lost (the accepted photo never lands in the draft). Block until it settles.
-    // Step-back keeps the screen mounted, so it's always safe.
-    if (step === 0) {
-      if (savingPhotos > 0) {
-        setNotice({ tone: "error", text: "Saving a photo — one moment…" });
-        return;
-      }
-      router.back();
+    if (navigationBusyMessage) {
+      setNotice({ tone: "error", text: navigationBusyMessage });
       return;
     }
-    setStep(0);
+    if (step === 0) router.back();
+    else setStep(0);
   };
 
   // Remove a photo from the draft AND cancel any already-queued upload for it (a prior offline submit may
@@ -279,6 +365,9 @@ function Wizard(props: {
       photoCount.current -= 1;
     }
     dispatch({ type: "removePhoto", key: photo.key });
+    // Retained evidence was uploaded before this edit and has no queue item. Omitting its scorecard-photo id
+    // from the replacement PUT unlinks it without deleting the underlying project-gallery file.
+    if (isExistingScorecardDraftPhoto(photo)) return;
     const id = photo.clientUploadId;
     pendingRemovalIds.current.add(id);
     // Best-effort now; on success drop it from the pending set. On failure it STAYS pending so onSubmit
@@ -286,6 +375,27 @@ function Wizard(props: {
     void removeQueuedUploads(ownerKey, [id])
       .then(() => pendingRemovalIds.current.delete(id))
       .catch(() => undefined);
+  };
+
+  const openPhotoCaption = (photo: ScorecardDraftPhoto) => {
+    if (!isScorecardDraftPhotoCaptionEditable(draft, photo)) return;
+    setCaptionPhotoKey(photo.key);
+  };
+
+  const toggleDeficiency = (key: ScorecardDraft["criticalDeficiencies"][number]) => {
+    if (draft.criticalDeficiencies.includes(key)) {
+      const evidenceCount = draft.photos.filter(
+        (photo) => photo.sectionKey === "critical_deficiency" && photo.deficiencyKey === key,
+      ).length;
+      if (evidenceCount > 0) {
+        setNotice({
+          tone: "error",
+          text: `Remove the ${evidenceCount} evidence photo${evidenceCount === 1 ? "" : "s"} before clearing this deficiency.`,
+        });
+        return;
+      }
+    }
+    dispatch({ type: "toggleDeficiency", key });
   };
 
   async function onCameraCapture(shot: CapturedShot, caption: string) {
@@ -414,8 +524,56 @@ function Wizard(props: {
     }
   }
 
+  async function recoverEditConflict() {
+    const scorecardId = draft.editingScorecardId;
+    if (!scorecardId || submitting || conflictRecoveryInFlight.current) return;
+    conflictRecoveryInFlight.current = true;
+    setSubmitting(true);
+    setNotice(null);
+    try {
+      const { scorecard } = await getScorecard(fetcher, scorecardId);
+      const rebased = rebaseScorecardEditDraft(draft, scorecard);
+      // Persist the new revision token before exposing the form again. If the app is killed after this point,
+      // the next retry still uses the rebased token and retains every local editable field/new photo.
+      await saveChain.current.catch(() => undefined);
+      await saveScorecardDraft(ownerKey, rebased.draft, Date.now());
+      // Rebase can merge evidence added by the other edit or drop retained evidence it removed. Keep the
+      // synchronous cap guard aligned with the replacement reducer state before the form becomes interactive.
+      photoCount.current = rebased.draft.photos.length;
+      dispatch({ type: "replaceDraft", draft: rebased.draft });
+      setHasEditConflict(false);
+      const overflowMessage = scorecardPhotoOverflowMessage(rebased.draft.photos.length, { afterRebase: true });
+      setNotice({
+        tone: overflowMessage ? "error" : "success",
+        text: overflowMessage ?? scorecardEditRebaseMessage(rebased),
+      });
+    } catch (error) {
+      setNotice({
+        tone: "error",
+        text: error instanceof Error
+          ? `Couldn’t load the latest scorecard: ${error.message}`
+          : "Couldn’t load the latest scorecard. Try again when you’re online.",
+      });
+    } finally {
+      conflictRecoveryInFlight.current = false;
+      setSubmitting(false);
+    }
+  }
+
   async function onSubmit() {
     if (submitting) return;
+    if (savingPhotos > 0) {
+      setNotice({ tone: "error", text: "Saving a photo — try again in a moment." });
+      return;
+    }
+    if (anyVoiceBusy || captionVoiceBusy) {
+      setNotice({ tone: "error", text: "Finishing dictation — try Submit again in a moment." });
+      return;
+    }
+    if (!validation.canSubmit) {
+      setNotice({ tone: "error", text: submitBlockMessage(validation) });
+      return;
+    }
     // Freeze before the marker save so a second tap or a photo edit cannot race the captured payload.
     setSubmitting(true);
     setNotice(null);
@@ -423,11 +581,16 @@ function Wizard(props: {
     // needs a retry. Mark this BEFORE draining so the list screen never offers an unsafe discard that would
     // orphan confirmed evidence.
     let draftForSubmit = draft;
-    if (draft.photos.length > 0 && !draft.evidenceUploadAttempted) {
-      draftForSubmit = { ...draft, evidenceUploadAttempted: true };
+    const newPhotos = scorecardDraftNewPhotos(draft);
+    const attemptedPhotoIds = newPhotos.map((photo) => photo.clientUploadId);
+    const markedDraft = attemptedPhotoIds.length > 0
+      ? markScorecardEvidenceUploadAttempted(draft, attemptedPhotoIds)
+      : draft;
+    if (markedDraft !== draft) {
+      draftForSubmit = markedDraft;
       try {
-        // Flush earlier autosaves, then durably write the safety marker before the first upload can finish.
-        // A kill/restart between a partial upload and the next React effect must still block discard.
+        // Flush earlier autosaves, then durably write the safety marker + cleanup ledger before the first
+        // upload can finish. This also appends photos added after an earlier attempt.
         await saveChain.current.catch(() => undefined);
         await saveScorecardDraft(ownerKey, draftForSubmit, Date.now());
       } catch {
@@ -435,7 +598,7 @@ function Wizard(props: {
         setSubmitting(false);
         return;
       }
-      dispatch({ type: "markEvidenceUploadAttempted" });
+      dispatch({ type: "markEvidenceUploadAttempted", clientUploadIds: attemptedPhotoIds });
     }
     // Retry-cancel any still-pending photo removals, so the drain in submitScorecard can't upload a
     // just-removed photo. Only clear on success — a failure keeps the ids pending AND blocks submit
@@ -451,7 +614,7 @@ function Wizard(props: {
       }
     }
     try {
-      const result = await submitScorecard(fetcher, ownerKey, draftForSubmit);
+      const result = await submitScorecard(fetcher, ownerKey, draftForSubmit, { draftOfficeFetcher });
       if (result.status === "photos_failed") {
         setNotice({ tone: "error", text: `${result.failed} photo${result.failed === 1 ? "" : "s"} couldn’t upload after several tries. Remove and re-add ${result.failed === 1 ? "it" : "them"}, then submit.` });
         setSubmitting(false);
@@ -469,20 +632,28 @@ function Wizard(props: {
       finalized.current = true;
       await saveChain.current.catch(() => undefined); // let any in-flight autosave settle (it will skip)
       await deleteScorecardDraft(ownerKey, draftId).catch(() => undefined);
-      onSubmitted(draft.dealId);
-    } catch {
-      setNotice({ tone: "error", text: "Couldn’t submit the scorecard. Your work is saved — try again." });
+      setSubmitting(false);
+      setSubmittedResult({ dealId: draft.dealId, scorecardId: draft.editingScorecardId });
+    } catch (error) {
+      const submitError = scorecardEditorSubmitError(error, editingSubmitted);
+      setHasEditConflict(submitError.hasEditConflict);
+      setNotice({
+        tone: "error",
+        text: submitError.message,
+      });
       setSubmitting(false);
     }
   }
 
-  const title = step === 0 ? "Project Scorecard" : FIELD_SCORECARD_SECTIONS[step - 1].title;
+  const title = step === 0
+    ? editingSubmitted ? "Editing submitted scorecard" : "Project Scorecard"
+    : FIELD_SCORECARD_SECTIONS[step - 1].title;
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
       <ScreenHeader onBack={goBack} title={draft.dealName} />
       <View style={styles.progressTrack}>
-        <View style={[styles.progressFill, { width: `${(step / LAST_STEP) * 100}%` }]} />
+        <View style={[styles.progressFill, { width: `${completionPercent}%` }]} />
       </View>
 
       <ScrollView
@@ -492,7 +663,13 @@ function Wizard(props: {
         style={submitting ? styles.frozen : undefined}
       >
         <Text style={styles.stepTitle}>{title}</Text>
-        {notice ? <Banner message={notice.text} tone={notice.tone} /> : null}
+        {notice ? (
+          <Banner
+            message={notice.text}
+            tone={notice.tone}
+            action={hasEditConflict ? { label: "Retry with my changes", onPress: () => void recoverEditConflict() } : undefined}
+          />
+        ) : null}
 
         {step === 0 ? (
           <OverviewStep
@@ -501,9 +678,12 @@ function Wizard(props: {
             onOpenSection={(index) => setStep(index + 1)}
             onAddDeficiencyPhoto={(key) => { setCameraDeficiency(key); setCameraSection(-1); }}
             onImportDeficiencyPhoto={(key) => void importForSection(-1, key)}
-            onEditPhoto={(photo) => setCaptionPhotoKey(photo.key)}
+            onEditPhoto={openPhotoCaption}
+            onRemovePhoto={removePhotoAndCancelUpload}
+            onToggleDeficiency={toggleDeficiency}
             onSign={(field) => setSigningField(field)}
             voiceEnabled={voiceEnabled}
+            getVoiceBusyHandler={getVoiceBusyHandler}
             photosBusy={savingPhotos > 0}
           />
         ) : (
@@ -512,11 +692,12 @@ function Wizard(props: {
             draft={draft}
             dispatch={dispatch}
             voiceEnabled={voiceEnabled}
+            onVoiceBusyChange={getVoiceBusyHandler(`cat:${FIELD_SCORECARD_SECTIONS[step - 1].key}`)}
             onAddPhoto={() => setCameraSection(step - 1)}
             onImport={() => void importForSection(step - 1)}
             photosBusy={savingPhotos > 0}
             onRemovePhoto={removePhotoAndCancelUpload}
-            onEditPhoto={(photo) => setCaptionPhotoKey(photo.key)}
+            onEditPhoto={openPhotoCaption}
           />
         )}
       </ScrollView>
@@ -529,12 +710,17 @@ function Wizard(props: {
 
       <View style={styles.footer}>
         <View style={styles.totalPill}>
-          <Text style={styles.totalText}>{total}/100</Text>
+          <Text style={styles.totalText}>{total.toFixed(1)}/10</Text>
         </View>
         {step > 0 ? (
-          <Button title="Done" onPress={() => setStep(0)} style={{ flex: 1 }} />
+          <Button
+            title={savingPhotos > 0 ? "Saving photo…" : anyVoiceBusy ? "Finishing dictation…" : "Done"}
+            onPress={goBack}
+            disabled={Boolean(navigationBusyMessage)}
+            style={{ flex: 1 }}
+          />
         ) : (
-          <Button title={savingPhotos > 0 ? "Saving photo…" : "Submit ✓"} onPress={onSubmit} loading={submitting} disabled={!validation.canSubmit || submitting || savingPhotos > 0} style={{ flex: 1 }} />
+          <Button title={savingPhotos > 0 ? "Saving photo…" : anyVoiceBusy ? "Finishing dictation…" : editingSubmitted ? "Save changes" : "Submit ✓"} onPress={onSubmit} loading={submitting} disabled={!validation.canSubmit || submitting || savingPhotos > 0 || anyVoiceBusy} style={{ flex: 1 }} />
         )}
       </View>
 
@@ -699,8 +885,11 @@ function OverviewStep({
   onAddDeficiencyPhoto,
   onImportDeficiencyPhoto,
   onEditPhoto,
+  onRemovePhoto,
+  onToggleDeficiency,
   onSign,
   voiceEnabled,
+  getVoiceBusyHandler,
   photosBusy,
 }: {
   draft: ScorecardDraft;
@@ -709,8 +898,11 @@ function OverviewStep({
   onAddDeficiencyPhoto: (key: string) => void;
   onImportDeficiencyPhoto: (key: string) => void;
   onEditPhoto: (photo: ScorecardDraftPhoto) => void;
+  onRemovePhoto: (photo: ScorecardDraftPhoto) => void;
+  onToggleDeficiency: (key: ScorecardDraft["criticalDeficiencies"][number]) => void;
   onSign: (field: "superintendentSignature" | "pmSignature") => void;
   voiceEnabled: boolean;
+  getVoiceBusyHandler: (key: string) => (busy: boolean) => void;
   photosBusy: boolean;
 }) {
   const average = scorecardDraftTotal(draft);
@@ -732,7 +924,11 @@ function OverviewStep({
         <Field label="Project manager">
           <TextInput value={draft.pmName} onChangeText={(value) => dispatch({ type: "setHeader", field: "pmName", value })} placeholder="Name" />
         </Field>
-        <Field label="Week of"><Text style={styles.readonly}>Set automatically when completed</Text></Field>
+        <Field label="Week of">
+          <Text style={styles.readonly}>
+            {isEditingScorecardDraft(draft) ? draft.weekOf : "Set automatically when completed"}
+          </Text>
+        </Field>
       </View>
 
       <View style={{ gap: theme.space.sm }}>
@@ -767,7 +963,7 @@ function OverviewStep({
           return (
             <View key={deficiency.key} style={[styles.deficiencyCard, selected && styles.deficiencyCardSelected]}>
               <Pressable
-                onPress={() => dispatch({ type: "toggleDeficiency", key: deficiency.key })}
+                onPress={() => onToggleDeficiency(deficiency.key)}
                 style={styles.deficiencyToggle}
                 accessibilityRole="checkbox"
                 accessibilityState={{ checked: selected }}
@@ -785,7 +981,7 @@ function OverviewStep({
                       multiline
                       style={{ minHeight: 84, textAlignVertical: "top", paddingTop: 10 }}
                     />
-                    {voiceEnabled ? <VoiceRecorder onTranscript={(text) => dispatch({ type: "appendDeficiencyNote", key: deficiency.key, text })} /> : null}
+                    {voiceEnabled ? <VoiceRecorder onTranscript={(text) => dispatch({ type: "appendDeficiencyNote", key: deficiency.key, text })} onBusyChange={getVoiceBusyHandler(`def:${deficiency.key}`)} /> : null}
                   </Field>
                   <View style={styles.deficiencyActions}>
                     <Button title={count ? String(count) + (count === 1 ? " photo" : " photos") : "Camera"} variant="ghost" onPress={() => onAddDeficiencyPhoto(deficiency.key)} disabled={photosBusy} style={{ flex: 1 }} />
@@ -794,9 +990,13 @@ function OverviewStep({
                   {photos.length > 0 ? (
                     <View style={styles.photoRow}>
                       {photos.map((photo) => (
-                        <Pressable key={photo.key} onPress={() => onEditPhoto(photo)} accessibilityRole="button" accessibilityLabel="Edit photo description">
-                          <Image source={{ uri: photo.uri }} style={styles.thumb} />
-                        </Pressable>
+                        <DraftPhotoThumbnail
+                          key={photo.key}
+                          photo={photo}
+                          captionEditable={isScorecardDraftPhotoCaptionEditable(draft, photo)}
+                          onEdit={onEditPhoto}
+                          onRemove={onRemovePhoto}
+                        />
                       ))}
                     </View>
                   ) : null}
@@ -805,6 +1005,35 @@ function OverviewStep({
             </View>
           );
         })}
+      </View>
+
+      <View style={{ gap: theme.space.sm }}>
+        <SectionLabel>Action items</SectionLabel>
+        <Text style={styles.hint}>Add the follow-up work, owner commitments, or corrections captured in this report.</Text>
+        {draft.actionItems.map((item, index) => (
+          <View key={`action-item-${index}`} style={styles.actionItemEditor}>
+            <TextInput
+              value={item}
+              onChangeText={(value) => dispatch({ type: "setActionItem", index, value })}
+              placeholder={`Action item ${index + 1}`}
+              multiline
+              style={styles.actionItemInput}
+            />
+            <Button
+              title="Remove"
+              variant="ghost"
+              onPress={() => dispatch({ type: "removeActionItem", index })}
+              accessibilityLabel={`Remove action item ${index + 1}`}
+            />
+          </View>
+        ))}
+        <Button title="Add action item" variant="ghost" onPress={() => dispatch({ type: "addActionItem" })} />
+        {voiceEnabled ? (
+          <VoiceRecorder
+            onTranscript={(text) => dispatch({ type: "appendActionItem", text })}
+            onBusyChange={getVoiceBusyHandler("action-items")}
+          />
+        ) : null}
       </View>
 
       <View style={{ gap: theme.space.md }}>
@@ -852,11 +1081,67 @@ function SetupStep({ draft, dispatch }: { draft: ScorecardDraft; dispatch: React
   );
 }
 
+/** Retained submitted evidence can be removed, but its file-level caption is read-only in the edit contract. */
+function DraftPhotoThumbnail({
+  photo,
+  captionEditable,
+  onEdit,
+  onRemove,
+}: {
+  photo: ScorecardDraftPhoto;
+  captionEditable: boolean;
+  onEdit: (photo: ScorecardDraftPhoto) => void;
+  onRemove: (photo: ScorecardDraftPhoto) => void;
+}) {
+  const retained = isExistingScorecardDraftPhoto(photo);
+  const image = photo.uri
+    ? <Image source={{ uri: photo.uri }} style={styles.thumb} />
+    : <View style={styles.thumb} />;
+  return (
+    <View style={styles.thumbWrap}>
+      {!captionEditable ? (
+        <View
+          accessibilityRole="image"
+          accessibilityLabel={retained
+            ? photo.caption || "Submitted evidence photo"
+            : `${photo.caption || "Evidence photo"}. Description locked after upload attempt.`}
+        >
+          {image}
+          <View style={styles.thumbCaption}>
+            <Text style={styles.thumbCaptionText}>{retained ? "Submitted" : "Description locked"}</Text>
+          </View>
+        </View>
+      ) : (
+        <Pressable
+          onPress={() => onEdit(photo)}
+          accessibilityRole="button"
+          accessibilityLabel={photo.caption.trim() ? "Photo with description. Edit description." : "Photo. Add description."}
+        >
+          {image}
+          <View style={styles.thumbCaption}>
+            <Text style={styles.thumbCaptionText}>{photo.caption.trim() ? "Edit" : "Describe"}</Text>
+          </View>
+        </Pressable>
+      )}
+      <Pressable
+        onPress={() => onRemove(photo)}
+        hitSlop={8}
+        style={styles.thumbX}
+        accessibilityRole="button"
+        accessibilityLabel="Remove photo"
+      >
+        <Text style={styles.thumbXText}>✕</Text>
+      </Pressable>
+    </View>
+  );
+}
+
 function SectionStep({
-  sectionIndex, draft, dispatch, voiceEnabled, onAddPhoto, onImport, photosBusy, onRemovePhoto, onEditPhoto,
+  sectionIndex, draft, dispatch, voiceEnabled, onVoiceBusyChange, onAddPhoto, onImport, photosBusy, onRemovePhoto, onEditPhoto,
 }: {
   sectionIndex: number; draft: ScorecardDraft; dispatch: React.Dispatch<DraftAction>;
-  voiceEnabled: boolean; onAddPhoto: () => void; onImport: () => void; photosBusy: boolean;
+  voiceEnabled: boolean; onVoiceBusyChange: (busy: boolean) => void;
+  onAddPhoto: () => void; onImport: () => void; photosBusy: boolean;
   onRemovePhoto: (photo: ScorecardDraftPhoto) => void;
   onEditPhoto: (photo: ScorecardDraftPhoto) => void;
 }) {
@@ -878,31 +1163,28 @@ function SectionStep({
       <Field label="Notes">
         <TextInput value={note} onChangeText={(v) => dispatch({ type: "setNote", sectionKey: section.key, note: v })} placeholder="Observations for this category" multiline style={{ minHeight: 96, textAlignVertical: "top", paddingTop: 10 }} />
         {voiceEnabled ? (
-          <VoiceRecorder onTranscript={(t) => dispatch({ type: "appendNote", sectionKey: section.key, text: t })} />
+          <VoiceRecorder onTranscript={(t) => dispatch({ type: "appendNote", sectionKey: section.key, text: t })} onBusyChange={onVoiceBusyChange} />
         ) : null}
       </Field>
       <View style={{ gap: theme.space.sm }}>
         <SectionLabel>Evidence photos ({photos.length})</SectionLabel>
         <View style={styles.photoRow}>
           {photos.map((p) => (
-            <View key={p.key} style={styles.thumbWrap}>
-              <Pressable
-                onPress={() => onEditPhoto(p)}
-                accessibilityRole="button"
-                accessibilityLabel={p.caption.trim() ? "Photo with description. Edit description." : "Photo. Add description."}
-              >
-                <Image source={{ uri: p.uri }} style={styles.thumb} />
-                <View style={styles.thumbCaption}>
-                  <Text style={styles.thumbCaptionText}>{p.caption.trim() ? "Edit" : "Describe"}</Text>
-                </View>
-              </Pressable>
-              <Pressable onPress={() => onRemovePhoto(p)} hitSlop={8} style={styles.thumbX}>
-                <Text style={styles.thumbXText}>✕</Text>
-              </Pressable>
-            </View>
+            <DraftPhotoThumbnail
+              key={p.key}
+              photo={p}
+              captionEditable={isScorecardDraftPhotoCaptionEditable(draft, p)}
+              onEdit={onEditPhoto}
+              onRemove={onRemovePhoto}
+            />
           ))}
         </View>
-        {photos.length > 0 ? <Text style={styles.photoHint}>Tap a photo to add a description or dictate it.</Text> : null}
+        {photos.some((photo) => isScorecardDraftPhotoCaptionEditable(draft, photo)) ? (
+          <Text style={styles.photoHint}>Tap a new photo to add a description or dictate it.</Text>
+        ) : null}
+        {photos.some((photo) => !isExistingScorecardDraftPhoto(photo) && !isScorecardDraftPhotoCaptionEditable(draft, photo)) ? (
+          <Text style={styles.photoHint}>Uploaded descriptions are locked. Remove and re-add a photo to change its description.</Text>
+        ) : null}
         <View style={styles.actions}>
           <Button title="Add photo" variant="ghost" onPress={onAddPhoto} disabled={photosDisabled} style={{ flex: 1 }} />
           <Button title="Import" variant="ghost" onPress={onImport} disabled={photosDisabled} style={{ flex: 1 }} />
@@ -945,7 +1227,7 @@ function ReviewStep({ draft, onEditStep }: { draft: ScorecardDraft; onEditStep: 
   return (
     <View style={{ gap: theme.space.md }}>
       <View style={styles.scoreWrap}>
-        <Text style={styles.bigScore}>{total}<Text style={styles.bigScoreMax}> /100</Text></Text>
+        <Text style={styles.bigScore}>{total.toFixed(1)}<Text style={styles.bigScoreMax}> /10</Text></Text>
         <RatingBadge rating={rating} label={scorecardRatingLabel(rating)} />
       </View>
       <View style={{ gap: 2 }}>
@@ -1012,6 +1294,10 @@ function ReviewStep({ draft, onEditStep }: { draft: ScorecardDraft; onEditStep: 
 // The one-page reason Submit is blocked, surfaced as a banner above the footer button (the multi-step
 // ReviewStep that also computed this is not part of the current single-screen flow).
 function submitBlockMessage(v: ReturnType<typeof validateScorecardDraft>): string {
+  if (v.tooManyPhotos) {
+    return scorecardPhotoOverflowMessage(MAX_SCORECARD_PHOTOS + v.photoOverflowCount)
+      ?? "Remove extra photos before saving.";
+  }
   if (v.missingSections.length > 0) return `Score all ${SECTION_COUNT} sections to submit (${v.missingSections.length} left).`;
   if (v.missingSignatures) return "Add the Superintendent and Project Manager signatures to submit.";
   if (v.missingWeekOf) return "Set the Week Of date to submit.";
@@ -1100,6 +1386,8 @@ const styles = StyleSheet.create({
   deficiencyCardSelected: { backgroundColor: "rgba(220,40,40,0.05)", paddingHorizontal: theme.space.sm, borderRadius: theme.radius.sm, borderBottomColor: "transparent" },
   deficiencyToggle: { flexDirection: "row", alignItems: "center", gap: theme.space.md },
   deficiencyActions: { flexDirection: "row", gap: theme.space.sm, paddingLeft: 34 },
+  actionItemEditor: { gap: theme.space.sm, padding: theme.space.sm, borderWidth: 1, borderColor: theme.color.border, borderRadius: theme.radius.md, backgroundColor: theme.color.surfaceCard },
+  actionItemInput: { minHeight: 68, textAlignVertical: "top", paddingTop: 10 },
   captionModalRoot: { flex: 1, justifyContent: "flex-end", backgroundColor: "rgba(15,23,42,0.35)" },
   captionBackdrop: { ...StyleSheet.absoluteFillObject },
   captionSheet: { gap: theme.space.md, backgroundColor: theme.color.surfaceCard, borderTopLeftRadius: theme.radius.lg, borderTopRightRadius: theme.radius.lg, padding: theme.space.lg },

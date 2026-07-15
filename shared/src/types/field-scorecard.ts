@@ -379,6 +379,49 @@ export interface ScorecardSubmissionInput {
   summary?: string | null;
 }
 
+/**
+ * One evidence link in a full submitted-scorecard replacement.
+ *
+ * Existing evidence is addressed by the scorecard-photo link id returned by the detail endpoint, never by
+ * an arbitrary file id. Newly captured evidence keeps using the upload queue's client id. The server
+ * requires exactly one of these references and re-authorizes either form against the submitted card.
+ * Caption is intentionally absent: retained captions are shared project-gallery file metadata and remain
+ * read-only here; a new photo's caption is persisted by its upload before this replacement references it.
+ */
+export type ScorecardUpdatePhotoInput =
+  | {
+      scorecardPhotoId: string;
+      clientUploadId?: never;
+      sectionKey: ScorecardPhotoInput["sectionKey"];
+      deficiencyKey?: ScorecardV2CriticalDeficiencyKey | null;
+    }
+  | {
+      scorecardPhotoId?: never;
+      clientUploadId: string;
+      sectionKey: ScorecardPhotoInput["sectionKey"];
+      deficiencyKey?: ScorecardV2CriticalDeficiencyKey | null;
+    };
+
+/**
+ * PUT /field/scorecards/:id body. This is a full replacement of the editable form content; record identity,
+ * deal, form kind/version, completion week, submitter, and submission timestamps remain immutable.
+ */
+export interface ScorecardUpdateInput {
+  /** Optimistic-concurrency token returned by the latest summary/detail read. */
+  expectedUpdatedAt: string;
+  superintendentName?: string | null;
+  pmName?: string | null;
+  items: ScorecardSubmissionItem[];
+  criticalDeficiencies: string[];
+  criticalDeficiencyNotes?: Record<string, string>;
+  actionItems: string[];
+  photos: ScorecardUpdatePhotoInput[];
+  superintendentSignature?: string | null;
+  pmSignature?: string | null;
+  /** Leadership Project Summary free text (voice-dictatable). */
+  summary?: string | null;
+}
+
 export interface FieldScorecardSummary {
   id: string;
   dealId: string;
@@ -397,6 +440,10 @@ export interface FieldScorecardSummary {
   criticalDeficiencyCount: number;
   submittedByName: string | null;
   submittedAt: string;
+  /** Optimistic-concurrency token for submitted-scorecard edits. */
+  updatedAt?: string;
+  /** UI hint only; the update endpoint independently enforces exact submittedBy UUID ownership. */
+  canEdit?: boolean;
   // PDF-availability signal: the field artifact render is best-effort/async and can lag or fail, so the
   // stored PDF key may still be null when the summary is read. `false` → the Download-PDF action would 404;
   // the CRM tab renders a disabled "PDF generating…" state instead of a live link.
@@ -414,6 +461,8 @@ export interface FieldScorecardPhotoView {
     | "project_summary";
   deficiencyKey?: string | null;
   fileId: string;
+  /** Durable mobile upload identity, when this evidence originated in the submitted-card editor. */
+  clientUploadId?: string | null;
   url: string | null;
   caption: string | null;
 }

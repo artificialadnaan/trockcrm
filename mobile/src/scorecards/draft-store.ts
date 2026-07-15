@@ -10,6 +10,20 @@ import { createAsyncMutex, sanitizeOwnerKey } from "../capture/upload-queue-core
 import type { ScorecardDraft } from "./draft";
 
 const ROOT = `${FileSystem.documentDirectory}scorecard-drafts/`;
+const OWNER_REGISTRY_PATH = `${ROOT}owners.json`;
+
+export type ScorecardDraftOwner = {
+  ownerKey: string;
+  officeId: string | null;
+};
+
+export type LocatedScorecardDraft = ScorecardDraftOwner & {
+  draft: ScorecardDraft;
+};
+
+type StoredDraftOwner = ScorecardDraftOwner & {
+  userId: string;
+};
 
 // Serialize every index READ-MODIFY-WRITE (autosave upsert + delete) for this process. Both read the whole
 // index then write it back; run concurrently (a slow autosave racing the submit-delete, or two autosaves)
@@ -18,6 +32,9 @@ const ROOT = `${FileSystem.documentDirectory}scorecard-drafts/`;
 const withDraftLock = createAsyncMutex();
 // Deletion must beat any autosave already queued by an open draft screen.
 const discardedDraftIdsByOwner = new Map<string, Set<string>>();
+// Autosaves are frequent; after the first durable registration in this process, avoid rereading the
+// global owner registry on every keystroke/photo-caption save.
+const registeredDraftOwnerKeys = new Set<string>();
 
 function discardedDraftIds(ownerKey: string): Set<string> {
   let ids = discardedDraftIdsByOwner.get(ownerKey);
@@ -41,6 +58,109 @@ function photoDir(ownerKey: string, draftId: string): string {
 async function ensureDir(dir: string): Promise<void> {
   const info = await FileSystem.getInfoAsync(dir);
   if (!info.exists) await FileSystem.makeDirectoryAsync(dir, { intermediates: true });
+}
+
+function parseDraftOwner(ownerKey: string): StoredDraftOwner | null {
+  const separator = ownerKey.indexOf(":");
+  if (separator <= 0) return null;
+  const userId = ownerKey.slice(0, separator);
+  const officeId = ownerKey.slice(separator + 1);
+  return { userId, ownerKey, officeId: officeId || null };
+}
+
+async function readOwnerRegistryFile(file: string): Promise<StoredDraftOwner[] | null> {
+  try {
+    const info = await FileSystem.getInfoAsync(file);
+    if (!info.exists) return null;
+    const raw = await FileSystem.readAsStringAsync(file);
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return null;
+    return parsed.flatMap((entry): StoredDraftOwner[] => {
+      if (!entry || typeof entry !== "object") return [];
+      const candidate = entry as Partial<StoredDraftOwner>;
+      if (typeof candidate.userId !== "string" || typeof candidate.ownerKey !== "string") return [];
+      if (candidate.officeId !== null && typeof candidate.officeId !== "string") return [];
+      const normalized = parseDraftOwner(candidate.ownerKey);
+      // Never let a corrupt/tampered registry redirect one user's recovery pass into another user's local
+      // namespace or bind a queue to a mismatched office header.
+      if (!normalized || normalized.userId !== candidate.userId || normalized.officeId !== candidate.officeId) return [];
+      return [normalized];
+    });
+  } catch {
+    return null;
+  }
+}
+
+async function readOwnerRegistry(): Promise<StoredDraftOwner[]> {
+  const temp = await readOwnerRegistryFile(`${OWNER_REGISTRY_PATH}.tmp`);
+  if (temp !== null) return temp;
+  return (await readOwnerRegistryFile(OWNER_REGISTRY_PATH)) ?? [];
+}
+
+async function writeOwnerRegistry(owners: StoredDraftOwner[]): Promise<void> {
+  await ensureDir(ROOT);
+  const tmp = `${OWNER_REGISTRY_PATH}.tmp`;
+  await FileSystem.writeAsStringAsync(tmp, JSON.stringify(owners));
+  await FileSystem.deleteAsync(OWNER_REGISTRY_PATH, { idempotent: true });
+  await FileSystem.moveAsync({ from: tmp, to: OWNER_REGISTRY_PATH });
+}
+
+/**
+ * Remember every office namespace that has held one of this user's scorecard drafts. This lets the
+ * In Progress screen and background uploader recover an edit created from a cross-office scorecard;
+ * neither surface can infer that owning office from the currently active office alone.
+ *
+ * Must be called while holding withDraftLock.
+ */
+async function registerDraftOwner(ownerKey: string): Promise<void> {
+  if (registeredDraftOwnerKeys.has(ownerKey)) return;
+  const owner = parseDraftOwner(ownerKey);
+  if (!owner) return; // Tests/legacy callers may use a non-production key without the user:office shape.
+  const owners = await readOwnerRegistry();
+  if (owners.some((entry) => entry.ownerKey === ownerKey)) {
+    registeredDraftOwnerKeys.add(ownerKey);
+    return;
+  }
+  await writeOwnerRegistry([...owners, owner]);
+  registeredDraftOwnerKeys.add(ownerKey);
+}
+
+/** All known scorecard-draft office namespaces for a user, always including the active/fallback one. */
+export async function listScorecardDraftOwners(
+  userId: string,
+  fallbackOwnerKey: string,
+): Promise<ScorecardDraftOwner[]> {
+  const fallback = parseDraftOwner(fallbackOwnerKey);
+  const registered = (await readOwnerRegistry()).filter((entry) => entry.userId === userId);
+  const byKey = new Map<string, ScorecardDraftOwner>();
+  if (fallback?.userId === userId) {
+    byKey.set(fallback.ownerKey, { ownerKey: fallback.ownerKey, officeId: fallback.officeId });
+  }
+  for (const owner of registered) {
+    byKey.set(owner.ownerKey, { ownerKey: owner.ownerKey, officeId: owner.officeId });
+  }
+  return [...byKey.values()];
+}
+
+/** Aggregate local drafts across active and cross-office namespaces, retaining where each draft lives. */
+export async function listScorecardDraftsForUser(
+  userId: string,
+  fallbackOwnerKey: string,
+): Promise<LocatedScorecardDraft[]> {
+  const owners = await listScorecardDraftOwners(userId, fallbackOwnerKey);
+  const batches = await Promise.all(
+    owners.map(async (owner) =>
+      (await listScorecardDrafts(owner.ownerKey)).map((draft) => ({ ...owner, draft })),
+    ),
+  );
+  // A draft id should have one owner, but prefer the newest copy if an interrupted migration/old build ever
+  // left a duplicate so the UI never displays two resumptions of the same logical draft.
+  const byId = new Map<string, LocatedScorecardDraft>();
+  for (const located of batches.flat()) {
+    const current = byId.get(located.draft.id);
+    if (!current || located.draft.updatedAt > current.draft.updatedAt) byId.set(located.draft.id, located);
+  }
+  return [...byId.values()];
 }
 
 // Read + parse one index file, or null if missing / partial / unparseable.
@@ -85,6 +205,9 @@ async function writeIndex(ownerKey: string, drafts: ScorecardDraft[]): Promise<v
 export async function saveScorecardDraft(ownerKey: string, draft: ScorecardDraft, now: number): Promise<void> {
   await withDraftLock(async () => {
     if (discardedDraftIds(ownerKey).has(draft.id)) return;
+    // Register before the per-owner index write. A stale registry entry is harmless if the later write
+    // fails, while an unregistered successful cross-office draft would be invisible to recovery surfaces.
+    await registerDraftOwner(ownerKey);
     const drafts = await listScorecardDrafts(ownerKey);
     const stamped = { ...draft, updatedAt: now };
     const idx = drafts.findIndex((d) => d.id === draft.id);

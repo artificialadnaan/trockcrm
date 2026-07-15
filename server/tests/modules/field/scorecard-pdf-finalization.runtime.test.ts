@@ -42,6 +42,8 @@ const RETRY_CARD = "55555555-5555-5555-5555-000000000002";
 const CHANGED_CARD = "55555555-5555-5555-5555-000000000003";
 const CAPTION_CHANGED_CARD = "55555555-5555-5555-5555-000000000004";
 const INTERLEAVED_CARD = "55555555-5555-5555-5555-000000000005";
+const CONTENT_CHANGED_CARD = "55555555-5555-5555-5555-000000000006";
+const CONCURRENT_CARD = "55555555-5555-5555-5555-000000000007";
 const EVIDENCE_PNG = readFileSync(new URL("../../../../client-field/public/favicon-32x32.png", import.meta.url));
 
 let pg: PGlite;
@@ -183,6 +185,59 @@ describe("finalizeFieldScorecardArtifacts", () => {
       SELECT pdf_r2_key, pdf_render_version FROM field_scorecards WHERE id = ${CAPTION_CHANGED_CARD}::uuid
     `);
     expect(row.rows[0]).toMatchObject({ pdf_r2_key: null, pdf_render_version: 1 });
+  });
+
+  it("does not publish a stale PDF when scorecard content changes without changing evidence", async () => {
+    await seedScorecard(CONTENT_CHANGED_CARD);
+    r2Mocks.putObject.mockImplementationOnce(async () => {
+      await db.execute(sql`
+        UPDATE field_scorecard_items
+        SET points = 10, note = 'Edited while the original PDF was rendering.'
+        WHERE scorecard_id = ${CONTENT_CHANGED_CARD}::uuid
+      `);
+      await db.execute(sql`
+        UPDATE field_scorecards
+        SET total_score = 100, average_score = 10, rating = 'elite', updated_at = updated_at + INTERVAL '1 second'
+        WHERE id = ${CONTENT_CHANGED_CARD}::uuid
+      `);
+    });
+
+    await expect(
+      finalizeFieldScorecardArtifacts({ id: "office-1", slug: "dallas" }, USER, CONTENT_CHANGED_CARD),
+    ).rejects.toMatchObject({ statusCode: 503, code: "SCORECARD_CONTENT_CHANGED" });
+
+    const row = await db.execute(sql`
+      SELECT pdf_r2_key, pdf_render_version FROM field_scorecards WHERE id = ${CONTENT_CHANGED_CARD}::uuid
+    `);
+    expect(row.rows[0]).toMatchObject({ pdf_r2_key: null, pdf_render_version: 1 });
+  });
+
+  it("lets two cross-instance finalizers for the same generation converge", async () => {
+    await seedScorecard(CONCURRENT_CARD);
+
+    // Hold both immutable uploads until both uncoalesced attempts reach publication. In production these
+    // callbacks model separate server instances, whose process-local single-flight maps cannot coalesce.
+    let entered = 0;
+    let releaseBoth!: () => void;
+    const bothEntered = new Promise<void>((resolve) => { releaseBoth = resolve; });
+    r2Mocks.putObject.mockImplementation(async () => {
+      entered += 1;
+      if (entered === 2) releaseBoth();
+      await bothEntered;
+    });
+
+    const [first, second] = await Promise.all([
+      renderAndStoreFieldScorecardArtifacts({ id: "office-1", slug: "dallas" }, USER, CONCURRENT_CARD),
+      renderAndStoreFieldScorecardArtifacts({ id: "office-1", slug: "dallas" }, USER, CONCURRENT_CARD),
+    ]);
+
+    expect(first).toMatch(new RegExp(`${CONCURRENT_CARD}\\.[a-f0-9]{64}\\.v2\\.pdf$`));
+    expect(second).toMatch(new RegExp(`${CONCURRENT_CARD}\\.[a-f0-9]{64}\\.v2\\.pdf$`));
+    const row = await db.execute(sql`
+      SELECT pdf_r2_key, pdf_render_version FROM field_scorecards WHERE id = ${CONCURRENT_CARD}::uuid
+    `);
+    expect(row.rows[0]).toMatchObject({ pdf_render_version: 2 });
+    expect([first, second]).toContain(row.rows[0]?.pdf_r2_key);
   });
 
   it("a stale finalizer cannot overwrite the object published by a newer evidence generation", async () => {

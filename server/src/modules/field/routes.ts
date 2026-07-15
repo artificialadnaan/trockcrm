@@ -36,8 +36,9 @@ import {
   listFieldScorecardsForProject,
   listRecentFieldScorecards,
   presignFieldScorecardPdf,
+  updateFieldScorecard,
 } from "./scorecards-service.js";
-import { parseScorecardSubmission } from "./scorecard-submission.js";
+import { parseScorecardSubmission, parseScorecardUpdate } from "./scorecard-submission.js";
 import { getFileDownloadUrl } from "../files/service.js";
 import {
   assertAccessibleFieldCaptureTarget,
@@ -76,6 +77,10 @@ import {
 import { assertPhotosBelongToDeal, generatePublicToken } from "../public-photo-tokens/service.js";
 import { publicPhotoShareUrl } from "../public-photo-tokens/public-share-url.js";
 import { resolveScorecardTeamNames } from "../deals/team-service.js";
+import {
+  assertScorecardEvidenceUploadAccess,
+  discardScorecardEditEvidence,
+} from "./scorecard-evidence-upload.js";
 
 // Default capture-target picker page size (mirrors searchPhotoUploadTargets' internal default), used as
 // the GLOBAL cap when the cross-office picker merges per-office results.
@@ -90,6 +95,36 @@ function parseOptionalPositiveInt(value: unknown): number | undefined {
     throw new AppError(400, "limit must be a positive integer between 1 and 100");
   }
   return parsed;
+}
+
+function parseOptionalScorecardId(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !value.trim()) {
+    throw new AppError(400, "scorecardId must be a valid UUID.");
+  }
+  const scorecardId = value.trim();
+  assertValidUuid(scorecardId, "scorecardId");
+  return scorecardId;
+}
+
+function parseOptionalClientUploadId(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !value.trim() || value.trim().length > 64) {
+    throw new AppError(400, "clientUploadId must be a non-empty string of at most 64 characters.");
+  }
+  return value.trim();
+}
+
+function parseScorecardDiscardEvidenceIds(value: unknown): string[] {
+  if (!Array.isArray(value)) throw new AppError(400, "clientUploadIds must be an array.");
+  if (value.length > 100) throw new AppError(400, "At most 100 evidence uploads can be discarded at once.");
+  const ids = value.map((candidate) => {
+    if (typeof candidate !== "string" || !candidate.trim() || candidate.trim().length > 64) {
+      throw new AppError(400, "Each clientUploadId must be a non-empty string of at most 64 characters.");
+    }
+    return candidate.trim();
+  });
+  return [...new Set(ids)];
 }
 
 function parseRequiredCoordinate(value: unknown, name: "lat" | "lng", min: number, max: number): number {
@@ -131,6 +166,31 @@ async function runFieldDealWrite<T>(
   assertValidCaptureTargetIds(target);
   const office = await resolveFieldWriteOffice(req.fieldUser!.tenantId, target, notFoundMessage);
   return runInOfficeTransaction(office, req.fieldUser!.id, run);
+}
+
+/**
+ * Photo writes ordinarily keep the generic cross-office feature flag semantics. Submitted-scorecard edit
+ * evidence is the narrow exception: resolve by immutable scorecard id, then authorize owner + deal inside
+ * that office before minting or confirming anything.
+ */
+async function runFieldPhotoWrite<T>(
+  req: any,
+  target: { dealId?: string; leadId?: string; opportunityId?: string },
+  scorecardId: string | undefined,
+  run: (db: FieldTenantDb, office: FieldOffice) => Promise<T>,
+  notFoundMessage?: string,
+): Promise<T> {
+  if (!scorecardId) return runFieldDealWrite(req, target, run, notFoundMessage);
+  assertValidCaptureTargetIds(target);
+  const office = await resolveWriteOffice("scorecard", scorecardId, "Scorecard not found");
+  return runInOfficeTransaction(office, req.fieldUser!.id, async (db, resolvedOffice) => {
+    await assertScorecardEvidenceUploadAccess(db, {
+      scorecardId,
+      userId: req.fieldUser!.id,
+      target,
+    });
+    return run(db, resolvedOffice);
+  });
 }
 
 /** Run a FILE-targeted field write (tags, transcription) in the photo's resolved (or uploader's) office. */
@@ -407,9 +467,14 @@ fieldRoutes.post("/photos/upload-url", requireFieldContractor, async (req, res, 
       leadId: typeof req.body.leadId === "string" ? req.body.leadId : undefined,
       opportunityId: typeof req.body.opportunityId === "string" ? req.body.opportunityId : undefined,
     };
+    const scorecardId = parseOptionalScorecardId(req.body.scorecardId);
+    const clientUploadId = parseOptionalClientUploadId(req.body.clientUploadId);
+    if (scorecardId && !clientUploadId) {
+      throw new AppError(400, "clientUploadId is required for scorecard edit evidence.");
+    }
     // The R2 key (b) is bound to the resolved office via `officeSlug: office.slug`; the deal-number
     // lookup inside requestUploadUrl runs in that same office's schema (a).
-    const result = await runFieldDealWrite(req, target, (db, office) =>
+    const result = await runFieldPhotoWrite(req, target, scorecardId, (db, office) =>
       requestFieldPhotoUploadUrl(db, {
         officeSlug: office.slug,
         userId: req.fieldUser!.id,
@@ -420,6 +485,8 @@ fieldRoutes.post("/photos/upload-url", requireFieldContractor, async (req, res, 
         photoCategory: req.body.category ?? req.body.photoCategory ?? null,
         caption: req.body.caption ?? null,
         tags: Array.isArray(req.body.tags) ? req.body.tags.map(String) : [],
+        scorecardId,
+        clientUploadId,
       }),
     );
     res.json(result);
@@ -435,9 +502,14 @@ fieldRoutes.post("/photos/confirm-upload", requireFieldContractor, async (req, r
       leadId: typeof req.body.leadId === "string" ? req.body.leadId : undefined,
       opportunityId: typeof req.body.opportunityId === "string" ? req.body.opportunityId : undefined,
     };
+    const scorecardId = parseOptionalScorecardId(req.body.scorecardId);
+    const clientUploadId = parseOptionalClientUploadId(req.body.clientUploadId);
+    if (scorecardId && !clientUploadId) {
+      throw new AppError(400, "clientUploadId is required for scorecard edit evidence.");
+    }
     // job_queue.office_id (c) is bound to the resolved office via `officeId: office.id`; officeSlug lets
     // confirmFieldPhotoUpload assert the token's r2Key was minted under this same office.
-    const result = await runFieldDealWrite(req, target, (db, office) =>
+    const result = await runFieldPhotoWrite(req, target, scorecardId, (db, office) =>
       confirmFieldPhotoUpload(db, {
         userId: req.fieldUser!.id,
         userRole: req.fieldUser!.role,
@@ -446,7 +518,8 @@ fieldRoutes.post("/photos/confirm-upload", requireFieldContractor, async (req, r
         ...target,
         uploadToken: String(req.body.uploadToken),
         objectKey: String(req.body.objectKey),
-        clientUploadId: typeof req.body.clientUploadId === "string" ? req.body.clientUploadId : undefined,
+        clientUploadId,
+        scorecardId,
         latitude: req.body.latitude !== undefined ? Number(req.body.latitude) : undefined,
         longitude: req.body.longitude !== undefined ? Number(req.body.longitude) : undefined,
         addressSource: req.body.addressSource,
@@ -954,13 +1027,73 @@ fieldRoutes.get("/scorecards", requireFieldContractor, async (req, res, next) =>
     const limitRaw = parseInt(req.query.limit as string, 10);
     const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 200) : 50;
     const { results, failures } = assertFanOutNotFullyDegraded(
-      await fanOutActiveOffices((officeDb) => listRecentFieldScorecards(officeDb, { limit })),
+      await fanOutActiveOffices((officeDb) =>
+        listRecentFieldScorecards(officeDb, { limit, viewerUserId: req.fieldUser!.id }),
+      ),
     );
     const scorecards = results
       .flatMap(({ office, value }) => value.scorecards.map((s) => ({ ...s, ...officeTag(office) })))
       .sort((a, b) => (b.submittedAt ?? "").localeCompare(a.submittedAt ?? ""))
       .slice(0, limit);
     res.json({ scorecards, degradedOffices: failures.map((failure) => failure.office.slug) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Discard cleanup for a submitted-card edit whose new evidence may already have confirmed before a 409.
+// Resolve by immutable scorecard id (like PUT), then let the service enforce exact submitter/deal ownership
+// and preserve anything that another successful request already linked to a scorecard.
+fieldRoutes.post("/scorecards/:id/discard-edit-evidence", requireFieldContractor, async (req, res, next) => {
+  try {
+    const id = String(req.params.id);
+    assertValidUuid(id, "id");
+    const clientUploadIds = parseScorecardDiscardEvidenceIds(req.body?.clientUploadIds);
+    const office = await resolveWriteOffice("scorecard", id, "Scorecard not found");
+    const result = await runInOfficeTransaction(office, req.fieldUser!.id, (db) =>
+      discardScorecardEditEvidence(db, {
+        scorecardId: id,
+        userId: req.fieldUser!.id,
+        clientUploadIds,
+      }),
+    );
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Full replacement of a submitted current-form scorecard's editable content. Unlike a new submission,
+// this write always resolves by SCORECARD id (independent of the cross-office-write feature flag): the row
+// already has one authoritative owning schema. The service enforces exact submittedBy UUID ownership with
+// no admin/director override, derives immutable deal/kind/version/week fields from that row, and applies an
+// optimistic updatedAt token before replacing content.
+fieldRoutes.put("/scorecards/:id", requireFieldContractor, async (req, res, next) => {
+  try {
+    const id = String(req.params.id);
+    assertValidUuid(id, "id");
+    const parsed = parseScorecardUpdate(req.body);
+    const office = await resolveWriteOffice("scorecard", id, "Scorecard not found");
+    const result = await runInOfficeTransaction(office, req.fieldUser!.id, (db) =>
+      updateFieldScorecard(db, {
+        userId: req.fieldUser!.id,
+        userRole: req.fieldUser!.role,
+        scorecardId: id,
+        ...parsed,
+      }),
+    );
+
+    // The edit is durable once the office transaction returns. Regenerate the immutable PDF after the
+    // response just like create: storage/transcode failures must not roll back or hide the successful edit.
+    res.json(result);
+    void finalizeFieldScorecardArtifacts(office, req.fieldUser!.id, id).catch((err) => {
+      console.error("[field-scorecard] PDF finalize failed after edit (edit is saved)", {
+        scorecardId: id,
+        office: office.slug,
+        err,
+      });
+    });
+    return;
   } catch (err) {
     next(err);
   }

@@ -42,7 +42,7 @@ export type AssignTargetResponse = { photo: FieldPhoto };
 export type TagsResponse = { tags: string[] };
 export type ProjectTagsResponse = { tags: string[] };
 
-export type UploadUrlRequest = {
+type UploadUrlRequestBase = {
   dealId?: string;
   leadId?: string;
   opportunityId?: string;
@@ -52,6 +52,13 @@ export type UploadUrlRequest = {
   caption?: string | null;
   tags?: string[];
 };
+
+/** A submitted-card edit upload must carry the queue id used to persist its exact authorization scope. */
+type UploadUrlScorecardScope =
+  | { scorecardId: string; clientUploadId: string }
+  | { scorecardId?: never; clientUploadId?: string };
+
+export type UploadUrlRequest = UploadUrlRequestBase & UploadUrlScorecardScope;
 export type UploadUrlResponse = {
   uploadUrl: string;
   objectKey: string;
@@ -66,6 +73,8 @@ export type ConfirmUploadRequest = {
   dealId?: string;
   leadId?: string;
   opportunityId?: string;
+  /** Must match the submitted-card edit scope used to mint the upload URL. */
+  scorecardId?: string;
   uploadToken: string;
   objectKey: string;
   /** Stable idempotency key so a resumed/background re-upload returns the existing photo, never a dup. */
@@ -186,10 +195,16 @@ export type FieldScorecardPhotoView = {
   sectionKey: ScorecardSectionKey | ScorecardLeadershipSectionKey | "critical_deficiency" | "project_summary";
   deficiencyKey?: string | null;
   fileId: string;
+  /** Durable upload identity used to reconcile a PUT that committed after its response was lost. */
+  clientUploadId?: string | null;
   url: string | null;
   caption: string | null;
 };
 export type FieldScorecardDetail = FieldScorecardSummary & {
+  /** Server-authoritative owner check: true only for the user who originally submitted this scorecard. */
+  canEdit: boolean;
+  /** Optimistic-concurrency token used when replacing an editable scorecard. */
+  updatedAt: string;
   criticalDeficiencyNotes?: Record<string, string>;
   superintendentSignature?: string | null;
   pmSignature?: string | null;
@@ -211,6 +226,7 @@ export type ScorecardDetailResponse = { scorecard: FieldScorecardDetail };
 // Matches server getFieldScorecardPdfDownload: { url, expiresAt } — NOT the report { url, filename } shape.
 export type ScorecardDownloadResponse = { url: string; expiresAt: string };
 export type CreateScorecardResponse = { scorecard: FieldScorecardSummary };
+export type UpdateScorecardResponse = { scorecard: FieldScorecardSummary };
 
 // The deal's assigned Superintendent + PM names, as returned by the FIELD route
 // GET /field/projects/:dealId/team. The server already resolves the two roles from the ACTIVE team rows

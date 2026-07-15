@@ -2,19 +2,24 @@ import {
   createScorecardDraft,
   createLeadershipScorecardDraft,
   isLeadershipDraft,
+  isScorecardDraftPhotoCaptionEditable,
   scorecardDraftReducer,
   scorecardDraftTotal,
   scorecardDraftAverage,
   scorecardDraftSectionsAnswered,
+  scorecardDraftCompletionPercent,
   isScorecardDraftComplete,
   scorecardDraftRating,
   scorecardActionItemsRequired,
   scorecardDraftPhotosForSection,
   scorecardDraftSummaryPhotos,
+  scorecardDraftEvidenceCleanupIds,
   validateScorecardDraft,
   scorecardDraftToSubmission,
   resolveScorecardTeamNames,
   seedScorecardDraftTeam,
+  MAX_SCORECARD_PHOTOS,
+  type DraftAction,
   type ScorecardDraft,
 } from "../draft";
 import { FIELD_SCORECARD_SECTION_KEYS, FIELD_SCORECARD_LEADERSHIP_SECTION_KEYS } from "../scoring";
@@ -39,6 +44,16 @@ function fullyScored(): ScorecardDraft {
   d = scorecardDraftReducer(d, { type: "setSignature", field: "superintendentSignature", value: "Sam Super" });
   d = scorecardDraftReducer(d, { type: "setSignature", field: "pmSignature", value: "Pat PM" });
   return d;
+}
+
+function signProject(draft: ScorecardDraft): ScorecardDraft {
+  let signed = scorecardDraftReducer(draft, {
+    type: "setSignature",
+    field: "superintendentSignature",
+    value: "Sam Super",
+  });
+  signed = scorecardDraftReducer(signed, { type: "setSignature", field: "pmSignature", value: "Pat PM" });
+  return signed;
 }
 
 describe("createScorecardDraft", () => {
@@ -75,6 +90,45 @@ describe("scoring", () => {
     d = scorecardDraftReducer(d, { type: "setScore", sectionKey: "schedule", points: 9 });
     expect(d.scores.schedule).toBe(9);
   });
+
+  it.each([
+    ["score", { type: "setScore", sectionKey: "schedule", points: 7 }],
+    ["note", { type: "setNote", sectionKey: "schedule", note: "Changed" }],
+    ["header", { type: "setHeader", field: "pmName", value: "Changed PM" }],
+    ["deficiency", { type: "toggleDeficiency", key: "safety_violation" }],
+    ["action item", { type: "setActionItems", items: ["Changed action"] }],
+    ["photo", {
+      type: "addPhoto",
+      photo: { key: "changed-photo", uri: "file://changed", clientUploadId: "changed-upload", sectionKey: "quality", caption: "" },
+    }],
+  ] satisfies [string, DraftAction][]) ("clears both Project signatures after a %s mutation", (_label, action) => {
+    const changed = scorecardDraftReducer(fullyScored(), action);
+    expect(changed.superintendentSignature).toBe("");
+    expect(changed.pmSignature).toBe("");
+  });
+
+  it("preserves the other approval while collecting the second signature", () => {
+    const superintendentSigned = scorecardDraftReducer(newDraft(), {
+      type: "setSignature",
+      field: "superintendentSignature",
+      value: "Sam Super",
+    });
+    const bothSigned = scorecardDraftReducer(superintendentSigned, {
+      type: "setSignature",
+      field: "pmSignature",
+      value: "Pat PM",
+    });
+    expect(bothSigned.superintendentSignature).toBe("Sam Super");
+    expect(bothSigned.pmSignature).toBe("Pat PM");
+  });
+
+  it("reports progress from rated categories without dividing by a navigation step", () => {
+    let d = newDraft();
+    expect(scorecardDraftCompletionPercent(d)).toBe(0);
+    d = scorecardDraftReducer(d, { type: "setScore", sectionKey: "schedule", points: 8 });
+    expect(scorecardDraftCompletionPercent(d)).toBe(12.5);
+    expect(scorecardDraftCompletionPercent(fullyScored())).toBe(100);
+  });
 });
 
 describe("category action items", () => {
@@ -83,14 +137,14 @@ describe("category action items", () => {
     d = scorecardDraftReducer(d, { type: "setScore", sectionKey: "schedule", points: 4 });
     expect(scorecardActionItemsRequired(d)).toBe(false);
     expect(validateScorecardDraft(d).needsActionItems).toBe(false);
-    expect(validateScorecardDraft(d).canSubmit).toBe(true);
+    expect(validateScorecardDraft(signProject(d)).canSubmit).toBe(true);
   });
 
   it("allows deficiency evidence without a global action-item gate", () => {
     let d = fullyScored();
     d = scorecardDraftReducer(d, { type: "toggleDeficiency", key: "failed_inspection" });
     expect(scorecardActionItemsRequired(d)).toBe(false);
-    expect(validateScorecardDraft(d).canSubmit).toBe(true);
+    expect(validateScorecardDraft(signProject(d)).canSubmit).toBe(true);
   });
 
   it("toggleDeficiency adds then removes", () => {
@@ -126,7 +180,25 @@ describe("validation", () => {
     }
     d = scorecardDraftReducer(d, { type: "setHeader", field: "weekOf", value: "2026-06-30" });
     expect(validateScorecardDraft(d).missingWeekOf).toBe(false);
-    expect(validateScorecardDraft(d).canSubmit).toBe(true);
+    expect(validateScorecardDraft(signProject(d)).canSubmit).toBe(true);
+  });
+
+  it("preserves an over-cap conflict result but visibly blocks submission until photos are removed", () => {
+    const d: ScorecardDraft = {
+      ...fullyScored(),
+      photos: Array.from({ length: MAX_SCORECARD_PHOTOS + 1 }, (_, index) => ({
+        key: `photo-${index}`,
+        uri: `file:///photo-${index}.jpg`,
+        clientUploadId: `upload-${index}`,
+        sectionKey: "quality" as const,
+        caption: "",
+      })),
+    };
+    const validation = validateScorecardDraft(d);
+    expect(validation.tooManyPhotos).toBe(true);
+    expect(validation.photoOverflowCount).toBe(1);
+    expect(validation.canSubmit).toBe(false);
+    expect(d.photos).toHaveLength(101);
   });
 });
 
@@ -182,6 +254,16 @@ describe("appendActionItem", () => {
     d = scorecardDraftReducer(d, { type: "setActionItems", items: ["Keep"] });
     d = scorecardDraftReducer(d, { type: "appendActionItem", text: "   " });
     expect(d.actionItems).toEqual(["Keep"]);
+  });
+
+  it("supports adding, editing, and removing individual action items", () => {
+    let d = newDraft();
+    d = scorecardDraftReducer(d, { type: "addActionItem" });
+    d = scorecardDraftReducer(d, { type: "setActionItem", index: 0, value: "Repair guardrail" });
+    d = scorecardDraftReducer(d, { type: "addActionItem" });
+    d = scorecardDraftReducer(d, { type: "setActionItem", index: 1, value: "Schedule inspection" });
+    d = scorecardDraftReducer(d, { type: "removeActionItem", index: 0 });
+    expect(d.actionItems).toEqual(["Schedule inspection"]);
   });
 });
 
@@ -349,6 +431,24 @@ describe("leadership validation", () => {
     expect(v.missingWeekOf).toBe(false); // server stamps week-of at completion
     expect(v.canSubmit).toBe(true); // no signatures/week-of gate blocks it
   });
+
+  it("applies the same evidence cap without dropping leadership category photos", () => {
+    const d: ScorecardDraft = {
+      ...fullyScoredLeadership(7),
+      photos: Array.from({ length: MAX_SCORECARD_PHOTOS + 2 }, (_, index) => ({
+        key: `lead-photo-${index}`,
+        uri: `file:///lead-photo-${index}.jpg`,
+        clientUploadId: `lead-upload-${index}`,
+        sectionKey: "safety" as const,
+        caption: "",
+      })),
+    };
+    const validation = validateScorecardDraft(d);
+    expect(validation.tooManyPhotos).toBe(true);
+    expect(validation.photoOverflowCount).toBe(2);
+    expect(validation.canSubmit).toBe(false);
+    expect(d.photos).toHaveLength(102);
+  });
 });
 
 describe("leadership photos", () => {
@@ -370,6 +470,73 @@ describe("leadership photos", () => {
     const d = scorecardDraftReducer(newLeadershipDraft(), { type: "markEvidenceUploadAttempted" });
     expect(d.evidenceUploadAttempted).toBe(true);
     expect(scorecardDraftReducer(d, { type: "markEvidenceUploadAttempted" })).toBe(d);
+  });
+
+  it("makes an attempted photo description explicitly read-only while leaving later photos editable", () => {
+    let d = scorecardDraftReducer(newLeadershipDraft(), {
+      type: "addPhoto",
+      photo: { key: "p1", uri: "file://p1", clientUploadId: "cu-1", sectionKey: "safety", caption: "Original" },
+    });
+    const first = d.photos[0]!;
+    expect(isScorecardDraftPhotoCaptionEditable(d, first)).toBe(true);
+
+    d = scorecardDraftReducer(d, { type: "markEvidenceUploadAttempted", clientUploadIds: ["cu-1"] });
+    expect(isScorecardDraftPhotoCaptionEditable(d, d.photos[0]!)).toBe(false);
+    expect(scorecardDraftReducer(d, { type: "setPhotoCaption", key: "p1", caption: "Must not drift" })).toBe(d);
+
+    d = scorecardDraftReducer(d, {
+      type: "addPhoto",
+      photo: { key: "p2", uri: "file://p2", clientUploadId: "cu-2", sectionKey: "safety", caption: "Later" },
+    });
+    expect(isScorecardDraftPhotoCaptionEditable(d, d.photos[1]!)).toBe(true);
+  });
+
+  it("does not manufacture a partial cleanup ledger for a legacy attempted draft", () => {
+    let d: ScorecardDraft = {
+      ...newLeadershipDraft(),
+      editingScorecardId: "scorecard-1",
+      editBaseUpdatedAt: "2026-07-14T12:00:00.000Z",
+      evidenceUploadAttempted: true,
+      // No evidenceUploadAttemptedIds: this draft predates the append-only ledger.
+    };
+    d = scorecardDraftReducer(d, {
+      type: "addPhoto",
+      photo: { key: "p-current", uri: "file://current", clientUploadId: "cu-current", sectionKey: "safety", caption: "" },
+    });
+    d = scorecardDraftReducer(d, {
+      type: "markEvidenceUploadAttempted",
+      clientUploadIds: ["cu-current"],
+    });
+
+    expect(d.evidenceUploadAttemptedIds).toBeUndefined();
+    expect(scorecardDraftEvidenceCleanupIds(d)).toEqual([]);
+  });
+
+  it("retains every attempted client id after photos are removed so a conflicted edit can be discarded", () => {
+    let d: ScorecardDraft = {
+      ...newLeadershipDraft(),
+      editingScorecardId: "scorecard-1",
+      editBaseUpdatedAt: "2026-07-14T12:00:00.000Z",
+    };
+    d = scorecardDraftReducer(d, {
+      type: "addPhoto",
+      photo: { key: "p1", uri: "file://p1", clientUploadId: "cu-1", sectionKey: "safety", caption: "" },
+    });
+    d = scorecardDraftReducer(d, { type: "markEvidenceUploadAttempted", clientUploadIds: ["cu-1"] });
+    d = scorecardDraftReducer(d, { type: "removePhoto", key: "p1" });
+    expect(d.evidenceUploadAttemptedIds).toEqual(["cu-1"]);
+    expect(scorecardDraftEvidenceCleanupIds(d)).toEqual(["cu-1"]);
+
+    d = scorecardDraftReducer(d, {
+      type: "addPhoto",
+      photo: { key: "p2", uri: "file://p2", clientUploadId: "cu-2", sectionKey: "quality_control", caption: "" },
+    });
+    d = scorecardDraftReducer(d, {
+      type: "markEvidenceUploadAttempted",
+      clientUploadIds: ["cu-1", "cu-2", "cu-2"],
+    });
+    expect(d.evidenceUploadAttemptedIds).toEqual(["cu-1", "cu-2"]);
+    expect(scorecardDraftEvidenceCleanupIds(d)).toEqual(["cu-1", "cu-2"]);
   });
 });
 

@@ -43,9 +43,55 @@ import { inferFileCategory } from "./infer-category.js";
 import { resolvePhotoAddressMetadata } from "./photo-geocoding.js";
 import { BUSINESS_TIMEZONE } from "../../lib/period.js";
 import { buildDealPhotoTimelineConditions, type DealPhotoTimelineFilters } from "./photo-timeline-filters.js";
+import {
+  lockScorecardEditEvidenceUploadForConfirm,
+  markScorecardEditEvidenceUploadConfirmed,
+  type ScorecardEditUploadScope,
+} from "../field/scorecard-evidence-upload.js";
 import crypto from "node:crypto";
 
 type TenantDb = NodePgDatabase<typeof schema>;
+
+type ScorecardEditUploadBinding = Awaited<ReturnType<typeof lockScorecardEditEvidenceUploadForConfirm>>;
+
+/**
+ * Generic uploads may dedupe by uploader + client id alone. Submitted-scorecard edit evidence is stricter:
+ * an existing file is a valid retry only after this exact durable binding already confirmed that exact
+ * file. Otherwise an ordinary upload (or another card's upload) could be adopted by the edit ledger and
+ * later hidden by edit cleanup.
+ */
+function assertExistingFileMatchesScorecardEditBinding(
+  binding: ScorecardEditUploadBinding,
+  file: Pick<typeof files.$inferSelect, "id" | "clientUploadId" | "uploadedBy" | "dealId">,
+  input: {
+    userId: string;
+    dealId?: string;
+    clientUploadId?: string;
+    scorecardEditScope?: ScorecardEditUploadScope;
+  },
+): void {
+  if (!binding) return;
+  const scope = input.scorecardEditScope;
+  if (
+    !scope ||
+    binding.scorecardId !== scope.scorecardId ||
+    binding.clientUploadId !== scope.clientUploadId ||
+    binding.clientUploadId !== input.clientUploadId ||
+    binding.uploadedBy !== input.userId ||
+    binding.dealId !== input.dealId ||
+    (binding.state !== "confirmed" && binding.state !== "linked") ||
+    binding.fileId !== file.id ||
+    file.clientUploadId !== binding.clientUploadId ||
+    file.uploadedBy !== binding.uploadedBy ||
+    file.dealId !== binding.dealId
+  ) {
+    throw new AppError(
+      409,
+      "This evidence upload id belongs to another file. Add the photo again to continue.",
+      "SCORECARD_EDIT_UPLOAD_SCOPE",
+    );
+  }
+}
 
 // ─── Pending Uploads (Fix 2: bind confirm-upload to upload-url grant) ───────
 
@@ -68,6 +114,8 @@ interface PendingUpload {
   description?: string;
   photoCategory?: PhotoCategory | null;
   tags?: string[];
+  /** Server-owned scope for submitted-scorecard edit evidence. Never sourced from generic client fields. */
+  scorecardEditScope?: ScorecardEditUploadScope;
   expiresAt: Date;
   /** Set when this upload is a new version of an existing file */
   parentFileId?: string;
@@ -135,6 +183,8 @@ export interface RequestUploadInput {
   tags?: string[];
   /** Allow the upload to remain unassigned until a later field-app step */
   allowUnassigned?: boolean;
+  /** Internal server-owned scope persisted with the pending token. */
+  scorecardEditScope?: ScorecardEditUploadScope;
 }
 
 export interface ConfirmUploadInput {
@@ -147,6 +197,10 @@ export interface ConfirmUploadInput {
    * and web upload paths omit it.
    */
   clientUploadId?: string;
+  /** Internal scope supplied only by the authorized field scorecard route. */
+  scorecardEditScope?: ScorecardEditUploadScope;
+  /** Authoritative target deal for tokenless/idempotent scoped confirms. */
+  scorecardEditDealId?: string;
   /** EXIF data extracted client-side (optional, server also extracts for images) */
   takenAt?: string;
   geoLat?: number;
@@ -621,6 +675,7 @@ export async function requestUploadUrl(
     description: input.description,
     photoCategory: input.photoCategory,
     tags: input.tags,
+    scorecardEditScope: input.scorecardEditScope,
     expiresAt: new Date(Date.now() + PRESIGNED_URL_EXPIRY_SECONDS * 1000),
   });
 
@@ -646,6 +701,35 @@ export async function confirmUpload(
   // race) — callers must then SKIP upload side effects (audit event, domain_event job) to avoid replaying
   // them for one photo.
 ): Promise<{ file: typeof files.$inferSelect; created: boolean }> {
+  // Validate edit-evidence scope before ANY idempotent return or insert. A live pending token proves what
+  // was minted; the durable registry covers consumed-token retries and rejects an omitted/swapped scope.
+  const pendingForScope = pendingUploads.get(input.uploadToken);
+  const pendingUploadFound = Boolean(pendingForScope && pendingForScope.expiresAt >= new Date());
+  const livePendingForScope = pendingUploadFound ? pendingForScope : undefined;
+  // A live token is the server-owned authority for the file row that will be inserted below. Never authorize
+  // its scorecard binding against a different caller-supplied deal and then persist `pending.dealId`: that
+  // would split one confirmation across two projects. The explicit deal is used only for consumed-token
+  // idempotent retries, where the durable binding + existing file remain the authority.
+  if (
+    livePendingForScope &&
+    input.scorecardEditDealId !== undefined &&
+    input.scorecardEditDealId !== livePendingForScope.dealId
+  ) {
+    throw new AppError(
+      400,
+      "Upload token does not match this scorecard evidence upload.",
+      "SCORECARD_EDIT_UPLOAD_SCOPE",
+    );
+  }
+  const scorecardEditDealId = livePendingForScope?.dealId ?? input.scorecardEditDealId;
+  const editBinding = await lockScorecardEditEvidenceUploadForConfirm(tenantDb, {
+    userId,
+    dealId: scorecardEditDealId,
+    scorecardId: input.scorecardEditScope?.scorecardId,
+    clientUploadId: input.clientUploadId,
+    pendingScope: livePendingForScope?.scorecardEditScope,
+    pendingUploadFound,
+  });
   // Idempotency (resilient upload queue): if this client upload already produced a row, return it instead
   // of creating a duplicate. This is decoupled from the single-use in-memory token, so it still dedupes
   // when a resumed/background queue re-runs an upload AFTER the original confirm succeeded (token gone) —
@@ -659,14 +743,24 @@ export async function confirmUpload(
       .where(and(eq(files.clientUploadId, input.clientUploadId), eq(files.uploadedBy, userId)))
       .limit(1);
     if (existing[0]) {
+      assertExistingFileMatchesScorecardEditBinding(editBinding, existing[0], {
+        userId,
+        dealId: scorecardEditDealId,
+        clientUploadId: input.clientUploadId,
+        scorecardEditScope: input.scorecardEditScope,
+      });
+      await markScorecardEditEvidenceUploadConfirmed(tenantDb, editBinding, existing[0].id);
+      // The edit-evidence binding is part of a successful confirmation. Keep a live token retryable when
+      // that durable state transition fails transiently; consuming it first can strand an uploaded object.
       pendingUploads.delete(input.uploadToken);
       return { file: existing[0], created: false };
     }
   }
 
   // Fix 2: Consume the pending upload token — don't trust client-supplied values
-  // Fix 7: Don't delete token until after DB insert succeeds — allows retry on
-  // transient failures. NOTE: pendingUploads is process-local (in-memory Map).
+  // Fix 7: Don't delete the token until the full durable confirmation succeeds — the file insert plus,
+  // when present, the submitted-scorecard edit binding. This allows retry on transient failures.
+  // NOTE: pendingUploads is process-local (in-memory Map).
   // This is fine for single-instance Railway deployment. If multi-instance is
   // needed, move pending uploads to DB-backed storage (e.g. a pending_uploads table).
   const pending = pendingUploads.get(input.uploadToken);
@@ -770,10 +864,13 @@ export async function confirmUpload(
     .onConflictDoNothing({ target: files.clientUploadId, where: isNotNull(files.clientUploadId) })
     .returning();
 
-  // Fix 7: NOW delete the token — DB insert succeeded, no retry needed
-  pendingUploads.delete(input.uploadToken);
-
-  if (result[0]) return { file: result[0], created: true };
+  if (result[0]) {
+    await markScorecardEditEvidenceUploadConfirmed(tenantDb, editBinding, result[0].id);
+    // Consume only after both the file row and submitted-edit binding are durably confirmed. The route
+    // transaction rolls back the insert if binding confirmation throws, and the retained token can retry.
+    pendingUploads.delete(input.uploadToken);
+    return { file: result[0], created: true };
+  }
 
   // onConflictDoNothing skipped the insert (a concurrent confirm with the same clientUploadId won). Find
   // the winner FIRST, then delete OUR freshly-PUT object only if it's actually distinct from the winner's.
@@ -786,6 +883,14 @@ export async function confirmUpload(
       .where(and(eq(files.clientUploadId, input.clientUploadId), eq(files.uploadedBy, userId)))
       .limit(1);
     if (winner[0]) {
+      assertExistingFileMatchesScorecardEditBinding(editBinding, winner[0], {
+        userId,
+        dealId: scorecardEditDealId,
+        clientUploadId: input.clientUploadId,
+        scorecardEditScope: input.scorecardEditScope,
+      });
+      await markScorecardEditEvidenceUploadConfirmed(tenantDb, editBinding, winner[0].id);
+      pendingUploads.delete(input.uploadToken);
       if (isR2Configured()) {
         if (pending.r2Key !== winner[0].r2Key) await deleteObject(pending.r2Key).catch(() => undefined);
         if (thumbnailR2Key && thumbnailR2Key !== winner[0].thumbnailR2Key) {
@@ -1632,8 +1737,8 @@ export async function updateFile(
 
 /**
  * A PDF is an immutable snapshot, so changing a linked photo's caption or hiding/restoring the photo must
- * invalidate that snapshot. The next authorized download regenerates it from the current evidence state
- * instead of serving stale text/embedded bytes (or omitting a restored photo).
+ * invalidate that snapshot. It also advances the submitted-card edit token: otherwise an editor opened
+ * before the evidence change could save with signatures approving the prior caption/visibility state.
  */
 export async function invalidateScorecardPdfArtifactsForFile(tenantDb: TenantDb, fileId: string): Promise<void> {
   const linked = await tenantDb
@@ -1649,6 +1754,10 @@ export async function invalidateScorecardPdfArtifactsForFile(tenantDb: TenantDb,
       pdfR2Key: null,
       pdfR2Bucket: null,
       pdfGeneratedAt: null,
+      // Guarantee a different optimistic-concurrency generation even when evidence changes in the same
+      // millisecond as the prior scorecard write. This also prevents PDF finalizers from coalescing across
+      // two evidence generations that otherwise share the same updated_at key.
+      updatedAt: sql`GREATEST(${fieldScorecards.updatedAt} + interval '1 millisecond', NOW())`,
     })
     .where(inArray(fieldScorecards.id, scorecardIds));
 }

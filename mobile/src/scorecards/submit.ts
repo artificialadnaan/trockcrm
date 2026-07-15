@@ -4,19 +4,32 @@
 // itself is the durability unit — on a photos-pending / failed POST the caller keeps the draft and retries
 // (the upload queue keeps retrying the photos in the background).
 
-import { createScorecard, type Fetcher } from "../api/endpoints";
+import { createScorecard, discardScorecardEditEvidence, updateScorecard, type Fetcher } from "../api/endpoints";
 import type { FieldScorecardSummary } from "../api/types";
 import type { CaptureUploadInput } from "../capture/upload";
-import { MAX_UPLOAD_ATTEMPTS, drainUploadQueue, enqueueUploads, getQueuedUploads } from "../capture/upload-queue";
+import {
+  MAX_UPLOAD_ATTEMPTS,
+  drainUploadQueue,
+  enqueueUploads,
+  getQueuedUploads,
+  removeQueuedUploadsAndWait,
+} from "../capture/upload-queue";
 import {
   scorecardDraftToSubmission,
+  scorecardDraftEvidenceCleanupIds,
+  scorecardDraftNewPhotos,
   todayLocalIso,
   type ScorecardDraft,
-  type ScorecardDraftPhoto,
+  type NewScorecardDraftPhoto,
 } from "./draft";
+import { scorecardDraftToUpdate } from "./edit";
 
 /** Build the field-photo upload input for a scorecard evidence photo — targets the deal and auto-tags. */
-export function scorecardPhotoUploadInput(photo: ScorecardDraftPhoto, dealId: string): CaptureUploadInput {
+export function scorecardPhotoUploadInput(
+  photo: NewScorecardDraftPhoto,
+  dealId: string,
+  editingScorecardId?: string,
+): CaptureUploadInput {
   return {
     uri: photo.uri,
     width: photo.width,
@@ -27,6 +40,7 @@ export function scorecardPhotoUploadInput(photo: ScorecardDraftPhoto, dealId: st
     tags: ["scorecard", photo.sectionKey],
     metadata: { takenAt: photo.takenAt, latitude: photo.latitude, longitude: photo.longitude, addressSource: photo.addressSource },
     clientUploadId: photo.clientUploadId,
+    ...(editingScorecardId ? { scorecardId: editingScorecardId, routeByTarget: true } : {}),
   };
 }
 
@@ -63,33 +77,74 @@ export type SubmitScorecardResult =
   | { status: "photos_pending"; remaining: number }
   | { status: "photos_failed"; failed: number };
 
+export type SubmitScorecardOptions = {
+  /**
+   * Default queue/new-submission fetcher, scoped to the durable draft office. Submitted-edit evidence is
+   * marked with its scorecard id and uses `scorecardFetcher` for the server's owner-authorized scorecard
+   * office resolver; an old pinned x-office-id can be rejected after re-homing. New/offline drafts stay pinned.
+   */
+  draftOfficeFetcher?: Fetcher;
+};
+
 /**
  * Submit a draft. Uploads its photos through the durable queue first; if any of THIS draft's photos are
  * still queued afterward (offline / mid-retry), returns `photos_pending` and the caller keeps the draft so
  * the queue can finish + the user can retry. Once all photos are confirmed, POSTs the scorecard.
  */
 export async function submitScorecard(
-  fetcher: Fetcher,
+  scorecardFetcher: Fetcher,
   ownerKey: string,
   draft: ScorecardDraft,
+  options: SubmitScorecardOptions = {},
 ): Promise<SubmitScorecardResult> {
-  if (draft.photos.length > 0) {
-    await enqueueUploads(ownerKey, draft.photos.map((p) => scorecardPhotoUploadInput(p, draft.dealId)));
-    await drainUploadQueue(ownerKey, fetcher);
+  const draftOfficeFetcher = options.draftOfficeFetcher ?? scorecardFetcher;
+  // Retained server evidence on an edit is referenced by scorecard-photo id. Only newly captured/imported
+  // evidence owns a clientUploadId and may enter the durable upload queue.
+  const newPhotos = scorecardDraftNewPhotos(draft);
+  const editCleanupIds = draft.editingScorecardId ? scorecardDraftEvidenceCleanupIds(draft) : [];
+  if (draft.editingScorecardId && editCleanupIds.length > 0) {
+    // The append-only attempt ledger also contains photos still selected in the form. Cancel only the ids
+    // the edit no longer references. A removed upload may already be inside a worker's confirm request, so
+    // wait for that worker before the PUT and server reconciliation; otherwise its late confirm could land
+    // after cleanup and leave hidden edit evidence orphaned in the gallery.
+    const selectedNewPhotoIds = new Set(newPhotos.map((photo) => photo.clientUploadId));
+    const removedAttemptedIds = editCleanupIds.filter((id) => !selectedNewPhotoIds.has(id));
+    if (removedAttemptedIds.length > 0) {
+      await removeQueuedUploadsAndWait(ownerKey, removedAttemptedIds);
+      // Reconcile abandoned confirmed rows before starting any selected uploads or committing the scorecard.
+      // If this is offline/unavailable, the PUT does not run and the unchanged edit token remains retryable.
+      await discardScorecardEditEvidence(scorecardFetcher, draft.editingScorecardId, removedAttemptedIds);
+    }
+  }
+  if (newPhotos.length > 0) {
+    const editingScorecardId = draft.editingScorecardId;
+    await enqueueUploads(
+      ownerKey,
+      newPhotos.map((p) => scorecardPhotoUploadInput(p, draft.dealId, editingScorecardId)),
+    );
+    await drainUploadQueue(
+      ownerKey,
+      draftOfficeFetcher,
+      editingScorecardId ? { targetFetcher: scorecardFetcher } : undefined,
+    );
     const stillQueued = await getQueuedUploads(ownerKey);
     const { pending, failed } = classifyDraftPhotoUploads(
-      draft.photos.map((p) => p.clientUploadId),
+      newPhotos.map((p) => p.clientUploadId),
       stillQueued.map((q) => ({ clientUploadId: q.clientUploadId, attempts: q.attempts })),
       MAX_UPLOAD_ATTEMPTS,
     );
     if (failed.length > 0) return { status: "photos_failed", failed: failed.length };
     if (pending.length > 0) return { status: "photos_pending", remaining: pending.length };
   }
+  if (draft.editingScorecardId) {
+    const { scorecard } = await updateScorecard(scorecardFetcher, draft.editingScorecardId, scorecardDraftToUpdate(draft));
+    return { status: "submitted", scorecard };
+  }
   // Stamp Week Of = the completion date, LOCAL, at submit time. Both kinds present it as "set automatically
   // when completed" (neither exposes an editable field), so a draft started one day and submitted the next
   // must file under the submit day — not the draft-creation day it was seeded with — and LOCAL avoids the
   // west-of-UTC off-by-one the old server-side UTC stamp caused. The server trusts this value.
   const submission = { ...scorecardDraftToSubmission(draft), weekOf: todayLocalIso() };
-  const { scorecard } = await createScorecard(fetcher, submission);
+  const { scorecard } = await createScorecard(draftOfficeFetcher, submission);
   return { status: "submitted", scorecard };
 }

@@ -97,3 +97,32 @@ export const fieldScorecardPhotos = pgTable(
     index("field_scorecard_photos_card_idx").on(table.scorecardId),
   ],
 );
+
+/**
+ * Durable ownership/state ledger for photos created while editing an already-submitted scorecard.
+ *
+ * This is deliberately separate from `files.tags`: tags are user-editable gallery metadata, while this
+ * row is a server-owned authorization/tombstone record. A globally unique client upload id can therefore
+ * never be replayed against another scorecard, and a discard that wins a race with confirm-upload remains
+ * durable across app/server restarts.
+ */
+export const fieldScorecardEditUploads = pgTable(
+  "field_scorecard_edit_uploads",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    scorecardId: uuid("scorecard_id").notNull(),
+    dealId: uuid("deal_id").notNull(),
+    clientUploadId: varchar("client_upload_id", { length: 64 }).notNull(),
+    uploadedBy: uuid("uploaded_by").notNull(),
+    fileId: uuid("file_id"),
+    /** authorized -> confirmed -> linked; discard may move authorized/confirmed -> discarded. */
+    state: varchar("state", { length: 20 }).default("authorized").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex("field_scorecard_edit_uploads_client_upload_key").on(table.clientUploadId),
+    index("field_scorecard_edit_uploads_card_idx").on(table.scorecardId),
+    index("field_scorecard_edit_uploads_file_idx").on(table.fileId),
+  ],
+);
