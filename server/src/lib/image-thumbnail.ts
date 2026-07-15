@@ -182,6 +182,24 @@ async function convertHeicToJpeg(source: Buffer): Promise<Uint8Array> {
   return heicConvert({ buffer: source, format: "JPEG", quality: THUMBNAIL_QUALITY / 100 });
 }
 
+/** Quality for a stored FULL-SIZE JPEG (higher than the thumbnail quality — this is the original a user views). */
+const STORABLE_JPEG_QUALITY = 85;
+
+/**
+ * Transcode a HEIC/HEIF original into a FULL-RESOLUTION JPEG for storage — EXIF-rotated and with any
+ * transparency flattened onto white, but NOT downscaled (unlike generateEvidenceJpeg, which resizes to a
+ * thumbnail). Used so a HEIC cover photo keeps its resolution and renders in every browser. Throws if the
+ * input can't be decoded (the caller surfaces that as a 4xx, never a broken stored object).
+ */
+export async function transcodeHeicToStorableJpeg(source: Buffer): Promise<Buffer> {
+  const converted = await withHeicDecodePermit(() => convertHeicToJpeg(source));
+  return sharp(Buffer.from(converted), { failOn: "none", limitInputPixels: EVIDENCE_DECODE_PIXEL_LIMIT })
+    .rotate()
+    .flatten({ background: { r: 255, g: 255, b: 255 } })
+    .jpeg({ quality: STORABLE_JPEG_QUALITY, mozjpeg: true })
+    .toBuffer();
+}
+
 /**
  * Generate a thumbnail for an already-stored image and persist it to R2, returning its key (or null on
  * any miss — never throws). Pass `sourceBuffer` when the caller already holds the original bytes

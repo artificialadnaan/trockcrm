@@ -19,14 +19,25 @@ const MIME_EXTENSIONS: Record<string, string> = {
 };
 
 /**
- * A cover photo may be any raster `image/*` EXCEPT SVG — an SVG can carry active content, and we render the
- * result inline in an <img>. Mirrors the inline-render allowlist used elsewhere for uploaded images.
+ * Cover photos are served inline from their stored key, so we only accept formats the browser can render
+ * directly — plus HEIC/HEIF, which the upload route transcodes to JPEG before storing. Everything else
+ * (SVG's active-content risk, TIFF and other non-renderable rasters) is rejected rather than stored as a
+ * cover that would open as a broken <img>.
  */
+const ACCEPTED_PROPERTY_IMAGE_MIMES = new Set([
+  "image/jpeg",
+  "image/jpg",
+  "image/png",
+  "image/webp",
+  "image/gif",
+  "image/heic",
+  "image/heif",
+]);
+
 export function isAcceptablePropertyImageMime(mimeType: string | null | undefined): boolean {
   if (!mimeType) return false;
   const base = mimeType.split(";")[0]!.trim().toLowerCase();
-  if (base === "image/svg+xml") return false;
-  return base.startsWith("image/");
+  return ACCEPTED_PROPERTY_IMAGE_MIMES.has(base);
 }
 
 /**

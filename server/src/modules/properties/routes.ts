@@ -18,7 +18,7 @@ import {
   type PropertyImageKeys,
 } from "./property-image-service.js";
 import { deleteObject, isR2Configured, putObject } from "../../lib/r2-client.js";
-import { generateAndStoreThumbnail, generateEvidenceJpeg } from "../../lib/image-thumbnail.js";
+import { generateAndStoreThumbnail, transcodeHeicToStorableJpeg } from "../../lib/image-thumbnail.js";
 
 const router = Router();
 
@@ -163,19 +163,25 @@ router.post("/:id/image", express.raw({ type: () => true, limit: PROPERTY_IMAGE_
       throw new AppError(400, "Request body (image) is empty.");
     }
 
+    // Fail fast when storage is unavailable — otherwise we'd persist an image key with no object behind it,
+    // reporting a false success and (once R2 is configured) presigning a key that 404s.
+    if (!isR2Configured()) {
+      throw new AppError(503, "Image storage is not configured.");
+    }
+
     // Confirm the property exists BEFORE writing to R2 so a bad id can't orphan an object.
     if (!(await propertyExists(req.tenantDb!, propertyId))) {
       throw new AppError(404, "Property not found");
     }
 
-    // HEIC/HEIF can't render in most browsers, so transcode to JPEG up front and store THAT as the
-    // original — otherwise the enlarged view (and the avatar, if the thumbnail step also can't decode)
-    // would be a broken <img>. Reuses the existing heic-convert-backed transcoder (EXIF-rotated).
+    // HEIC/HEIF can't render in most browsers, so transcode to a FULL-RESOLUTION JPEG up front and store
+    // THAT as the original — otherwise the enlarged view would be a broken <img>. Full-res (not the 600px
+    // evidence path) so a HEIC cover keeps the same resolution a JPEG/PNG upload would.
     let uploadBuffer = body;
     let uploadMime = mimeType;
     if (isHeicImageMime(mimeType)) {
       try {
-        uploadBuffer = await generateEvidenceJpeg(body, mimeType);
+        uploadBuffer = await transcodeHeicToStorableJpeg(body);
         uploadMime = "image/jpeg";
       } catch {
         throw new AppError(400, "Could not process this HEIC photo. Please upload a JPEG or PNG.");
@@ -187,12 +193,9 @@ router.post("/:id/image", express.raw({ type: () => true, limit: PROPERTY_IMAGE_
     // simultaneous replacements can't share a key and have one's cleanup delete the other's live object.
     const imageR2Key = buildPropertyImageR2Key(propertyId, extension, `${Date.now()}-${randomUUID()}`);
 
-    let imageThumbnailR2Key: string | null = null;
-    if (isR2Configured()) {
-      await putObject(imageR2Key, uploadBuffer, uploadMime);
-      // Best-effort thumbnail; a null result just means the avatar renders from the full-size original.
-      imageThumbnailR2Key = await generateAndStoreThumbnail(imageR2Key, uploadMime, uploadBuffer);
-    }
+    await putObject(imageR2Key, uploadBuffer, uploadMime);
+    // Best-effort thumbnail; a null result just means the avatar renders from the full-size original.
+    const imageThumbnailR2Key = await generateAndStoreThumbnail(imageR2Key, uploadMime, uploadBuffer);
 
     const updated = await setPropertyImageKeys(req.tenantDb!, propertyId, { imageR2Key, imageThumbnailR2Key });
     if (!updated) {

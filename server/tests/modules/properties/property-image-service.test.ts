@@ -9,16 +9,20 @@ import {
 } from "../../../src/modules/properties/property-image-service.js";
 
 describe("isAcceptablePropertyImageMime", () => {
-  it("accepts raster image types (with parameters)", () => {
+  it("accepts browser-renderable rasters + HEIC/HEIF (with parameters)", () => {
     expect(isAcceptablePropertyImageMime("image/jpeg")).toBe(true);
     expect(isAcceptablePropertyImageMime("image/png")).toBe(true);
     expect(isAcceptablePropertyImageMime("image/webp")).toBe(true);
+    expect(isAcceptablePropertyImageMime("image/gif")).toBe(true);
     expect(isAcceptablePropertyImageMime("image/heic")).toBe(true);
+    expect(isAcceptablePropertyImageMime("image/heif")).toBe(true);
     expect(isAcceptablePropertyImageMime("IMAGE/JPEG; charset=binary")).toBe(true);
   });
 
-  it("rejects SVG (active-content risk) and non-images", () => {
+  it("rejects SVG, non-browser-renderable rasters (TIFF), and non-images", () => {
     expect(isAcceptablePropertyImageMime("image/svg+xml")).toBe(false);
+    expect(isAcceptablePropertyImageMime("image/tiff")).toBe(false);
+    expect(isAcceptablePropertyImageMime("image/bmp")).toBe(false);
     expect(isAcceptablePropertyImageMime("application/pdf")).toBe(false);
     expect(isAcceptablePropertyImageMime("text/html")).toBe(false);
     expect(isAcceptablePropertyImageMime(null)).toBe(false);

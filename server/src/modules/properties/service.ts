@@ -789,4 +789,6 @@ async function presignPropertyImage(r2Key: string): Promise<string | null> {
   }
 }
 
-const PROPERTY_IMAGE_URL_TTL_SECONDS = 3600;
+// 24h so a full-size view opened from a long-lived detail page (well past a 1h TTL) doesn't hit an expired
+// URL. Cover photos aren't sensitive, so the longer-lived presigned URL is an acceptable trade-off.
+const PROPERTY_IMAGE_URL_TTL_SECONDS = 24 * 60 * 60;
