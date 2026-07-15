@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { api } from "@/lib/api";
+import type { ScorecardKind } from "@trock-crm/shared/types";
 
 export interface QcScorecardRow {
   scorecardId: string;
@@ -9,6 +10,7 @@ export interface QcScorecardRow {
   projectNumber: string | null;
   regionName: string | null;
   superintendentName: string | null;
+  kind: ScorecardKind;
   totalScore: number;
   formVersion: 1 | 2;
   averageScore: number | null;
@@ -24,6 +26,7 @@ export interface QcScorecardFilters {
   from?: string;
   to?: string;
   region?: string;
+  kind?: ScorecardKind;
   superintendent?: string;
   rating?: string;
   flaggedOnly?: boolean;
@@ -57,7 +60,7 @@ export function useQcScorecards(filters: QcScorecardFilters) {
   // flight. Only the newest request is allowed to commit its response — a slower older one is discarded.
   const requestIdRef = useRef(0);
 
-  const { from, to, region, superintendent, rating, flaggedOnly, search } = filters;
+  const { from, to, region, kind, superintendent, rating, flaggedOnly, search } = filters;
 
   const refetch = useCallback(async () => {
     const requestId = ++requestIdRef.current;
@@ -68,6 +71,7 @@ export function useQcScorecards(filters: QcScorecardFilters) {
       if (from) qs.set("from", from);
       if (to) qs.set("to", to);
       if (region) qs.set("region", region);
+      if (kind) qs.set("kind", kind);
       if (superintendent) qs.set("superintendent", superintendent);
       if (rating) qs.set("rating", rating);
       if (flaggedOnly) qs.set("flaggedOnly", "true");
@@ -92,7 +96,7 @@ export function useQcScorecards(filters: QcScorecardFilters) {
     } finally {
       if (requestId === requestIdRef.current) setLoading(false);
     }
-  }, [from, to, region, superintendent, rating, flaggedOnly, search, officeId]);
+  }, [from, to, region, kind, superintendent, rating, flaggedOnly, search, officeId]);
 
   useEffect(() => {
     void refetch();

@@ -25,7 +25,7 @@ const SC_LOST = "55555555-5555-5555-5555-000000000005"; // on a Lost deal → ex
 const SC_ARCHIVED = "55555555-5555-5555-5555-000000000006"; // on an archived (is_active=false) deal → excluded
 const SC_BB_LOST = "55555555-5555-5555-5555-000000000007"; // on a deal whose Bid Board mirror is Lost → excluded
 const SC_TEST = "55555555-5555-5555-5555-000000000008"; // on a test-data deal → excluded from reports
-const SC_LEADERSHIP = "55555555-5555-5555-5555-000000000009"; // kind='leadership' on a LIVE deal → excluded (project-only report)
+const SC_LEADERSHIP = "55555555-5555-5555-5555-000000000009"; // leadership card on a LIVE deal → included
 
 let pg: PGlite;
 let tdb: any;
@@ -66,9 +66,9 @@ beforeAll(async () => {
     { id: SC_ARCHIVED, clientSubmissionId: "66666666-6666-6666-6666-000000000006", dealId: DEAL_ARCHIVED, weekOf: "2026-06-30", projectNumber: "DFW-8888", superintendentName: "Sam Reyes", totalScore: 88, rating: "on_standard", submittedBy: USER, submittedByName: "Sam Reyes", submittedAt: new Date("2026-06-30T18:00:00Z") },
     { id: SC_BB_LOST, clientSubmissionId: "66666666-6666-6666-6666-000000000007", dealId: DEAL_BB_LOST, weekOf: "2026-06-30", projectNumber: "DFW-7777", superintendentName: "Sam Reyes", totalScore: 65, rating: "corrective_action", submittedBy: USER, submittedByName: "Sam Reyes", submittedAt: new Date("2026-06-30T18:00:00Z") },
     { id: SC_TEST, clientSubmissionId: "66666666-6666-6666-6666-000000000008", dealId: DEAL_TEST, weekOf: "2026-06-30", projectNumber: "DFW-0000", superintendentName: "Demo Tester", totalScore: 99, rating: "elite", submittedBy: USER, submittedByName: "Demo Tester", submittedAt: new Date("2026-06-30T18:00:00Z") },
-    // A leadership card on a fully-live, in-window Dallas deal — only its KIND makes it ineligible for the QC
-    // report (which is project-scorecards only). Proves the kind filter, not any other gate.
-    { id: SC_LEADERSHIP, clientSubmissionId: "66666666-6666-6666-6666-000000000009", dealId: DEAL_D, weekOf: "2026-06-30", projectNumber: "DFW-10432", superintendentName: "Leah Solo", totalScore: 90, rating: "elite", kind: "leadership", submittedBy: USER, submittedByName: "Lena Lead", submittedAt: new Date("2026-06-30T19:00:00Z") },
+    // Leadership and project cards intentionally share the QC report page. The explicit V2 average proves
+    // the report contract carries the authoritative /10 score instead of relying on totalScore fallback.
+    { id: SC_LEADERSHIP, clientSubmissionId: "66666666-6666-6666-6666-000000000009", dealId: DEAL_D, weekOf: "2026-06-30", projectNumber: "DFW-10432", superintendentName: "Leah Solo", totalScore: 90, formVersion: 2, averageScore: "9.0", rating: "elite", kind: "leadership", submittedBy: USER, submittedByName: "Lena Lead", submittedAt: new Date("2026-06-30T19:00:00Z") },
   ]);
 });
 
@@ -81,7 +81,7 @@ const JUNE = { from: "2026-06-01", to: "2026-06-30" };
 describe("getQcScorecardsReport", () => {
   it("returns scorecards in the week window, newest submission first, with the deal + region joined", async () => {
     const { scorecards } = await getQcScorecardsReport(tdb, JUNE);
-    expect(scorecards.map((s) => s.scorecardId)).toEqual([SC1, SC3, SC2]); // SC_OLD excluded (May); newest-first
+    expect(scorecards.map((s) => s.scorecardId)).toEqual([SC_LEADERSHIP, SC1, SC3, SC2]); // SC_OLD excluded (May)
     const sc1 = scorecards.find((s) => s.scorecardId === SC1)!;
     expect(sc1.projectName).toBe("Maple Street Tower");
     expect(sc1.regionName).toBe("Dallas");
@@ -89,6 +89,12 @@ describe("getQcScorecardsReport", () => {
     expect(sc1.pdfAvailable).toBe(true);
     expect(scorecards.find((s) => s.scorecardId === SC2)!.pdfAvailable).toBe(false);
     expect(scorecards.find((s) => s.scorecardId === SC3)!.deficiencyCount).toBe(2);
+    expect(scorecards.find((s) => s.scorecardId === SC_LEADERSHIP)).toMatchObject({
+      kind: "leadership",
+      formVersion: 2,
+      averageScore: 9,
+      deficiencyCount: 0,
+    });
   });
 
   it("excludes scorecards on Lost / archived / Bid-Board-Lost / test-data deals (live-project + reports gate)", async () => {
@@ -104,26 +110,33 @@ describe("getQcScorecardsReport", () => {
     expect(res.superintendents).not.toContain("Demo Tester");
   });
 
-  it("excludes leadership cards — the QC report is project scorecards only (kind filter)", async () => {
+  it("includes leadership cards and their filter options on the same QC report", async () => {
     const res = await getQcScorecardsReport(tdb, JUNE);
     const ids = res.scorecards.map((s) => s.scorecardId);
-    // SC_LEADERSHIP sits on a fully-live in-window deal and is the newest submission — only kind='leadership'
-    // keeps it out. Its superintendent ("Leah Solo", unique to the leadership card) must not leak into the
-    // superintendent options either — the kind filter applies to the option aggregation, not just the rows.
-    expect(ids).not.toContain(SC_LEADERSHIP);
-    expect(res.scorecards.map((s) => s.scorecardId)).toEqual([SC1, SC3, SC2]);
-    expect(res.superintendents).not.toContain("Leah Solo");
+    expect(ids).toContain(SC_LEADERSHIP);
+    expect(res.superintendents).toContain("Leah Solo");
+  });
+
+  it("filters project and leadership scorecards server-side before the row cap", async () => {
+    const project = await getQcScorecardsReport(tdb, { ...JUNE, kind: "project" });
+    expect(project.scorecards.map((s) => s.scorecardId)).toEqual([SC1, SC3, SC2]);
+    expect(project.scorecards.every((s) => s.kind === "project")).toBe(true);
+
+    const leadership = await getQcScorecardsReport(tdb, { ...JUNE, kind: "leadership" });
+    expect(leadership.scorecards.map((s) => s.scorecardId)).toEqual([SC_LEADERSHIP]);
+    // Options remain window-wide and independent of interactive filters, matching region/superintendent.
+    expect(leadership.superintendents).toEqual(["Dana Cole", "Leah Solo", "Sam Reyes"]);
   });
 
   it("filters by region name (server-side, before the cap)", async () => {
     const { scorecards } = await getQcScorecardsReport(tdb, { ...JUNE, region: "Dallas" });
-    expect(scorecards.map((s) => s.scorecardId).sort()).toEqual([SC1, SC2].sort());
+    expect(scorecards.map((s) => s.scorecardId).sort()).toEqual([SC1, SC2, SC_LEADERSHIP].sort());
   });
 
   it("returns window-wide region + superintendent options independent of the active filters", async () => {
     const res = await getQcScorecardsReport(tdb, { ...JUNE, region: "Dallas" });
     expect(res.regions).toEqual(["Atlanta", "Dallas"]); // both, even though filtered to Dallas
-    expect(res.superintendents).toEqual(["Dana Cole", "Sam Reyes"]);
+    expect(res.superintendents).toEqual(["Dana Cole", "Leah Solo", "Sam Reyes"]);
   });
 
   it("filters superintendent by EXACT name, not a substring contains", async () => {
@@ -147,8 +160,9 @@ describe("getQcScorecardsReport", () => {
 
   it("searches project name / number / superintendent", async () => {
     // A project-name match returns ALL that project's scorecards (both weeks on the Maple deal), newest-first.
-    expect((await getQcScorecardsReport(tdb, { ...JUNE, search: "Maple" })).scorecards.map((s) => s.scorecardId)).toEqual([SC1, SC2]);
+    expect((await getQcScorecardsReport(tdb, { ...JUNE, search: "Maple" })).scorecards.map((s) => s.scorecardId)).toEqual([SC_LEADERSHIP, SC1, SC2]);
     expect((await getQcScorecardsReport(tdb, { ...JUNE, search: "ATL-2207" })).scorecards.map((s) => s.scorecardId)).toEqual([SC3]);
     expect((await getQcScorecardsReport(tdb, { ...JUNE, search: "Dana" })).scorecards.map((s) => s.scorecardId)).toEqual([SC3]);
+    expect((await getQcScorecardsReport(tdb, { ...JUNE, search: "Leah" })).scorecards.map((s) => s.scorecardId)).toEqual([SC_LEADERSHIP]);
   });
 });
