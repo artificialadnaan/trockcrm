@@ -114,10 +114,12 @@ async function insertWonDeal(
   options: { assignedRepId?: string | null; estimatorUserId?: string | null } = {},
 ): Promise<void> {
   const { assignedRepId = REP, estimatorUserId = null } = options;
+  // Migration 0184 evaluates Won periods in Chicago; session CURRENT_DATE is a day ahead on UTC runners
+  // between UTC midnight and Chicago midnight, which would make this otherwise-current fixture future-dated.
   await db.query(
     `INSERT INTO office_dallas.deals (
        id, deal_number, name, stage_id, won_closed_date, assigned_rep_id, estimator_user_id, awarded_amount
-     ) VALUES ($1, 'TR-100', 'Won deal', $2, CURRENT_DATE, $3, $4, $5)`,
+     ) VALUES ($1, 'TR-100', 'Won deal', $2, (now() AT TIME ZONE 'America/Chicago')::date, $3, $4, $5)`,
     [id, WON_STAGE, assignedRepId, estimatorUserId, value],
   );
 }
@@ -361,7 +363,8 @@ describe("migration 0184 — Won metric reduction alerts (runtime, PGlite)", () 
     await pg.query(
       `INSERT INTO office_dallas.deals (
          id, deal_number, name, stage_id, bid_board_stage_slug, won_closed_date, assigned_rep_id, awarded_amount
-       ) VALUES ($1, 'TR-MIRROR', 'Mirrored Won deal', $2, 'won', CURRENT_DATE, $3, 75000)`,
+       ) VALUES ($1, 'TR-MIRROR', 'Mirrored Won deal', $2, 'won',
+                 (now() AT TIME ZONE 'America/Chicago')::date, $3, 75000)`,
       [MIRROR_DEAL, OPEN_STAGE, REP],
     );
 
