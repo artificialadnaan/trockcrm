@@ -5,6 +5,7 @@ jest.mock("../../capture/upload-queue", () => ({
   enqueueUploads: jest.fn(async () => []),
   drainUploadQueue: jest.fn(async () => ({ succeeded: 0, failed: 0, remaining: 0 })),
   getQueuedUploads: jest.fn(async () => []),
+  removeQueuedUploadsAndWait: jest.fn(async () => undefined),
 }));
 jest.mock("../../api/endpoints", () => ({
   createScorecard: jest.fn(async () => ({ scorecard: { id: "sc-1", dealId: "deal-1" } })),

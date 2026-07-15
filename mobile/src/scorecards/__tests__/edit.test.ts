@@ -92,6 +92,8 @@ describe("createScorecardEditDraft", () => {
       editingOfficeId: "office-1",
       editBaseUpdatedAt: "2026-07-14T14:05:00.000Z",
       editBasePhotoIds: ["scorecard-photo-1", "scorecard-photo-2"],
+      editBaseCriticalDeficiencies: ["failed_inspection"],
+      editBaseCriticalDeficiencyNotes: { failed_inspection: "Reinspect stair rail" },
       dealId: "deal-1",
       dealName: "Riverwalk Apartments",
       projectNumber: "DFW-1-10000-aa",
@@ -261,6 +263,22 @@ describe("refreshScorecardEditPhotoUrls", () => {
     }));
 
     expect(refreshed.editBaseUpdatedAt).toBe("2026-07-14T14:05:00.000Z");
+  });
+
+  it("hydrates missing deficiency snapshots when a safe revision refresh advances", () => {
+    const legacy = createScorecardEditDraft(detail(), { id: "local", clientSubmissionId: "edit", now: 1 });
+    delete legacy.editBaseCriticalDeficiencies;
+    delete legacy.editBaseCriticalDeficiencyNotes;
+
+    const refreshed = refreshScorecardEditPhotoUrls(legacy, detail({
+      updatedAt: "2026-07-14T14:10:00.000Z",
+    }));
+
+    expect(refreshed.editBaseUpdatedAt).toBe("2026-07-14T14:10:00.000Z");
+    expect(refreshed.editBaseCriticalDeficiencies).toEqual(["failed_inspection"]);
+    expect(refreshed.editBaseCriticalDeficiencyNotes).toEqual({
+      failed_inspection: "Reinspect stair rail",
+    });
   });
 
   it("preserves project signatures when only retained URLs rotate", () => {
@@ -435,6 +453,255 @@ describe("rebaseScorecardEditDraft", () => {
     )).toEqual(["scorecard-photo-1", "scorecard-photo-3"]);
   });
 
+  it("does not resurrect a critical deficiency removed locally when remote still has it and adds evidence", () => {
+    const base = createScorecardEditDraft(detail(), {
+      id: "local-removed-deficiency",
+      clientSubmissionId: "removed-deficiency-edit",
+      now: 1,
+    });
+    const local = {
+      ...base,
+      criticalDeficiencies: [],
+      deficiencyNotes: {},
+      // Removing a selected deficiency in the UI requires removing its evidence first.
+      photos: [base.photos[0]],
+      superintendentSignature: "fresh-super-signature",
+      pmSignature: "fresh-pm-signature",
+    };
+    const latest = detail({
+      updatedAt: "2026-07-14T16:15:00.000Z",
+      photos: [
+        ...detail().photos,
+        {
+          id: "remote-new-failed-inspection-photo",
+          fileId: "remote-new-failed-inspection-file",
+          sectionKey: "critical_deficiency",
+          deficiencyKey: "failed_inspection",
+          url: "https://fresh.example/remote-failed-inspection.jpg",
+          caption: "Remote evidence for locally removed deficiency",
+        },
+      ],
+    });
+
+    const rebased = rebaseScorecardEditDraft(local, latest);
+
+    expect(rebased.draft.criticalDeficiencies).toEqual([]);
+    expect(rebased.draft.deficiencyNotes).toEqual({});
+    expect(rebased.draft.photos).toEqual([
+      expect.objectContaining({ existingScorecardPhotoId: "scorecard-photo-1" }),
+    ]);
+    expect(rebased.mergedServerDeficiencyCount).toBe(0);
+    expect(rebased.mergedServerPhotoCount).toBe(0);
+    // Rebase did not change the locally reviewed report; fresh approvals remain valid.
+    expect(rebased.draft.superintendentSignature).toBe("fresh-super-signature");
+    expect(rebased.draft.pmSignature).toBe("fresh-pm-signature");
+    // The next conflict compares local intent against this latest remote base again.
+    expect(rebased.draft.editBaseCriticalDeficiencies).toEqual(["failed_inspection"]);
+    expect(rebased.draft.editBaseCriticalDeficiencyNotes).toEqual({
+      failed_inspection: "Reinspect stair rail",
+    });
+  });
+
+  it("keeps a pre-snapshot legacy draft local-biased instead of guessing that a removed deficiency is remote-new", () => {
+    const base = createScorecardEditDraft(detail(), {
+      id: "legacy-removed-deficiency",
+      clientSubmissionId: "legacy-removed-deficiency-edit",
+      now: 1,
+    });
+    const local = {
+      ...base,
+      editBaseCriticalDeficiencies: undefined,
+      editBaseCriticalDeficiencyNotes: undefined,
+      criticalDeficiencies: [],
+      deficiencyNotes: {},
+      photos: [base.photos[0]],
+    };
+
+    const rebased = rebaseScorecardEditDraft(local, detail({
+      updatedAt: "2026-07-14T16:20:00.000Z",
+    }));
+
+    expect(rebased.draft.criticalDeficiencies).toEqual([]);
+    expect(rebased.draft.photos).toEqual([
+      expect.objectContaining({ existingScorecardPhotoId: "scorecard-photo-1" }),
+    ]);
+    expect(rebased.draft.editBaseCriticalDeficiencies).toEqual(["failed_inspection"]);
+    expect(rebased.draft.editBaseCriticalDeficiencyNotes).toEqual({
+      failed_inspection: "Reinspect stair rail",
+    });
+  });
+
+  it("keeps a local note edit when the remote edit removes that deficiency", () => {
+    const base = createScorecardEditDraft(detail({
+      // Keep evidence out of this case so the local report itself is unchanged by rebase.
+      photos: [detail().photos[0]],
+    }), {
+      id: "local-note-vs-remote-removal",
+      clientSubmissionId: "local-note-vs-remote-removal-edit",
+      now: 1,
+    });
+    const local = {
+      ...base,
+      deficiencyNotes: { failed_inspection: "Local inspector follow-up is scheduled" },
+      superintendentSignature: "fresh-super-signature",
+      pmSignature: "fresh-pm-signature",
+    };
+    const latest = detail({
+      updatedAt: "2026-07-14T16:22:00.000Z",
+      criticalDeficiencyCount: 0,
+      criticalDeficiencies: [],
+      criticalDeficiencyNotes: {},
+      photos: [detail().photos[0]],
+    });
+
+    const rebased = rebaseScorecardEditDraft(local, latest);
+
+    expect(rebased.draft.criticalDeficiencies).toEqual(["failed_inspection"]);
+    expect(rebased.draft.deficiencyNotes).toEqual({
+      failed_inspection: "Local inspector follow-up is scheduled",
+    });
+    expect(rebased.removedServerDeficiencyCount).toBe(0);
+    expect(rebased.updatedServerDeficiencyNoteCount).toBe(0);
+    expect(rebased.draft.superintendentSignature).toBe("fresh-super-signature");
+    expect(rebased.draft.pmSignature).toBe("fresh-pm-signature");
+    expect(rebased.draft.editBaseCriticalDeficiencies).toEqual([]);
+    expect(rebased.draft.editBaseCriticalDeficiencyNotes).toEqual({});
+  });
+
+  it("adopts a remote-only deficiency note edit and requires fresh signatures", () => {
+    const base = createScorecardEditDraft(detail(), {
+      id: "remote-note-only",
+      clientSubmissionId: "remote-note-only-edit",
+      now: 1,
+    });
+    const local = {
+      ...base,
+      superintendentSignature: "fresh-super-signature",
+      pmSignature: "fresh-pm-signature",
+    };
+    const latest = detail({
+      updatedAt: "2026-07-14T16:23:00.000Z",
+      criticalDeficiencyNotes: { failed_inspection: "Remote inspector changed the follow-up" },
+    });
+
+    const rebased = rebaseScorecardEditDraft(local, latest);
+
+    expect(rebased.draft.criticalDeficiencies).toEqual(["failed_inspection"]);
+    expect(rebased.draft.deficiencyNotes).toEqual({
+      failed_inspection: "Remote inspector changed the follow-up",
+    });
+    expect(rebased.updatedServerDeficiencyNoteCount).toBe(1);
+    expect(rebased.draft.superintendentSignature).toBe("");
+    expect(rebased.draft.pmSignature).toBe("");
+    expect(rebased.draft.editBaseCriticalDeficiencyNotes).toEqual({
+      failed_inspection: "Remote inspector changed the follow-up",
+    });
+    expect(scorecardEditRebaseMessage(rebased)).toContain(
+      "1 critical deficiency note updated in the other edit was loaded for review.",
+    );
+  });
+
+  it("keeps a conflicting local deficiency note edit while advancing the remote base snapshot", () => {
+    const base = createScorecardEditDraft(detail(), {
+      id: "conflicting-note-edit",
+      clientSubmissionId: "conflicting-note-edit-attempt",
+      now: 1,
+    });
+    const local = {
+      ...base,
+      deficiencyNotes: { failed_inspection: "Keep the local correction plan" },
+      superintendentSignature: "fresh-super-signature",
+      pmSignature: "fresh-pm-signature",
+    };
+    const latest = detail({
+      updatedAt: "2026-07-14T16:24:00.000Z",
+      criticalDeficiencyNotes: { failed_inspection: "Conflicting remote correction plan" },
+    });
+
+    const rebased = rebaseScorecardEditDraft(local, latest);
+
+    expect(rebased.draft.deficiencyNotes).toEqual({
+      failed_inspection: "Keep the local correction plan",
+    });
+    expect(rebased.updatedServerDeficiencyNoteCount).toBe(0);
+    // Rebase did not alter the locally reviewed report, so its fresh approvals remain valid.
+    expect(rebased.draft.superintendentSignature).toBe("fresh-super-signature");
+    expect(rebased.draft.pmSignature).toBe("fresh-pm-signature");
+    expect(rebased.draft.editBaseCriticalDeficiencyNotes).toEqual({
+      failed_inspection: "Conflicting remote correction plan",
+    });
+  });
+
+  it("adopts a truly concurrent remote deficiency without evidence and requires fresh signatures", () => {
+    const baseDetail = detail({
+      criticalDeficiencyCount: 0,
+      criticalDeficiencies: [],
+      criticalDeficiencyNotes: {},
+      photos: [detail().photos[0]],
+    });
+    const base = createScorecardEditDraft(baseDetail, {
+      id: "remote-deficiency-add",
+      clientSubmissionId: "remote-deficiency-add-edit",
+      now: 1,
+    });
+    const local = {
+      ...base,
+      superintendentSignature: "fresh-super-signature",
+      pmSignature: "fresh-pm-signature",
+    };
+    const latest = detail({
+      ...baseDetail,
+      updatedAt: "2026-07-14T16:25:00.000Z",
+      criticalDeficiencyCount: 1,
+      criticalDeficiencies: ["safety_violation"],
+      criticalDeficiencyNotes: { safety_violation: "Remote safety issue" },
+    });
+
+    const rebased = rebaseScorecardEditDraft(local, latest);
+
+    expect(rebased.draft.criticalDeficiencies).toEqual(["safety_violation"]);
+    expect(rebased.draft.deficiencyNotes).toEqual({ safety_violation: "Remote safety issue" });
+    expect(rebased.mergedServerDeficiencyCount).toBe(1);
+    expect(rebased.removedServerDeficiencyCount).toBe(0);
+    expect(rebased.draft.superintendentSignature).toBe("");
+    expect(rebased.draft.pmSignature).toBe("");
+    expect(scorecardEditRebaseMessage(rebased)).toContain(
+      "1 critical deficiency added in the other edit was also preserved.",
+    );
+  });
+
+  it("adopts a remote deficiency removal when local stayed at base and requires fresh signatures", () => {
+    const base = createScorecardEditDraft(detail(), {
+      id: "remote-deficiency-remove",
+      clientSubmissionId: "remote-deficiency-remove-edit",
+      now: 1,
+    });
+    const local = {
+      ...base,
+      superintendentSignature: "fresh-super-signature",
+      pmSignature: "fresh-pm-signature",
+    };
+    const latest = detail({
+      updatedAt: "2026-07-14T16:28:00.000Z",
+      criticalDeficiencyCount: 0,
+      criticalDeficiencies: [],
+      criticalDeficiencyNotes: {},
+      photos: [detail().photos[0]],
+    });
+
+    const rebased = rebaseScorecardEditDraft(local, latest);
+
+    expect(rebased.draft.criticalDeficiencies).toEqual([]);
+    expect(rebased.draft.deficiencyNotes).toEqual({});
+    expect(rebased.removedServerDeficiencyCount).toBe(1);
+    expect(rebased.removedRetainedPhotoCount).toBe(1);
+    expect(rebased.draft.superintendentSignature).toBe("");
+    expect(rebased.draft.pmSignature).toBe("");
+    expect(scorecardEditRebaseMessage(rebased)).toContain(
+      "1 critical deficiency removed in the other edit was removed from this revision.",
+    );
+  });
+
   it("preserves the selected deficiency and note required by concurrently added deficiency evidence", () => {
     const baseDetail = detail({
       criticalDeficiencyCount: 0,
@@ -466,7 +733,11 @@ describe("rebaseScorecardEditDraft", () => {
       ],
     });
 
-    const rebased = rebaseScorecardEditDraft(local, latest);
+    const rebased = rebaseScorecardEditDraft({
+      ...local,
+      superintendentSignature: "fresh-super-signature",
+      pmSignature: "fresh-pm-signature",
+    }, latest);
 
     expect(rebased.draft.criticalDeficiencies).toEqual(["safety_violation"]);
     expect(rebased.draft.deficiencyNotes).toEqual({
@@ -480,6 +751,10 @@ describe("rebaseScorecardEditDraft", () => {
         deficiencyKey: "safety_violation",
       }),
     ]);
+    expect(rebased.mergedServerDeficiencyCount).toBe(1);
+    expect(rebased.mergedServerPhotoCount).toBe(1);
+    expect(rebased.draft.superintendentSignature).toBe("");
+    expect(rebased.draft.pmSignature).toBe("");
   });
 
   it("rebases leadership edits without losing local scores, summary, or category evidence", () => {

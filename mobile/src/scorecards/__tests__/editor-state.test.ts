@@ -15,11 +15,17 @@ describe("scorecard editor guards", () => {
     expect(scorecardEditorBusyMessage({ submitting: false, savingPhotos: false, voiceBusy: false })).toBeNull();
   });
 
-  it("makes a no-drop conflict overflow explicit", () => {
+  it("uses generic overflow copy by default and rebase wording only when explicitly requested", () => {
     expect(scorecardPhotoOverflowMessage(100)).toBeNull();
     expect(scorecardPhotoOverflowMessage(101)).toContain("Remove 1 photo before saving");
     expect(scorecardPhotoOverflowMessage(102)).toContain("Remove 2 photos before saving");
-    expect(scorecardPhotoOverflowMessage(102)).toContain("no evidence was removed automatically");
+    expect(scorecardPhotoOverflowMessage(102)).toContain("the limit is 100");
+    expect(scorecardPhotoOverflowMessage(102)).not.toContain("latest revision");
+    expect(scorecardPhotoOverflowMessage(102)).not.toContain("evidence was removed automatically");
+
+    const rebaseMessage = scorecardPhotoOverflowMessage(102, { afterRebase: true });
+    expect(rebaseMessage).toContain("after loading the latest revision");
+    expect(rebaseMessage).toContain("No evidence was removed automatically");
   });
 
   it("enables rebase recovery only for the explicit server conflict code", () => {

@@ -42,20 +42,23 @@ export type AssignTargetResponse = { photo: FieldPhoto };
 export type TagsResponse = { tags: string[] };
 export type ProjectTagsResponse = { tags: string[] };
 
-export type UploadUrlRequest = {
+type UploadUrlRequestBase = {
   dealId?: string;
   leadId?: string;
   opportunityId?: string;
-  /** Submitted-card edit scope; lets the server resolve + authorize the scorecard's office. */
-  scorecardId?: string;
-  /** Stable queue id; required with scorecardId so the server can persist the exact edit-upload scope. */
-  clientUploadId?: string;
   contentType: string;
   sizeBytes: number;
   category?: string | null;
   caption?: string | null;
   tags?: string[];
 };
+
+/** A submitted-card edit upload must carry the queue id used to persist its exact authorization scope. */
+type UploadUrlScorecardScope =
+  | { scorecardId: string; clientUploadId: string }
+  | { scorecardId?: never; clientUploadId?: string };
+
+export type UploadUrlRequest = UploadUrlRequestBase & UploadUrlScorecardScope;
 export type UploadUrlResponse = {
   uploadUrl: string;
   objectKey: string;

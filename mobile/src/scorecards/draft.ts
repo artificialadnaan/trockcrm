@@ -94,6 +94,13 @@ export interface ScorecardDraft {
    * without resurrecting evidence the local user intentionally removed.
    */
   editBasePhotoIds?: string[];
+  /**
+   * Critical-deficiency state present at editBaseUpdatedAt. Conflict recovery uses these as the base leg of a
+   * three-way merge so local selection/note edits win, while genuine remote changes can still be surfaced for
+   * review. Both are optional for pre-snapshot drafts, which rebase conservatively with local state winning.
+   */
+  editBaseCriticalDeficiencies?: ScorecardCriticalDeficiencyKey[];
+  editBaseCriticalDeficiencyNotes?: Partial<Record<ScorecardCriticalDeficiencyKey, string>>;
   // Project cards key scores/notes by the V2 section keys; leadership cards key by the 4 leadership keys.
   // Both are stored in the same maps (disjoint key sets), so the reducer/photo machinery is shared.
   scores: Partial<Record<ScorecardSectionKey | ScorecardLeadershipSectionKey, number>>;

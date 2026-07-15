@@ -541,7 +541,7 @@ function Wizard(props: {
       photoCount.current = rebased.draft.photos.length;
       dispatch({ type: "replaceDraft", draft: rebased.draft });
       setHasEditConflict(false);
-      const overflowMessage = scorecardPhotoOverflowMessage(rebased.draft.photos.length);
+      const overflowMessage = scorecardPhotoOverflowMessage(rebased.draft.photos.length, { afterRebase: true });
       setNotice({
         tone: overflowMessage ? "error" : "success",
         text: overflowMessage ?? scorecardEditRebaseMessage(rebased),

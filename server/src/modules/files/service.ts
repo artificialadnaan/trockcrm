@@ -732,15 +732,18 @@ export async function confirmUpload(
         clientUploadId: input.clientUploadId,
         scorecardEditScope: input.scorecardEditScope,
       });
-      pendingUploads.delete(input.uploadToken);
       await markScorecardEditEvidenceUploadConfirmed(tenantDb, editBinding, existing[0].id);
+      // The edit-evidence binding is part of a successful confirmation. Keep a live token retryable when
+      // that durable state transition fails transiently; consuming it first can strand an uploaded object.
+      pendingUploads.delete(input.uploadToken);
       return { file: existing[0], created: false };
     }
   }
 
   // Fix 2: Consume the pending upload token — don't trust client-supplied values
-  // Fix 7: Don't delete token until after DB insert succeeds — allows retry on
-  // transient failures. NOTE: pendingUploads is process-local (in-memory Map).
+  // Fix 7: Don't delete the token until the full durable confirmation succeeds — the file insert plus,
+  // when present, the submitted-scorecard edit binding. This allows retry on transient failures.
+  // NOTE: pendingUploads is process-local (in-memory Map).
   // This is fine for single-instance Railway deployment. If multi-instance is
   // needed, move pending uploads to DB-backed storage (e.g. a pending_uploads table).
   const pending = pendingUploads.get(input.uploadToken);
@@ -844,11 +847,11 @@ export async function confirmUpload(
     .onConflictDoNothing({ target: files.clientUploadId, where: isNotNull(files.clientUploadId) })
     .returning();
 
-  // Fix 7: NOW delete the token — DB insert succeeded, no retry needed
-  pendingUploads.delete(input.uploadToken);
-
   if (result[0]) {
     await markScorecardEditEvidenceUploadConfirmed(tenantDb, editBinding, result[0].id);
+    // Consume only after both the file row and submitted-edit binding are durably confirmed. The route
+    // transaction rolls back the insert if binding confirmation throws, and the retained token can retry.
+    pendingUploads.delete(input.uploadToken);
     return { file: result[0], created: true };
   }
 
@@ -870,6 +873,7 @@ export async function confirmUpload(
         scorecardEditScope: input.scorecardEditScope,
       });
       await markScorecardEditEvidenceUploadConfirmed(tenantDb, editBinding, winner[0].id);
+      pendingUploads.delete(input.uploadToken);
       if (isR2Configured()) {
         if (pending.r2Key !== winner[0].r2Key) await deleteObject(pending.r2Key).catch(() => undefined);
         if (thumbnailR2Key && thumbnailR2Key !== winner[0].thumbnailR2Key) {

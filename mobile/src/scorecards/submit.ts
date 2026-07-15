@@ -7,7 +7,13 @@
 import { createScorecard, discardScorecardEditEvidence, updateScorecard, type Fetcher } from "../api/endpoints";
 import type { FieldScorecardSummary } from "../api/types";
 import type { CaptureUploadInput } from "../capture/upload";
-import { MAX_UPLOAD_ATTEMPTS, drainUploadQueue, enqueueUploads, getQueuedUploads } from "../capture/upload-queue";
+import {
+  MAX_UPLOAD_ATTEMPTS,
+  drainUploadQueue,
+  enqueueUploads,
+  getQueuedUploads,
+  removeQueuedUploadsAndWait,
+} from "../capture/upload-queue";
 import {
   scorecardDraftToSubmission,
   scorecardDraftEvidenceCleanupIds,
@@ -103,6 +109,18 @@ export async function submitScorecard(
   // Retained server evidence on an edit is referenced by scorecard-photo id. Only newly captured/imported
   // evidence owns a clientUploadId and may enter the durable upload queue.
   const newPhotos = scorecardDraftNewPhotos(draft);
+  const editCleanupIds = draft.editingScorecardId ? scorecardDraftEvidenceCleanupIds(draft) : [];
+  if (draft.editingScorecardId && editCleanupIds.length > 0) {
+    // The append-only attempt ledger also contains photos still selected in the form. Cancel only the ids
+    // the edit no longer references. A removed upload may already be inside a worker's confirm request, so
+    // wait for that worker before the PUT and server reconciliation; otherwise its late confirm could land
+    // after cleanup and leave hidden edit evidence orphaned in the gallery.
+    const selectedNewPhotoIds = new Set(newPhotos.map((photo) => photo.clientUploadId));
+    const removedAttemptedIds = editCleanupIds.filter((id) => !selectedNewPhotoIds.has(id));
+    if (removedAttemptedIds.length > 0) {
+      await removeQueuedUploadsAndWait(ownerKey, removedAttemptedIds);
+    }
+  }
   if (newPhotos.length > 0) {
     const editingScorecardId = draft.editingScorecardId;
     await enqueueUploads(
@@ -130,10 +148,9 @@ export async function submitScorecard(
     // while confirmed-but-unselected rows are hidden and not left as orphaned gallery evidence. A cleanup
     // failure intentionally rejects this submit so the screen retains the draft; retry replays the
     // idempotent PUT and then retries cleanup before local finalization/navigation.
-    const cleanupIds = scorecardDraftEvidenceCleanupIds(draft);
-    if (cleanupIds.length > 0) {
+    if (editCleanupIds.length > 0) {
       try {
-        await discardScorecardEditEvidence(scorecardFetcher, draft.editingScorecardId, cleanupIds);
+        await discardScorecardEditEvidence(scorecardFetcher, draft.editingScorecardId, editCleanupIds);
       } catch (error) {
         throw new ScorecardEditCleanupPendingError(scorecard, { cause: error });
       }

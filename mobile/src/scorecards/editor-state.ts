@@ -17,11 +17,17 @@ export function scorecardEditorBusyMessage(state: ScorecardEditorBusyState): str
   return null;
 }
 
-/** Explain a conflict rebase that preserved more evidence than the server accepts. */
-export function scorecardPhotoOverflowMessage(photoCount: number): string | null {
+/** Explain an evidence overflow; rebase-specific wording is opt-in for the immediate recovery result only. */
+export function scorecardPhotoOverflowMessage(
+  photoCount: number,
+  options: { afterRebase?: boolean } = {},
+): string | null {
   const overflow = Math.max(0, photoCount - MAX_SCORECARD_PHOTOS);
   if (overflow === 0) return null;
-  return `This edit now has ${photoCount} photos after loading the latest revision. Remove ${overflow} photo${overflow === 1 ? "" : "s"} before saving; no evidence was removed automatically.`;
+  const remove = `Remove ${overflow} photo${overflow === 1 ? "" : "s"} before saving.`;
+  return options.afterRebase
+    ? `This edit now has ${photoCount} photos after loading the latest revision. ${remove} No evidence was removed automatically.`
+    : `This scorecard has ${photoCount} photos, but the limit is ${MAX_SCORECARD_PHOTOS}. ${remove}`;
 }
 
 export interface ScorecardEditorSubmitError {
