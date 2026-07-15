@@ -36,7 +36,7 @@ import {
   type DraftAction,
 } from "../../../src/scorecards/draft";
 import { rebaseScorecardEditDraft, scorecardEditRebaseMessage } from "../../../src/scorecards/edit";
-import { scorecardEditorBusyMessage, scorecardPhotoOverflowMessage } from "../../../src/scorecards/editor-state";
+import { scorecardEditorBusyMessage, scorecardEditorSubmitError, scorecardPhotoOverflowMessage } from "../../../src/scorecards/editor-state";
 import { loadScorecardDraft, saveScorecardDraft, deleteScorecardDraft, copyPhotoIntoDraft } from "../../../src/scorecards/draft-store";
 import { ScorecardEditCleanupPendingError, submitScorecard } from "../../../src/scorecards/submit";
 import { Badge, Button, EmptyState, LoadingState, SectionLabel, TextInput } from "../../../src/components/ui";
@@ -642,15 +642,11 @@ function Wizard(props: {
         setSubmitting(false);
         return;
       }
-      const status = (error as { status?: number } | null)?.status;
-      if (status === 409) setHasEditConflict(true);
+      const submitError = scorecardEditorSubmitError(error, editingSubmitted);
+      setHasEditConflict(submitError.hasEditConflict);
       setNotice({
         tone: "error",
-        text: status === 409
-          ? "This scorecard changed in another session. Your local work is safe. Reload the latest revision to retry with your changes."
-          : editingSubmitted
-            ? "Couldn’t save the scorecard changes. Your work is saved — try again."
-            : "Couldn’t submit the scorecard. Your work is saved — try again.",
+        text: submitError.message,
       });
       setSubmitting(false);
     }
