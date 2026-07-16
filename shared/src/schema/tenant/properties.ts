@@ -41,6 +41,11 @@ export const properties = pgTable(
     companycamId: text("companycam_id"),
     companycamProjectId: text("companycam_project_id"),
     hubspotPropertyId: text("hubspot_property_id"),
+    // Optional cover photo for the property profile. `imageR2Key` is the full-size original in R2;
+    // `imageThumbnailR2Key` is a small server-generated JPEG (sharp) used for the header avatar. Both null
+    // when no photo has been uploaded. Served to clients as presigned URLs, never as raw keys.
+    imageR2Key: text("image_r2_key"),
+    imageThumbnailR2Key: text("image_thumbnail_r2_key"),
     notes: text("notes"),
     isTestData: boolean("is_test_data").default(false).notNull(),
     isActive: boolean("is_active").default(true).notNull(),

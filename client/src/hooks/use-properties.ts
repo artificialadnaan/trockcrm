@@ -37,6 +37,10 @@ export interface PropertySurface {
   linkedValue?: string;
   activePipelineValue?: string;
   photosCount?: number;
+  /** Presigned inline URL for the full-size cover photo (null when none / storage unconfigured). */
+  imageUrl?: string | null;
+  /** Presigned inline URL for the small cover-photo thumbnail used in the header avatar. */
+  imageThumbnailUrl?: string | null;
 }
 
 export interface PropertyListFilters {
@@ -267,6 +271,28 @@ export async function updateProperty(
   return api<{ property: PropertySurface }>(`/properties/${propertyId}`, {
     method: "PATCH",
     json: input,
+    ...getOfficeRequestOptions(options.officeId),
+  });
+}
+
+/** Upload (or replace) a property's cover photo. Sends the raw image bytes; the server stores + thumbnails. */
+export async function uploadPropertyImage(propertyId: string, file: File, options: OfficeRequestOptions = {}) {
+  const office = getOfficeRequestOptions(options.officeId);
+  return api<{ property: PropertySurface }>(`/properties/${propertyId}/image`, {
+    method: "POST",
+    body: file,
+    headers: {
+      ...(office.headers ?? {}),
+      "Content-Type": file.type || "application/octet-stream",
+      "x-original-filename": encodeURIComponent(file.name),
+    },
+  });
+}
+
+/** Remove a property's cover photo. */
+export async function deletePropertyImage(propertyId: string, options: OfficeRequestOptions = {}) {
+  return api<{ property: PropertySurface }>(`/properties/${propertyId}/image`, {
+    method: "DELETE",
     ...getOfficeRequestOptions(options.officeId),
   });
 }

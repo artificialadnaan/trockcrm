@@ -175,11 +175,60 @@ export async function generateEvidenceJpeg(
     .toBuffer();
 }
 
-async function convertHeicToJpeg(source: Buffer): Promise<Uint8Array> {
+async function convertHeicToJpeg(source: Buffer, quality: number = THUMBNAIL_QUALITY / 100): Promise<Uint8Array> {
   if (!readHeifDimensions(source)) {
     throw new Error("HEIC/HEIF image is malformed or exceeds the PDF evidence decode limit");
   }
-  return heicConvert({ buffer: source, format: "JPEG", quality: THUMBNAIL_QUALITY / 100 });
+  return heicConvert({ buffer: source, format: "JPEG", quality });
+}
+
+/** Quality for a stored FULL-SIZE JPEG (higher than the thumbnail quality — this is the original a user views). */
+const STORABLE_JPEG_QUALITY = 88;
+/** Near-lossless intermediate for the HEIC decode, so re-encoding to the stored JPEG isn't stacked on top of
+ *  the thumbnail-grade (0.70) compression the evidence path uses. */
+const STORABLE_HEIC_DECODE_QUALITY = 0.95;
+
+/**
+ * Transcode a HEIC/HEIF original into a FULL-RESOLUTION JPEG for storage — EXIF-rotated and with any
+ * transparency flattened onto white, but NOT downscaled (unlike generateEvidenceJpeg, which resizes to a
+ * thumbnail). Decoded at near-lossless quality so the stored full-size cover isn't thumbnail-grade. Used so
+ * a HEIC cover photo keeps its resolution and renders in every browser. Throws if the input can't be
+ * decoded (the caller surfaces that as a 4xx, never a broken stored object).
+ */
+export async function transcodeHeicToStorableJpeg(source: Buffer): Promise<Buffer> {
+  const converted = await withHeicDecodePermit(() => convertHeicToJpeg(source, STORABLE_HEIC_DECODE_QUALITY));
+  return sharp(Buffer.from(converted), { failOn: "none", limitInputPixels: EVIDENCE_DECODE_PIXEL_LIMIT })
+    .rotate()
+    .flatten({ background: { r: 255, g: 255, b: 255 } })
+    .jpeg({ quality: STORABLE_JPEG_QUALITY, mozjpeg: true })
+    .toBuffer();
+}
+
+const RENDERABLE_FORMAT_TO_MIME: Record<string, { mime: string; extension: string }> = {
+  jpeg: { mime: "image/jpeg", extension: "jpg" },
+  png: { mime: "image/png", extension: "png" },
+  webp: { mime: "image/webp", extension: "webp" },
+  gif: { mime: "image/gif", extension: "gif" },
+};
+
+/**
+ * Decode `source` and return the canonical MIME + extension derived from the ACTUAL bytes — not the client's
+ * Content-Type/filename, which can be spoofed or simply wrong. Throws if the bytes don't decode or aren't a
+ * browser-renderable raster we store for a cover photo. This rejects e.g. a TIFF renamed to `.jpg`, which
+ * would otherwise be stored and served as image/jpeg and render as a broken <img>; a corrupt body with a
+ * valid header is also rejected by the forced pixel decode. HEIC/HEIF are transcoded upstream, not here.
+ */
+export async function probeStorableImageFormat(source: Buffer): Promise<{ mime: string; extension: string }> {
+  const { format } = await sharp(source, { failOn: "error", limitInputPixels: EVIDENCE_DECODE_PIXEL_LIMIT }).metadata();
+  const mapped = format ? RENDERABLE_FORMAT_TO_MIME[format] : undefined;
+  if (!mapped) {
+    throw new Error(`unsupported or undecodable cover image format: ${format ?? "unknown"}`);
+  }
+  // Force a real pixel decode so a corrupt body behind a valid header is rejected too.
+  await sharp(source, { failOn: "error", limitInputPixels: EVIDENCE_DECODE_PIXEL_LIMIT })
+    .resize({ width: 32, height: 32, fit: "inside", withoutEnlargement: true })
+    .toBuffer();
+  return mapped;
 }
 
 /**

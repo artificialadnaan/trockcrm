@@ -26,6 +26,7 @@ import {
   generateEvidenceJpeg,
   isThumbnailableImage,
   generateThumbnailBuffer,
+  probeStorableImageFormat,
   readHeifDimensions,
   withHeicDecodePermit,
 } from "../../src/lib/image-thumbnail.js";
@@ -34,6 +35,21 @@ import {
  * Unit proof for the server-side photo thumbnail helper. No R2/network: deriveThumbnailKey and
  * isThumbnailableImage are pure, and generateThumbnailBuffer runs sharp on an in-memory image.
  */
+
+describe("probeStorableImageFormat", () => {
+  it("returns the canonical mime + extension from the ACTUAL bytes", async () => {
+    const png = await sharp({ create: { width: 4, height: 4, channels: 3, background: "#ff0000" } }).png().toBuffer();
+    await expect(probeStorableImageFormat(png)).resolves.toEqual({ mime: "image/png", extension: "png" });
+    const jpg = await sharp({ create: { width: 4, height: 4, channels: 3, background: "#00ff00" } }).jpeg().toBuffer();
+    await expect(probeStorableImageFormat(jpg)).resolves.toEqual({ mime: "image/jpeg", extension: "jpg" });
+  });
+
+  it("rejects non-renderable formats (e.g. a TIFF renamed .jpg) and undecodable bytes", async () => {
+    const tiff = await sharp({ create: { width: 4, height: 4, channels: 3, background: "#0000ff" } }).tiff().toBuffer();
+    await expect(probeStorableImageFormat(tiff)).rejects.toThrow();
+    await expect(probeStorableImageFormat(Buffer.from("this is not an image"))).rejects.toThrow();
+  });
+});
 
 describe("deriveThumbnailKey", () => {
   it("puts the thumbnail in a sibling thumbs/ folder and forces .jpg", () => {
