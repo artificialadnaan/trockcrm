@@ -175,28 +175,44 @@ export async function generateEvidenceJpeg(
     .toBuffer();
 }
 
-async function convertHeicToJpeg(source: Buffer): Promise<Uint8Array> {
+async function convertHeicToJpeg(source: Buffer, quality: number = THUMBNAIL_QUALITY / 100): Promise<Uint8Array> {
   if (!readHeifDimensions(source)) {
     throw new Error("HEIC/HEIF image is malformed or exceeds the PDF evidence decode limit");
   }
-  return heicConvert({ buffer: source, format: "JPEG", quality: THUMBNAIL_QUALITY / 100 });
+  return heicConvert({ buffer: source, format: "JPEG", quality });
 }
 
 /** Quality for a stored FULL-SIZE JPEG (higher than the thumbnail quality — this is the original a user views). */
-const STORABLE_JPEG_QUALITY = 85;
+const STORABLE_JPEG_QUALITY = 88;
+/** Near-lossless intermediate for the HEIC decode, so re-encoding to the stored JPEG isn't stacked on top of
+ *  the thumbnail-grade (0.70) compression the evidence path uses. */
+const STORABLE_HEIC_DECODE_QUALITY = 0.95;
 
 /**
  * Transcode a HEIC/HEIF original into a FULL-RESOLUTION JPEG for storage — EXIF-rotated and with any
  * transparency flattened onto white, but NOT downscaled (unlike generateEvidenceJpeg, which resizes to a
- * thumbnail). Used so a HEIC cover photo keeps its resolution and renders in every browser. Throws if the
- * input can't be decoded (the caller surfaces that as a 4xx, never a broken stored object).
+ * thumbnail). Decoded at near-lossless quality so the stored full-size cover isn't thumbnail-grade. Used so
+ * a HEIC cover photo keeps its resolution and renders in every browser. Throws if the input can't be
+ * decoded (the caller surfaces that as a 4xx, never a broken stored object).
  */
 export async function transcodeHeicToStorableJpeg(source: Buffer): Promise<Buffer> {
-  const converted = await withHeicDecodePermit(() => convertHeicToJpeg(source));
+  const converted = await withHeicDecodePermit(() => convertHeicToJpeg(source, STORABLE_HEIC_DECODE_QUALITY));
   return sharp(Buffer.from(converted), { failOn: "none", limitInputPixels: EVIDENCE_DECODE_PIXEL_LIMIT })
     .rotate()
     .flatten({ background: { r: 255, g: 255, b: 255 } })
     .jpeg({ quality: STORABLE_JPEG_QUALITY, mozjpeg: true })
+    .toBuffer();
+}
+
+/**
+ * Throw if `source` is not a decodable raster image. Guards the property-cover upload so a corrupt or
+ * spoofed file (an allowed Content-Type over non-image bytes) isn't stored as an object that neither the
+ * avatar nor the full-size view can ever render — thumbnail generation is best-effort and would silently
+ * skip it. Decoding even a tiny downscaled render proves the bytes are a real image.
+ */
+export async function assertImageDecodes(source: Buffer): Promise<void> {
+  await sharp(source, { failOn: "error", limitInputPixels: EVIDENCE_DECODE_PIXEL_LIMIT })
+    .resize({ width: 32, height: 32, fit: "inside", withoutEnlargement: true })
     .toBuffer();
 }
 

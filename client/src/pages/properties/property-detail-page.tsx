@@ -251,6 +251,7 @@ export function PropertyDetailPage() {
           imageThumbnailUrl={property.imageThumbnailUrl}
           imageUrl={property.imageUrl}
           name={property.name}
+          onRefreshNeeded={refetch}
         />
       }
       typeBadge={

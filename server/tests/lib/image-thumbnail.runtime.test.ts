@@ -22,6 +22,7 @@ vi.mock("heic-convert", () => ({
 }));
 
 import {
+  assertImageDecodes,
   deriveThumbnailKey,
   generateEvidenceJpeg,
   isThumbnailableImage,
@@ -34,6 +35,17 @@ import {
  * Unit proof for the server-side photo thumbnail helper. No R2/network: deriveThumbnailKey and
  * isThumbnailableImage are pure, and generateThumbnailBuffer runs sharp on an in-memory image.
  */
+
+describe("assertImageDecodes", () => {
+  it("resolves for a real raster image", async () => {
+    const png = await sharp({ create: { width: 4, height: 4, channels: 3, background: "#ff0000" } }).png().toBuffer();
+    await expect(assertImageDecodes(png)).resolves.toBeUndefined();
+  });
+
+  it("rejects bytes that are not a decodable image (corrupt/spoofed upload)", async () => {
+    await expect(assertImageDecodes(Buffer.from("this is not an image"))).rejects.toThrow();
+  });
+});
 
 describe("deriveThumbnailKey", () => {
   it("puts the thumbnail in a sibling thumbs/ folder and forces .jpg", () => {

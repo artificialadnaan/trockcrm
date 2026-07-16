@@ -3,7 +3,7 @@
  */
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PropertyImageAvatar, PropertyPhotoButton } from "./property-image";
 import type { PropertySurface } from "@/hooks/use-properties";
 
@@ -46,6 +46,25 @@ describe("PropertyImageAvatar", () => {
     expect(img).not.toBeNull();
     expect(img!.getAttribute("src")).toBe("https://cdn.example/thumb.jpg");
     expect(container.querySelector('button[aria-label="View photo of Milo at Mountain Park"]')).not.toBeNull();
+  });
+
+  it("calls onRefreshNeeded once when the image fails to load (expired URL recovery)", () => {
+    const onRefreshNeeded = vi.fn();
+    act(() => {
+      root.render(
+        <PropertyImageAvatar
+          name="Milo"
+          imageThumbnailUrl="https://cdn/thumb.jpg"
+          imageUrl="https://cdn/full.jpg"
+          onRefreshNeeded={onRefreshNeeded}
+        />,
+      );
+    });
+    const img = container.querySelector("img") as HTMLImageElement;
+    act(() => img.dispatchEvent(new Event("error", { bubbles: false })));
+    act(() => img.dispatchEvent(new Event("error", { bubbles: false })));
+    // Bounded to a single refresh per URL so a genuinely broken object can't loop.
+    expect(onRefreshNeeded).toHaveBeenCalledTimes(1);
   });
 });
 

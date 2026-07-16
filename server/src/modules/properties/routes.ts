@@ -18,7 +18,7 @@ import {
   type PropertyImageKeys,
 } from "./property-image-service.js";
 import { deleteObject, isR2Configured, putObject } from "../../lib/r2-client.js";
-import { generateAndStoreThumbnail, transcodeHeicToStorableJpeg } from "../../lib/image-thumbnail.js";
+import { assertImageDecodes, generateAndStoreThumbnail, transcodeHeicToStorableJpeg } from "../../lib/image-thumbnail.js";
 
 const router = Router();
 
@@ -185,6 +185,15 @@ router.post("/:id/image", express.raw({ type: () => true, limit: PROPERTY_IMAGE_
         uploadMime = "image/jpeg";
       } catch {
         throw new AppError(400, "Could not process this HEIC photo. Please upload a JPEG or PNG.");
+      }
+    } else {
+      // Validate the declared image actually decodes before storing it — a corrupt/spoofed upload must not
+      // be saved as a cover that can never render (thumbnail generation below is best-effort and would
+      // silently skip it). The HEIC branch already proved decodability by transcoding.
+      try {
+        await assertImageDecodes(body);
+      } catch {
+        throw new AppError(400, "This image could not be read. Please upload a valid JPEG, PNG, WebP, or GIF.");
       }
     }
 
