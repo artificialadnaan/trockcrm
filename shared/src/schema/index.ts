@@ -28,6 +28,7 @@ export { userGraphTokens, graphTokenStatusEnum } from "./public/user-graph-token
 export { userExternalIdentities, externalUserSourceEnum } from "./public/user-external-identities.js";
 export { userLocalAuth } from "./public/user-local-auth.js";
 export { userLocalAuthEvents, localAuthEventTypeEnum } from "./public/user-local-auth-events.js";
+export { fieldUserPasswordResets } from "./public/field-user-password-resets.js";
 export { userCommissionSettings } from "./public/user-commission-settings.js";
 export {
   notificationRecipientGroups,

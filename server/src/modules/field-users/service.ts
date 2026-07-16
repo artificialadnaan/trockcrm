@@ -10,6 +10,8 @@ import { getFieldAppUrl } from "../auth/http-config.js";
 
 const INVITE_TOKEN_BYTES = 32;
 const INVITE_TTL_DAYS = 7;
+const PASSWORD_RESET_TTL_MINUTES = 30;
+const PASSWORD_RESET_MAX_LENGTH = 256;
 const MAX_FAILED_LOGIN_ATTEMPTS = 5;
 const LOCKOUT_WINDOW_MINUTES = 15;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -135,9 +137,54 @@ export function buildInviteEmail(input: {
   return { subject, html, text };
 }
 
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+export function buildFieldPasswordResetEmail(input: {
+  displayName: string;
+  resetUrl: string;
+}): { subject: string; html: string; text: string } {
+  const firstName = input.displayName.trim().split(/\s+/)[0] || input.displayName;
+  const subject = "Reset your T-Rock Cam password";
+  const html = `
+    <div style="font-family:Arial,Helvetica,sans-serif;line-height:1.5;color:#111827">
+      <p>Hi ${escapeHtml(firstName)},</p>
+      <p>An administrator created a secure password reset for your T-Rock Cam account.</p>
+      <p><a href="${escapeHtml(input.resetUrl)}" style="display:inline-block;background:#b91c1c;color:#ffffff;padding:10px 14px;border-radius:6px;text-decoration:none;font-weight:600">Set a new password</a></p>
+      <p>This single-use link expires in 30 minutes.</p>
+      <p>If you did not request help signing in, contact your administrator.</p>
+    </div>
+  `;
+  const text = [
+    `Hi ${firstName},`,
+    "",
+    "An administrator created a secure password reset for your T-Rock Cam account.",
+    `Set a new password: ${input.resetUrl}`,
+    "",
+    "This single-use link expires in 30 minutes.",
+    "If you did not request help signing in, contact your administrator.",
+  ].join("\n");
+  return { subject, html, text };
+}
+
 function fieldInviteUrl(rawToken: string): string {
   const base = getFieldAppUrl(process.env);
   return `${base.replace(/\/+$/, "")}/accept-invite?token=${encodeURIComponent(rawToken)}`;
+}
+
+function fieldPasswordResetUrl(rawToken: string): string {
+  const base = getFieldAppUrl(process.env);
+  return `${base.replace(/\/+$/, "")}/reset-password?token=${encodeURIComponent(rawToken)}`;
+}
+
+export function passwordResetExpiry(baseDate = new Date()): Date {
+  return new Date(baseDate.getTime() + PASSWORD_RESET_TTL_MINUTES * 60 * 1000);
 }
 
 function mapFieldUserRow(row: any, now = new Date()) {
@@ -299,6 +346,268 @@ export async function resendFieldUserInvite(input: {
   if (!sent) throw new AppError(500, "Failed to send invite email");
 
   return { invite: { id: invite.id, email: invite.email, expiresAt }, rawToken };
+}
+
+export async function requestFieldUserPasswordReset(input: {
+  userId: string;
+  tenantId: string;
+  resetByUserId: string;
+}) {
+  const rawToken = generateInviteToken();
+  const tokenHash = hashInviteToken(rawToken);
+  const expiresAt = passwordResetExpiry();
+
+  const resetUser = await db.transaction(async (tx) => {
+    const userResult = await tx.execute(sql`
+      SELECT id, email, display_name
+      FROM users
+      WHERE id = ${input.userId}::uuid
+        AND office_id = ${input.tenantId}::uuid
+        AND role = 'field_contractor'
+        AND is_active = true
+      FOR UPDATE
+    `);
+    const user = ((userResult as any).rows ?? userResult)[0];
+    if (!user) {
+      throw new AppError(404, "Active field user not found");
+    }
+
+    await tx.execute(sql`
+      UPDATE field_user_password_resets
+      SET invalidated_at = now()
+      WHERE user_id = ${user.id}::uuid
+        AND used_at IS NULL
+        AND invalidated_at IS NULL
+    `);
+
+    await tx.execute(sql`
+      INSERT INTO field_user_password_resets (
+        user_id,
+        token_hash,
+        requested_by_user_id,
+        expires_at
+      )
+      VALUES (
+        ${user.id}::uuid,
+        ${tokenHash},
+        ${input.resetByUserId}::uuid,
+        ${expiresAt}
+      )
+    `);
+
+    await tx.execute(sql`
+      INSERT INTO user_local_auth_events (user_id, event_type, actor_user_id, metadata)
+      VALUES (
+        ${user.id}::uuid,
+        'password_reset_requested',
+        ${input.resetByUserId}::uuid,
+        ${JSON.stringify({ expiresAt: expiresAt.toISOString(), source: "admin_field_user_reset" })}::jsonb
+      )
+    `);
+
+    return {
+      id: user.id,
+      email: user.email,
+      displayName: user.display_name ?? user.email,
+    };
+  });
+
+  const email = buildFieldPasswordResetEmail({
+    displayName: resetUser.displayName,
+    resetUrl: fieldPasswordResetUrl(rawToken),
+  });
+  const sent = await sendSystemEmail(resetUser.email, email.subject, email.html, {
+    text: email.text,
+    suppressGlobalBcc: true,
+    requireConfiguredTransport: true,
+  });
+  if (!sent) {
+    await db.execute(sql`
+      UPDATE field_user_password_resets
+      SET invalidated_at = now()
+      WHERE token_hash = ${tokenHash}
+        AND used_at IS NULL
+    `);
+    throw new AppError(500, "Failed to send password reset email");
+  }
+
+  return { user: resetUser, expiresAt };
+}
+
+export async function previewFieldUserPasswordReset(input: { token: string }) {
+  const tokenHash = hashInviteToken(input.token);
+  const result = await db.execute(sql`
+    SELECT u.email, u.first_name, u.last_name
+    FROM field_user_password_resets password_reset
+    INNER JOIN users u ON u.id = password_reset.user_id
+    WHERE password_reset.token_hash = ${tokenHash}
+      AND password_reset.used_at IS NULL
+      AND password_reset.invalidated_at IS NULL
+      AND password_reset.expires_at > now()
+      AND u.role = 'field_contractor'
+      AND u.is_active = true
+    LIMIT 1
+  `);
+  const row = ((result as any).rows ?? result)[0];
+  if (!row) {
+    throw new AppError(404, "Password reset link is invalid or expired");
+  }
+  return {
+    email: row.email,
+    firstName: row.first_name ?? "",
+    lastName: row.last_name ?? "",
+  };
+}
+
+export async function completeFieldUserPasswordReset(input: {
+  token: string;
+  newPassword: string;
+}) {
+  if (input.newPassword.length > PASSWORD_RESET_MAX_LENGTH) {
+    throw new AppError(400, `Password must be at most ${PASSWORD_RESET_MAX_LENGTH} characters`);
+  }
+  const tokenHash = hashInviteToken(input.token);
+
+  // Invalid public reset requests must stay cheap. Only perform scrypt after confirming that the
+  // supplied token currently names an active reset; the transaction below revalidates it for use.
+  const preflightResult = await db.execute(sql`
+    SELECT 1
+    FROM field_user_password_resets password_reset
+    INNER JOIN users u ON u.id = password_reset.user_id
+    WHERE password_reset.token_hash = ${tokenHash}
+      AND password_reset.used_at IS NULL
+      AND password_reset.invalidated_at IS NULL
+      AND password_reset.expires_at > now()
+      AND u.role = 'field_contractor'
+      AND u.is_active = true
+    LIMIT 1
+  `);
+  if (((preflightResult as any).rows ?? preflightResult).length === 0) {
+    throw new AppError(404, "Password reset link is invalid or expired");
+  }
+
+  const passwordHash = await hashPassword(input.newPassword);
+
+  const resetUser = await db.transaction(async (tx) => {
+    // Keep the same lock order as reset issuance: user first, reset row second. This serializes
+    // simultaneous admin requests and link consumption without a users↔resets deadlock.
+    const userResult = await tx.execute(sql`
+      SELECT u.id
+      FROM field_user_password_resets password_reset
+      INNER JOIN users u ON u.id = password_reset.user_id
+      WHERE password_reset.token_hash = ${tokenHash}
+        AND password_reset.used_at IS NULL
+        AND password_reset.invalidated_at IS NULL
+        AND password_reset.expires_at > now()
+        AND u.role = 'field_contractor'
+        AND u.is_active = true
+      FOR UPDATE OF u
+    `);
+    const user = ((userResult as any).rows ?? userResult)[0];
+    if (!user) {
+      throw new AppError(404, "Password reset link is invalid or expired");
+    }
+
+    const resetResult = await tx.execute(sql`
+      SELECT
+        password_reset.id,
+        password_reset.user_id,
+        password_reset.requested_by_user_id,
+        u.email
+      FROM field_user_password_resets password_reset
+      INNER JOIN users u ON u.id = password_reset.user_id
+      WHERE password_reset.token_hash = ${tokenHash}
+        AND password_reset.user_id = ${user.id}::uuid
+        AND password_reset.used_at IS NULL
+        AND password_reset.invalidated_at IS NULL
+        AND password_reset.expires_at > now()
+        AND u.role = 'field_contractor'
+        AND u.is_active = true
+      FOR UPDATE OF password_reset
+    `);
+    const reset = ((resetResult as any).rows ?? resetResult)[0];
+    if (!reset) {
+      throw new AppError(404, "Password reset link is invalid or expired");
+    }
+
+    await tx.execute(sql`
+      INSERT INTO user_local_auth (
+        user_id,
+        password_hash,
+        must_change_password,
+        is_enabled,
+        failed_login_attempts,
+        last_failed_login_at,
+        locked_until,
+        password_changed_at,
+        revoked_at,
+        revoked_by_user_id,
+        updated_at
+      )
+      VALUES (
+        ${reset.user_id}::uuid,
+        ${passwordHash},
+        false,
+        true,
+        0,
+        NULL,
+        NULL,
+        now(),
+        NULL,
+        NULL,
+        now()
+      )
+      ON CONFLICT (user_id) DO UPDATE
+      SET password_hash = EXCLUDED.password_hash,
+          must_change_password = false,
+          is_enabled = true,
+          invite_expires_at = NULL,
+          failed_login_attempts = 0,
+          last_failed_login_at = NULL,
+          locked_until = NULL,
+          password_changed_at = now(),
+          revoked_at = NULL,
+          revoked_by_user_id = NULL,
+          updated_at = now()
+    `);
+
+    await tx.execute(sql`
+      UPDATE users
+      SET token_version = token_version + 1,
+          updated_at = now()
+      WHERE id = ${reset.user_id}::uuid
+    `);
+
+    await tx.execute(sql`
+      UPDATE field_user_password_resets
+      SET used_at = now()
+      WHERE id = ${reset.id}::uuid
+        AND used_at IS NULL
+        AND invalidated_at IS NULL
+    `);
+
+    await tx.execute(sql`
+      UPDATE field_user_password_resets
+      SET invalidated_at = now()
+      WHERE user_id = ${reset.user_id}::uuid
+        AND id <> ${reset.id}::uuid
+        AND used_at IS NULL
+        AND invalidated_at IS NULL
+    `);
+
+    await tx.execute(sql`
+      INSERT INTO user_local_auth_events (user_id, event_type, actor_user_id, metadata)
+      VALUES (
+        ${reset.user_id}::uuid,
+        'password_reset_completed',
+        ${reset.user_id}::uuid,
+        ${JSON.stringify({ requestedByUserId: reset.requested_by_user_id })}::jsonb
+      )
+    `);
+
+    return { id: reset.user_id, email: reset.email };
+  });
+  return { success: true, user: resetUser };
 }
 
 export async function revokeFieldUserInvite(input: { inviteId: string; tenantId: string }) {

@@ -34,6 +34,7 @@ vi.mock("./pages/CapturePage", () => ({ CapturePage: () => <div>Capture page</di
 vi.mock("./pages/HomePage", () => ({ HomePage: () => <div>Home page</div> }));
 vi.mock("./pages/ProjectDetailPage", () => ({ ProjectDetailPage: () => <div>Project detail</div> }));
 vi.mock("./pages/ProjectsPage", () => ({ ProjectsPage: () => <div>Projects page</div> }));
+vi.mock("./pages/ResetPasswordPage", () => ({ ResetPasswordPage: () => <div>Reset password page</div> }));
 
 let root: Root | null = null;
 let container: HTMLDivElement | null = null;
@@ -58,5 +59,19 @@ describe("App routes", () => {
     );
 
     await vi.waitFor(() => expect(container!.textContent).toContain("Protected shell"));
+  });
+
+  it("registers the public password reset route", async () => {
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    root.render(
+      <MemoryRouter initialEntries={["/reset-password?token=raw-token"]}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    await vi.waitFor(() => expect(container!.textContent).toContain("Reset password page"));
   });
 });
