@@ -3,7 +3,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   applyStoredDealView,
-  collectPersistableDealViewParams,
   isBareDealsView,
   isPersistableDealViewParam,
   readStoredDealView,
@@ -34,10 +33,12 @@ describe("deals-view-preferences", () => {
   });
 
   describe("isBareDealsView — only a bare view is safe to hydrate into", () => {
-    it("treats an empty query or scope-only as bare", () => {
+    it("treats an empty query or context-only (scope / officeId) as bare", () => {
       expect(isBareDealsView("")).toBe(true);
       expect(isBareDealsView("scope=all")).toBe(true);
       expect(isBareDealsView("scope=mine")).toBe(true);
+      expect(isBareDealsView("officeId=office-b")).toBe(true); // cross-office context, still bare
+      expect(isBareDealsView("scope=all&officeId=office-b")).toBe(true);
     });
 
     it("treats any authoritative link (filter / dl_ base-list / explicit period-rep) as NOT bare", () => {
@@ -45,15 +46,6 @@ describe("deals-view-preferences", () => {
       expect(isBareDealsView("scope=all&dl_stageIds=estimating")).toBe(false); // base-list link
       expect(isBareDealsView("scope=all&period=ytd")).toBe(false); // explicit timeframe
       expect(isBareDealsView("assignedRepId=rep-1")).toBe(false); // explicit rep
-    });
-  });
-
-  describe("collectPersistableDealViewParams", () => {
-    it("keeps only the persistable params and drops everything else + empties", () => {
-      const collected = collectPersistableDealViewParams(
-        "scope=all&period=ytd&assignedRepId=rep-1&filter=at_risk&dl_stage=estimating&fb_region=x&assignedRepId2=&period2=",
-      );
-      expect(collected).toEqual({ period: "ytd", assignedRepId: "rep-1" });
     });
   });
 
@@ -95,12 +87,25 @@ describe("deals-view-preferences", () => {
       expect(readStoredDealView(null, "office-a")).toEqual({});
     });
 
+    it("returns an empty object for a null / undefined officeId (nothing stored under the default key)", () => {
+      expect(readStoredDealView("user-1", null)).toEqual({});
+      expect(readStoredDealView("user-1", undefined)).toEqual({});
+    });
+
     it("re-filters on read so a stale non-persistable key (incl. a since-removed dl_) can't leak back", () => {
       window.localStorage.setItem(
         "deals-view-preference:user-1:office-a",
         JSON.stringify({ period: "ytd", filter: "at_risk", scope: "all", dl_stage: "estimating" }),
       );
       expect(readStoredDealView("user-1", "office-a")).toEqual({ period: "ytd" });
+    });
+
+    it("drops a persistable key whose stored value is not a string (e.g. a corrupted period: 5)", () => {
+      window.localStorage.setItem(
+        "deals-view-preference:user-1:office-a",
+        JSON.stringify({ period: 5, assignedRepId: "rep-1" }),
+      );
+      expect(readStoredDealView("user-1", "office-a")).toEqual({ assignedRepId: "rep-1" });
     });
 
     it("survives malformed stored JSON", () => {

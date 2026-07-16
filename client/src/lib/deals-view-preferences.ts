@@ -28,27 +28,21 @@ export function isPersistableDealViewParam(key: string): boolean {
   return key === "period" || key === "assignedRepId";
 }
 
+// Context params that describe WHICH board is shown, not a filter on it — a bare view may carry these and
+// still hydrate. `scope` (Mine/All) and `officeId` (cross-office viewing) both fall here.
+const BARE_DEALS_CONTEXT_PARAMS = new Set(["scope", "officeId"]);
+
 /**
- * A "bare" /deals view carries no query state beyond `scope` (which persists on its own). Only a bare view
- * is safe to hydrate saved preferences into — any other param (a `?filter=` drill-down, a `dl_*` base-list
- * link, an explicit period/rep) makes the URL authoritative, so a shared/bookmarked link keeps its intended
- * result set instead of being narrowed by the recipient's stored rep/timeframe.
+ * A "bare" /deals view carries no query state beyond the context params above. Only a bare view is safe to
+ * hydrate saved preferences into — any other param (a `?filter=` drill-down, a `dl_*` base-list link, an
+ * explicit period/rep) makes the URL authoritative, so a shared/bookmarked link keeps its intended result
+ * set instead of being narrowed by the recipient's stored rep/timeframe.
  */
 export function isBareDealsView(search: string): boolean {
   for (const key of new URLSearchParams(search).keys()) {
-    if (key !== "scope") return false;
+    if (!BARE_DEALS_CONTEXT_PARAMS.has(key)) return false;
   }
   return true;
-}
-
-/** The persistable subset of a URL query string, as a plain record (empty values dropped). */
-export function collectPersistableDealViewParams(search: string): Record<string, string> {
-  const params = new URLSearchParams(search);
-  const out: Record<string, string> = {};
-  for (const [key, value] of params) {
-    if (value && isPersistableDealViewParam(key)) out[key] = value;
-  }
-  return out;
 }
 
 export function readStoredDealView(

@@ -437,7 +437,10 @@ describe("DealListPage", () => {
     mocks.buildDealStageWorkspacePathMock.mockReturnValue("/deals/stages/stage-won?scope=all");
 
     mocks.useTaskAssigneesMock.mockReturnValue({
-      assignees: [{ id: "rep-1", displayName: "Brett Jones" }],
+      assignees: [
+        { id: "rep-1", displayName: "Brett Jones" },
+        { id: "rep-9", displayName: "Nina Nine" },
+      ],
     });
 
     mocks.usePipelineStagesMock.mockReturnValue({
@@ -564,13 +567,17 @@ describe("DealListPage", () => {
       "deals-view-preference:user-1:office-1",
       JSON.stringify({ assignedRepId: "rep-9", period: "ytd" }),
     );
+    // Effective scope resolves to All on the bare return, so the saved rep is kept (not dropped as under Mine).
+    window.localStorage.setItem("pipeline-scope-preference:user-1", "all");
     mocks.useAuthMock.mockReturnValue({
       user: { id: "user-1", email: "a@b.test", displayName: "T", role: "admin", officeId: "office-1", activeOfficeId: "office-1" },
       loading: false,
     });
     let navigate: (to: string) => void = () => {};
+    const locations: string[] = [];
     function Probe() {
       navigate = useNavigate();
+      locations.push(useLocation().search);
       return <DealListPage />;
     }
     const container = document.createElement("div");
@@ -589,6 +596,10 @@ describe("DealListPage", () => {
     // The sidebar "Deals" link keeps this same route mounted; the return must RESTORE, not save {} and wipe.
     await act(async () => navigate("/deals"));
     expect(readStoredDealView("user-1", "office-1")).toMatchObject({ assignedRepId: "rep-9", period: "ytd" });
+    // And the URL itself is hydrated with the restored rep + timeframe.
+    const restored = locations[locations.length - 1];
+    expect(restored).toContain("assignedRepId=rep-9");
+    expect(restored).toContain("period=ytd");
     await act(async () => root?.unmount());
     container.remove();
   });
@@ -603,6 +614,28 @@ describe("DealListPage", () => {
     const view = await renderPageDomWithLocation("/deals");
     expect(view.searches.some((s) => s.includes("period=ytd"))).toBe(true);
     expect(view.searches.every((s) => !s.includes("assignedRepId=rep-9"))).toBe(true);
+    await view.cleanup();
+  });
+
+  it("KEEPS a saved rep under Watched scope (rep narrowing is valid there, unlike Mine)", async () => {
+    window.localStorage.setItem(
+      "deals-view-preference:user-1:office-1",
+      JSON.stringify({ assignedRepId: "rep-9", period: "ytd" }),
+    );
+    window.localStorage.setItem("pipeline-scope-preference:user-1", "watched");
+    const view = await renderPageDomWithLocation("/deals");
+    expect(view.searches.some((s) => s.includes("assignedRepId=rep-9"))).toBe(true);
+    await view.cleanup();
+  });
+
+  it("does NOT restore a stored rep who is no longer a selectable assignee (deactivated / wrong office)", async () => {
+    window.localStorage.setItem(
+      "deals-view-preference:user-1:office-1",
+      JSON.stringify({ assignedRepId: "rep-gone", period: "ytd" }), // rep-gone is not in the assignee list
+    );
+    const view = await renderPageDomWithLocation("/deals?scope=all");
+    expect(view.searches.some((s) => s.includes("period=ytd"))).toBe(true);
+    expect(view.searches.every((s) => !s.includes("assignedRepId=rep-gone"))).toBe(true);
     await view.cleanup();
   });
 

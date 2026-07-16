@@ -858,46 +858,54 @@ function DealListPageContent({
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
 
-  // Remember the standing dashboard header filters (Rep + timeframe) per-user, the same way Mine/All already
-  // persists — so opening a deal and returning to /deals restores the last selection instead of resetting.
-  // Scope stays owned by scope-preferences.
-  //
+  // Effective view context — the office and scope can BOTH be overridden by the URL for supported
+  // cross-office viewing (?officeId=) and shared/bookmarked links (?scope=). Hoisted here so the persistence
+  // layer AND the board/header below read one value.
+  const effectiveOfficeId = searchParams.get("officeId") ?? activeOfficeId;
+  const requestedScope = resolvePreferredScope({
+    requestedScope: searchParams.get("scope"),
+    userId,
+    fallback: getScope(searchParams, role),
+  });
+  // Team is not offered (see SCOPE_OPTIONS); coerce a stored/URL ?scope=team to a scope we actually render so
+  // the toggle and board never reach the dead "team" placeholder state.
+  const scope: PipelineScope = requestedScope === "team" ? "mine" : requestedScope;
+  const { assignees } = useTaskAssignees();
+
+  // Remember the standing dashboard header filters (Rep + timeframe) per (user, effective office), the same
+  // way Mine/All already persists — so opening a deal and returning to /deals restores the last selection.
   // This effect only RESTORES (reads the store); it never writes, so no navigation can wipe the saved
-  // selection. Writes happen exclusively in the Rep/Period control handlers (persistDealViewParam), which is
-  // the only reliable signal of an intentional change — a bare URL alone can't tell a "cleared to All time"
-  // from a "navigated back", and a drill-down can drop ?period without the user clearing it.
-  //
-  // Only a BARE view (no query beyond scope) hydrates: a `?filter=` drill-down, a `dl_*` base-list link, or
-  // an explicit period/rep in the URL is authoritative, so a shared/bookmarked link keeps its intended
-  // result instead of being narrowed by the recipient's stored selection.
+  // selection. Writes happen only in the Rep/Period control handlers (persistDealViewParam) — the reliable
+  // signal of an intentional change. Only a BARE view (no query beyond scope/officeId) hydrates; a `?filter=`
+  // drill-down, a `dl_*` base-list link, or an explicit period/rep is authoritative.
   useEffect(() => {
     if (searchParams.has("filter")) return;
     if (!isBareDealsView(searchParams.toString())) return;
-    const stored = readStoredDealView(userId, activeOfficeId);
-    // A saved Rep filter only applies under "all" scope — under Mine (or any non-all scope, which the shared
-    // scope-preference can flip to from another page) it would intersect with the viewer's own deals and
-    // empty the board. Restore the timeframe regardless; drop the rep unless the effective scope is "all".
-    const effectiveScope = resolvePreferredScope({
-      requestedScope: searchParams.get("scope"),
-      userId,
-      fallback: getScope(searchParams, role),
-    });
-    if (effectiveScope !== "all") delete stored.assignedRepId;
+    const stored = readStoredDealView(userId, effectiveOfficeId);
+    // A saved Rep is only meaningful under scopes that narrow by rep. Under Mine (which the shared scope
+    // preference can flip to from another page) it intersects the viewer's own deals and empties the board,
+    // so drop it there; Watched/On Hold/All keep it. The timeframe is always restored.
+    if (scope === "mine") delete stored.assignedRepId;
+    if (stored.assignedRepId) {
+      // Don't inject a rep who is no longer a selectable assignee (deactivated, or not in this office) — it
+      // would show an unresolved "Selected rep" and silently narrow the board. Wait for the list to load.
+      if (assignees.length === 0) return;
+      if (!assignees.some((assignee) => assignee.id === stored.assignedRepId)) delete stored.assignedRepId;
+    }
     const next = applyStoredDealView(searchParams.toString(), stored);
     if (next !== null) setSearchParams(next, { replace: true });
-  }, [searchParams, setSearchParams, userId, activeOfficeId, role]);
+  }, [searchParams, setSearchParams, userId, effectiveOfficeId, scope, assignees]);
 
-  // Persist a single header control (Rep or timeframe) as a per-user preference. Per-key so changing one
-  // control never drops the other from the store — important when the current view is a drill-down that
-  // doesn't carry ?period in its URL.
+  // Persist a single header control (Rep or timeframe) as a per-(user, office) preference. Per-key so
+  // changing one control never drops the other — important on a drill-down whose URL omits ?period.
   const persistDealViewParam = useCallback(
     (key: "period" | "assignedRepId", value: string | null) => {
-      const stored = readStoredDealView(userId, activeOfficeId);
+      const stored = readStoredDealView(userId, effectiveOfficeId);
       if (value) stored[key] = value;
       else delete stored[key];
-      writeStoredDealView(userId, activeOfficeId, stored);
+      writeStoredDealView(userId, effectiveOfficeId, stored);
     },
-    [userId, activeOfficeId],
+    [userId, effectiveOfficeId],
   );
 
   const [search, setSearch] = useState("");
@@ -905,19 +913,10 @@ function DealListPageContent({
   const [terminalDateFilters, setTerminalDateFilters] = useState<Record<TerminalOutcome, TerminalDateFilter>>(() =>
     resolveDrilldownTerminalDateFilters(searchParams)
   );
-  const requestedScope = resolvePreferredScope({
-    requestedScope: searchParams.get("scope"),
-    userId,
-    fallback: getScope(searchParams, role),
-  });
-  // Team is not offered (see SCOPE_OPTIONS); coerce a stored/URL ?scope=team to a scope we
-  // actually render so the toggle and board never reach the dead "team" placeholder state.
-  const scope: PipelineScope = requestedScope === "team" ? "mine" : requestedScope;
   const selectedPeriod = useMemo(() => normalizeDashboardPeriod(searchParams.get("period")), [searchParams]);
   const selectedPeriodRange = useMemo(() => getDashboardPeriodDateRange(selectedPeriod), [selectedPeriod]);
   const scopeOptions = SCOPE_OPTIONS;
   const { stages } = usePipelineStages("deal");
-  const { assignees } = useTaskAssignees();
   // Option sources for the base-view + drill-down FilterBar region / project-type dimensions (Rep stays
   // the page-level select / header; scope stays the page toggle — neither is a bar dimension here).
   const { regions } = useRegions();
