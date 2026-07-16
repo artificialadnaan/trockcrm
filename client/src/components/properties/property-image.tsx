@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Building2, ImagePlus, Loader2, Trash2, Upload } from "lucide-react";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
@@ -19,31 +19,23 @@ export function PropertyImageAvatar({
   imageThumbnailUrl,
   imageUrl,
   name,
-  onRefreshNeeded,
 }: {
   imageThumbnailUrl?: string | null;
   imageUrl?: string | null;
   name: string;
-  /** Called when an image fails to load (e.g. a presigned URL expired on a long-open tab) so the parent can
-   *  refetch fresh URLs. Recovery is bounded to one refresh per URL to avoid an onError → refetch loop. */
-  onRefreshNeeded?: () => void;
 }) {
   const [open, setOpen] = useState(false);
-  const refreshedUrl = useRef<string | null>(null);
+  // If the thumbnail can't load (e.g. a presigned URL expired on a very long-open tab, or a missing
+  // object), fall back to the building icon instead of a broken <img>. Deliberately NOT an auto-refetch:
+  // the property refetch remounts this component and re-signs the SAME key, so a genuinely broken object
+  // would loop. A page navigation/refresh re-signs the URLs. Reset when the URL changes so a later,
+  // freshly-signed URL gets its own attempt.
+  const [thumbFailed, setThumbFailed] = useState(false);
+  useEffect(() => setThumbFailed(false), [imageThumbnailUrl]);
 
-  if (!imageThumbnailUrl) {
+  if (!imageThumbnailUrl || thumbFailed) {
     return <Building2 className="h-9 w-9" />;
   }
-
-  const handleImageError = () => {
-    if (!onRefreshNeeded) return;
-    // Recover ONCE per URL: a fresh refetch replaces imageThumbnailUrl and re-arms this; a genuinely broken
-    // object (deleted key) keeps the same URL, so we don't loop.
-    if (refreshedUrl.current !== imageThumbnailUrl) {
-      refreshedUrl.current = imageThumbnailUrl;
-      onRefreshNeeded();
-    }
-  };
 
   return (
     <>
@@ -53,7 +45,12 @@ export function PropertyImageAvatar({
         className="h-full w-full focus:outline-none focus-visible:ring-2 focus-visible:ring-white"
         aria-label={`View photo of ${name}`}
       >
-        <img src={imageThumbnailUrl} alt={name} className="h-full w-full object-cover" onError={handleImageError} />
+        <img
+          src={imageThumbnailUrl}
+          alt={name}
+          className="h-full w-full object-cover"
+          onError={() => setThumbFailed(true)}
+        />
       </button>
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent className="max-w-3xl">
@@ -62,7 +59,6 @@ export function PropertyImageAvatar({
             src={imageUrl ?? imageThumbnailUrl}
             alt={name}
             className="max-h-[80vh] w-full rounded-md object-contain"
-            onError={handleImageError}
           />
         </DialogContent>
       </Dialog>

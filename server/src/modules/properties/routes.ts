@@ -8,11 +8,11 @@ import { parseMoneyBound } from "./query-params.js";
 import { randomUUID } from "node:crypto";
 import {
   PROPERTY_IMAGE_MAX_BYTES,
+  activePropertyExists,
   buildPropertyImageR2Key,
   clearPropertyImageKeys,
-  isAcceptablePropertyImageMime,
   isHeicImageMime,
-  propertyExists,
+  resolveEffectivePropertyImageMime,
   resolvePropertyImageExtension,
   setPropertyImageKeys,
   type PropertyImageKeys,
@@ -135,6 +135,22 @@ function decodeOriginalFilename(header: unknown): string | undefined {
   }
 }
 
+// Raw-body parser for the cover-photo upload that translates the body-parser size-limit error into a clean
+// 413 AppError. Without this, an over-cap upload rejects BEFORE the handler's try block and the shared error
+// handler turns the raw PayloadTooLargeError into a generic 500 instead of a clear "too large" message.
+function rawPropertyImageBody() {
+  const parser = express.raw({ type: () => true, limit: PROPERTY_IMAGE_MAX_BYTES });
+  return (req: Parameters<typeof parser>[0], res: Parameters<typeof parser>[1], next: (err?: unknown) => void) => {
+    parser(req, res, (err: unknown) => {
+      if (err && ((err as { type?: string }).type === "entity.too.large" || (err as { statusCode?: number }).statusCode === 413)) {
+        const maxMb = Math.floor(PROPERTY_IMAGE_MAX_BYTES / (1024 * 1024));
+        return next(new AppError(413, `Photo is too large. Please upload an image under ${maxMb} MB.`));
+      }
+      next(err);
+    });
+  };
+}
+
 // Best-effort R2 cleanup of superseded/removed cover-photo objects. Never throws — cleanup failure must
 // not fail a request that has already committed the authoritative DB change.
 async function deletePropertyImageObjects(keys: PropertyImageKeys): Promise<void> {
@@ -151,11 +167,15 @@ async function deletePropertyImageObjects(keys: PropertyImageKeys): Promise<void
 
 // POST /api/properties/:id/image — upload (or replace) the property's cover photo. Accepts raw image bytes
 // with the mime in Content-Type; anyone who can edit the property may set it (same surface as PATCH).
-router.post("/:id/image", express.raw({ type: () => true, limit: PROPERTY_IMAGE_MAX_BYTES }), async (req, res, next) => {
+router.post("/:id/image", rawPropertyImageBody(), async (req, res, next) => {
   try {
     const propertyId = req.params.id as string;
-    const mimeType = (req.headers["content-type"] as string | undefined) ?? "application/octet-stream";
-    if (!isAcceptablePropertyImageMime(mimeType)) {
+    const originalFilename = decodeOriginalFilename(req.headers["x-original-filename"]);
+    // Resolve the type from Content-Type, falling back to the filename extension — browsers often send
+    // application/octet-stream for camera images (HEIC especially), and rejecting on that would block a
+    // valid photo before the decoder/transcoder runs.
+    const mimeType = resolveEffectivePropertyImageMime(req.headers["content-type"] as string | undefined, originalFilename);
+    if (!mimeType) {
       throw new AppError(400, "Property photo must be an image (JPEG, PNG, WebP, HEIC, or GIF).");
     }
     const body = req.body as Buffer;
@@ -169,8 +189,9 @@ router.post("/:id/image", express.raw({ type: () => true, limit: PROPERTY_IMAGE_
       throw new AppError(503, "Image storage is not configured.");
     }
 
-    // Confirm the property exists BEFORE writing to R2 so a bad id can't orphan an object.
-    if (!(await propertyExists(req.tenantDb!, propertyId))) {
+    // Confirm the property exists AND is active BEFORE writing to R2 — a bad id can't orphan an object, and
+    // a soft-deleted property (read-only) can't have its cover mutated via a stale deep link.
+    if (!(await activePropertyExists(req.tenantDb!, propertyId))) {
       throw new AppError(404, "Property not found");
     }
 
@@ -197,7 +218,7 @@ router.post("/:id/image", express.raw({ type: () => true, limit: PROPERTY_IMAGE_
       }
     }
 
-    const extension = resolvePropertyImageExtension(decodeOriginalFilename(req.headers["x-original-filename"]), uploadMime);
+    const extension = resolvePropertyImageExtension(originalFilename, uploadMime);
     // A random suffix (not just the timestamp) makes each upload key globally unique, so two near-
     // simultaneous replacements can't share a key and have one's cleanup delete the other's live object.
     const imageR2Key = buildPropertyImageR2Key(propertyId, extension, `${Date.now()}-${randomUUID()}`);
@@ -224,6 +245,10 @@ router.post("/:id/image", express.raw({ type: () => true, limit: PROPERTY_IMAGE_
 router.delete("/:id/image", async (req, res, next) => {
   try {
     const propertyId = req.params.id as string;
+    // A soft-deleted property is read-only — don't mutate its cover even via a stale deep link.
+    if (!(await activePropertyExists(req.tenantDb!, propertyId))) {
+      throw new AppError(404, "Property not found");
+    }
     const cleared = await clearPropertyImageKeys(req.tenantDb!, propertyId);
     if (!cleared) {
       throw new AppError(404, "Property not found");

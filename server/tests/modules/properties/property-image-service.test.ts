@@ -5,6 +5,7 @@ import {
   isAcceptablePropertyImageMime,
   isHeicImageMime,
   redactPropertyImageKeys,
+  resolveEffectivePropertyImageMime,
   resolvePropertyImageExtension,
 } from "../../../src/modules/properties/property-image-service.js";
 
@@ -27,6 +28,29 @@ describe("isAcceptablePropertyImageMime", () => {
     expect(isAcceptablePropertyImageMime("text/html")).toBe(false);
     expect(isAcceptablePropertyImageMime(null)).toBe(false);
     expect(isAcceptablePropertyImageMime(undefined)).toBe(false);
+  });
+});
+
+describe("resolveEffectivePropertyImageMime", () => {
+  it("uses an accepted Content-Type as-is", () => {
+    expect(resolveEffectivePropertyImageMime("image/png", "whatever.bin")).toBe("image/png");
+    expect(resolveEffectivePropertyImageMime("image/jpeg; charset=binary", null)).toBe("image/jpeg");
+  });
+
+  it("falls back to the filename extension when the browser sends a generic/unknown type", () => {
+    // Browsers commonly send application/octet-stream for HEIC/camera images.
+    expect(resolveEffectivePropertyImageMime("application/octet-stream", "IMG_1234.HEIC")).toBe("image/heic");
+    expect(resolveEffectivePropertyImageMime("application/octet-stream", "photo.jpg")).toBe("image/jpeg");
+    expect(resolveEffectivePropertyImageMime("", "photo.png")).toBe("image/png");
+    expect(resolveEffectivePropertyImageMime(undefined, "photo.webp")).toBe("image/webp");
+  });
+
+  it("returns null when neither the type nor the extension identifies an accepted image", () => {
+    expect(resolveEffectivePropertyImageMime("application/octet-stream", "notes.txt")).toBeNull();
+    expect(resolveEffectivePropertyImageMime("application/pdf", "doc.pdf")).toBeNull();
+    expect(resolveEffectivePropertyImageMime("application/octet-stream", "noextension")).toBeNull();
+    expect(resolveEffectivePropertyImageMime("image/svg+xml", "x.svg")).toBeNull();
+    expect(resolveEffectivePropertyImageMime("image/tiff", "x.tiff")).toBeNull();
   });
 });
 

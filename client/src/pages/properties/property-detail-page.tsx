@@ -251,7 +251,6 @@ export function PropertyDetailPage() {
           imageThumbnailUrl={property.imageThumbnailUrl}
           imageUrl={property.imageUrl}
           name={property.name}
-          onRefreshNeeded={refetch}
         />
       }
       typeBadge={
@@ -296,7 +295,8 @@ export function PropertyDetailPage() {
             <Edit className="h-4 w-4" />
             Edit
           </Link>
-          <PropertyPhotoButton property={property} onChange={refetch} />
+          {/* Soft-deleted properties are read-only (mirrors PropertyEditPage), so no photo mutation. */}
+          {property.isActive ? <PropertyPhotoButton property={property} onChange={refetch} /> : null}
           {companyCamUrl ? (
             <a
               href={companyCamUrl}

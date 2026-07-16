@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { properties } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
@@ -38,6 +38,38 @@ export function isAcceptablePropertyImageMime(mimeType: string | null | undefine
   if (!mimeType) return false;
   const base = mimeType.split(";")[0]!.trim().toLowerCase();
   return ACCEPTED_PROPERTY_IMAGE_MIMES.has(base);
+}
+
+const EXTENSION_TO_MIME: Record<string, string> = {
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  png: "image/png",
+  webp: "image/webp",
+  gif: "image/gif",
+  heic: "image/heic",
+  heif: "image/heif",
+};
+
+/**
+ * The effective image type for an upload. Browsers often can't determine `file.type` for camera images
+ * (HEIC especially) and send `application/octet-stream`; in that case fall back to the original filename's
+ * extension so a valid photo isn't rejected before the decoder/transcoder can run. Returns the normalized
+ * mime, or null when neither the Content-Type nor the extension identifies an accepted image.
+ */
+export function resolveEffectivePropertyImageMime(
+  contentType: string | null | undefined,
+  originalFilename: string | null | undefined,
+): string | null {
+  const base = contentType?.split(";")[0]?.trim().toLowerCase();
+  if (base && ACCEPTED_PROPERTY_IMAGE_MIMES.has(base)) return base;
+
+  const name = originalFilename ?? "";
+  const dot = name.lastIndexOf(".");
+  if (dot >= 0 && dot < name.length - 1) {
+    const ext = name.slice(dot + 1).toLowerCase().replace(/[^a-z0-9]/g, "");
+    if (EXTENSION_TO_MIME[ext]) return EXTENSION_TO_MIME[ext];
+  }
+  return null;
 }
 
 /**
@@ -118,12 +150,16 @@ export async function buildPropertyImageUrls(
   return { imageUrl, imageThumbnailUrl };
 }
 
-/** Cheap existence probe so an upload can 404 BEFORE writing an object to R2 for a non-existent property. */
-export async function propertyExists(tenantDb: TenantDb, propertyId: string): Promise<boolean> {
+/**
+ * Cheap probe so an upload can 404 BEFORE writing to R2. Requires the property to be ACTIVE — a
+ * soft-deleted property is read-only (its detail page hides the control), so its cover can't be mutated
+ * even via a direct API call / stale deep link.
+ */
+export async function activePropertyExists(tenantDb: TenantDb, propertyId: string): Promise<boolean> {
   const [row] = await tenantDb
     .select({ id: properties.id })
     .from(properties)
-    .where(eq(properties.id, propertyId))
+    .where(and(eq(properties.id, propertyId), eq(properties.isActive, true)))
     .limit(1);
   return Boolean(row);
 }

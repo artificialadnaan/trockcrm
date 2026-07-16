@@ -11,6 +11,7 @@ import { drizzle } from "drizzle-orm/pglite";
 const T = "office_test";
 const COMPANY = "00000000-0000-0000-0000-0000000000c1";
 const PROP = "00000000-0000-0000-0000-0000000000a1";
+const INACTIVE_PROP = "00000000-0000-0000-0000-0000000000a2";
 const MISSING = "00000000-0000-0000-0000-0000000000ff";
 
 let pg: PGlite;
@@ -41,6 +42,7 @@ beforeAll(async () => {
     SET search_path TO ${T}, public;
   `);
   await pg.exec(`INSERT INTO ${T}.properties (id, company_id, name) VALUES ('${PROP}', '${COMPANY}', 'Milo at Mountain Park');`);
+  await pg.exec(`INSERT INTO ${T}.properties (id, company_id, name, is_active) VALUES ('${INACTIVE_PROP}', '${COMPANY}', 'Deleted Property', false);`);
   tdb = drizzle(pg) as never;
 });
 
@@ -53,10 +55,12 @@ async function svc() {
 }
 
 describe("property image key writers (real SQL)", () => {
-  it("propertyExists reflects the row", async () => {
-    const { propertyExists } = await svc();
-    expect(await propertyExists(tdb, PROP)).toBe(true);
-    expect(await propertyExists(tdb, MISSING)).toBe(false);
+  it("activePropertyExists is true only for an existing ACTIVE property", async () => {
+    const { activePropertyExists } = await svc();
+    expect(await activePropertyExists(tdb, PROP)).toBe(true);
+    expect(await activePropertyExists(tdb, MISSING)).toBe(false);
+    // Soft-deleted (read-only) property must not accept cover mutations.
+    expect(await activePropertyExists(tdb, INACTIVE_PROP)).toBe(false);
   });
 
   it("setPropertyImageKeys stores keys and returns the previous (null) keys on first set", async () => {

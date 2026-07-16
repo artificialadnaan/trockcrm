@@ -3,7 +3,7 @@
  */
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { PropertyImageAvatar, PropertyPhotoButton } from "./property-image";
 import type { PropertySurface } from "@/hooks/use-properties";
 
@@ -48,23 +48,18 @@ describe("PropertyImageAvatar", () => {
     expect(container.querySelector('button[aria-label="View photo of Milo at Mountain Park"]')).not.toBeNull();
   });
 
-  it("calls onRefreshNeeded once when the image fails to load (expired URL recovery)", () => {
-    const onRefreshNeeded = vi.fn();
+  it("falls back to the building icon when the thumbnail fails to load (no broken img, no loop)", () => {
     act(() => {
       root.render(
-        <PropertyImageAvatar
-          name="Milo"
-          imageThumbnailUrl="https://cdn/thumb.jpg"
-          imageUrl="https://cdn/full.jpg"
-          onRefreshNeeded={onRefreshNeeded}
-        />,
+        <PropertyImageAvatar name="Milo" imageThumbnailUrl="https://cdn/thumb.jpg" imageUrl="https://cdn/full.jpg" />,
       );
     });
     const img = container.querySelector("img") as HTMLImageElement;
-    act(() => img.dispatchEvent(new Event("error", { bubbles: false })));
-    act(() => img.dispatchEvent(new Event("error", { bubbles: false })));
-    // Bounded to a single refresh per URL so a genuinely broken object can't loop.
-    expect(onRefreshNeeded).toHaveBeenCalledTimes(1);
+    expect(img).not.toBeNull();
+    act(() => img.dispatchEvent(new Event("error")));
+    // The broken <img> is replaced by the fallback building icon (svg) — no auto-refetch to loop on.
+    expect(container.querySelector("img")).toBeNull();
+    expect(container.querySelector("svg")).not.toBeNull();
   });
 });
 
