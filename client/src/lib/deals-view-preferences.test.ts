@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   applyStoredDealView,
   collectPersistableDealViewParams,
+  isBareDealsView,
   isPersistableDealViewParam,
   readStoredDealView,
   writeStoredDealView,
@@ -29,6 +30,21 @@ describe("deals-view-preferences", () => {
       expect(isPersistableDealViewParam("estimate")).toBe(false);
       expect(isPersistableDealViewParam("won_from")).toBe(false);
       expect(isPersistableDealViewParam("lost_to")).toBe(false);
+    });
+  });
+
+  describe("isBareDealsView — only a bare view is safe to hydrate into", () => {
+    it("treats an empty query or scope-only as bare", () => {
+      expect(isBareDealsView("")).toBe(true);
+      expect(isBareDealsView("scope=all")).toBe(true);
+      expect(isBareDealsView("scope=mine")).toBe(true);
+    });
+
+    it("treats any authoritative link (filter / dl_ base-list / explicit period-rep) as NOT bare", () => {
+      expect(isBareDealsView("scope=all&filter=won")).toBe(false); // drill-down deep link
+      expect(isBareDealsView("scope=all&dl_stageIds=estimating")).toBe(false); // base-list link
+      expect(isBareDealsView("scope=all&period=ytd")).toBe(false); // explicit timeframe
+      expect(isBareDealsView("assignedRepId=rep-1")).toBe(false); // explicit rep
     });
   });
 

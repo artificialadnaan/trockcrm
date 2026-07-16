@@ -38,6 +38,7 @@ import { resolvePreferredScope, writeStoredScopePreference } from "@/lib/scope-p
 import {
   applyStoredDealView,
   collectPersistableDealViewParams,
+  isBareDealsView,
   readStoredDealView,
   writeStoredDealView,
 } from "@/lib/deals-view-preferences";
@@ -851,41 +852,48 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
   const [searchParams, setSearchParams] = useSearchParams();
 
   // Remember the standing dashboard header filters (Rep + timeframe) per-user, the same way Mine/All already
-  // persists — so opening a deal and returning to /deals (a nav link lands on a bare /deals) restores the
-  // last selection instead of resetting. Scope stays owned by scope-preferences.
-  //
-  // Persistence is a BASE-VIEW concern only: a `?filter=` drill-down (e.g. a shared /deals?filter=won link)
-  // omits period/rep on purpose (all-time/all-reps for that cohort), so we neither hydrate INTO it nor let it
-  // clobber the saved base-view selection.
-  const dealViewHydratedRef = useRef(false);
-  const dealViewWritePrimedRef = useRef(false);
+  // persists — so opening a deal and returning to /deals restores the last selection instead of resetting.
+  // Scope stays owned by scope-preferences. One effect owns both restore and save:
+  //   - Only a BARE view (no query beyond scope) restores from the store. Any authoritative link — a
+  //     `?filter=` drill-down, a `dl_*` base-list link, or an explicit period/rep — is left as-is.
+  //   - Returning from a drill-down to a bare /deals stays MOUNTED (same route), so we track the previous
+  //     drill-down state and RESTORE (never save {} and wipe the saved selection) on that transition.
+  const dealViewMountedRef = useRef(false);
+  const dealViewPrevFilterRef = useRef(false);
   useEffect(() => {
-    // Once on mount. The ref guard makes this single-shot even though `searchParams` is a dependency.
-    if (dealViewHydratedRef.current) return;
-    dealViewHydratedRef.current = true;
-    if (searchParams.has("filter")) return; // drill-down deep link: don't override its intentional defaults
-    const present = collectPersistableDealViewParams(searchParams.toString());
-    if (Object.keys(present).length > 0) {
-      // Explicit standing params on a base view (a bookmark / dashboard link) — persist THESE so a later
-      // bare return restores the settings they were just using, not a stale saved value.
-      writeStoredDealView(userId, present);
+    const search = searchParams.toString();
+    const filterActive = searchParams.has("filter");
+    const wasFilterActive = dealViewPrevFilterRef.current;
+    dealViewPrevFilterRef.current = filterActive;
+
+    const restoreFromStore = () => {
+      const next = applyStoredDealView(search, readStoredDealView(userId));
+      if (next !== null) setSearchParams(next, { replace: true });
+    };
+
+    if (!dealViewMountedRef.current) {
+      // Mount.
+      dealViewMountedRef.current = true;
+      if (filterActive) return; // drill-down deep link: don't touch the store or the URL
+      const present = collectPersistableDealViewParams(search);
+      if (Object.keys(present).length > 0) {
+        // Explicit standing params (bookmark/link) → persist so a later bare return restores THESE.
+        writeStoredDealView(userId, present);
+      } else if (isBareDealsView(search)) {
+        restoreFromStore(); // bare return → restore
+      }
       return;
     }
-    // Bare return → restore the last-used view from the store (an explicit URL param always wins).
-    const next = applyStoredDealView(searchParams.toString(), readStoredDealView(userId));
-    if (next !== null) setSearchParams(next, { replace: true });
+
+    // Subsequent navigations within the mounted page.
+    if (filterActive) return; // drill-down: leave the saved base-view selection untouched
+    if (wasFilterActive && isBareDealsView(search)) {
+      restoreFromStore(); // same-route return from a drill-down to a bare /deals → restore, don't wipe
+      return;
+    }
+    // A genuine base-view change (incl. clearing a filter to All time / All reps) → persist it.
+    writeStoredDealView(userId, collectPersistableDealViewParams(search));
   }, [searchParams, setSearchParams, userId]);
-  useEffect(() => {
-    // Skip the mount run (the hydrate effect above owns initial persistence), then save on every change.
-    if (!dealViewWritePrimedRef.current) {
-      dealViewWritePrimedRef.current = true;
-      return;
-    }
-    // Don't persist while a drill-down is active: some drill-downs (at_risk/stale) drop ?period, so writing
-    // their subset would silently clear the saved timeframe.
-    if (searchParams.has("filter")) return;
-    writeStoredDealView(userId, collectPersistableDealViewParams(searchParams.toString()));
-  }, [searchParams, userId]);
 
   const [search, setSearch] = useState("");
   const [drilldownPage, setDrilldownPage] = useState(1);

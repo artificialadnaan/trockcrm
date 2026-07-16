@@ -3,7 +3,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createRoot, type Root } from "react-dom/client";
-import { MemoryRouter, useLocation } from "react-router-dom";
+import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
+import { readStoredDealView } from "@/lib/deals-view-preferences";
 import type { ButtonHTMLAttributes, ReactNode } from "react";
 import { act, useEffect } from "react";
 import { USD_COMPACT } from "@/components/shared/formatters";
@@ -546,6 +547,50 @@ describe("DealListPage", () => {
     // A ?filter= deep link's omitted period/rep are intentional — never overwritten from the store.
     expect(view.searches.every((s) => !s.includes("assignedRepId=rep-9"))).toBe(true);
     await view.cleanup();
+  });
+
+  it("does NOT hydrate into a non-bare base-list deep link (e.g. a shared dl_ link is authoritative)", async () => {
+    window.localStorage.setItem(
+      "deals-view-preference:user-1",
+      JSON.stringify({ assignedRepId: "rep-9", period: "ytd" }),
+    );
+    const view = await renderPageDomWithLocation("/deals?scope=all&dl_stageIds=estimating");
+    expect(view.searches.every((s) => !s.includes("assignedRepId=rep-9"))).toBe(true);
+    await view.cleanup();
+  });
+
+  it("restores (does not wipe) saved filters on a same-route return from a drill-down to a bare /deals", async () => {
+    window.localStorage.setItem(
+      "deals-view-preference:user-1",
+      JSON.stringify({ assignedRepId: "rep-9", period: "ytd" }),
+    );
+    mocks.useAuthMock.mockReturnValue({
+      user: { id: "user-1", email: "a@b.test", displayName: "T", role: "admin", officeId: "office-1", activeOfficeId: "office-1" },
+      loading: false,
+    });
+    let navigate: (to: string) => void = () => {};
+    function Probe() {
+      navigate = useNavigate();
+      return <DealListPage />;
+    }
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    let root: Root | null = null;
+    await act(async () => {
+      root = createRoot(container);
+      root.render(
+        <MemoryRouter initialEntries={["/deals?scope=all&filter=won"]}>
+          <Probe />
+        </MemoryRouter>,
+      );
+    });
+    // On the drill-down deep link the store is left untouched.
+    expect(readStoredDealView("user-1")).toMatchObject({ assignedRepId: "rep-9", period: "ytd" });
+    // The sidebar "Deals" link keeps this same route mounted; the return must RESTORE, not save {} and wipe.
+    await act(async () => navigate("/deals"));
+    expect(readStoredDealView("user-1")).toMatchObject({ assignedRepId: "rep-9", period: "ytd" });
+    await act(async () => root?.unmount());
+    container.remove();
   });
 
   it("layers the Deals page rep into the board and the bid-board drill-down list", () => {
