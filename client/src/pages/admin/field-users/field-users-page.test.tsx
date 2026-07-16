@@ -64,8 +64,24 @@ describe("FieldUsersPage", () => {
             invitedAt: "2026-05-05T12:00:00.000Z",
             acceptedAt: null,
             expiresAt: "2026-05-12T12:00:00.000Z",
+          }, {
+            id: "field-1",
+            userId: "field-1",
+            inviteId: "accepted-invite-1",
+            email: "kposey@trockcontracting.com",
+            firstName: "Kevin",
+            lastName: "Posey",
+            phone: null,
+            active: true,
+            createdAt: "2026-05-01T12:00:00.000Z",
+            lastLoginAt: "2026-05-10T12:00:00.000Z",
+            inviteStatus: "accepted",
+            invitedBy: { id: "admin-1", name: "Admin User" },
+            invitedAt: "2026-05-01T12:00:00.000Z",
+            acceptedAt: "2026-05-01T13:00:00.000Z",
+            expiresAt: "2026-05-08T12:00:00.000Z",
           }],
-          total: 1,
+          total: 2,
           page: 1,
           perPage: 25,
         };
@@ -73,7 +89,7 @@ describe("FieldUsersPage", () => {
       if (path === "/admin/field-users/invite" && options?.method === "POST") {
         return { invite: { id: "invite-2", email: options.json?.email, expiresAt: "2026-05-12T12:00:00.000Z" } };
       }
-      if (path.includes("/resend-invite") || path.includes("/revoke") || path.includes("/deactivate") || path.includes("/reactivate")) {
+      if (path.includes("/resend-invite") || path.includes("/reset-password") || path.includes("/revoke") || path.includes("/deactivate") || path.includes("/reactivate")) {
         return { success: true, user: { id: "field-1", active: false }, invite: { id: "invite-1" } };
       }
       return {};
@@ -105,5 +121,67 @@ describe("FieldUsersPage", () => {
 
     node.querySelector<HTMLButtonElement>('[aria-label="Cancel invite"]')?.click();
     await vi.waitFor(() => expect(apiMock).toHaveBeenCalledWith("/admin/field-users/invites/invite-1/revoke", { method: "POST" }));
+
+    node.querySelector<HTMLButtonElement>('[aria-label="Reset field user password"]')?.click();
+    await vi.waitFor(() => expect(apiMock).toHaveBeenCalledWith("/admin/field-users/field-1/reset-password", { method: "POST" }));
+    expect(toastMock.success).toHaveBeenCalledWith("Password reset link sent to kposey@trockcontracting.com");
+  });
+
+  it("submits only one password reset while the request is in flight", async () => {
+    let resolveReset!: () => void;
+    const resetRequest = new Promise<void>((resolve) => {
+      resolveReset = resolve;
+    });
+    apiMock.mockImplementation(async (path: string) => {
+      if (path.startsWith("/admin/field-users?")) {
+        return {
+          users: [{
+            id: "field-1",
+            userId: "field-1",
+            inviteId: "accepted-invite-1",
+            email: "kposey@trockcontracting.com",
+            firstName: "Kevin",
+            lastName: "Posey",
+            phone: null,
+            active: true,
+            createdAt: "2026-05-01T12:00:00.000Z",
+            lastLoginAt: null,
+            inviteStatus: "accepted",
+            invitedBy: { id: "admin-1", name: "Admin User" },
+            invitedAt: "2026-05-01T12:00:00.000Z",
+            acceptedAt: "2026-05-01T13:00:00.000Z",
+            expiresAt: "2026-05-08T12:00:00.000Z",
+          }],
+          total: 1,
+          page: 1,
+          perPage: 25,
+        };
+      }
+      if (path === "/admin/field-users/field-1/reset-password") {
+        await resetRequest;
+        return { success: true };
+      }
+      return {};
+    });
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    const node = renderPage();
+    await vi.waitFor(() => expect(node.textContent).toContain("kposey@trockcontracting.com"));
+
+    const resetButton = node.querySelector<HTMLButtonElement>('[aria-label="Reset field user password"]')!;
+    resetButton.click();
+    resetButton.click();
+
+    await vi.waitFor(() => {
+      const resetCalls = apiMock.mock.calls.filter(([path]) =>
+        path === "/admin/field-users/field-1/reset-password"
+      );
+      expect(resetCalls).toHaveLength(1);
+    });
+
+    resolveReset();
+    await vi.waitFor(() =>
+      expect(toastMock.success).toHaveBeenCalledWith("Password reset link sent to kposey@trockcontracting.com")
+    );
   });
 });

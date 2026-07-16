@@ -1,26 +1,34 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
-import { Navigate, useNavigate, useSearchParams } from "react-router-dom";
 import { Eye, EyeOff } from "lucide-react";
-import { useAuth } from "../lib/auth";
-import { Button, TextInput } from "../components/ui";
+import { Link, useSearchParams } from "react-router-dom";
 import { BrandLogo } from "../components/BrandLogo";
+import { Button, TextInput } from "../components/ui";
+import { api } from "../lib/api";
 
 const MIN_PASSWORD_LENGTH = 12;
+const MAX_PASSWORD_LENGTH = 256;
+const INVALID_LINK_MESSAGE =
+  "This password reset link is invalid or has expired. Please ask your administrator for a new link.";
+
+type PasswordResetPreview = {
+  firstName: string;
+  lastName: string;
+  email: string;
+};
 
 function PasswordField({
   name,
   label,
   value,
-  autoComplete,
   onChange,
 }: {
   name: string;
   label: string;
   value: string;
-  autoComplete: string;
   onChange: (event: React.ChangeEvent<HTMLInputElement>) => void;
 }) {
   const [visible, setVisible] = useState(false);
+
   return (
     <label className="block space-y-2">
       <span className="text-sm font-semibold">{label}</span>
@@ -28,14 +36,15 @@ function PasswordField({
         <TextInput
           name={name}
           type={visible ? "text" : "password"}
-          autoComplete={autoComplete}
+          autoComplete="new-password"
+          maxLength={MAX_PASSWORD_LENGTH}
           value={value}
           onChange={onChange}
           className="pr-12"
         />
         <button
           type="button"
-          onClick={() => setVisible((prev) => !prev)}
+          onClick={() => setVisible((current) => !current)}
           aria-label={`${visible ? "Hide" : "Show"} ${label.toLowerCase()}`}
           aria-pressed={visible}
           className="absolute inset-y-0 right-0 flex items-center px-3 text-muted-foreground transition hover:text-foreground"
@@ -47,17 +56,16 @@ function PasswordField({
   );
 }
 
-export function AcceptInvitePage() {
-  const { user, acceptInvite, previewInvite } = useAuth();
+export function ResetPasswordPage() {
   const [params] = useSearchParams();
-  const navigate = useNavigate();
-  const token = params.get("token") ?? "";
-  const [preview, setPreview] = useState<{ firstName: string; lastName: string; email: string } | null>(null);
+  const token = params.get("token")?.trim() ?? "";
+  const [preview, setPreview] = useState<PasswordResetPreview | null>(null);
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [loading, setLoading] = useState(Boolean(token));
   const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(token ? null : "This invite link is invalid. Please contact your administrator for a new invite.");
+  const [completed, setCompleted] = useState(false);
+  const [error, setError] = useState<string | null>(token ? null : INVALID_LINK_MESSAGE);
 
   const passwordHint = useMemo(() => {
     if (!password) return `Use at least ${MIN_PASSWORD_LENGTH} characters.`;
@@ -68,30 +76,33 @@ export function AcceptInvitePage() {
 
   useEffect(() => {
     if (!token) return;
-    let cancelled = false;
+
+    const controller = new AbortController();
     setLoading(true);
-    previewInvite(token)
+    api<PasswordResetPreview>(`/auth/field-password-reset-preview?token=${encodeURIComponent(token)}`, {
+      signal: controller.signal,
+    })
       .then((payload) => {
-        if (!cancelled) setPreview(payload);
+        setPreview(payload);
       })
-      .catch((err) => {
-        if (!cancelled) setError(err instanceof Error ? err.message : "This invite link is invalid. Please contact your administrator for a new invite.");
+      .catch((requestError) => {
+        if (!controller.signal.aborted) {
+          setError(requestError instanceof Error ? requestError.message : INVALID_LINK_MESSAGE);
+        }
       })
       .finally(() => {
-        if (!cancelled) setLoading(false);
+        if (!controller.signal.aborted) setLoading(false);
       });
-    return () => {
-      cancelled = true;
-    };
-  }, [previewInvite, token]);
 
-  if (user) return <Navigate to="/projects" replace />;
+    return () => controller.abort();
+  }, [token]);
 
   async function onSubmit(event: FormEvent) {
     event.preventDefault();
     setError(null);
+
     if (!token || !preview) {
-      setError("This invite link is invalid. Please contact your administrator for a new invite.");
+      setError(INVALID_LINK_MESSAGE);
       return;
     }
     if (password.length < MIN_PASSWORD_LENGTH) {
@@ -102,12 +113,18 @@ export function AcceptInvitePage() {
       setError("Passwords do not match.");
       return;
     }
+
     setSubmitting(true);
     try {
-      await acceptInvite(token, password);
-      navigate("/projects", { replace: true });
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Unable to accept invite.");
+      await api("/auth/field-password-reset", {
+        method: "POST",
+        json: { token, newPassword: password },
+      });
+      setCompleted(true);
+      setPassword("");
+      setConfirmPassword("");
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "Unable to reset password.");
     } finally {
       setSubmitting(false);
     }
@@ -122,18 +139,34 @@ export function AcceptInvitePage() {
             <BrandLogo className="h-14 w-auto" />
             <div className="pt-1">
               <p className="text-xs font-black uppercase tracking-[0.24em] text-primary">Field App</p>
-              <h1 className="mt-1 text-3xl font-black">Accept invite</h1>
+              <h1 className="mt-1 text-3xl font-black">Reset password</h1>
             </div>
           </div>
-          {loading ? <p className="mt-5 text-muted-foreground">Loading invite...</p> : null}
-          {!loading && preview ? (
+
+          {loading ? <p className="mt-5 text-muted-foreground">Checking reset link...</p> : null}
+
+          {!loading && completed ? (
+            <div className="mt-5 space-y-4">
+              <div className="rounded-lg bg-emerald-50 p-4 text-sm text-emerald-900">
+                <p className="font-bold">Password reset.</p>
+                <p className="mt-1">You can now sign in to T-Rock Cam with your new password.</p>
+              </div>
+              <Link
+                to="/"
+                className="inline-flex min-h-11 w-full items-center justify-center rounded-md bg-primary px-4 py-2 font-semibold text-primary-foreground shadow-sm transition hover:brightness-95"
+              >
+                Return to Sign In
+              </Link>
+            </div>
+          ) : null}
+
+          {!loading && !completed && preview ? (
             <form className="mt-5 space-y-4" onSubmit={onSubmit}>
               <p className="rounded-md bg-muted p-3 text-sm">
-                Joining as <strong>{preview.firstName} {preview.lastName}</strong><br />
+                Resetting password for <strong>{preview.firstName} {preview.lastName}</strong>
+                <br />
                 <span className="text-muted-foreground">{preview.email}</span>
               </p>
-              {/* Hidden username field: lets password managers associate and save the new credential
-                  with this account instead of orphaning it (then autofilling a stale value at login). */}
               <input
                 type="text"
                 name="username"
@@ -146,26 +179,32 @@ export function AcceptInvitePage() {
               />
               <PasswordField
                 name="password"
-                label="Password"
-                autoComplete="new-password"
+                label="New password"
                 value={password}
                 onChange={(event) => setPassword(event.target.value)}
               />
               <PasswordField
                 name="confirmPassword"
-                label="Confirm password"
-                autoComplete="new-password"
+                label="Confirm new password"
                 value={confirmPassword}
                 onChange={(event) => setConfirmPassword(event.target.value)}
               />
               <p className="text-sm text-muted-foreground">{passwordHint}</p>
               {error ? <p className="rounded-md bg-red-50 p-3 text-sm font-medium text-red-700">{error}</p> : null}
               <Button className="w-full" disabled={submitting} type="submit">
-                {submitting ? "Creating account..." : "Create Account"}
+                {submitting ? "Resetting password..." : "Reset Password"}
               </Button>
             </form>
           ) : null}
-          {!loading && !preview && error ? <p className="mt-5 rounded-md bg-red-50 p-3 text-sm font-medium text-red-700">{error}</p> : null}
+
+          {!loading && !completed && !preview && error ? (
+            <div className="mt-5 space-y-4">
+              <p className="rounded-md bg-red-50 p-3 text-sm font-medium text-red-700">{error}</p>
+              <Link className="block text-center text-sm font-medium underline underline-offset-4" to="/">
+                Return to Sign In
+              </Link>
+            </div>
+          ) : null}
         </div>
       </section>
     </main>

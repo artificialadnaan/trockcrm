@@ -12,6 +12,7 @@ const authMocks = vi.hoisted(() => ({
   verifyPassword: vi.fn(async (password: string) => password === "correct-password-12"),
   signJwt: vi.fn(() => "jwt-token"),
 }));
+const TEST_CREDENTIAL = "<redacted - test creds in ops vault>";
 
 vi.mock("../../../src/db.js", () => ({
   db: dbMocks,
@@ -27,7 +28,9 @@ vi.mock("../../../src/modules/auth/service.js", () => ({
 
 const {
   acceptFieldInvite,
+  buildFieldPasswordResetEmail,
   buildInviteEmail,
+  completeFieldUserPasswordReset,
   deriveInviteStatus,
   generateInviteToken,
   hashInviteToken,
@@ -36,13 +39,30 @@ const {
   listFieldUsers,
   loginFieldUser,
   normalizeEmail,
+  passwordResetExpiry,
   previewFieldInvite,
+  previewFieldUserPasswordReset,
+  requestFieldUserPasswordReset,
   resendFieldUserInvite,
   revokeFieldUserInvite,
   setFieldUserActive,
   splitName,
   toFieldUserResponse,
 } = await import("../../../src/modules/field-users/service.js");
+
+function extractSqlText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (!value || typeof value !== "object") return "";
+  if (Array.isArray((value as { queryChunks?: unknown[] }).queryChunks)) {
+    return (value as { queryChunks: unknown[] }).queryChunks.map(extractSqlText).join("");
+  }
+  if ("value" in (value as Record<string, unknown>)) {
+    const chunkValue = (value as { value: unknown }).value;
+    if (Array.isArray(chunkValue)) return chunkValue.map(extractSqlText).join("");
+    if (typeof chunkValue === "string") return chunkValue;
+  }
+  return "";
+}
 
 describe("field user service helpers", () => {
   const originalFieldAppUrl = process.env.FIELD_APP_URL;
@@ -164,6 +184,165 @@ describe("field user service helpers", () => {
     expect(email.html).toContain("Admin User");
     expect(email.html).toContain("https://crm.test/accept-invite?token=raw");
     expect(email.text).toContain("https://crm.test/accept-invite?token=raw");
+  });
+
+  it("builds a field password reset email with a single-use link", () => {
+    const email = buildFieldPasswordResetEmail({
+      displayName: "Kevin Posey",
+      resetUrl: "https://field.example.com/reset-password?token=raw-token&next=1",
+    });
+
+    expect(email.subject).toContain("T-Rock Cam");
+    expect(email.html).toContain("raw-token&amp;next=1");
+    expect(email.text).toContain("raw-token&next=1");
+    expect(email.text).toContain("30 minutes");
+  });
+
+  it("requests a single-use reset for an accepted field user and emails the link without global BCC", async () => {
+    process.env.FIELD_APP_URL = "https://field.example.com";
+    dbMocks.execute
+      .mockResolvedValueOnce({
+        rows: [{
+          id: "field-1",
+          email: "kposey@trockcontracting.com",
+          display_name: "Kevin Posey",
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    const result = await requestFieldUserPasswordReset({
+      userId: "11111111-1111-1111-1111-111111111111",
+      tenantId: "22222222-2222-2222-2222-222222222222",
+      resetByUserId: "33333333-3333-3333-3333-333333333333",
+    });
+
+    expect(result).toEqual({
+      user: {
+        id: "field-1",
+        email: "kposey@trockcontracting.com",
+        displayName: "Kevin Posey",
+      },
+      expiresAt: expect.any(Date),
+    });
+    expect(extractSqlText(dbMocks.execute.mock.calls[0]?.[0])).toContain("role = 'field_contractor'");
+    expect(extractSqlText(dbMocks.execute.mock.calls[1]?.[0])).toContain("invalidated_at");
+    expect(extractSqlText(dbMocks.execute.mock.calls[2]?.[0])).toContain("field_user_password_resets");
+    expect(extractSqlText(dbMocks.execute.mock.calls[3]?.[0])).toContain("password_reset_requested");
+    expect(emailMocks.sendSystemEmail).toHaveBeenCalledWith(
+      "kposey@trockcontracting.com",
+      expect.stringContaining("Reset your T-Rock Cam password"),
+      expect.stringContaining("https://field.example.com/reset-password?token="),
+      expect.objectContaining({
+        text: expect.stringContaining("https://field.example.com/reset-password?token="),
+        suppressGlobalBcc: true,
+        requireConfiguredTransport: true,
+      })
+    );
+    expect(emailMocks.sendSystemEmail.mock.calls[0]?.[2]).not.toContain("raw-token");
+    expect(passwordResetExpiry(new Date("2026-05-05T12:00:00.000Z")).toISOString())
+      .toBe("2026-05-05T12:30:00.000Z");
+  });
+
+  it("rejects reset requests for missing, wrong-tenant, inactive, or non-field users", async () => {
+    dbMocks.execute.mockResolvedValueOnce({ rows: [] });
+
+    await expect(requestFieldUserPasswordReset({
+      userId: "11111111-1111-1111-1111-111111111111",
+      tenantId: "22222222-2222-2222-2222-222222222222",
+      resetByUserId: "33333333-3333-3333-3333-333333333333",
+    })).rejects.toMatchObject({ statusCode: 404 });
+    expect(emailMocks.sendSystemEmail).not.toHaveBeenCalled();
+  });
+
+  it("invalidates the reset token when required email delivery fails", async () => {
+    process.env.FIELD_APP_URL = "https://field.example.com";
+    emailMocks.sendSystemEmail.mockResolvedValueOnce(false);
+    dbMocks.execute
+      .mockResolvedValueOnce({
+        rows: [{ id: "field-1", email: "field@example.com", display_name: "Field User" }],
+      })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    await expect(requestFieldUserPasswordReset({
+      userId: "11111111-1111-1111-1111-111111111111",
+      tenantId: "22222222-2222-2222-2222-222222222222",
+      resetByUserId: "33333333-3333-3333-3333-333333333333",
+    })).rejects.toMatchObject({ statusCode: 500 });
+
+    expect(extractSqlText(dbMocks.execute.mock.calls[4]?.[0])).toContain("invalidated_at");
+  });
+
+  it("previews and completes a valid single-use field password reset", async () => {
+    dbMocks.execute.mockResolvedValueOnce({
+      rows: [{ email: "field@example.com", first_name: "Field", last_name: "User" }],
+    });
+    await expect(previewFieldUserPasswordReset({ token: "raw-token" })).resolves.toEqual({
+      email: "field@example.com",
+      firstName: "Field",
+      lastName: "User",
+    });
+
+    dbMocks.execute
+      .mockResolvedValueOnce({ rows: [{ exists: 1 }] })
+      .mockResolvedValueOnce({ rows: [{ id: "field-1" }] })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: "reset-1",
+          user_id: "field-1",
+          requested_by_user_id: "admin-1",
+          email: "field@example.com",
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    await expect(completeFieldUserPasswordReset({
+      token: "raw-token",
+      newPassword: TEST_CREDENTIAL,
+    })).resolves.toEqual({
+      success: true,
+      user: { id: "field-1", email: "field@example.com" },
+    });
+
+    expect(authMocks.hashPassword).toHaveBeenCalledWith(TEST_CREDENTIAL);
+    expect(extractSqlText(dbMocks.execute.mock.calls[1]?.[0])).toContain("SELECT 1");
+    expect(extractSqlText(dbMocks.execute.mock.calls[2]?.[0])).toContain("FOR UPDATE OF u");
+    expect(extractSqlText(dbMocks.execute.mock.calls[3]?.[0])).toContain("FOR UPDATE OF password_reset");
+    expect(extractSqlText(dbMocks.execute.mock.calls[4]?.[0])).toContain("must_change_password");
+    expect(extractSqlText(dbMocks.execute.mock.calls[5]?.[0])).toContain("token_version");
+    expect(extractSqlText(dbMocks.execute.mock.calls[6]?.[0])).toContain("used_at");
+    expect(extractSqlText(dbMocks.execute.mock.calls[8]?.[0])).toContain("password_reset_completed");
+  });
+
+  it("rejects expired, invalidated, or already-used password reset links", async () => {
+    dbMocks.execute.mockResolvedValueOnce({ rows: [] });
+    await expect(previewFieldUserPasswordReset({ token: "invalid" }))
+      .rejects.toMatchObject({ statusCode: 404 });
+
+    dbMocks.execute.mockResolvedValueOnce({ rows: [] });
+    await expect(completeFieldUserPasswordReset({
+      token: "invalid",
+      newPassword: TEST_CREDENTIAL,
+    })).rejects.toMatchObject({ statusCode: 404 });
+    expect(authMocks.hashPassword).not.toHaveBeenCalled();
+  });
+
+  it("rejects oversized reset passwords before token lookup or scrypt", async () => {
+    await expect(completeFieldUserPasswordReset({
+      token: "raw-token",
+      newPassword: "x".repeat(257),
+    })).rejects.toMatchObject({ statusCode: 400 });
+
+    expect(dbMocks.execute).not.toHaveBeenCalled();
+    expect(authMocks.hashPassword).not.toHaveBeenCalled();
   });
 
   it("creates an invite, hashes the raw token, and sends email without storing the raw token", async () => {

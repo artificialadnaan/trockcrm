@@ -558,6 +558,7 @@ describe("auth http config", () => {
     const env = { NODE_ENV: "test", DEV_MODE: "true" };
 
     expect(isPublicAuthCsrfExempt({ method: "POST", path: "/api/auth/accept-invite", env })).toBe(true);
+    expect(isPublicAuthCsrfExempt({ method: "POST", path: "/api/auth/field-password-reset", env })).toBe(true);
     expect(isPublicAuthCsrfExempt({ method: "POST", path: "/api/auth/field-login", env })).toBe(true);
     expect(isPublicAuthCsrfExempt({ method: "POST", path: "/api/auth/local/login", env })).toBe(true);
     expect(
