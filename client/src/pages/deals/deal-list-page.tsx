@@ -870,7 +870,9 @@ function DealListPageContent({
   // Team is not offered (see SCOPE_OPTIONS); coerce a stored/URL ?scope=team to a scope we actually render so
   // the toggle and board never reach the dead "team" placeholder state.
   const scope: PipelineScope = requestedScope === "team" ? "mine" : requestedScope;
-  const { assignees } = useTaskAssignees();
+  // Key the assignee list to the effective office so it reloads when the view switches offices (?officeId=)
+  // — otherwise a rep is validated / the picker is populated against the previous office's users.
+  const { assignees, loading: assigneesLoading } = useTaskAssignees({ officeId: effectiveOfficeId });
 
   // Remember the standing dashboard header filters (Rep + timeframe) per (user, effective office), the same
   // way Mine/All already persists — so opening a deal and returning to /deals restores the last selection.
@@ -888,13 +890,15 @@ function DealListPageContent({
     if (scope === "mine") delete stored.assignedRepId;
     if (stored.assignedRepId) {
       // Don't inject a rep who is no longer a selectable assignee (deactivated, or not in this office) — it
-      // would show an unresolved "Selected rep" and silently narrow the board. Wait for the list to load.
-      if (assignees.length === 0) return;
+      // would show an unresolved "Selected rep" and silently narrow the board. Defer the WHOLE hydration only
+      // while the list is still loading (the effect re-runs when it settles); once loaded — even to an empty
+      // or errored list — drop just the rep and still restore the office-independent timeframe.
+      if (assigneesLoading) return;
       if (!assignees.some((assignee) => assignee.id === stored.assignedRepId)) delete stored.assignedRepId;
     }
     const next = applyStoredDealView(searchParams.toString(), stored);
     if (next !== null) setSearchParams(next, { replace: true });
-  }, [searchParams, setSearchParams, userId, effectiveOfficeId, scope, assignees]);
+  }, [searchParams, setSearchParams, userId, effectiveOfficeId, scope, assignees, assigneesLoading]);
 
   // Persist a single header control (Rep or timeframe) as a per-(user, office) preference. Per-key so
   // changing one control never drops the other — important on a drill-down whose URL omits ?period.

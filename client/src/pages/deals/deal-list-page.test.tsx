@@ -441,6 +441,7 @@ describe("DealListPage", () => {
         { id: "rep-1", displayName: "Brett Jones" },
         { id: "rep-9", displayName: "Nina Nine" },
       ],
+      loading: false,
     });
 
     mocks.usePipelineStagesMock.mockReturnValue({
@@ -636,6 +637,19 @@ describe("DealListPage", () => {
     const view = await renderPageDomWithLocation("/deals?scope=all");
     expect(view.searches.some((s) => s.includes("period=ytd"))).toBe(true);
     expect(view.searches.every((s) => !s.includes("assignedRepId=rep-gone"))).toBe(true);
+    await view.cleanup();
+  });
+
+  it("still restores the timeframe when the assignee list has finished loading but is empty", async () => {
+    mocks.useTaskAssigneesMock.mockReturnValue({ assignees: [], loading: false });
+    window.localStorage.setItem(
+      "deals-view-preference:user-1:office-1",
+      JSON.stringify({ assignedRepId: "rep-9", period: "ytd" }),
+    );
+    const view = await renderPageDomWithLocation("/deals?scope=all");
+    // The office-independent timeframe is restored even though there are no assignees to validate the rep.
+    expect(view.searches.some((s) => s.includes("period=ytd"))).toBe(true);
+    expect(view.searches.every((s) => !s.includes("assignedRepId=rep-9"))).toBe(true);
     await view.cleanup();
   });
 
