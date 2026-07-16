@@ -593,6 +593,26 @@ describe("DealListPage", () => {
     container.remove();
   });
 
+  it("persists a header timeframe change made while on a drill-down, preserving the saved rep (per-key)", async () => {
+    window.localStorage.setItem("deals-view-preference:user-1", JSON.stringify({ assignedRepId: "rep-9" }));
+    const view = await renderPageDomWithLocation("/deals?scope=all&filter=won", "director");
+    await act(async () => {
+      const trigger = view.container.querySelector<HTMLButtonElement>('button[aria-label="Period"]');
+      trigger?.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+      trigger?.click();
+    });
+    await act(async () => {
+      const option = Array.from(document.querySelectorAll<HTMLElement>('[role="option"]')).find(
+        (el) => el.textContent?.trim() === "YTD",
+      );
+      option?.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType: "touch" }));
+      option?.click();
+    });
+    // The change made on the drill-down is saved, and the pre-existing rep is kept (not dropped).
+    expect(readStoredDealView("user-1")).toEqual({ assignedRepId: "rep-9", period: "ytd" });
+    await view.cleanup();
+  });
+
   it("layers the Deals page rep into the board and the bid-board drill-down list", () => {
     renderPage("/deals?scope=all&assignedRepId=rep-1&filter=bid_board");
 

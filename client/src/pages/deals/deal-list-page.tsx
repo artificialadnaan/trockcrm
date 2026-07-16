@@ -37,7 +37,6 @@ import type { DealListSortState } from "@/components/deals/deals-list-section";
 import { resolvePreferredScope, writeStoredScopePreference } from "@/lib/scope-preferences";
 import {
   applyStoredDealView,
-  collectPersistableDealViewParams,
   isBareDealsView,
   readStoredDealView,
   writeStoredDealView,
@@ -853,47 +852,35 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
 
   // Remember the standing dashboard header filters (Rep + timeframe) per-user, the same way Mine/All already
   // persists — so opening a deal and returning to /deals restores the last selection instead of resetting.
-  // Scope stays owned by scope-preferences. One effect owns both restore and save:
-  //   - Only a BARE view (no query beyond scope) restores from the store. Any authoritative link — a
-  //     `?filter=` drill-down, a `dl_*` base-list link, or an explicit period/rep — is left as-is.
-  //   - Returning from a drill-down to a bare /deals stays MOUNTED (same route), so we track the previous
-  //     drill-down state and RESTORE (never save {} and wipe the saved selection) on that transition.
-  const dealViewMountedRef = useRef(false);
-  const dealViewPrevFilterRef = useRef(false);
+  // Scope stays owned by scope-preferences.
+  //
+  // This effect only RESTORES (reads the store); it never writes, so no navigation can wipe the saved
+  // selection. Writes happen exclusively in the Rep/Period control handlers (persistDealViewParam), which is
+  // the only reliable signal of an intentional change — a bare URL alone can't tell a "cleared to All time"
+  // from a "navigated back", and a drill-down can drop ?period without the user clearing it.
+  //
+  // Only a BARE view (no query beyond scope) hydrates: a `?filter=` drill-down, a `dl_*` base-list link, or
+  // an explicit period/rep in the URL is authoritative, so a shared/bookmarked link keeps its intended
+  // result instead of being narrowed by the recipient's stored selection.
   useEffect(() => {
-    const search = searchParams.toString();
-    const filterActive = searchParams.has("filter");
-    const wasFilterActive = dealViewPrevFilterRef.current;
-    dealViewPrevFilterRef.current = filterActive;
-
-    const restoreFromStore = () => {
-      const next = applyStoredDealView(search, readStoredDealView(userId));
-      if (next !== null) setSearchParams(next, { replace: true });
-    };
-
-    if (!dealViewMountedRef.current) {
-      // Mount.
-      dealViewMountedRef.current = true;
-      if (filterActive) return; // drill-down deep link: don't touch the store or the URL
-      const present = collectPersistableDealViewParams(search);
-      if (Object.keys(present).length > 0) {
-        // Explicit standing params (bookmark/link) → persist so a later bare return restores THESE.
-        writeStoredDealView(userId, present);
-      } else if (isBareDealsView(search)) {
-        restoreFromStore(); // bare return → restore
-      }
-      return;
-    }
-
-    // Subsequent navigations within the mounted page.
-    if (filterActive) return; // drill-down: leave the saved base-view selection untouched
-    if (wasFilterActive && isBareDealsView(search)) {
-      restoreFromStore(); // same-route return from a drill-down to a bare /deals → restore, don't wipe
-      return;
-    }
-    // A genuine base-view change (incl. clearing a filter to All time / All reps) → persist it.
-    writeStoredDealView(userId, collectPersistableDealViewParams(search));
+    if (searchParams.has("filter")) return;
+    if (!isBareDealsView(searchParams.toString())) return;
+    const next = applyStoredDealView(searchParams.toString(), readStoredDealView(userId));
+    if (next !== null) setSearchParams(next, { replace: true });
   }, [searchParams, setSearchParams, userId]);
+
+  // Persist a single header control (Rep or timeframe) as a per-user preference. Per-key so changing one
+  // control never drops the other from the store — important when the current view is a drill-down that
+  // doesn't carry ?period in its URL.
+  const persistDealViewParam = useCallback(
+    (key: "period" | "assignedRepId", value: string | null) => {
+      const stored = readStoredDealView(userId);
+      if (value) stored[key] = value;
+      else delete stored[key];
+      writeStoredDealView(userId, stored);
+    },
+    [userId],
+  );
 
   const [search, setSearch] = useState("");
   const [drilldownPage, setDrilldownPage] = useState(1);
@@ -988,13 +975,15 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
   }, [searchParams, setSearchParams]);
 
   const updateSelectedRep = useCallback((repId: string) => {
+    const repValue = !repId || repId === "__all__" ? null : repId;
+    persistDealViewParam("assignedRepId", repValue); // remember the selection (incl. from a drill-down)
     setSearchParams((current) => {
       const next = new URLSearchParams(current);
-      if (!repId || repId === "__all__") next.delete("assignedRepId");
-      else next.set("assignedRepId", repId);
+      if (repValue) next.set("assignedRepId", repValue);
+      else next.delete("assignedRepId");
       return next;
     });
-  }, [setSearchParams]);
+  }, [persistDealViewParam, setSearchParams]);
 
   // The header period dropdown writes ?period, which already drives the KPI cards + read-only board
   // board-wide (selectedPeriodRange → useDealBoard wonPeriodRange → won_period_from/to, the outcome-aware
@@ -1003,9 +992,11 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
   // column date controls (Option A). One action -> one ?period write -> the board, KPIs, list, and both
   // terminal columns all follow it.
   const updatePeriod = useCallback((value: string) => {
+    const periodValue = !value || value === "__all__" ? null : value;
+    persistDealViewParam("period", periodValue); // remember the timeframe (incl. from a drill-down)
     const next = new URLSearchParams(searchParams);
-    if (!value || value === "__all__") next.delete("period");
-    else next.set("period", value);
+    if (periodValue) next.set("period", periodValue);
+    else next.delete("period");
     // Collapse any per-column won_*/lost_* override so a board-date change (from the top control OR a
     // terminal column) can never leave a stale per-column window behind — the board carries ONE date.
     for (const key of [...next.keys()]) {
@@ -1018,7 +1009,7 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
     // board/cards on a blended date range (Codex #600 P2).
     setSearchParams(next);
     setTerminalDateFilters(resolveDrilldownTerminalDateFilters(next));
-  }, [searchParams, setSearchParams]);
+  }, [searchParams, setSearchParams, persistDealViewParam]);
 
   const boardColumns = useMemo(
     () => buildCanonicalDealBoardColumns(board?.columns, stages),
