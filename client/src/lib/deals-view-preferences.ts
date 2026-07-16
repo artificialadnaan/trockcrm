@@ -15,8 +15,12 @@
 
 const STORAGE_PREFIX = "deals-view-preference";
 
-function storageKey(userId: string) {
-  return `${STORAGE_PREFIX}:${userId}`;
+// Keyed by user AND active office: a saved Rep (assignedRepId) is office-specific — restoring an office-A
+// rep on an office-B dashboard would filter the board by a user who isn't in office B (empty/misleading).
+// The timeframe is office-agnostic but is stored per-office too for simplicity (a multi-office user just
+// re-picks it after switching offices; single-office users — the majority — are unaffected).
+function storageKey(userId: string, officeId: string | null | undefined) {
+  return `${STORAGE_PREFIX}:${userId}:${officeId ?? "default"}`;
 }
 
 /** Allowlist (not denylist) of the query params that represent a STANDING /deals header preference. */
@@ -47,10 +51,13 @@ export function collectPersistableDealViewParams(search: string): Record<string,
   return out;
 }
 
-export function readStoredDealView(userId: string | null | undefined): Record<string, string> {
+export function readStoredDealView(
+  userId: string | null | undefined,
+  officeId: string | null | undefined,
+): Record<string, string> {
   if (!userId || typeof window === "undefined") return {};
   try {
-    const raw = window.localStorage.getItem(storageKey(userId));
+    const raw = window.localStorage.getItem(storageKey(userId, officeId));
     if (!raw) return {};
     const parsed = JSON.parse(raw) as unknown;
     if (!parsed || typeof parsed !== "object") return {};
@@ -66,10 +73,14 @@ export function readStoredDealView(userId: string | null | undefined): Record<st
   }
 }
 
-export function writeStoredDealView(userId: string | null | undefined, params: Record<string, string>): void {
+export function writeStoredDealView(
+  userId: string | null | undefined,
+  officeId: string | null | undefined,
+  params: Record<string, string>,
+): void {
   if (!userId || typeof window === "undefined") return;
   try {
-    window.localStorage.setItem(storageKey(userId), JSON.stringify(params));
+    window.localStorage.setItem(storageKey(userId, officeId), JSON.stringify(params));
   } catch {
     // Ignore quota / disabled-storage errors — persistence is a convenience, never load-bearing.
   }

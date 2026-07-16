@@ -529,7 +529,7 @@ describe("DealListPage", () => {
 
   it("restores the saved Rep + timeframe on a bare /deals return (hydrates from localStorage)", async () => {
     window.localStorage.setItem(
-      "deals-view-preference:user-1",
+      "deals-view-preference:user-1:office-1",
       JSON.stringify({ assignedRepId: "rep-9", period: "ytd" }),
     );
     const view = await renderPageDomWithLocation("/deals?scope=all");
@@ -540,7 +540,7 @@ describe("DealListPage", () => {
 
   it("does NOT hydrate saved filters into a drill-down deep link (its omitted period/rep are intentional)", async () => {
     window.localStorage.setItem(
-      "deals-view-preference:user-1",
+      "deals-view-preference:user-1:office-1",
       JSON.stringify({ assignedRepId: "rep-9", period: "ytd" }),
     );
     const view = await renderPageDomWithLocation("/deals?scope=all&filter=won");
@@ -551,7 +551,7 @@ describe("DealListPage", () => {
 
   it("does NOT hydrate into a non-bare base-list deep link (e.g. a shared dl_ link is authoritative)", async () => {
     window.localStorage.setItem(
-      "deals-view-preference:user-1",
+      "deals-view-preference:user-1:office-1",
       JSON.stringify({ assignedRepId: "rep-9", period: "ytd" }),
     );
     const view = await renderPageDomWithLocation("/deals?scope=all&dl_stageIds=estimating");
@@ -561,7 +561,7 @@ describe("DealListPage", () => {
 
   it("restores (does not wipe) saved filters on a same-route return from a drill-down to a bare /deals", async () => {
     window.localStorage.setItem(
-      "deals-view-preference:user-1",
+      "deals-view-preference:user-1:office-1",
       JSON.stringify({ assignedRepId: "rep-9", period: "ytd" }),
     );
     mocks.useAuthMock.mockReturnValue({
@@ -585,16 +585,29 @@ describe("DealListPage", () => {
       );
     });
     // On the drill-down deep link the store is left untouched.
-    expect(readStoredDealView("user-1")).toMatchObject({ assignedRepId: "rep-9", period: "ytd" });
+    expect(readStoredDealView("user-1", "office-1")).toMatchObject({ assignedRepId: "rep-9", period: "ytd" });
     // The sidebar "Deals" link keeps this same route mounted; the return must RESTORE, not save {} and wipe.
     await act(async () => navigate("/deals"));
-    expect(readStoredDealView("user-1")).toMatchObject({ assignedRepId: "rep-9", period: "ytd" });
+    expect(readStoredDealView("user-1", "office-1")).toMatchObject({ assignedRepId: "rep-9", period: "ytd" });
     await act(async () => root?.unmount());
     container.remove();
   });
 
+  it("restores the saved timeframe but NOT a saved rep when the effective scope is Mine (avoids an empty board)", async () => {
+    window.localStorage.setItem(
+      "deals-view-preference:user-1:office-1",
+      JSON.stringify({ assignedRepId: "rep-9", period: "ytd" }),
+    );
+    // The shared scope preference (owned by scope-preferences, set from any page) resolves to Mine here.
+    window.localStorage.setItem("pipeline-scope-preference:user-1", "mine");
+    const view = await renderPageDomWithLocation("/deals");
+    expect(view.searches.some((s) => s.includes("period=ytd"))).toBe(true);
+    expect(view.searches.every((s) => !s.includes("assignedRepId=rep-9"))).toBe(true);
+    await view.cleanup();
+  });
+
   it("persists a header timeframe change made while on a drill-down, preserving the saved rep (per-key)", async () => {
-    window.localStorage.setItem("deals-view-preference:user-1", JSON.stringify({ assignedRepId: "rep-9" }));
+    window.localStorage.setItem("deals-view-preference:user-1:office-1", JSON.stringify({ assignedRepId: "rep-9" }));
     const view = await renderPageDomWithLocation("/deals?scope=all&filter=won", "director");
     await act(async () => {
       const trigger = view.container.querySelector<HTMLButtonElement>('button[aria-label="Period"]');
@@ -609,7 +622,7 @@ describe("DealListPage", () => {
       option?.click();
     });
     // The change made on the drill-down is saved, and the pre-existing rep is kept (not dropped).
-    expect(readStoredDealView("user-1")).toEqual({ assignedRepId: "rep-9", period: "ytd" });
+    expect(readStoredDealView("user-1", "office-1")).toEqual({ assignedRepId: "rep-9", period: "ytd" });
     await view.cleanup();
   });
 

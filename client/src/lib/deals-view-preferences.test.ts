@@ -78,29 +78,34 @@ describe("deals-view-preferences", () => {
     });
   });
 
-  describe("read/write round-trip (per-user localStorage)", () => {
-    it("round-trips the persistable subset for a user", () => {
-      writeStoredDealView("user-1", { period: "mtd", assignedRepId: "rep-9" });
-      expect(readStoredDealView("user-1")).toEqual({ period: "mtd", assignedRepId: "rep-9" });
+  describe("read/write round-trip (per-user + per-office localStorage)", () => {
+    it("round-trips the persistable subset for a user + office", () => {
+      writeStoredDealView("user-1", "office-a", { period: "mtd", assignedRepId: "rep-9" });
+      expect(readStoredDealView("user-1", "office-a")).toEqual({ period: "mtd", assignedRepId: "rep-9" });
     });
 
-    it("is per-user and empty for an unknown user", () => {
-      writeStoredDealView("user-1", { period: "ytd" });
-      expect(readStoredDealView("user-2")).toEqual({});
-      expect(readStoredDealView(null)).toEqual({});
+    it("is keyed per-office — an office-A rep does NOT leak into office B", () => {
+      writeStoredDealView("user-1", "office-a", { period: "ytd", assignedRepId: "rep-a" });
+      expect(readStoredDealView("user-1", "office-b")).toEqual({});
+    });
+
+    it("is per-user and empty for an unknown user / null user", () => {
+      writeStoredDealView("user-1", "office-a", { period: "ytd" });
+      expect(readStoredDealView("user-2", "office-a")).toEqual({});
+      expect(readStoredDealView(null, "office-a")).toEqual({});
     });
 
     it("re-filters on read so a stale non-persistable key (incl. a since-removed dl_) can't leak back", () => {
       window.localStorage.setItem(
-        "deals-view-preference:user-1",
+        "deals-view-preference:user-1:office-a",
         JSON.stringify({ period: "ytd", filter: "at_risk", scope: "all", dl_stage: "estimating" }),
       );
-      expect(readStoredDealView("user-1")).toEqual({ period: "ytd" });
+      expect(readStoredDealView("user-1", "office-a")).toEqual({ period: "ytd" });
     });
 
     it("survives malformed stored JSON", () => {
-      window.localStorage.setItem("deals-view-preference:user-1", "{not json");
-      expect(readStoredDealView("user-1")).toEqual({});
+      window.localStorage.setItem("deals-view-preference:user-1:office-a", "{not json");
+      expect(readStoredDealView("user-1", "office-a")).toEqual({});
     });
   });
 });

@@ -843,10 +843,18 @@ export function DealListPage() {
     );
   }
 
-  return <DealListPageContent role={user.role} userId={user.id} />;
+  return <DealListPageContent role={user.role} userId={user.id} activeOfficeId={user.activeOfficeId ?? user.officeId ?? null} />;
 }
 
-function DealListPageContent({ role, userId }: { role: string; userId: string }) {
+function DealListPageContent({
+  role,
+  userId,
+  activeOfficeId,
+}: {
+  role: string;
+  userId: string;
+  activeOfficeId: string | null;
+}) {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
 
@@ -865,21 +873,31 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
   useEffect(() => {
     if (searchParams.has("filter")) return;
     if (!isBareDealsView(searchParams.toString())) return;
-    const next = applyStoredDealView(searchParams.toString(), readStoredDealView(userId));
+    const stored = readStoredDealView(userId, activeOfficeId);
+    // A saved Rep filter only applies under "all" scope — under Mine (or any non-all scope, which the shared
+    // scope-preference can flip to from another page) it would intersect with the viewer's own deals and
+    // empty the board. Restore the timeframe regardless; drop the rep unless the effective scope is "all".
+    const effectiveScope = resolvePreferredScope({
+      requestedScope: searchParams.get("scope"),
+      userId,
+      fallback: getScope(searchParams, role),
+    });
+    if (effectiveScope !== "all") delete stored.assignedRepId;
+    const next = applyStoredDealView(searchParams.toString(), stored);
     if (next !== null) setSearchParams(next, { replace: true });
-  }, [searchParams, setSearchParams, userId]);
+  }, [searchParams, setSearchParams, userId, activeOfficeId, role]);
 
   // Persist a single header control (Rep or timeframe) as a per-user preference. Per-key so changing one
   // control never drops the other from the store — important when the current view is a drill-down that
   // doesn't carry ?period in its URL.
   const persistDealViewParam = useCallback(
     (key: "period" | "assignedRepId", value: string | null) => {
-      const stored = readStoredDealView(userId);
+      const stored = readStoredDealView(userId, activeOfficeId);
       if (value) stored[key] = value;
       else delete stored[key];
-      writeStoredDealView(userId, stored);
+      writeStoredDealView(userId, activeOfficeId, stored);
     },
-    [userId],
+    [userId, activeOfficeId],
   );
 
   const [search, setSearch] = useState("");
