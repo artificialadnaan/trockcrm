@@ -14,16 +14,15 @@ describe("deals-view-preferences", () => {
   afterEach(() => window.localStorage.clear());
 
   describe("isPersistableDealViewParam — the standing-filter allowlist", () => {
-    it("persists the header Rep + timeframe and the base-list dl_ FilterBar dimensions", () => {
+    it("persists the header Rep + timeframe", () => {
       expect(isPersistableDealViewParam("period")).toBe(true);
       expect(isPersistableDealViewParam("assignedRepId")).toBe(true);
-      expect(isPersistableDealViewParam("dl_stage")).toBe(true);
-      expect(isPersistableDealViewParam("dl_region")).toBe(true);
-      expect(isPersistableDealViewParam("dl_sort")).toBe(true);
     });
 
-    it("does NOT persist scope (owned by scope-preferences) or transient drill-down state", () => {
-      expect(isPersistableDealViewParam("scope")).toBe(false);
+    it("does NOT persist scope, the base-list FilterBar (dl_), or transient drill-down state", () => {
+      expect(isPersistableDealViewParam("scope")).toBe(false); // owned by scope-preferences
+      expect(isPersistableDealViewParam("dl_stage")).toBe(false); // dropped by drill-downs — deferred
+      expect(isPersistableDealViewParam("dl_page")).toBe(false); // pagination is not a filter
       expect(isPersistableDealViewParam("filter")).toBe(false);
       expect(isPersistableDealViewParam("fb_stage")).toBe(false);
       expect(isPersistableDealViewParam("terminal")).toBe(false);
@@ -34,11 +33,11 @@ describe("deals-view-preferences", () => {
   });
 
   describe("collectPersistableDealViewParams", () => {
-    it("keeps only the persistable params and drops empties", () => {
+    it("keeps only the persistable params and drops everything else + empties", () => {
       const collected = collectPersistableDealViewParams(
-        "scope=all&period=ytd&assignedRepId=rep-1&filter=at_risk&dl_stage=estimating&fb_region=x&assignedRepId2=&dl_empty=",
+        "scope=all&period=ytd&assignedRepId=rep-1&filter=at_risk&dl_stage=estimating&fb_region=x&assignedRepId2=&period2=",
       );
-      expect(collected).toEqual({ period: "ytd", assignedRepId: "rep-1", dl_stage: "estimating" });
+      expect(collected).toEqual({ period: "ytd", assignedRepId: "rep-1" });
     });
   });
 
@@ -47,12 +46,10 @@ describe("deals-view-preferences", () => {
       const next = applyStoredDealView("assignedRepId=explicit", {
         period: "ytd",
         assignedRepId: "stored-rep",
-        dl_stage: "estimating",
       });
       const params = new URLSearchParams(next ?? "");
       expect(params.get("assignedRepId")).toBe("explicit"); // URL wins over the stored value
       expect(params.get("period")).toBe("ytd");
-      expect(params.get("dl_stage")).toBe("estimating");
     });
 
     it("returns null when nothing needs filling (all present or store empty)", () => {
@@ -67,8 +64,8 @@ describe("deals-view-preferences", () => {
 
   describe("read/write round-trip (per-user localStorage)", () => {
     it("round-trips the persistable subset for a user", () => {
-      writeStoredDealView("user-1", { period: "mtd", assignedRepId: "rep-9", dl_region: "west" });
-      expect(readStoredDealView("user-1")).toEqual({ period: "mtd", assignedRepId: "rep-9", dl_region: "west" });
+      writeStoredDealView("user-1", { period: "mtd", assignedRepId: "rep-9" });
+      expect(readStoredDealView("user-1")).toEqual({ period: "mtd", assignedRepId: "rep-9" });
     });
 
     it("is per-user and empty for an unknown user", () => {
@@ -77,10 +74,10 @@ describe("deals-view-preferences", () => {
       expect(readStoredDealView(null)).toEqual({});
     });
 
-    it("re-filters on read so a stale non-persistable key can't leak back", () => {
+    it("re-filters on read so a stale non-persistable key (incl. a since-removed dl_) can't leak back", () => {
       window.localStorage.setItem(
         "deals-view-preference:user-1",
-        JSON.stringify({ period: "ytd", filter: "at_risk", scope: "all" }),
+        JSON.stringify({ period: "ytd", filter: "at_risk", scope: "all", dl_stage: "estimating" }),
       );
       expect(readStoredDealView("user-1")).toEqual({ period: "ytd" });
     });

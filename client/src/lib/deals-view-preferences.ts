@@ -1,12 +1,17 @@
-// Per-user persistence for the /deals dashboard's STANDING filters, so a selection survives navigating into
-// a deal and back (via a nav link, which lands on a bare /deals with no query). Mirrors the localStorage
-// pattern of scope-preferences.ts (Mine/All), extended to the header Rep + timeframe and the base-list
-// FilterBar (`dl_`) dimensions.
+// Per-user persistence for the /deals dashboard's STANDING header filters, so a selection survives navigating
+// into a deal and back (via a nav link, which lands on a bare /deals with no query). Mirrors the localStorage
+// pattern of scope-preferences.ts (Mine/All), extended to the header Rep + timeframe.
 //
 // Scope (Mine/All) is intentionally NOT handled here — it already persists via scope-preferences.ts, and the
-// read path there (resolvePreferredScope) owns it. Transient DRILL-DOWN state is deliberately excluded (a
-// drill-down is contextual, not a standing preference): the outcome selector `filter`, the drill-down
-// FilterBar `fb_*`, and the KPI date windows (`terminal`/`estimate`/`won_*`/`lost_*`).
+// read path there (resolvePreferredScope) owns it.
+//
+// The base-list FilterBar (`dl_*`) dimensions are also NOT persisted here: those params are dropped from the
+// URL whenever a KPI drill-down is opened, so persisting them correctly needs dedicated round-trip handling
+// (a saved base-list filter must not be wiped just by viewing a drill-down). Tracked as a follow-up.
+//
+// Transient DRILL-DOWN state is likewise excluded (a drill-down is contextual, not a standing preference):
+// the outcome selector `filter`, the drill-down FilterBar `fb_*`, and the KPI date windows
+// (`terminal`/`estimate`/`won_*`/`lost_*`).
 
 const STORAGE_PREFIX = "deals-view-preference";
 
@@ -14,9 +19,9 @@ function storageKey(userId: string) {
   return `${STORAGE_PREFIX}:${userId}`;
 }
 
-/** Allowlist (not denylist) of the query params that represent a STANDING /deals view preference. */
+/** Allowlist (not denylist) of the query params that represent a STANDING /deals header preference. */
 export function isPersistableDealViewParam(key: string): boolean {
-  return key === "period" || key === "assignedRepId" || key.startsWith("dl_");
+  return key === "period" || key === "assignedRepId";
 }
 
 /** The persistable subset of a URL query string, as a plain record (empty values dropped). */

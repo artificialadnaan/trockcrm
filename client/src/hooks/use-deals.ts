@@ -983,8 +983,15 @@ export function useDealBoard(
   const [board, setBoard] = useState<DealBoardResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Latest-wins guard (mirrors useDeals): a stale response from a superseded request must never overwrite
+  // the board. This matters when params change in quick succession — e.g. a bare /deals mounts and then
+  // hydrates saved filters, firing an unfiltered then a filtered request; without this the slower
+  // unfiltered response could clobber the restored view. (useDeals already guards; useDealBoard did not.)
+  const boardRequestIdRef = useRef(0);
 
   const refetch = useCallback(() => {
+    const requestId = boardRequestIdRef.current + 1;
+    boardRequestIdRef.current = requestId;
     setLoading(true);
     setError(null);
     const params = new URLSearchParams({
@@ -1015,15 +1022,19 @@ export function useDealBoard(
     return api<DealBoardApiResponse>(`/deals/pipeline?${params.toString()}`)
       .then((result) => {
         const normalized = normalizeDealBoardResponse(result);
-        setBoard(normalized);
+        if (requestId === boardRequestIdRef.current) setBoard(normalized);
         return normalized;
       })
       .catch((err: unknown) => {
-        setBoard(null);
-        setError(err instanceof Error ? err.message : "Failed to load deal board");
+        if (requestId === boardRequestIdRef.current) {
+          setBoard(null);
+          setError(err instanceof Error ? err.message : "Failed to load deal board");
+        }
         throw err;
       })
-      .finally(() => setLoading(false));
+      .finally(() => {
+        if (requestId === boardRequestIdRef.current) setLoading(false);
+      });
   }, [
     assignedRepId,
     estimateSentDateRange?.from,

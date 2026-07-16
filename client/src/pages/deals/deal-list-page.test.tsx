@@ -526,6 +526,28 @@ describe("DealListPage", () => {
     expect(html).toContain("Service Hospital Roof");
   });
 
+  it("restores the saved Rep + timeframe on a bare /deals return (hydrates from localStorage)", async () => {
+    window.localStorage.setItem(
+      "deals-view-preference:user-1",
+      JSON.stringify({ assignedRepId: "rep-9", period: "ytd" }),
+    );
+    const view = await renderPageDomWithLocation("/deals?scope=all");
+    expect(view.searches.some((s) => s.includes("assignedRepId=rep-9"))).toBe(true);
+    expect(view.searches.some((s) => s.includes("period=ytd"))).toBe(true);
+    await view.cleanup();
+  });
+
+  it("does NOT hydrate saved filters into a drill-down deep link (its omitted period/rep are intentional)", async () => {
+    window.localStorage.setItem(
+      "deals-view-preference:user-1",
+      JSON.stringify({ assignedRepId: "rep-9", period: "ytd" }),
+    );
+    const view = await renderPageDomWithLocation("/deals?scope=all&filter=won");
+    // A ?filter= deep link's omitted period/rep are intentional — never overwritten from the store.
+    expect(view.searches.every((s) => !s.includes("assignedRepId=rep-9"))).toBe(true);
+    await view.cleanup();
+  });
+
   it("layers the Deals page rep into the board and the bid-board drill-down list", () => {
     renderPage("/deals?scope=all&assignedRepId=rep-1&filter=bid_board");
 
