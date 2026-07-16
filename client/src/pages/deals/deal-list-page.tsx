@@ -872,7 +872,11 @@ function DealListPageContent({
   const scope: PipelineScope = requestedScope === "team" ? "mine" : requestedScope;
   // Key the assignee list to the effective office so it reloads when the view switches offices (?officeId=)
   // — otherwise a rep is validated / the picker is populated against the previous office's users.
-  const { assignees, loading: assigneesLoading } = useTaskAssignees({ officeId: effectiveOfficeId });
+  const {
+    assignees,
+    loading: assigneesLoading,
+    loadedOfficeId: assigneesOfficeId,
+  } = useTaskAssignees({ officeId: effectiveOfficeId });
 
   // Remember the standing dashboard header filters (Rep + timeframe) per (user, effective office), the same
   // way Mine/All already persists — so opening a deal and returning to /deals restores the last selection.
@@ -890,15 +894,17 @@ function DealListPageContent({
     if (scope === "mine") delete stored.assignedRepId;
     if (stored.assignedRepId) {
       // Don't inject a rep who is no longer a selectable assignee (deactivated, or not in this office) — it
-      // would show an unresolved "Selected rep" and silently narrow the board. Defer the WHOLE hydration only
-      // while the list is still loading (the effect re-runs when it settles); once loaded — even to an empty
-      // or errored list — drop just the rep and still restore the office-independent timeframe.
-      if (assigneesLoading) return;
+      // would show an unresolved "Selected rep" and silently narrow the board. Defer the WHOLE hydration
+      // until the assignee list has settled FOR THE CURRENT office: while loading, and while the loaded list
+      // still belongs to a previous office (on an office switch the hook briefly reports the old list with
+      // loading=false before its reload effect fires). Once settled — even to an empty or errored list —
+      // drop just the rep and still restore the office-independent timeframe.
+      if (assigneesLoading || assigneesOfficeId !== effectiveOfficeId) return;
       if (!assignees.some((assignee) => assignee.id === stored.assignedRepId)) delete stored.assignedRepId;
     }
     const next = applyStoredDealView(searchParams.toString(), stored);
     if (next !== null) setSearchParams(next, { replace: true });
-  }, [searchParams, setSearchParams, userId, effectiveOfficeId, scope, assignees, assigneesLoading]);
+  }, [searchParams, setSearchParams, userId, effectiveOfficeId, scope, assignees, assigneesLoading, assigneesOfficeId]);
 
   // Persist a single header control (Rep or timeframe) as a per-(user, office) preference. Per-key so
   // changing one control never drops the other — important on a drill-down whose URL omits ?period.

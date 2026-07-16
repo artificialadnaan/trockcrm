@@ -442,6 +442,7 @@ describe("DealListPage", () => {
         { id: "rep-9", displayName: "Nina Nine" },
       ],
       loading: false,
+      loadedOfficeId: "office-1",
     });
 
     mocks.usePipelineStagesMock.mockReturnValue({
@@ -640,8 +641,27 @@ describe("DealListPage", () => {
     await view.cleanup();
   });
 
+  it("defers hydration while the loaded assignees still belong to a previous office (office-switch race)", async () => {
+    // Simulate the hook briefly reporting a stale office's list (loading:false) right after an office switch.
+    mocks.useTaskAssigneesMock.mockReturnValue({
+      assignees: [{ id: "rep-1", displayName: "Brett Jones" }],
+      loading: false,
+      loadedOfficeId: "office-STALE",
+    });
+    window.localStorage.setItem(
+      "deals-view-preference:user-1:office-1",
+      JSON.stringify({ assignedRepId: "rep-9", period: "ytd" }),
+    );
+    const view = await renderPageDomWithLocation("/deals?scope=all");
+    // Nothing is hydrated yet — not even the timeframe — until the assignee list settles for THIS office
+    // (otherwise a valid rep would be validated against the wrong office's list and dropped).
+    expect(view.searches.every((s) => !s.includes("period=ytd"))).toBe(true);
+    expect(view.searches.every((s) => !s.includes("assignedRepId=rep-9"))).toBe(true);
+    await view.cleanup();
+  });
+
   it("still restores the timeframe when the assignee list has finished loading but is empty", async () => {
-    mocks.useTaskAssigneesMock.mockReturnValue({ assignees: [], loading: false });
+    mocks.useTaskAssigneesMock.mockReturnValue({ assignees: [], loading: false, loadedOfficeId: "office-1" });
     window.localStorage.setItem(
       "deals-view-preference:user-1:office-1",
       JSON.stringify({ assignedRepId: "rep-9", period: "ytd" }),
