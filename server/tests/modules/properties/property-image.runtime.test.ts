@@ -107,4 +107,13 @@ describe("property image key writers (real SQL)", () => {
     });
     expect(result).toBeNull();
   });
+
+  it("refuses to write to a soft-deleted property (read-only)", async () => {
+    const { setPropertyImageKeys } = await svc();
+    const result = await setPropertyImageKeys(tdb, INACTIVE_PROP, {
+      imageR2Key: "properties/x/cover.jpg",
+      imageThumbnailR2Key: null,
+    });
+    expect(result).toBeNull();
+  });
 });

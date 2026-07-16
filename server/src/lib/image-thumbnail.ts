@@ -204,16 +204,31 @@ export async function transcodeHeicToStorableJpeg(source: Buffer): Promise<Buffe
     .toBuffer();
 }
 
+const RENDERABLE_FORMAT_TO_MIME: Record<string, { mime: string; extension: string }> = {
+  jpeg: { mime: "image/jpeg", extension: "jpg" },
+  png: { mime: "image/png", extension: "png" },
+  webp: { mime: "image/webp", extension: "webp" },
+  gif: { mime: "image/gif", extension: "gif" },
+};
+
 /**
- * Throw if `source` is not a decodable raster image. Guards the property-cover upload so a corrupt or
- * spoofed file (an allowed Content-Type over non-image bytes) isn't stored as an object that neither the
- * avatar nor the full-size view can ever render — thumbnail generation is best-effort and would silently
- * skip it. Decoding even a tiny downscaled render proves the bytes are a real image.
+ * Decode `source` and return the canonical MIME + extension derived from the ACTUAL bytes — not the client's
+ * Content-Type/filename, which can be spoofed or simply wrong. Throws if the bytes don't decode or aren't a
+ * browser-renderable raster we store for a cover photo. This rejects e.g. a TIFF renamed to `.jpg`, which
+ * would otherwise be stored and served as image/jpeg and render as a broken <img>; a corrupt body with a
+ * valid header is also rejected by the forced pixel decode. HEIC/HEIF are transcoded upstream, not here.
  */
-export async function assertImageDecodes(source: Buffer): Promise<void> {
+export async function probeStorableImageFormat(source: Buffer): Promise<{ mime: string; extension: string }> {
+  const { format } = await sharp(source, { failOn: "error", limitInputPixels: EVIDENCE_DECODE_PIXEL_LIMIT }).metadata();
+  const mapped = format ? RENDERABLE_FORMAT_TO_MIME[format] : undefined;
+  if (!mapped) {
+    throw new Error(`unsupported or undecodable cover image format: ${format ?? "unknown"}`);
+  }
+  // Force a real pixel decode so a corrupt body behind a valid header is rejected too.
   await sharp(source, { failOn: "error", limitInputPixels: EVIDENCE_DECODE_PIXEL_LIMIT })
     .resize({ width: 32, height: 32, fit: "inside", withoutEnlargement: true })
     .toBuffer();
+  return mapped;
 }
 
 /**

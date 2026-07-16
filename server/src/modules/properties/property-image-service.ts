@@ -176,12 +176,21 @@ export async function setPropertyImageKeys(
   propertyId: string,
   keys: PropertyImageKeys,
 ): Promise<PropertyImageUpdateResult | null> {
+  // Lock the row (FOR UPDATE) so a concurrent replacement or soft-delete serializes here. Without the lock,
+  // `previousKeys` could be read stale — a superseding upload's object would then never be cleaned up — and a
+  // soft-delete slipping in after the caller's existence check would be silently overwritten.
   const [existing] = await tenantDb
-    .select({ imageR2Key: properties.imageR2Key, imageThumbnailR2Key: properties.imageThumbnailR2Key })
+    .select({
+      imageR2Key: properties.imageR2Key,
+      imageThumbnailR2Key: properties.imageThumbnailR2Key,
+      isActive: properties.isActive,
+    })
     .from(properties)
     .where(eq(properties.id, propertyId))
+    .for("update")
     .limit(1);
-  if (!existing) return null;
+  // Missing OR soft-deleted (read-only) → refuse; the caller deletes any just-uploaded R2 object.
+  if (!existing || !existing.isActive) return null;
 
   const [property] = await tenantDb
     .update(properties)

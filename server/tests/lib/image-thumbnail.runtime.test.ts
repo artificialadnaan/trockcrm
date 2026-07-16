@@ -22,11 +22,11 @@ vi.mock("heic-convert", () => ({
 }));
 
 import {
-  assertImageDecodes,
   deriveThumbnailKey,
   generateEvidenceJpeg,
   isThumbnailableImage,
   generateThumbnailBuffer,
+  probeStorableImageFormat,
   readHeifDimensions,
   withHeicDecodePermit,
 } from "../../src/lib/image-thumbnail.js";
@@ -36,14 +36,18 @@ import {
  * isThumbnailableImage are pure, and generateThumbnailBuffer runs sharp on an in-memory image.
  */
 
-describe("assertImageDecodes", () => {
-  it("resolves for a real raster image", async () => {
+describe("probeStorableImageFormat", () => {
+  it("returns the canonical mime + extension from the ACTUAL bytes", async () => {
     const png = await sharp({ create: { width: 4, height: 4, channels: 3, background: "#ff0000" } }).png().toBuffer();
-    await expect(assertImageDecodes(png)).resolves.toBeUndefined();
+    await expect(probeStorableImageFormat(png)).resolves.toEqual({ mime: "image/png", extension: "png" });
+    const jpg = await sharp({ create: { width: 4, height: 4, channels: 3, background: "#00ff00" } }).jpeg().toBuffer();
+    await expect(probeStorableImageFormat(jpg)).resolves.toEqual({ mime: "image/jpeg", extension: "jpg" });
   });
 
-  it("rejects bytes that are not a decodable image (corrupt/spoofed upload)", async () => {
-    await expect(assertImageDecodes(Buffer.from("this is not an image"))).rejects.toThrow();
+  it("rejects non-renderable formats (e.g. a TIFF renamed .jpg) and undecodable bytes", async () => {
+    const tiff = await sharp({ create: { width: 4, height: 4, channels: 3, background: "#0000ff" } }).tiff().toBuffer();
+    await expect(probeStorableImageFormat(tiff)).rejects.toThrow();
+    await expect(probeStorableImageFormat(Buffer.from("this is not an image"))).rejects.toThrow();
   });
 });
 

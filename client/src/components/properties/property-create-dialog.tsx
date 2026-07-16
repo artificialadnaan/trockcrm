@@ -5,6 +5,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from 
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import { toast } from "sonner";
 import { createProperty, uploadPropertyImage } from "@/hooks/use-properties";
 import { CompanySelector } from "@/components/companies/company-selector";
 import { AddressAutocomplete } from "./address-autocomplete";
@@ -124,17 +125,21 @@ export function PropertyCreateDialog({
         },
         { officeId }
       );
-      // Best-effort: the property is already created, so an image failure must not block creation. The
-      // photo can always be added later from the property page.
+      // Best-effort: the property is already created, so an image failure must not block creation. On
+      // success, carry the upload response forward so consumers get the cover URLs; on failure, tell the
+      // user (the photo can always be added later from the property page).
+      let createdProperty = result.property;
       if (imageFile) {
         try {
-          await uploadPropertyImage(result.property.id, imageFile, { officeId });
+          const uploaded = await uploadPropertyImage(result.property.id, imageFile, { officeId });
+          createdProperty = uploaded.property;
         } catch (imageErr) {
           console.warn("Property created but cover photo upload failed", imageErr);
+          toast.error("Property created, but the cover photo failed to upload. You can add it from the property page.");
         }
       }
       setOpen(false);
-      onCreated?.(result.property);
+      onCreated?.(createdProperty);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to create property");
     } finally {

@@ -13,12 +13,11 @@ import {
   clearPropertyImageKeys,
   isHeicImageMime,
   resolveEffectivePropertyImageMime,
-  resolvePropertyImageExtension,
   setPropertyImageKeys,
   type PropertyImageKeys,
 } from "./property-image-service.js";
 import { deleteObject, isR2Configured, putObject } from "../../lib/r2-client.js";
-import { assertImageDecodes, generateAndStoreThumbnail, transcodeHeicToStorableJpeg } from "../../lib/image-thumbnail.js";
+import { generateAndStoreThumbnail, probeStorableImageFormat, transcodeHeicToStorableJpeg } from "../../lib/image-thumbnail.js";
 
 const router = Router();
 
@@ -195,30 +194,31 @@ router.post("/:id/image", rawPropertyImageBody(), async (req, res, next) => {
       throw new AppError(404, "Property not found");
     }
 
-    // HEIC/HEIF can't render in most browsers, so transcode to a FULL-RESOLUTION JPEG up front and store
-    // THAT as the original — otherwise the enlarged view would be a broken <img>. Full-res (not the 600px
-    // evidence path) so a HEIC cover keeps the same resolution a JPEG/PNG upload would.
+    // Derive the stored MIME + extension from the ACTUAL bytes, not the client metadata. HEIC/HEIF can't
+    // render in most browsers, so transcode to a FULL-RESOLUTION JPEG up front and store THAT; everything
+    // else is probed so a corrupt/spoofed file (e.g. a TIFF renamed .jpg) is rejected rather than stored as
+    // a cover that renders broken.
     let uploadBuffer = body;
-    let uploadMime = mimeType;
+    let uploadMime: string;
+    let extension: string;
     if (isHeicImageMime(mimeType)) {
       try {
         uploadBuffer = await transcodeHeicToStorableJpeg(body);
-        uploadMime = "image/jpeg";
       } catch {
         throw new AppError(400, "Could not process this HEIC photo. Please upload a JPEG or PNG.");
       }
+      uploadMime = "image/jpeg";
+      extension = "jpg";
     } else {
-      // Validate the declared image actually decodes before storing it — a corrupt/spoofed upload must not
-      // be saved as a cover that can never render (thumbnail generation below is best-effort and would
-      // silently skip it). The HEIC branch already proved decodability by transcoding.
       try {
-        await assertImageDecodes(body);
+        const probed = await probeStorableImageFormat(body);
+        uploadMime = probed.mime;
+        extension = probed.extension;
       } catch {
         throw new AppError(400, "This image could not be read. Please upload a valid JPEG, PNG, WebP, or GIF.");
       }
     }
 
-    const extension = resolvePropertyImageExtension(originalFilename, uploadMime);
     // A random suffix (not just the timestamp) makes each upload key globally unique, so two near-
     // simultaneous replacements can't share a key and have one's cleanup delete the other's live object.
     const imageR2Key = buildPropertyImageR2Key(propertyId, extension, `${Date.now()}-${randomUUID()}`);
@@ -226,16 +226,30 @@ router.post("/:id/image", rawPropertyImageBody(), async (req, res, next) => {
     await putObject(imageR2Key, uploadBuffer, uploadMime);
     // Best-effort thumbnail; a null result just means the avatar renders from the full-size original.
     const imageThumbnailR2Key = await generateAndStoreThumbnail(imageR2Key, uploadMime, uploadBuffer);
+    const newlyUploaded: PropertyImageKeys = { imageR2Key, imageThumbnailR2Key };
 
-    const updated = await setPropertyImageKeys(req.tenantDb!, propertyId, { imageR2Key, imageThumbnailR2Key });
-    if (!updated) {
-      throw new AppError(404, "Property not found");
+    let committed = false;
+    try {
+      const updated = await setPropertyImageKeys(req.tenantDb!, propertyId, { imageR2Key, imageThumbnailR2Key });
+      if (!updated) {
+        // Property was removed/soft-deleted between the check and the locked write.
+        throw new AppError(404, "Property not found");
+      }
+      const detail = await getPropertyDetail(req.tenantDb!, propertyId);
+      await req.commitTransaction!();
+      committed = true;
+
+      // Post-commit: the DB now points at the new keys, so delete the SUPERSEDED objects.
+      await deletePropertyImageObjects(updated.previousKeys);
+      res.status(201).json({ property: detail?.property ?? null });
+    } catch (err) {
+      // Pre-commit failure: the DB rolls back and won't reference these objects, so delete them so they
+      // don't orphan in R2. (No-op once committed.)
+      if (!committed) {
+        await deletePropertyImageObjects(newlyUploaded);
+      }
+      throw err;
     }
-    const detail = await getPropertyDetail(req.tenantDb!, propertyId);
-    await req.commitTransaction!();
-
-    await deletePropertyImageObjects(updated.previousKeys);
-    res.status(201).json({ property: detail?.property ?? null });
   } catch (err) {
     next(err);
   }
