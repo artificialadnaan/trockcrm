@@ -35,6 +35,12 @@ import { buildDrilldownListFilterBar } from "@/components/deals/deals-filterbar-
 import type { DealFilters } from "@/hooks/use-deals";
 import type { DealListSortState } from "@/components/deals/deals-list-section";
 import { resolvePreferredScope, writeStoredScopePreference } from "@/lib/scope-preferences";
+import {
+  applyStoredDealView,
+  collectPersistableDealViewParams,
+  readStoredDealView,
+  writeStoredDealView,
+} from "@/lib/deals-view-preferences";
 
 // Team scope is parked (PR #512) and not configured anywhere, so it is not offered here. The pills are
 // Mine | All plus the two deals-only filter pseudo-scopes Watched and On Hold. "On Hold" matches deals
@@ -843,6 +849,31 @@ export function DealListPage() {
 function DealListPageContent({ role, userId }: { role: string; userId: string }) {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
+
+  // Remember the standing dashboard filters (header Rep + timeframe + base-list `dl_` FilterBar) per-user,
+  // the same way Mine/All already persists — so opening a deal and returning to /deals (a nav link lands on
+  // a bare /deals) restores the last selection instead of resetting. Scope stays owned by scope-preferences;
+  // transient drill-down state (?filter / fb_* / terminal / won_* / lost_*) is intentionally NOT persisted.
+  const dealViewHydratedRef = useRef(false);
+  const dealViewWritePrimedRef = useRef(false);
+  useEffect(() => {
+    // Hydrate ONCE on mount: fill any missing standing param from the store. The ref guard makes this a
+    // single-shot even though `searchParams` is a dependency, and an explicit URL param always wins.
+    if (dealViewHydratedRef.current) return;
+    dealViewHydratedRef.current = true;
+    const next = applyStoredDealView(searchParams.toString(), readStoredDealView(userId));
+    if (next !== null) setSearchParams(next, { replace: true });
+  }, [searchParams, setSearchParams, userId]);
+  useEffect(() => {
+    // Skip the mount run (it would persist the pre-hydrate URL, briefly clobbering the store), then save the
+    // persistable subset on every change — including a deliberate clear.
+    if (!dealViewWritePrimedRef.current) {
+      dealViewWritePrimedRef.current = true;
+      return;
+    }
+    writeStoredDealView(userId, collectPersistableDealViewParams(searchParams.toString()));
+  }, [searchParams, userId]);
+
   const [search, setSearch] = useState("");
   const [drilldownPage, setDrilldownPage] = useState(1);
   const [terminalDateFilters, setTerminalDateFilters] = useState<Record<TerminalOutcome, TerminalDateFilter>>(() =>

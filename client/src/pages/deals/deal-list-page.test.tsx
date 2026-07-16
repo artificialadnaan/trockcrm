@@ -415,6 +415,10 @@ describe("boardRelevantParamKey (the board sync ignores list-namespace params, C
 
 describe("DealListPage", () => {
   beforeEach(() => {
+    // The page now persists standing filters to localStorage (deals-view-preferences); clear it between
+    // tests so one test's saved Rep/period/dl_ selection can't hydrate into the next (real usage = a fresh
+    // session per test).
+    window.localStorage.clear();
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-05-08T12:00:00Z"));
     mocks.useDealBoardMock.mockReset();
