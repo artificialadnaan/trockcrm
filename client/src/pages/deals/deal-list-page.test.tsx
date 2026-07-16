@@ -3,7 +3,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createRoot, type Root } from "react-dom/client";
-import { MemoryRouter, useLocation } from "react-router-dom";
+import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
+import { readStoredDealView } from "@/lib/deals-view-preferences";
 import type { ButtonHTMLAttributes, ReactNode } from "react";
 import { act, useEffect } from "react";
 import { USD_COMPACT } from "@/components/shared/formatters";
@@ -415,6 +416,10 @@ describe("boardRelevantParamKey (the board sync ignores list-namespace params, C
 
 describe("DealListPage", () => {
   beforeEach(() => {
+    // The page now persists standing filters to localStorage (deals-view-preferences); clear it between
+    // tests so one test's saved Rep/period/dl_ selection can't hydrate into the next (real usage = a fresh
+    // session per test).
+    window.localStorage.clear();
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-05-08T12:00:00Z"));
     mocks.useDealBoardMock.mockReset();
@@ -432,7 +437,12 @@ describe("DealListPage", () => {
     mocks.buildDealStageWorkspacePathMock.mockReturnValue("/deals/stages/stage-won?scope=all");
 
     mocks.useTaskAssigneesMock.mockReturnValue({
-      assignees: [{ id: "rep-1", displayName: "Brett Jones" }],
+      assignees: [
+        { id: "rep-1", displayName: "Brett Jones" },
+        { id: "rep-9", displayName: "Nina Nine" },
+      ],
+      loading: false,
+      loadedOfficeId: "office-1",
     });
 
     mocks.usePipelineStagesMock.mockReturnValue({
@@ -520,6 +530,167 @@ describe("DealListPage", () => {
     expect(html).toContain("Estimate Sent to Client");
     expect(html).toContain("Palm Villas");
     expect(html).toContain("Service Hospital Roof");
+  });
+
+  it("restores the saved Rep + timeframe on a bare /deals return (hydrates from localStorage)", async () => {
+    window.localStorage.setItem(
+      "deals-view-preference:user-1:office-1",
+      JSON.stringify({ assignedRepId: "rep-9", period: "ytd" }),
+    );
+    const view = await renderPageDomWithLocation("/deals?scope=all");
+    expect(view.searches.some((s) => s.includes("assignedRepId=rep-9"))).toBe(true);
+    expect(view.searches.some((s) => s.includes("period=ytd"))).toBe(true);
+    await view.cleanup();
+  });
+
+  it("does NOT hydrate saved filters into a drill-down deep link (its omitted period/rep are intentional)", async () => {
+    window.localStorage.setItem(
+      "deals-view-preference:user-1:office-1",
+      JSON.stringify({ assignedRepId: "rep-9", period: "ytd" }),
+    );
+    const view = await renderPageDomWithLocation("/deals?scope=all&filter=won");
+    // A ?filter= deep link's omitted period/rep are intentional — never overwritten from the store.
+    expect(view.searches.every((s) => !s.includes("assignedRepId=rep-9"))).toBe(true);
+    await view.cleanup();
+  });
+
+  it("does NOT hydrate into a non-bare base-list deep link (e.g. a shared dl_ link is authoritative)", async () => {
+    window.localStorage.setItem(
+      "deals-view-preference:user-1:office-1",
+      JSON.stringify({ assignedRepId: "rep-9", period: "ytd" }),
+    );
+    const view = await renderPageDomWithLocation("/deals?scope=all&dl_stageIds=estimating");
+    expect(view.searches.every((s) => !s.includes("assignedRepId=rep-9"))).toBe(true);
+    await view.cleanup();
+  });
+
+  it("restores (does not wipe) saved filters on a same-route return from a drill-down to a bare /deals", async () => {
+    window.localStorage.setItem(
+      "deals-view-preference:user-1:office-1",
+      JSON.stringify({ assignedRepId: "rep-9", period: "ytd" }),
+    );
+    // Effective scope resolves to All on the bare return, so the saved rep is kept (not dropped as under Mine).
+    window.localStorage.setItem("pipeline-scope-preference:user-1", "all");
+    mocks.useAuthMock.mockReturnValue({
+      user: { id: "user-1", email: "a@b.test", displayName: "T", role: "admin", officeId: "office-1", activeOfficeId: "office-1" },
+      loading: false,
+    });
+    let navigate: (to: string) => void = () => {};
+    const locations: string[] = [];
+    function Probe() {
+      navigate = useNavigate();
+      locations.push(useLocation().search);
+      return <DealListPage />;
+    }
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    let root: Root | null = null;
+    await act(async () => {
+      root = createRoot(container);
+      root.render(
+        <MemoryRouter initialEntries={["/deals?scope=all&filter=won"]}>
+          <Probe />
+        </MemoryRouter>,
+      );
+    });
+    // On the drill-down deep link the store is left untouched.
+    expect(readStoredDealView("user-1", "office-1")).toMatchObject({ assignedRepId: "rep-9", period: "ytd" });
+    // The sidebar "Deals" link keeps this same route mounted; the return must RESTORE, not save {} and wipe.
+    await act(async () => navigate("/deals"));
+    expect(readStoredDealView("user-1", "office-1")).toMatchObject({ assignedRepId: "rep-9", period: "ytd" });
+    // And the URL itself is hydrated with the restored rep + timeframe.
+    const restored = locations[locations.length - 1];
+    expect(restored).toContain("assignedRepId=rep-9");
+    expect(restored).toContain("period=ytd");
+    await act(async () => root?.unmount());
+    container.remove();
+  });
+
+  it("restores the saved timeframe but NOT a saved rep when the effective scope is Mine (avoids an empty board)", async () => {
+    window.localStorage.setItem(
+      "deals-view-preference:user-1:office-1",
+      JSON.stringify({ assignedRepId: "rep-9", period: "ytd" }),
+    );
+    // The shared scope preference (owned by scope-preferences, set from any page) resolves to Mine here.
+    window.localStorage.setItem("pipeline-scope-preference:user-1", "mine");
+    const view = await renderPageDomWithLocation("/deals");
+    expect(view.searches.some((s) => s.includes("period=ytd"))).toBe(true);
+    expect(view.searches.every((s) => !s.includes("assignedRepId=rep-9"))).toBe(true);
+    await view.cleanup();
+  });
+
+  it("KEEPS a saved rep under Watched scope (rep narrowing is valid there, unlike Mine)", async () => {
+    window.localStorage.setItem(
+      "deals-view-preference:user-1:office-1",
+      JSON.stringify({ assignedRepId: "rep-9", period: "ytd" }),
+    );
+    window.localStorage.setItem("pipeline-scope-preference:user-1", "watched");
+    const view = await renderPageDomWithLocation("/deals");
+    expect(view.searches.some((s) => s.includes("assignedRepId=rep-9"))).toBe(true);
+    await view.cleanup();
+  });
+
+  it("does NOT restore a stored rep who is no longer a selectable assignee (deactivated / wrong office)", async () => {
+    window.localStorage.setItem(
+      "deals-view-preference:user-1:office-1",
+      JSON.stringify({ assignedRepId: "rep-gone", period: "ytd" }), // rep-gone is not in the assignee list
+    );
+    const view = await renderPageDomWithLocation("/deals?scope=all");
+    expect(view.searches.some((s) => s.includes("period=ytd"))).toBe(true);
+    expect(view.searches.every((s) => !s.includes("assignedRepId=rep-gone"))).toBe(true);
+    await view.cleanup();
+  });
+
+  it("defers hydration while the loaded assignees still belong to a previous office (office-switch race)", async () => {
+    // Simulate the hook briefly reporting a stale office's list (loading:false) right after an office switch.
+    mocks.useTaskAssigneesMock.mockReturnValue({
+      assignees: [{ id: "rep-1", displayName: "Brett Jones" }],
+      loading: false,
+      loadedOfficeId: "office-STALE",
+    });
+    window.localStorage.setItem(
+      "deals-view-preference:user-1:office-1",
+      JSON.stringify({ assignedRepId: "rep-9", period: "ytd" }),
+    );
+    const view = await renderPageDomWithLocation("/deals?scope=all");
+    // Nothing is hydrated yet — not even the timeframe — until the assignee list settles for THIS office
+    // (otherwise a valid rep would be validated against the wrong office's list and dropped).
+    expect(view.searches.every((s) => !s.includes("period=ytd"))).toBe(true);
+    expect(view.searches.every((s) => !s.includes("assignedRepId=rep-9"))).toBe(true);
+    await view.cleanup();
+  });
+
+  it("still restores the timeframe when the assignee list has finished loading but is empty", async () => {
+    mocks.useTaskAssigneesMock.mockReturnValue({ assignees: [], loading: false, loadedOfficeId: "office-1" });
+    window.localStorage.setItem(
+      "deals-view-preference:user-1:office-1",
+      JSON.stringify({ assignedRepId: "rep-9", period: "ytd" }),
+    );
+    const view = await renderPageDomWithLocation("/deals?scope=all");
+    // The office-independent timeframe is restored even though there are no assignees to validate the rep.
+    expect(view.searches.some((s) => s.includes("period=ytd"))).toBe(true);
+    expect(view.searches.every((s) => !s.includes("assignedRepId=rep-9"))).toBe(true);
+    await view.cleanup();
+  });
+
+  it("persists a header timeframe change made while on a drill-down, preserving the saved rep (per-key)", async () => {
+    window.localStorage.setItem("deals-view-preference:user-1:office-1", JSON.stringify({ assignedRepId: "rep-9" }));
+    const view = await renderPageDomWithLocation("/deals?scope=all&filter=won", "director");
+    await act(async () => {
+      const trigger = view.container.querySelector<HTMLButtonElement>('button[aria-label="Period"]');
+      trigger?.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+      trigger?.click();
+    });
+    await act(async () => {
+      const option = Array.from(document.querySelectorAll<HTMLElement>('[role="option"]')).find(
+        (el) => el.textContent?.trim() === "YTD",
+      );
+      option?.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType: "touch" }));
+      option?.click();
+    });
+    // The change made on the drill-down is saved, and the pre-existing rep is kept (not dropped).
+    expect(readStoredDealView("user-1", "office-1")).toEqual({ assignedRepId: "rep-9", period: "ytd" });
+    await view.cleanup();
   });
 
   it("layers the Deals page rep into the board and the bid-board drill-down list", () => {

@@ -35,6 +35,12 @@ import { buildDrilldownListFilterBar } from "@/components/deals/deals-filterbar-
 import type { DealFilters } from "@/hooks/use-deals";
 import type { DealListSortState } from "@/components/deals/deals-list-section";
 import { resolvePreferredScope, writeStoredScopePreference } from "@/lib/scope-preferences";
+import {
+  applyStoredDealView,
+  isBareDealsView,
+  readStoredDealView,
+  writeStoredDealView,
+} from "@/lib/deals-view-preferences";
 
 // Team scope is parked (PR #512) and not configured anywhere, so it is not offered here. The pills are
 // Mine | All plus the two deals-only filter pseudo-scopes Watched and On Hold. "On Hold" matches deals
@@ -837,30 +843,90 @@ export function DealListPage() {
     );
   }
 
-  return <DealListPageContent role={user.role} userId={user.id} />;
+  return <DealListPageContent role={user.role} userId={user.id} activeOfficeId={user.activeOfficeId ?? user.officeId ?? null} />;
 }
 
-function DealListPageContent({ role, userId }: { role: string; userId: string }) {
+function DealListPageContent({
+  role,
+  userId,
+  activeOfficeId,
+}: {
+  role: string;
+  userId: string;
+  activeOfficeId: string | null;
+}) {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
-  const [search, setSearch] = useState("");
-  const [drilldownPage, setDrilldownPage] = useState(1);
-  const [terminalDateFilters, setTerminalDateFilters] = useState<Record<TerminalOutcome, TerminalDateFilter>>(() =>
-    resolveDrilldownTerminalDateFilters(searchParams)
-  );
+
+  // Effective view context — the office and scope can BOTH be overridden by the URL for supported
+  // cross-office viewing (?officeId=) and shared/bookmarked links (?scope=). Hoisted here so the persistence
+  // layer AND the board/header below read one value.
+  const effectiveOfficeId = searchParams.get("officeId") ?? activeOfficeId;
   const requestedScope = resolvePreferredScope({
     requestedScope: searchParams.get("scope"),
     userId,
     fallback: getScope(searchParams, role),
   });
-  // Team is not offered (see SCOPE_OPTIONS); coerce a stored/URL ?scope=team to a scope we
-  // actually render so the toggle and board never reach the dead "team" placeholder state.
+  // Team is not offered (see SCOPE_OPTIONS); coerce a stored/URL ?scope=team to a scope we actually render so
+  // the toggle and board never reach the dead "team" placeholder state.
   const scope: PipelineScope = requestedScope === "team" ? "mine" : requestedScope;
+  // Key the assignee list to the effective office so it reloads when the view switches offices (?officeId=)
+  // — otherwise a rep is validated / the picker is populated against the previous office's users.
+  const {
+    assignees,
+    loading: assigneesLoading,
+    loadedOfficeId: assigneesOfficeId,
+  } = useTaskAssignees({ officeId: effectiveOfficeId });
+
+  // Remember the standing dashboard header filters (Rep + timeframe) per (user, effective office), the same
+  // way Mine/All already persists — so opening a deal and returning to /deals restores the last selection.
+  // This effect only RESTORES (reads the store); it never writes, so no navigation can wipe the saved
+  // selection. Writes happen only in the Rep/Period control handlers (persistDealViewParam) — the reliable
+  // signal of an intentional change. Only a BARE view (no query beyond scope/officeId) hydrates; a `?filter=`
+  // drill-down, a `dl_*` base-list link, or an explicit period/rep is authoritative.
+  useEffect(() => {
+    if (searchParams.has("filter")) return;
+    if (!isBareDealsView(searchParams.toString())) return;
+    const stored = readStoredDealView(userId, effectiveOfficeId);
+    // A saved Rep is only meaningful under scopes that narrow by rep. Under Mine (which the shared scope
+    // preference can flip to from another page) it intersects the viewer's own deals and empties the board,
+    // so drop it there; Watched/On Hold/All keep it. The timeframe is always restored.
+    if (scope === "mine") delete stored.assignedRepId;
+    if (stored.assignedRepId) {
+      // Don't inject a rep who is no longer a selectable assignee (deactivated, or not in this office) — it
+      // would show an unresolved "Selected rep" and silently narrow the board. Defer the WHOLE hydration
+      // until the assignee list has settled FOR THE CURRENT office: while loading, and while the loaded list
+      // still belongs to a previous office (on an office switch the hook briefly reports the old list with
+      // loading=false before its reload effect fires). Once settled — even to an empty or errored list —
+      // drop just the rep and still restore the office-independent timeframe.
+      if (assigneesLoading || assigneesOfficeId !== effectiveOfficeId) return;
+      if (!assignees.some((assignee) => assignee.id === stored.assignedRepId)) delete stored.assignedRepId;
+    }
+    const next = applyStoredDealView(searchParams.toString(), stored);
+    if (next !== null) setSearchParams(next, { replace: true });
+  }, [searchParams, setSearchParams, userId, effectiveOfficeId, scope, assignees, assigneesLoading, assigneesOfficeId]);
+
+  // Persist a single header control (Rep or timeframe) as a per-(user, office) preference. Per-key so
+  // changing one control never drops the other — important on a drill-down whose URL omits ?period.
+  const persistDealViewParam = useCallback(
+    (key: "period" | "assignedRepId", value: string | null) => {
+      const stored = readStoredDealView(userId, effectiveOfficeId);
+      if (value) stored[key] = value;
+      else delete stored[key];
+      writeStoredDealView(userId, effectiveOfficeId, stored);
+    },
+    [userId, effectiveOfficeId],
+  );
+
+  const [search, setSearch] = useState("");
+  const [drilldownPage, setDrilldownPage] = useState(1);
+  const [terminalDateFilters, setTerminalDateFilters] = useState<Record<TerminalOutcome, TerminalDateFilter>>(() =>
+    resolveDrilldownTerminalDateFilters(searchParams)
+  );
   const selectedPeriod = useMemo(() => normalizeDashboardPeriod(searchParams.get("period")), [searchParams]);
   const selectedPeriodRange = useMemo(() => getDashboardPeriodDateRange(selectedPeriod), [selectedPeriod]);
   const scopeOptions = SCOPE_OPTIONS;
   const { stages } = usePipelineStages("deal");
-  const { assignees } = useTaskAssignees();
   // Option sources for the base-view + drill-down FilterBar region / project-type dimensions (Rep stays
   // the page-level select / header; scope stays the page toggle — neither is a bar dimension here).
   const { regions } = useRegions();
@@ -936,13 +1002,15 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
   }, [searchParams, setSearchParams]);
 
   const updateSelectedRep = useCallback((repId: string) => {
+    const repValue = !repId || repId === "__all__" ? null : repId;
+    persistDealViewParam("assignedRepId", repValue); // remember the selection (incl. from a drill-down)
     setSearchParams((current) => {
       const next = new URLSearchParams(current);
-      if (!repId || repId === "__all__") next.delete("assignedRepId");
-      else next.set("assignedRepId", repId);
+      if (repValue) next.set("assignedRepId", repValue);
+      else next.delete("assignedRepId");
       return next;
     });
-  }, [setSearchParams]);
+  }, [persistDealViewParam, setSearchParams]);
 
   // The header period dropdown writes ?period, which already drives the KPI cards + read-only board
   // board-wide (selectedPeriodRange → useDealBoard wonPeriodRange → won_period_from/to, the outcome-aware
@@ -951,9 +1019,11 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
   // column date controls (Option A). One action -> one ?period write -> the board, KPIs, list, and both
   // terminal columns all follow it.
   const updatePeriod = useCallback((value: string) => {
+    const periodValue = !value || value === "__all__" ? null : value;
+    persistDealViewParam("period", periodValue); // remember the timeframe (incl. from a drill-down)
     const next = new URLSearchParams(searchParams);
-    if (!value || value === "__all__") next.delete("period");
-    else next.set("period", value);
+    if (periodValue) next.set("period", periodValue);
+    else next.delete("period");
     // Collapse any per-column won_*/lost_* override so a board-date change (from the top control OR a
     // terminal column) can never leave a stale per-column window behind — the board carries ONE date.
     for (const key of [...next.keys()]) {
@@ -966,7 +1036,7 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
     // board/cards on a blended date range (Codex #600 P2).
     setSearchParams(next);
     setTerminalDateFilters(resolveDrilldownTerminalDateFilters(next));
-  }, [searchParams, setSearchParams]);
+  }, [searchParams, setSearchParams, persistDealViewParam]);
 
   const boardColumns = useMemo(
     () => buildCanonicalDealBoardColumns(board?.columns, stages),
