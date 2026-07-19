@@ -187,6 +187,9 @@ describe("processBidBoardInboxJob (async processing state machine)", () => {
     expect(row?.warnings_count).toBe(2);
     expect(row?.attempts).toBe(1);
     expect(row?.finished_at).toBeTruthy();
+    // The heavy payload is dropped on success (row retained for idempotency/status/metrics).
+    const full = await loadInboxRow(db, inboxId);
+    expect(full?.payload).toEqual({});
   });
 
   it("is idempotent: an already-succeeded row is a no-op and does NOT re-run the importer", async () => {
@@ -389,6 +392,34 @@ describe("recoverOrphanedInboxJobs (crash recovery)", () => {
     expect(recovered).toBe(0);
     const row = await loadInboxRow(db, inboxId);
     expect(row?.status).toBe("processing"); // untouched — not stale yet
+  });
+
+  it("does NOT terminalize a STALE attempts-exhausted 'processing' row while a LIVE job still owns it (slow final attempt)", async () => {
+    const { inboxId } = await accept(); // leaves a live pending job in place
+    await db.query(
+      `UPDATE public.bid_board_ingestion_inbox SET status='processing', attempts=5, max_attempts=5, started_at = now() - interval '30 minutes' WHERE id=$1`,
+      [inboxId]
+    );
+    const recovered = await recoverOrphanedInboxJobs(db, { staleProcessingMinutes: 10 });
+    expect(recovered).toBe(0);
+    const row = await loadInboxRow(db, inboxId);
+    expect(row?.status).toBe("processing"); // a live job owns it → left alone (not falsely failed)
+  });
+
+  it("retention: deletes terminal rows past the window, keeps recent ones", async () => {
+    const old = await accept({ payloadHash: "old" });
+    const recent = await accept({ payloadHash: "recent" });
+    await db.query(
+      `UPDATE public.bid_board_ingestion_inbox SET status='succeeded', finished_at = now() - interval '30 days' WHERE id=$1`,
+      [old.inboxId]
+    );
+    await db.query(
+      `UPDATE public.bid_board_ingestion_inbox SET status='succeeded', finished_at = now() WHERE id=$1`,
+      [recent.inboxId]
+    );
+    await recoverOrphanedInboxJobs(db, { retentionDays: 14 });
+    expect(await loadInboxRow(db, old.inboxId)).toBeNull();
+    expect(await loadInboxRow(db, recent.inboxId)).not.toBeNull();
   });
 });
 

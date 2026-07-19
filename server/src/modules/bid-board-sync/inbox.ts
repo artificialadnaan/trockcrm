@@ -186,10 +186,13 @@ export async function markInboxSucceeded(
   inboxId: string,
   fields: { runId: string | null; metrics: unknown; warningsCount: number }
 ): Promise<void> {
+  // Drop the (up to ~25MB) payload once the import has committed — the row is retained for idempotency +
+  // status + the metrics snapshot, but keeping every scraped payload forever would bloat the table
+  // unboundedly (a scrape every ~19min). A re-POST of the same key still dedupes to this 'succeeded' row.
   await db.query(
     `UPDATE public.bid_board_ingestion_inbox
      SET status = 'succeeded', run_id = $2, metrics = $3::jsonb, warnings_count = $4,
-         last_error = NULL, finished_at = NOW(), updated_at = NOW()
+         payload = '{}'::jsonb, last_error = NULL, finished_at = NOW(), updated_at = NOW()
      WHERE id = $1`,
     [inboxId, fields.runId, fields.metrics == null ? null : JSON.stringify(fields.metrics), fields.warningsCount]
   );
@@ -264,21 +267,37 @@ export async function readInboxStatusByKey(
  */
 export async function recoverOrphanedInboxJobs(
   db: Querier,
-  opts: { staleProcessingMinutes?: number } = {}
+  opts: { staleProcessingMinutes?: number; retentionDays?: number } = {}
 ): Promise<number> {
   const staleMinutes = opts.staleProcessingMinutes ?? 10;
+  const retentionDays = opts.retentionDays ?? 14;
 
+  const liveJobExists = `NOT EXISTS (
+    SELECT 1 FROM public.job_queue j
+    WHERE j.job_type = $1::text
+      AND j.status IN ('pending', 'processing')
+      AND j.payload->>'inboxId' = i.id::text
+  )`;
+
+  // (a) Terminalize a stale, attempts-exhausted 'processing' row ONLY when NO live job owns it — i.e. the
+  // worker died and the job is gone, not merely a legitimate final attempt still running (a slow import
+  // holds a 'processing' job the whole time). The live-job guard is what distinguishes the two.
   await db.query(
-    `UPDATE public.bid_board_ingestion_inbox
+    `UPDATE public.bid_board_ingestion_inbox AS i
      SET status = 'failed',
-         last_error = COALESCE(last_error, 'recovered: worker died on the final attempt'),
+         last_error = COALESCE(i.last_error, 'recovered: worker died on the final attempt'),
          finished_at = NOW(), updated_at = NOW()
-     WHERE status = 'processing'
-       AND attempts >= max_attempts
-       AND started_at < NOW() - make_interval(mins => $1::int)`,
-    [staleMinutes]
+     WHERE i.status = 'processing'
+       AND i.attempts >= i.max_attempts
+       AND i.started_at < NOW() - make_interval(mins => $2::int)
+       AND ${liveJobExists}`,
+    [BID_BOARD_INGEST_JOB_TYPE, staleMinutes]
   );
 
+  // (b) Re-enqueue rows still 'queued' or stale 'processing' with attempts left and no live job, using the
+  // row's OWN max_attempts (lockstep). If two worker instances run recovery at once both may enqueue a job
+  // for the same row — that's harmless: the handler claims the row once (markInboxProcessing) and the
+  // per-office lock serializes them, so the duplicate job is a no-op.
   const res = await db.query(
     `INSERT INTO public.job_queue (job_type, payload, office_id, status, run_after, max_attempts)
      SELECT $1::text, jsonb_build_object('inboxId', i.id::text), i.office_id, 'pending', NOW(), i.max_attempts
@@ -288,15 +307,20 @@ export async function recoverOrphanedInboxJobs(
          i.status = 'queued'
          OR (i.status = 'processing' AND i.started_at < NOW() - make_interval(mins => $2::int))
        )
-       AND NOT EXISTS (
-         SELECT 1 FROM public.job_queue j
-         WHERE j.job_type = $1::text
-           AND j.status IN ('pending', 'processing')
-           AND j.payload->>'inboxId' = i.id::text
-       )
+       AND ${liveJobExists}
      RETURNING id`,
     [BID_BOARD_INGEST_JOB_TYPE, staleMinutes]
   );
+
+  // (c) Retention: delete terminal rows past the window so the inbox (and any retained failed payloads)
+  // can't grow without bound. Idempotency for a re-POST past the window simply creates a fresh row.
+  await db.query(
+    `DELETE FROM public.bid_board_ingestion_inbox
+     WHERE status IN ('succeeded', 'failed')
+       AND COALESCE(finished_at, updated_at) < NOW() - make_interval(days => $1::int)`,
+    [retentionDays]
+  );
+
   return res.rowCount ?? res.rows.length;
 }
 
@@ -320,46 +344,43 @@ export interface ProcessInboxDeps {
 export type ProcessInboxOutcome = "succeeded" | "noop";
 
 /**
- * Process one inbox row: acquire the per-office lock, run the (unchanged) importer, and record the outcome.
- * Resolves 'succeeded'/'noop'; THROWS on any ingest failure so the durable job queue retries with backoff
- * (or dead-letters on the final attempt, at which point the inbox is marked terminally 'failed').
+ * Process one inbox row: run the (unchanged) importer under the per-office lock and record the outcome.
+ * Resolves 'succeeded'/'noop'; THROWS on any failure so the durable job queue retries with backoff (or
+ * dead-letters on the final attempt, at which point the inbox is marked terminally 'failed').
+ *
+ * The row is CLAIMED (markInboxProcessing — increments attempts, loads the payload exactly once via
+ * RETURNING *) BEFORE acquiring the office lock. That way a lock-acquisition or ingest failure both count
+ * against the inbox's attempts in lockstep with the job's — so a persistent pre-ingest failure terminalizes
+ * the row instead of looping the recovery re-enqueue. A terminal row ('succeeded'/'failed') yields a null
+ * claim → noop, so the job completes without resurrecting finished work.
  */
 export async function processBidBoardInboxJob(deps: ProcessInboxDeps): Promise<ProcessInboxOutcome> {
   const { db, inboxId } = deps;
   const now = deps.now ?? Date.now;
   const log = deps.log ?? (() => {});
 
-  const pre = await loadInboxRow(db, inboxId);
-  if (!pre) {
-    log(`[BidBoardIngest] inbox row ${inboxId} not found — nothing to process`);
-    return "noop";
-  }
-  if (pre.status === "succeeded") {
-    log(`[BidBoardIngest] inbox row ${inboxId} already succeeded — skipping (idempotent)`);
+  const claimed = await markInboxProcessing(db, inboxId);
+  if (!claimed) {
+    log(`[BidBoardIngest] inbox row ${inboxId} not claimable (already terminal or gone) — noop`);
     return "noop";
   }
 
-  return await deps.withOfficeLock(pre.office_slug, async () => {
-    // Re-read under the lock: a sibling worker may have finished it while we waited.
-    const locked = await loadInboxRow(db, inboxId);
-    if (!locked || locked.status === "succeeded") return "noop";
+  const startedMs = now();
+  const queueMs = startedMs - Date.parse(claimed.queued_at);
+  const logMeta = {
+    office: claimed.office_slug,
+    inboxId,
+    payloadHash: claimed.payload_hash,
+    rowCount: claimed.row_count,
+    attempt: claimed.attempts,
+    maxAttempts: claimed.max_attempts,
+    queueMs: Number.isFinite(queueMs) ? queueMs : undefined,
+  };
 
-    const claimed = await markInboxProcessing(db, inboxId);
-    if (!claimed) return "noop"; // flipped to 'succeeded' between the read and the update
-
-    const startedMs = now();
-    const queueMs = startedMs - Date.parse(claimed.queued_at);
-    const logMeta = {
-      office: claimed.office_slug,
-      inboxId,
-      payloadHash: claimed.payload_hash,
-      rowCount: claimed.row_count,
-      attempt: claimed.attempts,
-      maxAttempts: claimed.max_attempts,
-      queueMs: Number.isFinite(queueMs) ? queueMs : undefined,
-    };
-
-    try {
+  try {
+    // The lock wraps ONLY the import + its terminal write (the deal-row contention). The claim above is a
+    // cheap inbox UPDATE that doesn't touch deal rows, so it's safe outside the lock.
+    await deps.withOfficeLock(claimed.office_slug, async () => {
       const { runId, metrics, warnings } = await deps.ingest(claimed.payload);
       await markInboxSucceeded(db, inboxId, { runId, metrics, warningsCount: warnings?.length ?? 0 });
       log(
@@ -371,21 +392,21 @@ export async function processBidBoardInboxJob(deps: ProcessInboxDeps): Promise<P
           processMs: now() - startedMs,
         })}`
       );
-      return "succeeded";
-    } catch (err) {
-      const terminal = claimed.attempts >= claimed.max_attempts;
-      const message = err instanceof Error ? err.message : String(err);
-      await markInboxFailed(db, inboxId, { error: message, terminal });
-      log(
-        `[BidBoardIngest] ${JSON.stringify({
-          ...logMeta,
-          state: terminal ? "failed" : "retrying",
-          error: message,
-          processMs: now() - startedMs,
-        })}`
-      );
-      // Rethrow so the job queue retries with backoff (or dead-letters on the terminal attempt).
-      throw err;
-    }
-  });
+    });
+    return "succeeded";
+  } catch (err) {
+    const terminal = claimed.attempts >= claimed.max_attempts;
+    const message = err instanceof Error ? err.message : String(err);
+    await markInboxFailed(db, inboxId, { error: message, terminal });
+    log(
+      `[BidBoardIngest] ${JSON.stringify({
+        ...logMeta,
+        state: terminal ? "failed" : "retrying",
+        error: message,
+        processMs: now() - startedMs,
+      })}`
+    );
+    // Rethrow so the job queue retries with backoff (or dead-letters on the terminal attempt).
+    throw err;
+  }
 }

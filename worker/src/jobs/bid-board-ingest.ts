@@ -81,16 +81,27 @@ async function withOfficeSessionLock<T>(
     await client.query(`SET lock_timeout = '${OFFICE_LOCK_TIMEOUT}'`);
     await client.query("SELECT pg_advisory_lock($1, $2)", [namespace, key]);
   } catch (err) {
-    // Never acquired the lock (or it timed out) — return the connection intact and let the job retry.
-    client.release();
+    // Never acquired the lock (or it timed out). Reset the session setting so the next borrower of this
+    // pooled connection doesn't inherit our lock_timeout; if the reset fails, DESTROY the connection.
+    let resetErr: Error | undefined;
+    try {
+      await client.query("RESET lock_timeout");
+    } catch (e) {
+      resetErr = e instanceof Error ? e : new Error(String(e));
+    }
+    client.release(resetErr);
     throw err instanceof Error ? err : new Error(String(err));
   }
   let releaseErr: Error | undefined;
   try {
     return await fn();
   } finally {
+    // Release the lock AND reset our session-scoped lock_timeout before returning the connection. Any
+    // failure here → release(err) destroys the connection, so neither the advisory lock nor the lingering
+    // lock_timeout can be handed to the next borrower.
     try {
       await client.query("SELECT pg_advisory_unlock($1, $2)", [namespace, key]);
+      await client.query("RESET lock_timeout");
     } catch (err) {
       releaseErr = err instanceof Error ? err : new Error(String(err));
     }
