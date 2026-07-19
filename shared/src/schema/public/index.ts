@@ -28,6 +28,7 @@ export { userLocalAuthEvents, localAuthEventTypeEnum } from "./user-local-auth-e
 export { fieldUserPasswordResets } from "./field-user-password-resets.js";
 export { userCommissionSettings } from "./user-commission-settings.js";
 export { jobQueue, jobStatusEnum } from "./job-queue.js";
+export { bidBoardIngestionInbox } from "./bid-board-ingestion-inbox.js";
 export {
   costCatalogSources,
   costCatalogSnapshotVersions,

@@ -1,0 +1,44 @@
+-- Durable inbox for Bid Board → CRM ingestion.
+--
+-- WHY: the /api/bid-board-sync/ingest route used to run the ENTIRE import synchronously before returning
+-- 202. A slow Dallas import let Railway's edge time out and synthesize a 502 to SyncHub while the CRM kept
+-- working and committed; SyncHub then re-POSTed the full 25MB payload 3x, producing three overlapping
+-- imports that contended on the same deal rows (incident 2026-07-19T06:16Z). This table decouples
+-- ACCEPTANCE (fast, idempotent, durable) from PROCESSING (async, per-office-serialized worker job):
+--   • the route hashes the raw request body (sha256) and UPSERTs here keyed by (office_slug, payload_hash),
+--     so retries / concurrent duplicates of the same payload collapse to ONE logical ingestion;
+--   • it enqueues a single public.job_queue row carrying only this row's id (the large JSON payload stays
+--     OUT of job_queue, whose poller does SELECT * every tick);
+--   • the worker runs ingestBidBoardRows unchanged and records queued→processing→succeeded/failed here;
+--   • a signed status endpoint reads this table so SyncHub can resolve an ambiguous 502 without re-sending.
+--
+-- Public (not per-office): a single worker/route process serves every office, keyed by office_slug like
+-- bid_board_sync_alert_state (migration 0164). office_id is a best-effort denormalization for the job FK.
+CREATE TABLE IF NOT EXISTS public.bid_board_ingestion_inbox (
+  id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  office_slug     text NOT NULL,
+  office_id       uuid REFERENCES public.offices(id),
+  payload_hash    text NOT NULL,                 -- sha256 hex of the exact signed request body (idempotency key)
+  payload         jsonb NOT NULL,                -- the full BidBoardSyncPayload; processed by the worker
+  row_count       integer NOT NULL DEFAULT 0,
+  source_filename text,
+  status          text NOT NULL DEFAULT 'queued'
+                    CHECK (status IN ('queued', 'processing', 'succeeded', 'failed')),
+  attempts        integer NOT NULL DEFAULT 0,    -- incremented by the worker in lockstep with the job's attempts
+  max_attempts    integer NOT NULL DEFAULT 5,    -- 'failed' is only written on the FINAL attempt (terminal)
+  run_id          uuid,                          -- the bid_board_sync_runs id produced by a successful import
+  metrics         jsonb,                         -- IngestionMetrics snapshot on success
+  warnings_count  integer,
+  last_error      text,
+  queued_at       timestamptz NOT NULL DEFAULT now(),
+  started_at      timestamptz,
+  finished_at     timestamptz,
+  updated_at      timestamptz NOT NULL DEFAULT now(),
+  -- One logical ingestion per (office, payload). Retries and concurrent duplicate POSTs of the same body
+  -- hit this constraint and are deduped to the existing row (ON CONFLICT DO NOTHING in the route).
+  CONSTRAINT bid_board_ingestion_inbox_office_hash_uidx UNIQUE (office_slug, payload_hash)
+);
+
+-- Recovery + status scans look up by (office_slug, status).
+CREATE INDEX IF NOT EXISTS bid_board_ingestion_inbox_office_status_idx
+  ON public.bid_board_ingestion_inbox (office_slug, status);

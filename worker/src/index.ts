@@ -28,6 +28,7 @@ import { runRfpBidBoardCreateDeadLetterSweep } from "./jobs/rfp-bidboard-create.
 import { runRfpVoteInvitationDeadLetterSweep } from "./jobs/rfp-vote-invitation.js";
 import { runReportsExecutionTick } from "./jobs/reports-execution.js";
 import { runRepPerformanceRollup } from "./jobs/rep-performance-rollup.js";
+import { runBidBoardIngestInboxRecovery } from "./jobs/bid-board-ingest.js";
 
 const POLL_INTERVAL_MS = 2000; // Poll job queue every 2 seconds
 const RFP_DEAD_LETTER_SWEEP_INTERVAL_MS = 60000;
@@ -44,6 +45,10 @@ async function main() {
 
   // Recover stale jobs from previous crashes
   await recoverStaleJobs();
+
+  // Re-enqueue any Bid Board ingestion inbox rows left orphaned by a crash between accept + enqueue, or a
+  // worker death mid-import (never throws).
+  await runBidBoardIngestInboxRecovery();
 
   // Start PG LISTEN for real-time events
   await startListener((event) => {
@@ -83,6 +88,8 @@ async function main() {
     } catch (err) {
       console.error("[Worker:rfp_vote_invitation] Dead-letter sweep failed:", err);
     }
+    // Re-enqueue orphaned Bid Board ingestion inbox rows (self-healing; never throws).
+    await runBidBoardIngestInboxRecovery();
   }, RFP_DEAD_LETTER_SWEEP_INTERVAL_MS);
   console.log(`[Worker] RFP dead-letter sweeps (request delivery + Bid Board create + vote invitation) every ${RFP_DEAD_LETTER_SWEEP_INTERVAL_MS}ms`);
 
