@@ -406,6 +406,36 @@ describe("recoverOrphanedInboxJobs (crash recovery)", () => {
     expect(row?.status).toBe("processing"); // a live job owns it → left alone (not falsely failed)
   });
 
+  it("reclaims a 'processing' bid_board_ingest job stuck past the window (worker crashed without restart)", async () => {
+    const { inboxId } = await accept();
+    await db.query(
+      `UPDATE public.job_queue SET status='processing', started_processing_at = now() - interval '30 minutes'
+       WHERE job_type=$1 AND payload->>'inboxId'=$2`,
+      [BID_BOARD_INGEST_JOB_TYPE, inboxId]
+    );
+    await recoverOrphanedInboxJobs(db, { staleJobMinutes: 15 });
+    const r = await db.query(
+      `SELECT status FROM public.job_queue WHERE job_type=$1 AND payload->>'inboxId'=$2`,
+      [BID_BOARD_INGEST_JOB_TYPE, inboxId]
+    );
+    expect(r.rows[0].status).toBe("pending"); // reclaimed so a fresh worker can pick it up
+  });
+
+  it("does NOT reclaim a fresh 'processing' job (still legitimately running)", async () => {
+    const { inboxId } = await accept();
+    await db.query(
+      `UPDATE public.job_queue SET status='processing', started_processing_at = now()
+       WHERE job_type=$1 AND payload->>'inboxId'=$2`,
+      [BID_BOARD_INGEST_JOB_TYPE, inboxId]
+    );
+    await recoverOrphanedInboxJobs(db, { staleJobMinutes: 15 });
+    const r = await db.query(
+      `SELECT status FROM public.job_queue WHERE job_type=$1 AND payload->>'inboxId'=$2`,
+      [BID_BOARD_INGEST_JOB_TYPE, inboxId]
+    );
+    expect(r.rows[0].status).toBe("processing"); // untouched
+  });
+
   it("retention: deletes terminal rows past the window, keeps recent ones", async () => {
     const old = await accept({ payloadHash: "old" });
     const recent = await accept({ payloadHash: "recent" });

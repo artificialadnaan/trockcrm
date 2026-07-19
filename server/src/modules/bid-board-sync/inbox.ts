@@ -300,10 +300,23 @@ export async function readInboxStatusByKey(
  */
 export async function recoverOrphanedInboxJobs(
   db: Querier,
-  opts: { staleProcessingMinutes?: number; retentionDays?: number } = {}
+  opts: { staleProcessingMinutes?: number; staleJobMinutes?: number; retentionDays?: number } = {}
 ): Promise<number> {
   const staleMinutes = opts.staleProcessingMinutes ?? 10;
+  const staleJobMinutes = opts.staleJobMinutes ?? 15;
   const retentionDays = opts.retentionDays ?? 14;
+
+  // (0) Reclaim THIS job-type's own 'processing' jobs that have been stuck well past a normal run (worker
+  // died mid-import). The queue's recoverStaleJobs() only runs at worker startup; this periodic sweep
+  // covers a crash-without-restart window. Bounded far above a normal completion (lock wait + import).
+  await db.query(
+    `UPDATE public.job_queue
+     SET status = 'pending', run_after = NOW(), last_error = 'recovered stale bid_board_ingest job'
+     WHERE job_type = $1::text
+       AND status = 'processing'
+       AND started_processing_at < NOW() - make_interval(mins => $2::int)`,
+    [BID_BOARD_INGEST_JOB_TYPE, staleJobMinutes]
+  );
 
   const liveJobExists = `NOT EXISTS (
     SELECT 1 FROM public.job_queue j

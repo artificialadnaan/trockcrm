@@ -54,13 +54,19 @@ interface ServiceModule {
 // so without this a job whose same-office predecessor WEDGED (connection alive, not crashed) would block
 // forever and hold a pool connection. On timeout the acquire errors → the job retries with backoff. Set
 // comfortably above a normal import (bounded by the server pool's 45s query_timeout).
-const OFFICE_LOCK_TIMEOUT = "60s";
-// Client-side timeouts. The worker pool sets no query_timeout/keepalive, so a silent dead socket would
-// otherwise hang these queries forever — wedging pollJobs() (its `polling` reentrancy guard would stop the
-// worker from claiming ANY further job). Acquire is bounded ABOVE the 60s server-side lock_timeout so that
-// fires first on a live connection; the cleanup queries are quick so a short bound is plenty.
-const LOCK_ACQUIRE_TIMEOUT_MS = 70_000;
+// A same-office import can legitimately hold the lock for MINUTES (ingestBidBoardRows issues several
+// queries per row, each bounded by the server pool's 45s query_timeout — the whole import is not). Give a
+// waiter a generous window so it waits for the running import rather than timing out and spending an
+// attempt. (Same-office concurrency is itself rare: SyncHub serializes scrapes via bidboardStageSyncRunning
+// and identical retries are deduped to one job, so the lock mostly never contends.)
+const OFFICE_LOCK_TIMEOUT = "300s";
+// Client-side timeouts (dead-socket safety — the worker pool sets no query_timeout/keepalive, so without
+// these a silent dead socket hangs the query forever, wedging pollJobs()'s reentrancy guard and stopping
+// ALL job processing). Acquire is bounded just ABOVE the server-side lock_timeout so that fires first on a
+// live connection; other queries are quick so a short bound is plenty.
+const LOCK_ACQUIRE_TIMEOUT_MS = 330_000;
 const LOCK_CLEANUP_TIMEOUT_MS = 10_000;
+const INBOX_QUERY_TIMEOUT_MS = 30_000;
 
 /** Race a query against a client-side timeout so a dead socket can't hang the caller forever. On timeout
  *  the query rejects; the caller destroys the connection (release(err)), which cancels the server-side work. */
@@ -129,6 +135,20 @@ async function withOfficeSessionLock<T>(
   }
 }
 
+/** Pool-level query with a client-side timeout (dead-socket safety) that always clears its timer, so a
+ *  won race never leaves a dangling rejecting promise (unhandled rejection). */
+async function timedPoolQuery(text: string, params?: any[]): Promise<{ rows: any[]; rowCount?: number | null }> {
+  let timer: NodeJS.Timeout;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(`inbox query timed out after ${INBOX_QUERY_TIMEOUT_MS}ms`)), INBOX_QUERY_TIMEOUT_MS);
+  });
+  try {
+    return (await Promise.race([pool.query(text, params), timeout])) as { rows: any[]; rowCount?: number | null };
+  } finally {
+    clearTimeout(timer!);
+  }
+}
+
 export async function handleBidBoardIngestJob(
   payload: { inboxId?: string } | null,
   _officeId: string | null
@@ -146,7 +166,10 @@ export async function handleBidBoardIngestJob(
   ]);
 
   await inbox.processBidBoardInboxJob({
-    db: pool,
+    // Time-bound the inbox state-machine queries too (not just the lock-client): a silent dead socket on
+    // the timeout-less worker pool would otherwise hang the handler inside markInboxProcessing / the
+    // success/failure write, wedging pollJobs() the same way.
+    db: { query: timedPoolQuery },
     inboxId,
     ingest: (p) => service.ingestBidBoardRows(p),
     withOfficeLock: (officeSlug, fn) =>
