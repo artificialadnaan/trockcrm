@@ -1,11 +1,14 @@
 import crypto from "crypto";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   computeIdempotencyKey,
   extractOfficeSlug,
   isValidOfficeSlug,
   officeAdvisoryKey,
   BID_BOARD_ADVISORY_NAMESPACE,
+  acceptBidBoardIngestion,
+  recordSuccessWithRetry,
+  type Querier,
 } from "../../../src/modules/bid-board-sync/inbox.js";
 
 describe("bid-board inbox pure helpers", () => {
@@ -58,6 +61,53 @@ describe("bid-board inbox pure helpers", () => {
 
     it("separates offices (different lock keys → no cross-office blocking)", () => {
       expect(officeAdvisoryKey("dallas")).not.toBe(officeAdvisoryKey("atlanta"));
+    });
+  });
+
+  describe("acceptBidBoardIngestion resilience (scripted fake db)", () => {
+    it("re-runs the insert when a conflicting row vanishes between conflict and lookup (retention race)", async () => {
+      // office lookup → id; CTE #1 → conflict (0 rows); duplicate lookup → vanished (0 rows); CTE #2 → inserts.
+      const responses: Array<{ rows: any[] }> = [
+        { rows: [{ id: "office-1" }] },
+        { rows: [] }, // CTE #1: conflict
+        { rows: [] }, // duplicate lookup: row was deleted by retention
+        { rows: [{ id: "inbox-new" }] }, // CTE #2: fresh insert
+      ];
+      let i = 0;
+      const db: Querier = { query: vi.fn(async () => responses[i++] ?? { rows: [] }) };
+
+      const res = await acceptBidBoardIngestion(db, {
+        officeSlug: "dallas",
+        payload: { office_slug: "dallas", rows: [] },
+        payloadHash: "h",
+        rowCount: 0,
+        sourceFilename: null,
+      });
+      expect(res).toMatchObject({ inboxId: "inbox-new", duplicate: false, status: "queued" });
+    });
+  });
+
+  describe("recordSuccessWithRetry (post-commit bookkeeping)", () => {
+    it("retries a transient success-write failure so a committed import is never re-run", async () => {
+      let calls = 0;
+      const db: Querier = {
+        query: vi.fn(async () => {
+          calls++;
+          if (calls < 3) throw new Error("transient");
+          return { rows: [] };
+        }),
+      };
+      await expect(
+        recordSuccessWithRetry(db, "inbox-1", { runId: null, metrics: {}, warningsCount: 0 })
+      ).resolves.toBeUndefined();
+      expect(calls).toBe(3);
+    });
+
+    it("throws only after exhausting its retries", async () => {
+      const db: Querier = { query: vi.fn(async () => { throw new Error("down"); }) };
+      await expect(
+        recordSuccessWithRetry(db, "inbox-1", { runId: null, metrics: {}, warningsCount: 0 }, 2)
+      ).rejects.toThrow("down");
     });
   });
 });

@@ -100,49 +100,57 @@ export async function acceptBidBoardIngestion(
   // and no wrapping transaction is needed — so concurrent identical requests stay correct on the
   // (office_slug, payload_hash) UNIQUE constraint: exactly one inserts+enqueues, the rest see a conflict.
   // The 25MB payload lives here; job_queue carries only the inbox id (its poller does SELECT * per tick).
-  const inserted = await db.query(
-    `WITH ins AS (
-       INSERT INTO public.bid_board_ingestion_inbox
-         (office_slug, office_id, payload_hash, payload, row_count, source_filename, status, max_attempts)
-       VALUES ($1, $2, $3, $4::jsonb, $5, $6, 'queued', $7)
-       ON CONFLICT (office_slug, payload_hash) DO NOTHING
-       RETURNING id, office_id, max_attempts
-     ), job AS (
-       INSERT INTO public.job_queue (job_type, payload, office_id, status, run_after, max_attempts)
-       SELECT $8::text, jsonb_build_object('inboxId', ins.id::text), ins.office_id, 'pending', NOW(), ins.max_attempts
-       FROM ins
-       RETURNING 1
-     )
-     SELECT id FROM ins`,
-    [
-      args.officeSlug,
-      officeId,
-      args.payloadHash,
-      JSON.stringify(args.payload),
-      args.rowCount,
-      args.sourceFilename,
-      maxAttempts,
-      BID_BOARD_INGEST_JOB_TYPE,
-    ]
-  );
+  const insertParams = [
+    args.officeSlug,
+    officeId,
+    args.payloadHash,
+    JSON.stringify(args.payload),
+    args.rowCount,
+    args.sourceFilename,
+    maxAttempts,
+    BID_BOARD_INGEST_JOB_TYPE,
+  ];
 
-  if (inserted.rows.length > 0) {
-    return { inboxId: inserted.rows[0].id, status: "queued", duplicate: false, idempotencyKey: args.payloadHash };
+  // Loop to close a rare race: the CTE can see the UNIQUE conflict (row exists) while the retention sweep
+  // then deletes that expired terminal row before the duplicate lookup — leaving neither an insert nor an
+  // existing row. Re-running the CTE once (the conflicting row is now gone) inserts fresh. Bounded so a
+  // pathological ping-pong can't spin.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const inserted = await db.query(
+      `WITH ins AS (
+         INSERT INTO public.bid_board_ingestion_inbox
+           (office_slug, office_id, payload_hash, payload, row_count, source_filename, status, max_attempts)
+         VALUES ($1, $2, $3, $4::jsonb, $5, $6, 'queued', $7)
+         ON CONFLICT (office_slug, payload_hash) DO NOTHING
+         RETURNING id, office_id, max_attempts
+       ), job AS (
+         INSERT INTO public.job_queue (job_type, payload, office_id, status, run_after, max_attempts)
+         SELECT $8::text, jsonb_build_object('inboxId', ins.id::text), ins.office_id, 'pending', NOW(), ins.max_attempts
+         FROM ins
+         RETURNING 1
+       )
+       SELECT id FROM ins`,
+      insertParams
+    );
+
+    if (inserted.rows.length > 0) {
+      return { inboxId: inserted.rows[0].id, status: "queued", duplicate: false, idempotencyKey: args.payloadHash };
+    }
+
+    // Conflict: a row already exists for (office, hash) WITH its job (insert+enqueue is atomic). Return its
+    // current status; do NOT enqueue again.
+    const existing = await db.query(
+      `SELECT id, status FROM public.bid_board_ingestion_inbox WHERE office_slug = $1 AND payload_hash = $2`,
+      [args.officeSlug, args.payloadHash]
+    );
+    const row = existing.rows[0];
+    if (row) {
+      return { inboxId: row.id, status: row.status as InboxStatus, duplicate: true, idempotencyKey: args.payloadHash };
+    }
+    // Row vanished between the conflict and the lookup (retention delete) — retry the insert.
   }
 
-  // Duplicate: a row already exists for (office, hash) WITH its job (the insert+enqueue is atomic). Return
-  // its current status; do NOT enqueue again.
-  const existing = await db.query(
-    `SELECT id, status FROM public.bid_board_ingestion_inbox WHERE office_slug = $1 AND payload_hash = $2`,
-    [args.officeSlug, args.payloadHash]
-  );
-  const row = existing.rows[0];
-  return {
-    inboxId: row.id,
-    status: row.status as InboxStatus,
-    duplicate: true,
-    idempotencyKey: args.payloadHash,
-  };
+  throw new Error("acceptBidBoardIngestion: could not insert or resolve the inbox row after retries");
 }
 
 export interface InboxRow {
@@ -196,6 +204,31 @@ export async function markInboxSucceeded(
      WHERE id = $1`,
     [inboxId, fields.runId, fields.metrics == null ? null : JSON.stringify(fields.metrics), fields.warningsCount]
   );
+}
+
+/**
+ * Record success with a bounded retry. The import has already COMMITTED when this runs, so a transient
+ * failure of this inbox UPDATE must NOT bubble up as an ingest failure (that would re-run the committed
+ * import). Retries a few times; only if all fail does the caller's catch treat it as a failure (rare, and
+ * recovery reconciles from the durable job state).
+ */
+export async function recordSuccessWithRetry(
+  db: Querier,
+  inboxId: string,
+  fields: { runId: string | null; metrics: unknown; warningsCount: number },
+  attempts = 3
+): Promise<void> {
+  let lastErr: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      await markInboxSucceeded(db, inboxId, fields);
+      return;
+    } catch (err) {
+      lastErr = err;
+      await new Promise((r) => setTimeout(r, 50 * (i + 1)));
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
 }
 
 /**
@@ -382,7 +415,10 @@ export async function processBidBoardInboxJob(deps: ProcessInboxDeps): Promise<P
     // cheap inbox UPDATE that doesn't touch deal rows, so it's safe outside the lock.
     await deps.withOfficeLock(claimed.office_slug, async () => {
       const { runId, metrics, warnings } = await deps.ingest(claimed.payload);
-      await markInboxSucceeded(db, inboxId, { runId, metrics, warningsCount: warnings?.length ?? 0 });
+      // The import has COMMITTED. Recording success is post-commit bookkeeping — retry it so a transient
+      // failure here can't get classified as an ingest failure (which would re-run the committed import on
+      // the next attempt, duplicating the sync run + audit side-effects).
+      await recordSuccessWithRetry(db, inboxId, { runId, metrics, warningsCount: warnings?.length ?? 0 });
       log(
         `[BidBoardIngest] ${JSON.stringify({
           ...logMeta,

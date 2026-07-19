@@ -55,14 +55,40 @@ interface ServiceModule {
 // forever and hold a pool connection. On timeout the acquire errors → the job retries with backoff. Set
 // comfortably above a normal import (bounded by the server pool's 45s query_timeout).
 const OFFICE_LOCK_TIMEOUT = "60s";
+// Client-side timeouts. The worker pool sets no query_timeout/keepalive, so a silent dead socket would
+// otherwise hang these queries forever — wedging pollJobs() (its `polling` reentrancy guard would stop the
+// worker from claiming ANY further job). Acquire is bounded ABOVE the 60s server-side lock_timeout so that
+// fires first on a live connection; the cleanup queries are quick so a short bound is plenty.
+const LOCK_ACQUIRE_TIMEOUT_MS = 70_000;
+const LOCK_CLEANUP_TIMEOUT_MS = 10_000;
+
+/** Race a query against a client-side timeout so a dead socket can't hang the caller forever. On timeout
+ *  the query rejects; the caller destroys the connection (release(err)), which cancels the server-side work. */
+async function queryWithTimeout(
+  client: PoolClient,
+  sql: string,
+  params: any[] | undefined,
+  ms: number
+): Promise<unknown> {
+  let timer: NodeJS.Timeout;
+  const timeout = new Promise((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(`lock query timed out after ${ms}ms`)), ms);
+  });
+  try {
+    return await Promise.race([client.query(sql, params), timeout]);
+  } finally {
+    clearTimeout(timer!);
+  }
+}
 
 /**
  * Serialize per office with a Postgres SESSION advisory lock held across the whole import (the importer
  * opens its own connection/transaction, so a transaction-scoped lock wouldn't span it). Blocks until the
  * lock is free OR lock_timeout elapses — a same-office import in flight simply waits its turn instead of
- * contending on deal rows. The lock is explicitly released; if the unlock query fails the connection is
- * DESTROYED (pg-pool's release(err) removes it from the pool), so a leaked session lock can't be handed to
- * the next borrower.
+ * contending on deal rows. Every lock-client query is client-side time-bounded (dead-socket safety), and
+ * the lock is explicitly released; if the unlock/reset fails (or times out) the connection is DESTROYED
+ * (pg-pool's release(err) removes it from the pool), so neither a leaked session lock nor the lingering
+ * lock_timeout can be handed to the next borrower.
  */
 async function withOfficeSessionLock<T>(
   namespace: number,
@@ -78,18 +104,12 @@ async function withOfficeSessionLock<T>(
     throw err instanceof Error ? err : new Error(String(err));
   }
   try {
-    await client.query(`SET lock_timeout = '${OFFICE_LOCK_TIMEOUT}'`);
-    await client.query("SELECT pg_advisory_lock($1, $2)", [namespace, key]);
+    await queryWithTimeout(client, `SET lock_timeout = '${OFFICE_LOCK_TIMEOUT}'`, undefined, LOCK_CLEANUP_TIMEOUT_MS);
+    await queryWithTimeout(client, "SELECT pg_advisory_lock($1, $2)", [namespace, key], LOCK_ACQUIRE_TIMEOUT_MS);
   } catch (err) {
-    // Never acquired the lock (or it timed out). Reset the session setting so the next borrower of this
-    // pooled connection doesn't inherit our lock_timeout; if the reset fails, DESTROY the connection.
-    let resetErr: Error | undefined;
-    try {
-      await client.query("RESET lock_timeout");
-    } catch (e) {
-      resetErr = e instanceof Error ? e : new Error(String(e));
-    }
-    client.release(resetErr);
+    // Never acquired the lock (timed out server- or client-side). A client-side timeout means the socket may
+    // be dead / the acquire may still be pending, so DESTROY the connection rather than returning it.
+    client.release(err instanceof Error ? err : new Error(String(err)));
     throw err instanceof Error ? err : new Error(String(err));
   }
   let releaseErr: Error | undefined;
@@ -97,11 +117,11 @@ async function withOfficeSessionLock<T>(
     return await fn();
   } finally {
     // Release the lock AND reset our session-scoped lock_timeout before returning the connection. Any
-    // failure here → release(err) destroys the connection, so neither the advisory lock nor the lingering
-    // lock_timeout can be handed to the next borrower.
+    // failure/timeout here → release(err) destroys the connection, so neither the advisory lock nor the
+    // lingering lock_timeout can be handed to the next borrower (and a dead socket can't wedge the poller).
     try {
-      await client.query("SELECT pg_advisory_unlock($1, $2)", [namespace, key]);
-      await client.query("RESET lock_timeout");
+      await queryWithTimeout(client, "SELECT pg_advisory_unlock($1, $2)", [namespace, key], LOCK_CLEANUP_TIMEOUT_MS);
+      await queryWithTimeout(client, "RESET lock_timeout", undefined, LOCK_CLEANUP_TIMEOUT_MS);
     } catch (err) {
       releaseErr = err instanceof Error ? err : new Error(String(err));
     }
