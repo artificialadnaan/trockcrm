@@ -18,11 +18,10 @@ describe("compressForEnqueue", () => {
     expect(r).toEqual({ sourceUri: "file:///compressed.jpg", sizeBytes: 456, compressed: true });
   });
 
-  it("does NOT freeze a zero size — a size-read miss returns compressed:false so the drain re-derives it", async () => {
+  it("stays compressed:true when the size read misses (sizeBytes 0) — the drain re-stats, never re-encodes", async () => {
     (FileSystem.getInfoAsync as jest.Mock).mockResolvedValueOnce({ exists: true, size: 0 });
     const r = await compressForEnqueue("file:///orig.heic", 5000, 4000);
-    // keeps the compressed bytes, but marks NOT compressed so the drain re-derives a valid size
-    expect(r).toEqual({ sourceUri: "file:///compressed.jpg", compressed: false });
+    expect(r).toEqual({ sourceUri: "file:///compressed.jpg", sizeBytes: 0, compressed: true });
   });
 
   it("falls back to the ORIGINAL uri with compressed:false when compression throws (no photo lost)", async () => {

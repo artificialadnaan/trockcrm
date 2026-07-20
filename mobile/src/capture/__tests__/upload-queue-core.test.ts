@@ -3,6 +3,7 @@ import {
   applyGpsPatch,
   bumpAttempts,
   createAsyncMutex,
+  createBoundedRunner,
   dedupeQueue,
   isDrainable,
   newClientUploadId,
@@ -167,6 +168,30 @@ describe("createAsyncMutex", () => {
       expect(changed).toBe(true);
       expect(queue[0].metadata).toEqual({});
       expect(queue[1].metadata).toMatchObject({ latitude: 32.7, longitude: -96.8 });
+    });
+  });
+
+  describe("createBoundedRunner", () => {
+    it("runs at most `max` tasks concurrently across calls and drains the rest", async () => {
+      const run = createBoundedRunner(2);
+      let active = 0;
+      let peak = 0;
+      const task = () =>
+        run(async () => {
+          active++;
+          peak = Math.max(peak, active);
+          await new Promise((r) => setTimeout(r, 5));
+          active--;
+        });
+      await Promise.all([task(), task(), task(), task(), task()]);
+      expect(peak).toBe(2); // never more than 2 in flight, even with 5 queued
+    });
+
+    it("frees a slot even when a task throws", async () => {
+      const run = createBoundedRunner(1);
+      await expect(run(async () => Promise.reject(new Error("boom")))).rejects.toThrow("boom");
+      // The slot must be released — a follow-up task still runs.
+      await expect(run(async () => "ok")).resolves.toBe("ok");
     });
   });
 });

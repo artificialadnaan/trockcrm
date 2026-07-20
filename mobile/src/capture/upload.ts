@@ -77,12 +77,28 @@ export async function uploadCapture(
   // removed mid-upload never surfaces in the gallery — the already-PUT R2 bytes just dangle unconfirmed.
   opts: { shouldConfirm?: () => boolean | Promise<boolean> } = {},
 ): Promise<FieldPhoto> {
-  // Compression normally happens at ENQUEUE now, so a queued item's `uri` is already the compressed JPEG —
-  // use it as-is. A legacy/fallback item (compressed not set) is compressed here at drain time, as before.
-  const compressed =
-    input.compressed && typeof input.sizeBytes === "number" && input.sizeBytes > 0
-      ? { uri: input.uri, sizeBytes: input.sizeBytes, contentType: "image/jpeg" as const }
-      : await compressForUpload(input.uri, input.width, input.height);
+  // Compression normally happens at ENQUEUE now, so a queued item's `uri` is already the compressed JPEG.
+  // Never re-encode it (a 2nd 0.92 pass softens detail): trust the stored size, or re-STAT the durable file
+  // if the enqueue-time size read missed; only fall back to a real compression pass if we still can't get a
+  // size. A legacy/fallback item (compressed not set) is compressed here at drain, as before.
+  let compressed: { uri: string; sizeBytes: number; contentType: "image/jpeg" };
+  if (input.compressed) {
+    let sizeBytes = typeof input.sizeBytes === "number" && input.sizeBytes > 0 ? input.sizeBytes : 0;
+    if (sizeBytes <= 0) {
+      try {
+        const info = await FileSystem.getInfoAsync(input.uri);
+        if (info.exists && typeof info.size === "number") sizeBytes = info.size;
+      } catch {
+        /* re-stat failed → fall through to a compression pass, which returns a usable size */
+      }
+    }
+    compressed =
+      sizeBytes > 0
+        ? { uri: input.uri, sizeBytes, contentType: "image/jpeg" as const }
+        : await compressForUpload(input.uri, input.width, input.height);
+  } else {
+    compressed = await compressForUpload(input.uri, input.width, input.height);
+  }
   const target = onlyDefinedTarget(input.target);
   const scorecardScope = input.scorecardId ? { scorecardId: input.scorecardId } : {};
 

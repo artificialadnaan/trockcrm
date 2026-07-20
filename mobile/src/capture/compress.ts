@@ -74,13 +74,10 @@ export async function compressForEnqueue(
 ): Promise<EnqueueSource> {
   try {
     const c = await compressForUpload(uri, width, height);
-    // Only take the pre-compressed fast path with a USABLE size. compressForUpload leaves sizeBytes=0 when the
-    // best-effort getInfoAsync misses; freezing a 0 into the durable item would make the drain PUT sizeBytes:0,
-    // which the server rejects (<= 0) on every retry → terminal. Instead keep the compressed bytes but mark
-    // compressed:false so the drain re-derives the real size (re-compressing the already-small JPEG is cheap),
-    // preserving the self-heal main had.
-    if (c.sizeBytes > 0) return { sourceUri: c.uri, sizeBytes: c.sizeBytes, compressed: true };
-    return { sourceUri: c.uri, compressed: false };
+    // The bytes ARE compressed even when the best-effort getInfoAsync misses (sizeBytes 0) — mark compressed
+    // so the drain never re-encodes them (a 2nd lossy 0.92 pass would soften fine detail). uploadCapture
+    // re-STATS the durable copy when sizeBytes is 0, so we never PUT the server-rejected 0 either.
+    return { sourceUri: c.uri, sizeBytes: c.sizeBytes, compressed: true };
   } catch {
     return { sourceUri: uri, compressed: false };
   }

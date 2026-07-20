@@ -1,6 +1,7 @@
 jest.mock("expo-file-system/legacy", () => ({
   FileSystemUploadType: { BINARY_CONTENT: 0 },
   uploadAsync: jest.fn(async () => ({ status: 200 })),
+  getInfoAsync: jest.fn(async () => ({ exists: true, size: 777 })),
 }));
 
 jest.mock("../compress", () => ({
@@ -92,11 +93,17 @@ describe("uploadCapture compression handling (compress-on-enqueue)", () => {
     );
   });
 
-  it("re-compresses a stale queued item with a frozen sizeBytes:0 — never PUTs a zero size (self-heal)", async () => {
+  it("re-STATS a compressed item with a missing size instead of re-encoding it (no 2nd lossy pass)", async () => {
     const fetcher = jest.fn() as never;
     await uploadCapture(fetcher, { ...input(), uri: "file:///c.jpg", compressed: true, sizeBytes: 0 });
-    expect(compressForUpload).toHaveBeenCalled(); // 0 is not trusted → falls through to compression
-    expect(createUploadUrl).toHaveBeenCalledWith(fetcher, expect.objectContaining({ sizeBytes: 123 }));
+    expect(FileSystem.getInfoAsync).toHaveBeenCalledWith("file:///c.jpg");
+    expect(compressForUpload).not.toHaveBeenCalled(); // NOT re-encoded
+    expect(createUploadUrl).toHaveBeenCalledWith(fetcher, expect.objectContaining({ sizeBytes: 777 }));
+    expect(FileSystem.uploadAsync).toHaveBeenCalledWith(
+      "https://upload.test/photo",
+      "file:///c.jpg",
+      expect.anything(),
+    );
   });
 
   it("compresses a legacy/fallback item (compressed unset) at drain time, as before", async () => {

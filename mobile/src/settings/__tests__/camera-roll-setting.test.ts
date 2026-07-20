@@ -46,4 +46,18 @@ describe("saveToCameraRoll setting", () => {
     // Persist failed, but the in-session override still reflects the user's OFF choice.
     expect(await getSaveToCameraRoll()).toBe(false);
   });
+
+  it("serializes overlapping persists so the LAST toggle wins on disk even if an earlier write is slower", async () => {
+    let resolveFirst!: () => void;
+    (SecureStore.setItemAsync as jest.Mock)
+      .mockImplementationOnce(() => new Promise<void>((r) => (resolveFirst = () => r())))
+      .mockImplementationOnce(async () => undefined);
+    const p1 = setSaveToCameraRoll(false); // slow
+    const p2 = setSaveToCameraRoll(true); // fast, but must not land before the slow one
+    await new Promise((r) => setTimeout(r, 0)); // let the chained first write call setItemAsync
+    resolveFirst();
+    await Promise.all([p1, p2]);
+    const calls = (SecureStore.setItemAsync as jest.Mock).mock.calls;
+    expect(calls.map((c) => c[1])).toEqual(["false", "true"]); // executed in call order
+  });
 });

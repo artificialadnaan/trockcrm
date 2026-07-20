@@ -5,9 +5,11 @@ import { runConcurrentUploads, uploadCapture, UploadCancelledError, type Capture
 import { compressForEnqueue } from "./compress";
 import {
   UPLOAD_CONCURRENCY,
+  COMPRESS_CONCURRENCY,
   applyGpsPatch,
   bumpAttempts,
   createAsyncMutex,
+  createBoundedRunner,
   dedupeQueue,
   isDrainable,
   partitionResults,
@@ -53,6 +55,10 @@ export type DrainSummary = { succeeded: number; failed: number; remaining: numbe
 // Pure READS (getQueuedUploads/getQueuedCount/getFailedCount) stay lock-free — writeQueue is atomic
 // (tmp+move), so a read always sees a whole index, never a torn one.
 const withQueueLock = createAsyncMutex();
+
+// One shared runner bounds enqueue-time compression across ALL (fire-and-forget) enqueueUploads calls, so a
+// rapid per-photo burst can't launch unbounded 12MP ImageManipulator jobs.
+const runCompression = createBoundedRunner(COMPRESS_CONCURRENCY);
 
 // Because enqueue copies the file OUTSIDE the lock, a removeQueuedUploads can run while a photo is still
 // copying (before it's in the index). `enqueueing` holds ids currently mid-copy (registered under the
@@ -230,7 +236,9 @@ export async function enqueueUploads(
     });
     // Compress to the CRM JPEG NOW (best-effort → fallback to the original) so the durable queue stores the
     // compressed bytes and the drain is a pure PUT — moving the per-photo compression off the upload path.
-    const { sourceUri, sizeBytes, compressed } = await compressForEnqueue(input.uri, input.width, input.height);
+    const { sourceUri, sizeBytes, compressed } = await runCompression(() =>
+      compressForEnqueue(input.uri, input.width, input.height),
+    );
     // sourceUri !== input.uri means compression produced a fresh JPEG temp (success, incl. the size=0 path);
     // === means the fallback kept the ORIGINAL. Extension + temp-cleanup both key on THIS (not `compressed`,
     // which is false on the size=0 path even though sourceUri is a JPEG) so a .heic-named JPEG can't slip

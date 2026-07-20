@@ -14,6 +14,10 @@ const KEY = "settings.saveToCameraRoll";
 // read the stale persisted/default ON and keep saving despite the visible opt-out. Reset only on process
 // restart (where the persisted value is authoritative again).
 let sessionOverride: boolean | null = null;
+// Serialize persists so a slower EARLIER write can't land after a faster LATER one and leave the store stale
+// after a restart. FIFO: writes execute in call order → the last toggle wins on disk (in-session reads always
+// use sessionOverride regardless).
+let persistChain: Promise<unknown> = Promise.resolve();
 
 export async function getSaveToCameraRoll(): Promise<boolean> {
   if (sessionOverride !== null) return sessionOverride;
@@ -29,14 +33,14 @@ export async function getSaveToCameraRoll(): Promise<boolean> {
 
 export async function setSaveToCameraRoll(value: boolean): Promise<void> {
   sessionOverride = value; // honor the choice this session regardless of whether the persist below lands
-  try {
-    await SecureStore.setItemAsync(KEY, value ? "true" : "false");
-  } catch {
-    /* best-effort persist; sessionOverride keeps the choice for this session */
-  }
+  const run = () =>
+    SecureStore.setItemAsync(KEY, value ? "true" : "false").catch(() => undefined); // best-effort persist
+  persistChain = persistChain.then(run, run); // chain onto the tail either way so one failure can't wedge it
+  await persistChain;
 }
 
-/** Test-only: clear the in-session override so each test starts from the persisted/default value. */
+/** Test-only: clear the in-session override + persist chain so each test starts from the persisted/default. */
 export function __resetSaveToCameraRollSession(): void {
   sessionOverride = null;
+  persistChain = Promise.resolve();
 }

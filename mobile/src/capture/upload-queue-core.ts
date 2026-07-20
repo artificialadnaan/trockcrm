@@ -6,6 +6,44 @@ import type { CaptureUploadInput } from "./upload";
 // 5 (up from 3): a touch more throughput for big batches while staying gentle on the API rate limiter.
 export const UPLOAD_CONCURRENCY = 5;
 
+// Cap on concurrent enqueue-time compressions ACROSS all enqueueUploads calls. Per-photo captures fire
+// enqueueUploads without awaiting, so a fast burst could otherwise launch unbounded 12MP ImageManipulator
+// jobs → memory/CPU spike → camera jank or an app kill. Lower than UPLOAD_CONCURRENCY because decode+encode
+// is far heavier than a network PUT, and it runs while the camera preview is live.
+export const COMPRESS_CONCURRENCY = 3;
+
+/**
+ * A shared bounded runner: at most `max` tasks run concurrently across ALL callers; the rest queue and start
+ * as slots free (FIFO). Unlike createAsyncMutex (concurrency 1), this allows `max` in flight. A task that
+ * throws still frees its slot. Used for one module-level instance to bound enqueue-time compression.
+ */
+export function createBoundedRunner(max: number): <T>(task: () => Promise<T>) => Promise<T> {
+  let active = 0;
+  const waiters: Array<() => void> = [];
+  const acquire = () =>
+    new Promise<void>((resolve) => {
+      if (active < max) {
+        active++;
+        resolve();
+      } else {
+        waiters.push(resolve); // inherits the slot released to it (active stays at max)
+      }
+    });
+  const release = () => {
+    const next = waiters.shift();
+    if (next) next();
+    else active--;
+  };
+  return async function run<T>(task: () => Promise<T>): Promise<T> {
+    await acquire();
+    try {
+      return await task();
+    } finally {
+      release();
+    }
+  };
+}
+
 // After this many failed attempts an item is TERMINAL: it stops draining (no more re-compress/re-PUT) and
 // surfaces to the UI as "failed" so a permanently-broken capture (revoked access, non-transient 4xx) can't
 // retry forever on every resume/foreground/background trigger.
