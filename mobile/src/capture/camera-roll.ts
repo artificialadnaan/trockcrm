@@ -16,7 +16,9 @@ export async function saveOriginalToCameraRoll(uri: string): Promise<void> {
     const permission = await MediaLibrary.requestPermissionsAsync(true);
     if (!permission.granted) return;
     await MediaLibrary.saveToLibraryAsync(uri);
-  } catch {
-    /* best-effort backup — capture and the CRM upload proceed regardless */
+  } catch (err) {
+    // Redacted diagnostic ONLY — never log the uri / EXIF / image metadata. Capture + the CRM upload proceed
+    // regardless (best-effort backup).
+    console.warn(`[camera-roll] backup save failed: ${err instanceof Error ? err.name : "unknown"}`);
   }
 }

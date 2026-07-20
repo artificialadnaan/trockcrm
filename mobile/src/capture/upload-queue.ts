@@ -231,14 +231,20 @@ export async function enqueueUploads(
     // Compress to the CRM JPEG NOW (best-effort → fallback to the original) so the durable queue stores the
     // compressed bytes and the drain is a pure PUT — moving the per-photo compression off the upload path.
     const { sourceUri, sizeBytes, compressed } = await compressForEnqueue(input.uri, input.width, input.height);
-    // A compressed capture is always JPEG; a fallback keeps the original's extension.
-    const ext = compressed ? ".jpg" : input.uri.includes(".") ? input.uri.slice(input.uri.lastIndexOf(".")) : ".jpg";
+    // sourceUri !== input.uri means compression produced a fresh JPEG temp (success, incl. the size=0 path);
+    // === means the fallback kept the ORIGINAL. Extension + temp-cleanup both key on THIS (not `compressed`,
+    // which is false on the size=0 path even though sourceUri is a JPEG) so a .heic-named JPEG can't slip
+    // through and the size=0 temp doesn't leak.
+    const producedJpeg = sourceUri !== input.uri;
+    const ext = producedJpeg ? ".jpg" : input.uri.includes(".") ? input.uri.slice(input.uri.lastIndexOf(".")) : ".jpg";
     const dest = `${dir}${id}${ext}`;
     try {
       await FileSystem.copyAsync({ from: sourceUri, to: dest });
     } catch (err) {
-      // Copy failed — clear the in-flight marker (+ any tombstone) so `enqueueing` can't leak the id, then
-      // rethrow (a copy failure still aborts the batch, as before).
+      // Copy failed — reclaim the compressed temp (disk-full is exactly when copy throws, and this is the
+      // pressure that caused it), clear the in-flight marker (+ any tombstone), then rethrow (a copy failure
+      // still aborts the batch, as before). Never delete the ORIGINAL (producedJpeg guards that).
+      if (producedJpeg) await FileSystem.deleteAsync(sourceUri, { idempotent: true }).catch(() => undefined);
       await withQueueLock(async () => {
         enqueueing.delete(id);
         cancelledMidEnqueue.delete(id);
@@ -246,10 +252,9 @@ export async function enqueueUploads(
       throw err;
     }
     // Reclaim the transient compressed temp now it's durably copied, so a large offline burst doesn't
-    // front-load ~2x its footprint in the cache dir. GUARD `sourceUri !== input.uri`: on the fallback path
-    // sourceUri IS the original (which the fire-and-forget camera-roll backup + review preview still read) —
-    // that must never be deleted.
-    if (compressed && sourceUri !== input.uri) {
+    // front-load ~2x its footprint in the cache dir. GUARD producedJpeg: on the fallback path sourceUri IS
+    // the original (which the fire-and-forget camera-roll backup + review preview still read) — never delete it.
+    if (producedJpeg) {
       await FileSystem.deleteAsync(sourceUri, { idempotent: true }).catch(() => undefined);
     }
     const item: QueuedUpload = { ...input, uri: dest, sizeBytes, compressed, enqueuedAt: Date.now(), attempts: 0 };

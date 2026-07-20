@@ -9,7 +9,14 @@ import * as SecureStore from "expo-secure-store";
  */
 const KEY = "settings.saveToCameraRoll";
 
+// In-memory truth for the current app session, set the instant the user toggles. Load-bearing: if
+// setItemAsync REJECTS after the user turns the backup OFF, without this the next getSaveToCameraRoll would
+// read the stale persisted/default ON and keep saving despite the visible opt-out. Reset only on process
+// restart (where the persisted value is authoritative again).
+let sessionOverride: boolean | null = null;
+
 export async function getSaveToCameraRoll(): Promise<boolean> {
+  if (sessionOverride !== null) return sessionOverride;
   try {
     const raw = await SecureStore.getItemAsync(KEY);
     // Unset → ON (the default). Only an explicit "false" disables it, so a corrupt/legacy value stays ON.
@@ -21,9 +28,15 @@ export async function getSaveToCameraRoll(): Promise<boolean> {
 }
 
 export async function setSaveToCameraRoll(value: boolean): Promise<void> {
+  sessionOverride = value; // honor the choice this session regardless of whether the persist below lands
   try {
     await SecureStore.setItemAsync(KEY, value ? "true" : "false");
   } catch {
-    /* best-effort persist; the toggle still reflects the user's choice for this session */
+    /* best-effort persist; sessionOverride keeps the choice for this session */
   }
+}
+
+/** Test-only: clear the in-session override so each test starts from the persisted/default value. */
+export function __resetSaveToCameraRollSession(): void {
+  sessionOverride = null;
 }

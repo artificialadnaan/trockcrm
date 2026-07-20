@@ -23,10 +23,12 @@ export default function ProfileScreen() {
   const firstName = user?.firstName?.trim();
 
   const [saveToRoll, setSaveToRoll] = React.useState(true);
+  // If the user toggles BEFORE the async load resolves, the load must not clobber their choice.
+  const interactedRef = React.useRef(false);
   React.useEffect(() => {
     let active = true;
     void getSaveToCameraRoll().then((value) => {
-      if (active) setSaveToRoll(value);
+      if (active && !interactedRef.current) setSaveToRoll(value);
     });
     return () => {
       active = false;
@@ -34,8 +36,9 @@ export default function ProfileScreen() {
   }, []);
 
   const toggleSaveToRoll = (value: boolean) => {
+    interactedRef.current = true;
     setSaveToRoll(value); // optimistic — reflect the choice immediately
-    void setSaveToCameraRoll(value); // persist (best-effort)
+    void setSaveToCameraRoll(value); // persist (best-effort; the setting keeps an in-session override)
   };
 
   const openSupportTicket = () => {
@@ -73,6 +76,8 @@ export default function ProfileScreen() {
               value={saveToRoll}
               onValueChange={toggleSaveToRoll}
               trackColor={{ true: theme.color.textPrimary }}
+              accessibilityLabel="Save photos to camera roll"
+              accessibilityHint="When on, a full-resolution backup of every capture is saved to this device's camera roll"
             />
           </View>
         </Card>

@@ -1,5 +1,9 @@
 import * as SecureStore from "expo-secure-store";
-import { getSaveToCameraRoll, setSaveToCameraRoll } from "../camera-roll-setting";
+import {
+  getSaveToCameraRoll,
+  setSaveToCameraRoll,
+  __resetSaveToCameraRollSession,
+} from "../camera-roll-setting";
 
 // In-memory expo-secure-store (store lives inside the factory to dodge jest.mock hoisting).
 jest.mock("expo-secure-store", () => {
@@ -16,6 +20,7 @@ jest.mock("expo-secure-store", () => {
 describe("saveToCameraRoll setting", () => {
   beforeEach(() => {
     (SecureStore as unknown as { __clear: () => void }).__clear();
+    __resetSaveToCameraRollSession();
     jest.clearAllMocks();
   });
 
@@ -33,5 +38,12 @@ describe("saveToCameraRoll setting", () => {
   it("stays ON if the secure-store read throws (never silently disables the backup)", async () => {
     (SecureStore.getItemAsync as jest.Mock).mockRejectedValueOnce(new Error("keychain locked"));
     expect(await getSaveToCameraRoll()).toBe(true);
+  });
+
+  it("honors an in-session opt-out even when the persist REJECTS (no save despite a failed write)", async () => {
+    (SecureStore.setItemAsync as jest.Mock).mockRejectedValueOnce(new Error("keychain locked"));
+    await setSaveToCameraRoll(false);
+    // Persist failed, but the in-session override still reflects the user's OFF choice.
+    expect(await getSaveToCameraRoll()).toBe(false);
   });
 });
