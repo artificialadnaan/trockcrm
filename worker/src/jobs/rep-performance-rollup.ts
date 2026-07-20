@@ -192,7 +192,8 @@ export function computeRepAtRiskCountsFromRows(
 async function getRepAtRiskCountsForPeriod(
   client: { query: (sql: string, params?: unknown[]) => Promise<{ rows: any[]; rowCount: number | null }> },
   schemaName: string,
-  period: PeriodRange
+  period: PeriodRange,
+  now: Date
 ): Promise<RepAtRiskCount[]> {
   const result = await client.query(
     `SELECT
@@ -228,10 +229,15 @@ async function getRepAtRiskCountsForPeriod(
     [period.end]
   );
 
+  // LIVE periods (mtd/qtd/ytd/week_8back) are "as of now", so evaluate at the real current instant — the
+  // same instant the dashboard/list use. Using periodEndAsOfDate here would be midnight UTC of today, which
+  // the shared CT-day conversion reads as YESTERDAY, suppressing a target that expired today for one extra
+  // snapshot vs the live surfaces. HISTORICAL periods stay pinned to their (deterministic) period-end instant.
+  const isHistorical = HISTORICAL_PERIOD_KINDS.has(period.kind);
   return computeRepAtRiskCountsFromRows(
     result.rows as RepAtRiskInputRow[],
-    periodEndAsOfDate(period),
-    !HISTORICAL_PERIOD_KINDS.has(period.kind)
+    isHistorical ? periodEndAsOfDate(period) : now,
+    !isHistorical
   );
 }
 
@@ -240,7 +246,8 @@ async function refreshOfficePeriod(
   schemaName: string,
   officeId: string,
   officeName: string,
-  period: PeriodRange
+  period: PeriodRange,
+  now: Date
 ) {
   await client.query(
     `DELETE FROM public.rep_performance_snapshots
@@ -251,7 +258,7 @@ async function refreshOfficePeriod(
     [period.kind, period.start, period.end, officeId]
   );
 
-  const atRiskCounts = await getRepAtRiskCountsForPeriod(client, schemaName, period);
+  const atRiskCounts = await getRepAtRiskCountsForPeriod(client, schemaName, period, now);
 
   const insertResult = await client.query(
     `WITH rep_deals AS (
@@ -501,7 +508,8 @@ export async function runRepPerformanceRollup(now = new Date()): Promise<number>
             schemaName,
             String(office.id),
             String(office.name ?? "Unassigned"),
-            period
+            period,
+            now
           );
         }
         await client.query("COMMIT");
