@@ -80,6 +80,15 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
         cameraPermission: "Capture jobsite photos to attach to a project.",
       },
     ],
+    [
+      "expo-media-library",
+      {
+        // Write-only: T-Rock Cam only ADDS a backup copy of captured photos to the camera roll; it never
+        // reads the user's library. (NSPhotoLibraryAddUsageDescription is also declared in infoPlist above.)
+        savePhotosPermission: "T-Rock Cam saves a backup copy of captured jobsite photos to your camera roll.",
+        isAccessMediaLocationEnabled: false,
+      },
+    ],
     "expo-audio",
   ],
   experiments: {
