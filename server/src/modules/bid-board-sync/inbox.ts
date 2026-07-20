@@ -467,7 +467,13 @@ export async function recoverOrphanedInboxJobs(
      WHERE i.attempts < i.max_attempts
        AND (
          i.status = 'queued'
-         OR (i.status = 'processing' AND i.started_at < NOW() - make_interval(mins => $2::int))
+         OR (i.status = 'processing'
+             AND i.started_at < NOW() - make_interval(mins => $2::int)
+             -- Same lease guard as steps (0)/(a): a live import renewing its lease must NOT be re-enqueued,
+             -- even if its queue row vanished (e.g. the generic recoverStaleJobs reclaimed it). Otherwise the
+             -- new job just no-ops on the fresh lease and completes, and the 60s sweep churns out completed
+             -- jobs — growing job_queue and burning poll capacity — until the original import finishes.
+             AND (i.lease_expires_at IS NULL OR i.lease_expires_at < NOW()))
        )
        AND ${liveJobExists}
      ON CONFLICT ((payload->>'inboxId'))

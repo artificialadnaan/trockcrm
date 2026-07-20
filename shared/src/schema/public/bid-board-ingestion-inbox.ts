@@ -7,6 +7,7 @@ import {
   timestamp,
   index,
   unique,
+  check,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { offices } from "./offices.js";
@@ -47,5 +48,11 @@ export const bidBoardIngestionInbox = pgTable(
   (table) => [
     unique("bid_board_ingestion_inbox_office_hash_uidx").on(table.officeSlug, table.payloadHash),
     index("bid_board_ingestion_inbox_office_status_idx").on(table.officeSlug, table.status),
+    // Mirror migration 0188's inline CHECK (status IN (...)). Named to match Postgres's auto-name for the
+    // column check so drizzle-kit sees parity instead of generating a drift migration that drops it.
+    check(
+      "bid_board_ingestion_inbox_status_check",
+      sql`${table.status} IN ('queued', 'processing', 'succeeded', 'failed')`,
+    ),
   ]
 );

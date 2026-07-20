@@ -440,6 +440,20 @@ describe("recoverOrphanedInboxJobs (crash recovery)", () => {
     expect(await jobCount(fresh.inboxId)).toBe(0);
   });
 
+  it("does NOT re-enqueue a stale 'processing' row whose lease is still fresh (live import, queue row vanished)", async () => {
+    const { inboxId } = await accept();
+    await db.query(`DELETE FROM public.job_queue`); // queue row gone (e.g. generic recoverStaleJobs reclaimed it)
+    // stale started_at but a LIVE handler still renewing the lease.
+    await db.query(
+      `UPDATE public.bid_board_ingestion_inbox
+       SET status='processing', started_at = now() - interval '30 minutes', lease_expires_at = now() + interval '2 minutes' WHERE id=$1`,
+      [inboxId]
+    );
+    const recovered = await recoverOrphanedInboxJobs(db, { staleProcessingMinutes: 10 });
+    expect(recovered).toBe(0); // fresh lease → not re-enqueued (no churn of no-op jobs)
+    expect(await jobCount(inboxId)).toBe(0);
+  });
+
   it("marks a STALE attempts-exhausted 'processing' row terminally 'failed' (worker died on the final attempt) without re-enqueueing", async () => {
     const { inboxId } = await accept();
     await db.query(`DELETE FROM public.job_queue`);
