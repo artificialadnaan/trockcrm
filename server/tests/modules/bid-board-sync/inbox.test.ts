@@ -64,6 +64,13 @@ describe("bid-board inbox pure helpers", () => {
       expect(resolveIngestOfficeSlug({ officeSlug: "office_2" })).toBe("office_2");
     });
 
+    it("resolves camelCase officeSlug when office_slug is BLANK — mirrors the importer, NOT shadowed to dallas", () => {
+      // Coalescing on the raw aliases would pick the blank office_slug and default to dallas while the
+      // importer's textValue-per-alias resolves to atlanta — mis-keying the row + advisory lock.
+      expect(resolveIngestOfficeSlug({ office_slug: "", officeSlug: "atlanta" })).toBe("atlanta");
+      expect(resolveIngestOfficeSlug({ office_slug: "   ", officeSlug: "atlanta" })).toBe("atlanta");
+    });
+
     it("rejects (null) a PRESENT but schema-unsafe slug — never coerces it to dallas", () => {
       expect(resolveIngestOfficeSlug({ office_slug: "Dallas" })).toBeNull(); // uppercase
       expect(resolveIngestOfficeSlug({ office_slug: "dallas; drop" })).toBeNull();

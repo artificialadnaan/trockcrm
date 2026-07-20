@@ -479,6 +479,62 @@ describe("recoverOrphanedInboxJobs (crash recovery)", () => {
     expect(row?.status).toBe("processing"); // a live job owns it → left alone (not falsely failed)
   });
 
+  it("does NOT terminalize a LIVE final-attempt import (fresh lease) even with no live job (reclaimed + noop'd)", async () => {
+    // The scenario the lease guards: a healthy final attempt whose queue job was reclaimed, noop-claimed by
+    // another worker (blocked by the lease), and completed — so NO live job remains — while the original
+    // handler is STILL running and renewing the lease. step (a) must NOT 'fail' it (its later success would be
+    // blocked by the terminal-state guard).
+    const { inboxId } = await accept();
+    await db.query(`DELETE FROM public.job_queue`); // no live job
+    await db.query(
+      `UPDATE public.bid_board_ingestion_inbox
+       SET status='processing', attempts=5, max_attempts=5, started_at = now() - interval '30 minutes',
+           lease_expires_at = now() + interval '2 minutes' WHERE id=$1`,
+      [inboxId]
+    );
+    await recoverOrphanedInboxJobs(db, { staleProcessingMinutes: 10 });
+    expect((await loadInboxRow(db, inboxId))?.status).toBe("processing"); // fresh lease → alive → left alone
+  });
+
+  it("recovery of a stale FINAL-attempt row does NOT re-import it — claim noops (attempts stay at max), then terminalizes", async () => {
+    const { inboxId } = await accept();
+    await db.query(`DELETE FROM public.job_queue`); // no live job
+    // Worker died on the final attempt: processing, attempts == max, stale, lease expired.
+    await db.query(
+      `UPDATE public.bid_board_ingestion_inbox
+       SET status='processing', attempts=5, max_attempts=5, started_at = now() - interval '30 minutes',
+           lease_expires_at = now() - interval '5 minutes' WHERE id=$1`,
+      [inboxId]
+    );
+    const ingest = okIngest();
+    const outcome = await processBidBoardInboxJob({ db, inboxId, ingest, withOfficeLock: passthroughLock });
+    expect(outcome).toBe("noop"); // markInboxProcessing's attempts<max_attempts guard blocks the re-claim
+    expect(ingest).not.toHaveBeenCalled(); // the exhausted row is NOT imported a 6th time
+    expect((await loadInboxRow(db, inboxId))?.attempts).toBe(5); // not bumped past max
+
+    await recoverOrphanedInboxJobs(db); // no live job + exhausted + lease expired → terminalize
+    expect((await loadInboxRow(db, inboxId))?.status).toBe("failed");
+  });
+
+  it("step (0) does NOT reclaim a stale job whose inbox lease is still fresh (live long import)", async () => {
+    const { inboxId } = await accept();
+    await db.query(
+      `UPDATE public.bid_board_ingestion_inbox SET status='processing', lease_expires_at = now() + interval '2 minutes' WHERE id=$1`,
+      [inboxId]
+    );
+    await db.query(
+      `UPDATE public.job_queue SET status='processing', started_processing_at = now() - interval '30 minutes'
+       WHERE job_type=$1 AND payload->>'inboxId'=$2`,
+      [BID_BOARD_INGEST_JOB_TYPE, inboxId]
+    );
+    await recoverOrphanedInboxJobs(db, { staleJobMinutes: 15 });
+    const r = await db.query(
+      `SELECT status FROM public.job_queue WHERE job_type=$1 AND payload->>'inboxId'=$2`,
+      [BID_BOARD_INGEST_JOB_TYPE, inboxId]
+    );
+    expect(r.rows[0].status).toBe("processing"); // fresh lease → the live import's job is left running
+  });
+
   it("reclaims a 'processing' bid_board_ingest job stuck past the window (worker crashed without restart)", async () => {
     const { inboxId } = await accept();
     await db.query(

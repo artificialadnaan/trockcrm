@@ -38,6 +38,10 @@ export const bidBoardIngestionInbox = pgTable(
     queuedAt: timestamp("queued_at", { withTimezone: true }).defaultNow().notNull(),
     startedAt: timestamp("started_at", { withTimezone: true }),
     finishedAt: timestamp("finished_at", { withTimezone: true }),
+    // In-flight lease/heartbeat (migration 0188): set + renewed while an import runs so a concurrent claimant
+    // can only re-claim a 'processing' row whose lease has expired. Kept in the schema so db:generate can't
+    // treat the column as absent and drift.
+    leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => [

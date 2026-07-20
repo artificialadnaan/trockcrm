@@ -50,9 +50,20 @@ export function extractOfficeSlug(payload: any): string | null {
  * schema name + advisory-lock key, so a malformed value must never be silently coerced to dallas.
  */
 export function resolveIngestOfficeSlug(payload: any): string | null {
-  const raw = payload?.office_slug ?? payload?.officeSlug;
-  if (raw == null || (typeof raw === "string" && raw.trim() === "")) return "dallas";
-  return isValidOfficeSlug(raw) ? raw : null;
+  // Mirror the importer's normalizeOfficeSlug EXACTLY: textValue(office_slug) ?? textValue(officeSlug) ??
+  // 'dallas', where textValue trims and maps empty/whitespace to null. Coalescing on the RAW aliases
+  // (office_slug ?? officeSlug) would let a BLANK office_slug shadow a valid camelCase officeSlug and mis-key
+  // the row to dallas while the importer writes the other tenant (overlapping imports; status probes miss it).
+  const textValue = (value: unknown): string | null => {
+    if (value == null) return null;
+    const text = String(value).trim();
+    return text.length > 0 ? text : null;
+  };
+  const slug = textValue(payload?.office_slug) ?? textValue(payload?.officeSlug);
+  if (slug == null) return "dallas";
+  // The importer accepts any non-empty alias; the ROUTE additionally rejects a schema-unsafe slug (it becomes
+  // a tenant schema name + advisory-lock key), so a malformed present value 400s rather than being coerced.
+  return isValidOfficeSlug(slug) ? slug : null;
 }
 
 /**
@@ -232,6 +243,7 @@ export async function markInboxProcessing(db: Querier, inboxId: string): Promise
      SET status = 'processing', attempts = attempts + 1, started_at = NOW(), updated_at = NOW(),
          lease_expires_at = NOW() + make_interval(secs => $2::int)
      WHERE id = $1
+       AND attempts < max_attempts
        AND (
          status = 'queued'
          OR (status = 'processing' AND (lease_expires_at IS NULL OR lease_expires_at < NOW()))
@@ -392,12 +404,24 @@ export async function recoverOrphanedInboxJobs(
   // (0) Reclaim THIS job-type's own 'processing' jobs that have been stuck well past a normal run (worker
   // died mid-import). The queue's recoverStaleJobs() only runs at worker startup; this periodic sweep
   // covers a crash-without-restart window. Bounded far above a normal completion (lock wait + import).
+  // LEASE-AWARE: a LIVE final-attempt import can legitimately run past staleJobMinutes while its handler keeps
+  // renewing the inbox lease — do NOT reclaim its job. Reclaiming it would let another worker claim + noop the
+  // job (the lease blocks re-claim), complete the queue row, and then the step-(a) sweep, seeing no live job,
+  // would falsely 'fail' the still-running import (whose later markInboxSucceeded is then blocked by the
+  // terminal-state guard). So reclaim only when the inbox lease has EXPIRED (the handler is genuinely gone).
   await db.query(
-    `UPDATE public.job_queue
+    `UPDATE public.job_queue AS j
      SET status = 'pending', run_after = NOW(), last_error = 'recovered stale bid_board_ingest job'
-     WHERE job_type = $1::text
-       AND status = 'processing'
-       AND started_processing_at < NOW() - make_interval(mins => $2::int)`,
+     WHERE j.job_type = $1::text
+       AND j.status = 'processing'
+       AND j.started_processing_at < NOW() - make_interval(mins => $2::int)
+       AND NOT EXISTS (
+         SELECT 1 FROM public.bid_board_ingestion_inbox i
+         WHERE i.id::text = j.payload->>'inboxId'
+           AND i.status = 'processing'
+           AND i.lease_expires_at IS NOT NULL
+           AND i.lease_expires_at >= NOW()
+       )`,
     [BID_BOARD_INGEST_JOB_TYPE, staleJobMinutes]
   );
 
@@ -408,9 +432,13 @@ export async function recoverOrphanedInboxJobs(
       AND j.payload->>'inboxId' = i.id::text
   )`;
 
-  // (a) Terminalize a stale, attempts-exhausted 'processing' row ONLY when NO live job owns it — i.e. the
-  // worker died and the job is gone, not merely a legitimate final attempt still running (a slow import
-  // holds a 'processing' job the whole time). The live-job guard is what distinguishes the two.
+  // (a) Terminalize a stale, attempts-exhausted 'processing' row ONLY when the worker is genuinely gone —
+  // i.e. NO live job owns it AND its in-flight lease has EXPIRED. The lease guard is essential: a live
+  // final-attempt import can have its queue job reclaimed + noop'd + completed (so no live job remains) while
+  // its handler is STILL running and renewing the lease; without checking the lease, this would falsely
+  // 'fail' a healthy in-flight import, and its later markInboxSucceeded would then be blocked by the
+  // terminal-state guard. A fresh lease means the handler is alive — leave it be. (started_at gate retained
+  // as a floor so a just-claimed row isn't terminalized before the lease even has a chance to lapse.)
   await db.query(
     `UPDATE public.bid_board_ingestion_inbox AS i
      SET status = 'failed',
@@ -419,6 +447,7 @@ export async function recoverOrphanedInboxJobs(
      WHERE i.status = 'processing'
        AND i.attempts >= i.max_attempts
        AND i.started_at < NOW() - make_interval(mins => $2::int)
+       AND (i.lease_expires_at IS NULL OR i.lease_expires_at < NOW())
        AND ${liveJobExists}`,
     [BID_BOARD_INGEST_JOB_TYPE, staleMinutes]
   );
