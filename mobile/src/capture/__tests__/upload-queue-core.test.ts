@@ -2,6 +2,7 @@ import {
   MAX_UPLOAD_ATTEMPTS,
   applyGpsPatch,
   bumpAttempts,
+  collectEnqueueResults,
   createAsyncMutex,
   createBoundedRunner,
   dedupeQueue,
@@ -102,6 +103,31 @@ describe("upload-queue-core", () => {
       { status: "fulfilled", value: 3 },
     ];
     expect(partitionResults(items, results)).toEqual({ succeededIds: ["a", "c"], failedIds: ["b"] });
+  });
+
+  it("collectEnqueueResults returns queued items in order and drops skipped (null) entries", () => {
+    const a = item("a");
+    const c = item("c");
+    const settled: Array<PromiseSettledResult<QueuedUpload | null>> = [
+      { status: "fulfilled", value: a },
+      { status: "fulfilled", value: null }, // skipped: already queued
+      { status: "fulfilled", value: c },
+    ];
+    expect(collectEnqueueResults(settled)).toEqual([a, c]);
+  });
+
+  it("collectEnqueueResults rethrows the first rejection even when later items succeeded", () => {
+    const boom = new Error("copy failed");
+    const settled: Array<PromiseSettledResult<QueuedUpload | null>> = [
+      { status: "fulfilled", value: item("a") },
+      { status: "rejected", reason: boom },
+      { status: "fulfilled", value: item("c") },
+    ];
+    expect(() => collectEnqueueResults(settled)).toThrow(boom);
+  });
+
+  it("collectEnqueueResults returns [] for an empty batch", () => {
+    expect(collectEnqueueResults([])).toEqual([]);
   });
 });
 

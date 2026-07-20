@@ -8,6 +8,7 @@ import {
   COMPRESS_CONCURRENCY,
   applyGpsPatch,
   bumpAttempts,
+  collectEnqueueResults,
   createAsyncMutex,
   createBoundedRunner,
   dedupeQueue,
@@ -215,9 +216,11 @@ export async function patchQueuedMetadata(
 }
 
 /**
- * Copy each capture into durable storage and persist it to the index. The index is rewritten AFTER EACH
- * item is copied (not once at the end): if the app is killed mid-enqueue, every photo already copied is
- * recoverable from the index instead of being orphaned and lost. Returns the queued items.
+ * Copy each capture into durable storage and persist it to the index. Items run CONCURRENTLY (compression is
+ * bounded by the shared runner), but the index is rewritten AFTER EACH item is copied (not once at the end):
+ * if the app is killed mid-enqueue, every photo already copied is recoverable from the index instead of being
+ * orphaned and lost. Ids already durably queued (e.g. a scorecard retry) are skipped rather than re-copied.
+ * Returns the newly queued items (skipped ids are omitted).
  */
 export async function enqueueUploads(
   ownerKey: string,
@@ -226,19 +229,32 @@ export async function enqueueUploads(
   if (inputs.length === 0) return [];
   await ensureDir(ownerKey);
   const dir = ownerDir(ownerKey);
+  // Snapshot the ids ALREADY durably queued. A scorecard retry re-enqueues every newPhoto under its
+  // capture-stamped (stable) clientUploadId, and dedupeQueue keeps the OLD row on conflict — so without this,
+  // enqueueOne would still compress + copyAsync-OVERWRITE the durable file of a row that survives unchanged,
+  // stranding a legacy row's `compressed` flag / stale sizeBytes (→ a needless second lossy encode at drain)
+  // and burning a full-res compression per retry. We skip those ids entirely below. Same-batch / concurrent
+  // duplicates are caught by the in-flight `enqueueing` set; the persist-time dedupeQueue is the last backstop.
+  const alreadyQueued = await withQueueLock(
+    async () => new Set((await readQueue(ownerKey)).map((q) => q.clientUploadId)),
+  );
   // Process items CONCURRENTLY. The compression bottleneck is capped by runCompression
   // (COMPRESS_CONCURRENCY) ACROSS the whole batch, so a multi-photo submit (e.g. a scorecard) no longer pays
   // the SUM of every compression before the drain can start — it pays roughly ceil(N / COMPRESS_CONCURRENCY)
   // waves. Each item still persists INDIVIDUALLY (its index write under the lock, after its own copy), so a
-  // kill mid-enqueue still leaves every already-indexed photo recoverable. A copy failure rejects the batch
-  // (as before); siblings that already committed stay queued and dedupe on retry.
+  // kill mid-enqueue still leaves every already-indexed photo recoverable.
   const enqueueOne = async (input: CaptureUploadInput): Promise<QueuedUpload | null> => {
     const id = input.clientUploadId;
-    // Register as in-flight under the lock, then compress + copy OUTSIDE the lock — both are slow (CPU / large
-    // file) and must not block removeQueuedUploads / drain re-selection during a big batch.
-    await withQueueLock(async () => {
+    // Claim the id under the lock: skip if it's already durably queued (retry) or another worker is mid-copy
+    // for it (concurrent / same-batch duplicate). Only after claiming do we run the slow compress + copy
+    // OUTSIDE the lock — both are slow (CPU / large file) and must not block removeQueuedUploads / drain
+    // re-selection during a big batch.
+    const claimed = await withQueueLock(async () => {
+      if (alreadyQueued.has(id) || enqueueing.has(id)) return false;
       enqueueing.add(id);
+      return true;
     });
+    if (!claimed) return null;
     // Compress to the CRM JPEG NOW (best-effort → fallback to the original) so the durable queue stores the
     // compressed bytes and the drain is a pure PUT — moving the per-photo compression off the upload path.
     const { sourceUri, sizeBytes, compressed } = await runCompression(() =>
@@ -286,8 +302,12 @@ export async function enqueueUploads(
     return item;
   };
 
-  const results = await Promise.all(inputs.map((input) => enqueueOne(input)));
-  return results.filter((item): item is QueuedUpload => item !== null);
+  // allSettled (not all): WAIT for every worker to finish before propagating a copy failure, so none is still
+  // writing a dest file / the queue index when the scorecard screen catches the rejection and re-enables
+  // submit (an immediate retry would otherwise overlap the same files). A copy failure still aborts the whole
+  // batch — collectEnqueueResults rethrows the first rejection after all have settled.
+  const settled = await Promise.allSettled(inputs.map((input) => enqueueOne(input)));
+  return collectEnqueueResults(settled);
 }
 
 /** Remove items (and their files) from the persisted index — used after a successful upload. */

@@ -181,3 +181,16 @@ export function partitionResults(
   });
   return { succeededIds, failedIds };
 }
+
+/**
+ * Resolve a settled batch of concurrent enqueue attempts. A batch is run with `Promise.allSettled` (not
+ * `Promise.all`) so every worker finishes writing before we look at results — no worker is still mutating a
+ * dest file / the queue index when the caller regains control. A single copy failure still aborts the whole
+ * batch: we rethrow the FIRST rejection (after all have settled). Fulfilled `null`s are skipped items (id
+ * already durably queued or claimed by another worker) and are dropped from the returned list.
+ */
+export function collectEnqueueResults(settled: Array<PromiseSettledResult<QueuedUpload | null>>): QueuedUpload[] {
+  const rejected = settled.find((r) => r.status === "rejected");
+  if (rejected) throw (rejected as PromiseRejectedResult).reason;
+  return settled.flatMap((r) => (r.status === "fulfilled" && r.value ? [r.value] : []));
+}
