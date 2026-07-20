@@ -202,7 +202,12 @@ export async function handleBidBoardIngestJob(
 export async function runBidBoardIngestInboxRecovery(): Promise<number> {
   try {
     const inbox = await importFirstAvailable<InboxModule>(SERVER_INBOX_MODULES);
-    const recovered = await inbox.recoverOrphanedInboxJobs(pool);
+    // Route recovery's queries through the SAME bounded, client-destroying wrapper as the job handler — NOT
+    // the raw pool. The worker pool sets no query_timeout, so a silently-dead socket would otherwise hang one
+    // of recovery's queries forever: the startup call awaited in worker/src/index.ts would never reach job
+    // polling, and periodic invocations could retain pool slots. timedPoolQuery destroys the connection on
+    // timeout so a dead socket can neither wedge boot nor leak a slot.
+    const recovered = await inbox.recoverOrphanedInboxJobs({ query: timedPoolQuery });
     if (recovered > 0) {
       console.log(`[Worker:bid_board_ingest] Recovered ${recovered} orphaned inbox job(s)`);
     }
