@@ -208,6 +208,104 @@ describe("stale deal worker", () => {
     );
   });
 
+  it("does not generate a stale deal task for a near-postponed (future close target) over-SLA deal", async () => {
+    const dayMs = 24 * 60 * 60 * 1000;
+    const taskPersistence = { marker: "task-persistence" };
+    createTenantTaskRulePersistenceMock.mockReturnValue(taskPersistence);
+    evaluateTaskRulesMock.mockResolvedValue([{ ruleId: "stale_deal", action: "created" }]);
+
+    queryMock.mockImplementation(async (sql: string) => {
+      if (sql.includes("FROM public.offices")) {
+        return { rows: [{ id: "office-1", slug: "beta" }] };
+      }
+
+      if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") {
+        return { rows: [] };
+      }
+
+      if (sql.includes("pg_advisory_xact_lock")) {
+        return { rows: [] };
+      }
+
+      if (sql.includes("FROM office_beta.deals")) {
+        return {
+          rows: [
+            {
+              // Over-SLA but POSTPONED to a near (11-day) target via "Move Close Date". The nightly stale
+              // scan must honor that postponement (applyCloseTargetSuppression:true) — no task/notification.
+              deal_id: "deal-postponed",
+              deal_name: "Postponed Roof",
+              deal_number: "D-POSTP",
+              assigned_rep_id: "user-1",
+              stage_slug: "estimating",
+              workflow_route: "normal",
+              stage_entered_at: new Date(Date.now() - 45 * dayMs),
+              expected_close_date: new Date(Date.now() + 11 * dayMs).toISOString().slice(0, 10),
+              on_hold: false,
+              on_hold_started_at: null,
+              on_hold_accumulated_seconds: 0,
+              on_hold_accumulated_seconds_at_stage_entry: 0,
+              stage_name: "Estimating",
+              stale_escalation_tiers: [],
+            },
+            {
+              deal_id: "deal-active",
+              deal_name: "Active Roof",
+              deal_number: "D-ACTIVE",
+              assigned_rep_id: "user-1",
+              stage_slug: "estimating",
+              workflow_route: "normal",
+              stage_entered_at: new Date(Date.now() - 15 * dayMs),
+              expected_close_date: null,
+              on_hold: false,
+              on_hold_started_at: null,
+              on_hold_accumulated_seconds: 0,
+              on_hold_accumulated_seconds_at_stage_entry: 0,
+              stage_name: "Estimating",
+              stale_escalation_tiers: [],
+            },
+          ],
+        };
+      }
+
+      if (sql.includes("FROM office_beta.notifications")) {
+        return { rows: [] };
+      }
+
+      if (sql.includes("INSERT INTO office_beta.notifications")) {
+        return { rows: [{ id: "notification-1" }] };
+      }
+
+      if (sql.includes("SELECT pg_notify")) {
+        return { rows: [] };
+      }
+
+      throw new Error(`Unexpected SQL: ${sql}`);
+    });
+
+    await runStaleDealScan();
+
+    // Only the non-postponed active over-SLA deal reaches the rule evaluator.
+    expect(evaluateTaskRulesMock).toHaveBeenCalledTimes(1);
+    expect(evaluateTaskRulesMock).toHaveBeenCalledWith(
+      expect.objectContaining({ dealId: "deal-active" }),
+      taskPersistence,
+      expect.any(Array)
+    );
+    expect(evaluateTaskRulesMock).not.toHaveBeenCalledWith(
+      expect.objectContaining({ dealId: "deal-postponed" }),
+      taskPersistence,
+      expect.any(Array)
+    );
+    // Nor is a stale-deal NOTIFICATION fanned out for the postponed deal — every notification insert carries
+    // the deal id in its link (/deals/<id>), so the postponed deal's link must never appear.
+    const notifiedLinks = queryMock.mock.calls
+      .filter(([sql]) => typeof sql === "string" && sql.includes("INSERT INTO office_beta.notifications"))
+      .map(([, params]) => (params as unknown[] | undefined)?.[4]);
+    expect(notifiedLinks).toContain("/deals/deal-active");
+    expect(notifiedLinks).not.toContain("/deals/deal-postponed");
+  });
+
   it("rolls back the office transaction when notification fan-out fails mid-deal", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-04-01T12:00:00.000Z"));

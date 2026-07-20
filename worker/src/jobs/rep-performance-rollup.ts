@@ -139,9 +139,18 @@ function numberOrNull(value: string | number | bigint | null | undefined) {
   return Number.isFinite(numeric) ? numeric : null;
 }
 
+// Near-term postponement suppression applies to CURRENT-period snapshots only. HISTORICAL periods
+// (last_month/quarter/year) must stay deterministic: a postponement made TODAY must not retroactively drop a
+// deal from a CLOSED period's at_risk_count (a Jul 20→Jul 31 move would otherwise suppress the deal in the
+// June snapshot, since Jul 31 is future relative to the June period end). This mirrors periodAwarePipelineValueSql
+// above, which likewise refuses to re-zero historical value by today's close-target state. So historical
+// periods keep the pre-suppression behavior (near-term leg off; judged on stage-age as of period end).
+const HISTORICAL_PERIOD_KINDS = new Set<PeriodKind>(["last_month", "last_quarter", "last_year"]);
+
 export function computeRepAtRiskCountsFromRows(
   rows: RepAtRiskInputRow[],
-  asOf: Date
+  asOf: Date,
+  applyCloseTargetSuppression = true
 ): RepAtRiskCount[] {
   const countsByRep = new Map<string, number>();
 
@@ -154,11 +163,11 @@ export function computeRepAtRiskCountsFromRows(
         stageSlug: row.stage_slug,
         workflowRoute: normalizeWorkflowRoute(row.workflow_route),
         stageEnteredAt: row.stage_entered_at,
-        // Match the app's aggregate at-risk (applyCloseTargetSuppression:false): exclude the 90+ day
-        // auto-held case only, not a near close target, so the rep rollup mirrors the deals list/dashboard
-        // (Codex P2).
+        // Current-period snapshots honor a postponement (near today-or-future close target) so the stored
+        // at_risk_count mirrors the deals list/dashboard/detail; historical periods pass false (see
+        // HISTORICAL_PERIOD_KINDS) to stay deterministic. The 90+ day auto-held exclusion applies either way.
         expectedCloseDate: row.expected_close_date,
-        applyCloseTargetSuppression: false,
+        applyCloseTargetSuppression,
         onHold: row.on_hold,
         onHoldStartedAt: row.on_hold_started_at,
         onHoldAccumulatedSeconds: numberOrNull(row.on_hold_accumulated_seconds),
@@ -183,7 +192,8 @@ export function computeRepAtRiskCountsFromRows(
 async function getRepAtRiskCountsForPeriod(
   client: { query: (sql: string, params?: unknown[]) => Promise<{ rows: any[]; rowCount: number | null }> },
   schemaName: string,
-  period: PeriodRange
+  period: PeriodRange,
+  now: Date
 ): Promise<RepAtRiskCount[]> {
   const result = await client.query(
     `SELECT
@@ -219,9 +229,15 @@ async function getRepAtRiskCountsForPeriod(
     [period.end]
   );
 
+  // LIVE periods (mtd/qtd/ytd/week_8back) are "as of now", so evaluate at the real current instant — the
+  // same instant the dashboard/list use. Using periodEndAsOfDate here would be midnight UTC of today, which
+  // the shared CT-day conversion reads as YESTERDAY, suppressing a target that expired today for one extra
+  // snapshot vs the live surfaces. HISTORICAL periods stay pinned to their (deterministic) period-end instant.
+  const isHistorical = HISTORICAL_PERIOD_KINDS.has(period.kind);
   return computeRepAtRiskCountsFromRows(
     result.rows as RepAtRiskInputRow[],
-    periodEndAsOfDate(period)
+    isHistorical ? periodEndAsOfDate(period) : now,
+    !isHistorical
   );
 }
 
@@ -230,7 +246,8 @@ async function refreshOfficePeriod(
   schemaName: string,
   officeId: string,
   officeName: string,
-  period: PeriodRange
+  period: PeriodRange,
+  now: Date
 ) {
   await client.query(
     `DELETE FROM public.rep_performance_snapshots
@@ -241,7 +258,7 @@ async function refreshOfficePeriod(
     [period.kind, period.start, period.end, officeId]
   );
 
-  const atRiskCounts = await getRepAtRiskCountsForPeriod(client, schemaName, period);
+  const atRiskCounts = await getRepAtRiskCountsForPeriod(client, schemaName, period, now);
 
   const insertResult = await client.query(
     `WITH rep_deals AS (
@@ -491,7 +508,8 @@ export async function runRepPerformanceRollup(now = new Date()): Promise<number>
             schemaName,
             String(office.id),
             String(office.name ?? "Unassigned"),
-            period
+            period,
+            now
           );
         }
         await client.query("COMMIT");
