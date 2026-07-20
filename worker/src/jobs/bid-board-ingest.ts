@@ -135,17 +135,33 @@ async function withOfficeSessionLock<T>(
   }
 }
 
-/** Pool-level query with a client-side timeout (dead-socket safety) that always clears its timer, so a
- *  won race never leaves a dangling rejecting promise (unhandled rejection). */
-async function timedPoolQuery(text: string, params?: any[]): Promise<{ rows: any[]; rowCount?: number | null }> {
-  let timer: NodeJS.Timeout;
+/** Pool query with a client-side timeout (dead-socket safety). Checks out an EXPLICIT client so a timed-out
+ *  query can be DESTROYED (release(err) removes it from the pool). Racing the convenience pool.query() against
+ *  a timer would only reject the caller while pool.query keeps its checked-out client — on a genuinely dead
+ *  socket that slot never returns, and across retries the leaked slots exhaust the pool until ALL job
+ *  processing stops (the exact failure this guard exists to prevent). Mirrors withOfficeSessionLock. */
+export async function timedPoolQuery(text: string, params?: any[]): Promise<{ rows: any[]; rowCount?: number | null }> {
+  let client: PoolClient;
+  try {
+    client = await pool.connect();
+  } catch (err) {
+    throw err instanceof Error ? err : new Error(String(err));
+  }
+  let timer: NodeJS.Timeout | undefined;
+  let timedOut = false;
   const timeout = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => reject(new Error(`inbox query timed out after ${INBOX_QUERY_TIMEOUT_MS}ms`)), INBOX_QUERY_TIMEOUT_MS);
+    timer = setTimeout(() => {
+      timedOut = true;
+      reject(new Error(`inbox query timed out after ${INBOX_QUERY_TIMEOUT_MS}ms`));
+    }, INBOX_QUERY_TIMEOUT_MS);
   });
   try {
-    return (await Promise.race([pool.query(text, params), timeout])) as { rows: any[]; rowCount?: number | null };
+    return (await Promise.race([client.query(text, params), timeout])) as { rows: any[]; rowCount?: number | null };
   } finally {
-    clearTimeout(timer!);
+    clearTimeout(timer);
+    // On a client-side timeout the socket may be dead or the query still pending → DESTROY the connection so
+    // its slot can't leak. A clean result (or an ordinary query error) returns the connection normally.
+    client.release(timedOut ? new Error(`inbox query timed out after ${INBOX_QUERY_TIMEOUT_MS}ms`) : undefined);
   }
 }
 

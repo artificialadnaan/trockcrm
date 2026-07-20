@@ -342,8 +342,11 @@ export async function recoverOrphanedInboxJobs(
 
   // (b) Re-enqueue rows still 'queued' or stale 'processing' with attempts left and no live job, using the
   // row's OWN max_attempts (lockstep). If two worker instances run recovery at once both may enqueue a job
-  // for the same row — that's harmless: the handler claims the row once (markInboxProcessing) and the
-  // per-office lock serializes them, so the duplicate job is a no-op.
+  // for the same row — harmless because processBidBoardInboxJob RE-CHECKS the inbox status after acquiring
+  // the per-office lock and skips the import when a prior holder already committed it. (The lock serializes
+  // the two handlers but does NOT dedupe on its own — markInboxProcessing claims an in-flight 'processing'
+  // row, so both can capture the payload before the lock; the post-lock recheck is what prevents the
+  // duplicate import.)
   const res = await db.query(
     `INSERT INTO public.job_queue (job_type, payload, office_id, status, run_after, max_attempts)
      SELECT $1::text, jsonb_build_object('inboxId', i.id::text), i.office_id, 'pending', NOW(), i.max_attempts
@@ -426,7 +429,23 @@ export async function processBidBoardInboxJob(deps: ProcessInboxDeps): Promise<P
   try {
     // The lock wraps ONLY the import + its terminal write (the deal-row contention). The claim above is a
     // cheap inbox UPDATE that doesn't touch deal rows, so it's safe outside the lock.
+    let imported = false;
     await deps.withOfficeLock(claimed.office_slug, async () => {
+      // Re-check status AFTER acquiring the lock. markInboxProcessing claims an in-flight 'processing' row
+      // (needed so a genuinely-orphaned row can be recovered), so a DUPLICATE job — a concurrent recovery
+      // re-enqueue, or a still-running job the stale-job sweep reclaimed — can also claim this row and
+      // capture the payload before the lock. The lock only serializes; it does NOT dedupe. If the holder we
+      // waited behind already COMMITTED the import, the row is now terminal — skip so we never re-run a
+      // finished import (the duplicate-import incident this inbox exists to prevent). Only a still-open
+      // 'processing' row (the previous holder died mid-import, or we ARE the first) proceeds to ingest.
+      const current = await loadInboxRow(db, inboxId);
+      if (current && (current.status === "succeeded" || current.status === "failed")) {
+        log(
+          `[BidBoardIngest] ${JSON.stringify({ ...logMeta, state: "noop_after_lock", status: current.status })}`
+        );
+        return;
+      }
+      imported = true;
       const { runId, metrics, warnings } = await deps.ingest(claimed.payload);
       // The import has COMMITTED. Recording success is post-commit bookkeeping — retry it so a transient
       // failure here can't get classified as an ingest failure (which would re-run the committed import on
@@ -442,7 +461,7 @@ export async function processBidBoardInboxJob(deps: ProcessInboxDeps): Promise<P
         })}`
       );
     });
-    return "succeeded";
+    return imported ? "succeeded" : "noop";
   } catch (err) {
     const terminal = claimed.attempts >= claimed.max_attempts;
     const message = err instanceof Error ? err.message : String(err);

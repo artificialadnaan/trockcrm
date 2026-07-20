@@ -203,6 +203,49 @@ describe("processBidBoardInboxJob (async processing state machine)", () => {
     expect(ingest).not.toHaveBeenCalled();
   });
 
+  it("re-checks AFTER the lock: skips the import if a concurrent holder committed it while we waited (no duplicate)", async () => {
+    const { inboxId } = await accept();
+    const ingest = okIngest();
+    // markInboxProcessing claims this row ('processing'), then a duplicate job — a concurrent recovery
+    // re-enqueue (#2) or a reclaimed still-running job (#3) — commits the import and marks the row succeeded
+    // while we block on the office lock. The lock only serializes; the post-lock recheck is what prevents the
+    // second handler from re-running the already-committed import.
+    const lockLosesRace = async <T,>(_slug: string, fn: () => Promise<T>): Promise<T> => {
+      await db.query(
+        `UPDATE public.bid_board_ingestion_inbox
+         SET status='succeeded', run_id=$2, finished_at=now(), payload='{}'::jsonb WHERE id=$1`,
+        [inboxId, RUN_UUID]
+      );
+      return fn();
+    };
+
+    const outcome = await processBidBoardInboxJob({ db, inboxId, ingest, withOfficeLock: lockLosesRace });
+
+    expect(outcome).toBe("noop");
+    expect(ingest).not.toHaveBeenCalled(); // the committed import is NOT re-run
+    const row = await readInboxStatusByKey(db, "dallas", "hash-a");
+    expect(row?.status).toBe("succeeded"); // left exactly as the winner recorded it
+  });
+
+  it("still re-runs a genuinely orphaned 'processing' row (worker died mid-import) — the recheck only skips TERMINAL rows", async () => {
+    const { inboxId } = await accept();
+    // A worker claimed this row then died mid-import: it is 'processing' but never reached a terminal state,
+    // and recovery re-enqueued it. Claiming + rechecking must let the import actually run (not over-skip).
+    await db.query(
+      `UPDATE public.bid_board_ingestion_inbox
+       SET status='processing', started_at = now() - interval '30 minutes', attempts=1 WHERE id=$1`,
+      [inboxId]
+    );
+    const ingest = okIngest();
+
+    const outcome = await processBidBoardInboxJob({ db, inboxId, ingest, withOfficeLock: passthroughLock });
+
+    expect(outcome).toBe("succeeded");
+    expect(ingest).toHaveBeenCalledOnce(); // recovery DID re-run the unfinished import
+    const row = await readInboxStatusByKey(db, "dallas", "hash-a");
+    expect(row?.status).toBe("succeeded");
+  });
+
   it("a NON-terminal failure rethrows and leaves the row 'processing' (so status stays honest during backoff)", async () => {
     const { inboxId } = await accept(); // max_attempts default 5, this is attempt 1
     const ingest = vi.fn(async () => {

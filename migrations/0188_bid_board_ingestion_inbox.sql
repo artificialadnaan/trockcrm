@@ -42,3 +42,15 @@ CREATE TABLE IF NOT EXISTS public.bid_board_ingestion_inbox (
 -- Recovery + status scans look up by (office_slug, status).
 CREATE INDEX IF NOT EXISTS bid_board_ingestion_inbox_office_status_idx
   ON public.bid_board_ingestion_inbox (office_slug, status);
+
+-- Supporting index for this feature's periodic stale-job sweep (recoverOrphanedInboxJobs step 0), which runs
+-- every ~60s:  UPDATE public.job_queue ... WHERE job_type = 'bid_board_ingest' AND status = 'processing'
+--              AND started_processing_at < now() - interval.
+-- The only pre-existing job_queue index (job_queue_pending_idx, partial on status='pending') cannot serve a
+-- status='processing' predicate, so each tick would seq-scan the whole durable queue as its history grows.
+-- Partial on the transient 'processing' rows (so it stays tiny) and keyed (job_type, started_processing_at)
+-- so the sweep is an index range scan regardless of queue size, even with a parameterized job_type.
+-- (For a very large/hot prod job_queue this can instead be built out-of-band as CREATE INDEX CONCURRENTLY.)
+CREATE INDEX IF NOT EXISTS job_queue_processing_type_started_idx
+  ON public.job_queue (job_type, started_processing_at)
+  WHERE status = 'processing';
