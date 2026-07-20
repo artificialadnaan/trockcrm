@@ -201,26 +201,56 @@ export interface InboxRow {
   queued_at: string;
   started_at: string | null;
   finished_at: string | null;
+  lease_expires_at: string | null;
 }
+
+/**
+ * Lease/heartbeat for an in-flight import. markInboxProcessing stamps `lease_expires_at = NOW() + TTL`; the
+ * worker RENEWS it every INBOX_LEASE_RENEW_MS while the import runs (incl. the office-lock wait). A concurrent
+ * claimant can re-claim a 'processing' row ONLY once its lease has EXPIRED (the previous handler died) — never
+ * a live long-running import. Without this, the stale-job sweep reclaiming a live >15m import lets a second
+ * handler re-run markInboxProcessing and burn another inbox attempt, prematurely dead-lettering a healthy
+ * import. TTL is comfortably above the renew interval so a GC pause can't falsely expire a live lease.
+ */
+export const INBOX_LEASE_TTL_SECONDS = 180;
+export const INBOX_LEASE_RENEW_MS = 60_000;
 
 export async function loadInboxRow(db: Querier, inboxId: string): Promise<InboxRow | null> {
   const res = await db.query(`SELECT * FROM public.bid_board_ingestion_inbox WHERE id = $1`, [inboxId]);
   return (res.rows[0] as InboxRow) ?? null;
 }
 
-/** Transition a claimable (queued or in-flight) row → processing, stamping the attempt + start time.
- *  Returns the updated row, or null for a TERMINAL row ('succeeded' → already done; 'failed' →
- *  dead-lettered): a no-op so a drifting job retry can neither re-run a finished import nor resurrect a
- *  terminally-failed one. */
+/** Transition a claimable row → processing, stamping the attempt, start time, and a fresh lease.
+ *  Claims a 'queued' row always; claims a 'processing' row ONLY if its lease has EXPIRED (its handler died) —
+ *  so a live long-running import can't be double-claimed (which would burn an attempt). Returns the updated
+ *  row, or null for a TERMINAL row ('succeeded'/'failed') or a still-LEASED 'processing' row — a no-op so a
+ *  drifting/reclaimed job retry can neither re-run a finished import, resurrect a dead-lettered one, nor steal
+ *  a healthy in-flight one. */
 export async function markInboxProcessing(db: Querier, inboxId: string): Promise<InboxRow | null> {
   const res = await db.query(
     `UPDATE public.bid_board_ingestion_inbox
-     SET status = 'processing', attempts = attempts + 1, started_at = NOW(), updated_at = NOW()
-     WHERE id = $1 AND status IN ('queued', 'processing')
+     SET status = 'processing', attempts = attempts + 1, started_at = NOW(), updated_at = NOW(),
+         lease_expires_at = NOW() + make_interval(secs => $2::int)
+     WHERE id = $1
+       AND (
+         status = 'queued'
+         OR (status = 'processing' AND (lease_expires_at IS NULL OR lease_expires_at < NOW()))
+       )
      RETURNING *`,
-    [inboxId]
+    [inboxId, INBOX_LEASE_TTL_SECONDS]
   );
   return (res.rows[0] as InboxRow) ?? null;
+}
+
+/** Renew the in-flight lease (heartbeat). No-op unless the row is still 'processing' (this handler owns it),
+ *  so a renewal can't touch a row a terminal write already finished. Best-effort — the caller ignores errors. */
+export async function renewInboxLease(db: Querier, inboxId: string): Promise<void> {
+  await db.query(
+    `UPDATE public.bid_board_ingestion_inbox
+     SET lease_expires_at = NOW() + make_interval(secs => $2::int)
+     WHERE id = $1 AND status = 'processing'`,
+    [inboxId, INBOX_LEASE_TTL_SECONDS]
+  );
 }
 
 export async function markInboxSucceeded(
@@ -300,9 +330,12 @@ export async function markInboxFailed(
       [inboxId, fields.error]
     );
   } else {
+    // Non-terminal failure: the row stays 'processing' for the queue's backoff retry. RELEASE the lease
+    // (lease_expires_at = NULL) so the retry's markInboxProcessing can re-claim it immediately — otherwise a
+    // still-valid lease from this now-finished attempt would make the retry a no-op until the TTL elapsed.
     await db.query(
       `UPDATE public.bid_board_ingestion_inbox
-       SET last_error = $2, updated_at = NOW()
+       SET last_error = $2, updated_at = NOW(), lease_expires_at = NULL
        WHERE id = $1`,
       [inboxId, fields.error]
     );
@@ -440,6 +473,8 @@ export interface ProcessInboxDeps {
   ingest: (payload: any) => Promise<IngestResult>;
   /** Serialize per office. The worker supplies a pg session advisory lock; tests supply a pass-through. */
   withOfficeLock: <T>(officeSlug: string, fn: () => Promise<T>) => Promise<T>;
+  /** Lease-renew (heartbeat) interval while an import runs. Defaults to INBOX_LEASE_RENEW_MS; tests override. */
+  heartbeatMs?: number;
   now?: () => number;
   log?: (line: string) => void;
 }
@@ -464,9 +499,17 @@ export async function processBidBoardInboxJob(deps: ProcessInboxDeps): Promise<P
 
   const claimed = await markInboxProcessing(db, inboxId);
   if (!claimed) {
-    log(`[BidBoardIngest] inbox row ${inboxId} not claimable (already terminal or gone) — noop`);
+    log(`[BidBoardIngest] inbox row ${inboxId} not claimable (already terminal, dead-lettered, or LEASED by a live handler) — noop`);
     return "noop";
   }
+
+  // Renew the lease for the whole time this handler owns the row — through the office-lock wait AND the
+  // import — so the stale-job sweep can't let a second handler re-claim a live long-running import (which
+  // would burn an inbox attempt). Cleared in the finally below. unref so it never keeps the process alive.
+  const heartbeat = setInterval(() => {
+    void renewInboxLease(db, inboxId).catch(() => {});
+  }, deps.heartbeatMs ?? INBOX_LEASE_RENEW_MS);
+  (heartbeat as { unref?: () => void }).unref?.();
 
   const startedMs = now();
   const queueMs = startedMs - Date.parse(claimed.queued_at);
@@ -530,5 +573,9 @@ export async function processBidBoardInboxJob(deps: ProcessInboxDeps): Promise<P
     );
     // Rethrow so the job queue retries with backoff (or dead-letters on the terminal attempt).
     throw err;
+  } finally {
+    // Stop renewing the lease once we're done owning the row (success, noop, or failure/throw) — so a
+    // genuinely dead handler's lease can expire and recovery can re-claim.
+    clearInterval(heartbeat);
   }
 }

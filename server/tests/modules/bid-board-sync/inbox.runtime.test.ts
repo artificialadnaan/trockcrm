@@ -6,8 +6,10 @@ import {
   recoverOrphanedInboxJobs,
   readInboxStatusByKey,
   loadInboxRow,
+  markInboxProcessing,
   markInboxSucceeded,
   markInboxFailed,
+  renewInboxLease,
   BID_BOARD_INGEST_JOB_TYPE,
   type Querier,
 } from "../../../src/modules/bid-board-sync/inbox.js";
@@ -76,6 +78,7 @@ async function setupSchema() {
       queued_at timestamptz NOT NULL DEFAULT now(),
       started_at timestamptz,
       finished_at timestamptz,
+      lease_expires_at timestamptz,
       updated_at timestamptz NOT NULL DEFAULT now(),
       CONSTRAINT bid_board_ingestion_inbox_office_hash_uidx UNIQUE (office_slug, payload_hash)
     );
@@ -546,6 +549,58 @@ describe("terminal-write status guards (idempotent against a raced terminal stat
     const row = await readInboxStatusByKey(db, "dallas", "hash-a");
     expect(row?.status).toBe("succeeded"); // status='processing' guard held — not flipped to failed
     expect(row?.run_id).toBe(RUN_UUID);
+  });
+});
+
+describe("in-flight lease (heartbeat) — a live import can't be double-claimed", () => {
+  it("does NOT re-claim a 'processing' row whose lease is still valid (a live handler owns it)", async () => {
+    const { inboxId } = await accept();
+    const first = await markInboxProcessing(db, inboxId); // claims: processing + fresh lease
+    expect(first).not.toBeNull();
+    // A reclaimed/concurrent job tries to claim the SAME live row — blocked by the valid lease.
+    const second = await markInboxProcessing(db, inboxId);
+    expect(second).toBeNull();
+    const row = await loadInboxRow(db, inboxId);
+    expect(row?.attempts).toBe(1); // NOT double-charged — the key harm this prevents
+  });
+
+  it("DOES re-claim a 'processing' row whose lease has EXPIRED (the previous handler died)", async () => {
+    const { inboxId } = await accept();
+    await markInboxProcessing(db, inboxId);
+    await db.query(
+      `UPDATE public.bid_board_ingestion_inbox SET lease_expires_at = now() - interval '1 minute' WHERE id=$1`,
+      [inboxId]
+    );
+    const reclaimed = await markInboxProcessing(db, inboxId);
+    expect(reclaimed).not.toBeNull(); // genuine recovery of a dead handler
+    expect(reclaimed?.attempts).toBe(2);
+  });
+
+  it("a non-terminal failure RELEASES the lease so the backoff retry re-claims immediately", async () => {
+    const { inboxId } = await accept();
+    await markInboxProcessing(db, inboxId); // attempt 1, fresh lease
+    await markInboxFailed(db, inboxId, { error: "deal row deadlock", terminal: false });
+    expect((await loadInboxRow(db, inboxId))?.lease_expires_at).toBeNull(); // lease released
+    const retry = await markInboxProcessing(db, inboxId); // re-claimable even before TTL elapses
+    expect(retry).not.toBeNull();
+    expect(retry?.attempts).toBe(2);
+  });
+
+  it("renewInboxLease extends a live lease but no-ops on a terminal row", async () => {
+    const { inboxId } = await accept();
+    await markInboxProcessing(db, inboxId);
+    await db.query(
+      `UPDATE public.bid_board_ingestion_inbox SET lease_expires_at = now() + interval '3 seconds' WHERE id=$1`,
+      [inboxId]
+    );
+    await renewInboxLease(db, inboxId);
+    const renewed = await loadInboxRow(db, inboxId);
+    expect(new Date(renewed!.lease_expires_at!).getTime()).toBeGreaterThan(Date.now() + 60_000);
+
+    await db.query(`UPDATE public.bid_board_ingestion_inbox SET status='succeeded' WHERE id=$1`, [inboxId]);
+    const before = (await loadInboxRow(db, inboxId))!.lease_expires_at;
+    await renewInboxLease(db, inboxId); // status != 'processing' → no-op
+    expect(String((await loadInboxRow(db, inboxId))!.lease_expires_at)).toBe(String(before));
   });
 });
 
