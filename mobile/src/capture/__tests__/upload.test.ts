@@ -92,6 +92,13 @@ describe("uploadCapture compression handling (compress-on-enqueue)", () => {
     );
   });
 
+  it("re-compresses a stale queued item with a frozen sizeBytes:0 — never PUTs a zero size (self-heal)", async () => {
+    const fetcher = jest.fn() as never;
+    await uploadCapture(fetcher, { ...input(), uri: "file:///c.jpg", compressed: true, sizeBytes: 0 });
+    expect(compressForUpload).toHaveBeenCalled(); // 0 is not trusted → falls through to compression
+    expect(createUploadUrl).toHaveBeenCalledWith(fetcher, expect.objectContaining({ sizeBytes: 123 }));
+  });
+
   it("compresses a legacy/fallback item (compressed unset) at drain time, as before", async () => {
     const fetcher = jest.fn() as never;
     await uploadCapture(fetcher, input()); // no compressed flag → drain compresses

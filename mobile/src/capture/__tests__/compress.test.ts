@@ -7,6 +7,7 @@ jest.mock("expo-file-system/legacy", () => ({
 }));
 
 import * as ImageManipulator from "expo-image-manipulator";
+import * as FileSystem from "expo-file-system/legacy";
 import { compressForEnqueue } from "../compress";
 
 describe("compressForEnqueue", () => {
@@ -15,6 +16,13 @@ describe("compressForEnqueue", () => {
   it("returns the compressed source + size + compressed:true on success", async () => {
     const r = await compressForEnqueue("file:///orig.heic", 5000, 4000);
     expect(r).toEqual({ sourceUri: "file:///compressed.jpg", sizeBytes: 456, compressed: true });
+  });
+
+  it("does NOT freeze a zero size — a size-read miss returns compressed:false so the drain re-derives it", async () => {
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValueOnce({ exists: true, size: 0 });
+    const r = await compressForEnqueue("file:///orig.heic", 5000, 4000);
+    // keeps the compressed bytes, but marks NOT compressed so the drain re-derives a valid size
+    expect(r).toEqual({ sourceUri: "file:///compressed.jpg", compressed: false });
   });
 
   it("falls back to the ORIGINAL uri with compressed:false when compression throws (no photo lost)", async () => {

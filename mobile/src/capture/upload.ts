@@ -80,7 +80,7 @@ export async function uploadCapture(
   // Compression normally happens at ENQUEUE now, so a queued item's `uri` is already the compressed JPEG —
   // use it as-is. A legacy/fallback item (compressed not set) is compressed here at drain time, as before.
   const compressed =
-    input.compressed && typeof input.sizeBytes === "number"
+    input.compressed && typeof input.sizeBytes === "number" && input.sizeBytes > 0
       ? { uri: input.uri, sizeBytes: input.sizeBytes, contentType: "image/jpeg" as const }
       : await compressForUpload(input.uri, input.width, input.height);
   const target = onlyDefinedTarget(input.target);

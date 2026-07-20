@@ -245,6 +245,13 @@ export async function enqueueUploads(
       });
       throw err;
     }
+    // Reclaim the transient compressed temp now it's durably copied, so a large offline burst doesn't
+    // front-load ~2x its footprint in the cache dir. GUARD `sourceUri !== input.uri`: on the fallback path
+    // sourceUri IS the original (which the fire-and-forget camera-roll backup + review preview still read) —
+    // that must never be deleted.
+    if (compressed && sourceUri !== input.uri) {
+      await FileSystem.deleteAsync(sourceUri, { idempotent: true }).catch(() => undefined);
+    }
     const item: QueuedUpload = { ...input, uri: dest, sizeBytes, compressed, enqueuedAt: Date.now(), attempts: 0 };
     // Persist under the lock — but if a cancel arrived WHILE copying, drop the item (delete the copy)
     // instead of appending removed evidence. A crash right after the copy still recovers via the index.
