@@ -184,7 +184,9 @@ function getDealStaleAtRisk(row: StaleDealCandidateRow, now: Date) {
       workflowRoute: normalizeWorkflowRoute(row.workflow_route),
       stageEnteredAt: row.stage_entered_at,
       expectedCloseDate: row.expected_close_date ?? null,
-      applyCloseTargetSuppression: false,
+      // Honor a postponement (near today-or-future close target) so the Stale Deals report / regional
+      // ownership / unified-workflow at-risk match the deal-detail "Postponed" state, not just 90+ day hold.
+      applyCloseTargetSuppression: true,
       onHold: row.on_hold,
       onHoldStartedAt: row.on_hold_started_at,
       onHoldAccumulatedSeconds: numberOrNull(row.on_hold_accumulated_seconds),

@@ -32,7 +32,9 @@ export function getAiDealAtRiskResult(
       workflowRoute: normalizeWorkflowRoute(row.workflow_route),
       stageEnteredAt: row.stage_entered_at,
       expectedCloseDate: row.expected_close_date ?? null,
-      applyCloseTargetSuppression: false,
+      // Honor a postponement (near today-or-future close target) so the copilot's disconnect/blind-spot
+      // at-risk signals match the deal-detail "Postponed" state, not just the 90+ day auto-hold.
+      applyCloseTargetSuppression: true,
       onHold: row.on_hold,
       onHoldStartedAt: row.on_hold_started_at,
       onHoldAccumulatedSeconds: numberOrNull(row.on_hold_accumulated_seconds),

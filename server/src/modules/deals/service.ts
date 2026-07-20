@@ -142,7 +142,7 @@ function normalizeAtRiskViewerRole(role: string | null | undefined): UserRole | 
   return USER_ROLES.includes(role as UserRole) ? (role as UserRole) : null;
 }
 
-function attachAtRiskResult<T extends {
+export function attachAtRiskResult<T extends {
   stageId?: string | null;
   stageSlug?: string | null;
   bidBoardStageSlug?: string | null;
@@ -183,10 +183,12 @@ function attachAtRiskResult<T extends {
           deal.onHoldAccumulatedSecondsAtStageEntry == null
             ? null
             : Number(deal.onHoldAccumulatedSecondsAtStageEntry),
-        // Forward the close target everywhere so 90+ day targets count as effective hold. The
-        // shorter today-or-future SLA pause remains opt-in for detail-style messaging.
+        // Forward the close target everywhere so 90+ day targets count as effective hold, AND a near
+        // today-or-future postponement ("Move Close Date") quiets the stage-age SLA — the same suppression
+        // the deal-detail view shows as "Postponed". Defaults ON so the list/board/drill-down callers (which
+        // omit options) match detail; a caller can still opt OUT with { applyCloseTargetSuppression: false }.
         expectedCloseDate: deal.expectedCloseDate ?? null,
-        applyCloseTargetSuppression: options?.applyCloseTargetSuppression === true,
+        applyCloseTargetSuppression: options?.applyCloseTargetSuppression !== false,
       },
       normalizeAtRiskViewerRole(viewerRole),
       new Date()

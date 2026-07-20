@@ -43,7 +43,7 @@ describe("worker at-risk forwards expected_close_date (Codex P2 finding A)", () 
     expect(counts).toEqual([{ repId: "rep-1", atRiskCount: 1 }]);
   });
 
-  it("a near (today-or-future) close target does NOT suppress in the aggregate rollup (matches the app's applyCloseTargetSuppression:false paths)", () => {
+  it("a near (today-or-future) close target suppresses in the aggregate rollup (matches the deals list/dashboard/detail)", () => {
     const asOf = new Date("2026-05-08T00:00:00.000Z");
     const counts = computeRepAtRiskCountsFromRows(
       [
@@ -54,8 +54,10 @@ describe("worker at-risk forwards expected_close_date (Codex P2 finding A)", () 
       ],
       asOf
     );
-    // The worker rollup passes applyCloseTargetSuppression:false (like the deals list/dashboard/reports), so
-    // a near close target does NOT quiet an over-SLA deal — only the 90+ day auto-held case is excluded.
-    expect(counts).toEqual([{ repId: "rep-1", atRiskCount: 1 }]);
+    // A postponement (Move Close Date to a today-or-future target) quiets the stage-age SLA everywhere a
+    // user sees at-risk — the rollup now honors applyCloseTargetSuppression:true like the list/dashboard/
+    // detail, so an over-SLA deal postponed to next week drops out of the rep's at-risk count (returns [],
+    // no rep entry, since the rep has zero at-risk deals).
+    expect(counts).toEqual([]);
   });
 });
