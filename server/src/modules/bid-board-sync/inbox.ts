@@ -197,11 +197,14 @@ export async function markInboxSucceeded(
   // Drop the (up to ~25MB) payload once the import has committed — the row is retained for idempotency +
   // status + the metrics snapshot, but keeping every scraped payload forever would bloat the table
   // unboundedly (a scrape every ~19min). A re-POST of the same key still dedupes to this 'succeeded' row.
+  // status = 'processing' guard: idempotent against any terminal state — a stray/duplicate success write can
+  // never flip an already-'failed' row back to 'succeeded'. It also makes recordSuccessWithRetry's retry a
+  // clean no-op when a prior attempt's UPDATE committed but its ack was lost (the row is already 'succeeded').
   await db.query(
     `UPDATE public.bid_board_ingestion_inbox
      SET status = 'succeeded', run_id = $2, metrics = $3::jsonb, warnings_count = $4,
          payload = '{}'::jsonb, last_error = NULL, finished_at = NOW(), updated_at = NOW()
-     WHERE id = $1`,
+     WHERE id = $1 AND status = 'processing'`,
     [inboxId, fields.runId, fields.metrics == null ? null : JSON.stringify(fields.metrics), fields.warningsCount]
   );
 }
@@ -209,14 +212,23 @@ export async function markInboxSucceeded(
 /**
  * Record success with a bounded retry. The import has already COMMITTED when this runs, so a transient
  * failure of this inbox UPDATE must NOT bubble up as an ingest failure (that would re-run the committed
- * import). Retries a few times; only if all fail does the caller's catch treat it as a failure (rare, and
- * recovery reconciles from the durable job state).
+ * import). Retries with exponential backoff (~3s total across 6 attempts) so a short DB blip at the
+ * import→record seam is absorbed durably.
+ *
+ * RESIDUAL (inherent to the two-transaction design — the importer is deliberately UNCHANGED and commits in
+ * its OWN transaction, so there is no durable link from "import committed" to this separate inbox write): if
+ * EVERY attempt genuinely fails to commit (a sustained outage of several seconds precisely at this seam), the
+ * row stays 'processing' with its payload intact and the caller marks it failed + rethrows, so the job queue
+ * retries and re-runs the import. That re-run is SERIALIZED by the office lock (not the concurrent row-
+ * contention this inbox was built to stop) and converges the same deal rows, but it does duplicate the sync-
+ * run + audit bookkeeping. The only complete close is to write this success INSIDE the importer's
+ * transaction, which would couple + change ingestBidBoardRows — left as a deliberate follow-up.
  */
 export async function recordSuccessWithRetry(
   db: Querier,
   inboxId: string,
   fields: { runId: string | null; metrics: unknown; warningsCount: number },
-  attempts = 3
+  attempts = 6
 ): Promise<void> {
   let lastErr: unknown;
   for (let i = 0; i < attempts; i++) {
@@ -225,7 +237,8 @@ export async function recordSuccessWithRetry(
       return;
     } catch (err) {
       lastErr = err;
-      await new Promise((r) => setTimeout(r, 50 * (i + 1)));
+      // Exponential backoff, capped: 100, 200, 400, 800, 1600ms between the 6 attempts.
+      await new Promise((r) => setTimeout(r, Math.min(1600, 100 * 2 ** i)));
     }
   }
   throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
@@ -243,10 +256,13 @@ export async function markInboxFailed(
   fields: { error: string; terminal: boolean }
 ): Promise<void> {
   if (fields.terminal) {
+    // status = 'processing' guard: idempotent against any terminal state — if a concurrent path already
+    // recorded 'succeeded' between the import and this catch, the terminal failure write is a no-op instead
+    // of clobbering the real outcome (succeeded → failed).
     await db.query(
       `UPDATE public.bid_board_ingestion_inbox
        SET status = 'failed', last_error = $2, finished_at = NOW(), updated_at = NOW()
-       WHERE id = $1`,
+       WHERE id = $1 AND status = 'processing'`,
       [inboxId, fields.error]
     );
   } else {

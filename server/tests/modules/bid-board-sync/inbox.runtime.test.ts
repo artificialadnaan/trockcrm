@@ -6,6 +6,8 @@ import {
   recoverOrphanedInboxJobs,
   readInboxStatusByKey,
   loadInboxRow,
+  markInboxSucceeded,
+  markInboxFailed,
   BID_BOARD_INGEST_JOB_TYPE,
   type Querier,
 } from "../../../src/modules/bid-board-sync/inbox.js";
@@ -493,6 +495,32 @@ describe("recoverOrphanedInboxJobs (crash recovery)", () => {
     await recoverOrphanedInboxJobs(db, { retentionDays: 14 });
     expect(await loadInboxRow(db, old.inboxId)).toBeNull();
     expect(await loadInboxRow(db, recent.inboxId)).not.toBeNull();
+  });
+});
+
+describe("terminal-write status guards (idempotent against a raced terminal state)", () => {
+  it("markInboxSucceeded is a no-op on an already-'failed' row (never resurrects it to succeeded)", async () => {
+    const { inboxId } = await accept();
+    await db.query(
+      `UPDATE public.bid_board_ingestion_inbox SET status='failed', attempts=5, last_error='dead', finished_at=now() WHERE id=$1`,
+      [inboxId]
+    );
+    await markInboxSucceeded(db, inboxId, { runId: RUN_UUID, metrics: {}, warningsCount: 0 });
+    const row = await readInboxStatusByKey(db, "dallas", "hash-a");
+    expect(row?.status).toBe("failed"); // status='processing' guard held — not flipped to succeeded
+    expect(row?.run_id).toBeNull();
+  });
+
+  it("markInboxFailed(terminal) is a no-op on an already-'succeeded' row (never clobbers the outcome)", async () => {
+    const { inboxId } = await accept();
+    await db.query(
+      `UPDATE public.bid_board_ingestion_inbox SET status='succeeded', run_id=$2, finished_at=now() WHERE id=$1`,
+      [inboxId, RUN_UUID]
+    );
+    await markInboxFailed(db, inboxId, { error: "late failure after commit", terminal: true });
+    const row = await readInboxStatusByKey(db, "dallas", "hash-a");
+    expect(row?.status).toBe("succeeded"); // status='processing' guard held — not flipped to failed
+    expect(row?.run_id).toBe(RUN_UUID);
   });
 });
 

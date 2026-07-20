@@ -42,7 +42,7 @@ interface InboxModule {
   }) => Promise<"succeeded" | "noop">;
   recoverOrphanedInboxJobs: (
     db: { query: (text: string, params?: any[]) => Promise<{ rows: any[]; rowCount?: number | null }> },
-    opts?: { staleProcessingMinutes?: number }
+    opts?: { staleProcessingMinutes?: number; staleJobMinutes?: number; retentionDays?: number }
   ) => Promise<number>;
 }
 
