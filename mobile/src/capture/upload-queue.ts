@@ -226,8 +226,13 @@ export async function enqueueUploads(
   if (inputs.length === 0) return [];
   await ensureDir(ownerKey);
   const dir = ownerDir(ownerKey);
-  const queued: QueuedUpload[] = [];
-  for (const input of inputs) {
+  // Process items CONCURRENTLY. The compression bottleneck is capped by runCompression
+  // (COMPRESS_CONCURRENCY) ACROSS the whole batch, so a multi-photo submit (e.g. a scorecard) no longer pays
+  // the SUM of every compression before the drain can start — it pays roughly ceil(N / COMPRESS_CONCURRENCY)
+  // waves. Each item still persists INDIVIDUALLY (its index write under the lock, after its own copy), so a
+  // kill mid-enqueue still leaves every already-indexed photo recoverable. A copy failure rejects the batch
+  // (as before); siblings that already committed stay queued and dedupe on retry.
+  const enqueueOne = async (input: CaptureUploadInput): Promise<QueuedUpload | null> => {
     const id = input.clientUploadId;
     // Register as in-flight under the lock, then compress + copy OUTSIDE the lock — both are slow (CPU / large
     // file) and must not block removeQueuedUploads / drain re-selection during a big batch.
@@ -276,11 +281,13 @@ export async function enqueueUploads(
     });
     if (cancelled) {
       await FileSystem.deleteAsync(dest, { idempotent: true }).catch(() => undefined);
-      continue;
+      return null;
     }
-    queued.push(item);
-  }
-  return queued;
+    return item;
+  };
+
+  const results = await Promise.all(inputs.map((input) => enqueueOne(input)));
+  return results.filter((item): item is QueuedUpload => item !== null);
 }
 
 /** Remove items (and their files) from the persisted index — used after a successful upload. */

@@ -48,16 +48,30 @@ describe("saveToCameraRoll setting", () => {
   });
 
   it("serializes overlapping persists so the LAST toggle wins on disk even if an earlier write is slower", async () => {
+    // Model the durable store: each write updates it WHEN it completes, so the final value reflects which
+    // write landed LAST — the actual invariant (not just call order).
+    let durable: string | null = null;
     let resolveFirst!: () => void;
     (SecureStore.setItemAsync as jest.Mock)
-      .mockImplementationOnce(() => new Promise<void>((r) => (resolveFirst = () => r())))
-      .mockImplementationOnce(async () => undefined);
+      .mockImplementationOnce(
+        (_k: string, v: string) =>
+          new Promise<void>((r) => {
+            resolveFirst = () => {
+              durable = v;
+              r();
+            };
+          }),
+      )
+      .mockImplementationOnce(async (_k: string, v: string) => {
+        durable = v;
+      });
     const p1 = setSaveToCameraRoll(false); // slow
     const p2 = setSaveToCameraRoll(true); // fast, but must not land before the slow one
     await new Promise((r) => setTimeout(r, 0)); // let the chained first write call setItemAsync
-    resolveFirst();
+    resolveFirst(); // completes the slow write → durable="false"
     await Promise.all([p1, p2]);
     const calls = (SecureStore.setItemAsync as jest.Mock).mock.calls;
     expect(calls.map((c) => c[1])).toEqual(["false", "true"]); // executed in call order
+    expect(durable).toBe("true"); // …and the LAST toggle is what remains on disk
   });
 });
