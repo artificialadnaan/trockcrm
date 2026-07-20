@@ -3,6 +3,8 @@ import { describe, expect, it, vi } from "vitest";
 import {
   computeIdempotencyKey,
   extractOfficeSlug,
+  resolveIngestOfficeSlug,
+  countPayloadRows,
   isValidOfficeSlug,
   officeAdvisoryKey,
   BID_BOARD_ADVISORY_NAMESPACE,
@@ -46,6 +48,50 @@ describe("bid-board inbox pure helpers", () => {
       expect(extractOfficeSlug({ office_slug: "BAD SLUG" })).toBeNull();
       expect(extractOfficeSlug({})).toBeNull();
       expect(extractOfficeSlug(null)).toBeNull();
+    });
+  });
+
+  describe("resolveIngestOfficeSlug (legacy missing-office default)", () => {
+    it("defaults an ABSENT / empty office to dallas (matches the importer's normalizeOfficeSlug fallback)", () => {
+      expect(resolveIngestOfficeSlug({})).toBe("dallas");
+      expect(resolveIngestOfficeSlug({ office_slug: null })).toBe("dallas");
+      expect(resolveIngestOfficeSlug({ office_slug: "   " })).toBe("dallas");
+      expect(resolveIngestOfficeSlug(null)).toBe("dallas");
+    });
+
+    it("returns a PRESENT valid slug (snake_case or camelCase)", () => {
+      expect(resolveIngestOfficeSlug({ office_slug: "atlanta" })).toBe("atlanta");
+      expect(resolveIngestOfficeSlug({ officeSlug: "office_2" })).toBe("office_2");
+    });
+
+    it("rejects (null) a PRESENT but schema-unsafe slug — never coerces it to dallas", () => {
+      expect(resolveIngestOfficeSlug({ office_slug: "Dallas" })).toBeNull(); // uppercase
+      expect(resolveIngestOfficeSlug({ office_slug: "dallas; drop" })).toBeNull();
+      expect(resolveIngestOfficeSlug({ office_slug: "2dallas" })).toBeNull(); // leading digit
+    });
+  });
+
+  describe("countPayloadRows (sheets-aware, mirrors extractRows)", () => {
+    it("prefers the sender's provenance count", () => {
+      expect(countPayloadRows({ provenance: { rowCount: 42 }, rows: [1, 2] })).toBe(42);
+      expect(countPayloadRows({ provenance: { row_count: 7 } })).toBe(7);
+    });
+
+    it("counts top-level rows", () => {
+      expect(countPayloadRows({ rows: [1, 2, 3] })).toBe(3);
+    });
+
+    it("flattens an array-of-sheets payload (previously counted as 0)", () => {
+      expect(countPayloadRows({ sheets: [{ rows: [1, 2] }, { rows: [3] }, { rows: [] }] })).toBe(3);
+    });
+
+    it("flattens a keyed-object sheets payload", () => {
+      expect(countPayloadRows({ sheets: { Dallas: [1, 2], Atlanta: [3] } })).toBe(3);
+    });
+
+    it("is 0 for an empty / absent payload", () => {
+      expect(countPayloadRows({})).toBe(0);
+      expect(countPayloadRows(null)).toBe(0);
     });
   });
 

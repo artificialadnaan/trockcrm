@@ -70,8 +70,22 @@ describe("POST /api/bid-board-sync/ingest", () => {
     expect(inboxMocks.acceptBidBoardIngestion).not.toHaveBeenCalled();
   });
 
-  it("rejects a missing/invalid office_slug with 400", async () => {
+  it("defaults a MISSING office_slug to dallas (legacy importer fallback) and enqueues with 202", async () => {
     const body = JSON.stringify({ rows: [] });
+    const res = await request(createApp())
+      .post("/api/bid-board-sync/ingest")
+      .set("content-type", "application/json")
+      .set("x-bid-board-sync-signature", sign(body))
+      .send(body);
+    expect(res.status).toBe(202);
+    expect(inboxMocks.acceptBidBoardIngestion).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ officeSlug: "dallas" })
+    );
+  });
+
+  it("rejects a PRESENT but schema-unsafe office_slug with 400 (never coerced to dallas)", async () => {
+    const body = JSON.stringify({ office_slug: "BAD SLUG", rows: [] });
     const res = await request(createApp())
       .post("/api/bid-board-sync/ingest")
       .set("content-type", "application/json")
@@ -79,6 +93,20 @@ describe("POST /api/bid-board-sync/ingest", () => {
       .send(body);
     expect(res.status).toBe(400);
     expect(inboxMocks.acceptBidBoardIngestion).not.toHaveBeenCalled();
+  });
+
+  it("records the sheets-form row count (not 0) when the payload uses sheets", async () => {
+    const body = JSON.stringify({ office_slug: "dallas", sheets: [{ rows: [1, 2] }, { rows: [3] }] });
+    const res = await request(createApp())
+      .post("/api/bid-board-sync/ingest")
+      .set("content-type", "application/json")
+      .set("x-bid-board-sync-signature", sign(body))
+      .send(body);
+    expect(res.status).toBe(202);
+    expect(inboxMocks.acceptBidBoardIngestion).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ rowCount: 3 })
+    );
   });
 
   it("ACKNOWLEDGES with 202 promptly by enqueuing (does not run the import inline)", async () => {

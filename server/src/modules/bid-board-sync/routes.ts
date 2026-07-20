@@ -5,7 +5,8 @@ import {
   acceptBidBoardIngestion,
   readInboxStatusByKey,
   computeIdempotencyKey,
-  extractOfficeSlug,
+  resolveIngestOfficeSlug,
+  countPayloadRows,
 } from "./inbox.js";
 
 export const bidBoardSyncRoutes = Router();
@@ -22,13 +23,6 @@ function verifySignature(rawBody: Buffer, signatureHeader: string | undefined): 
   } catch {
     return false;
   }
-}
-
-function rowCountFromPayload(payload: any, rows: unknown[]): number {
-  const p = payload?.provenance;
-  if (typeof p?.rowCount === "number") return p.rowCount;
-  if (typeof p?.row_count === "number") return p.row_count;
-  return rows.length;
 }
 
 // Durably ACCEPT an ingestion request and return 202 immediately. The full import runs asynchronously in
@@ -56,14 +50,15 @@ bidBoardSyncRoutes.post(
         return;
       }
 
-      const officeSlug = extractOfficeSlug(payload);
+      // Absent office → 'dallas' (matches the importer's legacy normalizeOfficeSlug default, so a signed
+      // sender that omits the office keeps ingesting); a present-but-schema-unsafe slug is still rejected.
+      const officeSlug = resolveIngestOfficeSlug(payload);
       if (!officeSlug) {
-        res.status(400).json({ error: "Missing or invalid office_slug" });
+        res.status(400).json({ error: "Invalid office_slug" });
         return;
       }
 
       const idempotencyKey = computeIdempotencyKey(rawBody);
-      const rows = Array.isArray(payload?.rows) ? payload.rows : [];
       const sourceFilename =
         (typeof payload?.provenance?.sourceFilename === "string" && payload.provenance.sourceFilename) ||
         (typeof payload?.provenance?.source_filename === "string" && payload.provenance.source_filename) ||
@@ -73,7 +68,8 @@ bidBoardSyncRoutes.post(
         officeSlug,
         payload,
         payloadHash: idempotencyKey,
-        rowCount: rowCountFromPayload(payload, rows),
+        // Sheets-aware count (mirrors the importer's extractRows) so row_count + logs reflect the real size.
+        rowCount: countPayloadRows(payload),
         sourceFilename,
       });
 
@@ -115,7 +111,9 @@ bidBoardSyncRoutes.post(
         return;
       }
 
-      const officeSlug = extractOfficeSlug(body);
+      // Resolve the office the SAME way /ingest did (absent → 'dallas'), so a probe for a legacy no-office
+      // payload finds the row it was keyed under; a present-but-invalid slug still 400s.
+      const officeSlug = resolveIngestOfficeSlug(body);
       const idempotencyKey =
         typeof body?.idempotency_key === "string"
           ? body.idempotency_key

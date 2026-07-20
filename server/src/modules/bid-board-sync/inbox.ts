@@ -42,6 +42,40 @@ export function extractOfficeSlug(payload: any): string | null {
   return isValidOfficeSlug(slug) ? slug : null;
 }
 
+/**
+ * Resolve the office slug for ACCEPT, preserving the importer's LEGACY fallback: a payload that OMITS the
+ * office (absent or empty/whitespace) defaults to 'dallas' — mirroring the unchanged
+ * `normalizeOfficeSlug` (service.ts), so a signed sender relying on that documented-by-code default keeps
+ * ingesting. A PRESENT but schema-unsafe slug is still rejected (returns null): the slug becomes a tenant
+ * schema name + advisory-lock key, so a malformed value must never be silently coerced to dallas.
+ */
+export function resolveIngestOfficeSlug(payload: any): string | null {
+  const raw = payload?.office_slug ?? payload?.officeSlug;
+  if (raw == null || (typeof raw === "string" && raw.trim() === "")) return "dallas";
+  return isValidOfficeSlug(raw) ? raw : null;
+}
+
+/**
+ * Row count for the inbox row + processing logs. Prefers the sender's provenance count, else derives it the
+ * SAME way the importer's `extractRows` does — top-level `rows`, else flattened `sheets` (array-of-sheets or
+ * a keyed object) — so a sheets-form payload records its real size instead of 0 (the observability this
+ * incident added would otherwise report zero rows for a large ingestion).
+ */
+export function countPayloadRows(payload: any): number {
+  const provenance = payload?.provenance;
+  if (typeof provenance?.rowCount === "number") return provenance.rowCount;
+  if (typeof provenance?.row_count === "number") return provenance.row_count;
+  if (Array.isArray(payload?.rows)) return payload.rows.length;
+  const sheets = payload?.sheets;
+  if (Array.isArray(sheets)) {
+    return sheets.reduce((n: number, sheet: any) => n + (Array.isArray(sheet?.rows) ? sheet.rows.length : 0), 0);
+  }
+  if (sheets && typeof sheets === "object") {
+    return Object.values(sheets).reduce((n: number, rows: any) => n + (Array.isArray(rows) ? rows.length : 0), 0);
+  }
+  return 0;
+}
+
 /** Stable idempotency key: sha256 of the EXACT request bytes SyncHub signed. A retry of the same POST
  *  carries identical bytes → identical key → one logical ingestion; a genuinely new scrape (new
  *  extractedAt or changed rows) hashes differently → its own job.
