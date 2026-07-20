@@ -51,6 +51,12 @@ async function setupSchema() {
       completed_at timestamptz
     );
 
+    -- Mirrors migration 0188: at most one live bid_board_ingest job per inbox row (dedupes concurrent
+    -- recovery enqueues via ON CONFLICT).
+    CREATE UNIQUE INDEX job_queue_bbi_one_live_job_idx
+      ON public.job_queue ((payload->>'inboxId'))
+      WHERE job_type = 'bid_board_ingest' AND status IN ('pending', 'processing');
+
     CREATE TABLE public.bid_board_ingestion_inbox (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
       office_slug text NOT NULL,
@@ -378,6 +384,25 @@ describe("recoverOrphanedInboxJobs (crash recovery)", () => {
     expect(await jobCount(inboxId)).toBe(1);
     const recovered = await recoverOrphanedInboxJobs(db);
     expect(recovered).toBe(0);
+    expect(await jobCount(inboxId)).toBe(1);
+  });
+
+  it("enforces at most ONE live job per inbox row — a concurrent recovery enqueue is deduped by the unique index", async () => {
+    const { inboxId } = await accept(); // inbox row + one live 'pending' job
+    expect(await jobCount(inboxId)).toBe(1);
+    // Simulate a second worker's recovery that passed its own NOT EXISTS snapshot before the first committed,
+    // and tries to enqueue a second live job for the same inbox row. The partial unique index + ON CONFLICT
+    // DO NOTHING drops it, so the shared inbox attempts counter can't be double-charged.
+    const dup = await db.query(
+      `INSERT INTO public.job_queue (job_type, payload, office_id, status, run_after, max_attempts)
+       VALUES ($1, jsonb_build_object('inboxId', $2::text), NULL, 'pending', NOW(), 5)
+       ON CONFLICT ((payload->>'inboxId'))
+         WHERE job_type = 'bid_board_ingest' AND status IN ('pending', 'processing')
+         DO NOTHING
+       RETURNING id`,
+      [BID_BOARD_INGEST_JOB_TYPE, inboxId]
+    );
+    expect(dup.rows.length).toBe(0); // deduped — no second job
     expect(await jobCount(inboxId)).toBe(1);
   });
 

@@ -391,12 +391,13 @@ export async function recoverOrphanedInboxJobs(
   );
 
   // (b) Re-enqueue rows still 'queued' or stale 'processing' with attempts left and no live job, using the
-  // row's OWN max_attempts (lockstep). If two worker instances run recovery at once both may enqueue a job
-  // for the same row — harmless because processBidBoardInboxJob RE-CHECKS the inbox status after acquiring
-  // the per-office lock and skips the import when a prior holder already committed it. (The lock serializes
-  // the two handlers but does NOT dedupe on its own — markInboxProcessing claims an in-flight 'processing'
-  // row, so both can capture the payload before the lock; the post-lock recheck is what prevents the
-  // duplicate import.)
+  // row's OWN max_attempts (lockstep). Two guards keep this safe under concurrent multi-worker recovery:
+  //   1. If both replicas pass the NOT EXISTS snapshot and both INSERT, the partial UNIQUE index
+  //      job_queue_bbi_one_live_job_idx (one live job per inboxId) makes the loser hit ON CONFLICT DO
+  //      NOTHING — so only ONE job is enqueued and the shared inbox attempts counter isn't double-charged
+  //      (which would prematurely dead-letter a recoverable row).
+  //   2. Even if a duplicate job did run, processBidBoardInboxJob RE-CHECKS the inbox status after the
+  //      per-office lock and skips the import when a prior holder already committed it (no duplicate import).
   const res = await db.query(
     `INSERT INTO public.job_queue (job_type, payload, office_id, status, run_after, max_attempts)
      SELECT $1::text, jsonb_build_object('inboxId', i.id::text), i.office_id, 'pending', NOW(), i.max_attempts
@@ -407,6 +408,9 @@ export async function recoverOrphanedInboxJobs(
          OR (i.status = 'processing' AND i.started_at < NOW() - make_interval(mins => $2::int))
        )
        AND ${liveJobExists}
+     ON CONFLICT ((payload->>'inboxId'))
+       WHERE job_type = 'bid_board_ingest' AND status IN ('pending', 'processing')
+       DO NOTHING
      RETURNING id`,
     [BID_BOARD_INGEST_JOB_TYPE, staleMinutes]
   );

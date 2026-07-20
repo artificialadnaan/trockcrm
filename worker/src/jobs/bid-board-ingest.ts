@@ -176,10 +176,15 @@ export async function handleBidBoardIngestJob(
     return;
   }
 
-  const [inbox, service] = await Promise.all([
-    importFirstAvailable<InboxModule>(SERVER_INBOX_MODULES),
-    importFirstAvailable<ServiceModule>(SERVER_SERVICE_MODULES),
-  ]);
+  // Load ONLY the inbox module here — it's needed to CLAIM the row. Defer the heavier service module (the
+  // importer) into the ingest callback, which processBidBoardInboxJob runs AFTER markInboxProcessing has
+  // charged an attempt. Otherwise a service-module load failure (missing prod artifact / dep failure) would
+  // throw BEFORE the claim, leaving the inbox 'queued' with attempts=0 — and periodic recovery, seeing no
+  // live job and an untouched retry budget, would re-enqueue another 5-attempt job forever (infinite loop,
+  // never terminal, status stuck 'queued'). Charging the attempt first lets a persistent loader failure
+  // dead-letter the inbox like any other repeated failure. (Node caches the import, so the deferred load is
+  // a one-time cost.)
+  const inbox = await importFirstAvailable<InboxModule>(SERVER_INBOX_MODULES);
 
   await inbox.processBidBoardInboxJob({
     // Time-bound the inbox state-machine queries too (not just the lock-client): a silent dead socket on
@@ -187,7 +192,10 @@ export async function handleBidBoardIngestJob(
     // success/failure write, wedging pollJobs() the same way.
     db: { query: timedPoolQuery },
     inboxId,
-    ingest: (p) => service.ingestBidBoardRows(p),
+    ingest: async (p) => {
+      const service = await importFirstAvailable<ServiceModule>(SERVER_SERVICE_MODULES);
+      return service.ingestBidBoardRows(p);
+    },
     withOfficeLock: (officeSlug, fn) =>
       withOfficeSessionLock(inbox.BID_BOARD_ADVISORY_NAMESPACE, officeSlug, inbox.officeAdvisoryKey, fn),
     log: (line) => console.log(line),

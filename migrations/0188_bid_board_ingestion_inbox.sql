@@ -54,3 +54,14 @@ CREATE INDEX IF NOT EXISTS bid_board_ingestion_inbox_office_status_idx
 CREATE INDEX IF NOT EXISTS job_queue_processing_type_started_idx
   ON public.job_queue (job_type, started_processing_at)
   WHERE status = 'processing';
+
+-- At most ONE live (pending/processing) bid_board_ingest job per inbox row. Under a multi-worker deployment
+-- two recovery runs can both pass the re-enqueue's NOT EXISTS guard against their own snapshots and each
+-- INSERT a job for the same orphaned row; duplicate jobs would then each charge the SHARED inbox attempts
+-- counter (markInboxProcessing), exhausting max_attempts early and terminally failing a recoverable row.
+-- This partial + expression unique index (keyed on the payload's inboxId) makes the second insert hit
+-- ON CONFLICT DO NOTHING, so recovery is idempotent across replicas. Non-inbox job types have a NULL
+-- payload->>'inboxId' and are excluded by the predicate, so this constrains only bid_board_ingest.
+CREATE UNIQUE INDEX IF NOT EXISTS job_queue_bbi_one_live_job_idx
+  ON public.job_queue ((payload->>'inboxId'))
+  WHERE job_type = 'bid_board_ingest' AND status IN ('pending', 'processing');
