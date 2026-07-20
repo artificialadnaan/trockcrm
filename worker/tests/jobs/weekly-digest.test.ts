@@ -75,7 +75,7 @@ describe("weekly digest worker", () => {
         return { rows: [{ count: "4" }] };
       }
 
-      if (sql.includes("AS total_value")) {
+      if (sql.includes("), 0) AS total_value")) {
         return { rows: [{ total_value: "250000" }] };
       }
 
@@ -181,7 +181,7 @@ describe("weekly digest worker", () => {
         return { rows: [{ count: "4" }] };
       }
 
-      if (sql.includes("AS total_value")) {
+      if (sql.includes("), 0) AS total_value")) {
         return { rows: [{ total_value: "250000" }] };
       }
 

@@ -292,6 +292,18 @@ describe("stale deal worker", () => {
       taskPersistence,
       expect.any(Array)
     );
+    expect(evaluateTaskRulesMock).not.toHaveBeenCalledWith(
+      expect.objectContaining({ dealId: "deal-postponed" }),
+      taskPersistence,
+      expect.any(Array)
+    );
+    // Nor is a stale-deal NOTIFICATION fanned out for the postponed deal — every notification insert carries
+    // the deal id in its link (/deals/<id>), so the postponed deal's link must never appear.
+    const notifiedLinks = queryMock.mock.calls
+      .filter(([sql]) => typeof sql === "string" && sql.includes("INSERT INTO office_beta.notifications"))
+      .map(([, params]) => (params as unknown[] | undefined)?.[4]);
+    expect(notifiedLinks).toContain("/deals/deal-active");
+    expect(notifiedLinks).not.toContain("/deals/deal-postponed");
   });
 
   it("rolls back the office transaction when notification fan-out fails mid-deal", async () => {

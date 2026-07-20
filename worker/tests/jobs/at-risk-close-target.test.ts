@@ -60,4 +60,22 @@ describe("worker at-risk forwards expected_close_date (Codex P2 finding A)", () 
     // no rep entry, since the rep has zero at-risk deals).
     expect(counts).toEqual([]);
   });
+
+  it("a HISTORICAL-period rollup (applyCloseTargetSuppression=false) still counts a near-postponed over-SLA deal", () => {
+    const asOf = new Date("2026-05-08T00:00:00.000Z");
+    const counts = computeRepAtRiskCountsFromRows(
+      [
+        row({
+          stage_entered_at: new Date(asOf.getTime() - 15 * dayMs).toISOString(),
+          expected_close_date: new Date(asOf.getTime() + 5 * dayMs).toISOString().slice(0, 10),
+        }),
+      ],
+      asOf,
+      false
+    );
+    // Historical periods (last_month/quarter/year) must stay deterministic: a postponement made today must
+    // NOT retroactively drop a deal from a closed period's count. So near-term suppression is OFF for them and
+    // the over-SLA deal is still counted at-risk.
+    expect(counts).toEqual([{ repId: "rep-1", atRiskCount: 1 }]);
+  });
 });

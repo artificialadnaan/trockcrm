@@ -139,9 +139,18 @@ function numberOrNull(value: string | number | bigint | null | undefined) {
   return Number.isFinite(numeric) ? numeric : null;
 }
 
+// Near-term postponement suppression applies to CURRENT-period snapshots only. HISTORICAL periods
+// (last_month/quarter/year) must stay deterministic: a postponement made TODAY must not retroactively drop a
+// deal from a CLOSED period's at_risk_count (a Jul 20→Jul 31 move would otherwise suppress the deal in the
+// June snapshot, since Jul 31 is future relative to the June period end). This mirrors periodAwarePipelineValueSql
+// above, which likewise refuses to re-zero historical value by today's close-target state. So historical
+// periods keep the pre-suppression behavior (near-term leg off; judged on stage-age as of period end).
+const HISTORICAL_PERIOD_KINDS = new Set<PeriodKind>(["last_month", "last_quarter", "last_year"]);
+
 export function computeRepAtRiskCountsFromRows(
   rows: RepAtRiskInputRow[],
-  asOf: Date
+  asOf: Date,
+  applyCloseTargetSuppression = true
 ): RepAtRiskCount[] {
   const countsByRep = new Map<string, number>();
 
@@ -154,11 +163,11 @@ export function computeRepAtRiskCountsFromRows(
         stageSlug: row.stage_slug,
         workflowRoute: normalizeWorkflowRoute(row.workflow_route),
         stageEnteredAt: row.stage_entered_at,
-        // Match the app's at-risk (applyCloseTargetSuppression:true): a postponement (near today-or-future
-        // close target) quiets the nag too, so the stored rep at_risk_count mirrors the deals
-        // list/dashboard/detail — plus the 90+ day auto-held exclusion.
+        // Current-period snapshots honor a postponement (near today-or-future close target) so the stored
+        // at_risk_count mirrors the deals list/dashboard/detail; historical periods pass false (see
+        // HISTORICAL_PERIOD_KINDS) to stay deterministic. The 90+ day auto-held exclusion applies either way.
         expectedCloseDate: row.expected_close_date,
-        applyCloseTargetSuppression: true,
+        applyCloseTargetSuppression,
         onHold: row.on_hold,
         onHoldStartedAt: row.on_hold_started_at,
         onHoldAccumulatedSeconds: numberOrNull(row.on_hold_accumulated_seconds),
@@ -221,7 +230,8 @@ async function getRepAtRiskCountsForPeriod(
 
   return computeRepAtRiskCountsFromRows(
     result.rows as RepAtRiskInputRow[],
-    periodEndAsOfDate(period)
+    periodEndAsOfDate(period),
+    !HISTORICAL_PERIOD_KINDS.has(period.kind)
   );
 }
 
