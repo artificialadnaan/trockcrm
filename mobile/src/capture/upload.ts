@@ -34,6 +34,15 @@ export type CaptureUploadInput = {
    * in the local queue but is never sent in either upload request body.
    */
   routeByTarget?: boolean;
+  /**
+   * Set true when the queued `uri` is ALREADY the compressed CRM JPEG (compression moved to enqueue time so
+   * the drain is a pure PUT). When true, `sizeBytes` carries the compressed size and uploadCapture skips
+   * re-compressing. Absent/false = a legacy or fallback item whose `uri` is the original → the drain
+   * compresses it, exactly as before (safe migration of in-flight queue items).
+   */
+  compressed?: boolean;
+  /** Compressed byte size, set alongside `compressed: true` at enqueue (used for the upload-url request). */
+  sizeBytes?: number;
 };
 
 function onlyDefinedTarget(t: CaptureTargetRef): CaptureTargetRef {
@@ -68,7 +77,12 @@ export async function uploadCapture(
   // removed mid-upload never surfaces in the gallery — the already-PUT R2 bytes just dangle unconfirmed.
   opts: { shouldConfirm?: () => boolean | Promise<boolean> } = {},
 ): Promise<FieldPhoto> {
-  const compressed = await compressForUpload(input.uri, input.width, input.height);
+  // Compression normally happens at ENQUEUE now, so a queued item's `uri` is already the compressed JPEG —
+  // use it as-is. A legacy/fallback item (compressed not set) is compressed here at drain time, as before.
+  const compressed =
+    input.compressed && typeof input.sizeBytes === "number"
+      ? { uri: input.uri, sizeBytes: input.sizeBytes, contentType: "image/jpeg" as const }
+      : await compressForUpload(input.uri, input.width, input.height);
   const target = onlyDefinedTarget(input.target);
   const scorecardScope = input.scorecardId ? { scorecardId: input.scorecardId } : {};
 

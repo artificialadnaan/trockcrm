@@ -2,6 +2,7 @@ import * as FileSystem from "expo-file-system/legacy";
 import { activateKeepAwakeAsync, deactivateKeepAwake } from "expo-keep-awake";
 import type { Fetcher } from "../api/endpoints";
 import { runConcurrentUploads, uploadCapture, UploadCancelledError, type CaptureUploadInput } from "./upload";
+import { compressForEnqueue } from "./compress";
 import {
   UPLOAD_CONCURRENCY,
   applyGpsPatch,
@@ -222,15 +223,19 @@ export async function enqueueUploads(
   const queued: QueuedUpload[] = [];
   for (const input of inputs) {
     const id = input.clientUploadId;
-    const ext = input.uri.includes(".") ? input.uri.slice(input.uri.lastIndexOf(".")) : ".jpg";
-    const dest = `${dir}${id}${ext}`;
-    // Register as in-flight under the lock, then copy OUTSIDE the lock — a large photo's copy is slow and
-    // must not block removeQueuedUploads / drain re-selection during a big batch.
+    // Register as in-flight under the lock, then compress + copy OUTSIDE the lock — both are slow (CPU / large
+    // file) and must not block removeQueuedUploads / drain re-selection during a big batch.
     await withQueueLock(async () => {
       enqueueing.add(id);
     });
+    // Compress to the CRM JPEG NOW (best-effort → fallback to the original) so the durable queue stores the
+    // compressed bytes and the drain is a pure PUT — moving the per-photo compression off the upload path.
+    const { sourceUri, sizeBytes, compressed } = await compressForEnqueue(input.uri, input.width, input.height);
+    // A compressed capture is always JPEG; a fallback keeps the original's extension.
+    const ext = compressed ? ".jpg" : input.uri.includes(".") ? input.uri.slice(input.uri.lastIndexOf(".")) : ".jpg";
+    const dest = `${dir}${id}${ext}`;
     try {
-      await FileSystem.copyAsync({ from: input.uri, to: dest });
+      await FileSystem.copyAsync({ from: sourceUri, to: dest });
     } catch (err) {
       // Copy failed — clear the in-flight marker (+ any tombstone) so `enqueueing` can't leak the id, then
       // rethrow (a copy failure still aborts the batch, as before).
@@ -240,7 +245,7 @@ export async function enqueueUploads(
       });
       throw err;
     }
-    const item: QueuedUpload = { ...input, uri: dest, enqueuedAt: Date.now(), attempts: 0 };
+    const item: QueuedUpload = { ...input, uri: dest, sizeBytes, compressed, enqueuedAt: Date.now(), attempts: 0 };
     // Persist under the lock — but if a cancel arrived WHILE copying, drop the item (delete the copy)
     // instead of appending removed evidence. A crash right after the copy still recovers via the index.
     const cancelled = await withQueueLock(async () => {

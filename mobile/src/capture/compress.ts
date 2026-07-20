@@ -49,3 +49,33 @@ export async function compressForUpload(
 
   return { uri: result.uri, sizeBytes, contentType: "image/jpeg" };
 }
+
+export type EnqueueSource = {
+  /** The file to persist into the durable queue: the compressed JPEG, or the original on fallback. */
+  sourceUri: string;
+  /** Byte size of the compressed JPEG (undefined on fallback — the drain re-derives it). */
+  sizeBytes?: number;
+  /** True when sourceUri is the already-compressed JPEG, so the drain must NOT compress again. */
+  compressed: boolean;
+};
+
+/**
+ * Compress a capture to the CRM 4032/0.92 JPEG at ENQUEUE time (not at drain), returning the file to persist
+ * in the durable queue. This moves the per-photo compression off the upload path — the drain becomes a pure
+ * network PUT — and shrinks the on-disk queue to the compressed bytes.
+ *
+ * BEST-EFFORT: if compression fails, fall back to the ORIGINAL uri with `compressed: false`, so the drain
+ * compresses it exactly as before. No capture is ever dropped because compression failed.
+ */
+export async function compressForEnqueue(
+  uri: string,
+  width?: number,
+  height?: number,
+): Promise<EnqueueSource> {
+  try {
+    const c = await compressForUpload(uri, width, height);
+    return { sourceUri: c.uri, sizeBytes: c.sizeBytes, compressed: true };
+  } catch {
+    return { sourceUri: uri, compressed: false };
+  }
+}
