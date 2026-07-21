@@ -38,12 +38,14 @@ describe("estimator backfill", () => {
     expect(planEstimatorBackfill(["Alex Koch", "Sidney Gibson"])).toEqual([]);
   });
 
-  it("builds an idempotent per-tenant UPDATE that only fills NULLs", () => {
+  it("builds an idempotent per-tenant UPDATE that only fills NULLs and rejects a sales-source collision", () => {
     const sql = buildEstimatorBackfillUpdateSql("office_dallas").toLowerCase();
     expect(sql).toContain("update office_dallas.deals");
     expect(sql).toContain("set estimator_user_id = $1");
     expect(sql).toContain("bid_board_estimator = $2");
     expect(sql).toContain("estimator_user_id is null"); // idempotent: never overwrites
+    // Mirrors the sync's NULLIF($16, sales_source_user_id): never set estimator == the deal's sales source.
+    expect(sql).toContain("sales_source_user_id is null or sales_source_user_id <> $1");
   });
 
   it("validates the office schema identifier before raw interpolation", () => {
