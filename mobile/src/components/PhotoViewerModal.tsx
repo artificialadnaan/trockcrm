@@ -135,10 +135,11 @@ export function PhotoViewerModal({
 
   const saveToDevice = useCallback(async () => {
     if (savingId != null || !current) return; // one save at a time
-    const targetId = current.id;
     const url = current.fullImageUrl ?? current.imageUrl;
+    if (!url) return; // no image to save (placeholder / unresolved URL) — the action is hidden, but guard anyway
+    const targetId = current.id;
     setSavingId(targetId);
-    const result = url ? await savePhotoToDevice(url) : "failed";
+    const result = await savePhotoToDevice(url);
     setSavingId(null);
     const kind: SaveToast = result === "saved" ? "saved" : result === "permission_denied" ? "permission" : "error";
     setToast({ id: targetId, kind });
@@ -162,7 +163,9 @@ export function PhotoViewerModal({
               {photos.length ? `${safeIndex + 1} / ${photos.length}` : ""}
             </Text>
             <View style={styles.topBarActions}>
-              {current ? (
+              {/* Only advertise Save when there's actually a URL to download — a placeholder / unresolved
+                  photo would let the download 403/fail with a generic error, so hide the action instead. */}
+              {current && (current.fullImageUrl ?? current.imageUrl) ? (
                 <Pressable
                   onPress={saveToDevice}
                   hitSlop={12}

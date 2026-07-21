@@ -13,9 +13,11 @@ import {
   createBoundedRunner,
   dedupeQueue,
   isDrainable,
+  isTerminal,
   partitionResults,
   removeIds,
   sanitizeOwnerKey,
+  selectOrphanFiles,
   selectUploadFetcher,
   type QueuedUpload,
 } from "./upload-queue-core";
@@ -57,9 +59,12 @@ export type DrainSummary = { succeeded: number; failed: number; remaining: numbe
 // (tmp+move), so a read always sees a whole index, never a torn one.
 const withQueueLock = createAsyncMutex();
 
-// One shared runner bounds enqueue-time compression across ALL (fire-and-forget) enqueueUploads calls, so a
-// rapid per-photo burst can't launch unbounded 12MP ImageManipulator jobs.
-const runCompression = createBoundedRunner(COMPRESS_CONCURRENCY);
+// One shared runner bounds the WHOLE enqueue worker — the initial full-resolution copyAsync AND the
+// compression — across ALL (fire-and-forget) enqueueUploads calls. Bounding only the encode still let a
+// 100-photo scorecard fire 100 concurrent full-res copies (each retaining the original until a compression
+// slot frees), a severe I/O/disk spike. Capping the copies too holds the working set to ~COMPRESS_CONCURRENCY
+// originals at a time. (The per-id claim under the lock stays UNBOUNDED so a burst can't starve claiming.)
+const runEnqueueWork = createBoundedRunner(COMPRESS_CONCURRENCY);
 
 // Because enqueue copies the file OUTSIDE the lock, a removeQueuedUploads can run while a photo is still
 // copying (before it's in the index). `enqueueing` maps an id currently mid-enqueue → that enqueue's
@@ -148,18 +153,20 @@ export async function getQueuedCount(ownerKey: string): Promise<number> {
   return (await readQueue(ownerKey)).filter(isDrainable).length;
 }
 
-/** Count of TERMINAL items that exhausted their retries — drives the "failed" banner. */
+/** Count of TERMINAL items that exhausted their retries — drives the "failed" banner. Keys on isTerminal, not
+ *  `!isDrainable`, so a transient mid-enqueue `staging` row is never miscounted as failed. */
 export async function getFailedCount(ownerKey: string): Promise<number> {
-  return (await readQueue(ownerKey)).filter((item) => !isDrainable(item)).length;
+  return (await readQueue(ownerKey)).filter(isTerminal).length;
 }
 
-/** Discard the terminal/failed items (and their files) — the UI's "Dismiss failed" action. */
+/** Discard the terminal/failed items (and their files) — the UI's "Dismiss failed" action. Only TERMINAL
+ *  rows are removed; a `staging` row (still enqueuing) is left alone so its in-flight worker isn't rug-pulled. */
 export async function clearFailedUploads(ownerKey: string): Promise<void> {
   await withQueueLock(async () => {
     const current = await readQueue(ownerKey);
-    const failed = current.filter((item) => !isDrainable(item));
+    const failed = current.filter(isTerminal);
     if (failed.length === 0) return;
-    await writeQueue(ownerKey, current.filter(isDrainable));
+    await writeQueue(ownerKey, current.filter((item) => !isTerminal(item)));
     await deleteQueuedFiles(failed);
   });
 }
@@ -277,9 +284,13 @@ export async function enqueueUploads(
 
     // We OWN this id. Run the actual enqueue; whatever happens, settle `own` for any awaiter AND release the id
     // (compress + copy run OUTSIDE the lock — both are slow and must not block removeQueuedUploads / the drain).
+    // The copy + compress body is BOUNDED (runEnqueueWork) so a 100-photo batch holds ~COMPRESS_CONCURRENCY
+    // full-res originals in flight, not all 100 at once. Claiming the id happened above, UNBOUNDED, so the
+    // in-flight/await handshake can't be starved behind the copy queue.
     let result: QueuedUpload | null = null;
     let error: unknown;
     try {
+      result = await runEnqueueWork(async () => {
       // Persist the ORIGINAL into the durable queue BEFORE the slow compression, then stage the compressed bytes
       // to a SEPARATE durable path and switch the row only once that file is COMPLETE — the original is
       // preserved until then, so a torn write (app kill / disk full) mid-compressed-copy can never leave the row
@@ -289,7 +300,11 @@ export async function enqueueUploads(
       const origPath = `${dir}${id}.orig`;
       const jpgPath = `${dir}${id}.jpg`;
       await FileSystem.copyAsync({ from: input.uri, to: origPath });
-      const original: QueuedUpload = { ...input, uri: origPath, sizeBytes: 0, compressed: false, enqueuedAt: Date.now(), attempts: 0 };
+      // `staging: true` keeps this durable row NON-DRAINABLE (isDrainable) until compression finishes: the
+      // original is recoverable on a kill, but the drain won't pick it up and spin a SECOND compression
+      // concurrent with this one (which would push in-flight encodes past COMPRESS_CONCURRENCY → the jank/OOM
+      // path). Cleared on the compressed-file switch, and on the fallback path below.
+      const original: QueuedUpload = { ...input, uri: origPath, sizeBytes: 0, compressed: false, staging: true, enqueuedAt: Date.now(), attempts: 0 };
       // Persist under the lock — if a cancel arrived WHILE copying, drop the item (delete the copy) instead of
       // appending removed evidence.
       const cancelledAtPersist = await withQueueLock(async () => {
@@ -299,51 +314,58 @@ export async function enqueueUploads(
       });
       if (cancelledAtPersist) {
         await FileSystem.deleteAsync(origPath, { idempotent: true }).catch(() => undefined);
-        result = null;
-      } else {
-        // Compress the durable original into a SEPARATE file; the original row stays valid until the switch.
-        const { sourceUri, sizeBytes } = await runCompression(() =>
-          compressForEnqueue(origPath, input.width, input.height),
-        );
-        const producedJpeg = sourceUri !== origPath; // a fresh compressed temp, vs the fallback returning origPath
-        let stagedJpg = false;
-        if (producedJpeg) {
-          try {
-            await FileSystem.copyAsync({ from: sourceUri, to: jpgPath }); // SEPARATE path — original untouched
-            stagedJpg = true;
-          } catch {
-            // Staging the compressed file failed (e.g. disk pressure) — discard the partial; keep the original.
-            await FileSystem.deleteAsync(jpgPath, { idempotent: true }).catch(() => undefined);
-          } finally {
-            await FileSystem.deleteAsync(sourceUri, { idempotent: true }).catch(() => undefined);
-          }
-        }
-        if (stagedJpg) {
-          // Switch the row to the COMPLETE compressed file (only if still queued), then remove the original.
-          const switched = await withQueueLock(async () => {
-            if (cancelledMidEnqueue.has(id)) return false;
-            const q = await readQueue(ownerKey);
-            const i = q.findIndex((it) => it.clientUploadId === id);
-            if (i < 0) return false;
-            q[i] = { ...q[i], uri: jpgPath, compressed: true, sizeBytes };
-            await writeQueue(ownerKey, q);
-            return true;
-          });
-          if (switched) {
-            await FileSystem.deleteAsync(origPath, { idempotent: true }).catch(() => undefined); // no longer referenced
-            result = { ...original, uri: jpgPath, compressed: true, sizeBytes };
-          } else {
-            // Removed/cancelled during staging — clean up BOTH files.
-            await FileSystem.deleteAsync(jpgPath, { idempotent: true }).catch(() => undefined);
-            await FileSystem.deleteAsync(origPath, { idempotent: true }).catch(() => undefined);
-            result = null;
-          }
-        } else {
-          // Compression fell back (or staging failed) — the durable original stays (compressed:false); the drain
-          // compresses it at upload. Never lost.
-          result = original;
+        return null;
+      }
+      // Compress the durable original into a SEPARATE file; the original row stays valid until the switch.
+      const { sourceUri, sizeBytes } = await compressForEnqueue(origPath, input.width, input.height);
+      const producedJpeg = sourceUri !== origPath; // a fresh compressed temp, vs the fallback returning origPath
+      let stagedJpg = false;
+      if (producedJpeg) {
+        try {
+          await FileSystem.copyAsync({ from: sourceUri, to: jpgPath }); // SEPARATE path — original untouched
+          stagedJpg = true;
+        } catch {
+          // Staging the compressed file failed (e.g. disk pressure) — discard the partial; keep the original.
+          await FileSystem.deleteAsync(jpgPath, { idempotent: true }).catch(() => undefined);
+        } finally {
+          await FileSystem.deleteAsync(sourceUri, { idempotent: true }).catch(() => undefined);
         }
       }
+      if (stagedJpg) {
+        // Switch the row to the COMPLETE compressed file (only if still queued), then remove the original.
+        // Clearing `staging` here makes the now-compressed row drainable.
+        const switched = await withQueueLock(async () => {
+          if (cancelledMidEnqueue.has(id)) return false;
+          const q = await readQueue(ownerKey);
+          const i = q.findIndex((it) => it.clientUploadId === id);
+          if (i < 0) return false;
+          q[i] = { ...q[i], uri: jpgPath, compressed: true, sizeBytes, staging: false };
+          await writeQueue(ownerKey, q);
+          return true;
+        });
+        if (switched) {
+          await FileSystem.deleteAsync(origPath, { idempotent: true }).catch(() => undefined); // no longer referenced
+          return { ...original, uri: jpgPath, compressed: true, sizeBytes, staging: false };
+        }
+        // Removed/cancelled during staging — clean up BOTH files.
+        await FileSystem.deleteAsync(jpgPath, { idempotent: true }).catch(() => undefined);
+        await FileSystem.deleteAsync(origPath, { idempotent: true }).catch(() => undefined);
+        return null;
+      }
+      // Compression fell back (or staging failed) — the durable original stays (compressed:false); the drain
+      // compresses it at upload. Clear `staging` so the row becomes drainable (only if still queued + not
+      // cancelled), then hand back the drainable row.
+      const clearedOriginal: QueuedUpload = { ...original, staging: false };
+      await withQueueLock(async () => {
+        if (cancelledMidEnqueue.has(id)) return;
+        const q = await readQueue(ownerKey);
+        const i = q.findIndex((it) => it.clientUploadId === id);
+        if (i < 0) return;
+        q[i] = { ...q[i], staging: false };
+        await writeQueue(ownerKey, q);
+      });
+      return clearedOriginal;
+      });
     } catch (e) {
       error = e;
     }
@@ -397,6 +419,56 @@ export async function clearUploadQueue(ownerKey: string): Promise<void> {
   });
 }
 
+/**
+ * Self-heal the owner's storage before a drain. Two leaks an interrupted enqueue can leave behind:
+ *
+ *  1. STUCK STAGING ROWS — a row persisted `staging: true` whose enqueue then died (app killed mid-compress, or
+ *     a rare lock-write throw) with no live enqueue owning it. It would sit non-drainable forever. We clear
+ *     `staging` on any indexed row NOT currently mid-enqueue, so the original drains (and gets re-compressed at
+ *     upload) instead of stranding.
+ *  2. ORPHANED STAGING FILES — a `<id>.orig` / `<id>.jpg` on disk that no live index row references (killed
+ *     mid-copy before the row switch, or left as the pre-switch sibling). The normal cleanup only deletes
+ *     `item.uri`, so these leak. We delete every staging file not referenced by the (post-unstick) index.
+ *
+ * Runs under the queue lock so it can't race a concurrent enqueue's persist/switch. Best-effort throughout —
+ * a directory-list or delete failure never blocks the drain.
+ */
+async function reconcileOwnerStorage(ownerKey: string): Promise<void> {
+  await withQueueLock(async () => {
+    const queue = await readQueue(ownerKey);
+    // Unstick any staging row whose enqueue is no longer in flight (nothing left to complete the switch).
+    let changed = false;
+    const unstuck = queue.map((item) => {
+      if (item.staging === true && !enqueueing.has(item.clientUploadId)) {
+        changed = true;
+        return { ...item, staging: false };
+      }
+      return item;
+    });
+    if (changed) await writeQueue(ownerKey, unstuck);
+
+    // Reclaim staging files no live row references. Skip ids still mid-enqueue: their in-flight worker owns
+    // both `<id>.orig` and `<id>.jpg` and hasn't finished the switch, so neither is an orphan yet.
+    let names: string[];
+    try {
+      names = await FileSystem.readDirectoryAsync(ownerDir(ownerKey));
+    } catch {
+      return; // dir missing / unreadable — nothing to reclaim
+    }
+    const inflight = enqueueing;
+    const candidates = names.filter((name) => {
+      const id = name.slice(0, name.lastIndexOf("."));
+      return !inflight.has(id);
+    });
+    const orphans = selectOrphanFiles(candidates, unstuck);
+    await Promise.all(
+      orphans.map((name) =>
+        FileSystem.deleteAsync(`${ownerDir(ownerKey)}${name}`, { idempotent: true }).catch(() => undefined),
+      ),
+    );
+  });
+}
+
 // A drain must never run twice at once (foreground + background, or a double tap): a second caller would
 // re-upload in-flight items. Module-local guard — both entry points share this process.
 let draining = false;
@@ -419,6 +491,9 @@ export async function drainUploadQueue(
   draining = true;
   let keptAwake = false;
   try {
+    // Self-heal interrupted enqueues (stuck staging rows + orphaned staging files) before planning, so a kill
+    // mid-enqueue neither strands a photo nor leaks disk. Best-effort — never blocks the drain.
+    await reconcileOwnerStorage(ownerKey).catch(() => undefined);
     // Plan the drainable id order UNDER THE LOCK so the snapshot is consistent with any cancellation that
     // has already completed (terminal/failed items are left for the UI to surface + discard, never re-PUT).
     const planned = await withQueueLock(async () => {

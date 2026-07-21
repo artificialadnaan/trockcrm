@@ -55,11 +55,33 @@ export type QueuedUpload = CaptureUploadInput & {
   attempts: number;
   /** Epoch ms of the last drain attempt (for surfacing/debugging). */
   lastTriedAt?: number;
+  /**
+   * True while the durable ORIGINAL is persisted but enqueue-time compression is still in flight (the row's
+   * `.orig` file may yet be switched to the staged `.jpg`). Such a row is NOT drainable: draining it would
+   * launch a SECOND compression concurrent with the enqueue's, ballooning the in-flight encode count past
+   * COMPRESS_CONCURRENCY. Cleared once the compressed file is switched in (or compression falls back), after
+   * which the row drains normally. Absent on all legacy/committed rows (treated as not-staging).
+   */
+  staging?: boolean;
 };
 
-/** Drainable = not yet terminal. Legacy items without `attempts` are treated as 0. */
+/**
+ * TERMINAL = exhausted its retries and will never drain again (surfaced to the UI as "failed"). This is the
+ * `!isDrainable` complement's REAL meaning — a `staging` row is transiently non-drainable but NOT terminal, so
+ * the "failed" count/clear must key on this (not `!isDrainable`) or it would miscount / delete a mid-enqueue
+ * original. Legacy items without `attempts` are treated as 0.
+ */
+export function isTerminal(item: QueuedUpload): boolean {
+  return (item.attempts ?? 0) >= MAX_UPLOAD_ATTEMPTS;
+}
+
+/**
+ * Drainable = not yet terminal AND not mid-enqueue-staging. A `staging` row's original is durable (survives a
+ * kill) but must be skipped by the drain until its enqueue completes the compressed-file switch, so the drain
+ * can't spin up a duplicate compression. Legacy items without `attempts` are treated as 0.
+ */
 export function isDrainable(item: QueuedUpload): boolean {
-  return (item.attempts ?? 0) < MAX_UPLOAD_ATTEMPTS;
+  return !isTerminal(item) && item.staging !== true;
 }
 
 /** Legacy/unmarked queue items remain office-pinned; only an explicit edit-evidence marker opts out. */
@@ -123,6 +145,31 @@ export function dedupeQueue(existing: QueuedUpload[], incoming: QueuedUpload[]):
 export function removeIds(queue: QueuedUpload[], ids: Iterable<string>): QueuedUpload[] {
   const drop = new Set(ids);
   return queue.filter((item) => !drop.has(item.clientUploadId));
+}
+
+// A staged capture lives at `<id>.orig` (the pre-compression original) or `<id>.jpg` (the compressed copy),
+// and the index row points at whichever is CURRENT. If the app is killed mid-copy (before `<id>.jpg` is
+// switched in) or before/after a row is removed, the OTHER file can be left on disk while the index no longer
+// references it — a storage leak the drain never cleans (it only deletes `item.uri`). These extensions mark a
+// file as queue-owned staging so startup reconciliation can recognize + reclaim the unreferenced ones.
+const STAGING_EXTENSIONS = [".orig", ".jpg"] as const;
+
+/** True iff `name` is a queue staging file (`<id>.orig` / `<id>.jpg`) — the only files we may reclaim. */
+export function isStagingFileName(name: string): boolean {
+  return STAGING_EXTENSIONS.some((ext) => name.endsWith(ext));
+}
+
+/**
+ * Given the queue's on-disk filenames and the current index, return the staging files SAFE to delete: every
+ * `<id>.orig` / `<id>.jpg` NOT referenced by any live index row's basename. A row referenced by the index (via
+ * its uri basename) is kept; its sibling extension (the original after a switch, or a partial compressed copy
+ * from a torn write) is reclaimed. Non-staging files (index.json, .tmp, .bak) are never touched.
+ */
+export function selectOrphanFiles(fileNames: string[], queue: QueuedUpload[]): string[] {
+  const referenced = new Set(
+    queue.map((item) => item.uri.slice(item.uri.lastIndexOf("/") + 1)),
+  );
+  return fileNames.filter((name) => isStagingFileName(name) && !referenced.has(name));
 }
 
 /**

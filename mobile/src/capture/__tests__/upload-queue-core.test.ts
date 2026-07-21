@@ -7,10 +7,13 @@ import {
   createBoundedRunner,
   dedupeQueue,
   isDrainable,
+  isStagingFileName,
+  isTerminal,
   newClientUploadId,
   partitionResults,
   removeIds,
   sanitizeOwnerKey,
+  selectOrphanFiles,
   selectUploadFetcher,
   shouldRouteUploadByTarget,
   uploadOwnerKey,
@@ -93,6 +96,55 @@ describe("upload-queue-core", () => {
     const bumped = bumpAttempts(queue, ["a"], 1234);
     expect(bumped[0]).toMatchObject({ clientUploadId: "a", attempts: 1, lastTriedAt: 1234 });
     expect(bumped[1]).toMatchObject({ clientUploadId: "b", attempts: 1 }); // untouched
+  });
+
+  it("isDrainable excludes rows still mid-enqueue-staging (so the drain can't double-compress)", () => {
+    // A fresh original persisted before compression finishes is NON-drainable until `staging` is cleared.
+    expect(isDrainable({ ...item("a", 0), staging: true })).toBe(false);
+    // Cleared / absent staging drains normally (a legacy or committed row has no `staging` field).
+    expect(isDrainable({ ...item("a", 0), staging: false })).toBe(true);
+    expect(isDrainable(item("a", 0))).toBe(true);
+    // Staging never RESURRECTS a terminal row — the retry cap still wins.
+    expect(isDrainable({ ...item("a", MAX_UPLOAD_ATTEMPTS), staging: false })).toBe(false);
+  });
+
+  it("isTerminal keys the failed count on retries-exhausted, NOT the transient staging state", () => {
+    expect(isTerminal(item("a", MAX_UPLOAD_ATTEMPTS))).toBe(true);
+    expect(isTerminal(item("a", MAX_UPLOAD_ATTEMPTS - 1))).toBe(false);
+    expect(isTerminal(item("a", 0))).toBe(false);
+    // A mid-enqueue staging row is non-drainable but NOT terminal — it must never be counted/cleared as failed.
+    expect(isTerminal({ ...item("a", 0), staging: true })).toBe(false);
+    expect(isDrainable({ ...item("a", 0), staging: true })).toBe(false);
+  });
+
+  it("isStagingFileName recognizes only queue staging files", () => {
+    expect(isStagingFileName("cu-abc.orig")).toBe(true);
+    expect(isStagingFileName("cu-abc.jpg")).toBe(true);
+    expect(isStagingFileName("index.json")).toBe(false);
+    expect(isStagingFileName("index.json.tmp")).toBe(false);
+    expect(isStagingFileName("index.json.bak")).toBe(false);
+  });
+
+  it("selectOrphanFiles reclaims unreferenced staging files but never the live/index ones", () => {
+    // 'a' committed to its .jpg (its .orig sibling is a leftover); 'b' still on .orig (mid-fallback).
+    const queue: QueuedUpload[] = [
+      { ...item("a"), uri: "file:///queue/o1/a.jpg" },
+      { ...item("b"), uri: "file:///queue/o1/b.orig" },
+    ];
+    const onDisk = [
+      "a.jpg", // referenced by 'a' → keep
+      "a.orig", // 'a' switched away from it → orphan
+      "b.orig", // referenced by 'b' → keep
+      "c.jpg", // no row at all (killed mid-copy before the row landed) → orphan
+      "index.json", // never a staging file → keep
+      "index.json.bak",
+    ];
+    expect(selectOrphanFiles(onDisk, queue).sort()).toEqual(["a.orig", "c.jpg"]);
+  });
+
+  it("selectOrphanFiles keeps everything when every staging file is referenced", () => {
+    const queue: QueuedUpload[] = [{ ...item("a"), uri: "file:///queue/o1/a.jpg" }];
+    expect(selectOrphanFiles(["a.jpg", "index.json"], queue)).toEqual([]);
   });
 
   it("partitionResults splits succeeded vs failed by settled status (positional)", () => {
