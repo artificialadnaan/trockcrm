@@ -28,7 +28,8 @@ jest.mock("expo-file-system/legacy", () => {
 
 import * as FileSystem from "expo-file-system/legacy";
 import { saveScorecardDraft, listScorecardDrafts, deleteScorecardDraft } from "../draft-store";
-import type { ScorecardDraft } from "../draft";
+import type { ScorecardDraft, ScorecardDraftPhoto } from "../draft";
+import { FIELD_SCORECARD_SECTION_KEYS } from "../scoring";
 
 const fs = FileSystem as unknown as { __store: Map<string, string>; __reset: () => void };
 
@@ -85,6 +86,34 @@ describe("draft-store: interrupted-write recovery (listScorecardDrafts read orde
     await saveScorecardDraft("u1", draft("a"), 1);
     fs.__store.set(`${indexPath()}.tmp`, '[{"id":"b" PARTIAL'); // unparseable
     expect((await listScorecardDrafts("u1")).map((d) => d.id)).toEqual(["a"]);
+  });
+});
+
+describe("draft-store: photo URI rebasing on resume (rotated iOS container)", () => {
+  // A stale container path from a PRIOR install (different UUID), including the /Documents/ segment so it
+  // reads as a durable-store uri. The mock's live documentDirectory is file:///doc/.
+  const STALE = "file:///var/mobile/Containers/Data/Application/OLD-1111/Documents/";
+  function photo(uri: string): ScorecardDraftPhoto {
+    return { key: "p1", uri, clientUploadId: "cu-1", sectionKey: FIELD_SCORECARD_SECTION_KEYS[0], caption: "" };
+  }
+  function draftWithPhoto(id: string, uri: string): ScorecardDraft {
+    return { ...draft(id), photos: [photo(uri)] };
+  }
+
+  it("rebases a stale-container photo uri onto the live per-draft directory on load", async () => {
+    await saveScorecardDraft("u1", draftWithPhoto("a", `${STALE}scorecard-drafts/u1/a/cu-1.jpg`), 1);
+    const loaded = await listScorecardDrafts("u1");
+    // Healed onto the live doc dir (file:///doc/scorecard-drafts/<owner>/a/), keeping the deterministic
+    // <clientUploadId><ext> filename — so the resumed draft's photo renders and submit's copyAsync succeeds.
+    expect(loaded[0].photos[0].uri).toMatch(/^file:\/\/\/doc\/scorecard-drafts\/.*\/a\/cu-1\.jpg$/);
+    expect(loaded[0].photos[0].uri).not.toContain("OLD-1111");
+  });
+
+  it("leaves an already-live photo uri unchanged (idempotent)", async () => {
+    await saveScorecardDraft("u1", draftWithPhoto("a", `${STALE}scorecard-drafts/u1/a/cu-1.jpg`), 1);
+    const liveUri = (await listScorecardDrafts("u1"))[0].photos[0].uri;
+    await saveScorecardDraft("u1", draftWithPhoto("a", liveUri), 2);
+    expect((await listScorecardDrafts("u1"))[0].photos[0].uri).toBe(liveUri);
   });
 });
 
