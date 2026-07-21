@@ -11,7 +11,7 @@ vi.mock("../src/db.js", () => ({
   },
 }));
 
-const { deadJob, deferJob, pollJobs, registerJobHandler, recoverStaleJobs, __resetQueueStateForTest } = await import("../src/queue.js");
+const { deadJob, deferJob, pollJobs, pollBidBoardIngestJobs, registerJobHandler, recoverStaleJobs, __resetQueueStateForTest } = await import("../src/queue.js");
 
 describe("worker queue", () => {
   beforeEach(() => {
@@ -423,5 +423,85 @@ describe("worker queue", () => {
     const sql = String(call![0]);
     expect(sql).toMatch(/SET status = 'pending'/);
     expect(sql).not.toMatch(/THEN 'dead'/); // must NOT dead-letter a possibly-never-run final attempt
+  });
+
+  it("main pollJobs EXCLUDES bid_board_ingest from its claim (that type runs on a dedicated poller)", async () => {
+    // A multi-minute bid_board_ingest must not hold the main `polling` guard across its run phase and starve
+    // every other job type — so the main claim predicate excludes it.
+    let claimSql = "";
+    const client = {
+      query: vi.fn(async (sql: string) => {
+        if (sql.includes("SELECT * FROM public.job_queue")) {
+          claimSql = sql;
+          return { rows: [] };
+        }
+        if (sql === "BEGIN" || sql === "COMMIT") return { rows: [] };
+        throw new Error(`Unexpected client SQL: ${sql}`);
+      }),
+      release: vi.fn(),
+    };
+    connectMock.mockResolvedValue(client);
+
+    await pollJobs();
+
+    expect(claimSql).toContain("job_type <> 'bid_board_ingest'");
+  });
+
+  it("pollBidBoardIngestJobs claims ONLY bid_board_ingest, one at a time (LIMIT 1)", async () => {
+    let claimSql = "";
+    let claimParams: unknown[] | undefined;
+    const client = {
+      query: vi.fn(async (sql: string, params?: unknown[]) => {
+        if (sql.includes("SELECT * FROM public.job_queue")) {
+          claimSql = sql;
+          claimParams = params;
+          return { rows: [] };
+        }
+        if (sql === "BEGIN" || sql === "COMMIT") return { rows: [] };
+        throw new Error(`Unexpected client SQL: ${sql}`);
+      }),
+      release: vi.fn(),
+    };
+    connectMock.mockResolvedValue(client);
+
+    await pollBidBoardIngestJobs();
+
+    expect(claimSql).toContain("job_type = 'bid_board_ingest'");
+    expect(claimSql).not.toContain("<>"); // only-this-type, not exclude-this-type
+    expect(claimParams).toEqual([1]); // BID_BOARD_INGEST_CONCURRENCY — one import at a time
+  });
+
+  it("the dedicated poller reschedules a DEFERRED bid_board_ingest result as pending (does not complete it)", async () => {
+    // A live-leased inbox row surfaces as deferJob(...) → the queue row must go back to 'pending' with the
+    // requested delay, NOT 'completed' (which would strand the inbox until the slow periodic sweep).
+    registerJobHandler("bid_board_ingest", async () => deferJob("inbox lease held by a live handler", 182));
+    const client = {
+      query: vi.fn(async (sql: string) => {
+        if (sql === "BEGIN" || sql === "COMMIT") return { rows: [] };
+        if (sql.includes("SELECT * FROM public.job_queue")) {
+          return {
+            rows: [
+              { id: 51, job_type: "bid_board_ingest", office_id: "office-1", payload: { inboxId: "i1" }, attempts: 0, max_attempts: 8 },
+            ],
+          };
+        }
+        if (sql.includes("UPDATE public.job_queue SET status = 'processing'")) return { rows: [] };
+        throw new Error(`Unexpected client SQL: ${sql}`);
+      }),
+      release: vi.fn(),
+    };
+    connectMock.mockResolvedValue(client);
+    queryMock.mockResolvedValue({ rows: [] });
+
+    await pollBidBoardIngestJobs();
+
+    expect(queryMock).toHaveBeenCalledWith(
+      expect.stringContaining("SET status = 'pending'"),
+      ["inbox lease held by a live handler", 182, 51, 1],
+    );
+    expect(queryMock).not.toHaveBeenCalledWith(
+      expect.stringContaining("SET status = 'completed'"),
+      expect.anything(),
+    );
   });
 });

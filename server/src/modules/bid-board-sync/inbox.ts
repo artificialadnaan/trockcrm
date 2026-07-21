@@ -514,7 +514,12 @@ export interface ProcessInboxDeps {
   log?: (line: string) => void;
 }
 
-export type ProcessInboxOutcome = "succeeded" | "noop";
+export type ProcessInboxOutcome =
+  | "succeeded"
+  | "noop"
+  // The row is LEASED by a live handler (another replica is mid-import): the caller should DEFER the queue
+  // job (not complete it), coming back after the lease would lapse.
+  | { status: "deferred"; runAfterSeconds: number; reason: string };
 
 /**
  * Process one inbox row: run the (unchanged) importer under the per-office lock and record the outcome.
@@ -534,7 +539,27 @@ export async function processBidBoardInboxJob(deps: ProcessInboxDeps): Promise<P
 
   const claimed = await markInboxProcessing(db, inboxId);
   if (!claimed) {
-    log(`[BidBoardIngest] inbox row ${inboxId} not claimable (already terminal, dead-lettered, or LEASED by a live handler) — noop`);
+    // markInboxProcessing yields null for THREE cases; a LIVE-leased 'processing' row (another handler is
+    // actively importing) must NOT be treated like a terminal/exhausted one. Completing the queue job for a
+    // leased row is wrong: if that handler then dies, its attempt-bound queue outcome can't land (a duplicate
+    // claim already bumped attempts), so the inbox would sit 'processing' until the slow periodic sweep. DEFER
+    // instead — the queue re-runs this job just after the lease would lapse, re-driving the inbox promptly if
+    // the owner died (or deferring again if it's still alive). Terminal/dead-lettered/attempts-exhausted rows
+    // stay a noop so the job completes without resurrecting finished work.
+    const row = await loadInboxRow(db, inboxId);
+    const leaseMs = row?.lease_expires_at ? Date.parse(row.lease_expires_at) : NaN;
+    const nowMs = now();
+    if (row?.status === "processing" && row.attempts < row.max_attempts && Number.isFinite(leaseMs) && leaseMs > nowMs) {
+      // Come back just after the current lease lapses (+ buffer), bounded to the TTL so clock skew between the
+      // DB-stamped lease and this process can't defer for an absurd span.
+      const runAfterSeconds = Math.min(
+        INBOX_LEASE_TTL_SECONDS + 5,
+        Math.max(1, Math.ceil((leaseMs - nowMs) / 1000) + 2),
+      );
+      log(`[BidBoardIngest] inbox row ${inboxId} LEASED by a live handler — deferring ${runAfterSeconds}s (not completing)`);
+      return { status: "deferred", runAfterSeconds, reason: "inbox lease held by a live handler" };
+    }
+    log(`[BidBoardIngest] inbox row ${inboxId} not claimable (terminal / dead-lettered / attempts exhausted) — noop`);
     return "noop";
   }
 

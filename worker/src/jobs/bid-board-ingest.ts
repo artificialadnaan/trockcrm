@@ -6,6 +6,7 @@
 
 import type { PoolClient } from "pg";
 import { pool } from "../db.js";
+import { deferJob, type JobHandlerResult } from "../queue.js";
 
 // The importer + inbox state machine live in the server workspace; load them the same dist→src way the
 // Procore worker jobs do (compiled dist in prod, src under tsx in dev/test).
@@ -39,7 +40,7 @@ interface InboxModule {
     ingest: (payload: any) => Promise<{ runId: string | null; metrics: unknown; warnings: string[] }>;
     withOfficeLock: <T>(officeSlug: string, fn: () => Promise<T>) => Promise<T>;
     log?: (line: string) => void;
-  }) => Promise<"succeeded" | "noop">;
+  }) => Promise<"succeeded" | "noop" | { status: "deferred"; runAfterSeconds: number; reason: string }>;
   recoverOrphanedInboxJobs: (
     db: { query: (text: string, params?: any[]) => Promise<{ rows: any[]; rowCount?: number | null }> },
     opts?: { staleProcessingMinutes?: number; staleJobMinutes?: number; retentionDays?: number }
@@ -168,7 +169,7 @@ export async function timedPoolQuery(text: string, params?: any[]): Promise<{ ro
 export async function handleBidBoardIngestJob(
   payload: { inboxId?: string } | null,
   _officeId: string | null
-): Promise<void> {
+): Promise<JobHandlerResult> {
   const inboxId = payload?.inboxId;
   if (!inboxId) {
     // Malformed job with no inbox id — nothing durable to process. Complete without retry.
@@ -186,7 +187,7 @@ export async function handleBidBoardIngestJob(
   // a one-time cost.)
   const inbox = await importFirstAvailable<InboxModule>(SERVER_INBOX_MODULES);
 
-  await inbox.processBidBoardInboxJob({
+  const outcome = await inbox.processBidBoardInboxJob({
     // Time-bound the inbox state-machine queries too (not just the lock-client): a silent dead socket on
     // the timeout-less worker pool would otherwise hang the handler inside markInboxProcessing / the
     // success/failure write, wedging pollJobs() the same way.
@@ -200,6 +201,13 @@ export async function handleBidBoardIngestJob(
       withOfficeSessionLock(inbox.BID_BOARD_ADVISORY_NAMESPACE, officeSlug, inbox.officeAdvisoryKey, fn),
     log: (line) => console.log(line),
   });
+
+  // A live-leased inbox row → DEFER the queue job (don't complete): another handler owns the import, so come
+  // back after its lease would lapse to re-drive the inbox promptly if that owner died. "succeeded"/"noop"
+  // fall through to a normal completion.
+  if (typeof outcome === "object" && outcome.status === "deferred") {
+    return deferJob(outcome.reason, outcome.runAfterSeconds);
+  }
 }
 
 /**

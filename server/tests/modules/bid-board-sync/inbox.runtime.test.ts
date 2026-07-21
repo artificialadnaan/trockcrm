@@ -214,6 +214,57 @@ describe("processBidBoardInboxJob (async processing state machine)", () => {
     expect(ingest).not.toHaveBeenCalled();
   });
 
+  it("DEFERS (does not complete) when the row is live-LEASED by another handler", async () => {
+    const { inboxId } = await accept();
+    // Another replica is actively importing: 'processing' with a lease well in the future + attempts < max.
+    // markInboxProcessing yields null (won't steal a live lease); the job must be RESCHEDULED, not completed.
+    await db.query(
+      `UPDATE public.bid_board_ingestion_inbox
+         SET status='processing', attempts=1, lease_expires_at = now() + interval '3600 seconds' WHERE id=$1`,
+      [inboxId]
+    );
+    const ingest = okIngest();
+
+    const outcome = await processBidBoardInboxJob({ db, inboxId, ingest, withOfficeLock: passthroughLock });
+
+    expect(outcome).toMatchObject({ status: "deferred" });
+    // Bounded to the lease TTL (+buffer), never the full hour the lease has left.
+    const runAfterSeconds = (outcome as { runAfterSeconds: number }).runAfterSeconds;
+    expect(runAfterSeconds).toBeGreaterThan(0);
+    expect(runAfterSeconds).toBeLessThanOrEqual(185);
+    expect(ingest).not.toHaveBeenCalled(); // the live import is NOT double-run
+    const row = await loadInboxRow(db, inboxId);
+    expect(row?.status).toBe("processing"); // left leased for its owner
+  });
+
+  it("NOOPs (completes) a terminal 'failed' row rather than deferring", async () => {
+    const { inboxId } = await accept();
+    await db.query(`UPDATE public.bid_board_ingestion_inbox SET status='failed', attempts=1 WHERE id=$1`, [inboxId]);
+    const ingest = okIngest();
+
+    const outcome = await processBidBoardInboxJob({ db, inboxId, ingest, withOfficeLock: passthroughLock });
+
+    expect(outcome).toBe("noop");
+    expect(ingest).not.toHaveBeenCalled();
+  });
+
+  it("NOOPs an attempts-EXHAUSTED 'processing' row (lets the job dead-letter) — never defers forever", async () => {
+    const { inboxId } = await accept();
+    // At the attempts cap even with a live lease: markInboxProcessing still yields null, but deferring would
+    // loop forever, so this is a noop — the job dead-letters on its own final attempt.
+    await db.query(
+      `UPDATE public.bid_board_ingestion_inbox
+         SET status='processing', attempts=max_attempts, lease_expires_at = now() + interval '3600 seconds' WHERE id=$1`,
+      [inboxId]
+    );
+    const ingest = okIngest();
+
+    const outcome = await processBidBoardInboxJob({ db, inboxId, ingest, withOfficeLock: passthroughLock });
+
+    expect(outcome).toBe("noop");
+    expect(ingest).not.toHaveBeenCalled();
+  });
+
   it("re-checks AFTER the lock: skips the import if a concurrent holder committed it while we waited (no duplicate)", async () => {
     const { inboxId } = await accept();
     const ingest = okIngest();

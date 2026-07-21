@@ -122,114 +122,147 @@ async function flushPendingRecoveries(): Promise<void> {
   }
 }
 
+// The main poller EXCLUDES bid_board_ingest; that job type runs for MINUTES and gets its own dedicated poller
+// (pollBidBoardIngestJobs) so a long import can't hold a shared reentrancy guard across its run phase and
+// starve the email / domain-event / delivery jobs the main poller would otherwise claim on later ticks.
+const MAIN_POLL_JOB_TYPE_SQL = "AND job_type <> 'bid_board_ingest'";
+const BID_BOARD_INGEST_JOB_TYPE_SQL = "AND job_type = 'bid_board_ingest'";
+// One import at a time on the dedicated poller: imports are already per-office-serialized by an advisory lock,
+// and each holds a lock connection + the importer's queries, so a single in-flight import keeps this poller
+// well under the DB pool max even while the main poller runs its own RUN_CONCURRENCY batch.
+const BID_BOARD_INGEST_CONCURRENCY = 1;
+
+// Claim up to `limit` matching 'pending' rows in one short transaction, release the claim connection, then run
+// the claimed handlers. Shared by the main poller and the dedicated bid_board_ingest poller (each passes its
+// own job_type predicate + limit and owns its own reentrancy guard), so the intricate claim / commit-uncertain
+// / pool-safety logic lives in exactly one place. `jobTypeSql` is a hardcoded predicate constant (never user
+// input), appended into the claim WHERE.
+async function claimAndRunJobs(jobTypeSql: string, limit: number): Promise<void> {
+  // ── Claim phase ──────────────────────────────────────────────────────────────────────────────
+  // Hold a connection only long enough to grab + mark the batch, then RELEASE it before running any
+  // handler. Handlers open their own nested pool.connect() calls; holding the claim connection through
+  // the batch plus each job's nested connections could exhaust the pool (max 10) and block on a
+  // connect() with no timeout — which would leave the reentrancy guard stuck true and wedge the worker
+  // permanently (this is exactly the deadlock the SyncHub photo-link backfill hit).
+  let claimed: any[] = [];
+  // Rows that were marked 'processing' inside a claim transaction whose COMMIT then errored: the COMMIT
+  // may have actually succeeded server-side (a dead socket after commit still rejects on the client), so
+  // they can be stuck 'processing' even though `claimed` gets reset. Requeued best-effort below.
+  let commitUncertain: any[] = [];
+  let client: PoolClient;
+  try {
+    client = await pool.connect();
+  } catch (err) {
+    // With connectionTimeoutMillis set (db.ts), an exhausted pool REJECTS here. Swallow it as a skipped
+    // tick — the next poll retries — rather than letting it escape as an unhandled rejection that would
+    // crash the worker (index.ts schedules the pollers via bare setInterval).
+    console.error("[Worker] Poll: could not acquire a DB connection, skipping this tick:", err);
+    return;
+  }
+  let releaseError: Error | undefined;
+  try {
+    await client.query("BEGIN");
+    const result = await client.query(
+      `SELECT * FROM public.job_queue
+       WHERE status = 'pending' AND run_after <= NOW() ${jobTypeSql}
+       ORDER BY created_at ASC
+       LIMIT $1
+       FOR UPDATE SKIP LOCKED`,
+      [limit]
+    );
+    for (const job of result.rows) {
+      const handler = jobHandlers.get(job.job_type);
+      if (!handler) {
+        console.warn(`[Worker] No handler for job type: ${job.job_type}`);
+        await client.query(
+          "UPDATE public.job_queue SET status = 'dead', last_error = $1 WHERE id = $2",
+          [`No handler registered for job type: ${job.job_type}`, job.id]
+        );
+        continue;
+      }
+      await client.query(
+        "UPDATE public.job_queue SET status = 'processing', attempts = attempts + 1, started_processing_at = NOW() WHERE id = $1",
+        [job.id]
+      );
+      claimed.push(job);
+    }
+    await client.query("COMMIT");
+  } catch (err) {
+    // ROLLBACK can itself fail if the connection is already broken. Capture that so the finally can
+    // DESTROY the client (release(err)) rather than returning a possibly-poisoned connection — one still
+    // mid-transaction — to the pool for the next caller.
+    try {
+      await client.query("ROLLBACK");
+    } catch (rollbackErr) {
+      releaseError = rollbackErr as Error;
+    }
+    console.error("[Worker] Poll error:", err);
+    // The COMMIT may have landed server-side despite this rejection, leaving these rows 'processing'.
+    commitUncertain = claimed;
+    claimed = [];
+  } finally {
+    client.release(releaseError);
+  }
+
+  // Best-effort requeue of rows a failed/uncertain COMMIT may have left stranded at 'processing' (the run
+  // phase skips them because `claimed` was reset). Guarded on status='processing', so it's a no-op if the
+  // ROLLBACK actually undid the claim (rows already back to pending). A failed requeue is retried on a
+  // later tick (attemptRecovery → pendingRecoveries → flushPendingRecoveries).
+  for (const job of commitUncertain) {
+    // Bound to the claimed attempt (job.attempts + 1, the value the claim UPDATE wrote). If the COMMIT
+    // actually rolled back, the row is back at job.attempts and 'pending' → guard no-matches (harmless);
+    // if it landed, the row is 'processing' at job.attempts + 1 → requeued.
+    await attemptRecovery(job.id, job.attempts + 1, {
+      status: "pending",
+      error: "claim commit uncertain — requeued to pending",
+      runAfterSeconds: 30,
+    });
+  }
+
+  // ── Run phase ────────────────────────────────────────────────────────────────────────────────
+  // Claim connection already released. At most `limit` jobs, so their nested pool.connect() calls (a
+  // create_project handler opens ~3: its own client + ensurePublicPhotoLinkForDeal's client +
+  // resolveFallbackAdminUser's pool.query) stay under the pool max. processJob persists each job's
+  // outcome via attemptRecovery, which self-registers into pendingRecoveries if the write fails — so it
+  // never rejects. allSettled is a defensive backstop: if processJob somehow throws (a bug), it can't
+  // reject the poller (index.ts runs the pollers via bare setInterval → unhandled rejection) or clear the
+  // reentrancy guard while sibling jobs are still running.
+  const settled = await Promise.allSettled(claimed.map((job) => processJob(job)));
+  for (let i = 0; i < settled.length; i++) {
+    const outcome = settled[i];
+    if (outcome.status === "rejected") {
+      const job = claimed[i];
+      console.error(`[Worker] Job ${job.id} (${job.job_type}) processing threw unexpectedly:`, outcome.reason);
+    }
+  }
+}
+
 export async function pollJobs() {
   // Reentrancy guard — skip if a previous poll is still running
   if (polling) return;
   polling = true;
-
   try {
     // Retry any stranded-job recoveries a previous tick couldn't persist (pool was exhausted) so the worker
-    // self-heals without a restart.
+    // self-heals without a restart. Only the MAIN poller flushes: the dedicated poller's failed outcome
+    // writes also land in the shared pendingRecoveries map and are replayed here (a single flusher avoids two
+    // loops racing the same intents).
     await flushPendingRecoveries();
-    // ── Claim phase ──────────────────────────────────────────────────────────────────────────────
-    // Hold a connection only long enough to grab + mark the batch, then RELEASE it before running any
-    // handler. Handlers open their own nested pool.connect() calls; holding the claim connection through
-    // the batch plus each job's nested connections could exhaust the pool (max 10) and block on a
-    // connect() with no timeout — which would leave `polling` stuck true and wedge the worker permanently
-    // (this is exactly the deadlock the SyncHub photo-link backfill hit).
-    let claimed: any[] = [];
-    // Rows that were marked 'processing' inside a claim transaction whose COMMIT then errored: the COMMIT
-    // may have actually succeeded server-side (a dead socket after commit still rejects on the client), so
-    // they can be stuck 'processing' even though `claimed` gets reset. Requeued best-effort below.
-    let commitUncertain: any[] = [];
-    let client: PoolClient;
-    try {
-      client = await pool.connect();
-    } catch (err) {
-      // With connectionTimeoutMillis set (db.ts), an exhausted pool REJECTS here. Swallow it as a skipped
-      // tick — the next poll retries — rather than letting it escape as an unhandled rejection that would
-      // crash the worker (index.ts schedules setInterval(pollJobs) bare).
-      console.error("[Worker] Poll: could not acquire a DB connection, skipping this tick:", err);
-      return;
-    }
-    let releaseError: Error | undefined;
-    try {
-      await client.query("BEGIN");
-      const result = await client.query(
-        `SELECT * FROM public.job_queue
-         WHERE status = 'pending' AND run_after <= NOW()
-         ORDER BY created_at ASC
-         LIMIT $1
-         FOR UPDATE SKIP LOCKED`,
-        [RUN_CONCURRENCY]
-      );
-      for (const job of result.rows) {
-        const handler = jobHandlers.get(job.job_type);
-        if (!handler) {
-          console.warn(`[Worker] No handler for job type: ${job.job_type}`);
-          await client.query(
-            "UPDATE public.job_queue SET status = 'dead', last_error = $1 WHERE id = $2",
-            [`No handler registered for job type: ${job.job_type}`, job.id]
-          );
-          continue;
-        }
-        await client.query(
-          "UPDATE public.job_queue SET status = 'processing', attempts = attempts + 1, started_processing_at = NOW() WHERE id = $1",
-          [job.id]
-        );
-        claimed.push(job);
-      }
-      await client.query("COMMIT");
-    } catch (err) {
-      // ROLLBACK can itself fail if the connection is already broken. Capture that so the finally can
-      // DESTROY the client (release(err)) rather than returning a possibly-poisoned connection — one still
-      // mid-transaction — to the pool for the next caller.
-      try {
-        await client.query("ROLLBACK");
-      } catch (rollbackErr) {
-        releaseError = rollbackErr as Error;
-      }
-      console.error("[Worker] Poll error:", err);
-      // The COMMIT may have landed server-side despite this rejection, leaving these rows 'processing'.
-      commitUncertain = claimed;
-      claimed = [];
-    } finally {
-      client.release(releaseError);
-    }
-
-    // Best-effort requeue of rows a failed/uncertain COMMIT may have left stranded at 'processing' (the run
-    // phase skips them because `claimed` was reset). Guarded on status='processing', so it's a no-op if the
-    // ROLLBACK actually undid the claim (rows already back to pending). A failed requeue is retried on a
-    // later tick (attemptRecovery → pendingRecoveries → flushPendingRecoveries).
-    for (const job of commitUncertain) {
-      // Bound to the claimed attempt (job.attempts + 1, the value the claim UPDATE wrote). If the COMMIT
-      // actually rolled back, the row is back at job.attempts and 'pending' → guard no-matches (harmless);
-      // if it landed, the row is 'processing' at job.attempts + 1 → requeued.
-      await attemptRecovery(job.id, job.attempts + 1, {
-        status: "pending",
-        error: "claim commit uncertain — requeued to pending",
-        runAfterSeconds: 30,
-      });
-    }
-
-    // ── Run phase ────────────────────────────────────────────────────────────────────────────────
-    // Claim connection already released. At most RUN_CONCURRENCY jobs, so their nested pool.connect()
-    // calls (a create_project handler opens ~3: its own client + ensurePublicPhotoLinkForDeal's client +
-    // resolveFallbackAdminUser's pool.query) stay under the pool max. processJob persists each job's
-    // outcome via attemptRecovery, which self-registers into pendingRecoveries if the write fails — so it
-    // never rejects. allSettled is a defensive backstop: if processJob somehow throws (a bug), it can't
-    // reject pollJobs (index.ts runs setInterval(pollJobs) bare → unhandled rejection) or clear the
-    // `polling` guard while sibling jobs are still running.
-    const settled = await Promise.allSettled(claimed.map((job) => processJob(job)));
-    for (let i = 0; i < settled.length; i++) {
-      const outcome = settled[i];
-      if (outcome.status === "rejected") {
-        const job = claimed[i];
-        console.error(`[Worker] Job ${job.id} (${job.job_type}) processing threw unexpectedly:`, outcome.reason);
-      }
-    }
+    await claimAndRunJobs(MAIN_POLL_JOB_TYPE_SQL, RUN_CONCURRENCY);
   } finally {
     polling = false;
+  }
+}
+
+// Dedicated poller for the long-running bid_board_ingest import. Its OWN reentrancy guard means a multi-minute
+// import blocks ONLY this loop; pollJobs keeps claiming every other job type meanwhile.
+let pollingBidBoardIngest = false;
+export async function pollBidBoardIngestJobs() {
+  if (pollingBidBoardIngest) return;
+  pollingBidBoardIngest = true;
+  try {
+    await claimAndRunJobs(BID_BOARD_INGEST_JOB_TYPE_SQL, BID_BOARD_INGEST_CONCURRENCY);
+  } finally {
+    pollingBidBoardIngest = false;
   }
 }
 

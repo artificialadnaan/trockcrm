@@ -3,7 +3,7 @@ dotenv.config();
 
 import http from "http";
 import { startListener } from "./listener.js";
-import { pollJobs, recoverStaleJobs } from "./queue.js";
+import { pollBidBoardIngestJobs, pollJobs, recoverStaleJobs } from "./queue.js";
 import { registerAllJobs } from "./jobs/index.js";
 import cron from "node-cron";
 import { runStaleDealScan } from "./jobs/stale-deals.js";
@@ -62,6 +62,12 @@ async function main() {
   // Start job queue polling
   setInterval(pollJobs, POLL_INTERVAL_MS);
   console.log(`[Worker] Polling job queue every ${POLL_INTERVAL_MS}ms`);
+
+  // Dedicated poller for the long-running bid_board_ingest import, on its OWN reentrancy guard: a multi-minute
+  // import must not hold the main poller's guard across its run phase and stall email/domain-event/delivery
+  // jobs. pollJobs excludes bid_board_ingest; this poller claims only that type (one at a time).
+  setInterval(pollBidBoardIngestJobs, POLL_INTERVAL_MS);
+  console.log(`[Worker] Polling bid_board_ingest queue every ${POLL_INTERVAL_MS}ms (dedicated)`);
 
   setInterval(async () => {
     try {

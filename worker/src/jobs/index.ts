@@ -141,9 +141,9 @@ export function registerAllJobs() {
 
   // Bid Board → CRM async ingestion (enqueued by POST /api/bid-board-sync/ingest via the durable inbox).
   // Job type string mirrors BID_BOARD_INGEST_JOB_TYPE in server/src/modules/bid-board-sync/inbox.ts.
-  registerJobHandler("bid_board_ingest", async (payload, officeId) => {
-    await handleBidBoardIngestJob(payload, officeId);
-  });
+  // Return the handler's JobHandlerResult (don't discard it) so a deferred (live-leased) outcome reschedules
+  // the job as pending instead of completing it. Claimed + run by the DEDICATED bid_board_ingest poller.
+  registerJobHandler("bid_board_ingest", (payload, officeId) => handleBidBoardIngestJob(payload, officeId));
   registerJobHandler(WON_METRIC_REDUCTION_ALERT_JOB, handleWonMetricReductionAlert);
 
   registerJobHandler("reports_execution", async () => {

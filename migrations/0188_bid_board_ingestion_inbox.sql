@@ -47,17 +47,15 @@ CREATE TABLE IF NOT EXISTS public.bid_board_ingestion_inbox (
 CREATE INDEX IF NOT EXISTS bid_board_ingestion_inbox_office_status_idx
   ON public.bid_board_ingestion_inbox (office_slug, status);
 
--- NOTE ON CONCURRENCY: the two job_queue indexes below are written as plain CREATE INDEX IF NOT EXISTS, NOT
--- CONCURRENTLY. The migration runner executes each .sql file as ONE multi-statement query (implicit
--- transaction), and CREATE INDEX CONCURRENTLY cannot run inside a transaction block — so in-file CONCURRENTLY
--- would error. The codebase's pattern for a concurrent build (a dedicated .ts helper + a runner special-case,
--- e.g. project-number-first-set-index.ts) is deliberately NOT added here to keep this incident fix minimal.
--- On the existing prod job_queue, build these two CONCURRENTLY OUT-OF-BAND (they are IF NOT EXISTS, so the
--- migration then no-ops):
---   CREATE INDEX CONCURRENTLY IF NOT EXISTS job_queue_processing_type_started_idx
---     ON public.job_queue (job_type, started_processing_at) WHERE status = 'processing';
---   CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS job_queue_bbi_one_live_job_idx
---     ON public.job_queue ((payload->>'inboxId')) WHERE job_type = 'bid_board_ingest' AND status IN ('pending','processing');
+-- NOTE ON CONCURRENCY: the two job_queue indexes below are written as plain CREATE INDEX IF NOT EXISTS. On
+-- the existing prod job_queue (accumulated history), a plain build holds a write-blocking SHARE lock for its
+-- duration — stalling job enqueues + worker outcome writes — and CREATE INDEX CONCURRENTLY cannot run inside a
+-- transaction block, which is what the migration runner wraps each .sql file in. So this migration is
+-- INTERCEPTED by the runner (server/src/migrations/runner.ts → runBidBoardIngestIndexMigration in
+-- bid-board-ingest-indexes.ts): the runner builds these two CONCURRENTLY, out of transaction, BEFORE executing
+-- this file — mirroring the audit-log / project-number-first-set index migrations. The plain statements below
+-- then no-op via IF NOT EXISTS (and remain the source of truth for a fresh/CI DB where the table is empty and
+-- the in-transaction build is instant + non-blocking).
 
 -- Supporting index for this feature's periodic stale-job sweep (recoverOrphanedInboxJobs step 0), which runs
 -- every ~60s:  UPDATE public.job_queue ... WHERE job_type = 'bid_board_ingest' AND status = 'processing'
