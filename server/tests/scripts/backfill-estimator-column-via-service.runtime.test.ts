@@ -287,6 +287,48 @@ describe("estimator-column service backfill — dry-run vs commit via setDealEst
     const status = await runOne(tdb, co, ACTOR, OFFICE, false); // dry-run
     expect(status).toBe("skipped:CHANGE_ORDER_FIELD_LOCKED");
   });
+
+  it("runOne re-checks under the row lock and NEVER overwrites a concurrently-set estimator", async () => {
+    // D_ALREADY_LINKED currently has estimator_user_id = EST_TIM. Hand runOne a candidate that (via the
+    // service's correction path) WOULD reassign it to EST_ALEX — simulating an estimator assigned between the
+    // unlocked scan and this call. The lock+recheck must SKIP it as no_change and leave EST_TIM in place, so
+    // no clobber and no commission re-attribution. (Without the recheck, setDealEstimator would happily
+    // overwrite it and return "assigned".)
+    await pg.exec("BEGIN");
+    try {
+      const candidate = { dealId: D_ALREADY_LINKED, dealNumber: "dea", estimatorText: "alex", resolvedUserId: EST_ALEX };
+      const status = await runOne(tdb, candidate, ACTOR, OFFICE, true); // execute
+      expect(status).toBe("skipped:no_change");
+      expect(await estimatorUserId(D_ALREADY_LINKED)).toBe(EST_TIM); // untouched — not overwritten to EST_ALEX
+      expect(await dscCountForRep(D_ALREADY_LINKED, EST_ALEX)).toBe(0); // no re-attributed commission
+    } finally {
+      await pg.exec("ROLLBACK");
+    }
+  });
+
+  it("counts EVERY unresolved candidate under skipped:unresolved, not just once", async () => {
+    // The fixture has one unmapped name (D_UNRESOLVED); add two more so the count must be 3, not 1.
+    const insUnresolved = (id: string, text: string) =>
+      `INSERT INTO public.deals
+         (id, deal_number, name, stage_id, assigned_rep_id, estimator, estimator_user_id, bid_board_estimator,
+          awarded_amount, contract_signed_date, is_change_order, is_bid_board_owned, sales_source_user_id, is_active, workflow_route)
+       VALUES ('${id}','${id.slice(-4)}','Deal','${WON}','${O1}','${text}',NULL,NULL,100000,'2026-01-15',false,false,NULL,true,'service')`;
+    await pg.exec("BEGIN");
+    try {
+      await pg.exec(insUnresolved(U("0de8"), "Qqunknown"));
+      await pg.exec(insUnresolved(U("0de9"), "Wwunknown"));
+      const summary = await backfillTenantEstimatorColumn(tdb, query, {
+        schema: "public",
+        execute: false,
+        actorUserId: ACTOR,
+        officeId: OFFICE,
+      });
+      expect(summary.unresolved).toBe(3); // D_UNRESOLVED + 2 new
+      expect(summary.byStatus["skipped:unresolved"]).toBe(3); // bumped per row, not once
+    } finally {
+      await pg.exec("ROLLBACK");
+    }
+  });
 });
 
 describe("estimator-column service backfill — parseArgs + schema guard", () => {
@@ -301,6 +343,9 @@ describe("estimator-column service backfill — parseArgs + schema guard", () =>
   });
   it("rejects a non-UUID --actor", () => {
     expect(() => parseArgs(["--commit", "--actor=not-a-uuid"])).toThrow(/must be a UUID/);
+  });
+  it("rejects an unknown/misspelled flag before committing (would else widen --commit to ALL tenants)", () => {
+    expect(() => parseArgs(["--commit", `--actor=${ACTOR}`, "--tennant=office_dallas"])).toThrow(/Unknown argument/);
   });
   it("accepts a valid --commit --actor=<uuid> --tenant=office_x", () => {
     const parsed = parseArgs(["--commit", `--actor=${ACTOR}`, "--tenant=office_dallas"]);

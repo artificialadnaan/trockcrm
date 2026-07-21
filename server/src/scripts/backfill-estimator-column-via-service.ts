@@ -54,6 +54,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { drizzle } from "drizzle-orm/node-postgres";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
+import { and, eq } from "drizzle-orm";
 import * as schema from "@trock-crm/shared/schema";
 import { AppError } from "../middleware/error-handler.js";
 import { setDealEstimator } from "../modules/deals/service.js";
@@ -199,31 +200,46 @@ export async function runOne(
   officeId: string | null,
   execute: boolean
 ): Promise<EstimatorColumnBackfillStatus> {
-  const invoke = async (db: TenantDb): Promise<EstimatorColumnBackfillStatus> => {
-    // setDealEstimator returns null when the deal is not found / not active (soft-deleted). Its no-op
-    // short-circuit returns the existing row unchanged — but our candidate SQL requires estimator_user_id
-    // IS NULL, so an unchanged (oldEstimator === newEstimator) result can only mean a concurrent write set
-    // it first; classify that as no_change rather than a false "assigned".
-    const updated = await setDealEstimator(db, candidate.dealId, candidate.resolvedUserId, actorUserId, officeId);
+  const attempt = async (tx: TenantDb): Promise<EstimatorColumnBackfillStatus> => {
+    // Row-lock + RE-CHECK that the estimator is STILL null before touching it. The candidate scan is
+    // unlocked, so between it and here another request could have assigned an estimator. setDealEstimator
+    // ALLOWS overwriting a non-null estimator (its correction path), so without this guard the backfill
+    // could clobber a concurrently-set estimator and re-attribute its commission — and the post-call
+    // comparison could NOT detect it (the row would already equal our value). Under the lock, a
+    // no-longer-null row is a no_change skip. setDealEstimator re-locks this same row in its own nested
+    // transaction (SAVEPOINT); re-taking a lock we already hold is a no-op, so there is no deadlock.
+    const [locked] = await tx
+      .select({ estimatorUserId: schema.deals.estimatorUserId })
+      .from(schema.deals)
+      .where(and(eq(schema.deals.id, candidate.dealId), eq(schema.deals.isActive, true)))
+      .limit(1)
+      .for("update");
+    if (!locked) return "skipped:deal_not_found"; // not found / soft-deleted since the scan
+    if (locked.estimatorUserId != null) return "skipped:no_change"; // concurrently assigned between scan and lock
+    const updated = await setDealEstimator(tx, candidate.dealId, candidate.resolvedUserId, actorUserId, officeId);
     if (!updated) return "skipped:deal_not_found";
     if (updated.estimatorUserId !== candidate.resolvedUserId) return "skipped:no_change";
     return "assigned";
   };
 
   if (execute) {
+    // Wrap the lock+recheck+service call in ONE transaction so the row lock is held across the recheck and
+    // the write (setDealEstimator nests as a savepoint). A guard rejection throws → the tx rolls back → the
+    // error is classified as a skip and the run continues (one bad deal never aborts the batch).
     try {
-      return await invoke(tenantDb);
+      return await tenantDb.transaction(async (tx) => attempt(tx));
     } catch (err) {
       return classifyError(err);
     }
   }
 
-  // Faithful dry-run: run the real service call inside an outer transaction, capture the outcome, roll back.
+  // Faithful dry-run: run the real lock+recheck+service call inside an outer transaction, capture the
+  // outcome, then roll everything back so nothing persists (identical code path to --commit above).
   let captured: EstimatorColumnBackfillStatus = "skipped:unresolved";
   try {
     await tenantDb.transaction(async (tx) => {
       try {
-        captured = await invoke(tx);
+        captured = await attempt(tx);
       } catch (err) {
         // A guard rejection is a real outcome — capture it, then still roll back the (partial) tx cleanly.
         captured = classifyError(err);
@@ -255,8 +271,10 @@ export async function backfillTenantEstimatorColumn(
     bump(status);
     rows.push({ ...candidate, status });
   }
-  // Count unresolved rows under a single bucket (they're never handed to the service).
-  if (unresolved.length > 0) bump("skipped:unresolved");
+  // Count EVERY unresolved row under one bucket (they're never handed to the service). Bump per row, not
+  // once — otherwise a tenant with many unmapped names reports skipped:unresolved=1 and the operator badly
+  // under-estimates the manual cleanup backlog (prod has ~126 such rows in office_dallas alone).
+  for (let i = 0; i < unresolved.length; i++) bump("skipped:unresolved");
 
   return {
     schema: opts.schema,
@@ -272,11 +290,20 @@ export async function backfillTenantEstimatorColumn(
 
 export function parseArgs(argv: string[]): { tenant: string | null; execute: boolean; actorUserId: string | null } {
   // --tenant / --actor are execution-safety controls. Reject the space-separated form (--tenant office_x)
-  // and empty values — silently ignoring them would widen the blast radius (fall back to ALL tenants) or
-  // drop the audit actor. Only the --key=value form is accepted.
+  // FIRST, so its specific "use '='" message fires (rather than the generic unknown-argument error below on
+  // the stray value token). Silently ignoring them would widen the blast radius or drop the audit actor.
   for (const key of ["--tenant", "--actor"]) {
     if (argv.includes(key)) {
       throw new Error(`Use ${key}=<value> (with '='); the space-separated form is rejected.`);
+    }
+  }
+  // Then reject ANY remaining unrecognized argument. A misspelled safety flag (e.g. --tennant=office_dallas)
+  // would otherwise be silently ignored, leaving tenant=null so a --commit writes across EVERY discovered
+  // tenant. Recognized: --commit, --tenant=<office_x>, --actor=<uuid> (bare --tenant/--actor already threw).
+  for (const arg of argv) {
+    const recognized = arg === "--commit" || arg.startsWith("--tenant=") || arg.startsWith("--actor=");
+    if (!recognized) {
+      throw new Error(`Unknown argument ${JSON.stringify(arg)}. Valid: --commit, --tenant=<office_x>, --actor=<uuid>.`);
     }
   }
   const readValue = (key: string): string | null => {
@@ -368,9 +395,15 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     for (const t of tenants) {
       const officeId = await resolveOfficeId(client, t);
       if (!officeId) {
-        console.warn(`[${t}] WARNING: no active office row for slug '${t.replace(/^office_/, "")}' — office-scoped access checks will reject candidates.`);
+        // FAIL CLOSED: without an office id, validateAssignee's per-office access check is a NO-OP (it only
+        // runs `if (officeId && …)`), so any active mapped user would link WITHOUT office validation. Refuse
+        // to run this tenant unscoped rather than risk a cross-office attribution — skip it entirely.
+        console.warn(`[${t}] SKIPPED: no active public.offices row for slug '${t.replace(/^office_/, "")}'. Refusing to run unscoped (office-access checks are a no-op with a null office id).`);
+        continue;
       }
-      await client.query(`SET search_path TO ${t}, public`);
+      // OFFICE_SCHEMA_RE-validated above; also double-quote as a PG identifier at the interpolation site as
+      // defense-in-depth for the SET search_path (the regex already forbids quotes/semicolons/spaces).
+      await client.query(`SET search_path TO "${t}", public`);
       const tenantDb = drizzle(client, { schema });
       const summary = await backfillTenantEstimatorColumn(
         tenantDb,
