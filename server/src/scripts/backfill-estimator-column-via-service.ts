@@ -409,8 +409,13 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
       if (!officeId) {
         // FAIL CLOSED: without an office id, validateAssignee's per-office access check is a NO-OP (it only
         // runs `if (officeId && …)`), so any active mapped user would link WITHOUT office validation. Refuse
-        // to run this tenant unscoped rather than risk a cross-office attribution — skip it entirely.
-        console.warn(`[${t}] SKIPPED: no active public.offices row for slug '${t.replace(/^office_/, "")}'. Refusing to run unscoped (office-access checks are a no-op with a null office id).`);
+        // to run this tenant unscoped rather than risk a cross-office attribution.
+        const message = `[${t}] no active public.offices row for slug '${t.replace(/^office_/, "")}'. Refusing to run unscoped (office-access checks are a no-op with a null office id).`;
+        // For an EXPLICITLY requested --tenant, FAIL the command — silently skipping the only requested tenant
+        // would exit 0 with a zero grand total and let automation record a "successful" backfill that did
+        // nothing. For automatic multi-tenant discovery, skip-and-continue so one bad tenant can't abort the sweep.
+        if (tenant) throw new Error(message);
+        console.warn(`${message} SKIPPED (multi-tenant discovery).`);
         continue;
       }
       // OFFICE_SCHEMA_RE-validated above; also double-quote as a PG identifier at the interpolation site as
