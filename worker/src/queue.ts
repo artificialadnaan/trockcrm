@@ -118,6 +118,7 @@ class QueueQueryTimeout extends Error {
 
 // Race a query against QUEUE_QUERY_TIMEOUT_MS. It can't CANCEL the underlying query (a dead socket never
 // settles), so on a QueueQueryTimeout the CALLER must DESTROY the connection rather than return it to the pool.
+// Used for the CLAIM path, where the caller already holds an EXPLICIT client it destroys via release(err).
 function withQueueTimeout<T>(query: Promise<T>, label: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout>;
   const timeout = new Promise<never>((_, reject) => {
@@ -126,14 +127,48 @@ function withQueueTimeout<T>(query: Promise<T>, label: string): Promise<T> {
   return Promise.race([query, timeout]).finally(() => clearTimeout(timer)) as Promise<T>;
 }
 
+// Time-bounded outcome-write query. Checks out an EXPLICIT client so a timed-out query can be DESTROYED
+// (release(err) removes it from the pool). Racing the convenience pool.query() against a timer would only
+// reject the caller while pool.query keeps its checked-out client — on a genuinely dead socket that slot
+// never returns, and because the deferred-recovery flush re-attempts the write every tick, the leaked slots
+// pile up until they exhaust the pool (max 10) and stall UNRELATED worker jobs. Mirrors the claim path here
+// and timedPoolQuery in bid-board-ingest.ts. `label` distinguishes the two callers in the timeout error.
+async function timedOutcomeQuery(sql: string, params: any[], label: string): Promise<void> {
+  let client: PoolClient;
+  try {
+    client = await pool.connect();
+  } catch (err) {
+    // An exhausted pool REJECTS the acquire (connectionTimeoutMillis, db.ts). Surface it like any other write
+    // failure — the caller keeps the intent in pendingRecoveries and retries on a later tick.
+    throw err instanceof Error ? err : new Error(String(err));
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let timedOut = false;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      timedOut = true;
+      reject(new QueueQueryTimeout(label));
+    }, QUEUE_QUERY_TIMEOUT_MS);
+  });
+  try {
+    await Promise.race([client.query(sql, params), timeout]);
+  } finally {
+    clearTimeout(timer);
+    // On a client-side timeout the socket may be dead or the query still pending → DESTROY the connection so
+    // its slot can't leak. A clean result (or an ordinary query error) returns the connection normally.
+    client.release(timedOut ? new QueueQueryTimeout(label) : undefined);
+  }
+}
+
 /** Persist a job's outcome (its normal terminal write). On failure, keep the full intent for a later tick. */
 async function attemptRecovery(jobId: number, attempts: number, outcome: Outcome): Promise<void> {
   const { sql, params } = buildOutcomeUpdate(jobId, attempts, outcome);
   try {
-    // Time-bounded so a dead socket can't hang the run phase (and the reentrancy guard). pool.query manages the
-    // connection; the pool's TCP keepAlive (db.ts) evicts a genuinely-dead one. A timeout leaves the intent in
-    // pendingRecoveries for a later tick, exactly like any other write failure.
-    await withQueueTimeout(pool.query(sql, params), `job ${jobId} outcome write`);
+    // Time-bounded so a dead socket can't hang the run phase (and the reentrancy guard). Checks out an explicit
+    // client and DESTROYS it on timeout (see timedOutcomeQuery) so a hung write can't leak a pool slot — which,
+    // re-attempted every tick by the flush, would otherwise exhaust the pool and stall unrelated jobs. A timeout
+    // leaves the intent in pendingRecoveries for a later tick, exactly like any other write failure.
+    await timedOutcomeQuery(sql, params, `job ${jobId} outcome write`);
     pendingRecoveries.delete(jobId);
   } catch (err) {
     pendingRecoveries.set(jobId, { attempts, outcome });
@@ -146,7 +181,7 @@ async function flushPendingRecoveries(): Promise<void> {
   for (const [jobId, { attempts, outcome }] of [...pendingRecoveries]) {
     const { sql, params } = buildOutcomeUpdate(jobId, attempts, outcome);
     try {
-      await withQueueTimeout(pool.query(sql, params), `job ${jobId} outcome flush`);
+      await timedOutcomeQuery(sql, params, `job ${jobId} outcome flush`);
       pendingRecoveries.delete(jobId);
     } catch {
       break; // pool still unavailable / dead socket — retry the rest on a later tick
