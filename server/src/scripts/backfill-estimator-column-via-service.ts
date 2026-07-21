@@ -385,10 +385,22 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
         throw new Error(`Refusing unsafe tenant schema name: ${JSON.stringify(t)} (expected /^office_[a-z0-9_]+$/)`);
       }
     }
-    // On a WRITE, the actor is required (enforced in parseArgs). On a dry-run without --actor, fall back to
-    // a synthetic zero-uuid ONLY for the rolled-back call's created_by — nothing persists so no FK is hit.
-    // But prefer a real --actor even on a dry-run when supplied, so the faithful preview matches the write.
-    const effectiveActor = actorUserId ?? "00000000-0000-0000-0000-000000000000";
+    // On a WRITE, --actor is required (parseArgs). On a dry-run without --actor we STILL need a REAL user id
+    // for the rolled-back created_by: deal_signed_commissions.created_by is an FK to users(id) (migration 0062
+    // — NOT declared in the drizzle schema, so the PGlite tests don't enforce it), so a synthetic zero-uuid
+    // FK-violates on the FIRST signed candidate's minted commission and aborts the whole preview (rolling back
+    // afterward does not suppress the constraint check). Fall back to any active user (the value is thrown
+    // away on rollback); prefer the real --actor when supplied so the preview's created_by matches the write.
+    let effectiveActor = actorUserId;
+    if (!effectiveActor) {
+      const { rows } = await client.query<{ id: string }>(
+        "SELECT id FROM public.users WHERE is_active = true ORDER BY id LIMIT 1"
+      );
+      effectiveActor = rows[0]?.id ?? null;
+      if (!effectiveActor) {
+        throw new Error("No active user available for the throwaway dry-run actor; pass --actor=<uuid>.");
+      }
+    }
     console.log(`${execute ? "WRITE" : "DRY-RUN (no writes)"} — tenants: ${tenants.join(", ")}`);
     let grandAssigned = 0;
     let grandSkipped = 0;

@@ -91,6 +91,12 @@ beforeAll(async () => {
   await pg.exec(
     `ALTER TABLE public.deal_signed_commissions ADD CONSTRAINT deal_signed_commissions_dedup UNIQUE (deal_id, rep_user_id);`
   );
+  // Prod's deal_signed_commissions.created_by is an FK to users(id) (migration 0062 — absent from the drizzle
+  // schema, so tenantSchemaSql omits it). Add it here so the tests mirror prod: a minted commission's
+  // created_by MUST be a real user, which is exactly why the dry-run needs a real actor (not a zero-uuid).
+  await pg.exec(
+    `ALTER TABLE public.deal_signed_commissions ADD CONSTRAINT deal_signed_commissions_created_by_fkey FOREIGN KEY (created_by) REFERENCES users(id);`
+  );
   tdb = drizzle(pg);
 
   await pg.exec(`INSERT INTO public.offices (id, name, slug) VALUES
@@ -100,7 +106,8 @@ beforeAll(async () => {
     ('${EST_TIM}','Tim Estimator','tim@x.com','rep','${OFFICE}',true),
     ('${EST_ALEX}','Alex Estimator','alex@x.com','rep','${OFFICE}',true),
     ('${EST_OTHER}','Colby Estimator','colby@x.com','rep','${OTHER_OFFICE}',true),
-    ('${SRC}','Source Rep','src@x.com','rep','${OFFICE}',true)`);
+    ('${SRC}','Source Rep','src@x.com','rep','${OFFICE}',true),
+    ('${ACTOR}','Backfill Operator','ops@x.com','director','${OFFICE}',true)`);
   await pg.exec(`INSERT INTO public.pipeline_stage_config (id, name, slug, display_order) VALUES
     ('${WON}','Won','won',9)`);
   await pg.exec(`INSERT INTO public.user_commission_settings (user_id, commission_rate, is_active) VALUES
@@ -304,6 +311,19 @@ describe("estimator-column service backfill — dry-run vs commit via setDealEst
     } finally {
       await pg.exec("ROLLBACK");
     }
+  });
+
+  it("deal_signed_commissions.created_by is an FK to users — a non-existent actor is rejected", async () => {
+    // Prod-faithful (FK added in beforeAll): a minted commission's created_by MUST reference a real user, so a
+    // synthetic zero-uuid FK-violates. This is exactly why main() resolves a REAL active user for the dry-run
+    // actor instead of a zero-uuid — otherwise the FIRST signed candidate's mint aborts the whole preview.
+    await expect(
+      pg.query(
+        `INSERT INTO public.deal_signed_commissions
+           (deal_id, rep_user_id, attribution_role, source_value_kind, source_value_amount, applied_rate, amount, contract_signed_date_at_signing, created_by)
+         VALUES ('${D_TIM}','${EST_TIM}','estimator','awarded_amount',100000,0.020000,2000,'2026-01-15','00000000-0000-0000-0000-000000000000')`
+      )
+    ).rejects.toThrow();
   });
 
   it("counts EVERY unresolved candidate under skipped:unresolved, not just once", async () => {
