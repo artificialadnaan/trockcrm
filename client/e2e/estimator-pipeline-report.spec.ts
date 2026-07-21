@@ -38,7 +38,7 @@ const report = {
   stageColumns,
   estimators: [
     {
-      key: "sidney_gibson",
+      key: "sidney-user",
       configuredName: "Sidney Gibson",
       estimatorUserId: "sidney-user",
       estimatorName: "Sidney Gibson",
@@ -50,7 +50,7 @@ const report = {
       stages: stages(2),
     },
     {
-      key: "alex_koch",
+      key: "alex-user",
       configuredName: "Alex Koch",
       estimatorUserId: "alex-user",
       estimatorName: "Alex Koch",

@@ -2,10 +2,8 @@ import { Router, type Request } from "express";
 import {
   ESTIMATOR_PIPELINE_BUCKETS,
   ESTIMATOR_PIPELINE_COHORTS,
-  ESTIMATOR_PIPELINE_TARGET_KEYS,
   type EstimatorPipelineBucket,
   type EstimatorPipelineCohort,
-  type EstimatorPipelineTargetKey,
   type ScorecardKind,
 } from "@trock-crm/shared/types";
 import { requireRole, requireDirector } from "../../middleware/rbac.js";
@@ -202,13 +200,15 @@ export function parseEstimatorPipelineEvidenceQuery(
     throw new AppError(400, "bucket must be one of target, other, or missing");
   }
   const bucket = bucketRaw as EstimatorPipelineBucket;
+  // estimatorKey is now the estimator's CRM user id (a UUID). Validate its shape here; the service throws
+  // if the id is not a member of the dynamic BID_BOARD_ESTIMATOR_USER_MAP roster.
   const estimatorKeyRaw = pickQueryValue(query.estimatorKey);
-  let estimatorKey: EstimatorPipelineTargetKey | undefined;
+  let estimatorKey: string | undefined;
   if (bucket === "target") {
-    if (!estimatorKeyRaw || !(ESTIMATOR_PIPELINE_TARGET_KEYS as readonly string[]).includes(estimatorKeyRaw)) {
-      throw new AppError(400, "estimatorKey must identify a configured target estimator");
+    if (!estimatorKeyRaw || !UUID_PATTERN.test(estimatorKeyRaw)) {
+      throw new AppError(400, "estimatorKey must be a target estimator user id");
     }
-    estimatorKey = estimatorKeyRaw as EstimatorPipelineTargetKey;
+    estimatorKey = estimatorKeyRaw;
   } else if (estimatorKeyRaw !== undefined) {
     throw new AppError(400, "estimatorKey is only valid when bucket=target");
   }

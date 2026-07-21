@@ -1,26 +1,39 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
 import {
   getEstimatorPipelineEvidence,
   getEstimatorPipelineReport,
 } from "../../../src/modules/reports/estimator-pipeline-service.js";
+import { BID_BOARD_ESTIMATOR_USER_MAP_ENV } from "../../../src/modules/bid-board-sync/estimator-map.js";
 
 /**
  * REAL-SQL coverage for the estimator pipeline report. The fixture deliberately mixes canonical,
  * historical, and service-route stages so the summary and evidence paths must make the same cohort and
  * canonicalization decisions. Absolute anchors keep a shared mistake from passing via reconciliation alone.
+ *
+ * The roster is derived dynamically from BID_BOARD_ESTIMATOR_USER_MAP (name -> CRM user id). The seed maps
+ * three distinct estimators (Sidney, Alex, and a third — the previously "other" active user) so the report
+ * must produce one named row per mapped estimator, keyed by the user id.
  */
 const U = (suffix: string) => `00000000-0000-0000-0000-${suffix.padStart(12, "0")}`;
 const REPORT_NOW = new Date("2026-07-13T12:00:00.000Z");
 
 const SIDNEY = U("5101");
 const ALEX = U("5102");
-const OTHER_ACTIVE = U("5103");
+// A third mapped estimator proves the roster is not limited to two rows and drives the value-desc sort.
+const THIRD = U("5103");
 const OTHER_INACTIVE = U("5104");
 const OWNER = U("5105");
 const COMPANY = U("c001");
 const PROPERTY = U("f001");
+
+// name -> CRM user id, exactly the shape the Bid Board ingest map uses. Aliases collapse to one id.
+const ESTIMATOR_MAP_JSON = JSON.stringify({
+  "Sidney Gibson": SIDNEY,
+  "Alex Koch": ALEX,
+  "Casey Third": THIRD,
+});
 
 const STAGE = {
   opportunity: U("5701"),
@@ -106,7 +119,7 @@ beforeAll(async () => {
     INSERT INTO users (id, email, display_name, is_active) VALUES
       ('${SIDNEY}', 'SGibson@TRockGC.com', 'Sidney Gibson', true),
       ('${ALEX}', 'akoch@trockgc.com', 'Alex Koch', true),
-      ('${OTHER_ACTIVE}', 'other.active@example.com', 'Other Active', true),
+      ('${THIRD}', 'casey.third@example.com', 'Casey Third', true),
       ('${OTHER_INACTIVE}', 'other.inactive@example.com', 'Other Inactive', false),
       ('${OWNER}', 'owner@example.com', 'Project Owner', true);
 
@@ -143,7 +156,7 @@ beforeAll(async () => {
       id, deal_number, project_number, name, stage_id, assigned_rep_id, estimator_user_id,
       workflow_route, stage_entered_at, bid_estimate
     ) VALUES
-      ('${DEAL.otherActive}', 'E-301', 'P-301', 'Other active estimator', '${STAGE.sent}', '${OWNER}', '${OTHER_ACTIVE}', 'normal', '2026-07-05T12:00:00Z', 300),
+      ('${DEAL.otherActive}', 'E-301', 'P-301', 'Third estimator open', '${STAGE.sent}', '${OWNER}', '${THIRD}', 'normal', '2026-07-05T12:00:00Z', 300),
       ('${DEAL.otherInactive}', 'E-302', 'P-302', 'Other inactive estimator', '${STAGE.sent}', '${OWNER}', '${OTHER_INACTIVE}', 'normal', '2026-07-06T12:00:00Z', 40);
 
     -- Missing-assignment projects cover non-actionable, unmapped legacy, and explicit unassigned labels.
@@ -165,7 +178,7 @@ beforeAll(async () => {
     ) VALUES
       ('${DEAL.wonSidney}', 'W-101', 'PW-101', 'Sidney Won from boundary', '${STAGE.won}', '${OWNER}', '${SIDNEY}', 'normal', NULL, '2026-01-01T12:00:00Z', '2099-12-31', '2026-01-01', 1000, 1, NULL, false),
       ('${DEAL.wonAlexBidBoard}', 'W-201', 'PW-201', 'Alex Bid Board Won to boundary', '${STAGE.opportunity}', '${OWNER}', '${ALEX}', 'normal', 'won', '2020-01-01T12:00:00Z', NULL, '2026-07-13', 2000, 2, NULL, true),
-      ('${DEAL.wonOtherLegacy}', 'W-301', 'PW-301', 'Other legacy Won', '${STAGE.legacyWon}', '${OWNER}', '${OTHER_ACTIVE}', 'normal', NULL, '2026-04-15T12:00:00Z', NULL, '2026-04-15', 3000, 3, NULL, false),
+      ('${DEAL.wonOtherLegacy}', 'W-301', 'PW-301', 'Third legacy Won', '${STAGE.legacyWon}', '${OWNER}', '${THIRD}', 'normal', NULL, '2026-04-15T12:00:00Z', NULL, '2026-04-15', 3000, 3, NULL, false),
       ('${DEAL.wonMissing}', 'W-401', 'PW-401', 'Missing estimator Won', '${STAGE.won}', '${OWNER}', NULL, 'normal', NULL, '2026-06-01T12:00:00Z', NULL, '2026-06-01', 4000, 4, 'Not Assigned', false);
 
     -- A CRM-owned row may retain an obsolete mirror timestamp. Its displayed age must still use the CRM
@@ -209,6 +222,23 @@ afterAll(async () => {
   await pg?.close?.();
 });
 
+let previousEstimatorMapEnv: string | undefined;
+
+// Configure the estimator roster from the curated map for every test; restore the env afterward so this
+// suite does not leak the roster into other files sharing the process.
+beforeEach(() => {
+  previousEstimatorMapEnv = process.env[BID_BOARD_ESTIMATOR_USER_MAP_ENV];
+  process.env[BID_BOARD_ESTIMATOR_USER_MAP_ENV] = ESTIMATOR_MAP_JSON;
+});
+
+afterEach(() => {
+  if (previousEstimatorMapEnv === undefined) {
+    delete process.env[BID_BOARD_ESTIMATOR_USER_MAP_ENV];
+  } else {
+    process.env[BID_BOARD_ESTIMATOR_USER_MAP_ENV] = previousEstimatorMapEnv;
+  }
+});
+
 function byStage(stages: Array<{ stageSlug: string; count: number; value: number }>) {
   return new Map(stages.map((stage) => [stage.stageSlug, stage]));
 }
@@ -247,8 +277,17 @@ describe("estimator pipeline summary and evidence", () => {
 
   it("partitions the open-project cohort exactly once and merges canonical stage aliases", async () => {
     const report = await getEstimatorPipelineReport(tenantDb, REPORT_NOW);
-    const sidney = report.estimators.find((estimator) => estimator.key === "sidney_gibson")!;
-    const alex = report.estimators.find((estimator) => estimator.key === "alex_koch")!;
+    const sidney = report.estimators.find((estimator) => estimator.estimatorUserId === SIDNEY)!;
+    const alex = report.estimators.find((estimator) => estimator.estimatorUserId === ALEX)!;
+    const third = report.estimators.find((estimator) => estimator.estimatorUserId === THIRD)!;
+
+    // Every mapped estimator gets its own named row; the roster is not limited to two.
+    expect(report.estimators).toHaveLength(3);
+    // The report/evidence key is now the estimator user id, and configuredName folds to the display name.
+    expect(sidney.key).toBe(SIDNEY);
+    expect(sidney.configuredName).toBe("Sidney Gibson");
+    // Roster rows are ordered by OPEN pipeline value descending (Third 300 > Alex 200 > Sidney 175).
+    expect(report.estimators.map((estimator) => estimator.estimatorUserId)).toEqual([THIRD, ALEX, SIDNEY]);
 
     expect(report.pipeline).toEqual({ count: 9, value: 725.4 });
     expect(report.won).toEqual({ count: 4, value: 10000 });
@@ -274,10 +313,21 @@ describe("estimator pipeline summary and evidence", () => {
       estimatorUserId: ALEX,
       won: { count: 1, value: 2000 },
     });
-    expect(report.otherAssigned).toMatchObject({
-      count: 2,
-      value: 340,
+    expect(third).toMatchObject({
+      estimatorUserId: THIRD,
+      estimatorName: "Casey Third",
+      resolved: true,
+      active: true,
+      count: 1,
+      value: 300,
       won: { count: 1, value: 3000 },
+    });
+    // The third estimator absorbed the previously "other" active user's work, so only the inactive
+    // estimator's project remains in the Other bucket.
+    expect(report.otherAssigned).toMatchObject({
+      count: 1,
+      value: 40,
+      won: { count: 0, value: 0 },
     });
     expect(report.missingEstimator).toMatchObject({
       count: 3,
@@ -287,18 +337,24 @@ describe("estimator pipeline summary and evidence", () => {
       won: { count: 1, value: 4000 },
     });
 
-    expect(
-      sidney.count + alex.count + report.otherAssigned.count + report.missingEstimator.count,
-    ).toBe(report.pipeline.count);
-    expect(
-      sidney.value + alex.value + report.otherAssigned.value + report.missingEstimator.value,
-    ).toBe(report.pipeline.value);
-    expect(
-      sidney.won.count + alex.won.count + report.otherAssigned.won.count + report.missingEstimator.won.count,
-    ).toBe(report.won.count);
-    expect(
-      sidney.won.value + alex.won.value + report.otherAssigned.won.value + report.missingEstimator.won.value,
-    ).toBe(report.won.value);
+    // Reconciliation is roster-driven: the sum over every estimator row plus Other plus Missing equals
+    // the office pipeline total (partitioned exactly once).
+    const rosterCount = report.estimators.reduce((sum, estimator) => sum + estimator.count, 0);
+    const rosterValue = report.estimators.reduce((sum, estimator) => sum + estimator.value, 0);
+    const rosterWonCount = report.estimators.reduce((sum, estimator) => sum + estimator.won.count, 0);
+    const rosterWonValue = report.estimators.reduce((sum, estimator) => sum + estimator.won.value, 0);
+    expect(rosterCount + report.otherAssigned.count + report.missingEstimator.count).toBe(
+      report.pipeline.count,
+    );
+    expect(rosterValue + report.otherAssigned.value + report.missingEstimator.value).toBe(
+      report.pipeline.value,
+    );
+    expect(rosterWonCount + report.otherAssigned.won.count + report.missingEstimator.won.count).toBe(
+      report.won.count,
+    );
+    expect(rosterWonValue + report.otherAssigned.won.value + report.missingEstimator.won.value).toBe(
+      report.won.value,
+    );
 
     const columns = byStage(report.stageColumns.map((stage) => ({ ...stage, count: 0, value: 0 })));
     expect(new Set(columns.keys())).toEqual(
@@ -312,7 +368,7 @@ describe("estimator pipeline summary and evidence", () => {
     ]);
 
     const allStages = byStage(
-      [sidney, alex, report.otherAssigned, report.missingEstimator]
+      [sidney, alex, third, report.otherAssigned, report.missingEstimator]
         .flatMap((bucket) => bucket.stages)
         .reduce<Array<{ stageSlug: string; count: number; value: number }>>((merged, stage) => {
           const existing = merged.find((item) => item.stageSlug === stage.stageSlug);
@@ -336,15 +392,20 @@ describe("estimator pipeline summary and evidence", () => {
 
   it("reconciles target, other, and missing evidence to their summary buckets", async () => {
     const report = await getEstimatorPipelineReport(tenantDb, REPORT_NOW);
-    const sidneySummary = report.estimators.find((estimator) => estimator.key === "sidney_gibson")!;
+    const sidneySummary = report.estimators.find((estimator) => estimator.estimatorUserId === SIDNEY)!;
     const sidney = await getEstimatorPipelineEvidence(tenantDb, {
       bucket: "target",
-      estimatorKey: "sidney_gibson",
+      estimatorKey: SIDNEY,
       pageSize: 100,
     });
     const alex = await getEstimatorPipelineEvidence(tenantDb, {
       bucket: "target",
-      estimatorKey: "alex_koch",
+      estimatorKey: ALEX,
+      pageSize: 100,
+    });
+    const third = await getEstimatorPipelineEvidence(tenantDb, {
+      bucket: "target",
+      estimatorKey: THIRD,
       pageSize: 100,
     });
     const other = await getEstimatorPipelineEvidence(tenantDb, { bucket: "other", pageSize: 100 });
@@ -352,19 +413,25 @@ describe("estimator pipeline summary and evidence", () => {
 
     expect(sidney.total).toEqual({ count: sidneySummary.count, value: sidneySummary.value });
     expect(alex.total).toEqual({ count: 1, value: 200 });
+    expect(third.total).toEqual({ count: 1, value: 300 });
     expect(other.total).toEqual({ count: report.otherAssigned.count, value: report.otherAssigned.value });
     expect(missing.total).toEqual({
       count: report.missingEstimator.count,
       value: report.missingEstimator.value,
     });
-    expect([...sidney.records, ...alex.records, ...other.records, ...missing.records]).toHaveLength(
-      report.pipeline.count,
-    );
+    // The full open cohort partitions across every roster estimator plus the Other and Missing buckets.
+    expect([
+      ...sidney.records,
+      ...alex.records,
+      ...third.records,
+      ...other.records,
+      ...missing.records,
+    ]).toHaveLength(report.pipeline.count);
 
     expect(sidney.filter).toMatchObject({
       cohort: "open",
       bucket: "target",
-      estimatorKey: "sidney_gibson",
+      estimatorKey: SIDNEY,
       estimatorName: "Sidney Gibson",
       valueBasisLabel: "Best current estimate",
       period: null,
@@ -388,46 +455,65 @@ describe("estimator pipeline summary and evidence", () => {
       stageLabel: "Service Estimating",
       daysInStage: 0,
     });
+    expect(third.records[0]).toMatchObject({
+      dealId: DEAL.otherActive,
+      estimatorName: "Casey Third",
+      assignmentIssue: "none",
+    });
 
-    expect(other.records.find((record) => record.dealId === DEAL.otherActive)?.assignmentIssue).toBe("none");
+    // Only the inactive estimator's project remains in the Other bucket now that Casey is on the roster.
     expect(other.records.find((record) => record.dealId === DEAL.otherInactive)).toMatchObject({
       estimatorName: "Other Inactive",
       estimatorActive: false,
       assignmentIssue: "inactive_estimator",
     });
+    expect(other.records.map((record) => record.dealId)).toEqual([DEAL.otherInactive]);
     expect(missing.records.map((record) => record.dealNumber).sort()).toEqual(["E-401", "E-402", "E-403"]);
   });
 
   it("reconciles genuine CRM and Bid Board Won-YTD evidence without changing the open cohort", async () => {
     const report = await getEstimatorPipelineReport(tenantDb, REPORT_NOW);
-    const sidneySummary = report.estimators.find((estimator) => estimator.key === "sidney_gibson")!;
-    const alexSummary = report.estimators.find((estimator) => estimator.key === "alex_koch")!;
+    const sidneySummary = report.estimators.find((estimator) => estimator.estimatorUserId === SIDNEY)!;
+    const alexSummary = report.estimators.find((estimator) => estimator.estimatorUserId === ALEX)!;
+    const thirdSummary = report.estimators.find((estimator) => estimator.estimatorUserId === THIRD)!;
     const wonOptions = { cohort: "won" as const, pageSize: 100, now: REPORT_NOW };
     const sidney = await getEstimatorPipelineEvidence(tenantDb, {
       ...wonOptions,
       bucket: "target",
-      estimatorKey: "sidney_gibson",
+      estimatorKey: SIDNEY,
     });
     const alex = await getEstimatorPipelineEvidence(tenantDb, {
       ...wonOptions,
       bucket: "target",
-      estimatorKey: "alex_koch",
+      estimatorKey: ALEX,
+    });
+    const third = await getEstimatorPipelineEvidence(tenantDb, {
+      ...wonOptions,
+      bucket: "target",
+      estimatorKey: THIRD,
     });
     const other = await getEstimatorPipelineEvidence(tenantDb, { ...wonOptions, bucket: "other" });
     const missing = await getEstimatorPipelineEvidence(tenantDb, { ...wonOptions, bucket: "missing" });
 
     expect(sidney.total).toEqual(sidneySummary.won);
     expect(alex.total).toEqual(alexSummary.won);
+    expect(third.total).toEqual(thirdSummary.won);
     expect(other.total).toEqual(report.otherAssigned.won);
     expect(missing.total).toEqual(report.missingEstimator.won);
     expect(
-      sidney.total.count + alex.total.count + other.total.count + missing.total.count,
+      sidney.total.count + alex.total.count + third.total.count + other.total.count + missing.total.count,
     ).toBe(report.won.count);
     expect(
-      sidney.total.value + alex.total.value + other.total.value + missing.total.value,
+      sidney.total.value + alex.total.value + third.total.value + other.total.value + missing.total.value,
     ).toBe(report.won.value);
 
-    const records = [...sidney.records, ...alex.records, ...other.records, ...missing.records];
+    const records = [
+      ...sidney.records,
+      ...alex.records,
+      ...third.records,
+      ...other.records,
+      ...missing.records,
+    ];
     expect(records).toHaveLength(4);
     expect(new Set(records.map((record) => record.dealId)).size).toBe(4);
     expect(records.map((record) => record.dealNumber).sort()).toEqual(["W-101", "W-201", "W-301", "W-401"]);
@@ -458,7 +544,7 @@ describe("estimator pipeline summary and evidence", () => {
       cohort: "won",
       asOf: "2026-07-12",
       bucket: "target",
-      estimatorKey: "alex_koch",
+      estimatorKey: ALEX,
       pageSize: 100,
       now: REPORT_NOW,
     });
@@ -468,7 +554,9 @@ describe("estimator pipeline summary and evidence", () => {
       label: "Won YTD",
     });
     expect(carriedEarlierPeriod.total).toEqual({ count: 0, value: 0 });
-    expect(other.records[0]).toMatchObject({
+    // W-301 now belongs to the third roster estimator, so the Other-won bucket is empty.
+    expect(other.total).toEqual({ count: 0, value: 0 });
+    expect(third.records[0]).toMatchObject({
       dealId: DEAL.wonOtherLegacy,
       stageSlug: "won",
       pipelineValue: 3000,
@@ -482,7 +570,7 @@ describe("estimator pipeline summary and evidence", () => {
     const wonCell = await getEstimatorPipelineEvidence(tenantDb, {
       ...wonOptions,
       bucket: "target",
-      estimatorKey: "sidney_gibson",
+      estimatorKey: SIDNEY,
       stageSlug: "won",
     });
     expect(wonCell.total).toEqual(sidneySummary.won);

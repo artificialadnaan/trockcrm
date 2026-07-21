@@ -43,12 +43,15 @@ const report: EstimatorPipelineReport = {
   warnings: [],
 };
 
+// estimatorKey is now the estimator's CRM user id (a UUID string).
+const SIDNEY_USER_ID = "00000000-0000-0000-0000-000000005101";
+
 const evidence: EstimatorPipelineEvidenceResponse = {
   generatedAt: "2026-07-13T15:00:00.000Z",
   filter: {
     cohort: "open",
     bucket: "target",
-    estimatorKey: "sidney_gibson",
+    estimatorKey: SIDNEY_USER_ID,
     estimatorName: "Sidney Gibson",
     stageSlug: "estimating",
     stageLabel: "Estimating",
@@ -138,7 +141,7 @@ describe("useEstimatorPipelineEvidence", () => {
     const request: EstimatorPipelineEvidenceRequest = {
       cohort: "open",
       bucket: "target",
-      estimatorKey: "sidney_gibson",
+      estimatorKey: SIDNEY_USER_ID,
       stageSlug: "estimating",
       page: 2,
       pageSize: 25,
@@ -149,7 +152,7 @@ describe("useEstimatorPipelineEvidence", () => {
 
     expect(mocks.api).toHaveBeenCalledTimes(1);
     expect(mocks.api.mock.calls[0][0]).toBe(
-      "/reports/estimator-pipeline/evidence?cohort=open&bucket=target&page=2&pageSize=25&estimatorKey=sidney_gibson&stageSlug=estimating",
+      `/reports/estimator-pipeline/evidence?cohort=open&bucket=target&page=2&pageSize=25&estimatorKey=${SIDNEY_USER_ID}&stageSlug=estimating`,
     );
     expect(mocks.api.mock.calls[0][1].signal).toBeInstanceOf(AbortSignal);
     expect(latestEvidence).toMatchObject({ data: evidence, loading: false, error: null });
@@ -175,7 +178,7 @@ describe("useEstimatorPipelineEvidence", () => {
           cohort: "won",
           asOf: "2026-07-13",
           bucket: "target",
-          estimatorKey: "sidney_gibson",
+          estimatorKey: SIDNEY_USER_ID,
           page: 1,
           pageSize: 25,
         }}
@@ -185,7 +188,7 @@ describe("useEstimatorPipelineEvidence", () => {
     await flush();
 
     expect(mocks.api.mock.calls[0][0]).toBe(
-      "/reports/estimator-pipeline/evidence?cohort=won&bucket=target&page=1&pageSize=25&estimatorKey=sidney_gibson&asOf=2026-07-13",
+      `/reports/estimator-pipeline/evidence?cohort=won&bucket=target&page=1&pageSize=25&estimatorKey=${SIDNEY_USER_ID}&asOf=2026-07-13`,
     );
     expect(latestEvidence).toMatchObject({ data: wonEvidence, loading: false, error: null });
   });

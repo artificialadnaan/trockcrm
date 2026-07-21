@@ -1,7 +1,11 @@
 import type { WorkflowRoute } from "./workflow.js";
 
-export const ESTIMATOR_PIPELINE_TARGET_KEYS = ["sidney_gibson", "alex_koch"] as const;
-export type EstimatorPipelineTargetKey = (typeof ESTIMATOR_PIPELINE_TARGET_KEYS)[number];
+/**
+ * The report "key" identifying an estimator row is that estimator's CRM user id (a UUID string).
+ * The roster is derived dynamically from BID_BOARD_ESTIMATOR_USER_MAP, so there is no longer a fixed
+ * enum of target keys. Evidence drill-downs pass this userId as `estimatorKey`.
+ */
+export type EstimatorPipelineTargetKey = string;
 
 export const ESTIMATOR_PIPELINE_BUCKETS = ["target", "other", "missing"] as const;
 export type EstimatorPipelineBucket = (typeof ESTIMATOR_PIPELINE_BUCKETS)[number];

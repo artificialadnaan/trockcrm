@@ -52,7 +52,7 @@ const report: EstimatorPipelineReport = {
   ],
   estimators: [
     {
-      key: "sidney_gibson",
+      key: "sidney-user",
       configuredName: "Sidney Gibson",
       estimatorUserId: "sidney-user",
       estimatorName: "Sidney Gibson",
@@ -66,7 +66,7 @@ const report: EstimatorPipelineReport = {
       ],
     },
     {
-      key: "alex_koch",
+      key: "alex-user",
       configuredName: "Alex Koch",
       estimatorUserId: "alex-user",
       estimatorName: "Alex Koch",
@@ -161,7 +161,7 @@ describe("EstimatorPipelinePage", () => {
     expect(state.evidenceSelection).toEqual({
       cohort: "open",
       bucket: "target",
-      estimatorKey: "sidney_gibson",
+      estimatorKey: "sidney-user",
       title: "Sidney Gibson",
       description: "Current open projects across every active pipeline stage.",
     });
@@ -171,7 +171,7 @@ describe("EstimatorPipelinePage", () => {
       cohort: "won",
       period: { from: "2026-01-01", to: "2026-07-13", label: "Won YTD" },
       bucket: "target",
-      estimatorKey: "sidney_gibson",
+      estimatorKey: "sidney-user",
       title: "Sidney Gibson: Won YTD",
       description: "Projects won from Jan 1, 2026 through Jul 13, 2026.",
     });

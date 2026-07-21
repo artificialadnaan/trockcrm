@@ -4,7 +4,6 @@ import * as schema from "@trock-crm/shared/schema";
 import {
   CANONICAL_DEAL_STAGE_SLUGS,
   CANONICAL_DEAL_STAGE_LABELS,
-  ESTIMATOR_PIPELINE_TARGET_KEYS,
   toCanonicalDealStageSlug,
   type EstimatorAssignmentIssue,
   type EstimatorPipelineBucket,
@@ -18,6 +17,7 @@ import {
   type EstimatorPipelineWonPeriod,
   type WorkflowRoute,
 } from "@trock-crm/shared/types";
+import { estimatorRosterUserIds } from "../bid-board-sync/estimator-map.js";
 import {
   aliasedActiveDealCountFilterSql,
   aliasedBidBoardTerminalSql,
@@ -31,15 +31,6 @@ import { dealValueSqlForBasis } from "./foundations.js";
 
 const { companies, deals, pipelineStageConfig, properties, users } = schema;
 type TenantDb = NodePgDatabase<typeof schema>;
-
-export const ESTIMATOR_PIPELINE_TARGETS: ReadonlyArray<{
-  key: EstimatorPipelineTargetKey;
-  configuredName: string;
-  email: string;
-}> = [
-  { key: "sidney_gibson", configuredName: "Sidney Gibson", email: "sgibson@trockgc.com" },
-  { key: "alex_koch", configuredName: "Alex Koch", email: "akoch@trockgc.com" },
-];
 
 const ACTIONABLE_MISSING_STAGE_SLUGS = new Set([
   "estimating",
@@ -169,16 +160,16 @@ export function estimatorPipelineScopeSql(
     AND ${wonDateSql()} <= ${period.to}::date`;
 }
 
-export function buildEstimatorTargetUsersSql(): SQL {
+export function buildEstimatorRosterUsersSql(rosterUserIds: string[]): SQL {
   return sql`
     SELECT u.id AS id,
            u.email AS email,
            u.display_name AS display_name,
            u.is_active AS is_active
     FROM ${users} u
-    WHERE LOWER(u.email) IN (${sql.join(
-      ESTIMATOR_PIPELINE_TARGETS.map((target) => sql`${target.email.toLowerCase()}`),
-      sql`, `
+    WHERE u.id IN (${sql.join(
+      rosterUserIds.map((id) => sql`${id}::uuid`),
+      sql`, `,
     )})
     ORDER BY u.display_name ASC
   `;
@@ -212,28 +203,43 @@ interface TargetUserRow {
 }
 
 interface ResolvedTarget {
+  // The report/evidence key IS the estimator's CRM user id (a UUID string).
   key: EstimatorPipelineTargetKey;
   configuredName: string;
-  userId: string | null;
+  userId: string;
   name: string;
   resolved: boolean;
   active: boolean | null;
 }
 
+/**
+ * Build the estimator roster from the curated BID_BOARD_ESTIMATOR_USER_MAP (the same map the Bid Board
+ * ingest uses to link estimators). Each distinct mapped user id becomes one row keyed by that user id.
+ * A roster id with no matching CRM user (a misconfigured map entry) still emits an unresolved warning row.
+ * When the env is unset the roster is empty and the report shows only the Other + Missing buckets.
+ */
 async function resolveTargets(tenantDb: TenantDb): Promise<ResolvedTarget[]> {
-  const rows = rowsFromExecute<TargetUserRow>(await tenantDb.execute(buildEstimatorTargetUsersSql()));
-  const byEmail = new Map(rows.map((row) => [row.email.trim().toLowerCase(), row]));
-  return ESTIMATOR_PIPELINE_TARGETS.map((target) => {
-    const row = byEmail.get(target.email.toLowerCase());
-    return {
-      key: target.key,
-      configuredName: target.configuredName,
-      userId: row?.id ?? null,
-      name: row?.display_name?.trim() || target.configuredName,
-      resolved: Boolean(row),
-      active: row ? Boolean(row.is_active) : null,
-    };
-  });
+  const rosterUserIds = estimatorRosterUserIds();
+  if (rosterUserIds.length === 0) return [];
+
+  const rows = rowsFromExecute<TargetUserRow>(
+    await tenantDb.execute(buildEstimatorRosterUsersSql(rosterUserIds)),
+  );
+  const byId = new Map(rows.map((row) => [String(row.id).toLowerCase(), row]));
+  return rosterUserIds
+    .map((userId) => {
+      const row = byId.get(userId.toLowerCase());
+      const displayName = row?.display_name?.trim() || userId;
+      return {
+        key: userId,
+        configuredName: displayName,
+        userId,
+        name: displayName,
+        resolved: Boolean(row),
+        active: row ? Boolean(row.is_active) : null,
+      };
+    })
+    .sort((a, b) => a.name.localeCompare(b.name));
 }
 
 interface SummaryRow {
@@ -306,12 +312,13 @@ export async function getEstimatorPipelineReport(
     await tenantDb.execute(buildEstimatorPipelineSummarySql("won", wonPeriod)),
   );
 
+  // key === userId, so this maps each roster estimator's user id to its own key.
   const targetById = new Map(
-    targets.flatMap((target) => (target.userId ? [[target.userId, target.key] as const] : [])),
+    targets.map((target) => [target.userId, target.key] as const),
   );
   const targetMetrics = new Map(
-    ESTIMATOR_PIPELINE_TARGET_KEYS.map((key) => [
-      key,
+    targets.map((target) => [
+      target.key,
       { ...emptyMetric(), won: emptyMetric(), stages: new Map<string, EstimatorPipelineStageSummary>() },
     ]),
   );
@@ -416,21 +423,24 @@ export async function getEstimatorPipelineReport(
       stageLabel,
       displayOrder,
     })),
-    estimators: targets.map((target) => {
-      const metric = targetMetrics.get(target.key)!;
-      return {
-        key: target.key,
-        configuredName: target.configuredName,
-        estimatorUserId: target.userId,
-        estimatorName: target.name,
-        resolved: target.resolved,
-        active: target.active,
-        count: metric.count,
-        value: metric.value,
-        won: metric.won,
-        stages: sortedStages(metric.stages),
-      };
-    }),
+    estimators: targets
+      .map((target) => {
+        const metric = targetMetrics.get(target.key)!;
+        return {
+          key: target.key,
+          configuredName: target.configuredName,
+          estimatorUserId: target.userId,
+          estimatorName: target.name,
+          resolved: target.resolved,
+          active: target.active,
+          count: metric.count,
+          value: metric.value,
+          won: metric.won,
+          stages: sortedStages(metric.stages),
+        };
+      })
+      // Sort by OPEN pipeline value descending, with a stable A→Z tiebreak on the estimator name.
+      .sort((a, b) => b.value - a.value || a.estimatorName.localeCompare(b.estimatorName)),
     otherAssigned: {
       count: otherAssigned.count,
       value: otherAssigned.value,
@@ -571,7 +581,9 @@ export interface EstimatorPipelineEvidenceOptions {
   cohort?: EstimatorPipelineCohort;
   asOf?: string;
   bucket: EstimatorPipelineBucket;
-  estimatorKey?: EstimatorPipelineTargetKey;
+  // The evidence key is now the estimator's CRM user id (a UUID string). The service throws if it is not
+  // a member of the dynamic roster.
+  estimatorKey?: string;
   stageSlug?: string;
   page?: number;
   pageSize?: number;
