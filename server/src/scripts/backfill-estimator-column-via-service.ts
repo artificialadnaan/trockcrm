@@ -54,11 +54,19 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { drizzle } from "drizzle-orm/node-postgres";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import * as schema from "@trock-crm/shared/schema";
+import { LOST_DEAL_STAGE_SLUGS } from "@trock-crm/shared/types";
 import { AppError } from "../middleware/error-handler.js";
 import { setDealEstimator } from "../modules/deals/service.js";
 import { resolveEstimatorUserId } from "../modules/bid-board-sync/estimator-map.js";
+
+// Canonical lost/canceled pipeline stages: ["lost","deal_canceled","production_lost","service_lost","closed_lost"].
+// setDealEstimator ALWAYS mints the additive estimator commission (mintEstimatorCommissionForDeal has no stage
+// gate) and a lost deal retains its owner commission row, so a signed-then-lost deal would wrongly earn an
+// estimator cut. We EXCLUDE lost deals from candidacy (mirrors backfill-estimator-commissions.ts) — they are
+// also never shown by the estimator pipeline report (scope = open + won YTD), so there is no reason to link them.
+const LOST_STAGE_SLUG_SET: ReadonlySet<string> = new Set(LOST_DEAL_STAGE_SLUGS);
 
 type TenantDb = NodePgDatabase<typeof schema>;
 type QueryFn = (sql: string, params?: unknown[]) => Promise<{ rows: Record<string, unknown>[] }>;
@@ -133,14 +141,24 @@ export const CANDIDATE_COLUMN_SQL = `
   AND NULLIF(BTRIM(bid_board_estimator), '') IS NULL
 `;
 
-/** Rows matching the column predicate (pre-resolution). ORDER BY deal_number for stable, readable logs. */
+/**
+ * Rows matching the column predicate (pre-resolution), EXCLUDING lost/canceled stages. The
+ * pipeline_stage_config join exposes psc.slug so we can drop lost deals (see LOST_STAGE_SLUG_SET) — the same
+ * money-safety exclusion backfill-estimator-commissions.ts applies. ORDER BY deal_number for stable logs.
+ */
 export async function findEstimatorColumnRows(query: QueryFn): Promise<EstimatorColumnRow[]> {
-  const { rows } = await query(`
-    SELECT id AS deal_id, deal_number, BTRIM(estimator) AS estimator_text
-    FROM deals
+  const lostPlaceholders = LOST_DEAL_STAGE_SLUGS.map((_, i) => `$${i + 1}`).join(", ");
+  const { rows } = await query(
+    `
+    SELECT d.id AS deal_id, d.deal_number, BTRIM(d.estimator) AS estimator_text
+    FROM deals d
+    JOIN pipeline_stage_config psc ON psc.id = d.stage_id
     WHERE ${CANDIDATE_COLUMN_SQL}
-    ORDER BY deal_number
-  `);
+      AND psc.slug NOT IN (${lostPlaceholders})
+    ORDER BY d.deal_number
+  `,
+    [...LOST_DEAL_STAGE_SLUGS]
+  );
   return rows.map((r) => ({
     dealId: String(r.deal_id),
     dealNumber: r.deal_number == null ? null : String(r.deal_number),
@@ -201,21 +219,31 @@ export async function runOne(
   execute: boolean
 ): Promise<EstimatorColumnBackfillStatus> {
   const attempt = async (tx: TenantDb): Promise<EstimatorColumnBackfillStatus> => {
-    // Row-lock + RE-CHECK that the estimator is STILL null before touching it. The candidate scan is
-    // unlocked, so between it and here another request could have assigned an estimator. setDealEstimator
-    // ALLOWS overwriting a non-null estimator (its correction path), so without this guard the backfill
-    // could clobber a concurrently-set estimator and re-attribute its commission — and the post-call
-    // comparison could NOT detect it (the row would already equal our value). Under the lock, a
-    // no-longer-null row is a no_change skip. setDealEstimator re-locks this same row in its own nested
-    // transaction (SAVEPOINT); re-taking a lock we already hold is a no-op, so there is no deadlock.
+    // Re-check the FULL candidate predicate under a row lock before touching the deal. The candidate scan is
+    // unlocked, so between it and here a concurrent write (e.g. the RFP edit path, a manual estimator edit, a
+    // stage move) could have: assigned an estimator, changed the free-text `estimator`, populated
+    // `bid_board_estimator` (now Bid-Board sourced), or moved the deal to a LOST stage. setDealEstimator would
+    // otherwise happily overwrite / mint against stale text — and the post-call comparison could NOT detect a
+    // concurrent assignment (the row would already equal our value). Re-verify everything while holding the
+    // lock; setDealEstimator re-locks this same row in its own nested transaction (SAVEPOINT), and re-taking a
+    // lock we already hold is a no-op, so there is no deadlock.
     const [locked] = await tx
-      .select({ estimatorUserId: schema.deals.estimatorUserId })
+      .select({
+        estimatorUserId: schema.deals.estimatorUserId,
+        estimatorText: sql<string | null>`NULLIF(BTRIM(${schema.deals.estimator}), '')`,
+        bidBoardEstimator: sql<string | null>`NULLIF(BTRIM(${schema.deals.bidBoardEstimator}), '')`,
+        stageSlug: schema.pipelineStageConfig.slug,
+      })
       .from(schema.deals)
+      .innerJoin(schema.pipelineStageConfig, eq(schema.pipelineStageConfig.id, schema.deals.stageId))
       .where(and(eq(schema.deals.id, candidate.dealId), eq(schema.deals.isActive, true)))
       .limit(1)
-      .for("update");
+      .for("update", { of: schema.deals });
     if (!locked) return "skipped:deal_not_found"; // not found / soft-deleted since the scan
     if (locked.estimatorUserId != null) return "skipped:no_change"; // concurrently assigned between scan and lock
+    if (locked.estimatorText !== candidate.estimatorText) return "skipped:no_change"; // free-text changed since scan
+    if (locked.bidBoardEstimator != null) return "skipped:no_change"; // now Bid-Board sourced (the sync owns it)
+    if (LOST_STAGE_SLUG_SET.has(locked.stageSlug)) return "skipped:lost_stage"; // moved to a lost stage since scan
     const updated = await setDealEstimator(tx, candidate.dealId, candidate.resolvedUserId, actorUserId, officeId);
     if (!updated) return "skipped:deal_not_found";
     if (updated.estimatorUserId !== candidate.resolvedUserId) return "skipped:no_change";
@@ -414,6 +442,19 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
         // For an EXPLICITLY requested --tenant, FAIL the command — silently skipping the only requested tenant
         // would exit 0 with a zero grand total and let automation record a "successful" backfill that did
         // nothing. For automatic multi-tenant discovery, skip-and-continue so one bad tenant can't abort the sweep.
+        if (tenant) throw new Error(message);
+        console.warn(`${message} SKIPPED (multi-tenant discovery).`);
+        continue;
+      }
+      // Confirm the tenant actually OWNS a deals table before SET search_path. If an office is provisioned
+      // without its own deals table, an unqualified `deals` would fall through to a legacy public.deals via the
+      // search_path, and --commit could mutate that unrelated table while validating against this office.
+      // to_regclass returns NULL when the relation is absent (it does not error).
+      const { rows: dealsReg } = await client.query<{ reg: string | null }>("SELECT to_regclass($1) AS reg", [
+        `${t}.deals`,
+      ]);
+      if (!dealsReg[0]?.reg) {
+        const message = `[${t}] has no ${t}.deals table (schema not fully provisioned).`;
         if (tenant) throw new Error(message);
         console.warn(`${message} SKIPPED (multi-tenant discovery).`);
         continue;

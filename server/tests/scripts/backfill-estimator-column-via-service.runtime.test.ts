@@ -38,6 +38,7 @@ const EST_OTHER = U("0004"); // estimator "colby", rate 0.04, in OTHER_OFFICE on
 const SRC = U("0005"); // a sales source rep
 const ACTOR = U("0ac7"); // backfill operator (created_by + audit actor)
 const WON = U("0500");
+const LOST_STAGE = U("0502"); // a lost/canceled stage — candidates here must be EXCLUDED
 
 // Candidate deals (NULL estimator_user_id, populated free-text estimator, NULL bid_board_estimator):
 const D_TIM = U("0de1"); // estimator="Tim" -> EST_TIM, plain -> ASSIGNED
@@ -47,6 +48,7 @@ const D_CO = U("0de4"); // is_change_order=true, estimator="Tim" -> skipped:CHAN
 const D_SRC_CONFLICT = U("0de5"); // estimator="alex" but EST_ALEX is the sales source -> SALES_SOURCE_CONFLICT
 const D_BB_FIRSTFILL = U("0de6"); // is_bid_board_owned=true, estimator NULL currently -> BID_BOARD_OWNED_ESTIMATOR_LOCKED
 const D_OFFICE_DENIED = U("0de7"); // estimator="colby" -> EST_OTHER (no access to OFFICE) -> skipped:http_400
+const D_LOST = U("0de0"); // estimator="Tim" but in a LOST stage -> excluded from candidacy (no lost-deal mint)
 
 // Non-candidates (must NOT be scanned):
 const D_ALREADY_LINKED = U("0dea"); // estimator_user_id already set -> excluded (IS NULL predicate)
@@ -109,7 +111,7 @@ beforeAll(async () => {
     ('${SRC}','Source Rep','src@x.com','rep','${OFFICE}',true),
     ('${ACTOR}','Backfill Operator','ops@x.com','director','${OFFICE}',true)`);
   await pg.exec(`INSERT INTO public.pipeline_stage_config (id, name, slug, display_order) VALUES
-    ('${WON}','Won','won',9)`);
+    ('${WON}','Won','won',9), ('${LOST_STAGE}','Lost','lost',20)`);
   await pg.exec(`INSERT INTO public.user_commission_settings (user_id, commission_rate, is_active) VALUES
     ('${O1}',0.030000,true), ('${EST_TIM}',0.020000,true), ('${EST_ALEX}',0.050000,true),
     ('${EST_OTHER}',0.040000,true), ('${SRC}',0.030000,true)`);
@@ -124,13 +126,14 @@ beforeAll(async () => {
       isChangeOrder?: boolean;
       isBidBoardOwned?: boolean;
       salesSourceUserId?: string;
+      stageId?: string;
     } = {}
   ) =>
     `INSERT INTO public.deals
        (id, deal_number, name, stage_id, assigned_rep_id, estimator, estimator_user_id, bid_board_estimator,
         awarded_amount, contract_signed_date, is_change_order, is_bid_board_owned, sales_source_user_id, is_active, workflow_route)
      VALUES
-       ('${id}','${id.slice(-4)}','Deal','${WON}','${O1}',
+       ('${id}','${id.slice(-4)}','Deal','${opts.stageId ?? WON}','${O1}',
         ${estimatorText == null ? "NULL" : `'${estimatorText}'`},
         ${opts.estimatorUserId ? `'${opts.estimatorUserId}'` : "NULL"},
         ${opts.bidBoardEstimator ? `'${opts.bidBoardEstimator}'` : "NULL"},
@@ -144,6 +147,7 @@ beforeAll(async () => {
   await pg.exec(ins(D_SRC_CONFLICT, "alex", { salesSourceUserId: EST_ALEX }));
   await pg.exec(ins(D_BB_FIRSTFILL, "Tim", { isBidBoardOwned: true }));
   await pg.exec(ins(D_OFFICE_DENIED, "colby"));
+  await pg.exec(ins(D_LOST, "Tim", { stageId: LOST_STAGE })); // lost stage -> excluded from candidacy
   // Non-candidates:
   await pg.exec(ins(D_ALREADY_LINKED, "Tim", { estimatorUserId: EST_TIM }));
   await pg.exec(ins(D_HAS_BB, "Tim", { bidBoardEstimator: "Tim" }));
@@ -174,7 +178,7 @@ afterEach(() => {
 });
 
 describe("estimator-column service backfill — candidate selection + resolution", () => {
-  it("selects only NULL-estimator_user_id, populated-estimator, no-bid_board_estimator deals", async () => {
+  it("selects only NULL-estimator_user_id, populated-estimator, no-bid_board_estimator, non-lost deals", async () => {
     const rows = await findEstimatorColumnRows(query);
     const ids = rows.map((r) => r.dealId).sort();
     expect(ids).toEqual(
@@ -183,6 +187,7 @@ describe("estimator-column service backfill — candidate selection + resolution
     expect(ids).not.toContain(D_ALREADY_LINKED); // estimator_user_id already set
     expect(ids).not.toContain(D_HAS_BB); // bid_board_estimator populated
     expect(ids).not.toContain(D_NO_TEXT); // estimator column blank
+    expect(ids).not.toContain(D_LOST); // lost stage -> no additive estimator commission on a lost deal
   });
 
   it("candidate SQL is column-only (no user input, safe to interpolate)", () => {
@@ -311,6 +316,22 @@ describe("estimator-column service backfill — dry-run vs commit via setDealEst
     } finally {
       await pg.exec("ROLLBACK");
     }
+  });
+
+  it("runOne re-checks the FULL predicate under the lock: skips when the free-text estimator changed", async () => {
+    // Candidate resolved from stale scan text; the deal now names someone else -> don't assign the stale user.
+    const stale = { dealId: D_TIM, dealNumber: "de1", estimatorText: "Someone Else", resolvedUserId: EST_TIM };
+    expect(await runOne(tdb, stale, ACTOR, OFFICE, false)).toBe("skipped:no_change");
+  });
+
+  it("runOne skips (no_change) when bid_board_estimator became populated since the scan (now sync-owned)", async () => {
+    const candidate = { dealId: D_HAS_BB, dealNumber: "deb", estimatorText: "Tim", resolvedUserId: EST_TIM };
+    expect(await runOne(tdb, candidate, ACTOR, OFFICE, false)).toBe("skipped:no_change");
+  });
+
+  it("runOne skips (lost_stage) when the deal is in a lost stage under the lock", async () => {
+    const candidate = { dealId: D_LOST, dealNumber: "de0", estimatorText: "Tim", resolvedUserId: EST_TIM };
+    expect(await runOne(tdb, candidate, ACTOR, OFFICE, false)).toBe("skipped:lost_stage");
   });
 
   it("deal_signed_commissions.created_by is an FK to users — a non-existent actor is rejected", async () => {
