@@ -20,13 +20,21 @@ jest.mock("@expo/vector-icons", () => ({ Ionicons: () => null }));
 
 // Spy on the device-save so we can assert it is (never) invoked for a URL-less photo. `mock`-prefixed so
 // jest allows referencing it inside the hoisted factory.
-const mockSavePhotoToDevice = jest.fn(async (_url: string) => "saved" as const);
+type SaveResult = "saved" | "permission_denied" | "failed";
+const mockSavePhotoToDevice = jest.fn<Promise<SaveResult>, [string]>(async () => "saved");
 jest.mock("../../photos/save-to-device", () => ({ savePhotoToDevice: (url: string) => mockSavePhotoToDevice(url) }));
 
 // The edit hook needs auth/query context we don't want in a pure UI test.
 jest.mock("../../query/hooks", () => ({
   useUpdatePhotoMetadata: () => ({ mutate: jest.fn(), reset: jest.fn(), isError: false, isPending: false }),
 }));
+
+// Stub auth so the viewer has a fetcher for the fresh-URL refetch.
+jest.mock("../../auth/AuthContext", () => ({ useAuth: () => ({ fetcher: jest.fn(), user: { id: "u1" } }) }));
+
+// Spy on the project-photos fetch used to re-mint a fresh presigned URL on save.
+const mockGetProjectPhotos = jest.fn();
+jest.mock("../../api/endpoints", () => ({ getProjectPhotos: (...args: unknown[]) => mockGetProjectPhotos(...args) }));
 
 import { PhotoViewerModal } from "../PhotoViewerModal";
 
@@ -63,7 +71,11 @@ function photo(over: Partial<FieldPhoto>): FieldPhoto {
 }
 
 describe("PhotoViewerModal save action gating", () => {
-  beforeEach(() => mockSavePhotoToDevice.mockClear());
+  beforeEach(() => {
+    mockSavePhotoToDevice.mockClear();
+    mockSavePhotoToDevice.mockResolvedValue("saved");
+    mockGetProjectPhotos.mockReset();
+  });
 
   it("advertises Save when the current photo has a resolvable URL", () => {
     const { queryByLabelText } = render(
@@ -103,5 +115,99 @@ describe("PhotoViewerModal save action gating", () => {
       fireEvent.press(getByLabelText("Save photo to device"));
     });
     expect(mockSavePhotoToDevice).toHaveBeenCalledWith("https://r2.example/thumb.jpg");
+  });
+});
+
+describe("PhotoViewerModal expired-URL refresh", () => {
+  beforeEach(() => {
+    mockSavePhotoToDevice.mockReset();
+    mockGetProjectPhotos.mockReset();
+  });
+
+  it("re-fetches a fresh URL and retries once when the snapshot URL is expired (403 → failed)", async () => {
+    // First save (the stale snapshot URL) fails; the retry with the fresh URL succeeds.
+    mockSavePhotoToDevice
+      .mockResolvedValueOnce("failed")
+      .mockResolvedValueOnce("saved");
+    mockGetProjectPhotos.mockResolvedValueOnce({
+      photos: [photo({ id: "p1", fullImageUrl: "https://r2.example/full-FRESH.jpg" })],
+      pagination: { page: 1, limit: 200, total: 1, totalPages: 1 },
+    });
+
+    const { getByLabelText } = render(
+      <PhotoViewerModal
+        photos={[photo({ id: "p1", fullImageUrl: "https://r2.example/full-STALE.jpg" })]}
+        initialIndex={0}
+        visible
+        projectDealId="d1"
+        onClose={jest.fn()}
+      />,
+    );
+    await act(async () => {
+      fireEvent.press(getByLabelText("Save photo to device"));
+    });
+
+    expect(mockSavePhotoToDevice).toHaveBeenNthCalledWith(1, "https://r2.example/full-STALE.jpg");
+    expect(mockGetProjectPhotos).toHaveBeenCalledWith(expect.anything(), "d1", { page: 1, perPage: 200 });
+    expect(mockSavePhotoToDevice).toHaveBeenNthCalledWith(2, "https://r2.example/full-FRESH.jpg");
+  });
+
+  it("does NOT retry when the save succeeds on the first (unexpired) URL", async () => {
+    mockSavePhotoToDevice.mockResolvedValue("saved");
+    const { getByLabelText } = render(
+      <PhotoViewerModal
+        photos={[photo({ id: "p1", fullImageUrl: "https://r2.example/full.jpg" })]}
+        initialIndex={0}
+        visible
+        projectDealId="d1"
+        onClose={jest.fn()}
+      />,
+    );
+    await act(async () => {
+      fireEvent.press(getByLabelText("Save photo to device"));
+    });
+    expect(mockSavePhotoToDevice).toHaveBeenCalledTimes(1);
+    expect(mockGetProjectPhotos).not.toHaveBeenCalled();
+  });
+
+  it("does NOT retry on a permission denial (only genuine 'failed' triggers a refresh)", async () => {
+    mockSavePhotoToDevice.mockResolvedValue("permission_denied");
+    const { getByLabelText } = render(
+      <PhotoViewerModal
+        photos={[photo({ id: "p1", fullImageUrl: "https://r2.example/full.jpg" })]}
+        initialIndex={0}
+        visible
+        projectDealId="d1"
+        onClose={jest.fn()}
+      />,
+    );
+    await act(async () => {
+      fireEvent.press(getByLabelText("Save photo to device"));
+    });
+    expect(mockSavePhotoToDevice).toHaveBeenCalledTimes(1);
+    expect(mockGetProjectPhotos).not.toHaveBeenCalled();
+  });
+
+  it("surfaces the error without retrying the SAME URL when the refresh yields an identical (still-stale) URL", async () => {
+    mockSavePhotoToDevice.mockResolvedValue("failed");
+    mockGetProjectPhotos.mockResolvedValueOnce({
+      photos: [photo({ id: "p1", fullImageUrl: "https://r2.example/full-STALE.jpg" })],
+      pagination: { page: 1, limit: 200, total: 1, totalPages: 1 },
+    });
+    const { getByLabelText } = render(
+      <PhotoViewerModal
+        photos={[photo({ id: "p1", fullImageUrl: "https://r2.example/full-STALE.jpg" })]}
+        initialIndex={0}
+        visible
+        projectDealId="d1"
+        onClose={jest.fn()}
+      />,
+    );
+    await act(async () => {
+      fireEvent.press(getByLabelText("Save photo to device"));
+    });
+    // The refetch ran, but the URL matched — no pointless second save of the same dead link.
+    expect(mockGetProjectPhotos).toHaveBeenCalledTimes(1);
+    expect(mockSavePhotoToDevice).toHaveBeenCalledTimes(1);
   });
 });

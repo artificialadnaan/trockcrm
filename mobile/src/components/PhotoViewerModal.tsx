@@ -22,6 +22,8 @@ import { theme } from "../theme/theme";
 import { ZoomablePhoto } from "./ZoomablePhoto";
 import { Button, TextInput } from "./ui";
 import { useUpdatePhotoMetadata } from "../query/hooks";
+import { useAuth } from "../auth/AuthContext";
+import { getProjectPhotos } from "../api/endpoints";
 import { savePhotoToDevice } from "../photos/save-to-device";
 
 type SaveToast = "saved" | "permission" | "error";
@@ -37,6 +39,12 @@ const ADDRESS_SOURCE_LABEL: Record<string, string> = {
   deal_fallback: "Project address",
   manual_override: "Manually set",
 };
+
+// Presigned R2 URLs on a FieldPhoto are short-lived (~30 min). The viewer snapshots the photo list at open
+// time, so after the TTL the direct download 403s. Bound the pages we scan when re-fetching a fresh URL so a
+// large deal can't spin — the photo the user is looking at was on one of the first pages of the list anyway.
+const REFRESH_PER_PAGE = 200;
+const REFRESH_MAX_PAGES = 5;
 
 function formatTimestamp(photo: FieldPhoto): string {
   const value = photo.takenAt ?? photo.createdAt;
@@ -68,6 +76,7 @@ export function PhotoViewerModal({
   projectDealId?: string;
 }) {
   const { width, height } = useWindowDimensions();
+  const { fetcher } = useAuth();
   const [index, setIndex] = useState(initialIndex);
   // When a photo is zoomed we disable the pager so a one-finger pan moves the image instead of paging.
   const [zoomed, setZoomed] = useState(false);
@@ -133,20 +142,51 @@ export function PhotoViewerModal({
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => () => { if (toastTimer.current) clearTimeout(toastTimer.current); }, []);
 
+  // Re-fetch a FRESH presigned download URL for one photo id, bypassing the (possibly-expired) snapshot the
+  // viewer opened with. Scans a bounded number of pages of the viewed project's photo list. Returns null if
+  // we can't resolve a fresh URL (no deal scope, photo not found, or the fetch fails).
+  const fetchFreshUrl = useCallback(
+    async (dealId: string, photoId: string): Promise<string | null> => {
+      for (let page = 1; page <= REFRESH_MAX_PAGES; page += 1) {
+        let res: Awaited<ReturnType<typeof getProjectPhotos>>;
+        try {
+          res = await getProjectPhotos(fetcher, dealId, { page, perPage: REFRESH_PER_PAGE });
+        } catch {
+          return null; // network/auth error — fall back to the generic failure toast
+        }
+        const found = res.photos.find((p) => p.id === photoId);
+        if (found) return found.fullImageUrl ?? found.imageUrl ?? null;
+        const totalPages = res.pagination?.totalPages ?? 1;
+        if (page >= totalPages) break; // no more pages to scan
+      }
+      return null;
+    },
+    [fetcher],
+  );
+
   const saveToDevice = useCallback(async () => {
     if (savingId != null || !current) return; // one save at a time
     const url = current.fullImageUrl ?? current.imageUrl;
     if (!url) return; // no image to save (placeholder / unresolved URL) — the action is hidden, but guard anyway
     const targetId = current.id;
     setSavingId(targetId);
-    const result = await savePhotoToDevice(url);
+    let result = await savePhotoToDevice(url);
+    // A "failed" result on a valid URL is most often an EXPIRED presigned link (the viewer snapshotted the
+    // list at open time; R2 URLs live ~30 min). Re-fetch a fresh URL for this photo and retry ONCE before
+    // surfacing the error — a permission denial or a genuinely broken photo won't be masked (we only retry on
+    // "failed", and only when we resolve a DIFFERENT, fresh URL). Uses the VIEWED project's deal scope.
+    const refreshDealId = projectDealId ?? current.dealId ?? undefined;
+    if (result === "failed" && refreshDealId) {
+      const freshUrl = await fetchFreshUrl(refreshDealId, targetId);
+      if (freshUrl && freshUrl !== url) result = await savePhotoToDevice(freshUrl);
+    }
     setSavingId(null);
     const kind: SaveToast = result === "saved" ? "saved" : result === "permission_denied" ? "permission" : "error";
     setToast({ id: targetId, kind });
     AccessibilityInfo.announceForAccessibility(SAVE_TOAST_TEXT[kind]);
     if (toastTimer.current) clearTimeout(toastTimer.current);
     toastTimer.current = setTimeout(() => setToast(null), 2600);
-  }, [savingId, current]);
+  }, [savingId, current, projectDealId, fetchFreshUrl]);
 
   return (
     <Modal visible={visible} animationType="fade" onRequestClose={onClose} transparent={false}>
