@@ -184,9 +184,10 @@ describe("report route role guards", () => {
     } as any);
     const app = buildApp("director");
 
+    const estimatorId = "00000000-0000-0000-0000-000000005101";
     const summaryResponse = await request(app).get("/api/reports/estimator-pipeline");
     const evidenceResponse = await request(app).get(
-      "/api/reports/estimator-pipeline/evidence?bucket=target&estimatorKey=sidney_gibson&stageSlug=estimating&page=2&pageSize=50",
+      `/api/reports/estimator-pipeline/evidence?bucket=target&estimatorKey=${estimatorId}&stageSlug=estimating&page=2&pageSize=50`,
     );
 
     expect(summaryResponse.status).toBe(200);
@@ -197,7 +198,7 @@ describe("report route role guards", () => {
       cohort: "open",
       asOf: undefined,
       bucket: "target",
-      estimatorKey: "sidney_gibson",
+      estimatorKey: estimatorId,
       stageSlug: "estimating",
       page: 2,
       pageSize: 50,

@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { parseEstimatorPipelineEvidenceQuery } from "../../../src/modules/reports/routes.js";
 
+// estimatorKey is now the estimator's CRM user id (a UUID), not a fixed literal key.
+const ESTIMATOR_A = "00000000-0000-0000-0000-000000005101";
+const ESTIMATOR_B = "00000000-0000-0000-0000-000000005102";
+
 describe("parseEstimatorPipelineEvidenceQuery", () => {
   it("defaults evidence to the open cohort and validates an explicit cohort", () => {
     expect(parseEstimatorPipelineEvidenceQuery({ bucket: "missing" }).cohort).toBe("open");
@@ -15,21 +19,22 @@ describe("parseEstimatorPipelineEvidenceQuery", () => {
     expect(() => parseEstimatorPipelineEvidenceQuery({ bucket: "everyone" })).toThrow(/bucket/);
   });
 
-  it("requires a configured key for target drills and rejects keys on aggregate buckets", () => {
+  it("requires a valid user-id key for target drills and rejects keys on aggregate buckets", () => {
     expect(() => parseEstimatorPipelineEvidenceQuery({ bucket: "target" })).toThrow(/estimatorKey/);
+    // A non-UUID estimatorKey on a target drill is rejected at the route.
     expect(() =>
-      parseEstimatorPipelineEvidenceQuery({ bucket: "target", estimatorKey: "unknown_estimator" }),
+      parseEstimatorPipelineEvidenceQuery({ bucket: "target", estimatorKey: "sidney_gibson" }),
     ).toThrow(/estimatorKey/);
 
     for (const bucket of ["other", "missing"] as const) {
       expect(() =>
-        parseEstimatorPipelineEvidenceQuery({ bucket, estimatorKey: "sidney_gibson" }),
+        parseEstimatorPipelineEvidenceQuery({ bucket, estimatorKey: ESTIMATOR_A }),
       ).toThrow(/estimatorKey/);
     }
   });
 
-  it("accepts each configured target and applies pagination defaults", () => {
-    for (const estimatorKey of ["sidney_gibson", "alex_koch"] as const) {
+  it("accepts a valid user-id target key and applies pagination defaults", () => {
+    for (const estimatorKey of [ESTIMATOR_A, ESTIMATOR_B]) {
       expect(parseEstimatorPipelineEvidenceQuery({ bucket: "target", estimatorKey })).toEqual({
         cohort: "open",
         asOf: undefined,
@@ -57,7 +62,7 @@ describe("parseEstimatorPipelineEvidenceQuery", () => {
         cohort: "won",
         asOf: "2026-07-13",
         bucket: "target",
-        estimatorKey: "alex_koch",
+        estimatorKey: ESTIMATOR_B,
         stageSlug: "  won  ",
         page: ["3", "4"],
         pageSize: "100",
@@ -66,7 +71,7 @@ describe("parseEstimatorPipelineEvidenceQuery", () => {
       cohort: "won",
       asOf: "2026-07-13",
       bucket: "target",
-      estimatorKey: "alex_koch",
+      estimatorKey: ESTIMATOR_B,
       stageSlug: "won",
       page: 3,
       pageSize: 100,

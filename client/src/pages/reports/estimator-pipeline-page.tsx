@@ -195,7 +195,7 @@ export function EstimatorPipelinePage() {
   return (
     <OperationsReportShell
       title="Estimator Pipeline"
-      description="Current attribution for Sidney Gibson and Alex Koch across active pipeline work and projects won this year."
+      description="Current attribution across each estimator's active pipeline work and projects won this year."
     >
       {loading ? <ReportLoading /> : null}
 

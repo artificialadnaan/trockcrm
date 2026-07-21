@@ -98,11 +98,14 @@ const evidence: EstimatorPipelineEvidenceResponse = {
   ],
 };
 
+// estimatorKey is now the estimator's CRM user id (a UUID string).
+const SIDNEY_USER_ID = "00000000-0000-0000-0000-000000005101";
+
 const wonSelection: EstimatorDrillSelection = {
   cohort: "won",
   period: { from: "2026-01-01", to: "2026-07-13", label: "Won YTD" },
   bucket: "target",
-  estimatorKey: "sidney_gibson",
+  estimatorKey: SIDNEY_USER_ID,
   title: "Sidney Gibson: Won YTD",
   description: "Projects won from 2026-01-01 through 2026-07-13.",
 };
@@ -112,7 +115,7 @@ const wonEvidence: EstimatorPipelineEvidenceResponse = {
   filter: {
     cohort: "won",
     bucket: "target",
-    estimatorKey: "sidney_gibson",
+    estimatorKey: SIDNEY_USER_ID,
     estimatorName: "Sidney Gibson",
     stageSlug: null,
     stageLabel: null,

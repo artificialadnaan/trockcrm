@@ -27,7 +27,7 @@ const report: EstimatorPipelineReport = {
   ],
   estimators: [
     {
-      key: "sidney_gibson",
+      key: "estimator-sidney",
       configuredName: "Sidney Gibson",
       estimatorUserId: "estimator-sidney",
       estimatorName: "Sidney Gibson",
@@ -42,7 +42,7 @@ const report: EstimatorPipelineReport = {
       ],
     },
     {
-      key: "alex_koch",
+      key: "estimator-alex",
       configuredName: "Alex Koch",
       estimatorUserId: "estimator-alex",
       estimatorName: "Alex Koch",
@@ -141,7 +141,7 @@ describe("EstimatorStageMatrix", () => {
     expect(onDrill).toHaveBeenCalledWith({
       cohort: "open",
       bucket: "target",
-      estimatorKey: "sidney_gibson",
+      estimatorKey: "estimator-sidney",
       stageSlug: "estimating",
       title: "Sidney Gibson: Estimating",
       description: "Current open projects in Estimating.",
@@ -162,7 +162,7 @@ describe("EstimatorStageMatrix", () => {
       cohort: "won",
       period: { from: "2026-01-01", to: "2026-07-13", label: "Won YTD" },
       bucket: "target",
-      estimatorKey: "sidney_gibson",
+      estimatorKey: "estimator-sidney",
       title: "Sidney Gibson: Won YTD",
       description: "Projects won from Jan 1, 2026 through Jul 13, 2026.",
     });

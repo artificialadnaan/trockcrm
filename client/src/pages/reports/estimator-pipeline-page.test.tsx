@@ -52,7 +52,7 @@ const report: EstimatorPipelineReport = {
   ],
   estimators: [
     {
-      key: "sidney_gibson",
+      key: "sidney-user",
       configuredName: "Sidney Gibson",
       estimatorUserId: "sidney-user",
       estimatorName: "Sidney Gibson",
@@ -66,7 +66,7 @@ const report: EstimatorPipelineReport = {
       ],
     },
     {
-      key: "alex_koch",
+      key: "alex-user",
       configuredName: "Alex Koch",
       estimatorUserId: "alex-user",
       estimatorName: "Alex Koch",
@@ -161,7 +161,7 @@ describe("EstimatorPipelinePage", () => {
     expect(state.evidenceSelection).toEqual({
       cohort: "open",
       bucket: "target",
-      estimatorKey: "sidney_gibson",
+      estimatorKey: "sidney-user",
       title: "Sidney Gibson",
       description: "Current open projects across every active pipeline stage.",
     });
@@ -171,7 +171,7 @@ describe("EstimatorPipelinePage", () => {
       cohort: "won",
       period: { from: "2026-01-01", to: "2026-07-13", label: "Won YTD" },
       bucket: "target",
-      estimatorKey: "sidney_gibson",
+      estimatorKey: "sidney-user",
       title: "Sidney Gibson: Won YTD",
       description: "Projects won from Jan 1, 2026 through Jul 13, 2026.",
     });
@@ -204,9 +204,11 @@ describe("EstimatorPipelinePage", () => {
   it("surfaces every estimator identity warning without hiding the report", () => {
     state.data = {
       ...report,
+      // Verbatim server warning strings (resolveTargets in estimator-pipeline-service.ts) so this exercises
+      // what the report actually emits, not invented copy.
       warnings: [
-        "Sidney Gibson could not be resolved to an active CRM user.",
-        "Alex Koch is currently inactive.",
+        "Sidney Gibson could not be resolved to a CRM user. Check the report identity configuration.",
+        "Alex Koch is inactive. Existing assignments remain visible and may need reassignment.",
       ],
     };
 
@@ -214,8 +216,12 @@ describe("EstimatorPipelinePage", () => {
 
     const alert = container.querySelector('[role="alert"]');
     expect(alert?.textContent).toContain("Estimator identity check");
-    expect(alert?.textContent).toContain("Sidney Gibson could not be resolved to an active CRM user.");
-    expect(alert?.textContent).toContain("Alex Koch is currently inactive.");
+    expect(alert?.textContent).toContain(
+      "Sidney Gibson could not be resolved to a CRM user. Check the report identity configuration.",
+    );
+    expect(alert?.textContent).toContain(
+      "Alex Koch is inactive. Existing assignments remain visible and may need reassignment.",
+    );
     expect(container.textContent).toContain("Pipeline distribution");
   });
 
