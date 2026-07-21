@@ -4,9 +4,11 @@
 // itself is the durability unit — on a photos-pending / failed POST the caller keeps the draft and retries
 // (the upload queue keeps retrying the photos in the background).
 
+import * as FileSystem from "expo-file-system/legacy";
 import { createScorecard, discardScorecardEditEvidence, updateScorecard, type Fetcher } from "../api/endpoints";
 import type { FieldScorecardSummary } from "../api/types";
 import type { CaptureUploadInput } from "../capture/upload";
+import { isDurableStoreUri } from "../capture/doc-dir-uri";
 import {
   MAX_UPLOAD_ATTEMPTS,
   drainUploadQueue,
@@ -75,7 +77,32 @@ export function classifyDraftPhotoUploads(
 export type SubmitScorecardResult =
   | { status: "submitted"; scorecard: FieldScorecardSummary }
   | { status: "photos_pending"; remaining: number }
-  | { status: "photos_failed"; failed: number };
+  | { status: "photos_failed"; failed: number }
+  /** A new photo's durable file is GONE (deleted, or its stale-container path couldn't be healed). Surfaced
+   * with an actionable message instead of letting enqueue's copyAsync throw the opaque 'couldn't submit'. */
+  | { status: "photos_missing"; missing: number };
+
+/**
+ * Existence-check each NEW photo's durable file BEFORE enqueue. draft-store rebases stored uris onto the
+ * live document directory so a rotated iOS container heals, but a genuinely-deleted (or unhealable) file
+ * would otherwise reach enqueueUploads' FileSystem.copyAsync and reject — bubbling up as the opaque
+ * 'Couldn't submit the scorecard'. Detecting it here lets the caller show a specific remove-and-re-add
+ * message and keep the draft, rather than a permanently un-retryable brick. Only local durable-store uris
+ * are checked; remote/retained presigned evidence has no local file to stat.
+ */
+async function missingDurablePhotoIds(newPhotos: NewScorecardDraftPhoto[]): Promise<string[]> {
+  const missing: string[] = [];
+  for (const photo of newPhotos) {
+    if (!isDurableStoreUri(photo.uri, FileSystem.documentDirectory)) continue;
+    try {
+      const info = await FileSystem.getInfoAsync(photo.uri);
+      if (!info.exists) missing.push(photo.clientUploadId);
+    } catch {
+      missing.push(photo.clientUploadId); // treat an un-stattable file as missing (same actionable outcome)
+    }
+  }
+  return missing;
+}
 
 export type SubmitScorecardOptions = {
   /**
@@ -118,6 +145,10 @@ export async function submitScorecard(
   }
   if (newPhotos.length > 0) {
     const editingScorecardId = draft.editingScorecardId;
+    // Fail fast on a genuinely-missing durable file so enqueue's copyAsync can't throw the opaque generic
+    // error. The draft is kept (caller returns without discarding), so the user can remove + re-add the photo.
+    const missing = await missingDurablePhotoIds(newPhotos);
+    if (missing.length > 0) return { status: "photos_missing", missing: missing.length };
     await enqueueUploads(
       ownerKey,
       newPhotos.map((p) => scorecardPhotoUploadInput(p, draft.dealId, editingScorecardId)),

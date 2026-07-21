@@ -7,6 +7,7 @@ import * as FileSystem from "expo-file-system/legacy";
 // Both from the PURE queue core (createAsyncMutex + sanitizeOwnerKey) — avoids pulling the native
 // upload-queue module (camera / keep-awake) into a module whose only native dep is expo-file-system.
 import { createAsyncMutex, sanitizeOwnerKey } from "../capture/upload-queue-core";
+import { isDurableStoreUri, reconstructDurablePhotoUri } from "../capture/doc-dir-uri";
 import type { ScorecardDraft } from "./draft";
 
 const ROOT = `${FileSystem.documentDirectory}scorecard-drafts/`;
@@ -58,6 +59,30 @@ function photoDir(ownerKey: string, draftId: string): string {
 async function ensureDir(dir: string): Promise<void> {
   const info = await FileSystem.getInfoAsync(dir);
   if (!info.exists) await FileSystem.makeDirectoryAsync(dir, { intermediates: true });
+}
+
+/**
+ * Rebase a draft's NEW-evidence photo uris onto the LIVE per-draft directory. copyPhotoIntoDraft freezes an
+ * ABSOLUTE uri (rooted at documentDirectory) into index.json; the iOS container UUID in that path rotates
+ * across an app update/reinstall/restore, stranding every baked uri while the file itself moved with the
+ * container. Since durable copies are named deterministically (`<photoDir>/<clientUploadId><ext>`), rebuild
+ * the current path from the live photoDir + clientUploadId so a resumed draft's photos render + submit
+ * again. Retained/presigned evidence (existingScorecardPhotoId, a remote uri) and any non-durable uri are
+ * left untouched. Pure-ish: no FS I/O, so read paths stay lock-free.
+ */
+function rebaseDraftPhotoUris(ownerKey: string, draft: ScorecardDraft): ScorecardDraft {
+  const liveDir = photoDir(ownerKey, draft.id);
+  let changed = false;
+  const photos = draft.photos.map((photo) => {
+    // Only NEW evidence lives in the durable per-draft dir; retained evidence uses a refreshed remote uri.
+    if (photo.existingScorecardPhotoId || !photo.clientUploadId) return photo;
+    if (!isDurableStoreUri(photo.uri, FileSystem.documentDirectory)) return photo;
+    const rebased = reconstructDurablePhotoUri(photo.uri, liveDir, photo.clientUploadId);
+    if (rebased === photo.uri) return photo;
+    changed = true;
+    return { ...photo, uri: rebased };
+  });
+  return changed ? { ...draft, photos } : draft;
 }
 
 function parseDraftOwner(ownerKey: string): StoredDraftOwner | null {
@@ -183,10 +208,13 @@ export async function listScorecardDrafts(ownerKey: string): Promise<ScorecardDr
   // prefer a VALID .tmp first (readDraftIndexFile returns null for a partial/corrupt one → fall through),
   // then the live index. Reading the live index first here would return the STALE pre-save copy and the
   // next save would overwrite the newer edit that had already been fully written. Empty only if both fail.
+  // Rebase every returned draft's photo uris onto the live document directory so a rotated iOS container
+  // path self-heals on resume (covers BOTH the .tmp recovery path and the live index, and loadScorecardDraft
+  // which delegates here).
   const temp = await readDraftIndexFile(`${path}.tmp`);
-  if (temp !== null) return temp;
+  if (temp !== null) return temp.map((draft) => rebaseDraftPhotoUris(ownerKey, draft));
   const primary = await readDraftIndexFile(path);
-  if (primary !== null) return primary;
+  if (primary !== null) return primary.map((draft) => rebaseDraftPhotoUris(ownerKey, draft));
   return [];
 }
 

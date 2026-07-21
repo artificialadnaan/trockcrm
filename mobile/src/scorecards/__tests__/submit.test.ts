@@ -10,6 +10,16 @@ jest.mock("../../capture/upload-queue", () => ({
 jest.mock("../../api/endpoints", () => ({
   createScorecard: jest.fn(async () => ({ scorecard: { id: "sc-1", dealId: "deal-1" } })),
 }));
+// A tiny in-memory FS: default every file EXISTS (so the existing orchestration tests are unaffected), but
+// let a test mark specific uris missing to exercise the pre-enqueue existence guard.
+jest.mock("expo-file-system/legacy", () => {
+  const missing = new Set<string>();
+  return {
+    documentDirectory: "file:///doc/Documents/",
+    __setMissing: (uris: string[]) => { missing.clear(); for (const u of uris) missing.add(u); },
+    getInfoAsync: async (uri: string) => ({ exists: !missing.has(uri) }),
+  };
+});
 
 import {
   scorecardPhotoUploadInput,
@@ -20,6 +30,9 @@ import {
 import { todayLocalIso, type ScorecardDraft, type ScorecardDraftPhoto } from "../draft";
 import { enqueueUploads, drainUploadQueue, getQueuedUploads } from "../../capture/upload-queue";
 import { createScorecard } from "../../api/endpoints";
+import * as FileSystem from "expo-file-system/legacy";
+
+const fsMock = FileSystem as unknown as { __setMissing: (uris: string[]) => void };
 
 describe("scorecardPhotoUploadInput", () => {
   it("targets the deal and auto-tags scorecard + section, trimming the caption", () => {
@@ -98,8 +111,20 @@ describe("submitScorecard (orchestration)", () => {
     };
   }
 
+  // A photo whose durable file lives under the document directory (so the existence guard checks it).
+  function durablePhoto(id: string): ScorecardDraftPhoto {
+    return {
+      key: id,
+      uri: `file:///doc/Documents/scorecard-drafts/owner-1/d1/${id}.jpg`,
+      clientUploadId: id,
+      sectionKey: "schedule",
+      caption: "",
+    };
+  }
+
   beforeEach(() => {
     jest.clearAllMocks();
+    fsMock.__setMissing([]); // every file exists by default
     (getQueuedUploads as jest.Mock).mockResolvedValue([]);
     (createScorecard as jest.Mock).mockResolvedValue({ scorecard: { id: "sc-1", dealId: "deal-1" } });
   });
@@ -160,5 +185,33 @@ describe("submitScorecard (orchestration)", () => {
     const result = await submitScorecard(fetcher, "owner-1", draftWith([photo("a")]));
     expect(result).toEqual({ status: "photos_failed", failed: 1 });
     expect(createScorecard).not.toHaveBeenCalled();
+  });
+
+  it("with a durable photo whose FILE is missing: returns photos_missing, does NOT enqueue or POST", async () => {
+    // The stale-container / deleted-file case: the draft references a durable copy that no longer exists.
+    // Previously enqueueUploads' copyAsync would reject and bubble up as the opaque 'Couldn't submit' error;
+    // now we detect it up front and return an actionable outcome without throwing.
+    const p = durablePhoto("a");
+    fsMock.__setMissing([p.uri]);
+    const result = await submitScorecard(fetcher, "owner-1", draftWith([p]));
+    expect(result).toEqual({ status: "photos_missing", missing: 1 });
+    expect(enqueueUploads).not.toHaveBeenCalled();
+    expect(createScorecard).not.toHaveBeenCalled();
+  });
+
+  it("with all durable photo files present: proceeds to enqueue + POST", async () => {
+    const result = await submitScorecard(fetcher, "owner-1", draftWith([durablePhoto("a"), durablePhoto("b")]));
+    expect(enqueueUploads).toHaveBeenCalledTimes(1);
+    expect(result.status).toBe("submitted");
+  });
+
+  it("does NOT existence-check remote/retained (non-durable) uris", async () => {
+    // A photo:// or presigned uri has no durable file to stat — treat it as present and continue.
+    const remote: ScorecardDraftPhoto = {
+      key: "r", uri: "https://cdn.example.com/x.jpg?sig=y", clientUploadId: "r", sectionKey: "schedule", caption: "",
+    };
+    fsMock.__setMissing(["https://cdn.example.com/x.jpg?sig=y"]);
+    const result = await submitScorecard(fetcher, "owner-1", draftWith([remote]));
+    expect(result.status).toBe("submitted");
   });
 });
