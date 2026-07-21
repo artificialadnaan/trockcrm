@@ -666,7 +666,7 @@ describe("terminal-write status guards (idempotent against a raced terminal stat
       `UPDATE public.bid_board_ingestion_inbox SET status='succeeded', run_id=$2, finished_at=now() WHERE id=$1`,
       [inboxId, RUN_UUID]
     );
-    await markInboxFailed(db, inboxId, { error: "late failure after commit", terminal: true });
+    await markInboxFailed(db, inboxId, { error: "late failure after commit", terminal: true, attempt: 1 });
     const row = await readInboxStatusByKey(db, "dallas", "hash-a");
     expect(row?.status).toBe("succeeded"); // status='processing' guard held — not flipped to failed
     expect(row?.run_id).toBe(RUN_UUID);
@@ -700,11 +700,29 @@ describe("in-flight lease (heartbeat) — a live import can't be double-claimed"
   it("a non-terminal failure RELEASES the lease so the backoff retry re-claims immediately", async () => {
     const { inboxId } = await accept();
     await markInboxProcessing(db, inboxId); // attempt 1, fresh lease
-    await markInboxFailed(db, inboxId, { error: "deal row deadlock", terminal: false });
+    await markInboxFailed(db, inboxId, { error: "deal row deadlock", terminal: false, attempt: 1 });
     expect((await loadInboxRow(db, inboxId))?.lease_expires_at).toBeNull(); // lease released
     const retry = await markInboxProcessing(db, inboxId); // re-claimable even before TTL elapses
     expect(retry).not.toBeNull();
     expect(retry?.attempts).toBe(2);
+  });
+
+  it("a non-terminal failure bound to a STALE attempt does NOT clear a newer attempt's lease", async () => {
+    const { inboxId } = await accept();
+    await markInboxProcessing(db, inboxId); // attempt 1
+    // Attempt 1's lease lapsed and another replica RECLAIMED the row (attempt 2, fresh lease).
+    await db.query(
+      `UPDATE public.bid_board_ingestion_inbox SET lease_expires_at = now() - interval '1 minute' WHERE id=$1`,
+      [inboxId]
+    );
+    const reclaimed = await markInboxProcessing(db, inboxId); // attempt 2, fresh lease
+    expect(reclaimed?.attempts).toBe(2);
+    // The stale attempt-1 handler now unwinds with a non-terminal failure — bound to attempt 1, it must NOT
+    // clear attempt 2's live lease (which would let recovery reclaim the running import).
+    await markInboxFailed(db, inboxId, { error: "stale attempt unwinding", terminal: false, attempt: 1 });
+    const row = await loadInboxRow(db, inboxId);
+    expect(row?.lease_expires_at).not.toBeNull(); // attempt 2's fresh lease is intact
+    expect(row?.attempts).toBe(2);
   });
 
   it("renewInboxLease extends a live lease but no-ops on a terminal row", async () => {

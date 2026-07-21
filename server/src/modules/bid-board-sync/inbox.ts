@@ -350,27 +350,28 @@ export async function recordSuccessWithRetry(
 export async function markInboxFailed(
   db: Querier,
   inboxId: string,
-  fields: { error: string; terminal: boolean }
+  fields: { error: string; terminal: boolean; attempt: number }
 ): Promise<void> {
   if (fields.terminal) {
-    // status = 'processing' guard: idempotent against any terminal state — if a concurrent path already
-    // recorded 'succeeded' between the import and this catch, the terminal failure write is a no-op instead
-    // of clobbering the real outcome (succeeded → failed).
+    // status='processing' + attempts guard: idempotent against any terminal state (a concurrent 'succeeded'
+    // write is not clobbered), AND bound to the CLAIMING attempt so a stale handler whose row another replica
+    // already reclaimed (a new attempt) can't stomp that live attempt.
     await db.query(
       `UPDATE public.bid_board_ingestion_inbox
        SET status = 'failed', last_error = $2, finished_at = NOW(), updated_at = NOW()
-       WHERE id = $1 AND status = 'processing'`,
-      [inboxId, fields.error]
+       WHERE id = $1 AND status = 'processing' AND attempts = $3`,
+      [inboxId, fields.error, fields.attempt]
     );
   } else {
     // Non-terminal failure: the row stays 'processing' for the queue's backoff retry. RELEASE the lease
-    // (lease_expires_at = NULL) so the retry's markInboxProcessing can re-claim it immediately — otherwise a
-    // still-valid lease from this now-finished attempt would make the retry a no-op until the TTL elapsed.
+    // (lease_expires_at = NULL) so the retry's markInboxProcessing can re-claim it immediately. Bound to the
+    // CLAIMING attempt so a stale handler unwinding AFTER another replica reclaimed the row (which bumped
+    // attempts) can't clear the NEW handler's live lease — which would let recovery reclaim a running import.
     await db.query(
       `UPDATE public.bid_board_ingestion_inbox
        SET last_error = $2, updated_at = NOW(), lease_expires_at = NULL
-       WHERE id = $1`,
-      [inboxId, fields.error]
+       WHERE id = $1 AND attempts = $3`,
+      [inboxId, fields.error, fields.attempt]
     );
   }
 }
@@ -643,7 +644,7 @@ export async function processBidBoardInboxJob(deps: ProcessInboxDeps): Promise<P
   } catch (err) {
     const terminal = claimed.attempts >= claimed.max_attempts;
     const message = err instanceof Error ? err.message : String(err);
-    await markInboxFailed(db, inboxId, { error: message, terminal });
+    await markInboxFailed(db, inboxId, { error: message, terminal, attempt: claimed.attempts });
     log(
       `[BidBoardIngest] ${JSON.stringify({
         ...logMeta,
