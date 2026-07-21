@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
+  AccessibilityInfo,
   ActivityIndicator,
   FlatList,
   Modal,
@@ -123,23 +124,28 @@ export function PhotoViewerModal({
     [photos.length],
   );
 
-  // Download the CURRENT photo to the device's photo library. Explicit user action (the toolbar Save button),
-  // so it's not gated on the auto-backup setting. A transient toast reports the outcome.
-  const [saving, setSaving] = useState(false);
-  const [toast, setToast] = useState<SaveToast | null>(null);
+  // Download a photo to the device's photo library. Explicit user action (the toolbar Save button), so it's not
+  // gated on the auto-backup setting. The spinner + toast are keyed to the SAVED photo's id (not the currently
+  // shown one), so swiping away mid-download can't show "Saved" over a different, unsaved photo. VoiceOver is
+  // told via announceForAccessibility (accessibilityLiveRegion is Android-only — a no-op on this iOS app).
+  const [savingId, setSavingId] = useState<string | null>(null);
+  const [toast, setToast] = useState<{ id: string; kind: SaveToast } | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => () => { if (toastTimer.current) clearTimeout(toastTimer.current); }, []);
 
   const saveToDevice = useCallback(async () => {
-    if (saving || !current) return;
+    if (savingId != null || !current) return; // one save at a time
+    const targetId = current.id;
     const url = current.fullImageUrl ?? current.imageUrl;
-    setSaving(true);
+    setSavingId(targetId);
     const result = url ? await savePhotoToDevice(url) : "failed";
-    setSaving(false);
-    setToast(result === "saved" ? "saved" : result === "permission_denied" ? "permission" : "error");
+    setSavingId(null);
+    const kind: SaveToast = result === "saved" ? "saved" : result === "permission_denied" ? "permission" : "error";
+    setToast({ id: targetId, kind });
+    AccessibilityInfo.announceForAccessibility(SAVE_TOAST_TEXT[kind]);
     if (toastTimer.current) clearTimeout(toastTimer.current);
     toastTimer.current = setTimeout(() => setToast(null), 2600);
-  }, [saving, current]);
+  }, [savingId, current]);
 
   return (
     <Modal visible={visible} animationType="fade" onRequestClose={onClose} transparent={false}>
@@ -160,12 +166,12 @@ export function PhotoViewerModal({
                 <Pressable
                   onPress={saveToDevice}
                   hitSlop={12}
-                  disabled={saving}
+                  disabled={savingId != null}
                   style={styles.saveButton}
                   accessibilityRole="button"
                   accessibilityLabel="Save photo to device"
                 >
-                  {saving ? (
+                  {savingId === current.id ? (
                     <ActivityIndicator size="small" color={theme.color.textInverse} />
                   ) : (
                     <Ionicons name="download-outline" size={22} color={theme.color.textInverse} />
@@ -239,14 +245,14 @@ export function PhotoViewerModal({
                 <Ionicons name="chevron-forward" size={28} color={theme.color.textInverse} />
               </Pressable>
             ) : null}
-            {toast ? (
-              <View style={styles.toast} pointerEvents="none" accessibilityLiveRegion="polite">
+            {toast && current && toast.id === current.id ? (
+              <View style={styles.toast} pointerEvents="none">
                 <Ionicons
-                  name={toast === "saved" ? "checkmark-circle" : "alert-circle"}
+                  name={toast.kind === "saved" ? "checkmark-circle" : "alert-circle"}
                   size={16}
                   color={theme.color.textInverse}
                 />
-                <Text style={styles.toastText}>{SAVE_TOAST_TEXT[toast]}</Text>
+                <Text style={styles.toastText}>{SAVE_TOAST_TEXT[toast.kind]}</Text>
               </View>
             ) : null}
           </View>

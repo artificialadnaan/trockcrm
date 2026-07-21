@@ -62,10 +62,12 @@ const withQueueLock = createAsyncMutex();
 const runCompression = createBoundedRunner(COMPRESS_CONCURRENCY);
 
 // Because enqueue copies the file OUTSIDE the lock, a removeQueuedUploads can run while a photo is still
-// copying (before it's in the index). `enqueueing` holds ids currently mid-copy (registered under the
-// lock); a concurrent cancel tombstones them in `cancelledMidEnqueue`, and enqueue drops the item instead
-// of appending it. Both sets are consumed by the enqueue write → bounded, no leak.
-const enqueueing = new Set<string>();
+// copying (before it's in the index). `enqueueing` maps an id currently mid-enqueue → that enqueue's
+// COMPLETION promise (registered under the lock); a concurrent cancel tombstones the id in
+// `cancelledMidEnqueue`, and enqueue drops the item instead of appending it. The promise lets a DUPLICATE
+// enqueue of the same id (e.g. a double-tapped Retry) AWAIT the in-flight one's durability instead of
+// resolving early — otherwise the caller could delete the review-draft while the first worker still needs it.
+const enqueueing = new Map<string, Promise<QueuedUpload | null>>();
 const cancelledMidEnqueue = new Set<string>();
 // A discard removes queue rows first, then waits for any worker that had already selected one of those ids.
 // Without this small registry, confirm-upload could still be in flight while the server cleanup runs, land
@@ -245,61 +247,92 @@ export async function enqueueUploads(
   // kill mid-enqueue still leaves every already-indexed photo recoverable.
   const enqueueOne = async (input: CaptureUploadInput): Promise<QueuedUpload | null> => {
     const id = input.clientUploadId;
-    // Claim the id under the lock: skip if it's already durably queued (retry) or another worker is mid-copy
-    // for it (concurrent / same-batch duplicate). Only after claiming do we run the slow compress + copy
-    // OUTSIDE the lock — both are slow (CPU / large file) and must not block removeQueuedUploads / drain
-    // re-selection during a big batch.
-    const claimed = await withQueueLock(async () => {
-      if (alreadyQueued.has(id) || enqueueing.has(id)) return false;
-      enqueueing.add(id);
-      return true;
+    // Claim / attach under the lock. THREE outcomes:
+    //  - SKIP: the id is already DURABLY queued (a prior batch) → nothing to do; the caller may safely drop its
+    //    review-draft, since the queue already owns the photo.
+    //  - AWAIT: another caller is MID-enqueue for this id (in-flight, NOT yet durable). We must NOT report
+    //    success early — retryFailedShots (capture.tsx) deletes the review-draft on any resolution, and doing so
+    //    while the first worker is still reading the file loses the photo if that worker then fails. So mirror
+    //    the in-flight enqueue's promise: resolve only once it's durable, reject if it fails.
+    //  - OWN: we're the first → register our completion promise so a concurrent duplicate can await it.
+    let settleOwn!: (v: QueuedUpload | null) => void;
+    let failOwn!: (e: unknown) => void;
+    const own = new Promise<QueuedUpload | null>((res, rej) => {
+      settleOwn = res;
+      failOwn = rej;
     });
-    if (!claimed) return null;
-    // Compress to the CRM JPEG NOW (best-effort → fallback to the original) so the durable queue stores the
-    // compressed bytes and the drain is a pure PUT — moving the per-photo compression off the upload path.
-    const { sourceUri, sizeBytes, compressed } = await runCompression(() =>
-      compressForEnqueue(input.uri, input.width, input.height),
-    );
-    // sourceUri !== input.uri means compression produced a fresh JPEG temp (success, incl. the size=0 path);
-    // === means the fallback kept the ORIGINAL. Extension + temp-cleanup both key on THIS (not `compressed`,
-    // which is false on the size=0 path even though sourceUri is a JPEG) so a .heic-named JPEG can't slip
-    // through and the size=0 temp doesn't leak.
-    const producedJpeg = sourceUri !== input.uri;
-    const ext = producedJpeg ? ".jpg" : input.uri.includes(".") ? input.uri.slice(input.uri.lastIndexOf(".")) : ".jpg";
-    const dest = `${dir}${id}${ext}`;
+    own.catch(() => {}); // no unhandled-rejection if this enqueue fails and no duplicate ever attaches
+    const decision = await withQueueLock(async () => {
+      if (alreadyQueued.has(id)) return "skip" as const;
+      const inflight = enqueueing.get(id);
+      if (inflight) return inflight; // a Promise — await the in-flight enqueue below
+      enqueueing.set(id, own);
+      return "own" as const;
+    });
+    if (decision === "skip") return null;
+    if (decision !== "own") return decision; // await the in-flight enqueue's durable result (or its rejection)
+
+    // We OWN this id. Run the actual enqueue; whatever happens, settle `own` for any awaiter AND release the id
+    // (compress + copy run OUTSIDE the lock — both are slow and must not block removeQueuedUploads / the drain).
+    let result: QueuedUpload | null = null;
+    let error: unknown;
     try {
-      await FileSystem.copyAsync({ from: sourceUri, to: dest });
-    } catch (err) {
-      // Copy failed — reclaim the compressed temp (disk-full is exactly when copy throws, and this is the
-      // pressure that caused it), clear the in-flight marker (+ any tombstone), then rethrow (a copy failure
-      // still aborts the batch, as before). Never delete the ORIGINAL (producedJpeg guards that).
-      if (producedJpeg) await FileSystem.deleteAsync(sourceUri, { idempotent: true }).catch(() => undefined);
-      await withQueueLock(async () => {
-        enqueueing.delete(id);
-        cancelledMidEnqueue.delete(id);
+      // Compress to the CRM JPEG NOW (best-effort → fallback to the original) so the durable queue stores the
+      // compressed bytes and the drain is a pure PUT — moving the per-photo compression off the upload path.
+      const { sourceUri, sizeBytes, compressed } = await runCompression(() =>
+        compressForEnqueue(input.uri, input.width, input.height),
+      );
+      // sourceUri !== input.uri means compression produced a fresh JPEG temp (success, incl. the size=0 path);
+      // === means the fallback kept the ORIGINAL. Extension + temp-cleanup both key on THIS (not `compressed`,
+      // which is false on the size=0 path even though sourceUri is a JPEG) so a .heic-named JPEG can't slip
+      // through and the size=0 temp doesn't leak.
+      const producedJpeg = sourceUri !== input.uri;
+      const ext = producedJpeg ? ".jpg" : input.uri.includes(".") ? input.uri.slice(input.uri.lastIndexOf(".")) : ".jpg";
+      const dest = `${dir}${id}${ext}`;
+      try {
+        await FileSystem.copyAsync({ from: sourceUri, to: dest });
+      } catch (err) {
+        // Copy failed — reclaim the compressed temp (disk-full is exactly when copy throws) + clear any cancel
+        // tombstone, then rethrow (a copy failure still aborts the batch). Never delete the ORIGINAL.
+        if (producedJpeg) await FileSystem.deleteAsync(sourceUri, { idempotent: true }).catch(() => undefined);
+        await withQueueLock(async () => {
+          cancelledMidEnqueue.delete(id);
+        });
+        throw err;
+      }
+      // Reclaim the transient compressed temp now it's durably copied. GUARD producedJpeg: on the fallback path
+      // sourceUri IS the original (still read by the camera-roll backup + review preview) — never delete it.
+      if (producedJpeg) {
+        await FileSystem.deleteAsync(sourceUri, { idempotent: true }).catch(() => undefined);
+      }
+      const item: QueuedUpload = { ...input, uri: dest, sizeBytes, compressed, enqueuedAt: Date.now(), attempts: 0 };
+      // Persist under the lock — but if a cancel arrived WHILE copying, drop the item (delete the copy) instead
+      // of appending removed evidence. A crash right after the copy still recovers via the index.
+      const cancelled = await withQueueLock(async () => {
+        if (cancelledMidEnqueue.delete(id)) return true;
+        await writeQueue(ownerKey, dedupeQueue(await readQueue(ownerKey), [item]));
+        return false;
       });
-      throw err;
+      if (cancelled) {
+        await FileSystem.deleteAsync(dest, { idempotent: true }).catch(() => undefined);
+        result = null;
+      } else {
+        result = item;
+      }
+    } catch (e) {
+      error = e;
     }
-    // Reclaim the transient compressed temp now it's durably copied, so a large offline burst doesn't
-    // front-load ~2x its footprint in the cache dir. GUARD producedJpeg: on the fallback path sourceUri IS
-    // the original (which the fire-and-forget camera-roll backup + review preview still read) — never delete it.
-    if (producedJpeg) {
-      await FileSystem.deleteAsync(sourceUri, { idempotent: true }).catch(() => undefined);
-    }
-    const item: QueuedUpload = { ...input, uri: dest, sizeBytes, compressed, enqueuedAt: Date.now(), attempts: 0 };
-    // Persist under the lock — but if a cancel arrived WHILE copying, drop the item (delete the copy)
-    // instead of appending removed evidence. A crash right after the copy still recovers via the index.
-    const cancelled = await withQueueLock(async () => {
-      enqueueing.delete(id);
-      if (cancelledMidEnqueue.delete(id)) return true;
-      await writeQueue(ownerKey, dedupeQueue(await readQueue(ownerKey), [item]));
-      return false;
+    // Release the id (only if it's still OUR promise) and settle it for any awaiting duplicate — the id stays
+    // in-flight until HERE (after the durable persist), so a duplicate awaits real durability.
+    await withQueueLock(async () => {
+      if (enqueueing.get(id) === own) enqueueing.delete(id);
     });
-    if (cancelled) {
-      await FileSystem.deleteAsync(dest, { idempotent: true }).catch(() => undefined);
-      return null;
+    if (error !== undefined) {
+      failOwn(error);
+      throw error;
     }
-    return item;
+    settleOwn(result);
+    return result;
   };
 
   // allSettled (not all): WAIT for every worker to finish before propagating a copy failure, so none is still
