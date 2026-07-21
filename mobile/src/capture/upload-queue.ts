@@ -280,15 +280,16 @@ export async function enqueueUploads(
     let result: QueuedUpload | null = null;
     let error: unknown;
     try {
-      // Persist the ORIGINAL into the durable queue BEFORE the slow compression, then compress + REPLACE the
-      // bytes in place. streamPhoto (per-photo capture) doesn't await onCapture and has no separate durable copy
-      // — it relies on this function — so compressing FIRST (multi-second ImageManipulator) meant an app kill
-      // mid-compress left nothing recoverable. Now the file + index row exist before compression: a kill just
-      // leaves an uncompressed row the drain compresses at upload. dest is always `.jpg`; the `compressed` flag
-      // (NOT the extension) is what tells the drain whether it still needs to compress.
-      const dest = `${dir}${id}.jpg`;
-      await FileSystem.copyAsync({ from: input.uri, to: dest });
-      const original: QueuedUpload = { ...input, uri: dest, sizeBytes: 0, compressed: false, enqueuedAt: Date.now(), attempts: 0 };
+      // Persist the ORIGINAL into the durable queue BEFORE the slow compression, then stage the compressed bytes
+      // to a SEPARATE durable path and switch the row only once that file is COMPLETE — the original is
+      // preserved until then, so a torn write (app kill / disk full) mid-compressed-copy can never leave the row
+      // pointing at a damaged file. streamPhoto (per-photo capture) doesn't await onCapture and has no other
+      // durable copy, so compressing first would lose the photo on a mid-compress kill. The `compressed` flag
+      // (NOT the extension) tells the drain whether it still needs to compress.
+      const origPath = `${dir}${id}.orig`;
+      const jpgPath = `${dir}${id}.jpg`;
+      await FileSystem.copyAsync({ from: input.uri, to: origPath });
+      const original: QueuedUpload = { ...input, uri: origPath, sizeBytes: 0, compressed: false, enqueuedAt: Date.now(), attempts: 0 };
       // Persist under the lock — if a cancel arrived WHILE copying, drop the item (delete the copy) instead of
       // appending removed evidence.
       const cancelledAtPersist = await withQueueLock(async () => {
@@ -297,47 +298,49 @@ export async function enqueueUploads(
         return false;
       });
       if (cancelledAtPersist) {
-        await FileSystem.deleteAsync(dest, { idempotent: true }).catch(() => undefined);
+        await FileSystem.deleteAsync(origPath, { idempotent: true }).catch(() => undefined);
         result = null;
       } else {
-        // Compress the now-durable original + replace the bytes in place. On ANY compress/overwrite failure the
-        // original stays (compressed: false) and the drain compresses it at upload — the photo is never lost.
+        // Compress the durable original into a SEPARATE file; the original row stays valid until the switch.
         const { sourceUri, sizeBytes } = await runCompression(() =>
-          compressForEnqueue(dest, input.width, input.height),
+          compressForEnqueue(origPath, input.width, input.height),
         );
-        const producedJpeg = sourceUri !== dest; // a fresh compressed temp, vs the fallback returning `dest`
-        let replaced = false;
+        const producedJpeg = sourceUri !== origPath; // a fresh compressed temp, vs the fallback returning origPath
+        let stagedJpg = false;
         if (producedJpeg) {
           try {
-            await FileSystem.copyAsync({ from: sourceUri, to: dest });
-            replaced = true;
+            await FileSystem.copyAsync({ from: sourceUri, to: jpgPath }); // SEPARATE path — original untouched
+            stagedJpg = true;
           } catch {
-            // Overwrite failed (e.g. disk pressure) — the durable ORIGINAL row (compressed:false) stays.
+            // Staging the compressed file failed (e.g. disk pressure) — discard the partial; keep the original.
+            await FileSystem.deleteAsync(jpgPath, { idempotent: true }).catch(() => undefined);
           } finally {
             await FileSystem.deleteAsync(sourceUri, { idempotent: true }).catch(() => undefined);
           }
         }
-        if (replaced) {
-          // Flip the queued row to compressed — but ONLY if it's still queued (a concurrent cancel may have
-          // removed it since the persist above); never re-add a removed item or leave its file orphaned.
-          const stillQueued = await withQueueLock(async () => {
+        if (stagedJpg) {
+          // Switch the row to the COMPLETE compressed file (only if still queued), then remove the original.
+          const switched = await withQueueLock(async () => {
             if (cancelledMidEnqueue.has(id)) return false;
             const q = await readQueue(ownerKey);
             const i = q.findIndex((it) => it.clientUploadId === id);
             if (i < 0) return false;
-            q[i] = { ...q[i], compressed: true, sizeBytes };
+            q[i] = { ...q[i], uri: jpgPath, compressed: true, sizeBytes };
             await writeQueue(ownerKey, q);
             return true;
           });
-          if (!stillQueued) {
-            await FileSystem.deleteAsync(dest, { idempotent: true }).catch(() => undefined);
-            result = null;
+          if (switched) {
+            await FileSystem.deleteAsync(origPath, { idempotent: true }).catch(() => undefined); // no longer referenced
+            result = { ...original, uri: jpgPath, compressed: true, sizeBytes };
           } else {
-            result = { ...original, compressed: true, sizeBytes };
+            // Removed/cancelled during staging — clean up BOTH files.
+            await FileSystem.deleteAsync(jpgPath, { idempotent: true }).catch(() => undefined);
+            await FileSystem.deleteAsync(origPath, { idempotent: true }).catch(() => undefined);
+            result = null;
           }
         } else {
-          // Compression fell back (or the overwrite failed) — the durable original is compressed:false; the
-          // drain compresses it. Already recoverable.
+          // Compression fell back (or staging failed) — the durable original stays (compressed:false); the drain
+          // compresses it at upload. Never lost.
           result = original;
         }
       }
