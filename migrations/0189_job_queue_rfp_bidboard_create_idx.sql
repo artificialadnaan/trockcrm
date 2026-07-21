@@ -1,4 +1,5 @@
--- Migration 0188: partial index on public.job_queue for the rfp_bidboard_create sweeps.
+-- Migration 0189: partial index on public.job_queue for the rfp_bidboard_create sweeps.
+-- (0188 is reserved for the Bid Board 502 ingestion inbox on the CRM #935 branch.)
 --
 -- ROOT CAUSE: runRfpBidBoardCreateStuckDealSweep (worker/src/jobs/rfp-bidboard-create.ts) runs three
 -- correlated public.job_queue lookups PER candidate deal, PER office, once every minute:
