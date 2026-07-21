@@ -204,9 +204,11 @@ describe("EstimatorPipelinePage", () => {
   it("surfaces every estimator identity warning without hiding the report", () => {
     state.data = {
       ...report,
+      // Verbatim server warning strings (resolveTargets in estimator-pipeline-service.ts) so this exercises
+      // what the report actually emits, not invented copy.
       warnings: [
-        "Sidney Gibson could not be resolved to an active CRM user.",
-        "Alex Koch is currently inactive.",
+        "Sidney Gibson could not be resolved to a CRM user. Check the report identity configuration.",
+        "Alex Koch is inactive. Existing assignments remain visible and may need reassignment.",
       ],
     };
 
@@ -214,8 +216,12 @@ describe("EstimatorPipelinePage", () => {
 
     const alert = container.querySelector('[role="alert"]');
     expect(alert?.textContent).toContain("Estimator identity check");
-    expect(alert?.textContent).toContain("Sidney Gibson could not be resolved to an active CRM user.");
-    expect(alert?.textContent).toContain("Alex Koch is currently inactive.");
+    expect(alert?.textContent).toContain(
+      "Sidney Gibson could not be resolved to a CRM user. Check the report identity configuration.",
+    );
+    expect(alert?.textContent).toContain(
+      "Alex Koch is inactive. Existing assignments remain visible and may need reassignment.",
+    );
     expect(container.textContent).toContain("Pipeline distribution");
   });
 

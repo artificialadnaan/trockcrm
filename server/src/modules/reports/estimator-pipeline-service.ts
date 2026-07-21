@@ -17,7 +17,8 @@ import {
   type EstimatorPipelineWonPeriod,
   type WorkflowRoute,
 } from "@trock-crm/shared/types";
-import { estimatorRosterUserIds } from "../bid-board-sync/estimator-map.js";
+import { estimatorRosterEntries } from "../bid-board-sync/estimator-map.js";
+import { AppError } from "../../middleware/error-handler.js";
 import {
   aliasedActiveDealCountFilterSql,
   aliasedBidBoardTerminalSql,
@@ -219,8 +220,10 @@ interface ResolvedTarget {
  * When the env is unset the roster is empty and the report shows only the Other + Missing buckets.
  */
 async function resolveTargets(tenantDb: TenantDb): Promise<ResolvedTarget[]> {
-  const rosterUserIds = estimatorRosterUserIds();
-  if (rosterUserIds.length === 0) return [];
+  const rosterEntries = estimatorRosterEntries();
+  if (rosterEntries.length === 0) return [];
+  const rosterUserIds = rosterEntries.map((entry) => entry.userId);
+  const configuredNameById = new Map(rosterEntries.map((entry) => [entry.userId.toLowerCase(), entry.name]));
 
   const rows = rowsFromExecute<TargetUserRow>(
     await tenantDb.execute(buildEstimatorRosterUsersSql(rosterUserIds)),
@@ -229,7 +232,10 @@ async function resolveTargets(tenantDb: TenantDb): Promise<ResolvedTarget[]> {
   return rosterUserIds
     .map((userId) => {
       const row = byId.get(userId.toLowerCase());
-      const displayName = row?.display_name?.trim() || userId;
+      // Resolved → the CRM display name. Unresolved (a misconfigured map id with no CRM user) → the
+      // configured map name, so the warning + row read as a name rather than a raw UUID; userId only as a
+      // last resort.
+      const displayName = row?.display_name?.trim() || configuredNameById.get(userId.toLowerCase()) || userId;
       return {
         key: userId,
         configuredName: displayName,
@@ -598,13 +604,19 @@ export async function getEstimatorPipelineEvidence(
   const cohort = options.cohort ?? "open";
   const period = cohort === "won" ? wonYtdPeriodForEvidence(options.asOf, now) : null;
   const targets = await resolveTargets(tenantDb);
-  const selectedTarget = options.estimatorKey
-    ? targets.find((target) => target.key === options.estimatorKey) ?? null
+  // Roster keys are lowercase user ids; the route's UUID_PATTERN is case-insensitive, so normalize the
+  // request key before matching (an uppercase-but-valid id must still resolve).
+  const normalizedEstimatorKey = options.estimatorKey?.trim().toLowerCase();
+  const selectedTarget = normalizedEstimatorKey
+    ? targets.find((target) => target.key === normalizedEstimatorKey) ?? null
     : null;
   const targetIds = targets.flatMap((target) => (target.userId ? [target.userId] : []));
 
+  // A well-formed UUID that is not a current roster member (stale UI, roster changed since load, or a direct
+  // API call) is a CLIENT error, not a server fault — throw AppError(400) so it maps to 400, not a 500 + a
+  // noisy stack trace.
   if (options.bucket === "target" && !selectedTarget) {
-    throw new Error("A configured estimatorKey is required for target evidence");
+    throw new AppError(400, "estimatorKey must identify a current roster estimator");
   }
 
   const rows =

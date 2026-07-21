@@ -6,6 +6,7 @@ import {
   getEstimatorPipelineReport,
 } from "../../../src/modules/reports/estimator-pipeline-service.js";
 import { BID_BOARD_ESTIMATOR_USER_MAP_ENV } from "../../../src/modules/bid-board-sync/estimator-map.js";
+import { AppError } from "../../../src/middleware/error-handler.js";
 
 /**
  * REAL-SQL coverage for the estimator pipeline report. The fixture deliberately mixes canonical,
@@ -642,5 +643,63 @@ describe("estimator pipeline summary and evidence", () => {
     expect(clampedLastPage.pagination).toEqual({ page: 2, pageSize: 2, total: 3, totalPages: 2 });
     expect(clampedLastPage.records).toHaveLength(1);
     expect(clampedLastPage.total).toEqual({ count: 3, value: 10.4 });
+  });
+});
+
+describe("estimator pipeline roster edge cases", () => {
+  it("rejects a well-formed estimatorKey that is NOT on the roster with AppError(400), not a 500", async () => {
+    const notOnRoster = U("9999"); // valid UUID shape, never in the map
+    const err = await getEstimatorPipelineEvidence(tenantDb, {
+      bucket: "target",
+      estimatorKey: notOnRoster,
+      pageSize: 100,
+    }).then(
+      () => null,
+      (e) => e,
+    );
+    expect(err).toBeInstanceOf(AppError);
+    expect((err as AppError).statusCode).toBe(400);
+  });
+
+  it("returns an EMPTY roster (no estimator rows) when the map env is unset", async () => {
+    delete process.env[BID_BOARD_ESTIMATOR_USER_MAP_ENV];
+    const report = await getEstimatorPipelineReport(tenantDb, REPORT_NOW);
+    expect(report.estimators).toEqual([]);
+    // Every assigned deal now falls into Other; Missing unchanged; the open cohort still reconciles exactly.
+    expect(report.otherAssigned.count + report.missingEstimator.count).toBe(report.pipeline.count);
+    expect(report.otherAssigned.value + report.missingEstimator.value).toBe(report.pipeline.value);
+  });
+
+  it("shows the configured map NAME (not a raw UUID) for a roster id with no matching CRM user", async () => {
+    const ghostId = U("dead"); // valid UUID, no users row
+    process.env[BID_BOARD_ESTIMATOR_USER_MAP_ENV] = JSON.stringify({
+      ...JSON.parse(ESTIMATOR_MAP_JSON),
+      "Ghost Estimator": ghostId,
+    });
+    const report = await getEstimatorPipelineReport(tenantDb, REPORT_NOW);
+    const ghost = report.estimators.find((estimator) => estimator.estimatorUserId === ghostId)!;
+    expect(ghost.resolved).toBe(false);
+    // The configured (normalized) map name, NOT the raw UUID.
+    expect(ghost.estimatorName).toBe("ghost estimator");
+    expect(ghost.estimatorName).not.toBe(ghostId);
+    expect(report.warnings.some((warning) => warning.includes("ghost estimator"))).toBe(true);
+  });
+
+  it("warns when a roster estimator is INACTIVE and keeps its existing assignments in its own row", async () => {
+    process.env[BID_BOARD_ESTIMATOR_USER_MAP_ENV] = JSON.stringify({
+      ...JSON.parse(ESTIMATOR_MAP_JSON),
+      "Inactive One": OTHER_INACTIVE,
+    });
+    const report = await getEstimatorPipelineReport(tenantDb, REPORT_NOW);
+    const inactive = report.estimators.find((estimator) => estimator.estimatorUserId === OTHER_INACTIVE)!;
+    expect(inactive.resolved).toBe(true);
+    expect(inactive.active).toBe(false);
+    expect(inactive.estimatorName).toBe("Other Inactive"); // the resolved CRM name
+    expect(inactive.count).toBe(1); // its deal moved out of Other into its own row
+    expect(
+      report.warnings.some(
+        (warning) => warning.includes("Other Inactive") && warning.toLowerCase().includes("inactive"),
+      ),
+    ).toBe(true);
   });
 });
