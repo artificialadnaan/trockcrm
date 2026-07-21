@@ -2,6 +2,7 @@ import {
   scorecardEditorBusyMessage,
   scorecardEditorSubmitError,
   scorecardPhotoOverflowMessage,
+  scorecardPhotosMissingMessage,
 } from "../editor-state";
 
 describe("scorecard editor guards", () => {
@@ -76,6 +77,17 @@ describe("scorecard editor guards", () => {
       hasEditConflict: false,
       message: "This scorecard contains too many evidence photos. Remove photos and try again.",
     });
+  });
+
+  it("gives an actionable remove-and-re-add message when an evidence file is missing", () => {
+    expect(scorecardPhotosMissingMessage(1)).toBe(
+      "This photo’s file is missing — remove and re-add it, then submit.",
+    );
+    expect(scorecardPhotosMissingMessage(3)).toBe(
+      "3 photos’ files are missing — remove and re-add them, then submit.",
+    );
+    // Never renders a zero/negative count.
+    expect(scorecardPhotosMissingMessage(0)).toContain("This photo’s file is missing");
   });
 
   it("uses the correct generic fallback for edit saves and new submissions", () => {

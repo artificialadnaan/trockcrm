@@ -5,12 +5,14 @@ import { useLocalSearchParams, useRouter } from "expo-router";
 import { usePreventRemove } from "@react-navigation/native";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import * as ImagePicker from "expo-image-picker";
+import * as FileSystem from "expo-file-system/legacy";
 import SignatureScreen, { type SignatureViewRef } from "react-native-signature-canvas";
 import { theme } from "../../../src/theme/theme";
 import { useAuth } from "../../../src/auth/AuthContext";
 import { getScorecard, getTranscriptionConfig, type Fetcher } from "../../../src/api/endpoints";
 import { apiFetch } from "../../../src/api/client";
 import { uploadOwnerKey, newClientUploadId, removeQueuedUploads } from "../../../src/capture/upload-queue";
+import { isDurableStoreUri } from "../../../src/capture/doc-dir-uri";
 import { qk } from "../../../src/query/keys";
 import { extractExifMetadata, getLiveGps, type PhotoMetadata } from "../../../src/capture/metadata";
 import type { CapturedShot } from "../../../src/capture/CameraCapture";
@@ -37,7 +39,7 @@ import {
   type DraftAction,
 } from "../../../src/scorecards/draft";
 import { rebaseScorecardEditDraft, scorecardEditRebaseMessage } from "../../../src/scorecards/edit";
-import { scorecardEditorBusyMessage, scorecardEditorSubmitError, scorecardPhotoOverflowMessage } from "../../../src/scorecards/editor-state";
+import { scorecardEditorBusyMessage, scorecardEditorSubmitError, scorecardPhotoOverflowMessage, scorecardPhotosMissingMessage } from "../../../src/scorecards/editor-state";
 import { loadScorecardDraft, saveScorecardDraft, deleteScorecardDraft, copyPhotoIntoDraft } from "../../../src/scorecards/draft-store";
 import { submitScorecard } from "../../../src/scorecards/submit";
 import { Badge, Button, EmptyState, LoadingState, SectionLabel, TextInput } from "../../../src/components/ui";
@@ -615,6 +617,11 @@ function Wizard(props: {
     }
     try {
       const result = await submitScorecard(fetcher, ownerKey, draftForSubmit, { draftOfficeFetcher });
+      if (result.status === "photos_missing") {
+        setNotice({ tone: "error", text: scorecardPhotosMissingMessage(result.missing) });
+        setSubmitting(false);
+        return;
+      }
       if (result.status === "photos_failed") {
         setNotice({ tone: "error", text: `${result.failed} photo${result.failed === 1 ? "" : "s"} couldn’t upload after several tries. Remove and re-add ${result.failed === 1 ? "it" : "them"}, then submit.` });
         setSubmitting(false);
@@ -1094,9 +1101,29 @@ function DraftPhotoThumbnail({
   onRemove: (photo: ScorecardDraftPhoto) => void;
 }) {
   const retained = isExistingScorecardDraftPhoto(photo);
-  const image = photo.uri
-    ? <Image source={{ uri: photo.uri }} style={styles.thumb} />
-    : <View style={styles.thumb} />;
+  // Defense-in-depth: a resumed draft can reference a durable copy whose file is gone (a stale-container
+  // path draft-store couldn't heal, or a file deleted out from under us). Rather than render a silent blank
+  // box, stat the local file and BADGE it as unavailable so the crew knows to remove + re-add it. Only local
+  // durable-store uris are checked — a remote presigned uri has no local file to stat.
+  const [fileMissing, setFileMissing] = useState(false);
+  const checkableUri = photo.uri && isDurableStoreUri(photo.uri, FileSystem.documentDirectory) ? photo.uri : null;
+  useEffect(() => {
+    if (!checkableUri) { setFileMissing(false); return; }
+    let active = true;
+    FileSystem.getInfoAsync(checkableUri)
+      .then((info) => { if (active) setFileMissing(!info.exists); })
+      .catch(() => { if (active) setFileMissing(true); });
+    return () => { active = false; };
+  }, [checkableUri]);
+  const image = fileMissing
+    ? (
+      <View style={[styles.thumb, styles.thumbMissing]}>
+        <Text style={styles.thumbMissingText}>Photo{"\n"}unavailable</Text>
+      </View>
+    )
+    : photo.uri
+      ? <Image source={{ uri: photo.uri }} style={styles.thumb} />
+      : <View style={styles.thumb} />;
   return (
     <View style={styles.thumbWrap}>
       {!captionEditable ? (
@@ -1345,6 +1372,8 @@ const styles = StyleSheet.create({
   photoRow: { flexDirection: "row", flexWrap: "wrap", gap: theme.space.sm },
   thumbWrap: { position: "relative" },
   thumb: { width: 64, height: 64, borderRadius: theme.radius.sm, backgroundColor: theme.color.surfaceMuted },
+  thumbMissing: { alignItems: "center", justifyContent: "center", borderWidth: 1, borderColor: theme.color.border },
+  thumbMissingText: { color: theme.color.textMuted, fontFamily: theme.font.semibold, fontSize: 9, textAlign: "center" },
   thumbX: { position: "absolute", top: -6, right: -6, backgroundColor: theme.color.brandBlack, borderRadius: 999, width: 20, height: 20, alignItems: "center", justifyContent: "center" },
   thumbXText: { color: "#fff", fontSize: 11, fontFamily: theme.font.bold },
   thumbCaption: { position: "absolute", left: 0, right: 0, bottom: 0, paddingVertical: 2, backgroundColor: "rgba(17,17,17,0.72)", alignItems: "center" },

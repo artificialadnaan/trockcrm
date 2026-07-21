@@ -44,7 +44,7 @@ import {
   type DraftAction,
 } from "../../../../src/scorecards/draft";
 import { rebaseScorecardEditDraft, scorecardEditRebaseMessage } from "../../../../src/scorecards/edit";
-import { scorecardEditorBusyMessage, scorecardEditorSubmitError, scorecardPhotoOverflowMessage } from "../../../../src/scorecards/editor-state";
+import { scorecardEditorBusyMessage, scorecardEditorSubmitError, scorecardPhotoOverflowMessage, scorecardPhotosMissingMessage } from "../../../../src/scorecards/editor-state";
 import { loadScorecardDraft, saveScorecardDraft, deleteScorecardDraft, copyPhotoIntoDraft } from "../../../../src/scorecards/draft-store";
 import { submitScorecard } from "../../../../src/scorecards/submit";
 import { Button, EmptyState, LoadingState, SectionLabel, TextInput } from "../../../../src/components/ui";
@@ -528,6 +528,11 @@ function LeadershipForm(props: {
     }
     try {
       const result = await submitScorecard(fetcher, ownerKey, draftForSubmit, { draftOfficeFetcher });
+      if (result.status === "photos_missing") {
+        setNotice({ tone: "error", text: scorecardPhotosMissingMessage(result.missing) });
+        setSubmitting(false);
+        return;
+      }
       if (result.status === "photos_failed") {
         setNotice({ tone: "error", text: `${result.failed} photo${result.failed === 1 ? "" : "s"} couldn’t upload after several tries. Remove and re-add ${result.failed === 1 ? "it" : "them"}, then submit.` });
         setSubmitting(false);

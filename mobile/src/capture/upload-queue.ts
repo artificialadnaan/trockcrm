@@ -15,6 +15,7 @@ import {
   selectUploadFetcher,
   type QueuedUpload,
 } from "./upload-queue-core";
+import { isDurableStoreUri, reconstructDurablePhotoUri } from "./doc-dir-uri";
 
 export { MAX_UPLOAD_ATTEMPTS, UPLOAD_CONCURRENCY, dedupeQueue, newClientUploadId, partitionResults, removeIds, sanitizeOwnerKey, uploadOwnerKey, type QueuedUpload } from "./upload-queue-core";
 
@@ -85,6 +86,20 @@ async function readIndexFile(file: string): Promise<QueuedUpload[] | null> {
   }
 }
 
+// Rebase each queued item's uri onto the LIVE owner directory. enqueueUploads froze an ABSOLUTE uri
+// (rooted at documentDirectory) into the index; the iOS container UUID in that path rotates across an app
+// update/reinstall/restore, so a queued photo's baked uri would fail its FileSystem.copyAsync at drain time.
+// Durable copies are named deterministically (`<ownerDir>/<clientUploadId><ext>`), so rebuild the current
+// path from the live ownerDir + clientUploadId. Non-durable/legacy uris are left untouched.
+function rebaseQueuedUris(ownerKey: string, items: QueuedUpload[]): QueuedUpload[] {
+  const dir = ownerDir(ownerKey);
+  return items.map((item) => {
+    if (!isDurableStoreUri(item.uri, FileSystem.documentDirectory)) return item;
+    const rebased = reconstructDurablePhotoUri(item.uri, dir, item.clientUploadId);
+    return rebased === item.uri ? item : { ...item, uri: rebased };
+  });
+}
+
 async function readQueue(ownerKey: string): Promise<QueuedUpload[]> {
   const file = indexFile(ownerKey);
   // A leftover .tmp only exists when a write was interrupted before its final rename — and it holds the
@@ -93,11 +108,11 @@ async function readQueue(ownerKey: string): Promise<QueuedUpload[]> {
   // .tmp is the only complete copy (first write, or after the primary was cleared for the rename). Then the
   // live index, then the .bak from the previous successful write. Empty only when ALL are unreadable.
   const temp = await readIndexFile(`${file}.tmp`);
-  if (temp !== null) return temp;
+  if (temp !== null) return rebaseQueuedUris(ownerKey, temp);
   const primary = await readIndexFile(file);
-  if (primary !== null) return primary;
+  if (primary !== null) return rebaseQueuedUris(ownerKey, primary);
   const backup = await readIndexFile(`${file}.bak`);
-  return backup ?? [];
+  return backup ? rebaseQueuedUris(ownerKey, backup) : [];
 }
 
 // Crash-safe index write: serialize to a temp file FIRST (so the live index is never observed

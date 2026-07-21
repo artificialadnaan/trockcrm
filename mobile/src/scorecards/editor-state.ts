@@ -30,6 +30,17 @@ export function scorecardPhotoOverflowMessage(
     : `This scorecard has ${photoCount} photos, but the limit is ${MAX_SCORECARD_PHOTOS}. ${remove}`;
 }
 
+/**
+ * Actionable message when a submit found one or more evidence photos whose durable FILE is gone (deleted,
+ * or a stale-container path that couldn't be healed). The draft is kept, so the recovery is remove + re-add.
+ */
+export function scorecardPhotosMissingMessage(missing: number): string {
+  const count = Math.max(1, missing);
+  return count === 1
+    ? "This photo’s file is missing — remove and re-add it, then submit."
+    : `${count} photos’ files are missing — remove and re-add them, then submit.`;
+}
+
 export interface ScorecardEditorSubmitError {
   hasEditConflict: boolean;
   message: string;
