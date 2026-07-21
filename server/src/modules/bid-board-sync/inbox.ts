@@ -231,6 +231,27 @@ export async function loadInboxRow(db: Querier, inboxId: string): Promise<InboxR
   return (res.rows[0] as InboxRow) ?? null;
 }
 
+export interface InboxControlRow {
+  status: InboxStatus;
+  attempts: number;
+  max_attempts: number;
+  lease_expires_at: string | null;
+}
+
+/**
+ * Lightweight control-flow load: status + attempts + lease ONLY, never the (up to 25 MB) payload. Used for the
+ * post-lock recheck and the leased/terminal no-claim decision, where markInboxProcessing already returned the
+ * payload via RETURNING * — reloading it via loadInboxRow's SELECT * would hold a SECOND copy of the whole
+ * import in worker heap for the duration of the running import (precisely the large payloads this feature adds).
+ */
+export async function loadInboxControlRow(db: Querier, inboxId: string): Promise<InboxControlRow | null> {
+  const res = await db.query(
+    `SELECT status, attempts, max_attempts, lease_expires_at FROM public.bid_board_ingestion_inbox WHERE id = $1`,
+    [inboxId]
+  );
+  return (res.rows[0] as InboxControlRow) ?? null;
+}
+
 /** Transition a claimable row → processing, stamping the attempt, start time, and a fresh lease.
  *  Claims a 'queued' row always; claims a 'processing' row ONLY if its lease has EXPIRED (its handler died) —
  *  so a live long-running import can't be double-claimed (which would burn an attempt). Returns the updated
@@ -546,7 +567,7 @@ export async function processBidBoardInboxJob(deps: ProcessInboxDeps): Promise<P
     // instead — the queue re-runs this job just after the lease would lapse, re-driving the inbox promptly if
     // the owner died (or deferring again if it's still alive). Terminal/dead-lettered/attempts-exhausted rows
     // stay a noop so the job completes without resurrecting finished work.
-    const row = await loadInboxRow(db, inboxId);
+    const row = await loadInboxControlRow(db, inboxId);
     const leaseMs = row?.lease_expires_at ? Date.parse(row.lease_expires_at) : NaN;
     const nowMs = now();
     if (row?.status === "processing" && row.attempts < row.max_attempts && Number.isFinite(leaseMs) && leaseMs > nowMs) {
@@ -595,7 +616,7 @@ export async function processBidBoardInboxJob(deps: ProcessInboxDeps): Promise<P
       // waited behind already COMMITTED the import, the row is now terminal — skip so we never re-run a
       // finished import (the duplicate-import incident this inbox exists to prevent). Only a still-open
       // 'processing' row (the previous holder died mid-import, or we ARE the first) proceeds to ingest.
-      const current = await loadInboxRow(db, inboxId);
+      const current = await loadInboxControlRow(db, inboxId);
       if (current && (current.status === "succeeded" || current.status === "failed")) {
         log(
           `[BidBoardIngest] ${JSON.stringify({ ...logMeta, state: "noop_after_lock", status: current.status })}`

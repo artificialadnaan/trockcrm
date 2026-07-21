@@ -11,7 +11,7 @@ vi.mock("../src/db.js", () => ({
   },
 }));
 
-const { deadJob, deferJob, pollJobs, pollBidBoardIngestJobs, registerJobHandler, recoverStaleJobs, __resetQueueStateForTest } = await import("../src/queue.js");
+const { deadJob, deferJob, pollJobs, pollBidBoardIngestJobs, registerJobHandler, recoverStaleJobs, __resetQueueStateForTest, __setQueueQueryTimeoutForTest } = await import("../src/queue.js");
 
 describe("worker queue", () => {
   beforeEach(() => {
@@ -423,6 +423,30 @@ describe("worker queue", () => {
     const sql = String(call![0]);
     expect(sql).toMatch(/SET status = 'pending'/);
     expect(sql).not.toMatch(/THEN 'dead'/); // must NOT dead-letter a possibly-never-run final attempt
+  });
+
+  it("does NOT hang on a silently-dead socket — times out the claim query and DESTROYS the connection", async () => {
+    // The worker pool sets no query_timeout; a dead socket would otherwise hang the claim (and the poller's
+    // reentrancy guard) forever. withQueueTimeout must reject, and the poisoned client must be destroyed.
+    __setQueueQueryTimeoutForTest(20); // shrink so the test doesn't wait the real 30s
+    try {
+      const client = {
+        query: vi.fn((sql: string) => {
+          if (sql === "BEGIN") return Promise.resolve({ rows: [] });
+          if (sql.includes("SELECT * FROM public.job_queue")) return new Promise(() => {}); // never settles
+          return Promise.resolve({ rows: [] });
+        }),
+        release: vi.fn(),
+      };
+      connectMock.mockResolvedValue(client);
+
+      await expect(pollJobs()).resolves.toBeUndefined(); // completes (doesn't hang, doesn't reject)
+
+      expect(client.release).toHaveBeenCalledTimes(1);
+      expect(client.release.mock.calls[0][0]).toBeInstanceOf(Error); // destroyed (release(err)), not returned healthy
+    } finally {
+      __setQueueQueryTimeoutForTest(30_000); // restore for the other tests
+    }
   });
 
   it("main pollJobs EXCLUDES bid_board_ingest from its claim (that type runs on a dedicated poller)", async () => {

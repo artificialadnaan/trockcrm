@@ -97,11 +97,43 @@ function buildOutcomeUpdate(jobId: number, attempts: number, outcome: Outcome): 
   }
 }
 
+// Client-side timeout for the poller's OWN queue queries (the claim transaction + the outcome writes). The
+// worker pool sets no query_timeout/keepalive (db.ts), so a silently-dead PostgreSQL socket would otherwise
+// hang a client.query / pool.query FOREVER — wedging the reentrancy guard. For the dedicated bid_board_ingest
+// poller that means every later import goes unclaimed until a process restart (the main poller can't take them
+// — it excludes the type). Generous vs a normal sub-second claim/outcome write. `let` so tests can shrink it.
+let QUEUE_QUERY_TIMEOUT_MS = 30_000;
+
+/** Test-only: shrink the queue-query timeout so a dead-socket hang can be exercised without a 30s wait. */
+export function __setQueueQueryTimeoutForTest(ms: number) {
+  QUEUE_QUERY_TIMEOUT_MS = ms;
+}
+
+class QueueQueryTimeout extends Error {
+  constructor(label: string) {
+    super(`[Worker] ${label} exceeded ${QUEUE_QUERY_TIMEOUT_MS}ms — assuming a dead socket`);
+    this.name = "QueueQueryTimeout";
+  }
+}
+
+// Race a query against QUEUE_QUERY_TIMEOUT_MS. It can't CANCEL the underlying query (a dead socket never
+// settles), so on a QueueQueryTimeout the CALLER must DESTROY the connection rather than return it to the pool.
+function withQueueTimeout<T>(query: Promise<T>, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new QueueQueryTimeout(label)), QUEUE_QUERY_TIMEOUT_MS);
+  });
+  return Promise.race([query, timeout]).finally(() => clearTimeout(timer)) as Promise<T>;
+}
+
 /** Persist a job's outcome (its normal terminal write). On failure, keep the full intent for a later tick. */
 async function attemptRecovery(jobId: number, attempts: number, outcome: Outcome): Promise<void> {
   const { sql, params } = buildOutcomeUpdate(jobId, attempts, outcome);
   try {
-    await pool.query(sql, params);
+    // Time-bounded so a dead socket can't hang the run phase (and the reentrancy guard). pool.query manages the
+    // connection; the pool's TCP keepAlive (db.ts) evicts a genuinely-dead one. A timeout leaves the intent in
+    // pendingRecoveries for a later tick, exactly like any other write failure.
+    await withQueueTimeout(pool.query(sql, params), `job ${jobId} outcome write`);
     pendingRecoveries.delete(jobId);
   } catch (err) {
     pendingRecoveries.set(jobId, { attempts, outcome });
@@ -114,10 +146,10 @@ async function flushPendingRecoveries(): Promise<void> {
   for (const [jobId, { attempts, outcome }] of [...pendingRecoveries]) {
     const { sql, params } = buildOutcomeUpdate(jobId, attempts, outcome);
     try {
-      await pool.query(sql, params);
+      await withQueueTimeout(pool.query(sql, params), `job ${jobId} outcome flush`);
       pendingRecoveries.delete(jobId);
     } catch {
-      break; // pool still unavailable — retry the rest on a later tick
+      break; // pool still unavailable / dead socket — retry the rest on a later tick
     }
   }
 }
@@ -161,40 +193,55 @@ async function claimAndRunJobs(jobTypeSql: string, limit: number): Promise<void>
   }
   let releaseError: Error | undefined;
   try {
-    await client.query("BEGIN");
-    const result = await client.query(
-      `SELECT * FROM public.job_queue
-       WHERE status = 'pending' AND run_after <= NOW() ${jobTypeSql}
-       ORDER BY created_at ASC
-       LIMIT $1
-       FOR UPDATE SKIP LOCKED`,
-      [limit]
+    // Every claim query is time-bounded (withQueueTimeout): a silently-dead socket can't hang the transaction
+    // and, with it, the poller's reentrancy guard, indefinitely.
+    await withQueueTimeout(client.query("BEGIN"), "claim BEGIN");
+    const result = await withQueueTimeout(
+      client.query(
+        `SELECT * FROM public.job_queue
+         WHERE status = 'pending' AND run_after <= NOW() ${jobTypeSql}
+         ORDER BY created_at ASC
+         LIMIT $1
+         FOR UPDATE SKIP LOCKED`,
+        [limit]
+      ),
+      "claim SELECT"
     );
     for (const job of result.rows) {
       const handler = jobHandlers.get(job.job_type);
       if (!handler) {
         console.warn(`[Worker] No handler for job type: ${job.job_type}`);
-        await client.query(
-          "UPDATE public.job_queue SET status = 'dead', last_error = $1 WHERE id = $2",
-          [`No handler registered for job type: ${job.job_type}`, job.id]
+        await withQueueTimeout(
+          client.query(
+            "UPDATE public.job_queue SET status = 'dead', last_error = $1 WHERE id = $2",
+            [`No handler registered for job type: ${job.job_type}`, job.id]
+          ),
+          "claim dead-mark"
         );
         continue;
       }
-      await client.query(
-        "UPDATE public.job_queue SET status = 'processing', attempts = attempts + 1, started_processing_at = NOW() WHERE id = $1",
-        [job.id]
+      await withQueueTimeout(
+        client.query(
+          "UPDATE public.job_queue SET status = 'processing', attempts = attempts + 1, started_processing_at = NOW() WHERE id = $1",
+          [job.id]
+        ),
+        "claim mark-processing"
       );
       claimed.push(job);
     }
-    await client.query("COMMIT");
+    await withQueueTimeout(client.query("COMMIT"), "claim COMMIT");
   } catch (err) {
-    // ROLLBACK can itself fail if the connection is already broken. Capture that so the finally can
-    // DESTROY the client (release(err)) rather than returning a possibly-poisoned connection — one still
-    // mid-transaction — to the pool for the next caller.
-    try {
-      await client.query("ROLLBACK");
-    } catch (rollbackErr) {
-      releaseError = rollbackErr as Error;
+    // A query TIMEOUT means a dead socket — do NOT attempt ROLLBACK (it would hang too); just DESTROY the
+    // client via releaseError below. Any OTHER error: attempt a time-bounded ROLLBACK (which can itself fail
+    // on a broken connection) so the finally can destroy rather than return a poisoned, mid-transaction client.
+    if (err instanceof QueueQueryTimeout) {
+      releaseError = err;
+    } else {
+      try {
+        await withQueueTimeout(client.query("ROLLBACK"), "claim ROLLBACK");
+      } catch (rollbackErr) {
+        releaseError = rollbackErr as Error;
+      }
     }
     console.error("[Worker] Poll error:", err);
     // The COMMIT may have landed server-side despite this rejection, leaving these rows 'processing'.

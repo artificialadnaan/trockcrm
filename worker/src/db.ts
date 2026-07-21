@@ -10,6 +10,12 @@ const pool = new pg.Pool({
   // (e.g. a burst of jobs each opening nested connections) then surfaces as a retryable job error rather
   // than hanging a handler — and, with it, pollJobs — indefinitely.
   connectionTimeoutMillis: 10000,
+  // TCP keepalive so a SILENTLY-dead socket (no FIN/RST — a dropped NAT mapping, a killed upstream) is detected
+  // and errored instead of leaving a query hung forever. Without it the pollers' claim/outcome queries could
+  // wait indefinitely on a dead connection; the queue layer also applies its own client-side query timeout, but
+  // keepalive lets the pool actually EVICT the dead connection rather than leak it. First probe after 10s.
+  keepAlive: true,
+  keepAliveInitialDelayMillis: 10000,
 });
 
 export const db = drizzle(pool, { schema });
