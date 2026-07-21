@@ -262,15 +262,18 @@ export async function enqueueUploads(
       failOwn = rej;
     });
     own.catch(() => {}); // no unhandled-rejection if this enqueue fails and no duplicate ever attaches
+    // The locked section returns a NON-promise tag. Returning the in-flight PROMISE here would make
+    // withQueueLock assimilate it — the mutex would stay held until that enqueue settles, but the OWNING enqueue
+    // needs the SAME mutex to persist + release, so both would deadlock. Await the promise AFTER the lock.
     const decision = await withQueueLock(async () => {
-      if (alreadyQueued.has(id)) return "skip" as const;
+      if (alreadyQueued.has(id)) return { kind: "skip" as const };
       const inflight = enqueueing.get(id);
-      if (inflight) return inflight; // a Promise — await the in-flight enqueue below
+      if (inflight) return { kind: "await" as const, inflight };
       enqueueing.set(id, own);
-      return "own" as const;
+      return { kind: "own" as const };
     });
-    if (decision === "skip") return null;
-    if (decision !== "own") return decision; // await the in-flight enqueue's durable result (or its rejection)
+    if (decision.kind === "skip") return null;
+    if (decision.kind === "await") return decision.inflight; // await the in-flight enqueue OUTSIDE the mutex
 
     // We OWN this id. Run the actual enqueue; whatever happens, settle `own` for any awaiter AND release the id
     // (compress + copy run OUTSIDE the lock — both are slow and must not block removeQueuedUploads / the drain).
