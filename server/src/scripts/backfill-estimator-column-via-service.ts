@@ -104,7 +104,8 @@ export interface ResolvedEstimatorCandidate extends EstimatorColumnRow {
 }
 
 export type EstimatorColumnBackfillStatus =
-  | "assigned"
+  | "assigned" // linked AND the additive estimator commission row was minted
+  | "assigned:no_commission" // linked, but setDealEstimator's mint was SKIPPED (no rate / no owner row / unsigned)
   | "skipped:unresolved"
   | "skipped:deal_not_found"
   | "skipped:no_change" // setDealEstimator returned the row unchanged (already had this estimator — race)
@@ -215,6 +216,59 @@ function classifyError(err: unknown): EstimatorColumnBackfillStatus {
  * transaction together — nothing persists, yet the guards ran and either returned an updated row or threw.
  * We capture the outcome BEFORE throwing the rollback symbol so a would-be success is reported as such.
  */
+export async function attemptEstimatorLink(
+  tx: TenantDb,
+  candidate: ResolvedEstimatorCandidate,
+  actorUserId: string,
+  officeId: string | null
+): Promise<EstimatorColumnBackfillStatus> {
+  // Re-check the FULL candidate predicate under a row lock before touching the deal. The candidate scan is
+  // unlocked, so between it and here a concurrent write (e.g. the RFP edit path, a manual estimator edit, a
+  // stage move) could have: assigned an estimator, changed the free-text `estimator`, populated
+  // `bid_board_estimator` (now Bid-Board sourced), or moved the deal to a LOST stage. setDealEstimator would
+  // otherwise happily overwrite / mint against stale text — and the post-call comparison could NOT detect a
+  // concurrent assignment (the row would already equal our value). Re-verify everything while holding the
+  // lock; setDealEstimator re-locks this same row in its own nested transaction (SAVEPOINT), and re-taking a
+  // lock we already hold is a no-op, so there is no deadlock.
+  const [locked] = await tx
+    .select({
+      estimatorUserId: schema.deals.estimatorUserId,
+      estimatorText: sql<string | null>`NULLIF(BTRIM(${schema.deals.estimator}), '')`,
+      bidBoardEstimator: sql<string | null>`NULLIF(BTRIM(${schema.deals.bidBoardEstimator}), '')`,
+      stageSlug: schema.pipelineStageConfig.slug,
+      isTestData: schema.deals.isTestData,
+    })
+    .from(schema.deals)
+    .innerJoin(schema.pipelineStageConfig, eq(schema.pipelineStageConfig.id, schema.deals.stageId))
+    .where(and(eq(schema.deals.id, candidate.dealId), eq(schema.deals.isActive, true)))
+    .limit(1)
+    .for("update", { of: schema.deals });
+  if (!locked) return "skipped:deal_not_found"; // not found / soft-deleted since the scan
+  if (locked.estimatorUserId != null) return "skipped:no_change"; // concurrently assigned between scan and lock
+  if (locked.estimatorText !== candidate.estimatorText) return "skipped:no_change"; // free-text changed since scan
+  if (locked.bidBoardEstimator != null) return "skipped:no_change"; // now Bid-Board sourced (the sync owns it)
+  if (locked.isTestData === true) return "skipped:no_change"; // flagged test/demo since the scan — never link/mint
+  if (LOST_STAGE_SLUG_SET.has(locked.stageSlug)) return "skipped:lost_stage"; // moved to a lost stage since scan
+  const updated = await setDealEstimator(tx, candidate.dealId, candidate.resolvedUserId, actorUserId, officeId);
+  if (!updated) return "skipped:deal_not_found";
+  if (updated.estimatorUserId !== candidate.resolvedUserId) return "skipped:no_change";
+  // setDealEstimator mints the additive estimator commission as a side effect, but SILENTLY skips it (no row)
+  // when the estimator has no active commission rate, the deal has no owner commission row, or it isn't
+  // signed. Distinguish links whose commission was NOT minted so the operator can find the ones still needing
+  // a commission (e.g. an estimator without a configured rate) instead of reading a false "minted" success.
+  const [commissionRow] = await tx
+    .select({ id: schema.dealSignedCommissions.id })
+    .from(schema.dealSignedCommissions)
+    .where(
+      and(
+        eq(schema.dealSignedCommissions.dealId, candidate.dealId),
+        eq(schema.dealSignedCommissions.repUserId, candidate.resolvedUserId)
+      )
+    )
+    .limit(1);
+  return commissionRow ? "assigned" : "assigned:no_commission";
+}
+
 export async function runOne(
   tenantDb: TenantDb,
   candidate: ResolvedEstimatorCandidate,
@@ -222,58 +276,25 @@ export async function runOne(
   officeId: string | null,
   execute: boolean
 ): Promise<EstimatorColumnBackfillStatus> {
-  const attempt = async (tx: TenantDb): Promise<EstimatorColumnBackfillStatus> => {
-    // Re-check the FULL candidate predicate under a row lock before touching the deal. The candidate scan is
-    // unlocked, so between it and here a concurrent write (e.g. the RFP edit path, a manual estimator edit, a
-    // stage move) could have: assigned an estimator, changed the free-text `estimator`, populated
-    // `bid_board_estimator` (now Bid-Board sourced), or moved the deal to a LOST stage. setDealEstimator would
-    // otherwise happily overwrite / mint against stale text — and the post-call comparison could NOT detect a
-    // concurrent assignment (the row would already equal our value). Re-verify everything while holding the
-    // lock; setDealEstimator re-locks this same row in its own nested transaction (SAVEPOINT), and re-taking a
-    // lock we already hold is a no-op, so there is no deadlock.
-    const [locked] = await tx
-      .select({
-        estimatorUserId: schema.deals.estimatorUserId,
-        estimatorText: sql<string | null>`NULLIF(BTRIM(${schema.deals.estimator}), '')`,
-        bidBoardEstimator: sql<string | null>`NULLIF(BTRIM(${schema.deals.bidBoardEstimator}), '')`,
-        stageSlug: schema.pipelineStageConfig.slug,
-        isTestData: schema.deals.isTestData,
-      })
-      .from(schema.deals)
-      .innerJoin(schema.pipelineStageConfig, eq(schema.pipelineStageConfig.id, schema.deals.stageId))
-      .where(and(eq(schema.deals.id, candidate.dealId), eq(schema.deals.isActive, true)))
-      .limit(1)
-      .for("update", { of: schema.deals });
-    if (!locked) return "skipped:deal_not_found"; // not found / soft-deleted since the scan
-    if (locked.estimatorUserId != null) return "skipped:no_change"; // concurrently assigned between scan and lock
-    if (locked.estimatorText !== candidate.estimatorText) return "skipped:no_change"; // free-text changed since scan
-    if (locked.bidBoardEstimator != null) return "skipped:no_change"; // now Bid-Board sourced (the sync owns it)
-    if (locked.isTestData === true) return "skipped:no_change"; // flagged test/demo since the scan — never link/mint
-    if (LOST_STAGE_SLUG_SET.has(locked.stageSlug)) return "skipped:lost_stage"; // moved to a lost stage since scan
-    const updated = await setDealEstimator(tx, candidate.dealId, candidate.resolvedUserId, actorUserId, officeId);
-    if (!updated) return "skipped:deal_not_found";
-    if (updated.estimatorUserId !== candidate.resolvedUserId) return "skipped:no_change";
-    return "assigned";
-  };
-
   if (execute) {
     // Wrap the lock+recheck+service call in ONE transaction so the row lock is held across the recheck and
     // the write (setDealEstimator nests as a savepoint). A guard rejection throws → the tx rolls back → the
     // error is classified as a skip and the run continues (one bad deal never aborts the batch).
     try {
-      return await tenantDb.transaction(async (tx) => attempt(tx));
+      return await tenantDb.transaction(async (tx) => attemptEstimatorLink(tx, candidate, actorUserId, officeId));
     } catch (err) {
       return classifyError(err);
     }
   }
 
-  // Faithful dry-run: run the real lock+recheck+service call inside an outer transaction, capture the
-  // outcome, then roll everything back so nothing persists (identical code path to --commit above).
+  // Per-candidate faithful dry-run (isolated / single-deal use). The TENANT sweep batches the whole dry-run
+  // in one transaction instead — see backfillTenantEstimatorColumn — so a base deal's propagation to its CO
+  // children is visible to later candidates. Here we run the real call in an outer transaction and roll back.
   let captured: EstimatorColumnBackfillStatus = "skipped:unresolved";
   try {
     await tenantDb.transaction(async (tx) => {
       try {
-        captured = await attempt(tx);
+        captured = await attemptEstimatorLink(tx, candidate, actorUserId, officeId);
       } catch (err) {
         // A guard rejection is a real outcome — capture it, then still roll back the (partial) tx cleanly.
         captured = classifyError(err);
@@ -300,10 +321,37 @@ export async function backfillTenantEstimatorColumn(
   };
   const rows: EstimatorColumnBackfillSummary["rows"] = [];
 
-  for (const candidate of resolved) {
-    const status = await runOne(tenantDb, candidate, opts.actorUserId, opts.officeId, opts.execute);
-    bump(status);
-    rows.push({ ...candidate, status });
+  if (opts.execute) {
+    // WRITE: each candidate commits its own transaction. A base deal's estimator propagates to its active CO
+    // children on commit, so a later CO-child candidate observes it and reports skipped:no_change.
+    for (const candidate of resolved) {
+      const status = await runOne(tenantDb, candidate, opts.actorUserId, opts.officeId, true);
+      bump(status);
+      rows.push({ ...candidate, status });
+    }
+  } else {
+    // DRY-RUN: run ALL candidates inside ONE transaction, rolled back only after the whole tenant is
+    // evaluated — so cumulative effects (a base deal's assignment propagating estimator_user_id to its
+    // change-order children) are visible to later candidates, making the preview FAITHFUL to the sequential
+    // per-candidate write above. A guard rejection is classified + the sweep continues (setDealEstimator's
+    // savepoint absorbs it, leaving the outer transaction valid).
+    try {
+      await tenantDb.transaction(async (tx) => {
+        for (const candidate of resolved) {
+          let status: EstimatorColumnBackfillStatus;
+          try {
+            status = await attemptEstimatorLink(tx, candidate, opts.actorUserId, opts.officeId);
+          } catch (err) {
+            status = classifyError(err);
+          }
+          bump(status);
+          rows.push({ ...candidate, status });
+        }
+        throw DRY_RUN_ROLLBACK;
+      });
+    } catch (err) {
+      if (err !== DRY_RUN_ROLLBACK) throw err;
+    }
   }
   // Count EVERY unresolved row under one bucket (they're never handed to the service). Bump per row, not
   // once — otherwise a tenant with many unmapped names reports skipped:unresolved=1 and the operator badly
@@ -338,6 +386,13 @@ export function parseArgs(argv: string[]): { tenant: string | null; execute: boo
     const recognized = arg === "--commit" || arg.startsWith("--tenant=") || arg.startsWith("--actor=");
     if (!recognized) {
       throw new Error(`Unknown argument ${JSON.stringify(arg)}. Valid: --commit, --tenant=<office_x>, --actor=<uuid>.`);
+    }
+  }
+  // Reject DUPLICATE occurrences of a safety flag — readValue's argv.find() would silently take the FIRST, so
+  // `--tenant=all --tenant=office_dallas` would run across EVERY tenant while appearing to narrow the run.
+  for (const key of ["--tenant", "--actor"]) {
+    if (argv.filter((a) => a.startsWith(`${key}=`)).length > 1) {
+      throw new Error(`${key}= was passed more than once; specify it exactly once (it is a blast-radius safety control).`);
     }
   }
   const readValue = (key: string): string | null => {
@@ -449,6 +504,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     }
     console.log(`${execute ? "WRITE" : "DRY-RUN (no writes)"} — tenants: ${tenants.join(", ")}`);
     let grandAssigned = 0;
+    let grandNoCommission = 0;
     let grandSkipped = 0;
     for (const t of tenants) {
       const officeId = await resolveOfficeId(client, t);
@@ -487,16 +543,26 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
         { schema: t, execute, actorUserId: effectiveActor, officeId }
       );
       printSummary(summary);
-      grandAssigned += summary.byStatus["assigned"] ?? 0;
+      const minted = summary.byStatus["assigned"] ?? 0;
+      const noCommission = summary.byStatus["assigned:no_commission"] ?? 0;
+      grandAssigned += minted + noCommission; // both are successful LINKS (estimator_user_id set)
+      grandNoCommission += noCommission;
       grandSkipped += Object.entries(summary.byStatus)
-        .filter(([k]) => k !== "assigned")
+        .filter(([k]) => k !== "assigned" && k !== "assigned:no_commission")
         .reduce((acc, [, v]) => acc + v, 0);
     }
     console.log(
       `\n=== GRAND TOTAL ${execute ? "LINKED" : "(dry-run) WOULD LINK"}: ${grandAssigned} deal(s) to their estimator ` +
         `(${grandSkipped} skipped by guards / unresolved) ===`
     );
-    console.log("(Every link went through setDealEstimator: change-order / sales-source / office-access / Bid-Board guards enforced; estimator commission minted atomically.)");
+    if (grandNoCommission > 0) {
+      console.log(
+        `⚠️  ${grandNoCommission} of those were LINKED but had NO estimator commission minted (estimator has no ` +
+          `active rate, the deal has no owner commission row, or it isn't signed) — flagged assigned:no_commission, ` +
+          `they need a commission follow-up.`
+      );
+    }
+    console.log("(Every link went through setDealEstimator: change-order / sales-source / office-access / Bid-Board guards enforced; commission minted where eligible.)");
   } finally {
     await client.end();
   }

@@ -350,6 +350,72 @@ describe("estimator-column service backfill — dry-run vs commit via setDealEst
     expect(await runOne(tdb, candidate, ACTOR, OFFICE, false)).toBe("skipped:lost_stage");
   });
 
+  it("reports assigned:no_commission — links, but the mint is skipped when the estimator has no rate", async () => {
+    const EST_NORATE = U("0006"); // active user, but NO user_commission_settings row → mint skips_no_rate
+    const dealId = U("0d88");
+    await pg.exec("BEGIN");
+    try {
+      await pg.exec(
+        `INSERT INTO public.users (id, display_name, email, role, office_id, is_active) VALUES ('${EST_NORATE}','No Rate Est','norate@x.com','rep','${OFFICE}',true)`,
+      );
+      await pg.exec(
+        `INSERT INTO public.deals
+           (id, deal_number, name, stage_id, assigned_rep_id, estimator, estimator_user_id, bid_board_estimator,
+            awarded_amount, contract_signed_date, is_change_order, is_bid_board_owned, sales_source_user_id, is_active, workflow_route)
+         VALUES ('${dealId}','0d88','No-rate deal','${WON}','${O1}','norate',NULL,NULL,100000,'2026-01-15',false,false,NULL,true,'service')`,
+      );
+      // Owner row present, so the ONLY reason the mint skips is the missing estimator rate.
+      await pg.exec(
+        `INSERT INTO public.deal_signed_commissions
+           (deal_id, rep_user_id, attribution_role, source_value_kind, source_value_amount, applied_rate, amount, contract_signed_date_at_signing)
+         VALUES ('${dealId}','${O1}','owner','awarded_amount',100000,0.030000,3000,'2026-01-15')`,
+      );
+      const candidate = { dealId, dealNumber: "0d88", estimatorText: "norate", resolvedUserId: EST_NORATE };
+      const status = await runOne(tdb, candidate, ACTOR, OFFICE, true); // commit (inside BEGIN → rolled back)
+      expect(status).toBe("assigned:no_commission");
+      expect(await estimatorUserId(dealId)).toBe(EST_NORATE); // linked
+      expect(await dscCountForRep(dealId, EST_NORATE)).toBe(0); // but no estimator commission minted
+    } finally {
+      await pg.exec("ROLLBACK");
+    }
+  });
+
+  it("dry-run batches the tenant in one transaction: a CO child inherits the base's estimator (no_change), not CHANGE_ORDER_FIELD_LOCKED", async () => {
+    const base = U("0dba");
+    const child = U("0dbb");
+    await pg.exec("BEGIN");
+    try {
+      await pg.exec(
+        `INSERT INTO public.deals
+           (id, deal_number, name, stage_id, assigned_rep_id, estimator, estimator_user_id, bid_board_estimator,
+            awarded_amount, contract_signed_date, is_change_order, is_bid_board_owned, sales_source_user_id, is_active, workflow_route, parent_deal_id) VALUES
+           ('${base}','0dba','Base deal','${WON}','${O1}','Tim',NULL,NULL,100000,'2026-01-15',false,false,NULL,true,'service',NULL),
+           ('${child}','0dbb','CO child','${WON}','${O1}','Tim',NULL,NULL,50000,'2026-01-15',true,false,NULL,true,'service','${base}')`,
+      );
+      await pg.exec(
+        `INSERT INTO public.deal_signed_commissions
+           (deal_id, rep_user_id, attribution_role, source_value_kind, source_value_amount, applied_rate, amount, contract_signed_date_at_signing)
+         VALUES ('${base}','${O1}','owner','awarded_amount',100000,0.030000,3000,'2026-01-15')`,
+      );
+      const summary = await backfillTenantEstimatorColumn(tdb, query, {
+        schema: "public",
+        execute: false,
+        actorUserId: ACTOR,
+        officeId: OFFICE,
+      });
+      const baseRow = summary.rows.find((r) => r.dealId === base)!;
+      const childRow = summary.rows.find((r) => r.dealId === child)!;
+      // Base links; setDealEstimator propagates its estimator to the active CO child, so when the child is
+      // evaluated LATER IN THE SAME dry-run transaction it sees a non-null estimator → no_change, exactly what
+      // the sequential --commit run reports — NOT the CHANGE_ORDER_FIELD_LOCKED an isolated per-candidate
+      // rollback would have produced.
+      expect(baseRow.status).toMatch(/^assigned/);
+      expect(childRow.status).toBe("skipped:no_change");
+    } finally {
+      await pg.exec("ROLLBACK");
+    }
+  });
+
   it("deal_signed_commissions.created_by is an FK to users — a non-existent actor is rejected", async () => {
     // Prod-faithful (FK added in beforeAll): a minted commission's created_by MUST reference a real user, so a
     // synthetic zero-uuid FK-violates. This is exactly why main() resolves a REAL active user for the dry-run
@@ -403,6 +469,11 @@ describe("estimator-column service backfill — parseArgs + schema guard", () =>
   });
   it("rejects an unknown/misspelled flag before committing (would else widen --commit to ALL tenants)", () => {
     expect(() => parseArgs(["--commit", `--actor=${ACTOR}`, "--tennant=office_dallas"])).toThrow(/Unknown argument/);
+  });
+  it("rejects a DUPLICATE --tenant (argv.find would silently take the first, widening the blast radius)", () => {
+    expect(() =>
+      parseArgs(["--tenant=all", "--tenant=office_dallas", "--commit", `--actor=${ACTOR}`]),
+    ).toThrow(/more than once/);
   });
   it("accepts a valid --commit --actor=<uuid> --tenant=office_x", () => {
     const parsed = parseArgs(["--commit", `--actor=${ACTOR}`, "--tenant=office_dallas"]);
