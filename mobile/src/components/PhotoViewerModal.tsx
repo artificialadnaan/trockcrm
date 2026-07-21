@@ -1,5 +1,6 @@
-import React, { useCallback, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
+  ActivityIndicator,
   FlatList,
   Modal,
   type NativeScrollEvent,
@@ -20,6 +21,14 @@ import { theme } from "../theme/theme";
 import { ZoomablePhoto } from "./ZoomablePhoto";
 import { Button, TextInput } from "./ui";
 import { useUpdatePhotoMetadata } from "../query/hooks";
+import { savePhotoToDevice } from "../photos/save-to-device";
+
+type SaveToast = "saved" | "permission" | "error";
+const SAVE_TOAST_TEXT: Record<SaveToast, string> = {
+  saved: "Saved to Photos",
+  permission: "Allow photo access to save",
+  error: "Couldn't save photo",
+};
 
 const ADDRESS_SOURCE_LABEL: Record<string, string> = {
   exif: "From photo",
@@ -114,6 +123,24 @@ export function PhotoViewerModal({
     [photos.length],
   );
 
+  // Download the CURRENT photo to the device's photo library. Explicit user action (the toolbar Save button),
+  // so it's not gated on the auto-backup setting. A transient toast reports the outcome.
+  const [saving, setSaving] = useState(false);
+  const [toast, setToast] = useState<SaveToast | null>(null);
+  const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (toastTimer.current) clearTimeout(toastTimer.current); }, []);
+
+  const saveToDevice = useCallback(async () => {
+    if (saving || !current) return;
+    const url = current.fullImageUrl ?? current.imageUrl;
+    setSaving(true);
+    const result = url ? await savePhotoToDevice(url) : "failed";
+    setSaving(false);
+    setToast(result === "saved" ? "saved" : result === "permission_denied" ? "permission" : "error");
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(null), 2600);
+  }, [saving, current]);
+
   return (
     <Modal visible={visible} animationType="fade" onRequestClose={onClose} transparent={false}>
       {/* A fullScreen Modal renders in its own native window outside the app's SafeAreaProvider,
@@ -128,9 +155,27 @@ export function PhotoViewerModal({
             <Text style={styles.counter}>
               {photos.length ? `${safeIndex + 1} / ${photos.length}` : ""}
             </Text>
-            <Pressable onPress={onClose} hitSlop={12} accessibilityLabel="Close viewer">
-              <Text style={styles.close}>Close</Text>
-            </Pressable>
+            <View style={styles.topBarActions}>
+              {current ? (
+                <Pressable
+                  onPress={saveToDevice}
+                  hitSlop={12}
+                  disabled={saving}
+                  style={styles.saveButton}
+                  accessibilityRole="button"
+                  accessibilityLabel="Save photo to device"
+                >
+                  {saving ? (
+                    <ActivityIndicator size="small" color={theme.color.textInverse} />
+                  ) : (
+                    <Ionicons name="download-outline" size={22} color={theme.color.textInverse} />
+                  )}
+                </Pressable>
+              ) : null}
+              <Pressable onPress={onClose} hitSlop={12} accessibilityLabel="Close viewer">
+                <Text style={styles.close}>Close</Text>
+              </Pressable>
+            </View>
           </View>
 
           <View style={[styles.pager, { height: height * 0.58 }]}>
@@ -193,6 +238,16 @@ export function PhotoViewerModal({
               >
                 <Ionicons name="chevron-forward" size={28} color={theme.color.textInverse} />
               </Pressable>
+            ) : null}
+            {toast ? (
+              <View style={styles.toast} pointerEvents="none" accessibilityLiveRegion="polite">
+                <Ionicons
+                  name={toast === "saved" ? "checkmark-circle" : "alert-circle"}
+                  size={16}
+                  color={theme.color.textInverse}
+                />
+                <Text style={styles.toastText}>{SAVE_TOAST_TEXT[toast]}</Text>
+              </View>
             ) : null}
           </View>
 
@@ -279,7 +334,22 @@ const styles = StyleSheet.create({
     paddingVertical: theme.space.sm,
   },
   counter: { color: theme.color.textInverse, fontFamily: theme.font.medium, fontSize: 14 },
+  topBarActions: { flexDirection: "row", alignItems: "center", gap: theme.space.lg },
+  saveButton: { width: 28, alignItems: "center", justifyContent: "center" },
   close: { color: theme.color.textInverse, fontFamily: theme.font.semibold, fontSize: 16 },
+  toast: {
+    position: "absolute",
+    bottom: theme.space.lg,
+    alignSelf: "center",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.space.xs,
+    backgroundColor: "rgba(0,0,0,0.8)",
+    paddingHorizontal: theme.space.md,
+    paddingVertical: theme.space.sm,
+    borderRadius: theme.radius.md,
+  },
+  toastText: { color: theme.color.textInverse, fontFamily: theme.font.semibold, fontSize: 13 },
   noImage: { color: theme.color.textInverse, fontFamily: theme.font.body },
   pager: { position: "relative", justifyContent: "center" },
   chevron: {
