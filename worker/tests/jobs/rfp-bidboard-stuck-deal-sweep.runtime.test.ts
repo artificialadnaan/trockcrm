@@ -23,6 +23,8 @@ const DEAL_NOERR = U("d09"); // dead job has NULL last_error -> flips with the g
 const DEAL_RETRIGGERED = U("d10"); // F4: re-triggered round (attempt_at NULL, requested_at FRESH) + OLD-round dead job -> skip
 const DEAL_OVERRIDE_RETRY = U("d11"); // F5: override retry (reviewed_at FRESH, attempt_at NULL) + prior-attempt dead job -> skip
 const DEAL_FOREIGN = U("d12"); // F7: only dead job belongs to ANOTHER office -> skip (office-scoped lookup)
+const DEAL_STALE_ERR = U("d13"); // current-attempt dead job has NULL last_error, a PRIOR-attempt dead job has a
+                                 // non-null error -> flips with the GENERIC fallback (not the stale prior error)
 const OFFICE2 = U("0f2"); // a DIFFERENT office id (not provisioned as a schema) — for the cross-office job test
 
 /**
@@ -86,7 +88,12 @@ async function seed(): Promise<PGlite> {
       -- The prior attempt's dead job must NOT flip the fresh 'approving' state to failed.
       ('${DEAL_OVERRIDE_RETRY}', false, 'declined', NULL, NULL, 'approving', NULL, NULL, NOW() - INTERVAL '5 minutes', NULL),
       -- FOREIGN (F7): stuck baseline, but its only dead create job belongs to ANOTHER office -> office-scoped skip.
-      ('${DEAL_FOREIGN}', false, 'pending', NULL, NOW() - INTERVAL '2 hours', NULL, NULL, NULL, NULL, NULL);
+      ('${DEAL_FOREIGN}', false, 'pending', NULL, NOW() - INTERVAL '2 hours', NULL, NULL, NULL, NULL, NULL),
+      -- STALE_ERR: genuinely stuck on the CURRENT attempt (attempt_at 30 min ago, past the grace window). Its
+      -- current-attempt dead job carries NO last_error, but a PRIOR-attempt dead job (predating attempt_at) has a
+      -- non-null error. The error subquery must apply the SAME per-attempt freshness guards as the eligibility
+      -- EXISTS, so it ignores the stale prior error and falls back to the generic message.
+      ('${DEAL_STALE_ERR}', false, 'pending', NULL, NOW() - INTERVAL '2 hours', NULL, NULL, NULL, NULL, NOW() - INTERVAL '30 minutes');
 
     -- Dead / live create jobs. The stuck-deal sweep keys on payload->>'dealId'.
     INSERT INTO public.job_queue (job_type, payload, office_id, status, last_error, created_at) VALUES
@@ -114,7 +121,11 @@ async function seed(): Promise<PGlite> {
       -- OVERRIDE_RETRY: a prior-attempt dead job (1h ago, BEFORE the fresh 5-min-old reviewed_at).
       ('rfp_bidboard_create', '{"dealId":"${DEAL_OVERRIDE_RETRY}"}'::jsonb, '${OFFICE}', 'dead', 'old override attempt', NOW() - INTERVAL '1 hour'),
       -- FOREIGN: a dead job that belongs to ANOTHER office (office_id=OFFICE2) — the office-scoped EXISTS ignores it.
-      ('rfp_bidboard_create', '{"dealId":"${DEAL_FOREIGN}"}'::jsonb, '${OFFICE2}', 'dead', 'foreign office boom', NOW() - INTERVAL '1 hour');
+      ('rfp_bidboard_create', '{"dealId":"${DEAL_FOREIGN}"}'::jsonb, '${OFFICE2}', 'dead', 'foreign office boom', NOW() - INTERVAL '1 hour'),
+      -- STALE_ERR: the CURRENT-attempt dead job (created AFTER the 30-min-old attempt_at) has NO last_error...
+      ('rfp_bidboard_create', '{"dealId":"${DEAL_STALE_ERR}"}'::jsonb, '${OFFICE}', 'dead', NULL, NOW() - INTERVAL '20 minutes'),
+      -- ...and a PRIOR-attempt dead job (created BEFORE attempt_at) carries a stale non-null error the sweep must ignore.
+      ('rfp_bidboard_create', '{"dealId":"${DEAL_STALE_ERR}"}'::jsonb, '${OFFICE}', 'dead', 'STALE prior-attempt error', NOW() - INTERVAL '1 hour');
   `);
   return db;
 }
@@ -142,8 +153,9 @@ describe("runRfpBidBoardCreateStuckDealSweep (real SQL)", () => {
 
   it("1. flips a genuinely-stuck deal to send_failed (override 'failed' + last_attempt_error from the dead job)", async () => {
     const { db, flipped } = await run();
-    // The genuinely-stuck deals are: DEAL_STUCK, DEAL_OVERRIDE (declined+approving), DEAL_NOERR (no last_error).
-    expect(flipped).toBe(3);
+    // The genuinely-stuck deals are: DEAL_STUCK, DEAL_OVERRIDE (declined+approving), DEAL_NOERR (no last_error),
+    // DEAL_STALE_ERR (current-attempt dead job has no error, prior-attempt error ignored).
+    expect(flipped).toBe(4);
     const s = await status(db, DEAL_STUCK);
     expect(s.rfp_approval_status).toBe("send_failed");
     expect(s.rfp_override_state).toBe("failed");
@@ -192,7 +204,7 @@ describe("runRfpBidBoardCreateStuckDealSweep (real SQL)", () => {
     const db = pg;
     const client = { query: (sql: string, params?: unknown[]) => db.query(sql, params as never[]) as any };
     const first = await runRfpBidBoardCreateStuckDealSweep({ db: client as any });
-    expect(first).toBe(3);
+    expect(first).toBe(4);
     const second = await runRfpBidBoardCreateStuckDealSweep({ db: client as any });
     expect(second).toBe(0); // already override_state='failed' -> the idempotency guard excludes them all
     // And the deal state is unchanged / still surfaced.
@@ -253,5 +265,20 @@ describe("runRfpBidBoardCreateStuckDealSweep (real SQL)", () => {
     const s = await status(db, DEAL_FOREIGN);
     expect(s.rfp_approval_status).toBe("pending");
     expect(s.rfp_override_state).toBeNull();
+  });
+
+  it("14. surfaces the GENERIC fallback (not a stale PRIOR-attempt error) when the current-attempt dead job has no last_error", async () => {
+    // finding: the eligibility EXISTS matches the CURRENT attempt's dead job (created after attempt_at), which has
+    // last_error=NULL. Without the same freshness guards on the error subquery, `AND last_error IS NOT NULL` would
+    // skip it and pick the older prior-attempt job's STALE error — marking the deal with an obsolete reason. The
+    // guards make the subquery read only the current attempt, so it correctly falls back to the generic message.
+    const { db } = await run();
+    const s = await status(db, DEAL_STALE_ERR);
+    expect(s.rfp_approval_status).toBe("send_failed");
+    expect(s.rfp_override_state).toBe("failed");
+    expect(s.rfp_override_error).toBe("Bid Board create failed (recovered by stuck-deal sweep)");
+    expect(s.rfp_last_attempt_error).toBe("Bid Board create failed (recovered by stuck-deal sweep)");
+    // Explicitly NOT the stale prior-attempt error.
+    expect(s.rfp_override_error).not.toBe("STALE prior-attempt error");
   });
 });

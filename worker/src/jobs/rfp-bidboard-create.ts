@@ -404,7 +404,10 @@ export async function runRfpBidBoardCreateStuckDealSweep(
               )`;
 
     // Surfaced error = the most recent dead create job's last_error for THIS deal (in THIS office), truncated,
-    // falling back to a generic recovered-by-sweep message ($2).
+    // falling back to a generic recovered-by-sweep message ($2). Scope to the CURRENT attempt with the SAME
+    // freshness guards the eligibility EXISTS uses (finding): without them a current-attempt dead job with
+    // last_error=NULL would be skipped here (AND last_error IS NOT NULL) and a PRIOR round/attempt's non-null
+    // error picked instead — marking the deal with an obsolete reason rather than the documented $2 fallback.
     const deadJobError = `COALESCE(
                   (SELECT LEFT(j.last_error, 2000)
                      FROM public.job_queue j
@@ -413,6 +416,9 @@ export async function runRfpBidBoardCreateStuckDealSweep(
                       AND j.payload->>'dealId' = d.id::text
                       AND j.status = 'dead'
                       AND j.last_error IS NOT NULL
+                      AND (d.rfp_bidboard_attempt_at IS NULL OR j.created_at >= d.rfp_bidboard_attempt_at)
+                      AND (d.rfp_override_reviewed_at IS NULL OR j.created_at >= d.rfp_override_reviewed_at)
+                      AND (d.rfp_approval_requested_at IS NULL OR j.created_at >= d.rfp_approval_requested_at)
                     ORDER BY j.created_at DESC
                     LIMIT 1),
                   $2
