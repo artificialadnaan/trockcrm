@@ -280,47 +280,66 @@ export async function enqueueUploads(
     let result: QueuedUpload | null = null;
     let error: unknown;
     try {
-      // Compress to the CRM JPEG NOW (best-effort → fallback to the original) so the durable queue stores the
-      // compressed bytes and the drain is a pure PUT — moving the per-photo compression off the upload path.
-      const { sourceUri, sizeBytes, compressed } = await runCompression(() =>
-        compressForEnqueue(input.uri, input.width, input.height),
-      );
-      // sourceUri !== input.uri means compression produced a fresh JPEG temp (success, incl. the size=0 path);
-      // === means the fallback kept the ORIGINAL. Extension + temp-cleanup both key on THIS (not `compressed`,
-      // which is false on the size=0 path even though sourceUri is a JPEG) so a .heic-named JPEG can't slip
-      // through and the size=0 temp doesn't leak.
-      const producedJpeg = sourceUri !== input.uri;
-      const ext = producedJpeg ? ".jpg" : input.uri.includes(".") ? input.uri.slice(input.uri.lastIndexOf(".")) : ".jpg";
-      const dest = `${dir}${id}${ext}`;
-      try {
-        await FileSystem.copyAsync({ from: sourceUri, to: dest });
-      } catch (err) {
-        // Copy failed — reclaim the compressed temp (disk-full is exactly when copy throws) + clear any cancel
-        // tombstone, then rethrow (a copy failure still aborts the batch). Never delete the ORIGINAL.
-        if (producedJpeg) await FileSystem.deleteAsync(sourceUri, { idempotent: true }).catch(() => undefined);
-        await withQueueLock(async () => {
-          cancelledMidEnqueue.delete(id);
-        });
-        throw err;
-      }
-      // Reclaim the transient compressed temp now it's durably copied. GUARD producedJpeg: on the fallback path
-      // sourceUri IS the original (still read by the camera-roll backup + review preview) — never delete it.
-      if (producedJpeg) {
-        await FileSystem.deleteAsync(sourceUri, { idempotent: true }).catch(() => undefined);
-      }
-      const item: QueuedUpload = { ...input, uri: dest, sizeBytes, compressed, enqueuedAt: Date.now(), attempts: 0 };
-      // Persist under the lock — but if a cancel arrived WHILE copying, drop the item (delete the copy) instead
-      // of appending removed evidence. A crash right after the copy still recovers via the index.
-      const cancelled = await withQueueLock(async () => {
+      // Persist the ORIGINAL into the durable queue BEFORE the slow compression, then compress + REPLACE the
+      // bytes in place. streamPhoto (per-photo capture) doesn't await onCapture and has no separate durable copy
+      // — it relies on this function — so compressing FIRST (multi-second ImageManipulator) meant an app kill
+      // mid-compress left nothing recoverable. Now the file + index row exist before compression: a kill just
+      // leaves an uncompressed row the drain compresses at upload. dest is always `.jpg`; the `compressed` flag
+      // (NOT the extension) is what tells the drain whether it still needs to compress.
+      const dest = `${dir}${id}.jpg`;
+      await FileSystem.copyAsync({ from: input.uri, to: dest });
+      const original: QueuedUpload = { ...input, uri: dest, sizeBytes: 0, compressed: false, enqueuedAt: Date.now(), attempts: 0 };
+      // Persist under the lock — if a cancel arrived WHILE copying, drop the item (delete the copy) instead of
+      // appending removed evidence.
+      const cancelledAtPersist = await withQueueLock(async () => {
         if (cancelledMidEnqueue.delete(id)) return true;
-        await writeQueue(ownerKey, dedupeQueue(await readQueue(ownerKey), [item]));
+        await writeQueue(ownerKey, dedupeQueue(await readQueue(ownerKey), [original]));
         return false;
       });
-      if (cancelled) {
+      if (cancelledAtPersist) {
         await FileSystem.deleteAsync(dest, { idempotent: true }).catch(() => undefined);
         result = null;
       } else {
-        result = item;
+        // Compress the now-durable original + replace the bytes in place. On ANY compress/overwrite failure the
+        // original stays (compressed: false) and the drain compresses it at upload — the photo is never lost.
+        const { sourceUri, sizeBytes } = await runCompression(() =>
+          compressForEnqueue(dest, input.width, input.height),
+        );
+        const producedJpeg = sourceUri !== dest; // a fresh compressed temp, vs the fallback returning `dest`
+        let replaced = false;
+        if (producedJpeg) {
+          try {
+            await FileSystem.copyAsync({ from: sourceUri, to: dest });
+            replaced = true;
+          } catch {
+            // Overwrite failed (e.g. disk pressure) — the durable ORIGINAL row (compressed:false) stays.
+          } finally {
+            await FileSystem.deleteAsync(sourceUri, { idempotent: true }).catch(() => undefined);
+          }
+        }
+        if (replaced) {
+          // Flip the queued row to compressed — but ONLY if it's still queued (a concurrent cancel may have
+          // removed it since the persist above); never re-add a removed item or leave its file orphaned.
+          const stillQueued = await withQueueLock(async () => {
+            if (cancelledMidEnqueue.has(id)) return false;
+            const q = await readQueue(ownerKey);
+            const i = q.findIndex((it) => it.clientUploadId === id);
+            if (i < 0) return false;
+            q[i] = { ...q[i], compressed: true, sizeBytes };
+            await writeQueue(ownerKey, q);
+            return true;
+          });
+          if (!stillQueued) {
+            await FileSystem.deleteAsync(dest, { idempotent: true }).catch(() => undefined);
+            result = null;
+          } else {
+            result = { ...original, compressed: true, sizeBytes };
+          }
+        } else {
+          // Compression fell back (or the overwrite failed) — the durable original is compressed:false; the
+          // drain compresses it. Already recoverable.
+          result = original;
+        }
       }
     } catch (e) {
       error = e;
@@ -329,6 +348,7 @@ export async function enqueueUploads(
     // in-flight until HERE (after the durable persist), so a duplicate awaits real durability.
     await withQueueLock(async () => {
       if (enqueueing.get(id) === own) enqueueing.delete(id);
+      cancelledMidEnqueue.delete(id); // clear any lingering tombstone on every exit path
     });
     if (error !== undefined) {
       failOwn(error);
