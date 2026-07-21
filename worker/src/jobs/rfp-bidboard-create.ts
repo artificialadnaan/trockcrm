@@ -296,3 +296,159 @@ export async function runRfpBidBoardCreateDeadLetterSweep(
     }
   }
 }
+
+/** Fallback surfaced error when the dead job carries no last_error (or none is found for the deal). */
+const STUCK_SWEEP_FALLBACK_ERROR = "Bid Board create failed (recovered by stuck-deal sweep)";
+
+/**
+ * DEAL-KEYED watchdog backstop for rfp_bidboard_create. The per-JOB sweep above
+ * (runRfpBidBoardCreateDeadLetterSweep) marks every dead job it examines dealHandled='true' UNCONDITIONALLY —
+ * even when its deal UPDATE matched 0 rows (a guard transiently false at sweep time, a re-trigger race, etc.).
+ * Once a job is dealHandled='true' it is excluded from every future per-job sweep, so a deal whose flip was
+ * MISSED is orphaned forever: stuck rfp_approval_status='pending', is_bid_board_owned=false, no Retry, showing
+ * "creating Bid Board…" permanently (a real DFW-2-19826-ae deal is in exactly this state).
+ *
+ * This sweep re-examines the STUCK DEALS directly — keyed on the deal, NOT on any job's dealHandled flag — and
+ * flips genuinely-dead ones to the SAME visible, recoverable failed marker the per-job sweep + the failed
+ * callback set: rfp_approval_status='send_failed' (the Pending-RFP attention status pendingRfpSubStateForStatus
+ * surfaces + offers Retry for) PLUS rfp_override_state='failed' + rfp_override_error for the audit. Its WHERE
+ * guards MIRROR the per-job sweep so it can never clobber a healthy / fresh / approved / re-confirmed-denial
+ * deal, AND it additionally proves — for THIS attempt — that a dead create job exists and nothing live is
+ * retrying, plus a grace window so it never races the per-job sweep or a just-enqueued retry.
+ *
+ * One bulk UPDATE per office schema (bounded by `limit`), summed across schemas. Offices are enumerated the SAME
+ * way runRfpPendingSlaScan does (public.offices WHERE is_active -> office_<slug>). It writes NO job_queue state —
+ * the per-job sweep still owns dealHandled; this one only fixes the deal. Idempotent: once a deal is
+ * override_state='failed' the guard excludes it, so a re-run flips nothing.
+ */
+export async function runRfpBidBoardCreateStuckDealSweep(
+  deps: {
+    db?: PoolLike;
+    limit?: number;
+  } = {}
+): Promise<number> {
+  const db = deps.db ?? (pool as PoolLike);
+  const limit = deps.limit ?? 25;
+
+  // Enumerate every active office schema exactly as runRfpPendingSlaScan does: public.offices WHERE is_active,
+  // validating the slug before interpolating it into a schema identifier. (Mirrors rfp-pending-sla.ts.)
+  const offices = await db.query(`SELECT slug FROM public.offices WHERE is_active = true`);
+  let flipped = 0;
+
+  for (const office of offices.rows) {
+    const slug = office.slug;
+    // Same slug guard resolveOfficeSchema/rfp-pending-sla apply — reject anything that isn't a safe identifier
+    // rather than interpolate it into a schema name.
+    if (typeof slug !== "string" || !/^[a-z][a-z0-9_]*$/.test(slug)) {
+      console.error(`[Worker:rfp_bidboard_create] Stuck-deal sweep: invalid office slug "${slug}" — skipping`);
+      continue;
+    }
+    const schema = quoteIdent(`office_${slug}`);
+
+    try {
+      // ONE bulk UPDATE per schema. The CTE picks the stuck-deal candidates (LIMIT $1) so the work is bounded,
+      // then the outer UPDATE re-applies the SAME predicate as the CTE via `d.id IN (...)`. Each guard MIRRORS
+      // the per-job dead-letter sweep's WHERE so this can never flip a deal the per-job sweep would refuse.
+      const result = await db.query(
+        `WITH stuck AS (
+           SELECT d.id
+             FROM ${schema}.deals d
+            WHERE
+              -- request-less (voting-path) only: every rfp_bidboard_create is a voting 2/3-yes or an
+              -- override-approve, both of which keep rfp_approval_request_id NULL (mirrors the per-job sweep +
+              -- the failed callback). Never touch the requested/estimator delivery path.
+              d.rfp_approval_request_id IS NULL
+              -- never touch an already-created deal — the bid-board-created callback already linked it.
+              AND d.is_bid_board_owned = false
+              -- never resurrect a failure onto a terminally re-confirmed denial.
+              AND d.rfp_override_decision IS DISTINCT FROM 'denial_reconfirmed'
+              -- only a create-in-flight sub-case (mirrors the per-job sweep): a 2/3-YES voting create (pending)
+              -- or an override-approve (declined + 'approving'). Never overwrite a linked/approved deal.
+              AND (
+                d.rfp_approval_status = 'pending'
+                OR (d.rfp_approval_status = 'declined' AND d.rfp_override_state = 'approving')
+              )
+              -- idempotency: once override_state='failed' the failure is already surfaced, so a re-run skips it.
+              AND d.rfp_override_state IS DISTINCT FROM 'failed'
+              -- the create is genuinely DEAD for the CURRENT attempt: a dead create job exists whose created_at
+              -- is no older than rfp_bidboard_attempt_at (the >= freshness mirrors the per-job sweep's finding-F5
+              -- so an OLD round's dead job can't flip a fresh round). attempt_at NULL = a first-attempt create
+              -- that predates the stamp (still eligible, it has a dead job).
+              AND EXISTS (
+                SELECT 1 FROM public.job_queue j
+                 WHERE j.job_type = 'rfp_bidboard_create'
+                   AND j.payload->>'dealId' = d.id::text
+                   AND j.status = 'dead'
+                   AND (d.rfp_bidboard_attempt_at IS NULL OR j.created_at >= d.rfp_bidboard_attempt_at)
+              )
+              -- ...and NOTHING live is still retrying it: no pending/processing create job for the deal. If a
+              -- retry is in flight we must not pre-empt it with a failure.
+              AND NOT EXISTS (
+                SELECT 1 FROM public.job_queue j
+                 WHERE j.job_type = 'rfp_bidboard_create'
+                   AND j.payload->>'dealId' = d.id::text
+                   AND j.status IN ('pending', 'processing')
+              )
+              -- GRACE WINDOW: only flip if the stuck state is at least a few minutes old, so this never races the
+              -- per-job sweep or a just-enqueued retry. attempt_at NULL = a first-attempt create that predates
+              -- the stamp (still eligible — it already has a dead job by the EXISTS guard above).
+              AND (
+                d.rfp_bidboard_attempt_at IS NULL
+                OR d.rfp_bidboard_attempt_at < NOW() - interval '10 minutes'
+              )
+            LIMIT $1
+         )
+         UPDATE ${schema}.deals d
+            SET rfp_override_state = 'failed',
+                -- surfaced error = the most recent dead rfp_bidboard_create job's last_error for THIS deal
+                -- (truncated to 2000 chars), falling back to a generic recovered-by-sweep message.
+                rfp_override_error = COALESCE(
+                  (SELECT LEFT(j.last_error, 2000)
+                     FROM public.job_queue j
+                    WHERE j.job_type = 'rfp_bidboard_create'
+                      AND j.payload->>'dealId' = d.id::text
+                      AND j.status = 'dead'
+                      AND j.last_error IS NOT NULL
+                    ORDER BY j.created_at DESC
+                    LIMIT 1),
+                  $2
+                ),
+                -- 2/3-YES sub-case (was 'pending') -> send_failed, the Pending-RFP attention status the surface
+                -- renders + offers Retry for. Override sub-case (was 'declined' + 'approving') MUST STAY
+                -- 'declined' (mirrors the per-job sweep's finding G4) so /rfp-review buttons keep working;
+                -- /rfp-retry still recovers it via rfp_override_state='failed'.
+                rfp_approval_status = CASE WHEN d.rfp_approval_status = 'pending' THEN 'send_failed' ELSE d.rfp_approval_status END,
+                -- populate the VISIBLE send_failed reason (Pending-RFP + deal detail read rfp_last_attempt_error)
+                -- on the send_failed sub-case only, mirroring the per-job sweep's finding W8.
+                rfp_last_attempt_error = CASE
+                  WHEN d.rfp_approval_status = 'pending' THEN COALESCE(
+                    (SELECT LEFT(j.last_error, 2000)
+                       FROM public.job_queue j
+                      WHERE j.job_type = 'rfp_bidboard_create'
+                        AND j.payload->>'dealId' = d.id::text
+                        AND j.status = 'dead'
+                        AND j.last_error IS NOT NULL
+                      ORDER BY j.created_at DESC
+                      LIMIT 1),
+                    $2
+                  )
+                  ELSE d.rfp_last_attempt_error
+                END,
+                updated_at = NOW()
+          WHERE d.id IN (SELECT id FROM stuck)`,
+        [limit, STUCK_SWEEP_FALLBACK_ERROR]
+      );
+      // Count the rows the UPDATE actually flipped. node-postgres exposes `rowCount`; PGlite (the test harness)
+      // exposes `affectedRows` — honor whichever the driver returns.
+      const r = result as { rowCount?: number | null; affectedRows?: number | null };
+      flipped += r.rowCount ?? r.affectedRows ?? 0;
+    } catch (err) {
+      // One office's failure must not abort the whole sweep — log + continue (mirrors rfp-pending-sla's
+      // per-office try/catch). The next tick retries this schema.
+      console.error(`[Worker:rfp_bidboard_create] Stuck-deal sweep failed for ${schema} — skipping`, err);
+    }
+  }
+
+  // The caller (worker/src/index.ts) logs the flipped count, mirroring the sibling sweeps — no internal log.
+  return flipped;
+}

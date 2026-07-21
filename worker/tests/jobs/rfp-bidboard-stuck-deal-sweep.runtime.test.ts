@@ -1,0 +1,212 @@
+import { afterEach, describe, expect, it } from "vitest";
+import { PGlite } from "@electric-sql/pglite";
+import { runRfpBidBoardCreateStuckDealSweep } from "../../src/jobs/rfp-bidboard-create.js";
+
+// ---- Deal-keyed watchdog sweep (real SQL / PGlite) ----
+// This sweep re-examines STUCK deals DIRECTLY (independent of any job's dealHandled flag) and flips a
+// genuinely-dead create to send_failed. It exists because the per-JOB dead-letter sweep marks a dead job
+// dealHandled='true' UNCONDITIONALLY (even when its deal UPDATE matched 0 rows), so a deal whose flip was
+// missed is otherwise orphaned forever (a real DFW-2-19826-ae deal is in exactly this state).
+const U = (s: string) => `00000000-0000-0000-0000-${s.padStart(12, "0")}`;
+const OFFICE = U("0f1");
+
+// Deal ids for the eight scenarios below.
+const DEAL_STUCK = U("d01"); // genuinely stuck: pending + request-less + unowned + dead job + no live + old
+const DEAL_OWNED = U("d02"); // already a Bid Board project (is_bid_board_owned=true) -> never touch
+const DEAL_LIVE = U("d03"); // has a LIVE (pending/processing) create job -> still retrying, don't flip
+const DEAL_NODEAD = U("d04"); // NO dead create job (never enqueued / all still pending) -> nothing dead to surface
+const DEAL_GRACE = U("d05"); // attempt_at very recent (inside the 10-min grace window) -> too fresh, skip
+const DEAL_REQUESTED = U("d06"); // rfp_approval_request_id set (requested/estimator path, not voting) -> skip
+const DEAL_FRESH_ROUND = U("d07"); // dead job is from an OLD round; attempt_at is NEWER than it -> stale, skip
+const DEAL_OVERRIDE = U("d08"); // override-approve sub-case (declined + approving) -> flips, KEEPS declined
+const DEAL_NOERR = U("d09"); // dead job has NULL last_error -> flips with the generic fallback error
+
+/**
+ * Seed a fresh PGlite with public.offices + public.job_queue + one office_test.deals + the eight deals above.
+ * Mirrors the rfp-vote-invitation dead-letter runtime harness (same job_queue shape) but adds the deals columns
+ * the stuck-deal sweep reads/writes.
+ */
+async function seed(): Promise<PGlite> {
+  const db = new PGlite();
+  await db.exec(`
+    CREATE TABLE public.offices (id uuid PRIMARY KEY, slug text NOT NULL, is_active boolean NOT NULL DEFAULT true);
+    CREATE TABLE public.job_queue (
+      id bigserial PRIMARY KEY, job_type text NOT NULL, payload jsonb NOT NULL, office_id uuid,
+      status text NOT NULL, last_error text, created_at timestamptz NOT NULL DEFAULT now()
+    );
+    CREATE SCHEMA office_test;
+    CREATE TABLE office_test.deals (
+      id uuid PRIMARY KEY,
+      is_bid_board_owned boolean NOT NULL DEFAULT false,
+      rfp_approval_status text,
+      rfp_approval_request_id integer,
+      rfp_approval_requested_at timestamptz,
+      rfp_override_state text,
+      rfp_override_error text,
+      rfp_override_decision text,
+      rfp_override_reviewed_at timestamptz,
+      rfp_bidboard_attempt_at timestamptz,
+      rfp_last_attempt_error text,
+      updated_at timestamptz
+    );
+    INSERT INTO public.offices (id, slug, is_active) VALUES ('${OFFICE}', 'test', true);
+
+    -- All seven deals share the request-less, unowned, override_state!=failed baseline unless noted otherwise.
+    INSERT INTO office_test.deals
+      (id, is_bid_board_owned, rfp_approval_status, rfp_approval_request_id, rfp_approval_requested_at,
+       rfp_override_state, rfp_override_error, rfp_override_decision, rfp_override_reviewed_at, rfp_bidboard_attempt_at)
+    VALUES
+      -- STUCK: attempt_at NULL (first attempt, predates the stamp) -> eligible via the dead-job EXISTS guard.
+      ('${DEAL_STUCK}', false, 'pending', NULL, NOW() - INTERVAL '2 hours', NULL, NULL, NULL, NULL, NULL),
+      -- OWNED: already a Bid Board project -> never touch.
+      ('${DEAL_OWNED}', true, 'pending', NULL, NOW() - INTERVAL '2 hours', NULL, NULL, NULL, NULL, NULL),
+      -- LIVE: still has a pending/processing create job retrying -> don't flip.
+      ('${DEAL_LIVE}', false, 'pending', NULL, NOW() - INTERVAL '2 hours', NULL, NULL, NULL, NULL, NULL),
+      -- NODEAD: no dead create job exists -> nothing dead to surface.
+      ('${DEAL_NODEAD}', false, 'pending', NULL, NOW() - INTERVAL '2 hours', NULL, NULL, NULL, NULL, NULL),
+      -- GRACE: attempt_at 1 min ago (inside the 10-min grace window) -> too fresh, skip.
+      ('${DEAL_GRACE}', false, 'pending', NULL, NOW() - INTERVAL '2 hours', NULL, NULL, NULL, NULL, NOW() - INTERVAL '1 minute'),
+      -- REQUESTED: request_id set -> requested/estimator path, not voting -> skip.
+      ('${DEAL_REQUESTED}', false, 'pending', 42, NOW() - INTERVAL '2 hours', NULL, NULL, NULL, NULL, NULL),
+      -- FRESH_ROUND: attempt_at is NEWER than the dead job (an OLD round's dead job) -> stale, skip.
+      ('${DEAL_FRESH_ROUND}', false, 'pending', NULL, NOW() - INTERVAL '2 hours', NULL, NULL, NULL, NULL, NOW() - INTERVAL '30 minutes'),
+      -- OVERRIDE: override-approve create-in-flight (declined + override_state 'approving') -> flips, but the
+      -- status MUST STAY 'declined' (only override_state -> 'failed'), so /rfp-review buttons keep working.
+      ('${DEAL_OVERRIDE}', false, 'declined', NULL, NOW() - INTERVAL '2 hours', 'approving', NULL, NULL, NULL, NULL),
+      -- NOERR: stuck like DEAL_STUCK, but its dead job carries NO last_error -> the generic fallback is used.
+      ('${DEAL_NOERR}', false, 'pending', NULL, NOW() - INTERVAL '2 hours', NULL, NULL, NULL, NULL, NULL);
+
+    -- Dead / live create jobs. The stuck-deal sweep keys on payload->>'dealId'.
+    INSERT INTO public.job_queue (job_type, payload, office_id, status, last_error, created_at) VALUES
+      -- STUCK: a dead create job (created 1h ago).
+      ('rfp_bidboard_create', '{"dealId":"${DEAL_STUCK}"}'::jsonb, '${OFFICE}', 'dead', 'rfp_bidboard_create failed with 502: edge timeout', NOW() - INTERVAL '1 hour'),
+      -- OWNED: a dead create job too (proving the ownership guard is what excludes it, not a missing dead job).
+      ('rfp_bidboard_create', '{"dealId":"${DEAL_OWNED}"}'::jsonb, '${OFFICE}', 'dead', 'boom', NOW() - INTERVAL '1 hour'),
+      -- LIVE: a dead job AND a live (pending) retry -> the live one blocks the flip.
+      ('rfp_bidboard_create', '{"dealId":"${DEAL_LIVE}"}'::jsonb, '${OFFICE}', 'dead', 'boom', NOW() - INTERVAL '1 hour'),
+      ('rfp_bidboard_create', '{"dealId":"${DEAL_LIVE}"}'::jsonb, '${OFFICE}', 'pending', NULL, NOW() - INTERVAL '5 minutes'),
+      -- NODEAD: only a live job, no dead one.
+      ('rfp_bidboard_create', '{"dealId":"${DEAL_NODEAD}"}'::jsonb, '${OFFICE}', 'processing', NULL, NOW() - INTERVAL '5 minutes'),
+      -- GRACE: a dead job (old), but the deal's attempt_at is inside the grace window.
+      ('rfp_bidboard_create', '{"dealId":"${DEAL_GRACE}"}'::jsonb, '${OFFICE}', 'dead', 'boom', NOW() - INTERVAL '1 hour'),
+      -- REQUESTED: a dead job (proving the request_id guard excludes it, not a missing dead job).
+      ('rfp_bidboard_create', '{"dealId":"${DEAL_REQUESTED}"}'::jsonb, '${OFFICE}', 'dead', 'boom', NOW() - INTERVAL '1 hour'),
+      -- FRESH_ROUND: a dead job from an OLD round (created 1h ago), BEFORE the deal's 30-min-old attempt_at stamp.
+      ('rfp_bidboard_create', '{"dealId":"${DEAL_FRESH_ROUND}"}'::jsonb, '${OFFICE}', 'dead', 'old round boom', NOW() - INTERVAL '1 hour'),
+      -- OVERRIDE: a dead create job for the override-approve deal.
+      ('rfp_bidboard_create', '{"dealId":"${DEAL_OVERRIDE}"}'::jsonb, '${OFFICE}', 'dead', 'override create 500', NOW() - INTERVAL '1 hour'),
+      -- NOERR: a dead create job with NO last_error.
+      ('rfp_bidboard_create', '{"dealId":"${DEAL_NOERR}"}'::jsonb, '${OFFICE}', 'dead', NULL, NOW() - INTERVAL '1 hour');
+  `);
+  return db;
+}
+
+describe("runRfpBidBoardCreateStuckDealSweep (real SQL)", () => {
+  let pg: PGlite | null = null;
+  afterEach(async () => { await pg?.close(); pg = null; });
+
+  async function run() {
+    pg = await seed();
+    const db = pg;
+    const client = { query: (sql: string, params?: unknown[]) => db.query(sql, params as never[]) as any };
+    const flipped = await runRfpBidBoardCreateStuckDealSweep({ db: client as any });
+    return { db, flipped };
+  }
+
+  async function status(db: PGlite, id: string) {
+    const rows = (await db.query(
+      `SELECT rfp_approval_status, rfp_override_state, rfp_override_error, rfp_last_attempt_error
+         FROM office_test.deals WHERE id = $1`,
+      [id],
+    )).rows as any[];
+    return rows[0];
+  }
+
+  it("1. flips a genuinely-stuck deal to send_failed (override 'failed' + last_attempt_error from the dead job)", async () => {
+    const { db, flipped } = await run();
+    // The genuinely-stuck deals are: DEAL_STUCK, DEAL_OVERRIDE (declined+approving), DEAL_NOERR (no last_error).
+    expect(flipped).toBe(3);
+    const s = await status(db, DEAL_STUCK);
+    expect(s.rfp_approval_status).toBe("send_failed");
+    expect(s.rfp_override_state).toBe("failed");
+    // The surfaced error comes from the dead job's last_error, truncated to 2000 chars.
+    expect(s.rfp_override_error).toBe("rfp_bidboard_create failed with 502: edge timeout");
+    expect(s.rfp_last_attempt_error).toBe("rfp_bidboard_create failed with 502: edge timeout");
+  });
+
+  it("2. does NOT flip an already-owned deal (is_bid_board_owned=true)", async () => {
+    const { db } = await run();
+    const s = await status(db, DEAL_OWNED);
+    expect(s.rfp_approval_status).toBe("pending");
+    expect(s.rfp_override_state).toBeNull();
+  });
+
+  it("3. does NOT flip a deal with a LIVE (pending/processing) create job", async () => {
+    const { db } = await run();
+    const s = await status(db, DEAL_LIVE);
+    expect(s.rfp_approval_status).toBe("pending");
+    expect(s.rfp_override_state).toBeNull();
+  });
+
+  it("4. does NOT flip a deal with NO dead create job", async () => {
+    const { db } = await run();
+    const s = await status(db, DEAL_NODEAD);
+    expect(s.rfp_approval_status).toBe("pending");
+    expect(s.rfp_override_state).toBeNull();
+  });
+
+  it("5. does NOT flip a deal inside the grace window (attempt_at very recent)", async () => {
+    const { db } = await run();
+    const s = await status(db, DEAL_GRACE);
+    expect(s.rfp_approval_status).toBe("pending");
+    expect(s.rfp_override_state).toBeNull();
+  });
+
+  it("6. does NOT flip a deal with a request_id set (requested/estimator path, not voting)", async () => {
+    const { db } = await run();
+    const s = await status(db, DEAL_REQUESTED);
+    expect(s.rfp_approval_status).toBe("pending");
+    expect(s.rfp_override_state).toBeNull();
+  });
+
+  it("7. is idempotent: a second run flips nothing (returns 0)", async () => {
+    pg = await seed();
+    const db = pg;
+    const client = { query: (sql: string, params?: unknown[]) => db.query(sql, params as never[]) as any };
+    const first = await runRfpBidBoardCreateStuckDealSweep({ db: client as any });
+    expect(first).toBe(3);
+    const second = await runRfpBidBoardCreateStuckDealSweep({ db: client as any });
+    expect(second).toBe(0); // already override_state='failed' -> the idempotency guard excludes them all
+    // And the deal state is unchanged / still surfaced.
+    const s = await status(db, DEAL_STUCK);
+    expect(s.rfp_approval_status).toBe("send_failed");
+    expect(s.rfp_override_state).toBe("failed");
+  });
+
+  it("8. does NOT flip based on an OLD-round dead job when attempt_at is newer than that job (freshness)", async () => {
+    const { db } = await run();
+    const s = await status(db, DEAL_FRESH_ROUND);
+    expect(s.rfp_approval_status).toBe("pending");
+    expect(s.rfp_override_state).toBeNull();
+  });
+
+  it("9. flips the override-approve sub-case (declined + approving) but KEEPS status 'declined'", async () => {
+    const { db } = await run();
+    const s = await status(db, DEAL_OVERRIDE);
+    // Only override_state -> 'failed'; the status stays 'declined' so /rfp-review buttons keep working, and
+    // rfp_last_attempt_error is NOT populated (that visible field is only for the send_failed sub-case).
+    expect(s.rfp_approval_status).toBe("declined");
+    expect(s.rfp_override_state).toBe("failed");
+    expect(s.rfp_override_error).toBe("override create 500");
+    expect(s.rfp_last_attempt_error).toBeNull();
+  });
+
+  it("10. flips with the generic fallback error when the dead job carries no last_error", async () => {
+    const { db } = await run();
+    const s = await status(db, DEAL_NOERR);
+    expect(s.rfp_approval_status).toBe("send_failed");
+    expect(s.rfp_override_state).toBe("failed");
+    expect(s.rfp_override_error).toBe("Bid Board create failed (recovered by stuck-deal sweep)");
+    expect(s.rfp_last_attempt_error).toBe("Bid Board create failed (recovered by stuck-deal sweep)");
+  });
+});

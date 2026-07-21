@@ -24,7 +24,10 @@ import { runRfpPendingSlaScan } from "./jobs/rfp-pending-sla.js";
 import { runCallRecordingCleanup } from "./jobs/call-recording-cleanup.js";
 import { runCallRecordingTranscription } from "./jobs/call-recording-transcribe.js";
 import { runRfpRequestDeadLetterSweep } from "./jobs/rfp-request-delivery.js";
-import { runRfpBidBoardCreateDeadLetterSweep } from "./jobs/rfp-bidboard-create.js";
+import {
+  runRfpBidBoardCreateDeadLetterSweep,
+  runRfpBidBoardCreateStuckDealSweep,
+} from "./jobs/rfp-bidboard-create.js";
 import { runRfpVoteInvitationDeadLetterSweep } from "./jobs/rfp-vote-invitation.js";
 import { runReportsExecutionTick } from "./jobs/reports-execution.js";
 import { runRepPerformanceRollup } from "./jobs/rep-performance-rollup.js";
@@ -74,6 +77,16 @@ async function main() {
       }
     } catch (err) {
       console.error("[Worker:rfp_bidboard_create] Dead-letter sweep failed:", err);
+    }
+    // Deal-keyed watchdog: recover deals the per-JOB sweep above marked dealHandled='true' but never actually
+    // flipped (its deal UPDATE matched 0 rows), which are otherwise orphaned in "creating Bid Board…" forever.
+    try {
+      const flippedStuck = await runRfpBidBoardCreateStuckDealSweep();
+      if (flippedStuck > 0) {
+        console.log(`[Worker:rfp_bidboard_create] Stuck-deal sweep flipped ${flippedStuck} orphaned deal(s) to send_failed`);
+      }
+    } catch (err) {
+      console.error("[Worker:rfp_bidboard_create] Stuck-deal sweep failed:", err);
     }
     try {
       const handledInvites = await runRfpVoteInvitationDeadLetterSweep();
