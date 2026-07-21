@@ -130,6 +130,9 @@ export interface EstimatorColumnBackfillSummary {
  *   • NULLIF(BTRIM(bid_board_estimator),'') IS NULL    — NOT a Bid-Board-sourced name (those are the sync's
  *                                                        to resolve at ingest; this backfill is only for the
  *                                                        manual first-name-only column)
+ *   • COALESCE(is_test_data, false) = false            — never link/mint on a test/demo deal (setDealEstimator
+ *                                                        has no test-data guard; prod reads, commission reports,
+ *                                                        and the sibling commission backfill all exclude them)
  *
  * NOTE: is_active / change-order / office-access / BB-ownership are NOT filtered here — setDealEstimator is
  * the authority on those and SKIPS (returns null or throws a classified AppError) any deal that must not
@@ -139,6 +142,7 @@ export const CANDIDATE_COLUMN_SQL = `
   estimator_user_id IS NULL
   AND NULLIF(BTRIM(estimator), '') IS NOT NULL
   AND NULLIF(BTRIM(bid_board_estimator), '') IS NULL
+  AND COALESCE(is_test_data, false) = false
 `;
 
 /**
@@ -233,6 +237,7 @@ export async function runOne(
         estimatorText: sql<string | null>`NULLIF(BTRIM(${schema.deals.estimator}), '')`,
         bidBoardEstimator: sql<string | null>`NULLIF(BTRIM(${schema.deals.bidBoardEstimator}), '')`,
         stageSlug: schema.pipelineStageConfig.slug,
+        isTestData: schema.deals.isTestData,
       })
       .from(schema.deals)
       .innerJoin(schema.pipelineStageConfig, eq(schema.pipelineStageConfig.id, schema.deals.stageId))
@@ -243,6 +248,7 @@ export async function runOne(
     if (locked.estimatorUserId != null) return "skipped:no_change"; // concurrently assigned between scan and lock
     if (locked.estimatorText !== candidate.estimatorText) return "skipped:no_change"; // free-text changed since scan
     if (locked.bidBoardEstimator != null) return "skipped:no_change"; // now Bid-Board sourced (the sync owns it)
+    if (locked.isTestData === true) return "skipped:no_change"; // flagged test/demo since the scan — never link/mint
     if (LOST_STAGE_SLUG_SET.has(locked.stageSlug)) return "skipped:lost_stage"; // moved to a lost stage since scan
     const updated = await setDealEstimator(tx, candidate.dealId, candidate.resolvedUserId, actorUserId, officeId);
     if (!updated) return "skipped:deal_not_found";
@@ -427,6 +433,18 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
       effectiveActor = rows[0]?.id ?? null;
       if (!effectiveActor) {
         throw new Error("No active user available for the throwaway dry-run actor; pass --actor=<uuid>.");
+      }
+    } else {
+      // Validate a SUPPLIED --actor up front. It is stamped as deal_signed_commissions.created_by (an FK to
+      // users) AND the audit_log.changed_by (NO FK). A syntactically-valid but nonexistent UUID would let
+      // unsigned candidates commit deal changes + a bogus audit actor, then FK-fail on the first SIGNED
+      // candidate's minted commission — a partially-completed run with an invalid audit trail. Fail before the
+      // tenant loop instead.
+      const { rows } = await client.query<{ ok: number }>("SELECT 1 AS ok FROM public.users WHERE id = $1", [
+        effectiveActor,
+      ]);
+      if (rows.length === 0) {
+        throw new Error(`--actor ${effectiveActor} is not a known user (public.users); pass a real operator/system user id.`);
       }
     }
     console.log(`${execute ? "WRITE" : "DRY-RUN (no writes)"} — tenants: ${tenants.join(", ")}`);

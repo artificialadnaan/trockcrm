@@ -190,6 +190,22 @@ describe("estimator-column service backfill — candidate selection + resolution
     expect(ids).not.toContain(D_LOST); // lost stage -> no additive estimator commission on a lost deal
   });
 
+  it("excludes is_test_data deals from candidacy (never link/mint on a test/demo deal)", async () => {
+    await pg.exec("BEGIN");
+    try {
+      await pg.exec(
+        `INSERT INTO public.deals
+           (id, deal_number, name, stage_id, assigned_rep_id, estimator, estimator_user_id, bid_board_estimator,
+            awarded_amount, contract_signed_date, is_change_order, is_bid_board_owned, sales_source_user_id, is_active, workflow_route, is_test_data)
+         VALUES ('${U("0d77")}','0d77','Test Deal','${WON}','${O1}','Tim',NULL,NULL,100000,'2026-01-15',false,false,NULL,true,'service',true)`
+      );
+      const ids = (await findEstimatorColumnRows(query)).map((r) => r.dealId);
+      expect(ids).not.toContain(U("0d77"));
+    } finally {
+      await pg.exec("ROLLBACK");
+    }
+  });
+
   it("candidate SQL is column-only (no user input, safe to interpolate)", () => {
     expect(CANDIDATE_COLUMN_SQL).toContain("estimator_user_id IS NULL");
     expect(CANDIDATE_COLUMN_SQL).toContain("NULLIF(BTRIM(estimator), '') IS NOT NULL");
