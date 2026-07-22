@@ -208,7 +208,17 @@ export function dateHeading(value: string) {
 }
 
 export function photoTime(photo: FieldPhoto) {
-  return new Date(photo.takenAt ?? photo.createdAt).getTime();
+  const t = Date.parse(photo.takenAt ?? photo.createdAt ?? "");
+  return Number.isNaN(t) ? 0 : t;
+}
+
+/** Parse a photo timestamp to a YYYY-MM-DD day, tolerating a missing/invalid value. NEVER throws — a bad
+ *  timestamp must fall into an "unknown" bucket, not crash the gallery/filters with `new Date(bad).toISOString()`
+ *  (a RangeError, which with no error boundary was an app-killing crash). */
+export function toDayString(value: string | null | undefined): string {
+  if (!value) return "";
+  const t = Date.parse(value);
+  return Number.isNaN(t) ? "" : new Date(t).toISOString().slice(0, 10);
 }
 
 export function groupPhotos(photos: FieldPhoto[], grouping: PhotoGrouping) {
@@ -222,8 +232,9 @@ export function groupPhotos(photos: FieldPhoto[], grouping: PhotoGrouping) {
     let sort: number | string = 0;
     if (grouping === "date") {
       const value = photo.takenAt ?? photo.createdAt;
-      key = new Date(value).toISOString().slice(0, 10);
-      label = dateHeading(value);
+      const day = toDayString(value);
+      key = day || "unknown";
+      label = day ? dateHeading(value) : "Unknown date";
       sort = photoTime(photo);
     } else if (grouping === "category") {
       key = photo.photoCategory ?? photo.subcategory ?? "uncategorized";
@@ -258,13 +269,15 @@ export function filterPhotos(
       if (!filters.categories.includes(category)) return false;
     }
     if (filters.tags.length > 0) {
-      const photoTags = (Array.isArray(photo.tags) ? photo.tags : []).map((tag) => tag.toLowerCase());
+      const photoTags = (Array.isArray(photo.tags) ? photo.tags : [])
+        .filter((tag): tag is string => typeof tag === "string")
+        .map((tag) => tag.toLowerCase());
       if (!photoTags.some((tag) => normalizedTags.includes(tag))) return false;
     }
     if (filters.uploaderIds.length > 0 && !filters.uploaderIds.includes(photo.uploadedBy)) return false;
-    const day = new Date(photo.takenAt ?? photo.createdAt).toISOString().slice(0, 10);
-    if (filters.from && day < filters.from) return false;
-    if (filters.to && day > filters.to) return false;
+    const day = toDayString(photo.takenAt ?? photo.createdAt);
+    if (filters.from && (!day || day < filters.from)) return false;
+    if (filters.to && (!day || day > filters.to)) return false;
     return true;
   });
 }
@@ -282,7 +295,11 @@ export function uploadersOf(photos: FieldPhoto[]): { id: string; name: string }[
 export function tagsOf(photos: FieldPhoto[]): string[] {
   const set = new Set<string>();
   for (const photo of photos) {
-    for (const tag of photo.tags ?? []) set.add(tag);
+    // Only real, non-empty string tags — a null/non-string element would otherwise crash the sort
+    // (`null.localeCompare`) or render as an invalid React child in the filter chips.
+    for (const tag of photo.tags ?? []) {
+      if (typeof tag === "string" && tag.length > 0) set.add(tag);
+    }
   }
   return Array.from(set).sort((a, b) => a.localeCompare(b));
 }
