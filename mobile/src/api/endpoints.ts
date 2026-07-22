@@ -33,6 +33,8 @@ import type {
   ScorecardDownloadResponse,
   DealTeamResponse,
   CorrectiveActionsResponse,
+  CorrectiveActionUploadUrlResponse,
+  CorrectiveActionConfirmUploadResponse,
 } from "./types";
 import type { ScorecardSubmissionPayload, ScorecardUpdatePayload } from "../scorecards/draft";
 
@@ -223,6 +225,33 @@ export const submitCorrectiveActionResponse = (
     // Omit photoFileIds entirely when absent so a comment-only response sends a minimal body (matches the
     // server's optional parse — [] and undefined are equivalent there, but omitting keeps the wire clean).
     body: body.photoFileIds ? { comment: body.comment, photoFileIds: body.photoFileIds } : { comment: body.comment },
+  });
+
+// Step 1 (presign) of the SCORECARD-SCOPED corrective-action response-photo upload. Unlike the generic
+// /field/photos/upload-url (which lands the file in the UPLOADER'S active office), this route resolves the
+// SCORECARD'S owning office, so the returned fileId exists in the same tenant the response POST reads — the
+// only correct path for an assigned responder working an off-office project. Mirrors the web responder's
+// requestCorrectiveActionUploadUrl contract. Returns { uploadUrl, objectKey, uploadToken, expiresIn }.
+export const requestCorrectiveActionUploadUrl = (
+  f: Fetcher,
+  scorecardId: string,
+  body: { contentType: string; sizeBytes: number },
+) =>
+  f<CorrectiveActionUploadUrlResponse>(`/field/scorecards/${scorecardId}/corrective-actions/upload/url`, {
+    method: "POST",
+    body: { contentType: body.contentType, sizeBytes: body.sizeBytes },
+  });
+
+// Step 2 (confirm) of the scorecard-scoped upload — creates the files row on the scorecard's deal (in the
+// scorecard's office) and returns the fresh { fileId } the response POST's photoFileIds expects.
+export const confirmCorrectiveActionUpload = (
+  f: Fetcher,
+  scorecardId: string,
+  body: { uploadToken: string; objectKey: string },
+) =>
+  f<CorrectiveActionConfirmUploadResponse>(`/field/scorecards/${scorecardId}/corrective-actions/upload`, {
+    method: "POST",
+    body: { uploadToken: body.uploadToken, objectKey: body.objectKey },
   });
 
 // The deal's assigned Superintendent + PM NAMES — used ONLY to best-effort pre-fill a new scorecard's

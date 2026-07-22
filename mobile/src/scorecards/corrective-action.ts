@@ -1,29 +1,37 @@
 // Corrective-action per-item response: hold a comment + captured evidence photos for ONE flagged item, then
-// submit. The submit mirrors scorecard submit.ts's durable-upload orchestration (enqueueUploads →
-// drainUploadQueue → getQueuedUploads → classifyDraftPhotoUploads for pending/failed classification), then
-// collects each confirmed photo's server fileId and POSTs { comment, photoFileIds } to Plan 2's endpoint.
+// submit. Each response photo is uploaded through the SCORECARD-SCOPED corrective-action upload endpoints
+// (presign → PUT to R2 → confirm), NOT the generic field-photo upload queue.
 //
-// WHY fileIds (not clientUploadIds like the scorecard POST): the corrective-action response endpoint links
-// evidence by real file id and strictly validates each belongs to the deal — it does NOT resolve
-// clientUploadIds. The durable queue drain already presigned + PUT + confirmed every photo, and now SURFACES
-// each confirmed server file id (keyed by clientUploadId) in its summary — so we read the ids straight from
-// the drain, with NO second upload. Only if a photo isn't in this drain's map (e.g. it was already confirmed
-// by an earlier offline drain and has since left the queue) do we fall back to an idempotent uploadCapture
-// (server dedupes on clientUploadId → the EXISTING file + its id, never a duplicate); those fallbacks run
-// CONCURRENTLY. Output ids stay in the original photo order.
+// WHY the scorecard-scoped endpoints (not the generic `{ target: { dealId } }` queue): the generic
+// /field/photos upload route resolves the UPLOADER'S ACTIVE office. For an assigned responder working an
+// OFF-office project while cross-office field WRITES are disabled (the default), that lands the file in the
+// responder's own tenant — but the response POST (POST /field/scorecards/:id/corrective-actions/:itemId)
+// resolves the SCORECARD'S office, so the fileId is absent there and the response is rejected as "not part of
+// the project" (and the file is orphaned in the wrong tenant). The scorecard-scoped
+// /field/scorecards/:id/corrective-actions/upload{/url} pair resolves the SCORECARD'S office on both steps,
+// so the returned fileId always exists in the tenant the response POST reads — cross-office or not. This is
+// the SAME contract the web responder uses (client/src/hooks/use-corrective-actions.ts).
+//
+// WHY fileIds (not clientUploadIds like the scorecard POST): the response endpoint links evidence by real
+// file id and strictly validates each belongs to the deal — it does NOT resolve clientUploadIds. Confirm
+// returns the fresh { fileId }; we collect those in the ORIGINAL photo order and POST { comment, photoFileIds }.
+//
+// TRADE-OFF vs the durable upload queue: these uploads are eager (per-submit), not offline-resilient — a
+// mid-upload network drop fails the submit (photos_failed / thrown) and the responder retries, exactly as the
+// web responder behaves. Routing through the scorecard's office (correctness) takes priority over the queue's
+// offline resilience for corrective-action responses; ordinary field-capture photos keep the durable queue.
 
-import { submitCorrectiveActionResponse, type Fetcher } from "../api/endpoints";
-import type { CorrectiveActionItem } from "../api/types";
-import type { CaptureUploadInput } from "../capture/upload";
-import { runConcurrentUploads, uploadCapture } from "../capture/upload";
+import * as FileSystem from "expo-file-system/legacy";
 import {
-  MAX_UPLOAD_ATTEMPTS,
-  UPLOAD_CONCURRENCY,
-  drainUploadQueue,
-  enqueueUploads,
-  getQueuedUploads,
-} from "../capture/upload-queue";
-import { classifyDraftPhotoUploads } from "./submit";
+  confirmCorrectiveActionUpload,
+  requestCorrectiveActionUploadUrl,
+  submitCorrectiveActionResponse,
+  type Fetcher,
+} from "../api/endpoints";
+import type { CorrectiveActionItem } from "../api/types";
+import { compressForUpload } from "../capture/compress";
+import { runConcurrentUploads } from "../capture/concurrency";
+import { UPLOAD_CONCURRENCY } from "../capture/upload-queue-core";
 
 /** A captured response-evidence photo, before it's uploaded. `key` == `clientUploadId` (stable + unique). */
 export type CorrectiveResponsePhoto = {
@@ -90,30 +98,38 @@ export function correctiveResponseReducer(
 }
 
 /**
- * Build the field-photo upload input for a corrective-action RESPONSE photo — targets the deal (so it lands
- * in the gallery + gets a real file id) and tags it as corrective-action evidence. Mirrors
- * scorecardPhotoUploadInput but with the corrective_action tag (NOT a section key).
+ * Upload ONE corrective-action RESPONSE photo through the SCORECARD-SCOPED endpoints and return its server
+ * fileId. presign (office = the scorecard's) → compress to the CRM JPEG → PUT to R2 → confirm (office = the
+ * scorecard's) → { fileId }. The file therefore lands in the SCORECARD'S tenant, so the returned id is
+ * accepted by the response POST even when the responder's active office differs (off-office project /
+ * cross-office writes disabled). Mirrors the web responder's uploadCorrectiveActionPhoto.
+ *
+ * NOTE: the response endpoint links evidence by fileId and does not carry per-photo tags/GPS/caption on the
+ * file itself (unlike the generic gallery upload) — the corrective-action response owns the caption/context.
  */
-export function correctiveResponsePhotoUploadInput(
+async function uploadCorrectiveResponsePhoto(
+  fetcher: Fetcher,
+  scorecardId: string,
   photo: CorrectiveResponsePhoto,
-  dealId: string,
-): CaptureUploadInput {
-  return {
-    uri: photo.uri,
-    width: photo.width,
-    height: photo.height,
-    target: { dealId },
-    category: null,
-    caption: photo.caption.trim() ? photo.caption.trim() : null,
-    tags: ["scorecard", "corrective_action"],
-    metadata: {
-      takenAt: photo.takenAt,
-      latitude: photo.latitude,
-      longitude: photo.longitude,
-      addressSource: photo.addressSource,
-    },
-    clientUploadId: photo.clientUploadId,
-  };
+): Promise<string> {
+  const compressed = await compressForUpload(photo.uri, photo.width, photo.height);
+  const presign = await requestCorrectiveActionUploadUrl(fetcher, scorecardId, {
+    contentType: compressed.contentType,
+    sizeBytes: compressed.sizeBytes,
+  });
+  const put = await FileSystem.uploadAsync(presign.uploadUrl, compressed.uri, {
+    httpMethod: "PUT",
+    uploadType: FileSystem.FileSystemUploadType.BINARY_CONTENT,
+    headers: { "Content-Type": compressed.contentType },
+  });
+  if (put.status < 200 || put.status >= 300) {
+    throw new Error(`Upload to storage failed (R2 returned ${put.status}).`);
+  }
+  const { fileId } = await confirmCorrectiveActionUpload(fetcher, scorecardId, {
+    uploadToken: presign.uploadToken,
+    objectKey: presign.objectKey,
+  });
+  return fileId;
 }
 
 export type SubmitCorrectiveActionItemInput = {
@@ -130,54 +146,34 @@ export type SubmitCorrectiveActionItemResult =
   | { status: "photos_failed"; failed: number };
 
 /**
- * Upload this item's response photos through the durable queue, then submit the response. If any of the
- * photos are still queued after the drain (offline / mid-retry) we return photos_pending (keeps retrying) or
- * photos_failed (retries exhausted), exactly like submitScorecard — the caller keeps the captured photos and
- * retries. Once all are confirmed, we resolve each photo's server fileId and POST { comment, photoFileIds }.
+ * Upload this item's response photos through the SCORECARD-SCOPED corrective-action upload endpoints (which
+ * resolve the SCORECARD'S owning office, NOT the responder's active office), then submit the response with the
+ * resulting fileIds. Uploads run CONCURRENTLY (bounded by UPLOAD_CONCURRENCY); their fileIds keep the original
+ * photo order. If ANY photo fails to upload we return photos_failed (the caller keeps the captured photos and
+ * retries) and DO NOT POST — so a partial upload never submits a response missing evidence.
+ *
+ * Unlike the durable-queue field-capture path, this is eager (per-submit) and not offline-resilient: routing
+ * through the scorecard's office is required for the fileIds to exist in the tenant the response POST reads.
+ * (There is no photos_pending here — nothing sits in a background queue; a stuck upload surfaces as failure.)
  */
 export async function submitCorrectiveActionItem(
   fetcher: Fetcher,
-  ownerKey: string,
   input: SubmitCorrectiveActionItemInput,
 ): Promise<SubmitCorrectiveActionItemResult> {
   const photoFileIds: string[] = [];
   if (input.photos.length > 0) {
-    const uploadInputs = input.photos.map((p) => correctiveResponsePhotoUploadInput(p, input.dealId));
-    await enqueueUploads(ownerKey, uploadInputs);
-    const drain = await drainUploadQueue(ownerKey, fetcher);
-    const stillQueued = await getQueuedUploads(ownerKey);
-    const { pending, failed } = classifyDraftPhotoUploads(
-      input.photos.map((p) => p.clientUploadId),
-      stillQueued.map((q) => ({ clientUploadId: q.clientUploadId, attempts: q.attempts })),
-      MAX_UPLOAD_ATTEMPTS,
-    );
-    if (failed.length > 0) return { status: "photos_failed", failed: failed.length };
-    if (pending.length > 0) return { status: "photos_pending", remaining: pending.length };
-
-    // Every photo is confirmed in the deal gallery. Prefer the file id the drain just confirmed (no second
-    // upload). A photo missing from the drain map was confirmed by an EARLIER drain (already gone from the
-    // queue), so re-confirm those — CONCURRENTLY — with an idempotent uploadCapture (server dedupes on
-    // clientUploadId → the existing file, no duplicate). Indices align 1:1 with input.photos so the resulting
-    // fileIds keep the original photo order.
     const resolved: string[] = new Array(input.photos.length);
-    const fallbackIndices: number[] = [];
-    input.photos.forEach((p, i) => {
-      const fileId = drain.confirmedFileIds[p.clientUploadId];
-      if (fileId) resolved[i] = fileId;
-      else fallbackIndices.push(i);
+    const settled = await runConcurrentUploads(
+      input.photos.map((_, i) => i),
+      UPLOAD_CONCURRENCY,
+      (i) => uploadCorrectiveResponsePhoto(fetcher, input.scorecardId, input.photos[i]),
+    );
+    let failedCount = 0;
+    settled.forEach((r, i) => {
+      if (r.status === "fulfilled") resolved[i] = r.value;
+      else failedCount += 1;
     });
-    if (fallbackIndices.length > 0) {
-      const settled = await runConcurrentUploads(
-        fallbackIndices,
-        UPLOAD_CONCURRENCY,
-        (i) => uploadCapture(fetcher, uploadInputs[i]),
-      );
-      settled.forEach((r, k) => {
-        const i = fallbackIndices[k];
-        if (r.status === "fulfilled") resolved[i] = r.value.id;
-        else throw r.reason instanceof Error ? r.reason : new Error(String(r.reason));
-      });
-    }
+    if (failedCount > 0) return { status: "photos_failed", failed: failedCount };
     photoFileIds.push(...resolved);
   }
 

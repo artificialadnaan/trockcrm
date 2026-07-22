@@ -277,7 +277,7 @@ function CorrectiveActionItemCard({
     setSubmitting(true);
     setNotice(null);
     try {
-      const result = await submitCorrectiveActionItem(fetcher, ownerKey, {
+      const result = await submitCorrectiveActionItem(fetcher, {
         scorecardId,
         itemId: item.id,
         dealId,

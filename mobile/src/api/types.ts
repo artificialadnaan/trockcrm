@@ -279,3 +279,14 @@ export type CorrectiveActionItem = {
 // GET /field/scorecards/:id/corrective-actions and the POST response both wrap the items in `{ items }`
 // (corrective-action-routes.ts) — there is no top-level scorecardId/status on the wire.
 export type CorrectiveActionsResponse = { items: CorrectiveActionItem[] };
+
+// The scorecard-SCOPED corrective-action response-photo upload (server resolves the SCORECARD's owning
+// office, NOT the uploader's active office). Distinct from the generic /field/photos upload contract: no
+// capture target / clientUploadId / tags, and confirm returns a bare { fileId } for the response POST.
+export type CorrectiveActionUploadUrlResponse = {
+  uploadUrl: string;
+  objectKey: string;
+  uploadToken: string;
+  expiresIn: number;
+};
+export type CorrectiveActionConfirmUploadResponse = { fileId: string };

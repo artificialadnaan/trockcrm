@@ -1,18 +1,23 @@
 // Drive the corrective-action per-item response state + submit orchestration deterministically by mocking
-// the durable-queue, direct-upload, and API seams (jest hoists these above the imports).
-jest.mock("../../capture/upload-queue", () => ({
-  MAX_UPLOAD_ATTEMPTS: 5,
-  UPLOAD_CONCURRENCY: 5,
-  enqueueUploads: jest.fn(async () => []),
-  drainUploadQueue: jest.fn(async () => ({ succeeded: 0, failed: 0, remaining: 0, confirmedFileIds: {} })),
-  getQueuedUploads: jest.fn(async () => []),
+// the SCORECARD-SCOPED upload endpoints, the R2 PUT, and compression (jest hoists these above the imports).
+// The response photos MUST upload through the scorecard-scoped endpoints (server resolves the SCORECARD'S
+// office, not the uploader's active office) so the returned fileIds exist in the tenant the response POST
+// reads — the fix for the off-office orphaned-file bug.
+jest.mock("expo-file-system/legacy", () => ({
+  FileSystemUploadType: { BINARY_CONTENT: 0 },
+  // Default: R2 accepts the PUT.
+  uploadAsync: jest.fn(async () => ({ status: 200 })),
 }));
-jest.mock("../../capture/upload", () => ({
-  // Default: every capture resolves to a photo whose id is the fileId (id === clientUploadId-derived).
-  uploadCapture: jest.fn(async (_f: unknown, input: { clientUploadId: string }) => ({
-    id: `file-${input.clientUploadId}`,
+jest.mock("../../capture/compress", () => ({
+  // Return a stable compressed descriptor keyed off the source uri so assertions can trace each photo.
+  compressForUpload: jest.fn(async (uri: string) => ({
+    uri: `${uri}.jpg`,
+    sizeBytes: 1234,
+    contentType: "image/jpeg",
   })),
-  // Minimal bounded pool for the fallback path — run each worker and settle (never rejects).
+}));
+jest.mock("../../capture/concurrency", () => ({
+  // Bounded pool that runs each worker and settles (never rejects) — preserves input order.
   runConcurrentUploads: jest.fn(
     async <T, R>(items: T[], _c: number, worker: (item: T, index: number) => Promise<R>) =>
       Promise.all(
@@ -27,19 +32,28 @@ jest.mock("../../capture/upload", () => ({
   ),
 }));
 jest.mock("../../api/endpoints", () => ({
+  requestCorrectiveActionUploadUrl: jest.fn(async (_f: unknown, _scorecardId: string) => ({
+    uploadUrl: "https://r2.example/upload",
+    objectKey: "obj-key",
+    uploadToken: "up-token",
+    expiresIn: 900,
+  })),
+  confirmCorrectiveActionUpload: jest.fn(async (_f: unknown, _scorecardId: string) => ({ fileId: "file-x" })),
   submitCorrectiveActionResponse: jest.fn(async () => ({ items: [{ id: "item-1", status: "resolved" }] })),
 }));
 
 import {
   correctiveResponseReducer,
   emptyCorrectiveResponse,
-  correctiveResponsePhotoUploadInput,
   submitCorrectiveActionItem,
   type CorrectiveResponsePhoto,
 } from "../corrective-action";
-import { enqueueUploads, drainUploadQueue, getQueuedUploads } from "../../capture/upload-queue";
-import { uploadCapture, runConcurrentUploads } from "../../capture/upload";
-import { submitCorrectiveActionResponse } from "../../api/endpoints";
+import * as FileSystem from "expo-file-system/legacy";
+import {
+  requestCorrectiveActionUploadUrl,
+  confirmCorrectiveActionUpload,
+  submitCorrectiveActionResponse,
+} from "../../api/endpoints";
 
 function photo(id: string, extra: Partial<CorrectiveResponsePhoto> = {}): CorrectiveResponsePhoto {
   return { key: id, uri: `file://${id}`, clientUploadId: id, caption: "", ...extra };
@@ -70,61 +84,35 @@ describe("correctiveResponseReducer", () => {
   });
 });
 
-describe("correctiveResponsePhotoUploadInput", () => {
-  it("targets the deal and tags the upload as corrective-action evidence, trimming the caption", () => {
-    const input = correctiveResponsePhotoUploadInput(
-      photo("a", { caption: "  Re-inspected  ", takenAt: "2026-07-22T00:00:00Z", latitude: 32.9, longitude: -96.7, addressSource: "live_gps" }),
-      "deal-1",
-    );
-    expect(input.target).toEqual({ dealId: "deal-1" });
-    expect(input.tags).toEqual(["scorecard", "corrective_action"]);
-    expect(input.caption).toBe("Re-inspected");
-    expect(input.category).toBeNull();
-    expect(input.clientUploadId).toBe("a");
-    expect(input.metadata).toMatchObject({ latitude: 32.9, longitude: -96.7, addressSource: "live_gps" });
-  });
-
-  it("nulls a blank caption", () => {
-    expect(correctiveResponsePhotoUploadInput(photo("a", { caption: "   " }), "d").caption).toBeNull();
-  });
-});
-
 describe("submitCorrectiveActionItem", () => {
   const fetcher = (() => {}) as never;
 
   beforeEach(() => {
     jest.clearAllMocks();
-    (getQueuedUploads as jest.Mock).mockResolvedValue([]);
-    (enqueueUploads as jest.Mock).mockResolvedValue([]);
-    (drainUploadQueue as jest.Mock).mockResolvedValue({ succeeded: 0, failed: 0, remaining: 0, confirmedFileIds: {} });
-    (uploadCapture as jest.Mock).mockImplementation(async (_f: unknown, input: { clientUploadId: string }) => ({
-      id: `file-${input.clientUploadId}`,
-    }));
-    (runConcurrentUploads as jest.Mock).mockImplementation(
-      async <T, R>(items: T[], _c: number, worker: (item: T, index: number) => Promise<R>) =>
-        Promise.all(
-          items.map(async (item, i): Promise<PromiseSettledResult<R>> => {
-            try {
-              return { status: "fulfilled", value: await worker(item, i) };
-            } catch (reason) {
-              return { status: "rejected", reason };
-            }
-          }),
-        ),
-    );
-    (submitCorrectiveActionResponse as jest.Mock).mockResolvedValue({ items: [{ id: "item-1", status: "resolved" }] });
+    (FileSystem.uploadAsync as jest.Mock).mockResolvedValue({ status: 200 });
+    (requestCorrectiveActionUploadUrl as jest.Mock).mockResolvedValue({
+      uploadUrl: "https://r2.example/upload",
+      objectKey: "obj-key",
+      uploadToken: "up-token",
+      expiresIn: 900,
+    });
+    (confirmCorrectiveActionUpload as jest.Mock).mockResolvedValue({ fileId: "file-x" });
+    (submitCorrectiveActionResponse as jest.Mock).mockResolvedValue({
+      items: [{ id: "item-1", status: "resolved" }],
+    });
   });
 
-  it("with no photos: skips the queue and POSTs just the comment → resolved", async () => {
-    const result = await submitCorrectiveActionItem(fetcher, "owner-1", {
+  it("with no photos: skips upload and POSTs just the comment → resolved", async () => {
+    const result = await submitCorrectiveActionItem(fetcher, {
       scorecardId: "sc-1",
       itemId: "item-1",
       dealId: "deal-1",
       photos: [],
       comment: "No evidence needed.",
     });
-    expect(enqueueUploads).not.toHaveBeenCalled();
-    expect(drainUploadQueue).not.toHaveBeenCalled();
+    expect(requestCorrectiveActionUploadUrl).not.toHaveBeenCalled();
+    expect(confirmCorrectiveActionUpload).not.toHaveBeenCalled();
+    expect(FileSystem.uploadAsync).not.toHaveBeenCalled();
     expect(submitCorrectiveActionResponse).toHaveBeenCalledWith(fetcher, "sc-1", "item-1", {
       comment: "No evidence needed.",
       photoFileIds: [],
@@ -132,76 +120,70 @@ describe("submitCorrectiveActionItem", () => {
     expect(result).toEqual({ status: "resolved", items: [{ id: "item-1", status: "resolved" }] });
   });
 
-  it("with photos all confirmed IN THIS DRAIN: reads fileIds from the drain summary WITHOUT a second upload", async () => {
-    (getQueuedUploads as jest.Mock).mockResolvedValue([]); // nothing left queued = all uploaded
-    (drainUploadQueue as jest.Mock).mockResolvedValue({
-      succeeded: 2,
-      failed: 0,
-      remaining: 0,
-      confirmedFileIds: { a: "file-a", b: "file-b" },
-    });
-    const result = await submitCorrectiveActionItem(fetcher, "owner-1", {
+  it("uploads each photo through the SCORECARD-SCOPED endpoints (office resolves from the scorecard) and flows the fileIds into the response POST, in order", async () => {
+    // Distinct fileId per confirm so we can assert order is preserved.
+    (confirmCorrectiveActionUpload as jest.Mock).mockImplementation(async (_f, _sc, body) => ({
+      fileId: `file-for-${body.objectKey}`,
+    }));
+    // Deterministic objectKey per photo, derived from its (distinct) compressed size, so confirm's
+    // objectKey-derived fileId is traceable back to the source photo AND order-stable.
+    (requestCorrectiveActionUploadUrl as jest.Mock).mockImplementation(async (_f, _sc, body) => ({
+      uploadUrl: "https://r2.example/upload",
+      objectKey: `obj-${body.sizeBytes}`,
+      uploadToken: "up-token",
+      expiresIn: 900,
+    }));
+    // Give the two photos distinct compressed sizes so their objectKeys (and thus fileIds) differ + are traceable.
+    const { compressForUpload } = jest.requireMock("../../capture/compress") as {
+      compressForUpload: jest.Mock;
+    };
+    compressForUpload
+      .mockResolvedValueOnce({ uri: "file://a.jpg", sizeBytes: 111, contentType: "image/jpeg" })
+      .mockResolvedValueOnce({ uri: "file://b.jpg", sizeBytes: 222, contentType: "image/jpeg" });
+
+    const result = await submitCorrectiveActionItem(fetcher, {
       scorecardId: "sc-1",
       itemId: "item-1",
       dealId: "deal-1",
       photos: [photo("a"), photo("b")],
       comment: "Corrected.",
     });
-    expect(enqueueUploads).toHaveBeenCalledTimes(1);
-    expect(drainUploadQueue).toHaveBeenCalledWith("owner-1", fetcher);
-    // No second upload: the drain already surfaced the confirmed file ids.
-    expect(uploadCapture).not.toHaveBeenCalled();
-    expect(runConcurrentUploads).not.toHaveBeenCalled();
-    expect(submitCorrectiveActionResponse).toHaveBeenCalledWith(fetcher, "sc-1", "item-1", {
-      comment: "Corrected.",
-      photoFileIds: ["file-a", "file-b"],
-    });
+
+    // Presign + confirm target the SCORECARD id (office resolves from the scorecard server-side), NOT a deal.
+    expect(requestCorrectiveActionUploadUrl).toHaveBeenCalledTimes(2);
+    expect((requestCorrectiveActionUploadUrl as jest.Mock).mock.calls[0][1]).toBe("sc-1");
+    expect(confirmCorrectiveActionUpload).toHaveBeenCalledTimes(2);
+    expect((confirmCorrectiveActionUpload as jest.Mock).mock.calls[0][1]).toBe("sc-1");
+    // Each photo is PUT to the presigned R2 url.
+    expect(FileSystem.uploadAsync).toHaveBeenCalledTimes(2);
+
+    // The confirmed fileIds flow into the response POST, preserving the original photo order (a before b).
+    const call = (submitCorrectiveActionResponse as jest.Mock).mock.calls[0];
+    expect(call[1]).toBe("sc-1");
+    expect(call[2]).toBe("item-1");
+    expect(call[3].comment).toBe("Corrected.");
+    expect(call[3].photoFileIds).toEqual(["file-for-obj-111", "file-for-obj-222"]);
     expect(result.status).toBe("resolved");
   });
 
-  it("falls back to a concurrent idempotent re-confirm (no re-PUT context) only for photos missing from the drain map, preserving order", async () => {
-    (getQueuedUploads as jest.Mock).mockResolvedValue([]); // nothing left queued = all uploaded
-    // Photo "a" was confirmed by an EARLIER drain (already gone from the queue → not in this map); "b" here.
-    (drainUploadQueue as jest.Mock).mockResolvedValue({
-      succeeded: 1,
-      failed: 0,
-      remaining: 0,
-      confirmedFileIds: { b: "file-b" },
-    });
-    const result = await submitCorrectiveActionItem(fetcher, "owner-1", {
+  it("with a photo whose R2 PUT fails: returns photos_failed and does NOT POST", async () => {
+    (FileSystem.uploadAsync as jest.Mock)
+      .mockResolvedValueOnce({ status: 200 })
+      .mockResolvedValueOnce({ status: 500 });
+    const result = await submitCorrectiveActionItem(fetcher, {
       scorecardId: "sc-1",
       itemId: "item-1",
       dealId: "deal-1",
       photos: [photo("a"), photo("b")],
       comment: "Corrected.",
     });
-    // Only the uncovered photo ("a") is re-confirmed via uploadCapture; "b" comes from the drain map.
-    expect(runConcurrentUploads).toHaveBeenCalledTimes(1);
-    expect(uploadCapture).toHaveBeenCalledTimes(1);
-    expect((uploadCapture as jest.Mock).mock.calls[0][1]).toMatchObject({ clientUploadId: "a" });
-    expect(submitCorrectiveActionResponse).toHaveBeenCalledWith(fetcher, "sc-1", "item-1", {
-      comment: "Corrected.",
-      photoFileIds: ["file-a", "file-b"],
-    });
-    expect(result.status).toBe("resolved");
-  });
-
-  it("with a photo still retrying: returns photos_pending and does NOT POST", async () => {
-    (getQueuedUploads as jest.Mock).mockResolvedValue([{ clientUploadId: "a", attempts: 1 }]);
-    const result = await submitCorrectiveActionItem(fetcher, "owner-1", {
-      scorecardId: "sc-1",
-      itemId: "item-1",
-      dealId: "deal-1",
-      photos: [photo("a")],
-      comment: "Corrected.",
-    });
-    expect(result).toEqual({ status: "photos_pending", remaining: 1 });
+    expect(result).toEqual({ status: "photos_failed", failed: 1 });
     expect(submitCorrectiveActionResponse).not.toHaveBeenCalled();
   });
 
-  it("with a photo past the retry cap: returns photos_failed and does NOT POST", async () => {
-    (getQueuedUploads as jest.Mock).mockResolvedValue([{ clientUploadId: "a", attempts: 5 }]);
-    const result = await submitCorrectiveActionItem(fetcher, "owner-1", {
+  it("with a confirm that rejects: returns photos_failed and does NOT POST", async () => {
+    (confirmCorrectiveActionUpload as jest.Mock).mockRejectedValue(new Error("network"));
+    const result = await submitCorrectiveActionItem(fetcher, {
       scorecardId: "sc-1",
       itemId: "item-1",
       dealId: "deal-1",
