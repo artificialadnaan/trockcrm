@@ -199,6 +199,26 @@ describe("deadLetterGraceMinutes — env parsing (Codex P2: blank must not disab
     expect(deadLetterGraceMinutes()).toBe(20);
   });
 
+  // Codex P2: the value is passed to `make_interval(mins => $2::int)`, so a finite NON-integer would blow up
+  // every office's sweep with Postgres `invalid input syntax for type integer`. Only a non-negative integer is
+  // accepted; a fractional value falls back to the default.
+  it('"0.5" (finite non-integer) → default (would otherwise crash $2::int)', () => {
+    process.env[KEY] = "0.5";
+    expect(deadLetterGraceMinutes()).toBe(DEAD_LETTER_GRACE_MINUTES_DEFAULT);
+  });
+
+  it('"15.9" (finite non-integer) → default', () => {
+    process.env[KEY] = "15.9";
+    expect(deadLetterGraceMinutes()).toBe(DEAD_LETTER_GRACE_MINUTES_DEFAULT);
+  });
+
+  it('"0" (explicit integer escape hatch) → 0, "20" → 20', () => {
+    process.env[KEY] = "0";
+    expect(deadLetterGraceMinutes()).toBe(0);
+    process.env[KEY] = "20";
+    expect(deadLetterGraceMinutes()).toBe(20);
+  });
+
   it("garbage / negative → default", () => {
     process.env[KEY] = "abc";
     expect(deadLetterGraceMinutes()).toBe(DEAD_LETTER_GRACE_MINUTES_DEFAULT);

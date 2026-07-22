@@ -83,6 +83,7 @@ async function setupSchema() {
       started_at timestamptz,
       finished_at timestamptz,
       lease_expires_at timestamptz,
+      dead_letter_alerted_at timestamptz,
       updated_at timestamptz NOT NULL DEFAULT now(),
       CONSTRAINT bid_board_ingestion_inbox_office_hash_uidx UNIQUE (office_slug, payload_hash)
     );
@@ -664,6 +665,31 @@ describe("recoverOrphanedInboxJobs (crash recovery)", () => {
     // Preserved despite being 30 days old — it's the office's per-office newest succeeded extracted_at row.
     expect(await loadInboxRow(db, watermark.inboxId)).not.toBeNull();
     expect(await latestCommittedExtractedAt(db, "dallas", "00000000-0000-4000-8000-0000000000ff")).not.toBeNull();
+  });
+
+  // Codex P2: an old 'failed' row that was never dead-letter-alerted (the heartbeat cron / email was down
+  // through the whole retention window) must SURVIVE the retention delete — otherwise the alert is lost
+  // forever. An old 'failed' row that WAS already alerted (dead_letter_alerted_at set) is still pruned.
+  it("retention: KEEPS an old unalerted 'failed' row, still prunes an old alerted 'failed' row", async () => {
+    const unalerted = await accept({ payloadHash: "dl-unalerted" });
+    const alerted = await accept({ payloadHash: "dl-alerted" });
+    await db.query(
+      `UPDATE public.bid_board_ingestion_inbox
+         SET status='failed', attempts=5, last_error='dead', finished_at = now() - interval '30 days',
+             dead_letter_alerted_at = NULL
+       WHERE id=$1`,
+      [unalerted.inboxId]
+    );
+    await db.query(
+      `UPDATE public.bid_board_ingestion_inbox
+         SET status='failed', attempts=5, last_error='dead', finished_at = now() - interval '30 days',
+             dead_letter_alerted_at = now() - interval '29 days'
+       WHERE id=$1`,
+      [alerted.inboxId]
+    );
+    await recoverOrphanedInboxJobs(db, { retentionDays: 14 });
+    expect(await loadInboxRow(db, unalerted.inboxId)).not.toBeNull(); // unalerted failure preserved
+    expect(await loadInboxRow(db, alerted.inboxId)).toBeNull(); // already-alerted failure pruned
   });
 });
 

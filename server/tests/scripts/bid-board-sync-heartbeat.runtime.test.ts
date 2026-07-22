@@ -407,6 +407,54 @@ describe("dead-letter sweep", () => {
     expect(await unalertedFailedCount()).toBe(0);
   });
 
+  // Codex P2 (LOCK-FIRST): eligibility must be read UNDER the held lock, not before it. If the SELECT ran
+  // first, a row could reconcile 'failed' → 'succeeded' (and its handler release the lock) between the SELECT
+  // and the try-lock — the probe then succeeds but the stale snapshot is emailed. Prove the ordering: when the
+  // lock is NOT acquired, the eligibility SELECT is never issued (deferred BEFORE any read); when it IS
+  // acquired, the read follows the successful lock.
+  it("reads eligibility only AFTER the office lock is acquired (lock-first ordering)", async () => {
+    await seedInbox("failed", { finishedAt: ago(30), lastError: "aged-eligible" }); // aged, eligible
+
+    // (1) Lock held → deferred and the eligibility SELECT never runs.
+    const order: string[] = [];
+    const heldWithTrace: typeof client = {
+      query: async (text, params) => {
+        if (/pg_try_advisory_lock/.test(text)) {
+          order.push("lock");
+          return { rows: [{ got: false }] } as any;
+        }
+        if (/FROM public\.bid_board_ingestion_inbox\b[\s\S]*status = 'failed'/.test(text)) order.push("read");
+        return client.query(text, params);
+      },
+    };
+    const deferred = await sweepDeadLettersForOffice(heldWithTrace, {
+      office: "dallas",
+      now: NOW,
+      sendAlert: async () => true,
+    });
+    expect(deferred).toMatchObject({ count: 0, sent: false, deferred: true });
+    expect(order).toContain("lock");
+    expect(order).not.toContain("read"); // eligibility NOT read when the lock was refused
+
+    // (2) Lock free → the successful lock precedes the eligibility read.
+    const order2: string[] = [];
+    const freeWithTrace: typeof client = {
+      query: async (text, params) => {
+        if (/pg_try_advisory_lock/.test(text)) order2.push("lock");
+        if (/FROM public\.bid_board_ingestion_inbox\b[\s\S]*status = 'failed'/.test(text)) order2.push("read");
+        return client.query(text, params);
+      },
+    };
+    const swept = await sweepDeadLettersForOffice(freeWithTrace, {
+      office: "dallas",
+      now: NOW,
+      sendAlert: async () => true,
+    });
+    expect(swept).toMatchObject({ count: 1, sent: true });
+    expect(order2.indexOf("lock")).toBeGreaterThanOrEqual(0);
+    expect(order2.indexOf("lock")).toBeLessThan(order2.indexOf("read")); // lock BEFORE read
+  });
+
   it("acquires then RELEASES the office lock when free, so it never blocks a real import", async () => {
     await seedInbox("failed", { finishedAt: ago(30), lastError: "aged-eligible" });
     const r = await sweepDeadLettersForOffice(client, { office: "dallas", now: NOW, sendAlert: async () => true });

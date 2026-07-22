@@ -150,7 +150,10 @@ export function deadLetterGraceMinutes(): number {
   const raw = (process.env.BID_BOARD_DEAD_LETTER_GRACE_MINUTES ?? "").trim();
   if (raw === "") return DEAD_LETTER_GRACE_MINUTES_DEFAULT;
   const n = Number(raw);
-  return Number.isFinite(n) && n >= 0 ? n : DEAD_LETTER_GRACE_MINUTES_DEFAULT;
+  // Must be a non-negative INTEGER: this value is passed straight to `make_interval(mins => $2::int)`, so a
+  // finite non-integer (e.g. "0.5", "15.9") would blow up every office's sweep with Postgres `invalid input
+  // syntax for type integer`. Reject non-integers (and negatives / NaN) → fall back to the default. (Codex P2)
+  return Number.isInteger(n) && n >= 0 ? n : DEAD_LETTER_GRACE_MINUTES_DEFAULT;
 }
 
 /** Pure renderer for the dead-letter batch email — one email per office per sweep listing the imports whose
@@ -182,8 +185,9 @@ export function renderDeadLetterEmail(e: { office: string; rows: DeadLetterRow[]
     <code>bid_board_ingestion_inbox</code> row) for the underlying error.</p>
     <p><strong>Recovery:</strong> re-POSTing the SAME payload is a no-op — it hashes to the same idempotency
     key, hits the inbox's <code>ON CONFLICT DO NOTHING</code>, and returns the existing <code>failed</code>
-    row WITHOUT enqueuing a new job. To retry, generate a FRESH scrape/payload (which produces a new
-    idempotency key and its own job) or explicitly requeue the ingestion after fixing the underlying error.</p>
+    row WITHOUT enqueuing a new job. There is no in-place requeue of a dead-lettered row. To retry, fix the
+    underlying error, then generate a FRESH scrape/payload — a new idempotency key produces a NEW inbox row
+    with its own job (and, being unalerted, it is naturally re-alerted if it dead-letters again).</p>
     <ul>${items}</ul>${more}
   `;
   return { subject, html };
@@ -425,13 +429,19 @@ export function deadLetterBatchIdempotencyKey(office: string, ids: string[]): st
  * ACTIVE-IMPORT SERIALIZATION (Codex P2): the eligibility grace only bounds the inbox's POST-COMMIT reconcile
  * retries — NOT a long-running FINAL-attempt import. recoverOrphanedInboxJobs can mark a row 'failed' while the
  * handler is still importing (lease renewals lapsed); the age predicate could then alert it before it commits
- * and recordSuccessWithRetry reconciles it back to 'succeeded'. So before sending, we take a NON-BLOCKING
- * pg_try_advisory_lock on the SAME per-office key the ingestion holds across an import
- * (BID_BOARD_ADVISORY_NAMESPACE + officeAdvisoryKey(office), inbox.ts). If a handler holds it (an import is
- * active for this office) the try-lock fails → we DEFER this office's sweep this cycle (no send, no failure);
- * it's caught next cron cycle. If it's free we unlock immediately and proceed — a no-active-import proof, not a
- * held serialization (a handler that starts AFTER our probe imports a NOT-YET-eligible row: its just-'failed'
- * intermediate state is younger than the grace window, so it can't be alerted this cycle anyway).
+ * and recordSuccessWithRetry reconciles it back to 'succeeded'. So we take a NON-BLOCKING pg_try_advisory_lock
+ * on the SAME per-office key the ingestion holds across an import (BID_BOARD_ADVISORY_NAMESPACE +
+ * officeAdvisoryKey(office), inbox.ts) BEFORE reading the eligibility set, and HOLD it across the read + send +
+ * marker. If a handler holds it (an import is active for this office) the try-lock fails → we DEFER this
+ * office's sweep this cycle (no read, no send, no failure); it's caught next cron cycle.
+ *
+ * LOCK-FIRST, READ-UNDER-LOCK (Codex P2): reading eligibility BEFORE the lock left a window where a row could
+ * reconcile 'failed' → 'succeeded' (and its import handler release the lock) BETWEEN the SELECT and the
+ * try-lock — the probe then succeeds but the stale snapshot is still emailed + stamped. Holding the lock across
+ * the read guarantees no import handler runs (hence no reconcile) for this office during the sweep, so the
+ * eligibility set can't shift under us. The `AND status = 'failed'` marker guard is kept as a backstop. Sends
+ * are bounded by the sender's own timeout, so holding the lock across the send can't wedge a future import
+ * indefinitely; the lock is released in a `finally`.
  */
 export async function sweepDeadLettersForOffice(
   client: Queryable,
@@ -442,11 +452,11 @@ export async function sweepDeadLettersForOffice(
   const reg = await client.query(`SELECT to_regclass('public.bid_board_ingestion_inbox') AS reg`);
   if (!reg.rows[0]?.reg) return { office: opts.office, count: 0, sent: false };
 
-  const rows = await getDeadLetteredInboxRows(client, opts.office);
-  if (rows.length === 0) return { office: opts.office, count: 0, sent: false };
-
-  // Establish that no import handler is active for this office before alerting. Non-blocking: a held lock means
-  // an import is in flight, so defer rather than risk a false terminal alert on a row it may still reconcile.
+  // Acquire the office lock FIRST — before reading eligibility — so no import handler can run (and thus no
+  // 'failed' → 'succeeded' reconcile can land) for this office while we read+send+mark. Non-blocking: a held
+  // lock means an import is in flight, so defer this cycle rather than risk a false terminal alert on a row it
+  // may still reconcile. (A handler that starts AFTER we hold the lock is serialized behind us; its just-
+  // 'failed' intermediate state would be younger than the grace window anyway, so it can't be alerted now.)
   const lockKey = officeAdvisoryKey(opts.office);
   const lockRes = await client.query("SELECT pg_try_advisory_lock($1, $2) AS got", [
     BID_BOARD_ADVISORY_NAMESPACE,
@@ -457,28 +467,39 @@ export async function sweepDeadLettersForOffice(
     // still NULL-marked and will be alerted next cron cycle once the import releases the lock.
     return { office: opts.office, count: 0, sent: false, deferred: true };
   }
-  // We only needed the lock as a NON-active-import probe; release it immediately so we never block a real
-  // import (and so a same-session second sweep isn't confused by our own held lock). Best-effort: if the
-  // unlock query itself fails, the session-scoped lock is released on client.end() in the cron's finally.
-  await client.query("SELECT pg_advisory_unlock($1, $2)", [BID_BOARD_ADVISORY_NAMESPACE, lockKey]);
 
-  let sent = false;
-  if (opts.sendAlert) {
-    const { subject, html } = renderDeadLetterEmail({ office: opts.office, rows, now: opts.now });
-    const idempotencyKey = deadLetterBatchIdempotencyKey(opts.office, rows.map((r) => r.id));
+  try {
+    // Read the eligibility set UNDER the held lock so it can't shift (reconcile out) between here and the send.
+    const rows = await getDeadLetteredInboxRows(client, opts.office);
+    if (rows.length === 0) return { office: opts.office, count: 0, sent: false };
+
+    let sent = false;
+    if (opts.sendAlert) {
+      const { subject, html } = renderDeadLetterEmail({ office: opts.office, rows, now: opts.now });
+      const idempotencyKey = deadLetterBatchIdempotencyKey(opts.office, rows.map((r) => r.id));
+      try {
+        sent = await opts.sendAlert(subject, html, idempotencyKey);
+      } catch (err) {
+        sent = false;
+        console.error(`[bid-board-heartbeat] office=${opts.office} dead-letter email send threw:`, err);
+      }
+    }
+
+    if (sent) {
+      // Stamp EVERY row in the batch (not just the displayed cap) so the whole set is retired in one shot.
+      await markDeadLettersAlerted(client, rows.map((r) => r.id), opts.now);
+    }
+    return { office: opts.office, count: rows.length, sent };
+  } finally {
+    // Release what we acquired so we never block a real import (and so a same-session second sweep isn't
+    // confused by our own held lock). Best-effort: if the unlock query itself throws, the session-scoped lock
+    // is still released on client.end() in the cron's finally.
     try {
-      sent = await opts.sendAlert(subject, html, idempotencyKey);
+      await client.query("SELECT pg_advisory_unlock($1, $2)", [BID_BOARD_ADVISORY_NAMESPACE, lockKey]);
     } catch (err) {
-      sent = false;
-      console.error(`[bid-board-heartbeat] office=${opts.office} dead-letter email send threw:`, err);
+      console.error(`[bid-board-heartbeat] office=${opts.office} dead-letter sweep advisory unlock failed:`, err);
     }
   }
-
-  if (sent) {
-    // Stamp EVERY row in the batch (not just the displayed cap) so the whole set is retired in one shot.
-    await markDeadLettersAlerted(client, rows.map((r) => r.id), opts.now);
-  }
-  return { office: opts.office, count: rows.length, sent };
 }
 
 // ── Entry point ─────────────────────────────────────────────────────────────

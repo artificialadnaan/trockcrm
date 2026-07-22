@@ -618,6 +618,12 @@ export async function recoverOrphanedInboxJobs(
     `DELETE FROM public.bid_board_ingestion_inbox
      WHERE status IN ('succeeded', 'failed')
        AND COALESCE(finished_at, updated_at) < NOW() - make_interval(days => $1::int)
+       -- Never delete a 'failed' row that has NOT yet been dead-letter-alerted. If the heartbeat cron / email
+       -- transport is down through the whole retention window, the dead-letter sweep would otherwise lose the
+       -- alert forever when the row ages out. Keep unalerted failures until the sweep stamps
+       -- dead_letter_alerted_at (a genuine dead-letter is alerted at most one grace-cycle after it fails, so
+       -- this only preserves rows the monitor never got to). (Codex P2)
+       AND NOT (status = 'failed' AND dead_letter_alerted_at IS NULL)
        -- Keep the newest succeeded snapshot PER OFFICE (the monotonic watermark latestCommittedExtractedAt
        -- reads) regardless of age. Otherwise a long (>retention) worker/SyncHub outage would delete an office's
        -- only watermark row, and a delayed/replayed OLDER payload could then pass the monotonic guard and
