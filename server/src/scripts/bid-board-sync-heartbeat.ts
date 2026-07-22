@@ -10,6 +10,7 @@
 // Runs as a dedicated Railway cron (recommended every ~20 min; cadence is ~19 min, threshold default
 // 60 min ≈ 3 missed cycles). Reuses the canonical Resend sender. All config is env-driven; an empty
 // recipients list is a full no-op so the job is inert until deliberately turned on.
+import { createHash } from "node:crypto";
 import pg from "pg";
 import { sendSystemEmail } from "../lib/resend-client.js";
 
@@ -138,8 +139,14 @@ const DEAD_LETTER_EMAIL_ROW_CAP = 20; // a schema-drift outage can fail every im
 export const DEAD_LETTER_GRACE_MINUTES_DEFAULT = 15;
 
 export function deadLetterGraceMinutes(): number {
-  const raw = Number(process.env.BID_BOARD_DEAD_LETTER_GRACE_MINUTES);
-  return Number.isFinite(raw) && raw >= 0 ? raw : DEAD_LETTER_GRACE_MINUTES_DEFAULT;
+  // Trim first: Number("") and Number("   ") are 0, and the `>= 0` gate would ACCEPT that 0 — so a blank or
+  // whitespace-only env var (a common representation of an unset optional deployment variable) would silently
+  // DISABLE the grace and re-open the reconcile false-positive race. Treat empty/whitespace as unset (fall back
+  // to the default); only an explicit numeric "0" disables the grace. (Codex P2)
+  const raw = (process.env.BID_BOARD_DEAD_LETTER_GRACE_MINUTES ?? "").trim();
+  if (raw === "") return DEAD_LETTER_GRACE_MINUTES_DEFAULT;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : DEAD_LETTER_GRACE_MINUTES_DEFAULT;
 }
 
 /** Pure renderer for the dead-letter batch email — one email per office per sweep listing the imports whose
@@ -271,19 +278,22 @@ export async function getDeadLetteredInboxRows(
   }));
 }
 
-/** Stamp dead_letter_alerted_at on exactly the rows just alerted (idempotent: only rows still NULL). Retires
- *  the batch so a healthy run alerts each dead-lettered row once — the per-row replacement for a timestamp
- *  watermark, immune to out-of-order commits. NOTE: the send→stamp pair is at-least-once, not exactly-once:
- *  if the send succeeds but this UPDATE fails (or the process dies before it), the rows stay NULL and the next
- *  cron re-sends the SAME batch. That is the correct safe bias for an alert — a rare duplicate on a post-send
- *  crash, never a LOST alert. The server's sendSystemEmail carries no Resend idempotency key (unlike the
- *  worker's system-email sender), so provider-side dedup isn't available on this path. */
+/** Stamp dead_letter_alerted_at on exactly the rows just alerted (idempotent: only rows still NULL AND still
+ *  'failed'). Retires the batch so a healthy run alerts each dead-lettered row once — the per-row replacement
+ *  for a timestamp watermark, immune to out-of-order commits. The `status = 'failed'` guard closes the
+ *  reconcile race: if the inbox's reconcileFailedButCommitted path flips a row 'failed' → 'succeeded' between
+ *  the sweep's SELECT and this stamp, that row is NOT stamped (so it never carries a stale dead-letter marker
+ *  on a now-succeeded import). NOTE: the send→stamp pair is at-least-once, not exactly-once: if the send
+ *  succeeds but this UPDATE fails (or the process dies before it), the rows stay NULL and the next cron
+ *  re-sends the SAME batch. That is the correct safe bias for an alert — a rare duplicate on a post-send crash,
+ *  never a LOST alert — and the sweep passes a stable Resend idempotencyKey so that re-send dedupes provider-
+ *  side when the batch is unchanged. */
 export async function markDeadLettersAlerted(client: Queryable, ids: string[], now: Date): Promise<void> {
   if (ids.length === 0) return;
   await client.query(
     `UPDATE public.bid_board_ingestion_inbox
         SET dead_letter_alerted_at = $2
-      WHERE id = ANY($1::uuid[]) AND dead_letter_alerted_at IS NULL`,
+      WHERE id = ANY($1::uuid[]) AND dead_letter_alerted_at IS NULL AND status = 'failed'`,
     [ids, now]
   );
 }
@@ -297,8 +307,10 @@ export interface OfficeHeartbeatResult {
 }
 
 /** Sends the rendered alert; returns true on success. Injected so the path is unit-testable and so a
- *  send failure can be observed (the throttle only advances on a successful send). */
-export type AlertSender = (subject: string, html: string) => Promise<boolean>;
+ *  send failure can be observed (the throttle only advances on a successful send). The optional
+ *  `idempotencyKey` is threaded to Resend so an at-least-once re-send of the SAME batch dedupes provider-side
+ *  (the dead-letter sweep supplies it; the heartbeat leaves it undefined). */
+export type AlertSender = (subject: string, html: string, idempotencyKey?: string) => Promise<boolean>;
 
 /**
  * Run the heartbeat for one office: read last-success + prior state, decide, send the alert (if any),
@@ -382,14 +394,25 @@ export interface DeadLetterSweepResult {
   sent: boolean; // an alert email actually sent (false for none-found or a failed send)
 }
 
+/** Stable Resend idempotency key for one office's dead-letter batch: derived from the office + the SORTED row
+ *  ids so an identical batch re-sent after an uncertain marker write dedupes provider-side (at-least-once →
+ *  effectively once). Sorting makes it order-independent; the sha256 keeps it a bounded length regardless of
+ *  batch size. If the eligible set CHANGES (a row reconciled out, a new failure aged in) the key changes and a
+ *  genuinely different alert still goes out. */
+export function deadLetterBatchIdempotencyKey(office: string, ids: string[]): string {
+  const digest = createHash("sha256").update([...ids].sort().join(",")).digest("hex");
+  return `dead-letter:${office}:${digest}`;
+}
+
 /**
  * Sweep one office for still-unalerted dead-lettered ('failed') inbox rows that have AGED past the reconcile
  * grace window and email a single batch. The rows are stamped dead_letter_alerted_at ONLY on a successful send
  * (mirrors runHeartbeatForOffice's send-gated throttle), so a transient transport failure re-alerts the SAME
  * batch next run instead of dropping it, and a per-row marker means no failure is ever skipped by a timestamp
  * cursor. Delivery is AT-LEAST-ONCE: a crash between a successful send and the marker UPDATE re-sends the batch
- * next run (a rare duplicate, never a lost alert) — the correct safe bias for a monitor. Sender is injected; a
- * thrown sender never escapes this fn.
+ * next run — but the send carries a STABLE Resend idempotencyKey derived from the batch, so that re-send
+ * dedupes provider-side (a rare duplicate never pages recipients twice) — the correct safe bias for a monitor.
+ * Sender is injected; a thrown sender never escapes this fn.
  */
 export async function sweepDeadLettersForOffice(
   client: Queryable,
@@ -406,8 +429,9 @@ export async function sweepDeadLettersForOffice(
   let sent = false;
   if (opts.sendAlert) {
     const { subject, html } = renderDeadLetterEmail({ office: opts.office, rows, now: opts.now });
+    const idempotencyKey = deadLetterBatchIdempotencyKey(opts.office, rows.map((r) => r.id));
     try {
-      sent = await opts.sendAlert(subject, html);
+      sent = await opts.sendAlert(subject, html, idempotencyKey);
     } catch (err) {
       sent = false;
       console.error(`[bid-board-heartbeat] office=${opts.office} dead-letter email send threw:`, err);
@@ -483,8 +507,10 @@ export async function main(now: Date = new Date()): Promise<void> {
 
     const wrap: Queryable = { query: (text, params) => client.query(text, params as unknown[]) };
     // The sender returns true only on a successful send; runHeartbeatForOffice uses that to gate the
-    // throttle anchor, and swallows a thrown transport so one office can't crash the loop.
-    const sendAlert: AlertSender = (subject, html) => sendSystemEmail(to, subject, html);
+    // throttle anchor, and swallows a thrown transport so one office can't crash the loop. A dead-letter batch
+    // supplies an idempotencyKey so its at-least-once re-send dedupes at Resend; the heartbeat leaves it undefined.
+    const sendAlert: AlertSender = (subject, html, idempotencyKey) =>
+      sendSystemEmail(to, subject, html, idempotencyKey ? { idempotencyKey } : {});
     let completed = 0;
     // Track dead-letter sweeps INDEPENDENTLY of the heartbeat checks: a sweep that THROWS (migration 0190's
     // column missing, a permissions error, DB blip) counts as failed; a clean to_regclass table-absent early

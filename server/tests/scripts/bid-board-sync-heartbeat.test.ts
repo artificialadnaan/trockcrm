@@ -1,5 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import {
+  DEAD_LETTER_GRACE_MINUTES_DEFAULT,
+  deadLetterBatchIdempotencyKey,
+  deadLetterGraceMinutes,
   decideHeartbeat,
   renderDeadLetterEmail,
   renderHeartbeatEmail,
@@ -157,5 +160,70 @@ describe("renderDeadLetterEmail (pure)", () => {
     expect(html).toContain("File-19.xlsx"); // the 20th shown (0-indexed)
     expect(html).not.toContain("File-20.xlsx"); // capped
     expect(html).toContain("and 6 more");
+  });
+});
+
+describe("deadLetterGraceMinutes — env parsing (Codex P2: blank must not disable the grace)", () => {
+  const KEY = "BID_BOARD_DEAD_LETTER_GRACE_MINUTES";
+  afterEach(() => {
+    delete process.env[KEY];
+  });
+
+  it("unset → default", () => {
+    delete process.env[KEY];
+    expect(deadLetterGraceMinutes()).toBe(DEAD_LETTER_GRACE_MINUTES_DEFAULT);
+  });
+
+  it("blank string → default (NOT 0 — a blank env var must not silently disable the grace)", () => {
+    process.env[KEY] = "";
+    expect(deadLetterGraceMinutes()).toBe(DEAD_LETTER_GRACE_MINUTES_DEFAULT);
+  });
+
+  it("whitespace-only → default", () => {
+    process.env[KEY] = "   ";
+    expect(deadLetterGraceMinutes()).toBe(DEAD_LETTER_GRACE_MINUTES_DEFAULT);
+  });
+
+  it('explicit "0" → 0 (the escape hatch that disables the grace)', () => {
+    process.env[KEY] = "0";
+    expect(deadLetterGraceMinutes()).toBe(0);
+  });
+
+  it('"20" → 20', () => {
+    process.env[KEY] = "20";
+    expect(deadLetterGraceMinutes()).toBe(20);
+  });
+
+  it('"  20  " (surrounding whitespace) → 20', () => {
+    process.env[KEY] = "  20  ";
+    expect(deadLetterGraceMinutes()).toBe(20);
+  });
+
+  it("garbage / negative → default", () => {
+    process.env[KEY] = "abc";
+    expect(deadLetterGraceMinutes()).toBe(DEAD_LETTER_GRACE_MINUTES_DEFAULT);
+    process.env[KEY] = "-5";
+    expect(deadLetterGraceMinutes()).toBe(DEAD_LETTER_GRACE_MINUTES_DEFAULT);
+  });
+});
+
+describe("deadLetterBatchIdempotencyKey — stable, order-independent batch key", () => {
+  it("is deterministic and independent of id order (same batch → same key)", () => {
+    const a = deadLetterBatchIdempotencyKey("dallas", ["id-3", "id-1", "id-2"]);
+    const b = deadLetterBatchIdempotencyKey("dallas", ["id-1", "id-2", "id-3"]);
+    expect(a).toBe(b);
+    expect(a).toMatch(/^dead-letter:dallas:[0-9a-f]{64}$/);
+  });
+
+  it("changes when the batch membership changes (a different alert gets a different key)", () => {
+    const two = deadLetterBatchIdempotencyKey("dallas", ["id-1", "id-2"]);
+    const three = deadLetterBatchIdempotencyKey("dallas", ["id-1", "id-2", "id-3"]);
+    expect(two).not.toBe(three);
+  });
+
+  it("namespaces by office (same ids, different office → different key)", () => {
+    const dallas = deadLetterBatchIdempotencyKey("dallas", ["id-1"]);
+    const atlanta = deadLetterBatchIdempotencyKey("atlanta", ["id-1"]);
+    expect(dallas).not.toBe(atlanta);
   });
 });

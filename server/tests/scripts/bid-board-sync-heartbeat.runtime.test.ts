@@ -3,6 +3,7 @@ import { PGlite } from "@electric-sql/pglite";
 import {
   getDeadLetteredInboxRows,
   getLastCommittedSuccessAt,
+  markDeadLettersAlerted,
   readAlertState,
   runHeartbeatForOffice,
   sweepDeadLettersForOffice,
@@ -336,6 +337,32 @@ describe("dead-letter sweep", () => {
     });
     expect(retried).toMatchObject({ count: 1, sent: true }); // re-alerted the same row
     expect(await unalertedFailedCount()).toBe(0); // now stamped
+  });
+
+  // Codex P2: reconcileFailedButCommitted can flip a row 'failed' → 'succeeded' AFTER the sweep SELECTs it but
+  // BEFORE the marker UPDATE. markDeadLettersAlerted's `AND status = 'failed'` guard must then skip that now-
+  // 'succeeded' row so a reconciled import never carries a stale dead-letter marker.
+  it("markDeadLettersAlerted skips a row that reconciled to 'succeeded' between select and mark", async () => {
+    const stillFailed = await seedInbox("failed", { finishedAt: ago(30), lastError: "genuinely-dead" });
+    const reconciled = await seedInbox("failed", { finishedAt: ago(30), lastError: "raced-to-success" });
+
+    // Simulate the reconcile that lands after the sweep's SELECT: this row is now 'succeeded'.
+    await client.query(
+      `UPDATE public.bid_board_ingestion_inbox SET status = 'succeeded', last_error = NULL WHERE id = $1`,
+      [reconciled]
+    );
+
+    // Mark BOTH ids (as the sweep would after a send): only the still-'failed' one is stamped.
+    await markDeadLettersAlerted(client, [stillFailed, reconciled], NOW);
+
+    const { rows } = await client.query(
+      `SELECT id, status, dead_letter_alerted_at FROM public.bid_board_ingestion_inbox WHERE id = ANY($1::uuid[])`,
+      [[stillFailed, reconciled]]
+    );
+    const byId = Object.fromEntries(rows.map((r) => [r.id, r]));
+    expect(byId[stillFailed].dead_letter_alerted_at).not.toBeNull(); // genuine dead-letter → stamped
+    expect(byId[reconciled].status).toBe("succeeded");
+    expect(byId[reconciled].dead_letter_alerted_at).toBeNull(); // reconciled row NOT stamped
   });
 
   it("skips cleanly (no throw, no send) when the inbox table is absent (migration 0188 not applied)", async () => {
