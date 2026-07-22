@@ -166,6 +166,55 @@ export function isScorecardV2CriticalDeficiencyKey(key: string): key is Scorecar
   return FIELD_SCORECARD_V2_CRITICAL_DEFICIENCIES.some((deficiency) => deficiency.key === key);
 }
 
+const V2_DEFICIENCY_LABEL_BY_KEY: Record<string, string> = Object.fromEntries(
+  FIELD_SCORECARD_V2_CRITICAL_DEFICIENCIES.map((deficiency) => [deficiency.key, deficiency.label]),
+);
+
+/** Human label for a critical-deficiency key; falls back to the raw key for unknown keys. */
+export function scorecardV2CriticalDeficiencyLabel(key: string): string {
+  return V2_DEFICIENCY_LABEL_BY_KEY[key] ?? key;
+}
+
+// ── Corrective-action helpers ───────────────────────────────────────────────────
+// When a scorecard trips the corrective-action band, one tracked item is seeded per flagged issue
+// (each non-empty action item and each critical deficiency). These pure helpers drive that seeding
+// (see server/src/modules/field/scorecards-service.ts) and the closure logic.
+
+/** True iff the rating is the "Corrective Action Required" band. */
+export function isCorrectiveActionBand(rating: ScorecardRating): boolean {
+  return rating === "corrective_action";
+}
+
+export interface FlaggedItem {
+  itemType: "action_item" | "critical_deficiency";
+  itemRef: string;
+  itemLabel: string;
+}
+
+/**
+ * Enumerate the flagged items on a below-band scorecard: one per non-empty action item (ref = its
+ * index) and one per critical deficiency (ref = the deficiency key). Labels are captured at seed time.
+ */
+export function enumerateFlaggedItems(input: {
+  actionItems: string[];
+  criticalDeficiencies: string[];
+}): FlaggedItem[] {
+  const items: FlaggedItem[] = [];
+  input.actionItems.forEach((text, i) => {
+    if (text.trim()) {
+      items.push({ itemType: "action_item", itemRef: String(i), itemLabel: text });
+    }
+  });
+  for (const key of input.criticalDeficiencies) {
+    items.push({
+      itemType: "critical_deficiency",
+      itemRef: key,
+      itemLabel: scorecardV2CriticalDeficiencyLabel(key),
+    });
+  }
+  return items;
+}
+
 export function computeScorecardV2Average(items: readonly { sectionKey: ScorecardV2SectionKey; points: number }[]): number {
   return Math.round((items.reduce((sum, item) => sum + item.points, 0) / FIELD_SCORECARD_V2_SECTIONS.length) * 10) / 10;
 }
