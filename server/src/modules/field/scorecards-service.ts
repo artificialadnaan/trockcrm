@@ -10,6 +10,7 @@ import {
   fieldScorecardPhotos,
   files,
   jobQueue,
+  scorecardCorrectiveActions,
 } from "@trock-crm/shared/schema";
 import { generateDownloadUrl, headObjectStrict, putObject } from "../../lib/r2-client.js";
 import { buildScorecardPdfData, renderFieldScorecardPdf, MAX_EVIDENCE_PHOTOS } from "./scorecard-pdf.js";
@@ -31,6 +32,8 @@ import {
   computeScorecardLeadershipAverage,
   computeScorecardTotal,
   computeScorecardV2Average,
+  enumerateFlaggedItems,
+  isCorrectiveActionBand,
   isLeadershipSectionKey,
   isLegalSectionPoints,
   isScorecardCriticalDeficiencyKey,
@@ -312,6 +315,31 @@ export async function createFieldScorecard(
     await tenantDb
       .insert(fieldScorecardPhotos)
       .values(photoLinks.map((p) => ({ scorecardId: card.id, sectionKey: p.sectionKey, deficiencyKey: p.deficiencyKey ?? null, fileId: p.fileId })));
+  }
+
+  // Corrective-action follow-up: when the card trips the corrective-action band, open the stage and seed
+  // one tracked item per flagged issue (each action item + each critical deficiency). Runs in this same
+  // transaction (the caller wraps createFieldScorecard in runInOfficeTransaction), so the status walk and
+  // seeded items commit atomically with the card. Only open the stage when there is at least one flagged
+  // item to correct — a below-band card with no action items and no deficiencies has nothing to walk, so it
+  // stays `submitted` (see spec §4.2: items drive the stage).
+  if (isCorrectiveActionBand(rating)) {
+    const flagged = enumerateFlaggedItems({ actionItems, criticalDeficiencies: deficiencies });
+    if (flagged.length > 0) {
+      await tenantDb
+        .update(fieldScorecards)
+        .set({ status: "corrective_action_open", updatedAt: new Date() })
+        .where(eq(fieldScorecards.id, card.id));
+      await tenantDb.insert(scorecardCorrectiveActions).values(
+        flagged.map((f) => ({
+          scorecardId: card.id,
+          itemType: f.itemType,
+          itemRef: f.itemRef,
+          itemLabel: f.itemLabel,
+          status: "open" as const,
+        })),
+      );
+    }
   }
 
   // Durable outbox: enqueue the email job IN THIS TRANSACTION so it commits atomically with the scorecard.

@@ -46,7 +46,9 @@ export const fieldScorecards = pgTable(
     /** V2 supplemental description keyed by critical-deficiency key. */
     criticalDeficiencyNotes: jsonb("critical_deficiency_notes").$type<Record<string, string>>().default({}).notNull(),
     actionItems: text("action_items").array().default([]).notNull(),
-    status: varchar("status", { length: 20 }).default("submitted").notNull(),
+    // varchar(30) (migration 0190) fits the corrective-action stage values: 'corrective_action_open' (22),
+    // 'corrective_action_closed' (24). Legacy value is 'submitted'.
+    status: varchar("status", { length: 30 }).default("submitted").notNull(),
     submittedBy: uuid("submitted_by").notNull(),
     submittedByName: text("submitted_by_name"),
     submittedAt: timestamp("submitted_at", { withTimezone: true }).defaultNow().notNull(),
