@@ -522,6 +522,12 @@ export interface FieldScorecardSummary {
   hasPdf: boolean;
   officeSlug?: string;
   officeId?: string;
+  /**
+   * Lifecycle status of a submitted card: `submitted` (normal), `corrective_action_open` (below-band, a
+   * response is required), or `corrective_action_closed` (all items resolved). Optional so older API
+   * deployments that don't emit it don't break consumers; a missing value means `submitted`.
+   */
+  status?: string;
 }
 export interface FieldScorecardPhotoView {
   id: string;

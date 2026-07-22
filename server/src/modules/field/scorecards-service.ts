@@ -1523,6 +1523,9 @@ function toSummary(
     // PDF is rendered/uploaded post-response (best-effort/async) — null right after submit until the
     // artifact lands. Surface availability so downstream (mobile + CRM) can gate the download action.
     hasPdf: Boolean(row.pdfR2Key ?? row.pdfGeneratedAt),
+    // Lifecycle status (submitted / corrective_action_open / corrective_action_closed) so the field
+    // Scorecards list can surface a "Corrective action required" affordance without a second fetch.
+    status: row.status ?? "submitted",
   };
 }
 

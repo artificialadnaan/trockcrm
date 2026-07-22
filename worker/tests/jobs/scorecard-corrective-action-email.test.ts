@@ -99,7 +99,7 @@ describe("scorecard corrective-action notification email", () => {
     const pmCall = sendEmail.mock.calls.find((c) => c[0] === "dana.cole@example.com")!;
     const superText = superCall[3].text as string;
     const pmText = pmCall[3].text as string;
-    expect(superText).toContain(`trockcrm://scorecard/${SCORECARD}/corrective-action`);
+    expect(superText).toContain(`trockcam://scorecards/corrective-action/${SCORECARD}`);
     expect(pmText).toContain(`https://trockcrm.com/scorecards/${SCORECARD}/corrective-action?token=`);
 
     // Flagged items appear in the body.

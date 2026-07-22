@@ -200,8 +200,11 @@ export async function handleScorecardCorrectiveActionEmail(
   for (const recipient of recipients) {
     let link: string;
     if (recipient.userId) {
-      // CRM user → TRock Cam deep link (they respond in-app).
-      link = `trockcrm://scorecard/${encodeURIComponent(scorecardId)}/corrective-action`;
+      // CRM user → TRock Cam deep link (they respond in-app). The scheme + path must match the app exactly:
+      // the Expo config `scheme` is `trockcam` (app.config.ts) and the expo-router file route is
+      // app/(app)/scorecards/corrective-action/[id].tsx, so the deep link is
+      // trockcam://scorecards/corrective-action/<id> (the `(app)` group is transparent in the URL).
+      link = `trockcam://scorecards/corrective-action/${encodeURIComponent(scorecardId)}`;
     } else {
       // Email-only → mint a recipient-bound web token and append it to the responder URL.
       const rawToken = crypto.randomBytes(32).toString("base64url");

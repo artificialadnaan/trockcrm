@@ -339,11 +339,13 @@ export default function ProjectDetailScreen() {
               const scoreText = isLeadership
                 ? `${(s.averageScore ?? s.totalScore / 10).toFixed(1)}/10`
                 : `${s.totalScore}/100`;
+              const correctiveOpen = s.status === "corrective_action_open";
+              const correctiveClosed = s.status === "corrective_action_closed";
               return (
                 <Pressable
                   key={s.id}
                   accessibilityRole="button"
-                  accessibilityLabel={`${isLeadership ? "Leadership scorecard" : "Scorecard"}, week of ${formatShortDate(s.weekOf)}, ${scoreText}, ${s.ratingLabel}`}
+                  accessibilityLabel={`${isLeadership ? "Leadership scorecard" : "Scorecard"}, week of ${formatShortDate(s.weekOf)}, ${scoreText}, ${s.ratingLabel}${correctiveOpen ? ", corrective action required" : correctiveClosed ? ", corrective action resolved" : ""}`}
                   onPress={() => router.push({ pathname: "/(app)/scorecards/view/[id]", params: { id: s.id } })}
                   style={({ pressed }) => [styles.reportRow, pressed && { opacity: 0.7 }]}
                 >
@@ -356,6 +358,26 @@ export default function ProjectDetailScreen() {
                         : ""}
                     </Text>
                     <RatingBadge rating={s.rating} label={`${scoreText} · ${s.ratingLabel}`} />
+                    {/* Corrective-action affordance: an OPEN card gets a tappable prompt that opens the
+                        itemized response flow; a CLOSED card shows a static "Resolved" badge. Stops row-press
+                        propagation so the button routes to the response screen, not the detail view. */}
+                    {correctiveOpen ? (
+                      <Pressable
+                        accessibilityRole="button"
+                        accessibilityLabel="Document the corrective action"
+                        onPress={() => router.push({ pathname: "/(app)/scorecards/corrective-action/[id]", params: { id: s.id } })}
+                        style={({ pressed }) => [styles.correctivePrompt, pressed && { opacity: 0.75 }]}
+                      >
+                        <Ionicons name="alert-circle" size={16} color={theme.color.brandRed} />
+                        <Text style={styles.correctivePromptText}>Corrective action required</Text>
+                        <Text style={styles.correctiveChevron}>›</Text>
+                      </Pressable>
+                    ) : correctiveClosed ? (
+                      <View style={styles.correctiveResolved}>
+                        <Ionicons name="checkmark-circle" size={14} color="#166534" />
+                        <Text style={styles.correctiveResolvedText}>Resolved</Text>
+                      </View>
+                    ) : null}
                   </View>
                 </Pressable>
               );
@@ -416,4 +438,27 @@ const styles = StyleSheet.create({
     padding: theme.space.md,
   },
   reportTitle: { flex: 1, fontFamily: theme.font.medium, fontSize: 14, color: theme.color.textPrimary },
+  correctivePrompt: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.space.xs,
+    marginTop: theme.space.xs,
+    paddingVertical: theme.space.xs,
+    paddingHorizontal: theme.space.sm,
+    borderRadius: theme.radius.sm,
+    borderWidth: 1,
+    borderColor: theme.color.brandRed,
+    backgroundColor: "#FEF2F2",
+    alignSelf: "flex-start",
+  },
+  correctivePromptText: { fontFamily: theme.font.semibold, fontSize: 13, color: theme.color.brandRed },
+  correctiveChevron: { fontSize: 16, color: theme.color.brandRed, marginLeft: 2 },
+  correctiveResolved: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    marginTop: theme.space.xs,
+    alignSelf: "flex-start",
+  },
+  correctiveResolvedText: { fontFamily: theme.font.medium, fontSize: 12, color: "#166534" },
 });
