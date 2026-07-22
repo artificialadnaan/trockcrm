@@ -17,6 +17,7 @@ import {
   fieldScorecardPhotos,
   fieldScorecards,
   scorecardCorrectiveActions,
+  scorecardCorrectiveActionTokens,
 } from "@trock-crm/shared/schema";
 import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
 
@@ -165,6 +166,7 @@ beforeAll(async () => {
       fieldScorecardPhotos,
       fieldScorecardEditUploads,
       scorecardCorrectiveActions,
+      scorecardCorrectiveActionTokens,
       dealTeamMembers,
       contacts,
     ]),
@@ -189,6 +191,7 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
+  await tdb.execute(sql`DELETE FROM scorecard_corrective_action_tokens`);
   await tdb.execute(sql`DELETE FROM scorecard_corrective_actions`);
   await tdb.execute(sql`DELETE FROM field_scorecard_edit_uploads`);
   await tdb.execute(sql`DELETE FROM field_scorecard_photos`);
@@ -400,5 +403,115 @@ describe("updateFieldScorecard corrective-action reconcile", () => {
     expect(await getStatus(scorecard.id)).toBe("corrective_action_open");
     // No second notification — the card was already open.
     expect(await correctiveJobCount()).toBe(1);
+  });
+
+  it("preserves duplicate action-item MULTIPLICITY: two identical-label flags yield two open items (finding 3)", async () => {
+    // A single flag; then an edit adds a SECOND action item with the IDENTICAL label. Multiset (label +
+    // cardinality) matching must insert a second tracked row rather than collapsing both onto one — otherwise
+    // resolving the one row could close the card while the duplicate flag has no response.
+    const { scorecard } = await createFieldScorecard(
+      tdb,
+      createInput({ items: v2Items(5), actionItems: ["Re-inspect slab 2"] }),
+    );
+    expect(await getItems(scorecard.id)).toHaveLength(1);
+
+    const at = await currentUpdatedAt(scorecard.id);
+    await updateFieldScorecard(
+      tdb,
+      updateInput(scorecard.id, at, {
+        items: v2Items(5),
+        actionItems: ["Re-inspect slab 2", "Re-inspect slab 2"], // duplicate label
+      }),
+    );
+    const after = await getItems(scorecard.id);
+    expect(after).toHaveLength(2);
+    expect(after.every((i) => i.item_type === "action_item")).toBe(true);
+    expect(after.every((i) => i.item_label === "Re-inspect slab 2")).toBe(true);
+    expect(after.filter((i) => i.status === "open")).toHaveLength(2);
+    // Distinct rows (distinct item_refs → distinct ids), so each duplicate flag is independently trackable.
+    expect(new Set(after.map((i) => i.item_ref)).size).toBe(2);
+    expect(await getStatus(scorecard.id)).toBe("corrective_action_open");
+
+    // Resolving ONE duplicate leaves the card open (the second identical flag still needs a response).
+    await resolveCorrectiveActionItem(tdb, {
+      scorecardId: scorecard.id,
+      itemId: after[0].id,
+      responseComment: "first re-inspection done",
+      respondedBy: { userId: OWNER, name: "Sam", email: null },
+    });
+    expect(await getStatus(scorecard.id)).toBe("corrective_action_open");
+    const stillOpen = (await getItems(scorecard.id)).filter((i) => i.status === "open");
+    expect(stillOpen).toHaveLength(1);
+  });
+
+  it("trimming a duplicate action item deletes an OPEN copy but preserves the RESOLVED one (finding 3)", async () => {
+    // Two identical-label flags, one resolved. An edit dropping to a SINGLE copy of that label must keep the
+    // resolved row (history) and delete the still-open duplicate — not the other way round.
+    const { scorecard } = await createFieldScorecard(
+      tdb,
+      createInput({ items: v2Items(5), actionItems: ["Verify hold points", "Verify hold points"] }),
+    );
+    const both = await getItems(scorecard.id);
+    expect(both).toHaveLength(2);
+    await resolveCorrectiveActionItem(tdb, {
+      scorecardId: scorecard.id,
+      itemId: both[0].id,
+      responseComment: "verified",
+      respondedBy: { userId: OWNER, name: "Sam", email: null },
+    });
+
+    const at = await currentUpdatedAt(scorecard.id);
+    await updateFieldScorecard(
+      tdb,
+      updateInput(scorecard.id, at, { items: v2Items(5), actionItems: ["Verify hold points"] }),
+    );
+    const after = await getItems(scorecard.id);
+    expect(after).toHaveLength(1);
+    expect(after[0].id).toBe(both[0].id); // the RESOLVED row survived
+    expect(after[0].status).toBe("resolved");
+    // The lone surviving item is resolved history → the card auto-closes.
+    expect(await getStatus(scorecard.id)).toBe("corrective_action_closed");
+  });
+
+  it("a REOPEN deletes prior-cycle responder tokens so the worker re-mints a fresh link (finding 6)", async () => {
+    // Open with a flag, mint a prior-cycle web token, resolve → close. Editing to add a NEW flag re-opens the
+    // card; the reconcile must delete the stale token so the worker's per-recipient reuse-skip can't strand the
+    // email-only recipient on a link from the closed cycle.
+    const { scorecard } = await createFieldScorecard(
+      tdb,
+      createInput({ items: v2Items(5), actionItems: ["Only flag"] }),
+    );
+    const [only] = await getItems(scorecard.id);
+    // A prior-cycle token for the email-only PM.
+    await tdb.insert(scorecardCorrectiveActionTokens).values({
+      scorecardId: scorecard.id,
+      tokenHash: "prior-cycle-hash",
+      recipientEmail: "pm@example.com",
+      role: "project_manager",
+      expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+    });
+    await resolveCorrectiveActionItem(tdb, {
+      scorecardId: scorecard.id,
+      itemId: only.id,
+      responseComment: "fixed",
+      respondedBy: { userId: OWNER, name: "Sam", email: null },
+    });
+    expect(await getStatus(scorecard.id)).toBe("corrective_action_closed");
+    const tokensBefore = await tdb.execute(
+      sql`SELECT COUNT(*)::int AS c FROM scorecard_corrective_action_tokens WHERE scorecard_id = ${scorecard.id}`,
+    );
+    expect((tokensBefore.rows[0] as { c: number }).c).toBe(1);
+
+    // Edit adds a fresh flag → re-open → the reconcile deletes the prior-cycle token.
+    const at = await currentUpdatedAt(scorecard.id);
+    await updateFieldScorecard(
+      tdb,
+      updateInput(scorecard.id, at, { items: v2Items(5), actionItems: ["Only flag", "Brand new flag"] }),
+    );
+    expect(await getStatus(scorecard.id)).toBe("corrective_action_open");
+    const tokensAfter = await tdb.execute(
+      sql`SELECT COUNT(*)::int AS c FROM scorecard_corrective_action_tokens WHERE scorecard_id = ${scorecard.id}`,
+    );
+    expect((tokensAfter.rows[0] as { c: number }).c).toBe(0);
   });
 });

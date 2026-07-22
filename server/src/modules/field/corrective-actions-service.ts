@@ -1,7 +1,12 @@
 import { and, eq, inArray } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
-import { fieldScorecards, jobQueue, scorecardCorrectiveActions } from "@trock-crm/shared/schema";
+import {
+  fieldScorecards,
+  jobQueue,
+  scorecardCorrectiveActions,
+  scorecardCorrectiveActionTokens,
+} from "@trock-crm/shared/schema";
 import {
   enumerateFlaggedItems,
   isCorrectiveActionBand,
@@ -199,36 +204,79 @@ export async function reconcileScorecardCorrectiveActions(
     return;
   }
 
-  // Match each freshly-flagged item to an existing row by its STABLE key: deficiency → item_ref (the key),
-  // action item → item_label (the text). A flagged item with no match is newly-flagged → insert as open.
-  // A tracked OPEN item that is no longer flagged is stale → delete (else it blocks closure).
-  const matchKey = (type: FlaggedItem["itemType"], ref: string, label: string) =>
-    type === "critical_deficiency" ? `d:${ref}` : `a:${label}`;
-  const existingByKey = new Map(
-    existing.map((row) => [matchKey(row.itemType as FlaggedItem["itemType"], row.itemRef, row.itemLabel), row]),
-  );
-  const flaggedKeys = new Set(flagged.map((f) => matchKey(f.itemType, f.itemRef, f.itemLabel)));
+  // Match freshly-flagged items to existing rows by their STABLE key, then reconcile: unmatched flags →
+  // insert as open; tracked OPEN rows with no matching flag → delete (else they block closure). Resolved rows
+  // are always preserved as history.
+  //
+  // Deficiencies match by their KEY (item_ref) — a deficiency key is unique per card, so a plain key match
+  // is correct. Action items match by LABEL AND CARDINALITY (a MULTISET): two action items with identical
+  // text are TWO distinct flags and must yield TWO tracked rows. A plain by-label match would collapse both
+  // onto one existing row, so the second flag would never be inserted — then resolving the single row could
+  // close the card while a duplicate flag has no response. So for each label we match up to
+  // min(existingCount, flaggedCount) rows (those stay as-is), insert the surplus flags, and delete surplus
+  // OPEN rows (preferring to keep resolved rows as history when trimming duplicates).
+  const toInsert: FlaggedItem[] = [];
+  const staleOpenIds: string[] = [];
 
+  // ── Deficiencies: unique-key match. ──────────────────────────────────────────
+  const existingDeficiencyByRef = new Map(
+    existing.filter((row) => row.itemType === "critical_deficiency").map((row) => [row.itemRef, row]),
+  );
+  const flaggedDeficiencyRefs = new Set(
+    flagged.filter((f) => f.itemType === "critical_deficiency").map((f) => f.itemRef),
+  );
+  for (const f of flagged) {
+    if (f.itemType !== "critical_deficiency") continue;
+    if (!existingDeficiencyByRef.has(f.itemRef)) toInsert.push(f);
+  }
+  for (const row of existing) {
+    if (row.itemType !== "critical_deficiency" || row.status !== "open") continue;
+    if (!flaggedDeficiencyRefs.has(row.itemRef)) staleOpenIds.push(row.id);
+  }
+
+  // ── Action items: multiset (label + cardinality) match. ──────────────────────
   // A fresh action-item item_ref that never collides with an existing action_item row (the uniqueness key is
-  // (scorecard_id, item_type, item_ref)). Deficiencies keep their key as item_ref (already stable + unique).
+  // (scorecard_id, item_type, item_ref)). Grows monotonically as inserts are minted below.
   let nextActionRef =
     existing
       .filter((row) => row.itemType === "action_item")
       .reduce((max, row) => Math.max(max, Number.parseInt(row.itemRef, 10) || 0), -1) + 1;
-
-  const toInsert: FlaggedItem[] = [];
-  for (const f of flagged) {
-    if (existingByKey.has(matchKey(f.itemType, f.itemRef, f.itemLabel))) continue;
-    toInsert.push(
-      f.itemType === "critical_deficiency"
-        ? f
-        : { ...f, itemRef: String(nextActionRef++) },
-    );
+  // Group existing action rows by label — resolved rows FIRST so, when trimming a surplus, we keep resolved
+  // history and delete the open duplicates.
+  const existingActionByLabel = new Map<string, typeof existing>();
+  for (const row of existing) {
+    if (row.itemType !== "action_item") continue;
+    const bucket = existingActionByLabel.get(row.itemLabel) ?? [];
+    bucket.push(row);
+    existingActionByLabel.set(row.itemLabel, bucket);
   }
-  const staleOpenIds = existing
-    .filter((row) => row.status === "open")
-    .filter((row) => !flaggedKeys.has(matchKey(row.itemType as FlaggedItem["itemType"], row.itemRef, row.itemLabel)))
-    .map((row) => row.id);
+  for (const bucket of existingActionByLabel.values()) {
+    bucket.sort((a, b) => (a.status === "resolved" ? 0 : 1) - (b.status === "resolved" ? 0 : 1));
+  }
+  const flaggedActionCountByLabel = new Map<string, number>();
+  for (const f of flagged) {
+    if (f.itemType !== "action_item") continue;
+    flaggedActionCountByLabel.set(f.itemLabel, (flaggedActionCountByLabel.get(f.itemLabel) ?? 0) + 1);
+  }
+  // Insert the surplus flags per label (flaggedCount - existingCount, when positive).
+  for (const [label, flaggedCount] of flaggedActionCountByLabel) {
+    const existingCount = existingActionByLabel.get(label)?.length ?? 0;
+    for (let i = existingCount; i < flaggedCount; i++) {
+      toInsert.push({ itemType: "action_item", itemRef: String(nextActionRef++), itemLabel: label });
+    }
+  }
+  // Delete surplus OPEN existing rows per label (existingCount - flaggedCount, when positive). The bucket is
+  // resolved-first, so we walk from the END (open rows) to trim, never touching resolved history.
+  for (const [label, bucket] of existingActionByLabel) {
+    const flaggedCount = flaggedActionCountByLabel.get(label) ?? 0;
+    let surplus = bucket.length - flaggedCount;
+    for (let i = bucket.length - 1; i >= 0 && surplus > 0; i--) {
+      if (bucket[i].status === "open") {
+        staleOpenIds.push(bucket[i].id);
+        surplus--;
+      }
+    }
+  }
 
   if (staleOpenIds.length > 0) {
     await tx.delete(scorecardCorrectiveActions).where(inArray(scorecardCorrectiveActions.id, staleOpenIds));
@@ -275,6 +323,15 @@ export async function reconcileScorecardCorrectiveActions(
       .update(fieldScorecards)
       .set({ correctiveActionEmailSentAt: null })
       .where(eq(fieldScorecards.id, input.scorecardId));
+    // A REOPEN starts a NEW notification cycle, so prior-cycle web tokens must not survive it. The worker's
+    // per-recipient reuse-skip treats a surviving unexpired token as "already delivered THIS cycle" and skips
+    // re-sending — which, across a reopen, would silently strand the email-only recipient on the old cycle's
+    // link while the job stamps the new cycle as sent. Deleting the outstanding tokens on the transition keeps
+    // that invariant true (a surviving token ⟺ a same-cycle delivery), so the worker re-mints + re-sends a
+    // fresh link on the reopen. A fresh submit has no tokens to delete, so this is a no-op there.
+    await tx
+      .delete(scorecardCorrectiveActionTokens)
+      .where(eq(scorecardCorrectiveActionTokens.scorecardId, input.scorecardId));
     await tx.insert(jobQueue).values({
       jobType: SCORECARD_CORRECTIVE_ACTION_EMAIL_JOB,
       payload: {
