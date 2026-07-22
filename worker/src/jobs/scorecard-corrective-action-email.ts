@@ -64,10 +64,14 @@ function hashToken(rawToken: string): string {
  *   - an email-only member gets a freshly-minted recipient-bound web token appended to the responder URL.
  *
  * Idempotent per scorecard via field_scorecards.corrective_action_email_sent_at (mirrors email_sent_at):
- * checked before sending, stamped once ONLY when every ASSIGNED super/PM role was delivered this run (an
- * assigned-but-unresolvable role — inactive identity or missing/invalid email — leaves the stamp NULL so a
- * later requeue still notifies it; finding 4). Plus the Resend idempotencyKey is per (scorecard, recipient),
- * so a re-delivery in the crash window (sent, not yet stamped) doesn't double-email a recipient. Email-only
+ * checked before sending, stamped once ONLY when every ASSIGNED super/PM role was delivered this run. An
+ * assigned-but-unresolvable role — inactive identity or missing/invalid email — instead THROWS so the queue
+ * retries (a normal return would COMPLETE the job and strand the un-notified role forever; finding 4). The
+ * Resend idempotencyKey is scoped to the corrective-action CYCLE — for an email-only recipient it carries the
+ * freshly-minted token hash (a reopen mints a fresh token → new key, so the new link is actually sent, not
+ * false-deduped by Resend as a same-key/different-payload `invalid_idempotent_request`), and for a CRM user
+ * (no token) it is per (scorecard, recipient) since their deep link is cycle-stable — so a re-delivery in the
+ * crash window (sent, not yet stamped) or a throw-triggered retry doesn't double-email a recipient. Email-only
  * tokens carry a delivered_at set only AFTER a successful send, so a retry reuses a DELIVERED token but
  * (re)sends an undelivered one — delivery is never inferred from mere token existence (finding 5).
  */
@@ -233,9 +237,9 @@ export async function handleScorecardCorrectiveActionEmail(
 
   // NOTE: we deliberately do NOT blanket-delete this scorecard's outstanding tokens up front. On a retry
   // after a PARTIAL delivery (recipient A sent, B failed before the scorecard-level stamp), a blanket delete
-  // would drop A's ALREADY-DELIVERED token and mint a new one — but A's re-send is suppressed by the
-  // per-recipient Resend idempotency key, so A never receives the new link and is stranded on the deleted
-  // one. Instead, token rotation is per-recipient inside the loop: a recipient who already holds an
+  // would drop A's ALREADY-DELIVERED token — and A can't be re-sent (we can't reconstruct A's raw token to
+  // rebuild the link), so A would be stranded on the deleted one. Instead, token rotation is per-recipient
+  // inside the loop: a recipient who already holds an
   // unexpired/unconsumed AND DELIVERED token was emailed on a prior attempt, so we reuse it (skip re-mint +
   // re-send); a recipient whose send fails has their just-minted token deleted before we rethrow, so the retry
   // re-mints and re-sends them a fresh, working link. Only the OFFICE tenant schema is interpolated (regex-
@@ -257,8 +261,8 @@ export async function handleScorecardCorrectiveActionEmail(
       // so a crash in that window (or a send failure whose cleanup delete didn't land) leaves an undelivered
       // token; skipping on mere existence would strand the recipient with a link they never got while the
       // scorecard is stamped sent. A delivered token means they were emailed on a prior attempt — we can't
-      // reconstruct the raw token to re-send, and the per-recipient Resend idempotency key would suppress a
-      // re-send anyway — so reuse it (skip re-mint + re-send), leaving their working link intact.
+      // reconstruct the raw token to re-send them anyway — so reuse it (skip re-mint + re-send, never rebuilding
+      // the idempotency key for them), leaving their working link intact.
       const existing = await query(
         `SELECT 1 FROM ${tenantSchema}.scorecard_corrective_action_tokens
           WHERE scorecard_id = $1::uuid AND LOWER(recipient_email) = LOWER($2)
@@ -299,11 +303,28 @@ export async function handleScorecardCorrectiveActionEmail(
       link,
     });
 
+    // The Resend idempotency key must be UNIQUE PER CORRECTIVE-ACTION CYCLE, not just per (scorecard,
+    // recipient). A REOPEN deletes the prior cycle's tokens + re-enqueues a fresh job that mints a NEW token
+    // (new payload/link). If the key were cycle-stable, Resend would see the same key with a DIFFERENT payload
+    // and return `invalid_idempotent_request` — which sendSystemEmailWithMetadata treats as an already-
+    // delivered success — so the worker would stamp delivered_at / the scorecard while the email-only
+    // responder only holds the now-deleted old link: permanently stranded. Scoping the key to the freshly-
+    // minted token hash makes it differ every cycle (each cycle mints a random token → new hash), so the new
+    // payload is actually sent; WITHIN a cycle a retry reuses the same undelivered token (or, after a failed
+    // send, its replacement) and a genuine crash-window duplicate of a DELIVERED token is skipped before we
+    // reach here — so the only time this key is (re)built is at a real mint+send, where cycle-scoping is
+    // exactly right. CRM users mint no token (mintedTokenHash === null): their deep link is stable and a
+    // suppressed duplicate is never a strand (the app link is always valid), so the (scorecard, recipient)
+    // key correctly dedups their within-cycle retries.
+    const idempotencyKey = mintedTokenHash
+      ? `corrective-action-${tenantSchema}-${scorecardId}-token-${mintedTokenHash}`
+      : `corrective-action-${tenantSchema}-${scorecardId}-${recipient.email.toLowerCase()}`;
+
     let result: SendSystemEmailResult;
     try {
       result = await sendEmail(recipient.email, email.subject, email.html, {
         text: email.text,
-        idempotencyKey: `corrective-action-${tenantSchema}-${scorecardId}-${recipient.email.toLowerCase()}`,
+        idempotencyKey,
       });
       if (!result.success) throw new Error("Email provider returned unsuccessful result");
     } catch (err) {
@@ -335,19 +356,29 @@ export async function handleScorecardCorrectiveActionEmail(
     });
   }
 
-  // Scorecard-level idempotency stamp (mirrors email_sent_at). Written ONLY when every resolved recipient was
-  // delivered (we reached here without throwing) AND every ASSIGNED super/PM role resolved this run. If an
-  // assigned role is currently unresolvable — the super has an email but the PM role is unassigned-at-this-
-  // -instant is fine, but a PM that IS assigned yet has an inactive identity or missing/invalid email is NOT —
-  // we leave the stamp NULL so a later requeue (after that role's email/identity is fixed) still notifies the
-  // stranded role. Already-delivered recipients are then skipped via their DELIVERED token (email-only) or a
-  // Resend-idempotency-suppressed re-send (CRM users), so no one is double-notified. (finding 4)
+  // An ASSIGNED super/PM role that did NOT resolve into a deliverable recipient this run (inactive identity, or
+  // missing/invalid email) means the delivery is INCOMPLETE: that responder was never notified. A plain
+  // `return` here would leave corrective_action_email_sent_at NULL but COMPLETE the job normally — and a
+  // completed queue row never re-runs, so the un-notified role would be stranded forever (nothing re-enqueues
+  // on a later identity/email fix). Instead THROW so the queue RETRIES with backoff (max_attempts = 6), giving
+  // the role time to be fixed; the final attempt dead-letters (a loud, inspectable give-up that #945's dead-
+  // letter sweep alerts on). We deliberately do NOT stamp, so a manual requeue after dead-lettering still
+  // notifies.
+  //
+  // The throw is SAFE against double-notifying a recipient that DID send this run. The handler runs each query
+  // via pool.query (NO wrapping transaction — see the worker queue: processJob calls the handler directly and
+  // only writes the job_queue outcome on the thrown error), so every delivered_at stamp already written this
+  // run is committed and SURVIVES the throw. On the retry: an email-only recipient with a DELIVERED token is
+  // reuse-skipped above (no re-mint, no re-send, key never rebuilt); a CRM user is re-sent but under the
+  // per-recipient, cycle-stable idempotency key, so Resend dedups the true duplicate. Nobody is emailed twice.
   if (unresolvedAssignedRoles.length > 0) {
     logger.warn(
-      "[CorrectiveActionEmail] An assigned super/PM role is unresolvable (inactive identity or missing/invalid email) - not stamping (re-runnable)",
+      "[CorrectiveActionEmail] An assigned super/PM role is unresolvable (inactive identity or missing/invalid email) - throwing to retry (not stamping)",
       { scorecardId, dealId, unresolvedAssignedRoles }
     );
-    return;
+    throw new Error(
+      `Assigned super/PM role(s) unresolvable on deal ${dealId} (${unresolvedAssignedRoles.join(", ")}) - retrying until identity/email is fixed`,
+    );
   }
   await query(
     `UPDATE ${tenantSchema}.field_scorecards

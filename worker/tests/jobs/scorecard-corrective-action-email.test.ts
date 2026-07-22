@@ -143,9 +143,39 @@ describe("scorecard corrective-action notification email", () => {
     expect(superCall[2]).toContain("Re-inspect slab 2");
     expect(superCall[2]).toContain("Missed hold point");
 
-    // Idempotency key is per (scorecard, recipient).
+    // Idempotency key is scoped to the corrective-action CYCLE. For the email-only PM it carries the freshly-
+    // minted token hash (so a reopen — which mints a fresh token — produces a DIFFERENT key, avoiding a Resend
+    // false-dedup that would strand them; see the two-cycle test below).
     expect(pmCall[3].idempotencyKey).toContain(SCORECARD);
-    expect(pmCall[3].idempotencyKey).toContain("dana.cole@example.com");
+    expect(pmCall[3].idempotencyKey).toBe(`corrective-action-office_dallas-${SCORECARD}-token-${inserts[0].params[1]}`);
+
+    // The CRM user (no token) keeps a (scorecard, recipient) key — their deep link is cycle-stable.
+    expect(superCall[3].idempotencyKey).toBe(`corrective-action-office_dallas-${SCORECARD}-sam.super@trock.com`);
+  });
+
+  it("uses a DIFFERENT idempotency key for the same email-only recipient across two corrective-action cycles (finding 1)", async () => {
+    // A reopen (open→resolve→close, then edit-reopen) deletes the prior cycle's tokens and mints a FRESH one.
+    // If the Resend idempotency key were cycle-stable (scorecard+email), Resend would see the same key with a
+    // different payload → invalid_idempotent_request → sendSystemEmailWithMetadata treats it as delivered → the
+    // worker stamps while the responder holds only the now-deleted old link (stranded). Scoping the key to the
+    // minted token hash makes it differ every cycle. Model each cycle as its own handler run (fresh stamp NULL,
+    // no surviving token) and assert the two email-only keys differ.
+    const emailOnlyPm = [{ role: "project_manager", name: "Dana Cole", email: "dana.cole@example.com", user_id: null }];
+
+    const cycle1 = makeQuery({ recipients: emailOnlyPm, assignedRoles: [{ role: "project_manager" }], existingTokenEmails: [] });
+    const send1 = vi.fn().mockResolvedValue({ success: true, messageId: "m1" });
+    await handleScorecardCorrectiveActionEmail(payload, null, { query: cycle1.query as any, sendEmail: send1, env, logger: makeLogger() });
+
+    const cycle2 = makeQuery({ recipients: emailOnlyPm, assignedRoles: [{ role: "project_manager" }], existingTokenEmails: [] });
+    const send2 = vi.fn().mockResolvedValue({ success: true, messageId: "m2" });
+    await handleScorecardCorrectiveActionEmail(payload, null, { query: cycle2.query as any, sendEmail: send2, env, logger: makeLogger() });
+
+    const key1 = send1.mock.calls[0][3].idempotencyKey as string;
+    const key2 = send2.mock.calls[0][3].idempotencyKey as string;
+    // Both are cycle-scoped to their own minted token hash — and those hashes are random-unique per cycle.
+    expect(key1).toBe(`corrective-action-office_dallas-${SCORECARD}-token-${cycle1.inserts[0].params[1]}`);
+    expect(key2).toBe(`corrective-action-office_dallas-${SCORECARD}-token-${cycle2.inserts[0].params[1]}`);
+    expect(key1).not.toBe(key2);
   });
 
   it("is idempotent: skips entirely when the scorecard was already notified", async () => {
@@ -159,22 +189,29 @@ describe("scorecard corrective-action notification email", () => {
     expect(inserts).toHaveLength(0);
   });
 
-  it("skips a recipient with no email, sends to the rest, and does NOT stamp (re-runnable)", async () => {
+  it("sends to the resolvable recipient but THROWS when an assigned recipient has no email (finding 4)", async () => {
+    // The PM role IS assigned but has a blank email, so it never resolves into a deliverable recipient. The
+    // super is delivered, but the assigned PM was NOT — the handler THROWS so the queue retries (a plain return
+    // would COMPLETE the row and strand the PM forever) and does NOT stamp.
     const { query } = makeQuery({
       recipients: [
         { role: "superintendent", name: "Sam Super", email: "sam.super@trock.com", user_id: "u-1" },
         { role: "project_manager", name: "No Email", email: "   ", user_id: null },
       ],
+      // Both roles are assigned; only the super resolves (the PM's email is blank).
+      assignedRoles: [{ role: "superintendent" }, { role: "project_manager" }],
     });
     const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "m" });
     const logger = makeLogger();
 
-    await handleScorecardCorrectiveActionEmail(payload, null, { query: query as any, sendEmail, env, logger });
+    await expect(
+      handleScorecardCorrectiveActionEmail(payload, null, { query: query as any, sendEmail, env, logger }),
+    ).rejects.toThrow(/unresolvable/i);
+
+    // The resolvable super was still delivered before the throw.
     expect(sendEmail).toHaveBeenCalledTimes(1);
     expect(sendEmail.mock.calls[0][0]).toBe("sam.super@trock.com");
-
-    // A super/PM was skipped for a missing email, so the scorecard-level stamp is NOT written — a later
-    // requeue (after the PM's email is fixed) can still notify them (per-recipient delivery, finding 8).
+    // Not stamped — a later requeue (after the PM's email is fixed) can still notify them.
     const stampCalls = query.mock.calls.filter(([text]) => /UPDATE .*field_scorecards/i.test(text as string));
     expect(stampCalls).toHaveLength(0);
   });
@@ -196,11 +233,13 @@ describe("scorecard corrective-action notification email", () => {
     expect(stampCalls).toHaveLength(1);
   });
 
-  it("does NOT stamp when a role is ASSIGNED but currently UNRESOLVABLE (finding 4: partial-role incompleteness)", async () => {
+  it("THROWS (does not complete-as-success) when a role is ASSIGNED but currently UNRESOLVABLE (finding 4)", async () => {
     // The PM role IS assigned (an active deal_team_members row) but its identity is unresolvable this run — e.g.
     // an inactive user/contact, so it never appears in the resolved-recipient set (which drops inactive
-    // identities). The super was delivered, but the assigned PM was NOT — delivery is INCOMPLETE, so the stamp
-    // must be withheld so a later requeue (once the PM's identity/email is fixed) still notifies them.
+    // identities). The super was delivered, but the assigned PM was NOT — delivery is INCOMPLETE. A plain return
+    // would COMPLETE the queue row (never re-runnable) and strand the un-notified PM forever, so the handler
+    // THROWS → the queue retries with backoff up to max_attempts, then dead-letters. It must NOT stamp, and the
+    // resolvable super must still have been delivered this run (the throw comes AFTER their send).
     const { query } = makeQuery({
       recipients: [{ role: "superintendent", name: "Sam Super", email: "sam.super@trock.com", user_id: "u-1" }],
       assignedRoles: [{ role: "superintendent" }, { role: "project_manager" }],
@@ -208,10 +247,39 @@ describe("scorecard corrective-action notification email", () => {
     const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "m" });
     const logger = makeLogger();
 
-    await handleScorecardCorrectiveActionEmail(payload, null, { query: query as any, sendEmail, env, logger });
+    await expect(
+      handleScorecardCorrectiveActionEmail(payload, null, { query: query as any, sendEmail, env, logger }),
+    ).rejects.toThrow(/unresolvable/i);
 
+    // The resolvable super WAS delivered before the throw (delivered_at stamps run via pool.query with no
+    // wrapping transaction, so they survive the throw).
     expect(sendEmail).toHaveBeenCalledTimes(1);
     expect(sendEmail.mock.calls[0][0]).toBe("sam.super@trock.com");
+    // Never stamped — a later requeue (once the PM's identity/email is fixed) still notifies the stranded PM.
+    const stampCalls = query.mock.calls.filter(([text]) => /UPDATE .*field_scorecards/i.test(text as string));
+    expect(stampCalls).toHaveLength(0);
+  });
+
+  it("on the retry after an unresolvable-role throw, an already-DELIVERED email-only recipient is NOT re-sent (finding 4)", async () => {
+    // Model the RETRY run: the super was delivered on the prior attempt (holds a DELIVERED token) and the PM is
+    // still assigned-but-unresolvable. The handler must NOT re-send the delivered super (reuse-skip on their
+    // DELIVERED token — no re-mint, no re-send, key never rebuilt) yet STILL throw because the PM is unresolved.
+    const { query, inserts, tokenDeletes } = makeQuery({
+      recipients: [{ role: "superintendent", name: "Ext Super", email: "ext.super@example.com", user_id: null }],
+      assignedRoles: [{ role: "superintendent" }, { role: "project_manager" }],
+      existingTokenEmails: ["ext.super@example.com"], // delivered on the prior attempt
+    });
+    const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "m" });
+    const logger = makeLogger();
+
+    await expect(
+      handleScorecardCorrectiveActionEmail(payload, null, { query: query as any, sendEmail, env, logger }),
+    ).rejects.toThrow(/unresolvable/i);
+
+    // The delivered super is reused (not re-sent, not re-minted, not deleted); still no stamp.
+    expect(sendEmail).not.toHaveBeenCalled();
+    expect(inserts).toHaveLength(0);
+    expect(tokenDeletes).toHaveLength(0);
     const stampCalls = query.mock.calls.filter(([text]) => /UPDATE .*field_scorecards/i.test(text as string));
     expect(stampCalls).toHaveLength(0);
   });
