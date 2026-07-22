@@ -9,8 +9,10 @@ type TenantDb = NodePgDatabase<typeof schema>;
 export interface AddTeamMemberInput {
   dealId: string;
   // Exactly ONE of userId / contactId identifies the member — a staff user (public.users) OR a directory
-  // contact (tenant contacts). The DB check constraint (deal_team_members_user_or_contact_check) enforces
-  // the same one-of at the storage layer; this service asserts it before the insert for a clean 400.
+  // contact (tenant contacts). The DB check constraint (deal_team_members_identity_check) enforces the same
+  // one-of at the storage layer (it additionally permits an email-only member — user_id + contact_id both
+  // NULL, member_email set — added for corrective-action recipients, which this user/contact path never
+  // creates); this service asserts the one-of before the insert for a clean 400.
   userId?: string | null;
   contactId?: string | null;
   role: string;
@@ -54,7 +56,7 @@ export async function addTeamMember(tenantDb: TenantDb, input: AddTeamMemberInpu
   if (!input.role) throw new AppError(400, "role is required");
   const hasUser = Boolean(input.userId);
   const hasContact = Boolean(input.contactId);
-  // Exactly one of the two identities — mirrors the deal_team_members_user_or_contact_check constraint.
+  // Exactly one of the two identities — mirrors the deal_team_members_identity_check constraint.
   if (hasUser === hasContact) {
     throw new AppError(400, "Provide exactly one of userId or contactId");
   }

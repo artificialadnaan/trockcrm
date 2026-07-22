@@ -58,6 +58,10 @@ export const fieldScorecards = pgTable(
     /** Renderer revision used for the stored PDF artifact. Version 1 covers legacy/unversioned PDFs. */
     pdfRenderVersion: smallint("pdf_render_version").default(1).notNull(),
     emailSentAt: timestamp("email_sent_at", { withTimezone: true }),
+    // Idempotency stamp for the below-band corrective-action notification (migration 0191). Mirrors
+    // email_sent_at: the scorecard_corrective_action_email worker handler stamps this once after sending to
+    // ALL recipients in one run, and skips if it's already set — so a job retry never re-notifies.
+    correctiveActionEmailSentAt: timestamp("corrective_action_email_sent_at", { withTimezone: true }),
     isActive: boolean("is_active").default(true).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
