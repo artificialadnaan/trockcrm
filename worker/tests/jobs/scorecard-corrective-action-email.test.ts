@@ -31,10 +31,25 @@ const FLAGGED = [
 ];
 
 // Build a query mock routing on the SQL text. `sentAt` seeds the idempotency column.
-function makeQuery(opts: { sentAt?: string | null; recipients?: any[]; flagged?: any[] } = {}) {
+// `existingTokenEmails` makes the per-recipient "does this recipient already hold a valid token?" existence
+// check return a row for those (lower-cased) emails — modelling a partial-delivery retry.
+function makeQuery(
+  opts: {
+    sentAt?: string | null;
+    recipients?: any[];
+    flagged?: any[];
+    existingTokenEmails?: string[];
+  } = {},
+) {
   const inserts: { sql: string; params: any[] }[] = [];
   const tokenDeletes: { sql: string; params: any[] }[] = [];
+  const existing = new Set((opts.existingTokenEmails ?? []).map((e) => e.toLowerCase()));
   const query = vi.fn(async (text: string, params: any[] = []) => {
+    // Per-recipient token existence check: SELECT 1 FROM ...tokens WHERE recipient_email = $2 ...
+    if (/SELECT 1 FROM \S*scorecard_corrective_action_tokens/i.test(text)) {
+      const email = String(params[1] ?? "").toLowerCase();
+      return { rows: existing.has(email) ? [{ "?column?": 1 }] : [] };
+    }
     if (/DELETE FROM .*scorecard_corrective_action_tokens/i.test(text)) {
       tokenDeletes.push({ sql: text, params });
       return { rows: [] };
@@ -122,7 +137,7 @@ describe("scorecard corrective-action notification email", () => {
     expect(inserts).toHaveLength(0);
   });
 
-  it("skips a recipient with no email but still sends to the rest", async () => {
+  it("skips a recipient with no email, sends to the rest, and does NOT stamp (re-runnable)", async () => {
     const { query } = makeQuery({
       recipients: [
         { role: "superintendent", name: "Sam Super", email: "sam.super@trock.com", user_id: "u-1" },
@@ -135,6 +150,11 @@ describe("scorecard corrective-action notification email", () => {
     await handleScorecardCorrectiveActionEmail(payload, null, { query: query as any, sendEmail, env, logger });
     expect(sendEmail).toHaveBeenCalledTimes(1);
     expect(sendEmail.mock.calls[0][0]).toBe("sam.super@trock.com");
+
+    // A super/PM was skipped for a missing email, so the scorecard-level stamp is NOT written — a later
+    // requeue (after the PM's email is fixed) can still notify them (per-recipient delivery, finding 8).
+    const stampCalls = query.mock.calls.filter(([text]) => /UPDATE .*field_scorecards/i.test(text as string));
+    expect(stampCalls).toHaveLength(0);
   });
 
   it("stamps corrective_action_email_sent_at exactly once after sending", async () => {
@@ -161,32 +181,66 @@ describe("scorecard corrective-action notification email", () => {
     expect(tokenDeletes).toHaveLength(0);
   });
 
-  it("clears prior unexpired tokens before re-minting (no orphan accumulation across retries)", async () => {
-    // On a retry (the prior attempt sent+minted but crashed before stamping), the handler re-enters the send
-    // phase. It must DELETE the scorecard's prior unexpired, unconsumed tokens BEFORE minting the new one, so
-    // orphan token rows don't accumulate. We can't reuse a prior token (only its hash is stored).
+  it("does NOT blanket-delete tokens on a fresh run (no orphan-cleanup delete)", async () => {
+    // The old handler blanket-deleted all of the scorecard's unexpired tokens before minting. That stranded an
+    // already-delivered recipient on a retry. There is now NO up-front delete — rotation is per-recipient.
     const { query, inserts, tokenDeletes } = makeQuery();
     const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "m" });
     const logger = makeLogger();
 
     await handleScorecardCorrectiveActionEmail(payload, null, { query: query as any, sendEmail, env, logger });
 
-    // Exactly one cleanup delete, scoped to this scorecard, gating on unexpired + unconsumed.
-    expect(tokenDeletes).toHaveLength(1);
-    expect(tokenDeletes[0].params[0]).toBe(SCORECARD);
-    expect(tokenDeletes[0].sql).toMatch(/consumed_at IS NULL/i);
-    expect(tokenDeletes[0].sql).toMatch(/expires_at > NOW\(\)/i);
-    // Then the fresh token is minted (the email-only PM).
+    expect(tokenDeletes).toHaveLength(0);
+    // The email-only PM still gets exactly one fresh token minted.
     expect(inserts).toHaveLength(1);
+  });
 
-    // Cleanup happens BEFORE the mint (call ordering in the mock).
-    const deleteCallIdx = query.mock.calls.findIndex(([t]) =>
-      /DELETE FROM .*scorecard_corrective_action_tokens/i.test(t as string),
-    );
-    const insertCallIdx = query.mock.calls.findIndex(([t]) =>
-      /INSERT INTO .*scorecard_corrective_action_tokens/i.test(t as string),
-    );
-    expect(deleteCallIdx).toBeGreaterThanOrEqual(0);
-    expect(insertCallIdx).toBeGreaterThan(deleteCallIdx);
+  it("retry after a partial delivery REUSES the delivered recipient's token (no re-mint, no re-send)", async () => {
+    // Finding 7: recipient A (email-only PM) was delivered on a prior attempt (holds a valid token); B failed.
+    // On retry, A's token must NOT be deleted or re-minted, and A must NOT be re-sent (the Resend idempotency
+    // key would suppress it anyway, stranding A on a deleted link). Model A already holding a token.
+    const { query, inserts, tokenDeletes } = makeQuery({
+      recipients: [
+        { role: "project_manager", name: "Dana Cole", email: "dana.cole@example.com", user_id: null },
+        { role: "superintendent", name: "Ext Super", email: "ext.super@example.com", user_id: null },
+      ],
+      existingTokenEmails: ["dana.cole@example.com"], // A already delivered
+    });
+    const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "m" });
+    const logger = makeLogger();
+
+    await handleScorecardCorrectiveActionEmail(payload, null, { query: query as any, sendEmail, env, logger });
+
+    // A (dana) is reused: not re-sent, not re-minted, not deleted. Only B (ext.super) is minted + sent.
+    expect(tokenDeletes).toHaveLength(0);
+    expect(inserts).toHaveLength(1);
+    expect(inserts[0].params[2]).toBe("ext.super@example.com");
+    const toAddresses = sendEmail.mock.calls.map((c) => c[0]);
+    expect(toAddresses).toEqual(["ext.super@example.com"]);
+    expect(toAddresses).not.toContain("dana.cole@example.com");
+  });
+
+  it("deletes the just-minted token for a recipient whose send FAILS (so a retry re-mints a working link)", async () => {
+    // Finding 7: if a fresh mint's send fails, the token (whose raw link never reached the recipient) is
+    // deleted before the handler throws, so the retry re-mints + re-sends rather than stranding them.
+    const { query, inserts, tokenDeletes } = makeQuery({
+      recipients: [
+        { role: "project_manager", name: "Dana Cole", email: "dana.cole@example.com", user_id: null },
+      ],
+    });
+    const sendEmail = vi.fn().mockRejectedValue(new Error("provider down"));
+    const logger = makeLogger();
+
+    await expect(
+      handleScorecardCorrectiveActionEmail(payload, null, { query: query as any, sendEmail, env, logger }),
+    ).rejects.toThrow(/provider down/);
+
+    // The token was minted then deleted (its link never delivered), scoped by its own token_hash.
+    expect(inserts).toHaveLength(1);
+    expect(tokenDeletes).toHaveLength(1);
+    expect(tokenDeletes[0].params[0]).toBe(inserts[0].params[1]); // deleted by the minted token_hash
+    // No stamp on a failed batch.
+    const stampCalls = query.mock.calls.filter(([text]) => /UPDATE .*field_scorecards/i.test(text as string));
+    expect(stampCalls).toHaveLength(0);
   });
 });

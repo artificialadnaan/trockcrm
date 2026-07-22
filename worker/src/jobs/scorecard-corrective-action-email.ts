@@ -60,7 +60,7 @@ function hashToken(rawToken: string): string {
  * seeds tracked items + enqueues this job in the SAME submit transaction (durable outbox). The handler
  * resolves the deal's superintendent + project_manager (hybrid: CRM users OR email-only members), and sends
  * ONE email per recipient:
- *   - a CRM user gets a TRock Cam deep link (trockcrm://scorecard/<id>/corrective-action);
+ *   - a CRM user gets a TRock Cam deep link (trockcam://scorecards/corrective-action/<id>);
  *   - an email-only member gets a freshly-minted recipient-bound web token appended to the responder URL.
  *
  * Idempotent per scorecard via field_scorecards.corrective_action_email_sent_at (mirrors email_sent_at):
@@ -134,14 +134,19 @@ export async function handleScorecardCorrectiveActionEmail(
     [dealId]
   );
   const recipients: ResolvedRecipient[] = [];
+  // Whether ANY expected super/PM role was resolved but had no usable email. Used below to decide whether the
+  // scorecard-level idempotency stamp may be written: if a recipient was skipped for a missing email, we do
+  // NOT stamp, so a later requeue (after the email is fixed) can still notify them (finding 8).
+  let skippedForMissingEmail = false;
   for (const row of recipientRes.rows as any[]) {
     const email = normalizeText(row.email);
     const role = row.role as RecipientRole;
+    if (role !== "superintendent" && role !== "project_manager") continue;
     if (!email || !basicValidEmail(email)) {
       logger.warn("[CorrectiveActionEmail] Recipient has no resolvable email - skipping", { scorecardId, role });
+      skippedForMissingEmail = true;
       continue;
     }
-    if (role !== "superintendent" && role !== "project_manager") continue;
     recipients.push({ role, name: normalizeText(row.name) ?? email, email, userId: normalizeText(row.user_id) });
   }
 
@@ -182,23 +187,19 @@ export async function handleScorecardCorrectiveActionEmail(
 
   const sendEmail = deps.sendEmail ?? sendSystemEmailWithMetadata;
 
-  // Retry-orphan cleanup. This handler mints + inserts a fresh email-only token inside the send loop; a
-  // crash AFTER a token insert but BEFORE the scorecard-level `corrective_action_email_sent_at` stamp leaves
-  // orphan token rows that the retry would ADD to (each run mints anew). We only have the token HASH, not the
-  // raw value, so a prior token can't be reused — instead, delete any prior UNEXPIRED, unconsumed tokens for
-  // this scorecard before re-minting. This runs only on the retry path: a successful run stamps
-  // corrective_action_email_sent_at and short-circuits above, so a completed notification never re-enters
-  // here. A partially-delivered prior attempt (no stamp) had no reliably-working link for every recipient, so
-  // re-minting + re-sending fresh links (deduped per-recipient by the Resend idempotencyKey) is correct.
-  await query(
-    `DELETE FROM ${tenantSchema}.scorecard_corrective_action_tokens
-      WHERE scorecard_id = $1::uuid AND consumed_at IS NULL AND expires_at > NOW()`,
-    [scorecardId]
-  );
+  // NOTE: we deliberately do NOT blanket-delete this scorecard's outstanding tokens up front. On a retry
+  // after a PARTIAL delivery (recipient A sent, B failed before the scorecard-level stamp), a blanket delete
+  // would drop A's ALREADY-DELIVERED token and mint a new one — but A's re-send is suppressed by the
+  // per-recipient Resend idempotency key, so A never receives the new link and is stranded on the deleted
+  // one. Instead, token rotation is per-recipient inside the loop: a recipient who already holds an
+  // unexpired/unconsumed token was emailed on a prior attempt, so we reuse it (skip re-mint + re-send); a
+  // recipient whose send fails has their just-minted token deleted before we rethrow, so the retry re-mints
+  // and re-sends them a fresh, working link. Only the OFFICE tenant schema is interpolated (regex-validated).
 
   // Send one email per recipient with the link appropriate to their identity.
   for (const recipient of recipients) {
     let link: string;
+    let mintedTokenHash: string | null = null;
     if (recipient.userId) {
       // CRM user → TRock Cam deep link (they respond in-app). The scheme + path must match the app exactly:
       // the Expo config `scheme` is `trockcam` (app.config.ts) and the expo-router file route is
@@ -206,7 +207,25 @@ export async function handleScorecardCorrectiveActionEmail(
       // trockcam://scorecards/corrective-action/<id> (the `(app)` group is transparent in the URL).
       link = `trockcam://scorecards/corrective-action/${encodeURIComponent(scorecardId)}`;
     } else {
-      // Email-only → mint a recipient-bound web token and append it to the responder URL.
+      // Email-only → they respond via a tokenized web link. If this recipient already holds an
+      // unexpired/unconsumed token, they were emailed on a prior attempt (a partial-delivery retry); we can't
+      // reconstruct the raw token to re-send the same link, and the per-recipient Resend idempotency key would
+      // suppress a re-send anyway — so reuse it: skip re-minting AND re-sending, leaving their existing link
+      // intact. (Only a send FAILURE deletes a just-minted token, so an existing row always means delivered.)
+      const existing = await query(
+        `SELECT 1 FROM ${tenantSchema}.scorecard_corrective_action_tokens
+          WHERE scorecard_id = $1::uuid AND LOWER(recipient_email) = LOWER($2)
+            AND consumed_at IS NULL AND expires_at > NOW()
+          LIMIT 1`,
+        [scorecardId, recipient.email]
+      );
+      if ((existing.rows?.length ?? 0) > 0) {
+        logger.log("[CorrectiveActionEmail] Recipient already has a valid token - reusing (no re-send)", {
+          scorecardId,
+          role: recipient.role,
+        });
+        continue;
+      }
       const rawToken = crypto.randomBytes(32).toString("base64url");
       const tokenHash = hashToken(rawToken);
       const expiresAt = new Date(Date.now() + TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000);
@@ -216,6 +235,7 @@ export async function handleScorecardCorrectiveActionEmail(
          VALUES ($1::uuid, $2, $3, $4, $5)`,
         [scorecardId, tokenHash, recipient.email, recipient.role, expiresAt.toISOString()]
       );
+      mintedTokenHash = tokenHash;
       link = `${frontendUrl}/scorecards/${encodeURIComponent(scorecardId)}/corrective-action?token=${encodeURIComponent(rawToken)}`;
     }
 
@@ -229,11 +249,25 @@ export async function handleScorecardCorrectiveActionEmail(
       link,
     });
 
-    const result = await sendEmail(recipient.email, email.subject, email.html, {
-      text: email.text,
-      idempotencyKey: `corrective-action-${tenantSchema}-${scorecardId}-${recipient.email.toLowerCase()}`,
-    });
-    if (!result.success) throw new Error("Email provider returned unsuccessful result");
+    let result: SendSystemEmailResult;
+    try {
+      result = await sendEmail(recipient.email, email.subject, email.html, {
+        text: email.text,
+        idempotencyKey: `corrective-action-${tenantSchema}-${scorecardId}-${recipient.email.toLowerCase()}`,
+      });
+      if (!result.success) throw new Error("Email provider returned unsuccessful result");
+    } catch (err) {
+      // The send did not succeed. Delete the token we just minted for this recipient (if any) so its raw link
+      // — which never reached them — is not left dangling; the retry then re-mints + re-sends a fresh, working
+      // link. Delivered recipients' tokens are untouched (we never minted for them this run).
+      if (mintedTokenHash) {
+        await query(
+          `DELETE FROM ${tenantSchema}.scorecard_corrective_action_tokens WHERE token_hash = $1`,
+          [mintedTokenHash]
+        ).catch(() => undefined);
+      }
+      throw err;
+    }
     logger.log("[CorrectiveActionEmail] Sent corrective-action email", {
       scorecardId,
       role: recipient.role,
@@ -242,7 +276,18 @@ export async function handleScorecardCorrectiveActionEmail(
     });
   }
 
-  // Stamp once after all recipients are sent (scorecard-level idempotency — mirrors email_sent_at).
+  // Scorecard-level idempotency stamp (mirrors email_sent_at). Written ONLY when every resolved recipient was
+  // delivered (we reached here without throwing) AND no super/PM was skipped for a missing email. If someone
+  // was skipped, we leave the stamp NULL so a later requeue — after their email is fixed — can still notify
+  // them; already-delivered recipients are then skipped via their existing token (email-only) or a
+  // Resend-idempotency-suppressed re-send (CRM users), so no one is double-notified.
+  if (skippedForMissingEmail) {
+    logger.warn(
+      "[CorrectiveActionEmail] A super/PM was skipped for a missing email - not stamping (re-runnable)",
+      { scorecardId, dealId }
+    );
+    return;
+  }
   await query(
     `UPDATE ${tenantSchema}.field_scorecards
         SET corrective_action_email_sent_at = NOW()
