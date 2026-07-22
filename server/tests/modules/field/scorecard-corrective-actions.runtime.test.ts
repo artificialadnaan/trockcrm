@@ -9,6 +9,7 @@ import {
   fieldScorecardItems,
   fieldScorecardPhotos,
   scorecardCorrectiveActions,
+  scorecardCorrectiveActionTokens,
   dealTeamMembers,
   contacts,
 } from "@trock-crm/shared/schema";
@@ -124,6 +125,7 @@ beforeAll(async () => {
       fieldScorecardItems,
       fieldScorecardPhotos,
       scorecardCorrectiveActions,
+      scorecardCorrectiveActionTokens,
       dealTeamMembers,
       contacts,
     ]),
@@ -145,6 +147,7 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
+  await tdb.execute(sql`DELETE FROM scorecard_corrective_action_tokens`);
   await tdb.execute(sql`DELETE FROM scorecard_corrective_actions`);
   await tdb.execute(sql`DELETE FROM field_scorecard_photos`);
   await tdb.execute(sql`DELETE FROM field_scorecard_items`);
@@ -177,6 +180,13 @@ describe("createFieldScorecard corrective-action trigger", () => {
     const deficiency = items.find((i) => i.item_type === "critical_deficiency");
     expect(deficiency?.item_ref).toBe("missed_hold_point");
     expect(deficiency?.item_label).toBe("Missed hold point");
+  });
+
+  it("RETURNS the reconciled status (corrective_action_open), not the pre-reconcile 'submitted' (finding 1)", async () => {
+    // The summary is built from the reconciled row, so a below-band create surfaces corrective_action_open
+    // immediately — the freshly-inserted row was 'submitted' before the reconcile walked it open.
+    const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
+    expect(scorecard.status).toBe("corrective_action_open");
   });
 
   it("leaves a passing scorecard as 'submitted' with no corrective-action rows", async () => {

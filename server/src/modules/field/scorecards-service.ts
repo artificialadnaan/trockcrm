@@ -58,6 +58,7 @@ import { runInOffice, runInOfficeTransaction } from "./cross-office.js";
 import { resolveScorecardTeamEmails } from "../deals/team-service.js";
 import { markScorecardEditEvidenceLinked } from "./scorecard-evidence-upload.js";
 import { reconcileScorecardCorrectiveActions } from "./corrective-actions-service.js";
+import { isAssignedCorrectiveActionResponder } from "./corrective-action-recipients.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 type ScorecardRow = typeof fieldScorecards.$inferSelect;
@@ -336,6 +337,14 @@ export async function createFieldScorecard(
     deficiencies,
     currentStatus: "submitted",
   });
+  // The reconcile above may have walked the freshly-inserted card into `corrective_action_open` (a below-band
+  // submit with a flagged item), but `card` still carries its pre-reconcile `submitted` status. Re-read the row
+  // so the returned summary reflects the reconciled status — the edit path does the same (reconciledCard).
+  const [reconciledCard] = await tenantDb
+    .select()
+    .from(fieldScorecards)
+    .where(eq(fieldScorecards.id, card.id))
+    .limit(1);
 
   // Durable outbox: enqueue the email job IN THIS TRANSACTION so it commits atomically with the scorecard.
   // The PDF is rendered + stored post-response (best-effort); if that fails or the process dies first, the
@@ -374,7 +383,7 @@ export async function createFieldScorecard(
     maxAttempts: 6,
   });
 
-  return { scorecard: toSummary(card, project.name, input.userId), created: true };
+  return { scorecard: toSummary(reconciledCard ?? card, project.name, input.userId), created: true };
 }
 
 /**
@@ -573,15 +582,28 @@ export async function updateFieldScorecard(
 
   // Preserve retained scorecard-photo link ids (the mobile edit form uses them on the next save), while
   // removing omitted links and inserting newly uploaded evidence. Gallery files themselves are never deleted.
+  // The edit-replacement contract covers ONLY the submitter's original evidence. Corrective-action response
+  // photos (corrective_action_id set) are a separate surface — they never enter currentPhotos/retainedLinkIds
+  // (the read above excludes them), so a bare scorecard_id DELETE would clobber every response-photo link on a
+  // content edit made after a responder attaches evidence. Scope BOTH branches to corrective_action_id IS NULL
+  // so response photos survive.
   const retainedLinkIds = photos.flatMap((photo) => (photo.linkId ? [photo.linkId] : []));
   if (retainedLinkIds.length === 0) {
-    await tenantDb.delete(fieldScorecardPhotos).where(eq(fieldScorecardPhotos.scorecardId, card.id));
+    await tenantDb
+      .delete(fieldScorecardPhotos)
+      .where(
+        and(
+          eq(fieldScorecardPhotos.scorecardId, card.id),
+          isNull(fieldScorecardPhotos.correctiveActionId),
+        ),
+      );
   } else {
     await tenantDb
       .delete(fieldScorecardPhotos)
       .where(
         and(
           eq(fieldScorecardPhotos.scorecardId, card.id),
+          isNull(fieldScorecardPhotos.correctiveActionId),
           notInArray(fieldScorecardPhotos.id, retainedLinkIds),
         ),
       );
@@ -699,7 +721,19 @@ export async function listFieldScorecardsForProject(
     .from(fieldScorecards)
     .where(and(eq(fieldScorecards.dealId, dealId), eq(fieldScorecards.isActive, true)))
     .orderBy(desc(fieldScorecards.submittedAt));
-  return { scorecards: rows.map((row) => toSummary(row, project.name, access.userId)) };
+  // Corrective-action responder capability is a DEAL-level fact (the assigned super/PM on this deal, or an
+  // admin/director role) — identical for every card here — so resolve it ONCE. The mobile "Document the
+  // corrective action" CTA gates on this so it isn't shown to a browse-only field user who'd hit a 403 from
+  // the responder endpoint. Same authorization predicate the responder endpoint enforces (spec §7.1).
+  const canRespondToCorrectiveAction = await isAssignedCorrectiveActionResponder(tenantDb, dealId, {
+    id: access.userId,
+    role: access.userRole,
+  });
+  return {
+    scorecards: rows.map((row) =>
+      toSummary(row, project.name, access.userId, canRespondToCorrectiveAction),
+    ),
+  };
 }
 
 export async function listRecentFieldScorecards(
@@ -1505,6 +1539,7 @@ function toSummary(
   row: ScorecardSummarySource,
   projectName = row.projectName ?? null,
   viewerUserId?: string,
+  canRespondToCorrectiveAction?: boolean,
 ): FieldScorecardSummary {
   const formVersion: ScorecardFormVersion = row.formVersion === 2 ? 2 : 1;
   const kind: ScorecardKind = row.kind === "leadership" ? "leadership" : "project";
@@ -1538,6 +1573,10 @@ function toSummary(
     // Lifecycle status (submitted / corrective_action_open / corrective_action_closed) so the field
     // Scorecards list can surface a "Corrective action required" affordance without a second fetch.
     status: row.status ?? "submitted",
+    // Whether the REQUESTING user may document the corrective action (assigned super/PM or admin/director).
+    // Gates the mobile CTA so it isn't shown to a browsing-only field user who'd get a 403. Omitted (undefined)
+    // when the caller didn't compute it, so consumers fall back to their own conservative gate.
+    ...(canRespondToCorrectiveAction === undefined ? {} : { canRespondToCorrectiveAction }),
   };
 }
 
