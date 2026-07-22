@@ -528,6 +528,14 @@ export interface FieldScorecardSummary {
    * deployments that don't emit it don't break consumers; a missing value means `submitted`.
    */
   status?: string;
+  /**
+   * Whether the REQUESTING user is authorized to document the corrective action for this card (the deal's
+   * assigned superintendent/project_manager, or an admin/director). The mobile "Document the corrective
+   * action" CTA gates on this so it isn't shown to a field user who can browse the project but would get a
+   * 403 from the responder endpoint. Optional so older API deployments don't break consumers; a missing
+   * value means the client falls back to its own conservative gate.
+   */
+  canRespondToCorrectiveAction?: boolean;
 }
 export interface FieldScorecardPhotoView {
   id: string;
