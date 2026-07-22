@@ -401,7 +401,17 @@ export async function runRfpBidBoardCreateStuckDealSweep(
                  WHERE j.job_type = 'rfp_bidboard_create'
                    AND j.office_id = $3
                    AND j.payload->>'dealId' = d.id::text
-                   AND j.status IN ('pending', 'processing')
+                   -- A 'completed' current-attempt job is ACCEPTED, not done: handleRfpBidBoardCreate completes
+                   -- on SyncHub's 2xx/202 and leaves the deal for the async bid-board-created callback. Duplicate
+                   -- create rows demonstrably exist in this incident, so treating only pending/processing as
+                   -- "live" would flip a deal whose create is ALREADY RUNNING to send_failed and expose Retry ->
+                   -- a SECOND external create. Count a current-attempt completed job as live too — but only
+                   -- within a generous callback window (completed_at recent) so a genuinely-failed 202 whose
+                   -- callback never arrives can still be recovered by this sweep once the window elapses.
+                   AND (
+                     j.status IN ('pending', 'processing')
+                     OR (j.status = 'completed' AND j.completed_at > NOW() - interval '30 minutes')
+                   )
                    AND (d.rfp_bidboard_attempt_at IS NULL OR j.created_at >= d.rfp_bidboard_attempt_at)
                    AND (d.rfp_override_reviewed_at IS NULL OR j.created_at >= d.rfp_override_reviewed_at)
                    AND (d.rfp_approval_requested_at IS NULL OR j.created_at >= d.rfp_approval_requested_at)

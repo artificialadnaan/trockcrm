@@ -27,6 +27,10 @@ const DEAL_STALE_ERR = U("d13"); // current-attempt dead job has NULL last_error
                                  // non-null error -> flips with the GENERIC fallback (not the stale prior error)
 const DEAL_STALE_LIVE = U("d14"); // current-attempt dead job + a STALE (prior-round) PENDING job -> the stale
                                   // live job must NOT block recovery; the deal still flips to send_failed
+const DEAL_COMPLETED_LIVE = U("d15"); // current-attempt dead (duplicate) job + a current-attempt COMPLETED job
+                                      // (SyncHub 202 accepted, callback pending) -> the completed job counts as
+                                      // live within the callback window, so the deal must NOT flip (Retry would
+                                      // fire a SECOND external create)
 const OFFICE2 = U("0f2"); // a DIFFERENT office id (not provisioned as a schema) — for the cross-office job test
 
 /**
@@ -40,7 +44,8 @@ async function seed(): Promise<PGlite> {
     CREATE TABLE public.offices (id uuid PRIMARY KEY, slug text NOT NULL, is_active boolean NOT NULL DEFAULT true);
     CREATE TABLE public.job_queue (
       id bigserial PRIMARY KEY, job_type text NOT NULL, payload jsonb NOT NULL, office_id uuid,
-      status text NOT NULL, last_error text, created_at timestamptz NOT NULL DEFAULT now()
+      status text NOT NULL, last_error text, created_at timestamptz NOT NULL DEFAULT now(),
+      completed_at timestamptz
     );
     CREATE SCHEMA office_test;
     CREATE TABLE office_test.deals (
@@ -138,6 +143,19 @@ async function seed(): Promise<PGlite> {
       ('rfp_bidboard_create', '{"dealId":"${DEAL_STALE_LIVE}"}'::jsonb, '${OFFICE}', 'dead', 'current attempt boom', NOW() - INTERVAL '20 minutes'),
       -- ...PLUS a STALE PENDING job from a PRIOR round (created 1h ago, BEFORE attempt_at) that must NOT block the flip.
       ('rfp_bidboard_create', '{"dealId":"${DEAL_STALE_LIVE}"}'::jsonb, '${OFFICE}', 'pending', NULL, NOW() - INTERVAL '1 hour');
+
+    -- COMPLETED_LIVE (P1): genuinely-stuck baseline (attempt_at 30 min ago, past grace). It has a current-attempt
+    -- DEAD duplicate job (satisfies the dead-job EXISTS), BUT also a current-attempt COMPLETED job (SyncHub 202
+    -- accepted, completed 5 min ago — callback pending). The completed job counts as live within the callback
+    -- window, so the sweep must NOT flip this deal (a Retry would fire a SECOND external create).
+    INSERT INTO office_test.deals
+      (id, is_bid_board_owned, rfp_approval_status, rfp_approval_request_id, rfp_approval_requested_at,
+       rfp_override_state, rfp_override_error, rfp_override_decision, rfp_override_reviewed_at, rfp_bidboard_attempt_at)
+    VALUES ('${DEAL_COMPLETED_LIVE}', false, 'pending', NULL, NOW() - INTERVAL '2 hours', NULL, NULL, NULL, NULL, NOW() - INTERVAL '30 minutes');
+    INSERT INTO public.job_queue (job_type, payload, office_id, status, last_error, created_at) VALUES
+      ('rfp_bidboard_create', '{"dealId":"${DEAL_COMPLETED_LIVE}"}'::jsonb, '${OFFICE}', 'dead', 'duplicate create dead', NOW() - INTERVAL '20 minutes');
+    INSERT INTO public.job_queue (job_type, payload, office_id, status, last_error, created_at, completed_at) VALUES
+      ('rfp_bidboard_create', '{"dealId":"${DEAL_COMPLETED_LIVE}"}'::jsonb, '${OFFICE}', 'completed', NULL, NOW() - INTERVAL '20 minutes', NOW() - INTERVAL '5 minutes');
   `);
   return db;
 }
@@ -187,6 +205,16 @@ describe("runRfpBidBoardCreateStuckDealSweep (real SQL)", () => {
   it("3. does NOT flip a deal with a LIVE (pending/processing) create job", async () => {
     const { db } = await run();
     const s = await status(db, DEAL_LIVE);
+    expect(s.rfp_approval_status).toBe("pending");
+    expect(s.rfp_override_state).toBeNull();
+  });
+
+  it("3b. does NOT flip a deal whose current-attempt create job is COMPLETED (202 accepted, callback pending)", async () => {
+    // A dead duplicate exists (dead-job EXISTS matches), but a current-attempt completed job (completed 5 min
+    // ago, inside the callback window) means the create is ALREADY RUNNING — flipping to send_failed would expose
+    // Retry and fire a SECOND external create, the exact duplicate this watchdog exists to prevent.
+    const { db } = await run();
+    const s = await status(db, DEAL_COMPLETED_LIVE);
     expect(s.rfp_approval_status).toBe("pending");
     expect(s.rfp_override_state).toBeNull();
   });
