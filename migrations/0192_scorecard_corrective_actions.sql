@@ -1,4 +1,4 @@
--- Migration 0190: corrective-action follow-up for below-band scorecards.
+-- Migration 0192: corrective-action follow-up for below-band scorecards.
 -- Per-tenant (office_* schemas). Seeds one scorecard_corrective_actions row per flagged item when a scorecard
 -- trips the corrective-action band; the scorecard's status walks submitted -> corrective_action_open ->
 -- corrective_action_closed. See docs/superpowers/specs/2026-07-22-scorecard-corrective-actions-design.md.

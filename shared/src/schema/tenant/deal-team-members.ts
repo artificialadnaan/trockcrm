@@ -26,7 +26,7 @@ export const dealTeamMembers = pgTable(
     dealId: uuid("deal_id").notNull(),
     userId: uuid("user_id"),
     contactId: uuid("contact_id"),
-    // Email-only member (migration 0191): a superintendent / project_manager who is NOT a CRM user or a
+    // Email-only member (migration 0193): a superintendent / project_manager who is NOT a CRM user or a
     // directory contact — just a name + email. Such a row carries member_email (and typically member_name)
     // with user_id AND contact_id both NULL, so the corrective-action flow can notify + token-auth them.
     memberName: text("member_name"),
@@ -40,7 +40,7 @@ export const dealTeamMembers = pgTable(
   },
   (table) => [
     // Exactly one of user_id / contact_id identifies a linked identity, OR — for an email-only member —
-    // both are NULL and member_email is present. Migration 0191 replaces the old exclusive check with this
+    // both are NULL and member_email is present. Migration 0193 replaces the old exclusive check with this
     // one so email-only super/PM rows can be stored on the same table (one resolution path).
     check(
       "deal_team_members_identity_check",

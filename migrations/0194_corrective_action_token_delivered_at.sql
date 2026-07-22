@@ -1,4 +1,4 @@
--- Migration 0192: scorecard_corrective_action_tokens.delivered_at — a distinct DELIVERY marker.
+-- Migration 0194: scorecard_corrective_action_tokens.delivered_at — a distinct DELIVERY marker.
 -- Per-tenant (office_* schemas). The corrective-action email job INSERTS a token row BEFORE it sends the
 -- email; a crash in that window leaves the row committed but the raw token never delivered. Recovery then
 -- retries, and the reuse-existing-token skip (which inferred "delivered" from mere row existence) would skip

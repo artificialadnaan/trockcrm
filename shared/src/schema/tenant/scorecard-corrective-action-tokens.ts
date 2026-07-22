@@ -11,7 +11,7 @@ import {
 // grants an email-only superintendent / project_manager access to that scorecard's corrective-action flow
 // without a login. Only the sha256 hash of the raw token is stored (token_hash); the raw value is emailed
 // once. Mirrors the public_photo_tokens shape (hash at rest, expiry). The FK (scorecard_id ->
-// field_scorecards ON DELETE CASCADE) and the token_hash uniqueness are owned by migration 0191; Drizzle
+// field_scorecards ON DELETE CASCADE) and the token_hash uniqueness are owned by migration 0193; Drizzle
 // declares the unique so db:generate sees parity.
 export const scorecardCorrectiveActionTokens = pgTable(
   "scorecard_corrective_action_tokens",
@@ -28,7 +28,7 @@ export const scorecardCorrectiveActionTokens = pgTable(
     /**
      * Set AFTER a successful email send (NOT at INSERT). Delivery ≠ token existence: the row is inserted
      * before the send, so a crash in that window leaves an undelivered token. The reuse-skip requires
-     * delivered_at IS NOT NULL (an undelivered token is re-sent, not skipped). Owned by migration 0192.
+     * delivered_at IS NOT NULL (an undelivered token is re-sent, not skipped). Owned by migration 0194.
      */
     deliveredAt: timestamp("delivered_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),

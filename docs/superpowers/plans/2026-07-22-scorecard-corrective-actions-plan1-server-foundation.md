@@ -21,20 +21,20 @@
 ### Task 1: Migration — new table, status values, photo FK
 
 **Files:**
-- Create: `migrations/0190_scorecard_corrective_actions.sql`
+- Create: `migrations/0192_scorecard_corrective_actions.sql`
 - Reference: an existing per-tenant migration with a `DO`-loop over `office_*` schemas AND a `-- TENANT_SCHEMA_START/END` block.
 
 - [ ] **Step 1: Find the next migration number and confirm it's free**
 
 Run: `ls migrations/ | grep -oE '^0[0-9]{3}' | sort -u | tail -3`
-Expected: highest is `0189`; use `0190`. (If not, use the next free number and rename accordingly throughout.)
+Expected at authoring time: highest was `0189`, so this plan used `0190`. **Shipped renumbered:** after #945 landed `0190`/`0191` (bid-board dead-letter) on main first, the corrective-action migrations were renumbered to **`0192`/`0193`/`0194`** to avoid the collision. (Always re-check the next free number and rename accordingly throughout.)
 
 - [ ] **Step 2: Write the migration**
 
-Create `migrations/0190_scorecard_corrective_actions.sql`. It must (a) run for every EXISTING `office_*` schema via a `DO`-loop, AND (b) include a `-- TENANT_SCHEMA_START/END` block so the office provisioner replays it for NEW offices. Per-tenant objects: the new table + its indexes + the `field_scorecard_photos.corrective_action_id` column. `field_scorecards.status` is a `varchar(20)` and MUST be widened to `varchar(30)` in BOTH the `DO`-loop and the TENANT_SCHEMA block (`ALTER TABLE ... ALTER COLUMN status TYPE varchar(30)`): the new values `corrective_action_open` (22 chars) and `corrective_action_closed` (24 chars) do not fit `varchar(20)`. The new values are enforced in app code + a widened CHECK if one exists (verify: `grep -n "status" migrations/*field_scorecard* 2>/dev/null` — `field_scorecards.status` has no CHECK constraint, so only the column length changes here; but if a CHECK on status ever exists, this migration must drop+recreate it to include the new values).
+Create `migrations/0192_scorecard_corrective_actions.sql`. It must (a) run for every EXISTING `office_*` schema via a `DO`-loop, AND (b) include a `-- TENANT_SCHEMA_START/END` block so the office provisioner replays it for NEW offices. Per-tenant objects: the new table + its indexes + the `field_scorecard_photos.corrective_action_id` column. `field_scorecards.status` is a `varchar(20)` and MUST be widened to `varchar(30)` in BOTH the `DO`-loop and the TENANT_SCHEMA block (`ALTER TABLE ... ALTER COLUMN status TYPE varchar(30)`): the new values `corrective_action_open` (22 chars) and `corrective_action_closed` (24 chars) do not fit `varchar(20)`. The new values are enforced in app code + a widened CHECK if one exists (verify: `grep -n "status" migrations/*field_scorecard* 2>/dev/null` — `field_scorecards.status` has no CHECK constraint, so only the column length changes here; but if a CHECK on status ever exists, this migration must drop+recreate it to include the new values).
 
 ```sql
--- Migration 0190: corrective-action follow-up for below-band scorecards.
+-- Migration 0192: corrective-action follow-up for below-band scorecards.
 -- Per-tenant (office_* schemas). Seeds one scorecard_corrective_actions row per flagged item when a scorecard
 -- trips the corrective-action band; the scorecard's status walks submitted -> corrective_action_open ->
 -- corrective_action_closed. See docs/superpowers/specs/2026-07-22-scorecard-corrective-actions-design.md.
@@ -103,13 +103,13 @@ ALTER TABLE "{{schema}}".field_scorecard_photos
 
 - [ ] **Step 3: Verify the migration parses on a throwaway PGlite**
 
-Write a scratch check (or rely on Task 2's runtime test which creates the tables). Minimum: `grep -c "TENANT_SCHEMA" migrations/0190_scorecard_corrective_actions.sql` → expected `2` (START + END).
+Write a scratch check (or rely on Task 2's runtime test which creates the tables). Minimum: `grep -c "TENANT_SCHEMA" migrations/0192_scorecard_corrective_actions.sql` → expected `2` (START + END).
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add migrations/0190_scorecard_corrective_actions.sql
-git commit -m "feat(scorecards): migration 0190 — corrective-action items table + status/photo columns"
+git add migrations/0192_scorecard_corrective_actions.sql
+git commit -m "feat(scorecards): migration 0192 — corrective-action items table + status/photo columns"
 ```
 
 ---
@@ -143,7 +143,7 @@ describe("scorecardCorrectiveActions schema", () => {
 Run: `npx vitest run shared/src/schema/tenant/__tests__/scorecard-corrective-actions.test.ts`
 Expected: FAIL — cannot find `../scorecard-corrective-actions`.
 
-- [ ] **Step 3: Create the Drizzle table (mirror migration 0190 exactly)**
+- [ ] **Step 3: Create the Drizzle table (mirror migration 0192 exactly)**
 
 ```typescript
 import { pgSchema, text, timestamp, uuid, unique, index } from "drizzle-orm/pg-core";

@@ -1,5 +1,5 @@
--- Migration 0191: corrective-action recipients — email-only team members + recipient-bound web tokens.
--- Per-tenant (office_* schemas). Extends the below-band corrective-action flow (migration 0190) so the
+-- Migration 0193: corrective-action recipients — email-only team members + recipient-bound web tokens.
+-- Per-tenant (office_* schemas). Extends the below-band corrective-action flow (migration 0192) so the
 -- deal's superintendent / project_manager can be notified even when they are NOT a CRM user or a directory
 -- contact — just a name + email — and can respond via a token-authed web page.
 --

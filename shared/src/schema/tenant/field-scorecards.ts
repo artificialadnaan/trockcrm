@@ -46,7 +46,7 @@ export const fieldScorecards = pgTable(
     /** V2 supplemental description keyed by critical-deficiency key. */
     criticalDeficiencyNotes: jsonb("critical_deficiency_notes").$type<Record<string, string>>().default({}).notNull(),
     actionItems: text("action_items").array().default([]).notNull(),
-    // varchar(30) (migration 0190) fits the corrective-action stage values: 'corrective_action_open' (22),
+    // varchar(30) (migration 0192) fits the corrective-action stage values: 'corrective_action_open' (22),
     // 'corrective_action_closed' (24). Legacy value is 'submitted'.
     status: varchar("status", { length: 30 }).default("submitted").notNull(),
     submittedBy: uuid("submitted_by").notNull(),
@@ -58,7 +58,7 @@ export const fieldScorecards = pgTable(
     /** Renderer revision used for the stored PDF artifact. Version 1 covers legacy/unversioned PDFs. */
     pdfRenderVersion: smallint("pdf_render_version").default(1).notNull(),
     emailSentAt: timestamp("email_sent_at", { withTimezone: true }),
-    // Idempotency stamp for the below-band corrective-action notification (migration 0191). Mirrors
+    // Idempotency stamp for the below-band corrective-action notification (migration 0193). Mirrors
     // email_sent_at: the scorecard_corrective_action_email worker handler stamps this once after sending to
     // ALL recipients in one run, and skips if it's already set — so a job retry never re-notifies.
     correctiveActionEmailSentAt: timestamp("corrective_action_email_sent_at", { withTimezone: true }),
@@ -92,7 +92,7 @@ export const fieldScorecardPhotos = pgTable(
   {
     id: uuid("id").primaryKey().defaultRandom(),
     scorecardId: uuid("scorecard_id").notNull(),
-    // Nullable as of migration 0191: a corrective-action RESPONSE photo carries corrective_action_id and has
+    // Nullable as of migration 0193: a corrective-action RESPONSE photo carries corrective_action_id and has
     // section_key/deficiency_key null (spec §4.3). Original scorecard-evidence photos always set section_key.
     sectionKey: varchar("section_key", { length: 40 }),
     /** V2 critical-deficiency evidence is attached to the exact selected deficiency. */

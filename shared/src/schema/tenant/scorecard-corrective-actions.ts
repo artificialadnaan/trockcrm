@@ -11,7 +11,7 @@ import {
 // Per-office (cloned into every office_* schema). One row per flagged item on a below-band scorecard,
 // seeded `open` at submit; flips to `resolved` when the super/PM documents corrective action. The
 // scorecard auto-closes once no `open` rows remain. FKs (scorecard_id -> field_scorecards) and the
-// (scorecard_id, item_type, item_ref) uniqueness are owned by migration 0190; Drizzle keeps bare uuid
+// (scorecard_id, item_type, item_ref) uniqueness are owned by migration 0192; Drizzle keeps bare uuid
 // columns to match the closeout-checklist / field-scorecards convention.
 export const scorecardCorrectiveActions = pgTable(
   "scorecard_corrective_actions",
@@ -41,7 +41,7 @@ export const scorecardCorrectiveActions = pgTable(
       table.itemRef,
     ),
     index("scorecard_corrective_actions_scorecard_idx").on(table.scorecardId),
-    // Partial index over open items — mirrors migration 0190's scorecard_corrective_actions_open_idx so
+    // Partial index over open items — mirrors migration 0192's scorecard_corrective_actions_open_idx so
     // db:generate sees parity. Backs the closure check (any `open` rows left for this scorecard?).
     index("scorecard_corrective_actions_open_idx")
       .on(table.scorecardId)

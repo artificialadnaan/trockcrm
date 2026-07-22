@@ -156,7 +156,7 @@ no-op).
 - `field_scorecard_photos.corrective_action_id` (nullable FK).
 - Deal team email-only columns (or sibling table).
 - `scorecard_corrective_action_tokens` table.
-- Next free migration number at implementation time (0191+), one concern per migration.
+- Next free migration number at implementation time (0192+), one concern per migration.
 
 ## 11. Testing
 

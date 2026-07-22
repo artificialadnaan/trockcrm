@@ -23,7 +23,7 @@
 ### Task 1: Schema — email-only team members + token table
 
 **Files:**
-- Create: `migrations/0191_corrective_action_recipients.sql` (verify next free number; Plan 1 used 0190)
+- Create: `migrations/0193_corrective_action_recipients.sql` (verify next free number; Plan 1 used 0192)
 - Modify: `shared/src/schema/tenant/deal-team-members.ts`; create `shared/src/schema/tenant/scorecard-corrective-action-tokens.ts`; export from the tenant schema index.
 - Test: `shared/src/schema/tenant/__tests__/corrective-action-recipients.test.ts`
 
@@ -31,7 +31,7 @@
 
 Run: `ls migrations/ | grep -oE '^0[0-9]{3}' | sort -u | tail -3` and read the CREATE for `deal_team_members` (grep the migrations) — note whether `user_id` is `NOT NULL` and whether any UNIQUE includes it. The migration must relax `user_id` to nullable and add `member_name text`, `member_email text`, and a `CHECK (user_id IS NOT NULL OR member_email IS NOT NULL)`. Both a `DO`-loop over existing `office_*` schemas AND a `-- TENANT_SCHEMA_START/END` block (literal `office_dallas.` token — the convention Plan 1 verified via `office/service.ts`).
 
-- [ ] **Step 2: Write the migration** (`0191_corrective_action_recipients.sql`)
+- [ ] **Step 2: Write the migration** (`0193_corrective_action_recipients.sql`)
 
 Per-tenant, for each `office_*` (DO-loop, `to_regclass`-guarded like Plan 1) and in a TENANT_SCHEMA block:
 ```sql
@@ -66,7 +66,7 @@ CREATE INDEX IF NOT EXISTS scorecard_corrective_action_tokens_scorecard_idx
 
 - [ ] **Step 4: Shape test** — assert the new columns/table exist in the Drizzle models. Run it; expect pass.
 
-- [ ] **Step 5: Commit** — `feat(scorecards): email-only team members + corrective-action token schema (migration 0191)`
+- [ ] **Step 5: Commit** — `feat(scorecards): email-only team members + corrective-action token schema (migration 0193)`
 
 ---
 

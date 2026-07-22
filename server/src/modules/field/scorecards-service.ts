@@ -906,7 +906,7 @@ export async function renderAndStoreFieldScorecardArtifacts(
     const photoRows = await db
       .select({
         fileId: files.id,
-        // section_key is nullable as of migration 0191 (corrective-action RESPONSE photos have it null), but
+        // section_key is nullable as of migration 0193 (corrective-action RESPONSE photos have it null), but
         // this query excludes those (corrective_action_id IS NULL) so only section-keyed ORIGINAL evidence
         // remains — COALESCE keeps the downstream evidence type as `string`.
         sectionKey: sql<string>`COALESCE(${fieldScorecardPhotos.sectionKey}, '')`,
