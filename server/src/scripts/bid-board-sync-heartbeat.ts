@@ -113,6 +113,50 @@ export function renderHeartbeatEmail(e: HeartbeatEmail): { subject: string; html
   return { subject, html };
 }
 
+// ── Dead-letter alert (a 202-accepted push whose async inbox job later terminalized to 'failed') ──────────
+
+export interface DeadLetterRow {
+  id: string; // inbox row id — the sweep stamps dead_letter_alerted_at on exactly these after a sent alert
+  sourceFilename: string | null;
+  lastError: string | null;
+  idempotencyKey: string; // payload_hash — ops query /ingest/status (or the inbox row) with it
+  finishedAt: Date | null;
+}
+
+const DEAD_LETTER_EMAIL_ROW_CAP = 20; // a schema-drift outage can fail every import; cap the emailed list
+
+/** Pure renderer for the dead-letter batch email — one email per office per sweep listing the imports whose
+ *  asynchronous CRM ingestion dead-lettered since the last alert. Separate from sending so it is unit-testable. */
+export function renderDeadLetterEmail(e: { office: string; rows: DeadLetterRow[]; now: Date }): {
+  subject: string;
+  html: string;
+} {
+  const office = escapeHtml(e.office);
+  const n = e.rows.length;
+  const shown = e.rows.slice(0, DEAD_LETTER_EMAIL_ROW_CAP);
+  const items = shown
+    .map(
+      (r) =>
+        `<li><strong>${escapeHtml(r.sourceFilename ?? "(unknown file)")}</strong> — ` +
+        `failed ${r.finishedAt ? r.finishedAt.toISOString() : "(time unknown)"}<br/>` +
+        `error: ${escapeHtml(r.lastError ?? "(none captured)")}<br/>` +
+        `idempotency key: ${escapeHtml(r.idempotencyKey)}</li>`
+    )
+    .join("");
+  const more = n > shown.length ? `<p>…and ${n - shown.length} more.</p>` : "";
+  const subject = `⚠️ Bid Board ingestion DEAD-LETTERED — office ${e.office} (${n} failed import${n === 1 ? "" : "s"})`;
+  const html = `
+    <h2>Bid Board → CRM ingestion reached a terminal failure</h2>
+    <p><strong>Office:</strong> ${office}</p>
+    <p>${n} Bid Board import${n === 1 ? "" : "s"} were durably accepted (HTTP 202) but their asynchronous
+    ingestion dead-lettered after retries — the inbox row is in status <code>failed</code>. These will NOT be
+    retried automatically. Query the CRM signed status endpoint with the idempotency key (or inspect the
+    <code>bid_board_ingestion_inbox</code> row) for the underlying error, then re-trigger the push.</p>
+    <ul>${items}</ul>${more}
+  `;
+  return { subject, html };
+}
+
 // ── DB I/O ──────────────────────────────────────────────────────────────────
 
 export interface Queryable {
@@ -174,6 +218,38 @@ export async function upsertAlertState(
            last_success_at = EXCLUDED.last_success_at,
            updated_at = EXCLUDED.updated_at`,
     [officeSlug, fields.state, fields.lastAlertedAt, fields.lastSuccessAt, fields.now]
+  );
+}
+
+/** The office's still-UNALERTED dead-lettered inbox rows (status='failed', dead_letter_alerted_at IS NULL),
+ *  oldest-first. Selecting by the per-row NULL marker (not a `finished_at > watermark` cursor) means an
+ *  out-of-order or same-timestamp failure commit can never be skipped. */
+export async function getDeadLetteredInboxRows(client: Queryable, officeSlug: string): Promise<DeadLetterRow[]> {
+  const { rows } = await client.query(
+    `SELECT id, source_filename, last_error, payload_hash, finished_at
+       FROM public.bid_board_ingestion_inbox
+      WHERE office_slug = $1 AND status = 'failed' AND dead_letter_alerted_at IS NULL
+      ORDER BY finished_at ASC NULLS FIRST, id ASC`,
+    [officeSlug]
+  );
+  return rows.map((r) => ({
+    id: r.id as string,
+    sourceFilename: r.source_filename ?? null,
+    lastError: r.last_error ?? null,
+    idempotencyKey: r.payload_hash as string,
+    finishedAt: r.finished_at ? new Date(r.finished_at) : null,
+  }));
+}
+
+/** Stamp dead_letter_alerted_at on exactly the rows just alerted (idempotent: only rows still NULL). One row
+ *  = one alert, forever, regardless of commit ordering — the per-row replacement for a timestamp watermark. */
+export async function markDeadLettersAlerted(client: Queryable, ids: string[], now: Date): Promise<void> {
+  if (ids.length === 0) return;
+  await client.query(
+    `UPDATE public.bid_board_ingestion_inbox
+        SET dead_letter_alerted_at = $2
+      WHERE id = ANY($1::uuid[]) AND dead_letter_alerted_at IS NULL`,
+    [ids, now]
   );
 }
 
@@ -265,6 +341,49 @@ export async function runHeartbeatForOffice(
   return { office: opts.office, decision, lastSuccessAt, sent };
 }
 
+export interface DeadLetterSweepResult {
+  office: string;
+  count: number; // dead-lettered rows found this sweep
+  sent: boolean; // an alert email actually sent (false for none-found or a failed send)
+}
+
+/**
+ * Sweep one office for still-unalerted dead-lettered ('failed') inbox rows and email a single batch. The rows
+ * are stamped dead_letter_alerted_at ONLY on a successful send (mirrors runHeartbeatForOffice's send-gated
+ * throttle), so a transient transport failure re-alerts the SAME batch next run instead of dropping it, and a
+ * per-row marker means no failure is ever skipped by a timestamp cursor. Sender is injected; a thrown sender
+ * never escapes this fn.
+ */
+export async function sweepDeadLettersForOffice(
+  client: Queryable,
+  opts: { office: string; now: Date; sendAlert?: AlertSender }
+): Promise<DeadLetterSweepResult> {
+  // Skip cleanly if the inbox table isn't provisioned in this environment yet (migration 0188 not applied) —
+  // the absence-of-success heartbeat still runs; we just don't error every tick on a missing prerequisite.
+  const reg = await client.query(`SELECT to_regclass('public.bid_board_ingestion_inbox') AS reg`);
+  if (!reg.rows[0]?.reg) return { office: opts.office, count: 0, sent: false };
+
+  const rows = await getDeadLetteredInboxRows(client, opts.office);
+  if (rows.length === 0) return { office: opts.office, count: 0, sent: false };
+
+  let sent = false;
+  if (opts.sendAlert) {
+    const { subject, html } = renderDeadLetterEmail({ office: opts.office, rows, now: opts.now });
+    try {
+      sent = await opts.sendAlert(subject, html);
+    } catch (err) {
+      sent = false;
+      console.error(`[bid-board-heartbeat] office=${opts.office} dead-letter email send threw:`, err);
+    }
+  }
+
+  if (sent) {
+    // Stamp EVERY row in the batch (not just the displayed cap) so the whole set is retired in one shot.
+    await markDeadLettersAlerted(client, rows.map((r) => r.id), opts.now);
+  }
+  return { office: opts.office, count: rows.length, sent };
+}
+
 // ── Entry point ─────────────────────────────────────────────────────────────
 
 function recipients(): string[] {
@@ -347,6 +466,18 @@ export async function main(now: Date = new Date()): Promise<void> {
         );
       } catch (err) {
         console.error(`[bid-board-heartbeat] office=${office} heartbeat check FAILED:`, err);
+      }
+
+      // Dead-letter sweep: a 202-accepted push whose async ingestion later dead-lettered is invisible to the
+      // absence-of-success check above (which stays quiet while other imports still succeed), so alert on
+      // newly-'failed' inbox rows. Its OWN try/catch so a sweep error can't sink the heartbeat or the loop.
+      try {
+        const dl = await sweepDeadLettersForOffice(wrap, { office, now, sendAlert });
+        if (dl.count > 0) {
+          console.log(`[bid-board-heartbeat] office=${office} dead-letters=${dl.count} sent=${dl.sent}`);
+        }
+      } catch (err) {
+        console.error(`[bid-board-heartbeat] office=${office} dead-letter sweep FAILED:`, err);
       }
     }
     // If EVERY office errored (state table missing, DB down, …) the monitor itself is dark — exit

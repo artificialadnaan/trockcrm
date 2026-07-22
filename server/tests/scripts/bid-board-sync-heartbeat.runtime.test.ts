@@ -1,9 +1,11 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import {
+  getDeadLetteredInboxRows,
   getLastCommittedSuccessAt,
   readAlertState,
   runHeartbeatForOffice,
+  sweepDeadLettersForOffice,
 } from "../../src/scripts/bid-board-sync-heartbeat.js";
 
 /**
@@ -38,6 +40,16 @@ beforeAll(async () => {
       last_success_at timestamptz,
       updated_at timestamptz NOT NULL DEFAULT now()
     );
+    CREATE TABLE public.bid_board_ingestion_inbox (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      office_slug text NOT NULL,
+      payload_hash text NOT NULL,
+      source_filename text,
+      status text NOT NULL DEFAULT 'queued',
+      last_error text,
+      finished_at timestamptz,
+      dead_letter_alerted_at timestamptz
+    );
   `);
 }, 30000); // PGlite cold-start can exceed the default 10s hook timeout when runtime suites start in parallel
 
@@ -46,7 +58,9 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
-  await pg.exec(`TRUNCATE office_dallas.bid_board_sync_runs; TRUNCATE public.bid_board_sync_alert_state;`);
+  await pg.exec(
+    `TRUNCATE office_dallas.bid_board_sync_runs; TRUNCATE public.bid_board_sync_alert_state; TRUNCATE public.bid_board_ingestion_inbox;`
+  );
 });
 
 async function seedRun(status: string, createdAt: Date) {
@@ -54,6 +68,39 @@ async function seedRun(status: string, createdAt: Date) {
     status,
     createdAt,
   ]);
+}
+
+let inboxSeq = 0;
+async function seedInbox(
+  status: string,
+  opts: { finishedAt?: Date; sourceFilename?: string; lastError?: string; office?: string; alertedAt?: Date } = {},
+): Promise<string> {
+  inboxSeq++;
+  const { rows } = await client.query(
+    `INSERT INTO public.bid_board_ingestion_inbox
+       (office_slug, payload_hash, source_filename, status, last_error, finished_at, dead_letter_alerted_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+    [
+      opts.office ?? "dallas",
+      `hash-${inboxSeq}`,
+      opts.sourceFilename ?? `ProjectList-${inboxSeq}.xlsx`,
+      status,
+      opts.lastError ?? null,
+      opts.finishedAt ?? null,
+      opts.alertedAt ?? null,
+    ]
+  );
+  return rows[0].id as string;
+}
+
+/** Count of still-unalerted 'failed' inbox rows for an office (the sweep's eligibility set). */
+async function unalertedFailedCount(office = "dallas"): Promise<number> {
+  const { rows } = await client.query(
+    `SELECT count(*)::int AS n FROM public.bid_board_ingestion_inbox
+      WHERE office_slug = $1 AND status = 'failed' AND dead_letter_alerted_at IS NULL`,
+    [office]
+  );
+  return rows[0].n as number;
 }
 
 describe("getLastCommittedSuccessAt", () => {
@@ -190,5 +237,88 @@ describe("runHeartbeatForOffice — incident + throttle + recovery (persisted)",
     const retried = await runHeartbeatForOffice(client, { ...opts, now: new Date(NOW.getTime() + 41 * MIN) });
     expect(retried.decision.action).toBe("alert_recovered"); // retried
     expect((await readAlertState(client, "dallas"))?.state).toBe("ok");
+  });
+});
+
+describe("dead-letter sweep", () => {
+  it("getDeadLetteredInboxRows returns only still-UNALERTED 'failed' rows, oldest-first", async () => {
+    await seedInbox("failed", { finishedAt: ago(30), lastError: "boom-old" });
+    await seedInbox("failed", { finishedAt: ago(10), lastError: "boom-new" });
+    await seedInbox("failed", { finishedAt: ago(20), lastError: "already", alertedAt: ago(1) }); // already stamped → excluded
+    await seedInbox("succeeded", { finishedAt: ago(5) }); // not a failure
+    await seedInbox("queued"); // not a failure
+
+    const rows = await getDeadLetteredInboxRows(client, "dallas");
+    expect(rows.map((r) => r.lastError)).toEqual(["boom-old", "boom-new"]); // oldest-first, unalerted failures only
+  });
+
+  it("sweeps unalerted dead-letters into ONE batch email, marks them alerted, then no-ops", async () => {
+    await seedInbox("failed", { finishedAt: ago(30), sourceFilename: "A.xlsx", lastError: "e1" });
+    await seedInbox("failed", { finishedAt: ago(10), sourceFilename: "B.xlsx", lastError: "e2" });
+    const calls: { subject: string; html: string }[] = [];
+    const sendAlert = async (subject: string, html: string) => (calls.push({ subject, html }), true);
+
+    const first = await sweepDeadLettersForOffice(client, { office: "dallas", now: NOW, sendAlert });
+    expect(first).toMatchObject({ count: 2, sent: true });
+    expect(calls).toHaveLength(1); // ONE batched email, not one per row
+    expect(calls[0].subject).toMatch(/2 failed imports/);
+    expect(calls[0].html).toContain("A.xlsx");
+    expect(calls[0].html).toContain("B.xlsx");
+    expect(await unalertedFailedCount()).toBe(0); // both stamped
+
+    const second = await sweepDeadLettersForOffice(client, { office: "dallas", now: NOW, sendAlert });
+    expect(second).toMatchObject({ count: 0, sent: false });
+    expect(calls).toHaveLength(1); // nothing new → no second email
+  });
+
+  it("a failure committing OUT OF ORDER (older finished_at than an already-alerted row) is STILL alerted", async () => {
+    // The exact P1 a timestamp watermark misses: alert a newer failure first, then a slow failure commits with
+    // an OLDER finished_at. The per-row NULL marker still selects it; a `finished_at > watermark` cursor wouldn't.
+    await seedInbox("failed", { finishedAt: ago(10), lastError: "newer-first" });
+    const send1: string[] = [];
+    await sweepDeadLettersForOffice(client, { office: "dallas", now: NOW, sendAlert: async (_s, h) => (send1.push(h), true) });
+    expect(send1[0]).toContain("newer-first");
+    expect(await unalertedFailedCount()).toBe(0);
+
+    await seedInbox("failed", { finishedAt: ago(30), lastError: "older-straggler" }); // earlier timestamp, later commit
+    const send2: string[] = [];
+    const r = await sweepDeadLettersForOffice(client, {
+      office: "dallas",
+      now: new Date(NOW.getTime() + MIN),
+      sendAlert: async (_s, h) => (send2.push(h), true),
+    });
+    expect(r.count).toBe(1);
+    expect(send2[0]).toContain("older-straggler"); // NOT skipped despite its older timestamp
+  });
+
+  it("does NOT mark rows on a failed send — the same batch re-alerts next run", async () => {
+    await seedInbox("failed", { finishedAt: ago(10), lastError: "e" });
+    const failed = await sweepDeadLettersForOffice(client, { office: "dallas", now: NOW, sendAlert: async () => false });
+    expect(failed).toMatchObject({ count: 1, sent: false });
+    expect(await unalertedFailedCount()).toBe(1); // NOT stamped
+
+    const retried = await sweepDeadLettersForOffice(client, {
+      office: "dallas",
+      now: new Date(NOW.getTime() + MIN),
+      sendAlert: async () => true,
+    });
+    expect(retried).toMatchObject({ count: 1, sent: true }); // re-alerted the same row
+    expect(await unalertedFailedCount()).toBe(0); // now stamped
+  });
+
+  it("skips cleanly (no throw, no send) when the inbox table is absent (migration 0188 not applied)", async () => {
+    await pg.exec(`ALTER TABLE public.bid_board_ingestion_inbox RENAME TO bid_board_ingestion_inbox_tmp;`);
+    try {
+      let sends = 0;
+      const r = await sweepDeadLettersForOffice(client, {
+        office: "dallas",
+        now: NOW,
+        sendAlert: async () => (sends++, true),
+      });
+      expect(r).toMatchObject({ count: 0, sent: false });
+      expect(sends).toBe(0);
+    } finally {
+      await pg.exec(`ALTER TABLE public.bid_board_ingestion_inbox_tmp RENAME TO bid_board_ingestion_inbox;`);
+    }
   });
 });

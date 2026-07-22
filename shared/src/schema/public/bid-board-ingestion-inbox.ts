@@ -46,6 +46,9 @@ export const bidBoardIngestionInbox = pgTable(
     // can only re-claim a 'processing' row whose lease has expired. Kept in the schema so db:generate can't
     // treat the column as absent and drift.
     leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
+    // Per-row dead-letter alert marker (migration 0190): stamped once when the heartbeat cron emails the
+    // dead-letter alert for a 'failed' row, so a timestamp watermark can't skip an out-of-order commit.
+    deadLetterAlertedAt: timestamp("dead_letter_alerted_at", { withTimezone: true }),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => [
@@ -55,6 +58,11 @@ export const bidBoardIngestionInbox = pgTable(
     index("bid_board_ingestion_inbox_office_extracted_idx")
       .on(table.officeSlug, table.extractedAt.desc())
       .where(sql`${table.status} = 'succeeded'`),
+    // Serves the heartbeat dead-letter sweep's exact predicate (migration 0190); tiny — a stamped or
+    // non-'failed' row drops out of it.
+    index("bid_board_ingestion_inbox_dead_letter_idx")
+      .on(table.officeSlug, table.finishedAt)
+      .where(sql`${table.status} = 'failed' AND ${table.deadLetterAlertedAt} IS NULL`),
     // Mirror migration 0188's inline CHECK (status IN (...)). Named to match Postgres's auto-name for the
     // column check so drizzle-kit sees parity instead of generating a drift migration that drops it.
     check(

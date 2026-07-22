@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   decideHeartbeat,
+  renderDeadLetterEmail,
   renderHeartbeatEmail,
+  type DeadLetterRow,
 } from "../../src/scripts/bid-board-sync-heartbeat.js";
 
 const MIN = 60_000;
@@ -112,5 +114,40 @@ describe("renderHeartbeatEmail (pure)", () => {
     });
     expect(subject.toLowerCase()).toMatch(/recover|resumed|back/);
     expect(html).toContain("2026-06-18T21:55:00.000Z");
+  });
+});
+
+describe("renderDeadLetterEmail (pure)", () => {
+  const row = (i: number): DeadLetterRow => ({
+    id: `id-${i}`,
+    sourceFilename: `File-${i}.xlsx`,
+    lastError: `err-${i}`,
+    idempotencyKey: `hash-${i}`,
+    finishedAt: new Date("2026-07-22T03:00:00.000Z"),
+  });
+
+  it("renders a batch: pluralized subject, each file/error/key, and finished timestamp", () => {
+    const { subject, html } = renderDeadLetterEmail({ office: "dallas", rows: [row(1), row(2)], now: NOW });
+    expect(subject).toContain("DEAD-LETTERED");
+    expect(subject).toContain("2 failed imports");
+    expect(html).toContain("File-1.xlsx");
+    expect(html).toContain("err-2");
+    expect(html).toContain("hash-1");
+    expect(html).toContain("2026-07-22T03:00:00.000Z");
+  });
+
+  it("uses the singular for one failure", () => {
+    const { subject } = renderDeadLetterEmail({ office: "dallas", rows: [row(1)], now: NOW });
+    expect(subject).toMatch(/1 failed import\b/);
+    expect(subject).not.toContain("imports");
+  });
+
+  it("caps the emailed list at 20 and notes how many more", () => {
+    const rows = Array.from({ length: 26 }, (_, i) => row(i));
+    const { subject, html } = renderDeadLetterEmail({ office: "dallas", rows, now: NOW });
+    expect(subject).toContain("26 failed imports"); // subject reflects the TRUE count
+    expect(html).toContain("File-19.xlsx"); // the 20th shown (0-indexed)
+    expect(html).not.toContain("File-20.xlsx"); // capped
+    expect(html).toContain("and 6 more");
   });
 });
