@@ -151,6 +151,22 @@ export function useScorecard(id: string | undefined) {
   });
 }
 
+/**
+ * A below-band scorecard's corrective-action items + their inline responses (Plan 2's read endpoint).
+ * Mirrors useScorecard: keyed on (user, scorecardId), calls getCorrectiveActions. The endpoint 404s when the
+ * scorecard has no corrective actions (not below-band / unknown), which the screen surfaces as empty. A short
+ * staleTime + the screen's focus-refetch keep the item statuses fresh after a response is submitted elsewhere.
+ */
+export function useCorrectiveActions(scorecardId: string | undefined) {
+  const { fetcher, user } = useAuth();
+  return useQuery({
+    queryKey: qk.correctiveActions(user?.id ?? "anon", scorecardId ?? ""),
+    queryFn: () => api.getCorrectiveActions(fetcher, scorecardId!),
+    enabled: !!user && !!scorecardId,
+    staleTime: 30_000,
+  });
+}
+
 export function usePendingPhotos() {
   const { fetcher, user } = useAuth();
   return useQuery({

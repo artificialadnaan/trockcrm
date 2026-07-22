@@ -14,6 +14,7 @@ export const qk = {
   projectReports: (uid: string, dealId: string) => ["projectReports", uid, dealId] as const,
   projectScorecards: (uid: string, dealId: string) => ["projectScorecards", uid, dealId] as const,
   scorecard: (uid: string, id: string) => ["scorecard", uid, id] as const,
+  correctiveActions: (uid: string, scorecardId: string) => ["correctiveActions", uid, scorecardId] as const,
   pending: (uid: string) => ["pending", uid] as const,
   projectTags: (uid: string, dealId: string, q: string) => ["projectTags", uid, dealId, q] as const,
   targets: (uid: string, search: string) => ["targets", uid, search] as const,
