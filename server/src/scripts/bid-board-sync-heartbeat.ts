@@ -128,7 +128,16 @@ export interface DeadLetterRow {
   finishedAt: Date | null;
 }
 
-const DEAD_LETTER_EMAIL_ROW_CAP = 20; // a schema-drift outage can fail every import; cap the emailed list
+const DEAD_LETTER_EMAIL_ROW_CAP = 20; // a schema-drift outage can fail every import; cap the emailed LIST
+
+/**
+ * Query-level ceiling on how many eligible dead-letter rows ONE sweep pulls (and then marks). Well above
+ * DEAD_LETTER_EMAIL_ROW_CAP so the rendered "…and N more" tail is still populated on a large outage, but bounded
+ * so a schema-drift storm that dead-letters thousands of imports can't make a single sweep read + stamp an
+ * unbounded set (holding memory + a long UPDATE). Every row in the bounded batch is stamped after a successful
+ * send; any remainder is carried into the next cron cycle. (Codex P2)
+ */
+export const DEAD_LETTER_SWEEP_BATCH_LIMIT = 200;
 
 /**
  * Eligibility GRACE window (minutes): a row is only alerted once its `finished_at` is older than this. It
@@ -263,19 +272,23 @@ export async function upsertAlertState(
  *  skipped. The grace filter (finished_at older than `graceMinutes`) excludes a just-'failed' row that the
  *  inbox's reconcileFailedButCommitted path may still flip back to 'succeeded' — so the sweep never sends a
  *  false terminal alert on (or stamps) a row that is about to recover. A NULL finished_at is excluded too: it
- *  has no age to compare, and a real dead-letter always stamps finished_at (markInboxFailed / recovery). */
+ *  has no age to compare, and a real dead-letter always stamps finished_at (markInboxFailed / recovery).
+ *  BOUNDED by DEAD_LETTER_SWEEP_BATCH_LIMIT (oldest-first) so a storm that dead-letters thousands of imports
+ *  can't make one sweep read + stamp an unbounded set; the remainder is picked up next cron cycle. */
 export async function getDeadLetteredInboxRows(
   client: Queryable,
   officeSlug: string,
-  graceMinutes: number = deadLetterGraceMinutes()
+  graceMinutes: number = deadLetterGraceMinutes(),
+  limit: number = DEAD_LETTER_SWEEP_BATCH_LIMIT
 ): Promise<DeadLetterRow[]> {
   const { rows } = await client.query(
     `SELECT id, source_filename, last_error, payload_hash, finished_at
        FROM public.bid_board_ingestion_inbox
       WHERE office_slug = $1 AND status = 'failed' AND dead_letter_alerted_at IS NULL
         AND finished_at IS NOT NULL AND finished_at < NOW() - make_interval(mins => $2::int)
-      ORDER BY finished_at ASC NULLS FIRST, id ASC`,
-    [officeSlug, graceMinutes]
+      ORDER BY finished_at ASC NULLS FIRST, id ASC
+      LIMIT $3::int`,
+    [officeSlug, graceMinutes, limit]
   );
   return rows.map((r) => ({
     id: r.id as string,
@@ -288,10 +301,11 @@ export async function getDeadLetteredInboxRows(
 
 /** Stamp dead_letter_alerted_at on exactly the rows just alerted (idempotent: only rows still NULL AND still
  *  'failed'). Retires the batch so a healthy run alerts each dead-lettered row once — the per-row replacement
- *  for a timestamp watermark, immune to out-of-order commits. The `status = 'failed'` guard closes the
- *  reconcile race: if the inbox's reconcileFailedButCommitted path flips a row 'failed' → 'succeeded' between
- *  the sweep's SELECT and this stamp, that row is NOT stamped (so it never carries a stale dead-letter marker
- *  on a now-succeeded import). NOTE: the send→stamp pair is at-least-once, not exactly-once: if the send
+ *  for a timestamp watermark, immune to out-of-order commits. The `status = 'failed'` guard is the BACKSTOP for
+ *  this UNLOCKED stamp (the sweep releases the office lock after reading eligibility, before the send + this
+ *  mark): if the inbox's reconcileFailedButCommitted path flips a row 'failed' → 'succeeded' after the sweep's
+ *  SELECT but before this stamp, that row is NOT stamped (so it never carries a stale dead-letter marker on a
+ *  now-succeeded import). NOTE: the send→stamp pair is at-least-once, not exactly-once: if the send
  *  succeeds but this UPDATE fails (or the process dies before it), the rows stay NULL and the next cron
  *  re-sends the SAME batch. That is the correct safe bias for an alert — a rare duplicate on a post-send crash,
  *  never a LOST alert — and the sweep passes a stable Resend idempotencyKey so that re-send dedupes provider-
@@ -407,10 +421,19 @@ export interface DeadLetterSweepResult {
 }
 
 /** Stable Resend idempotency key for one office's dead-letter batch: derived from the office + the SORTED row
- *  ids so an identical batch re-sent after an uncertain marker write dedupes provider-side (at-least-once →
+ *  ids so an IDENTICAL batch re-sent after an uncertain marker write dedupes provider-side (at-least-once →
  *  effectively once). Sorting makes it order-independent; the sha256 keeps it a bounded length regardless of
- *  batch size. If the eligible set CHANGES (a row reconciled out, a new failure aged in) the key changes and a
- *  genuinely different alert still goes out. */
+ *  batch size.
+ *
+ *  ACCEPTED at-least-once behavior (Codex P2, finding D): if the send succeeds but the marker UPDATE fails (or
+ *  the process dies before it) AND a NEW failure ages into the eligibility set before the retry cron, the next
+ *  sweep's batch is a SUPERSET (old rows + the new one), so its key differs and Resend does NOT dedupe it — the
+ *  recipient gets ONE extra email covering the old rows plus the new failure. That is a rare duplicate, never a
+ *  LOST alert, and it is the correct safe bias for a monitor: delivery is at-least-once by design (the marker is
+ *  a best-effort retirement, not an exactly-once ledger). Deriving the key from only the oldest row + a time
+ *  bucket would trade this rare duplicate for a real risk of SUPPRESSING the new failure's alert, so we keep the
+ *  full-batch key. If the eligible set merely SHRINKS (a row reconciled out) the remaining-subset key differs
+ *  too and a correct, smaller alert still goes out. */
 export function deadLetterBatchIdempotencyKey(office: string, ids: string[]): string {
   const digest = createHash("sha256").update([...ids].sort().join(",")).digest("hex");
   return `dead-letter:${office}:${digest}`;
@@ -431,17 +454,27 @@ export function deadLetterBatchIdempotencyKey(office: string, ids: string[]): st
  * handler is still importing (lease renewals lapsed); the age predicate could then alert it before it commits
  * and recordSuccessWithRetry reconciles it back to 'succeeded'. So we take a NON-BLOCKING pg_try_advisory_lock
  * on the SAME per-office key the ingestion holds across an import (BID_BOARD_ADVISORY_NAMESPACE +
- * officeAdvisoryKey(office), inbox.ts) BEFORE reading the eligibility set, and HOLD it across the read + send +
- * marker. If a handler holds it (an import is active for this office) the try-lock fails → we DEFER this
- * office's sweep this cycle (no read, no send, no failure); it's caught next cron cycle.
+ * officeAdvisoryKey(office), inbox.ts) BEFORE reading the eligibility set. If a handler holds it (an import is
+ * active for this office) the try-lock fails → we DEFER this office's sweep this cycle (no read, no send, no
+ * failure); it's caught next cron cycle.
  *
- * LOCK-FIRST, READ-UNDER-LOCK (Codex P2): reading eligibility BEFORE the lock left a window where a row could
- * reconcile 'failed' → 'succeeded' (and its import handler release the lock) BETWEEN the SELECT and the
- * try-lock — the probe then succeeds but the stale snapshot is still emailed + stamped. Holding the lock across
- * the read guarantees no import handler runs (hence no reconcile) for this office during the sweep, so the
- * eligibility set can't shift under us. The `AND status = 'failed'` marker guard is kept as a backstop. Sends
- * are bounded by the sender's own timeout, so holding the lock across the send can't wedge a future import
- * indefinitely; the lock is released in a `finally`.
+ * READ-UNDER-LOCK, then UNLOCK-BEFORE-SEND (Codex P1/P2): we acquire the lock, READ the eligibility set while
+ * holding it, then RELEASE the lock BEFORE the email send + the marker UPDATE. Two constraints are satisfied at
+ * once:
+ *   - (last round) read UNDER the lock: holding the lock across the SELECT guarantees no import handler is
+ *     running for this office AT READ TIME, so no 'failed' → 'succeeded' reconcile can be in flight — every aged
+ *     'failed' row we read is genuinely terminal, not a mid-reconcile snapshot. (The lock-first ordering closes
+ *     the earlier race where a row could reconcile out between an unlocked SELECT and the try-lock.)
+ *   - (this round) do NOT hold the lock across I/O: the email send is a network call to Resend that can STALL.
+ *     Holding the per-office ingestion lock across that stall would starve real imports (which need the SAME
+ *     lock, 300s timeout) and could dead-letter queued imports. So we unlock the instant the read completes and
+ *     do the send + mark UNLOCKED.
+ * CORRECTNESS AFTER UNLOCK: because no handler was active at read time, our snapshot is a set of genuinely
+ * terminal rows. An import that STARTS after we unlock is a NEW payload → a NEW inbox row (different
+ * payload_hash), never a reconcile of a row in our snapshot (a reconcile only touches the row an in-flight
+ * import already owned, and none were in flight). And the guarded markDeadLettersAlerted (`AND status =
+ * 'failed'`) remains the backstop: if a row in our snapshot somehow did flip 'succeeded' by mark time, it is
+ * simply skipped. Delivery is at-least-once (see markDeadLettersAlerted / deadLetterBatchIdempotencyKey).
  */
 export async function sweepDeadLettersForOffice(
   client: Queryable,
@@ -453,10 +486,9 @@ export async function sweepDeadLettersForOffice(
   if (!reg.rows[0]?.reg) return { office: opts.office, count: 0, sent: false };
 
   // Acquire the office lock FIRST — before reading eligibility — so no import handler can run (and thus no
-  // 'failed' → 'succeeded' reconcile can land) for this office while we read+send+mark. Non-blocking: a held
-  // lock means an import is in flight, so defer this cycle rather than risk a false terminal alert on a row it
-  // may still reconcile. (A handler that starts AFTER we hold the lock is serialized behind us; its just-
-  // 'failed' intermediate state would be younger than the grace window anyway, so it can't be alerted now.)
+  // 'failed' → 'succeeded' reconcile can land) for this office while we read the eligibility set. Non-blocking:
+  // a held lock means an import is in flight, so defer this cycle rather than risk a false terminal alert on a
+  // row it may still reconcile.
   const lockKey = officeAdvisoryKey(opts.office);
   const lockRes = await client.query("SELECT pg_try_advisory_lock($1, $2) AS got", [
     BID_BOARD_ADVISORY_NAMESPACE,
@@ -468,37 +500,47 @@ export async function sweepDeadLettersForOffice(
     return { office: opts.office, count: 0, sent: false, deferred: true };
   }
 
+  // Read the eligibility set UNDER the held lock so no in-flight import can be mid-reconcile, then RELEASE the
+  // lock BEFORE the (potentially-stalling) send so we never hold the per-office ingestion lock across network
+  // I/O and starve real imports. Reading under the lock proves these aged 'failed' rows are genuinely terminal;
+  // the send + guarded mark happen safely unlocked (see the fn doc).
+  let rows: DeadLetterRow[];
   try {
-    // Read the eligibility set UNDER the held lock so it can't shift (reconcile out) between here and the send.
-    const rows = await getDeadLetteredInboxRows(client, opts.office);
-    if (rows.length === 0) return { office: opts.office, count: 0, sent: false };
-
-    let sent = false;
-    if (opts.sendAlert) {
-      const { subject, html } = renderDeadLetterEmail({ office: opts.office, rows, now: opts.now });
-      const idempotencyKey = deadLetterBatchIdempotencyKey(opts.office, rows.map((r) => r.id));
-      try {
-        sent = await opts.sendAlert(subject, html, idempotencyKey);
-      } catch (err) {
-        sent = false;
-        console.error(`[bid-board-heartbeat] office=${opts.office} dead-letter email send threw:`, err);
-      }
-    }
-
-    if (sent) {
-      // Stamp EVERY row in the batch (not just the displayed cap) so the whole set is retired in one shot.
-      await markDeadLettersAlerted(client, rows.map((r) => r.id), opts.now);
-    }
-    return { office: opts.office, count: rows.length, sent };
+    rows = await getDeadLetteredInboxRows(client, opts.office);
   } finally {
-    // Release what we acquired so we never block a real import (and so a same-session second sweep isn't
-    // confused by our own held lock). Best-effort: if the unlock query itself throws, the session-scoped lock
-    // is still released on client.end() in the cron's finally.
+    await releaseOfficeLock(client, opts.office, lockKey);
+  }
+  if (rows.length === 0) return { office: opts.office, count: 0, sent: false };
+
+  let sent = false;
+  if (opts.sendAlert) {
+    const { subject, html } = renderDeadLetterEmail({ office: opts.office, rows, now: opts.now });
+    const idempotencyKey = deadLetterBatchIdempotencyKey(opts.office, rows.map((r) => r.id));
     try {
-      await client.query("SELECT pg_advisory_unlock($1, $2)", [BID_BOARD_ADVISORY_NAMESPACE, lockKey]);
+      sent = await opts.sendAlert(subject, html, idempotencyKey);
     } catch (err) {
-      console.error(`[bid-board-heartbeat] office=${opts.office} dead-letter sweep advisory unlock failed:`, err);
+      sent = false;
+      console.error(`[bid-board-heartbeat] office=${opts.office} dead-letter email send threw:`, err);
     }
+  }
+
+  if (sent) {
+    // Stamp EVERY row in the bounded batch (not just the displayed cap) so the whole read set is retired in one
+    // shot; any rows beyond DEAD_LETTER_SWEEP_BATCH_LIMIT are handled next cron cycle. The `AND status =
+    // 'failed'` guard inside markDeadLettersAlerted is the backstop for the (now-unlocked) mark.
+    await markDeadLettersAlerted(client, rows.map((r) => r.id), opts.now);
+  }
+  return { office: opts.office, count: rows.length, sent };
+}
+
+/** Best-effort release of the per-office ingestion advisory lock. If the unlock query itself throws, the
+ *  session-scoped lock is still released on client.end() in the cron's finally, so a failure here can't leak a
+ *  hold past the process. */
+async function releaseOfficeLock(client: Queryable, office: string, lockKey: number): Promise<void> {
+  try {
+    await client.query("SELECT pg_advisory_unlock($1, $2)", [BID_BOARD_ADVISORY_NAMESPACE, lockKey]);
+  } catch (err) {
+    console.error(`[bid-board-heartbeat] office=${office} dead-letter sweep advisory unlock failed:`, err);
   }
 }
 

@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import {
+  DEAD_LETTER_SWEEP_BATCH_LIMIT,
   getDeadLetteredInboxRows,
   getLastCommittedSuccessAt,
   markDeadLettersAlerted,
@@ -94,6 +95,21 @@ async function seedInbox(
     ]
   );
   return rows[0].id as string;
+}
+
+/**
+ * PGlite is single-session and its advisory locks are re-entrant, so acquiring the office lock in-test would
+ * return true. To simulate ANOTHER backend (the import worker) holding it, wrap the base client and intercept
+ * ONLY the sweep's pg_try_advisory_lock probe with {got:false} (as a real held lock in another session would),
+ * delegating every other query through to real Postgres.
+ */
+function makeLockDeniedClient(base: typeof client): typeof client {
+  return {
+    query: async (text, params) => {
+      if (/pg_try_advisory_lock/.test(text)) return { rows: [{ got: false }] } as any;
+      return base.query(text, params);
+    },
+  };
 }
 
 /** Count of still-unalerted 'failed' inbox rows for an office (the sweep's eligibility set). */
@@ -305,6 +321,51 @@ describe("dead-letter sweep", () => {
     expect(calls).toHaveLength(1); // nothing new → no second email
   });
 
+  // Codex P2: getDeadLetteredInboxRows must be BOUNDED (a schema-drift storm can dead-letter thousands). The
+  // default ceiling is well above the emailed-list cap so the "…and N more" tail still renders. Prove the LIMIT
+  // clause with a small explicit limit (seeding thousands in PGlite would be needlessly slow), and prove the
+  // sweep processes ONE bounded batch, marking every row it read, with the remainder carried to the next cycle.
+  it("bounds the eligibility read at the batch limit; the next sweep drains the remainder", async () => {
+    expect(DEAD_LETTER_SWEEP_BATCH_LIMIT).toBeGreaterThan(20); // generously above DEAD_LETTER_EMAIL_ROW_CAP
+
+    // 5 aged-eligible failures, oldest-first by finished_at.
+    for (let i = 0; i < 5; i++) {
+      await seedInbox("failed", { finishedAt: ago(60 - i), lastError: `dl-${i}` });
+    }
+
+    // The LIMIT is honored (oldest-first): a limit of 3 returns exactly the 3 oldest.
+    const capped = await getDeadLetteredInboxRows(client, "dallas", 15, 3);
+    expect(capped.map((r) => r.lastError)).toEqual(["dl-0", "dl-1", "dl-2"]);
+
+    // A bounded sweep marks EVERY row in its batch; with a limit of 2 that's the 2 oldest, and 3 remain for the
+    // next cycle. (The production default limit is large, so a real sweep drains all 5 at once — this drives the
+    // bound explicitly by monkeypatching the read to a small limit.)
+    const boundedClient: typeof client = {
+      query: async (text, params) => {
+        if (/FROM public\.bid_board_ingestion_inbox\b[\s\S]*status = 'failed'/.test(text) && /LIMIT/.test(text)) {
+          // Force the batch limit ($3) down to 2 for this test.
+          return client.query(text, [params![0], params![1], 2]);
+        }
+        return client.query(text, params);
+      },
+    };
+    const calls: string[] = [];
+    const send = async (_s: string, h: string) => (calls.push(h), true);
+
+    const firstBatch = await sweepDeadLettersForOffice(boundedClient, { office: "dallas", now: NOW, sendAlert: send });
+    expect(firstBatch).toMatchObject({ count: 2, sent: true }); // exactly the bounded batch
+    expect(calls).toHaveLength(1);
+    expect(await unalertedFailedCount()).toBe(3); // 3 remain unstamped for the next cycle
+
+    const secondBatch = await sweepDeadLettersForOffice(boundedClient, { office: "dallas", now: NOW, sendAlert: send });
+    expect(secondBatch).toMatchObject({ count: 2, sent: true });
+    expect(await unalertedFailedCount()).toBe(1);
+
+    const thirdBatch = await sweepDeadLettersForOffice(boundedClient, { office: "dallas", now: NOW, sendAlert: send });
+    expect(thirdBatch).toMatchObject({ count: 1, sent: true });
+    expect(await unalertedFailedCount()).toBe(0); // fully drained across the bounded batches
+  });
+
   it("a failure committing OUT OF ORDER (older finished_at than an already-alerted row) is STILL alerted", async () => {
     // The exact P1 a timestamp watermark misses: alert a newer failure first, then a slow failure commits with
     // an OLDER finished_at. The per-row NULL marker still selects it; a `finished_at > watermark` cursor wouldn't.
@@ -375,16 +436,8 @@ describe("dead-letter sweep", () => {
   it("DEFERS (no send, no stamp) when an import handler holds the office advisory lock", async () => {
     await seedInbox("failed", { finishedAt: ago(30), lastError: "aged-eligible" }); // aged past the grace
 
-    // Simulate ANOTHER backend (the import worker) holding the office lock: PGlite is single-session and its
-    // advisory locks are re-entrant, so acquiring it here would return true. Instead intercept ONLY the sweep's
-    // pg_try_advisory_lock probe and answer "not acquired" (as a real held lock in another session would),
-    // passing every other query through to real Postgres.
-    const held: typeof client = {
-      query: async (text, params) => {
-        if (/pg_try_advisory_lock/.test(text)) return { rows: [{ got: false }] } as any;
-        return client.query(text, params);
-      },
-    };
+    // Simulate ANOTHER backend (the import worker) holding the office lock (see makeLockDeniedClient).
+    const held = makeLockDeniedClient(client);
     let sends = 0;
     const r = await sweepDeadLettersForOffice(held, {
       office: "dallas",
@@ -412,7 +465,11 @@ describe("dead-letter sweep", () => {
   // and the try-lock — the probe then succeeds but the stale snapshot is emailed. Prove the ordering: when the
   // lock is NOT acquired, the eligibility SELECT is never issued (deferred BEFORE any read); when it IS
   // acquired, the read follows the successful lock.
-  it("reads eligibility only AFTER the office lock is acquired (lock-first ordering)", async () => {
+  //
+  // Codex P1 (UNLOCK-BEFORE-SEND): the sweep must ALSO release the lock BEFORE the email send so a stalled
+  // Resend call can't hold the per-office ingestion lock and starve imports. So the full ordering under a free
+  // lock is lock → read → unlock → send (→ mark), which this test asserts end-to-end.
+  it("reads under the lock, then UNLOCKS before the send (lock → read → unlock → send)", async () => {
     await seedInbox("failed", { finishedAt: ago(30), lastError: "aged-eligible" }); // aged, eligible
 
     // (1) Lock held → deferred and the eligibility SELECT never runs.
@@ -436,23 +493,28 @@ describe("dead-letter sweep", () => {
     expect(order).toContain("lock");
     expect(order).not.toContain("read"); // eligibility NOT read when the lock was refused
 
-    // (2) Lock free → the successful lock precedes the eligibility read.
+    // (2) Lock free → the full lock → read → unlock → send ordering, tracing every step.
     const order2: string[] = [];
     const freeWithTrace: typeof client = {
       query: async (text, params) => {
         if (/pg_try_advisory_lock/.test(text)) order2.push("lock");
-        if (/FROM public\.bid_board_ingestion_inbox\b[\s\S]*status = 'failed'/.test(text)) order2.push("read");
+        else if (/pg_advisory_unlock/.test(text)) order2.push("unlock");
+        else if (/FROM public\.bid_board_ingestion_inbox\b[\s\S]*status = 'failed'/.test(text)) order2.push("read");
         return client.query(text, params);
       },
     };
     const swept = await sweepDeadLettersForOffice(freeWithTrace, {
       office: "dallas",
       now: NOW,
-      sendAlert: async () => true,
+      sendAlert: async () => (order2.push("send"), true),
     });
     expect(swept).toMatchObject({ count: 1, sent: true });
+    // Exact ordering: acquire the lock, read eligibility UNDER it, release it, THEN send. The send must NOT be
+    // under the lock (a stalled send can't hold the per-office ingestion lock).
     expect(order2.indexOf("lock")).toBeGreaterThanOrEqual(0);
-    expect(order2.indexOf("lock")).toBeLessThan(order2.indexOf("read")); // lock BEFORE read
+    expect(order2.indexOf("lock")).toBeLessThan(order2.indexOf("read")); // lock BEFORE read (read under lock)
+    expect(order2.indexOf("read")).toBeLessThan(order2.indexOf("unlock")); // read BEFORE unlock
+    expect(order2.indexOf("unlock")).toBeLessThan(order2.indexOf("send")); // unlock BEFORE send (KEY: no I/O under lock)
   });
 
   it("acquires then RELEASES the office lock when free, so it never blocks a real import", async () => {
@@ -539,12 +601,7 @@ describe("runHeartbeatSweeps — all-offices fail guards", () => {
     await seedInbox("failed", { finishedAt: ago(30), lastError: "aged-eligible" });
     // Force the office lock to read as held so the only office's sweep DEFERS — a deferred sweep is a clean
     // skip, not a failure, so the all-offices guard must not throw.
-    const held: typeof client = {
-      query: async (text, params) => {
-        if (/pg_try_advisory_lock/.test(text)) return { rows: [{ got: false }] } as any;
-        return client.query(text, params);
-      },
-    };
+    const held = makeLockDeniedClient(client);
     let sends = 0;
     await expect(
       runHeartbeatSweeps(held, {
