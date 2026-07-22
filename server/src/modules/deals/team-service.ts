@@ -199,7 +199,65 @@ export async function removeTeamMember(tenantDb: TenantDb, memberId: string, dea
     .returning();
 
   if (result.length === 0) throw new AppError(404, "Team member not found");
-  return result[0];
+
+  // Revoke any outstanding corrective-action web tokens for this recipient on the deal's scorecards.
+  // verifyCorrectiveActionToken checks only hash + expiry, so without this a removed email-only super/PM
+  // would keep read/write access to the responder page for up to the token TTL (30 days). We revoke by the
+  // recipient's resolved email (tokens are recipient_email-bound), scoped to THIS deal's scorecards.
+  const removed = result[0];
+  if (removed.role === "superintendent" || removed.role === "project_manager") {
+    await revokeCorrectiveActionTokensForRemovedMember(tenantDb, dealId, removed);
+  }
+  return removed;
+}
+
+/**
+ * Delete the removed super/PM's corrective-action tokens for the deal's scorecards. The removed row's email
+ * is resolved from whichever identity it used (staff user, directory contact, or an email-only member's
+ * member_email). To avoid revoking a token that is still legitimately held — e.g. the same person is assigned
+ * to the deal twice, or a still-active member resolves to the same email — we only delete tokens whose
+ * recipient_email is NOT the email of any OTHER active super/PM assignment on this deal. Runs in the same
+ * tenant transaction as the removal (the DELETE route commits both together), so the revoke is atomic with
+ * the soft-delete — a security revoke should not silently no-op if it fails.
+ */
+async function revokeCorrectiveActionTokensForRemovedMember(
+  tenantDb: TenantDb,
+  dealId: string,
+  removed: { userId: string | null; contactId: string | null; memberEmail: string | null },
+): Promise<void> {
+  // Resolve the removed member's email (lower-cased) from its identity. An email-only member carries it
+  // directly; a linked user/contact resolves it from the joined identity row.
+  const emailRes = await tenantDb.execute(sql`
+    SELECT LOWER(COALESCE(
+      ${removed.memberEmail},
+      (SELECT email FROM public.users WHERE id = ${removed.userId ?? null}),
+      (SELECT email FROM contacts WHERE id = ${removed.contactId ?? null})
+    )) AS email
+  `);
+  const email = (emailRes.rows?.[0] as { email?: string | null } | undefined)?.email;
+  if (!email) return;
+
+  // If any OTHER active super/PM on this deal still resolves to the same email, the token is still valid for
+  // them — do not revoke.
+  const stillAssigned = await tenantDb.execute(sql`
+    SELECT 1
+      FROM deal_team_members dtm
+      LEFT JOIN public.users u ON dtm.user_id = u.id
+      LEFT JOIN contacts c ON dtm.contact_id = c.id
+     WHERE dtm.deal_id = ${dealId}
+       AND dtm.is_active = TRUE
+       AND dtm.role IN ('superintendent', 'project_manager')
+       AND LOWER(COALESCE(dtm.member_email, u.email, c.email)) = ${email}
+     LIMIT 1
+  `);
+  if ((stillAssigned.rows?.length ?? 0) > 0) return;
+
+  // Revoke: delete this recipient's tokens on every scorecard belonging to the deal.
+  await tenantDb.execute(sql`
+    DELETE FROM scorecard_corrective_action_tokens
+     WHERE LOWER(recipient_email) = ${email}
+       AND scorecard_id IN (SELECT id FROM field_scorecards WHERE deal_id = ${dealId})
+  `);
 }
 
 export interface ScorecardTeamEmails {

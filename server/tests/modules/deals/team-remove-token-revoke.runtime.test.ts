@@ -1,0 +1,158 @@
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { PGlite } from "@electric-sql/pglite";
+import { drizzle } from "drizzle-orm/pglite";
+import { sql } from "drizzle-orm";
+import { addTeamMember, removeTeamMember } from "../../../src/modules/deals/team-service.js";
+import {
+  mintCorrectiveActionToken,
+  verifyCorrectiveActionToken,
+} from "../../../src/modules/field/corrective-action-tokens.js";
+import {
+  dealTeamMembers,
+  contacts,
+  deals,
+  fieldScorecards,
+  fieldScorecardItems,
+  fieldScorecardPhotos,
+  scorecardCorrectiveActions,
+  scorecardCorrectiveActionTokens,
+} from "@trock-crm/shared/schema";
+import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
+
+// Removing a deal's super/PM must revoke that recipient's outstanding corrective-action web tokens on the
+// deal's scorecards — verifyCorrectiveActionToken checks only hash + expiry, so a removed email-only member
+// would otherwise keep read/write access to the responder page until the token TTL expires (30 days).
+const DEAL = "11111111-1111-1111-1111-111111111111";
+const OTHER_DEAL = "11111111-1111-1111-1111-1111111111ff";
+const USER = "33333333-3333-3333-3333-333333333333";
+const SCORECARD = "55555555-5555-5555-5555-000000000001";
+const OTHER_SCORECARD = "55555555-5555-5555-5555-0000000000ff";
+const EXT_PM_EMAIL = "ext.pm@example.com";
+
+let pg: PGlite;
+let tdb: any;
+
+beforeAll(async () => {
+  pg = new PGlite();
+  await pg.exec(`
+    CREATE TABLE public.users (id uuid PRIMARY KEY, display_name text, email text, avatar_url text, is_active boolean DEFAULT true);
+  `);
+  await pg.exec(
+    tenantSchemaSql("public", [
+      dealTeamMembers,
+      contacts,
+      deals,
+      fieldScorecards,
+      fieldScorecardItems,
+      fieldScorecardPhotos,
+      scorecardCorrectiveActions,
+      scorecardCorrectiveActionTokens,
+    ]),
+  );
+  await pg.exec(`
+    INSERT INTO public.users (id, display_name, email, is_active) VALUES
+      ('${USER}', 'Sam Super', 'sam.super@trock.com', true);
+  `);
+  tdb = drizzle(pg);
+});
+
+afterAll(async () => {
+  await pg?.close?.();
+});
+
+beforeEach(async () => {
+  await tdb.execute(sql`DELETE FROM scorecard_corrective_action_tokens`);
+  await tdb.execute(sql`DELETE FROM deal_team_members`);
+  await tdb.execute(sql`DELETE FROM field_scorecards`);
+  // Two scorecards: one on the deal under test, one on a different deal (its token must NOT be revoked).
+  await tdb.execute(sql`
+    INSERT INTO field_scorecards (id, client_submission_id, deal_id, week_of, form_version, kind, total_score, rating, status, submitted_by)
+    VALUES
+      (${SCORECARD}, '66666666-0000-0000-0000-000000000001', ${DEAL}, '2026-06-30', 1, 'project', 60, 'corrective_action', 'corrective_action_open', ${USER}),
+      (${OTHER_SCORECARD}, '66666666-0000-0000-0000-0000000000ff', ${OTHER_DEAL}, '2026-06-30', 1, 'project', 60, 'corrective_action', 'corrective_action_open', ${USER})
+  `);
+});
+
+describe("removeTeamMember revokes the removed recipient's corrective-action tokens", () => {
+  it("deletes an email-only PM's token on the deal's scorecard, so it no longer authorizes", async () => {
+    const member = await addTeamMember(tdb, {
+      dealId: DEAL,
+      role: "project_manager",
+      memberName: "Ext PM",
+      memberEmail: EXT_PM_EMAIL,
+    });
+    const { rawToken } = await mintCorrectiveActionToken(tdb, {
+      scorecardId: SCORECARD,
+      recipientEmail: EXT_PM_EMAIL,
+      role: "project_manager",
+      ttlDays: 30,
+    });
+    // The token authorizes before removal.
+    expect(await verifyCorrectiveActionToken(tdb, rawToken)).not.toBeNull();
+
+    await removeTeamMember(tdb, member.id, DEAL);
+
+    // After removal the token is revoked (deleted) → no longer authorizes.
+    expect(await verifyCorrectiveActionToken(tdb, rawToken)).toBeNull();
+    const remaining = await tdb.execute(
+      sql`SELECT COUNT(*)::int AS n FROM scorecard_corrective_action_tokens WHERE recipient_email = ${EXT_PM_EMAIL}`,
+    );
+    expect(remaining.rows[0].n).toBe(0);
+  });
+
+  it("resolves the email from a linked staff user and revokes that user's token", async () => {
+    const member = await addTeamMember(tdb, { dealId: DEAL, userId: USER, role: "superintendent" });
+    const { rawToken } = await mintCorrectiveActionToken(tdb, {
+      scorecardId: SCORECARD,
+      recipientEmail: "sam.super@trock.com",
+      role: "superintendent",
+      ttlDays: 30,
+    });
+    await removeTeamMember(tdb, member.id, DEAL);
+    expect(await verifyCorrectiveActionToken(tdb, rawToken)).toBeNull();
+  });
+
+  it("does NOT revoke a token for the same email on a DIFFERENT deal's scorecard", async () => {
+    const member = await addTeamMember(tdb, {
+      dealId: DEAL,
+      role: "project_manager",
+      memberName: "Ext PM",
+      memberEmail: EXT_PM_EMAIL,
+    });
+    // A token for the same recipient but bound to another deal's scorecard.
+    const { rawToken: otherToken } = await mintCorrectiveActionToken(tdb, {
+      scorecardId: OTHER_SCORECARD,
+      recipientEmail: EXT_PM_EMAIL,
+      role: "project_manager",
+      ttlDays: 30,
+    });
+    await removeTeamMember(tdb, member.id, DEAL);
+    // The other deal's token is untouched — removal is scoped to THIS deal's scorecards.
+    expect(await verifyCorrectiveActionToken(tdb, otherToken)).not.toBeNull();
+  });
+
+  it("keeps the token when another ACTIVE super/PM on the deal still resolves to the same email", async () => {
+    // Two email-only PM assignments with the same email (e.g. a duplicate). Removing ONE must not revoke the
+    // token, because the other active assignment still legitimately holds it.
+    const dup1 = await addTeamMember(tdb, {
+      dealId: DEAL,
+      role: "project_manager",
+      memberName: "Ext PM",
+      memberEmail: EXT_PM_EMAIL,
+    });
+    await addTeamMember(tdb, {
+      dealId: DEAL,
+      role: "project_manager",
+      memberName: "Ext PM (dup)",
+      memberEmail: EXT_PM_EMAIL,
+    });
+    const { rawToken } = await mintCorrectiveActionToken(tdb, {
+      scorecardId: SCORECARD,
+      recipientEmail: EXT_PM_EMAIL,
+      role: "project_manager",
+      ttlDays: 30,
+    });
+    await removeTeamMember(tdb, dup1.id, DEAL);
+    expect(await verifyCorrectiveActionToken(tdb, rawToken)).not.toBeNull();
+  });
+});
