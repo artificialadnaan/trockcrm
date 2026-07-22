@@ -39,6 +39,7 @@ import { handleRfpVoteInvitation, RFP_VOTE_INVITATION_JOB } from "./rfp-vote-inv
 import { handleRfpBidBoardCreate, RFP_BIDBOARD_CREATE_JOB } from "./rfp-bidboard-create.js";
 import { handleRfpVoteOutcomeEmail, RFP_VOTE_OUTCOME_JOB } from "./rfp-vote-outcome.js";
 import { handleWonMetricReductionAlert, WON_METRIC_REDUCTION_ALERT_JOB } from "./won-metric-reduction-alert.js";
+import { handleBidBoardIngestJob } from "./bid-board-ingest.js";
 
 const SERVER_MODULE_ROOT =
   process.env.NODE_ENV === "production" ? "../../../server/dist/modules" : "../../../server/src/modules";
@@ -137,6 +138,12 @@ export function registerAllJobs() {
   registerJobHandler(RFP_VOTE_INVITATION_JOB, handleRfpVoteInvitation);
   registerJobHandler(RFP_BIDBOARD_CREATE_JOB, handleRfpBidBoardCreate);
   registerJobHandler(RFP_VOTE_OUTCOME_JOB, handleRfpVoteOutcomeEmail);
+
+  // Bid Board → CRM async ingestion (enqueued by POST /api/bid-board-sync/ingest via the durable inbox).
+  // Job type string mirrors BID_BOARD_INGEST_JOB_TYPE in server/src/modules/bid-board-sync/inbox.ts.
+  // Return the handler's JobHandlerResult (don't discard it) so a deferred (live-leased) outcome reschedules
+  // the job as pending instead of completing it. Claimed + run by the DEDICATED bid_board_ingest poller.
+  registerJobHandler("bid_board_ingest", (payload, officeId) => handleBidBoardIngestJob(payload, officeId));
   registerJobHandler(WON_METRIC_REDUCTION_ALERT_JOB, handleWonMetricReductionAlert);
 
   registerJobHandler("reports_execution", async () => {
