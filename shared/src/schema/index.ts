@@ -166,6 +166,7 @@ export {
   fieldScorecardPhotos,
   fieldScorecardEditUploads,
 } from "./tenant/field-scorecards.js";
+export { scorecardCorrectiveActions } from "./tenant/scorecard-corrective-actions.js";
 export {
   projects,
   projectPhaseHistory,

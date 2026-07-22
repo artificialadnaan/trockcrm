@@ -89,6 +89,8 @@ export const fieldScorecardPhotos = pgTable(
     sectionKey: varchar("section_key", { length: 40 }).notNull(),
     /** V2 critical-deficiency evidence is attached to the exact selected deficiency. */
     deficiencyKey: varchar("deficiency_key", { length: 40 }),
+    /** Set on corrective-action response photos (FK -> scorecard_corrective_actions); null for scorecard evidence. */
+    correctiveActionId: uuid("corrective_action_id"),
     fileId: uuid("file_id").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },
