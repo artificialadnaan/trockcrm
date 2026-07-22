@@ -50,60 +50,79 @@ export async function resolveCorrectiveActionItem(
   input: ResolveCorrectiveActionInput,
 ): Promise<void> {
   await db.transaction(async (tx) => {
-    // Serialize resolves for the SAME scorecard. Office transactions run at READ COMMITTED, so two
-    // responders closing out the final two open items in separate transactions could each run their
-    // `stillOpen` SELECT before seeing the other's uncommitted resolve → neither observes zero open
-    // items → the scorecard is stuck `corrective_action_open` forever. Taking a FOR UPDATE row lock on
-    // the parent scorecard makes the second resolve block until the first commits, after which its
-    // `stillOpen` SELECT sees the now-committed resolve and closes the scorecard correctly.
-    await tx
-      .select({ id: fieldScorecards.id })
-      .from(fieldScorecards)
-      .where(eq(fieldScorecards.id, input.scorecardId))
-      .limit(1)
-      .for("update");
-
-    const now = new Date();
-    const updated = await tx
-      .update(scorecardCorrectiveActions)
-      .set({
-        status: "resolved",
-        responseComment: input.responseComment,
-        respondedByUserId: input.respondedBy.userId,
-        responderName: input.respondedBy.name,
-        responderEmail: input.respondedBy.email,
-        respondedAt: now,
-        updatedAt: now,
-      })
-      .where(
-        and(
-          eq(scorecardCorrectiveActions.id, input.itemId),
-          eq(scorecardCorrectiveActions.scorecardId, input.scorecardId),
-          // Idempotent: only an OPEN item transitions. Already-resolved / unknown ids update no row.
-          eq(scorecardCorrectiveActions.status, "open"),
-        ),
-      )
-      .returning({ id: scorecardCorrectiveActions.id });
-
-    if (updated.length === 0) return; // already resolved or not found — no-op.
-
-    const stillOpen = await tx
-      .select({ id: scorecardCorrectiveActions.id })
-      .from(scorecardCorrectiveActions)
-      .where(
-        and(
-          eq(scorecardCorrectiveActions.scorecardId, input.scorecardId),
-          eq(scorecardCorrectiveActions.status, "open"),
-        ),
-      );
-
-    if (stillOpen.length === 0) {
-      await tx
-        .update(fieldScorecards)
-        .set({ status: "corrective_action_closed", updatedAt: new Date() })
-        .where(eq(fieldScorecards.id, input.scorecardId));
-    }
+    await resolveCorrectiveActionItemTx(tx, input);
   });
+}
+
+/**
+ * The transaction-scoped body of resolveCorrectiveActionItem: takes the parent-scorecard FOR UPDATE lock,
+ * status-guards the item flip, and auto-closes the scorecard when it was the last open item. Runs inside a
+ * caller-supplied transaction so the response-photo write and this resolve are atomic (spec §8) — a caller
+ * that has already inserted response photos in the SAME tx rolls both back together on failure, and a
+ * concurrent/stale submit whose item is no longer `open` never leaves orphan photos (the caller checks the
+ * status under the same lock before inserting). See resolveCorrectiveActionItem for the concurrency rationale.
+ *
+ * Returns true when it flipped an open item to resolved, false when the item was already resolved / unknown
+ * (the idempotent no-op) — the caller uses this to decide whether the write is the winning one.
+ */
+export async function resolveCorrectiveActionItemTx(
+  tx: TenantDb,
+  input: ResolveCorrectiveActionInput,
+): Promise<boolean> {
+  // Serialize resolves for the SAME scorecard. Office transactions run at READ COMMITTED, so two
+  // responders closing out the final two open items in separate transactions could each run their
+  // `stillOpen` SELECT before seeing the other's uncommitted resolve → neither observes zero open
+  // items → the scorecard is stuck `corrective_action_open` forever. Taking a FOR UPDATE row lock on
+  // the parent scorecard makes the second resolve block until the first commits, after which its
+  // `stillOpen` SELECT sees the now-committed resolve and closes the scorecard correctly.
+  await tx
+    .select({ id: fieldScorecards.id })
+    .from(fieldScorecards)
+    .where(eq(fieldScorecards.id, input.scorecardId))
+    .limit(1)
+    .for("update");
+
+  const now = new Date();
+  const updated = await tx
+    .update(scorecardCorrectiveActions)
+    .set({
+      status: "resolved",
+      responseComment: input.responseComment,
+      respondedByUserId: input.respondedBy.userId,
+      responderName: input.respondedBy.name,
+      responderEmail: input.respondedBy.email,
+      respondedAt: now,
+      updatedAt: now,
+    })
+    .where(
+      and(
+        eq(scorecardCorrectiveActions.id, input.itemId),
+        eq(scorecardCorrectiveActions.scorecardId, input.scorecardId),
+        // Idempotent: only an OPEN item transitions. Already-resolved / unknown ids update no row.
+        eq(scorecardCorrectiveActions.status, "open"),
+      ),
+    )
+    .returning({ id: scorecardCorrectiveActions.id });
+
+  if (updated.length === 0) return false; // already resolved or not found — no-op.
+
+  const stillOpen = await tx
+    .select({ id: scorecardCorrectiveActions.id })
+    .from(scorecardCorrectiveActions)
+    .where(
+      and(
+        eq(scorecardCorrectiveActions.scorecardId, input.scorecardId),
+        eq(scorecardCorrectiveActions.status, "open"),
+      ),
+    );
+
+  if (stillOpen.length === 0) {
+    await tx
+      .update(fieldScorecards)
+      .set({ status: "corrective_action_closed", updatedAt: new Date() })
+      .where(eq(fieldScorecards.id, input.scorecardId));
+  }
+  return true;
 }
 
 export interface ReconcileCorrectiveActionsInput {

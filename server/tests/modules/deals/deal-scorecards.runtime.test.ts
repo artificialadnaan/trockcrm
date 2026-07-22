@@ -226,6 +226,13 @@ describe("corrective-action thread on the detail (spec §9)", () => {
     expect(open.status).toBe("open");
     expect(open.responseComment).toBeNull();
     expect(open.photos).toEqual([]);
+
+    // The response photo appears ONLY under correctiveActions — NOT in the Evidence `photos` list (which is
+    // original section-keyed evidence). Before the filter fix, the CA_PHOTO_FILE row (which also carries the
+    // scorecard_id) double-rendered here with sectionKey: null (a DTO violation).
+    expect(detail.photos.map((p) => p.fileId)).not.toContain(CA_PHOTO_FILE);
+    expect(detail.photos.map((p) => p.fileId)).toEqual([FILE1]);
+    expect(detail.photos.every((p) => p.sectionKey != null)).toBe(true);
   });
 
   it("returns an empty correctiveActions array for a passing card (no items)", async () => {

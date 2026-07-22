@@ -110,7 +110,16 @@ export async function getDealScorecardDetail(
     })
     .from(fieldScorecardPhotos)
     .leftJoin(files, eq(files.id, fieldScorecardPhotos.fileId))
-    .where(eq(fieldScorecardPhotos.scorecardId, scorecardId));
+    .where(
+      and(
+        eq(fieldScorecardPhotos.scorecardId, scorecardId),
+        // ORIGINAL evidence only. A corrective-action RESPONSE photo (corrective_action_id set) is threaded
+        // under correctiveActions[] below; excluding it here keeps it from double-rendering in the Evidence
+        // grid AND avoids emitting a sectionKey: null row (a DTO violation — response photos have no section),
+        // matching the PDF/edit evidence reads.
+        isNull(fieldScorecardPhotos.correctiveActionId),
+      ),
+    );
 
   const photos = await Promise.all(
     photoRows.map(async (p) => ({

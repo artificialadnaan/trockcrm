@@ -1027,7 +1027,16 @@ export async function renderAndStoreFieldScorecardArtifacts(
       })
       .from(fieldScorecardPhotos)
       .innerJoin(files, eq(files.id, fieldScorecardPhotos.fileId))
-      .where(eq(fieldScorecardPhotos.scorecardId, scorecardId))
+      .where(
+        and(
+          eq(fieldScorecardPhotos.scorecardId, scorecardId),
+          // MUST mirror the initial evidence read's filter: the PDF embeds ONLY original evidence, so a
+          // corrective-action RESPONSE photo (corrective_action_id set) is excluded here too. Without this,
+          // once any response photo exists the recheck fingerprint includes it while the initial fingerprint
+          // did not, so they never match → a spurious SCORECARD_EVIDENCE_CHANGED on every regeneration.
+          isNull(fieldScorecardPhotos.correctiveActionId),
+        ),
+      )
       .for("share", { of: files });
     if (scorecardEvidenceFingerprint(currentEvidenceRows) !== evidenceFingerprint) {
       throw new AppError(

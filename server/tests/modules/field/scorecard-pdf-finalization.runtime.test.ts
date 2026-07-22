@@ -37,6 +37,11 @@ import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
 const DEAL = "11111111-1111-1111-1111-111111111111";
 const USER = "33333333-3333-3333-3333-333333333333";
 const FILE = "aaaaaaaa-0000-0000-0000-000000000001";
+// A distinct file used only as a corrective-action RESPONSE photo — it must NOT participate in the PDF
+// evidence fingerprint (corrective_action_id IS NULL excludes it on both the initial read and the recheck).
+const RESPONSE_FILE = "aaaaaaaa-0000-0000-0000-000000000002";
+const RESPONSE_PHOTO_CARD = "55555555-5555-5555-5555-000000000008";
+const RESPONSE_CORRECTIVE_ACTION = "77777777-7777-7777-7777-000000000001";
 const CARD = "55555555-5555-5555-5555-000000000001";
 const RETRY_CARD = "55555555-5555-5555-5555-000000000002";
 const CHANGED_CARD = "55555555-5555-5555-5555-000000000003";
@@ -69,6 +74,9 @@ beforeAll(async () => {
     INSERT INTO deals VALUES ('${DEAL}', 'Maple Street Tower', 'DFW-10432');
     INSERT INTO files VALUES (
       '${FILE}', 'Framing detail', 'original/photo.jpg', 'thumbs/photo.jpg', 'image/jpeg', true, NULL, NOW()
+    );
+    INSERT INTO files VALUES (
+      '${RESPONSE_FILE}', 'Corrective action photo', 'original/response.jpg', 'thumbs/response.jpg', 'image/jpeg', true, NULL, NOW()
     );
   `);
   db = drizzle(pg);
@@ -296,5 +304,38 @@ describe("finalizeFieldScorecardArtifacts", () => {
     expect(row.rows[0]).toMatchObject({ pdf_r2_key: currentKey, pdf_render_version: 2 });
     expect(objects.get(currentKey!)).toBe(puts[1].pdf);
     expect(objects.get(puts[0].key)).toBe(puts[0].pdf);
+  });
+
+  it("regenerates the PDF for a scorecard that has a corrective-action RESPONSE photo (recheck excludes it)", async () => {
+    // A below-band scorecard accrued a corrective-action RESPONSE photo (corrective_action_id set). The PDF
+    // embeds ONLY original evidence, so both the initial evidence read AND the publication recheck must
+    // exclude the response photo. Before the fix, the recheck selected ALL field_scorecard_photos, so its
+    // fingerprint included the response photo while the initial fingerprint did not → SCORECARD_EVIDENCE_CHANGED
+    // on every regeneration. This proves the finalizer now succeeds with a response photo present.
+    await seedScorecard(RESPONSE_PHOTO_CARD);
+    await db.insert(fieldScorecardPhotos).values({
+      scorecardId: RESPONSE_PHOTO_CARD,
+      sectionKey: null,
+      deficiencyKey: null,
+      fileId: RESPONSE_FILE,
+      correctiveActionId: RESPONSE_CORRECTIVE_ACTION,
+    });
+
+    const key = await finalizeFieldScorecardArtifacts(
+      { id: "office-1", slug: "dallas" },
+      USER,
+      RESPONSE_PHOTO_CARD,
+    );
+
+    // The render published successfully (no spurious SCORECARD_EVIDENCE_CHANGED), and only the ORIGINAL
+    // evidence file was pulled from R2 — the response file was never fetched for the PDF.
+    expect(key).toMatch(new RegExp(`${RESPONSE_PHOTO_CARD}\\.[a-f0-9]{64}\\.v2\\.pdf$`));
+    expect(r2Mocks.getObjectBuffer).toHaveBeenCalledWith("thumbs/photo.jpg", { maxBytes: 750_000 });
+    expect(r2Mocks.getObjectBuffer).not.toHaveBeenCalledWith("thumbs/response.jpg", { maxBytes: 750_000 });
+
+    const row = await db.execute(sql`
+      SELECT pdf_r2_key, pdf_render_version FROM field_scorecards WHERE id = ${RESPONSE_PHOTO_CARD}::uuid
+    `);
+    expect(row.rows[0]).toMatchObject({ pdf_r2_key: key, pdf_render_version: 2 });
   });
 });

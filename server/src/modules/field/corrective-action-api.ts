@@ -3,11 +3,12 @@ import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
 import {
   fieldScorecardPhotos,
+  fieldScorecards,
   files,
   scorecardCorrectiveActions,
 } from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
-import { resolveCorrectiveActionItem } from "./corrective-actions-service.js";
+import { resolveCorrectiveActionItemTx } from "./corrective-actions-service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -132,9 +133,18 @@ export interface SubmitCorrectiveActionResponseInput {
 
 /**
  * Submit a per-item corrective-action response: link any already-uploaded photos to the item
- * (field_scorecard_photos.corrective_action_id), then resolve the item via Plan 1's
- * resolveCorrectiveActionItem (which auto-closes the scorecard when it's the last open item). The caller
- * has already authorized access (session or token) and bound the db to the scorecard's office.
+ * (field_scorecard_photos.corrective_action_id), then resolve the item (auto-closing the scorecard when it's
+ * the last open item). The caller has already authorized access (session or token) and MUST run this inside
+ * a transaction (the route wraps it in runInOfficeTransaction) so the OPEN-status gate, the photo inserts,
+ * and the resolve are ONE atomic unit under the parent-scorecard FOR UPDATE lock.
+ *
+ * Atomicity (spec §8): everything below shares the caller's transaction + the parent-scorecard lock. Without
+ * that, two responders submitting the same item concurrently (or a stale form after another responder already
+ * resolved it) would each insert their response photos, but only the FIRST resolve wins (the status-guarded
+ * UPDATE is a no-op for the loser) — orphaning the loser's photos onto the winner's finalized response.
+ * Re-reading the item's status under the lock and bailing when it is no longer `open` (BEFORE inserting)
+ * means the losing/stale path inserts nothing and returns the same idempotent no-op. It also makes a retry
+ * safe: once resolved the item is no longer `open`, so a replayed request never re-inserts the photo links.
  *
  * Strict belongs-checks: the item must belong to the scorecard, and every photoFileId must belong to the
  * scorecard's deal — a foreign/nonexistent file id is a 400, never silently linked.
@@ -150,9 +160,26 @@ export async function submitCorrectiveActionResponse(
   const comment = input.comment?.trim();
   if (!comment) throw new AppError(400, "A response comment is required.");
 
-  // The item must belong to this scorecard (strict). Resolve its deal via the scorecard for the photo check.
+  const photoFileIds = [...new Set((input.photoFileIds ?? []).filter((id) => id && id.trim()))];
+
+  // Take the parent-scorecard lock up front. resolveCorrectiveActionItemTx re-takes the same lock (a cheap
+  // no-op re-lock in the same tx), so serialization holds across the whole submit. We deliberately do NOT
+  // open a nested db.transaction here: the route already runs us inside runInOfficeTransaction's transaction
+  // (matching reconcileScorecardCorrectiveActions / resolveCorrectiveActionItemTx, which also take an
+  // ambient tx), so a nested begin/commit would prematurely close that outer transaction.
+  await db
+    .select({ id: fieldScorecards.id })
+    .from(fieldScorecards)
+    .where(eq(fieldScorecards.id, input.scorecardId))
+    .limit(1)
+    .for("update");
+
+  // The item must belong to this scorecard (strict), and we read its status under the lock.
   const [item] = await db
-    .select({ id: scorecardCorrectiveActions.id, scorecardId: scorecardCorrectiveActions.scorecardId })
+    .select({
+      id: scorecardCorrectiveActions.id,
+      status: scorecardCorrectiveActions.status,
+    })
     .from(scorecardCorrectiveActions)
     .where(
       and(
@@ -163,10 +190,14 @@ export async function submitCorrectiveActionResponse(
     .limit(1);
   if (!item) throw new AppError(404, "Corrective-action item not found.");
 
-  const photoFileIds = [...new Set((input.photoFileIds ?? []).filter((id) => id && id.trim()))];
+  // If the item is no longer open (a concurrent/stale submit lost the race), do NOT insert photos — the
+  // resolve below would be a no-op and any inserted photos would orphan onto the winner's response. Return
+  // cleanly (the caller re-reads the current thread), preserving the idempotent no-op result.
+  if (item.status !== "open") return;
+
   if (photoFileIds.length > 0) {
-    // Every file must belong to this scorecard's deal (via field_scorecard_photos on the same scorecard, or
-    // an active file on the deal). Resolve the deal from the scorecard and assert membership.
+    // Every file must belong to this scorecard's deal. Resolve the deal from the scorecard and assert
+    // membership.
     const dealRow = await db.execute(
       sql`SELECT deal_id FROM field_scorecards WHERE id = ${input.scorecardId} LIMIT 1`,
     );
@@ -220,7 +251,8 @@ export async function submitCorrectiveActionResponse(
     }
   }
 
-  await resolveCorrectiveActionItem(db, {
+  // Resolve within the SAME (caller-supplied) transaction so a resolve failure rolls back the photo inserts.
+  await resolveCorrectiveActionItemTx(db, {
     scorecardId: input.scorecardId,
     itemId: input.itemId,
     responseComment: comment,

@@ -289,6 +289,45 @@ describe("submitCorrectiveActionResponse", () => {
     expect(items.find((i) => i.id === first.id)!.status).toBe("open");
   });
 
+  it("a STALE submit after the item is already resolved inserts NO orphan photos (losing-path no-op)", async () => {
+    const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
+    const [first] = await getCorrectiveActionItems(tdb, scorecard.id);
+
+    // First (winning) submit resolves the item with FILE_A as its response photo.
+    await submitCorrectiveActionResponse(tdb, {
+      scorecardId: scorecard.id,
+      itemId: first.id,
+      comment: "resolved by the first responder",
+      photoFileIds: [FILE_A],
+      respondedBy: { userId: USER, name: "Sam", email: null },
+    });
+
+    // A SECOND (stale) submit for the SAME now-resolved item — e.g. a concurrent responder or a replayed
+    // request — carries its OWN fresh photo (FILE_B). Because the item is no longer `open`, the resolve is a
+    // no-op AND the response photo must NOT be inserted (else it orphans onto the winner's finalized response).
+    await submitCorrectiveActionResponse(tdb, {
+      scorecardId: scorecard.id,
+      itemId: first.id,
+      comment: "stale submit from a losing responder",
+      photoFileIds: [FILE_B],
+      respondedBy: { userId: null, name: "Ext PM", email: "pm@x.com" },
+    });
+
+    // The item keeps the WINNER's comment/responder (the stale resolve did not overwrite it).
+    const items = await getCorrectiveActionItems(tdb, scorecard.id);
+    const resolved = items.find((i) => i.id === first.id)!;
+    expect(resolved.status).toBe("resolved");
+    expect(resolved.responseComment).toBe("resolved by the first responder");
+    expect(resolved.respondedByUserId).toBe(USER);
+
+    // Only the WINNER's photo (FILE_A) is linked — the loser's FILE_B never became a response-photo row.
+    expect(resolved.photos.map((p) => p.fileId)).toEqual([FILE_A]);
+    const orphan = await tdb.execute(
+      sql`SELECT id FROM field_scorecard_photos WHERE scorecard_id = ${scorecard.id} AND file_id = ${FILE_B}`,
+    );
+    expect(orphan.rows).toHaveLength(0);
+  });
+
   it("inserts a FRESH file as a NEW response photo (corrective_action_id set) that never appears as evidence", async () => {
     const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
     const [first] = await getCorrectiveActionItems(tdb, scorecard.id);
