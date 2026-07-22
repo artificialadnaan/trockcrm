@@ -8,16 +8,30 @@ type TenantDb = NodePgDatabase<typeof schema>;
 
 export interface AddTeamMemberInput {
   dealId: string;
-  // Exactly ONE of userId / contactId identifies the member — a staff user (public.users) OR a directory
-  // contact (tenant contacts). The DB check constraint (deal_team_members_identity_check) enforces the same
-  // one-of at the storage layer (it additionally permits an email-only member — user_id + contact_id both
-  // NULL, member_email set — added for corrective-action recipients, which this user/contact path never
-  // creates); this service asserts the one-of before the insert for a clean 400.
+  // Exactly ONE of userId / contactId identifies a LINKED member — a staff user (public.users) OR a directory
+  // contact (tenant contacts). OR, for an email-only member, BOTH are null and memberEmail (+ typically
+  // memberName) are set. The DB check constraint (deal_team_members_identity_check) enforces the same three
+  // shapes at the storage layer; this service asserts the shape before the insert for a clean 400.
   userId?: string | null;
   contactId?: string | null;
+  // Email-only member (spec §4.4): a superintendent / project_manager who is NOT a CRM user or directory
+  // contact — just a name + email — so the corrective-action flow can notify + token-auth them. Only honored
+  // when neither userId nor contactId is set. Restricted to super/PM roles (see EMAIL_ONLY_TEAM_ROLES).
+  memberName?: string | null;
+  memberEmail?: string | null;
   role: string;
   assignedBy?: string;
   notes?: string;
+}
+
+// Email-only members exist ONLY to be corrective-action recipients (spec §4.4/§6), so only the two roles
+// that flow resolves are allowed to be email-only. Every other role must be a CRM user or directory contact.
+export const EMAIL_ONLY_TEAM_ROLES = new Set(["superintendent", "project_manager"]);
+
+// Minimal, storage-layer email validation for an email-only member (a permissive shape check — a single @
+// with non-empty local + domain parts). The client also validates; this is the server backstop.
+export function isValidMemberEmail(email: string): boolean {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
 }
 
 export interface UpdateTeamMemberInput {
@@ -34,17 +48,27 @@ export async function getTeamMembers(tenantDb: TenantDb, dealId: string) {
       SELECT dtm.id, dtm.deal_id AS "dealId", dtm.user_id AS "userId", dtm.contact_id AS "contactId",
              dtm.role, dtm.assigned_by AS "assignedBy", dtm.notes, dtm.is_active AS "isActive",
              dtm.created_at AS "createdAt", dtm.updated_at AS "updatedAt",
-             COALESCE(u.display_name, TRIM(CONCAT(c.first_name, ' ', c.last_name))) AS "displayName",
-             COALESCE(u.email, c.email) AS "email",
-             u.avatar_url AS "avatarUrl"
+             -- An email-only member (both fks null) has no linked identity, so COALESCE falls through to the
+             -- member_name/member_email on the row itself. The member_email-IS-NOT-NULL flag lets the UI
+             -- render it distinctly (an external, no-login recipient).
+             COALESCE(u.display_name, NULLIF(TRIM(CONCAT(c.first_name, ' ', c.last_name)), ''), dtm.member_name) AS "displayName",
+             COALESCE(u.email, c.email, dtm.member_email) AS "email",
+             u.avatar_url AS "avatarUrl",
+             (dtm.user_id IS NULL AND dtm.contact_id IS NULL AND dtm.member_email IS NOT NULL) AS "isEmailOnly"
       FROM deal_team_members dtm
       LEFT JOIN public.users u ON dtm.user_id = u.id
       LEFT JOIN contacts c ON dtm.contact_id = c.id
       WHERE dtm.deal_id = ${dealId} AND dtm.is_active = TRUE
-        -- Only surface members whose linked identity is ALSO active: a deactivated staff user
+        -- Surface members whose linked identity is ALSO active: a deactivated staff user
         -- (public.users.is_active) or an archived directory contact (contacts.is_active) must not show as an
         -- active team member — consistent with resolveScorecardTeamEmails/Names, which skip inactive identities.
-        AND ((dtm.user_id IS NOT NULL AND u.is_active) OR (dtm.contact_id IS NOT NULL AND c.is_active))
+        -- An email-only member (both fks null, member_email set) has no linked identity to deactivate, so it
+        -- always shows while its deal_team_members row is active.
+        AND (
+          (dtm.user_id IS NOT NULL AND u.is_active)
+          OR (dtm.contact_id IS NOT NULL AND c.is_active)
+          OR (dtm.user_id IS NULL AND dtm.contact_id IS NULL AND dtm.member_email IS NOT NULL)
+        )
       ORDER BY dtm.created_at
     `
   );
@@ -56,7 +80,38 @@ export async function addTeamMember(tenantDb: TenantDb, input: AddTeamMemberInpu
   if (!input.role) throw new AppError(400, "role is required");
   const hasUser = Boolean(input.userId);
   const hasContact = Boolean(input.contactId);
-  // Exactly one of the two identities — mirrors the deal_team_members_identity_check constraint.
+  const memberEmail = input.memberEmail?.trim() || "";
+  const memberName = input.memberName?.trim() || "";
+
+  // Email-only member (spec §4.4): neither a user nor a contact, just name + email. Only when NO linked
+  // identity is provided AND an email is present — otherwise fall through to the strict user/contact one-of.
+  if (!hasUser && !hasContact && memberEmail) {
+    if (!EMAIL_ONLY_TEAM_ROLES.has(input.role)) {
+      throw new AppError(400, "An email-only member must be a superintendent or project manager.");
+    }
+    if (!isValidMemberEmail(memberEmail)) {
+      throw new AppError(400, "A valid email is required for an email-only member.");
+    }
+    if (!memberName) {
+      throw new AppError(400, "A name is required for an email-only member.");
+    }
+    const emailResult = await tenantDb
+      .insert(dealTeamMembers)
+      .values({
+        dealId: input.dealId,
+        userId: null,
+        contactId: null,
+        memberName,
+        memberEmail,
+        role: input.role as any,
+        assignedBy: input.assignedBy ?? null,
+        notes: input.notes ?? null,
+      })
+      .returning();
+    return emailResult[0];
+  }
+
+  // Exactly one of the two linked identities — mirrors the deal_team_members_identity_check constraint.
   if (hasUser === hasContact) {
     throw new AppError(400, "Provide exactly one of userId or contactId");
   }

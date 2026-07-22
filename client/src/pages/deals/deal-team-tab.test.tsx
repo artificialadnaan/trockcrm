@@ -19,9 +19,11 @@ describe("DealTeamTab role picker (Estimator is user-only)", () => {
     expect(source).toContain('return mode === "contact" ? roles.filter((r) => r !== "estimator") : roles;');
   });
 
-  it("clears an already-selected estimator role when switching to contact mode", () => {
-    expect(source).toContain('if (m === "contact") {');
-    expect(source).toContain('setRole((prev) => (prev === "estimator" ? "" : prev));');
+  it("clears a now-invalid role when switching away from user mode (estimator in contact, non-super/PM in email)", () => {
+    // Switching to contact OR email mode re-validates the picked role against rolesForMode(m) and clears it
+    // if the mode no longer offers it — so a picked estimator can't survive into contact mode.
+    expect(source).toContain('if (m !== "user") {');
+    expect(source).toContain('setRole((prev) => (prev && rolesForMode(m).includes(prev) ? prev : ""));');
   });
 
   it("still offers Estimator (keeps it in ROLE_LABELS for user mode)", () => {

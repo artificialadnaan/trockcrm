@@ -186,6 +186,44 @@ describe("POST /:id/team user assignment", () => {
   });
 });
 
+describe("POST /:id/team email-only member (spec §4.4)", () => {
+  it("delegates an email-only super to addTeamMember with memberName/memberEmail (no user/contact lookup)", async () => {
+    const { res, nextErr } = await postTeam({
+      role: "superintendent",
+      memberName: "Ext Super",
+      memberEmail: "ext.super@example.com",
+    });
+    expect(nextErr).toBeUndefined();
+    expect(res.statusCode).toBe(201);
+    expect(usersMock.listUsers).not.toHaveBeenCalled();
+    expect(contactsMock.getContactById).not.toHaveBeenCalled();
+    expect(teamMocks.addTeamMember).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        memberName: "Ext Super",
+        memberEmail: "ext.super@example.com",
+        role: "superintendent",
+      }),
+    );
+  });
+
+  it("does NOT take the email-only path when a userId is also provided (falls through to one-of)", async () => {
+    usersMock.listUsers.mockResolvedValue([{ id: USER_UUID, isActive: true }] as any);
+    const { res, nextErr } = await postTeam({
+      userId: USER_UUID,
+      role: "project_manager",
+      memberEmail: "ext@example.com",
+    });
+    // The linked-user path wins; addTeamMember is called with the user id, not the email-only shape.
+    expect(nextErr).toBeUndefined();
+    expect(res.statusCode).toBe(201);
+    expect(teamMocks.addTeamMember).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ userId: USER_UUID }),
+    );
+  });
+});
+
 describe("POST /:id/team contact assignment", () => {
   it("assigns an active directory contact", async () => {
     contactsMock.getContactById.mockResolvedValue({ id: CONTACT_UUID, isActive: true } as any);

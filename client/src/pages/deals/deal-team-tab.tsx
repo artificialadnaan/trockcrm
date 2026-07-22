@@ -33,11 +33,12 @@ type TeamRole =
 interface TeamMember {
   id: string;
   dealId: string;
-  // Exactly one of userId / contactId is set (server one-of check): app-user members carry userId,
-  // CRM-contact members carry contactId. The server resolves displayName/email for BOTH, so the list
-  // renders them identically without branching on which id is present.
+  // A member is a LINKED identity (userId XOR contactId) OR an email-only external (both null, isEmailOnly).
+  // The server resolves displayName/email for ALL three, so the list renders them the same way; isEmailOnly
+  // just adds a distinguishing badge for the external, no-login recipient.
   userId: string | null;
   contactId: string | null;
+  isEmailOnly?: boolean;
   role: TeamRole;
   assignedBy: string | null;
   notes: string | null;
@@ -90,12 +91,50 @@ const ROLE_LABELS: Record<TeamRole, string> = {
   other: "Other",
 };
 
+type AddMemberMode = "user" | "contact" | "email";
+
+// An email-only member exists ONLY to be a corrective-action recipient (spec §4.4/§6), so it is restricted
+// to the super/PM roles the corrective-action flow resolves. Mirrors the server EMAIL_ONLY_TEAM_ROLES gate.
+const EMAIL_ONLY_ROLES: TeamRole[] = ["superintendent", "project_manager"];
+
 // A contact-backed estimator is rejected 400 by the server (an estimator must be a staff user, since
 // revision routing only picks estimator rows whose user_id IS NOT NULL). So the role picker only offers
-// Estimator in USER mode — filter it out in contact mode instead of letting the user fill a doomed form.
-function rolesForMode(mode: "user" | "contact"): TeamRole[] {
+// Estimator in USER mode. Email mode only offers super/PM.
+function rolesForMode(mode: AddMemberMode): TeamRole[] {
   const roles = Object.keys(ROLE_LABELS) as TeamRole[];
+  if (mode === "email") return EMAIL_ONLY_ROLES;
   return mode === "contact" ? roles.filter((r) => r !== "estimator") : roles;
+}
+
+// Permissive email shape check (mirrors the server isValidMemberEmail backstop): a single @ with non-empty
+// local + dotted domain parts.
+export function isValidEmailOnlyMemberEmail(email: string): boolean {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
+}
+
+/**
+ * Pure validation for the add-member form (unit-tested). Returns an error message, or null when valid.
+ * Email mode requires a name, a valid email, and a super/PM role; user/contact modes require their picker.
+ */
+export function validateAddMemberForm(input: {
+  mode: AddMemberMode;
+  role: TeamRole | "";
+  userId: string;
+  hasSelectedContact: boolean;
+  memberName: string;
+  memberEmail: string;
+}): string | null {
+  if (!input.role) return "Please select a role";
+  if (input.mode === "user" && !input.userId) return "Please select a user";
+  if (input.mode === "contact" && !input.hasSelectedContact) return "Please select a contact";
+  if (input.mode === "email") {
+    if (!input.memberName.trim()) return "Please enter a name";
+    if (!isValidEmailOnlyMemberEmail(input.memberEmail)) return "Please enter a valid email";
+    if (!EMAIL_ONLY_ROLES.includes(input.role)) {
+      return "An email-only member must be a Superintendent or Project Manager";
+    }
+  }
+  return null;
 }
 
 const ROLE_BADGE_CLASSES: Record<TeamRole, string> = {
@@ -213,10 +252,20 @@ export function DealTeamTab({ dealId, onCountChange }: DealTeamTabProps) {
                 </div>
                 <div className="flex-1 min-w-0">
                   <p className="text-sm font-semibold truncate">{member.displayName}</p>
-                  {member.notes && (
+                  {member.isEmailOnly ? (
+                    <p className="text-xs text-muted-foreground truncate">{member.email}</p>
+                  ) : member.notes ? (
                     <p className="text-xs text-muted-foreground truncate">{member.notes}</p>
-                  )}
+                  ) : null}
                 </div>
+                {member.isEmailOnly && (
+                  <Badge
+                    variant="outline"
+                    className="text-xs flex-shrink-0 bg-slate-100 text-slate-600 border-slate-200"
+                  >
+                    External
+                  </Badge>
+                )}
                 <Badge
                   variant="outline"
                   className={`text-xs flex-shrink-0 ${ROLE_BADGE_CLASSES[member.role]}`}
@@ -263,12 +312,15 @@ function AddMemberDialog({
   const [notes, setNotes] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
-  // A member is EITHER an app user OR a CRM contact — the server (one-of check) accepts { userId, ... }
-  // or { contactId, ... }. Default to the existing user flow so nothing changes for that path.
-  const [mode, setMode] = useState<"user" | "contact">("user");
+  // A member is an app user, a CRM contact, OR an email-only external (spec §4.4). The server accepts
+  // { userId }, { contactId }, or { memberName, memberEmail }. Default to the existing user flow.
+  const [mode, setMode] = useState<AddMemberMode>("user");
   const [contactQuery, setContactQuery] = useState("");
   const [contactResults, setContactResults] = useState<ContactSuggestion[]>([]);
   const [selectedContact, setSelectedContact] = useState<ContactSuggestion | null>(null);
+  // Email-only member fields.
+  const [memberName, setMemberName] = useState("");
+  const [memberEmail, setMemberEmail] = useState("");
   // Same stale-response guard the Billing tab uses: bump on every keystroke so a slow earlier
   // /contacts/search response can't land after a newer query and overwrite it.
   const searchSeq = useRef(0);
@@ -281,6 +333,8 @@ function AddMemberDialog({
     setContactQuery("");
     setContactResults([]);
     setSelectedContact(null);
+    setMemberName("");
+    setMemberEmail("");
     ++searchSeq.current;
   };
 
@@ -312,27 +366,27 @@ function AddMemberDialog({
   };
 
   const handleSubmit = async () => {
-    if (!role) {
-      toast.error("Please select a role");
-      return;
-    }
-    if (mode === "user" && !userId) {
-      toast.error("Please select a user");
-      return;
-    }
-    if (mode === "contact" && !selectedContact) {
-      toast.error("Please select a contact");
+    const validationError = validateAddMemberForm({
+      mode,
+      role,
+      userId,
+      hasSelectedContact: Boolean(selectedContact),
+      memberName,
+      memberEmail,
+    });
+    if (validationError) {
+      toast.error(validationError);
       return;
     }
     setSubmitting(true);
     try {
-      await api(`/deals/${dealId}/team`, {
-        method: "POST",
-        json:
-          mode === "contact"
-            ? { contactId: selectedContact!.id, role, notes: notes.trim() || null }
-            : { userId, role, notes: notes.trim() || null },
-      });
+      const json =
+        mode === "contact"
+          ? { contactId: selectedContact!.id, role, notes: notes.trim() || null }
+          : mode === "email"
+            ? { memberName: memberName.trim(), memberEmail: memberEmail.trim(), role, notes: notes.trim() || null }
+            : { userId, role, notes: notes.trim() || null };
+      await api(`/deals/${dealId}/team`, { method: "POST", json });
       toast.success("Team member added");
       onOpenChange(false);
       resetFields();
@@ -359,12 +413,13 @@ function AddMemberDialog({
           <DialogTitle>Add Team Member</DialogTitle>
         </DialogHeader>
         <div className="space-y-4 pt-2">
-          {/* User / Contact segmented toggle: assign an app user OR a CRM contact. Switching clears the
-              other mode's selection so we never submit a stale id from the hidden picker. */}
+          {/* User / Contact / Email segmented toggle: assign an app user, a CRM contact, OR an email-only
+              external super/PM (spec §4.4). Switching clears the other modes' selections so we never submit
+              a stale id from a hidden picker. */}
           <div className="space-y-1.5">
             <span className="text-sm font-medium">Assign</span>
             <div className="inline-flex rounded-md border p-0.5">
-              {(["user", "contact"] as const).map((m) => (
+              {(["user", "contact", "email"] as const).map((m) => (
                 <button
                   key={m}
                   type="button"
@@ -374,11 +429,13 @@ function AddMemberDialog({
                     setContactQuery("");
                     setContactResults([]);
                     setSelectedContact(null);
+                    setMemberName("");
+                    setMemberEmail("");
                     ++searchSeq.current;
-                    // Estimator is user-only; clear it when switching to contact mode so the picker
-                    // and the submitted role stay consistent with what the server will accept.
-                    if (m === "contact") {
-                      setRole((prev) => (prev === "estimator" ? "" : prev));
+                    // Estimator is user-only; email mode is super/PM-only. Clear a now-invalid role so the
+                    // picker + submitted role stay consistent with what the server will accept.
+                    if (m !== "user") {
+                      setRole((prev) => (prev && rolesForMode(m).includes(prev) ? prev : ""));
                     }
                   }}
                   className={`px-3 py-1 text-sm rounded ${
@@ -387,13 +444,42 @@ function AddMemberDialog({
                       : "text-muted-foreground hover:bg-muted/50"
                   }`}
                 >
-                  {m === "user" ? "User" : "Contact"}
+                  {m === "user" ? "User" : m === "contact" ? "Contact" : "Email"}
                 </button>
               ))}
             </div>
           </div>
 
-          {mode === "user" ? (
+          {mode === "email" ? (
+            <div className="space-y-3">
+              <p className="text-xs text-muted-foreground">
+                An external Superintendent or Project Manager with no CRM login. They receive corrective-action
+                notifications and respond via a secure link.
+              </p>
+              <div className="space-y-1.5">
+                <label htmlFor="team-member-name" className="text-sm font-medium">Name</label>
+                <input
+                  id="team-member-name"
+                  type="text"
+                  placeholder="Full name"
+                  value={memberName}
+                  onChange={(e) => setMemberName(e.target.value)}
+                  className="w-full rounded-md border px-2 py-1.5 text-sm"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <label htmlFor="team-member-email" className="text-sm font-medium">Email</label>
+                <input
+                  id="team-member-email"
+                  type="email"
+                  placeholder="name@example.com"
+                  value={memberEmail}
+                  onChange={(e) => setMemberEmail(e.target.value)}
+                  className="w-full rounded-md border px-2 py-1.5 text-sm"
+                />
+              </div>
+            </div>
+          ) : mode === "user" ? (
             <div className="space-y-1.5">
               <label id="team-user-label" htmlFor="team-user-select" className="text-sm font-medium">User</label>
               <Select value={userId} onValueChange={(v) => setUserId(v ?? "")} disabled={loadingUsers}>

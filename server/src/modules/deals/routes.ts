@@ -3966,13 +3966,32 @@ router.post("/:id/team", async (req, res, next) => {
     const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
     if (!deal) throw new AppError(404, "Deal not found");
 
-    const { userId, contactId, role, notes } = req.body;
+    const { userId, contactId, role, notes, memberName, memberEmail } = req.body;
     if (!role) throw new AppError(400, "role is required");
     if (!DEAL_TEAM_ROLES.includes(role)) throw new AppError(400, "Invalid role");
-    // A member is EITHER a staff user OR a directory contact — exactly one identity. (The DB check
-    // constraint enforces the same one-of; this is the clean, user-facing 400.)
     const hasUser = Boolean(userId);
     const hasContact = Boolean(contactId);
+    const trimmedMemberEmail = typeof memberEmail === "string" ? memberEmail.trim() : "";
+
+    // Email-only member (spec §4.4): a super/PM who is NOT a CRM user or directory contact — just name +
+    // email — so the corrective-action flow can notify + token-auth them. Only when NO linked identity is
+    // provided AND an email is present; addTeamMember validates the role/email/name shape.
+    if (!hasUser && !hasContact && trimmedMemberEmail) {
+      const member = await addTeamMember(req.tenantDb!, {
+        dealId: req.params.id,
+        memberName: typeof memberName === "string" ? memberName : null,
+        memberEmail: trimmedMemberEmail,
+        role,
+        assignedBy: req.user!.id,
+        notes,
+      });
+      await req.commitTransaction!();
+      res.status(201).json({ member });
+      return;
+    }
+
+    // A LINKED member is EITHER a staff user OR a directory contact — exactly one identity. (The DB check
+    // constraint enforces the same one-of; this is the clean, user-facing 400.)
     if (hasUser === hasContact) throw new AppError(400, "Provide exactly one of userId or contactId");
     // A contact-backed estimator is a visibly-dead row: revision routing (resolveRevisionTaskAssignee)
     // only ever picks estimator rows whose user_id IS NOT NULL, so a contact estimator can never be routed
