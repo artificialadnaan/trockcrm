@@ -549,6 +549,35 @@ export interface FieldScorecardItemView {
   points: number;
   note: string | null;
 }
+/** A response photo linked to a corrective-action item (spec §4.3 — corrective_action_id set). */
+export interface CorrectiveActionResponsePhotoView {
+  id: string;
+  fileId: string;
+  url?: string | null;
+  caption?: string | null;
+}
+/**
+ * A single flagged item on a below-band scorecard (each action item / critical deficiency) with its inline
+ * corrective-action response, threaded under the original item on the deal Scorecards tab (spec §9). Mirrors
+ * the server corrective-action-api.ts CorrectiveActionItemView.
+ */
+export interface CorrectiveActionItemView {
+  id: string;
+  /** `action_item` | `critical_deficiency` (varchar — kept a string so a new value never breaks the parse). */
+  itemType: string;
+  /** The deficiency key or the action-item index this row was seeded from. */
+  itemRef: string;
+  /** The denormalized human label captured at seed time (action text / deficiency label). */
+  itemLabel: string;
+  /** `open` | `resolved`. */
+  status: string;
+  responseComment: string | null;
+  respondedByUserId: string | null;
+  responderName: string | null;
+  responderEmail: string | null;
+  respondedAt: string | null;
+  photos: CorrectiveActionResponsePhotoView[];
+}
 export interface FieldScorecardDetail extends FieldScorecardSummary {
   items: FieldScorecardItemView[];
   criticalDeficiencies: string[];
@@ -559,4 +588,10 @@ export interface FieldScorecardDetail extends FieldScorecardSummary {
   pmSignature?: string | null;
   /** Leadership Project Summary free text. */
   summary?: string | null;
+  /**
+   * The corrective-action items + their inline responses for a below-band scorecard (spec §9). Present (may
+   * be empty) only when the card tripped the corrective-action band; omitted for passing cards. Optional so
+   * older API deployments don't break consumers.
+   */
+  correctiveActions?: CorrectiveActionItemView[];
 }

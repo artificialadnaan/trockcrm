@@ -12,6 +12,7 @@ import {
   FIELD_SCORECARD_V2_CRITICAL_DEFICIENCIES,
   type FieldScorecardSummary,
   type FieldScorecardDetail,
+  type CorrectiveActionItemView,
   type ScorecardRating,
 } from "@trock-crm/shared/types";
 import { isApiError } from "@/lib/api";
@@ -23,6 +24,27 @@ const RATING_BADGE: Record<ScorecardRating, string> = {
   needs_improvement: "bg-amber-100 text-amber-800 border-amber-200",
   corrective_action: "bg-red-100 text-red-800 border-red-200",
 };
+// Corrective-action lifecycle badge (spec §9): open = a response is required, closed = every flagged item
+// resolved. A plain `submitted` card has no badge (returns null).
+export function correctiveActionStatusBadge(
+  status: string | undefined,
+): { label: string; className: string } | null {
+  if (status === "corrective_action_open") {
+    return { label: "Corrective Action Open", className: "bg-red-100 text-red-800 border-red-200" };
+  }
+  if (status === "corrective_action_closed") {
+    return { label: "Corrective Action Closed", className: "bg-green-100 text-green-800 border-green-200" };
+  }
+  return null;
+}
+
+function formatRespondedAt(iso: string | null): string | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+}
+
 const SECTION_TITLE = new Map<string, string>(FIELD_SCORECARD_SECTIONS.map((s) => [s.key, s.title]));
 const SECTION_MAX = new Map<string, number>(FIELD_SCORECARD_SECTIONS.map((s) => [s.key, s.maxPoints]));
 const DEFICIENCY_LABEL = new Map<string, string>(FIELD_SCORECARD_CRITICAL_DEFICIENCIES.map((d) => [d.key, d.label]));
@@ -169,6 +191,14 @@ function ScorecardRow({ dealId, summary }: { dealId: string; summary: FieldScore
           {scoreLabel}
           <span className="text-xs font-normal text-gray-400">{scoreMax}</span>
         </span>
+        {(() => {
+          const caBadge = correctiveActionStatusBadge(summary.status);
+          return caBadge ? (
+            <Badge variant="outline" className={caBadge.className}>
+              {caBadge.label}
+            </Badge>
+          ) : null;
+        })()}
         <Badge variant="outline" className={RATING_BADGE[summary.rating]}>
           {summary.ratingLabel}
         </Badge>
@@ -374,6 +404,10 @@ export function ScorecardDetailView({ detail }: { detail: FieldScorecardDetail }
         </div>
       )}
 
+      {detail.correctiveActions && detail.correctiveActions.length > 0 && (
+        <CorrectiveActionThread items={detail.correctiveActions} status={detail.status} />
+      )}
+
       {isV2 && (
         <div>
           <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">Signatures</h4>
@@ -409,6 +443,88 @@ export function ScorecardDetailView({ detail }: { detail: FieldScorecardDetail }
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// The "reply thread": each flagged item (action item / critical deficiency) with its inline corrective-action
+// response — responder name + date + comment + response photos — under the original item (spec §9). Resolved
+// items show their response; still-open items show an "Awaiting response" hint. A closed scorecard reads as
+// the full before/after.
+export function CorrectiveActionThread({
+  items,
+  status,
+}: {
+  items: CorrectiveActionItemView[];
+  status?: string;
+}) {
+  const resolvedCount = items.filter((i) => i.status === "resolved").length;
+  const allResolved = status === "corrective_action_closed" || (items.length > 0 && resolvedCount === items.length);
+  return (
+    <div>
+      <div className="mb-2 flex items-center justify-between">
+        <h4 className="text-xs font-semibold uppercase tracking-wide text-gray-500">Corrective Actions</h4>
+        <span className={`text-xs font-medium ${allResolved ? "text-green-700" : "text-red-600"}`}>
+          {resolvedCount} / {items.length} resolved
+        </span>
+      </div>
+      <div className="space-y-2">
+        {items.map((item) => {
+          const respondedAt = formatRespondedAt(item.respondedAt);
+          const isResolved = item.status === "resolved";
+          return (
+            <div key={item.id} className="rounded-md border border-gray-200 bg-white p-3">
+              <div className="flex items-start justify-between gap-2">
+                <p className="text-sm font-medium text-gray-900">{item.itemLabel}</p>
+                <Badge
+                  variant="outline"
+                  className={
+                    isResolved
+                      ? "shrink-0 bg-green-100 text-green-800 border-green-200"
+                      : "shrink-0 bg-amber-100 text-amber-800 border-amber-200"
+                  }
+                >
+                  {isResolved ? "Resolved" : "Open"}
+                </Badge>
+              </div>
+              {isResolved ? (
+                <div className="mt-2 border-l-2 border-gray-200 pl-3">
+                  <div className="flex items-center gap-2 text-xs text-gray-500">
+                    <span className="font-medium text-gray-700">
+                      {item.responderName ?? item.responderEmail ?? "Responder"}
+                    </span>
+                    {respondedAt && <span>· {respondedAt}</span>}
+                  </div>
+                  {item.responseComment && (
+                    <p className="mt-1 whitespace-pre-wrap text-sm text-gray-900">{item.responseComment}</p>
+                  )}
+                  {item.photos.length > 0 && (
+                    <div className="mt-2 grid grid-cols-3 gap-2 sm:grid-cols-4">
+                      {item.photos.map((p) =>
+                        p.url ? (
+                          <a key={p.id} href={p.url} target="_blank" rel="noopener noreferrer" className="group block">
+                            <img
+                              src={p.url}
+                              alt={p.caption ?? "Corrective action photo"}
+                              className="aspect-square w-full rounded-md object-cover ring-1 ring-gray-200 group-hover:ring-gray-400"
+                            />
+                          </a>
+                        ) : (
+                          <div key={p.id} className="flex aspect-square items-center justify-center rounded-md bg-gray-100 text-[11px] text-gray-400">
+                            Unavailable
+                          </div>
+                        ),
+                      )}
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <p className="mt-1 text-xs italic text-gray-400">Awaiting corrective-action response.</p>
+              )}
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
