@@ -25,6 +25,12 @@ export const scorecardCorrectiveActionTokens = pgTable(
     role: text("role").notNull(),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     consumedAt: timestamp("consumed_at", { withTimezone: true }),
+    /**
+     * Set AFTER a successful email send (NOT at INSERT). Delivery ≠ token existence: the row is inserted
+     * before the send, so a crash in that window leaves an undelivered token. The reuse-skip requires
+     * delivered_at IS NOT NULL (an undelivered token is re-sent, not skipped). Owned by migration 0192.
+     */
+    deliveredAt: timestamp("delivered_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => [

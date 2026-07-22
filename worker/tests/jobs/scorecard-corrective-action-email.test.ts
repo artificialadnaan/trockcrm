@@ -40,15 +40,20 @@ function makeQuery(
     sentAt?: string | null;
     status?: string;
     recipients?: any[];
+    assignedRoles?: any[];
     flagged?: any[];
     existingTokenEmails?: string[];
   } = {},
 ) {
   const inserts: { sql: string; params: any[] }[] = [];
   const tokenDeletes: { sql: string; params: any[] }[] = [];
+  const tokenDelivers: { sql: string; params: any[] }[] = [];
+  // existingTokenEmails model DELIVERED tokens: the reuse-skip query requires delivered_at IS NOT NULL, so
+  // only a delivered token returns a row (an undelivered remnant returns nothing → the recipient is re-sent).
   const existing = new Set((opts.existingTokenEmails ?? []).map((e) => e.toLowerCase()));
   const query = vi.fn(async (text: string, params: any[] = []) => {
-    // Per-recipient token existence check: SELECT 1 FROM ...tokens WHERE recipient_email = $2 ...
+    // Per-recipient DELIVERED-token existence check: SELECT 1 FROM ...tokens WHERE recipient_email = $2 ...
+    // ... AND delivered_at IS NOT NULL.
     if (/SELECT 1 FROM \S*scorecard_corrective_action_tokens/i.test(text)) {
       const email = String(params[1] ?? "").toLowerCase();
       return { rows: existing.has(email) ? [{ "?column?": 1 }] : [] };
@@ -61,8 +66,21 @@ function makeQuery(
       inserts.push({ sql: text, params });
       return { rows: [] };
     }
+    if (/UPDATE \S*scorecard_corrective_action_tokens SET delivered_at/i.test(text)) {
+      tokenDelivers.push({ sql: text, params });
+      return { rows: [] };
+    }
     if (/UPDATE .*field_scorecards/i.test(text)) {
       return { rows: [] };
+    }
+    // The assigned-super/PM-roles query (finding 4) — SELECT DISTINCT dtm.role ... deal_team_members without a
+    // JOIN. Distinguished from the recipient-resolution query by the absence of user_id/email columns; return
+    // the caller's assignedRoles (defaults to whatever recipients carry, i.e. every assigned role resolvable).
+    if (/SELECT DISTINCT dtm\.role/i.test(text)) {
+      const rows =
+        opts.assignedRoles ??
+        (opts.recipients ?? RECIPIENTS).map((r: any) => ({ role: r.role }));
+      return { rows };
     }
     if (/FROM \S*field_scorecards/i.test(text)) {
       return {
@@ -92,7 +110,7 @@ function makeQuery(
     }
     return { rows: [] };
   });
-  return { query, inserts, tokenDeletes };
+  return { query, inserts, tokenDeletes, tokenDelivers };
 }
 
 describe("scorecard corrective-action notification email", () => {
@@ -159,6 +177,97 @@ describe("scorecard corrective-action notification email", () => {
     // requeue (after the PM's email is fixed) can still notify them (per-recipient delivery, finding 8).
     const stampCalls = query.mock.calls.filter(([text]) => /UPDATE .*field_scorecards/i.test(text as string));
     expect(stampCalls).toHaveLength(0);
+  });
+
+  it("STAMPS when only ONE role is assigned and it was delivered (finding 4: single-role deal is complete)", async () => {
+    // A deal legitimately has only a superintendent assigned (no PM). Once the super is delivered there is
+    // nothing owed for the unassigned PM role, so the scorecard-level stamp IS written.
+    const { query } = makeQuery({
+      recipients: [{ role: "superintendent", name: "Sam Super", email: "sam.super@trock.com", user_id: "u-1" }],
+      assignedRoles: [{ role: "superintendent" }],
+    });
+    const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "m" });
+    const logger = makeLogger();
+
+    await handleScorecardCorrectiveActionEmail(payload, null, { query: query as any, sendEmail, env, logger });
+
+    expect(sendEmail).toHaveBeenCalledTimes(1);
+    const stampCalls = query.mock.calls.filter(([text]) => /UPDATE .*field_scorecards/i.test(text as string));
+    expect(stampCalls).toHaveLength(1);
+  });
+
+  it("does NOT stamp when a role is ASSIGNED but currently UNRESOLVABLE (finding 4: partial-role incompleteness)", async () => {
+    // The PM role IS assigned (an active deal_team_members row) but its identity is unresolvable this run — e.g.
+    // an inactive user/contact, so it never appears in the resolved-recipient set (which drops inactive
+    // identities). The super was delivered, but the assigned PM was NOT — delivery is INCOMPLETE, so the stamp
+    // must be withheld so a later requeue (once the PM's identity/email is fixed) still notifies them.
+    const { query } = makeQuery({
+      recipients: [{ role: "superintendent", name: "Sam Super", email: "sam.super@trock.com", user_id: "u-1" }],
+      assignedRoles: [{ role: "superintendent" }, { role: "project_manager" }],
+    });
+    const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "m" });
+    const logger = makeLogger();
+
+    await handleScorecardCorrectiveActionEmail(payload, null, { query: query as any, sendEmail, env, logger });
+
+    expect(sendEmail).toHaveBeenCalledTimes(1);
+    expect(sendEmail.mock.calls[0][0]).toBe("sam.super@trock.com");
+    const stampCalls = query.mock.calls.filter(([text]) => /UPDATE .*field_scorecards/i.test(text as string));
+    expect(stampCalls).toHaveLength(0);
+  });
+
+  it("marks a freshly-minted email-only token DELIVERED only AFTER a successful send (finding 5)", async () => {
+    const { query, inserts, tokenDelivers } = makeQuery({
+      recipients: [{ role: "project_manager", name: "Dana Cole", email: "dana.cole@example.com", user_id: null }],
+      assignedRoles: [{ role: "project_manager" }],
+    });
+    const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "m" });
+    const logger = makeLogger();
+
+    await handleScorecardCorrectiveActionEmail(payload, null, { query: query as any, sendEmail, env, logger });
+
+    // One token minted, then stamped delivered_at (by the SAME token_hash) after the send succeeded.
+    expect(inserts).toHaveLength(1);
+    expect(tokenDelivers).toHaveLength(1);
+    expect(tokenDelivers[0].params[0]).toBe(inserts[0].params[1]); // delivered by the minted token_hash
+  });
+
+  it("does NOT mark delivered_at when the send FAILS — token stays undelivered so a retry re-sends (finding 5)", async () => {
+    const { query, inserts, tokenDelivers, tokenDeletes } = makeQuery({
+      recipients: [{ role: "project_manager", name: "Dana Cole", email: "dana.cole@example.com", user_id: null }],
+      assignedRoles: [{ role: "project_manager" }],
+    });
+    const sendEmail = vi.fn().mockRejectedValue(new Error("provider down"));
+    const logger = makeLogger();
+
+    await expect(
+      handleScorecardCorrectiveActionEmail(payload, null, { query: query as any, sendEmail, env, logger }),
+    ).rejects.toThrow(/provider down/);
+
+    expect(inserts).toHaveLength(1);
+    // The failed send deletes the token and NEVER stamps delivered_at.
+    expect(tokenDeletes).toHaveLength(1);
+    expect(tokenDelivers).toHaveLength(0);
+  });
+
+  it("RE-SENDS an email-only recipient whose token EXISTS but was never DELIVERED (finding 5: crash-safe)", async () => {
+    // A crash between INSERT and send left an UNDELIVERED token row. The reuse-skip requires delivered_at IS
+    // NOT NULL, so it does NOT skip: the recipient is re-minted + re-sent (not stranded on a link they never
+    // got). Modeled by existingTokenEmails being EMPTY — the delivered-token check returns no row.
+    const { query, inserts, tokenDelivers } = makeQuery({
+      recipients: [{ role: "project_manager", name: "Dana Cole", email: "dana.cole@example.com", user_id: null }],
+      assignedRoles: [{ role: "project_manager" }],
+      existingTokenEmails: [], // an undelivered remnant is invisible to the delivered-token reuse check
+    });
+    const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "m" });
+    const logger = makeLogger();
+
+    await handleScorecardCorrectiveActionEmail(payload, null, { query: query as any, sendEmail, env, logger });
+
+    // Re-sent: a fresh token minted + delivered, the recipient emailed.
+    expect(inserts).toHaveLength(1);
+    expect(tokenDelivers).toHaveLength(1);
+    expect(sendEmail.mock.calls.map((c) => c[0])).toEqual(["dana.cole@example.com"]);
   });
 
   it("stamps corrective_action_email_sent_at exactly once after sending", async () => {

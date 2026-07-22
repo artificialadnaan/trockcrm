@@ -64,9 +64,12 @@ function hashToken(rawToken: string): string {
  *   - an email-only member gets a freshly-minted recipient-bound web token appended to the responder URL.
  *
  * Idempotent per scorecard via field_scorecards.corrective_action_email_sent_at (mirrors email_sent_at):
- * checked before sending, stamped once after ALL recipients are sent. Plus the Resend idempotencyKey is
- * per (scorecard, recipient), so a re-delivery in the crash window (sent, not yet stamped) doesn't
- * double-email a recipient. A recipient with no resolvable email is skipped (logged), never emailed.
+ * checked before sending, stamped once ONLY when every ASSIGNED super/PM role was delivered this run (an
+ * assigned-but-unresolvable role — inactive identity or missing/invalid email — leaves the stamp NULL so a
+ * later requeue still notifies it; finding 4). Plus the Resend idempotencyKey is per (scorecard, recipient),
+ * so a re-delivery in the crash window (sent, not yet stamped) doesn't double-email a recipient. Email-only
+ * tokens carry a delivered_at set only AFTER a successful send, so a retry reuses a DELIVERED token but
+ * (re)sends an undelivered one — delivery is never inferred from mere token existence (finding 5).
  */
 export async function handleScorecardCorrectiveActionEmail(
   payload: ScorecardCorrectiveActionEmailPayload,
@@ -146,20 +149,17 @@ export async function handleScorecardCorrectiveActionEmail(
     [dealId]
   );
   const recipients: ResolvedRecipient[] = [];
-  // Whether ANY expected super/PM role was resolved but had no usable email. Used below to decide whether the
-  // scorecard-level idempotency stamp may be written: if a recipient was skipped for a missing email, we do
-  // NOT stamp, so a later requeue (after the email is fixed) can still notify them (finding 8).
-  let skippedForMissingEmail = false;
+  const resolvedRoles = new Set<RecipientRole>();
   for (const row of recipientRes.rows as any[]) {
     const email = normalizeText(row.email);
     const role = row.role as RecipientRole;
     if (role !== "superintendent" && role !== "project_manager") continue;
     if (!email || !basicValidEmail(email)) {
       logger.warn("[CorrectiveActionEmail] Recipient has no resolvable email - skipping", { scorecardId, role });
-      skippedForMissingEmail = true;
       continue;
     }
     recipients.push({ role, name: normalizeText(row.name) ?? email, email, userId: normalizeText(row.user_id) });
+    resolvedRoles.add(role);
   }
 
   if (recipients.length === 0) {
@@ -178,6 +178,31 @@ export async function handleScorecardCorrectiveActionEmail(
       `No superintendent/project-manager with an email on deal ${dealId} - retrying until the team is assigned`,
     );
   }
+
+  // Which super/PM roles are ASSIGNED AT ALL on this deal — an active deal_team_members row for the role,
+  // REGARDLESS of whether its identity currently resolves to a usable email. This is deliberately broader than
+  // the resolved-recipient query above (which drops inactive users/contacts and blank emails), so we can tell:
+  //   - a role ASSIGNED but currently UNRESOLVABLE (inactive identity, or missing/invalid email) → the delivery
+  //     is INCOMPLETE this run: that responder was never notified, so we must NOT stamp (leave re-runnable);
+  //   - a role NOT ASSIGNED AT ALL → nothing owed for it, so a deal with only one of the two roles can still be
+  //     complete once that one role is delivered.
+  // "Required" = every role that IS assigned. This is the minimal coherent rule: don't stamp until every
+  // assigned super/PM role has been delivered; unassigned roles owe nothing. (finding 4)
+  const assignedRes = await query(
+    `SELECT DISTINCT dtm.role AS role
+       FROM ${tenantSchema}.deal_team_members dtm
+      WHERE dtm.deal_id = $1::uuid
+        AND dtm.is_active = TRUE
+        AND dtm.role IN ('superintendent', 'project_manager')`,
+    [dealId]
+  );
+  const assignedRoles = new Set<RecipientRole>();
+  for (const row of assignedRes.rows as any[]) {
+    const role = row.role as RecipientRole;
+    if (role === "superintendent" || role === "project_manager") assignedRoles.add(role);
+  }
+  // Roles that ARE assigned but did NOT resolve into a deliverable recipient this run.
+  const unresolvedAssignedRoles = [...assignedRoles].filter((role) => !resolvedRoles.has(role));
 
   // Flagged items for the email body (the open corrective-action rows).
   const flaggedRes = await query(
@@ -211,9 +236,10 @@ export async function handleScorecardCorrectiveActionEmail(
   // would drop A's ALREADY-DELIVERED token and mint a new one — but A's re-send is suppressed by the
   // per-recipient Resend idempotency key, so A never receives the new link and is stranded on the deleted
   // one. Instead, token rotation is per-recipient inside the loop: a recipient who already holds an
-  // unexpired/unconsumed token was emailed on a prior attempt, so we reuse it (skip re-mint + re-send); a
-  // recipient whose send fails has their just-minted token deleted before we rethrow, so the retry re-mints
-  // and re-sends them a fresh, working link. Only the OFFICE tenant schema is interpolated (regex-validated).
+  // unexpired/unconsumed AND DELIVERED token was emailed on a prior attempt, so we reuse it (skip re-mint +
+  // re-send); a recipient whose send fails has their just-minted token deleted before we rethrow, so the retry
+  // re-mints and re-sends them a fresh, working link. Only the OFFICE tenant schema is interpolated (regex-
+  // validated).
 
   // Send one email per recipient with the link appropriate to their identity.
   for (const recipient of recipients) {
@@ -226,25 +252,30 @@ export async function handleScorecardCorrectiveActionEmail(
       // trockcam://scorecards/corrective-action/<id> (the `(app)` group is transparent in the URL).
       link = `trockcam://scorecards/corrective-action/${encodeURIComponent(scorecardId)}`;
     } else {
-      // Email-only → they respond via a tokenized web link. If this recipient already holds an
-      // unexpired/unconsumed token, they were emailed on a prior attempt (a partial-delivery retry); we can't
-      // reconstruct the raw token to re-send the same link, and the per-recipient Resend idempotency key would
-      // suppress a re-send anyway — so reuse it: skip re-minting AND re-sending, leaving their existing link
-      // intact. (Only a send FAILURE deletes a just-minted token, so an existing row always means delivered.)
+      // Email-only → they respond via a tokenized web link. Reuse an existing token ONLY when it was actually
+      // DELIVERED (delivered_at IS NOT NULL) — delivery ≠ token existence. The row is inserted BEFORE the send,
+      // so a crash in that window (or a send failure whose cleanup delete didn't land) leaves an undelivered
+      // token; skipping on mere existence would strand the recipient with a link they never got while the
+      // scorecard is stamped sent. A delivered token means they were emailed on a prior attempt — we can't
+      // reconstruct the raw token to re-send, and the per-recipient Resend idempotency key would suppress a
+      // re-send anyway — so reuse it (skip re-mint + re-send), leaving their working link intact.
       const existing = await query(
         `SELECT 1 FROM ${tenantSchema}.scorecard_corrective_action_tokens
           WHERE scorecard_id = $1::uuid AND LOWER(recipient_email) = LOWER($2)
-            AND consumed_at IS NULL AND expires_at > NOW()
+            AND consumed_at IS NULL AND expires_at > NOW() AND delivered_at IS NOT NULL
           LIMIT 1`,
         [scorecardId, recipient.email]
       );
       if ((existing.rows?.length ?? 0) > 0) {
-        logger.log("[CorrectiveActionEmail] Recipient already has a valid token - reusing (no re-send)", {
+        logger.log("[CorrectiveActionEmail] Recipient already has a DELIVERED token - reusing (no re-send)", {
           scorecardId,
           role: recipient.role,
         });
         continue;
       }
+      // No reuse: mint a FRESH token below. An earlier UNDELIVERED remnant (crash window) is harmless — it
+      // never authorizes reuse (delivered_at IS NULL) and token_hash is random-unique, so no collision — so we
+      // deliberately don't pre-delete it (keeps rotation strictly per-recipient, no blanket/scan delete).
       const rawToken = crypto.randomBytes(32).toString("base64url");
       const tokenHash = hashToken(rawToken);
       const expiresAt = new Date(Date.now() + TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000);
@@ -287,6 +318,15 @@ export async function handleScorecardCorrectiveActionEmail(
       }
       throw err;
     }
+    // The send succeeded → mark the just-minted token DELIVERED, so a later retry reuses it (skips re-send)
+    // instead of re-minting. A crash BEFORE this stamp leaves delivered_at NULL, so the retry (re)sends it —
+    // exactly the crash-safe behavior finding 5 requires.
+    if (mintedTokenHash) {
+      await query(
+        `UPDATE ${tenantSchema}.scorecard_corrective_action_tokens SET delivered_at = NOW() WHERE token_hash = $1`,
+        [mintedTokenHash]
+      );
+    }
     logger.log("[CorrectiveActionEmail] Sent corrective-action email", {
       scorecardId,
       role: recipient.role,
@@ -296,14 +336,16 @@ export async function handleScorecardCorrectiveActionEmail(
   }
 
   // Scorecard-level idempotency stamp (mirrors email_sent_at). Written ONLY when every resolved recipient was
-  // delivered (we reached here without throwing) AND no super/PM was skipped for a missing email. If someone
-  // was skipped, we leave the stamp NULL so a later requeue — after their email is fixed — can still notify
-  // them; already-delivered recipients are then skipped via their existing token (email-only) or a
-  // Resend-idempotency-suppressed re-send (CRM users), so no one is double-notified.
-  if (skippedForMissingEmail) {
+  // delivered (we reached here without throwing) AND every ASSIGNED super/PM role resolved this run. If an
+  // assigned role is currently unresolvable — the super has an email but the PM role is unassigned-at-this-
+  // -instant is fine, but a PM that IS assigned yet has an inactive identity or missing/invalid email is NOT —
+  // we leave the stamp NULL so a later requeue (after that role's email/identity is fixed) still notifies the
+  // stranded role. Already-delivered recipients are then skipped via their DELIVERED token (email-only) or a
+  // Resend-idempotency-suppressed re-send (CRM users), so no one is double-notified. (finding 4)
+  if (unresolvedAssignedRoles.length > 0) {
     logger.warn(
-      "[CorrectiveActionEmail] A super/PM was skipped for a missing email - not stamping (re-runnable)",
-      { scorecardId, dealId }
+      "[CorrectiveActionEmail] An assigned super/PM role is unresolvable (inactive identity or missing/invalid email) - not stamping (re-runnable)",
+      { scorecardId, dealId, unresolvedAssignedRoles }
     );
     return;
   }
