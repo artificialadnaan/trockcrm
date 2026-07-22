@@ -1,5 +1,7 @@
-import React, { useCallback, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
+  AccessibilityInfo,
+  ActivityIndicator,
   FlatList,
   Modal,
   type NativeScrollEvent,
@@ -20,6 +22,16 @@ import { theme } from "../theme/theme";
 import { ZoomablePhoto } from "./ZoomablePhoto";
 import { Button, TextInput } from "./ui";
 import { useUpdatePhotoMetadata } from "../query/hooks";
+import { useAuth } from "../auth/AuthContext";
+import { getProjectPhotos } from "../api/endpoints";
+import { savePhotoToDevice } from "../photos/save-to-device";
+
+type SaveToast = "saved" | "permission" | "error";
+const SAVE_TOAST_TEXT: Record<SaveToast, string> = {
+  saved: "Saved to Photos",
+  permission: "Allow photo access to save",
+  error: "Couldn't save photo",
+};
 
 const ADDRESS_SOURCE_LABEL: Record<string, string> = {
   exif: "From photo",
@@ -27,6 +39,16 @@ const ADDRESS_SOURCE_LABEL: Record<string, string> = {
   deal_fallback: "Project address",
   manual_override: "Manually set",
 };
+
+// Presigned R2 URLs on a FieldPhoto are short-lived (~30 min). The viewer snapshots the photo list at open
+// time, so after the TTL the direct download 403s. Bound the pages we scan when re-fetching a fresh URL so a
+// large deal can't spin. This ceiling MUST match the gallery's own page ceiling (useProjectPhotos'
+// PHOTOS_MAX_PAGES) — the viewer can only show a photo the gallery loaded, so any photo the user is looking at
+// is reachable within these pages. A smaller cap (was 5) left a photo past ~1000 (page 5 × 200) unable to
+// refresh an expired URL, even though the gallery loads up to 50 pages. The scan still stops the instant it
+// finds the photo, or when it passes the reported totalPages — so a small deal pays only one page.
+const REFRESH_PER_PAGE = 200;
+const REFRESH_MAX_PAGES = 50;
 
 function formatTimestamp(photo: FieldPhoto): string {
   const value = photo.takenAt ?? photo.createdAt;
@@ -58,6 +80,7 @@ export function PhotoViewerModal({
   projectDealId?: string;
 }) {
   const { width, height } = useWindowDimensions();
+  const { fetcher } = useAuth();
   const [index, setIndex] = useState(initialIndex);
   // When a photo is zoomed we disable the pager so a one-finger pan moves the image instead of paging.
   const [zoomed, setZoomed] = useState(false);
@@ -114,6 +137,61 @@ export function PhotoViewerModal({
     [photos.length],
   );
 
+  // Download a photo to the device's photo library. Explicit user action (the toolbar Save button), so it's not
+  // gated on the auto-backup setting. The spinner + toast are keyed to the SAVED photo's id (not the currently
+  // shown one), so swiping away mid-download can't show "Saved" over a different, unsaved photo. VoiceOver is
+  // told via announceForAccessibility (accessibilityLiveRegion is Android-only — a no-op on this iOS app).
+  const [savingId, setSavingId] = useState<string | null>(null);
+  const [toast, setToast] = useState<{ id: string; kind: SaveToast } | null>(null);
+  const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (toastTimer.current) clearTimeout(toastTimer.current); }, []);
+
+  // Re-fetch a FRESH presigned download URL for one photo id, bypassing the (possibly-expired) snapshot the
+  // viewer opened with. Scans a bounded number of pages of the viewed project's photo list. Returns null if
+  // we can't resolve a fresh URL (no deal scope, photo not found, or the fetch fails).
+  const fetchFreshUrl = useCallback(
+    async (dealId: string, photoId: string): Promise<string | null> => {
+      for (let page = 1; page <= REFRESH_MAX_PAGES; page += 1) {
+        let res: Awaited<ReturnType<typeof getProjectPhotos>>;
+        try {
+          res = await getProjectPhotos(fetcher, dealId, { page, perPage: REFRESH_PER_PAGE });
+        } catch {
+          return null; // network/auth error — fall back to the generic failure toast
+        }
+        const found = res.photos.find((p) => p.id === photoId);
+        if (found) return found.fullImageUrl ?? found.imageUrl ?? null;
+        const totalPages = res.pagination?.totalPages ?? 1;
+        if (page >= totalPages) break; // no more pages to scan
+      }
+      return null;
+    },
+    [fetcher],
+  );
+
+  const saveToDevice = useCallback(async () => {
+    if (savingId != null || !current) return; // one save at a time
+    const url = current.fullImageUrl ?? current.imageUrl;
+    if (!url) return; // no image to save (placeholder / unresolved URL) — the action is hidden, but guard anyway
+    const targetId = current.id;
+    setSavingId(targetId);
+    let result = await savePhotoToDevice(url);
+    // A "failed" result on a valid URL is most often an EXPIRED presigned link (the viewer snapshotted the
+    // list at open time; R2 URLs live ~30 min). Re-fetch a fresh URL for this photo and retry ONCE before
+    // surfacing the error — a permission denial or a genuinely broken photo won't be masked (we only retry on
+    // "failed", and only when we resolve a DIFFERENT, fresh URL). Uses the VIEWED project's deal scope.
+    const refreshDealId = projectDealId ?? current.dealId ?? undefined;
+    if (result === "failed" && refreshDealId) {
+      const freshUrl = await fetchFreshUrl(refreshDealId, targetId);
+      if (freshUrl && freshUrl !== url) result = await savePhotoToDevice(freshUrl);
+    }
+    setSavingId(null);
+    const kind: SaveToast = result === "saved" ? "saved" : result === "permission_denied" ? "permission" : "error";
+    setToast({ id: targetId, kind });
+    AccessibilityInfo.announceForAccessibility(SAVE_TOAST_TEXT[kind]);
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(null), 2600);
+  }, [savingId, current, projectDealId, fetchFreshUrl]);
+
   return (
     <Modal visible={visible} animationType="fade" onRequestClose={onClose} transparent={false}>
       {/* A fullScreen Modal renders in its own native window outside the app's SafeAreaProvider,
@@ -128,9 +206,29 @@ export function PhotoViewerModal({
             <Text style={styles.counter}>
               {photos.length ? `${safeIndex + 1} / ${photos.length}` : ""}
             </Text>
-            <Pressable onPress={onClose} hitSlop={12} accessibilityLabel="Close viewer">
-              <Text style={styles.close}>Close</Text>
-            </Pressable>
+            <View style={styles.topBarActions}>
+              {/* Only advertise Save when there's actually a URL to download — a placeholder / unresolved
+                  photo would let the download 403/fail with a generic error, so hide the action instead. */}
+              {current && (current.fullImageUrl ?? current.imageUrl) ? (
+                <Pressable
+                  onPress={saveToDevice}
+                  hitSlop={12}
+                  disabled={savingId != null}
+                  style={styles.saveButton}
+                  accessibilityRole="button"
+                  accessibilityLabel="Save photo to device"
+                >
+                  {savingId === current.id ? (
+                    <ActivityIndicator size="small" color={theme.color.textInverse} />
+                  ) : (
+                    <Ionicons name="download-outline" size={22} color={theme.color.textInverse} />
+                  )}
+                </Pressable>
+              ) : null}
+              <Pressable onPress={onClose} hitSlop={12} accessibilityLabel="Close viewer">
+                <Text style={styles.close}>Close</Text>
+              </Pressable>
+            </View>
           </View>
 
           <View style={[styles.pager, { height: height * 0.58 }]}>
@@ -193,6 +291,16 @@ export function PhotoViewerModal({
               >
                 <Ionicons name="chevron-forward" size={28} color={theme.color.textInverse} />
               </Pressable>
+            ) : null}
+            {toast && current && toast.id === current.id ? (
+              <View style={styles.toast} pointerEvents="none">
+                <Ionicons
+                  name={toast.kind === "saved" ? "checkmark-circle" : "alert-circle"}
+                  size={16}
+                  color={theme.color.textInverse}
+                />
+                <Text style={styles.toastText}>{SAVE_TOAST_TEXT[toast.kind]}</Text>
+              </View>
             ) : null}
           </View>
 
@@ -279,7 +387,22 @@ const styles = StyleSheet.create({
     paddingVertical: theme.space.sm,
   },
   counter: { color: theme.color.textInverse, fontFamily: theme.font.medium, fontSize: 14 },
+  topBarActions: { flexDirection: "row", alignItems: "center", gap: theme.space.lg },
+  saveButton: { width: 28, alignItems: "center", justifyContent: "center" },
   close: { color: theme.color.textInverse, fontFamily: theme.font.semibold, fontSize: 16 },
+  toast: {
+    position: "absolute",
+    bottom: theme.space.lg,
+    alignSelf: "center",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.space.xs,
+    backgroundColor: "rgba(0,0,0,0.8)",
+    paddingHorizontal: theme.space.md,
+    paddingVertical: theme.space.sm,
+    borderRadius: theme.radius.md,
+  },
+  toastText: { color: theme.color.textInverse, fontFamily: theme.font.semibold, fontSize: 13 },
   noImage: { color: theme.color.textInverse, fontFamily: theme.font.body },
   pager: { position: "relative", justifyContent: "center" },
   chevron: {

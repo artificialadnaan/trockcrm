@@ -6,6 +6,44 @@ import type { CaptureUploadInput } from "./upload";
 // 5 (up from 3): a touch more throughput for big batches while staying gentle on the API rate limiter.
 export const UPLOAD_CONCURRENCY = 5;
 
+// Cap on concurrent enqueue-time compressions ACROSS all enqueueUploads calls. Per-photo captures fire
+// enqueueUploads without awaiting, so a fast burst could otherwise launch unbounded 12MP ImageManipulator
+// jobs → memory/CPU spike → camera jank or an app kill. Lower than UPLOAD_CONCURRENCY because decode+encode
+// is far heavier than a network PUT, and it runs while the camera preview is live.
+export const COMPRESS_CONCURRENCY = 3;
+
+/**
+ * A shared bounded runner: at most `max` tasks run concurrently across ALL callers; the rest queue and start
+ * as slots free (FIFO). Unlike createAsyncMutex (concurrency 1), this allows `max` in flight. A task that
+ * throws still frees its slot. Used for one module-level instance to bound enqueue-time compression.
+ */
+export function createBoundedRunner(max: number): <T>(task: () => Promise<T>) => Promise<T> {
+  let active = 0;
+  const waiters: Array<() => void> = [];
+  const acquire = () =>
+    new Promise<void>((resolve) => {
+      if (active < max) {
+        active++;
+        resolve();
+      } else {
+        waiters.push(resolve); // inherits the slot released to it (active stays at max)
+      }
+    });
+  const release = () => {
+    const next = waiters.shift();
+    if (next) next();
+    else active--;
+  };
+  return async function run<T>(task: () => Promise<T>): Promise<T> {
+    await acquire();
+    try {
+      return await task();
+    } finally {
+      release();
+    }
+  };
+}
+
 // After this many failed attempts an item is TERMINAL: it stops draining (no more re-compress/re-PUT) and
 // surfaces to the UI as "failed" so a permanently-broken capture (revoked access, non-transient 4xx) can't
 // retry forever on every resume/foreground/background trigger.
@@ -17,11 +55,45 @@ export type QueuedUpload = CaptureUploadInput & {
   attempts: number;
   /** Epoch ms of the last drain attempt (for surfacing/debugging). */
   lastTriedAt?: number;
+  /**
+   * True while the durable ORIGINAL is persisted but enqueue-time compression is still in flight (the row's
+   * `.orig` file may yet be switched to the staged `.jpg`). Such a row is NOT drainable: draining it would
+   * launch a SECOND compression concurrent with the enqueue's, ballooning the in-flight encode count past
+   * COMPRESS_CONCURRENCY. Cleared once the compressed file is switched in (or compression falls back), after
+   * which the row drains normally. Absent on all legacy/committed rows (treated as not-staging).
+   */
+  staging?: boolean;
 };
 
-/** Drainable = not yet terminal. Legacy items without `attempts` are treated as 0. */
+/**
+ * TERMINAL = exhausted its retries and will never drain again (surfaced to the UI as "failed"). This is the
+ * `!isDrainable` complement's REAL meaning — a `staging` row is transiently non-drainable but NOT terminal, so
+ * the "failed" count/clear must key on this (not `!isDrainable`) or it would miscount / delete a mid-enqueue
+ * original. Legacy items without `attempts` are treated as 0.
+ */
+export function isTerminal(item: QueuedUpload): boolean {
+  return (item.attempts ?? 0) >= MAX_UPLOAD_ATTEMPTS;
+}
+
+/**
+ * Drainable = not yet terminal AND not mid-enqueue-staging. A `staging` row's original is durable (survives a
+ * kill) but must be skipped by the drain until its enqueue completes the compressed-file switch, so the drain
+ * can't spin up a duplicate compression. Legacy items without `attempts` are treated as 0.
+ */
 export function isDrainable(item: QueuedUpload): boolean {
-  return (item.attempts ?? 0) < MAX_UPLOAD_ATTEMPTS;
+  return !isTerminal(item) && item.staging !== true;
+}
+
+/**
+ * SCHEDULABLE = a row that a drain would eventually act on: either drainable now, OR a mid-enqueue `staging`
+ * row that becomes drainable once reconciliation unsticks it (which runs INSIDE drainUploadQueue). The
+ * "should we schedule a drain?" gates key on THIS, not isDrainable — otherwise a lone interrupted capture (a
+ * `staging` row with no live worker) counts as 0 drainable → no drain is ever scheduled → its reconciliation
+ * never runs and the photo stays hidden/unshipped forever. Terminal (retries-exhausted) rows are NOT
+ * schedulable: they only surface to the UI for dismissal.
+ */
+export function isSchedulable(item: QueuedUpload): boolean {
+  return !isTerminal(item) && (item.staging === true || isDrainable(item));
 }
 
 /** Legacy/unmarked queue items remain office-pinned; only an explicit edit-evidence marker opts out. */
@@ -87,6 +159,31 @@ export function removeIds(queue: QueuedUpload[], ids: Iterable<string>): QueuedU
   return queue.filter((item) => !drop.has(item.clientUploadId));
 }
 
+// A staged capture lives at `<id>.orig` (the pre-compression original) or `<id>.jpg` (the compressed copy),
+// and the index row points at whichever is CURRENT. If the app is killed mid-copy (before `<id>.jpg` is
+// switched in) or before/after a row is removed, the OTHER file can be left on disk while the index no longer
+// references it — a storage leak the drain never cleans (it only deletes `item.uri`). These extensions mark a
+// file as queue-owned staging so startup reconciliation can recognize + reclaim the unreferenced ones.
+const STAGING_EXTENSIONS = [".orig", ".jpg"] as const;
+
+/** True iff `name` is a queue staging file (`<id>.orig` / `<id>.jpg`) — the only files we may reclaim. */
+export function isStagingFileName(name: string): boolean {
+  return STAGING_EXTENSIONS.some((ext) => name.endsWith(ext));
+}
+
+/**
+ * Given the queue's on-disk filenames and the current index, return the staging files SAFE to delete: every
+ * `<id>.orig` / `<id>.jpg` NOT referenced by any live index row's basename. A row referenced by the index (via
+ * its uri basename) is kept; its sibling extension (the original after a switch, or a partial compressed copy
+ * from a torn write) is reclaimed. Non-staging files (index.json, .tmp, .bak) are never touched.
+ */
+export function selectOrphanFiles(fileNames: string[], queue: QueuedUpload[]): string[] {
+  const referenced = new Set(
+    queue.map((item) => item.uri.slice(item.uri.lastIndexOf("/") + 1)),
+  );
+  return fileNames.filter((name) => isStagingFileName(name) && !referenced.has(name));
+}
+
 /**
  * Fill GPS coordinates onto a still-queued item — ONLY if it's coordless (never overwrites EXIF/existing
  * coords). Used when a camera session's fix lands after a shot was already streamed coordless. Returns
@@ -142,4 +239,17 @@ export function partitionResults(
     else failedIds.push(item.clientUploadId);
   });
   return { succeededIds, failedIds };
+}
+
+/**
+ * Resolve a settled batch of concurrent enqueue attempts. A batch is run with `Promise.allSettled` (not
+ * `Promise.all`) so every worker finishes writing before we look at results — no worker is still mutating a
+ * dest file / the queue index when the caller regains control. A single copy failure still aborts the whole
+ * batch: we rethrow the FIRST rejection (after all have settled). Fulfilled `null`s are skipped items (id
+ * already durably queued or claimed by another worker) and are dropped from the returned list.
+ */
+export function collectEnqueueResults(settled: Array<PromiseSettledResult<QueuedUpload | null>>): QueuedUpload[] {
+  const rejected = settled.find((r) => r.status === "rejected");
+  if (rejected) throw (rejected as PromiseRejectedResult).reason;
+  return settled.flatMap((r) => (r.status === "fulfilled" && r.value ? [r.value] : []));
 }

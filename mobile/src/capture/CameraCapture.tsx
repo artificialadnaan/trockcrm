@@ -26,6 +26,7 @@ import {
 import { theme } from "../theme/theme";
 import { Button } from "../components/ui";
 import { PhotoCaptionEditor } from "../components/PhotoCaptionEditor";
+import { saveOriginalToCameraRoll } from "./camera-roll";
 
 // `capturedAt` is the shutter timestamp, stamped at capture time. In per-photo mode the shot isn't
 // committed until the note sheet is dismissed, so the parent uses this (not commit-time now()) as the
@@ -255,6 +256,10 @@ export default function CameraCapture({
     try {
       const photo = await cameraRef.current.takePictureAsync({ quality: 1, exif: true });
       if (photo?.uri) {
+        // Fire-and-forget: back up the untouched FULL-RES original to the device camera roll (gated by the
+        // setting + write-only permission; best-effort, never throws). Kept off the shutter path so it can't
+        // slow capture — the CRM still gets the compressed copy via the normal enqueue.
+        void saveOriginalToCameraRoll(photo.uri);
         const shot: CapturedShot = {
           uri: photo.uri,
           width: photo.width,

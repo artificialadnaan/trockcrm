@@ -1,6 +1,7 @@
 jest.mock("expo-file-system/legacy", () => ({
   FileSystemUploadType: { BINARY_CONTENT: 0 },
   uploadAsync: jest.fn(async () => ({ status: 200 })),
+  getInfoAsync: jest.fn(async () => ({ exists: true, size: 777 })),
 }));
 
 jest.mock("../compress", () => ({
@@ -21,7 +22,9 @@ jest.mock("../../api/endpoints", () => ({
   replacePhotoTags: jest.fn(async () => ({ tags: [] })),
 }));
 
+import * as FileSystem from "expo-file-system/legacy";
 import { confirmUpload, createUploadUrl, replacePhotoTags } from "../../api/endpoints";
+import { compressForUpload } from "../compress";
 import { uploadCapture, type CaptureUploadInput } from "../upload";
 
 function input(scorecardId?: string): CaptureUploadInput {
@@ -67,5 +70,51 @@ describe("uploadCapture scorecard edit scope", () => {
     expect(createUploadUrl).toHaveBeenCalledWith(fetcher, expect.objectContaining({ clientUploadId: "upload-1" }));
     expect(confirmUpload).toHaveBeenCalledWith(fetcher, expect.not.objectContaining({ scorecardId: expect.anything() }));
     expect(replacePhotoTags).toHaveBeenCalledWith(fetcher, "photo-1", ["scorecard", "safety"]);
+  });
+});
+
+describe("uploadCapture compression handling (compress-on-enqueue)", () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  it("does NOT re-compress a pre-compressed item — uploads its uri with the stored sizeBytes", async () => {
+    const fetcher = jest.fn() as never;
+    await uploadCapture(fetcher, {
+      ...input(),
+      uri: "file:///already-compressed.jpg",
+      compressed: true,
+      sizeBytes: 999,
+    });
+    expect(compressForUpload).not.toHaveBeenCalled();
+    expect(createUploadUrl).toHaveBeenCalledWith(fetcher, expect.objectContaining({ sizeBytes: 999 }));
+    expect(FileSystem.uploadAsync).toHaveBeenCalledWith(
+      "https://upload.test/photo",
+      "file:///already-compressed.jpg",
+      expect.anything(),
+    );
+  });
+
+  it("re-STATS a compressed item with a missing size instead of re-encoding it (no 2nd lossy pass)", async () => {
+    const fetcher = jest.fn() as never;
+    await uploadCapture(fetcher, { ...input(), uri: "file:///c.jpg", compressed: true, sizeBytes: 0 });
+    expect(FileSystem.getInfoAsync).toHaveBeenCalledWith("file:///c.jpg");
+    expect(compressForUpload).not.toHaveBeenCalled(); // NOT re-encoded
+    expect(createUploadUrl).toHaveBeenCalledWith(fetcher, expect.objectContaining({ sizeBytes: 777 }));
+    expect(FileSystem.uploadAsync).toHaveBeenCalledWith(
+      "https://upload.test/photo",
+      "file:///c.jpg",
+      expect.anything(),
+    );
+  });
+
+  it("compresses a legacy/fallback item (compressed unset) at drain time, as before", async () => {
+    const fetcher = jest.fn() as never;
+    await uploadCapture(fetcher, input()); // no compressed flag → drain compresses
+    expect(compressForUpload).toHaveBeenCalledWith("file:///photo.jpg", undefined, undefined);
+    expect(createUploadUrl).toHaveBeenCalledWith(fetcher, expect.objectContaining({ sizeBytes: 123 }));
+    expect(FileSystem.uploadAsync).toHaveBeenCalledWith(
+      "https://upload.test/photo",
+      "file:///compressed.jpg",
+      expect.anything(),
+    );
   });
 });

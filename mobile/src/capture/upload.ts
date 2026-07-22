@@ -34,6 +34,15 @@ export type CaptureUploadInput = {
    * in the local queue but is never sent in either upload request body.
    */
   routeByTarget?: boolean;
+  /**
+   * Set true when the queued `uri` is ALREADY the compressed CRM JPEG (compression moved to enqueue time so
+   * the drain is a pure PUT). When true, `sizeBytes` carries the compressed size and uploadCapture skips
+   * re-compressing. Absent/false = a legacy or fallback item whose `uri` is the original → the drain
+   * compresses it, exactly as before (safe migration of in-flight queue items).
+   */
+  compressed?: boolean;
+  /** Compressed byte size, set alongside `compressed: true` at enqueue (used for the upload-url request). */
+  sizeBytes?: number;
 };
 
 function onlyDefinedTarget(t: CaptureTargetRef): CaptureTargetRef {
@@ -68,7 +77,28 @@ export async function uploadCapture(
   // removed mid-upload never surfaces in the gallery — the already-PUT R2 bytes just dangle unconfirmed.
   opts: { shouldConfirm?: () => boolean | Promise<boolean> } = {},
 ): Promise<FieldPhoto> {
-  const compressed = await compressForUpload(input.uri, input.width, input.height);
+  // Compression normally happens at ENQUEUE now, so a queued item's `uri` is already the compressed JPEG.
+  // Never re-encode it (a 2nd 0.92 pass softens detail): trust the stored size, or re-STAT the durable file
+  // if the enqueue-time size read missed; only fall back to a real compression pass if we still can't get a
+  // size. A legacy/fallback item (compressed not set) is compressed here at drain, as before.
+  let compressed: { uri: string; sizeBytes: number; contentType: "image/jpeg" };
+  if (input.compressed) {
+    let sizeBytes = typeof input.sizeBytes === "number" && input.sizeBytes > 0 ? input.sizeBytes : 0;
+    if (sizeBytes <= 0) {
+      try {
+        const info = await FileSystem.getInfoAsync(input.uri);
+        if (info.exists && typeof info.size === "number") sizeBytes = info.size;
+      } catch {
+        /* re-stat failed → fall through to a compression pass, which returns a usable size */
+      }
+    }
+    compressed =
+      sizeBytes > 0
+        ? { uri: input.uri, sizeBytes, contentType: "image/jpeg" as const }
+        : await compressForUpload(input.uri, input.width, input.height);
+  } else {
+    compressed = await compressForUpload(input.uri, input.width, input.height);
+  }
   const target = onlyDefinedTarget(input.target);
   const scorecardScope = input.scorecardId ? { scorecardId: input.scorecardId } : {};
 

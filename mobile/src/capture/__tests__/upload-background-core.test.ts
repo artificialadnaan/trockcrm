@@ -10,7 +10,7 @@ describe("drainBackgroundOwnerQueues", () => {
   it("continues after owner failures, then rethrows the first error", async () => {
     const first = new Error("office a unavailable");
     const second = new Error("office b index unreadable");
-    const getQueuedCount = jest.fn(async (ownerKey: string) => {
+    const getSchedulableCount = jest.fn(async (ownerKey: string) => {
       if (ownerKey === "user:office-b") throw second;
       return 1;
     });
@@ -18,9 +18,9 @@ describe("drainBackgroundOwnerQueues", () => {
       if (owner.ownerKey === "user:office-a") throw first;
     });
 
-    await expect(drainBackgroundOwnerQueues(owners, { getQueuedCount, drainOwner })).rejects.toBe(first);
+    await expect(drainBackgroundOwnerQueues(owners, { getSchedulableCount, drainOwner })).rejects.toBe(first);
 
-    expect(getQueuedCount).toHaveBeenCalledTimes(3);
+    expect(getSchedulableCount).toHaveBeenCalledTimes(3);
     expect(drainOwner.mock.calls.map(([owner]) => owner.ownerKey)).toEqual([
       "user:office-a",
       "user:office-c",
@@ -28,14 +28,27 @@ describe("drainBackgroundOwnerQueues", () => {
   });
 
   it("skips empty queues and resolves after every successful owner", async () => {
-    const getQueuedCount = jest.fn(async (ownerKey: string) => ownerKey === "user:office-b" ? 0 : 1);
+    const getSchedulableCount = jest.fn(async (ownerKey: string) => ownerKey === "user:office-b" ? 0 : 1);
     const drainOwner = jest.fn(async (_owner: BackgroundUploadOwner) => undefined);
 
-    await expect(drainBackgroundOwnerQueues(owners, { getQueuedCount, drainOwner })).resolves.toBeUndefined();
+    await expect(drainBackgroundOwnerQueues(owners, { getSchedulableCount, drainOwner })).resolves.toBeUndefined();
 
     expect(drainOwner.mock.calls.map(([owner]) => owner.ownerKey)).toEqual([
       "user:office-a",
       "user:office-c",
     ]);
+  });
+
+  it("drains an owner whose only rows are mid-enqueue staging (schedulable > 0, drainable would be 0)", async () => {
+    // A lone capture interrupted mid-enqueue leaves a `staging` row: 0 DRAINABLE but 1 SCHEDULABLE. Gating on
+    // the schedulable count (not drainable-only) is what lets the drain run to reconcile + ship it — the whole
+    // point of finding 2. Simulate that owner reporting 1 schedulable row.
+    const getSchedulableCount = jest.fn(async (ownerKey: string) => (ownerKey === "user:office-b" ? 1 : 0));
+    const drainOwner = jest.fn(async (_owner: BackgroundUploadOwner) => undefined);
+
+    await expect(drainBackgroundOwnerQueues(owners, { getSchedulableCount, drainOwner })).resolves.toBeUndefined();
+
+    // Only office-b (the staging-only owner) is drained; the truly-empty owners are skipped.
+    expect(drainOwner.mock.calls.map(([owner]) => owner.ownerKey)).toEqual(["user:office-b"]);
   });
 });
