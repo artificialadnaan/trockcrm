@@ -13,6 +13,11 @@ import {
 import { verifyCorrectiveActionToken } from "./corrective-action-tokens.js";
 import { isAssignedCorrectiveActionResponder } from "./corrective-action-recipients.js";
 import { getCorrectiveActionItems, submitCorrectiveActionResponse } from "./corrective-action-api.js";
+import {
+  requestCorrectiveActionUploadUrl,
+  confirmCorrectiveActionUpload,
+  CORRECTIVE_ACTION_SYSTEM_UPLOADER,
+} from "./corrective-action-upload.js";
 
 /** The responder identity threaded into a resolved item (a CRM user, or an email-only token recipient). */
 export interface CorrectiveActionResponder {
@@ -130,8 +135,74 @@ export function registerCorrectiveActionRoutes(fieldRoutes: Router): void {
     },
   );
 
+  // NOTE ON ORDERING: the upload routes below MUST be registered BEFORE the `:itemId` catch-all POST — else
+  // Express would bind POST /…/corrective-actions/upload to `:itemId = "upload"` (a 400 on the uuid assert).
+
+  // Step 1 (presign) of the token-scoped response-photo upload: mint a presigned R2 upload URL for a fresh
+  // photo on the scorecard's deal. Session OR token auth. The web (email-only) responder has no field
+  // session, so uploads can't go through the session-scoped field upload endpoint — this token-authed pair
+  // is that path. Returns { uploadUrl, objectKey, uploadToken } for the browser to PUT to R2.
+  fieldRoutes.post(
+    "/scorecards/:id/corrective-actions/upload/url",
+    requireFieldSessionOrToken,
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const id = String(req.params.id);
+        assertValidUuid(id, "id");
+        const { office, responder } = await authorizeCorrectiveAction(req, id);
+        const result = await runInOffice(office, (db: FieldTenantDb) =>
+          requestCorrectiveActionUploadUrl(db, {
+            scorecardId: id,
+            officeSlug: office.slug,
+            uploaderId: responder.userId ?? CORRECTIVE_ACTION_SYSTEM_UPLOADER,
+            contentType: String(req.body?.contentType),
+            sizeBytes: Number(req.body?.sizeBytes),
+          }),
+        );
+        res.json(result);
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  // Step 2 (confirm) of the token-scoped response-photo upload: after the browser PUT the object to R2,
+  // create the files row on the deal and return { fileId } — the id the response POST's photoFileIds expects
+  // (a fresh file, never existing scorecard evidence). Session OR token auth.
+  fieldRoutes.post(
+    "/scorecards/:id/corrective-actions/upload",
+    requireFieldSessionOrToken,
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const id = String(req.params.id);
+        assertValidUuid(id, "id");
+        const uploadToken = typeof req.body?.uploadToken === "string" ? req.body.uploadToken : "";
+        const objectKey = typeof req.body?.objectKey === "string" ? req.body.objectKey : "";
+        if (!uploadToken || !objectKey) {
+          throw new AppError(400, "uploadToken and objectKey are required.");
+        }
+        const { office, responder } = await authorizeCorrectiveAction(req, id);
+        const result = await runInOfficeTransaction(
+          office,
+          responder.userId ?? "",
+          (db: FieldTenantDb) =>
+            confirmCorrectiveActionUpload(db, {
+              scorecardId: id,
+              uploaderId: responder.userId ?? CORRECTIVE_ACTION_SYSTEM_UPLOADER,
+              uploadToken,
+              objectKey,
+            }),
+        );
+        res.status(201).json(result);
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
   // Submit a per-item corrective-action response (comment + already-uploaded photo ids). Session OR token
-  // auth. Marks the item resolved (auto-closing the scorecard when it's the last open item).
+  // auth. Marks the item resolved (auto-closing the scorecard when it's the last open item). Registered
+  // AFTER the /upload routes so "upload" is never captured as an :itemId.
   fieldRoutes.post(
     "/scorecards/:id/corrective-actions/:itemId",
     requireFieldSessionOrToken,
