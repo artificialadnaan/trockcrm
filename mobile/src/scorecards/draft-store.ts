@@ -288,3 +288,30 @@ export async function copyPhotoIntoDraft(
   await FileSystem.copyAsync({ from: srcUri, to: dest });
   return dest;
 }
+
+/**
+ * Delete a single durable copy at `uri` (best-effort; never throws). Use when a photo is removed from an
+ * in-memory draft that isn't index-backed (e.g. the corrective-action response flow, which copies captures
+ * into a synthetic per-item dir via copyPhotoIntoDraft but keeps its state in a reducer, not the draft index).
+ * Without this, a removed photo's copied file leaks on disk until the whole dir is cleaned.
+ */
+export async function deleteDraftPhotoFile(uri: string): Promise<void> {
+  try {
+    await FileSystem.deleteAsync(uri, { idempotent: true });
+  } catch {
+    /* best-effort */
+  }
+}
+
+/**
+ * Delete a synthetic draft's whole photo directory (best-effort; never throws). Use to clean up a per-item
+ * copy dir after its captures have been submitted, mirroring how deleteScorecardDraft reclaims a draft's
+ * photoDir. For non-index-backed flows there's no index entry to remove — this reclaims just the copied files.
+ */
+export async function deleteDraftPhotoDir(ownerKey: string, draftId: string): Promise<void> {
+  try {
+    await FileSystem.deleteAsync(photoDir(ownerKey, draftId), { idempotent: true });
+  } catch {
+    /* best-effort */
+  }
+}

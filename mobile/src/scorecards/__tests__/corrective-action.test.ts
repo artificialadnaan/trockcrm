@@ -2,8 +2,9 @@
 // the durable-queue, direct-upload, and API seams (jest hoists these above the imports).
 jest.mock("../../capture/upload-queue", () => ({
   MAX_UPLOAD_ATTEMPTS: 5,
+  UPLOAD_CONCURRENCY: 5,
   enqueueUploads: jest.fn(async () => []),
-  drainUploadQueue: jest.fn(async () => ({ succeeded: 0, failed: 0, remaining: 0 })),
+  drainUploadQueue: jest.fn(async () => ({ succeeded: 0, failed: 0, remaining: 0, confirmedFileIds: {} })),
   getQueuedUploads: jest.fn(async () => []),
 }));
 jest.mock("../../capture/upload", () => ({
@@ -11,6 +12,19 @@ jest.mock("../../capture/upload", () => ({
   uploadCapture: jest.fn(async (_f: unknown, input: { clientUploadId: string }) => ({
     id: `file-${input.clientUploadId}`,
   })),
+  // Minimal bounded pool for the fallback path — run each worker and settle (never rejects).
+  runConcurrentUploads: jest.fn(
+    async <T, R>(items: T[], _c: number, worker: (item: T, index: number) => Promise<R>) =>
+      Promise.all(
+        items.map(async (item, i): Promise<PromiseSettledResult<R>> => {
+          try {
+            return { status: "fulfilled", value: await worker(item, i) };
+          } catch (reason) {
+            return { status: "rejected", reason };
+          }
+        }),
+      ),
+  ),
 }));
 jest.mock("../../api/endpoints", () => ({
   submitCorrectiveActionResponse: jest.fn(async () => ({ items: [{ id: "item-1", status: "resolved" }] })),
@@ -24,7 +38,7 @@ import {
   type CorrectiveResponsePhoto,
 } from "../corrective-action";
 import { enqueueUploads, drainUploadQueue, getQueuedUploads } from "../../capture/upload-queue";
-import { uploadCapture } from "../../capture/upload";
+import { uploadCapture, runConcurrentUploads } from "../../capture/upload";
 import { submitCorrectiveActionResponse } from "../../api/endpoints";
 
 function photo(id: string, extra: Partial<CorrectiveResponsePhoto> = {}): CorrectiveResponsePhoto {
@@ -82,10 +96,22 @@ describe("submitCorrectiveActionItem", () => {
     jest.clearAllMocks();
     (getQueuedUploads as jest.Mock).mockResolvedValue([]);
     (enqueueUploads as jest.Mock).mockResolvedValue([]);
-    (drainUploadQueue as jest.Mock).mockResolvedValue({ succeeded: 0, failed: 0, remaining: 0 });
+    (drainUploadQueue as jest.Mock).mockResolvedValue({ succeeded: 0, failed: 0, remaining: 0, confirmedFileIds: {} });
     (uploadCapture as jest.Mock).mockImplementation(async (_f: unknown, input: { clientUploadId: string }) => ({
       id: `file-${input.clientUploadId}`,
     }));
+    (runConcurrentUploads as jest.Mock).mockImplementation(
+      async <T, R>(items: T[], _c: number, worker: (item: T, index: number) => Promise<R>) =>
+        Promise.all(
+          items.map(async (item, i): Promise<PromiseSettledResult<R>> => {
+            try {
+              return { status: "fulfilled", value: await worker(item, i) };
+            } catch (reason) {
+              return { status: "rejected", reason };
+            }
+          }),
+        ),
+    );
     (submitCorrectiveActionResponse as jest.Mock).mockResolvedValue({ items: [{ id: "item-1", status: "resolved" }] });
   });
 
@@ -106,8 +132,14 @@ describe("submitCorrectiveActionItem", () => {
     expect(result).toEqual({ status: "resolved", items: [{ id: "item-1", status: "resolved" }] });
   });
 
-  it("with photos all confirmed: enqueues, drains, collects fileIds, then POSTs → resolved", async () => {
+  it("with photos all confirmed IN THIS DRAIN: reads fileIds from the drain summary WITHOUT a second upload", async () => {
     (getQueuedUploads as jest.Mock).mockResolvedValue([]); // nothing left queued = all uploaded
+    (drainUploadQueue as jest.Mock).mockResolvedValue({
+      succeeded: 2,
+      failed: 0,
+      remaining: 0,
+      confirmedFileIds: { a: "file-a", b: "file-b" },
+    });
     const result = await submitCorrectiveActionItem(fetcher, "owner-1", {
       scorecardId: "sc-1",
       itemId: "item-1",
@@ -117,6 +149,36 @@ describe("submitCorrectiveActionItem", () => {
     });
     expect(enqueueUploads).toHaveBeenCalledTimes(1);
     expect(drainUploadQueue).toHaveBeenCalledWith("owner-1", fetcher);
+    // No second upload: the drain already surfaced the confirmed file ids.
+    expect(uploadCapture).not.toHaveBeenCalled();
+    expect(runConcurrentUploads).not.toHaveBeenCalled();
+    expect(submitCorrectiveActionResponse).toHaveBeenCalledWith(fetcher, "sc-1", "item-1", {
+      comment: "Corrected.",
+      photoFileIds: ["file-a", "file-b"],
+    });
+    expect(result.status).toBe("resolved");
+  });
+
+  it("falls back to a concurrent idempotent re-confirm (no re-PUT context) only for photos missing from the drain map, preserving order", async () => {
+    (getQueuedUploads as jest.Mock).mockResolvedValue([]); // nothing left queued = all uploaded
+    // Photo "a" was confirmed by an EARLIER drain (already gone from the queue → not in this map); "b" here.
+    (drainUploadQueue as jest.Mock).mockResolvedValue({
+      succeeded: 1,
+      failed: 0,
+      remaining: 0,
+      confirmedFileIds: { b: "file-b" },
+    });
+    const result = await submitCorrectiveActionItem(fetcher, "owner-1", {
+      scorecardId: "sc-1",
+      itemId: "item-1",
+      dealId: "deal-1",
+      photos: [photo("a"), photo("b")],
+      comment: "Corrected.",
+    });
+    // Only the uncovered photo ("a") is re-confirmed via uploadCapture; "b" comes from the drain map.
+    expect(runConcurrentUploads).toHaveBeenCalledTimes(1);
+    expect(uploadCapture).toHaveBeenCalledTimes(1);
+    expect((uploadCapture as jest.Mock).mock.calls[0][1]).toMatchObject({ clientUploadId: "a" });
     expect(submitCorrectiveActionResponse).toHaveBeenCalledWith(fetcher, "sc-1", "item-1", {
       comment: "Corrected.",
       photoFileIds: ["file-a", "file-b"],

@@ -359,8 +359,9 @@ export default function ProjectDetailScreen() {
                     </Text>
                     <RatingBadge rating={s.rating} label={`${scoreText} · ${s.ratingLabel}`} />
                     {/* Corrective-action affordance: an OPEN card gets a tappable prompt that opens the
-                        itemized response flow; a CLOSED card shows a static "Resolved" badge. Stops row-press
-                        propagation so the button routes to the response screen, not the detail view. */}
+                        itemized response flow; a CLOSED card gets a tappable "Resolved" badge routing to the
+                        SAME screen, which renders the resolved items read-only so the responses stay reachable.
+                        Both route to the response screen, not the detail view. */}
                     {correctiveOpen ? (
                       <Pressable
                         accessibilityRole="button"
@@ -373,10 +374,16 @@ export default function ProjectDetailScreen() {
                         <Text style={styles.correctiveChevron}>›</Text>
                       </Pressable>
                     ) : correctiveClosed ? (
-                      <View style={styles.correctiveResolved}>
+                      <Pressable
+                        accessibilityRole="button"
+                        accessibilityLabel="Review the resolved corrective action"
+                        onPress={() => router.push({ pathname: "/(app)/scorecards/corrective-action/[id]", params: { id: s.id } })}
+                        style={({ pressed }) => [styles.correctiveResolved, pressed && { opacity: 0.75 }]}
+                      >
                         <Ionicons name="checkmark-circle" size={14} color="#166534" />
                         <Text style={styles.correctiveResolvedText}>Resolved</Text>
-                      </View>
+                        <Text style={styles.correctiveResolvedChevron}>›</Text>
+                      </Pressable>
                     ) : null}
                   </View>
                 </Pressable>
@@ -461,4 +468,5 @@ const styles = StyleSheet.create({
     alignSelf: "flex-start",
   },
   correctiveResolvedText: { fontFamily: theme.font.medium, fontSize: 12, color: "#166534" },
+  correctiveResolvedChevron: { fontSize: 14, color: "#166534", marginLeft: 2 },
 });

@@ -5,17 +5,20 @@
 //
 // WHY fileIds (not clientUploadIds like the scorecard POST): the corrective-action response endpoint links
 // evidence by real file id and strictly validates each belongs to the deal — it does NOT resolve
-// clientUploadIds. So after the durable queue confirms every photo, we resolve fileIds with a single
-// idempotent uploadCapture per photo (server dedupes on clientUploadId → returns the EXISTING file + its id,
-// never a duplicate), then attach those ids. The queue drain is what gives durability + the retry cap;
-// uploadCapture's re-confirm is only the fileId lookup.
+// clientUploadIds. The durable queue drain already presigned + PUT + confirmed every photo, and now SURFACES
+// each confirmed server file id (keyed by clientUploadId) in its summary — so we read the ids straight from
+// the drain, with NO second upload. Only if a photo isn't in this drain's map (e.g. it was already confirmed
+// by an earlier offline drain and has since left the queue) do we fall back to an idempotent uploadCapture
+// (server dedupes on clientUploadId → the EXISTING file + its id, never a duplicate); those fallbacks run
+// CONCURRENTLY. Output ids stay in the original photo order.
 
 import { submitCorrectiveActionResponse, type Fetcher } from "../api/endpoints";
 import type { CorrectiveActionItem } from "../api/types";
 import type { CaptureUploadInput } from "../capture/upload";
-import { uploadCapture } from "../capture/upload";
+import { runConcurrentUploads, uploadCapture } from "../capture/upload";
 import {
   MAX_UPLOAD_ATTEMPTS,
+  UPLOAD_CONCURRENCY,
   drainUploadQueue,
   enqueueUploads,
   getQueuedUploads,
@@ -141,7 +144,7 @@ export async function submitCorrectiveActionItem(
   if (input.photos.length > 0) {
     const uploadInputs = input.photos.map((p) => correctiveResponsePhotoUploadInput(p, input.dealId));
     await enqueueUploads(ownerKey, uploadInputs);
-    await drainUploadQueue(ownerKey, fetcher);
+    const drain = await drainUploadQueue(ownerKey, fetcher);
     const stillQueued = await getQueuedUploads(ownerKey);
     const { pending, failed } = classifyDraftPhotoUploads(
       input.photos.map((p) => p.clientUploadId),
@@ -151,13 +154,31 @@ export async function submitCorrectiveActionItem(
     if (failed.length > 0) return { status: "photos_failed", failed: failed.length };
     if (pending.length > 0) return { status: "photos_pending", remaining: pending.length };
 
-    // Every photo is confirmed in the deal gallery. Resolve each one's server file id via an idempotent
-    // re-confirm (dedupes on clientUploadId → the existing file, no duplicate). The queue drain already did
-    // the durable/retryable upload; this only reads back the id the corrective-action POST needs.
-    for (let i = 0; i < input.photos.length; i += 1) {
-      const uploaded = await uploadCapture(fetcher, uploadInputs[i]);
-      photoFileIds.push(uploaded.id);
+    // Every photo is confirmed in the deal gallery. Prefer the file id the drain just confirmed (no second
+    // upload). A photo missing from the drain map was confirmed by an EARLIER drain (already gone from the
+    // queue), so re-confirm those — CONCURRENTLY — with an idempotent uploadCapture (server dedupes on
+    // clientUploadId → the existing file, no duplicate). Indices align 1:1 with input.photos so the resulting
+    // fileIds keep the original photo order.
+    const resolved: string[] = new Array(input.photos.length);
+    const fallbackIndices: number[] = [];
+    input.photos.forEach((p, i) => {
+      const fileId = drain.confirmedFileIds[p.clientUploadId];
+      if (fileId) resolved[i] = fileId;
+      else fallbackIndices.push(i);
+    });
+    if (fallbackIndices.length > 0) {
+      const settled = await runConcurrentUploads(
+        fallbackIndices,
+        UPLOAD_CONCURRENCY,
+        (i) => uploadCapture(fetcher, uploadInputs[i]),
+      );
+      settled.forEach((r, k) => {
+        const i = fallbackIndices[k];
+        if (r.status === "fulfilled") resolved[i] = r.value.id;
+        else throw r.reason instanceof Error ? r.reason : new Error(String(r.reason));
+      });
     }
+    photoFileIds.push(...resolved);
   }
 
   const { items } = await submitCorrectiveActionResponse(fetcher, input.scorecardId, input.itemId, {

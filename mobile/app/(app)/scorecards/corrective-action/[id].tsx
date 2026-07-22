@@ -9,7 +9,7 @@ import { useCorrectiveActions, useScorecard } from "../../../../src/query/hooks"
 import { getTranscriptionConfig } from "../../../../src/api/endpoints";
 import { qk } from "../../../../src/query/keys";
 import { uploadOwnerKey, newClientUploadId } from "../../../../src/capture/upload-queue";
-import { copyPhotoIntoDraft } from "../../../../src/scorecards/draft-store";
+import { copyPhotoIntoDraft, deleteDraftPhotoDir, deleteDraftPhotoFile } from "../../../../src/scorecards/draft-store";
 import { extractExifMetadata, getLiveGps } from "../../../../src/capture/metadata";
 import type { CapturedShot } from "../../../../src/capture/CameraCapture";
 import {
@@ -189,6 +189,13 @@ function CorrectiveActionItemCard({
   const busy = savingPhotos > 0 || submitting || voiceBusy || captionVoiceBusy;
   const captionPhoto = state.photos.find((p) => p.key === captionKey) ?? null;
 
+  function onRemovePhoto(photo: CorrectiveResponsePhoto) {
+    // Delete the durable copy first (best-effort), then drop it from state — otherwise the copied file leaks
+    // in the synthetic draft dir until (or unless) the whole dir is cleaned.
+    void deleteDraftPhotoFile(photo.uri);
+    dispatch({ type: "removePhoto", key: photo.key });
+  }
+
   async function onCameraCapture(shot: CapturedShot, caption: string) {
     if (state.photos.length >= MAX_RESPONSE_PHOTOS) {
       setNotice({ tone: "error", text: `A response can hold at most ${MAX_RESPONSE_PHOTOS} photos.` });
@@ -267,7 +274,9 @@ function CorrectiveActionItemCard({
         setSubmitting(false);
         return;
       }
-      // Resolved — parent refetch/invalidate replaces this card with the read-only resolved view.
+      // Resolved — reclaim the synthetic per-item copy dir (best-effort; the photos are now durable server
+      // records), then let the parent refetch/invalidate swap in the read-only resolved view.
+      void deleteDraftPhotoDir(ownerKey, draftId);
       onResolved();
     } catch (error) {
       setNotice({
@@ -312,7 +321,7 @@ function CorrectiveActionItemCard({
               key={photo.key}
               photo={photo}
               onEdit={() => setCaptionKey(photo.key)}
-              onRemove={() => dispatch({ type: "removePhoto", key: photo.key })}
+              onRemove={() => onRemovePhoto(photo)}
             />
           ))}
         </View>
