@@ -88,6 +88,7 @@ import { PipelineHygienePage } from "@/pages/pipeline/pipeline-hygiene-page";
 import { ProjectDetailPage } from "@/pages/projects/project-detail-page";
 import { PublicPhotoViewerPage } from "@/pages/public/photo-viewer-page";
 import { DailySummaryPage } from "@/pages/public/daily-summary-page";
+import CorrectiveActionResponderPage from "@/pages/scorecards/corrective-action-responder";
 import { Toaster } from "@/components/ui/sonner";
 
 const HomeDashboardPage = lazy(() =>
@@ -145,6 +146,9 @@ function AuthGate({ children }: { children: ReactNode }) {
 
   if (location.pathname.startsWith("/p/")) return <>{children}</>;
   if (location.pathname.startsWith("/daily-summary/")) return <>{children}</>; // token-guarded public page
+  // Public tokenized corrective-action responder (email-only super/PM, no login) — the recipient-bound
+  // ?token authorizes the flow, so this path must bypass the auth gate. Matches /scorecards/:id/corrective-action.
+  if (/^\/scorecards\/[^/]+\/corrective-action$/.test(location.pathname)) return <>{children}</>;
 
   if (loading) {
     return (
@@ -216,6 +220,7 @@ export function App() {
             <Routes>
             <Route path="/p/:token" element={<PublicPhotoViewerPage />} />
             <Route path="/daily-summary/:date" element={<DailySummaryPage />} />
+            <Route path="/scorecards/:id/corrective-action" element={<CorrectiveActionResponderPage />} />
             <Route path="/photos/capture" element={<PhotoCapturePage />} />
             <Route path="/onboarding-required" element={<OnboardingRequiredPage />} />
             <Route element={<AppShell />}>

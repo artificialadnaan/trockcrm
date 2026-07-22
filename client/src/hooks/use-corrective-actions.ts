@@ -7,6 +7,9 @@ export interface CorrectiveActionResponsePhoto {
   fileId: string;
   clientUploadId: string | null;
   caption: string | null;
+  // The Plan 2 read endpoint returns fileId only (no presigned URL). `url` is optional so a future
+  // URL-resolving variant can populate it; the responder page renders a thumbnail only when present.
+  url?: string | null;
 }
 
 export interface CorrectiveActionItem {
