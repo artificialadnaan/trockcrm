@@ -136,6 +136,14 @@ describe("renderDeadLetterEmail (pure)", () => {
     expect(html).toContain("2026-07-22T03:00:00.000Z");
   });
 
+  it("states the CORRECT recovery: a same-payload re-POST is a no-op; needs a fresh payload / requeue", () => {
+    const { html } = renderDeadLetterEmail({ office: "dallas", rows: [row(1)], now: NOW });
+    // The old copy said "re-trigger the push", which hits ON CONFLICT DO NOTHING and enqueues nothing.
+    expect(html).not.toMatch(/re-trigger the push/i);
+    expect(html.toLowerCase()).toContain("no-op");
+    expect(html.toLowerCase()).toMatch(/fresh scrape|new idempotency key|requeue/);
+  });
+
   it("uses the singular for one failure", () => {
     const { subject } = renderDeadLetterEmail({ office: "dallas", rows: [row(1)], now: NOW });
     expect(subject).toMatch(/1 failed import\b/);

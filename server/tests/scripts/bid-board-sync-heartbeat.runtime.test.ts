@@ -241,10 +241,12 @@ describe("runHeartbeatForOffice — incident + throttle + recovery (persisted)",
 });
 
 describe("dead-letter sweep", () => {
+  // Ages comfortably past the default 15-min reconcile grace, so these rows are eligible. The grace itself is
+  // exercised by its own test below.
   it("getDeadLetteredInboxRows returns only still-UNALERTED 'failed' rows, oldest-first", async () => {
-    await seedInbox("failed", { finishedAt: ago(30), lastError: "boom-old" });
-    await seedInbox("failed", { finishedAt: ago(10), lastError: "boom-new" });
-    await seedInbox("failed", { finishedAt: ago(20), lastError: "already", alertedAt: ago(1) }); // already stamped → excluded
+    await seedInbox("failed", { finishedAt: ago(60), lastError: "boom-old" });
+    await seedInbox("failed", { finishedAt: ago(30), lastError: "boom-new" });
+    await seedInbox("failed", { finishedAt: ago(45), lastError: "already", alertedAt: ago(1) }); // already stamped → excluded
     await seedInbox("succeeded", { finishedAt: ago(5) }); // not a failure
     await seedInbox("queued"); // not a failure
 
@@ -252,9 +254,38 @@ describe("dead-letter sweep", () => {
     expect(rows.map((r) => r.lastError)).toEqual(["boom-old", "boom-new"]); // oldest-first, unalerted failures only
   });
 
+  // A row that just terminalized 'failed' can still be flipped back to 'succeeded' by the inbox's
+  // reconcileFailedButCommitted path (a slow final-attempt import that commits after recovery), so the sweep
+  // must NOT alert it until it ages past the grace window — else it sends a false terminal alert and stamps a
+  // row that is about to recover. The grace compares finished_at against the DB's NOW(), so finished_at must
+  // be anchored to the real clock (not the fixed test NOW) for this eligibility test.
+  it("does NOT alert a just-'failed' row until it ages past the reconcile grace", async () => {
+    const id = await seedInbox("failed", { lastError: "maybe-still-reconciling" });
+    // finished_at = NOW() - 3 min (inside the default 15-min grace).
+    await client.query(
+      `UPDATE public.bid_board_ingestion_inbox SET finished_at = NOW() - make_interval(mins => 3) WHERE id = $1`,
+      [id]
+    );
+    // Inside the grace: excluded from the eligibility set and not swept.
+    expect(await getDeadLetteredInboxRows(client, "dallas", 15)).toHaveLength(0);
+    const early = await sweepDeadLettersForOffice(client, { office: "dallas", now: NOW, sendAlert: async () => true });
+    expect(early).toMatchObject({ count: 0, sent: false });
+    expect(await unalertedFailedCount()).toBe(1); // still eligible for a future sweep — NOT stamped
+
+    // Age the SAME row past the grace (finished_at = NOW() - 20 min): now eligible and alerted.
+    await client.query(
+      `UPDATE public.bid_board_ingestion_inbox SET finished_at = NOW() - make_interval(mins => 20) WHERE id = $1`,
+      [id]
+    );
+    expect(await getDeadLetteredInboxRows(client, "dallas", 15)).toHaveLength(1);
+    const late = await sweepDeadLettersForOffice(client, { office: "dallas", now: NOW, sendAlert: async () => true });
+    expect(late).toMatchObject({ count: 1, sent: true });
+    expect(await unalertedFailedCount()).toBe(0); // now alerted + stamped
+  });
+
   it("sweeps unalerted dead-letters into ONE batch email, marks them alerted, then no-ops", async () => {
-    await seedInbox("failed", { finishedAt: ago(30), sourceFilename: "A.xlsx", lastError: "e1" });
-    await seedInbox("failed", { finishedAt: ago(10), sourceFilename: "B.xlsx", lastError: "e2" });
+    await seedInbox("failed", { finishedAt: ago(60), sourceFilename: "A.xlsx", lastError: "e1" });
+    await seedInbox("failed", { finishedAt: ago(30), sourceFilename: "B.xlsx", lastError: "e2" });
     const calls: { subject: string; html: string }[] = [];
     const sendAlert = async (subject: string, html: string) => (calls.push({ subject, html }), true);
 
@@ -274,13 +305,14 @@ describe("dead-letter sweep", () => {
   it("a failure committing OUT OF ORDER (older finished_at than an already-alerted row) is STILL alerted", async () => {
     // The exact P1 a timestamp watermark misses: alert a newer failure first, then a slow failure commits with
     // an OLDER finished_at. The per-row NULL marker still selects it; a `finished_at > watermark` cursor wouldn't.
-    await seedInbox("failed", { finishedAt: ago(10), lastError: "newer-first" });
+    // Both are aged past the grace window so eligibility isn't what's under test.
+    await seedInbox("failed", { finishedAt: ago(30), lastError: "newer-first" });
     const send1: string[] = [];
     await sweepDeadLettersForOffice(client, { office: "dallas", now: NOW, sendAlert: async (_s, h) => (send1.push(h), true) });
     expect(send1[0]).toContain("newer-first");
     expect(await unalertedFailedCount()).toBe(0);
 
-    await seedInbox("failed", { finishedAt: ago(30), lastError: "older-straggler" }); // earlier timestamp, later commit
+    await seedInbox("failed", { finishedAt: ago(60), lastError: "older-straggler" }); // earlier timestamp, later commit
     const send2: string[] = [];
     const r = await sweepDeadLettersForOffice(client, {
       office: "dallas",
@@ -292,7 +324,7 @@ describe("dead-letter sweep", () => {
   });
 
   it("does NOT mark rows on a failed send — the same batch re-alerts next run", async () => {
-    await seedInbox("failed", { finishedAt: ago(10), lastError: "e" });
+    await seedInbox("failed", { finishedAt: ago(30), lastError: "e" }); // aged past the grace window
     const failed = await sweepDeadLettersForOffice(client, { office: "dallas", now: NOW, sendAlert: async () => false });
     expect(failed).toMatchObject({ count: 1, sent: false });
     expect(await unalertedFailedCount()).toBe(1); // NOT stamped

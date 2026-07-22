@@ -125,6 +125,23 @@ export interface DeadLetterRow {
 
 const DEAD_LETTER_EMAIL_ROW_CAP = 20; // a schema-drift outage can fail every import; cap the emailed list
 
+/**
+ * Eligibility GRACE window (minutes): a row is only alerted once its `finished_at` is older than this. It
+ * closes a false-positive race with the inbox's reconcileFailedButCommitted path (inbox.ts): a slow FINAL-
+ * attempt import can outlive its lease so recovery terminalizes the row 'failed', and THEN the import commits
+ * and recordSuccessWithRetry flips 'failed' → 'succeeded' within its bounded retry (~3s). The sweep's UNLOCKED
+ * read could otherwise capture that intermediate 'failed' state and both send a false terminal-failure alert
+ * AND stamp a now-'succeeded' row. The reconcile happens within seconds of the commit; 15 min is a large,
+ * env-overridable safety margin over that window (a genuine dead-letter is still alerted, just one cron cycle
+ * later). Values <= 0 disable the grace (alert immediately) — kept only as an escape hatch.
+ */
+export const DEAD_LETTER_GRACE_MINUTES_DEFAULT = 15;
+
+export function deadLetterGraceMinutes(): number {
+  const raw = Number(process.env.BID_BOARD_DEAD_LETTER_GRACE_MINUTES);
+  return Number.isFinite(raw) && raw >= 0 ? raw : DEAD_LETTER_GRACE_MINUTES_DEFAULT;
+}
+
 /** Pure renderer for the dead-letter batch email — one email per office per sweep listing the imports whose
  *  asynchronous CRM ingestion dead-lettered since the last alert. Separate from sending so it is unit-testable. */
 export function renderDeadLetterEmail(e: { office: string; rows: DeadLetterRow[]; now: Date }): {
@@ -151,7 +168,11 @@ export function renderDeadLetterEmail(e: { office: string; rows: DeadLetterRow[]
     <p>${n} Bid Board import${n === 1 ? "" : "s"} were durably accepted (HTTP 202) but their asynchronous
     ingestion dead-lettered after retries — the inbox row is in status <code>failed</code>. These will NOT be
     retried automatically. Query the CRM signed status endpoint with the idempotency key (or inspect the
-    <code>bid_board_ingestion_inbox</code> row) for the underlying error, then re-trigger the push.</p>
+    <code>bid_board_ingestion_inbox</code> row) for the underlying error.</p>
+    <p><strong>Recovery:</strong> re-POSTing the SAME payload is a no-op — it hashes to the same idempotency
+    key, hits the inbox's <code>ON CONFLICT DO NOTHING</code>, and returns the existing <code>failed</code>
+    row WITHOUT enqueuing a new job. To retry, generate a FRESH scrape/payload (which produces a new
+    idempotency key and its own job) or explicitly requeue the ingestion after fixing the underlying error.</p>
     <ul>${items}</ul>${more}
   `;
   return { subject, html };
@@ -221,16 +242,25 @@ export async function upsertAlertState(
   );
 }
 
-/** The office's still-UNALERTED dead-lettered inbox rows (status='failed', dead_letter_alerted_at IS NULL),
- *  oldest-first. Selecting by the per-row NULL marker (not a `finished_at > watermark` cursor) means an
- *  out-of-order or same-timestamp failure commit can never be skipped. */
-export async function getDeadLetteredInboxRows(client: Queryable, officeSlug: string): Promise<DeadLetterRow[]> {
+/** The office's still-UNALERTED dead-lettered inbox rows (status='failed', dead_letter_alerted_at IS NULL) that
+ *  have AGED past the reconcile grace window, oldest-first. Selecting by the per-row NULL marker (not a
+ *  `finished_at > watermark` cursor) means an out-of-order or same-timestamp failure commit can never be
+ *  skipped. The grace filter (finished_at older than `graceMinutes`) excludes a just-'failed' row that the
+ *  inbox's reconcileFailedButCommitted path may still flip back to 'succeeded' — so the sweep never sends a
+ *  false terminal alert on (or stamps) a row that is about to recover. A NULL finished_at is excluded too: it
+ *  has no age to compare, and a real dead-letter always stamps finished_at (markInboxFailed / recovery). */
+export async function getDeadLetteredInboxRows(
+  client: Queryable,
+  officeSlug: string,
+  graceMinutes: number = deadLetterGraceMinutes()
+): Promise<DeadLetterRow[]> {
   const { rows } = await client.query(
     `SELECT id, source_filename, last_error, payload_hash, finished_at
        FROM public.bid_board_ingestion_inbox
       WHERE office_slug = $1 AND status = 'failed' AND dead_letter_alerted_at IS NULL
+        AND finished_at IS NOT NULL AND finished_at < NOW() - make_interval(mins => $2::int)
       ORDER BY finished_at ASC NULLS FIRST, id ASC`,
-    [officeSlug]
+    [officeSlug, graceMinutes]
   );
   return rows.map((r) => ({
     id: r.id as string,
@@ -241,8 +271,13 @@ export async function getDeadLetteredInboxRows(client: Queryable, officeSlug: st
   }));
 }
 
-/** Stamp dead_letter_alerted_at on exactly the rows just alerted (idempotent: only rows still NULL). One row
- *  = one alert, forever, regardless of commit ordering — the per-row replacement for a timestamp watermark. */
+/** Stamp dead_letter_alerted_at on exactly the rows just alerted (idempotent: only rows still NULL). Retires
+ *  the batch so a healthy run alerts each dead-lettered row once — the per-row replacement for a timestamp
+ *  watermark, immune to out-of-order commits. NOTE: the send→stamp pair is at-least-once, not exactly-once:
+ *  if the send succeeds but this UPDATE fails (or the process dies before it), the rows stay NULL and the next
+ *  cron re-sends the SAME batch. That is the correct safe bias for an alert — a rare duplicate on a post-send
+ *  crash, never a LOST alert. The server's sendSystemEmail carries no Resend idempotency key (unlike the
+ *  worker's system-email sender), so provider-side dedup isn't available on this path. */
 export async function markDeadLettersAlerted(client: Queryable, ids: string[], now: Date): Promise<void> {
   if (ids.length === 0) return;
   await client.query(
@@ -348,11 +383,13 @@ export interface DeadLetterSweepResult {
 }
 
 /**
- * Sweep one office for still-unalerted dead-lettered ('failed') inbox rows and email a single batch. The rows
- * are stamped dead_letter_alerted_at ONLY on a successful send (mirrors runHeartbeatForOffice's send-gated
- * throttle), so a transient transport failure re-alerts the SAME batch next run instead of dropping it, and a
- * per-row marker means no failure is ever skipped by a timestamp cursor. Sender is injected; a thrown sender
- * never escapes this fn.
+ * Sweep one office for still-unalerted dead-lettered ('failed') inbox rows that have AGED past the reconcile
+ * grace window and email a single batch. The rows are stamped dead_letter_alerted_at ONLY on a successful send
+ * (mirrors runHeartbeatForOffice's send-gated throttle), so a transient transport failure re-alerts the SAME
+ * batch next run instead of dropping it, and a per-row marker means no failure is ever skipped by a timestamp
+ * cursor. Delivery is AT-LEAST-ONCE: a crash between a successful send and the marker UPDATE re-sends the batch
+ * next run (a rare duplicate, never a lost alert) — the correct safe bias for a monitor. Sender is injected; a
+ * thrown sender never escapes this fn.
  */
 export async function sweepDeadLettersForOffice(
   client: Queryable,
@@ -449,6 +486,13 @@ export async function main(now: Date = new Date()): Promise<void> {
     // throttle anchor, and swallows a thrown transport so one office can't crash the loop.
     const sendAlert: AlertSender = (subject, html) => sendSystemEmail(to, subject, html);
     let completed = 0;
+    // Track dead-letter sweeps INDEPENDENTLY of the heartbeat checks: a sweep that THROWS (migration 0190's
+    // column missing, a permissions error, DB blip) counts as failed; a clean to_regclass table-absent early
+    // return does NOT (the sweep ran fine, there was just nothing provisioned to sweep). If EVERY office's
+    // sweep throws, the dead-letter monitor is entirely dark and must fail the cron (below) — a sweep error
+    // must not otherwise stop the other offices or the heartbeat checks (each stays in its own try/catch).
+    let sweepAttempts = 0;
+    let sweepFailures = 0;
     for (const office of officeList) {
       // One office failing (missing schema, transient DB error) must not sink the others.
       try {
@@ -471,12 +515,14 @@ export async function main(now: Date = new Date()): Promise<void> {
       // Dead-letter sweep: a 202-accepted push whose async ingestion later dead-lettered is invisible to the
       // absence-of-success check above (which stays quiet while other imports still succeed), so alert on
       // newly-'failed' inbox rows. Its OWN try/catch so a sweep error can't sink the heartbeat or the loop.
+      sweepAttempts++;
       try {
         const dl = await sweepDeadLettersForOffice(wrap, { office, now, sendAlert });
         if (dl.count > 0) {
           console.log(`[bid-board-heartbeat] office=${office} dead-letters=${dl.count} sent=${dl.sent}`);
         }
       } catch (err) {
+        sweepFailures++;
         console.error(`[bid-board-heartbeat] office=${office} dead-letter sweep FAILED:`, err);
       }
     }
@@ -484,6 +530,13 @@ export async function main(now: Date = new Date()): Promise<void> {
     // non-zero so the cron is visibly failing instead of silently reporting success (Codex).
     if (officeList.length > 0 && completed === 0) {
       throw new Error(`heartbeat check failed for ALL ${officeList.length} office(s) — see logs above`);
+    }
+    // Same guard for the dead-letter sweep: if EVERY office's sweep THREW (e.g. migration 0190 not applied so
+    // the column is missing, or a permissions error), the dead-letter monitor is silently dark. Fail the cron
+    // so the outage is visible rather than a false exit-0 (Codex). A clean table-absent early return isn't a
+    // failure, so a not-yet-provisioned inbox alone won't trip this.
+    if (sweepAttempts > 0 && sweepFailures === sweepAttempts) {
+      throw new Error(`dead-letter sweep failed for ALL ${sweepAttempts} office(s) — see logs above`);
     }
   } finally {
     await client.end();
