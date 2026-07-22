@@ -257,3 +257,96 @@ describe("token-scoped corrective-action photo upload", () => {
     expect(res.status).toBe(400);
   });
 });
+
+describe("token-scoped corrective-action photo discard", () => {
+  async function tokenFor(scId: string) {
+    const { rawToken } = await mintCorrectiveActionToken(tdb, {
+      scorecardId: scId,
+      recipientEmail: "pm@example.com",
+      role: "project_manager",
+      ttlDays: 30,
+    });
+    return rawToken;
+  }
+
+  it("discards an uploaded-but-un-submitted photo (session): soft-deletes the file", async () => {
+    const { confirmRes } = await uploadPhoto("");
+    const fileId = confirmRes.body.fileId as string;
+
+    const del = await request(app).delete(
+      `/scorecards/${scorecardId}/corrective-actions/upload/${fileId}`,
+    );
+    expect(del.status).toBe(200);
+    expect(del.body.discarded).toBe(true);
+
+    const rows = await tdb.execute(sql`SELECT is_active, deleted_at FROM files WHERE id = ${fileId}`);
+    expect(rows.rows[0].is_active).toBe(false);
+    expect(rows.rows[0].deleted_at).not.toBeNull();
+  });
+
+  it("discards via a valid ?token (email-only responder)", async () => {
+    const rawToken = await tokenFor(scorecardId);
+    const query = `?token=${encodeURIComponent(rawToken)}`;
+    const { confirmRes } = await uploadPhoto(query);
+    const fileId = confirmRes.body.fileId as string;
+
+    const del = await request(app).delete(
+      `/scorecards/${scorecardId}/corrective-actions/upload/${fileId}${query}`,
+    );
+    expect(del.status).toBe(200);
+    const rows = await tdb.execute(sql`SELECT is_active FROM files WHERE id = ${fileId}`);
+    expect(rows.rows[0].is_active).toBe(false);
+  });
+
+  it("rejects (409) discarding a photo that is already attached to a submitted response", async () => {
+    const rawToken = await tokenFor(scorecardId);
+    const query = `?token=${encodeURIComponent(rawToken)}`;
+    const { confirmRes } = await uploadPhoto(query);
+    const fileId = confirmRes.body.fileId as string;
+
+    // Submit a response that attaches the photo (creates its field_scorecard_photos row).
+    const items = await request(app).get(`/scorecards/${scorecardId}/corrective-actions${query}`);
+    const itemId = items.body.items[0].id;
+    const resp = await request(app)
+      .post(`/scorecards/${scorecardId}/corrective-actions/${itemId}${query}`)
+      .send({ comment: "fixed", photoFileIds: [fileId] });
+    expect(resp.status).toBe(200);
+
+    const del = await request(app).delete(
+      `/scorecards/${scorecardId}/corrective-actions/upload/${fileId}${query}`,
+    );
+    expect(del.status).toBe(409);
+    // The attached file MUST remain active (never dropped from the finalized response).
+    const rows = await tdb.execute(sql`SELECT is_active FROM files WHERE id = ${fileId}`);
+    expect(rows.rows[0].is_active).toBe(true);
+  });
+
+  it("404s discarding a file that is not a corrective-action upload (foreign gallery file)", async () => {
+    // A plain project photo on the same deal — NOT minted via the corrective-action flow.
+    const other = "88888888-8888-8888-8888-888888888888";
+    await tdb.execute(sql`
+      INSERT INTO files (id, category, display_name, system_filename, original_filename, mime_type,
+        file_size_bytes, file_extension, r2_key, r2_bucket, deal_id, uploaded_by, is_active)
+      VALUES (${other}, 'photo', 'site.jpg', 'sys.jpg', 'site.jpg', 'image/jpeg', 10, 'jpg',
+        ${"plain-key-" + Date.now()}, 'b', ${DEAL}, ${USER}, true)
+    `);
+    const del = await request(app).delete(
+      `/scorecards/${scorecardId}/corrective-actions/upload/${other}`,
+    );
+    expect(del.status).toBe(404);
+    const rows = await tdb.execute(sql`SELECT is_active FROM files WHERE id = ${other}`);
+    expect(rows.rows[0].is_active).toBe(true);
+  });
+
+  it("403s a discard with a token minted for a DIFFERENT scorecard", async () => {
+    const { confirmRes } = await uploadPhoto("");
+    const fileId = confirmRes.body.fileId as string;
+    const foreign = await tokenFor("99999999-9999-9999-9999-999999999999");
+    const del = await request(app).delete(
+      `/scorecards/${scorecardId}/corrective-actions/upload/${fileId}?token=${encodeURIComponent(foreign)}`,
+    );
+    expect(del.status).toBe(403);
+    const rows = await tdb.execute(sql`SELECT is_active FROM files WHERE id = ${fileId}`);
+    expect(rows.rows[0].is_active).toBe(true);
+  });
+});

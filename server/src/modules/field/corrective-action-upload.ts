@@ -2,9 +2,14 @@ import { sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
-import { requestUploadUrl, confirmUpload } from "../files/service.js";
+import { requestUploadUrl, confirmUpload, deleteFile } from "../files/service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
+
+// Every corrective-action upload's original_filename is minted by requestCorrectiveActionUploadUrl below as
+// `corrective-action-<timestamp>.<ext>`. discardCorrectiveActionUpload uses this prefix to prove a file was
+// created via THIS flow (and is therefore safe to reclaim) — a plain project photo/document never matches it.
+const CORRECTIVE_ACTION_FILENAME_PREFIX = "corrective-action-";
 
 // files.uploaded_by is NOT NULL WITH a real FK to public.users(id) in prod (migration 0001) — the drizzle
 // schema omits `.references()`, but the constraint is live. So an email-only (token) responder, who has NO
@@ -82,7 +87,7 @@ export async function requestCorrectiveActionUploadUrl(
   const ext = extensionForContentType(input.contentType);
 
   const result = await requestUploadUrl(db, input.officeSlug, uploaderId, {
-    originalFilename: `corrective-action-${Date.now()}.${ext}`,
+    originalFilename: `${CORRECTIVE_ACTION_FILENAME_PREFIX}${Date.now()}.${ext}`,
     mimeType: input.contentType,
     fileSizeBytes: Number(input.sizeBytes),
     category: "photo",
@@ -128,6 +133,69 @@ export async function confirmCorrectiveActionUpload(
     uploadToken: input.uploadToken,
   });
   return { fileId: file.id };
+}
+
+export interface DiscardCorrectiveActionUploadInput {
+  scorecardId: string;
+  fileId: string;
+  /** The session user id (for the deletedBy audit stamp), or null for an email-only token responder. */
+  sessionUserId: string | null;
+}
+
+/**
+ * Discard a corrective-action response photo that was uploaded (confirmUpload created a files row on the
+ * deal) but has NOT yet been submitted as evidence — the responder removed it, or abandoned/refreshed the
+ * page. Without this, every removed-before-submit or abandoned upload leaves a permanent, unattached file in
+ * the project gallery/storage.
+ *
+ * Eligibility (all must hold, else no delete):
+ *   - the file belongs to THIS scorecard's deal (files.deal_id = scorecard.deal_id) and is still active;
+ *   - it was created via the corrective-action upload flow (original_filename `corrective-action-…`) — a
+ *     regular project photo/document never matches, so this can only ever reclaim its own uploads;
+ *   - it is NOT attached to any corrective action / not existing evidence: no field_scorecard_photos row
+ *     references it (a submitted response photo has corrective_action_id set; scorecard evidence has a
+ *     section_key row) — an attached file is a 409, never deleted.
+ *
+ * A file that doesn't exist / isn't on this deal / isn't a corrective-action upload is a 404 (no-op). An
+ * already-attached file is a 409 (no-op). Otherwise the file is soft-deleted through the shared files-service
+ * deleteFile path (is_active=false + deleted_at), the same delete used everywhere else.
+ */
+export async function discardCorrectiveActionUpload(
+  db: TenantDb,
+  input: DiscardCorrectiveActionUploadInput,
+): Promise<{ discarded: true }> {
+  const { dealId } = await resolveScorecard(db, input.scorecardId);
+
+  // Load the candidate file scoped to this scorecard's deal + the corrective-action flow. Anything outside
+  // that (foreign file, wrong deal, not a corrective-action upload, already soft-deleted) is a 404 no-op.
+  const fileRes = await db.execute(sql`
+    SELECT id
+    FROM files
+    WHERE id = ${input.fileId}
+      AND deal_id = ${dealId}
+      AND is_active = true
+      AND deleted_at IS NULL
+      AND original_filename LIKE ${CORRECTIVE_ACTION_FILENAME_PREFIX + "%"}
+    LIMIT 1
+  `);
+  if (fileRes.rows.length === 0) {
+    throw new AppError(404, "That photo can't be discarded.");
+  }
+
+  // If ANY field_scorecard_photos row references this file, it is already attached — either a submitted
+  // corrective-action response photo (corrective_action_id set) or original scorecard evidence. Deleting it
+  // would drop it from a finalized response / the evidence grid, so reject with a 409 (no-op).
+  const attachedRes = await db.execute(sql`
+    SELECT 1 FROM field_scorecard_photos WHERE file_id = ${input.fileId} LIMIT 1
+  `);
+  if (attachedRes.rows.length > 0) {
+    throw new AppError(409, "That photo is already attached to a response and can't be discarded.");
+  }
+
+  // Soft-delete via the shared files path (is_active=false + deleted_at + audit stamp). A token responder has
+  // no CRM user id, so deletedBy is null in that case.
+  await deleteFile(db, input.fileId, "field", input.sessionUserId ?? undefined);
+  return { discarded: true };
 }
 
 /**

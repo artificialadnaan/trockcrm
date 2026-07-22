@@ -17,6 +17,7 @@ import { getFileDownloadUrl } from "../files/service.js";
 import {
   requestCorrectiveActionUploadUrl,
   confirmCorrectiveActionUpload,
+  discardCorrectiveActionUpload,
 } from "./corrective-action-upload.js";
 
 /** The responder identity threaded into a resolved item (a CRM user, or an email-only token recipient). */
@@ -221,6 +222,38 @@ export function registerCorrectiveActionRoutes(fieldRoutes: Router): void {
             }),
         );
         res.status(201).json(result);
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  // Discard a corrective-action response photo that was uploaded but NOT yet submitted (the responder removed
+  // it, or abandoned/refreshed the page). Without this every removed-before-submit upload leaves a permanent,
+  // unattached file in the project gallery. Session OR token auth. Registered BEFORE the `:itemId` route so
+  // "upload" is never captured as an :itemId. The service only deletes an eligible file (this scorecard's
+  // deal + corrective-action flow + not yet attached to any corrective action) — a 404/409 no-op otherwise.
+  fieldRoutes.delete(
+    "/scorecards/:id/corrective-actions/upload/:fileId",
+    requireFieldSessionOrToken,
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const id = String(req.params.id);
+        const fileId = String(req.params.fileId);
+        assertValidUuid(id, "id");
+        assertValidUuid(fileId, "fileId");
+        const { office, responder } = await authorizeCorrectiveAction(req, id);
+        const result = await runInOfficeTransaction(
+          office,
+          responder.userId ?? "",
+          (db: FieldTenantDb) =>
+            discardCorrectiveActionUpload(db, {
+              scorecardId: id,
+              fileId,
+              sessionUserId: responder.userId,
+            }),
+        );
+        res.json(result);
       } catch (err) {
         next(err);
       }
