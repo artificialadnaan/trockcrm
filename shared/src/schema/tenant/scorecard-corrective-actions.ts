@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import {
   pgTable,
   uuid,
@@ -40,5 +41,10 @@ export const scorecardCorrectiveActions = pgTable(
       table.itemRef,
     ),
     index("scorecard_corrective_actions_scorecard_idx").on(table.scorecardId),
+    // Partial index over open items — mirrors migration 0190's scorecard_corrective_actions_open_idx so
+    // db:generate sees parity. Backs the closure check (any `open` rows left for this scorecard?).
+    index("scorecard_corrective_actions_open_idx")
+      .on(table.scorecardId)
+      .where(sql`${table.status} = 'open'`),
   ],
 );
