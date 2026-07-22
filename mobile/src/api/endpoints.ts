@@ -32,6 +32,7 @@ import type {
   ScorecardDetailResponse,
   ScorecardDownloadResponse,
   DealTeamResponse,
+  CorrectiveActionsResponse,
 } from "./types";
 import type { ScorecardSubmissionPayload, ScorecardUpdatePayload } from "../scorecards/draft";
 
@@ -201,6 +202,28 @@ export const getScorecard = (f: Fetcher, id: string) =>
 // (view/[id].tsx) turns that into a "still generating" toast rather than a crash.
 export const getScorecardDownload = (f: Fetcher, id: string) =>
   f<ScorecardDownloadResponse>(`/field/scorecards/${id}/download`);
+
+// ── Corrective actions ────────────────────────────────────────────────────────
+// Read a below-band scorecard's corrective-action items + their inline responses. Session auth in-app
+// (the server also admits a ?token for the email-only web responder, unused here). Returns { items }.
+export const getCorrectiveActions = (f: Fetcher, scorecardId: string) =>
+  f<CorrectiveActionsResponse>(`/field/scorecards/${scorecardId}/corrective-actions`);
+
+// Submit a per-item response (comment + already-uploaded response-photo file ids). The server links the
+// photos, marks the item resolved, auto-closes the scorecard on the last open item, and returns the
+// refreshed { items } list.
+export const submitCorrectiveActionResponse = (
+  f: Fetcher,
+  scorecardId: string,
+  itemId: string,
+  body: { comment: string; photoFileIds?: string[] },
+) =>
+  f<CorrectiveActionsResponse>(`/field/scorecards/${scorecardId}/corrective-actions/${itemId}`, {
+    method: "POST",
+    // Omit photoFileIds entirely when absent so a comment-only response sends a minimal body (matches the
+    // server's optional parse — [] and undefined are equivalent there, but omitting keeps the wire clean).
+    body: body.photoFileIds ? { comment: body.comment, photoFileIds: body.photoFileIds } : { comment: body.comment },
+  });
 
 // The deal's assigned Superintendent + PM NAMES — used ONLY to best-effort pre-fill a new scorecard's
 // header. FIELD-scoped route (/field/...): T-Rock Cam authenticates with surface:"field", which CRM auth

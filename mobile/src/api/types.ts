@@ -232,3 +232,34 @@ export type UpdateScorecardResponse = { scorecard: FieldScorecardSummary };
 // GET /field/projects/:dealId/team. The server already resolves the two roles from the ACTIVE team rows
 // (with active user/contact identities), so the app just seeds these directly — no client-side role match.
 export type DealTeamResponse = { superintendentName: string | null; pmName: string | null };
+
+// ── Corrective actions ────────────────────────────────────────────────────────
+// A response-evidence photo linked to a corrective-action item. Mirrors the server's
+// CorrectiveActionResponsePhoto (corrective-action-api.ts) — the read endpoint returns file identity, NOT a
+// presigned url (there's no photo-URL resolver on that path yet), so the screen shows a fileId chip, not an
+// <Image>. `clientUploadId` is the durable mobile upload identity when the photo came from this app.
+export type CorrectiveActionResponsePhoto = {
+  id: string;
+  fileId: string;
+  clientUploadId: string | null;
+  caption: string | null;
+};
+// One flagged corrective-action item (an action item or critical deficiency) with its inline response.
+// Matches the server's CorrectiveActionItemView field-for-field. `itemType`/`status` are kept as broad
+// strings (the server column is a varchar) so an unknown future value never breaks the parse.
+export type CorrectiveActionItem = {
+  id: string;
+  itemType: string;
+  itemRef: string;
+  itemLabel: string;
+  status: string;
+  responseComment: string | null;
+  respondedByUserId: string | null;
+  responderName: string | null;
+  responderEmail: string | null;
+  respondedAt: string | null;
+  photos: CorrectiveActionResponsePhoto[];
+};
+// GET /field/scorecards/:id/corrective-actions and the POST response both wrap the items in `{ items }`
+// (corrective-action-routes.ts) — there is no top-level scorecardId/status on the wire.
+export type CorrectiveActionsResponse = { items: CorrectiveActionItem[] };
