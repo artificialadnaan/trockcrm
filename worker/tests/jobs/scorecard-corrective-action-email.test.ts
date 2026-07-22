@@ -33,7 +33,12 @@ const FLAGGED = [
 // Build a query mock routing on the SQL text. `sentAt` seeds the idempotency column.
 function makeQuery(opts: { sentAt?: string | null; recipients?: any[]; flagged?: any[] } = {}) {
   const inserts: { sql: string; params: any[] }[] = [];
+  const tokenDeletes: { sql: string; params: any[] }[] = [];
   const query = vi.fn(async (text: string, params: any[] = []) => {
+    if (/DELETE FROM .*scorecard_corrective_action_tokens/i.test(text)) {
+      tokenDeletes.push({ sql: text, params });
+      return { rows: [] };
+    }
     if (/INSERT INTO .*scorecard_corrective_action_tokens/i.test(text)) {
       inserts.push({ sql: text, params });
       return { rows: [] };
@@ -68,7 +73,7 @@ function makeQuery(opts: { sentAt?: string | null; recipients?: any[]; flagged?:
     }
     return { rows: [] };
   });
-  return { query, inserts };
+  return { query, inserts, tokenDeletes };
 }
 
 describe("scorecard corrective-action notification email", () => {
@@ -145,12 +150,43 @@ describe("scorecard corrective-action notification email", () => {
   });
 
   it("does not stamp or mint if there are no resolvable recipients (loud no-recipient case is a no-op skip)", async () => {
-    const { query, inserts } = makeQuery({ recipients: [] });
+    const { query, inserts, tokenDeletes } = makeQuery({ recipients: [] });
     const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "m" });
     const logger = makeLogger();
 
     await handleScorecardCorrectiveActionEmail(payload, null, { query: query as any, sendEmail, env, logger });
     expect(sendEmail).not.toHaveBeenCalled();
     expect(inserts).toHaveLength(0);
+    // No recipients → the handler returns before the send phase, so no orphan-cleanup delete either.
+    expect(tokenDeletes).toHaveLength(0);
+  });
+
+  it("clears prior unexpired tokens before re-minting (no orphan accumulation across retries)", async () => {
+    // On a retry (the prior attempt sent+minted but crashed before stamping), the handler re-enters the send
+    // phase. It must DELETE the scorecard's prior unexpired, unconsumed tokens BEFORE minting the new one, so
+    // orphan token rows don't accumulate. We can't reuse a prior token (only its hash is stored).
+    const { query, inserts, tokenDeletes } = makeQuery();
+    const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "m" });
+    const logger = makeLogger();
+
+    await handleScorecardCorrectiveActionEmail(payload, null, { query: query as any, sendEmail, env, logger });
+
+    // Exactly one cleanup delete, scoped to this scorecard, gating on unexpired + unconsumed.
+    expect(tokenDeletes).toHaveLength(1);
+    expect(tokenDeletes[0].params[0]).toBe(SCORECARD);
+    expect(tokenDeletes[0].sql).toMatch(/consumed_at IS NULL/i);
+    expect(tokenDeletes[0].sql).toMatch(/expires_at > NOW\(\)/i);
+    // Then the fresh token is minted (the email-only PM).
+    expect(inserts).toHaveLength(1);
+
+    // Cleanup happens BEFORE the mint (call ordering in the mock).
+    const deleteCallIdx = query.mock.calls.findIndex(([t]) =>
+      /DELETE FROM .*scorecard_corrective_action_tokens/i.test(t as string),
+    );
+    const insertCallIdx = query.mock.calls.findIndex(([t]) =>
+      /INSERT INTO .*scorecard_corrective_action_tokens/i.test(t as string),
+    );
+    expect(deleteCallIdx).toBeGreaterThanOrEqual(0);
+    expect(insertCallIdx).toBeGreaterThan(deleteCallIdx);
   });
 });

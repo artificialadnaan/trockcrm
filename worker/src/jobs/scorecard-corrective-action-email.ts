@@ -182,6 +182,20 @@ export async function handleScorecardCorrectiveActionEmail(
 
   const sendEmail = deps.sendEmail ?? sendSystemEmailWithMetadata;
 
+  // Retry-orphan cleanup. This handler mints + inserts a fresh email-only token inside the send loop; a
+  // crash AFTER a token insert but BEFORE the scorecard-level `corrective_action_email_sent_at` stamp leaves
+  // orphan token rows that the retry would ADD to (each run mints anew). We only have the token HASH, not the
+  // raw value, so a prior token can't be reused — instead, delete any prior UNEXPIRED, unconsumed tokens for
+  // this scorecard before re-minting. This runs only on the retry path: a successful run stamps
+  // corrective_action_email_sent_at and short-circuits above, so a completed notification never re-enters
+  // here. A partially-delivered prior attempt (no stamp) had no reliably-working link for every recipient, so
+  // re-minting + re-sending fresh links (deduped per-recipient by the Resend idempotencyKey) is correct.
+  await query(
+    `DELETE FROM ${tenantSchema}.scorecard_corrective_action_tokens
+      WHERE scorecard_id = $1::uuid AND consumed_at IS NULL AND expires_at > NOW()`,
+    [scorecardId]
+  );
+
   // Send one email per recipient with the link appropriate to their identity.
   for (const recipient of recipients) {
     let link: string;
