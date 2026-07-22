@@ -39,7 +39,7 @@ export default function RootLayout() {
             <StatusBar style="dark" />
             {/* App-wide render safety net: a screen throw becomes a recoverable in-app error, not a hard
                 crash that kicks the user out of the app. */}
-            <ErrorBoundary>
+            <ErrorBoundary queryClient={queryClient}>
               <Stack screenOptions={{ headerShown: false }}>
                 <Stack.Screen name="index" />
                 <Stack.Screen name="login" />

@@ -266,6 +266,18 @@ describe("filter crash-proofing", () => {
     expect(tagsOf(photos)).toEqual(["Elevation", "Floor 1"]);
   });
 
+  it("tagsOf tolerates a non-ARRAY tags container (bare string, object, null) without iterating it", () => {
+    const photos = [
+      photo({ tags: "floor,elevation" as any }), // a string would otherwise yield 1-char "tags" via for..of
+      photo({ tags: { 0: "floor" } as any }), // a non-iterable object would otherwise throw in for..of
+      photo({ tags: null as any }),
+      photo({ tags: ["Real Tag"] }),
+    ];
+    const run = () => tagsOf(photos);
+    expect(run).not.toThrow();
+    expect(run()).toEqual(["Real Tag"]); // only the genuine array of strings contributes
+  });
+
   it("filterPhotos by tag does not throw when a photo carries non-string tags, and still matches by string", () => {
     const photos = [
       photo({ id: "a", tags: ["Floor 1", null as any] }),

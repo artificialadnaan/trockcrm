@@ -295,9 +295,12 @@ export function uploadersOf(photos: FieldPhoto[]): { id: string; name: string }[
 export function tagsOf(photos: FieldPhoto[]): string[] {
   const set = new Set<string>();
   for (const photo of photos) {
-    // Only real, non-empty string tags — a null/non-string element would otherwise crash the sort
-    // (`null.localeCompare`) or render as an invalid React child in the filter chips.
-    for (const tag of photo.tags ?? []) {
+    // Normalize the CONTAINER with Array.isArray (not just `?? []`): a non-array tags value — a bare string
+    // ("floor,elevation") or a malformed object — would otherwise be iterated by for..of (a string yields its
+    // characters as 1-char "tags"; a non-iterable object throws). Then keep only real, non-empty string
+    // ELEMENTS — a null/non-string element would crash the sort (`null.localeCompare`) or render as an invalid
+    // React child in the filter chips.
+    for (const tag of Array.isArray(photo.tags) ? photo.tags : []) {
       if (typeof tag === "string" && tag.length > 0) set.add(tag);
     }
   }
