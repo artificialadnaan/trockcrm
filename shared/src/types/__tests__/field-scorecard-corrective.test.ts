@@ -22,6 +22,26 @@ describe("enumerateFlaggedItems", () => {
     ]);
   });
 
+  it("labels V1-only deficiency keys via the V1 constant (not just the V2 map)", () => {
+    // `site_org_below` and `safety_access` are V1 keys absent from the V2 deficiency map; the default
+    // (V1) form fires the trigger, so these must resolve to human labels — not the raw key.
+    const items = enumerateFlaggedItems({
+      actionItems: [],
+      criticalDeficiencies: ["site_org_below", "safety_access"],
+    });
+    expect(items).toEqual([
+      { itemType: "critical_deficiency", itemRef: "site_org_below", itemLabel: "Site organization below standard" },
+      { itemType: "critical_deficiency", itemRef: "safety_access", itemLabel: "Safety or access issue" },
+    ]);
+  });
+
+  it("falls back to the raw key for an unknown deficiency key", () => {
+    const items = enumerateFlaggedItems({ actionItems: [], criticalDeficiencies: ["totally_unknown"] });
+    expect(items).toEqual([
+      { itemType: "critical_deficiency", itemRef: "totally_unknown", itemLabel: "totally_unknown" },
+    ]);
+  });
+
   it("returns an empty list when nothing is flagged", () => {
     expect(enumerateFlaggedItems({ actionItems: [], criticalDeficiencies: [] })).toEqual([]);
   });

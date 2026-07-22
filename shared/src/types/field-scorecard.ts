@@ -175,6 +175,27 @@ export function scorecardV2CriticalDeficiencyLabel(key: string): string {
   return V2_DEFICIENCY_LABEL_BY_KEY[key] ?? key;
 }
 
+// Merged V2 + V1 deficiency-label lookup. V1 scorecards (the default form version, which fires the
+// corrective-action trigger) use FIELD_SCORECARD_CRITICAL_DEFICIENCIES — whose keys (e.g. `site_org_below`,
+// `safety_access`) are absent from the V2 map — so seeding must consult both constants or those items would
+// seed the raw key as their label. Built lazily so it can reference FIELD_SCORECARD_CRITICAL_DEFICIENCIES,
+// which is declared later in this module. Prefer the V2 label when a key exists in both.
+let mergedDeficiencyLabelByKey: Record<string, string> | undefined;
+function getMergedDeficiencyLabelByKey(): Record<string, string> {
+  if (!mergedDeficiencyLabelByKey) {
+    mergedDeficiencyLabelByKey = {
+      ...Object.fromEntries(FIELD_SCORECARD_CRITICAL_DEFICIENCIES.map((d) => [d.key, d.label])),
+      ...V2_DEFICIENCY_LABEL_BY_KEY,
+    };
+  }
+  return mergedDeficiencyLabelByKey;
+}
+
+/** Human label for a critical-deficiency key across BOTH the V1 and V2 forms; falls back to the raw key. */
+export function scorecardCriticalDeficiencyLabel(key: string): string {
+  return getMergedDeficiencyLabelByKey()[key] ?? key;
+}
+
 // ── Corrective-action helpers ───────────────────────────────────────────────────
 // When a scorecard trips the corrective-action band, one tracked item is seeded per flagged issue
 // (each non-empty action item and each critical deficiency). These pure helpers drive that seeding
@@ -209,7 +230,9 @@ export function enumerateFlaggedItems(input: {
     items.push({
       itemType: "critical_deficiency",
       itemRef: key,
-      itemLabel: scorecardV2CriticalDeficiencyLabel(key),
+      // Consult BOTH the V1 and V2 deficiency constants: V1 (the default form) fires this trigger with
+      // keys absent from the V2 map, which would otherwise seed the raw key as the label.
+      itemLabel: scorecardCriticalDeficiencyLabel(key),
     });
   }
   return items;
