@@ -159,6 +159,32 @@ describe("getCorrectiveActionItems", () => {
       AppError,
     );
   });
+
+  it("resolves a non-null url for each response photo via resolvePhotoUrl", async () => {
+    const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
+    const [first] = await getCorrectiveActionItems(tdb, scorecard.id);
+    // Attach a fresh response photo (FILE_B) to the first item.
+    await submitCorrectiveActionResponse(tdb, {
+      scorecardId: scorecard.id,
+      itemId: first.id,
+      comment: "corrective action documented",
+      photoFileIds: [FILE_B],
+      respondedBy: { userId: USER, name: "Sam", email: null },
+    });
+
+    // WITH a resolver: the response photo carries a resolvable url (same shape the evidence read uses).
+    const withUrl = await getCorrectiveActionItems(tdb, scorecard.id, {
+      resolvePhotoUrl: async (fileId) => `https://r2.example/${fileId}`,
+    });
+    const resolved = withUrl.find((i) => i.id === first.id)!;
+    expect(resolved.photos).toHaveLength(1);
+    expect(resolved.photos[0].fileId).toBe(FILE_B);
+    expect(resolved.photos[0].url).toBe(`https://r2.example/${FILE_B}`);
+
+    // WITHOUT a resolver: url is null (older deployments / no presigner) — the client falls back to "Unavailable".
+    const withoutUrl = await getCorrectiveActionItems(tdb, scorecard.id);
+    expect(withoutUrl.find((i) => i.id === first.id)!.photos[0].url).toBeNull();
+  });
 });
 
 describe("submitCorrectiveActionResponse", () => {

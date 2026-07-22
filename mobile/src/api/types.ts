@@ -241,13 +241,15 @@ export type DealTeamResponse = { superintendentName: string | null; pmName: stri
 
 // ── Corrective actions ────────────────────────────────────────────────────────
 // A response-evidence photo linked to a corrective-action item. Mirrors the server's
-// CorrectiveActionResponsePhoto (corrective-action-api.ts) — the read endpoint returns file identity, NOT a
-// presigned url (there's no photo-URL resolver on that path yet), so the screen shows a fileId chip, not an
-// <Image>. `clientUploadId` is the durable mobile upload identity when the photo came from this app.
+// CorrectiveActionResponsePhoto (corrective-action-api.ts). The read endpoint now resolves a presigned `url`
+// (same presigner as scorecard evidence); it is optional so an older API deployment (or a failed resolution)
+// degrades to a fileId chip instead of an <Image>. `clientUploadId` is the durable mobile upload identity
+// when the photo came from this app.
 export type CorrectiveActionResponsePhoto = {
   id: string;
   fileId: string;
   clientUploadId: string | null;
+  url?: string | null;
   caption: string | null;
 };
 // One flagged corrective-action item (an action item or critical deficiency) with its inline response.

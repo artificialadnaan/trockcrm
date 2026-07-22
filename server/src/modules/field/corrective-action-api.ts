@@ -15,6 +15,12 @@ export interface CorrectiveActionResponsePhoto {
   id: string;
   fileId: string;
   clientUploadId: string | null;
+  /**
+   * A presigned/authorized R2 URL for the response photo, resolved through the SAME presigner the scorecard
+   * evidence read uses (getFileDownloadUrl). Null when no resolver was passed or resolution failed; the
+   * deal-tab thread + mobile treat it as optional and fall back to "Unavailable" without it.
+   */
+  url: string | null;
   caption: string | null;
 }
 
@@ -38,10 +44,14 @@ export interface CorrectiveActionItemView {
  * inline response (comment + responder + response photos). Used by the read endpoint for BOTH the in-app
  * (session) and tokenized web (email-only) responder flows — the caller has already authorized access to
  * this scorecard. Throws 404 if the scorecard has no corrective-action items (not below-band, or unknown).
+ *
+ * Response photos carry a resolvable `url` when the caller passes `resolvePhotoUrl` (the same presigner the
+ * scorecard evidence read uses); without it the url is null and the client shows "Unavailable".
  */
 export async function getCorrectiveActionItems(
   db: TenantDb,
   scorecardId: string,
+  opts?: { resolvePhotoUrl?: (fileId: string) => Promise<string | null> },
 ): Promise<CorrectiveActionItemView[]> {
   const rows = await db
     .select()
@@ -69,11 +79,30 @@ export async function getCorrectiveActionItems(
         )
         .where(inArray(fieldScorecardPhotos.correctiveActionId, itemIds))
     : [];
+  // Resolve each response photo's presigned URL once (deduped by fileId), concurrently, so a repeated file id
+  // doesn't presign twice and read latency doesn't scale with the photo count.
+  const resolvePhotoUrl = opts?.resolvePhotoUrl;
+  const uniqueFileIds = [...new Set(photoRows.map((p) => p.fileId))];
+  const urlByFileId = new Map<string, string | null>();
+  if (resolvePhotoUrl) {
+    await Promise.all(
+      uniqueFileIds.map(async (fileId) => {
+        urlByFileId.set(fileId, await resolvePhotoUrl(fileId));
+      }),
+    );
+  }
+
   const photosByItem = new Map<string, CorrectiveActionResponsePhoto[]>();
   for (const p of photoRows) {
     if (!p.correctiveActionId) continue;
     const list = photosByItem.get(p.correctiveActionId) ?? [];
-    list.push({ id: p.id, fileId: p.fileId, clientUploadId: p.clientUploadId ?? null, caption: p.caption ?? null });
+    list.push({
+      id: p.id,
+      fileId: p.fileId,
+      clientUploadId: p.clientUploadId ?? null,
+      url: urlByFileId.get(p.fileId) ?? null,
+      caption: p.caption ?? null,
+    });
     photosByItem.set(p.correctiveActionId, list);
   }
 

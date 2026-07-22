@@ -13,6 +13,7 @@ import {
 import { verifyCorrectiveActionToken } from "./corrective-action-tokens.js";
 import { isAssignedCorrectiveActionResponder } from "./corrective-action-recipients.js";
 import { getCorrectiveActionItems, submitCorrectiveActionResponse } from "./corrective-action-api.js";
+import { getFileDownloadUrl } from "../files/service.js";
 import {
   requestCorrectiveActionUploadUrl,
   confirmCorrectiveActionUpload,
@@ -103,6 +104,18 @@ async function authorizeCorrectiveAction(
   };
 }
 
+/**
+ * A photo-URL resolver bound to the request's office db, matching the scorecard evidence read
+ * (getFieldScorecardDetail / getDealScorecardDetail): presign via getFileDownloadUrl, degrade to null on any
+ * failure so one bad object never fails the whole read.
+ */
+function correctiveActionPhotoUrlResolver(db: FieldTenantDb) {
+  return (fileId: string) =>
+    getFileDownloadUrl(db, fileId)
+      .then((r) => r.url)
+      .catch(() => null);
+}
+
 function parsePhotoFileIds(value: unknown): string[] {
   if (value == null) return [];
   if (!Array.isArray(value)) throw new AppError(400, "photoFileIds must be an array.");
@@ -127,7 +140,9 @@ export function registerCorrectiveActionRoutes(fieldRoutes: Router): void {
         const id = String(req.params.id);
         assertValidUuid(id, "id");
         const { office } = await authorizeCorrectiveAction(req, id);
-        const items = await runInOffice(office, (db: FieldTenantDb) => getCorrectiveActionItems(db, id));
+        const items = await runInOffice(office, (db: FieldTenantDb) =>
+          getCorrectiveActionItems(db, id, { resolvePhotoUrl: correctiveActionPhotoUrlResolver(db) }),
+        );
         res.json({ items });
       } catch (err) {
         next(err);
@@ -225,7 +240,7 @@ export function registerCorrectiveActionRoutes(fieldRoutes: Router): void {
             photoFileIds,
             respondedBy: responder,
           });
-          return getCorrectiveActionItems(db, id);
+          return getCorrectiveActionItems(db, id, { resolvePhotoUrl: correctiveActionPhotoUrlResolver(db) });
         });
         res.json({ items });
       } catch (err) {
