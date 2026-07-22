@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useSearchParams } from "react-router-dom";
 import { CheckCircle2, Loader2, Upload, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -119,6 +119,9 @@ function ItemCard({
   const [uploading, setUploading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  // Track every object URL we allocate so each is revoked EXACTLY once — on removal or on unmount. A blob URL
+  // that outlives its <img> leaks memory until the tab closes; the responder page can accumulate many.
+  const previewUrlsRef = useRef<Set<string>>(new Set());
 
   const isResolved = item.status === "resolved";
 
@@ -130,7 +133,9 @@ function ItemCard({
       try {
         for (const file of Array.from(files)) {
           const fileId = await uploadCorrectiveActionPhoto(scorecardId, file, token);
-          setPhotos((prev) => [...prev, { fileId, previewUrl: URL.createObjectURL(file) }]);
+          const previewUrl = URL.createObjectURL(file);
+          previewUrlsRef.current.add(previewUrl);
+          setPhotos((prev) => [...prev, { fileId, previewUrl }]);
         }
       } catch (e) {
         setSubmitError(e instanceof Error ? e.message : "Photo upload failed. Please try again.");
@@ -142,7 +147,23 @@ function ItemCard({
   );
 
   const removePhoto = useCallback((fileId: string) => {
-    setPhotos((prev) => prev.filter((p) => p.fileId !== fileId));
+    setPhotos((prev) => {
+      const removed = prev.find((p) => p.fileId === fileId);
+      if (removed && previewUrlsRef.current.delete(removed.previewUrl)) {
+        URL.revokeObjectURL(removed.previewUrl);
+      }
+      return prev.filter((p) => p.fileId !== fileId);
+    });
+  }, []);
+
+  // Revoke any preview URLs still allocated when this item card unmounts (page nav, item resolved → read-only
+  // re-render). Runs once on unmount; per-photo removals already revoke eagerly above.
+  useEffect(() => {
+    const urls = previewUrlsRef.current;
+    return () => {
+      for (const url of urls) URL.revokeObjectURL(url);
+      urls.clear();
+    };
   }, []);
 
   const submit = useCallback(async () => {

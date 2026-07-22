@@ -424,6 +424,9 @@ function AddMemberDialog({
                   key={m}
                   type="button"
                   onClick={() => {
+                    // Re-selecting the ALREADY-active mode is a no-op: don't wipe the in-progress selection /
+                    // search / member fields the user is filling in. Only reset when actually switching modes.
+                    if (m === mode) return;
                     setMode(m);
                     setUserId("");
                     setContactQuery("");

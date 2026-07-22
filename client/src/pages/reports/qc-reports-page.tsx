@@ -190,7 +190,7 @@ export default function QcReportsPage() {
           allLabel="All ratings"
         />
         <FilterSelect
-          label="Corrective Action"
+          label="Corrective Action Status"
           value={correctiveActionStatus}
           onChange={(value) => setCorrectiveActionStatus(value as "" | "open" | "closed")}
           options={["open", "closed"]}

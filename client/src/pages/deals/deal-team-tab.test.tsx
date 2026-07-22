@@ -29,4 +29,10 @@ describe("DealTeamTab role picker (Estimator is user-only)", () => {
   it("still offers Estimator (keeps it in ROLE_LABELS for user mode)", () => {
     expect(source).toContain('estimator: "Estimator"');
   });
+
+  it("makes re-selecting the already-active mode a no-op (no reset of in-progress fields)", () => {
+    // The onClick short-circuits before any setMode/clear when the clicked mode equals the current mode, so
+    // tapping the active segment never wipes what the user is entering.
+    expect(source).toContain("if (m === mode) return;");
+  });
 });

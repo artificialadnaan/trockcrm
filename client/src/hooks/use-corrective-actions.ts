@@ -39,6 +39,15 @@ function withToken(path: string, token?: string): string {
   return `${path}${sep}token=${encodeURIComponent(token)}`;
 }
 
+// A token responder may open the public page in a browser that ALSO holds a CRM auth cookie. The global CSRF
+// middleware then treats an unsafe /api/field/* request as a field-app request and demands the field header
+// (`x-requested-with: XMLHttpRequest`) — the CRM double-submit header alone is rejected, so a valid token
+// could READ but not POST/upload. Send the field header ONLY for token-mode writes; session (non-token) calls
+// stay unchanged.
+function tokenFieldCsrf(token?: string): { fieldCsrf: true } | Record<string, never> {
+  return token ? { fieldCsrf: true } : {};
+}
+
 /** Read a scorecard's corrective-action items + their inline responses. Session mode omits the token. */
 export async function getCorrectiveActions(scorecardId: string, token?: string): Promise<CorrectiveActionItem[]> {
   const res = await api<CorrectiveActionsResponse>(
@@ -63,7 +72,7 @@ export async function submitCorrectiveActionResponse(
     : { comment: body.comment };
   const res = await api<CorrectiveActionsResponse>(
     withToken(`/field/scorecards/${scorecardId}/corrective-actions/${itemId}`, token),
-    { method: "POST", json },
+    { method: "POST", json, ...tokenFieldCsrf(token) },
   );
   return res.items;
 }
@@ -83,7 +92,7 @@ export async function requestCorrectiveActionUploadUrl(
 ): Promise<CorrectiveActionUploadUrl> {
   return api<CorrectiveActionUploadUrl>(
     withToken(`/field/scorecards/${scorecardId}/corrective-actions/upload/url`, token),
-    { method: "POST", json: { contentType: body.contentType, sizeBytes: body.sizeBytes } },
+    { method: "POST", json: { contentType: body.contentType, sizeBytes: body.sizeBytes }, ...tokenFieldCsrf(token) },
   );
 }
 
@@ -95,7 +104,7 @@ export async function confirmCorrectiveActionUpload(
 ): Promise<{ fileId: string }> {
   return api<{ fileId: string }>(
     withToken(`/field/scorecards/${scorecardId}/corrective-actions/upload`, token),
-    { method: "POST", json: { uploadToken: body.uploadToken, objectKey: body.objectKey } },
+    { method: "POST", json: { uploadToken: body.uploadToken, objectKey: body.objectKey }, ...tokenFieldCsrf(token) },
   );
 }
 

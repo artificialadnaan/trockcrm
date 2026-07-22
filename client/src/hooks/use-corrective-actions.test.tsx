@@ -37,40 +37,42 @@ describe("corrective-action client API", () => {
     expect(apiMock).toHaveBeenCalledWith("/field/scorecards/sc-1/corrective-actions?token=tok-abc");
   });
 
-  it("submitCorrectiveActionResponse posts the comment/photos and appends the token", async () => {
+  it("submitCorrectiveActionResponse posts the comment/photos and appends the token + field CSRF header flag", async () => {
     apiMock.mockResolvedValue({ items: [] });
     await submitCorrectiveActionResponse("sc-1", "item-1", { comment: "fixed", photoFileIds: ["f1"] }, "tok-abc");
     expect(apiMock).toHaveBeenCalledWith(
       "/field/scorecards/sc-1/corrective-actions/item-1?token=tok-abc",
-      expect.objectContaining({ method: "POST", json: { comment: "fixed", photoFileIds: ["f1"] } }),
+      expect.objectContaining({ method: "POST", json: { comment: "fixed", photoFileIds: ["f1"] }, fieldCsrf: true }),
     );
   });
 
-  it("submitCorrectiveActionResponse omits photoFileIds when absent and omits the token in session mode", async () => {
+  it("submitCorrectiveActionResponse omits photoFileIds/token AND the field CSRF flag in session mode", async () => {
     apiMock.mockResolvedValue({ items: [] });
     await submitCorrectiveActionResponse("sc-1", "item-1", { comment: "just a note" });
     expect(apiMock).toHaveBeenCalledWith(
       "/field/scorecards/sc-1/corrective-actions/item-1",
       expect.objectContaining({ method: "POST", json: { comment: "just a note" } }),
     );
+    // No token → no field CSRF flag (session cookie already double-submits the CRM CSRF header).
+    expect(apiMock.mock.calls[0][1]).not.toHaveProperty("fieldCsrf");
   });
 
-  it("requestCorrectiveActionUploadUrl posts contentType/sizeBytes and appends the token", async () => {
+  it("requestCorrectiveActionUploadUrl posts contentType/sizeBytes and appends the token + field CSRF flag", async () => {
     apiMock.mockResolvedValue({ uploadUrl: "http://r2", objectKey: "k", uploadToken: "ut", expiresIn: 3600 });
     await requestCorrectiveActionUploadUrl("sc-1", { contentType: "image/jpeg", sizeBytes: 10 }, "tok-abc");
     expect(apiMock).toHaveBeenCalledWith(
       "/field/scorecards/sc-1/corrective-actions/upload/url?token=tok-abc",
-      expect.objectContaining({ method: "POST", json: { contentType: "image/jpeg", sizeBytes: 10 } }),
+      expect.objectContaining({ method: "POST", json: { contentType: "image/jpeg", sizeBytes: 10 }, fieldCsrf: true }),
     );
   });
 
-  it("confirmCorrectiveActionUpload posts the uploadToken/objectKey and returns { fileId }", async () => {
+  it("confirmCorrectiveActionUpload posts the uploadToken/objectKey (with the field CSRF flag) and returns { fileId }", async () => {
     apiMock.mockResolvedValue({ fileId: "file-9" });
     const out = await confirmCorrectiveActionUpload("sc-1", { uploadToken: "ut", objectKey: "k" }, "tok-abc");
     expect(out).toEqual({ fileId: "file-9" });
     expect(apiMock).toHaveBeenCalledWith(
       "/field/scorecards/sc-1/corrective-actions/upload?token=tok-abc",
-      expect.objectContaining({ method: "POST", json: { uploadToken: "ut", objectKey: "k" } }),
+      expect.objectContaining({ method: "POST", json: { uploadToken: "ut", objectKey: "k" }, fieldCsrf: true }),
     );
   });
 

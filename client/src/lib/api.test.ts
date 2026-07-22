@@ -173,6 +173,49 @@ describe("api CSRF handling", () => {
     );
   });
 
+  it("sends the field-app CSRF header when fieldCsrf is set", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await api("/field/scorecards/sc-1/corrective-actions/item-1?token=tok", {
+      method: "POST",
+      json: { comment: "fixed" },
+      fieldCsrf: true,
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          "x-requested-with": "XMLHttpRequest",
+        }),
+      })
+    );
+  });
+
+  it("omits the field-app CSRF header when fieldCsrf is not set", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await api("/field/scorecards/sc-1/corrective-actions/item-1", {
+      method: "POST",
+      json: { comment: "session note" },
+    });
+
+    const sentHeaders = fetchMock.mock.calls[0][1].headers as Record<string, string>;
+    expect(sentHeaders).not.toHaveProperty("x-requested-with");
+  });
+
   it("does not override an explicit x-office-id header", async () => {
     window.history.replaceState(null, "", "/deals/deal-1?officeId=office-atlanta");
     const fetchMock = vi.fn().mockResolvedValue(
