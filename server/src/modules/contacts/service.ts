@@ -6,6 +6,7 @@ import type * as schema from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
 import { updateBreaksBillingAddress } from "../../lib/billing-address.js";
 import { buildContactSearchCondition } from "../search/unified-search.js";
+import { revokeCorrectiveActionTokensForRemovedMember } from "../deals/team-service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 const INVALID_EMAIL_MESSAGE = "Please enter a valid email address.";
@@ -820,6 +821,20 @@ export async function deleteContact(tenantDb: TenantDb, contactId: string, userR
   // (billing_contact_id IS NULL) isn't falsely satisfied by a contact users can no longer select (Codex P2).
   await tenantDb.update(deals).set({ billingContactId: null }).where(eq(deals.billingContactId, contactId));
 
+  // Capture the deals where this contact is an ACTIVE super/PM BEFORE deactivating — those are the scorecards
+  // whose corrective-action web tokens must be revoked (a contact-backed responder holds a recipient-bound
+  // token; archiving must not leave them access for the 30-day TTL). Distinct deal ids only.
+  const responderDeals = await tenantDb
+    .selectDistinct({ dealId: dealTeamMembers.dealId })
+    .from(dealTeamMembers)
+    .where(
+      and(
+        eq(dealTeamMembers.contactId, contactId),
+        eq(dealTeamMembers.isActive, true),
+        inArray(dealTeamMembers.role, ["superintendent", "project_manager"]),
+      ),
+    );
+
   // Deactivate this contact's active deal-team assignments. getTeamMembers already HIDES rows whose linked
   // identity is inactive, so leaving them active leaves a phantom assignment admins can't remove from the UI.
   // Flip is_active here (matching the deals update above + merge-service's dealTeamMembers writes) so the
@@ -828,6 +843,18 @@ export async function deleteContact(tenantDb: TenantDb, contactId: string, userR
     .update(dealTeamMembers)
     .set({ isActive: false, updatedAt: new Date() })
     .where(and(eq(dealTeamMembers.contactId, contactId), eq(dealTeamMembers.isActive, true)));
+
+  // Revoke the archived contact's corrective-action tokens on each affected deal's scorecards. Runs AFTER the
+  // deactivation above so the contact's own now-inactive rows don't preserve their token; the shared helper is
+  // a no-op when another ACTIVE super/PM on the deal still resolves to the same email (a shared-mailbox case).
+  // verifyCorrectiveActionToken checks only hash + expiry, so this delete is the only server-side gate.
+  for (const { dealId } of responderDeals) {
+    await revokeCorrectiveActionTokensForRemovedMember(tenantDb, dealId, {
+      userId: null,
+      contactId,
+      memberEmail: null,
+    });
+  }
 
   return result[0];
 }

@@ -245,7 +245,7 @@ export async function removeTeamMember(tenantDb: TenantDb, memberId: string, dea
  * tenant transaction as the removal (the DELETE route commits both together), so the revoke is atomic with
  * the soft-delete — a security revoke should not silently no-op if it fails.
  */
-async function revokeCorrectiveActionTokensForRemovedMember(
+export async function revokeCorrectiveActionTokensForRemovedMember(
   tenantDb: TenantDb,
   dealId: string,
   removed: { userId: string | null; contactId: string | null; memberEmail: string | null },
