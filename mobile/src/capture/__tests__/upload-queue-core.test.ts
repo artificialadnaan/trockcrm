@@ -7,6 +7,7 @@ import {
   createBoundedRunner,
   dedupeQueue,
   isDrainable,
+  isSchedulable,
   isStagingFileName,
   isTerminal,
   newClientUploadId,
@@ -115,6 +116,20 @@ describe("upload-queue-core", () => {
     // A mid-enqueue staging row is non-drainable but NOT terminal — it must never be counted/cleared as failed.
     expect(isTerminal({ ...item("a", 0), staging: true })).toBe(false);
     expect(isDrainable({ ...item("a", 0), staging: true })).toBe(false);
+  });
+
+  it("isSchedulable counts drainable AND mid-enqueue staging rows (so a lone staging row still triggers a drain)", () => {
+    // Drainable rows are schedulable.
+    expect(isSchedulable(item("a", 0))).toBe(true);
+    expect(isSchedulable({ ...item("a", 0), staging: false })).toBe(true);
+    // A mid-enqueue staging row is NOT drainable, but IS schedulable — the drain's reconciliation unsticks it,
+    // so a lone interrupted capture must still schedule a drain (finding 2). This is the key divergence from
+    // isDrainable.
+    expect(isDrainable({ ...item("a", 0), staging: true })).toBe(false);
+    expect(isSchedulable({ ...item("a", 0), staging: true })).toBe(true);
+    // A terminal (retries-exhausted) row is neither drainable NOR schedulable — it only surfaces for dismissal.
+    expect(isSchedulable(item("a", MAX_UPLOAD_ATTEMPTS))).toBe(false);
+    expect(isSchedulable({ ...item("a", MAX_UPLOAD_ATTEMPTS), staging: true })).toBe(false);
   });
 
   it("isStagingFileName recognizes only queue staging files", () => {

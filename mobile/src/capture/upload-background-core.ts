@@ -8,7 +8,11 @@ export type BackgroundUploadOwner = { ownerKey: string; officeId: string | null 
 export async function drainBackgroundOwnerQueues(
   owners: readonly BackgroundUploadOwner[],
   operations: {
-    getQueuedCount: (ownerKey: string) => Promise<number>;
+    /** Count of rows a drain should be SCHEDULED for — drainable OR a mid-enqueue `staging` row that the
+     *  drain's own reconciliation will unstick. MUST include staging rows (getSchedulableCount, not
+     *  getQueuedCount): a lone interrupted capture is 0 drainable but still needs a drain to reconcile +
+     *  ship it, and gating on drainable-only would skip that owner forever. */
+    getSchedulableCount: (ownerKey: string) => Promise<number>;
     drainOwner: (owner: BackgroundUploadOwner) => Promise<unknown>;
   },
 ): Promise<void> {
@@ -16,7 +20,7 @@ export async function drainBackgroundOwnerQueues(
   let hasError = false;
   for (const owner of owners) {
     try {
-      if ((await operations.getQueuedCount(owner.ownerKey)) === 0) continue;
+      if ((await operations.getSchedulableCount(owner.ownerKey)) === 0) continue;
       await operations.drainOwner(owner);
     } catch (error) {
       if (!hasError) {

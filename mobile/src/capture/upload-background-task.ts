@@ -5,7 +5,7 @@ import type { Fetcher } from "../api/endpoints";
 import { isTokenExpired, loadSession, type Session } from "../auth/session";
 import { listScorecardDraftOwners } from "../scorecards/draft-store";
 import { drainBackgroundOwnerQueues } from "./upload-background-core";
-import { drainUploadQueue, getQueuedCount, uploadOwnerKey } from "./upload-queue";
+import { drainUploadQueue, getSchedulableCount, uploadOwnerKey } from "./upload-queue";
 
 /**
  * Best-effort BACKGROUND drain of the persistent upload queue.
@@ -41,7 +41,7 @@ TaskManager.defineTask(UPLOAD_QUEUE_TASK, async () => {
     // is re-homed. The server resolves + authorizes that scorecard; ordinary/new-draft captures remain pinned.
     const targetFetcher = buildSessionFetcher(session, null);
     await drainBackgroundOwnerQueues(owners, {
-      getQueuedCount,
+      getSchedulableCount,
       drainOwner: (owner) =>
         drainUploadQueue(owner.ownerKey, buildSessionFetcher(session, owner.officeId), { targetFetcher }),
     });

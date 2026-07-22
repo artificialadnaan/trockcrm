@@ -42,9 +42,13 @@ const ADDRESS_SOURCE_LABEL: Record<string, string> = {
 
 // Presigned R2 URLs on a FieldPhoto are short-lived (~30 min). The viewer snapshots the photo list at open
 // time, so after the TTL the direct download 403s. Bound the pages we scan when re-fetching a fresh URL so a
-// large deal can't spin — the photo the user is looking at was on one of the first pages of the list anyway.
+// large deal can't spin. This ceiling MUST match the gallery's own page ceiling (useProjectPhotos'
+// PHOTOS_MAX_PAGES) — the viewer can only show a photo the gallery loaded, so any photo the user is looking at
+// is reachable within these pages. A smaller cap (was 5) left a photo past ~1000 (page 5 × 200) unable to
+// refresh an expired URL, even though the gallery loads up to 50 pages. The scan still stops the instant it
+// finds the photo, or when it passes the reported totalPages — so a small deal pays only one page.
 const REFRESH_PER_PAGE = 200;
-const REFRESH_MAX_PAGES = 5;
+const REFRESH_MAX_PAGES = 50;
 
 function formatTimestamp(photo: FieldPhoto): string {
   const value = photo.takenAt ?? photo.createdAt;

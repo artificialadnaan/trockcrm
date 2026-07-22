@@ -188,6 +188,42 @@ describe("PhotoViewerModal expired-URL refresh", () => {
     expect(mockGetProjectPhotos).not.toHaveBeenCalled();
   });
 
+  it("refreshes a photo that lives BEYOND the first 5 pages (a large gallery), not just the first pages", async () => {
+    // The gallery (useProjectPhotos) loads up to 50 pages; the refresh scan must reach a photo past page 5
+    // (the old cap) or an expired URL for a later photo could never be re-minted. Report 7 total pages and
+    // place the target on page 7 — the scan should keep going until it finds it, then retry with the fresh URL.
+    mockSavePhotoToDevice
+      .mockResolvedValueOnce("failed") // stale snapshot URL
+      .mockResolvedValueOnce("saved"); // fresh URL from page 7
+    // Pages 1..6 don't contain the target; page 7 does. limit 200 mirrors PHOTOS_PER_PAGE, so page indexes
+    // line up with the gallery's.
+    mockGetProjectPhotos.mockImplementation(async (_fetcher: unknown, _dealId: string, opts: { page: number }) => {
+      const pagination = { page: opts.page, limit: 200, total: 1400, totalPages: 7 };
+      if (opts.page === 7) {
+        return { photos: [photo({ id: "p1", fullImageUrl: "https://r2.example/full-FRESH.jpg" })], pagination };
+      }
+      return { photos: [photo({ id: `other-${opts.page}` })], pagination };
+    });
+
+    const { getByLabelText } = render(
+      <PhotoViewerModal
+        photos={[photo({ id: "p1", fullImageUrl: "https://r2.example/full-STALE.jpg" })]}
+        initialIndex={0}
+        visible
+        projectDealId="d1"
+        onClose={jest.fn()}
+      />,
+    );
+    await act(async () => {
+      fireEvent.press(getByLabelText("Save photo to device"));
+    });
+
+    // It scanned all 7 pages (would have stopped at 5 under the old cap and never found the photo).
+    expect(mockGetProjectPhotos).toHaveBeenCalledTimes(7);
+    expect(mockGetProjectPhotos).toHaveBeenLastCalledWith(expect.anything(), "d1", { page: 7, perPage: 200 });
+    expect(mockSavePhotoToDevice).toHaveBeenNthCalledWith(2, "https://r2.example/full-FRESH.jpg");
+  });
+
   it("surfaces the error without retrying the SAME URL when the refresh yields an identical (still-stale) URL", async () => {
     mockSavePhotoToDevice.mockResolvedValue("failed");
     mockGetProjectPhotos.mockResolvedValueOnce({

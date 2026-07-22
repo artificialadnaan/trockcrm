@@ -84,6 +84,18 @@ export function isDrainable(item: QueuedUpload): boolean {
   return !isTerminal(item) && item.staging !== true;
 }
 
+/**
+ * SCHEDULABLE = a row that a drain would eventually act on: either drainable now, OR a mid-enqueue `staging`
+ * row that becomes drainable once reconciliation unsticks it (which runs INSIDE drainUploadQueue). The
+ * "should we schedule a drain?" gates key on THIS, not isDrainable — otherwise a lone interrupted capture (a
+ * `staging` row with no live worker) counts as 0 drainable → no drain is ever scheduled → its reconciliation
+ * never runs and the photo stays hidden/unshipped forever. Terminal (retries-exhausted) rows are NOT
+ * schedulable: they only surface to the UI for dismissal.
+ */
+export function isSchedulable(item: QueuedUpload): boolean {
+  return !isTerminal(item) && (item.staging === true || isDrainable(item));
+}
+
 /** Legacy/unmarked queue items remain office-pinned; only an explicit edit-evidence marker opts out. */
 export function shouldRouteUploadByTarget(item: Pick<CaptureUploadInput, "routeByTarget">): boolean {
   return item.routeByTarget === true;
