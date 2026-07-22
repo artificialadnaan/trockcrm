@@ -85,4 +85,45 @@ describe("useQcScorecards", () => {
       averageScore: 8.5,
     });
   });
+
+  it("sends correctiveActionStatus to the server and retains the row status", async () => {
+    mocks.api.mockResolvedValue({
+      data: {
+        scorecards: [{
+          scorecardId: "sc-open",
+          dealId: "deal-2",
+          projectName: "Maple St",
+          projectNumber: "DFW-200",
+          regionName: "Dallas",
+          superintendentName: "Sam Reyes",
+          kind: "project",
+          totalScore: 60,
+          formVersion: 1,
+          averageScore: null,
+          rating: "corrective_action",
+          deficiencyCount: 2,
+          weekOf: "2026-07-14",
+          submittedAt: "2026-07-14T18:34:03.000Z",
+          submittedByName: "Sam Reyes",
+          pdfAvailable: true,
+          status: "corrective_action_open",
+        }],
+        regions: ["Dallas"],
+        superintendents: ["Sam Reyes"],
+        truncated: false,
+      },
+    });
+
+    act(() => root.render(
+      <MemoryRouter initialEntries={["/projects/qc-reports?officeId=office-dallas"]}>
+        <Probe filters={{ from: "2026-07-01", to: "2026-07-31", correctiveActionStatus: "open" }} />
+      </MemoryRouter>,
+    ));
+    await flush();
+
+    expect(mocks.api).toHaveBeenCalledWith(
+      "/reports/qc-scorecards?from=2026-07-01&to=2026-07-31&correctiveActionStatus=open",
+    );
+    expect(latest?.scorecards[0]?.status).toBe("corrective_action_open");
+  });
 });

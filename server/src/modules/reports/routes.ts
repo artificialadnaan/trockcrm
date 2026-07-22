@@ -383,6 +383,11 @@ router.get("/qc-scorecards", requireAnyRole, async (req, res, next) => {
       throw new AppError(400, "'kind' must be 'project' or 'leadership'.");
     }
     const kind = rawKind as ScorecardKind | undefined;
+    const rawCaStatus = readQueryString(req.query.correctiveActionStatus);
+    if (rawCaStatus && rawCaStatus !== "open" && rawCaStatus !== "closed") {
+      throw new AppError(400, "'correctiveActionStatus' must be 'open' or 'closed'.");
+    }
+    const correctiveActionStatus = rawCaStatus as "open" | "closed" | undefined;
 
     const data = await getQcScorecardsReport(req.tenantDb!, {
       from,
@@ -393,6 +398,7 @@ router.get("/qc-scorecards", requireAnyRole, async (req, res, next) => {
       rating: readQueryString(req.query.rating),
       flaggedOnly: req.query.flaggedOnly === "true",
       search: readQueryString(req.query.search),
+      correctiveActionStatus,
     });
     await req.commitTransaction!();
     res.json({ data });

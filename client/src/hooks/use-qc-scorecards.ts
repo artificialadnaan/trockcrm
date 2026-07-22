@@ -20,6 +20,9 @@ export interface QcScorecardRow {
   submittedAt: string;
   submittedByName: string | null;
   pdfAvailable: boolean;
+  // Lifecycle status: `submitted` | `corrective_action_open` | `corrective_action_closed`. Drives the
+  // Corrective Action column + filter. Optional so older API deployments don't break the row parse.
+  status?: string;
 }
 
 export interface QcScorecardFilters {
@@ -31,6 +34,8 @@ export interface QcScorecardFilters {
   rating?: string;
   flaggedOnly?: boolean;
   search?: string;
+  /** Narrow to open vs closed corrective-action cards. */
+  correctiveActionStatus?: "open" | "closed";
 }
 
 interface QcScorecardsResponse {
@@ -60,7 +65,7 @@ export function useQcScorecards(filters: QcScorecardFilters) {
   // flight. Only the newest request is allowed to commit its response — a slower older one is discarded.
   const requestIdRef = useRef(0);
 
-  const { from, to, region, kind, superintendent, rating, flaggedOnly, search } = filters;
+  const { from, to, region, kind, superintendent, rating, flaggedOnly, search, correctiveActionStatus } = filters;
 
   const refetch = useCallback(async () => {
     const requestId = ++requestIdRef.current;
@@ -76,6 +81,7 @@ export function useQcScorecards(filters: QcScorecardFilters) {
       if (rating) qs.set("rating", rating);
       if (flaggedOnly) qs.set("flaggedOnly", "true");
       if (search) qs.set("search", search);
+      if (correctiveActionStatus) qs.set("correctiveActionStatus", correctiveActionStatus);
       const res = await api<{ data: QcScorecardsResponse }>(`/reports/qc-scorecards?${qs.toString()}`);
       if (requestId !== requestIdRef.current) return; // a newer request superseded this one
       setScorecards(res.data.scorecards);
@@ -96,7 +102,7 @@ export function useQcScorecards(filters: QcScorecardFilters) {
     } finally {
       if (requestId === requestIdRef.current) setLoading(false);
     }
-  }, [from, to, region, kind, superintendent, rating, flaggedOnly, search, officeId]);
+  }, [from, to, region, kind, superintendent, rating, flaggedOnly, search, correctiveActionStatus, officeId]);
 
   useEffect(() => {
     void refetch();
