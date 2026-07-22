@@ -101,7 +101,18 @@ beforeAll(async () => {
   await pg.exec(
     `CREATE UNIQUE INDEX IF NOT EXISTS files_client_upload_id_key ON public.files (client_upload_id) WHERE client_upload_id IS NOT NULL;`,
   );
+  // files.uploaded_by is NOT NULL WITH a real FK to public.users(id) in PROD (migration 0001) — the drizzle
+  // schema (which tenantSchemaSql derives from) OMITS `.references()`, so this class of bug is invisible
+  // without the constraint. Add it explicitly here: a nil-uuid uploader (an email-only token responder with
+  // no CRM user) must FK-violate, and the submitter fallback must satisfy it.
+  await pg.exec(
+    `ALTER TABLE public.files ADD CONSTRAINT files_uploaded_by_fk FOREIGN KEY (uploaded_by) REFERENCES public.users(id);`,
+  );
   await pg.exec(`INSERT INTO deals (id, name, deal_number, is_active) VALUES ('${DEAL}', 'Maple St', 'DFW-1', true);`);
+  // The scorecard's submitter — a real active user; token uploads are attributed to this id (not a nil uuid).
+  await pg.exec(
+    `INSERT INTO public.users (id, display_name, email, is_active) VALUES ('${USER}', 'Sam Super', 'sam.super@trock.com', true);`,
+  );
   tdb = drizzle(pg);
   app = makeApp();
 });
@@ -158,7 +169,7 @@ describe("token-scoped corrective-action photo upload", () => {
     expect(rows.rows[0].category).toBe("photo");
   });
 
-  it("uploads via a valid ?token (no session) and returns { fileId }", async () => {
+  it("uploads via a valid ?token (no session) and attributes files.uploaded_by to the submitter", async () => {
     const { rawToken } = await mintCorrectiveActionToken(tdb, {
       scorecardId,
       recipientEmail: "pm@example.com",
@@ -168,6 +179,25 @@ describe("token-scoped corrective-action photo upload", () => {
     const { confirmRes } = await uploadPhoto(`?token=${encodeURIComponent(rawToken)}`);
     expect(confirmRes.status).toBe(201);
     expect(typeof confirmRes.body.fileId).toBe("string");
+    // The email-only responder has no CRM user id → the row must be attributed to the scorecard's
+    // submitter (a real user that satisfies the files.uploaded_by FK), NOT a nil uuid.
+    const rows = await tdb.execute(
+      sql`SELECT uploaded_by FROM files WHERE id = ${confirmRes.body.fileId}`,
+    );
+    expect(rows.rows[0].uploaded_by).toBe(USER);
+  });
+
+  it("would FK-violate if a token upload used the nil-uuid sentinel as uploaded_by (regression guard)", async () => {
+    // Proves the FK is live in this test's schema: a nil uuid (no such user) cannot be the uploader. This is
+    // exactly what the old CORRECTIVE_ACTION_SYSTEM_UPLOADER sentinel would have attempted in prod.
+    await expect(
+      tdb.execute(sql`
+        INSERT INTO files (id, category, display_name, system_filename, original_filename, mime_type,
+          file_size_bytes, file_extension, r2_key, r2_bucket, deal_id, uploaded_by)
+        VALUES (gen_random_uuid(), 'photo', 'x', 'x', 'x', 'image/jpeg', 1, 'jpg',
+          ${"nil-key-" + Date.now()}, 'b', ${DEAL}, '00000000-0000-0000-0000-000000000000')
+      `),
+    ).rejects.toThrow();
   });
 
   it("returns a fileId that submitCorrectiveActionResponse accepts as a fresh response photo", async () => {

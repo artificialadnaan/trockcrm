@@ -17,7 +17,6 @@ import { getFileDownloadUrl } from "../files/service.js";
 import {
   requestCorrectiveActionUploadUrl,
   confirmCorrectiveActionUpload,
-  CORRECTIVE_ACTION_SYSTEM_UPLOADER,
 } from "./corrective-action-upload.js";
 
 /** The responder identity threaded into a resolved item (a CRM user, or an email-only token recipient). */
@@ -182,7 +181,7 @@ export function registerCorrectiveActionRoutes(fieldRoutes: Router): void {
           requestCorrectiveActionUploadUrl(db, {
             scorecardId: id,
             officeSlug: office.slug,
-            uploaderId: responder.userId ?? CORRECTIVE_ACTION_SYSTEM_UPLOADER,
+            sessionUserId: responder.userId,
             contentType: String(req.body?.contentType),
             sizeBytes: Number(req.body?.sizeBytes),
           }),
@@ -216,7 +215,7 @@ export function registerCorrectiveActionRoutes(fieldRoutes: Router): void {
           (db: FieldTenantDb) =>
             confirmCorrectiveActionUpload(db, {
               scorecardId: id,
-              uploaderId: responder.userId ?? CORRECTIVE_ACTION_SYSTEM_UPLOADER,
+              sessionUserId: responder.userId,
               uploadToken,
               objectKey,
             }),

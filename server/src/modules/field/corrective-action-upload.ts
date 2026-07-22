@@ -6,10 +6,12 @@ import { requestUploadUrl, confirmUpload } from "../files/service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
-// A stable, FK-less sentinel used as files.uploaded_by for an email-only (token) responder who has no CRM
-// user id. files.uploaded_by is NOT NULL with no FK reference, so a nil uuid is safe and lets us key the
-// idempotent-confirm dedup (uploadedBy) consistently for token uploads.
-export const CORRECTIVE_ACTION_SYSTEM_UPLOADER = "00000000-0000-0000-0000-000000000000";
+// files.uploaded_by is NOT NULL WITH a real FK to public.users(id) in prod (migration 0001) — the drizzle
+// schema omits `.references()`, but the constraint is live. So an email-only (token) responder, who has NO
+// CRM user id, CANNOT be recorded as the uploader with a nil uuid (it would FK-violate → the token upload
+// fails). Instead we attribute a token upload to the scorecard's submitter (`field_scorecards.submitted_by`
+// — a real, active user on the deal's office who owns this scorecard). resolveScorecardUploader() looks that
+// up so the caller passes a session user id (when present) or falls back to the submitter.
 
 const IMAGE_CONTENT_TYPES = new Set([
   "image/jpeg",
@@ -40,8 +42,11 @@ function extensionForContentType(contentType: string): string {
 export interface CorrectiveActionUploadUrlInput {
   scorecardId: string;
   officeSlug: string;
-  /** The uploader identity — a CRM user id (session) or the system sentinel (email-only token responder). */
-  uploaderId: string;
+  /**
+   * The session user id when the caller is a CRM user, or null for an email-only (token) responder. A null
+   * resolves to the scorecard's submitter as the files.uploaded_by (never a nil uuid — that FK-violates).
+   */
+  sessionUserId: string | null;
   contentType: string;
   sizeBytes: number;
 }
@@ -69,10 +74,14 @@ export async function requestCorrectiveActionUploadUrl(
   if (input.sizeBytes > MAX_UPLOAD_BYTES) {
     throw new AppError(400, "Photo exceeds the maximum upload size.");
   }
-  const dealId = await resolveScorecardDealId(db, input.scorecardId);
+  const { dealId, uploaderId } = await resolveScorecardUploader(
+    db,
+    input.scorecardId,
+    input.sessionUserId,
+  );
   const ext = extensionForContentType(input.contentType);
 
-  const result = await requestUploadUrl(db, input.officeSlug, input.uploaderId, {
+  const result = await requestUploadUrl(db, input.officeSlug, uploaderId, {
     originalFilename: `corrective-action-${Date.now()}.${ext}`,
     mimeType: input.contentType,
     fileSizeBytes: Number(input.sizeBytes),
@@ -91,7 +100,12 @@ export async function requestCorrectiveActionUploadUrl(
 
 export interface ConfirmCorrectiveActionUploadInput {
   scorecardId: string;
-  uploaderId: string;
+  /**
+   * The session user id when the caller is a CRM user, or null for an email-only (token) responder — resolved
+   * to the scorecard's submitter as files.uploaded_by (never a nil uuid). MUST match the presign step's
+   * resolved uploader so confirmUpload's idempotent-confirm dedup (keyed on uploadedBy) is consistent.
+   */
+  sessionUserId: string | null;
   uploadToken: string;
   objectKey: string;
 }
@@ -106,20 +120,42 @@ export async function confirmCorrectiveActionUpload(
   db: TenantDb,
   input: ConfirmCorrectiveActionUploadInput,
 ): Promise<{ fileId: string }> {
-  // Resolve the deal so a foreign token can't file the row against another project (belt-and-suspenders;
-  // the caller already bound the token to this scorecard).
-  await resolveScorecardDealId(db, input.scorecardId);
-  const { file } = await confirmUpload(db, input.uploaderId, {
+  // Resolve the deal (belt-and-suspenders; the caller already bound the token to this scorecard) AND the
+  // uploader — a session user id, or the scorecard's submitter for a token responder (never a nil uuid,
+  // which would FK-violate files.uploaded_by → public.users).
+  const { uploaderId } = await resolveScorecardUploader(db, input.scorecardId, input.sessionUserId);
+  const { file } = await confirmUpload(db, uploaderId, {
     uploadToken: input.uploadToken,
   });
   return { fileId: file.id };
 }
 
-async function resolveScorecardDealId(db: TenantDb, scorecardId: string): Promise<string> {
+/**
+ * Resolve the uploader to stamp on a token-scoped upload: the session user when one is present, otherwise the
+ * scorecard's submitter (`field_scorecards.submitted_by`) — a real user id that satisfies the live
+ * files.uploaded_by → public.users FK. A nil uuid must NEVER be used (it would FK-violate in prod). Also
+ * returns the deal id so callers presign/file the row against the right project in one round trip.
+ */
+async function resolveScorecardUploader(
+  db: TenantDb,
+  scorecardId: string,
+  sessionUserId: string | null,
+): Promise<{ dealId: string; uploaderId: string }> {
+  const { dealId, submittedBy } = await resolveScorecard(db, scorecardId);
+  const uploaderId = sessionUserId ?? submittedBy;
+  return { dealId, uploaderId };
+}
+
+async function resolveScorecard(
+  db: TenantDb,
+  scorecardId: string,
+): Promise<{ dealId: string; submittedBy: string }> {
   const res = await db.execute(
-    sql`SELECT deal_id FROM field_scorecards WHERE id = ${scorecardId} LIMIT 1`,
+    sql`SELECT deal_id, submitted_by FROM field_scorecards WHERE id = ${scorecardId} LIMIT 1`,
   );
-  const dealId = (res.rows[0] as { deal_id?: string } | undefined)?.deal_id;
-  if (!dealId) throw new AppError(404, "Scorecard not found.");
-  return dealId;
+  const row = res.rows[0] as { deal_id?: string; submitted_by?: string } | undefined;
+  const dealId = row?.deal_id;
+  const submittedBy = row?.submitted_by;
+  if (!dealId || !submittedBy) throw new AppError(404, "Scorecard not found.");
+  return { dealId, submittedBy };
 }
