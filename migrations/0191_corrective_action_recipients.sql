@@ -64,6 +64,16 @@ BEGIN
       schema_name
     );
 
+    -- (2b) Relax field_scorecard_photos.section_key to nullable: a corrective-action RESPONSE photo carries
+    -- corrective_action_id and has section_key/deficiency_key null (spec §4.3). Existing evidence rows keep
+    -- their section_key. Idempotent (DROP NOT NULL on an already-nullable column is a no-op).
+    IF to_regclass(format('%I.field_scorecard_photos', schema_name)) IS NOT NULL THEN
+      EXECUTE format(
+        'ALTER TABLE %I.field_scorecard_photos ALTER COLUMN section_key DROP NOT NULL',
+        schema_name
+      );
+    END IF;
+
     -- (3) Recipient-bound web tokens.
     EXECUTE format(
       'CREATE TABLE IF NOT EXISTS %I.scorecard_corrective_action_tokens (
@@ -109,6 +119,7 @@ BEGIN
   END IF;
 END $$;
 ALTER TABLE office_dallas.field_scorecards ADD COLUMN IF NOT EXISTS corrective_action_email_sent_at timestamptz;
+ALTER TABLE office_dallas.field_scorecard_photos ALTER COLUMN section_key DROP NOT NULL;
 CREATE TABLE IF NOT EXISTS office_dallas.scorecard_corrective_action_tokens (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   scorecard_id uuid NOT NULL REFERENCES office_dallas.field_scorecards(id) ON DELETE CASCADE,

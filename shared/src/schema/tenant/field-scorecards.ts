@@ -92,7 +92,9 @@ export const fieldScorecardPhotos = pgTable(
   {
     id: uuid("id").primaryKey().defaultRandom(),
     scorecardId: uuid("scorecard_id").notNull(),
-    sectionKey: varchar("section_key", { length: 40 }).notNull(),
+    // Nullable as of migration 0191: a corrective-action RESPONSE photo carries corrective_action_id and has
+    // section_key/deficiency_key null (spec §4.3). Original scorecard-evidence photos always set section_key.
+    sectionKey: varchar("section_key", { length: 40 }),
     /** V2 critical-deficiency evidence is attached to the exact selected deficiency. */
     deficiencyKey: varchar("deficiency_key", { length: 40 }),
     /** Set on corrective-action response photos (FK -> scorecard_corrective_actions); null for scorecard evidence. */

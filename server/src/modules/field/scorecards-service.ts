@@ -489,14 +489,23 @@ export async function updateFieldScorecard(
     .select({
       id: fieldScorecardPhotos.id,
       fileId: fieldScorecardPhotos.fileId,
-      sectionKey: fieldScorecardPhotos.sectionKey,
+      // Original evidence always has a section_key; response photos (section_key null,
+      // corrective_action_id set) are excluded below, so COALESCE keeps this `string`.
+      sectionKey: sql<string>`COALESCE(${fieldScorecardPhotos.sectionKey}, '')`,
       deficiencyKey: fieldScorecardPhotos.deficiencyKey,
       isActive: files.isActive,
       deletedAt: files.deletedAt,
     })
     .from(fieldScorecardPhotos)
     .innerJoin(files, eq(files.id, fieldScorecardPhotos.fileId))
-    .where(eq(fieldScorecardPhotos.scorecardId, card.id));
+    .where(
+      and(
+        eq(fieldScorecardPhotos.scorecardId, card.id),
+        // The edit-replacement contract covers only the submitter's ORIGINAL evidence. Corrective-action
+        // response photos are a separate surface and must never be clobbered by a scorecard edit.
+        isNull(fieldScorecardPhotos.correctiveActionId),
+      ),
+    );
   const visibleCurrentPhotos = currentPhotos.filter((photo) => photo.isActive && photo.deletedAt === null);
   const editablePhotos = await resolveUpdatePhotoLinks(
     tenantDb,
@@ -860,7 +869,10 @@ export async function renderAndStoreFieldScorecardArtifacts(
     const photoRows = await db
       .select({
         fileId: files.id,
-        sectionKey: fieldScorecardPhotos.sectionKey,
+        // section_key is nullable as of migration 0191 (corrective-action RESPONSE photos have it null), but
+        // this query excludes those (corrective_action_id IS NULL) so only section-keyed ORIGINAL evidence
+        // remains — COALESCE keeps the downstream evidence type as `string`.
+        sectionKey: sql<string>`COALESCE(${fieldScorecardPhotos.sectionKey}, '')`,
         deficiencyKey: fieldScorecardPhotos.deficiencyKey,
         caption: files.description,
         r2Key: files.r2Key,
@@ -871,7 +883,13 @@ export async function renderAndStoreFieldScorecardArtifacts(
       })
       .from(fieldScorecardPhotos)
       .innerJoin(files, eq(files.id, fieldScorecardPhotos.fileId))
-      .where(eq(fieldScorecardPhotos.scorecardId, scorecardId))
+      .where(
+        and(
+          eq(fieldScorecardPhotos.scorecardId, scorecardId),
+          // Exclude corrective-action response photos — the scorecard PDF embeds only the original evidence.
+          isNull(fieldScorecardPhotos.correctiveActionId),
+        ),
+      )
       // Deterministic order (link time, then PK tie-breaker) so the downstream MAX_EVIDENCE_PHOTOS cap
       // always keeps/drops the SAME photos across renders, not an arbitrary Postgres physical-row order.
       .orderBy(fieldScorecardPhotos.createdAt, fieldScorecardPhotos.id);
