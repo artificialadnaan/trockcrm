@@ -31,6 +31,8 @@ const DEAL_COMPLETED_LIVE = U("d15"); // current-attempt dead (duplicate) job + 
                                       // (SyncHub 202 accepted, callback pending) -> the completed job counts as
                                       // live within the callback window, so the deal must NOT flip (Retry would
                                       // fire a SECOND external create)
+const DEAL_ARCHIVED = U("d16"); // stuck baseline BUT is_active=false (deleteDeal archived it, RFP fields intact)
+                                // -> the watchdog must NOT rewrite a terminal archived row to send_failed
 const OFFICE2 = U("0f2"); // a DIFFERENT office id (not provisioned as a schema) — for the cross-office job test
 
 /**
@@ -60,6 +62,7 @@ async function seed(): Promise<PGlite> {
       rfp_override_reviewed_at timestamptz,
       rfp_bidboard_attempt_at timestamptz,
       rfp_last_attempt_error text,
+      is_active boolean NOT NULL DEFAULT true,
       updated_at timestamptz
     );
     INSERT INTO public.offices (id, slug, is_active) VALUES ('${OFFICE}', 'test', true);
@@ -156,6 +159,15 @@ async function seed(): Promise<PGlite> {
       ('rfp_bidboard_create', '{"dealId":"${DEAL_COMPLETED_LIVE}"}'::jsonb, '${OFFICE}', 'dead', 'duplicate create dead', NOW() - INTERVAL '20 minutes');
     INSERT INTO public.job_queue (job_type, payload, office_id, status, last_error, created_at, completed_at) VALUES
       ('rfp_bidboard_create', '{"dealId":"${DEAL_COMPLETED_LIVE}"}'::jsonb, '${OFFICE}', 'completed', NULL, NOW() - INTERVAL '20 minutes', NOW() - INTERVAL '5 minutes');
+
+    -- ARCHIVED (P2): identical stuck baseline to DEAL_STUCK (dead job, past grace) but is_active=false — the deal
+    -- was archived after its create died. deleteDeal only flips is_active; the RFP fields stay intact. The
+    -- watchdog must exclude it (its create handler + failed callback both refuse to reconcile inactive deals).
+    INSERT INTO office_test.deals
+      (id, is_bid_board_owned, rfp_approval_status, rfp_approval_requested_at, rfp_bidboard_attempt_at, is_active)
+    VALUES ('${DEAL_ARCHIVED}', false, 'pending', NOW() - INTERVAL '2 hours', NOW() - INTERVAL '30 minutes', false);
+    INSERT INTO public.job_queue (job_type, payload, office_id, status, last_error, created_at) VALUES
+      ('rfp_bidboard_create', '{"dealId":"${DEAL_ARCHIVED}"}'::jsonb, '${OFFICE}', 'dead', 'archived deal boom', NOW() - INTERVAL '20 minutes');
   `);
   return db;
 }
@@ -215,6 +227,17 @@ describe("runRfpBidBoardCreateStuckDealSweep (real SQL)", () => {
     // Retry and fire a SECOND external create, the exact duplicate this watchdog exists to prevent.
     const { db } = await run();
     const s = await status(db, DEAL_COMPLETED_LIVE);
+    expect(s.rfp_approval_status).toBe("pending");
+    expect(s.rfp_override_state).toBeNull();
+  });
+
+  it("3c. does NOT flip an ARCHIVED (is_active=false) deal even with a genuinely-stuck baseline", async () => {
+    // DEAL_ARCHIVED has the exact stuck baseline of DEAL_STUCK (dead job, no live retry, past grace) but was
+    // archived after the create died (deleteDeal flips is_active=false, leaving the RFP fields intact). The
+    // watchdog must exclude it — its create handler + failed-callback both refuse to reconcile inactive deals,
+    // so flipping it to send_failed would strand a terminal row in a "retryable" state no one can clear.
+    const { db } = await run();
+    const s = await status(db, DEAL_ARCHIVED);
     expect(s.rfp_approval_status).toBe("pending");
     expect(s.rfp_override_state).toBeNull();
   });
