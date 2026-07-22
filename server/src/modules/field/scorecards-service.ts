@@ -1535,6 +1535,11 @@ function scorecardEditableContentEquals(input: {
   return JSON.stringify(current) === JSON.stringify(desired);
 }
 
+// The current-form editable lifecycle — MUST match the accepted statuses in updateFieldScorecard's guard
+// (`submitted` + the two corrective-action states). canEdit gates the mobile edit action; if it were narrower
+// than the edit guard, an open/closed V2 card could never reach the edit/reconciliation path.
+const EDITABLE_SCORECARD_STATUSES = new Set(["submitted", "corrective_action_open", "corrective_action_closed"]);
+
 function toSummary(
   row: ScorecardSummarySource,
   projectName = row.projectName ?? null,
@@ -1566,7 +1571,7 @@ function toSummary(
       Boolean(viewerUserId) &&
       row.submittedBy === viewerUserId &&
       formVersion === 2 &&
-      (row.status ?? "submitted") === "submitted",
+      EDITABLE_SCORECARD_STATUSES.has(row.status ?? "submitted"),
     // PDF is rendered/uploaded post-response (best-effort/async) — null right after submit until the
     // artifact lands. Surface availability so downstream (mobile + CRM) can gate the download action.
     hasPdf: Boolean(row.pdfR2Key ?? row.pdfGeneratedAt),

@@ -437,6 +437,29 @@ describe("updateFieldScorecard authorization and visibility", () => {
     expect((await listRecentFieldScorecards(tdb, { viewerUserId: OTHER_USER })).scorecards[0]?.canEdit).toBe(false);
   });
 
+  it("advertises canEdit for the submitter on open AND closed corrective-action cards (finding 3)", async () => {
+    // A below-band card opens in corrective_action_open. canEdit must be true for the submitter so the mobile
+    // edit action (gated on canEdit) can reach the edit/reconciliation path — the edit guard accepts this status.
+    const { scorecard } = await createFieldScorecard(tdb, projectSubmission({
+      clientSubmissionId: csid(13),
+      items: projectItems(5), // avg 5 → corrective_action_open
+      actionItems: ["Re-inspect slab 2"],
+    }));
+    expect(scorecard.status).toBe("corrective_action_open");
+    expect(scorecard.canEdit).toBe(true);
+    expect((await getFieldScorecardDetail(tdb, scorecard.id, OWNER_ACCESS)).canEdit).toBe(true);
+    expect((await listFieldScorecardsForProject(tdb, OWNER_ACCESS, DEAL)).scorecards[0]?.canEdit).toBe(true);
+    // A different user still can't edit it.
+    expect((await getFieldScorecardDetail(tdb, scorecard.id, OTHER_ACCESS)).canEdit).toBe(false);
+
+    // Drive the card to corrective_action_closed and confirm canEdit stays true for the submitter (re-open path).
+    await tdb.execute(
+      sql`UPDATE field_scorecards SET status = 'corrective_action_closed' WHERE id = ${scorecard.id}`,
+    );
+    expect((await getFieldScorecardDetail(tdb, scorecard.id, OWNER_ACCESS)).canEdit).toBe(true);
+    expect((await getFieldScorecardDetail(tdb, scorecard.id, OTHER_ACCESS)).canEdit).toBe(false);
+  });
+
   it("denies a different UUID even when that user is an admin", async () => {
     const { scorecard } = await createFieldScorecard(tdb, projectSubmission({ clientSubmissionId: csid(11) }));
     await expectAppError(
