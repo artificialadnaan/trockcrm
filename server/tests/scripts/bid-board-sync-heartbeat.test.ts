@@ -1,7 +1,12 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import {
+  DEAD_LETTER_GRACE_MINUTES_DEFAULT,
+  deadLetterBatchIdempotencyKey,
+  deadLetterGraceMinutes,
   decideHeartbeat,
+  renderDeadLetterEmail,
   renderHeartbeatEmail,
+  type DeadLetterRow,
 } from "../../src/scripts/bid-board-sync-heartbeat.js";
 
 const MIN = 60_000;
@@ -112,5 +117,133 @@ describe("renderHeartbeatEmail (pure)", () => {
     });
     expect(subject.toLowerCase()).toMatch(/recover|resumed|back/);
     expect(html).toContain("2026-06-18T21:55:00.000Z");
+  });
+});
+
+describe("renderDeadLetterEmail (pure)", () => {
+  const row = (i: number): DeadLetterRow => ({
+    id: `id-${i}`,
+    sourceFilename: `File-${i}.xlsx`,
+    lastError: `err-${i}`,
+    idempotencyKey: `hash-${i}`,
+    finishedAt: new Date("2026-07-22T03:00:00.000Z"),
+  });
+
+  it("renders a batch: pluralized subject, each file/error/key, and finished timestamp", () => {
+    const { subject, html } = renderDeadLetterEmail({ office: "dallas", rows: [row(1), row(2)], now: NOW });
+    expect(subject).toContain("DEAD-LETTERED");
+    expect(subject).toContain("2 failed imports");
+    expect(html).toContain("File-1.xlsx");
+    expect(html).toContain("err-2");
+    expect(html).toContain("hash-1");
+    expect(html).toContain("2026-07-22T03:00:00.000Z");
+  });
+
+  it("states the CORRECT recovery: a same-payload re-POST is a no-op; needs a fresh payload / requeue", () => {
+    const { html } = renderDeadLetterEmail({ office: "dallas", rows: [row(1)], now: NOW });
+    // The old copy said "re-trigger the push", which hits ON CONFLICT DO NOTHING and enqueues nothing.
+    expect(html).not.toMatch(/re-trigger the push/i);
+    expect(html.toLowerCase()).toContain("no-op");
+    expect(html.toLowerCase()).toMatch(/fresh scrape|new idempotency key|requeue/);
+  });
+
+  it("uses the singular for one failure", () => {
+    const { subject } = renderDeadLetterEmail({ office: "dallas", rows: [row(1)], now: NOW });
+    expect(subject).toMatch(/1 failed import\b/);
+    expect(subject).not.toContain("imports");
+  });
+
+  it("caps the emailed list at 20 and notes how many more", () => {
+    const rows = Array.from({ length: 26 }, (_, i) => row(i));
+    const { subject, html } = renderDeadLetterEmail({ office: "dallas", rows, now: NOW });
+    expect(subject).toContain("26 failed imports"); // subject reflects the TRUE count
+    expect(html).toContain("File-19.xlsx"); // the 20th shown (0-indexed)
+    expect(html).not.toContain("File-20.xlsx"); // capped
+    expect(html).toContain("and 6 more");
+  });
+});
+
+describe("deadLetterGraceMinutes — env parsing (Codex P2: blank must not disable the grace)", () => {
+  const KEY = "BID_BOARD_DEAD_LETTER_GRACE_MINUTES";
+  afterEach(() => {
+    delete process.env[KEY];
+  });
+
+  it("unset → default", () => {
+    delete process.env[KEY];
+    expect(deadLetterGraceMinutes()).toBe(DEAD_LETTER_GRACE_MINUTES_DEFAULT);
+  });
+
+  it("blank string → default (NOT 0 — a blank env var must not silently disable the grace)", () => {
+    process.env[KEY] = "";
+    expect(deadLetterGraceMinutes()).toBe(DEAD_LETTER_GRACE_MINUTES_DEFAULT);
+  });
+
+  it("whitespace-only → default", () => {
+    process.env[KEY] = "   ";
+    expect(deadLetterGraceMinutes()).toBe(DEAD_LETTER_GRACE_MINUTES_DEFAULT);
+  });
+
+  it('explicit "0" → 0 (the escape hatch that disables the grace)', () => {
+    process.env[KEY] = "0";
+    expect(deadLetterGraceMinutes()).toBe(0);
+  });
+
+  it('"20" → 20', () => {
+    process.env[KEY] = "20";
+    expect(deadLetterGraceMinutes()).toBe(20);
+  });
+
+  it('"  20  " (surrounding whitespace) → 20', () => {
+    process.env[KEY] = "  20  ";
+    expect(deadLetterGraceMinutes()).toBe(20);
+  });
+
+  // Codex P2: the value is passed to `make_interval(mins => $2::int)`, so a finite NON-integer would blow up
+  // every office's sweep with Postgres `invalid input syntax for type integer`. Only a non-negative integer is
+  // accepted; a fractional value falls back to the default.
+  it('"0.5" (finite non-integer) → default (would otherwise crash $2::int)', () => {
+    process.env[KEY] = "0.5";
+    expect(deadLetterGraceMinutes()).toBe(DEAD_LETTER_GRACE_MINUTES_DEFAULT);
+  });
+
+  it('"15.9" (finite non-integer) → default', () => {
+    process.env[KEY] = "15.9";
+    expect(deadLetterGraceMinutes()).toBe(DEAD_LETTER_GRACE_MINUTES_DEFAULT);
+  });
+
+  it('"0" (explicit integer escape hatch) → 0, "20" → 20', () => {
+    process.env[KEY] = "0";
+    expect(deadLetterGraceMinutes()).toBe(0);
+    process.env[KEY] = "20";
+    expect(deadLetterGraceMinutes()).toBe(20);
+  });
+
+  it("garbage / negative → default", () => {
+    process.env[KEY] = "abc";
+    expect(deadLetterGraceMinutes()).toBe(DEAD_LETTER_GRACE_MINUTES_DEFAULT);
+    process.env[KEY] = "-5";
+    expect(deadLetterGraceMinutes()).toBe(DEAD_LETTER_GRACE_MINUTES_DEFAULT);
+  });
+});
+
+describe("deadLetterBatchIdempotencyKey — stable, order-independent batch key", () => {
+  it("is deterministic and independent of id order (same batch → same key)", () => {
+    const a = deadLetterBatchIdempotencyKey("dallas", ["id-3", "id-1", "id-2"]);
+    const b = deadLetterBatchIdempotencyKey("dallas", ["id-1", "id-2", "id-3"]);
+    expect(a).toBe(b);
+    expect(a).toMatch(/^dead-letter:dallas:[0-9a-f]{64}$/);
+  });
+
+  it("changes when the batch membership changes (a different alert gets a different key)", () => {
+    const two = deadLetterBatchIdempotencyKey("dallas", ["id-1", "id-2"]);
+    const three = deadLetterBatchIdempotencyKey("dallas", ["id-1", "id-2", "id-3"]);
+    expect(two).not.toBe(three);
+  });
+
+  it("namespaces by office (same ids, different office → different key)", () => {
+    const dallas = deadLetterBatchIdempotencyKey("dallas", ["id-1"]);
+    const atlanta = deadLetterBatchIdempotencyKey("atlanta", ["id-1"]);
+    expect(dallas).not.toBe(atlanta);
   });
 });

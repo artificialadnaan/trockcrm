@@ -43,7 +43,12 @@ interface InboxModule {
   }) => Promise<"succeeded" | "noop" | { status: "deferred"; runAfterSeconds: number; reason: string }>;
   recoverOrphanedInboxJobs: (
     db: { query: (text: string, params?: any[]) => Promise<{ rows: any[]; rowCount?: number | null }> },
-    opts?: { staleProcessingMinutes?: number; staleJobMinutes?: number; retentionDays?: number }
+    opts?: {
+      staleProcessingMinutes?: number;
+      staleJobMinutes?: number;
+      retentionDays?: number;
+      hardRetentionDays?: number;
+    }
   ) => Promise<number>;
 }
 
@@ -215,6 +220,14 @@ export async function handleBidBoardIngestJob(
  * landed) or stale 'processing' (worker died mid-import) with no live job. Never throws — recovery must
  * not crash worker boot.
  */
+/** Optional positive-integer env override; unset/blank/garbage → undefined (the inbox default applies). */
+function optionalPositiveIntEnv(name: string): number | undefined {
+  const raw = (process.env[name] ?? "").trim();
+  if (raw === "") return undefined;
+  const n = Number(raw);
+  return Number.isInteger(n) && n > 0 ? n : undefined;
+}
+
 export async function runBidBoardIngestInboxRecovery(): Promise<number> {
   try {
     const inbox = await importFirstAvailable<InboxModule>(SERVER_INBOX_MODULES);
@@ -223,7 +236,14 @@ export async function runBidBoardIngestInboxRecovery(): Promise<number> {
     // of recovery's queries forever: the startup call awaited in worker/src/index.ts would never reach job
     // polling, and periodic invocations could retain pool slots. timedPoolQuery destroys the connection on
     // timeout so a dead socket can neither wedge boot nor leak a slot.
-    const recovered = await inbox.recoverOrphanedInboxJobs({ query: timedPoolQuery });
+    //
+    // hardRetentionDays (env-overridable) is the ceiling past which even an UNALERTED 'failed' row is purged, so
+    // that — with BID_BOARD_HEARTBEAT_RECIPIENTS unset by default — deferred-retention failures can't grow
+    // without bound. Undefined when unset → the inbox module's own default (60 days) applies.
+    const recovered = await inbox.recoverOrphanedInboxJobs(
+      { query: timedPoolQuery },
+      { hardRetentionDays: optionalPositiveIntEnv("BID_BOARD_INBOX_HARD_RETENTION_DAYS") }
+    );
     if (recovered > 0) {
       console.log(`[Worker:bid_board_ingest] Recovered ${recovered} orphaned inbox job(s)`);
     }

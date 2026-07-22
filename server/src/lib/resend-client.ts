@@ -23,6 +23,13 @@ export interface SendEmailOptions {
   suppressGlobalBcc?: boolean;
   /** Fail closed instead of treating a missing mail transport as a successful dev send. */
   requireConfiguredTransport?: boolean;
+  /**
+   * Optional Resend idempotency key (threaded to resend.emails.send's second arg). When set, a re-send of the
+   * SAME payload under the SAME key dedupes provider-side — used by at-least-once alert senders (e.g. the
+   * dead-letter sweep) so a re-send after an uncertain marker write can't duplicate the page. Omitting it is a
+   * no-op, so every existing caller is unaffected. Mirrors the worker's system-email sender.
+   */
+  idempotencyKey?: string;
 }
 
 export interface SendEmailResult {
@@ -167,17 +174,30 @@ export async function sendSystemEmailWithMetadata(
   }
 
   try {
-    const result = await client.emails.send({
-      from: FROM_ADDRESS,
-      to: overridden.to,
-      subject: overridden.subject,
-      html: overridden.htmlBody,
-      ...(options.text ? { text: options.text } : {}),
-      ...(overridden.cc.length ? { cc: overridden.cc } : {}),
-      ...(overridden.bcc.length ? { bcc: overridden.bcc } : {}),
-    });
+    const result = await client.emails.send(
+      {
+        from: FROM_ADDRESS,
+        to: overridden.to,
+        subject: overridden.subject,
+        html: overridden.htmlBody,
+        ...(options.text ? { text: options.text } : {}),
+        ...(overridden.cc.length ? { cc: overridden.cc } : {}),
+        ...(overridden.bcc.length ? { bcc: overridden.bcc } : {}),
+      },
+      options.idempotencyKey ? { idempotencyKey: options.idempotencyKey } : undefined
+    );
 
     if (result.error) {
+      // Resend returns 409 `invalid_idempotent_request` when this key was already used with a DIFFERENT payload —
+      // i.e. the email was already delivered under the original payload. When a caller supplied an idempotency key,
+      // treat ONLY that as delivered so an at-least-once retry stamps 'sent' instead of stranding on a re-send it
+      // can never win. Everything else (incl. `concurrent_idempotent_requests` — the original is still in flight)
+      // falls through to the normal failure path. Mirrors the worker's system-email sender.
+      const err = result.error as { name?: string };
+      if (options.idempotencyKey != null && err.name === "invalid_idempotent_request") {
+        console.warn(`[Email] invalid_idempotent_request for "${overridden.subject}" — already delivered, treating as sent`);
+        return { success: true, messageId: null };
+      }
       console.error("[Email] Resend error:", result.error);
       return { success: false, messageId: null };
     }
