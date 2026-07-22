@@ -3,6 +3,7 @@ import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
 import { sql } from "drizzle-orm";
 import { createFieldScorecard } from "../../../src/modules/field/scorecards-service.js";
+import { resolveCorrectiveActionItem } from "../../../src/modules/field/corrective-actions-service.js";
 import {
   fieldScorecards,
   fieldScorecardItems,
@@ -209,5 +210,98 @@ describe("createFieldScorecard corrective-action trigger", () => {
     expect(scorecard.rating).toBe("corrective_action");
     expect((await getScorecardRow(scorecard.id)).status).toBe("submitted");
     expect(await getCorrectiveActions(scorecard.id)).toHaveLength(0);
+  });
+});
+
+describe("resolveCorrectiveActionItem closure", () => {
+  it("resolving the LAST open item auto-closes the scorecard; resolving a non-last item does not", async () => {
+    const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
+    const items = await getCorrectiveActions(scorecard.id);
+    expect(items).toHaveLength(3);
+
+    await resolveCorrectiveActionItem(tdb, {
+      scorecardId: scorecard.id,
+      itemId: items[0].id,
+      responseComment: "fixed",
+      respondedBy: { userId: USER, name: "Sam", email: null },
+    });
+    expect((await getScorecardRow(scorecard.id)).status).toBe("corrective_action_open");
+
+    for (const it of items.slice(1)) {
+      await resolveCorrectiveActionItem(tdb, {
+        scorecardId: scorecard.id,
+        itemId: it.id,
+        responseComment: "fixed",
+        respondedBy: { userId: null, name: "Ext PM", email: "pm@x.com" },
+      });
+    }
+    expect((await getScorecardRow(scorecard.id)).status).toBe("corrective_action_closed");
+
+    const resolved = await getCorrectiveActions(scorecard.id);
+    expect(resolved.every((i) => i.status === "resolved")).toBe(true);
+  });
+
+  it("stamps the responder identity + comment on the resolved item", async () => {
+    const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
+    const [first] = await getCorrectiveActions(scorecard.id);
+    await resolveCorrectiveActionItem(tdb, {
+      scorecardId: scorecard.id,
+      itemId: first.id,
+      responseComment: "Slab re-inspected, hold point cleared",
+      respondedBy: { userId: USER, name: "Sam Field", email: null },
+    });
+    const res = await tdb.execute(sql`
+      SELECT status, response_comment, responded_by_user_id, responder_name, responder_email, responded_at
+      FROM scorecard_corrective_actions WHERE id = ${first.id}
+    `);
+    const row = res.rows[0];
+    expect(row.status).toBe("resolved");
+    expect(row.response_comment).toBe("Slab re-inspected, hold point cleared");
+    expect(row.responded_by_user_id).toBe(USER);
+    expect(row.responder_name).toBe("Sam Field");
+    expect(row.responder_email).toBeNull();
+    expect(row.responded_at).not.toBeNull();
+  });
+
+  it("re-resolving an already-resolved item is a no-op (idempotent) and keeps it closed", async () => {
+    const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
+    const items = await getCorrectiveActions(scorecard.id);
+    for (const it of items) {
+      await resolveCorrectiveActionItem(tdb, {
+        scorecardId: scorecard.id,
+        itemId: it.id,
+        responseComment: "fixed",
+        respondedBy: { userId: USER, name: "Sam", email: null },
+      });
+    }
+    expect((await getScorecardRow(scorecard.id)).status).toBe("corrective_action_closed");
+
+    // Re-resolving the first item again is a no-op — no throw, still closed.
+    await expect(
+      resolveCorrectiveActionItem(tdb, {
+        scorecardId: scorecard.id,
+        itemId: items[0].id,
+        responseComment: "second attempt",
+        respondedBy: { userId: USER, name: "Sam", email: null },
+      }),
+    ).resolves.toBeUndefined();
+    expect((await getScorecardRow(scorecard.id)).status).toBe("corrective_action_closed");
+
+    // The original responder/comment on item 0 is untouched (guarded update skipped it).
+    const after = await tdb.execute(
+      sql`SELECT response_comment FROM scorecard_corrective_actions WHERE id = ${items[0].id}`,
+    );
+    expect(after.rows[0].response_comment).toBe("fixed");
+  });
+
+  it("resolving an unknown item id is a no-op that does not close the scorecard", async () => {
+    const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
+    await resolveCorrectiveActionItem(tdb, {
+      scorecardId: scorecard.id,
+      itemId: "00000000-0000-0000-0000-0000000000ff",
+      responseComment: "nope",
+      respondedBy: { userId: USER, name: "Sam", email: null },
+    });
+    expect((await getScorecardRow(scorecard.id)).status).toBe("corrective_action_open");
   });
 });
