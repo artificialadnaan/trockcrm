@@ -360,6 +360,11 @@ export async function runRfpBidBoardCreateStuckDealSweep(
               d.rfp_approval_request_id IS NULL
               -- never touch an already-created deal — the bid-board-created callback already linked it.
               AND d.is_bid_board_owned = false
+              -- never touch an ARCHIVED deal: deleteDeal sets is_active=false but LEAVES the RFP fields intact,
+              -- and the create handler + failed callback both refuse to reconcile inactive deals (findDeal filters
+              -- is_active=true). Without this the watchdog would rewrite a terminal archived row to send_failed and
+              -- bump its updated_at. (Applied to BOTH the CTE and the outer UPDATE via this shared predicate.)
+              AND d.is_active = true
               -- never resurrect a failure onto a terminally re-confirmed denial.
               AND d.rfp_override_decision IS DISTINCT FROM 'denial_reconfirmed'
               -- only a create-in-flight sub-case (mirrors the per-job sweep): a 2/3-YES voting create (pending)
