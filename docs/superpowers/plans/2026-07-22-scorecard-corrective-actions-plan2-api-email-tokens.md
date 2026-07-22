@@ -23,7 +23,7 @@
 ### Task 1: Schema — email-only team members + token table
 
 **Files:**
-- Create: `migrations/0192_corrective_action_recipients.sql` (verify next free number; Plan 1 used 0190/0191)
+- Create: `migrations/0191_corrective_action_recipients.sql` (verify next free number; Plan 1 used 0190)
 - Modify: `shared/src/schema/tenant/deal-team-members.ts`; create `shared/src/schema/tenant/scorecard-corrective-action-tokens.ts`; export from the tenant schema index.
 - Test: `shared/src/schema/tenant/__tests__/corrective-action-recipients.test.ts`
 
@@ -31,7 +31,7 @@
 
 Run: `ls migrations/ | grep -oE '^0[0-9]{3}' | sort -u | tail -3` and read the CREATE for `deal_team_members` (grep the migrations) — note whether `user_id` is `NOT NULL` and whether any UNIQUE includes it. The migration must relax `user_id` to nullable and add `member_name text`, `member_email text`, and a `CHECK (user_id IS NOT NULL OR member_email IS NOT NULL)`. Both a `DO`-loop over existing `office_*` schemas AND a `-- TENANT_SCHEMA_START/END` block (literal `office_dallas.` token — the convention Plan 1 verified via `office/service.ts`).
 
-- [ ] **Step 2: Write the migration** (`0192_corrective_action_recipients.sql`)
+- [ ] **Step 2: Write the migration** (`0191_corrective_action_recipients.sql`)
 
 Per-tenant, for each `office_*` (DO-loop, `to_regclass`-guarded like Plan 1) and in a TENANT_SCHEMA block:
 ```sql
@@ -66,7 +66,7 @@ CREATE INDEX IF NOT EXISTS scorecard_corrective_action_tokens_scorecard_idx
 
 - [ ] **Step 4: Shape test** — assert the new columns/table exist in the Drizzle models. Run it; expect pass.
 
-- [ ] **Step 5: Commit** — `feat(scorecards): email-only team members + corrective-action token schema (migration 0192)`
+- [ ] **Step 5: Commit** — `feat(scorecards): email-only team members + corrective-action token schema (migration 0191)`
 
 ---
 
@@ -137,7 +137,7 @@ Query `deal_team_members` where `deal_id = dealId AND is_active AND role IN ('su
 
 - [ ] **Step 1: Failing test.** Cover: (a) `GET /field/scorecards/:id/corrective-actions` returns the items + their responses for a session user assigned to the deal; (b) the same GET works with `?token=<raw>` for an email-only recipient (no session); (c) `POST /field/scorecards/:id/corrective-actions/:itemId` with `{ comment, photoFileIds? }` marks the item resolved (via `resolveCorrectiveActionItem`) stamping the responder (user id for session, `recipient_email`/name for token), and closing the scorecard when it's the last; (d) an invalid/expired token → 401/403; (e) a session user NOT on the deal's team and not an authorized role → 403; (f) a token for scorecard A cannot touch scorecard B.
 
-- [ ] **Step 2: Implement.** An auth resolver that accepts EITHER the field session (`requireFieldContractor` + assigned-to-deal or an authorized role) OR a valid `?token` (via `verifyCorrectiveActionToken`, and the token's `scorecardId` must equal the route param). The POST links any `photoFileIds` (already-uploaded files) to the item by setting `field_scorecard_photos.corrective_action_id`, then calls `resolveCorrectiveActionItem` with the responder identity. All writes in the deal's office schema; strict scorecard-belongs-to-deal checks. (Photo UPLOAD for the token path can reuse the existing field upload endpoint if it accepts a token, or add a token-scoped upload — if that's large, stub the upload endpoint's auth to accept the token and note it; the itemized response linking is the core.)
+- [ ] **Step 2: Implement.** An auth resolver that accepts EITHER the field session (`requireFieldContractor` + assigned-to-deal or an authorized role) OR a valid `?token` (via `verifyCorrectiveActionToken`, and the token's `scorecardId` must equal the route param). The POST's `photoFileIds` are FRESH response uploads: INSERT each as a NEW `field_scorecard_photos` row with `section_key`/`deficiency_key` NULL and `corrective_action_id` = this item — BEFORE calling `resolveCorrectiveActionItem` with the responder identity. Do NOT reclassify existing evidence by stamping `corrective_action_id` on an existing row; guard against it — reject any fileId that already has a `field_scorecard_photos` row for this scorecard (stamping it would drop that evidence from the PDF/evidence grid, which exclude `corrective_action_id IS NOT NULL`, letting a responder hijack/erase original evidence). All writes in the deal's office schema; strict scorecard-belongs-to-deal checks. (Photo UPLOAD for the token path can reuse the existing field upload endpoint if it accepts a token, or add a token-scoped upload — if that's large, stub the upload endpoint's auth to accept the token and note it; the itemized response linking is the core.)
 
 - [ ] **Step 3: Run → pass. Typecheck. Commit** — `feat(scorecards): corrective-action read + itemized response API (session or token auth)`
 

@@ -48,8 +48,10 @@ items** like replies. Once every flagged item has a response, the scorecard **au
 
 ### 4.1 Scorecard status (stages)
 `field_scorecards.status` values become: `submitted` | `corrective_action_open` | `corrective_action_closed`.
-- On submit, if the rating is the corrective-action band → `corrective_action_open`; else `submitted`
-  (unchanged behavior for passing scorecards).
+- On submit, the stage opens to `corrective_action_open` **only when** the rating is the corrective-action
+  band **AND** there is at least one flagged item (≥1 action item or critical deficiency). Otherwise the card
+  stays `submitted` — including a below-band card with **no** flagged items (nothing to correct itemwise), as
+  well as any passing scorecard (unchanged behavior).
 
 ### 4.2 New table: `scorecard_corrective_actions` (per-tenant schema)
 One row per **flagged item** on a below-band scorecard, seeded `open` at submit.
@@ -90,12 +92,13 @@ corrective-action flow. Mirrors `public_photo_tokens` handling (hash at rest, ex
 ## 5. Trigger & notification
 
 - In `createFieldScorecard` (`server/src/modules/field/scorecards-service.ts`), after computing the rating:
-  if corrective-action band, set `status = corrective_action_open`, seed `scorecard_corrective_actions` rows
-  (one per action item + deficiency), and enqueue a durable `scorecard_corrective_action_email` job **in the
-  submit transaction** (same outbox pattern as the existing email job).
+  if the rating is the corrective-action band **and** there is ≥1 flagged item (see §4.1), set
+  `status = corrective_action_open`, seed `scorecard_corrective_actions` rows (one per action item +
+  deficiency), and enqueue a durable `scorecard_corrective_action_email` job **in the submit transaction**
+  (same outbox pattern as the existing email job).
 - Worker handler resolves recipients per deal (hybrid, see §6), mints web tokens for email-only recipients,
   and sends **one email per recipient** (or a shared email with per-recipient links) with: the score/rating,
-  the flagged items, and a **link** — a TRock Cam deep link (`trockcrm://scorecard/<id>/corrective-action`) for
+  the flagged items, and a **link** — a TRock Cam deep link (`trockcam://scorecards/corrective-action/<id>`) for
   CRM users, or the tokenized web URL for email-only. Idempotent per (scorecard, recipient) via an
   `email_sent_at`-style stamp.
 

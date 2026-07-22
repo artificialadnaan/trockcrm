@@ -21,20 +21,20 @@
 ### Task 1: Migration — new table, status values, photo FK
 
 **Files:**
-- Create: `migrations/0191_scorecard_corrective_actions.sql`
+- Create: `migrations/0190_scorecard_corrective_actions.sql`
 - Reference: an existing per-tenant migration with a `DO`-loop over `office_*` schemas AND a `-- TENANT_SCHEMA_START/END` block.
 
 - [ ] **Step 1: Find the next migration number and confirm it's free**
 
 Run: `ls migrations/ | grep -oE '^0[0-9]{3}' | sort -u | tail -3`
-Expected: highest is `0190`; use `0191`. (If not, use the next free number and rename accordingly throughout.)
+Expected: highest is `0189`; use `0190`. (If not, use the next free number and rename accordingly throughout.)
 
 - [ ] **Step 2: Write the migration**
 
-Create `migrations/0191_scorecard_corrective_actions.sql`. It must (a) run for every EXISTING `office_*` schema via a `DO`-loop, AND (b) include a `-- TENANT_SCHEMA_START/END` block so the office provisioner replays it for NEW offices. Per-tenant objects: the new table + its indexes + the `field_scorecard_photos.corrective_action_id` column. `field_scorecards.status` is already a `varchar` — no type change; new values are enforced in app code + a widened CHECK if one exists (verify: `grep -n "status" migrations/*field_scorecard* 2>/dev/null` — if there's a CHECK constraint on status, this migration must drop+recreate it to include the new values).
+Create `migrations/0190_scorecard_corrective_actions.sql`. It must (a) run for every EXISTING `office_*` schema via a `DO`-loop, AND (b) include a `-- TENANT_SCHEMA_START/END` block so the office provisioner replays it for NEW offices. Per-tenant objects: the new table + its indexes + the `field_scorecard_photos.corrective_action_id` column. `field_scorecards.status` is already a `varchar` — no type change; new values are enforced in app code + a widened CHECK if one exists (verify: `grep -n "status" migrations/*field_scorecard* 2>/dev/null` — if there's a CHECK constraint on status, this migration must drop+recreate it to include the new values).
 
 ```sql
--- Migration 0191: corrective-action follow-up for below-band scorecards.
+-- Migration 0190: corrective-action follow-up for below-band scorecards.
 -- Per-tenant (office_* schemas). Seeds one scorecard_corrective_actions row per flagged item when a scorecard
 -- trips the corrective-action band; the scorecard's status walks submitted -> corrective_action_open ->
 -- corrective_action_closed. See docs/superpowers/specs/2026-07-22-scorecard-corrective-actions-design.md.
@@ -103,13 +103,13 @@ ALTER TABLE "{{schema}}".field_scorecard_photos
 
 - [ ] **Step 3: Verify the migration parses on a throwaway PGlite**
 
-Write a scratch check (or rely on Task 2's runtime test which creates the tables). Minimum: `grep -c "TENANT_SCHEMA" migrations/0191_scorecard_corrective_actions.sql` → expected `2` (START + END).
+Write a scratch check (or rely on Task 2's runtime test which creates the tables). Minimum: `grep -c "TENANT_SCHEMA" migrations/0190_scorecard_corrective_actions.sql` → expected `2` (START + END).
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add migrations/0191_scorecard_corrective_actions.sql
-git commit -m "feat(scorecards): migration 0191 — corrective-action items table + status/photo columns"
+git add migrations/0190_scorecard_corrective_actions.sql
+git commit -m "feat(scorecards): migration 0190 — corrective-action items table + status/photo columns"
 ```
 
 ---
@@ -143,7 +143,7 @@ describe("scorecardCorrectiveActions schema", () => {
 Run: `npx vitest run shared/src/schema/tenant/__tests__/scorecard-corrective-actions.test.ts`
 Expected: FAIL — cannot find `../scorecard-corrective-actions`.
 
-- [ ] **Step 3: Create the Drizzle table (mirror migration 0191 exactly)**
+- [ ] **Step 3: Create the Drizzle table (mirror migration 0190 exactly)**
 
 ```typescript
 import { pgSchema, text, timestamp, uuid, unique, index } from "drizzle-orm/pg-core";
@@ -326,35 +326,32 @@ Expected: FAIL (status is `submitted`; no rows seeded).
 
 - [ ] **Step 3: Implement the trigger in `createFieldScorecard`**
 
-Inside the existing submit transaction, after `rating` is computed and the scorecard row is inserted, add:
+Inside the existing submit transaction, after `rating` is computed and the scorecard row is inserted, add. Enumerate the flagged items FIRST, then open the stage ONLY when the rating is in the corrective-action band AND there is at least one flagged item — otherwise the card stays `submitted` (a below-band card with nothing flagged has nothing to correct):
 
 ```typescript
-if (isCorrectiveActionBand(rating)) {
+const flagged = enumerateFlaggedItems({ actionItems, criticalDeficiencies: deficiencies });
+
+if (isCorrectiveActionBand(rating) && flagged.length > 0) {
   await tenantDb
     .update(fieldScorecards)
     .set({ status: "corrective_action_open" })
     .where(eq(fieldScorecards.id, card.id));
 
-  const flagged = enumerateFlaggedItems({ actionItems, criticalDeficiencies: deficiencies });
-  if (flagged.length > 0) {
-    await tenantDb.insert(scorecardCorrectiveActions).values(
-      flagged.map((f) => ({
-        scorecardId: card.id,
-        itemType: f.itemType,
-        itemRef: f.itemRef,
-        itemLabel: f.itemLabel,
-        status: "open" as const,
-      }))
-    );
-  }
+  await tenantDb.insert(scorecardCorrectiveActions).values(
+    flagged.map((f) => ({
+      scorecardId: card.id,
+      itemType: f.itemType,
+      itemRef: f.itemRef,
+      itemLabel: f.itemLabel,
+      status: "open" as const,
+    }))
+  );
 }
 ```
 
 Use the same `tenantDb`/`card`/`actionItems`/`deficiencies` bindings already present in `createFieldScorecard` (verify their exact names). Import `isCorrectiveActionBand`, `enumerateFlaggedItems`, `scorecardCorrectiveActions`.
 
-> EDGE CASE the test must also cover (add a third test): below-band rating but ZERO flagged items (score low, but the form had no action items / deficiencies). Decide + encode: status still `corrective_action_open` but zero seeded rows means it is trivially "all items resolved". To avoid a scorecard that is open-but-uncloseable-yet-instantly-closeable ambiguity, **seed at minimum a synthetic `action_item` item from the low score itself** OR keep it simple: if `flagged.length === 0`, leave status `submitted` (nothing to correct itemwise). Choose the latter for v1 (documented in the spec §4.2 implies items drive the stage). Encode: only set `corrective_action_open` when `flagged.length > 0`.
-
-Adjust Step 3 accordingly: wrap the status update in `if (isCorrectiveActionBand(rating) && flagged.length > 0)`.
+> EDGE CASE the test must also cover (add a third test): below-band rating but ZERO flagged items (score low, but the form had no action items / deficiencies). For v1, if `flagged.length === 0`, leave status `submitted` (nothing to correct itemwise) — the spec §4.2 has items drive the stage. This is exactly what the Step 3 block above encodes: `corrective_action_open` is only set when `isCorrectiveActionBand(rating) && flagged.length > 0`.
 
 - [ ] **Step 4: Run — expect pass (all three cases)**
 

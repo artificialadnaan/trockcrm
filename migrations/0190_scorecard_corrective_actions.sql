@@ -7,6 +7,12 @@
 -- ('corrective_action_open' = 22 chars, 'corrective_action_closed' = 24 chars) do not fit varchar(20).
 -- field_scorecards.status has no CHECK constraint, so only the column length changes here; the new
 -- allowed values are enforced in application code.
+--
+-- DEPLOYMENT: the per-tenant DO-loop below runs inside a single transaction (the whole migration commits
+-- atomically), so it briefly ALTERs field_scorecards + field_scorecard_photos across every office_* schema —
+-- deploy in a low-traffic window to minimize lock contention. The index creates deliberately do NOT use
+-- CREATE INDEX CONCURRENTLY: CONCURRENTLY cannot run inside a transaction block, and these tables are new /
+-- empty at create time so a plain CREATE INDEX is instant and safe here.
 
 DO $tenant$
 DECLARE schema_name text;
