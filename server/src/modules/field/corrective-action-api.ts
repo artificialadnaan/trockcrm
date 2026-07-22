@@ -161,31 +161,33 @@ export async function submitCorrectiveActionResponse(
       throw new AppError(400, "One or more photos are not part of this project.");
     }
 
-    // Link each file to this item as response evidence. Upsert a field_scorecard_photos row per file with
-    // corrective_action_id set and section/deficiency null (a response photo, per spec §4.3). If a row for
-    // this (scorecard, file) already exists (an original evidence photo), stamp its corrective_action_id.
+    // A response photo MUST be a distinct fresh file. Reject any file that already has a
+    // field_scorecard_photos row for this scorecard — that is existing scorecard EVIDENCE, and stamping
+    // corrective_action_id on it would drop it from the PDF/evidence grid (those queries exclude
+    // corrective_action_id IS NOT NULL), letting a responder hijack/erase original evidence.
+    const existing = await db
+      .select({ fileId: fieldScorecardPhotos.fileId })
+      .from(fieldScorecardPhotos)
+      .where(
+        and(
+          eq(fieldScorecardPhotos.scorecardId, input.scorecardId),
+          inArray(fieldScorecardPhotos.fileId, photoFileIds),
+        ),
+      );
+    if (existing.length > 0) {
+      throw new AppError(400, "A response photo must be a new file, not existing scorecard evidence.");
+    }
+
+    // Insert each fresh file as a NEW response-photo row: corrective_action_id set to this item, and
+    // section/deficiency null (a response photo, per spec §4.3). Never UPDATE/stamp an existing row.
     for (const fileId of photoFileIds) {
-      const existing = await db
-        .select({ id: fieldScorecardPhotos.id })
-        .from(fieldScorecardPhotos)
-        .where(
-          and(eq(fieldScorecardPhotos.scorecardId, input.scorecardId), eq(fieldScorecardPhotos.fileId, fileId)),
-        )
-        .limit(1);
-      if (existing[0]) {
-        await db
-          .update(fieldScorecardPhotos)
-          .set({ correctiveActionId: input.itemId })
-          .where(eq(fieldScorecardPhotos.id, existing[0].id));
-      } else {
-        await db.insert(fieldScorecardPhotos).values({
-          scorecardId: input.scorecardId,
-          sectionKey: null,
-          deficiencyKey: null,
-          fileId,
-          correctiveActionId: input.itemId,
-        });
-      }
+      await db.insert(fieldScorecardPhotos).values({
+        scorecardId: input.scorecardId,
+        sectionKey: null,
+        deficiencyKey: null,
+        fileId,
+        correctiveActionId: input.itemId,
+      });
     }
   }
 

@@ -228,4 +228,81 @@ describe("submitCorrectiveActionResponse", () => {
       }),
     ).rejects.toBeInstanceOf(AppError);
   });
+
+  it("rejects a photo file id that is EXISTING scorecard evidence (no hijack of original evidence) (400)", async () => {
+    const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
+    const [first] = await getCorrectiveActionItems(tdb, scorecard.id);
+
+    // FILE_A is already an ORIGINAL evidence photo on this scorecard (section-keyed, no corrective action).
+    await tdb.execute(sql`
+      INSERT INTO field_scorecard_photos (scorecard_id, section_key, deficiency_key, file_id, corrective_action_id)
+      VALUES (${scorecard.id}, 'quality', NULL, ${FILE_A}, NULL)
+    `);
+
+    // Attempting to attach that existing-evidence file id as a RESPONSE photo must be rejected — otherwise
+    // it would stamp corrective_action_id and drop it from the PDF/evidence grid (evidence erased).
+    await expect(
+      submitCorrectiveActionResponse(tdb, {
+        scorecardId: scorecard.id,
+        itemId: first.id,
+        comment: "trying to hijack evidence",
+        photoFileIds: [FILE_A],
+        respondedBy: { userId: USER, name: "Sam", email: null },
+      }),
+    ).rejects.toBeInstanceOf(AppError);
+
+    // The original evidence row is untouched: still section-keyed, still corrective_action_id NULL (visible).
+    const rows = await tdb.execute(
+      sql`SELECT section_key, corrective_action_id FROM field_scorecard_photos WHERE scorecard_id = ${scorecard.id} AND file_id = ${FILE_A}`,
+    );
+    expect(rows.rows).toHaveLength(1);
+    expect(rows.rows[0].section_key).toBe("quality");
+    expect(rows.rows[0].corrective_action_id).toBeNull();
+    // And the item stayed open (the reject aborted before resolution).
+    const items = await getCorrectiveActionItems(tdb, scorecard.id);
+    expect(items.find((i) => i.id === first.id)!.status).toBe("open");
+  });
+
+  it("inserts a FRESH file as a NEW response photo (corrective_action_id set) that never appears as evidence", async () => {
+    const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
+    const [first] = await getCorrectiveActionItems(tdb, scorecard.id);
+
+    // Seed an original evidence photo (FILE_A) so we can prove the evidence query still surfaces it while
+    // excluding the fresh response photo (FILE_B).
+    await tdb.execute(sql`
+      INSERT INTO field_scorecard_photos (scorecard_id, section_key, deficiency_key, file_id, corrective_action_id)
+      VALUES (${scorecard.id}, 'quality', NULL, ${FILE_A}, NULL)
+    `);
+
+    // FILE_B is fresh (no field_scorecard_photos row yet) → inserted as a NEW response photo row.
+    await submitCorrectiveActionResponse(tdb, {
+      scorecardId: scorecard.id,
+      itemId: first.id,
+      comment: "corrective action documented",
+      photoFileIds: [FILE_B],
+      respondedBy: { userId: USER, name: "Sam", email: null },
+    });
+
+    // The response photo is attached to the item (corrective_action_id set, section_key null).
+    const items = await getCorrectiveActionItems(tdb, scorecard.id);
+    const resolved = items.find((i) => i.id === first.id)!;
+    expect(resolved.status).toBe("resolved");
+    expect(resolved.photos.map((p) => p.fileId)).toEqual([FILE_B]);
+
+    const responseRow = await tdb.execute(
+      sql`SELECT section_key, corrective_action_id FROM field_scorecard_photos WHERE scorecard_id = ${scorecard.id} AND file_id = ${FILE_B}`,
+    );
+    expect(responseRow.rows).toHaveLength(1);
+    expect(responseRow.rows[0].section_key).toBeNull();
+    expect(responseRow.rows[0].corrective_action_id).toBe(first.id);
+
+    // The evidence/PDF query (corrective_action_id IS NULL) surfaces ONLY the original evidence (FILE_A),
+    // never the response photo (FILE_B).
+    const evidence = await tdb.execute(
+      sql`SELECT file_id FROM field_scorecard_photos WHERE scorecard_id = ${scorecard.id} AND corrective_action_id IS NULL`,
+    );
+    const evidenceFileIds = (evidence.rows as { file_id: string }[]).map((r) => r.file_id);
+    expect(evidenceFileIds).toContain(FILE_A);
+    expect(evidenceFileIds).not.toContain(FILE_B);
+  });
 });
