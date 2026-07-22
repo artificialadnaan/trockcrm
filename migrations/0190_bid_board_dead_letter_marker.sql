@@ -13,14 +13,15 @@
 -- once is immune: the sweep selects rows still NULL and marks them, so no terminalization is skipped and each
 -- dead-lettered row alerts exactly once regardless of commit ordering.
 --
--- Additive + nullable (existing 'failed' rows read NULL = eligible on the first sweep). The partial index
--- serves the sweep's exact predicate and stays tiny — a stamped or non-'failed' row drops out of it. Public
--- (not per-tenant) table; a single plain, idempotent ALTER + CREATE INDEX. Mirrors the drizzle definition in
+-- Additive + nullable (existing 'failed' rows read NULL = eligible on the first sweep). Public (not
+-- per-tenant) table; a single idempotent ALTER. Mirrors the drizzle definition in
 -- shared/src/schema/public/bid-board-ingestion-inbox.ts so db:generate sees parity, not drift.
+--
+-- The partial index that serves the sweep's predicate lives in its OWN single-statement migration (0191)
+-- so it can build CONCURRENTLY: bid_board_ingestion_inbox is written continuously by the ingest worker
+-- (status/lease/finished_at updates), so a plain CREATE INDEX would take a write-blocking lock. CREATE INDEX
+-- CONCURRENTLY cannot run inside a transaction block, and a file with more than one statement runs as an
+-- implicit transaction, so the index cannot share this ALTER's file — it is split out (see 0191).
 
 ALTER TABLE public.bid_board_ingestion_inbox
   ADD COLUMN IF NOT EXISTS dead_letter_alerted_at timestamptz;
-
-CREATE INDEX IF NOT EXISTS bid_board_ingestion_inbox_dead_letter_idx
-  ON public.bid_board_ingestion_inbox (office_slug, finished_at)
-  WHERE status = 'failed' AND dead_letter_alerted_at IS NULL;

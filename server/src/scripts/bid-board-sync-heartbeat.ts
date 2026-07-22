@@ -13,6 +13,10 @@
 import { createHash } from "node:crypto";
 import pg from "pg";
 import { sendSystemEmail } from "../lib/resend-client.js";
+// Reuse the EXACT per-office advisory-lock key the inbox ingestion holds while an import runs, so the sweep
+// can cheaply establish (via a non-blocking pg_try_advisory_lock on the same key) that no handler is active
+// for this office before it alerts — see sweepDeadLettersForOffice.
+import { BID_BOARD_ADVISORY_NAMESPACE, officeAdvisoryKey } from "../modules/bid-board-sync/inbox.js";
 
 export type AlertState = "ok" | "stalled";
 export type HeartbeatAction = "alert_stalled" | "alert_recovered" | "none";
@@ -390,8 +394,12 @@ export async function runHeartbeatForOffice(
 
 export interface DeadLetterSweepResult {
   office: string;
-  count: number; // dead-lettered rows found this sweep
-  sent: boolean; // an alert email actually sent (false for none-found or a failed send)
+  count: number; // dead-lettered rows ALERTED on this sweep (0 when deferred — see `deferred`)
+  sent: boolean; // an alert email actually sent (false for none-found, a failed send, or a deferred sweep)
+  /** True when an import handler holds this office's advisory lock, so the sweep skipped this cycle to avoid
+   *  a false terminal alert on a still-running (potentially reconciling) import — NOT a failure; retried next
+   *  cron cycle. `count`/`sent` are 0/false in that case. */
+  deferred?: boolean;
 }
 
 /** Stable Resend idempotency key for one office's dead-letter batch: derived from the office + the SORTED row
@@ -413,6 +421,17 @@ export function deadLetterBatchIdempotencyKey(office: string, ids: string[]): st
  * next run — but the send carries a STABLE Resend idempotencyKey derived from the batch, so that re-send
  * dedupes provider-side (a rare duplicate never pages recipients twice) — the correct safe bias for a monitor.
  * Sender is injected; a thrown sender never escapes this fn.
+ *
+ * ACTIVE-IMPORT SERIALIZATION (Codex P2): the eligibility grace only bounds the inbox's POST-COMMIT reconcile
+ * retries — NOT a long-running FINAL-attempt import. recoverOrphanedInboxJobs can mark a row 'failed' while the
+ * handler is still importing (lease renewals lapsed); the age predicate could then alert it before it commits
+ * and recordSuccessWithRetry reconciles it back to 'succeeded'. So before sending, we take a NON-BLOCKING
+ * pg_try_advisory_lock on the SAME per-office key the ingestion holds across an import
+ * (BID_BOARD_ADVISORY_NAMESPACE + officeAdvisoryKey(office), inbox.ts). If a handler holds it (an import is
+ * active for this office) the try-lock fails → we DEFER this office's sweep this cycle (no send, no failure);
+ * it's caught next cron cycle. If it's free we unlock immediately and proceed — a no-active-import proof, not a
+ * held serialization (a handler that starts AFTER our probe imports a NOT-YET-eligible row: its just-'failed'
+ * intermediate state is younger than the grace window, so it can't be alerted this cycle anyway).
  */
 export async function sweepDeadLettersForOffice(
   client: Queryable,
@@ -425,6 +444,23 @@ export async function sweepDeadLettersForOffice(
 
   const rows = await getDeadLetteredInboxRows(client, opts.office);
   if (rows.length === 0) return { office: opts.office, count: 0, sent: false };
+
+  // Establish that no import handler is active for this office before alerting. Non-blocking: a held lock means
+  // an import is in flight, so defer rather than risk a false terminal alert on a row it may still reconcile.
+  const lockKey = officeAdvisoryKey(opts.office);
+  const lockRes = await client.query("SELECT pg_try_advisory_lock($1, $2) AS got", [
+    BID_BOARD_ADVISORY_NAMESPACE,
+    lockKey,
+  ]);
+  if (!lockRes.rows[0]?.got) {
+    // A handler holds the office lock → an import is active. Skip this cycle; the row (if genuinely dead) is
+    // still NULL-marked and will be alerted next cron cycle once the import releases the lock.
+    return { office: opts.office, count: 0, sent: false, deferred: true };
+  }
+  // We only needed the lock as a NON-active-import probe; release it immediately so we never block a real
+  // import (and so a same-session second sweep isn't confused by our own held lock). Best-effort: if the
+  // unlock query itself fails, the session-scoped lock is released on client.end() in the cron's finally.
+  await client.query("SELECT pg_advisory_unlock($1, $2)", [BID_BOARD_ADVISORY_NAMESPACE, lockKey]);
 
   let sent = false;
   if (opts.sendAlert) {
@@ -470,6 +506,87 @@ function intEnv(name: string, fallback: number): number {
 // Stable 64-bit key for the whole-job advisory lock (any constant; namespaced so it can't collide).
 const HEARTBEAT_ADVISORY_LOCK_KEY = 0x6268_6274; // "bbht"
 
+/**
+ * Run the heartbeat check + dead-letter sweep across every office and enforce the two "all offices dark" fail
+ * guards, throwing so the cron exits non-zero when the whole monitor is dark. Extracted from main() (which
+ * only wires env + the DB client + the whole-job lock) so it is unit-testable against PGlite with an injected
+ * sender — the same seam every other fn in this file uses. Per-office isolation is preserved (each check and
+ * each sweep stays in its own try/catch); one office failing never sinks the others.
+ */
+export async function runHeartbeatSweeps(
+  wrap: Queryable,
+  opts: { officeList: string[]; now: Date; thresholdMinutes: number; realertMinutes: number; sendAlert: AlertSender }
+): Promise<void> {
+  const { officeList, now, thresholdMinutes, realertMinutes, sendAlert } = opts;
+  let completed = 0;
+  // Track dead-letter sweeps INDEPENDENTLY of the heartbeat checks: a sweep that THROWS (migration 0190's
+  // column missing, a permissions error, DB blip) OR that finds eligible rows it could not DELIVER (invalid
+  // Resend key, outage) counts as failed; a clean to_regclass table-absent early return, an empty office, and
+  // a `deferred` (import-in-progress) sweep do NOT. If EVERY office's sweep fails, the dead-letter monitor is
+  // entirely dark and must fail the cron (below) — a sweep failure must not otherwise stop the other offices
+  // or the heartbeat checks (each stays in its own try/catch).
+  let sweepAttempts = 0;
+  let sweepFailures = 0;
+  for (const office of officeList) {
+    // One office failing (missing schema, transient DB error) must not sink the others.
+    try {
+      const { decision, lastSuccessAt, sent } = await runHeartbeatForOffice(wrap, {
+        office,
+        now,
+        thresholdMinutes,
+        realertMinutes,
+        sendAlert,
+      });
+      completed++;
+      console.log(
+        `[bid-board-heartbeat] office=${office} stalled=${decision.stalled} action=${decision.action} ` +
+          `sent=${sent} lastSuccess=${lastSuccessAt ? lastSuccessAt.toISOString() : "never"}`
+      );
+    } catch (err) {
+      console.error(`[bid-board-heartbeat] office=${office} heartbeat check FAILED:`, err);
+    }
+
+    // Dead-letter sweep: a 202-accepted push whose async ingestion later dead-lettered is invisible to the
+    // absence-of-success check above (which stays quiet while other imports still succeed), so alert on
+    // newly-'failed' inbox rows. Its OWN try/catch so a sweep error can't sink the heartbeat or the loop.
+    sweepAttempts++;
+    try {
+      const dl = await sweepDeadLettersForOffice(wrap, { office, now, sendAlert });
+      // Eligible rows existed but nothing was DELIVERED (invalid Resend key, quota, transport outage) — count
+      // it as a sweep failure just like a throw, so the "all offices' sweeps failed → throw non-zero" guard
+      // below fires and the cron surfaces the dark monitor instead of a false exit-0 (Codex P2). The legit
+      // no-op cases do NOT trip it: count===0 (nothing to send) and a `deferred` sweep (an import held the
+      // office lock; retried next cycle) both leave sent=false without any undelivered eligible batch.
+      if (dl.count > 0 && !dl.sent && !dl.deferred) {
+        sweepFailures++;
+        console.error(
+          `[bid-board-heartbeat] office=${office} dead-letter DELIVERY failed for ${dl.count} eligible row(s) — no email sent`
+        );
+      } else if (dl.deferred) {
+        console.log(`[bid-board-heartbeat] office=${office} dead-letter sweep DEFERRED (import in progress)`);
+      } else if (dl.count > 0) {
+        console.log(`[bid-board-heartbeat] office=${office} dead-letters=${dl.count} sent=${dl.sent}`);
+      }
+    } catch (err) {
+      sweepFailures++;
+      console.error(`[bid-board-heartbeat] office=${office} dead-letter sweep FAILED:`, err);
+    }
+  }
+  // If EVERY office errored (state table missing, DB down, …) the monitor itself is dark — exit
+  // non-zero so the cron is visibly failing instead of silently reporting success (Codex).
+  if (officeList.length > 0 && completed === 0) {
+    throw new Error(`heartbeat check failed for ALL ${officeList.length} office(s) — see logs above`);
+  }
+  // Same guard for the dead-letter sweep: if EVERY office's sweep FAILED (migration 0190 not applied so the
+  // column is missing, a permissions error, OR eligible rows that could not be delivered), the dead-letter
+  // monitor is silently dark. Fail the cron so the outage is visible rather than a false exit-0 (Codex). A
+  // clean table-absent early return / empty office / deferred sweep isn't a failure, so a not-yet-provisioned
+  // inbox or an import-in-progress alone won't trip this.
+  if (sweepAttempts > 0 && sweepFailures === sweepAttempts) {
+    throw new Error(`dead-letter sweep failed for ALL ${sweepAttempts} office(s) — see logs above`);
+  }
+}
+
 export async function main(now: Date = new Date()): Promise<void> {
   // Empty recipients → full no-op: the job ships inert and only activates when configured.
   const to = recipients();
@@ -511,59 +628,8 @@ export async function main(now: Date = new Date()): Promise<void> {
     // supplies an idempotencyKey so its at-least-once re-send dedupes at Resend; the heartbeat leaves it undefined.
     const sendAlert: AlertSender = (subject, html, idempotencyKey) =>
       sendSystemEmail(to, subject, html, idempotencyKey ? { idempotencyKey } : {});
-    let completed = 0;
-    // Track dead-letter sweeps INDEPENDENTLY of the heartbeat checks: a sweep that THROWS (migration 0190's
-    // column missing, a permissions error, DB blip) counts as failed; a clean to_regclass table-absent early
-    // return does NOT (the sweep ran fine, there was just nothing provisioned to sweep). If EVERY office's
-    // sweep throws, the dead-letter monitor is entirely dark and must fail the cron (below) — a sweep error
-    // must not otherwise stop the other offices or the heartbeat checks (each stays in its own try/catch).
-    let sweepAttempts = 0;
-    let sweepFailures = 0;
-    for (const office of officeList) {
-      // One office failing (missing schema, transient DB error) must not sink the others.
-      try {
-        const { decision, lastSuccessAt, sent } = await runHeartbeatForOffice(wrap, {
-          office,
-          now,
-          thresholdMinutes,
-          realertMinutes,
-          sendAlert,
-        });
-        completed++;
-        console.log(
-          `[bid-board-heartbeat] office=${office} stalled=${decision.stalled} action=${decision.action} ` +
-            `sent=${sent} lastSuccess=${lastSuccessAt ? lastSuccessAt.toISOString() : "never"}`
-        );
-      } catch (err) {
-        console.error(`[bid-board-heartbeat] office=${office} heartbeat check FAILED:`, err);
-      }
 
-      // Dead-letter sweep: a 202-accepted push whose async ingestion later dead-lettered is invisible to the
-      // absence-of-success check above (which stays quiet while other imports still succeed), so alert on
-      // newly-'failed' inbox rows. Its OWN try/catch so a sweep error can't sink the heartbeat or the loop.
-      sweepAttempts++;
-      try {
-        const dl = await sweepDeadLettersForOffice(wrap, { office, now, sendAlert });
-        if (dl.count > 0) {
-          console.log(`[bid-board-heartbeat] office=${office} dead-letters=${dl.count} sent=${dl.sent}`);
-        }
-      } catch (err) {
-        sweepFailures++;
-        console.error(`[bid-board-heartbeat] office=${office} dead-letter sweep FAILED:`, err);
-      }
-    }
-    // If EVERY office errored (state table missing, DB down, …) the monitor itself is dark — exit
-    // non-zero so the cron is visibly failing instead of silently reporting success (Codex).
-    if (officeList.length > 0 && completed === 0) {
-      throw new Error(`heartbeat check failed for ALL ${officeList.length} office(s) — see logs above`);
-    }
-    // Same guard for the dead-letter sweep: if EVERY office's sweep THREW (e.g. migration 0190 not applied so
-    // the column is missing, or a permissions error), the dead-letter monitor is silently dark. Fail the cron
-    // so the outage is visible rather than a false exit-0 (Codex). A clean table-absent early return isn't a
-    // failure, so a not-yet-provisioned inbox alone won't trip this.
-    if (sweepAttempts > 0 && sweepFailures === sweepAttempts) {
-      throw new Error(`dead-letter sweep failed for ALL ${sweepAttempts} office(s) — see logs above`);
-    }
+    await runHeartbeatSweeps(wrap, { officeList, now, thresholdMinutes, realertMinutes, sendAlert });
   } finally {
     await client.end();
   }

@@ -6,8 +6,10 @@ import {
   markDeadLettersAlerted,
   readAlertState,
   runHeartbeatForOffice,
+  runHeartbeatSweeps,
   sweepDeadLettersForOffice,
 } from "../../src/scripts/bid-board-sync-heartbeat.js";
+import { BID_BOARD_ADVISORY_NAMESPACE, officeAdvisoryKey } from "../../src/modules/bid-board-sync/inbox.js";
 
 /**
  * Runtime (PGlite) proof of the heartbeat against real Postgres: the committed-success query, and the
@@ -365,6 +367,69 @@ describe("dead-letter sweep", () => {
     expect(byId[reconciled].dead_letter_alerted_at).toBeNull(); // reconciled row NOT stamped
   });
 
+  // Codex P2: the grace only bounds POST-COMMIT reconcile retries, not a long-running FINAL-attempt import.
+  // recoverOrphanedInboxJobs can mark a row 'failed' while the handler is still importing, and the age
+  // predicate could then alert it before the import commits + reconciles back to 'succeeded'. So the sweep
+  // takes a NON-BLOCKING pg_try_advisory_lock on the SAME per-office key the ingestion holds while importing;
+  // a held lock (import active) DEFERS the sweep this cycle — no send, no stamp, no failure.
+  it("DEFERS (no send, no stamp) when an import handler holds the office advisory lock", async () => {
+    await seedInbox("failed", { finishedAt: ago(30), lastError: "aged-eligible" }); // aged past the grace
+
+    // Simulate ANOTHER backend (the import worker) holding the office lock: PGlite is single-session and its
+    // advisory locks are re-entrant, so acquiring it here would return true. Instead intercept ONLY the sweep's
+    // pg_try_advisory_lock probe and answer "not acquired" (as a real held lock in another session would),
+    // passing every other query through to real Postgres.
+    const held: typeof client = {
+      query: async (text, params) => {
+        if (/pg_try_advisory_lock/.test(text)) return { rows: [{ got: false }] } as any;
+        return client.query(text, params);
+      },
+    };
+    let sends = 0;
+    const r = await sweepDeadLettersForOffice(held, {
+      office: "dallas",
+      now: NOW,
+      sendAlert: async () => (sends++, true),
+    });
+    expect(r).toMatchObject({ count: 0, sent: false, deferred: true });
+    expect(sends).toBe(0); // no alert while an import is active
+    expect(await unalertedFailedCount()).toBe(1); // NOT stamped — still eligible next cycle
+
+    // Once the lock is FREE (no interceptor), the same row is swept and alerted.
+    const free = await sweepDeadLettersForOffice(client, {
+      office: "dallas",
+      now: NOW,
+      sendAlert: async () => (sends++, true),
+    });
+    expect(free).toMatchObject({ count: 1, sent: true });
+    expect(free.deferred).toBeUndefined();
+    expect(sends).toBe(1);
+    expect(await unalertedFailedCount()).toBe(0);
+  });
+
+  it("acquires then RELEASES the office lock when free, so it never blocks a real import", async () => {
+    await seedInbox("failed", { finishedAt: ago(30), lastError: "aged-eligible" });
+    const r = await sweepDeadLettersForOffice(client, { office: "dallas", now: NOW, sendAlert: async () => true });
+    expect(r).toMatchObject({ count: 1, sent: true });
+    // The sweep must have unlocked what it acquired: a fresh non-blocking acquire of the SAME key succeeds, and
+    // the session's lock count is back to zero after one unlock (a leaked hold would need a second unlock).
+    const reacquire = await client.query("SELECT pg_try_advisory_lock($1, $2) AS got", [
+      BID_BOARD_ADVISORY_NAMESPACE,
+      officeAdvisoryKey("dallas"),
+    ]);
+    expect(reacquire.rows[0].got).toBe(true);
+    const unlock1 = await client.query("SELECT pg_advisory_unlock($1, $2) AS ok", [
+      BID_BOARD_ADVISORY_NAMESPACE,
+      officeAdvisoryKey("dallas"),
+    ]);
+    expect(unlock1.rows[0].ok).toBe(true);
+    const unlock2 = await client.query("SELECT pg_advisory_unlock($1, $2) AS ok", [
+      BID_BOARD_ADVISORY_NAMESPACE,
+      officeAdvisoryKey("dallas"),
+    ]);
+    expect(unlock2.rows[0].ok).toBe(false); // nothing left held → the sweep did not leak a lock
+  });
+
   it("skips cleanly (no throw, no send) when the inbox table is absent (migration 0188 not applied)", async () => {
     await pg.exec(`ALTER TABLE public.bid_board_ingestion_inbox RENAME TO bid_board_ingestion_inbox_tmp;`);
     try {
@@ -379,5 +444,69 @@ describe("dead-letter sweep", () => {
     } finally {
       await pg.exec(`ALTER TABLE public.bid_board_ingestion_inbox_tmp RENAME TO bid_board_ingestion_inbox;`);
     }
+  });
+});
+
+describe("runHeartbeatSweeps — all-offices fail guards", () => {
+  const opts = { thresholdMinutes: 60, realertMinutes: 60 };
+
+  // Codex P2: an eligible dead-letter batch that CANNOT be delivered (invalid Resend key, quota, outage) must
+  // count as a sweep failure so the "all offices' sweeps failed" guard throws — otherwise the monitor stays
+  // dark while the cron exits 0. A recent success keeps the heartbeat check itself green (so only the sweep
+  // failure is under test).
+  it("throws when EVERY office has eligible dead-letters but NONE could be delivered", async () => {
+    await seedRun("success", ago(5)); // heartbeat healthy → completed>0, so only the sweep guard can throw
+    await seedInbox("failed", { finishedAt: ago(30), lastError: "undeliverable" }); // aged, eligible
+
+    await expect(
+      runHeartbeatSweeps(client, {
+        ...opts,
+        officeList: ["dallas"],
+        now: NOW,
+        sendAlert: async () => false, // persistent transport failure across all offices
+      })
+    ).rejects.toThrow(/dead-letter sweep failed for ALL/);
+
+    expect(await unalertedFailedCount()).toBe(1); // never stamped → retryable next run
+  });
+
+  it("does NOT throw when the undeliverable batch is only SOME offices (others deliver or no-op)", async () => {
+    await seedRun("success", ago(5));
+    await seedInbox("failed", { finishedAt: ago(30), lastError: "atlanta-undeliverable", office: "atlanta" });
+
+    // dallas has nothing to sweep (a clean no-op) so not every sweep failed; the guard must NOT trip even
+    // though atlanta's batch could not be delivered.
+    await expect(
+      runHeartbeatSweeps(client, {
+        ...opts,
+        officeList: ["dallas", "atlanta"],
+        now: NOW,
+        sendAlert: async () => false,
+      })
+    ).resolves.toBeUndefined();
+  });
+
+  it("a deferred sweep (import in progress) does NOT count as a failure", async () => {
+    await seedRun("success", ago(5));
+    await seedInbox("failed", { finishedAt: ago(30), lastError: "aged-eligible" });
+    // Force the office lock to read as held so the only office's sweep DEFERS — a deferred sweep is a clean
+    // skip, not a failure, so the all-offices guard must not throw.
+    const held: typeof client = {
+      query: async (text, params) => {
+        if (/pg_try_advisory_lock/.test(text)) return { rows: [{ got: false }] } as any;
+        return client.query(text, params);
+      },
+    };
+    let sends = 0;
+    await expect(
+      runHeartbeatSweeps(held, {
+        ...opts,
+        officeList: ["dallas"],
+        now: NOW,
+        sendAlert: async () => (sends++, true),
+      })
+    ).resolves.toBeUndefined();
+    expect(sends).toBe(0);
+    expect(await unalertedFailedCount()).toBe(1); // deferred → untouched, retried next cycle
   });
 });
