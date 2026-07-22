@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api } from "@/lib/api";
+import { api, isApiError } from "@/lib/api";
 
 // ── Types (mirror the server corrective-action-api.ts CorrectiveActionItemView shape) ─────────────────
 export interface CorrectiveActionResponsePhoto {
@@ -152,18 +152,27 @@ export interface UseCorrectiveActions {
   items: CorrectiveActionItem[];
   loading: boolean;
   error: string | null;
+  /**
+   * The HTTP status of the load failure, when the error came from an ApiError (null otherwise — e.g. a
+   * network failure or a non-JSON body). The responder page branches on this: ONLY a confirmed 401/403 is
+   * a genuinely-expired/foreign link (show the ExpiredState); any other failure (network / 5xx / undefined
+   * status) is retryable.
+   */
+  errorStatus: number | null;
   refetch: () => Promise<void>;
 }
 
 /**
  * Load a scorecard's corrective-action items. Works in BOTH modes: a CRM/field session (no token), or the
  * email-only web responder (pass the recipient-bound token). A 401/403 (invalid/expired/foreign token)
- * surfaces as `error` with an empty `items` so the responder page can show a clear "link expired" state.
+ * surfaces as `error` + `errorStatus` with an empty `items` so the responder page can show a clear "link
+ * expired" state; other failures surface a null `errorStatus` so the page can offer a retry instead.
  */
 export function useCorrectiveActions(scorecardId: string | undefined, token?: string): UseCorrectiveActions {
   const [items, setItems] = useState<CorrectiveActionItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [errorStatus, setErrorStatus] = useState<number | null>(null);
   const requestIdRef = useRef(0);
 
   const refetch = useCallback(async () => {
@@ -171,6 +180,7 @@ export function useCorrectiveActions(scorecardId: string | undefined, token?: st
     const requestId = ++requestIdRef.current;
     setLoading(true);
     setError(null);
+    setErrorStatus(null);
     try {
       const loaded = await getCorrectiveActions(scorecardId, token);
       if (requestId !== requestIdRef.current) return;
@@ -178,6 +188,9 @@ export function useCorrectiveActions(scorecardId: string | undefined, token?: st
     } catch (e) {
       if (requestId !== requestIdRef.current) return;
       setError(e instanceof Error ? e.message : "Failed to load corrective actions");
+      // Carry the HTTP status ONLY when it came from the api() wrapper's ApiError — a network/non-JSON
+      // failure has no status and must stay retryable (null), not read as an expired link.
+      setErrorStatus(isApiError(e) ? e.status : null);
       setItems([]);
     } finally {
       if (requestId === requestIdRef.current) setLoading(false);
@@ -188,5 +201,5 @@ export function useCorrectiveActions(scorecardId: string | undefined, token?: st
     void refetch();
   }, [refetch]);
 
-  return { items, loading, error, refetch };
+  return { items, loading, error, errorStatus, refetch };
 }

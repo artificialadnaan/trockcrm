@@ -4,7 +4,19 @@ import { createRoot } from "react-dom/client";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const apiMock = vi.hoisted(() => vi.fn());
-vi.mock("@/lib/api", () => ({ api: apiMock }));
+class ApiError extends Error {
+  status: number;
+  code?: string;
+  constructor(status: number, message?: string) {
+    super(message ?? `HTTP ${status}`);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
+vi.mock("@/lib/api", () => ({
+  api: apiMock,
+  isApiError: (e: unknown) => e instanceof ApiError,
+}));
 
 vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
 
@@ -105,8 +117,8 @@ describe("corrective-action client API", () => {
     });
   });
 
-  it("useCorrectiveActions surfaces an expired/invalid token error", async () => {
-    apiMock.mockRejectedValue(Object.assign(new Error("This corrective-action link is invalid or has expired."), { status: 401 }));
+  it("useCorrectiveActions surfaces an expired/invalid token error with the 401 status", async () => {
+    apiMock.mockRejectedValue(new ApiError(401, "This corrective-action link is invalid or has expired."));
 
     let snapshot: ReturnType<typeof useCorrectiveActions> | null = null;
     function Probe() {
@@ -122,7 +134,33 @@ describe("corrective-action client API", () => {
 
     expect(snapshot!.loading).toBe(false);
     expect(snapshot!.error).toContain("invalid or has expired");
+    expect(snapshot!.errorStatus).toBe(401);
     expect(snapshot!.items).toEqual([]);
+
+    await act(async () => {
+      root.unmount();
+      await flushEffects();
+    });
+  });
+
+  it("useCorrectiveActions leaves errorStatus null for a non-ApiError (network) failure", async () => {
+    apiMock.mockRejectedValue(new Error("Failed to fetch"));
+
+    let snapshot: ReturnType<typeof useCorrectiveActions> | null = null;
+    function Probe() {
+      snapshot = useCorrectiveActions("sc-9", "tok");
+      return null;
+    }
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(<Probe />);
+      await flushEffects();
+    });
+
+    expect(snapshot!.loading).toBe(false);
+    expect(snapshot!.error).toContain("Failed to fetch");
+    expect(snapshot!.errorStatus).toBeNull();
 
     await act(async () => {
       root.unmount();

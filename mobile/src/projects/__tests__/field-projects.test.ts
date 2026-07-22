@@ -1,5 +1,6 @@
 import {
   categoryLabel,
+  correctiveAffordance,
   filterPhotos,
   formatDistanceMiles,
   groupPhotos,
@@ -302,5 +303,24 @@ describe("filter crash-proofing", () => {
     expect(toDayString("2026-07-22T03:00:00.000Z")).toBe("2026-07-22");
     expect(toDayString(null)).toBe("");
     expect(toDayString("not-a-date")).toBe("");
+  });
+});
+
+describe("correctiveAffordance", () => {
+  it("makes the open-card prompt TAPPABLE only when the viewer can respond", () => {
+    expect(correctiveAffordance("corrective_action_open", true)).toBe("open_tappable");
+    // An unassigned rep/field_contractor would 403 at the responder endpoint → read-only status, no route.
+    expect(correctiveAffordance("corrective_action_open", false)).toBe("open_status");
+  });
+
+  it("makes the closed-card Resolved badge TAPPABLE only when the viewer can respond", () => {
+    expect(correctiveAffordance("corrective_action_closed", true)).toBe("closed_tappable");
+    expect(correctiveAffordance("corrective_action_closed", false)).toBe("closed_status");
+  });
+
+  it("returns none for a card without a corrective action, regardless of canRespond", () => {
+    expect(correctiveAffordance("submitted", true)).toBe("none");
+    expect(correctiveAffordance(undefined, true)).toBe("none");
+    expect(correctiveAffordance("submitted", false)).toBe("none");
   });
 });

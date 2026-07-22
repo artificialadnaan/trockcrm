@@ -55,8 +55,11 @@ beforeEach(() => {
   document.body.appendChild(container);
   root = createRoot(container);
   Object.values(mocks).forEach((m) => m.mockReset());
-  // jsdom lacks URL.createObjectURL, which the upload preview uses.
-  (URL as unknown as { createObjectURL: () => string }).createObjectURL = () => "blob:preview";
+  // jsdom lacks URL.createObjectURL/revokeObjectURL, which the upload preview uses. Give each blob a unique
+  // url so the revoke assertions can count distinct previews.
+  let blobSeq = 0;
+  (URL as unknown as { createObjectURL: () => string }).createObjectURL = () => `blob:preview-${++blobSeq}`;
+  (URL as unknown as { revokeObjectURL: (u: string) => void }).revokeObjectURL = vi.fn();
 });
 
 afterEach(() => {
@@ -66,7 +69,7 @@ afterEach(() => {
 
 describe("CorrectiveActionResponderPage", () => {
   it("passes the ?token from the query to useCorrectiveActions and renders open items", async () => {
-    mocks.useCorrectiveActions.mockReturnValue({ items: [openItem], loading: false, error: null, refetch: vi.fn() });
+    mocks.useCorrectiveActions.mockReturnValue({ items: [openItem], loading: false, error: null, errorStatus: null, refetch: vi.fn() });
 
     await renderAt("/scorecards/sc-1/corrective-action?token=tok-xyz");
 
@@ -78,16 +81,17 @@ describe("CorrectiveActionResponderPage", () => {
   });
 
   it("shows the expired-link state when the token is missing", async () => {
-    mocks.useCorrectiveActions.mockReturnValue({ items: [], loading: false, error: null, refetch: vi.fn() });
+    mocks.useCorrectiveActions.mockReturnValue({ items: [], loading: false, error: null, errorStatus: null, refetch: vi.fn() });
     await renderAt("/scorecards/sc-1/corrective-action");
     expect(container.textContent).toContain("has expired");
   });
 
-  it("shows the expired-link state on a 401/403 error from the hook", async () => {
+  it("shows the expired-link state ONLY on a 401/403 error from the hook", async () => {
     mocks.useCorrectiveActions.mockReturnValue({
       items: [],
       loading: false,
       error: "This corrective-action link is invalid or has expired.",
+      errorStatus: 403,
       refetch: vi.fn(),
     });
     await renderAt("/scorecards/sc-1/corrective-action?token=bad");
@@ -95,11 +99,48 @@ describe("CorrectiveActionResponderPage", () => {
     expect(container.textContent).toContain("invalid or has expired");
   });
 
+  it("shows a retryable load-error state (NOT expired) on a non-401/403 failure", async () => {
+    const refetch = vi.fn();
+    mocks.useCorrectiveActions.mockReturnValue({
+      items: [],
+      loading: false,
+      error: "Something went wrong.",
+      errorStatus: 500,
+      refetch,
+    });
+    await renderAt("/scorecards/sc-1/corrective-action?token=tok");
+    const text = container.textContent ?? "";
+    expect(text).not.toContain("has expired");
+    expect(text).toContain("couldn’t load the corrective actions");
+    const retry = Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.includes("Try again"))!;
+    expect(retry).toBeTruthy();
+    await act(async () => {
+      retry.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
+    });
+    expect(refetch).toHaveBeenCalled();
+  });
+
+  it("shows a retryable load-error state when errorStatus is null (network failure)", async () => {
+    mocks.useCorrectiveActions.mockReturnValue({
+      items: [],
+      loading: false,
+      error: "Failed to fetch",
+      errorStatus: null,
+      refetch: vi.fn(),
+    });
+    await renderAt("/scorecards/sc-1/corrective-action?token=tok");
+    const text = container.textContent ?? "";
+    expect(text).not.toContain("has expired");
+    expect(text).toContain("couldn’t load the corrective actions");
+  });
+
   it("shows the completion state when every item is resolved", async () => {
     mocks.useCorrectiveActions.mockReturnValue({
       items: [{ ...openItem, status: "resolved", responseComment: "done", responderName: "Ext PM" }],
       loading: false,
       error: null,
+      errorStatus: null,
       refetch: vi.fn(),
     });
     await renderAt("/scorecards/sc-1/corrective-action?token=tok");
@@ -112,7 +153,7 @@ describe("CorrectiveActionResponderPage", () => {
 
   it("submits a per-item response with the token and refetches", async () => {
     const refetch = vi.fn();
-    mocks.useCorrectiveActions.mockReturnValue({ items: [openItem], loading: false, error: null, refetch });
+    mocks.useCorrectiveActions.mockReturnValue({ items: [openItem], loading: false, error: null, errorStatus: null, refetch });
     mocks.submitCorrectiveActionResponse.mockResolvedValue([]);
 
     await renderAt("/scorecards/sc-1/corrective-action?token=tok-xyz");
@@ -141,5 +182,72 @@ describe("CorrectiveActionResponderPage", () => {
       "tok-xyz",
     );
     expect(refetch).toHaveBeenCalled();
+  });
+
+  it("revokes the pending preview URLs on a successful submit (item stays mounted under the same key)", async () => {
+    const refetch = vi.fn();
+    mocks.useCorrectiveActions.mockReturnValue({ items: [openItem], loading: false, error: null, errorStatus: null, refetch });
+    mocks.uploadCorrectiveActionPhoto.mockResolvedValue("file-1");
+    mocks.submitCorrectiveActionResponse.mockResolvedValue([]);
+
+    await renderAt("/scorecards/sc-1/corrective-action?token=tok");
+
+    // Attach a photo → allocates one preview blob URL.
+    const fileInput = container.querySelector('input[type="file"]') as HTMLInputElement;
+    const file = new File([new Uint8Array([1, 2, 3])], "p.jpg", { type: "image/jpeg" });
+    Object.defineProperty(fileInput, "files", { value: [file], configurable: true });
+    await act(async () => {
+      fileInput.dispatchEvent(new Event("change", { bubbles: true }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(mocks.uploadCorrectiveActionPhoto).toHaveBeenCalled();
+
+    const textarea = container.querySelector("textarea")!;
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!;
+      setter.call(textarea, "Done");
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+      await Promise.resolve();
+    });
+
+    const revoke = URL.revokeObjectURL as unknown as ReturnType<typeof vi.fn>;
+    revoke.mockClear();
+
+    const submitBtn = Array.from(container.querySelectorAll("button")).find((b) =>
+      b.textContent?.includes("Submit response"),
+    )!;
+    await act(async () => {
+      submitBtn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // The blob URL allocated for the preview is revoked on success (not left pinned) — the item card did NOT
+    // unmount (same React key), so this must happen explicitly in submit, not via the unmount cleanup.
+    expect(revoke).toHaveBeenCalledWith("blob:preview-1");
+  });
+
+  it("caps the combined photo selection at the server limit (50) before uploading", async () => {
+    mocks.useCorrectiveActions.mockReturnValue({ items: [openItem], loading: false, error: null, errorStatus: null, refetch: vi.fn() });
+    mocks.uploadCorrectiveActionPhoto.mockImplementation(async () => `file-${Math.random()}`);
+
+    await renderAt("/scorecards/sc-1/corrective-action?token=tok");
+
+    const fileInput = container.querySelector('input[type="file"]') as HTMLInputElement;
+    // Pick 51 files in one go — one over the cap.
+    const files = Array.from({ length: 51 }, (_, i) => new File([new Uint8Array([i])], `p${i}.jpg`, { type: "image/jpeg" }));
+    Object.defineProperty(fileInput, "files", { value: files, configurable: true });
+    await act(async () => {
+      fileInput.dispatchEvent(new Event("change", { bubbles: true }));
+      // Let all the sequential uploads settle.
+      for (let i = 0; i < 60; i++) await Promise.resolve();
+    });
+
+    // Only 50 uploaded (the 51st truncated) and the input is now disabled at the cap.
+    expect(mocks.uploadCorrectiveActionPhoto).toHaveBeenCalledTimes(50);
+    expect(container.textContent).toContain("at most 50");
+    const capInput = container.querySelector('input[type="file"]') as HTMLInputElement;
+    expect(capInput.disabled).toBe(true);
   });
 });

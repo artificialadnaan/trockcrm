@@ -33,6 +33,34 @@ export function formatDistanceMiles(mi?: number | null): string | null {
 }
 
 /**
+ * The corrective-action affordance to render on a project's scorecard row, gated on server authorization.
+ * The responder endpoint is restricted to the assigned super/PM (or an admin/director) — so only a viewer the
+ * server says CAN respond (`canRespond`) gets a TAPPABLE affordance that routes to the response screen; a
+ * viewer who can't gets the same status as NON-tappable text (routing there would only 403 → a load error).
+ *
+ *  - "open_tappable"   → OPEN card, viewer can respond   → "Corrective action required", routes.
+ *  - "open_status"     → OPEN card, viewer can't respond → "Corrective action required", read-only.
+ *  - "closed_tappable" → CLOSED card, viewer can respond → "Resolved" badge, routes (read-only screen).
+ *  - "closed_status"   → CLOSED card, viewer can't respond → "Resolved" badge, read-only.
+ *  - "none"            → no corrective action on this card.
+ */
+export type CorrectiveAffordance =
+  | "open_tappable"
+  | "open_status"
+  | "closed_tappable"
+  | "closed_status"
+  | "none";
+
+export function correctiveAffordance(
+  status: string | undefined,
+  canRespond: boolean,
+): CorrectiveAffordance {
+  if (status === "corrective_action_open") return canRespond ? "open_tappable" : "open_status";
+  if (status === "corrective_action_closed") return canRespond ? "closed_tappable" : "closed_status";
+  return "none";
+}
+
+/**
  * Off-office projects are VIEW-ONLY until cross-office WRITES ship: the write endpoints (star,
  * generate-report, add-photo) are single-office and target the user's writable office schema, so a
  * write to a project owned by a different office 404s server-side. Suppress those actions for off-office

@@ -1,5 +1,5 @@
-import React, { Suspense, useCallback, useReducer, useRef, useState } from "react";
-import { Image, KeyboardAvoidingView, Modal, Platform, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
+import React, { Suspense, useCallback, useEffect, useReducer, useRef, useState } from "react";
+import { Image, KeyboardAvoidingView, Linking, Modal, Platform, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -8,7 +8,7 @@ import { useAuth } from "../../../../src/auth/AuthContext";
 import { useCorrectiveActions, useScorecard } from "../../../../src/query/hooks";
 import { getTranscriptionConfig } from "../../../../src/api/endpoints";
 import { qk } from "../../../../src/query/keys";
-import { uploadOwnerKey, newClientUploadId } from "../../../../src/capture/upload-queue";
+import { uploadOwnerKey, newClientUploadId, removeQueuedUploadsAndWait } from "../../../../src/capture/upload-queue";
 import { copyPhotoIntoDraft, deleteDraftPhotoDir, deleteDraftPhotoFile } from "../../../../src/scorecards/draft-store";
 import { extractExifMetadata, getLiveGps } from "../../../../src/capture/metadata";
 import type { CapturedShot } from "../../../../src/capture/CameraCapture";
@@ -181,6 +181,23 @@ function CorrectiveActionItemCard({
   // Synthetic, per-item durable copy target so captured shots survive until submit (there's no persisted
   // draft here). Deterministic per scorecard+item so a re-entry reuses the same directory.
   const draftId = useRef(`corrective-${scorecardId}-${item.id}`).current;
+  // Route-exit cleanup: captured shots are copied into the synthetic per-item dir, but nothing restores them
+  // on re-entry — so backing out / an app kill before submit orphans the copies. On unmount of an UNRESOLVED
+  // item, reclaim the dir. Guards (read from a ref so the unmount closure sees the LATEST values, not the
+  // mount-time snapshot): skip while a submit is in flight (its own success path cleans up + would race a
+  // delete-out-from-under), and skip once submitted OK (already cleaned). A resolved item never reaches this
+  // component branch (it early-returns ResolvedItemCard above), so there's nothing to clean there.
+  const cleanupGuardRef = useRef({ submitting: false, submittedOk: false });
+  cleanupGuardRef.current.submitting = submitting;
+  useEffect(() => {
+    return () => {
+      const g = cleanupGuardRef.current;
+      if (g.submitting || g.submittedOk) return;
+      void deleteDraftPhotoDir(ownerKey, draftId);
+    };
+    // Owner+draftId are stable for this card; run the teardown once on unmount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ownerKey, draftId]);
 
   if (item.status !== "open") {
     return <ResolvedItemCard item={item} />;
@@ -189,10 +206,13 @@ function CorrectiveActionItemCard({
   const busy = savingPhotos > 0 || submitting || voiceBusy || captionVoiceBusy;
   const captionPhoto = state.photos.find((p) => p.key === captionKey) ?? null;
 
-  function onRemovePhoto(photo: CorrectiveResponsePhoto) {
-    // Delete the durable copy first (best-effort), then drop it from state — otherwise the copied file leaks
-    // in the synthetic draft dir until (or unless) the whole dir is cleaned.
-    void deleteDraftPhotoFile(photo.uri);
+  async function onRemovePhoto(photo: CorrectiveResponsePhoto) {
+    // Cancel any queued/in-flight upload for this photo FIRST (a prior offline submit enqueued it under this
+    // clientUploadId). Awaiting removeQueuedUploadsAndWait guarantees a worker that already selected it can't
+    // still confirm — otherwise a later drain would upload evidence the user just pulled off the response.
+    // Only THEN delete the durable draft copy + drop it from state (same order for every removal path).
+    await removeQueuedUploadsAndWait(ownerKey, [photo.clientUploadId]).catch(() => undefined);
+    await deleteDraftPhotoFile(photo.uri);
     dispatch({ type: "removePhoto", key: photo.key });
   }
 
@@ -275,7 +295,9 @@ function CorrectiveActionItemCard({
         return;
       }
       // Resolved — reclaim the synthetic per-item copy dir (best-effort; the photos are now durable server
-      // records), then let the parent refetch/invalidate swap in the read-only resolved view.
+      // records), then let the parent refetch/invalidate swap in the read-only resolved view. Mark submittedOk
+      // so the unmount teardown doesn't fire a second (racing) delete of the same dir.
+      cleanupGuardRef.current.submittedOk = true;
       void deleteDraftPhotoDir(ownerKey, draftId);
       onResolved();
     } catch (error) {
@@ -321,7 +343,7 @@ function CorrectiveActionItemCard({
               key={photo.key}
               photo={photo}
               onEdit={() => setCaptionKey(photo.key)}
-              onRemove={() => onRemovePhoto(photo)}
+              onRemove={() => void onRemovePhoto(photo)}
             />
           ))}
         </View>
@@ -407,6 +429,12 @@ function ResponsePhotoThumb({
 }
 
 function ResolvedItemCard({ item }: { item: CorrectiveActionItem }) {
+  // The read endpoint resolves a presigned `url` per response photo — render them as tappable thumbnails so
+  // the documented evidence is inspectable in TRock Cam (mirrors the scorecard detail evidence grid: tap →
+  // open the presigned url in the system browser). Fall back to the count only for photos without a url (an
+  // older API deployment, or a failed presign).
+  const photosWithUrl = item.photos.filter((p) => Boolean(p.url));
+  const withoutUrl = item.photos.length - photosWithUrl.length;
   return (
     <View style={[styles.itemCard, styles.itemCardResolved]}>
       <View style={styles.itemHeader}>
@@ -415,9 +443,23 @@ function ResolvedItemCard({ item }: { item: CorrectiveActionItem }) {
       </View>
       <Text style={styles.itemLabel}>{item.itemLabel}</Text>
       {item.responseComment ? <Text style={styles.resolvedComment}>{item.responseComment}</Text> : null}
-      {item.photos.length > 0 ? (
+      {photosWithUrl.length > 0 ? (
+        <View style={styles.photoRow}>
+          {photosWithUrl.map((photo) => (
+            <Pressable
+              key={photo.id}
+              onPress={() => photo.url && void Linking.openURL(photo.url).catch(() => undefined)}
+              accessibilityRole="imagebutton"
+              accessibilityLabel={photo.caption ?? "Response photo"}
+            >
+              <Image source={{ uri: photo.url! }} style={styles.thumb} resizeMode="cover" />
+            </Pressable>
+          ))}
+        </View>
+      ) : null}
+      {withoutUrl > 0 ? (
         <Text style={styles.metaSmall}>
-          {item.photos.length} response photo{item.photos.length === 1 ? "" : "s"} attached
+          {withoutUrl} response photo{withoutUrl === 1 ? "" : "s"} attached
         </Text>
       ) : null}
       <Text style={styles.metaSmall}>

@@ -184,6 +184,14 @@ export type FieldScorecardSummary = {
    * Optional so older API deployments that don't emit it still parse (a missing value reads as `submitted`).
    */
   status?: string;
+  /**
+   * True iff the CURRENT viewer may respond to this card's corrective action (assigned super/PM on the deal,
+   * or an admin/director) — the same predicate the responder endpoint enforces. A DEAL-level fact the server
+   * resolves once for every card in listFieldScorecardsForProject. Gates the project-list "Document the
+   * corrective action" CTA so a browse-only field user isn't routed into a 403. Optional so older API
+   * deployments that don't emit it still parse (treat a missing value as "cannot respond").
+   */
+  canRespondToCorrectiveAction?: boolean;
   formVersion?: 1 | 2;
   /** Discriminates project (default) vs leadership cards — the submitted list scores leadership out of 10. */
   kind?: ScorecardKind;

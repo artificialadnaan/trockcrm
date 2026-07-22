@@ -20,12 +20,17 @@ interface PendingPhoto {
   previewUrl: string;
 }
 
+// The server rejects a response with more than this many photos (corrective-action-routes.ts parsePhotoFileIds:
+// "At most 50 photos can be attached to a response"). Cap the COMBINED selection here BEFORE uploading so the
+// recipient never uploads (potentially >1GB across) files + creates gallery rows only for the POST to 400.
+const MAX_RESPONSE_PHOTOS = 50;
+
 export default function CorrectiveActionResponderPage() {
   const { id } = useParams();
   const [searchParams] = useSearchParams();
   const token = searchParams.get("token") ?? undefined;
 
-  const { items, loading, error, refetch } = useCorrectiveActions(id, token);
+  const { items, loading, error, errorStatus, refetch } = useCorrectiveActions(id, token);
 
   const openCount = useMemo(() => items.filter((i) => i.status !== "resolved").length, [items]);
   const allResolved = items.length > 0 && openCount === 0;
@@ -44,10 +49,15 @@ export default function CorrectiveActionResponderPage() {
     );
   }
 
-  // A 401/403 (invalid / expired / foreign token) surfaces as an error with empty items — show the clear
-  // "link expired" state rather than an empty form.
+  // Distinguish an EXPIRED LINK from a transient LOAD FAILURE. Only a confirmed 401/403 (invalid / expired /
+  // foreign token) means the link itself is unusable — show the "link expired" state with no retry. Any other
+  // failure (network drop, 5xx, non-JSON body → null status) is transient, so offer a retry instead of a
+  // misleading "expired" message.
   if (error) {
-    return <ExpiredState detail={error} />;
+    if (errorStatus === 401 || errorStatus === 403) {
+      return <ExpiredState detail={error} />;
+    }
+    return <LoadErrorState detail={error} onRetry={() => void refetch()} />;
   }
 
   return (
@@ -103,6 +113,25 @@ function ExpiredState({ detail }: { detail?: string }) {
   );
 }
 
+// A transient load failure (network / 5xx) — NOT an expired link. Offer a retry so the recipient isn't
+// misled into thinking a valid link has expired.
+function LoadErrorState({ detail, onRetry }: { detail?: string; onRetry: () => void }) {
+  return (
+    <div className="flex min-h-screen items-center justify-center bg-slate-50 px-6 text-center">
+      <div>
+        <p className="text-sm font-semibold uppercase tracking-wide text-slate-500">Couldn’t load</p>
+        <h1 className="mt-2 text-2xl font-semibold text-slate-950">We couldn’t load the corrective actions.</h1>
+        <p className="mt-2 text-sm text-slate-600">
+          {detail ?? "Something went wrong. Check your connection and try again."}
+        </p>
+        <Button className="mt-4" onClick={onRetry}>
+          Try again
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 function ItemCard({
   scorecardId,
   token,
@@ -128,10 +157,26 @@ function ItemCard({
   const onPickFiles = useCallback(
     async (files: FileList | null) => {
       if (!files || files.length === 0) return;
+      // Cap the COMBINED selection (already-selected + newly-picked) at the server limit BEFORE uploading —
+      // the multi-file picker is unrestricted, so without this a 51+ selection uploads every file (and
+      // creates a gallery row per file) only for the response POST to be rejected. Truncate the overflow and
+      // tell the recipient rather than silently dropping or wasting the upload.
+      const remaining = MAX_RESPONSE_PHOTOS - photos.length;
+      if (remaining <= 0) {
+        setSubmitError(`You can attach at most ${MAX_RESPONSE_PHOTOS} photos to a response.`);
+        return;
+      }
+      const picked = Array.from(files);
+      const accepted = picked.slice(0, remaining);
+      const overflow = picked.length - accepted.length;
       setUploading(true);
-      setSubmitError(null);
+      setSubmitError(
+        overflow > 0
+          ? `Only ${accepted.length} of the ${picked.length} selected photos were added — a response can hold at most ${MAX_RESPONSE_PHOTOS}.`
+          : null,
+      );
       try {
-        for (const file of Array.from(files)) {
+        for (const file of accepted) {
           const fileId = await uploadCorrectiveActionPhoto(scorecardId, file, token);
           const previewUrl = URL.createObjectURL(file);
           previewUrlsRef.current.add(previewUrl);
@@ -143,7 +188,7 @@ function ItemCard({
         setUploading(false);
       }
     },
-    [scorecardId, token],
+    [scorecardId, token, photos.length],
   );
 
   const removePhoto = useCallback((fileId: string) => {
@@ -180,12 +225,21 @@ function ItemCard({
         { comment: comment.trim(), photoFileIds: photos.map((p) => p.fileId) },
         token,
       );
+      // Revoke every pending preview URL NOW, on success. onResolved() refetches THIS item under the same
+      // React key, so the card re-renders into its resolved (read-only) branch WITHOUT unmounting — the
+      // unmount cleanup below never runs, and each blob URL would stay pinned until the tab closes. Clearing
+      // the Set here also means that cleanup can't double-revoke if the card later does unmount.
+      for (const url of previewUrlsRef.current) URL.revokeObjectURL(url);
+      previewUrlsRef.current.clear();
+      setPhotos([]);
       onResolved();
     } catch (e) {
       setSubmitError(e instanceof Error ? e.message : "Couldn’t submit the response. Please try again.");
       setSubmitting(false);
     }
   }, [comment, photos, scorecardId, item.id, token, onResolved]);
+
+  const atCap = photos.length >= MAX_RESPONSE_PHOTOS;
 
   return (
     <div className="rounded-lg border border-slate-200 bg-white p-4">
@@ -262,15 +316,21 @@ function ItemCard({
           )}
 
           <div className="flex flex-wrap items-center gap-2">
-            <label className="inline-flex cursor-pointer items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-[13px] font-semibold text-slate-700 hover:border-slate-300">
+            <label
+              className={`inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-[13px] font-semibold text-slate-700 ${
+                atCap || uploading || submitting
+                  ? "cursor-not-allowed opacity-50"
+                  : "cursor-pointer hover:border-slate-300"
+              }`}
+            >
               {uploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
-              Add photo
+              {atCap ? `Photo limit reached (${MAX_RESPONSE_PHOTOS})` : "Add photo"}
               <input
                 type="file"
                 accept="image/*"
                 multiple
                 className="hidden"
-                disabled={uploading || submitting}
+                disabled={uploading || submitting || atCap}
                 onChange={(e) => void onPickFiles(e.target.files)}
               />
             </label>

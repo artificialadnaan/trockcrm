@@ -9,6 +9,7 @@ import { useAuth } from "../../../src/auth/AuthContext";
 import { getReportDownload, getTranscriptionConfig } from "../../../src/api/endpoints";
 import {
   categoryLabel,
+  correctiveAffordance,
   filterPhotos,
   groupPhotos,
   isProjectOffOffice,
@@ -339,13 +340,15 @@ export default function ProjectDetailScreen() {
               const scoreText = isLeadership
                 ? `${(s.averageScore ?? s.totalScore / 10).toFixed(1)}/10`
                 : `${s.totalScore}/100`;
-              const correctiveOpen = s.status === "corrective_action_open";
-              const correctiveClosed = s.status === "corrective_action_closed";
+              // The responder endpoint is restricted to the assigned super/PM or an admin/director, so the
+              // affordance is TAPPABLE only when the server says this viewer can respond (else it 403s → a
+              // load error). correctiveAffordance encodes all four (open/closed × can/can't) cases.
+              const affordance = correctiveAffordance(s.status, s.canRespondToCorrectiveAction === true);
               return (
                 <Pressable
                   key={s.id}
                   accessibilityRole="button"
-                  accessibilityLabel={`${isLeadership ? "Leadership scorecard" : "Scorecard"}, week of ${formatShortDate(s.weekOf)}, ${scoreText}, ${s.ratingLabel}${correctiveOpen ? ", corrective action required" : correctiveClosed ? ", corrective action resolved" : ""}`}
+                  accessibilityLabel={`${isLeadership ? "Leadership scorecard" : "Scorecard"}, week of ${formatShortDate(s.weekOf)}, ${scoreText}, ${s.ratingLabel}${s.status === "corrective_action_open" ? ", corrective action required" : s.status === "corrective_action_closed" ? ", corrective action resolved" : ""}`}
                   onPress={() => router.push({ pathname: "/(app)/scorecards/view/[id]", params: { id: s.id } })}
                   style={({ pressed }) => [styles.reportRow, pressed && { opacity: 0.7 }]}
                 >
@@ -358,11 +361,13 @@ export default function ProjectDetailScreen() {
                         : ""}
                     </Text>
                     <RatingBadge rating={s.rating} label={`${scoreText} · ${s.ratingLabel}`} />
-                    {/* Corrective-action affordance: an OPEN card gets a tappable prompt that opens the
-                        itemized response flow; a CLOSED card gets a tappable "Resolved" badge routing to the
-                        SAME screen, which renders the resolved items read-only so the responses stay reachable.
-                        Both route to the response screen, not the detail view. */}
-                    {correctiveOpen ? (
+                    {/* Corrective-action affordance, gated on server authorization (canRespond). A viewer who
+                        CAN respond gets a TAPPABLE prompt (open card) / "Resolved" badge (closed card) that
+                        routes to the itemized response screen. A viewer who CANNOT respond sees the same
+                        status as read-only text with NO route — the responder endpoint would 403 them, so
+                        routing there would only produce a load error. Both tappable variants route to the
+                        response screen (read-only for a resolved card), not the detail view. */}
+                    {affordance === "open_tappable" ? (
                       <Pressable
                         accessibilityRole="button"
                         accessibilityLabel="Document the corrective action"
@@ -373,7 +378,12 @@ export default function ProjectDetailScreen() {
                         <Text style={styles.correctivePromptText}>Corrective action required</Text>
                         <Text style={styles.correctiveChevron}>›</Text>
                       </Pressable>
-                    ) : correctiveClosed ? (
+                    ) : affordance === "open_status" ? (
+                      <View accessibilityRole="text" accessibilityLabel="Corrective action required" style={styles.correctiveStatus}>
+                        <Ionicons name="alert-circle" size={16} color={theme.color.brandRed} />
+                        <Text style={styles.correctivePromptText}>Corrective action required</Text>
+                      </View>
+                    ) : affordance === "closed_tappable" ? (
                       <Pressable
                         accessibilityRole="button"
                         accessibilityLabel="Review the resolved corrective action"
@@ -384,6 +394,11 @@ export default function ProjectDetailScreen() {
                         <Text style={styles.correctiveResolvedText}>Resolved</Text>
                         <Text style={styles.correctiveResolvedChevron}>›</Text>
                       </Pressable>
+                    ) : affordance === "closed_status" ? (
+                      <View accessibilityRole="text" accessibilityLabel="Corrective action resolved" style={styles.correctiveResolved}>
+                        <Ionicons name="checkmark-circle" size={14} color="#166534" />
+                        <Text style={styles.correctiveResolvedText}>Resolved</Text>
+                      </View>
                     ) : null}
                   </View>
                 </Pressable>
@@ -460,6 +475,14 @@ const styles = StyleSheet.create({
   },
   correctivePromptText: { fontFamily: theme.font.semibold, fontSize: 13, color: theme.color.brandRed },
   correctiveChevron: { fontSize: 16, color: theme.color.brandRed, marginLeft: 2 },
+  // Non-tappable open-status variant (no border/chevron) for a viewer who can't respond.
+  correctiveStatus: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.space.xs,
+    marginTop: theme.space.xs,
+    alignSelf: "flex-start",
+  },
   correctiveResolved: {
     flexDirection: "row",
     alignItems: "center",
