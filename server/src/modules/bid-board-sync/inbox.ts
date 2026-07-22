@@ -87,6 +87,23 @@ export function countPayloadRows(payload: any): number {
   return 0;
 }
 
+/**
+ * Extract the scrape's snapshot timestamp (payload.provenance.extractedAt / extracted_at) as an ISO string, or
+ * null if absent/blank/unparseable. Mirrors ingestBidBoardRows' own extractedAt resolution (textValue of the two
+ * aliases) so the value we persist for the monotonic guard is the SAME instant the importer stamps into
+ * bid_board_last_updated_at. A value that doesn't parse to a real date is treated as absent (null) — the guard
+ * never blocks on an uninterpretable timestamp.
+ */
+export function extractPayloadExtractedAt(payload: any): string | null {
+  const raw =
+    (typeof payload?.provenance?.extractedAt === "string" && payload.provenance.extractedAt.trim()) ||
+    (typeof payload?.provenance?.extracted_at === "string" && payload.provenance.extracted_at.trim()) ||
+    null;
+  if (!raw) return null;
+  const ms = Date.parse(raw);
+  return Number.isFinite(ms) ? new Date(ms).toISOString() : null;
+}
+
 /** Stable idempotency key: sha256 of the EXACT request bytes SyncHub signed. A retry of the same POST
  *  carries identical bytes → identical key → one logical ingestion; a genuinely new scrape (new
  *  extractedAt or changed rows) hashes differently → its own job.
@@ -132,6 +149,9 @@ export async function acceptBidBoardIngestion(
   }
 ): Promise<AcceptResult> {
   const maxAttempts = args.maxAttempts ?? BID_BOARD_INGEST_MAX_ATTEMPTS;
+  // Persist the scrape's snapshot timestamp so the worker can enforce per-office monotonicity (skip a stale
+  // snapshot). Derived from the payload here so the route doesn't have to thread it through.
+  const extractedAt = extractPayloadExtractedAt(args.payload);
 
   const officeRes = await db.query(
     `SELECT id FROM public.offices WHERE slug = $1 AND is_active = true`,
@@ -154,6 +174,7 @@ export async function acceptBidBoardIngestion(
     args.sourceFilename,
     maxAttempts,
     BID_BOARD_INGEST_JOB_TYPE,
+    extractedAt,
   ];
 
   // Loop to close a rare race: the CTE can see the UNIQUE conflict (row exists) while the retention sweep
@@ -164,8 +185,8 @@ export async function acceptBidBoardIngestion(
     const inserted = await db.query(
       `WITH ins AS (
          INSERT INTO public.bid_board_ingestion_inbox
-           (office_slug, office_id, payload_hash, payload, row_count, source_filename, status, max_attempts)
-         VALUES ($1, $2, $3, $4::jsonb, $5, $6, 'queued', $7)
+           (office_slug, office_id, payload_hash, payload, row_count, source_filename, status, max_attempts, extracted_at)
+         VALUES ($1, $2, $3, $4::jsonb, $5, $6, 'queued', $7, $9::timestamptz)
          ON CONFLICT (office_slug, payload_hash) DO NOTHING
          RETURNING id, office_id, max_attempts
        ), job AS (
@@ -209,6 +230,7 @@ export interface InboxRow {
   status: InboxStatus;
   attempts: number;
   max_attempts: number;
+  extracted_at: string | null;
   queued_at: string;
   started_at: string | null;
   finished_at: string | null;
@@ -252,6 +274,28 @@ export async function loadInboxControlRow(db: Querier, inboxId: string): Promise
   return (res.rows[0] as InboxControlRow) ?? null;
 }
 
+/**
+ * Newest snapshot (extracted_at) that has ALREADY committed for this office — the MAX extracted_at over the
+ * office's 'succeeded' rows, EXCLUDING the row being processed (a re-run of the very same row, e.g. a recovered
+ * mid-import, must not measure itself as stale). Returns null when no prior snapshot has committed or none carried
+ * an extracted_at. Read under the per-office lock so it observes the latest committed state (multi-replica /
+ * reverse-order claims included).
+ */
+export async function latestCommittedExtractedAt(
+  db: Querier,
+  officeSlug: string,
+  excludeInboxId: string
+): Promise<string | null> {
+  const res = await db.query(
+    `SELECT MAX(extracted_at) AS latest
+     FROM public.bid_board_ingestion_inbox
+     WHERE office_slug = $1 AND status = 'succeeded' AND extracted_at IS NOT NULL AND id <> $2`,
+    [officeSlug, excludeInboxId]
+  );
+  const latest = res.rows[0]?.latest ?? null;
+  return latest == null ? null : String(latest);
+}
+
 /** Transition a claimable row → processing, stamping the attempt, start time, and a fresh lease.
  *  Claims a 'queued' row always; claims a 'processing' row ONLY if its lease has EXPIRED (its handler died) —
  *  so a live long-running import can't be double-claimed (which would burn an attempt). Returns the updated
@@ -286,24 +330,42 @@ export async function renewInboxLease(db: Querier, inboxId: string): Promise<voi
   );
 }
 
+/**
+ * Outcome of the guarded success write:
+ *  - "recorded":         the UPDATE landed (row moved 'processing' → 'succeeded').
+ *  - "already_succeeded": 0 rows AND the row is already 'succeeded' — a clean idempotent no-op (a retry of a
+ *                         write whose ack was lost). Nothing to do.
+ *  - "conflict_failed":   0 rows AND the row is 'failed' — the import COMMITTED but recovery terminalized the
+ *                         inbox 'failed' first (a slow final attempt outlived its lease while heartbeats stalled,
+ *                         then the import committed). Silently reporting success would leave the status endpoint
+ *                         permanently reporting 'failed' for a run that actually succeeded, so the caller must
+ *                         surface/reconcile this rather than treat it as success.
+ */
+export type MarkSucceededResult = "recorded" | "already_succeeded" | "conflict_failed";
+
 export async function markInboxSucceeded(
   db: Querier,
   inboxId: string,
   fields: { runId: string | null; metrics: unknown; warningsCount: number }
-): Promise<void> {
+): Promise<MarkSucceededResult> {
   // Drop the (up to ~25MB) payload once the import has committed — the row is retained for idempotency +
   // status + the metrics snapshot, but keeping every scraped payload forever would bloat the table
   // unboundedly (a scrape every ~19min). A re-POST of the same key still dedupes to this 'succeeded' row.
   // status = 'processing' guard: idempotent against any terminal state — a stray/duplicate success write can
   // never flip an already-'failed' row back to 'succeeded'. It also makes recordSuccessWithRetry's retry a
   // clean no-op when a prior attempt's UPDATE committed but its ack was lost (the row is already 'succeeded').
-  await db.query(
+  const res = await db.query(
     `UPDATE public.bid_board_ingestion_inbox
      SET status = 'succeeded', run_id = $2, metrics = $3::jsonb, warnings_count = $4,
          payload = '{}'::jsonb, last_error = NULL, finished_at = NOW(), updated_at = NOW()
      WHERE id = $1 AND status = 'processing'`,
     [inboxId, fields.runId, fields.metrics == null ? null : JSON.stringify(fields.metrics), fields.warningsCount]
   );
+  if ((res.rowCount ?? 0) > 0) return "recorded";
+  // 0 rows: the status='processing' guard blocked us — the row is already terminal. Distinguish a benign
+  // already-'succeeded' (idempotent no-op) from a 'failed' row that CONTRADICTS this committed import.
+  const row = await loadInboxControlRow(db, inboxId);
+  return row?.status === "failed" ? "conflict_failed" : "already_succeeded";
 }
 
 /**
@@ -325,12 +387,29 @@ export async function recordSuccessWithRetry(
   db: Querier,
   inboxId: string,
   fields: { runId: string | null; metrics: unknown; warningsCount: number },
-  attempts = 6
+  attempts = 6,
+  log: (line: string) => void = () => {}
 ): Promise<void> {
   let lastErr: unknown;
   for (let i = 0; i < attempts; i++) {
     try {
-      await markInboxSucceeded(db, inboxId, fields);
+      const outcome = await markInboxSucceeded(db, inboxId, fields);
+      if (outcome === "conflict_failed") {
+        // The import COMMITTED but the inbox row was already terminalized 'failed' (recovery outran a slow final
+        // attempt whose heartbeats stalled). Leaving it 'failed' would make the status endpoint permanently lie
+        // about a run that actually succeeded. RECONCILE: flip the stale-'failed' row to 'succeeded' with this
+        // run's metrics. Guarded on status='failed' so it can't clobber any other terminal transition, and it
+        // preserves the payload-drop + run bookkeeping markInboxSucceeded would have written.
+        await reconcileFailedButCommitted(db, inboxId, fields);
+        log(
+          `[BidBoardIngest] ${JSON.stringify({
+            inboxId,
+            state: "reconciled_failed_to_succeeded",
+            runId: fields.runId,
+            note: "import committed but inbox was terminalized 'failed' by recovery — flipped to 'succeeded'",
+          })}`
+        );
+      }
       return;
     } catch (err) {
       lastErr = err;
@@ -339,6 +418,27 @@ export async function recordSuccessWithRetry(
     }
   }
   throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
+}
+
+/**
+ * Reconcile the narrow window where the import COMMITTED but the inbox was already terminalized 'failed' by
+ * recovery (the final-attempt import outlived its lease while heartbeats stalled, recovery step (a) failed the
+ * row, then the import committed). The committed import is the ground truth, so flip 'failed' → 'succeeded'.
+ * Guarded on status='failed' so it's an idempotent no-op once reconciled and can never touch a 'processing' or
+ * 'succeeded' row. Best-effort part of recordSuccessWithRetry's own bounded retry loop.
+ */
+export async function reconcileFailedButCommitted(
+  db: Querier,
+  inboxId: string,
+  fields: { runId: string | null; metrics: unknown; warningsCount: number }
+): Promise<void> {
+  await db.query(
+    `UPDATE public.bid_board_ingestion_inbox
+     SET status = 'succeeded', run_id = $2, metrics = $3::jsonb, warnings_count = $4,
+         payload = '{}'::jsonb, last_error = NULL, finished_at = NOW(), updated_at = NOW()
+     WHERE id = $1 AND status = 'failed'`,
+    [inboxId, fields.runId, fields.metrics == null ? null : JSON.stringify(fields.metrics), fields.warningsCount]
+  );
 }
 
 /**
@@ -609,6 +709,9 @@ export async function processBidBoardInboxJob(deps: ProcessInboxDeps): Promise<P
     // The lock wraps ONLY the import + its terminal write (the deal-row contention). The claim above is a
     // cheap inbox UPDATE that doesn't touch deal rows, so it's safe outside the lock.
     let imported = false;
+    // The row was terminalized 'succeeded' as a deliberate stale-snapshot skip (monotonic guard) rather than by
+    // running the importer. The queue still COMPLETES (no retry) — the outcome is a "noop" (nothing imported).
+    let skippedStale = false;
     await deps.withOfficeLock(claimed.office_slug, async () => {
       // Re-check status AFTER acquiring the lock. markInboxProcessing claims an in-flight 'processing' row
       // (needed so a genuinely-orphaned row can be recovered), so a DUPLICATE job — a concurrent recovery
@@ -624,12 +727,44 @@ export async function processBidBoardInboxJob(deps: ProcessInboxDeps): Promise<P
         );
         return;
       }
+
+      // MONOTONIC GUARD (per office). The advisory lock serializes imports but does NOT preserve age order: an
+      // OLDER snapshot whose job fell into queue backoff (or a reverse-order multi-replica claim) can reach this
+      // point AFTER a newer snapshot already committed. Running the (unchanged) importer would overwrite the deal
+      // Bid Board mirror + bid_board_last_updated_at with STALE data. Read under the lock — so it observes the
+      // newest committed state — and SKIP (terminal no-op success) when this snapshot is strictly older than the
+      // office's newest already-committed one. Only compares when BOTH timestamps are present: a NULL incoming or
+      // NULL prior snapshot never blocks (we can't order them), preserving legacy no-provenance behavior. Equal
+      // timestamps still import (idempotent re-apply of the same snapshot converges the same rows).
+      if (claimed.extracted_at) {
+        const latestCommitted = await latestCommittedExtractedAt(db, claimed.office_slug, inboxId);
+        if (latestCommitted && Date.parse(claimed.extracted_at) < Date.parse(latestCommitted)) {
+          skippedStale = true;
+          await recordSuccessWithRetry(db, inboxId, {
+            runId: null,
+            metrics: { skipped: "stale_snapshot", extractedAt: claimed.extracted_at, latestCommitted },
+            warningsCount: 0,
+          });
+          log(
+            `[BidBoardIngest] ${JSON.stringify({
+              ...logMeta,
+              state: "skipped_stale_snapshot",
+              extractedAt: claimed.extracted_at,
+              latestCommitted,
+              processMs: now() - startedMs,
+            })}`
+          );
+          return;
+        }
+      }
+
       imported = true;
       const { runId, metrics, warnings } = await deps.ingest(claimed.payload);
       // The import has COMMITTED. Recording success is post-commit bookkeeping — retry it so a transient
       // failure here can't get classified as an ingest failure (which would re-run the committed import on
-      // the next attempt, duplicating the sync run + audit side-effects).
-      await recordSuccessWithRetry(db, inboxId, { runId, metrics, warningsCount: warnings?.length ?? 0 });
+      // the next attempt, duplicating the sync run + audit side-effects). Pass `log` so a failed→succeeded
+      // reconcile (import committed but recovery already terminalized the row 'failed') is surfaced.
+      await recordSuccessWithRetry(db, inboxId, { runId, metrics, warningsCount: warnings?.length ?? 0 }, 6, log);
       log(
         `[BidBoardIngest] ${JSON.stringify({
           ...logMeta,
@@ -640,6 +775,9 @@ export async function processBidBoardInboxJob(deps: ProcessInboxDeps): Promise<P
         })}`
       );
     });
+    // "succeeded" only when we actually ran the import. A stale-snapshot skip terminalized the row 'succeeded'
+    // but imported nothing → "noop" (the queue completes without a retry), same as an after-lock terminal skip.
+    if (skippedStale) return "noop";
     return imported ? "succeeded" : "noop";
   } catch (err) {
     const terminal = claimed.attempts >= claimed.max_attempts;

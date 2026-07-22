@@ -22,6 +22,14 @@ CREATE TABLE IF NOT EXISTS public.bid_board_ingestion_inbox (
   payload         jsonb NOT NULL,                -- the full BidBoardSyncPayload; processed by the worker
   row_count       integer NOT NULL DEFAULT 0,
   source_filename text,
+  -- The scrape's snapshot timestamp (payload.provenance.extractedAt). Used to keep same-office ingestion
+  -- MONOTONIC: the per-office advisory lock serializes imports but does NOT preserve age order, so an OLDER
+  -- snapshot whose job fell into queue backoff can run AFTER a newer one committed and regress the deal Bid
+  -- Board mirror + bid_board_last_updated_at. Under the office lock the worker skips (no-op) an ingestion whose
+  -- extracted_at is strictly older than the newest already-committed ('succeeded') snapshot for the office, so a
+  -- stale snapshot can never overwrite newer mirror data (multi-replica reverse-order claims included). NULL when
+  -- the sender omits provenance.extractedAt — a NULL snapshot is never treated as stale (falls back to importing).
+  extracted_at    timestamptz,
   status          text NOT NULL DEFAULT 'queued'
                     CHECK (status IN ('queued', 'processing', 'succeeded', 'failed')),
   attempts        integer NOT NULL DEFAULT 0,    -- incremented by the worker in lockstep with the job's attempts
@@ -46,6 +54,13 @@ CREATE TABLE IF NOT EXISTS public.bid_board_ingestion_inbox (
 -- Recovery + status scans look up by (office_slug, status).
 CREATE INDEX IF NOT EXISTS bid_board_ingestion_inbox_office_status_idx
   ON public.bid_board_ingestion_inbox (office_slug, status);
+
+-- The monotonic guard (processBidBoardInboxJob) reads MAX(extracted_at) over the office's already-'succeeded'
+-- rows to decide whether an incoming snapshot is stale. Partial on 'succeeded' + keyed (office_slug,
+-- extracted_at DESC) so that lookup is a tiny index scan regardless of inbox size.
+CREATE INDEX IF NOT EXISTS bid_board_ingestion_inbox_office_extracted_idx
+  ON public.bid_board_ingestion_inbox (office_slug, extracted_at DESC)
+  WHERE status = 'succeeded';
 
 -- NOTE ON CONCURRENCY: the two job_queue indexes below are written as plain CREATE INDEX IF NOT EXISTS. On
 -- the existing prod job_queue (accumulated history), a plain build holds a write-blocking SHARE lock for its

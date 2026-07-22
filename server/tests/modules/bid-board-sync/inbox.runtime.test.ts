@@ -10,6 +10,9 @@ import {
   markInboxSucceeded,
   markInboxFailed,
   renewInboxLease,
+  recordSuccessWithRetry,
+  latestCommittedExtractedAt,
+  extractPayloadExtractedAt,
   BID_BOARD_INGEST_JOB_TYPE,
   type Querier,
 } from "../../../src/modules/bid-board-sync/inbox.js";
@@ -67,6 +70,7 @@ async function setupSchema() {
       payload jsonb NOT NULL,
       row_count integer NOT NULL DEFAULT 0,
       source_filename text,
+      extracted_at timestamptz,
       status text NOT NULL DEFAULT 'queued'
         CHECK (status IN ('queued','processing','succeeded','failed')),
       attempts integer NOT NULL DEFAULT 0,
@@ -740,6 +744,225 @@ describe("in-flight lease (heartbeat) — a live import can't be double-claimed"
     const before = (await loadInboxRow(db, inboxId))!.lease_expires_at;
     await renewInboxLease(db, inboxId); // status != 'processing' → no-op
     expect(String((await loadInboxRow(db, inboxId))!.lease_expires_at)).toBe(String(before));
+  });
+});
+
+describe("monotonic per-office ingestion (a stale snapshot never overwrites newer mirror data)", () => {
+  const OLD = "2026-07-19T06:00:00.000Z";
+  const NEW = "2026-07-19T06:20:00.000Z";
+  const payloadAt = (extractedAt: string | null) => ({
+    office_slug: "dallas",
+    ...(extractedAt ? { provenance: { extractedAt } } : {}),
+    rows: [{ Name: "Palm Villas" }],
+  });
+
+  it("persists the payload's provenance.extractedAt on accept", async () => {
+    const { inboxId } = await accept({ payload: payloadAt(NEW), payloadHash: "with-extracted" });
+    const row = await loadInboxRow(db, inboxId);
+    expect(row?.extracted_at).toBeTruthy();
+    expect(new Date(row!.extracted_at as string).toISOString()).toBe(NEW);
+  });
+
+  it("SKIPS (noop, terminal 'succeeded') an OLDER snapshot after a newer one already committed — importer NOT run", async () => {
+    // Newer snapshot commits first (out-of-order: the older one fell into queue backoff).
+    const newer = await accept({ payload: payloadAt(NEW), payloadHash: "newer" });
+    await processBidBoardInboxJob({ db, inboxId: newer.inboxId, ingest: okIngest(), withOfficeLock: passthroughLock });
+
+    const older = await accept({ payload: payloadAt(OLD), payloadHash: "older" });
+    const staleIngest = okIngest();
+    const outcome = await processBidBoardInboxJob({
+      db,
+      inboxId: older.inboxId,
+      ingest: staleIngest,
+      withOfficeLock: passthroughLock,
+    });
+
+    expect(outcome).toBe("noop"); // completed without importing
+    expect(staleIngest).not.toHaveBeenCalled(); // the stale snapshot's importer NEVER ran (no mirror regression)
+    const row = await loadInboxRow(db, older.inboxId);
+    expect(row?.status).toBe("succeeded"); // terminalized so a status probe resolves it (not stuck)
+    expect((row?.metrics as any)?.skipped).toBe("stale_snapshot");
+    expect(row?.payload).toEqual({}); // heavy payload dropped
+  });
+
+  it("IMPORTS a NEWER snapshot even though an older one already committed", async () => {
+    const older = await accept({ payload: payloadAt(OLD), payloadHash: "older" });
+    await processBidBoardInboxJob({ db, inboxId: older.inboxId, ingest: okIngest(), withOfficeLock: passthroughLock });
+
+    const newer = await accept({ payload: payloadAt(NEW), payloadHash: "newer" });
+    const freshIngest = okIngest();
+    const outcome = await processBidBoardInboxJob({
+      db,
+      inboxId: newer.inboxId,
+      ingest: freshIngest,
+      withOfficeLock: passthroughLock,
+    });
+
+    expect(outcome).toBe("succeeded");
+    expect(freshIngest).toHaveBeenCalledOnce(); // the newer snapshot IS applied
+  });
+
+  it("IMPORTS an equal-timestamp snapshot (idempotent re-apply converges the same rows)", async () => {
+    const first = await accept({ payload: payloadAt(NEW), payloadHash: "first" });
+    await processBidBoardInboxJob({ db, inboxId: first.inboxId, ingest: okIngest(), withOfficeLock: passthroughLock });
+
+    const same = await accept({ payload: payloadAt(NEW), payloadHash: "same-ts" });
+    const ingest = okIngest();
+    const outcome = await processBidBoardInboxJob({ db, inboxId: same.inboxId, ingest, withOfficeLock: passthroughLock });
+
+    expect(outcome).toBe("succeeded"); // equal is NOT older → still imported
+    expect(ingest).toHaveBeenCalledOnce();
+  });
+
+  it("does NOT block across offices — an older Atlanta snapshot imports despite a newer Dallas commit", async () => {
+    const dallasNew = await accept({ payload: payloadAt(NEW), payloadHash: "dallas-new" });
+    await processBidBoardInboxJob({ db, inboxId: dallasNew.inboxId, ingest: okIngest(), withOfficeLock: passthroughLock });
+
+    const atlantaOld = await accept({
+      officeSlug: "atlanta",
+      payloadHash: "atlanta-old",
+      payload: { office_slug: "atlanta", provenance: { extractedAt: OLD }, rows: [] },
+    });
+    const ingest = okIngest();
+    const outcome = await processBidBoardInboxJob({
+      db,
+      inboxId: atlantaOld.inboxId,
+      ingest,
+      withOfficeLock: passthroughLock,
+    });
+
+    expect(outcome).toBe("succeeded"); // the guard is per-office, so Dallas's newer commit doesn't gate Atlanta
+    expect(ingest).toHaveBeenCalledOnce();
+  });
+
+  it("never blocks when the incoming snapshot has NO extracted_at (legacy no-provenance sender)", async () => {
+    const withTs = await accept({ payload: payloadAt(NEW), payloadHash: "with-ts" });
+    await processBidBoardInboxJob({ db, inboxId: withTs.inboxId, ingest: okIngest(), withOfficeLock: passthroughLock });
+
+    const noTs = await accept({ payload: payloadAt(null), payloadHash: "no-ts" });
+    const ingest = okIngest();
+    const outcome = await processBidBoardInboxJob({ db, inboxId: noTs.inboxId, ingest, withOfficeLock: passthroughLock });
+
+    expect(outcome).toBe("succeeded"); // can't order a NULL snapshot → import (preserve legacy behavior)
+    expect(ingest).toHaveBeenCalledOnce();
+  });
+
+  it("only a PRIOR-SUCCEEDED snapshot gates — a newer snapshot still 'processing' does not block an older one", async () => {
+    // A newer snapshot is claimed but NOT yet committed (still 'processing'); an older one must still import
+    // because only COMMITTED ('succeeded') snapshots establish the monotonic floor.
+    const newer = await accept({ payload: payloadAt(NEW), payloadHash: "newer-inflight" });
+    await db.query(
+      `UPDATE public.bid_board_ingestion_inbox SET status='processing', attempts=1,
+         lease_expires_at = now() + interval '3600 seconds' WHERE id=$1`,
+      [newer.inboxId]
+    );
+    const older = await accept({ payload: payloadAt(OLD), payloadHash: "older-runs" });
+    const ingest = okIngest();
+    const outcome = await processBidBoardInboxJob({ db, inboxId: older.inboxId, ingest, withOfficeLock: passthroughLock });
+    expect(outcome).toBe("succeeded");
+    expect(ingest).toHaveBeenCalledOnce();
+  });
+
+  it("latestCommittedExtractedAt returns the MAX committed snapshot and excludes the given row", async () => {
+    const a = await accept({ payload: payloadAt(OLD), payloadHash: "a" });
+    const b = await accept({ payload: payloadAt(NEW), payloadHash: "b" });
+    await db.query(`UPDATE public.bid_board_ingestion_inbox SET status='succeeded' WHERE id IN ($1,$2)`, [
+      a.inboxId,
+      b.inboxId,
+    ]);
+    // The driver may return timestamptz as a tz-qualified string or Date; the contract is a Date.parse-able
+    // instant (the guard compares via Date.parse), so assert the epoch rather than an exact string form.
+    const max = await latestCommittedExtractedAt(db, "dallas", "00000000-0000-4000-8000-0000000000ff");
+    expect(Date.parse(max!)).toBe(Date.parse(NEW));
+    // Excluding b (the max) falls back to a's older timestamp.
+    const excludingMax = await latestCommittedExtractedAt(db, "dallas", b.inboxId);
+    expect(Date.parse(excludingMax!)).toBe(Date.parse(OLD));
+    // No committed snapshot for an office → null.
+    expect(await latestCommittedExtractedAt(db, "atlanta", b.inboxId)).toBeNull();
+  });
+});
+
+describe("extractPayloadExtractedAt", () => {
+  it("reads camelCase and snake_case provenance aliases and normalizes to ISO", () => {
+    expect(extractPayloadExtractedAt({ provenance: { extractedAt: "2026-07-19T06:00:00Z" } })).toBe(
+      "2026-07-19T06:00:00.000Z"
+    );
+    expect(extractPayloadExtractedAt({ provenance: { extracted_at: "2026-07-19T06:00:00Z" } })).toBe(
+      "2026-07-19T06:00:00.000Z"
+    );
+  });
+  it("returns null for absent, blank, or unparseable timestamps", () => {
+    expect(extractPayloadExtractedAt({})).toBeNull();
+    expect(extractPayloadExtractedAt({ provenance: { extractedAt: "   " } })).toBeNull();
+    expect(extractPayloadExtractedAt({ provenance: { extractedAt: "not-a-date" } })).toBeNull();
+  });
+});
+
+describe("markInboxSucceeded reconciliation (import committed but inbox was terminalized 'failed')", () => {
+  it("markInboxSucceeded reports 'conflict_failed' (not silent success) when the row is already 'failed'", async () => {
+    const { inboxId } = await accept();
+    await db.query(
+      `UPDATE public.bid_board_ingestion_inbox SET status='failed', attempts=5, last_error='dead', finished_at=now() WHERE id=$1`,
+      [inboxId]
+    );
+    const result = await markInboxSucceeded(db, inboxId, { runId: RUN_UUID, metrics: {}, warningsCount: 0 });
+    expect(result).toBe("conflict_failed"); // surfaced, NOT reported as success
+    const row = await readInboxStatusByKey(db, "dallas", "hash-a");
+    expect(row?.status).toBe("failed"); // markInboxSucceeded itself does not flip it (guarded on 'processing')
+  });
+
+  it("markInboxSucceeded reports 'already_succeeded' for a benign idempotent no-op", async () => {
+    const { inboxId } = await accept();
+    await db.query(
+      `UPDATE public.bid_board_ingestion_inbox SET status='succeeded', run_id=$2, finished_at=now() WHERE id=$1`,
+      [inboxId, RUN_UUID]
+    );
+    const result = await markInboxSucceeded(db, inboxId, { runId: RUN_UUID, metrics: {}, warningsCount: 0 });
+    expect(result).toBe("already_succeeded");
+  });
+
+  it("markInboxSucceeded reports 'recorded' on the normal processing→succeeded transition", async () => {
+    const { inboxId } = await accept();
+    await db.query(`UPDATE public.bid_board_ingestion_inbox SET status='processing' WHERE id=$1`, [inboxId]);
+    const result = await markInboxSucceeded(db, inboxId, { runId: RUN_UUID, metrics: {}, warningsCount: 0 });
+    expect(result).toBe("recorded");
+    expect((await readInboxStatusByKey(db, "dallas", "hash-a"))?.status).toBe("succeeded");
+  });
+
+  it("recordSuccessWithRetry RECONCILES a stale 'failed' row to 'succeeded' (the committed import is ground truth)", async () => {
+    const { inboxId } = await accept();
+    // Recovery terminalized the row 'failed' while the final-attempt import was still running; the import then
+    // committed and this success write lands — it must flip the inbox back to the truthful 'succeeded'.
+    await db.query(
+      `UPDATE public.bid_board_ingestion_inbox SET status='failed', attempts=5, last_error='recovered: worker died', finished_at=now() WHERE id=$1`,
+      [inboxId]
+    );
+    await recordSuccessWithRetry(db, inboxId, { runId: RUN_UUID, metrics: { updated: 3 }, warningsCount: 1 });
+    const row = await readInboxStatusByKey(db, "dallas", "hash-a");
+    expect(row?.status).toBe("succeeded"); // status endpoint no longer permanently lies 'failed'
+    expect(row?.run_id).toBe(RUN_UUID);
+    expect(row?.warnings_count).toBe(1);
+    expect(row?.last_error).toBeNull();
+  });
+
+  it("processBidBoardInboxJob returns 'succeeded' AND reconciles when recovery raced the inbox to 'failed' mid-import", async () => {
+    const { inboxId } = await accept();
+    // The post-lock recheck passes (row still 'processing'), then WHILE the import runs recovery terminalizes the
+    // inbox 'failed' (a slow final attempt whose lease lapsed). The import commits; the post-commit success write
+    // must RECONCILE the stale 'failed' back to 'succeeded', not silently pass and leave the status endpoint lying.
+    const ingest = vi.fn(async () => {
+      await db.query(
+        `UPDATE public.bid_board_ingestion_inbox SET status='failed', attempts=5, finished_at=now() WHERE id=$1`,
+        [inboxId]
+      );
+      return { runId: RUN_UUID, metrics: { updated: 3 }, warnings: [] };
+    });
+    const outcome = await processBidBoardInboxJob({ db, inboxId, ingest, withOfficeLock: passthroughLock });
+    expect(outcome).toBe("succeeded");
+    expect(ingest).toHaveBeenCalledOnce();
+    const row = await readInboxStatusByKey(db, "dallas", "hash-a");
+    expect(row?.status).toBe("succeeded"); // reconciled — not left permanently 'failed'
+    expect(row?.run_id).toBe(RUN_UUID);
   });
 });
 

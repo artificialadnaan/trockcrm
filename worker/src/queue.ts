@@ -56,7 +56,15 @@ let polling = false;
 type Outcome =
   | { status: "completed" }
   | { status: "dead"; error: string }
-  | { status: "pending"; error: string; runAfterSeconds: number };
+  | { status: "pending"; error: string; runAfterSeconds: number }
+  // A DEFERRAL: the handler chose to hand the work back untouched because another durable lease still owns it
+  // (e.g. a live bid_board_ingest import on another replica, or an active recipient lease). Unlike a
+  // retry-after-failure 'pending', a deferral must NOT consume a queue attempt — otherwise repeated deferrals of
+  // a genuinely-leased job (e.g. startup recovery requeuing an import still running elsewhere) burn the whole
+  // attempt budget and dead-letter the queue row without the handler ever executing. So the outcome write rolls
+  // the claim's attempt increment BACK, keeping the queue attempt counter aligned with the inbox's (which a
+  // deferral also leaves unbumped).
+  | { status: "deferred"; error: string; runAfterSeconds: number };
 
 // A deferred outcome write bound to the SPECIFIC claimed attempt it belongs to (`attempts` = the row's
 // value at claim time). The write guard checks this so a stale intent flushed late can't apply to a LATER
@@ -92,6 +100,15 @@ function buildOutcomeUpdate(jobId: number, attempts: number, outcome: Outcome): 
     case "pending":
       return {
         sql: `UPDATE public.job_queue SET status = 'pending', last_error = $1, run_after = NOW() + make_interval(secs => $2) WHERE id = $3 AND status = 'processing' AND attempts = $4`,
+        params: [outcome.error, outcome.runAfterSeconds, jobId, attempts],
+      };
+    case "deferred":
+      // Same as 'pending' but ROLLS BACK the claim's attempt increment (attempts - 1): a deferral is not an
+      // attempt. Still guarded on status='processing' AND attempts = the claimed value, so it only rolls back the
+      // row THIS handler claimed — never a later re-claim (which bumped attempts again). The row lands back at
+      // its pre-claim attempt count so a live-leased job can be re-driven indefinitely without dead-lettering.
+      return {
+        sql: `UPDATE public.job_queue SET status = 'pending', last_error = $1, run_after = NOW() + make_interval(secs => $2), attempts = attempts - 1 WHERE id = $3 AND status = 'processing' AND attempts = $4`,
         params: [outcome.error, outcome.runAfterSeconds, jobId, attempts],
       };
   }
@@ -365,13 +382,17 @@ async function processJob(job: any): Promise<void> {
       outcome = { status: "dead", error: result.error };
       console.error(`[Worker] Job ${job.id} (${job.job_type}) rejected without retry: ${result.error}`);
     } else if (result && result.status === "pending") {
+      // A handler-RETURNED 'pending' is always a deliberate DEFERRAL (a retry-after-failure 'pending' is
+      // computed in the catch below from a thrown error, never returned). A deferral must not consume a queue
+      // attempt, so it's persisted as the 'deferred' outcome, which rolls the claim's increment back — otherwise
+      // repeated deferrals of a genuinely-leased job would burn the attempt budget and dead-letter it unrun.
       outcome = {
-        status: "pending",
+        status: "deferred",
         error: result.error,
         runAfterSeconds: Math.max(1, Math.ceil(result.runAfterSeconds)),
       };
       console.log(
-        `[Worker] Job ${job.id} (${job.job_type}) deferred for ${outcome.runAfterSeconds}s: ${result.error}`,
+        `[Worker] Job ${job.id} (${job.job_type}) deferred for ${outcome.runAfterSeconds}s (attempt not consumed): ${result.error}`,
       );
     } else {
       outcome = { status: "completed" };

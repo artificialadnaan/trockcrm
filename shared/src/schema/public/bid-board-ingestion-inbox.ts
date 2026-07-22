@@ -29,6 +29,9 @@ export const bidBoardIngestionInbox = pgTable(
     payload: jsonb("payload").notNull(),
     rowCount: integer("row_count").default(0).notNull(),
     sourceFilename: text("source_filename"),
+    // The scrape's snapshot timestamp (payload.provenance.extractedAt). Drives the monotonic per-office guard
+    // that skips a stale snapshot so an older retry can't overwrite newer Bid Board mirror data (migration 0188).
+    extractedAt: timestamp("extracted_at", { withTimezone: true }),
     status: text("status").default("queued").notNull(),
     attempts: integer("attempts").default(0).notNull(),
     maxAttempts: integer("max_attempts").default(5).notNull(),
@@ -48,6 +51,10 @@ export const bidBoardIngestionInbox = pgTable(
   (table) => [
     unique("bid_board_ingestion_inbox_office_hash_uidx").on(table.officeSlug, table.payloadHash),
     index("bid_board_ingestion_inbox_office_status_idx").on(table.officeSlug, table.status),
+    // Supports the monotonic guard's MAX(extracted_at) lookup over the office's 'succeeded' rows (migration 0188).
+    index("bid_board_ingestion_inbox_office_extracted_idx")
+      .on(table.officeSlug, table.extractedAt.desc())
+      .where(sql`${table.status} = 'succeeded'`),
     // Mirror migration 0188's inline CHECK (status IN (...)). Named to match Postgres's auto-name for the
     // column check so drizzle-kit sees parity instead of generating a drift migration that drops it.
     check(

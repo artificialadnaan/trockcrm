@@ -147,7 +147,9 @@ describe("bid-board inbox pure helpers", () => {
         query: vi.fn(async () => {
           calls++;
           if (calls < 3) throw new Error("transient");
-          return { rows: [] };
+          // A landed UPDATE reports rowCount 1 → markInboxSucceeded returns 'recorded' (no follow-up status read),
+          // so the retry loop ends here without an extra query.
+          return { rows: [], rowCount: 1 };
         }),
       };
       await expect(

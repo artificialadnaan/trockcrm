@@ -106,7 +106,7 @@ describe("worker queue", () => {
     );
   });
 
-  it("reschedules an explicitly deferred handler result instead of completing it", async () => {
+  it("reschedules an explicitly deferred handler result WITHOUT consuming an attempt (rolls the claim back)", async () => {
     const jobType = "unit_test_explicit_defer";
     registerJobHandler(jobType, async () => deferJob("waiting for another worker lease", 300));
     const { queries } = installPool(
@@ -117,8 +117,18 @@ describe("worker queue", () => {
 
     const pendingWrite = queries.find(([sql]) => sql.includes("SET status = 'pending'"));
     expect(pendingWrite).toBeTruthy();
+    // A DEFERRAL must not burn a queue attempt — the outcome write rolls the claim's increment back
+    // (attempts = attempts - 1), so repeated deferrals of a genuinely-leased job can't dead-letter it unrun.
+    expect(pendingWrite![0]).toContain("attempts = attempts - 1");
+    // Still guarded on the CLAIMED attempt so a late flush can't roll back a re-claim.
+    expect(pendingWrite![0]).toContain("AND attempts = $4");
     expect(pendingWrite![1]).toEqual(["waiting for another worker lease", 300, 42, 1]);
     expect(queries.some(([sql]) => sql.includes("SET status = 'completed'"))).toBe(false);
+    // A deferral is NOT a failure retry — the failure-retry pending write (no attempt rollback) must not appear.
+    const retryWrite = queries.find(
+      ([sql]) => sql.includes("SET status = 'pending'") && !sql.includes("attempts = attempts - 1")
+    );
+    expect(retryWrite).toBeUndefined();
   });
 
   it("releases the poll (claim) connection BEFORE running job handlers (so nested pool.connect can't deadlock)", async () => {
@@ -298,6 +308,9 @@ describe("worker queue", () => {
     expect(pendingCall).toBeTruthy();
     // Bound to the claimed attempt so a late flush can't stomp a re-claim.
     expect(pendingCall![0]).toContain("AND attempts = $4");
+    // A failure retry (thrown error) DOES consume the attempt — unlike a deliberate deferral, it must NOT roll
+    // the claim back (otherwise a persistently-failing job would loop forever without ever dead-lettering).
+    expect(pendingCall![0]).not.toContain("attempts = attempts - 1");
     // params = [error, backoffSeconds, id, claimedAttempt] — backoff 3^2 = 9 (NOT the old fixed 30), attempt 2.
     expect(pendingCall![1]).toEqual(["handler boom", 9, 66, 2]);
   });
@@ -478,9 +491,11 @@ describe("worker queue", () => {
     expect(claim![1]).toEqual([1]); // BID_BOARD_INGEST_CONCURRENCY — one import at a time
   });
 
-  it("the dedicated poller reschedules a DEFERRED bid_board_ingest result as pending (does not complete it)", async () => {
+  it("the dedicated poller reschedules a DEFERRED bid_board_ingest result as pending without consuming an attempt", async () => {
     // A live-leased inbox row surfaces as deferJob(...) → the queue row must go back to 'pending' with the
-    // requested delay, NOT 'completed' (which would strand the inbox until the slow periodic sweep).
+    // requested delay, NOT 'completed' (which would strand the inbox until the slow periodic sweep). And the
+    // deferral must ROLL BACK the claim's attempt increment: startup recovery can requeue an import still running
+    // on another replica, and each defer would otherwise burn a queue attempt until the row dead-letters unrun.
     registerJobHandler("bid_board_ingest", async () => deferJob("inbox lease held by a live handler", 182));
     const { queries } = installPool(
       claimRouter(() => [
@@ -492,6 +507,7 @@ describe("worker queue", () => {
 
     const pendingWrite = queries.find(([sql]) => sql.includes("SET status = 'pending'"));
     expect(pendingWrite).toBeTruthy();
+    expect(pendingWrite![0]).toContain("attempts = attempts - 1"); // attempt not consumed
     expect(pendingWrite![1]).toEqual(["inbox lease held by a live handler", 182, 51, 1]);
     expect(queries.some(([sql]) => sql.includes("SET status = 'completed'"))).toBe(false);
   });
