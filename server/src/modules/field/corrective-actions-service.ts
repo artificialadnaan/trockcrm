@@ -200,6 +200,14 @@ export async function reconcileScorecardCorrectiveActions(
         .update(fieldScorecards)
         .set({ status: "submitted", updatedAt: new Date() })
         .where(eq(fieldScorecards.id, input.scorecardId));
+      // The corrective-action cycle no longer exists (the edit lifted the card out of the band / removed every
+      // flag), so its outstanding recipient-bound web tokens must not keep authorizing the responder flow or the
+      // token-scoped upload routes until they expire. Revoke them on the same transition — same invariant the
+      // reopen path enforces (a surviving token ⟺ a live corrective-action cycle). A card that had no email-only
+      // recipient has no tokens, so this is a no-op there.
+      await tx
+        .delete(scorecardCorrectiveActionTokens)
+        .where(eq(scorecardCorrectiveActionTokens.scorecardId, input.scorecardId));
     }
     return;
   }

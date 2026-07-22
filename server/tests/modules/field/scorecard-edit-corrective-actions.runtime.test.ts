@@ -514,4 +514,39 @@ describe("updateFieldScorecard corrective-action reconcile", () => {
     );
     expect((tokensAfter.rows[0] as { c: number }).c).toBe(0);
   });
+
+  it("lifting an OPEN card ABOVE band (cancel) revokes its outstanding responder tokens", async () => {
+    // An edit that lifts a card out of the band walks it back to `submitted` and drops the open items — the
+    // corrective-action cycle no longer exists, so a prior recipient-bound web token must NOT keep authorizing
+    // the responder flow / token-scoped uploads until it expires.
+    const { scorecard } = await createFieldScorecard(
+      tdb,
+      createInput({ items: v2Items(5), actionItems: ["Fix it"] }),
+    );
+    expect(await getStatus(scorecard.id)).toBe("corrective_action_open");
+    // An outstanding web token for the email-only PM.
+    await tdb.insert(scorecardCorrectiveActionTokens).values({
+      scorecardId: scorecard.id,
+      tokenHash: "cancel-cycle-hash",
+      recipientEmail: "pm@example.com",
+      role: "project_manager",
+      expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+    });
+    const tokensBefore = await tdb.execute(
+      sql`SELECT COUNT(*)::int AS c FROM scorecard_corrective_action_tokens WHERE scorecard_id = ${scorecard.id}`,
+    );
+    expect((tokensBefore.rows[0] as { c: number }).c).toBe(1);
+
+    // Edit lifts the card above band → revert to submitted → the reconcile must revoke the outstanding token.
+    const at = await currentUpdatedAt(scorecard.id);
+    const { scorecard: updated } = await updateFieldScorecard(
+      tdb,
+      updateInput(scorecard.id, at, { items: v2Items(9), actionItems: [] }),
+    );
+    expect(updated.status).toBe("submitted");
+    const tokensAfter = await tdb.execute(
+      sql`SELECT COUNT(*)::int AS c FROM scorecard_corrective_action_tokens WHERE scorecard_id = ${scorecard.id}`,
+    );
+    expect((tokensAfter.rows[0] as { c: number }).c).toBe(0);
+  });
 });
