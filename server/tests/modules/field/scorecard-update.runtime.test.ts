@@ -22,6 +22,7 @@ import {
   fieldScorecardItems,
   fieldScorecardPhotos,
   fieldScorecards,
+  scorecardCorrectiveActions,
 } from "@trock-crm/shared/schema";
 import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
 
@@ -98,6 +99,7 @@ function updateInput(
     userId: OWNER,
     userRole: "field_contractor",
     scorecardId,
+    office: OFFICE,
     expectedUpdatedAt,
     superintendentName: "Updated Superintendent",
     pmName: "Updated PM",
@@ -170,6 +172,7 @@ beforeAll(async () => {
     fieldScorecardItems,
     fieldScorecardPhotos,
     fieldScorecardEditUploads,
+    scorecardCorrectiveActions,
     dealTeamMembers,
     contacts,
   ]));
@@ -194,6 +197,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await tdb.execute(sql`DELETE FROM field_scorecard_edit_uploads`);
+  await tdb.execute(sql`DELETE FROM scorecard_corrective_actions`);
   await tdb.execute(sql`DELETE FROM field_scorecard_photos`);
   await tdb.execute(sql`DELETE FROM field_scorecard_items`);
   await tdb.execute(sql`DELETE FROM field_scorecards`);

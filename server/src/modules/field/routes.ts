@@ -1085,6 +1085,7 @@ fieldRoutes.put("/scorecards/:id", requireFieldContractor, async (req, res, next
         userId: req.fieldUser!.id,
         userRole: req.fieldUser!.role,
         scorecardId: id,
+        office,
         ...parsed,
       }),
     );

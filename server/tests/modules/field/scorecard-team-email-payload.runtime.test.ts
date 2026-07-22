@@ -8,6 +8,7 @@ import {
   fieldScorecards,
   fieldScorecardItems,
   fieldScorecardPhotos,
+  scorecardCorrectiveActions,
   dealTeamMembers,
   contacts,
 } from "@trock-crm/shared/schema";
@@ -85,7 +86,7 @@ beforeAll(async () => {
     );
   `);
   await pg.exec(
-    tenantSchemaSql("public", [fieldScorecards, fieldScorecardItems, fieldScorecardPhotos, dealTeamMembers, contacts]),
+    tenantSchemaSql("public", [fieldScorecards, fieldScorecardItems, fieldScorecardPhotos, scorecardCorrectiveActions, dealTeamMembers, contacts]),
   );
   await pg.exec(
     `ALTER TABLE public.field_scorecards ADD CONSTRAINT field_scorecards_csid_uniq UNIQUE (client_submission_id);`,
@@ -110,6 +111,7 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
+  await tdb.execute(sql`DELETE FROM scorecard_corrective_actions`);
   await tdb.execute(sql`DELETE FROM field_scorecard_items`);
   await tdb.execute(sql`DELETE FROM field_scorecards`);
   await tdb.execute(sql`DELETE FROM deal_team_members`);

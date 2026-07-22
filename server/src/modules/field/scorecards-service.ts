@@ -10,7 +10,6 @@ import {
   fieldScorecardPhotos,
   files,
   jobQueue,
-  scorecardCorrectiveActions,
 } from "@trock-crm/shared/schema";
 import { generateDownloadUrl, headObjectStrict, putObject } from "../../lib/r2-client.js";
 import { buildScorecardPdfData, renderFieldScorecardPdf, MAX_EVIDENCE_PHOTOS } from "./scorecard-pdf.js";
@@ -32,8 +31,6 @@ import {
   computeScorecardLeadershipAverage,
   computeScorecardTotal,
   computeScorecardV2Average,
-  enumerateFlaggedItems,
-  isCorrectiveActionBand,
   isLeadershipSectionKey,
   isLegalSectionPoints,
   isScorecardCriticalDeficiencyKey,
@@ -60,6 +57,7 @@ import { activeProjectWhere, assertActiveFieldProject, type FieldAccessContext }
 import { runInOffice, runInOfficeTransaction } from "./cross-office.js";
 import { resolveScorecardTeamEmails } from "../deals/team-service.js";
 import { markScorecardEditEvidenceLinked } from "./scorecard-evidence-upload.js";
+import { reconcileScorecardCorrectiveActions } from "./corrective-actions-service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 type ScorecardRow = typeof fieldScorecards.$inferSelect;
@@ -94,6 +92,8 @@ export interface UpdateFieldScorecardInput {
   userId: string;
   userRole: FieldAccessContext["userRole"];
   scorecardId: string;
+  /** Owning office (id + slug) — used to enqueue the corrective-action notification if an edit opens it. */
+  office: { id: string; slug: string };
   expectedUpdatedAt: string;
   superintendentName?: string | null;
   pmName?: string | null;
@@ -162,10 +162,9 @@ interface ScorecardSummarySource {
 // job_type string — MUST match the worker's registerJobHandler(FIELD_SCORECARD_EMAIL_JOB, ...). The server
 // can't import from the worker package, so the string is duplicated (as with the other enqueue sites).
 const FIELD_SCORECARD_EMAIL_JOB = "field_scorecard_email";
-// job_type string for the below-band corrective-action notification — MUST match the worker's
-// registerJobHandler(SCORECARD_CORRECTIVE_ACTION_EMAIL_JOB, ...). Duplicated (server can't import worker),
-// same as FIELD_SCORECARD_EMAIL_JOB above.
-const SCORECARD_CORRECTIVE_ACTION_EMAIL_JOB = "scorecard_corrective_action_email";
+// The below-band corrective-action notification job (job_type "scorecard_corrective_action_email") is
+// enqueued by reconcileScorecardCorrectiveActions (corrective-actions-service.ts), shared by the create +
+// edit paths, so its constant lives there.
 const SCORECARD_PDF_DOWNLOAD_EXPIRY_SECONDS = 60 * 60;
 // Give the synchronous render + R2 upload (sub-second) a head start over the worker's poll, so the email
 // job normally finds the PDF already stored. If render/upload failed, the worker degrades to a
@@ -321,49 +320,22 @@ export async function createFieldScorecard(
       .values(photoLinks.map((p) => ({ scorecardId: card.id, sectionKey: p.sectionKey, deficiencyKey: p.deficiencyKey ?? null, fileId: p.fileId })));
   }
 
-  // Corrective-action follow-up: when the card trips the corrective-action band, open the stage and seed
-  // one tracked item per flagged issue (each action item + each critical deficiency). Runs in this same
-  // transaction (the caller wraps createFieldScorecard in runInOfficeTransaction), so the status walk and
-  // seeded items commit atomically with the card. Only open the stage when there is at least one flagged
-  // item to correct — a below-band card with no action items and no deficiencies has nothing to walk, so it
-  // stays `submitted` (see spec §4.2: items drive the stage).
-  if (isCorrectiveActionBand(rating)) {
-    const flagged = enumerateFlaggedItems({ actionItems, criticalDeficiencies: deficiencies });
-    if (flagged.length > 0) {
-      await tenantDb
-        .update(fieldScorecards)
-        .set({ status: "corrective_action_open", updatedAt: new Date() })
-        .where(eq(fieldScorecards.id, card.id));
-      await tenantDb.insert(scorecardCorrectiveActions).values(
-        flagged.map((f) => ({
-          scorecardId: card.id,
-          itemType: f.itemType,
-          itemRef: f.itemRef,
-          itemLabel: f.itemLabel,
-          status: "open" as const,
-        })),
-      );
-
-      // Durable outbox: enqueue the corrective-action notification in THIS transaction so it commits
-      // atomically with the opened stage + seeded items. The worker resolves the deal's super/PM (users get
-      // an app deep link; email-only get a minted web token) and sends one email per recipient. Same table
-      // + delay + retry shape as the field_scorecard_email job above; idempotency is a scorecard-level
-      // stamp (field_scorecards.corrective_action_email_sent_at) checked/set by the worker.
-      await tenantDb.insert(jobQueue).values({
-        jobType: SCORECARD_CORRECTIVE_ACTION_EMAIL_JOB,
-        payload: {
-          tenantSchema: `office_${input.office.slug}`,
-          scorecardId: card.id,
-          dealId: input.dealId,
-          officeId: input.office.id,
-        },
-        officeId: input.office.id,
-        status: "pending",
-        runAfter: new Date(Date.now() + SCORECARD_EMAIL_RUN_AFTER_SECONDS * 1000),
-        maxAttempts: 6,
-      });
-    }
-  }
+  // Corrective-action follow-up: when the card trips the corrective-action band with at least one flagged
+  // item, open the stage, seed one tracked item per flagged issue (each action item + each critical
+  // deficiency), and enqueue the notification. Runs in this same transaction (the caller wraps
+  // createFieldScorecard in runInOfficeTransaction), so the status walk + seeded items + job commit
+  // atomically with the card. A below-band card with no action items and no deficiencies has nothing to
+  // walk, so it stays `submitted` (see spec §4.2: items drive the stage). This is the SAME reconcile the
+  // edit path runs, so the two can never drift; the freshly-inserted card is `submitted`.
+  await reconcileScorecardCorrectiveActions(tenantDb, {
+    scorecardId: card.id,
+    dealId: input.dealId,
+    office: input.office,
+    rating,
+    actionItems,
+    deficiencies,
+    currentStatus: "submitted",
+  });
 
   // Durable outbox: enqueue the email job IN THIS TRANSACTION so it commits atomically with the scorecard.
   // The PDF is rendered + stored post-response (best-effort); if that fails or the process dies first, the
@@ -428,7 +400,17 @@ export async function updateFieldScorecard(
   if (card.submittedBy !== input.userId) {
     throw new AppError(403, "Only the person who submitted this scorecard can edit it.", "SCORECARD_EDIT_FORBIDDEN");
   }
-  if (card.status !== "submitted" || card.formVersion !== 2) {
+  // Editable statuses are the whole current-form lifecycle: `submitted` plus the two corrective-action
+  // states. An edit can raise a card out of the band (open → submitted) or add/remove flags while it is open
+  // or re-open a closed card — reconcileScorecardCorrectiveActions (below) walks the status + tracked items
+  // to match the freshly recomputed rating. The pre-edit status drives the enqueue-on-transition decision.
+  const preEditStatus = card.status;
+  if (
+    (preEditStatus !== "submitted" &&
+      preEditStatus !== "corrective_action_open" &&
+      preEditStatus !== "corrective_action_closed") ||
+    card.formVersion !== 2
+  ) {
     throw new AppError(422, "Only submitted current-form scorecards can be edited.", "SCORECARD_EDIT_UNSUPPORTED");
   }
 
@@ -666,9 +648,9 @@ export async function updateFieldScorecard(
     throw new AppError(409, "The scorecard could not be updated. Please reload and try again.", "SCORECARD_EDIT_CONFLICT");
   }
 
-  // Do not create a second notification. If the original durable email is still waiting to run, keep its
-  // score text aligned with the newly edited PDF. A job already processing/completed keeps its original
-  // submission notification semantics.
+  // Do not create a second field-scorecard-completed notification. If the original durable email is still
+  // waiting to run, keep its score text aligned with the newly edited PDF. A job already processing/completed
+  // keeps its original submission notification semantics.
   await tenantDb.execute(sql`
     UPDATE public.job_queue
     SET payload = payload || jsonb_build_object(
@@ -681,7 +663,28 @@ export async function updateFieldScorecard(
       AND payload->>'scorecardId' = ${card.id}
   `);
 
-  return { scorecard: toSummary(updatedCard, project.name, input.userId) };
+  // Reconcile the corrective-action lifecycle against the recomputed rating + flagged items in THIS same
+  // edit transaction — the SAME shared helper the create path runs, so the two never drift. It may open the
+  // stage (edit dropped into the band), revert to `submitted` (edit lifted it back out), add/remove tracked
+  // items, auto-close (all flags resolved), or re-open a closed card (a fresh flag) — resetting the email
+  // stamp + re-enqueuing the notification only on a transition INTO open. preEditStatus is the status before
+  // this edit; the reconcile may write a NEWER status than updatedCard carries, so re-read it for the summary.
+  await reconcileScorecardCorrectiveActions(tenantDb, {
+    scorecardId: card.id,
+    dealId: card.dealId,
+    office: input.office,
+    rating,
+    actionItems,
+    deficiencies,
+    currentStatus: preEditStatus,
+  });
+  const [reconciledCard] = await tenantDb
+    .select()
+    .from(fieldScorecards)
+    .where(eq(fieldScorecards.id, card.id))
+    .limit(1);
+
+  return { scorecard: toSummary(reconciledCard ?? updatedCard, project.name, input.userId) };
 }
 
 export async function listFieldScorecardsForProject(
