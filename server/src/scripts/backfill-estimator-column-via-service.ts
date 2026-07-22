@@ -552,8 +552,8 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
         .reduce((acc, [, v]) => acc + v, 0);
     }
     console.log(
-      `\n=== GRAND TOTAL ${execute ? "LINKED" : "(dry-run) WOULD LINK"}: ${grandAssigned} deal(s) to their estimator ` +
-        `(${grandSkipped} skipped by guards / unresolved) ===`
+      `\n=== GRAND TOTAL ${execute ? "LINKED" : "(dry-run) WOULD LINK"}: ${grandAssigned} BASE deal(s) to their ` +
+        `estimator (${grandSkipped} skipped by guards / unresolved) ===`
     );
     if (grandNoCommission > 0) {
       console.log(
