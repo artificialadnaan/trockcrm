@@ -11,7 +11,13 @@ import {
 } from "../../../src/modules/deals/team-service.js";
 import { deleteContact } from "../../../src/modules/contacts/service.js";
 import { resolveCorrectiveActionRecipients } from "../../../src/modules/field/corrective-action-recipients.js";
-import { dealTeamMembers, contacts, deals } from "@trock-crm/shared/schema";
+import {
+  dealTeamMembers,
+  contacts,
+  deals,
+  fieldScorecards,
+  scorecardCorrectiveActionTokens,
+} from "@trock-crm/shared/schema";
 import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
 
 // deal_team_members can point at EITHER a staff user (public.users) OR a directory contact (tenant
@@ -31,7 +37,17 @@ beforeAll(async () => {
   await pg.exec(`
     CREATE TABLE public.users (id uuid PRIMARY KEY, display_name text, email text, avatar_url text, is_active boolean DEFAULT true);
   `);
-  await pg.exec(tenantSchemaSql("public", [dealTeamMembers, contacts, deals]));
+  // field_scorecards + the corrective-action token table are needed because re-roling a super/PM off the
+  // responder roles now revokes that recipient's tokens (finding 4), whose DELETE references both tables.
+  await pg.exec(
+    tenantSchemaSql("public", [
+      dealTeamMembers,
+      contacts,
+      deals,
+      fieldScorecards,
+      scorecardCorrectiveActionTokens,
+    ]),
+  );
   await pg.exec(`
     INSERT INTO public.users (id, display_name, email, avatar_url, is_active) VALUES
       ('${USER}', 'Sam Super', 'sam.super@trock.com', 'https://cdn/sam.png', true);

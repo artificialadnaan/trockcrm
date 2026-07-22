@@ -2,7 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
 import { sql } from "drizzle-orm";
-import { addTeamMember, removeTeamMember } from "../../../src/modules/deals/team-service.js";
+import { addTeamMember, removeTeamMember, updateTeamMember } from "../../../src/modules/deals/team-service.js";
 import {
   mintCorrectiveActionToken,
   verifyCorrectiveActionToken,
@@ -153,6 +153,88 @@ describe("removeTeamMember revokes the removed recipient's corrective-action tok
       ttlDays: 30,
     });
     await removeTeamMember(tdb, dup1.id, DEAL);
+    expect(await verifyCorrectiveActionToken(tdb, rawToken)).not.toBeNull();
+  });
+});
+
+describe("updateTeamMember revokes tokens when a super/PM LEAVES the responder role (finding 4)", () => {
+  it("re-roling an email-only super to a non-responder role revokes their token", async () => {
+    const member = await addTeamMember(tdb, {
+      dealId: DEAL,
+      role: "superintendent",
+      memberName: "Ext Super",
+      memberEmail: EXT_PM_EMAIL,
+    });
+    const { rawToken } = await mintCorrectiveActionToken(tdb, {
+      scorecardId: SCORECARD,
+      recipientEmail: EXT_PM_EMAIL,
+      role: "superintendent",
+      ttlDays: 30,
+    });
+    expect(await verifyCorrectiveActionToken(tdb, rawToken)).not.toBeNull();
+
+    // Re-role super → foreman (a non-responder role). The token must no longer authorize.
+    await updateTeamMember(tdb, member.id, DEAL, { role: "foreman" });
+    expect(await verifyCorrectiveActionToken(tdb, rawToken)).toBeNull();
+  });
+
+  it("a LATERAL super→PM swap keeps the token (they remain a responder)", async () => {
+    const member = await addTeamMember(tdb, {
+      dealId: DEAL,
+      role: "superintendent",
+      memberName: "Ext Super",
+      memberEmail: EXT_PM_EMAIL,
+    });
+    const { rawToken } = await mintCorrectiveActionToken(tdb, {
+      scorecardId: SCORECARD,
+      recipientEmail: EXT_PM_EMAIL,
+      role: "superintendent",
+      ttlDays: 30,
+    });
+    await updateTeamMember(tdb, member.id, DEAL, { role: "project_manager" });
+    // Still a responder (now PM) → the token stays valid.
+    expect(await verifyCorrectiveActionToken(tdb, rawToken)).not.toBeNull();
+  });
+
+  it("does not revoke on a notes-only update (role unchanged)", async () => {
+    const member = await addTeamMember(tdb, {
+      dealId: DEAL,
+      role: "project_manager",
+      memberName: "Ext PM",
+      memberEmail: EXT_PM_EMAIL,
+    });
+    const { rawToken } = await mintCorrectiveActionToken(tdb, {
+      scorecardId: SCORECARD,
+      recipientEmail: EXT_PM_EMAIL,
+      role: "project_manager",
+      ttlDays: 30,
+    });
+    await updateTeamMember(tdb, member.id, DEAL, { notes: "left a note" });
+    expect(await verifyCorrectiveActionToken(tdb, rawToken)).not.toBeNull();
+  });
+
+  it("keeps the token when ANOTHER active super/PM still resolves to the same email after the re-role", async () => {
+    // Two same-email super/PM assignments; re-roling ONE off the responder roles must not strand the other.
+    const one = await addTeamMember(tdb, {
+      dealId: DEAL,
+      role: "superintendent",
+      memberName: "Ext Super",
+      memberEmail: EXT_PM_EMAIL,
+    });
+    await addTeamMember(tdb, {
+      dealId: DEAL,
+      role: "project_manager",
+      memberName: "Ext PM (same email)",
+      memberEmail: EXT_PM_EMAIL,
+    });
+    const { rawToken } = await mintCorrectiveActionToken(tdb, {
+      scorecardId: SCORECARD,
+      recipientEmail: EXT_PM_EMAIL,
+      role: "superintendent",
+      ttlDays: 30,
+    });
+    await updateTeamMember(tdb, one.id, DEAL, { role: "foreman" });
+    // The still-active PM assignment holds the same email → token preserved.
     expect(await verifyCorrectiveActionToken(tdb, rawToken)).not.toBeNull();
   });
 });

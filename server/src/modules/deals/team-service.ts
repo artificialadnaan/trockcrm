@@ -157,20 +157,26 @@ export async function updateTeamMember(
     return existing;
   }
 
+  // Read the PRE-update row: its role (to detect a super/PM LEAVING that role) + identity (to resolve the
+  // recipient email for token revocation). Also validates existence before the estimator guard / update.
+  const [target] = await tenantDb
+    .select({
+      userId: dealTeamMembers.userId,
+      contactId: dealTeamMembers.contactId,
+      memberEmail: dealTeamMembers.memberEmail,
+      role: dealTeamMembers.role,
+    })
+    .from(dealTeamMembers)
+    .where(and(eq(dealTeamMembers.id, memberId), eq(dealTeamMembers.dealId, dealId)))
+    .limit(1);
+  if (!target) throw new AppError(404, "Team member not found");
+
   // Guard the CHANGE-TO-estimator path too (not just add): a contact-backed member (contact_id set /
   // user_id null) re-roled to "estimator" would be a visibly-dead row — revision routing
   // (resolveRevisionTaskAssignee) only picks estimator rows whose user_id IS NOT NULL, so it could never be
   // routed a revision task. Mirrors the add-time reject in addTeamMember + the POST route.
-  if (input.role === "estimator") {
-    const [target] = await tenantDb
-      .select({ userId: dealTeamMembers.userId, contactId: dealTeamMembers.contactId })
-      .from(dealTeamMembers)
-      .where(and(eq(dealTeamMembers.id, memberId), eq(dealTeamMembers.dealId, dealId)))
-      .limit(1);
-    if (!target) throw new AppError(404, "Team member not found");
-    if (target.contactId || !target.userId) {
-      throw new AppError(400, "Estimator must be a staff user, not a contact.");
-    }
+  if (input.role === "estimator" && (target.contactId || !target.userId)) {
+    throw new AppError(400, "Estimator must be a staff user, not a contact.");
   }
 
   updates.updatedAt = new Date();
@@ -188,7 +194,26 @@ export async function updateTeamMember(
     .returning();
 
   if (result.length === 0) throw new AppError(404, "Team member not found");
-  return result[0];
+  const updated = result[0];
+
+  // A super/PM re-roled to a non-responder role (or deactivated) via update must lose its corrective-action
+  // web tokens, exactly like removeTeamMember — otherwise a former responder keeps read/write access to the
+  // responder page for the token TTL (30 days). Revoke when the member WAS a super/PM but is NO LONGER an
+  // ACTIVE super/PM after the update. verifyCorrectiveActionToken checks only hash + expiry, so this is the
+  // only server-side gate. The revoke helper is a no-op if the same recipient email is still held by another
+  // active super/PM on the deal (so a lateral super↔PM swap keeps their token). Runs in the same tenant
+  // transaction as the update (the PATCH route commits both together).
+  const wasResponder = target.role === "superintendent" || target.role === "project_manager";
+  const stillResponder =
+    updated.isActive && (updated.role === "superintendent" || updated.role === "project_manager");
+  if (wasResponder && !stillResponder) {
+    await revokeCorrectiveActionTokensForRemovedMember(tenantDb, dealId, {
+      userId: target.userId,
+      contactId: target.contactId,
+      memberEmail: target.memberEmail,
+    });
+  }
+  return updated;
 }
 
 export async function removeTeamMember(tenantDb: TenantDb, memberId: string, dealId: string) {
