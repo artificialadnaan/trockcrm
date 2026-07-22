@@ -1,7 +1,6 @@
 import React from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { router } from "expo-router";
 import type { QueryClient } from "@tanstack/react-query";
 import { theme } from "../theme/theme";
 
@@ -50,17 +49,6 @@ export class ErrorBoundary extends React.Component<Props, State> {
     this.setState({ hasError: false, error: null });
   };
 
-  /** Escape hatch for a failure that reproduces even with fresh data: navigate to a guaranteed-safe route so
-   *  the user is never trapped behind a repeatedly-throwing screen. */
-  goToStart = () => {
-    try {
-      router.replace("/");
-    } catch {
-      /* best-effort — retry() is still available */
-    }
-    this.setState({ hasError: false, error: null });
-  };
-
   render() {
     if (this.state.hasError) {
       const where = this.props.area ? ` loading ${this.props.area}` : "";
@@ -69,7 +57,7 @@ export class ErrorBoundary extends React.Component<Props, State> {
           <View style={styles.center}>
             <Text style={styles.title}>Something went wrong{where}.</Text>
             <Text style={styles.body}>
-              The screen hit an unexpected error. Tap Try again to reload, or go back to the start.
+              The screen hit an unexpected error. Tap Try again to reload the screen.
             </Text>
             <Pressable
               onPress={this.retry}
@@ -77,13 +65,6 @@ export class ErrorBoundary extends React.Component<Props, State> {
               style={({ pressed }) => [styles.button, pressed && { opacity: 0.85 }]}
             >
               <Text style={styles.buttonText}>Try again</Text>
-            </Pressable>
-            <Pressable
-              onPress={this.goToStart}
-              accessibilityRole="button"
-              style={({ pressed }) => [styles.secondary, pressed && { opacity: 0.7 }]}
-            >
-              <Text style={styles.secondaryText}>Go to start</Text>
             </Pressable>
           </View>
         </SafeAreaView>
@@ -106,6 +87,4 @@ const styles = StyleSheet.create({
     borderRadius: theme.radius.md,
   },
   buttonText: { fontFamily: theme.font.semibold, fontSize: 15, color: theme.color.textInverse },
-  secondary: { paddingVertical: theme.space.sm, paddingHorizontal: theme.space.md },
-  secondaryText: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.textMuted },
 });
