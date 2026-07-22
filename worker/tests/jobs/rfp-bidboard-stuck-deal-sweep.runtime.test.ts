@@ -25,6 +25,8 @@ const DEAL_OVERRIDE_RETRY = U("d11"); // F5: override retry (reviewed_at FRESH, 
 const DEAL_FOREIGN = U("d12"); // F7: only dead job belongs to ANOTHER office -> skip (office-scoped lookup)
 const DEAL_STALE_ERR = U("d13"); // current-attempt dead job has NULL last_error, a PRIOR-attempt dead job has a
                                  // non-null error -> flips with the GENERIC fallback (not the stale prior error)
+const DEAL_STALE_LIVE = U("d14"); // current-attempt dead job + a STALE (prior-round) PENDING job -> the stale
+                                  // live job must NOT block recovery; the deal still flips to send_failed
 const OFFICE2 = U("0f2"); // a DIFFERENT office id (not provisioned as a schema) — for the cross-office job test
 
 /**
@@ -93,7 +95,13 @@ async function seed(): Promise<PGlite> {
       -- current-attempt dead job carries NO last_error, but a PRIOR-attempt dead job (predating attempt_at) has a
       -- non-null error. The error subquery must apply the SAME per-attempt freshness guards as the eligibility
       -- EXISTS, so it ignores the stale prior error and falls back to the generic message.
-      ('${DEAL_STALE_ERR}', false, 'pending', NULL, NOW() - INTERVAL '2 hours', NULL, NULL, NULL, NULL, NOW() - INTERVAL '30 minutes');
+      ('${DEAL_STALE_ERR}', false, 'pending', NULL, NOW() - INTERVAL '2 hours', NULL, NULL, NULL, NULL, NOW() - INTERVAL '30 minutes'),
+      -- STALE_LIVE (finding): genuinely stuck on the CURRENT attempt (attempt_at 30 min ago, past grace). Its
+      -- current-attempt dead job (created 20 min ago, AFTER attempt_at) matches the eligibility EXISTS. But a
+      -- STALE PENDING create job from a PRIOR round (created 1h ago, BEFORE attempt_at) is still on the queue —
+      -- its handler will reject it on the round recheck, so it can never advance this deal. The live-job NOT
+      -- EXISTS must be scoped to the current attempt so this stale pending job does NOT block recovery.
+      ('${DEAL_STALE_LIVE}', false, 'pending', NULL, NOW() - INTERVAL '2 hours', NULL, NULL, NULL, NULL, NOW() - INTERVAL '30 minutes');
 
     -- Dead / live create jobs. The stuck-deal sweep keys on payload->>'dealId'.
     INSERT INTO public.job_queue (job_type, payload, office_id, status, last_error, created_at) VALUES
@@ -125,7 +133,11 @@ async function seed(): Promise<PGlite> {
       -- STALE_ERR: the CURRENT-attempt dead job (created AFTER the 30-min-old attempt_at) has NO last_error...
       ('rfp_bidboard_create', '{"dealId":"${DEAL_STALE_ERR}"}'::jsonb, '${OFFICE}', 'dead', NULL, NOW() - INTERVAL '20 minutes'),
       -- ...and a PRIOR-attempt dead job (created BEFORE attempt_at) carries a stale non-null error the sweep must ignore.
-      ('rfp_bidboard_create', '{"dealId":"${DEAL_STALE_ERR}"}'::jsonb, '${OFFICE}', 'dead', 'STALE prior-attempt error', NOW() - INTERVAL '1 hour');
+      ('rfp_bidboard_create', '{"dealId":"${DEAL_STALE_ERR}"}'::jsonb, '${OFFICE}', 'dead', 'STALE prior-attempt error', NOW() - INTERVAL '1 hour'),
+      -- STALE_LIVE: a CURRENT-attempt dead job (created 20 min ago, AFTER the 30-min-old attempt_at)...
+      ('rfp_bidboard_create', '{"dealId":"${DEAL_STALE_LIVE}"}'::jsonb, '${OFFICE}', 'dead', 'current attempt boom', NOW() - INTERVAL '20 minutes'),
+      -- ...PLUS a STALE PENDING job from a PRIOR round (created 1h ago, BEFORE attempt_at) that must NOT block the flip.
+      ('rfp_bidboard_create', '{"dealId":"${DEAL_STALE_LIVE}"}'::jsonb, '${OFFICE}', 'pending', NULL, NOW() - INTERVAL '1 hour');
   `);
   return db;
 }
@@ -154,8 +166,9 @@ describe("runRfpBidBoardCreateStuckDealSweep (real SQL)", () => {
   it("1. flips a genuinely-stuck deal to send_failed (override 'failed' + last_attempt_error from the dead job)", async () => {
     const { db, flipped } = await run();
     // The genuinely-stuck deals are: DEAL_STUCK, DEAL_OVERRIDE (declined+approving), DEAL_NOERR (no last_error),
-    // DEAL_STALE_ERR (current-attempt dead job has no error, prior-attempt error ignored).
-    expect(flipped).toBe(4);
+    // DEAL_STALE_ERR (current-attempt dead job has no error, prior-attempt error ignored), DEAL_STALE_LIVE
+    // (current-attempt dead job + a stale prior-round pending job that must not block the flip).
+    expect(flipped).toBe(5);
     const s = await status(db, DEAL_STUCK);
     expect(s.rfp_approval_status).toBe("send_failed");
     expect(s.rfp_override_state).toBe("failed");
@@ -204,7 +217,7 @@ describe("runRfpBidBoardCreateStuckDealSweep (real SQL)", () => {
     const db = pg;
     const client = { query: (sql: string, params?: unknown[]) => db.query(sql, params as never[]) as any };
     const first = await runRfpBidBoardCreateStuckDealSweep({ db: client as any });
-    expect(first).toBe(4);
+    expect(first).toBe(5);
     const second = await runRfpBidBoardCreateStuckDealSweep({ db: client as any });
     expect(second).toBe(0); // already override_state='failed' -> the idempotency guard excludes them all
     // And the deal state is unchanged / still surfaced.
@@ -280,5 +293,21 @@ describe("runRfpBidBoardCreateStuckDealSweep (real SQL)", () => {
     expect(s.rfp_last_attempt_error).toBe("Bid Board create failed (recovered by stuck-deal sweep)");
     // Explicitly NOT the stale prior-attempt error.
     expect(s.rfp_override_error).not.toBe("STALE prior-attempt error");
+  });
+
+  it("15. flips despite a STALE prior-round PENDING job (live-job NOT EXISTS is scoped to the current attempt)", async () => {
+    // finding: the live-job NOT EXISTS must carry the SAME per-attempt freshness guards as the dead-job EXISTS.
+    // After a Return-to-Opportunity + re-trigger (or an override retry) an OLD create job from the prior round can
+    // still be sitting 'pending' on queue backoff; its handler rejects it on the round recheck so it can never
+    // advance this deal. An UNQUALIFIED NOT EXISTS would treat that stale pending job as a live retry and block
+    // recovery of a deal whose CURRENT attempt genuinely died. Here the current-attempt dead job (20 min old,
+    // after the 30-min attempt_at) makes the deal eligible, and the stale pending job (1h old, before attempt_at)
+    // must NOT suppress the flip.
+    const { db } = await run();
+    const s = await status(db, DEAL_STALE_LIVE);
+    expect(s.rfp_approval_status).toBe("send_failed");
+    expect(s.rfp_override_state).toBe("failed");
+    expect(s.rfp_override_error).toBe("current attempt boom");
+    expect(s.rfp_last_attempt_error).toBe("current attempt boom");
   });
 });

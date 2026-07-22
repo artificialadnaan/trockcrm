@@ -386,14 +386,25 @@ export async function runRfpBidBoardCreateStuckDealSweep(
                    AND (d.rfp_override_reviewed_at IS NULL OR j.created_at >= d.rfp_override_reviewed_at)
                    AND (d.rfp_approval_requested_at IS NULL OR j.created_at >= d.rfp_approval_requested_at)
               )
-              -- ...and NOTHING live is still retrying it: no pending/processing create job (THIS office) for the
-              -- deal. If a retry is in flight we must not pre-empt it with a failure.
+              -- ...and NOTHING live is still retrying it FOR THE CURRENT ATTEMPT: no pending/processing create
+              -- job (THIS office) whose created_at is no older than all three of the deal's current-attempt
+              -- stamps. If a fresh retry is in flight we must not pre-empt it with a failure. The SAME freshness
+              -- guards as the dead-job EXISTS are essential (finding): after a Return-to-Opportunity + re-trigger
+              -- (or an override retry), an OLD create job from the PRIOR round can still be sitting 'pending' on
+              -- queue backoff. That stale job predates the current attempt and its handler
+              -- (handleRfpBidBoardCreate) will reject it on the round-mismatch recheck, so it will NEVER advance
+              -- this deal — yet an UNQUALIFIED NOT EXISTS would treat it as a live retry and block recovery of a
+              -- deal whose CURRENT attempt genuinely died (the dead-job EXISTS matched a fresh dead job). Scope
+              -- this to the current attempt so only a live job for THIS round/attempt suppresses the flip.
               AND NOT EXISTS (
                 SELECT 1 FROM public.job_queue j
                  WHERE j.job_type = 'rfp_bidboard_create'
                    AND j.office_id = $3
                    AND j.payload->>'dealId' = d.id::text
                    AND j.status IN ('pending', 'processing')
+                   AND (d.rfp_bidboard_attempt_at IS NULL OR j.created_at >= d.rfp_bidboard_attempt_at)
+                   AND (d.rfp_override_reviewed_at IS NULL OR j.created_at >= d.rfp_override_reviewed_at)
+                   AND (d.rfp_approval_requested_at IS NULL OR j.created_at >= d.rfp_approval_requested_at)
               )
               -- GRACE WINDOW: only flip if the stuck state is at least a few minutes old, so this never races the
               -- per-job sweep or a just-enqueued retry. (attempt_at NULL = a first-attempt create predating the

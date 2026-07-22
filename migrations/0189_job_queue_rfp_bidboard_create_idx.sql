@@ -14,10 +14,22 @@
 -- FIX: a partial index covering (office_id, (payload->>'dealId'), status, created_at DESC) restricted to
 -- job_type = 'rfp_bidboard_create' — small (only this job type), and its trailing created_at DESC also
 -- serves the error subquery's ORDER BY ... LIMIT 1. job_queue is a PUBLIC (not per-tenant) table, so this
--- is a single plain CREATE INDEX (no tenant DO-loop). Idempotent via IF NOT EXISTS.
+-- is a single CREATE INDEX (no tenant DO-loop). Idempotent via IF NOT EXISTS.
+--
+-- CONCURRENTLY (finding): public.job_queue is written continuously (API enqueues + worker status flips) and
+-- retains COMPLETED/DEAD rows, so a plain CREATE INDEX would hold a SHARE lock — blocking every insert/status
+-- update on a large table for the whole build. CREATE INDEX CONCURRENTLY cannot run inside a transaction
+-- block, but the migration runner (server/src/migrations/runner.ts) executes each .sql file with a bare
+-- client.query(sql) — no BEGIN/COMMIT wrapper — and this file is a SINGLE statement, so PostgreSQL runs it in
+-- autocommit and CONCURRENTLY is permitted. (The 0138/0120/0167 CONCURRENTLY caveats apply only to the
+-- PER-TENANT DO-loop migrations, which ARE transactional; this public single-index migration is not.)
+--
+-- If a prior CONCURRENTLY build is interrupted it can leave an INVALID index stub; IF NOT EXISTS would then
+-- skip the rebuild. That risk is acceptable here (a re-run of the migration file only happens if the
+-- _migrations row was not recorded, i.e. the query itself errored) — reindex/drop-invalid is an ops step.
 --
 -- Schema source of truth: shared/src/schema/public/job-queue.ts declares the matching index() entry.
 
-CREATE INDEX IF NOT EXISTS job_queue_rfp_bidboard_create_deal_idx
+CREATE INDEX CONCURRENTLY IF NOT EXISTS job_queue_rfp_bidboard_create_deal_idx
   ON public.job_queue (office_id, (payload->>'dealId'), status, created_at DESC)
   WHERE job_type = 'rfp_bidboard_create';
