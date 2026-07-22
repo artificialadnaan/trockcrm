@@ -167,7 +167,13 @@ async function getScorecardCorrectiveActionThread(
     .select()
     .from(scorecardCorrectiveActions)
     .where(eq(scorecardCorrectiveActions.scorecardId, scorecardId))
-    .orderBy(scorecardCorrectiveActions.itemType, scorecardCorrectiveActions.itemRef);
+    // Group by kind (item_type), then order refs NUMERICALLY (mirrors getCorrectiveActionItems): an
+    // action-item item_ref is a numeric STRING, so a lexical sort gives 0,1,10,11,2,… once there are ≥11
+    // items. Zero-pad numeric refs so they sort numerically; deficiency KEY refs (non-numeric) fall through.
+    .orderBy(
+      scorecardCorrectiveActions.itemType,
+      sql`CASE WHEN ${scorecardCorrectiveActions.itemRef} ~ '^[0-9]+$' THEN lpad(${scorecardCorrectiveActions.itemRef}, 12, '0') ELSE ${scorecardCorrectiveActions.itemRef} END`,
+    );
   if (rows.length === 0) return [];
 
   const itemIds = rows.map((r) => r.id);

@@ -11,7 +11,10 @@ import {
   type FieldTenantDb,
 } from "./cross-office.js";
 import { verifyCorrectiveActionToken } from "./corrective-action-tokens.js";
-import { isAssignedCorrectiveActionResponder } from "./corrective-action-recipients.js";
+import {
+  isAssignedCorrectiveActionResponder,
+  resolveCorrectiveActionRecipients,
+} from "./corrective-action-recipients.js";
 import { getCorrectiveActionItems, submitCorrectiveActionResponse } from "./corrective-action-api.js";
 import { getFileDownloadUrl } from "../files/service.js";
 import {
@@ -71,7 +74,28 @@ async function authorizeCorrectiveAction(
       // A recipient-bound token grants access ONLY to its own scorecard's flow.
       throw new AppError(403, "This link does not grant access to this scorecard.");
     }
-    return { office, responder: { userId: null, name: null, email: verified.recipientEmail } };
+    // Verify-time revalidation: a token verified by hash+expiry alone would keep working for its full TTL
+    // even after the assignment drifts (the recipient's email CHANGED, or the super/PM was reassigned) — the
+    // per-mutation archive/removal hooks don't cover an email CHANGE. So re-resolve the deal's CURRENT active
+    // superintendent/PM recipients and confirm the token's email still matches a live assignment. If not, the
+    // link no longer maps to an assigned responder → 403. (The mutation hooks stay as belt-and-suspenders.)
+    const responder = await runInOffice(office, async (db) => {
+      const dealRes = await db.execute(
+        sql`SELECT deal_id FROM field_scorecards WHERE id = ${scorecardId} LIMIT 1`,
+      );
+      const dealId = (dealRes.rows[0] as { deal_id?: string } | undefined)?.deal_id;
+      if (!dealId) throw new AppError(404, "Scorecard not found");
+      const recipients = await resolveCorrectiveActionRecipients(db, dealId);
+      const wanted = verified.recipientEmail.trim().toLowerCase();
+      const match = recipients.find((r) => r.email.trim().toLowerCase() === wanted);
+      if (!match) {
+        throw new AppError(403, "This corrective-action link no longer matches an assigned recipient.");
+      }
+      // Carry the resolved recipient's configured name so the stamped responder_name is the assignee's name
+      // (not null). Keep the token's recipientEmail as the canonical stamped email.
+      return { userId: null, name: match.name, email: verified.recipientEmail };
+    });
+    return { office, responder };
   }
 
   // Session path — requireFieldContractor already populated req.fieldUser.

@@ -56,7 +56,10 @@ import { AppError } from "../../middleware/error-handler.js";
 import { activeProjectWhere, assertActiveFieldProject, type FieldAccessContext } from "./projects-service.js";
 import { runInOffice, runInOfficeTransaction } from "./cross-office.js";
 import { resolveScorecardTeamEmails } from "../deals/team-service.js";
-import { markScorecardEditEvidenceLinked } from "./scorecard-evidence-upload.js";
+import {
+  markScorecardEditEvidenceLinked,
+  EDITABLE_SCORECARD_STATUSES,
+} from "./scorecard-evidence-upload.js";
 import { reconcileScorecardCorrectiveActions } from "./corrective-actions-service.js";
 import { isAssignedCorrectiveActionResponder } from "./corrective-action-recipients.js";
 
@@ -1537,8 +1540,9 @@ function scorecardEditableContentEquals(input: {
 
 // The current-form editable lifecycle — MUST match the accepted statuses in updateFieldScorecard's guard
 // (`submitted` + the two corrective-action states). canEdit gates the mobile edit action; if it were narrower
-// than the edit guard, an open/closed V2 card could never reach the edit/reconciliation path.
-const EDITABLE_SCORECARD_STATUSES = new Set(["submitted", "corrective_action_open", "corrective_action_closed"]);
+// than the edit guard, an open/closed V2 card could never reach the edit/reconciliation path. Defined once in
+// scorecard-evidence-upload.ts (the evidence-presign guard reuses the same set) and re-imported here to keep a
+// single source of truth for the editable lifecycle.
 
 function toSummary(
   row: ScorecardSummarySource,

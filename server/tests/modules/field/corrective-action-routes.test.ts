@@ -122,6 +122,13 @@ beforeEach(async () => {
     INSERT INTO deal_team_members (deal_id, user_id, role, is_active)
     VALUES (${DEAL}, ${USER}, 'superintendent', true)
   `);
+  // An email-only assigned PROJECT MANAGER whose email matches the token recipient used by the token tests.
+  // The token path revalidates the token email against the deal's CURRENT active super/PM recipients, so a
+  // matching active assignment must exist for a token to grant access.
+  await tdb.execute(sql`
+    INSERT INTO deal_team_members (deal_id, user_id, contact_id, member_name, member_email, role, is_active)
+    VALUES (${DEAL}, NULL, NULL, 'Pat Manager', 'pm@example.com', 'project_manager', true)
+  `);
 
   // Seed a below-band scorecard with two open corrective-action items.
   scorecardId = "22222222-2222-2222-2222-222222222222";
@@ -188,6 +195,23 @@ describe("GET /scorecards/:id/corrective-actions", () => {
       `/scorecards/${scorecardId}/corrective-actions?token=not-a-real-token`,
     );
     expect(res.status).toBe(401);
+  });
+
+  it("403s a still-unexpired token whose email no longer matches an active super/PM assignment (revalidate)", async () => {
+    // Mint a token for the PM recipient, then simulate the assignment DRIFTING: the PM member's email is
+    // changed (a case the archive/removal hooks don't cover). The token hash+expiry are still valid, but the
+    // verify-time revalidation must reject it because no active recipient carries that email anymore.
+    const { rawToken } = await mintCorrectiveActionToken(tdb, {
+      scorecardId,
+      recipientEmail: "pm@example.com",
+      role: "project_manager",
+      ttlDays: 30,
+    });
+    await tdb.execute(sql`UPDATE deal_team_members SET member_email = 'new.pm@example.com' WHERE member_email = 'pm@example.com'`);
+    const res = await request(app).get(
+      `/scorecards/${scorecardId}/corrective-actions?token=${encodeURIComponent(rawToken)}`,
+    );
+    expect(res.status).toBe(403);
   });
 
   it("the TOKEN read path resolves a non-null url for the responder's own submitted photos", async () => {
@@ -261,6 +285,28 @@ describe("POST /scorecards/:id/corrective-actions/:itemId", () => {
       sql`SELECT responded_by_user_id, responder_email FROM scorecard_corrective_actions WHERE id = ${itemIds[0]}`,
     );
     expect(item.rows[0].responded_by_user_id).toBeNull();
+    expect(item.rows[0].responder_email).toBe("pm@example.com");
+  });
+
+  it("stamps the configured recipient NAME (not null) on a token response", async () => {
+    // The seeded PM member has member_name 'Pat Manager'. A token response must carry that resolved name into
+    // responder_name (previously hard-coded null), so the CRM/mobile thread shows the assignee's name.
+    const { rawToken } = await mintCorrectiveActionToken(tdb, {
+      scorecardId,
+      recipientEmail: "pm@example.com",
+      role: "project_manager",
+      ttlDays: 30,
+    });
+    const res = await request(app)
+      .post(
+        `/scorecards/${scorecardId}/corrective-actions/${itemIds[0]}?token=${encodeURIComponent(rawToken)}`,
+      )
+      .send({ comment: "fixed by external pm" });
+    expect(res.status).toBe(200);
+    const item = await tdb.execute(
+      sql`SELECT responder_name, responder_email FROM scorecard_corrective_actions WHERE id = ${itemIds[0]}`,
+    );
+    expect(item.rows[0].responder_name).toBe("Pat Manager");
     expect(item.rows[0].responder_email).toBe("pm@example.com");
   });
 

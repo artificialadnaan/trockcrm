@@ -58,7 +58,13 @@ export async function getCorrectiveActionItems(
     .select()
     .from(scorecardCorrectiveActions)
     .where(eq(scorecardCorrectiveActions.scorecardId, scorecardId))
-    .orderBy(scorecardCorrectiveActions.itemType, scorecardCorrectiveActions.itemRef);
+    // Group by kind (item_type) as before, then order refs NUMERICALLY: action-item item_ref is a numeric
+    // STRING ("0".."49"), so a lexical sort gives 0,1,10,11,2,… once there are ≥11 items. Zero-pad numeric
+    // refs so they sort numerically without a cast that could error on deficiency KEY refs (non-numeric).
+    .orderBy(
+      scorecardCorrectiveActions.itemType,
+      sql`CASE WHEN ${scorecardCorrectiveActions.itemRef} ~ '^[0-9]+$' THEN lpad(${scorecardCorrectiveActions.itemRef}, 12, '0') ELSE ${scorecardCorrectiveActions.itemRef} END`,
+    );
   if (rows.length === 0) {
     throw new AppError(404, "No corrective actions for this scorecard.");
   }

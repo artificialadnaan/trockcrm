@@ -154,6 +154,16 @@ describe("getCorrectiveActionItems", () => {
     );
   });
 
+  it("orders action items NUMERICALLY by ref, not lexically (finding 5)", async () => {
+    // 12 action items → numeric-string refs "0".."11". A lexical sort would interleave 0,1,10,11,2,…; the
+    // query must return them in numeric (== seed/input) order so the responder surfaces show the real sequence.
+    const actionItems = Array.from({ length: 12 }, (_, i) => `Fix ${i}`);
+    const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission({ actionItems }));
+    const items = await getCorrectiveActionItems(tdb, scorecard.id);
+    const actionLabels = items.filter((i) => i.itemType === "action_item").map((i) => i.itemLabel);
+    expect(actionLabels).toEqual(actionItems);
+  });
+
   it("throws 404 when the scorecard has no corrective-action items (or does not exist)", async () => {
     await expect(getCorrectiveActionItems(tdb, "00000000-0000-0000-0000-0000000000ff")).rejects.toBeInstanceOf(
       AppError,

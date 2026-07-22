@@ -133,6 +133,12 @@ beforeEach(async () => {
     INSERT INTO deal_team_members (deal_id, user_id, role, is_active)
     VALUES (${DEAL}, ${USER}, 'superintendent', true)
   `);
+  // An email-only assigned PROJECT MANAGER whose email matches the token recipient used by the token tests.
+  // The token path revalidates the token email against the deal's CURRENT active super/PM recipients.
+  await tdb.execute(sql`
+    INSERT INTO deal_team_members (deal_id, user_id, contact_id, member_name, member_email, role, is_active)
+    VALUES (${DEAL}, NULL, NULL, 'Pat Manager', 'pm@example.com', 'project_manager', true)
+  `);
   scorecardId = "22222222-2222-2222-2222-222222222222";
   await tdb.execute(sql`
     INSERT INTO field_scorecards (id, client_submission_id, deal_id, week_of, form_version, kind, total_score, rating, status, submitted_by)
