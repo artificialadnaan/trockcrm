@@ -25,6 +25,7 @@ const {
   submitCorrectiveActionResponse,
   requestCorrectiveActionUploadUrl,
   confirmCorrectiveActionUpload,
+  discardCorrectiveActionPhoto,
   useCorrectiveActions,
 } = await import("./use-corrective-actions");
 
@@ -86,6 +87,25 @@ describe("corrective-action client API", () => {
       "/field/scorecards/sc-1/corrective-actions/upload?token=tok-abc",
       expect.objectContaining({ method: "POST", json: { uploadToken: "ut", objectKey: "k" }, fieldCsrf: true }),
     );
+  });
+
+  it("discardCorrectiveActionPhoto DELETEs the upload route with the token + field CSRF flag", async () => {
+    apiMock.mockResolvedValue({ discarded: true });
+    await discardCorrectiveActionPhoto("sc-1", "file-9", "tok-abc");
+    expect(apiMock).toHaveBeenCalledWith(
+      "/field/scorecards/sc-1/corrective-actions/upload/file-9?token=tok-abc",
+      expect.objectContaining({ method: "DELETE", fieldCsrf: true }),
+    );
+  });
+
+  it("discardCorrectiveActionPhoto omits the token + field CSRF flag in session mode", async () => {
+    apiMock.mockResolvedValue({ discarded: true });
+    await discardCorrectiveActionPhoto("sc-1", "file-9");
+    expect(apiMock).toHaveBeenCalledWith(
+      "/field/scorecards/sc-1/corrective-actions/upload/file-9",
+      expect.objectContaining({ method: "DELETE" }),
+    );
+    expect(apiMock.mock.calls[0][1]).not.toHaveProperty("fieldCsrf");
   });
 
   it("useCorrectiveActions loads items in token mode and exposes loading/error", async () => {

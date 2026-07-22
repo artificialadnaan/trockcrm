@@ -9,12 +9,14 @@ const mocks = vi.hoisted(() => ({
   useCorrectiveActions: vi.fn(),
   submitCorrectiveActionResponse: vi.fn(),
   uploadCorrectiveActionPhoto: vi.fn(),
+  discardCorrectiveActionPhoto: vi.fn(),
 }));
 
 vi.mock("@/hooks/use-corrective-actions", () => ({
   useCorrectiveActions: mocks.useCorrectiveActions,
   submitCorrectiveActionResponse: mocks.submitCorrectiveActionResponse,
   uploadCorrectiveActionPhoto: mocks.uploadCorrectiveActionPhoto,
+  discardCorrectiveActionPhoto: mocks.discardCorrectiveActionPhoto,
 }));
 
 import CorrectiveActionResponderPage from "./corrective-action-responder";
@@ -55,6 +57,8 @@ beforeEach(() => {
   document.body.appendChild(container);
   root = createRoot(container);
   Object.values(mocks).forEach((m) => m.mockReset());
+  // Default the fire-and-forget discard to a resolved promise so `.catch()` in removePhoto/unmount is valid.
+  mocks.discardCorrectiveActionPhoto.mockResolvedValue(undefined);
   // jsdom lacks URL.createObjectURL/revokeObjectURL, which the upload preview uses. Give each blob a unique
   // url so the revoke assertions can count distinct previews.
   let blobSeq = 0;
@@ -249,5 +253,89 @@ describe("CorrectiveActionResponderPage", () => {
     expect(container.textContent).toContain("at most 50");
     const capInput = container.querySelector('input[type="file"]') as HTMLInputElement;
     expect(capInput.disabled).toBe(true);
+  });
+
+  it("discards the uploaded file server-side when a photo is removed before submit", async () => {
+    mocks.useCorrectiveActions.mockReturnValue({ items: [openItem], loading: false, error: null, errorStatus: null, refetch: vi.fn() });
+    mocks.uploadCorrectiveActionPhoto.mockResolvedValue("file-99");
+
+    await renderAt("/scorecards/sc-1/corrective-action?token=tok-xyz");
+
+    const fileInput = container.querySelector('input[type="file"]') as HTMLInputElement;
+    const file = new File([new Uint8Array([1])], "p.jpg", { type: "image/jpeg" });
+    Object.defineProperty(fileInput, "files", { value: [file], configurable: true });
+    await act(async () => {
+      fileInput.dispatchEvent(new Event("change", { bubbles: true }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const removeBtn = Array.from(container.querySelectorAll("button")).find(
+      (b) => b.getAttribute("aria-label") === "Remove photo",
+    )!;
+    await act(async () => {
+      removeBtn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
+    });
+
+    expect(mocks.discardCorrectiveActionPhoto).toHaveBeenCalledWith("sc-1", "file-99", "tok-xyz");
+  });
+
+  it("does NOT discard a photo that was already submitted in a response", async () => {
+    mocks.useCorrectiveActions.mockReturnValue({ items: [openItem], loading: false, error: null, errorStatus: null, refetch: vi.fn() });
+    mocks.uploadCorrectiveActionPhoto.mockResolvedValue("file-77");
+    mocks.submitCorrectiveActionResponse.mockResolvedValue([]);
+
+    await renderAt("/scorecards/sc-1/corrective-action?token=tok");
+
+    const fileInput = container.querySelector('input[type="file"]') as HTMLInputElement;
+    const file = new File([new Uint8Array([1])], "p.jpg", { type: "image/jpeg" });
+    Object.defineProperty(fileInput, "files", { value: [file], configurable: true });
+    await act(async () => {
+      fileInput.dispatchEvent(new Event("change", { bubbles: true }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const textarea = container.querySelector("textarea")!;
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!;
+      setter.call(textarea, "Done");
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+      await Promise.resolve();
+    });
+
+    const submitBtn = Array.from(container.querySelectorAll("button")).find((b) =>
+      b.textContent?.includes("Submit response"),
+    )!;
+    await act(async () => {
+      submitBtn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // The photo is now legitimate response evidence — it must NOT be discarded, even after unmount.
+    await act(() => root.unmount());
+    expect(mocks.discardCorrectiveActionPhoto).not.toHaveBeenCalled();
+  });
+
+  it("discards uploaded-but-un-submitted photos on unmount (page nav / abandon)", async () => {
+    mocks.useCorrectiveActions.mockReturnValue({ items: [openItem], loading: false, error: null, errorStatus: null, refetch: vi.fn() });
+    mocks.uploadCorrectiveActionPhoto.mockResolvedValue("file-abandoned");
+
+    await renderAt("/scorecards/sc-1/corrective-action?token=tok-nav");
+
+    const fileInput = container.querySelector('input[type="file"]') as HTMLInputElement;
+    const file = new File([new Uint8Array([1])], "p.jpg", { type: "image/jpeg" });
+    Object.defineProperty(fileInput, "files", { value: [file], configurable: true });
+    await act(async () => {
+      fileInput.dispatchEvent(new Event("change", { bubbles: true }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // Navigate away (unmount) without submitting → the orphaned upload is reclaimed.
+    await act(() => root.unmount());
+    expect(mocks.discardCorrectiveActionPhoto).toHaveBeenCalledWith("sc-1", "file-abandoned", "tok-nav");
   });
 });

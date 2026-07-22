@@ -109,6 +109,25 @@ export async function confirmCorrectiveActionUpload(
 }
 
 /**
+ * Discard an uploaded-but-not-yet-submitted response photo. Selecting a photo eagerly presigns → uploads →
+ * confirms, which creates a persistent files row on the deal; if the responder removes that photo (or
+ * abandons/navigates away) before submitting, this reclaims the orphaned upload so it doesn't become a
+ * permanent, unattached file in the project gallery. The server only deletes an eligible file (this
+ * scorecard's deal + corrective-action flow + not yet attached to any response); an already-submitted photo
+ * is a 409/404 no-op. Best-effort — callers should not block the UI on it.
+ */
+export async function discardCorrectiveActionPhoto(
+  scorecardId: string,
+  fileId: string,
+  token?: string,
+): Promise<void> {
+  await api<{ discarded: true }>(
+    withToken(`/field/scorecards/${scorecardId}/corrective-actions/upload/${fileId}`, token),
+    { method: "DELETE", ...tokenFieldCsrf(token) },
+  );
+}
+
+/**
  * PUT the file to the presigned R2 URL between the presign + confirm steps. In dev the presign returns the
  * `/api/files/dev-upload` mock endpoint (same-origin); everything else is a plain R2 PUT.
  */

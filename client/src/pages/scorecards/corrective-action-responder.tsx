@@ -7,6 +7,7 @@ import {
   useCorrectiveActions,
   submitCorrectiveActionResponse,
   uploadCorrectiveActionPhoto,
+  discardCorrectiveActionPhoto,
   type CorrectiveActionItem,
 } from "@/hooks/use-corrective-actions";
 
@@ -151,6 +152,15 @@ function ItemCard({
   // Track every object URL we allocate so each is revoked EXACTLY once — on removal or on unmount. A blob URL
   // that outlives its <img> leaks memory until the tab closes; the responder page can accumulate many.
   const previewUrlsRef = useRef<Set<string>>(new Set());
+  // Track fileIds that were uploaded (a persistent files row was created on the deal) but NOT yet submitted
+  // as a response. Selecting a photo eagerly uploads+confirms, so a removed-before-submit or abandoned photo
+  // must be discarded server-side or it becomes a permanent, unattached file in the project gallery. Cleared
+  // on a successful submit (those photos are now legitimate response evidence — never delete them).
+  const pendingFileIdsRef = useRef<Set<string>>(new Set());
+  // Keep the latest scorecardId/token available to the unmount-only cleanup effect (empty deps) so it can
+  // discard still-pending uploads without re-subscribing on every prop identity change.
+  const discardArgsRef = useRef({ scorecardId, token });
+  discardArgsRef.current = { scorecardId, token };
 
   const isResolved = item.status === "resolved";
 
@@ -178,6 +188,8 @@ function ItemCard({
       try {
         for (const file of accepted) {
           const fileId = await uploadCorrectiveActionPhoto(scorecardId, file, token);
+          // Mark it pending-discard-on-cleanup the instant it's confirmed (a persistent files row now exists).
+          pendingFileIdsRef.current.add(fileId);
           const previewUrl = URL.createObjectURL(file);
           previewUrlsRef.current.add(previewUrl);
           setPhotos((prev) => [...prev, { fileId, previewUrl }]);
@@ -191,23 +203,42 @@ function ItemCard({
     [scorecardId, token, photos.length],
   );
 
-  const removePhoto = useCallback((fileId: string) => {
-    setPhotos((prev) => {
-      const removed = prev.find((p) => p.fileId === fileId);
-      if (removed && previewUrlsRef.current.delete(removed.previewUrl)) {
-        URL.revokeObjectURL(removed.previewUrl);
+  const removePhoto = useCallback(
+    (fileId: string) => {
+      // Best-effort server-side discard of the orphaned upload (a persistent files row was created on select).
+      // Fire-and-forget: the UI drops the photo immediately regardless of the delete outcome (an already-
+      // submitted photo would 409/404, but a pending one never has been submitted here).
+      if (pendingFileIdsRef.current.delete(fileId)) {
+        void discardCorrectiveActionPhoto(scorecardId, fileId, token).catch(() => {});
       }
-      return prev.filter((p) => p.fileId !== fileId);
-    });
-  }, []);
+      setPhotos((prev) => {
+        const removed = prev.find((p) => p.fileId === fileId);
+        if (removed && previewUrlsRef.current.delete(removed.previewUrl)) {
+          URL.revokeObjectURL(removed.previewUrl);
+        }
+        return prev.filter((p) => p.fileId !== fileId);
+      });
+    },
+    [scorecardId, token],
+  );
 
-  // Revoke any preview URLs still allocated when this item card unmounts (page nav, item resolved → read-only
-  // re-render). Runs once on unmount; per-photo removals already revoke eagerly above.
+  // On unmount (page nav / abandon / refresh via component teardown): revoke any still-allocated preview URLs
+  // AND best-effort discard any uploaded-but-un-submitted photos so an abandoned upload doesn't linger as a
+  // permanent, unattached file in the project gallery. Runs once on unmount; per-photo removals already
+  // revoke + discard eagerly above, and a successful submit clears the pending set (never discard submitted
+  // evidence). Note: an item resolving re-renders under the SAME key (no unmount), so submit clears the set
+  // itself — this teardown only fires on a real unmount.
   useEffect(() => {
     const urls = previewUrlsRef.current;
+    const pending = pendingFileIdsRef.current;
     return () => {
       for (const url of urls) URL.revokeObjectURL(url);
       urls.clear();
+      const { scorecardId: sid, token: tok } = discardArgsRef.current;
+      for (const fileId of pending) {
+        void discardCorrectiveActionPhoto(sid, fileId, tok).catch(() => {});
+      }
+      pending.clear();
     };
   }, []);
 
@@ -231,6 +262,9 @@ function ItemCard({
       // the Set here also means that cleanup can't double-revoke if the card later does unmount.
       for (const url of previewUrlsRef.current) URL.revokeObjectURL(url);
       previewUrlsRef.current.clear();
+      // These photos are now legitimate response evidence — drop them from the pending-discard set so the
+      // unmount cleanup (and any later remove) never deletes a submitted photo.
+      pendingFileIdsRef.current.clear();
       setPhotos([]);
       onResolved();
     } catch (e) {
