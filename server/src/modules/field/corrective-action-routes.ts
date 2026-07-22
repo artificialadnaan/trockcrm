@@ -129,6 +129,19 @@ function parsePhotoFileIds(value: unknown): string[] {
   });
 }
 
+// Upper bound on a corrective-action response comment. response_comment is an unbounded TEXT column, so cap
+// the input here (mirrors the parsePhotoFileIds cap idiom) to reject an oversized/abusive payload rather than
+// persist megabytes of free text. Generous enough for a full narrative; the service also trims + requires it.
+const MAX_RESPONSE_COMMENT_LENGTH = 5000;
+
+function parseComment(value: unknown): string {
+  const comment = typeof value === "string" ? value : "";
+  if (comment.length > MAX_RESPONSE_COMMENT_LENGTH) {
+    throw new AppError(400, `A response comment must be at most ${MAX_RESPONSE_COMMENT_LENGTH} characters.`);
+  }
+  return comment;
+}
+
 /** Register the corrective-action read + response endpoints on the field router. */
 export function registerCorrectiveActionRoutes(fieldRoutes: Router): void {
   // Read the scorecard's corrective-action items + their inline responses. Session OR token auth.
@@ -227,7 +240,7 @@ export function registerCorrectiveActionRoutes(fieldRoutes: Router): void {
         const itemId = String(req.params.itemId);
         assertValidUuid(id, "id");
         assertValidUuid(itemId, "itemId");
-        const comment = typeof req.body?.comment === "string" ? req.body.comment : "";
+        const comment = parseComment(req.body?.comment);
         const photoFileIds = parsePhotoFileIds(req.body?.photoFileIds);
 
         const { office, responder } = await authorizeCorrectiveAction(req, id);

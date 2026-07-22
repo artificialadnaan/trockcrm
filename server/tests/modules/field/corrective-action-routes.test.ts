@@ -50,6 +50,12 @@ vi.mock("../../../src/modules/field/cross-office.js", () => ({
   runInOfficeTransaction: vi.fn(async (_office: any, _userId: any, run: any) => run(tdb, OFFICE)),
 }));
 
+// Presign the response-photo URL deterministically so the token-read path can be asserted (the route wires
+// getFileDownloadUrl as the photo-URL resolver for BOTH the session and token flows).
+vi.mock("../../../src/modules/files/service.js", () => ({
+  getFileDownloadUrl: vi.fn(async (_db: any, fileId: string) => ({ url: `https://r2.example/${fileId}` })),
+}));
+
 // Import AFTER the mocks so the routes bind to the mocked cross-office/projects.
 const { registerCorrectiveActionRoutes } = await import(
   "../../../src/modules/field/corrective-action-routes.js"
@@ -184,6 +190,35 @@ describe("GET /scorecards/:id/corrective-actions", () => {
     expect(res.status).toBe(401);
   });
 
+  it("the TOKEN read path resolves a non-null url for the responder's own submitted photos", async () => {
+    // Seed a resolved item that carries a corrective-action RESPONSE photo (a fresh file). The token read
+    // must pass a presigner so the web responder's own photo grid renders (not an empty grid).
+    const RESPONSE_FILE = "aaaaaaaa-0000-0000-0000-0000000000ca";
+    await tdb.execute(sql`INSERT INTO files (id, deal_id, is_active) VALUES (${RESPONSE_FILE}, ${DEAL}, true)`);
+    await tdb.execute(sql`
+      UPDATE scorecard_corrective_actions SET status = 'resolved', response_comment = 'done', responder_email = 'pm@example.com'
+      WHERE id = ${itemIds[0]}
+    `);
+    await tdb.execute(sql`
+      INSERT INTO field_scorecard_photos (scorecard_id, section_key, deficiency_key, file_id, corrective_action_id)
+      VALUES (${scorecardId}, NULL, NULL, ${RESPONSE_FILE}, ${itemIds[0]})
+    `);
+
+    const { rawToken } = await mintCorrectiveActionToken(tdb, {
+      scorecardId,
+      recipientEmail: "pm@example.com",
+      role: "project_manager",
+      ttlDays: 30,
+    });
+    const res = await request(app).get(
+      `/scorecards/${scorecardId}/corrective-actions?token=${encodeURIComponent(rawToken)}`,
+    );
+    expect(res.status).toBe(200);
+    const resolved = res.body.items.find((i: any) => i.id === itemIds[0]);
+    expect(resolved.photos).toHaveLength(1);
+    expect(resolved.photos[0].url).toBe(`https://r2.example/${RESPONSE_FILE}`);
+  });
+
 });
 
 describe("POST /scorecards/:id/corrective-actions/:itemId", () => {
@@ -240,6 +275,25 @@ describe("POST /scorecards/:id/corrective-actions/:itemId", () => {
       sql`SELECT status FROM scorecard_corrective_actions WHERE id = ${itemIds[0]}`,
     );
     expect(item.rows[0].status).toBe("open");
+  });
+
+  it("400s a response comment that exceeds the max length (5000 chars)", async () => {
+    const res = await request(app)
+      .post(`/scorecards/${scorecardId}/corrective-actions/${itemIds[0]}`)
+      .send({ comment: "x".repeat(5001) });
+    expect(res.status).toBe(400);
+    // The item stays open — the oversized comment was rejected before any resolve.
+    const item = await tdb.execute(
+      sql`SELECT status FROM scorecard_corrective_actions WHERE id = ${itemIds[0]}`,
+    );
+    expect(item.rows[0].status).toBe("open");
+  });
+
+  it("accepts a comment exactly at the max length (5000 chars)", async () => {
+    const res = await request(app)
+      .post(`/scorecards/${scorecardId}/corrective-actions/${itemIds[0]}`)
+      .send({ comment: "x".repeat(5000) });
+    expect(res.status).toBe(200);
   });
 
   it("403s a token minted for a DIFFERENT scorecard (no cross-scorecard access)", async () => {
