@@ -540,6 +540,64 @@ describe("dead-letter sweep", () => {
     expect(unlock2.rows[0].ok).toBe(false); // nothing left held → the sweep did not leak a lock
   });
 
+  // Codex P2 (UNLOCK-BEFORE-SEND, hardened): releaseOfficeLock swallows pg_advisory_unlock errors, so if the
+  // unlock is canceled/fails while the session stays alive, the sweep could proceed to the (slow) Resend send
+  // while STILL holding the per-office ingestion lock — blocking imports across the whole network I/O. The sweep
+  // must therefore only send once the unlock is CONFIRMED: an unlock that returns false OR throws → DEFER this
+  // cycle (no send, no stamp); the session-scoped lock still frees on client.end() and the row stays eligible.
+  it("DEFERS (no send, no stamp) when the office-lock release returns false", async () => {
+    await seedInbox("failed", { finishedAt: ago(30), lastError: "aged-eligible" });
+    let sends = 0;
+    // The advisory-lock ACQUIRE (pg_try_advisory_lock) delegates to real Postgres (so the read runs under a
+    // real lock); only the RELEASE (pg_advisory_unlock) is forced to report no-lock-released.
+    const unlockFalse: typeof client = {
+      query: async (text, params) => {
+        if (/pg_advisory_unlock/.test(text)) return { rows: [{ released: false }] } as any;
+        return client.query(text, params);
+      },
+    };
+    const r = await sweepDeadLettersForOffice(unlockFalse, {
+      office: "dallas",
+      now: NOW,
+      sendAlert: async () => (sends++, true),
+    });
+    expect(r).toMatchObject({ count: 0, sent: false, deferred: true });
+    expect(sends).toBe(0); // did NOT send while possibly still holding the lock
+    expect(await unalertedFailedCount()).toBe(1); // NOT stamped — still eligible next cycle
+
+    // Real unlock leaked because our interceptor short-circuited it; drop the still-held session lock so the
+    // suite's shared session doesn't carry it into the next test.
+    await client.query("SELECT pg_advisory_unlock($1, $2)", [
+      BID_BOARD_ADVISORY_NAMESPACE,
+      officeAdvisoryKey("dallas"),
+    ]);
+  });
+
+  it("DEFERS (no send, no stamp) when the office-lock release THROWS", async () => {
+    await seedInbox("failed", { finishedAt: ago(30), lastError: "aged-eligible" });
+    let sends = 0;
+    const unlockThrows: typeof client = {
+      query: async (text, params) => {
+        if (/pg_advisory_unlock/.test(text)) throw new Error("unlock canceled");
+        return client.query(text, params);
+      },
+    };
+    const r = await sweepDeadLettersForOffice(unlockThrows, {
+      office: "dallas",
+      now: NOW,
+      sendAlert: async () => (sends++, true),
+    });
+    expect(r).toMatchObject({ count: 0, sent: false, deferred: true });
+    expect(sends).toBe(0);
+    expect(await unalertedFailedCount()).toBe(1);
+
+    // The intercepted unlock threw before releasing the real lock; free it so the shared session is clean.
+    await client.query("SELECT pg_advisory_unlock($1, $2)", [
+      BID_BOARD_ADVISORY_NAMESPACE,
+      officeAdvisoryKey("dallas"),
+    ]);
+  });
+
   it("skips cleanly (no throw, no send) when the inbox table is absent (migration 0188 not applied)", async () => {
     await pg.exec(`ALTER TABLE public.bid_board_ingestion_inbox RENAME TO bid_board_ingestion_inbox_tmp;`);
     try {

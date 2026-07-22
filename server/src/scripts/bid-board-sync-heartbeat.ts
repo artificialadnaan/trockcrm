@@ -468,7 +468,10 @@ export function deadLetterBatchIdempotencyKey(office: string, ids: string[]): st
  *   - (this round) do NOT hold the lock across I/O: the email send is a network call to Resend that can STALL.
  *     Holding the per-office ingestion lock across that stall would starve real imports (which need the SAME
  *     lock, 300s timeout) and could dead-letter queued imports. So we unlock the instant the read completes and
- *     do the send + mark UNLOCKED.
+ *     do the send + mark UNLOCKED — but ONLY once releaseOfficeLock CONFIRMS the unlock (pg_advisory_unlock ⇒
+ *     true). If the unlock is refused/canceled/throws so we may STILL hold the lock, we DEFER this cycle (no
+ *     send, no stamp) rather than run the slow send under a held lock; the session-scoped lock still frees on
+ *     client.end() and the rows stay NULL-marked for the next cron cycle. (Codex P2)
  * CORRECTNESS AFTER UNLOCK: because no handler was active at read time, our snapshot is a set of genuinely
  * terminal rows. An import that STARTS after we unlock is a NEW payload → a NEW inbox row (different
  * payload_hash), never a reconcile of a row in our snapshot (a reconcile only touches the row an in-flight
@@ -505,10 +508,22 @@ export async function sweepDeadLettersForOffice(
   // I/O and starve real imports. Reading under the lock proves these aged 'failed' rows are genuinely terminal;
   // the send + guarded mark happen safely unlocked (see the fn doc).
   let rows: DeadLetterRow[];
+  let released: boolean;
   try {
     rows = await getDeadLetteredInboxRows(client, opts.office);
   } finally {
-    await releaseOfficeLock(client, opts.office, lockKey);
+    released = await releaseOfficeLock(client, opts.office, lockKey);
+  }
+  // If the unlock did NOT report success (pg_advisory_unlock returned false, or the query threw), we may STILL
+  // hold the per-office ingestion lock. Do NOT proceed to the (slow) Resend send while possibly holding it —
+  // that would block real imports across the whole network I/O, defeating the unlock-before-send protection.
+  // DEFER this cycle: no send, no stamp. The session-scoped lock is still released on client.end() in the
+  // cron's finally, and the rows stay NULL-marked so the next cron cycle re-reads + alerts them. (Codex P2)
+  if (!released) {
+    console.warn(
+      `[bid-board-heartbeat] office=${opts.office} office lock not confirmed released — deferring dead-letter send this cycle`
+    );
+    return { office: opts.office, count: 0, sent: false, deferred: true };
   }
   if (rows.length === 0) return { office: opts.office, count: 0, sent: false };
 
@@ -533,14 +548,22 @@ export async function sweepDeadLettersForOffice(
   return { office: opts.office, count: rows.length, sent };
 }
 
-/** Best-effort release of the per-office ingestion advisory lock. If the unlock query itself throws, the
- *  session-scoped lock is still released on client.end() in the cron's finally, so a failure here can't leak a
- *  hold past the process. */
-async function releaseOfficeLock(client: Queryable, office: string, lockKey: number): Promise<void> {
+/** Release the per-office ingestion advisory lock and REPORT whether it actually released. Postgres'
+ *  pg_advisory_unlock returns a boolean: true = a matching session-level lock was released, false = there was
+ *  no such lock to release (an unexpected state here). Returns true ONLY on a confirmed `true`; a `false` result
+ *  OR a thrown query counts as NOT-released so the caller can decline to do network I/O while it may still hold
+ *  the lock (see sweepDeadLettersForOffice). Either way the session-scoped lock is still released on client.end()
+ *  in the cron's finally, so a failure here can't leak a hold past the process. */
+async function releaseOfficeLock(client: Queryable, office: string, lockKey: number): Promise<boolean> {
   try {
-    await client.query("SELECT pg_advisory_unlock($1, $2)", [BID_BOARD_ADVISORY_NAMESPACE, lockKey]);
+    const res = await client.query("SELECT pg_advisory_unlock($1, $2) AS released", [
+      BID_BOARD_ADVISORY_NAMESPACE,
+      lockKey,
+    ]);
+    return res.rows[0]?.released === true;
   } catch (err) {
     console.error(`[bid-board-heartbeat] office=${office} dead-letter sweep advisory unlock failed:`, err);
+    return false;
   }
 }
 
