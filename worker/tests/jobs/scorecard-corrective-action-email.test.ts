@@ -32,10 +32,13 @@ const FLAGGED = [
 
 // Build a query mock routing on the SQL text. `sentAt` seeds the idempotency column.
 // `existingTokenEmails` makes the per-recipient "does this recipient already hold a valid token?" existence
-// check return a row for those (lower-cased) emails — modelling a partial-delivery retry.
+// check return a row for those (lower-cased) emails — modelling a partial-delivery retry. `status` seeds the
+// scorecard lifecycle status the snapshot reads (defaults to corrective_action_open — the only status that
+// notifies; the worker skips any other).
 function makeQuery(
   opts: {
     sentAt?: string | null;
+    status?: string;
     recipients?: any[];
     flagged?: any[];
     existingTokenEmails?: string[];
@@ -65,6 +68,7 @@ function makeQuery(
       return {
         rows: [
           {
+            status: opts.status ?? "corrective_action_open",
             corrective_action_email_sent_at: opts.sentAt ?? null,
             deal_id: DEAL,
             project_number: "DFW-10432",
@@ -169,16 +173,66 @@ describe("scorecard corrective-action notification email", () => {
     expect(stampCalls[0][0]).toMatch(/corrective_action_email_sent_at/i);
   });
 
-  it("does not stamp or mint if there are no resolvable recipients (loud no-recipient case is a no-op skip)", async () => {
+  it("THROWS (does not complete-as-success) when there are no resolvable recipients, so the queue retries", async () => {
+    // Finding 7: zero super/PM-with-email is usually transient (team assigned shortly after filing). A
+    // success-return would drop the notification forever, so the handler THROWS a retryable error → the queue
+    // retries with backoff up to max_attempts, then dead-letters. It must not send, mint, or stamp.
     const { query, inserts, tokenDeletes } = makeQuery({ recipients: [] });
     const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "m" });
     const logger = makeLogger();
 
-    await handleScorecardCorrectiveActionEmail(payload, null, { query: query as any, sendEmail, env, logger });
+    await expect(
+      handleScorecardCorrectiveActionEmail(payload, null, { query: query as any, sendEmail, env, logger }),
+    ).rejects.toThrow(/No superintendent\/project-manager with an email/i);
     expect(sendEmail).not.toHaveBeenCalled();
     expect(inserts).toHaveLength(0);
-    // No recipients → the handler returns before the send phase, so no orphan-cleanup delete either.
     expect(tokenDeletes).toHaveLength(0);
+    // No stamp on a no-recipient throw — a later assignment + requeue can still notify.
+    const stampCalls = query.mock.calls.filter(([text]) => /UPDATE .*field_scorecards/i.test(text as string));
+    expect(stampCalls).toHaveLength(0);
+  });
+
+  it("skips entirely (no email, no error) when the card is no longer corrective_action_open", async () => {
+    // Finding 5: the job runs after a delay. If an edit lifted the card above-band (status 'submitted') or the
+    // team resolved it in-app first (status 'corrective_action_closed'), there is nothing to notify — complete
+    // cleanly without sending or stamping. Verify BOTH non-open statuses.
+    for (const status of ["submitted", "corrective_action_closed"]) {
+      const { query, inserts, tokenDeletes } = makeQuery({ status });
+      const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "m" });
+      const logger = makeLogger();
+
+      await handleScorecardCorrectiveActionEmail(payload, null, { query: query as any, sendEmail, env, logger });
+      expect(sendEmail, `status=${status}`).not.toHaveBeenCalled();
+      expect(inserts, `status=${status}`).toHaveLength(0);
+      expect(tokenDeletes, `status=${status}`).toHaveLength(0);
+      // No recipient resolution even happens — the handler returns right after the snapshot read.
+      const stampCalls = query.mock.calls.filter(([text]) => /UPDATE .*field_scorecards/i.test(text as string));
+      expect(stampCalls, `status=${status}`).toHaveLength(0);
+    }
+  });
+
+  it("re-sends on a REOPEN cycle (stamp cleared) even though a prior-cycle token would still exist", async () => {
+    // Finding 6: a reopen clears corrective_action_email_sent_at AND (server-side reconcile) deletes the prior
+    // cycle's tokens, so the worker no longer finds a stale token to reuse-skip on. Model the post-reopen state:
+    // stamp is NULL (fresh cycle) and NO existing token → the email-only recipient IS re-minted + re-emailed.
+    const { query, inserts, tokenDeletes } = makeQuery({
+      sentAt: null,
+      status: "corrective_action_open",
+      recipients: [
+        { role: "project_manager", name: "Dana Cole", email: "dana.cole@example.com", user_id: null },
+      ],
+      existingTokenEmails: [], // reconcile deleted the prior-cycle token
+    });
+    const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "m" });
+    const logger = makeLogger();
+
+    await handleScorecardCorrectiveActionEmail(payload, null, { query: query as any, sendEmail, env, logger });
+
+    // The email-only PM is re-minted + re-emailed on the reopen (not stranded on the deleted prior-cycle link).
+    expect(inserts).toHaveLength(1);
+    expect(tokenDeletes).toHaveLength(0);
+    const toAddresses = sendEmail.mock.calls.map((c) => c[0]);
+    expect(toAddresses).toEqual(["dana.cole@example.com"]);
   });
 
   it("does NOT blanket-delete tokens on a fresh run (no orphan-cleanup delete)", async () => {

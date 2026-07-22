@@ -88,13 +88,25 @@ export async function handleScorecardCorrectiveActionEmail(
   // Idempotency + scorecard snapshot. tenantSchema is regex-validated above (isSafeTenantSchema), so
   // interpolating it as the schema qualifier is safe — identifiers can't be $-parametrized.
   const scorecardRes = await query(
-    `SELECT corrective_action_email_sent_at, deal_id, project_number, total_score, rating, form_version, kind, week_of
+    `SELECT status, corrective_action_email_sent_at, deal_id, project_number, total_score, rating, form_version, kind, week_of
        FROM ${tenantSchema}.field_scorecards WHERE id = $1::uuid LIMIT 1`,
     [scorecardId]
   );
   const scorecard = scorecardRes.rows[0];
   if (!scorecard) {
     logger.warn("[CorrectiveActionEmail] Scorecard not found - skipping", { tenantSchema, scorecardId });
+    return;
+  }
+  // The corrective action must still be OPEN to notify. This job runs after a delay, during which an edit may
+  // lift the card above-band (status → 'submitted') or the team may resolve every item in-app (status →
+  // 'corrective_action_closed'); reconciliation deleted the open items in the first case, so the responder link
+  // would 404 anyway. If the card is no longer open there is nothing to notify — complete cleanly (no email,
+  // no error), never stamping sent, so a later reopen (which re-enqueues) still notifies.
+  if (scorecard.status !== "corrective_action_open") {
+    logger.log("[CorrectiveActionEmail] Scorecard no longer corrective_action_open - skipping (nothing to notify)", {
+      scorecardId,
+      status: scorecard.status,
+    });
     return;
   }
   if (scorecard.corrective_action_email_sent_at) {
@@ -151,13 +163,20 @@ export async function handleScorecardCorrectiveActionEmail(
   }
 
   if (recipients.length === 0) {
-    // No super/PM with an email on this deal. Not a misconfiguration we can fix by retrying (the fix is to
-    // assign the deal team), so skip WITHOUT stamping — a later assignment + requeue can still notify.
+    // No super/PM with an email on this deal RIGHT NOW. This is usually transient — the team is often assigned
+    // shortly after the scorecard is filed — so completing-as-success here would drop the notification forever
+    // (nothing re-enqueues on a later assignment). Instead THROW a retryable error so the queue retries with
+    // backoff up to max_attempts, giving the team time to be assigned; the final attempt dead-letters with this
+    // message (a loud, inspectable give-up). Residual limitation: a team assigned AFTER max_attempts is
+    // exhausted still won't be notified — a fuller enqueue-on-team-change trigger is a noted follow-up
+    // (out of scope here). We do NOT stamp corrective_action_email_sent_at, so a manual requeue can still notify.
     logger.warn(
-      "[CorrectiveActionEmail] No superintendent/project-manager with an email on the deal - nothing to notify",
+      "[CorrectiveActionEmail] No superintendent/project-manager with an email on the deal - will retry",
       { scorecardId, dealId }
     );
-    return;
+    throw new Error(
+      `No superintendent/project-manager with an email on deal ${dealId} - retrying until the team is assigned`,
+    );
   }
 
   // Flagged items for the email body (the open corrective-action rows).
