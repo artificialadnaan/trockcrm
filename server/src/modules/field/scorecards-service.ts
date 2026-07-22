@@ -162,6 +162,10 @@ interface ScorecardSummarySource {
 // job_type string — MUST match the worker's registerJobHandler(FIELD_SCORECARD_EMAIL_JOB, ...). The server
 // can't import from the worker package, so the string is duplicated (as with the other enqueue sites).
 const FIELD_SCORECARD_EMAIL_JOB = "field_scorecard_email";
+// job_type string for the below-band corrective-action notification — MUST match the worker's
+// registerJobHandler(SCORECARD_CORRECTIVE_ACTION_EMAIL_JOB, ...). Duplicated (server can't import worker),
+// same as FIELD_SCORECARD_EMAIL_JOB above.
+const SCORECARD_CORRECTIVE_ACTION_EMAIL_JOB = "scorecard_corrective_action_email";
 const SCORECARD_PDF_DOWNLOAD_EXPIRY_SECONDS = 60 * 60;
 // Give the synchronous render + R2 upload (sub-second) a head start over the worker's poll, so the email
 // job normally finds the PDF already stored. If render/upload failed, the worker degrades to a
@@ -339,6 +343,25 @@ export async function createFieldScorecard(
           status: "open" as const,
         })),
       );
+
+      // Durable outbox: enqueue the corrective-action notification in THIS transaction so it commits
+      // atomically with the opened stage + seeded items. The worker resolves the deal's super/PM (users get
+      // an app deep link; email-only get a minted web token) and sends one email per recipient. Same table
+      // + delay + retry shape as the field_scorecard_email job above; idempotency is a scorecard-level
+      // stamp (field_scorecards.corrective_action_email_sent_at) checked/set by the worker.
+      await tenantDb.insert(jobQueue).values({
+        jobType: SCORECARD_CORRECTIVE_ACTION_EMAIL_JOB,
+        payload: {
+          tenantSchema: `office_${input.office.slug}`,
+          scorecardId: card.id,
+          dealId: input.dealId,
+          officeId: input.office.id,
+        },
+        officeId: input.office.id,
+        status: "pending",
+        runAfter: new Date(Date.now() + SCORECARD_EMAIL_RUN_AFTER_SECONDS * 1000),
+        maxAttempts: 6,
+      });
     }
   }
 

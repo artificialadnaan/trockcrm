@@ -213,6 +213,64 @@ describe("createFieldScorecard corrective-action trigger", () => {
   });
 });
 
+describe("createFieldScorecard corrective-action email enqueue", () => {
+  async function correctiveEmailJobs(): Promise<
+    { payload: any; max_attempts: number; run_after: string; office_id: string | null }[]
+  > {
+    const res = await tdb.execute(sql`
+      SELECT payload, max_attempts, run_after, office_id
+      FROM public.job_queue
+      WHERE job_type = 'scorecard_corrective_action_email'
+      ORDER BY id
+    `);
+    return res.rows as any[];
+  }
+
+  it("enqueues ONE corrective-action email job on a below-band submit", async () => {
+    const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
+    const jobs = await correctiveEmailJobs();
+    expect(jobs).toHaveLength(1);
+    const [job] = jobs;
+    expect(job.payload.scorecardId).toBe(scorecard.id);
+    expect(job.payload.dealId).toBe(DEAL);
+    expect(job.payload.tenantSchema).toBe("office_test");
+    expect(job.payload.officeId).toBe("00000000-0000-0000-0000-0000000000f1");
+    expect(job.office_id).toBe("00000000-0000-0000-0000-0000000000f1");
+    expect(job.max_attempts).toBe(6);
+    // Delayed a short while so the notification email doesn't race an immediate poll (mirrors the
+    // field_scorecard_email job). run_after is strictly in the future.
+    expect(new Date(job.run_after).getTime()).toBeGreaterThan(Date.now());
+  });
+
+  it("enqueues NO corrective-action email job on a passing submit", async () => {
+    await createFieldScorecard(tdb, passingSubmission());
+    expect(await correctiveEmailJobs()).toHaveLength(0);
+  });
+
+  it("enqueues NO corrective-action email job for a below-band card with no flagged items", async () => {
+    await createFieldScorecard(
+      tdb,
+      submission({
+        clientSubmissionId: csid(301),
+        formVersion: 2,
+        items: [
+          "planning_precon",
+          "jobsite_5s",
+          "safety",
+          "schedule",
+          "subcontractor",
+          "quality",
+          "communication",
+          "financial",
+        ].map((sectionKey) => ({ sectionKey, points: 5 })),
+        criticalDeficiencies: [],
+        actionItems: [],
+      }),
+    );
+    expect(await correctiveEmailJobs()).toHaveLength(0);
+  });
+});
+
 describe("resolveCorrectiveActionItem closure", () => {
   // NOTE: these resolves run sequentially. True concurrency isn't reproducible in PGlite (single
   // connection), but a FOR UPDATE row lock on the parent scorecard serializes concurrent resolves for the
