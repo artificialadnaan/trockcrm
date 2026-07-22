@@ -83,6 +83,7 @@ async function setupSchema() {
       started_at timestamptz,
       finished_at timestamptz,
       lease_expires_at timestamptz,
+      dead_letter_alerted_at timestamptz,
       updated_at timestamptz NOT NULL DEFAULT now(),
       CONSTRAINT bid_board_ingestion_inbox_office_hash_uidx UNIQUE (office_slug, payload_hash)
     );
@@ -664,6 +665,70 @@ describe("recoverOrphanedInboxJobs (crash recovery)", () => {
     // Preserved despite being 30 days old — it's the office's per-office newest succeeded extracted_at row.
     expect(await loadInboxRow(db, watermark.inboxId)).not.toBeNull();
     expect(await latestCommittedExtractedAt(db, "dallas", "00000000-0000-4000-8000-0000000000ff")).not.toBeNull();
+  });
+
+  // Codex P2: an old 'failed' row that was never dead-letter-alerted (the heartbeat cron / email was down
+  // through the whole retention window) must SURVIVE the retention delete — otherwise the alert is lost
+  // forever. An old 'failed' row that WAS already alerted (dead_letter_alerted_at set) is still pruned.
+  it("retention: KEEPS an old unalerted 'failed' row, still prunes an old alerted 'failed' row", async () => {
+    const unalerted = await accept({ payloadHash: "dl-unalerted" });
+    const alerted = await accept({ payloadHash: "dl-alerted" });
+    await db.query(
+      `UPDATE public.bid_board_ingestion_inbox
+         SET status='failed', attempts=5, last_error='dead', finished_at = now() - interval '30 days',
+             dead_letter_alerted_at = NULL
+       WHERE id=$1`,
+      [unalerted.inboxId]
+    );
+    await db.query(
+      `UPDATE public.bid_board_ingestion_inbox
+         SET status='failed', attempts=5, last_error='dead', finished_at = now() - interval '30 days',
+             dead_letter_alerted_at = now() - interval '29 days'
+       WHERE id=$1`,
+      [alerted.inboxId]
+    );
+    await recoverOrphanedInboxJobs(db, { retentionDays: 14 });
+    expect(await loadInboxRow(db, unalerted.inboxId)).not.toBeNull(); // unalerted failure preserved
+    expect(await loadInboxRow(db, alerted.inboxId)).toBeNull(); // already-alerted failure pruned
+  });
+
+  // Codex P2 (hard ceiling): deferring retention for an UNALERTED 'failed' row can't be indefinite —
+  // BID_BOARD_HEARTBEAT_RECIPIENTS is unset by default, so nothing ever stamps dead_letter_alerted_at and the
+  // rows (incl. their retained payload) would grow forever. A HARD retention ceiling (hardRetentionDays)
+  // finally purges an unalerted failure once it's clearly never going to be delivered; younger ones survive.
+  it("retention: an unalerted 'failed' row survives below hardRetentionDays but is purged above it", async () => {
+    const young = await accept({ payloadHash: "dl-young" }); // past retention, within the hard ceiling → kept
+    const ancient = await accept({ payloadHash: "dl-ancient" }); // past the hard ceiling → purged
+    await db.query(
+      `UPDATE public.bid_board_ingestion_inbox
+         SET status='failed', attempts=5, last_error='dead', finished_at = now() - interval '40 days',
+             dead_letter_alerted_at = NULL
+       WHERE id=$1`,
+      [young.inboxId]
+    );
+    await db.query(
+      `UPDATE public.bid_board_ingestion_inbox
+         SET status='failed', attempts=5, last_error='dead', finished_at = now() - interval '70 days',
+             dead_letter_alerted_at = NULL
+       WHERE id=$1`,
+      [ancient.inboxId]
+    );
+    // retentionDays=14 (normal deferred), hardRetentionDays=60: 40d < 60d survives, 70d > 60d is purged.
+    await recoverOrphanedInboxJobs(db, { retentionDays: 14, hardRetentionDays: 60 });
+    expect(await loadInboxRow(db, young.inboxId)).not.toBeNull(); // 40d unalerted failure still preserved
+    expect(await loadInboxRow(db, ancient.inboxId)).toBeNull(); // 70d unalerted failure purged at the hard ceiling
+  });
+
+  // A succeeded/alerted row still prunes at the NORMAL retentionDays (the hard ceiling only relaxes the
+  // unalerted-failure deferral; it must not extend life for ordinary terminal rows).
+  it("retention: a succeeded row still prunes at normal retentionDays regardless of hardRetentionDays", async () => {
+    const succeeded = await accept({ payloadHash: "succ-old" });
+    await db.query(
+      `UPDATE public.bid_board_ingestion_inbox SET status='succeeded', finished_at = now() - interval '30 days' WHERE id=$1`,
+      [succeeded.inboxId]
+    );
+    await recoverOrphanedInboxJobs(db, { retentionDays: 14, hardRetentionDays: 60 });
+    expect(await loadInboxRow(db, succeeded.inboxId)).toBeNull(); // 30d succeeded pruned at the 14d normal window
   });
 });
 

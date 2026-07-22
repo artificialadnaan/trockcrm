@@ -524,11 +524,23 @@ export async function readInboxStatusByKey(
  */
 export async function recoverOrphanedInboxJobs(
   db: Querier,
-  opts: { staleProcessingMinutes?: number; staleJobMinutes?: number; retentionDays?: number } = {}
+  opts: {
+    staleProcessingMinutes?: number;
+    staleJobMinutes?: number;
+    retentionDays?: number;
+    hardRetentionDays?: number;
+  } = {}
 ): Promise<number> {
   const staleMinutes = opts.staleProcessingMinutes ?? 10;
   const staleJobMinutes = opts.staleJobMinutes ?? 15;
   const retentionDays = opts.retentionDays ?? 14;
+  // HARD retention ceiling for an UNALERTED 'failed' row. The normal retentionDays cleanup is deferred for such
+  // a row so a down heartbeat cron / mail transport can't lose the alert when the row ages out — but
+  // BID_BOARD_HEARTBEAT_RECIPIENTS is UNSET by default (the whole monitor is inert), so NOTHING ever stamps
+  // dead_letter_alerted_at and those rows (incl. their retained payload) would otherwise grow without bound.
+  // This ceiling — well beyond the grace/alert window (default 60 days) — lets retention finally purge an
+  // unalerted failure once it's clearly never going to be delivered. (Codex P2)
+  const hardRetentionDays = opts.hardRetentionDays ?? 60;
 
   // (0) Reclaim THIS job-type's own 'processing' jobs that have been stuck well past a normal run (worker
   // died mid-import). The queue's recoverStaleJobs() only runs at worker startup; this periodic sweep
@@ -618,6 +630,18 @@ export async function recoverOrphanedInboxJobs(
     `DELETE FROM public.bid_board_ingestion_inbox
      WHERE status IN ('succeeded', 'failed')
        AND COALESCE(finished_at, updated_at) < NOW() - make_interval(days => $1::int)
+       -- Defer normal-retention cleanup for a 'failed' row that has NOT yet been dead-letter-alerted. If the
+       -- heartbeat cron / email transport is down through the whole retention window, the dead-letter sweep
+       -- would otherwise lose the alert forever when the row ages out. Keep unalerted failures until the sweep
+       -- stamps dead_letter_alerted_at (a genuine dead-letter is alerted at most one grace-cycle after it fails,
+       -- so this only preserves rows the monitor never got to) — BUT only up to a HARD ceiling
+       -- ($2 = hardRetentionDays, well beyond the grace/alert window). BID_BOARD_HEARTBEAT_RECIPIENTS is unset
+       -- by default (the monitor is inert), so nothing would ever stamp these rows; the ceiling stops them (and
+       -- their retained payload) from accumulating forever. (Codex P2)
+       AND NOT (
+         status = 'failed' AND dead_letter_alerted_at IS NULL
+         AND COALESCE(finished_at, updated_at) >= NOW() - make_interval(days => $2::int)
+       )
        -- Keep the newest succeeded snapshot PER OFFICE (the monotonic watermark latestCommittedExtractedAt
        -- reads) regardless of age. Otherwise a long (>retention) worker/SyncHub outage would delete an office's
        -- only watermark row, and a delayed/replayed OLDER payload could then pass the monotonic guard and
@@ -628,7 +652,7 @@ export async function recoverOrphanedInboxJobs(
          WHERE status = 'succeeded' AND extracted_at IS NOT NULL
          ORDER BY office_slug, extracted_at DESC, id DESC
        )`,
-    [retentionDays]
+    [retentionDays, hardRetentionDays]
   );
 
   return res.rowCount ?? res.rows.length;
