@@ -101,7 +101,14 @@ export function extractPayloadExtractedAt(payload: any): string | null {
     null;
   if (!raw) return null;
   const ms = Date.parse(raw);
-  return Number.isFinite(ms) ? new Date(ms).toISOString() : null;
+  if (!Number.isFinite(ms)) return null;
+  // Future-skew bound: a signed sender with a clock/config error could submit an implausibly-FUTURE
+  // extractedAt. Persisting it as the office watermark would then classify every subsequent correctly-timed
+  // snapshot as stale (skipped) until the poisoned row ages out of retention. Reject anything more than an
+  // hour ahead of now — treat it as no provenance (null never blocks the monotonic guard, so the snapshot
+  // still imports; it just doesn't get to poison the watermark).
+  if (ms > Date.now() + 60 * 60 * 1000) return null;
+  return new Date(ms).toISOString();
 }
 
 /** Stable idempotency key: sha256 of the EXACT request bytes SyncHub signed. A retry of the same POST
@@ -610,7 +617,17 @@ export async function recoverOrphanedInboxJobs(
   await db.query(
     `DELETE FROM public.bid_board_ingestion_inbox
      WHERE status IN ('succeeded', 'failed')
-       AND COALESCE(finished_at, updated_at) < NOW() - make_interval(days => $1::int)`,
+       AND COALESCE(finished_at, updated_at) < NOW() - make_interval(days => $1::int)
+       -- Keep the newest succeeded snapshot PER OFFICE (the monotonic watermark latestCommittedExtractedAt
+       -- reads) regardless of age. Otherwise a long (>retention) worker/SyncHub outage would delete an office's
+       -- only watermark row, and a delayed/replayed OLDER payload could then pass the monotonic guard and
+       -- overwrite the newer Bid Board mirror already stored in the tenant schema.
+       AND id NOT IN (
+         SELECT DISTINCT ON (office_slug) id
+         FROM public.bid_board_ingestion_inbox
+         WHERE status = 'succeeded' AND extracted_at IS NOT NULL
+         ORDER BY office_slug, extracted_at DESC, id DESC
+       )`,
     [retentionDays]
   );
 

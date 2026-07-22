@@ -649,6 +649,22 @@ describe("recoverOrphanedInboxJobs (crash recovery)", () => {
     expect(await loadInboxRow(db, old.inboxId)).toBeNull();
     expect(await loadInboxRow(db, recent.inboxId)).not.toBeNull();
   });
+
+  it("retention: KEEPS an office's newest succeeded snapshot (the monotonic watermark) even past the window", async () => {
+    // An office whose only succeeded ingestion is OLD (past retention) — its watermark row must survive so a
+    // delayed/replayed OLDER payload can't overwrite the newer mirror after a long (>retention) outage.
+    const watermark = await accept({ payloadHash: "wm" });
+    await db.query(
+      `UPDATE public.bid_board_ingestion_inbox
+         SET status='succeeded', extracted_at = now() - interval '40 days', finished_at = now() - interval '30 days'
+       WHERE id=$1`,
+      [watermark.inboxId]
+    );
+    await recoverOrphanedInboxJobs(db, { retentionDays: 14 });
+    // Preserved despite being 30 days old — it's the office's per-office newest succeeded extracted_at row.
+    expect(await loadInboxRow(db, watermark.inboxId)).not.toBeNull();
+    expect(await latestCommittedExtractedAt(db, "dallas", "00000000-0000-4000-8000-0000000000ff")).not.toBeNull();
+  });
 });
 
 describe("terminal-write status guards (idempotent against a raced terminal state)", () => {
@@ -895,6 +911,13 @@ describe("extractPayloadExtractedAt", () => {
     expect(extractPayloadExtractedAt({})).toBeNull();
     expect(extractPayloadExtractedAt({ provenance: { extractedAt: "   " } })).toBeNull();
     expect(extractPayloadExtractedAt({ provenance: { extractedAt: "not-a-date" } })).toBeNull();
+  });
+  it("rejects an implausibly-FUTURE timestamp so a clock-skewed sender can't poison the watermark", () => {
+    const farFuture = new Date(Date.now() + 48 * 60 * 60 * 1000).toISOString(); // +2 days
+    expect(extractPayloadExtractedAt({ provenance: { extractedAt: farFuture } })).toBeNull();
+    // A recent (past/near-now) timestamp is still accepted + normalized.
+    const nearNow = new Date(Date.now() - 60 * 1000).toISOString(); // 1 min ago
+    expect(extractPayloadExtractedAt({ provenance: { extractedAt: nearNow } })).toBe(new Date(nearNow).toISOString());
   });
 });
 
