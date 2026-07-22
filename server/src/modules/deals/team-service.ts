@@ -263,7 +263,11 @@ async function revokeCorrectiveActionTokensForRemovedMember(
   if (!email) return;
 
   // If any OTHER active super/PM on this deal still resolves to the same email, the token is still valid for
-  // them — do not revoke.
+  // them — do not revoke. But a match only counts when the OTHER assignment's LINKED identity is itself active:
+  // a user-backed row needs public.users.is_active, a contact-backed row needs contacts.is_active, and an
+  // email-only member (both fks null, member_email set) has no linked identity to deactivate so it always
+  // counts. Otherwise a stale (deactivated-user) same-email assignment could preserve a token that no active
+  // responder actually holds — consistent with the active-identity gate used everywhere else in this file.
   const stillAssigned = await tenantDb.execute(sql`
     SELECT 1
       FROM deal_team_members dtm
@@ -273,6 +277,11 @@ async function revokeCorrectiveActionTokensForRemovedMember(
        AND dtm.is_active = TRUE
        AND dtm.role IN ('superintendent', 'project_manager')
        AND LOWER(COALESCE(dtm.member_email, u.email, c.email)) = ${email}
+       AND (
+         (dtm.user_id IS NOT NULL AND u.is_active)
+         OR (dtm.contact_id IS NOT NULL AND c.is_active)
+         OR (dtm.user_id IS NULL AND dtm.contact_id IS NULL AND dtm.member_email IS NOT NULL)
+       )
      LIMIT 1
   `);
   if ((stillAssigned.rows?.length ?? 0) > 0) return;

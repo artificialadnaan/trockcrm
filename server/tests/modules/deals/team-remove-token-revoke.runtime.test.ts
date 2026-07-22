@@ -25,6 +25,10 @@ import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
 const DEAL = "11111111-1111-1111-1111-111111111111";
 const OTHER_DEAL = "11111111-1111-1111-1111-1111111111ff";
 const USER = "33333333-3333-3333-3333-333333333333";
+// Two staff users that both resolve to EXT_PM_EMAIL — one active, one deactivated. Used to prove the
+// stillAssigned guard requires the OTHER same-email assignment's linked USER to be active.
+const ACTIVE_EMAIL_USER = "33333333-3333-3333-3333-3333330000aa";
+const INACTIVE_EMAIL_USER = "33333333-3333-3333-3333-3333330000bb";
 const SCORECARD = "55555555-5555-5555-5555-000000000001";
 const OTHER_SCORECARD = "55555555-5555-5555-5555-0000000000ff";
 const EXT_PM_EMAIL = "ext.pm@example.com";
@@ -51,7 +55,9 @@ beforeAll(async () => {
   );
   await pg.exec(`
     INSERT INTO public.users (id, display_name, email, is_active) VALUES
-      ('${USER}', 'Sam Super', 'sam.super@trock.com', true);
+      ('${USER}', 'Sam Super', 'sam.super@trock.com', true),
+      ('${ACTIVE_EMAIL_USER}', 'Active Same-Email PM', '${EXT_PM_EMAIL}', true),
+      ('${INACTIVE_EMAIL_USER}', 'Deactivated Same-Email PM', '${EXT_PM_EMAIL}', false);
   `);
   tdb = drizzle(pg);
 });
@@ -153,6 +159,48 @@ describe("removeTeamMember revokes the removed recipient's corrective-action tok
       ttlDays: 30,
     });
     await removeTeamMember(tdb, dup1.id, DEAL);
+    expect(await verifyCorrectiveActionToken(tdb, rawToken)).not.toBeNull();
+  });
+
+  it("REVOKES when the only other same-email assignment is backed by a DEACTIVATED user", async () => {
+    // The removed email-only PM shares EXT_PM_EMAIL with another super/PM assignment — but that assignment is
+    // backed by a deactivated staff user. A deactivated user does not legitimately hold the token, so the
+    // stillAssigned guard must NOT count it: revocation proceeds.
+    const emailMember = await addTeamMember(tdb, {
+      dealId: DEAL,
+      role: "project_manager",
+      memberName: "Ext PM",
+      memberEmail: EXT_PM_EMAIL,
+    });
+    await addTeamMember(tdb, { dealId: DEAL, userId: INACTIVE_EMAIL_USER, role: "project_manager" });
+    const { rawToken } = await mintCorrectiveActionToken(tdb, {
+      scorecardId: SCORECARD,
+      recipientEmail: EXT_PM_EMAIL,
+      role: "project_manager",
+      ttlDays: 30,
+    });
+    await removeTeamMember(tdb, emailMember.id, DEAL);
+    // No ACTIVE identity still holds the email → token revoked.
+    expect(await verifyCorrectiveActionToken(tdb, rawToken)).toBeNull();
+  });
+
+  it("KEEPS the token when another same-email assignment is backed by an ACTIVE user", async () => {
+    // Same shape as above but the other assignment's staff user is active → it legitimately holds the token.
+    const emailMember = await addTeamMember(tdb, {
+      dealId: DEAL,
+      role: "project_manager",
+      memberName: "Ext PM",
+      memberEmail: EXT_PM_EMAIL,
+    });
+    await addTeamMember(tdb, { dealId: DEAL, userId: ACTIVE_EMAIL_USER, role: "project_manager" });
+    const { rawToken } = await mintCorrectiveActionToken(tdb, {
+      scorecardId: SCORECARD,
+      recipientEmail: EXT_PM_EMAIL,
+      role: "project_manager",
+      ttlDays: 30,
+    });
+    await removeTeamMember(tdb, emailMember.id, DEAL);
+    // The active user still resolves to the same email → token preserved.
     expect(await verifyCorrectiveActionToken(tdb, rawToken)).not.toBeNull();
   });
 });
