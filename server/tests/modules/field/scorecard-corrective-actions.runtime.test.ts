@@ -214,6 +214,10 @@ describe("createFieldScorecard corrective-action trigger", () => {
 });
 
 describe("resolveCorrectiveActionItem closure", () => {
+  // NOTE: these resolves run sequentially. True concurrency isn't reproducible in PGlite (single
+  // connection), but a FOR UPDATE row lock on the parent scorecard serializes concurrent resolves for the
+  // same scorecard in production so two responders closing out the last open items can't each miss the
+  // other's uncommitted resolve and leave the scorecard stuck `corrective_action_open`.
   it("resolving the LAST open item auto-closes the scorecard; resolving a non-last item does not", async () => {
     const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
     const items = await getCorrectiveActions(scorecard.id);

@@ -25,12 +25,29 @@ export interface ResolveCorrectiveActionInput {
  * only an OPEN row ever transitions, so two concurrent resolves of the same item can't double-apply, and a
  * replayed request never re-stamps a different responder over the first. Runs in a single transaction so the
  * closure check reads the item flip it just made.
+ *
+ * Concurrency: a FOR UPDATE lock on the parent scorecard row (taken at the top of the transaction)
+ * serializes resolves for the same scorecard, so two responders closing out the last open items can't each
+ * miss the other's uncommitted resolve and leave the scorecard stuck open.
  */
 export async function resolveCorrectiveActionItem(
   db: TenantDb,
   input: ResolveCorrectiveActionInput,
 ): Promise<void> {
   await db.transaction(async (tx) => {
+    // Serialize resolves for the SAME scorecard. Office transactions run at READ COMMITTED, so two
+    // responders closing out the final two open items in separate transactions could each run their
+    // `stillOpen` SELECT before seeing the other's uncommitted resolve → neither observes zero open
+    // items → the scorecard is stuck `corrective_action_open` forever. Taking a FOR UPDATE row lock on
+    // the parent scorecard makes the second resolve block until the first commits, after which its
+    // `stillOpen` SELECT sees the now-committed resolve and closes the scorecard correctly.
+    await tx
+      .select({ id: fieldScorecards.id })
+      .from(fieldScorecards)
+      .where(eq(fieldScorecards.id, input.scorecardId))
+      .limit(1)
+      .for("update");
+
     const now = new Date();
     const updated = await tx
       .update(scorecardCorrectiveActions)
