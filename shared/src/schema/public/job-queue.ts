@@ -36,5 +36,16 @@ export const jobQueue = pgTable(
     index("job_queue_pending_idx")
       .on(table.status, table.runAfter)
       .where(sql`status = 'pending'`),
+    // Backs the rfp_bidboard_create sweeps' correlated per-deal lookups (worker/src/jobs/rfp-bidboard-create.ts):
+    // dead-create EXISTS / live-retry NOT EXISTS / surfaced-error subquery, all keyed on office_id +
+    // payload->>'dealId' + status and ordered by created_at DESC. Partial on this job type to stay small.
+    index("job_queue_rfp_bidboard_create_deal_idx")
+      .on(
+        table.officeId,
+        sql`(payload->>'dealId')`,
+        table.status,
+        sql`created_at DESC`
+      )
+      .where(sql`job_type = 'rfp_bidboard_create'`),
   ]
 );
