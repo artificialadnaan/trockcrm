@@ -87,3 +87,46 @@ export async function resolveCorrectiveActionRecipients(
   }
   return recipients;
 }
+
+/**
+ * The CRM base roles authorized to read/respond to a corrective action on ANY deal (spec §7.1). These are
+ * management/oversight roles — everyone else (rep, construction, field_contractor) may respond ONLY when
+ * they are the deal's assigned superintendent/project_manager.
+ */
+const CORRECTIVE_ACTION_MANAGEMENT_ROLES = new Set(["admin", "director"]);
+
+export function isCorrectiveActionManagementRole(role: string | null | undefined): boolean {
+  return !!role && CORRECTIVE_ACTION_MANAGEMENT_ROLES.has(role);
+}
+
+/**
+ * Whether a SESSION user may read/respond to this deal's corrective action (spec §7.1). Two admits:
+ *   1. the user holds an authorized management role (admin/director) — allowed on any deal; OR
+ *   2. the user is an ACTIVE deal_team_members row on THIS deal whose role is superintendent or
+ *      project_manager (matched by user_id) — the assigned super/PM.
+ *
+ * This is NARROWER than assertActiveFieldProject (which merely checks the deal is browsable): a
+ * field_contractor/construction/rep who is not on the team — even though they can browse the project — is
+ * NOT authorized to respond or auto-close. Membership is matched by user_id only (contact/email-only rows
+ * are token-authed, never session-authed).
+ */
+export async function isAssignedCorrectiveActionResponder(
+  db: TenantDb,
+  dealId: string,
+  user: { id: string; role: string | null | undefined },
+): Promise<boolean> {
+  if (isCorrectiveActionManagementRole(user.role)) return true;
+  const result = await db.execute(
+    sql`
+      SELECT 1
+        FROM deal_team_members dtm
+       WHERE dtm.deal_id = ${dealId}
+         AND dtm.user_id = ${user.id}
+         AND dtm.is_active = TRUE
+         AND dtm.role IN ('superintendent', 'project_manager')
+       LIMIT 1
+    `,
+  );
+  const rows = (result as { rows?: unknown[] }).rows ?? [];
+  return rows.length > 0;
+}

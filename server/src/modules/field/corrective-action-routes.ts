@@ -10,8 +10,8 @@ import {
   type FieldOffice,
   type FieldTenantDb,
 } from "./cross-office.js";
-import { assertActiveFieldProject } from "./projects-service.js";
 import { verifyCorrectiveActionToken } from "./corrective-action-tokens.js";
+import { isAssignedCorrectiveActionResponder } from "./corrective-action-recipients.js";
 import { getCorrectiveActionItems, submitCorrectiveActionResponse } from "./corrective-action-api.js";
 
 /** The responder identity threaded into a resolved item (a CRM user, or an email-only token recipient). */
@@ -43,8 +43,11 @@ function rawToken(req: Request): string | null {
  * Resolve the owning office of the route's scorecard, then authorize the caller against it:
  *   - token path: the `?token` must verify IN that office AND its scorecardId must equal the route :id
  *     (a token for scorecard A can't touch scorecard B) → an invalid/expired/cross-scorecard token is 401/403;
- *   - session path: the field user must be able to browse the scorecard's deal (assertActiveFieldProject) —
- *     the same gate getFieldScorecardDetail uses. (Assigned-super/PM-only narrowing is a Plan 3/4 refinement.)
+ *   - session path: the field user must be the deal's ASSIGNED superintendent/project_manager (an active
+ *     deal_team_members row matched by user_id) OR hold an authorized management role (admin/director) —
+ *     spec §7.1. This is narrower than mere browse access (assertActiveFieldProject): a field_contractor /
+ *     construction / rep who can browse the project but is not on the team is 403, so they can't respond or
+ *     auto-close another crew's corrective action.
  *
  * Returns the office + the responder identity to stamp on any resolution.
  */
@@ -74,8 +77,16 @@ async function authorizeCorrectiveAction(
     );
     const dealId = (dealRes.rows[0] as { deal_id?: string } | undefined)?.deal_id;
     if (!dealId) throw new AppError(404, "Scorecard not found");
-    // Gate on the scorecard's deal being browsable to this field user (throws 403/404 if not).
-    await assertActiveFieldProject(db, { userId: fieldUser.id, userRole: fieldUser.role }, dealId);
+    // Gate on the caller being the deal's assigned super/PM, or an authorized management role (spec §7.1).
+    // Browse access alone (assertActiveFieldProject) is NOT enough — a browsable-but-unassigned field user
+    // must not respond to / auto-close another crew's corrective action.
+    const allowed = await isAssignedCorrectiveActionResponder(db, dealId, {
+      id: fieldUser.id,
+      role: fieldUser.role,
+    });
+    if (!allowed) {
+      throw new AppError(403, "You are not authorized to respond to this scorecard's corrective action.");
+    }
   });
   return {
     office,

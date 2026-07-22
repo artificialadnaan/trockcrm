@@ -20,8 +20,9 @@ const USER = "33333333-3333-3333-3333-333333333333";
 const STAGE_ACTIVE = "cccccccc-0000-0000-0000-000000000001";
 const OFFICE = { id: "office-1", slug: "test" };
 
-// Toggle whether the session field user can browse the deal (assertActiveFieldProject throws when false).
-let sessionAuthorized = true;
+// The identity requireFieldContractor injects for the SESSION path. Tests mutate this to exercise the
+// spec §7.1 gate: an assigned super/PM user, a management role (admin/director), or an unauthorized role.
+let sessionUser: { id: string; role: string } = { id: USER, role: "field_contractor" };
 
 // A single fake office backed by PGlite. resolveWriteOffice returns it; runInOffice/runInOfficeTransaction
 // run the callback against the shared PGlite drizzle db.
@@ -31,11 +32,11 @@ let tdb: any;
 vi.mock("../../../src/middleware/field-auth.js", () => ({
   requireFieldContractor: (req: any, _res: any, next: (err?: unknown) => void) => {
     req.fieldUser = {
-      id: USER,
+      id: sessionUser.id,
       email: "sam.super@trock.com",
       firstName: "Sam",
       lastName: "Super",
-      role: "field_contractor",
+      role: sessionUser.role,
       tenantId: OFFICE.id,
       active: true,
     };
@@ -47,16 +48,6 @@ vi.mock("../../../src/modules/field/cross-office.js", () => ({
   resolveWriteOffice: vi.fn(async () => OFFICE),
   runInOffice: vi.fn(async (_office: any, run: any) => run(tdb, OFFICE)),
   runInOfficeTransaction: vi.fn(async (_office: any, _userId: any, run: any) => run(tdb, OFFICE)),
-}));
-
-vi.mock("../../../src/modules/field/projects-service.js", () => ({
-  assertActiveFieldProject: vi.fn(async () => {
-    if (!sessionAuthorized) {
-      const { AppError } = await import("../../../src/middleware/error-handler.js");
-      throw new AppError(403, "Not authorized for this project");
-    }
-    return { id: DEAL };
-  }),
 }));
 
 // Import AFTER the mocks so the routes bind to the mocked cross-office/projects.
@@ -113,10 +104,18 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
-  sessionAuthorized = true;
+  // Default the session user to the ASSIGNED superintendent (a team-member row is seeded below), so the
+  // happy-path session tests are authorized. Per-test overrides exercise the management-role and 403 cases.
+  sessionUser = { id: USER, role: "field_contractor" };
   await tdb.execute(sql`DELETE FROM scorecard_corrective_action_tokens`);
   await tdb.execute(sql`DELETE FROM scorecard_corrective_actions`);
   await tdb.execute(sql`DELETE FROM field_scorecards`);
+  await tdb.execute(sql`DELETE FROM deal_team_members`);
+  // USER is the deal's assigned superintendent (active) → authorized on the session path.
+  await tdb.execute(sql`
+    INSERT INTO deal_team_members (deal_id, user_id, role, is_active)
+    VALUES (${DEAL}, ${USER}, 'superintendent', true)
+  `);
 
   // Seed a below-band scorecard with two open corrective-action items.
   scorecardId = "22222222-2222-2222-2222-222222222222";
@@ -135,10 +134,33 @@ beforeEach(async () => {
 });
 
 describe("GET /scorecards/:id/corrective-actions", () => {
-  it("returns items for a session user authorized to the deal", async () => {
+  it("returns items for the deal's assigned superintendent (session user)", async () => {
     const res = await request(app).get(`/scorecards/${scorecardId}/corrective-actions`);
     expect(res.status).toBe(200);
     expect(res.body.items).toHaveLength(2);
+  });
+
+  it("returns items for an admin/director (management role) not on the team", async () => {
+    // Remove the team membership so ONLY the management role admits this user.
+    await tdb.execute(sql`DELETE FROM deal_team_members`);
+    for (const role of ["admin", "director"] as const) {
+      sessionUser = { id: "44444444-4444-4444-4444-444444444444", role };
+      const res = await request(app).get(`/scorecards/${scorecardId}/corrective-actions`);
+      expect(res.status).toBe(200);
+      expect(res.body.items).toHaveLength(2);
+    }
+  });
+
+  it("403s a field_contractor NOT on the deal team (browsable ≠ authorized)", async () => {
+    sessionUser = { id: "44444444-4444-4444-4444-444444444444", role: "field_contractor" };
+    const res = await request(app).get(`/scorecards/${scorecardId}/corrective-actions`);
+    expect(res.status).toBe(403);
+  });
+
+  it("403s a rep NOT on the deal team", async () => {
+    sessionUser = { id: "44444444-4444-4444-4444-444444444444", role: "rep" };
+    const res = await request(app).get(`/scorecards/${scorecardId}/corrective-actions`);
+    expect(res.status).toBe(403);
   });
 
   it("returns items for an email-only recipient via ?token (no session)", async () => {
@@ -162,11 +184,6 @@ describe("GET /scorecards/:id/corrective-actions", () => {
     expect(res.status).toBe(401);
   });
 
-  it("403s a session user not authorized to the deal", async () => {
-    sessionAuthorized = false;
-    const res = await request(app).get(`/scorecards/${scorecardId}/corrective-actions`);
-    expect(res.status).toBe(403);
-  });
 });
 
 describe("POST /scorecards/:id/corrective-actions/:itemId", () => {
@@ -210,6 +227,19 @@ describe("POST /scorecards/:id/corrective-actions/:itemId", () => {
     );
     expect(item.rows[0].responded_by_user_id).toBeNull();
     expect(item.rows[0].responder_email).toBe("pm@example.com");
+  });
+
+  it("403s a POST from a field_contractor NOT on the deal team (can't respond/auto-close)", async () => {
+    sessionUser = { id: "44444444-4444-4444-4444-444444444444", role: "field_contractor" };
+    const res = await request(app)
+      .post(`/scorecards/${scorecardId}/corrective-actions/${itemIds[0]}`)
+      .send({ comment: "should be blocked" });
+    expect(res.status).toBe(403);
+    // The item stays open — the unauthorized POST did not resolve it.
+    const item = await tdb.execute(
+      sql`SELECT status FROM scorecard_corrective_actions WHERE id = ${itemIds[0]}`,
+    );
+    expect(item.rows[0].status).toBe("open");
   });
 
   it("403s a token minted for a DIFFERENT scorecard (no cross-scorecard access)", async () => {
