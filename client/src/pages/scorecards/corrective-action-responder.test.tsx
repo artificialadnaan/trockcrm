@@ -3,6 +3,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ApiError } from "@/lib/api";
 import type { CorrectiveActionItem } from "@/hooks/use-corrective-actions";
 
 const mocks = vi.hoisted(() => ({
@@ -244,15 +245,88 @@ describe("CorrectiveActionResponderPage", () => {
     Object.defineProperty(fileInput, "files", { value: files, configurable: true });
     await act(async () => {
       fileInput.dispatchEvent(new Event("change", { bubbles: true }));
-      // Let all the sequential uploads settle.
-      for (let i = 0; i < 60; i++) await Promise.resolve();
+      // Let all the (bounded-concurrency) uploads settle.
+      for (let i = 0; i < 120; i++) await Promise.resolve();
     });
 
-    // Only 50 uploaded (the 51st truncated) and the input is now disabled at the cap.
+    // The cap is enforced on the accepted set BEFORE uploading, so the concurrent pool can't overshoot it:
+    // only 50 uploaded (the 51st truncated) and the input is now disabled at the cap.
     expect(mocks.uploadCorrectiveActionPhoto).toHaveBeenCalledTimes(50);
     expect(container.textContent).toContain("at most 50");
     const capInput = container.querySelector('input[type="file"]') as HTMLInputElement;
     expect(capInput.disabled).toBe(true);
+  });
+
+  it("uploads all accepted files with bounded concurrency and keeps their order stable", async () => {
+    mocks.useCorrectiveActions.mockReturnValue({ items: [openItem], loading: false, error: null, errorStatus: null, refetch: vi.fn() });
+    // Resolve each upload to a fileId derived from its filename, but with a staggered delay so that LATER
+    // files finish BEFORE earlier ones — proving the resulting order is index-based, not completion-based.
+    // p0 (slowest) … p3 (fastest): if order were completion-driven the previews would come out reversed.
+    let maxInFlight = 0;
+    let inFlight = 0;
+    mocks.uploadCorrectiveActionPhoto.mockImplementation((_sc: string, file: File) => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      const idx = Number(file.name.replace(/\D/g, ""));
+      // Earlier index → longer delay (more microtask turns) so completion order is reversed vs pick order.
+      const turns = (4 - idx) * 2;
+      return new Promise<string>((resolve) => {
+        let n = turns;
+        const tick = () => {
+          if (n-- <= 0) {
+            inFlight -= 1;
+            resolve(`file-${idx}`);
+            return;
+          }
+          void Promise.resolve().then(tick);
+        };
+        tick();
+      });
+    });
+
+    await renderAt("/scorecards/sc-1/corrective-action?token=tok");
+
+    const fileInput = container.querySelector('input[type="file"]') as HTMLInputElement;
+    const files = Array.from({ length: 4 }, (_, i) => new File([new Uint8Array([i])], `p${i}.jpg`, { type: "image/jpeg" }));
+    Object.defineProperty(fileInput, "files", { value: files, configurable: true });
+    await act(async () => {
+      fileInput.dispatchEvent(new Event("change", { bubbles: true }));
+      for (let i = 0; i < 40; i++) await Promise.resolve();
+    });
+
+    // All four accepted files were uploaded.
+    expect(mocks.uploadCorrectiveActionPhoto).toHaveBeenCalledTimes(4);
+    // Concurrency was actually exercised (more than one upload in flight at once).
+    expect(maxInFlight).toBeGreaterThan(1);
+    // The rendered previews (one <img> per photo, in DOM order) map back to the ORIGINAL pick order — the
+    // remove buttons carry each fileId's position; assert the four cards are present and correctly ordered by
+    // reading the remove-button count (4) and that submit sends the fileIds in index order below.
+    const removeBtns = Array.from(container.querySelectorAll('button[aria-label="Remove photo"]'));
+    expect(removeBtns.length).toBe(4);
+
+    // Submit and assert photoFileIds are in original index order (file-0..file-3), not completion order.
+    mocks.submitCorrectiveActionResponse.mockResolvedValue([]);
+    const textarea = container.querySelector("textarea")!;
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!;
+      setter.call(textarea, "Done");
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+      await Promise.resolve();
+    });
+    const submitBtn = Array.from(container.querySelectorAll("button")).find((b) =>
+      b.textContent?.includes("Submit response"),
+    )!;
+    await act(async () => {
+      submitBtn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(mocks.submitCorrectiveActionResponse).toHaveBeenCalledWith(
+      "sc-1",
+      "item-1",
+      { comment: "Done", photoFileIds: ["file-0", "file-1", "file-2", "file-3"] },
+      "tok",
+    );
   });
 
   it("discards the uploaded file server-side when a photo is removed before submit", async () => {
@@ -337,5 +411,58 @@ describe("CorrectiveActionResponderPage", () => {
     // Navigate away (unmount) without submitting → the orphaned upload is reclaimed.
     await act(() => root.unmount());
     expect(mocks.discardCorrectiveActionPhoto).toHaveBeenCalledWith("sc-1", "file-abandoned", "tok-nav");
+  });
+
+  it("on a 409 already-resolved submit: discards the uploaded fileIds, surfaces the already-resolved state, and refetches (not a success)", async () => {
+    const refetch = vi.fn();
+    mocks.useCorrectiveActions.mockReturnValue({ items: [openItem], loading: false, error: null, errorStatus: null, refetch });
+    mocks.uploadCorrectiveActionPhoto.mockResolvedValue("file-race");
+    // The response POST loses the race: another responder already resolved the item, so the server 409s with
+    // CORRECTIVE_ACTION_ALREADY_RESOLVED and our fileIds never attach.
+    mocks.submitCorrectiveActionResponse.mockRejectedValue(
+      new ApiError(409, { code: "CORRECTIVE_ACTION_ALREADY_RESOLVED", message: "Already resolved" }),
+    );
+
+    await renderAt("/scorecards/sc-1/corrective-action?token=tok-race");
+
+    // Attach a photo so there is an uploaded fileId to discard.
+    const fileInput = container.querySelector('input[type="file"]') as HTMLInputElement;
+    const file = new File([new Uint8Array([1])], "p.jpg", { type: "image/jpeg" });
+    Object.defineProperty(fileInput, "files", { value: [file], configurable: true });
+    await act(async () => {
+      fileInput.dispatchEvent(new Event("change", { bubbles: true }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const textarea = container.querySelector("textarea")!;
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!;
+      setter.call(textarea, "Corrected");
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+      await Promise.resolve();
+    });
+
+    const submitBtn = Array.from(container.querySelectorAll("button")).find((b) =>
+      b.textContent?.includes("Submit response"),
+    )!;
+    await act(async () => {
+      submitBtn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // The just-uploaded fileId is discarded (it never attached to a response) — NOT kept as evidence.
+    expect(mocks.discardCorrectiveActionPhoto).toHaveBeenCalledWith("sc-1", "file-race", "tok-race");
+    // The already-resolved notice is surfaced (not a success message).
+    expect(container.textContent).toContain("just resolved by someone else");
+    // The items query is refreshed so the card can re-render into its resolved read-only branch.
+    expect(refetch).toHaveBeenCalled();
+
+    // This lost race is NOT this user's successful submission: the uploaded id must not survive as pending
+    // evidence — a later unmount discards nothing further (the set was cleared, and it's already discarded).
+    mocks.discardCorrectiveActionPhoto.mockClear();
+    await act(() => root.unmount());
+    expect(mocks.discardCorrectiveActionPhoto).not.toHaveBeenCalled();
   });
 });

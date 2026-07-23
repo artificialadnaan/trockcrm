@@ -3,6 +3,7 @@ import { useParams, useSearchParams } from "react-router-dom";
 import { CheckCircle2, Loader2, Upload, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
+import { isApiError } from "@/lib/api";
 import {
   useCorrectiveActions,
   submitCorrectiveActionResponse,
@@ -25,6 +26,39 @@ interface PendingPhoto {
 // "At most 50 photos can be attached to a response"). Cap the COMBINED selection here BEFORE uploading so the
 // recipient never uploads (potentially >1GB across) files + creates gallery rows only for the POST to 400.
 const MAX_RESPONSE_PHOTOS = 50;
+
+// Upload the accepted files with a small worker-pool rather than one-at-a-time, so a multi-photo selection
+// isn't gated on the slowest sequential PUT. Mirrors the mobile responder's UPLOAD_CONCURRENCY.
+const UPLOAD_CONCURRENCY = 4;
+
+// The response POST 409s with this code when another responder resolved the item after THIS caller already
+// uploaded photos — a lost race whose photoFileIds did NOT attach (server corrective-action-api.ts). Detected
+// on submit so we discard the orphaned uploads instead of claiming a phantom success.
+const ALREADY_RESOLVED_CODE = "CORRECTIVE_ACTION_ALREADY_RESOLVED";
+
+// Bounded-concurrency worker pool: run `worker` over `items` with at most `concurrency` in flight, returning a
+// settled result per item IN ORIGINAL INDEX ORDER (never rejects) so the caller can keep photo order stable
+// and handle per-file failures individually. Mirrors the mobile responder's runConcurrentUploads.
+async function runBoundedConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T, index: number) => Promise<R>,
+): Promise<Array<PromiseSettledResult<R>>> {
+  const results: Array<PromiseSettledResult<R>> = new Array(items.length);
+  let nextIndex = 0;
+  async function runNext(): Promise<void> {
+    const index = nextIndex++;
+    if (index >= items.length) return;
+    try {
+      results[index] = { status: "fulfilled", value: await worker(items[index], index) };
+    } catch (err) {
+      results[index] = { status: "rejected", reason: err };
+    }
+    await runNext();
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, runNext));
+  return results;
+}
 
 export default function CorrectiveActionResponderPage() {
   const { id } = useParams();
@@ -149,6 +183,11 @@ function ItemCard({
   const [uploading, setUploading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  // Set when the response POST 409'd as already-resolved (another responder beat this caller). The item's
+  // own refetch will re-render it into the resolved read-only branch; this flag surfaces a clear "someone
+  // else just resolved this" notice in the brief window before/around that refresh, and marks this as NOT
+  // the current user's successful submission.
+  const [alreadyResolved, setAlreadyResolved] = useState(false);
   // Track every object URL we allocate so each is revoked EXACTLY once — on removal or on unmount. A blob URL
   // that outlives its <img> leaks memory until the tab closes; the responder page can accumulate many.
   const previewUrlsRef = useRef<Set<string>>(new Set());
@@ -177,6 +216,8 @@ function ItemCard({
         return;
       }
       const picked = Array.from(files);
+      // Enforce the cap on the ACCEPTED set BEFORE uploading — the concurrent pool below can't overshoot it
+      // because only these `accepted` files are ever handed to `uploadCorrectiveActionPhoto`.
       const accepted = picked.slice(0, remaining);
       const overflow = picked.length - accepted.length;
       setUploading(true);
@@ -186,15 +227,44 @@ function ItemCard({
           : null,
       );
       try {
-        for (const file of accepted) {
+        // Upload with bounded concurrency (a few in flight) instead of one-at-a-time, but collect the results
+        // by ORIGINAL INDEX so the resulting photos keep a deterministic order regardless of which PUT finishes
+        // first. Per-file bookkeeping (pending-discard set + preview URL) happens as each upload resolves.
+        const settled = await runBoundedConcurrency(accepted, UPLOAD_CONCURRENCY, async (file) => {
           const fileId = await uploadCorrectiveActionPhoto(scorecardId, file, token);
           // Mark it pending-discard-on-cleanup the instant it's confirmed (a persistent files row now exists).
           pendingFileIdsRef.current.add(fileId);
           const previewUrl = URL.createObjectURL(file);
           previewUrlsRef.current.add(previewUrl);
-          setPhotos((prev) => [...prev, { fileId, previewUrl }]);
+          return { fileId, previewUrl };
+        });
+
+        // Append the SUCCESSFUL uploads in original index order so a slower earlier file never lands after a
+        // faster later one.
+        const uploaded: PendingPhoto[] = [];
+        let failures = 0;
+        for (const result of settled) {
+          if (result.status === "fulfilled") uploaded.push(result.value);
+          else failures += 1;
+        }
+        if (uploaded.length > 0) {
+          setPhotos((prev) => [...prev, ...uploaded]);
+        }
+        // Surface a per-batch failure count without clobbering the overflow notice when there was no failure.
+        if (failures > 0) {
+          const firstError = settled.find((r) => r.status === "rejected") as
+            | PromiseRejectedResult
+            | undefined;
+          const reason =
+            firstError?.reason instanceof Error ? firstError.reason.message : "Photo upload failed.";
+          setSubmitError(
+            failures === accepted.length
+              ? `Photo upload failed. Please try again. (${reason})`
+              : `${failures} of ${accepted.length} photos failed to upload. Please retry those. (${reason})`,
+          );
         }
       } catch (e) {
+        // runBoundedConcurrency never rejects, so this only guards an unexpected throw (defensive).
         setSubmitError(e instanceof Error ? e.message : "Photo upload failed. Please try again.");
       } finally {
         setUploading(false);
@@ -268,6 +338,26 @@ function ItemCard({
       setPhotos([]);
       onResolved();
     } catch (e) {
+      // Lost-race 409: another responder resolved this item AFTER we uploaded, so the server did NOT attach
+      // our photoFileIds. Do NOT treat this as our success — discard the now-orphaned uploads (they'd
+      // otherwise linger as unattached files on the deal), clear the pending set + preview URLs so the
+      // unmount cleanup can't double-discard/double-revoke, surface the already-resolved notice, and refresh
+      // the items query so the card re-renders into its resolved read-only branch.
+      if (isApiError(e) && e.status === 409 && e.code === ALREADY_RESOLVED_CODE) {
+        const orphanedIds = [...pendingFileIdsRef.current];
+        pendingFileIdsRef.current.clear();
+        for (const fileId of orphanedIds) {
+          void discardCorrectiveActionPhoto(scorecardId, fileId, token).catch(() => {});
+        }
+        for (const url of previewUrlsRef.current) URL.revokeObjectURL(url);
+        previewUrlsRef.current.clear();
+        setPhotos([]);
+        setSubmitError(null);
+        setAlreadyResolved(true);
+        setSubmitting(false);
+        onResolved();
+        return;
+      }
       setSubmitError(e instanceof Error ? e.message : "Couldn’t submit the response. Please try again.");
       setSubmitting(false);
     }
@@ -320,6 +410,12 @@ function ItemCard({
         </div>
       ) : (
         <div className="mt-3 space-y-3">
+          {alreadyResolved && (
+            <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+              This item was just resolved by someone else. Your response wasn’t recorded — refreshing to show
+              their resolution.
+            </div>
+          )}
           <Textarea
             value={comment}
             onChange={(e) => setComment(e.target.value)}
