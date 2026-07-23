@@ -35,7 +35,7 @@ fires or *what* deals are searchable. Pure presentation/enrichment.
 | Field | Source | Notes |
 |---|---|---|
 | Deal name / number | `event.deal_name` / `event.deal_number` | already in event |
-| Deal $ amount | `new_snapshot` → best of `awardedAmount → bidEstimate → ddEstimate` (fallback `old_snapshot`) | snapshots carry all three; **no query** |
+| Deal $ amount | `new_snapshot` → best of `awardedAmount → bidBoardTotalSales → bidEstimate → ddEstimate` (fallback `old_snapshot`) — canonical `DEAL_VALUE_PRIORITY_CHAIN`, same order search uses | snapshots carry all; **no query** |
 | Terminal-aware YTD impact | `event.impacts` (already terminal-aware) | stays in the existing **Figure** row |
 | Rep old→new names | resolve UUIDs in `changed_fields.assigned_rep_id{.from,.to}` + `estimator_user_id` via `public.users` | **one batched query** |
 | Actor name | already resolved by `enrichEventAuditCitation` | unchanged |

@@ -598,7 +598,8 @@ In `server/tests/modules/search/soft-deleted-won-search.runtime.test.ts`, the `d
 ```sql
       on_hold boolean DEFAULT false, is_change_order boolean DEFAULT false,
       is_active boolean NOT NULL DEFAULT true, stage_id uuid,
-      awarded_amount numeric(14,2), bid_estimate numeric(14,2), dd_estimate numeric(14,2),
+      awarded_amount numeric(14,2), bid_board_total_sales numeric(14,2),
+      bid_estimate numeric(14,2), dd_estimate numeric(14,2),
       updated_at timestamptz DEFAULT now()
 ```
 
@@ -621,8 +622,8 @@ import { searchDeals } from "../../../src/modules/search/service.js";
 
 const U = (s: string) => `00000000-0000-0000-0000-${s.padStart(12, "0")}`;
 const ST = { opp: U("57a1") };
-const REP = U("re01");
-const D = { withRep: U("d01"), noRep: U("d02"), bidOnly: U("d03") };
+const REP = U("ee01"); // hex-only (r/e-typo would be an invalid uuid and crash beforeAll)
+const D = { withRep: U("d01"), noRep: U("d02"), bidOnly: U("d03"), bbOnly: U("d04") };
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let tdb: any;
@@ -642,17 +643,19 @@ beforeAll(async () => {
       company_id uuid, primary_contact_id uuid, assigned_rep_id uuid,
       on_hold boolean DEFAULT false, is_change_order boolean DEFAULT false,
       is_active boolean NOT NULL DEFAULT true, stage_id uuid,
-      awarded_amount numeric(14,2), bid_estimate numeric(14,2), dd_estimate numeric(14,2),
+      awarded_amount numeric(14,2), bid_board_total_sales numeric(14,2),
+      bid_estimate numeric(14,2), dd_estimate numeric(14,2),
       updated_at timestamptz DEFAULT now()
     );
 
     INSERT INTO pipeline_stage_config (id, slug) VALUES ('${ST.opp}','opportunity');
     INSERT INTO users (id, display_name) VALUES ('${REP}','Caleb Stone');
 
-    INSERT INTO deals (id, name, stage_id, is_active, assigned_rep_id, awarded_amount, bid_estimate, dd_estimate) VALUES
-      ('${D.withRep}', 'Zephyr Awarded',  '${ST.opp}', true, '${REP}', 12322.86, 12322.86, 12155.00),
-      ('${D.noRep}',   'Zephyr No Rep',   '${ST.opp}', true, NULL,      50000.00, NULL,     NULL),
-      ('${D.bidOnly}', 'Zephyr Bid Only', '${ST.opp}', true, '${REP}',  NULL,      7500.00, 7000.00);
+    INSERT INTO deals (id, name, stage_id, is_active, assigned_rep_id, awarded_amount, bid_board_total_sales, bid_estimate, dd_estimate) VALUES
+      ('${D.withRep}', 'Zephyr Awarded',  '${ST.opp}', true, '${REP}', 12322.86, NULL,     12322.86, 12155.00),
+      ('${D.noRep}',   'Zephyr No Rep',   '${ST.opp}', true, NULL,      50000.00, NULL,     NULL,     NULL),
+      ('${D.bidOnly}', 'Zephyr Bid Only', '${ST.opp}', true, '${REP}',  NULL,      NULL,     7500.00,  7000.00),
+      ('${D.bbOnly}',  'Zephyr BB Only',  '${ST.opp}', true, '${REP}',  NULL,      31000.00, 8000.00,  NULL);
   `);
   tdb = drizzle(pg);
 }, 30000);
@@ -676,7 +679,10 @@ describe("searchDeals — rep name + best-value amount enrichment", () => {
 
     const bidOnly = byId.get(D.bidOnly)!;
     expect(bidOnly.assignedRepName).toBe("Caleb Stone");
-    expect(Number(bidOnly.dealValue)).toBe(7500); // falls through to bid_estimate
+    expect(Number(bidOnly.dealValue)).toBe(7500); // awarded+bbts null -> bid_estimate
+
+    const bbOnly = byId.get(D.bbOnly)!;
+    expect(Number(bbOnly.dealValue)).toBe(31000); // bid_board_total_sales beats bid_estimate
   });
 });
 ```
@@ -703,6 +709,7 @@ In `searchDeals`, add the value columns + rep name to the `.select({...})` (afte
 ```ts
       assignedRepName: users.displayName,
       awardedAmount: deals.awardedAmount,
+      bidBoardTotalSales: deals.bidBoardTotalSales,
       bidEstimate: deals.bidEstimate,
       ddEstimate: deals.ddEstimate,
 ```
@@ -728,7 +735,10 @@ Update the `.map(...)` return object (add two fields to the mapped `SearchResult
     rank: Number(r.relevance ?? 0),
     isChangeOrder: r.isChangeOrder === true,
     assignedRepName: r.assignedRepName ?? null,
-    dealValue: firstNonEmpty(r.awardedAmount, r.bidEstimate, r.ddEstimate),
+    // Deliberately the RAW best-value (awarded>bbts>bid>dd, canonical DEAL_VALUE_PRIORITY_CHAIN),
+    // NOT the on-hold-zeroed effective value: search is a display surface (on-hold already shows a
+    // badge), not a reporting aggregate. Matches the email builder's snapshotBestValue order.
+    dealValue: firstNonEmpty(r.awardedAmount, r.bidBoardTotalSales, r.bidEstimate, r.ddEstimate),
   }));
 ```
 
@@ -874,37 +884,49 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 Open `client/src/pages/search/search-page.test.tsx` and confirm how it builds result fixtures (it mocks `useSearch`). Add a test that a deal result renders the rep name + compact amount. Add this test inside the existing top-level `describe`:
 
+This file uses `renderToStaticMarkup` + a `hit()` fixture and mocks all three hooks
+(`useSearch`, `useAiSearch`, `useRecentSearches`) — NOT the command-palette's
+`setSearchState/render/container` helpers. Add a new `describe` mirroring the file's first
+block; set ALL THREE mocks (SearchPage unconditionally calls `useAiSearch()` and
+`useRecentSearches()`, so leaving them unset throws) and assert on the returned HTML string:
+
 ```ts
-  it("shows deal amount + rep name on a deal result card", () => {
-    setSearchState({
+describe("SearchPage — deal amount + rep name", () => {
+  it("shows deal amount (compact) and rep name on a deal result card", () => {
+    mocks.useRecentSearchesMock.mockReturnValue({ recent: [], addRecent: vi.fn(), clearRecent: vi.fn() });
+    mocks.useAiSearchMock.mockReturnValue({ query: "", setQuery: vi.fn(), results: null, loading: false });
+    mocks.useSearchMock.mockReturnValue({
+      query: "terraces",
+      setQuery: vi.fn(),
+      loading: false,
+      error: null,
       results: {
         deals: [
-          {
-            entityType: "deal",
-            id: "d1",
-            primaryLabel: "Terraces at Highbury Court",
+          hit("deal", "d1", "Terraces at Highbury Court", "/deals/d1", {
+            status: "won",
             secondaryLabel: "DFW-4-16326-af",
             tertiaryLabel: "Atlanta, GA",
-            status: "won",
-            deepLink: "/deals/d1",
-            rank: 1,
             assignedRepName: "Caleb Stone",
             dealValue: "12322.86",
-          },
+          }),
         ],
         companies: [], contacts: [], leads: [], properties: [], files: [],
         total: 1, query: "terraces",
       },
-      loading: false,
     });
-    render();
-    const text = container!.textContent ?? "";
-    expect(text).toContain("Caleb Stone");
-    expect(text).toContain("$12.3K");
-  });
-```
 
-Note: match the existing `search-page.test.tsx` helpers (`setSearchState`/`render`/`container`). If the file uses different helper names, adapt this test to them — read the file first and reuse its exact scaffolding (mock of `@/hooks/use-search`, jsdom env, MemoryRouter).
+    const html = renderToStaticMarkup(
+      <MemoryRouter initialEntries={["/search?q=terraces"]}>
+        <SearchPage />
+      </MemoryRouter>,
+    );
+    expect(html).toContain("Caleb Stone");
+    expect(html).toContain("$12.3K"); // formatCurrencyCompact(12322.86)
+    expect(html).toContain("DFW-4-16326-af");
+    expect(html).toContain("Atlanta, GA");
+  });
+});
+```
 
 - [ ] **Step 2: Run to verify it fails**
 
@@ -968,7 +990,9 @@ npm run typecheck:tests -w worker
 npm run typecheck:tests -w server
 npm run typecheck:tests -w client
 ```
-Expected: no type errors in any workspace.
+Expected: no type errors. NOTE: worker/server `typecheck:tests` cover `src` only, not `tests/` —
+so worker/server test-fixture type errors are caught by RUNNING the tests (Steps 2-3), not here.
+The client `typecheck:tests` DOES cover `.test.tsx`, so the client search tests must be type-clean.
 
 - [ ] **Step 2: Run the full test suites for touched workspaces**
 
