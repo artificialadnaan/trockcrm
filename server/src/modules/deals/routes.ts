@@ -4040,7 +4040,19 @@ router.patch("/:id/team/:memberId", async (req, res, next) => {
 
     const { role, notes } = req.body;
     if (role !== undefined && !DEAL_TEAM_ROLES.includes(role)) throw new AppError(400, "Invalid role");
-    const member = await updateTeamMember(req.tenantDb!, req.params.memberId, req.params.id, { role, notes });
+    // Thread the office (id + `office_<slug>`) so a responder-role change can enqueue a fresh corrective-action
+    // notification cycle for the deal's open cards (the replacement responder must be notified).
+    const teamOffice =
+      req.officeSlug && req.user!.activeOfficeId
+        ? { id: req.user!.activeOfficeId, slug: req.officeSlug }
+        : undefined;
+    const member = await updateTeamMember(
+      req.tenantDb!,
+      req.params.memberId,
+      req.params.id,
+      { role, notes },
+      teamOffice,
+    );
     await req.commitTransaction!();
     res.json({ member });
   } catch (err) {
@@ -4054,7 +4066,13 @@ router.delete("/:id/team/:memberId", async (req, res, next) => {
     const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
     if (!deal) throw new AppError(404, "Deal not found");
 
-    await removeTeamMember(req.tenantDb!, req.params.memberId, req.params.id);
+    // Thread the office (id + `office_<slug>`) so removing a responder can enqueue a fresh corrective-action
+    // notification cycle for the deal's open cards (the replacement responder must be notified).
+    const teamOffice =
+      req.officeSlug && req.user!.activeOfficeId
+        ? { id: req.user!.activeOfficeId, slug: req.officeSlug }
+        : undefined;
+    await removeTeamMember(req.tenantDb!, req.params.memberId, req.params.id, teamOffice);
     await req.commitTransaction!();
     res.json({ success: true });
   } catch (err) {

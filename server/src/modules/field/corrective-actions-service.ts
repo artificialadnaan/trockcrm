@@ -220,8 +220,10 @@ export interface ReconcileCorrectiveActionsInput {
  * original notification already sent (email_sent_at non-null); if the original job is still pending it reads
  * items fresh at send time, so a second enqueue would double-send.
  *
- * NOT inBand (edit lifted the card above band / removed every flag): if currently corrective_action_open,
- * revert to `submitted` and DELETE the open items (now obsolete). ALSO purge RESOLVED rows for items no longer
+ * NOT inBand (edit lifted the card above band / removed every flag): if currently corrective_action_open OR
+ * corrective_action_closed, revert to `submitted` and DELETE the open items (now obsolete) — a closed card
+ * whose corrective rows no longer apply must not keep showing a resolved corrective action. ALSO purge
+ * RESOLVED rows for items no longer
  * flagged in this edit — the same removed-item cleanup the in-band path applies, so a later re-add of that
  * flag reopens with a fresh open row instead of matching a stale resolved row (the reopen-recurrence bug). A
  * STILL-flagged item's resolved row is preserved (it must not reopen if the card later drops back in-band);
@@ -293,7 +295,15 @@ export async function reconcileScorecardCorrectiveActions(
     if (idsToDelete.length > 0) {
       await tx.delete(scorecardCorrectiveActions).where(inArray(scorecardCorrectiveActions.id, idsToDelete));
     }
-    if (input.currentStatus === "corrective_action_open") {
+    // Walk the card back to `submitted` from EITHER open OR closed. An OPEN card that leaves the band obviously
+    // has no live corrective action; but a CLOSED card whose corrective rows are removed / no longer apply must
+    // ALSO revert — otherwise the QC report + mobile/deal status badges keep showing a "resolved corrective
+    // action" that no longer exists. Both are corrective-action statuses that must not survive an edit that
+    // dropped the card out of the band / removed every flag.
+    if (
+      input.currentStatus === "corrective_action_open" ||
+      input.currentStatus === "corrective_action_closed"
+    ) {
       await tx
         .update(fieldScorecards)
         .set({ status: "submitted", updatedAt: new Date() })
@@ -301,8 +311,8 @@ export async function reconcileScorecardCorrectiveActions(
       // The corrective-action cycle no longer exists (the edit lifted the card out of the band / removed every
       // flag), so its outstanding recipient-bound web tokens must not keep authorizing the responder flow or the
       // token-scoped upload routes until they expire. Revoke them on the same transition — same invariant the
-      // reopen path enforces (a surviving token ⟺ a live corrective-action cycle). A card that had no email-only
-      // recipient has no tokens, so this is a no-op there.
+      // reopen path enforces (a surviving token ⟺ a live corrective-action cycle), applied to the closed→submitted
+      // transition too. A card that had no email-only recipient has no tokens, so this is a no-op there.
       await tx
         .delete(scorecardCorrectiveActionTokens)
         .where(eq(scorecardCorrectiveActionTokens.scorecardId, input.scorecardId));
@@ -494,4 +504,71 @@ export async function reconcileScorecardCorrectiveActions(
       maxAttempts: 6,
     });
   }
+}
+
+/**
+ * Start a FRESH notification cycle for every OPEN corrective-action scorecard on a deal. Called when the deal's
+ * super/PM responder assignment changes (a removal or a re-role off the responder roles) so a newly-assigned
+ * responder is actually NOTIFIED of the existing open corrective actions — the worker's per-send recipient
+ * revalidation only covers a change that happens DURING an active send, not a reassignment that lands after the
+ * original cycle already stamped as sent, so without this the replacement responder is authorized but silently
+ * unnotified.
+ *
+ * For each field_scorecards row on the deal with status = 'corrective_action_open':
+ *   - reset corrective_action_email_sent_at = NULL (so the worker sends again),
+ *   - delete its scorecard_corrective_action_tokens (prior-cycle links must not survive a new cycle — the
+ *     worker's per-recipient reuse-skip would otherwise treat a surviving token as "already delivered THIS
+ *     cycle" and skip re-sending, stranding the new responder), and
+ *   - enqueue a scorecard_corrective_action_email job whose payload mirrors the reconcile enqueue EXACTLY
+ *     (jobType SCORECARD_CORRECTIVE_ACTION_EMAIL_JOB, { tenantSchema, scorecardId, dealId, officeId, cycleNonce }
+ *     with a fresh per-cycle nonce, run_after ~120s, max_attempts 6, matching office_id + status).
+ *
+ * Runs in the caller's tenant transaction (the team-mutation PATCH/DELETE route commits both together), so the
+ * revoke + re-notify is atomic with the team change.
+ */
+export async function restartCorrectiveActionNotificationCycleForDeal(
+  tx: TenantDb,
+  input: { dealId: string; office: { id: string; slug: string } },
+): Promise<void> {
+  const openScorecards = await tx
+    .select({ id: fieldScorecards.id })
+    .from(fieldScorecards)
+    .where(
+      and(
+        eq(fieldScorecards.dealId, input.dealId),
+        eq(fieldScorecards.status, "corrective_action_open"),
+      ),
+    );
+  if (openScorecards.length === 0) return;
+
+  const scorecardIds = openScorecards.map((s) => s.id);
+
+  // Clear the sent stamp so the worker re-sends this cycle.
+  await tx
+    .update(fieldScorecards)
+    .set({ correctiveActionEmailSentAt: null, updatedAt: new Date() })
+    .where(inArray(fieldScorecards.id, scorecardIds));
+
+  // Drop prior-cycle tokens on these scorecards (see the reuse-skip rationale above).
+  await tx
+    .delete(scorecardCorrectiveActionTokens)
+    .where(inArray(scorecardCorrectiveActionTokens.scorecardId, scorecardIds));
+
+  // Enqueue one fresh notification job per open scorecard — payload shape identical to the reconcile enqueue.
+  await tx.insert(jobQueue).values(
+    scorecardIds.map((scorecardId) => ({
+      jobType: SCORECARD_CORRECTIVE_ACTION_EMAIL_JOB,
+      payload: {
+        tenantSchema: `office_${input.office.slug}`,
+        scorecardId,
+        dealId: input.dealId,
+        officeId: input.office.id,
+        cycleNonce: randomUUID(),
+      },
+      officeId: input.office.id,
+      status: "pending" as const,
+      runAfter: new Date(Date.now() + SCORECARD_EMAIL_RUN_AFTER_SECONDS * 1000),
+      maxAttempts: 6,
+    })),
+  );
 }

@@ -136,6 +136,15 @@ export async function confirmCorrectiveActionUpload(
   db: TenantDb,
   input: ConfirmCorrectiveActionUploadInput,
 ): Promise<{ fileId: string }> {
+  // Serialize the open-check + file-create against the close that a concurrent submit/resolve performs. The
+  // submit/discard paths (submitCorrectiveActionResponse / discardCorrectiveActionUpload) take this SAME
+  // parent-scorecard FOR UPDATE lock; resolving the last open item auto-closes the scorecard under it. Without
+  // taking the lock here, another responder could resolve the last open item (committing the close) BETWEEN
+  // this assertOpenCorrectiveAction check and confirmUpload — the open-check would pass, the close would
+  // commit, and confirmUpload would still create an active file with no open item to attach it to → a
+  // permanent orphan. Holding the lock makes the open-check + confirmUpload atomic w.r.t. that close. The route
+  // runs us inside runInOfficeTransaction's transaction, so we take the ambient lock here (no nested tx).
+  await db.execute(sql`SELECT id FROM field_scorecards WHERE id = ${input.scorecardId} LIMIT 1 FOR UPDATE`);
   // Gate confirm on an OPEN corrective action too (not just presign): a token holder could have obtained a
   // presigned URL while open, then confirmed after closure. Reject a confirm once the corrective action is
   // closed so a closed scorecard can never gain a new orphaned response file.

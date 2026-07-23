@@ -3,8 +3,20 @@ import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { dealTeamMembers } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
+import { restartCorrectiveActionNotificationCycleForDeal } from "../field/corrective-actions-service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
+
+/**
+ * Owning office (id + slug) threaded from the deal route so a responder-role team mutation can enqueue a fresh
+ * corrective-action notification cycle (payload needs officeId + `office_<slug>` tenant schema). Optional so
+ * direct/legacy callers that never trigger the re-notify still type-check; when absent the re-notify is skipped
+ * (the token revoke still runs), which is safe — the re-notify is a best-effort convenience, not a security gate.
+ */
+export interface TeamMutationOffice {
+  id: string;
+  slug: string;
+}
 
 export interface AddTeamMemberInput {
   dealId: string;
@@ -141,7 +153,8 @@ export async function updateTeamMember(
   tenantDb: TenantDb,
   memberId: string,
   dealId: string,
-  input: UpdateTeamMemberInput
+  input: UpdateTeamMemberInput,
+  office?: TeamMutationOffice,
 ) {
   const updates: Record<string, any> = {};
   if (input.role !== undefined) updates.role = input.role;
@@ -179,6 +192,15 @@ export async function updateTeamMember(
     throw new AppError(400, "Estimator must be a staff user, not a contact.");
   }
 
+  // Preserve the ADD-flow email-only role restriction on UPDATE: an email-only member (no linked user AND no
+  // linked contact — just a name + email) exists only to be a corrective-action recipient, so it may hold
+  // ONLY a super/PM role (EMAIL_ONLY_TEAM_ROLES). Without this the PATCH could set any non-estimator role
+  // (e.g. foreman) on an email-only member, which addTeamMember rejects. Only guard when a role is being set.
+  const isEmailOnly = !target.userId && !target.contactId;
+  if (input.role !== undefined && isEmailOnly && !EMAIL_ONLY_TEAM_ROLES.has(input.role)) {
+    throw new AppError(400, "An email-only member must be a superintendent or project manager.");
+  }
+
   updates.updatedAt = new Date();
 
   const result = await tenantDb
@@ -212,11 +234,24 @@ export async function updateTeamMember(
       contactId: target.contactId,
       memberEmail: target.memberEmail,
     });
+    // A responder just LEFT the super/PM role — on a normal reassignment the replacement responder is now
+    // authorized but was never notified of the deal's existing OPEN corrective actions (the worker's per-send
+    // recipient revalidation only covers a change DURING an active send). Start a fresh notification cycle for
+    // the deal's open corrective-action scorecards so the new responder gets a link. Best-effort: skipped when
+    // no office context was threaded (the token revoke above still ran).
+    if (office) {
+      await restartCorrectiveActionNotificationCycleForDeal(tenantDb, { dealId, office });
+    }
   }
   return updated;
 }
 
-export async function removeTeamMember(tenantDb: TenantDb, memberId: string, dealId: string) {
+export async function removeTeamMember(
+  tenantDb: TenantDb,
+  memberId: string,
+  dealId: string,
+  office?: TeamMutationOffice,
+) {
   const result = await tenantDb
     .update(dealTeamMembers)
     .set({ isActive: false, updatedAt: new Date() })
@@ -232,6 +267,13 @@ export async function removeTeamMember(tenantDb: TenantDb, memberId: string, dea
   const removed = result[0];
   if (removed.role === "superintendent" || removed.role === "project_manager") {
     await revokeCorrectiveActionTokensForRemovedMember(tenantDb, dealId, removed);
+    // Removing a responder is the first half of a reassignment — the replacement (added separately) would be
+    // authorized but never notified of the deal's existing OPEN corrective actions. Start a fresh notification
+    // cycle so the new responder gets a link. Best-effort: skipped when no office context was threaded (the
+    // token revoke above still ran).
+    if (office) {
+      await restartCorrectiveActionNotificationCycleForDeal(tenantDb, { dealId, office });
+    }
   }
   return removed;
 }

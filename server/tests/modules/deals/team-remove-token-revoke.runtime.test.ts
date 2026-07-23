@@ -36,10 +36,18 @@ const EXT_PM_EMAIL = "ext.pm@example.com";
 let pg: PGlite;
 let tdb: any;
 
+const OFFICE = { id: "00000000-0000-0000-0000-0000000000f1", slug: "test" };
+
 beforeAll(async () => {
   pg = new PGlite();
   await pg.exec(`
     CREATE TABLE public.users (id uuid PRIMARY KEY, display_name text, email text, avatar_url text, is_active boolean DEFAULT true);
+    CREATE TABLE public.job_queue (
+      id bigserial PRIMARY KEY, job_type varchar(100) NOT NULL, payload jsonb NOT NULL, office_id uuid,
+      status text NOT NULL DEFAULT 'pending', attempts int NOT NULL DEFAULT 0, max_attempts int NOT NULL DEFAULT 3,
+      last_error text, started_processing_at timestamptz, run_after timestamptz NOT NULL DEFAULT now(),
+      created_at timestamptz NOT NULL DEFAULT now(), completed_at timestamptz
+    );
   `);
   await pg.exec(
     tenantSchemaSql("public", [
@@ -66,7 +74,15 @@ afterAll(async () => {
   await pg?.close?.();
 });
 
+async function correctiveJobCount(): Promise<number> {
+  const res = await tdb.execute(sql`
+    SELECT COUNT(*)::int AS c FROM public.job_queue WHERE job_type = 'scorecard_corrective_action_email'
+  `);
+  return (res.rows[0] as { c: number }).c;
+}
+
 beforeEach(async () => {
+  await tdb.execute(sql`DELETE FROM public.job_queue`);
   await tdb.execute(sql`DELETE FROM scorecard_corrective_action_tokens`);
   await tdb.execute(sql`DELETE FROM deal_team_members`);
   await tdb.execute(sql`DELETE FROM field_scorecards`);
@@ -206,12 +222,13 @@ describe("removeTeamMember revokes the removed recipient's corrective-action tok
 });
 
 describe("updateTeamMember revokes tokens when a super/PM LEAVES the responder role (finding 4)", () => {
-  it("re-roling an email-only super to a non-responder role revokes their token", async () => {
+  it("re-roling a LINKED super to a non-responder role revokes their token", async () => {
+    // A LINKED staff-user super (ACTIVE_EMAIL_USER resolves to EXT_PM_EMAIL). An email-only member can no longer
+    // be re-roled to a non-super/PM role (finding 3), so a linked member exercises the leave-the-role revoke.
     const member = await addTeamMember(tdb, {
       dealId: DEAL,
+      userId: ACTIVE_EMAIL_USER,
       role: "superintendent",
-      memberName: "Ext Super",
-      memberEmail: EXT_PM_EMAIL,
     });
     const { rawToken } = await mintCorrectiveActionToken(tdb, {
       scorecardId: SCORECARD,
@@ -262,12 +279,13 @@ describe("updateTeamMember revokes tokens when a super/PM LEAVES the responder r
   });
 
   it("keeps the token when ANOTHER active super/PM still resolves to the same email after the re-role", async () => {
-    // Two same-email super/PM assignments; re-roling ONE off the responder roles must not strand the other.
+    // Two same-email super/PM assignments; re-roling ONE off the responder roles must not strand the other. The
+    // re-roled one is a LINKED staff user (ACTIVE_EMAIL_USER → EXT_PM_EMAIL) since an email-only member can no
+    // longer be re-roled to foreman (finding 3); the other stays an email-only PM holding the same email.
     const one = await addTeamMember(tdb, {
       dealId: DEAL,
+      userId: ACTIVE_EMAIL_USER,
       role: "superintendent",
-      memberName: "Ext Super",
-      memberEmail: EXT_PM_EMAIL,
     });
     await addTeamMember(tdb, {
       dealId: DEAL,
@@ -284,5 +302,157 @@ describe("updateTeamMember revokes tokens when a super/PM LEAVES the responder r
     await updateTeamMember(tdb, one.id, DEAL, { role: "foreman" });
     // The still-active PM assignment holds the same email → token preserved.
     expect(await verifyCorrectiveActionToken(tdb, rawToken)).not.toBeNull();
+  });
+});
+
+describe("email-only member role restriction on UPDATE (finding 3)", () => {
+  it("rejects re-roling an email-only member to a non-super/PM role (foreman) with a 400", async () => {
+    const member = await addTeamMember(tdb, {
+      dealId: DEAL,
+      role: "superintendent",
+      memberName: "Ext Super",
+      memberEmail: EXT_PM_EMAIL,
+    });
+    // An email-only member (no user, no contact) may only be super/PM — foreman is rejected, mirroring the ADD
+    // flow's EMAIL_ONLY_TEAM_ROLES restriction.
+    await expect(updateTeamMember(tdb, member.id, DEAL, { role: "foreman" })).rejects.toMatchObject({
+      statusCode: 400,
+    });
+    // The role is unchanged (the update was rejected before the write).
+    const row = await tdb.execute(sql`SELECT role FROM deal_team_members WHERE id = ${member.id}`);
+    expect((row.rows[0] as { role: string }).role).toBe("superintendent");
+  });
+
+  it("allows re-roling an email-only member between super and PM (project_manager) OK", async () => {
+    const member = await addTeamMember(tdb, {
+      dealId: DEAL,
+      role: "superintendent",
+      memberName: "Ext Super",
+      memberEmail: EXT_PM_EMAIL,
+    });
+    const updated = await updateTeamMember(tdb, member.id, DEAL, { role: "project_manager" });
+    expect(updated.role).toBe("project_manager");
+  });
+
+  it("does not restrict a LINKED (staff-user) member to super/PM (foreman OK)", async () => {
+    // The email-only restriction applies ONLY to email-only members; a linked staff user may take any role.
+    const member = await addTeamMember(tdb, { dealId: DEAL, userId: USER, role: "superintendent" });
+    const updated = await updateTeamMember(tdb, member.id, DEAL, { role: "foreman" });
+    expect(updated.role).toBe("foreman");
+  });
+});
+
+describe("responder reassignment re-notifies the deal's open corrective-action cards (finding 4)", () => {
+  it("removing a responder clears sent_at, deletes tokens, and enqueues a fresh job per open card", async () => {
+    // Mark the deal's open corrective-action scorecard as already-sent + carrying a prior-cycle token.
+    await tdb.execute(sql`UPDATE field_scorecards SET corrective_action_email_sent_at = now() WHERE id = ${SCORECARD}`);
+    const member = await addTeamMember(tdb, {
+      dealId: DEAL,
+      role: "superintendent",
+      memberName: "Ext Super",
+      memberEmail: EXT_PM_EMAIL,
+    });
+    await mintCorrectiveActionToken(tdb, {
+      scorecardId: SCORECARD,
+      recipientEmail: EXT_PM_EMAIL,
+      role: "superintendent",
+      ttlDays: 30,
+    });
+    expect(await correctiveJobCount()).toBe(0);
+
+    await removeTeamMember(tdb, member.id, DEAL, OFFICE);
+
+    // The open card's sent stamp is cleared, its tokens are gone, and exactly one fresh job was enqueued.
+    const sentAt = await tdb.execute(
+      sql`SELECT corrective_action_email_sent_at AS s FROM field_scorecards WHERE id = ${SCORECARD}`,
+    );
+    expect((sentAt.rows[0] as { s: unknown }).s).toBeNull();
+    const tokens = await tdb.execute(
+      sql`SELECT COUNT(*)::int AS c FROM scorecard_corrective_action_tokens WHERE scorecard_id = ${SCORECARD}`,
+    );
+    expect((tokens.rows[0] as { c: number }).c).toBe(0);
+    expect(await correctiveJobCount()).toBe(1);
+    // The enqueued job carries the exact reconcile payload shape (tenantSchema, scorecardId, dealId, officeId,
+    // cycleNonce) + matching office_id / status.
+    const job = await tdb.execute(
+      sql`SELECT job_type, office_id, status, max_attempts, payload FROM public.job_queue WHERE job_type = 'scorecard_corrective_action_email' LIMIT 1`,
+    );
+    const jr = job.rows[0] as { office_id: string; status: string; max_attempts: number; payload: any };
+    expect(jr.office_id).toBe(OFFICE.id);
+    expect(jr.status).toBe("pending");
+    expect(jr.max_attempts).toBe(6);
+    expect(jr.payload.tenantSchema).toBe(`office_${OFFICE.slug}`);
+    expect(jr.payload.scorecardId).toBe(SCORECARD);
+    expect(jr.payload.dealId).toBe(DEAL);
+    expect(jr.payload.officeId).toBe(OFFICE.id);
+    expect(typeof jr.payload.cycleNonce).toBe("string");
+  });
+
+  it("re-roling a responder off super/PM re-notifies the deal's open cards", async () => {
+    await tdb.execute(sql`UPDATE field_scorecards SET corrective_action_email_sent_at = now() WHERE id = ${SCORECARD}`);
+    // A second super/PM keeps the deal populated with an active responder for the replacement scenario. The
+    // LEAVING member is a LINKED staff user (email-only members can't be re-roled to foreman — finding 3).
+    await addTeamMember(tdb, { dealId: DEAL, userId: USER, role: "project_manager" });
+    const leaving = await addTeamMember(tdb, {
+      dealId: DEAL,
+      userId: ACTIVE_EMAIL_USER,
+      role: "superintendent",
+    });
+    expect(await correctiveJobCount()).toBe(0);
+
+    await updateTeamMember(tdb, leaving.id, DEAL, { role: "foreman" }, OFFICE);
+
+    const sentAt = await tdb.execute(
+      sql`SELECT corrective_action_email_sent_at AS s FROM field_scorecards WHERE id = ${SCORECARD}`,
+    );
+    expect((sentAt.rows[0] as { s: unknown }).s).toBeNull();
+    expect(await correctiveJobCount()).toBe(1);
+  });
+
+  it("does NOT re-notify a card on a DIFFERENT deal", async () => {
+    await tdb.execute(sql`UPDATE field_scorecards SET corrective_action_email_sent_at = now() WHERE id = ${OTHER_SCORECARD}`);
+    const member = await addTeamMember(tdb, {
+      dealId: DEAL,
+      role: "superintendent",
+      memberName: "Ext Super",
+      memberEmail: EXT_PM_EMAIL,
+    });
+    await removeTeamMember(tdb, member.id, DEAL, OFFICE);
+    // The OTHER deal's card is untouched: its sent stamp survives and NO job targets it. (The removal DOES
+    // re-notify THIS deal's open card, so the re-notify is scoped to the mutated deal, not global.)
+    const otherSentAt = await tdb.execute(
+      sql`SELECT corrective_action_email_sent_at AS s FROM field_scorecards WHERE id = ${OTHER_SCORECARD}`,
+    );
+    expect((otherSentAt.rows[0] as { s: unknown }).s).not.toBeNull();
+    const otherDealJobs = await tdb.execute(sql`
+      SELECT COUNT(*)::int AS c FROM public.job_queue
+      WHERE job_type = 'scorecard_corrective_action_email'
+        AND payload->>'scorecardId' = ${OTHER_SCORECARD}
+    `);
+    expect((otherDealJobs.rows[0] as { c: number }).c).toBe(0);
+    // Exactly one job was enqueued — for THIS deal's open card only.
+    const thisDealJobs = await tdb.execute(sql`
+      SELECT COUNT(*)::int AS c FROM public.job_queue
+      WHERE job_type = 'scorecard_corrective_action_email'
+        AND payload->>'scorecardId' = ${SCORECARD}
+    `);
+    expect((thisDealJobs.rows[0] as { c: number }).c).toBe(1);
+  });
+
+  it("re-roling a super to PM (still a responder) does NOT re-notify (no responder left the role)", async () => {
+    await tdb.execute(sql`UPDATE field_scorecards SET corrective_action_email_sent_at = now() WHERE id = ${SCORECARD}`);
+    const member = await addTeamMember(tdb, {
+      dealId: DEAL,
+      role: "superintendent",
+      memberName: "Ext Super",
+      memberEmail: EXT_PM_EMAIL,
+    });
+    await updateTeamMember(tdb, member.id, DEAL, { role: "project_manager" }, OFFICE);
+    // A lateral super↔PM swap keeps the responder → no fresh cycle, sent stamp preserved.
+    const sentAt = await tdb.execute(
+      sql`SELECT corrective_action_email_sent_at AS s FROM field_scorecards WHERE id = ${SCORECARD}`,
+    );
+    expect((sentAt.rows[0] as { s: unknown }).s).not.toBeNull();
+    expect(await correctiveJobCount()).toBe(0);
   });
 });

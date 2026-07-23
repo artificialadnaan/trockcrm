@@ -1,6 +1,7 @@
 import type { NextFunction, Request, Response, Router } from "express";
 import { sql } from "drizzle-orm";
 import { requireFieldContractor } from "../../middleware/field-auth.js";
+import { correctiveActionPublicLimiter } from "../../middleware/rate-limit.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { assertValidUuid } from "./photos-service.js";
 import {
@@ -49,6 +50,16 @@ function rawToken(req: Request): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
+// A raw corrective-action token is base64url of 32 random bytes → exactly 43 url-safe chars ([A-Za-z0-9_-]),
+// see generateRawCorrectiveActionToken. A cheap SHAPE check rejected here (BEFORE resolveWriteOffice fans the
+// UUID across every office schema) means a garbage/obviously-forged token never triggers the cross-office scan
+// — it fails as a plain 401. A well-formed but unknown token still hits the scan, but the IP rate limiter caps
+// that volume.
+const CORRECTIVE_ACTION_TOKEN_SHAPE = /^[A-Za-z0-9_-]{43}$/;
+function isWellFormedCorrectiveActionToken(token: string): boolean {
+  return CORRECTIVE_ACTION_TOKEN_SHAPE.test(token);
+}
+
 /**
  * Resolve the owning office of the route's scorecard, then authorize the caller against it:
  *   - token path: the `?token` must verify IN that office AND its scorecardId must equal the route :id
@@ -65,8 +76,15 @@ async function authorizeCorrectiveAction(
   req: Request,
   scorecardId: string,
 ): Promise<{ office: FieldOffice; responder: CorrectiveActionResponder }> {
-  const office = await resolveWriteOffice("scorecard", scorecardId, "Scorecard not found");
   const token = rawToken(req);
+  // Pre-scan shape guard: a malformed token can't be a real one, so reject it as 401 BEFORE
+  // resolveWriteOffice fans the scorecard UUID across every active office schema (one DB query per office).
+  // This blunts the cross-office-scan DoS surface for obviously-forged tokens (the IP rate limiter caps
+  // well-formed-but-unknown floods). The session path (no token) is unaffected.
+  if (token && !isWellFormedCorrectiveActionToken(token)) {
+    throw new AppError(401, "This corrective-action link is invalid or has expired.");
+  }
+  const office = await resolveWriteOffice("scorecard", scorecardId, "Scorecard not found");
 
   if (token) {
     // Verify the token AND revalidate the assignment in a SINGLE office transaction sharing one db handle
@@ -182,6 +200,7 @@ export function registerCorrectiveActionRoutes(fieldRoutes: Router): void {
   // Read the scorecard's corrective-action items + their inline responses. Session OR token auth.
   fieldRoutes.get(
     "/scorecards/:id/corrective-actions",
+    correctiveActionPublicLimiter,
     requireFieldSessionOrToken,
     async (req: Request, res: Response, next: NextFunction) => {
       try {
@@ -207,6 +226,7 @@ export function registerCorrectiveActionRoutes(fieldRoutes: Router): void {
   // is that path. Returns { uploadUrl, objectKey, uploadToken } for the browser to PUT to R2.
   fieldRoutes.post(
     "/scorecards/:id/corrective-actions/upload/url",
+    correctiveActionPublicLimiter,
     requireFieldSessionOrToken,
     async (req: Request, res: Response, next: NextFunction) => {
       try {
@@ -234,6 +254,7 @@ export function registerCorrectiveActionRoutes(fieldRoutes: Router): void {
   // (a fresh file, never existing scorecard evidence). Session OR token auth.
   fieldRoutes.post(
     "/scorecards/:id/corrective-actions/upload",
+    correctiveActionPublicLimiter,
     requireFieldSessionOrToken,
     async (req: Request, res: Response, next: NextFunction) => {
       try {
@@ -272,6 +293,7 @@ export function registerCorrectiveActionRoutes(fieldRoutes: Router): void {
   // deal + corrective-action flow + not yet attached to any corrective action) — a 404/409 no-op otherwise.
   fieldRoutes.delete(
     "/scorecards/:id/corrective-actions/upload/:fileId",
+    correctiveActionPublicLimiter,
     requireFieldSessionOrToken,
     async (req: Request, res: Response, next: NextFunction) => {
       try {
@@ -302,6 +324,7 @@ export function registerCorrectiveActionRoutes(fieldRoutes: Router): void {
   // AFTER the /upload routes so "upload" is never captured as an :itemId.
   fieldRoutes.post(
     "/scorecards/:id/corrective-actions/:itemId",
+    correctiveActionPublicLimiter,
     requireFieldSessionOrToken,
     async (req: Request, res: Response, next: NextFunction) => {
       try {

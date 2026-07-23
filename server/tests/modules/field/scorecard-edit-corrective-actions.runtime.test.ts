@@ -837,4 +837,76 @@ describe("updateFieldScorecard corrective-action reconcile", () => {
     );
     expect((tokensAfter.rows[0] as { c: number }).c).toBe(0);
   });
+
+  it("a CLOSED card edited ABOVE band reverts to submitted and revokes its tokens (finding 1)", async () => {
+    // A card whose corrective action was RESOLVED (status corrective_action_closed) then edited above band must
+    // NOT stay corrective_action_closed — the QC report + status badges would show a resolved corrective action
+    // that no longer exists. It must revert to `submitted` and revoke outstanding responder tokens, exactly like
+    // the open→submitted cancel.
+    const { scorecard } = await createFieldScorecard(
+      tdb,
+      createInput({ items: v2Items(5), actionItems: ["Fix it"] }),
+    );
+    const [only] = await getItems(scorecard.id);
+    await resolveCorrectiveActionItem(tdb, {
+      scorecardId: scorecard.id,
+      itemId: only.id,
+      responseComment: "fixed",
+      respondedBy: { userId: OWNER, name: "Sam", email: null },
+    });
+    expect(await getStatus(scorecard.id)).toBe("corrective_action_closed");
+    // A leftover responder token from the resolved cycle.
+    await tdb.insert(scorecardCorrectiveActionTokens).values({
+      scorecardId: scorecard.id,
+      tokenHash: "closed-cancel-hash",
+      recipientEmail: "pm@example.com",
+      role: "project_manager",
+      expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+    });
+
+    // Edit lifts the card ABOVE band while removing the flag → not-inBand from a CLOSED status.
+    const at = await currentUpdatedAt(scorecard.id);
+    const { scorecard: updated } = await updateFieldScorecard(
+      tdb,
+      updateInput(scorecard.id, at, { items: v2Items(9), actionItems: [] }),
+    );
+    expect(updated.rating).not.toBe("corrective_action");
+    expect(updated.status).toBe("submitted");
+    expect(await getStatus(scorecard.id)).toBe("submitted");
+    // The stale resolved row is purged and the token revoked.
+    expect(await getItems(scorecard.id)).toHaveLength(0);
+    const tokensAfter = await tdb.execute(
+      sql`SELECT COUNT(*)::int AS c FROM scorecard_corrective_action_tokens WHERE scorecard_id = ${scorecard.id}`,
+    );
+    expect((tokensAfter.rows[0] as { c: number }).c).toBe(0);
+  });
+
+  it("a CLOSED card edited to REMOVE all flags (still low score) reverts to submitted (finding 1)", async () => {
+    // The other not-inBand path from CLOSED: the score stays below band but EVERY flag is removed (no flags →
+    // not-inBand). The card must revert to `submitted` (not linger as corrective_action_closed) since there is
+    // no longer any corrective action.
+    const { scorecard } = await createFieldScorecard(
+      tdb,
+      createInput({ items: v2Items(5), criticalDeficiencies: ["missed_hold_point"] }),
+    );
+    const [def] = await getItems(scorecard.id);
+    await resolveCorrectiveActionItem(tdb, {
+      scorecardId: scorecard.id,
+      itemId: def.id,
+      responseComment: "corrected",
+      respondedBy: { userId: OWNER, name: "Sam", email: null },
+    });
+    expect(await getStatus(scorecard.id)).toBe("corrective_action_closed");
+
+    // Keep the low score (5) but remove every flag → not-inBand → revert to submitted.
+    const at = await currentUpdatedAt(scorecard.id);
+    const { scorecard: updated } = await updateFieldScorecard(
+      tdb,
+      updateInput(scorecard.id, at, { items: v2Items(5), criticalDeficiencies: [], actionItems: [] }),
+    );
+    expect(updated.status).toBe("submitted");
+    expect(await getStatus(scorecard.id)).toBe("submitted");
+    // The now-stale resolved row is purged (no flags remain).
+    expect(await getItems(scorecard.id)).toHaveLength(0);
+  });
 });

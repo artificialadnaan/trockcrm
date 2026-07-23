@@ -340,6 +340,40 @@ describe("token-scoped corrective-action photo upload", () => {
     expect(confirmRes.status).toBe(409);
   });
 
+  it("takes the parent-scorecard FOR UPDATE lock BEFORE the open-check + file-create on confirm (finding E)", async () => {
+    // confirmCorrectiveActionUpload must serialize its open-check + file-create against the close a concurrent
+    // resolve commits. It takes the SAME parent-scorecard FOR UPDATE lock the submit/discard paths use, up front
+    // — otherwise a resolve of the last open item could commit the close between the open-check and confirmUpload
+    // and this would still create an active orphan file. Assert the FOR UPDATE on field_scorecards is issued and
+    // precedes the ownership-ledger INSERT (the file-create work).
+    const urlRes = await request(app)
+      .post(`/scorecards/${scorecardId}/corrective-actions/upload/url`)
+      .send({ contentType: "image/jpeg", sizeBytes: 1024 });
+    expect(urlRes.status).toBe(200);
+
+    const seen: string[] = [];
+    const origExecute = tdb.execute.bind(tdb);
+    const spy = vi.spyOn(tdb, "execute").mockImplementation(((...args: any[]) => {
+      const q = args[0];
+      const text = typeof q === "string" ? q : (q?.strings?.join?.("?") ?? JSON.stringify(q));
+      seen.push(text);
+      return origExecute(...args);
+    }) as any);
+    try {
+      const confirmRes = await request(app)
+        .post(`/scorecards/${scorecardId}/corrective-actions/upload`)
+        .send({ uploadToken: urlRes.body.uploadToken, objectKey: urlRes.body.objectKey });
+      expect(confirmRes.status).toBe(201);
+    } finally {
+      spy.mockRestore();
+    }
+    const lockIdx = seen.findIndex((t) => /FROM field_scorecards/i.test(t) && /FOR UPDATE/i.test(t));
+    const ledgerIdx = seen.findIndex((t) => /scorecard_corrective_action_uploads/i.test(t));
+    expect(lockIdx).toBeGreaterThanOrEqual(0); // the parent-scorecard lock was taken
+    expect(ledgerIdx).toBeGreaterThanOrEqual(0); // the file-create ledger write ran
+    expect(lockIdx).toBeLessThan(ledgerIdx); // the lock precedes the file-create work
+  });
+
   it("rejects confirming scorecard B's upload token through scorecard A's route (cross-scorecard token confusion, finding #7)", async () => {
     // Presign an upload for scorecard B (deal B) — a legitimate token bound to deal B.
     const urlResB = await request(app)
