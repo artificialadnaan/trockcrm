@@ -13,6 +13,9 @@ export interface SearchResult {
   status?: DealLifecycle | null;
   deepLink: string;
   rank: number;
+  // Assigned rep display name + best-value deal amount (raw string). Deal results only.
+  assignedRepName?: string | null;
+  dealValue?: string | null;
 }
 
 export interface SearchResponse {

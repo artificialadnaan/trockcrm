@@ -36,6 +36,9 @@ export interface SearchResult {
   rank: number;
   // True when this deal result is a change-order child deal, so the UI can badge it. Deal results only.
   isChangeOrder?: boolean;
+  // Assigned rep display name + best-value deal amount (awarded>bbts>bid>dd, raw string). Deal results only.
+  assignedRepName?: string | null;
+  dealValue?: string | null;
 }
 
 export interface SearchResponse {
@@ -371,10 +374,16 @@ export async function searchDeals(tenantDb: TenantDb, query: string, limit: numb
       onHold: deals.onHold,
       isChangeOrder: deals.isChangeOrder,
       stageSlug: pipelineStageConfig.slug,
+      assignedRepName: users.displayName,
+      awardedAmount: deals.awardedAmount,
+      bidBoardTotalSales: deals.bidBoardTotalSales,
+      bidEstimate: deals.bidEstimate,
+      ddEstimate: deals.ddEstimate,
       relevance,
     })
     .from(deals)
     .leftJoin(pipelineStageConfig, eq(pipelineStageConfig.id, deals.stageId))
+    .leftJoin(users, eq(users.id, deals.assignedRepId))
     .where(
       and(
         buildDealSearchCondition(query),
@@ -405,7 +414,25 @@ export async function searchDeals(tenantDb: TenantDb, query: string, limit: numb
     deepLink: `/deals/${r.id}`,
     rank: Number(r.relevance ?? 0),
     isChangeOrder: r.isChangeOrder === true,
+    assignedRepName: r.assignedRepName ?? null,
+    // Deliberately the RAW best-value (awarded>bbts>bid>dd, canonical DEAL_VALUE_PRIORITY_CHAIN),
+    // NOT the on-hold-zeroed effective value: search is a display surface (on-hold already shows a
+    // badge), not a reporting aggregate. Matches the Won-metric email builder's snapshotBestValue.
+    dealValue: firstPositiveValue(r.awardedAmount, r.bidBoardTotalSales, r.bidEstimate, r.ddEstimate),
   }));
+}
+
+// Best-value amount for a deal search result: awarded_amount > bid_board_total_sales > bid_estimate
+// > dd_estimate, positive-gated to match the canonical resolver (deal-value-sql.ts / deal-hold.ts):
+// a 0/negative candidate is SKIPPED so it falls through to the next positive estimate. numeric(14,2)
+// arrives as a string from pg; the first positive candidate is returned in its raw string form, else null.
+function firstPositiveValue(...values: Array<string | number | null>): string | null {
+  for (const v of values) {
+    if (v == null) continue;
+    const n = Number(v);
+    if (Number.isFinite(n) && n > 0) return String(v);
+  }
+  return null;
 }
 
 /**

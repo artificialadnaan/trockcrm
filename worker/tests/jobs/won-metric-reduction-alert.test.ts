@@ -15,6 +15,9 @@ const TAKASHI_ID = "44444444-4444-4444-8444-444444444444";
 const ADNAAN_ID = "55555555-5555-4555-8555-555555555555";
 const TAKASHI = "takashi@trockgc.com";
 const ADNAAN = "adnaan@trockgc.com";
+const REP_FROM = "f5ade4ca-ee41-5188-b6d6-d58a2630e89c";
+const REP_TO = "e537cc4a-fc5e-46d4-901a-99a9bf5e2ec6";
+const REASSIGN_NAMES: Record<string, string> = { [REP_FROM]: "Chris Higingbotham", [REP_TO]: "Caleb Stone" };
 
 const BASE_EVENT = {
   event_id: EVENT_ID,
@@ -116,10 +119,21 @@ function makeQuery(options: { event?: Record<string, unknown>; sentRecipients?: 
       return { rows: [] };
     }
     if (sql.includes("FROM public.users")) {
+      if (sql.includes("display_name")) {
+        // Batched rep-name resolution by id (WHERE id = ANY($1)).
+        const ids = (params[0] as string[]) ?? [];
+        const rows = ids
+          .map((id) => ({ id: String(id).toLowerCase(), display_name: (REASSIGN_NAMES as Record<string, string>)[String(id).toLowerCase()] }))
+          .filter((row) => row.display_name);
+        return { rows };
+      }
       const email = String(params[0]).toLowerCase();
       if (email === TAKASHI) return { rows: [{ id: TAKASHI_ID }] };
       if (email === ADNAAN) return { rows: [{ id: ADNAAN_ID }] };
       return { rows: [] };
+    }
+    if (sql.includes("FROM office_dallas.deals") && sql.includes("property_state")) {
+      return { rows: [{ property_address: "50 Mount Zion Rd", property_city: "Atlanta", property_state: "GA" }] };
     }
     if (sql.includes("INSERT INTO office_dallas.notifications")) {
       notificationIds.add(String(params[0]));
@@ -196,6 +210,169 @@ describe("resolveWonMetricImpact", () => {
   });
 });
 
+const REASSIGN_EVENT = {
+  dealId: DEAL_ID,
+  dealName: "Terraces at Highbury Court",
+  dealNumber: "DFW-4-16326-af",
+  reportMetricKey: "assigned_rep.won_ytd",
+  definitionVersion: null,
+  releaseReference: null,
+  actionLabel: "Won deal reassigned",
+  reasonCode: "won_reassigned",
+  changedFields: { assigned_rep_id: { from: REP_FROM, to: REP_TO } },
+  auditReference: { actorName: "Chris Higingbotham", auditLogIds: ["10893467"] },
+  newSnapshot: { awardedAmount: 12322.86, bidEstimate: 12322.86, ddEstimate: 12155.0, assignedRepId: REP_TO },
+  oldSnapshot: { awardedAmount: 12322.86, assignedRepId: REP_FROM },
+};
+
+const REASSIGN_IMPACT = {
+  metricKey: "assigned_rep.won_ytd",
+  before: 12322.86,
+  after: 0,
+  delta: -12322.86,
+  countBefore: 1,
+  countAfter: 0,
+  countDelta: -1,
+  unit: "usd",
+  isNegative: true,
+};
+
+describe("buildWonMetricReductionEmail — enrichment", () => {
+  it("resolves rep UUIDs to names, adds a why-summary and Job/Amount/Location rows", () => {
+    const email = buildWonMetricReductionEmail({
+      event: REASSIGN_EVENT,
+      impact: REASSIGN_IMPACT,
+      officeId: OFFICE_ID,
+      frontendUrl: "https://trockcrm.com",
+      userNames: REASSIGN_NAMES,
+      dealLocation: { address: "50 Mount Zion Rd", city: "Atlanta", state: "GA" },
+    });
+
+    // Names, never raw UUIDs.
+    expect(email.html).toContain("Chris Higingbotham");
+    expect(email.html).toContain("Caleb Stone");
+    expect(email.html).not.toContain(REP_FROM);
+    expect(email.html).not.toContain(REP_TO);
+    // Why-summary sentence.
+    expect(email.html).toContain("reassigned");
+    expect(email.text).toContain("Chris Higingbotham → Caleb Stone");
+    // New rows.
+    expect(email.html).toContain("Terraces at Highbury Court");
+    expect(email.html).toContain("$12,322.86"); // Amount row (full currency)
+    expect(email.html).toContain("Atlanta, GA"); // Location row
+    // Existing behavior preserved.
+    expect(email.html).toContain("Open Terraces at Highbury Court");
+  });
+
+  it("falls back to the raw id when a rep uuid is unknown and never throws on missing enrichment", () => {
+    const email = buildWonMetricReductionEmail({
+      event: REASSIGN_EVENT,
+      impact: REASSIGN_IMPACT,
+      frontendUrl: "https://trockcrm.com",
+      // no userNames, no dealLocation
+    });
+    expect(email.html).toContain(REP_FROM); // unresolved id shown, not a crash
+    expect(email.html).toContain("$12,322.86"); // amount still derived from snapshot
+  });
+});
+
+describe("buildWonMetricReductionEmail — value/summary edge cases", () => {
+  const build = (event: Record<string, unknown>) =>
+    buildWonMetricReductionEmail({ event: event as never, impact: REASSIGN_IMPACT, frontendUrl: "https://trockcrm.com" });
+
+  it("skips a non-positive higher-priority amount and reports the effective value change", () => {
+    // awarded cleared to 0 but bid stays 80k -> effective Won value is 80k, not 0.
+    const email = build({
+      ...REASSIGN_EVENT,
+      reasonCode: "won_value_reduced",
+      actionLabel: "Won value changed",
+      changedFields: { awarded_amount: { from: 100000, to: 0 } },
+      newSnapshot: { awardedAmount: 0, bidEstimate: 80000 },
+      oldSnapshot: { awardedAmount: 100000, bidEstimate: 80000 },
+    });
+    expect(email.text).toContain("Amount: $80,000.00"); // falls through 0 to the positive estimate
+    expect(email.text).toContain("was lowered from $100,000.00 to $80,000.00"); // effective, not raw field
+  });
+
+  it("labels a Bid Board / Estimator-only stage change distinctly from a CRM stage change", () => {
+    const email = build({
+      ...REASSIGN_EVENT,
+      reasonCode: "won_stage_changed",
+      actionLabel: "Bid Board stage changed",
+      changedFields: { bid_board_stage_slug: { from: "won", to: "estimating" } },
+      newSnapshot: { awardedAmount: 50000 },
+      oldSnapshot: { awardedAmount: 50000 },
+    });
+    expect(email.html).toContain("Bid Board (Estimator Pipeline) Won stage"); // summary distinguishes it from CRM stage
+  });
+
+  it("does not invent a deal for a report_definition_change reduction", () => {
+    const email = build({
+      dealId: null,
+      dealName: null,
+      dealNumber: null,
+      reportMetricKey: "office.won_ytd",
+      definitionVersion: "won-v2",
+      releaseReference: "PR #950",
+      actionLabel: "Published Won metric definition changed",
+      reasonCode: "report_definition_change",
+      changedFields: {},
+      auditReference: {},
+      newSnapshot: {},
+      oldSnapshot: {},
+    });
+    expect(email.html).toContain("definition change");
+    expect(email.html).not.toContain("This deal");
+    expect(email.text).not.toContain("Job:"); // no fictitious "Job: Deal" row (R2-1)
+  });
+
+  it("shows the current rep on a non-reassignment reduction via the snapshot", () => {
+    const email = buildWonMetricReductionEmail({
+      event: {
+        ...REASSIGN_EVENT,
+        reasonCode: "placed_on_hold",
+        actionLabel: "Deal placed on hold",
+        changedFields: { on_hold: { from: false, to: true } },
+        newSnapshot: { awardedAmount: 50000, assignedRepId: REP_TO },
+        oldSnapshot: { awardedAmount: 50000, assignedRepId: REP_TO },
+      } as never,
+      impact: REASSIGN_IMPACT,
+      frontendUrl: "https://trockcrm.com",
+      userNames: REASSIGN_NAMES,
+    });
+    expect(email.text).toContain("Sales rep: Caleb Stone"); // R2-2: current rep, no reassignment diff
+  });
+
+  it("does not claim company Won is unchanged when a reassignment also changed the value", () => {
+    const email = buildWonMetricReductionEmail({
+      event: {
+        ...REASSIGN_EVENT,
+        changedFields: { assigned_rep_id: { from: REP_FROM, to: REP_TO }, awarded_amount: { from: 100000, to: 60000 } },
+        newSnapshot: { awardedAmount: 60000, assignedRepId: REP_TO },
+        oldSnapshot: { awardedAmount: 100000, assignedRepId: REP_FROM },
+      } as never,
+      impact: REASSIGN_IMPACT,
+      frontendUrl: "https://trockcrm.com",
+      userNames: REASSIGN_NAMES,
+    });
+    expect(email.html).toContain("reassigned");
+    expect(email.html).not.toContain("company Won is unchanged"); // R2-3: compound edit
+  });
+
+  it("represents a fully-cleared value as $0 instead of the old amount", () => {
+    const email = build({
+      ...REASSIGN_EVENT,
+      reasonCode: "won_value_reduced",
+      actionLabel: "Won value changed",
+      changedFields: { awarded_amount: { from: 100000, to: 0 } },
+      newSnapshot: { awardedAmount: 0 },
+      oldSnapshot: { awardedAmount: 100000 },
+    });
+    expect(email.text).toContain("Amount: $0.00"); // R2-4: populated all-zero snapshot -> $0
+    expect(email.text).toContain("was lowered from $100,000.00 to $0.00");
+  });
+});
+
 describe("enableWonMetricReductionAlertDelivery", () => {
   it("opens the database gate and reports the number of backfilled events", async () => {
     const query = vi.fn().mockResolvedValue({ rows: [{ queued_count: "2" }] });
@@ -212,6 +389,46 @@ describe("enableWonMetricReductionAlertDelivery", () => {
 });
 
 describe("handleWonMetricReductionAlert", () => {
+  it("resolves rep UUIDs to names and adds the why-summary for a reassignment event", async () => {
+    const reassignEvent = {
+      ...BASE_EVENT,
+      action_label: "Won deal reassigned",
+      reason_code: "won_reassigned",
+      changed_fields: { assigned_rep_id: { from: REP_FROM, to: REP_TO } },
+      impacts: {
+        "assigned_rep.won_ytd": {
+          scope: "assigned_rep",
+          scopeId: REP_FROM,
+          metric: "won_ytd",
+          countBefore: 1,
+          countAfter: 0,
+          countDelta: -1,
+          before: 12322.86,
+          after: 0,
+          delta: -12322.86,
+          unit: "usd",
+        },
+      },
+      new_snapshot: { awardedAmount: 12322.86, assignedRepId: REP_TO },
+      old_snapshot: { awardedAmount: 12322.86, assignedRepId: REP_FROM },
+      deal_name: "Terraces at Highbury Court",
+      deal_number: "DFW-4-16326-af",
+      report_metric_key: "assigned_rep.won_ytd",
+    };
+    const { query } = makeQuery({ event: reassignEvent });
+    const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "resend-1" });
+
+    await handleWonMetricReductionAlert({ eventId: EVENT_ID }, null, { query, sendEmail, env: ENV, logger: silent });
+
+    const html = sendEmail.mock.calls[0][2] as string;
+    expect(html).toContain("Chris Higingbotham");
+    expect(html).toContain("Caleb Stone");
+    expect(html).not.toContain(REP_FROM);
+    expect(html).not.toContain(REP_TO);
+    expect(html).toContain("Atlanta, GA");
+    expect(html).toContain("reassigned");
+  });
+
   it("claims each recipient before sending, stamps receipts after delivery, and creates deterministic in-app cards", async () => {
     const { query, receipts, notificationIds, calls } = makeQuery();
     const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "resend-1" });

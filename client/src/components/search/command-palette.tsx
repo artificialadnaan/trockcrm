@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { Search, FileText, User, Building2, Briefcase, Target, MapPin, Clock, X } from "lucide-react";
 import { useSearch, useRecentSearches, type SearchEntityType, type SearchResult } from "@/hooks/use-search";
+import { formatCurrencyCompact } from "@/lib/deal-utils";
 
 interface CommandPaletteProps {
   open: boolean;
@@ -79,13 +80,20 @@ function ResultItem({
         <div className="font-medium text-sm text-gray-900 truncate">
           {result.primaryLabel}
         </div>
-        {result.secondaryLabel && (
-          <div className="text-xs text-gray-500 truncate">
-            {result.secondaryLabel}
-            {result.tertiaryLabel && ` \u00B7 ${result.tertiaryLabel}`}
-          </div>
-        )}
+        {(() => {
+          // Deal-only assignedRepName is appended to the number/location meta line; falsy parts drop
+          // out so there is never a dangling separator (and non-deal results are unchanged).
+          const meta = [result.secondaryLabel, result.tertiaryLabel, result.assignedRepName].filter(Boolean);
+          return meta.length > 0 ? (
+            <div className="text-xs text-gray-500 truncate">{meta.join(" \u00B7 ")}</div>
+          ) : null;
+        })()}
       </div>
+      {result.dealValue != null && result.dealValue !== "" ? (
+        <span className="text-xs font-medium text-gray-700 flex-shrink-0 tabular-nums">
+          {formatCurrencyCompact(result.dealValue)}
+        </span>
+      ) : null}
       {result.status && STATUS_BADGES[result.status] ? (
         <span
           className={`text-xs px-1.5 py-0.5 rounded font-medium flex-shrink-0 ${STATUS_BADGES[result.status].className}`}

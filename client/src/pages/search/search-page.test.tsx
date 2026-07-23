@@ -86,6 +86,42 @@ describe("SearchPage — renders the unified entity groups (PR5)", () => {
   });
 });
 
+describe("SearchPage — deal amount + rep name", () => {
+  it("shows deal amount (compact) and rep name on a deal result card", () => {
+    mocks.useRecentSearchesMock.mockReturnValue({ recent: [], addRecent: vi.fn(), clearRecent: vi.fn() });
+    mocks.useAiSearchMock.mockReturnValue({ query: "", setQuery: vi.fn(), results: null, loading: false });
+    mocks.useSearchMock.mockReturnValue({
+      query: "terraces",
+      setQuery: vi.fn(),
+      loading: false,
+      error: null,
+      results: {
+        deals: [
+          hit("deal", "d1", "Terraces at Highbury Court", "/deals/d1", {
+            status: "won",
+            secondaryLabel: "DFW-4-16326-af",
+            tertiaryLabel: "Atlanta, GA",
+            assignedRepName: "Caleb Stone",
+            dealValue: "12322.86",
+          }),
+        ],
+        companies: [], contacts: [], leads: [], properties: [], files: [],
+        total: 1, query: "terraces",
+      },
+    });
+
+    const html = renderToStaticMarkup(
+      <MemoryRouter initialEntries={["/search?q=terraces"]}>
+        <SearchPage />
+      </MemoryRouter>,
+    );
+    expect(html).toContain("Caleb Stone");
+    expect(html).toContain("$12.3K"); // formatCurrencyCompact(12322.86)
+    expect(html).toContain("DFW-4-16326-af");
+    expect(html).toContain("Atlanta, GA");
+  });
+});
+
 describe("SearchPage — AI summary never contradicts the rendered entity groups", () => {
   function renderWith(structuredResults: Record<string, unknown>, ai: ReturnType<typeof aiResults> | null) {
     mocks.useRecentSearchesMock.mockReturnValue({ recent: [], addRecent: vi.fn(), clearRecent: vi.fn() });

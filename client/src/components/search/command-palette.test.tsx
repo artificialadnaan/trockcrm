@@ -147,4 +147,26 @@ describe("CommandPalette — unified grouped, no-blank search UX", () => {
     act(() => dealButton.dispatchEvent(new MouseEvent("click", { bubbles: true })));
     expect(capturedLocation).toBe("/deals/d1");
   });
+
+  it("renders a deal's amount (right-aligned, compact) and the rep name on the meta line", () => {
+    const results = {
+      ...fullResults(),
+      deals: [
+        r("deal", "d1", "Terraces at Highbury Court", "/deals/d1", {
+          status: "won",
+          secondaryLabel: "DFW-4-16326-af",
+          tertiaryLabel: "Atlanta, GA",
+          assignedRepName: "Caleb Stone",
+          dealValue: "12322.86",
+        }),
+      ],
+    };
+    setSearchState({ results, loading: false });
+    render();
+    const text = container!.textContent ?? "";
+    expect(text).toContain("Caleb Stone");
+    expect(text).toContain("$12.3K"); // formatCurrencyCompact(12322.86)
+    expect(text).toContain("DFW-4-16326-af");
+    expect(text).toContain("Atlanta, GA");
+  });
 });

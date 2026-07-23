@@ -190,11 +190,23 @@ export async function handleWonMetricReductionAlert(
     });
     return null;
   });
+  // Enrichment lookups are best-effort: a failure logs and the email still sends (with raw ids /
+  // no location), never dead-lettering the alert. They run before the per-recipient delivery loop.
+  const userNames = await resolveReductionUserNames(query, eventForDelivery).catch((error) => {
+    logger.warn("[WonMetricReductionAlert] Could not resolve rep names; sending with raw ids", { eventId, error });
+    return new Map<string, string>();
+  });
+  const dealLocation = await resolveDealLocation(query, eventForDelivery.tenantSchema, eventForDelivery.dealId).catch((error) => {
+    logger.warn("[WonMetricReductionAlert] Could not resolve deal location; sending without it", { eventId, error });
+    return null;
+  });
   const email = buildWonMetricReductionEmail({
     event: eventForDelivery,
     impact,
     officeId,
     frontendUrl: resolveFrontendUrl(env),
+    userNames,
+    dealLocation,
   });
   const sendEmail = deps.sendEmail ?? sendSystemEmailWithMetadata;
   let deferredOutcome: DeferredJobResult | null = null;
@@ -477,19 +489,32 @@ type WonMetricReductionEmailEvent = Pick<
   | "reasonCode"
   | "changedFields"
   | "auditReference"
-> & { newSnapshot?: unknown };
+> & { newSnapshot?: unknown; oldSnapshot?: unknown };
 
 export function buildWonMetricReductionEmail(input: {
   event: WonMetricReductionEmailEvent;
   impact: WonMetricImpact;
   officeId?: string | null;
   frontendUrl: string;
+  userNames?: Record<string, string> | Map<string, string>;
+  dealLocation?: { address: string | null; city: string | null; state: string | null } | null;
 }) {
   const metricLabel = metricLabelFor(input.impact.metricKey ?? input.event.reportMetricKey);
   const figure = formatImpact(input.impact, metricLabel);
   const reason = input.event.reasonCode ? humanizeToken(input.event.reasonCode) : "Metric reduction detected";
   const action = input.event.actionLabel ?? "No action label was supplied";
-  const changedFields = formatChangedFields(input.event.changedFields);
+  const names = toNameMap(input.userNames);
+  const changedFields = formatChangedFields(input.event.changedFields, names);
+  const dealAmount = dealAmountFromSnapshot(input.event.newSnapshot, input.event.oldSnapshot);
+  const locationText = formatDealLocation(input.dealLocation);
+  const repChangeText = formatRepChange(input.event.changedFields, names) ?? currentRepName(input.event, names);
+  const summary = buildReductionSummary({
+    event: input.event,
+    names,
+    amount: dealAmount,
+    locationText,
+    actorName: auditActorName(input.event.auditReference),
+  });
   const auditCitation = formatAuditCitation(input.event.auditReference);
   const definition = input.event.definitionVersion ? `Definition ${input.event.definitionVersion}` : null;
   const releaseReference = input.event.releaseReference;
@@ -503,10 +528,14 @@ export function buildWonMetricReductionEmail(input: {
 
   const subject = `Won metric reduced: ${metricLabel} ${formatImpactDelta(input.impact)}`;
   const textLines = [
-    "Won metric reduction detected",
+    summary ?? "Won metric reduction detected",
     figure,
     `Reason: ${reason}`,
     `Exact action: ${action}`,
+    input.event.dealName ? `Job: ${input.event.dealName}${dealNumber ? ` (${dealNumber})` : ""}` : null,
+    dealAmount != null ? `Amount: ${formatCurrency(dealAmount)}` : null,
+    locationText ? `Location: ${locationText}` : null,
+    repChangeText ? `Sales rep: ${repChangeText}` : null,
     changedFields ? `Changed fields: ${changedFields}` : null,
     auditCitation ? `Audit citation: ${auditCitation}` : null,
     definition,
@@ -518,6 +547,10 @@ export function buildWonMetricReductionEmail(input: {
     ["Figure", figure] as [string, string],
     ["Reason", reason] as [string, string],
     ["Exact action", action] as [string, string],
+    ...(input.event.dealName ? ([["Job", dealNumber ? `${input.event.dealName} (${dealNumber})` : input.event.dealName]] as Array<[string, string]>) : []),
+    ...(dealAmount != null ? ([["Amount", formatCurrency(dealAmount)]] as Array<[string, string]>) : []),
+    ...(locationText ? ([["Location", locationText]] as Array<[string, string]>) : []),
+    ...(repChangeText ? ([["Sales rep", repChangeText]] as Array<[string, string]>) : []),
     ...(changedFields ? ([['Changed fields', changedFields]] as Array<[string, string]>) : []),
     ...(auditCitation ? ([['Audit citation', auditCitation]] as Array<[string, string]>) : []),
     ...(definition ? ([['Definition', definition]] as Array<[string, string]>) : []),
@@ -543,6 +576,7 @@ export function buildWonMetricReductionEmail(input: {
       <tr><td style="padding:28px 30px;">
         <h1 style="margin:0 0 8px;font-family:Arial,Helvetica,sans-serif;font-size:20px;line-height:28px;color:#991b1b;">Won metric reduced</h1>
         <p style="margin:0 0 20px;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:20px;color:#334155;">A Won figure decreased and needs review.</p>
+        ${summary ? `<p style="margin:0 0 20px;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:21px;color:#111827;font-weight:bold;">${escapeHtml(summary)}</p>` : ""}
         <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width:100%;border-collapse:collapse;">${htmlRows}</table>
         <p style="margin:24px 0 0;"><a href="${escapeHtml(primaryUrl)}" style="display:inline-block;background:#b91c1c;color:#ffffff;font-family:Arial,Helvetica,sans-serif;font-size:14px;font-weight:bold;line-height:20px;padding:10px 16px;text-decoration:none;border-radius:4px;">${primaryLabel}</a></p>
         ${releaseHtml}
@@ -612,6 +646,64 @@ async function resolveOfficeId(query: PgQuery, tenantSchema: string): Promise<st
     [tenantSchema],
   );
   return normalizeUuid(result.rows[0]?.id) ?? null;
+}
+
+// Batch-resolve every user UUID that appears in changed_fields (from/to) and the snapshots
+// (assignedRepId/estimatorUserId) to a display name, so the email shows names not raw ids.
+async function resolveReductionUserNames(query: PgQuery, event: WonMetricReductionEvent): Promise<Map<string, string>> {
+  const ids = new Set<string>();
+  const add = (v: unknown) => {
+    if (typeof v === "string" && UUID_RE.test(v.trim())) ids.add(v.trim().toLowerCase());
+  };
+  const changed = parseJson(event.changedFields);
+  if (isRecord(changed)) {
+    for (const change of Object.values(changed)) {
+      if (isRecord(change)) {
+        add(change.from);
+        add(change.to);
+      }
+    }
+  }
+  for (const snap of [event.oldSnapshot, event.newSnapshot]) {
+    const s = parseJson(snap);
+    if (isRecord(s)) {
+      add(s.assignedRepId);
+      add(s.estimatorUserId);
+    }
+  }
+  if (ids.size === 0) return new Map();
+  const result = await query(
+    `SELECT id::text AS id, display_name FROM public.users WHERE id = ANY($1::uuid[])`,
+    [[...ids]],
+  );
+  const map = new Map<string, string>();
+  for (const row of result.rows) {
+    const id = normalizeUuid(row.id);
+    const name = normalizeText(row.display_name);
+    if (id && name) map.set(id, name);
+  }
+  return map;
+}
+
+// The deal's property location for the email "Location" row. Not captured in the trigger snapshot,
+// so read the live (soft-deleted deals keep the row) deal. Schema-name is guarded like the audit join.
+async function resolveDealLocation(
+  query: PgQuery,
+  tenantSchema: string,
+  dealId: string | null,
+): Promise<{ address: string | null; city: string | null; state: string | null } | null> {
+  if (!dealId || !isSafeTenantSchema(tenantSchema)) return null;
+  const result = await query(
+    `SELECT property_address, property_city, property_state FROM ${tenantSchema}.deals WHERE id = $1::uuid LIMIT 1`,
+    [dealId],
+  );
+  const row = result.rows[0];
+  if (!row) return null;
+  return {
+    address: normalizeText(row.property_address),
+    city: normalizeText(row.property_city),
+    state: normalizeText(row.property_state),
+  };
 }
 
 function normalizeEvent(row: any, fallbackId: string): WonMetricReductionEvent | null {
@@ -965,22 +1057,208 @@ function canonicalWonYtdTieBreak(metricKey: string | null): number {
   return 0;
 }
 
-function formatChangedFields(value: unknown): string | null {
+function formatChangedFields(value: unknown, names?: Map<string, string>): string | null {
   const parsed = parseJson(value);
   if (!isRecord(parsed)) return normalizeText(typeof parsed === "string" ? parsed : null);
+  const render = (v: unknown): string => {
+    if (v === undefined) return "—";
+    const name = names ? resolveUserName(names, v) : null;
+    return name ?? formatBrief(v);
+  };
   const parts: string[] = [];
   for (const [field, change] of Object.entries(parsed).slice(0, 5)) {
     if (isRecord(change)) {
       const before = readValue(change, ["before", "old", "oldValue", "old_value", "previous", "from"]);
       const after = readValue(change, ["after", "new", "newValue", "new_value", "current", "to"]);
       if (before !== undefined || after !== undefined) {
-        parts.push(`${humanizeToken(field)}: ${before === undefined ? "—" : formatBrief(before)} → ${after === undefined ? "—" : formatBrief(after)}`);
+        parts.push(`${humanizeToken(field)}: ${render(before)} → ${render(after)}`);
         continue;
       }
     }
-    parts.push(`${humanizeToken(field)}: ${formatBrief(change)}`);
+    parts.push(`${humanizeToken(field)}: ${render(change)}`);
   }
   return parts.length ? parts.join("; ") : null;
+}
+
+// Normalize the uuid->name lookup into a lower-cased Map, accepting either a Record or a Map.
+function toNameMap(userNames?: Record<string, string> | Map<string, string>): Map<string, string> {
+  const m = new Map<string, string>();
+  if (userNames instanceof Map) {
+    for (const [k, v] of userNames) m.set(k.toLowerCase(), v);
+  } else if (userNames) {
+    for (const [k, v] of Object.entries(userNames)) m.set(k.toLowerCase(), v);
+  }
+  return m;
+}
+
+// Resolve a value to a display name only when it is a UUID present in the map; else null.
+function resolveUserName(names: Map<string, string>, value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const v = value.trim();
+  if (!UUID_RE.test(v)) return null;
+  return names.get(v.toLowerCase()) ?? null;
+}
+
+// Deal value from a mutation snapshot, in canonical DEAL_VALUE_PRIORITY_CHAIN order. Positive-gated
+// to match the resolver (deal-value-sql.ts / deal-hold.ts): a 0/negative candidate is SKIPPED, not
+// shown, so it falls through to the next positive estimate.
+function snapshotBestValue(snapshot: unknown): number | null {
+  const s = parseJson(snapshot);
+  if (!isRecord(s)) return null;
+  for (const key of ["awardedAmount", "bidBoardTotalSales", "bidEstimate", "ddEstimate"]) {
+    const v = numericValue(s[key]);
+    if (v != null && v > 0) return v;
+  }
+  return null;
+}
+
+// True when the snapshot actually carries value columns (even if they are 0), vs. an empty snapshot
+// (e.g. a deletion's `{}`) that carries none.
+function snapshotHasValueKeys(snapshot: unknown): boolean {
+  const s = parseJson(snapshot);
+  if (!isRecord(s)) return false;
+  return ["awardedAmount", "bidBoardTotalSales", "bidEstimate", "ddEstimate"].some((k) => s[k] != null);
+}
+
+// Effective Won value of a snapshot: the best positive candidate, or 0 when the snapshot IS populated
+// with value columns but every candidate is non-positive (a genuine reduce-to-zero), else null (no data).
+function effectiveSnapshotValue(snapshot: unknown): number | null {
+  const best = snapshotBestValue(snapshot);
+  if (best != null) return best;
+  return snapshotHasValueKeys(snapshot) ? 0 : null;
+}
+
+function dealAmountFromSnapshot(newSnapshot: unknown, oldSnapshot: unknown): number | null {
+  return effectiveSnapshotValue(newSnapshot) ?? effectiveSnapshotValue(oldSnapshot);
+}
+
+function formatDealLocation(loc?: { address: string | null; city: string | null; state: string | null } | null): string | null {
+  if (!loc) return null;
+  const cityState = [loc.city, loc.state].filter(Boolean).join(", ");
+  return [loc.address, cityState].filter(Boolean).join(" · ") || null;
+}
+
+// A UUID-valued {from,to} change resolved to display names, falling back to the raw id (never fabricated).
+function repFromTo(changedFields: unknown, names: Map<string, string>, key: string): { from: string; to: string } | null {
+  const parsed = parseJson(changedFields);
+  if (!isRecord(parsed)) return null;
+  const change = parsed[key];
+  if (!isRecord(change)) return null;
+  const from = readValue(change, ["from", "old", "previous"]);
+  const to = readValue(change, ["to", "new", "current"]);
+  const label = (v: unknown): string => resolveUserName(names, v) ?? (typeof v === "string" && v ? v : "—");
+  return { from: label(from), to: label(to) };
+}
+
+function formatRepChange(changedFields: unknown, names: Map<string, string>): string | null {
+  const parts: string[] = [];
+  const rep = repFromTo(changedFields, names, "assigned_rep_id");
+  if (rep) parts.push(`${rep.from} → ${rep.to}`);
+  const est = repFromTo(changedFields, names, "estimator_user_id");
+  if (est) parts.push(`Estimator: ${est.from} → ${est.to}`);
+  return parts.length ? parts.join("; ") : null;
+}
+
+// The deal's current rep name (new snapshot, falling back to old) — used for the Sales-rep row on a
+// reduction that ISN'T a reassignment (no assigned_rep_id diff), so the row still names the owner.
+function currentRepName(event: WonMetricReductionEmailEvent, names: Map<string, string>): string | null {
+  for (const snap of [event.newSnapshot, event.oldSnapshot]) {
+    const s = parseJson(snap);
+    if (isRecord(s)) {
+      const name = resolveUserName(names, s.assignedRepId);
+      if (name) return name;
+    }
+  }
+  return null;
+}
+
+// A value column changed in the SAME event. Within a won_reassigned event this is the only way the
+// canonical company Won total also moved (stage/hold/active changes would pick a different reason).
+function changedFieldsHasValueChange(changedFields: unknown): boolean {
+  const parsed = parseJson(changedFields);
+  if (!isRecord(parsed)) return false;
+  return ["awarded_amount", "bid_board_total_sales", "bid_estimate", "dd_estimate"].some((k) => k in parsed);
+}
+
+function auditActorName(auditReference: unknown): string | null {
+  const parsed = parseJson(auditReference);
+  if (!isRecord(parsed)) return null;
+  return (
+    normalizeText(parsed.actorName) ??
+    normalizeText(parsed.actor_name) ??
+    normalizeText(parsed.actorSystemProcess) ??
+    null
+  );
+}
+
+// Human-readable "why" sentence, templated per reason_code. Never throws on missing pieces.
+function buildReductionSummary(input: {
+  event: WonMetricReductionEmailEvent;
+  names: Map<string, string>;
+  amount: number | null;
+  locationText: string | null;
+  actorName: string | null;
+}): string | null {
+  const { event, names, amount, locationText, actorName } = input;
+  const by = actorName ? ` by ${actorName}` : "";
+  // No deal behind this reduction (e.g. a published metric-definition change) — don't invent one.
+  if (!event.dealId) {
+    if (event.reasonCode === "report_definition_change") {
+      return `A published Won metric definition change reduced this figure${by}.`;
+    }
+    return null;
+  }
+  const name = event.dealName ?? "This deal";
+  const idParts = [event.dealNumber, amount != null ? formatCurrency(amount) : null, locationText].filter(Boolean);
+  const idSuffix = idParts.length ? ` (${idParts.join(" · ")})` : "";
+  const rep = repFromTo(event.changedFields, names, "assigned_rep_id");
+  switch (event.reasonCode) {
+    case "won_reassigned": {
+      const fromTo = rep ? ` from ${rep.from} → ${rep.to}` : "";
+      // Only a value change in the same event can move the canonical company Won on a reassignment;
+      // otherwise the credit merely moved rep-to-rep (company total unchanged).
+      const valueAlsoChanged = changedFieldsHasValueChange(event.changedFields);
+      const moved = rep
+        ? valueAlsoChanged
+          ? ` The Won credit moved to ${rep.to}.`
+          : ` The Won credit moved to ${rep.to}; company Won is unchanged.`
+        : "";
+      return `Won deal ${name}${idSuffix} was reassigned${fromTo}${by}.${moved}`;
+    }
+    case "won_estimator_reassigned": {
+      const est = repFromTo(event.changedFields, names, "estimator_user_id");
+      const fromTo = est ? ` from ${est.from} → ${est.to}` : "";
+      return `The estimator on Won deal ${name}${idSuffix} was reassigned${fromTo}${by}.`;
+    }
+    case "won_value_reduced": {
+      // Report the EFFECTIVE Won-value transition old->new, not the raw changed field: awarded $100 -> $0
+      // with an unchanged $80 bid is $100 -> $80; a full clear to $0 reads $100 -> $0 (not "no data").
+      const oldVal = effectiveSnapshotValue(event.oldSnapshot);
+      const newVal = effectiveSnapshotValue(event.newSnapshot);
+      const detail = oldVal != null && newVal != null ? ` from ${formatCurrency(oldVal)} to ${formatCurrency(newVal)}` : "";
+      return `The Won value of ${name}${idSuffix} was lowered${detail}${by}.`;
+    }
+    case "deal_deleted":
+      return `Won deal ${name}${idSuffix} was deleted${by}, removing it from Won.`;
+    case "archived_or_deactivated":
+      return `Won deal ${name}${idSuffix} was deactivated${by}, removing it from Won.`;
+    case "placed_on_hold":
+      return `Won deal ${name}${idSuffix} was placed on hold${by}, removing it from the Won figure.`;
+    case "marked_test_data":
+      return `${name}${idSuffix} was marked as test data${by}, excluding it from Won.`;
+    case "won_stage_changed": {
+      // A Bid Board / Estimator-Pipeline stage move (bid_board_stage_slug only, CRM stage_id unchanged)
+      // leaves the canonical company Won figure intact — say so, so recipients don't think CRM-Won was lost.
+      const parsed = parseJson(event.changedFields);
+      const bidBoardOnly = isRecord(parsed) && "bid_board_stage_slug" in parsed && !("stage_id" in parsed);
+      const stage = bidBoardOnly ? "a Bid Board (Estimator Pipeline) Won stage" : "a Won stage";
+      return `${name}${idSuffix} was moved out of ${stage}${by}.`;
+    }
+    case "won_date_rebucketed":
+      return `The Won close date of ${name}${idSuffix} changed${by}, moving it out of this period.`;
+    default:
+      return `A Won contribution from ${name}${idSuffix} was reduced${by}.`;
+  }
 }
 
 function formatAuditCitation(value: unknown): string | null {
