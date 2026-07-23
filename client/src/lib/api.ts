@@ -43,6 +43,14 @@ interface ApiOptions extends RequestInit {
    * where the office-scoped effective role would otherwise 403.
    */
   suppressOfficeHeader?: boolean;
+  /**
+   * Send the field-app CSRF header (`x-requested-with: XMLHttpRequest`) on this request. The global CSRF
+   * middleware treats an unsafe `/api/field/*` request that carries a CRM auth cookie as a field-app request
+   * and requires THIS header — the CRM double-submit header alone is rejected. Set for the token-scoped
+   * corrective-action responder writes so a recipient who happens to also hold a CRM session can still
+   * POST/upload (they could only READ otherwise). Session (non-token) field calls don't need it.
+   */
+  fieldCsrf?: boolean;
 }
 
 interface ApiErrorPayload {
@@ -126,7 +134,7 @@ export function isApiError(error: unknown): error is ApiError {
 }
 
 export async function api<T = unknown>(path: string, options: ApiOptions = {}): Promise<T> {
-  const { json, suppressOfficeHeader, ...fetchOptions } = options;
+  const { json, suppressOfficeHeader, fieldCsrf, ...fetchOptions } = options;
 
   const headers: Record<string, string> = {
     ...(fetchOptions.headers as Record<string, string>),
@@ -134,6 +142,12 @@ export async function api<T = unknown>(path: string, options: ApiOptions = {}): 
   const officeId = readOfficeIdFromLocation();
   if (officeId && !suppressOfficeHeader && !hasOfficeHeader(headers)) {
     headers["x-office-id"] = officeId;
+  }
+
+  // Field-app CSRF header: required by the global middleware for an unsafe /api/field/* request that also
+  // carries a CRM auth cookie (see ApiOptions.fieldCsrf). Harmless when no cookie is present.
+  if (fieldCsrf) {
+    headers["x-requested-with"] = "XMLHttpRequest";
   }
 
   if (json) {

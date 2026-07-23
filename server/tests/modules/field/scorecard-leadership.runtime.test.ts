@@ -7,7 +7,7 @@ import {
   getFieldScorecardDetail,
   listFieldScorecardsForProject,
 } from "../../../src/modules/field/scorecards-service.js";
-import { fieldScorecards, fieldScorecardItems, fieldScorecardPhotos, dealTeamMembers, contacts } from "@trock-crm/shared/schema";
+import { fieldScorecards, fieldScorecardItems, fieldScorecardPhotos, scorecardCorrectiveActions, dealTeamMembers, contacts } from "@trock-crm/shared/schema";
 import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
 
 // Leadership scorecard: a distinct KIND in the SAME tables — 4 categories rated 1-10 (average out of 10,
@@ -78,7 +78,7 @@ beforeAll(async () => {
     -- resolveScorecardTeamEmails checks users.is_active, so the island carries it (defaulting active).
     CREATE TABLE public.users (id uuid PRIMARY KEY, display_name text, email text, avatar_url text, is_active boolean DEFAULT true);
   `);
-  await pg.exec(tenantSchemaSql("public", [fieldScorecards, fieldScorecardItems, fieldScorecardPhotos, dealTeamMembers, contacts]));
+  await pg.exec(tenantSchemaSql("public", [fieldScorecards, fieldScorecardItems, fieldScorecardPhotos, scorecardCorrectiveActions, dealTeamMembers, contacts]));
   await pg.exec(
     `ALTER TABLE public.field_scorecards ADD CONSTRAINT field_scorecards_csid_uniq UNIQUE (client_submission_id);`,
   );
@@ -99,6 +99,7 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
+  await tdb.execute(sql`DELETE FROM scorecard_corrective_actions`);
   await tdb.execute(sql`DELETE FROM field_scorecard_photos`);
   await tdb.execute(sql`DELETE FROM field_scorecard_items`);
   await tdb.execute(sql`DELETE FROM field_scorecards`);

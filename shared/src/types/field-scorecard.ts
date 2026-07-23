@@ -166,6 +166,78 @@ export function isScorecardV2CriticalDeficiencyKey(key: string): key is Scorecar
   return FIELD_SCORECARD_V2_CRITICAL_DEFICIENCIES.some((deficiency) => deficiency.key === key);
 }
 
+const V2_DEFICIENCY_LABEL_BY_KEY: Record<string, string> = Object.fromEntries(
+  FIELD_SCORECARD_V2_CRITICAL_DEFICIENCIES.map((deficiency) => [deficiency.key, deficiency.label]),
+);
+
+/** Human label for a critical-deficiency key; falls back to the raw key for unknown keys. */
+export function scorecardV2CriticalDeficiencyLabel(key: string): string {
+  return V2_DEFICIENCY_LABEL_BY_KEY[key] ?? key;
+}
+
+// Merged V2 + V1 deficiency-label lookup. V1 scorecards (the default form version, which fires the
+// corrective-action trigger) use FIELD_SCORECARD_CRITICAL_DEFICIENCIES — whose keys (e.g. `site_org_below`,
+// `safety_access`) are absent from the V2 map — so seeding must consult both constants or those items would
+// seed the raw key as their label. Built lazily so it can reference FIELD_SCORECARD_CRITICAL_DEFICIENCIES,
+// which is declared later in this module. Prefer the V2 label when a key exists in both.
+let mergedDeficiencyLabelByKey: Record<string, string> | undefined;
+function getMergedDeficiencyLabelByKey(): Record<string, string> {
+  if (!mergedDeficiencyLabelByKey) {
+    mergedDeficiencyLabelByKey = {
+      ...Object.fromEntries(FIELD_SCORECARD_CRITICAL_DEFICIENCIES.map((d) => [d.key, d.label])),
+      ...V2_DEFICIENCY_LABEL_BY_KEY,
+    };
+  }
+  return mergedDeficiencyLabelByKey;
+}
+
+/** Human label for a critical-deficiency key across BOTH the V1 and V2 forms; falls back to the raw key. */
+export function scorecardCriticalDeficiencyLabel(key: string): string {
+  return getMergedDeficiencyLabelByKey()[key] ?? key;
+}
+
+// ── Corrective-action helpers ───────────────────────────────────────────────────
+// When a scorecard trips the corrective-action band, one tracked item is seeded per flagged issue
+// (each non-empty action item and each critical deficiency). These pure helpers drive that seeding
+// (see server/src/modules/field/scorecards-service.ts) and the closure logic.
+
+/** True iff the rating is the "Corrective Action Required" band. */
+export function isCorrectiveActionBand(rating: ScorecardRating): boolean {
+  return rating === "corrective_action";
+}
+
+export interface FlaggedItem {
+  itemType: "action_item" | "critical_deficiency";
+  itemRef: string;
+  itemLabel: string;
+}
+
+/**
+ * Enumerate the flagged items on a below-band scorecard: one per non-empty action item (ref = its
+ * index) and one per critical deficiency (ref = the deficiency key). Labels are captured at seed time.
+ */
+export function enumerateFlaggedItems(input: {
+  actionItems: string[];
+  criticalDeficiencies: string[];
+}): FlaggedItem[] {
+  const items: FlaggedItem[] = [];
+  input.actionItems.forEach((text, i) => {
+    if (text.trim()) {
+      items.push({ itemType: "action_item", itemRef: String(i), itemLabel: text });
+    }
+  });
+  for (const key of input.criticalDeficiencies) {
+    items.push({
+      itemType: "critical_deficiency",
+      itemRef: key,
+      // Consult BOTH the V1 and V2 deficiency constants: V1 (the default form) fires this trigger with
+      // keys absent from the V2 map, which would otherwise seed the raw key as the label.
+      itemLabel: scorecardCriticalDeficiencyLabel(key),
+    });
+  }
+  return items;
+}
+
 export function computeScorecardV2Average(items: readonly { sectionKey: ScorecardV2SectionKey; points: number }[]): number {
   return Math.round((items.reduce((sum, item) => sum + item.points, 0) / FIELD_SCORECARD_V2_SECTIONS.length) * 10) / 10;
 }
@@ -450,6 +522,20 @@ export interface FieldScorecardSummary {
   hasPdf: boolean;
   officeSlug?: string;
   officeId?: string;
+  /**
+   * Lifecycle status of a submitted card: `submitted` (normal), `corrective_action_open` (below-band, a
+   * response is required), or `corrective_action_closed` (all items resolved). Optional so older API
+   * deployments that don't emit it don't break consumers; a missing value means `submitted`.
+   */
+  status?: string;
+  /**
+   * Whether the REQUESTING user is authorized to document the corrective action for this card (the deal's
+   * assigned superintendent/project_manager, or an admin/director). The mobile "Document the corrective
+   * action" CTA gates on this so it isn't shown to a field user who can browse the project but would get a
+   * 403 from the responder endpoint. Optional so older API deployments don't break consumers; a missing
+   * value means the client falls back to its own conservative gate.
+   */
+  canRespondToCorrectiveAction?: boolean;
 }
 export interface FieldScorecardPhotoView {
   id: string;
@@ -471,6 +557,35 @@ export interface FieldScorecardItemView {
   points: number;
   note: string | null;
 }
+/** A response photo linked to a corrective-action item (spec §4.3 — corrective_action_id set). */
+export interface CorrectiveActionResponsePhotoView {
+  id: string;
+  fileId: string;
+  url?: string | null;
+  caption?: string | null;
+}
+/**
+ * A single flagged item on a below-band scorecard (each action item / critical deficiency) with its inline
+ * corrective-action response, threaded under the original item on the deal Scorecards tab (spec §9). Mirrors
+ * the server corrective-action-api.ts CorrectiveActionItemView.
+ */
+export interface CorrectiveActionItemView {
+  id: string;
+  /** `action_item` | `critical_deficiency` (varchar — kept a string so a new value never breaks the parse). */
+  itemType: string;
+  /** The deficiency key or the action-item index this row was seeded from. */
+  itemRef: string;
+  /** The denormalized human label captured at seed time (action text / deficiency label). */
+  itemLabel: string;
+  /** `open` | `resolved`. */
+  status: string;
+  responseComment: string | null;
+  respondedByUserId: string | null;
+  responderName: string | null;
+  responderEmail: string | null;
+  respondedAt: string | null;
+  photos: CorrectiveActionResponsePhotoView[];
+}
 export interface FieldScorecardDetail extends FieldScorecardSummary {
   items: FieldScorecardItemView[];
   criticalDeficiencies: string[];
@@ -481,4 +596,10 @@ export interface FieldScorecardDetail extends FieldScorecardSummary {
   pmSignature?: string | null;
   /** Leadership Project Summary free text. */
   summary?: string | null;
+  /**
+   * The corrective-action items + their inline responses for a below-band scorecard (spec §9). Present (may
+   * be empty) only when the card tripped the corrective-action band; omitted for passing cards. Optional so
+   * older API deployments don't break consumers.
+   */
+  correctiveActions?: CorrectiveActionItemView[];
 }

@@ -174,12 +174,22 @@ router.post(
         throw new AppError(400, "winnerId and loserId are required");
       }
 
+      // Thread the office (id + `office_<slug>`) so a merge that repoints an active super/PM assignment to a
+      // winner with a DIFFERENT email can restart each affected deal's open corrective-action cycle (finding
+      // P2). Same shape the PATCH/DELETE contact routes + deal team routes thread; undefined when either piece
+      // is missing → the restart is skipped (best-effort).
+      const teamOffice =
+        req.officeSlug && req.user!.activeOfficeId
+          ? { id: req.user!.activeOfficeId, slug: req.officeSlug }
+          : undefined;
+
       const result = await mergeContacts(
         req.tenantDb!,
         winnerId,
         loserId,
         req.user!.id,
-        req.params.id as string
+        req.params.id as string,
+        teamOffice,
       );
 
       await req.commitTransaction!();
@@ -299,7 +309,14 @@ router.post("/", async (req, res, next) => {
 router.patch("/:id", async (req, res, next) => {
   try {
     validateEmailIfPresent(req.body.email);
-    const contact = await updateContact(req.tenantDb!, req.params.id, req.body);
+    // Thread the office (id + `office_<slug>`) so changing a super/PM contact's email can restart each affected
+    // deal's open corrective-action notification cycle (finding P2). Same shape the DELETE route + deal team
+    // routes thread; undefined when either piece is missing → the restart is skipped (best-effort).
+    const teamOffice =
+      req.officeSlug && req.user!.activeOfficeId
+        ? { id: req.user!.activeOfficeId, slug: req.officeSlug }
+        : undefined;
+    const contact = await updateContact(req.tenantDb!, req.params.id, req.body, teamOffice);
     await req.commitTransaction!();
     res.json({ contact });
   } catch (err) {
@@ -351,7 +368,14 @@ router.patch("/:id/owner", async (req, res, next) => {
 router.delete("/:id", requireRole("admin", "director"), async (req, res, next) => {
   try {
     const contactId = req.params.id as string;
-    const contact = await deleteContact(req.tenantDb!, contactId, req.user!.role);
+    // Thread the office (id + `office_<slug>`) so archiving a super/PM contact can restart each affected deal's
+    // open corrective-action notification cycle (finding D). Same shape the deal team routes thread; undefined
+    // when either piece is missing → the restart is skipped (best-effort, the token revoke still runs).
+    const teamOffice =
+      req.officeSlug && req.user!.activeOfficeId
+        ? { id: req.user!.activeOfficeId, slug: req.officeSlug }
+        : undefined;
+    const contact = await deleteContact(req.tenantDb!, contactId, req.user!.role, teamOffice);
     if (contact) {
       await writeSoftDeleteAuditLog(req.tenantDb!, {
         actorUserId: req.user!.id,

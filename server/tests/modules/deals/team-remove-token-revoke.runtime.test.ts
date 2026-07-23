@@ -1,0 +1,679 @@
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { PGlite } from "@electric-sql/pglite";
+import { drizzle } from "drizzle-orm/pglite";
+import { sql } from "drizzle-orm";
+import { addTeamMember, removeTeamMember, updateTeamMember } from "../../../src/modules/deals/team-service.js";
+import {
+  mintCorrectiveActionToken,
+  verifyCorrectiveActionToken,
+} from "../../../src/modules/field/corrective-action-tokens.js";
+import {
+  dealTeamMembers,
+  contacts,
+  deals,
+  fieldScorecards,
+  fieldScorecardItems,
+  fieldScorecardPhotos,
+  scorecardCorrectiveActions,
+  scorecardCorrectiveActionTokens,
+} from "@trock-crm/shared/schema";
+import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
+
+// Removing a deal's super/PM must revoke that recipient's outstanding corrective-action web tokens on the
+// deal's scorecards — verifyCorrectiveActionToken checks only hash + expiry, so a removed email-only member
+// would otherwise keep read/write access to the responder page until the token TTL expires (30 days).
+const DEAL = "11111111-1111-1111-1111-111111111111";
+const OTHER_DEAL = "11111111-1111-1111-1111-1111111111ff";
+const USER = "33333333-3333-3333-3333-333333333333";
+// Two staff users that both resolve to EXT_PM_EMAIL — one active, one deactivated. Used to prove the
+// stillAssigned guard requires the OTHER same-email assignment's linked USER to be active.
+const ACTIVE_EMAIL_USER = "33333333-3333-3333-3333-3333330000aa";
+const INACTIVE_EMAIL_USER = "33333333-3333-3333-3333-3333330000bb";
+const SCORECARD = "55555555-5555-5555-5555-000000000001";
+const OTHER_SCORECARD = "55555555-5555-5555-5555-0000000000ff";
+const EXT_PM_EMAIL = "ext.pm@example.com";
+
+let pg: PGlite;
+let tdb: any;
+
+const OFFICE = { id: "00000000-0000-0000-0000-0000000000f1", slug: "test" };
+
+beforeAll(async () => {
+  pg = new PGlite();
+  await pg.exec(`
+    CREATE TABLE public.users (id uuid PRIMARY KEY, display_name text, email text, avatar_url text, is_active boolean DEFAULT true);
+    CREATE TABLE public.job_queue (
+      id bigserial PRIMARY KEY, job_type varchar(100) NOT NULL, payload jsonb NOT NULL, office_id uuid,
+      status text NOT NULL DEFAULT 'pending', attempts int NOT NULL DEFAULT 0, max_attempts int NOT NULL DEFAULT 3,
+      last_error text, started_processing_at timestamptz, run_after timestamptz NOT NULL DEFAULT now(),
+      created_at timestamptz NOT NULL DEFAULT now(), completed_at timestamptz
+    );
+  `);
+  await pg.exec(
+    tenantSchemaSql("public", [
+      dealTeamMembers,
+      contacts,
+      deals,
+      fieldScorecards,
+      fieldScorecardItems,
+      fieldScorecardPhotos,
+      scorecardCorrectiveActions,
+      scorecardCorrectiveActionTokens,
+    ]),
+  );
+  await pg.exec(`
+    INSERT INTO public.users (id, display_name, email, is_active) VALUES
+      ('${USER}', 'Sam Super', 'sam.super@trock.com', true),
+      ('${ACTIVE_EMAIL_USER}', 'Active Same-Email PM', '${EXT_PM_EMAIL}', true),
+      ('${INACTIVE_EMAIL_USER}', 'Deactivated Same-Email PM', '${EXT_PM_EMAIL}', false);
+  `);
+  tdb = drizzle(pg);
+});
+
+afterAll(async () => {
+  await pg?.close?.();
+});
+
+async function correctiveJobCount(): Promise<number> {
+  const res = await tdb.execute(sql`
+    SELECT COUNT(*)::int AS c FROM public.job_queue WHERE job_type = 'scorecard_corrective_action_email'
+  `);
+  return (res.rows[0] as { c: number }).c;
+}
+
+beforeEach(async () => {
+  await tdb.execute(sql`DELETE FROM public.job_queue`);
+  await tdb.execute(sql`DELETE FROM scorecard_corrective_action_tokens`);
+  await tdb.execute(sql`DELETE FROM deal_team_members`);
+  await tdb.execute(sql`DELETE FROM field_scorecards`);
+  // Two scorecards: one on the deal under test, one on a different deal (its token must NOT be revoked).
+  await tdb.execute(sql`
+    INSERT INTO field_scorecards (id, client_submission_id, deal_id, week_of, form_version, kind, total_score, rating, status, submitted_by)
+    VALUES
+      (${SCORECARD}, '66666666-0000-0000-0000-000000000001', ${DEAL}, '2026-06-30', 1, 'project', 60, 'corrective_action', 'corrective_action_open', ${USER}),
+      (${OTHER_SCORECARD}, '66666666-0000-0000-0000-0000000000ff', ${OTHER_DEAL}, '2026-06-30', 1, 'project', 60, 'corrective_action', 'corrective_action_open', ${USER})
+  `);
+});
+
+describe("removeTeamMember revokes the removed recipient's corrective-action tokens", () => {
+  it("deletes an email-only PM's token on the deal's scorecard, so it no longer authorizes", async () => {
+    const member = await addTeamMember(tdb, {
+      dealId: DEAL,
+      role: "project_manager",
+      memberName: "Ext PM",
+      memberEmail: EXT_PM_EMAIL,
+    });
+    const { rawToken } = await mintCorrectiveActionToken(tdb, {
+      scorecardId: SCORECARD,
+      recipientEmail: EXT_PM_EMAIL,
+      role: "project_manager",
+      ttlDays: 30,
+    });
+    // The token authorizes before removal.
+    expect(await verifyCorrectiveActionToken(tdb, rawToken)).not.toBeNull();
+
+    await removeTeamMember(tdb, member.id, DEAL);
+
+    // After removal the token is revoked (deleted) → no longer authorizes.
+    expect(await verifyCorrectiveActionToken(tdb, rawToken)).toBeNull();
+    const remaining = await tdb.execute(
+      sql`SELECT COUNT(*)::int AS n FROM scorecard_corrective_action_tokens WHERE recipient_email = ${EXT_PM_EMAIL}`,
+    );
+    expect(remaining.rows[0].n).toBe(0);
+  });
+
+  it("resolves the email from a linked staff user and revokes that user's token", async () => {
+    const member = await addTeamMember(tdb, { dealId: DEAL, userId: USER, role: "superintendent" });
+    const { rawToken } = await mintCorrectiveActionToken(tdb, {
+      scorecardId: SCORECARD,
+      recipientEmail: "sam.super@trock.com",
+      role: "superintendent",
+      ttlDays: 30,
+    });
+    await removeTeamMember(tdb, member.id, DEAL);
+    expect(await verifyCorrectiveActionToken(tdb, rawToken)).toBeNull();
+  });
+
+  it("does NOT revoke a token for the same email on a DIFFERENT deal's scorecard", async () => {
+    const member = await addTeamMember(tdb, {
+      dealId: DEAL,
+      role: "project_manager",
+      memberName: "Ext PM",
+      memberEmail: EXT_PM_EMAIL,
+    });
+    // A token for the same recipient but bound to another deal's scorecard.
+    const { rawToken: otherToken } = await mintCorrectiveActionToken(tdb, {
+      scorecardId: OTHER_SCORECARD,
+      recipientEmail: EXT_PM_EMAIL,
+      role: "project_manager",
+      ttlDays: 30,
+    });
+    await removeTeamMember(tdb, member.id, DEAL);
+    // The other deal's token is untouched — removal is scoped to THIS deal's scorecards.
+    expect(await verifyCorrectiveActionToken(tdb, otherToken)).not.toBeNull();
+  });
+
+  it("keeps the token when another ACTIVE super/PM on the deal still resolves to the same email", async () => {
+    // Two email-only PM assignments with the same email (e.g. a duplicate). Removing ONE must not revoke the
+    // token, because the other active assignment still legitimately holds it.
+    const dup1 = await addTeamMember(tdb, {
+      dealId: DEAL,
+      role: "project_manager",
+      memberName: "Ext PM",
+      memberEmail: EXT_PM_EMAIL,
+    });
+    await addTeamMember(tdb, {
+      dealId: DEAL,
+      role: "project_manager",
+      memberName: "Ext PM (dup)",
+      memberEmail: EXT_PM_EMAIL,
+    });
+    const { rawToken } = await mintCorrectiveActionToken(tdb, {
+      scorecardId: SCORECARD,
+      recipientEmail: EXT_PM_EMAIL,
+      role: "project_manager",
+      ttlDays: 30,
+    });
+    await removeTeamMember(tdb, dup1.id, DEAL);
+    expect(await verifyCorrectiveActionToken(tdb, rawToken)).not.toBeNull();
+  });
+
+  it("REVOKES when the only other same-email assignment is backed by a DEACTIVATED user", async () => {
+    // The removed email-only PM shares EXT_PM_EMAIL with another super/PM assignment — but that assignment is
+    // backed by a deactivated staff user. A deactivated user does not legitimately hold the token, so the
+    // stillAssigned guard must NOT count it: revocation proceeds.
+    const emailMember = await addTeamMember(tdb, {
+      dealId: DEAL,
+      role: "project_manager",
+      memberName: "Ext PM",
+      memberEmail: EXT_PM_EMAIL,
+    });
+    await addTeamMember(tdb, { dealId: DEAL, userId: INACTIVE_EMAIL_USER, role: "project_manager" });
+    const { rawToken } = await mintCorrectiveActionToken(tdb, {
+      scorecardId: SCORECARD,
+      recipientEmail: EXT_PM_EMAIL,
+      role: "project_manager",
+      ttlDays: 30,
+    });
+    await removeTeamMember(tdb, emailMember.id, DEAL);
+    // No ACTIVE identity still holds the email → token revoked.
+    expect(await verifyCorrectiveActionToken(tdb, rawToken)).toBeNull();
+  });
+
+  it("KEEPS the token when another same-email assignment is backed by an ACTIVE user", async () => {
+    // Same shape as above but the other assignment's staff user is active → it legitimately holds the token.
+    const emailMember = await addTeamMember(tdb, {
+      dealId: DEAL,
+      role: "project_manager",
+      memberName: "Ext PM",
+      memberEmail: EXT_PM_EMAIL,
+    });
+    await addTeamMember(tdb, { dealId: DEAL, userId: ACTIVE_EMAIL_USER, role: "project_manager" });
+    const { rawToken } = await mintCorrectiveActionToken(tdb, {
+      scorecardId: SCORECARD,
+      recipientEmail: EXT_PM_EMAIL,
+      role: "project_manager",
+      ttlDays: 30,
+    });
+    await removeTeamMember(tdb, emailMember.id, DEAL);
+    // The active user still resolves to the same email → token preserved.
+    expect(await verifyCorrectiveActionToken(tdb, rawToken)).not.toBeNull();
+  });
+});
+
+describe("updateTeamMember revokes tokens when a super/PM LEAVES the responder role (finding 4)", () => {
+  it("re-roling a LINKED super to a non-responder role revokes their token", async () => {
+    // A LINKED staff-user super (ACTIVE_EMAIL_USER resolves to EXT_PM_EMAIL). An email-only member can no longer
+    // be re-roled to a non-super/PM role (finding 3), so a linked member exercises the leave-the-role revoke.
+    const member = await addTeamMember(tdb, {
+      dealId: DEAL,
+      userId: ACTIVE_EMAIL_USER,
+      role: "superintendent",
+    });
+    const { rawToken } = await mintCorrectiveActionToken(tdb, {
+      scorecardId: SCORECARD,
+      recipientEmail: EXT_PM_EMAIL,
+      role: "superintendent",
+      ttlDays: 30,
+    });
+    expect(await verifyCorrectiveActionToken(tdb, rawToken)).not.toBeNull();
+
+    // Re-role super → foreman (a non-responder role). The token must no longer authorize.
+    await updateTeamMember(tdb, member.id, DEAL, { role: "foreman" });
+    expect(await verifyCorrectiveActionToken(tdb, rawToken)).toBeNull();
+  });
+
+  it("a LATERAL super→PM swap keeps the token (they remain a responder)", async () => {
+    const member = await addTeamMember(tdb, {
+      dealId: DEAL,
+      role: "superintendent",
+      memberName: "Ext Super",
+      memberEmail: EXT_PM_EMAIL,
+    });
+    const { rawToken } = await mintCorrectiveActionToken(tdb, {
+      scorecardId: SCORECARD,
+      recipientEmail: EXT_PM_EMAIL,
+      role: "superintendent",
+      ttlDays: 30,
+    });
+    await updateTeamMember(tdb, member.id, DEAL, { role: "project_manager" });
+    // Still a responder (now PM) → the token stays valid.
+    expect(await verifyCorrectiveActionToken(tdb, rawToken)).not.toBeNull();
+  });
+
+  it("does not revoke on a notes-only update (role unchanged)", async () => {
+    const member = await addTeamMember(tdb, {
+      dealId: DEAL,
+      role: "project_manager",
+      memberName: "Ext PM",
+      memberEmail: EXT_PM_EMAIL,
+    });
+    const { rawToken } = await mintCorrectiveActionToken(tdb, {
+      scorecardId: SCORECARD,
+      recipientEmail: EXT_PM_EMAIL,
+      role: "project_manager",
+      ttlDays: 30,
+    });
+    await updateTeamMember(tdb, member.id, DEAL, { notes: "left a note" });
+    expect(await verifyCorrectiveActionToken(tdb, rawToken)).not.toBeNull();
+  });
+
+  it("keeps the token when ANOTHER active super/PM still resolves to the same email after the re-role", async () => {
+    // Two same-email super/PM assignments; re-roling ONE off the responder roles must not strand the other. The
+    // re-roled one is a LINKED staff user (ACTIVE_EMAIL_USER → EXT_PM_EMAIL) since an email-only member can no
+    // longer be re-roled to foreman (finding 3); the other stays an email-only PM holding the same email.
+    const one = await addTeamMember(tdb, {
+      dealId: DEAL,
+      userId: ACTIVE_EMAIL_USER,
+      role: "superintendent",
+    });
+    await addTeamMember(tdb, {
+      dealId: DEAL,
+      role: "project_manager",
+      memberName: "Ext PM (same email)",
+      memberEmail: EXT_PM_EMAIL,
+    });
+    const { rawToken } = await mintCorrectiveActionToken(tdb, {
+      scorecardId: SCORECARD,
+      recipientEmail: EXT_PM_EMAIL,
+      role: "superintendent",
+      ttlDays: 30,
+    });
+    await updateTeamMember(tdb, one.id, DEAL, { role: "foreman" });
+    // The still-active PM assignment holds the same email → token preserved.
+    expect(await verifyCorrectiveActionToken(tdb, rawToken)).not.toBeNull();
+  });
+});
+
+describe("email-only member role restriction on UPDATE (finding 3)", () => {
+  it("rejects re-roling an email-only member to a non-super/PM role (foreman) with a 400", async () => {
+    const member = await addTeamMember(tdb, {
+      dealId: DEAL,
+      role: "superintendent",
+      memberName: "Ext Super",
+      memberEmail: EXT_PM_EMAIL,
+    });
+    // An email-only member (no user, no contact) may only be super/PM — foreman is rejected, mirroring the ADD
+    // flow's EMAIL_ONLY_TEAM_ROLES restriction.
+    await expect(updateTeamMember(tdb, member.id, DEAL, { role: "foreman" })).rejects.toMatchObject({
+      statusCode: 400,
+    });
+    // The role is unchanged (the update was rejected before the write).
+    const row = await tdb.execute(sql`SELECT role FROM deal_team_members WHERE id = ${member.id}`);
+    expect((row.rows[0] as { role: string }).role).toBe("superintendent");
+  });
+
+  it("allows re-roling an email-only member between super and PM (project_manager) OK", async () => {
+    const member = await addTeamMember(tdb, {
+      dealId: DEAL,
+      role: "superintendent",
+      memberName: "Ext Super",
+      memberEmail: EXT_PM_EMAIL,
+    });
+    const updated = await updateTeamMember(tdb, member.id, DEAL, { role: "project_manager" });
+    expect(updated.role).toBe("project_manager");
+  });
+
+  it("does not restrict a LINKED (staff-user) member to super/PM (foreman OK)", async () => {
+    // The email-only restriction applies ONLY to email-only members; a linked staff user may take any role.
+    const member = await addTeamMember(tdb, { dealId: DEAL, userId: USER, role: "superintendent" });
+    const updated = await updateTeamMember(tdb, member.id, DEAL, { role: "foreman" });
+    expect(updated.role).toBe("foreman");
+  });
+});
+
+describe("responder reassignment re-notifies the deal's open corrective-action cards (finding 4)", () => {
+  it("removing a responder clears sent_at, deletes tokens, and enqueues a fresh job per open card", async () => {
+    // Mark the deal's open corrective-action scorecard as already-sent + carrying a prior-cycle token.
+    await tdb.execute(sql`UPDATE field_scorecards SET corrective_action_email_sent_at = now() WHERE id = ${SCORECARD}`);
+    const member = await addTeamMember(tdb, {
+      dealId: DEAL,
+      role: "superintendent",
+      memberName: "Ext Super",
+      memberEmail: EXT_PM_EMAIL,
+    });
+    await mintCorrectiveActionToken(tdb, {
+      scorecardId: SCORECARD,
+      recipientEmail: EXT_PM_EMAIL,
+      role: "superintendent",
+      ttlDays: 30,
+    });
+    expect(await correctiveJobCount()).toBe(0);
+
+    await removeTeamMember(tdb, member.id, DEAL, OFFICE);
+
+    // The open card's sent stamp is cleared, its tokens are gone, and exactly one fresh job was enqueued.
+    const sentAt = await tdb.execute(
+      sql`SELECT corrective_action_email_sent_at AS s FROM field_scorecards WHERE id = ${SCORECARD}`,
+    );
+    expect((sentAt.rows[0] as { s: unknown }).s).toBeNull();
+    const tokens = await tdb.execute(
+      sql`SELECT COUNT(*)::int AS c FROM scorecard_corrective_action_tokens WHERE scorecard_id = ${SCORECARD}`,
+    );
+    expect((tokens.rows[0] as { c: number }).c).toBe(0);
+    expect(await correctiveJobCount()).toBe(1);
+    // The enqueued job carries the exact reconcile payload shape (tenantSchema, scorecardId, dealId, officeId,
+    // cycleNonce) + matching office_id / status.
+    const job = await tdb.execute(
+      sql`SELECT job_type, office_id, status, max_attempts, payload FROM public.job_queue WHERE job_type = 'scorecard_corrective_action_email' LIMIT 1`,
+    );
+    const jr = job.rows[0] as { office_id: string; status: string; max_attempts: number; payload: any };
+    expect(jr.office_id).toBe(OFFICE.id);
+    expect(jr.status).toBe("pending");
+    expect(jr.max_attempts).toBe(6);
+    expect(jr.payload.tenantSchema).toBe(`office_${OFFICE.slug}`);
+    expect(jr.payload.scorecardId).toBe(SCORECARD);
+    expect(jr.payload.dealId).toBe(DEAL);
+    expect(jr.payload.officeId).toBe(OFFICE.id);
+    expect(typeof jr.payload.cycleNonce).toBe("string");
+  });
+
+  it("re-roling a responder off super/PM re-notifies the deal's open cards", async () => {
+    await tdb.execute(sql`UPDATE field_scorecards SET corrective_action_email_sent_at = now() WHERE id = ${SCORECARD}`);
+    // A second super/PM keeps the deal populated with an active responder for the replacement scenario. The
+    // LEAVING member is a LINKED staff user (email-only members can't be re-roled to foreman — finding 3).
+    await addTeamMember(tdb, { dealId: DEAL, userId: USER, role: "project_manager" });
+    const leaving = await addTeamMember(tdb, {
+      dealId: DEAL,
+      userId: ACTIVE_EMAIL_USER,
+      role: "superintendent",
+    });
+    expect(await correctiveJobCount()).toBe(0);
+
+    await updateTeamMember(tdb, leaving.id, DEAL, { role: "foreman" }, OFFICE);
+
+    const sentAt = await tdb.execute(
+      sql`SELECT corrective_action_email_sent_at AS s FROM field_scorecards WHERE id = ${SCORECARD}`,
+    );
+    expect((sentAt.rows[0] as { s: unknown }).s).toBeNull();
+    expect(await correctiveJobCount()).toBe(1);
+  });
+
+  it("does NOT re-notify a card on a DIFFERENT deal", async () => {
+    await tdb.execute(sql`UPDATE field_scorecards SET corrective_action_email_sent_at = now() WHERE id = ${OTHER_SCORECARD}`);
+    const member = await addTeamMember(tdb, {
+      dealId: DEAL,
+      role: "superintendent",
+      memberName: "Ext Super",
+      memberEmail: EXT_PM_EMAIL,
+    });
+    await removeTeamMember(tdb, member.id, DEAL, OFFICE);
+    // The OTHER deal's card is untouched: its sent stamp survives and NO job targets it. (The removal DOES
+    // re-notify THIS deal's open card, so the re-notify is scoped to the mutated deal, not global.)
+    const otherSentAt = await tdb.execute(
+      sql`SELECT corrective_action_email_sent_at AS s FROM field_scorecards WHERE id = ${OTHER_SCORECARD}`,
+    );
+    expect((otherSentAt.rows[0] as { s: unknown }).s).not.toBeNull();
+    const otherDealJobs = await tdb.execute(sql`
+      SELECT COUNT(*)::int AS c FROM public.job_queue
+      WHERE job_type = 'scorecard_corrective_action_email'
+        AND payload->>'scorecardId' = ${OTHER_SCORECARD}
+    `);
+    expect((otherDealJobs.rows[0] as { c: number }).c).toBe(0);
+    // Exactly one job was enqueued — for THIS deal's open card only.
+    const thisDealJobs = await tdb.execute(sql`
+      SELECT COUNT(*)::int AS c FROM public.job_queue
+      WHERE job_type = 'scorecard_corrective_action_email'
+        AND payload->>'scorecardId' = ${SCORECARD}
+    `);
+    expect((thisDealJobs.rows[0] as { c: number }).c).toBe(1);
+  });
+
+  it("re-roling a super to PM (a lateral responder swap) DOES re-notify (finding 2)", async () => {
+    await tdb.execute(sql`UPDATE field_scorecards SET corrective_action_email_sent_at = now() WHERE id = ${SCORECARD}`);
+    const member = await addTeamMember(tdb, {
+      dealId: DEAL,
+      role: "superintendent",
+      memberName: "Ext Super",
+      memberEmail: EXT_PM_EMAIL,
+    });
+    await updateTeamMember(tdb, member.id, DEAL, { role: "project_manager" }, OFFICE);
+    // A TRUE lateral super↔PM swap can expose an OLDER same-role assignee whose token was deleted by the newer
+    // assignment's cycle (DISTINCT ON role recipient resolution) → the fallback would be stranded. So a lateral
+    // swap restarts the cycle: sent stamp cleared, exactly ONE fresh job.
+    const sentAt = await tdb.execute(
+      sql`SELECT corrective_action_email_sent_at AS s FROM field_scorecards WHERE id = ${SCORECARD}`,
+    );
+    expect((sentAt.rows[0] as { s: unknown }).s).toBeNull();
+    expect(await correctiveJobCount()).toBe(1);
+  });
+});
+
+describe("a responder ENTERING the team re-notifies the deal's open corrective-action cards (finding 2)", () => {
+  it("ADDING an active email-only super to a deal with an open card enqueues a fresh cycle", async () => {
+    // A newly-added responder becomes authorized (the token/assignment IS the auth) but the original
+    // notification already stamped as sent — without an add-path restart the new responder is never emailed a
+    // link. Adding an ACTIVE super/PM must start a fresh cycle: clear sent_at, delete prior-cycle tokens, enqueue
+    // exactly one job for the deal's open card.
+    await tdb.execute(sql`UPDATE field_scorecards SET corrective_action_email_sent_at = now() WHERE id = ${SCORECARD}`);
+    // A prior-cycle token that must be cleared when the new cycle starts.
+    await mintCorrectiveActionToken(tdb, {
+      scorecardId: SCORECARD,
+      recipientEmail: "prior@example.com",
+      role: "project_manager",
+      ttlDays: 30,
+    });
+    expect(await correctiveJobCount()).toBe(0);
+
+    await addTeamMember(
+      tdb,
+      { dealId: DEAL, role: "superintendent", memberName: "New Super", memberEmail: EXT_PM_EMAIL },
+      OFFICE,
+    );
+
+    const sentAt = await tdb.execute(
+      sql`SELECT corrective_action_email_sent_at AS s FROM field_scorecards WHERE id = ${SCORECARD}`,
+    );
+    expect((sentAt.rows[0] as { s: unknown }).s).toBeNull();
+    const tokens = await tdb.execute(
+      sql`SELECT COUNT(*)::int AS c FROM scorecard_corrective_action_tokens WHERE scorecard_id = ${SCORECARD}`,
+    );
+    expect((tokens.rows[0] as { c: number }).c).toBe(0);
+    expect(await correctiveJobCount()).toBe(1);
+  });
+
+  it("ADDING a LINKED (staff-user) PM to a deal with an open card enqueues a fresh cycle", async () => {
+    await tdb.execute(sql`UPDATE field_scorecards SET corrective_action_email_sent_at = now() WHERE id = ${SCORECARD}`);
+    await addTeamMember(tdb, { dealId: DEAL, userId: USER, role: "project_manager" }, OFFICE);
+    expect(await correctiveJobCount()).toBe(1);
+  });
+
+  it("ADDING a NON-responder (foreman via a linked user) does NOT re-notify", async () => {
+    await tdb.execute(sql`UPDATE field_scorecards SET corrective_action_email_sent_at = now() WHERE id = ${SCORECARD}`);
+    // A foreman is not a responder → no authorization gained → no fresh cycle.
+    await addTeamMember(tdb, { dealId: DEAL, userId: USER, role: "foreman" }, OFFICE);
+    expect(await correctiveJobCount()).toBe(0);
+    const sentAt = await tdb.execute(
+      sql`SELECT corrective_action_email_sent_at AS s FROM field_scorecards WHERE id = ${SCORECARD}`,
+    );
+    expect((sentAt.rows[0] as { s: unknown }).s).not.toBeNull();
+  });
+
+  it("ADDING a responder with NO office context does NOT enqueue (best-effort, skipped)", async () => {
+    await tdb.execute(sql`UPDATE field_scorecards SET corrective_action_email_sent_at = now() WHERE id = ${SCORECARD}`);
+    await addTeamMember(tdb, {
+      dealId: DEAL,
+      role: "superintendent",
+      memberName: "New Super",
+      memberEmail: EXT_PM_EMAIL,
+    });
+    // No office threaded → the restart is skipped (like the leave path), so no job and the stamp is untouched.
+    expect(await correctiveJobCount()).toBe(0);
+    const sentAt = await tdb.execute(
+      sql`SELECT corrective_action_email_sent_at AS s FROM field_scorecards WHERE id = ${SCORECARD}`,
+    );
+    expect((sentAt.rows[0] as { s: unknown }).s).not.toBeNull();
+  });
+
+  it("re-roling a foreman INTO project_manager re-notifies the deal's open cards", async () => {
+    await tdb.execute(sql`UPDATE field_scorecards SET corrective_action_email_sent_at = now() WHERE id = ${SCORECARD}`);
+    // A LINKED foreman (a non-responder) re-roled INTO PM becomes an authorized responder → fresh cycle.
+    const member = await addTeamMember(tdb, { dealId: DEAL, userId: USER, role: "foreman" });
+    expect(await correctiveJobCount()).toBe(0);
+
+    await updateTeamMember(tdb, member.id, DEAL, { role: "project_manager" }, OFFICE);
+
+    const sentAt = await tdb.execute(
+      sql`SELECT corrective_action_email_sent_at AS s FROM field_scorecards WHERE id = ${SCORECARD}`,
+    );
+    expect((sentAt.rows[0] as { s: unknown }).s).toBeNull();
+    expect(await correctiveJobCount()).toBe(1);
+  });
+
+  it("a LATERAL super→PM swap restarts EXACTLY ONCE (finding 2 — one job, not two)", async () => {
+    await tdb.execute(sql`UPDATE field_scorecards SET corrective_action_email_sent_at = now() WHERE id = ${SCORECARD}`);
+    const member = await addTeamMember(tdb, {
+      dealId: DEAL,
+      role: "superintendent",
+      memberName: "Ext Super",
+      memberEmail: EXT_PM_EMAIL,
+    });
+    expect(await correctiveJobCount()).toBe(0);
+
+    // A TRUE lateral swap restarts the cycle (the DISTINCT ON role fallback could otherwise be stranded), but via
+    // the SINGLE dedicated lateral branch — mutually exclusive with enter/leave — so EXACTLY ONE job, never two.
+    await updateTeamMember(tdb, member.id, DEAL, { role: "project_manager" }, OFFICE);
+    expect(await correctiveJobCount()).toBe(1);
+  });
+
+  it("a LATERAL PM→super swap ALSO restarts the cycle exactly once (finding 2)", async () => {
+    await tdb.execute(sql`UPDATE field_scorecards SET corrective_action_email_sent_at = now() WHERE id = ${SCORECARD}`);
+    const member = await addTeamMember(tdb, {
+      dealId: DEAL,
+      role: "project_manager",
+      memberName: "Ext PM",
+      memberEmail: EXT_PM_EMAIL,
+    });
+    expect(await correctiveJobCount()).toBe(0);
+
+    await updateTeamMember(tdb, member.id, DEAL, { role: "superintendent" }, OFFICE);
+    const sentAt = await tdb.execute(
+      sql`SELECT corrective_action_email_sent_at AS s FROM field_scorecards WHERE id = ${SCORECARD}`,
+    );
+    expect((sentAt.rows[0] as { s: unknown }).s).toBeNull();
+    expect(await correctiveJobCount()).toBe(1);
+  });
+
+  it("a no-op update that KEEPS the responder role does NOT restart (finding 2 — not a lateral swap)", async () => {
+    await tdb.execute(sql`UPDATE field_scorecards SET corrective_action_email_sent_at = now() WHERE id = ${SCORECARD}`);
+    const member = await addTeamMember(tdb, {
+      dealId: DEAL,
+      role: "superintendent",
+      memberName: "Ext Super",
+      memberEmail: EXT_PM_EMAIL,
+    });
+    expect(await correctiveJobCount()).toBe(0);
+
+    // Re-setting the SAME role (superintendent → superintendent) is not a lateral swap → the role is unchanged, so
+    // no responder was exposed and no restart fires. A notes-only edit likewise keeps the role.
+    await updateTeamMember(tdb, member.id, DEAL, { role: "superintendent", notes: "touched" }, OFFICE);
+    const sentAt = await tdb.execute(
+      sql`SELECT corrective_action_email_sent_at AS s FROM field_scorecards WHERE id = ${SCORECARD}`,
+    );
+    expect((sentAt.rows[0] as { s: unknown }).s).not.toBeNull();
+    expect(await correctiveJobCount()).toBe(0);
+  });
+});
+
+describe("updateTeamMember locks the target row FOR UPDATE before deriving the role transition (finding B)", () => {
+  it("issues a SELECT ... FROM deal_team_members ... FOR UPDATE on the pre-update read", async () => {
+    // Concurrent PATCHes on the SAME member must serialize before the wasResponder/stillResponder decision +
+    // notification-cycle restart. Assert the pre-update SELECT carries a FOR UPDATE row lock (mirrors the
+    // set-deal-estimator / confirm-upload FOR-UPDATE assertions). We capture the generated SQL off the PGlite
+    // connection so we see the drizzle query-builder's emitted lock clause.
+    const member = await addTeamMember(tdb, { dealId: DEAL, userId: USER, role: "superintendent" });
+
+    const seen: string[] = [];
+    const origQuery = pg.query.bind(pg);
+    const spy = vi.spyOn(pg, "query").mockImplementation(((q: any, ...rest: any[]) => {
+      if (typeof q === "string") seen.push(q);
+      return origQuery(q, ...rest);
+    }) as any);
+    try {
+      // A role change (super → project_manager) exercises the full pre-update read + transition path.
+      await updateTeamMember(tdb, member.id, DEAL, { role: "project_manager" });
+    } finally {
+      spy.mockRestore();
+    }
+
+    const lockIdx = seen.findIndex(
+      (t) => /from\s+"?deal_team_members"?/i.test(t) && /for update/i.test(t),
+    );
+    expect(lockIdx).toBeGreaterThanOrEqual(0); // the target team-member row was locked FOR UPDATE
+  });
+});
+
+describe("removeTeamMember side effects run exactly once — idempotent DELETE (finding C)", () => {
+  it("a retried removeTeamMember of the same member is a no-op: no extra token deletes, no extra enqueue", async () => {
+    await tdb.execute(sql`UPDATE field_scorecards SET corrective_action_email_sent_at = now() WHERE id = ${SCORECARD}`);
+    const member = await addTeamMember(tdb, {
+      dealId: DEAL,
+      role: "superintendent",
+      memberName: "Ext Super",
+      memberEmail: EXT_PM_EMAIL,
+    });
+    // A prior-cycle token that the FIRST removal revokes.
+    await mintCorrectiveActionToken(tdb, {
+      scorecardId: SCORECARD,
+      recipientEmail: EXT_PM_EMAIL,
+      role: "superintendent",
+      ttlDays: 30,
+    });
+
+    // First removal: flips the row inactive, revokes the token, restarts the cycle (one job).
+    const first = await removeTeamMember(tdb, member.id, DEAL, OFFICE);
+    expect(first.is_active ?? (first as any).isActive).toBe(false);
+    expect(await correctiveJobCount()).toBe(1);
+    const tokensAfterFirst = await tdb.execute(
+      sql`SELECT COUNT(*)::int AS c FROM scorecard_corrective_action_tokens WHERE scorecard_id = ${SCORECARD}`,
+    );
+    expect((tokensAfterFirst.rows[0] as { c: number }).c).toBe(0);
+
+    // Simulate a NEW responder replacing the removed one: mint a fresh token + re-stamp the card as sent, so we
+    // can prove a RETRIED delete does NOT clobber the replacement's token or reset the sent stamp.
+    await mintCorrectiveActionToken(tdb, {
+      scorecardId: SCORECARD,
+      recipientEmail: "replacement@example.com",
+      role: "superintendent",
+      ttlDays: 30,
+    });
+    await tdb.execute(sql`UPDATE field_scorecards SET corrective_action_email_sent_at = now() WHERE id = ${SCORECARD}`);
+
+    // Retried removal of the SAME (already-inactive) member: the deactivation UPDATE now matches is_active=true
+    // rows only → 0 rows flipped → the side effects (token revoke + cycle restart) must NOT run again.
+    await expect(removeTeamMember(tdb, member.id, DEAL, OFFICE)).rejects.toMatchObject({ statusCode: 404 });
+
+    // No SECOND enqueue (still exactly one job from the first removal).
+    expect(await correctiveJobCount()).toBe(1);
+    // The replacement's fresh token survives (a retried DELETE did not re-run the revoke).
+    const tokensAfterRetry = await tdb.execute(
+      sql`SELECT COUNT(*)::int AS c FROM scorecard_corrective_action_tokens WHERE scorecard_id = ${SCORECARD} AND recipient_email = 'replacement@example.com'`,
+    );
+    expect((tokensAfterRetry.rows[0] as { c: number }).c).toBe(1);
+    // The re-stamped sent_at is NOT reset (no second cycle restart).
+    const sentAt = await tdb.execute(
+      sql`SELECT corrective_action_email_sent_at AS s FROM field_scorecards WHERE id = ${SCORECARD}`,
+    );
+    expect((sentAt.rows[0] as { s: unknown }).s).not.toBeNull();
+  });
+});

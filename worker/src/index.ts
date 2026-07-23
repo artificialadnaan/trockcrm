@@ -32,6 +32,7 @@ import { runRfpVoteInvitationDeadLetterSweep } from "./jobs/rfp-vote-invitation.
 import { runReportsExecutionTick } from "./jobs/reports-execution.js";
 import { runRepPerformanceRollup } from "./jobs/rep-performance-rollup.js";
 import { runBidBoardIngestInboxRecovery } from "./jobs/bid-board-ingest.js";
+import { runCorrectiveActionUploadJanitor } from "./jobs/corrective-action-upload-janitor.js";
 
 const POLL_INTERVAL_MS = 2000; // Poll job queue every 2 seconds
 const RFP_DEAD_LETTER_SWEEP_INTERVAL_MS = 60000;
@@ -219,6 +220,23 @@ async function main() {
     }
   }, { timezone: "America/Chicago" });
   console.log("[Worker] Cron scheduled: call recording cleanup at 3:30 AM CT daily");
+
+  // Corrective-action abandoned-upload janitor: daily at 3:45 AM CT. Reclaims STALE, UNATTACHED
+  // corrective-action response uploads (a scorecard_corrective_action_uploads ledger row whose file has no
+  // field_scorecard_photos link and is older than the threshold) that the client's unreliable browser-side
+  // discard missed — soft-deletes the file + removes the ledger row, per active office, best-effort + logged.
+  cron.schedule("45 3 * * *", async () => {
+    console.log("[Worker:cron] Running corrective-action upload janitor...");
+    try {
+      const { reclaimed, officesSwept } = await runCorrectiveActionUploadJanitor();
+      console.log(
+        `[Worker:cron] Corrective-action upload janitor reclaimed ${reclaimed} upload(s) across ${officesSwept} office(s)`
+      );
+    } catch (err) {
+      console.error("[Worker:cron] Corrective-action upload janitor failed:", err);
+    }
+  }, { timezone: "America/Chicago" });
+  console.log("[Worker] Cron scheduled: corrective-action upload janitor at 3:45 AM CT daily");
 
   // Procore sync poll: every 15 minutes
   cron.schedule("*/15 * * * *", async () => {

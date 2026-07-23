@@ -166,6 +166,9 @@ export {
   fieldScorecardPhotos,
   fieldScorecardEditUploads,
 } from "./tenant/field-scorecards.js";
+export { scorecardCorrectiveActions } from "./tenant/scorecard-corrective-actions.js";
+export { scorecardCorrectiveActionTokens } from "./tenant/scorecard-corrective-action-tokens.js";
+export { scorecardCorrectiveActionUploads } from "./tenant/scorecard-corrective-action-uploads.js";
 export {
   projects,
   projectPhaseHistory,

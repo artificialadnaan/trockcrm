@@ -8,6 +8,16 @@ import {
 import { AppError } from "../../middleware/error-handler.js";
 import type { FieldTenantDb } from "./cross-office.js";
 
+// The current-form editable lifecycle — `submitted` plus the two corrective-action states. This MUST match
+// the accepted statuses in updateFieldScorecard's edit guard AND the `canEdit` gate in scorecards-service.ts
+// (which re-exports this): the mobile editor opens on any of these statuses, so evidence presign must be
+// allowed on the same set — else an open/closed corrective card opens for edit but adding a photo 422s here.
+export const EDITABLE_SCORECARD_STATUSES = new Set([
+  "submitted",
+  "corrective_action_open",
+  "corrective_action_closed",
+]);
+
 export type ScorecardEvidenceUploadTarget = {
   dealId?: string;
   leadId?: string;
@@ -53,7 +63,7 @@ export function assertScorecardEvidenceUploadCard(
   if (card.submittedBy !== input.userId) {
     throw new AppError(403, "Only the person who submitted this scorecard can add evidence.", "SCORECARD_EDIT_FORBIDDEN");
   }
-  if (card.status !== "submitted" || card.formVersion !== 2) {
+  if (!EDITABLE_SCORECARD_STATUSES.has(card.status) || card.formVersion !== 2) {
     throw new AppError(422, "Only submitted current-form scorecards can accept edited evidence.", "SCORECARD_EDIT_UNSUPPORTED");
   }
   if (card.dealId !== input.target.dealId) {

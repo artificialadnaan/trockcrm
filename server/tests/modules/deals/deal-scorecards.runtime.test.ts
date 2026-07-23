@@ -14,7 +14,13 @@ import {
   getDealScorecardPdfArtifactState,
   presignDealScorecardPdf,
 } from "../../../src/modules/deals/scorecards-service.js";
-import { fieldScorecards, fieldScorecardItems, fieldScorecardPhotos } from "@trock-crm/shared/schema";
+import {
+  fieldScorecards,
+  fieldScorecardItems,
+  fieldScorecardPhotos,
+  scorecardCorrectiveActions,
+} from "@trock-crm/shared/schema";
+import { sql } from "drizzle-orm";
 import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
 
 const DEAL = "11111111-1111-1111-1111-111111111111";
@@ -42,7 +48,9 @@ beforeAll(async () => {
     );
     SET search_path TO public;
   `);
-  await pg.exec(tenantSchemaSql("public", [fieldScorecards, fieldScorecardItems, fieldScorecardPhotos]));
+  await pg.exec(
+    tenantSchemaSql("public", [fieldScorecards, fieldScorecardItems, fieldScorecardPhotos, scorecardCorrectiveActions]),
+  );
   await pg.exec(`INSERT INTO files (id, description) VALUES ('${FILE1}', 'Slab crack'), ('${FILE2}', 'Crew briefing');`);
   tdb = drizzle(pg);
 
@@ -164,6 +172,94 @@ describe("getDealScorecardDetail", () => {
     expect(detail.photos[0].caption).toBe("Crew briefing");
     // Leadership cards carry no deficiencies/signatures.
     expect(detail.criticalDeficiencies).toEqual([]);
+  });
+});
+
+describe("corrective-action thread on the detail (spec §9)", () => {
+  const CA_ITEM_1 = "cccccccc-0000-0000-0000-000000000001";
+  const CA_ITEM_2 = "cccccccc-0000-0000-0000-000000000002";
+  const CA_PHOTO_FILE = "aaaaaaaa-0000-0000-0000-0000000000ca";
+
+  beforeAll(async () => {
+    await pg.exec(`INSERT INTO files (id, description) VALUES ('${CA_PHOTO_FILE}', 'After fix');`);
+    // Mark SC_NEWER open + seed two corrective-action items (one resolved with a response photo, one open).
+    await tdb.execute(sql`UPDATE field_scorecards SET status = 'corrective_action_open' WHERE id = ${SC_NEWER}`);
+    await tdb.insert(scorecardCorrectiveActions).values([
+      {
+        id: CA_ITEM_1, scorecardId: SC_NEWER, itemType: "action_item", itemRef: "0", itemLabel: "Re-pour slab",
+        status: "resolved", responseComment: "Slab re-poured and cured", responderName: "Sam Super",
+        respondedByUserId: USER, respondedAt: new Date("2026-07-02T12:00:00Z"),
+      },
+      {
+        id: CA_ITEM_2, scorecardId: SC_NEWER, itemType: "critical_deficiency", itemRef: "failed_inspection",
+        itemLabel: "Failed inspection", status: "open",
+      },
+    ]);
+    await tdb.insert(fieldScorecardPhotos).values([
+      { scorecardId: SC_NEWER, sectionKey: null, deficiencyKey: null, fileId: CA_PHOTO_FILE, correctiveActionId: CA_ITEM_1 },
+    ]);
+  });
+
+  afterAll(async () => {
+    await tdb.execute(sql`DELETE FROM field_scorecard_photos WHERE corrective_action_id IS NOT NULL`);
+    await tdb.execute(sql`DELETE FROM scorecard_corrective_actions`);
+    await tdb.execute(sql`UPDATE field_scorecards SET status = 'submitted' WHERE id = ${SC_NEWER}`);
+  });
+
+  it("includes the scorecard status + corrective-action items with responses on the detail", async () => {
+    const detail = await getDealScorecardDetail(tdb, DEAL, SC_NEWER, {
+      resolvePhotoUrl: async (fileId) => `url://${fileId}`,
+    });
+    expect(detail.status).toBe("corrective_action_open");
+    expect(detail.correctiveActions).toHaveLength(2);
+
+    const resolved = detail.correctiveActions!.find((i) => i.id === CA_ITEM_1)!;
+    expect(resolved.status).toBe("resolved");
+    expect(resolved.itemLabel).toBe("Re-pour slab");
+    expect(resolved.responseComment).toBe("Slab re-poured and cured");
+    expect(resolved.responderName).toBe("Sam Super");
+    expect(resolved.respondedAt).toBeTruthy();
+    expect(resolved.photos).toHaveLength(1);
+    expect(resolved.photos[0].url).toBe(`url://${CA_PHOTO_FILE}`);
+
+    const open = detail.correctiveActions!.find((i) => i.id === CA_ITEM_2)!;
+    expect(open.status).toBe("open");
+    expect(open.responseComment).toBeNull();
+    expect(open.photos).toEqual([]);
+
+    // The response photo appears ONLY under correctiveActions — NOT in the Evidence `photos` list (which is
+    // original section-keyed evidence). Before the filter fix, the CA_PHOTO_FILE row (which also carries the
+    // scorecard_id) double-rendered here with sectionKey: null (a DTO violation).
+    expect(detail.photos.map((p) => p.fileId)).not.toContain(CA_PHOTO_FILE);
+    expect(detail.photos.map((p) => p.fileId)).toEqual([FILE1]);
+    expect(detail.photos.every((p) => p.sectionKey != null)).toBe(true);
+  });
+
+  it("returns an empty correctiveActions array for a passing card (no items)", async () => {
+    const detail = await getDealScorecardDetail(tdb, DEAL, SC_OLDER);
+    expect(detail.correctiveActions).toEqual([]);
+    expect(detail.status).toBe("submitted");
+  });
+
+  it("drops a response photo whose backing file is soft-deleted from the thread (finding F)", async () => {
+    // The resolved item's response photo (CA_PHOTO_FILE) is active by default → it appears in the thread. Once
+    // its backing file is soft-deleted, the INNER-join photo query must DROP the link entirely (a LEFT join
+    // would keep the row with a stale fileId → a broken photo). An active file still appears.
+    const detailActive = await getDealScorecardDetail(tdb, DEAL, SC_NEWER, {
+      resolvePhotoUrl: async (fileId) => `url://${fileId}`,
+    });
+    expect(detailActive.correctiveActions!.find((i) => i.id === CA_ITEM_1)!.photos).toHaveLength(1);
+
+    await pg.exec(`UPDATE files SET is_active = false, deleted_at = NOW() WHERE id = '${CA_PHOTO_FILE}'`);
+    try {
+      const detail = await getDealScorecardDetail(tdb, DEAL, SC_NEWER, {
+        resolvePhotoUrl: async (fileId) => `url://${fileId}`,
+      });
+      // The soft-deleted response photo is gone — no broken/orphaned link on the resolved item.
+      expect(detail.correctiveActions!.find((i) => i.id === CA_ITEM_1)!.photos).toEqual([]);
+    } finally {
+      await pg.exec(`UPDATE files SET is_active = true, deleted_at = NULL WHERE id = '${CA_PHOTO_FILE}'`);
+    }
   });
 });
 

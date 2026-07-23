@@ -6,6 +6,9 @@ import type * as schema from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
 import { updateBreaksBillingAddress } from "../../lib/billing-address.js";
 import { buildContactSearchCondition } from "../search/unified-search.js";
+import { revokeCorrectiveActionTokensForRemovedMember } from "../deals/team-service.js";
+import type { TeamMutationOffice } from "../deals/team-service.js";
+import { restartCorrectiveActionNotificationCycleForDeal } from "../field/corrective-actions-service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 const INVALID_EMAIL_MESSAGE = "Please enter a valid email address.";
@@ -691,11 +694,20 @@ export async function createContact(
 
 /**
  * Update an existing contact.
+ *
+ * `office` (id + slug) is threaded from the PATCH route so CHANGING the email of a contact who is an active
+ * super/PM responder restarts each affected deal's open corrective-action notification cycle (finding P2). The
+ * verify-time recipient revalidation 403s a delivered token whose recipient email no longer matches an active
+ * super/PM assignment — so an email change instantly invalidates the old link while the new address never gets
+ * one. Mirroring the archive path (deleteContact), we resolve the affected deals BEFORE the update and restart
+ * AFTER, so the worker re-sends a working link to the contact's NEW email. Optional so direct/legacy callers
+ * that never change the email still type-check; when absent the restart is skipped (best-effort).
  */
 export async function updateContact(
   tenantDb: TenantDb,
   contactId: string,
-  input: UpdateContactInput
+  input: UpdateContactInput,
+  office?: TeamMutationOffice,
 ) {
   const existing = await getContactById(tenantDb, contactId);
   if (!existing) {
@@ -778,11 +790,43 @@ export async function updateContact(
     }
   }
 
+  // Detect an actual email CHANGE (finding P2). `input.email` is already normalized (lower/trim/null) above, and
+  // `existing.email` was normalized on its own prior write, so the strict compare is a real value change. If a
+  // super/PM responder's email changes, the delivered corrective-action token's recipient-email no longer matches
+  // their active assignment → verify-time revalidation 403s the old link while the new address never got one. So
+  // resolve the deals where this contact is an ACTIVE super/PM BEFORE the update, then restart each after (mirror
+  // the archive path). Distinct deal ids only.
+  const emailChanged = input.email !== undefined && input.email !== existing.email;
+  const responderDeals =
+    emailChanged && office
+      ? await tenantDb
+          .selectDistinct({ dealId: dealTeamMembers.dealId })
+          .from(dealTeamMembers)
+          .where(
+            and(
+              eq(dealTeamMembers.contactId, contactId),
+              eq(dealTeamMembers.isActive, true),
+              inArray(dealTeamMembers.role, ["superintendent", "project_manager"]),
+            ),
+          )
+      : [];
+
   const result = await tenantDb
     .update(contacts)
     .set(updates)
     .where(eq(contacts.id, contactId))
     .returning();
+
+  // Restart each affected deal's open corrective-action cycle AFTER the email write (finding P2): the worker
+  // re-sends a fresh link to the contact's NEW email, so an open item isn't stranded on a now-403ing old link.
+  // The restart clears the sent stamp + prior-cycle tokens and enqueues a fresh job per open card. Best-effort:
+  // only when office context was threaded (else responderDeals is empty). Runs in the caller's tenant
+  // transaction (the PATCH route commits both together).
+  if (office) {
+    for (const { dealId } of responderDeals) {
+      await restartCorrectiveActionNotificationCycleForDeal(tenantDb, { dealId, office });
+    }
+  }
 
   return result[0];
 }
@@ -790,8 +834,18 @@ export async function updateContact(
 /**
  * Soft-delete a contact.
  * Only directors/admins can delete.
+ *
+ * `office` (id + slug) is threaded from the DELETE route so archiving a super/PM contact can restart each
+ * affected deal's open corrective-action notification cycle (finding D). Optional so legacy/direct callers that
+ * never trigger the re-notify still type-check; when absent the re-notify is skipped (the token revoke still
+ * runs) — best-effort, matching the team-member removal path.
  */
-export async function deleteContact(tenantDb: TenantDb, contactId: string, userRole: string) {
+export async function deleteContact(
+  tenantDb: TenantDb,
+  contactId: string,
+  userRole: string,
+  office?: TeamMutationOffice,
+) {
   if (userRole === "rep") {
     throw new AppError(403, "Only directors and admins can delete contacts");
   }
@@ -820,6 +874,20 @@ export async function deleteContact(tenantDb: TenantDb, contactId: string, userR
   // (billing_contact_id IS NULL) isn't falsely satisfied by a contact users can no longer select (Codex P2).
   await tenantDb.update(deals).set({ billingContactId: null }).where(eq(deals.billingContactId, contactId));
 
+  // Capture the deals where this contact is an ACTIVE super/PM BEFORE deactivating — those are the scorecards
+  // whose corrective-action web tokens must be revoked (a contact-backed responder holds a recipient-bound
+  // token; archiving must not leave them access for the 30-day TTL). Distinct deal ids only.
+  const responderDeals = await tenantDb
+    .selectDistinct({ dealId: dealTeamMembers.dealId })
+    .from(dealTeamMembers)
+    .where(
+      and(
+        eq(dealTeamMembers.contactId, contactId),
+        eq(dealTeamMembers.isActive, true),
+        inArray(dealTeamMembers.role, ["superintendent", "project_manager"]),
+      ),
+    );
+
   // Deactivate this contact's active deal-team assignments. getTeamMembers already HIDES rows whose linked
   // identity is inactive, so leaving them active leaves a phantom assignment admins can't remove from the UI.
   // Flip is_active here (matching the deals update above + merge-service's dealTeamMembers writes) so the
@@ -828,6 +896,30 @@ export async function deleteContact(tenantDb: TenantDb, contactId: string, userR
     .update(dealTeamMembers)
     .set({ isActive: false, updatedAt: new Date() })
     .where(and(eq(dealTeamMembers.contactId, contactId), eq(dealTeamMembers.isActive, true)));
+
+  // Revoke the archived contact's corrective-action tokens on each affected deal's scorecards. Runs AFTER the
+  // deactivation above so the contact's own now-inactive rows don't preserve their token; the shared helper is
+  // a no-op when another ACTIVE super/PM on the deal still resolves to the same email (a shared-mailbox case).
+  // verifyCorrectiveActionToken checks only hash + expiry, so this delete is the only server-side gate.
+  //
+  // Then restart each affected deal's open corrective-action cycle (finding D): archiving a super/PM contact is
+  // a responder removal, exactly like removeTeamMember. If the archived contact was the NEWEST super/PM and an
+  // OLDER active assignment remains, resolution falls back to the older assignee — but their prior token was
+  // deleted when the newer row was added, and `corrective_action_email_sent_at` is still set, so without a
+  // restart the fallback assignee is stranded (authorized but with no working link and no fresh email). The
+  // restart clears the sent stamp + prior-cycle tokens and enqueues a fresh notification job per open card, so
+  // the worker re-sends the fallback (or any remaining) responder a working link. Best-effort: skipped when no
+  // office context was threaded (the token revoke above still ran). Runs in the caller's tenant transaction.
+  for (const { dealId } of responderDeals) {
+    await revokeCorrectiveActionTokensForRemovedMember(tenantDb, dealId, {
+      userId: null,
+      contactId,
+      memberEmail: null,
+    });
+    if (office) {
+      await restartCorrectiveActionNotificationCycleForDeal(tenantDb, { dealId, office });
+    }
+  }
 
   return result[0];
 }

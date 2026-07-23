@@ -81,12 +81,18 @@ import {
   assertScorecardEvidenceUploadAccess,
   discardScorecardEditEvidence,
 } from "./scorecard-evidence-upload.js";
+import { registerCorrectiveActionRoutes } from "./corrective-action-routes.js";
 
 // Default capture-target picker page size (mirrors searchPhotoUploadTargets' internal default), used as
 // the GLOBAL cap when the cross-office picker merges per-office results.
 const FIELD_CAPTURE_TARGET_DEFAULT_LIMIT = 30;
 
 export const fieldRoutes = Router();
+
+// Corrective-action read + itemized-response endpoints (session OR recipient-bound token auth). Registered
+// on the field router; the token path intentionally bypasses requireFieldContractor (email-only responders
+// have no session) and authorizes via the scorecard's office + the ?token instead.
+registerCorrectiveActionRoutes(fieldRoutes);
 
 function parseOptionalPositiveInt(value: unknown): number | undefined {
   if (typeof value !== "string") return undefined;
@@ -1079,6 +1085,7 @@ fieldRoutes.put("/scorecards/:id", requireFieldContractor, async (req, res, next
         userId: req.fieldUser!.id,
         userRole: req.fieldUser!.role,
         scorecardId: id,
+        office,
         ...parsed,
       }),
     );

@@ -10,7 +10,14 @@ import {
   resolveScorecardTeamNames,
 } from "../../../src/modules/deals/team-service.js";
 import { deleteContact } from "../../../src/modules/contacts/service.js";
-import { dealTeamMembers, contacts, deals } from "@trock-crm/shared/schema";
+import { resolveCorrectiveActionRecipients } from "../../../src/modules/field/corrective-action-recipients.js";
+import {
+  dealTeamMembers,
+  contacts,
+  deals,
+  fieldScorecards,
+  scorecardCorrectiveActionTokens,
+} from "@trock-crm/shared/schema";
 import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
 
 // deal_team_members can point at EITHER a staff user (public.users) OR a directory contact (tenant
@@ -30,7 +37,17 @@ beforeAll(async () => {
   await pg.exec(`
     CREATE TABLE public.users (id uuid PRIMARY KEY, display_name text, email text, avatar_url text, is_active boolean DEFAULT true);
   `);
-  await pg.exec(tenantSchemaSql("public", [dealTeamMembers, contacts, deals]));
+  // field_scorecards + the corrective-action token table are needed because re-roling a super/PM off the
+  // responder roles now revokes that recipient's tokens (finding 4), whose DELETE references both tables.
+  await pg.exec(
+    tenantSchemaSql("public", [
+      dealTeamMembers,
+      contacts,
+      deals,
+      fieldScorecards,
+      scorecardCorrectiveActionTokens,
+    ]),
+  );
   await pg.exec(`
     INSERT INTO public.users (id, display_name, email, avatar_url, is_active) VALUES
       ('${USER}', 'Sam Super', 'sam.super@trock.com', 'https://cdn/sam.png', true);
@@ -84,6 +101,75 @@ describe("addTeamMember (user vs contact one-of)", () => {
     const member = await addTeamMember(tdb, { dealId: DEAL, userId: USER, role: "estimator" });
     expect(member.userId).toBe(USER);
     expect(member.role).toBe("estimator");
+  });
+});
+
+describe("addTeamMember (email-only member — spec §4.4)", () => {
+  it("adds an email-only superintendent (no userId/contactId, name + email on the row)", async () => {
+    const member = await addTeamMember(tdb, {
+      dealId: DEAL,
+      role: "superintendent",
+      memberName: "Ext Super",
+      memberEmail: "ext.super@example.com",
+    });
+    expect(member.userId).toBeNull();
+    expect(member.contactId).toBeNull();
+    expect(member.memberEmail).toBe("ext.super@example.com");
+    expect(member.memberName).toBe("Ext Super");
+    expect(member.role).toBe("superintendent");
+  });
+
+  it("surfaces the email-only member in getTeamMembers with an isEmailOnly flag", async () => {
+    await addTeamMember(tdb, {
+      dealId: DEAL,
+      role: "project_manager",
+      memberName: "Ext PM",
+      memberEmail: "ext.pm@example.com",
+    });
+    const [row] = (await getTeamMembers(tdb, DEAL)) as any[];
+    expect(row.displayName).toBe("Ext PM");
+    expect(row.email).toBe("ext.pm@example.com");
+    expect(row.userId).toBeNull();
+    expect(row.contactId).toBeNull();
+    expect(row.isEmailOnly).toBe(true);
+  });
+
+  it("rejects an email-only member for a non-super/PM role", async () => {
+    await expect(
+      addTeamMember(tdb, {
+        dealId: DEAL,
+        role: "foreman",
+        memberName: "Ext Foreman",
+        memberEmail: "ext.foreman@example.com",
+      }),
+    ).rejects.toThrow(/superintendent or project manager/i);
+  });
+
+  it("rejects an email-only member with an invalid email", async () => {
+    await expect(
+      addTeamMember(tdb, { dealId: DEAL, role: "superintendent", memberName: "Bad", memberEmail: "not-an-email" }),
+    ).rejects.toThrow(/valid email/i);
+  });
+
+  it("rejects an email-only member with no name", async () => {
+    await expect(
+      addTeamMember(tdb, { dealId: DEAL, role: "superintendent", memberEmail: "noname@example.com" }),
+    ).rejects.toThrow(/name is required/i);
+  });
+
+  it("is resolved by resolveCorrectiveActionRecipients (userId null, its email/name)", async () => {
+    await addTeamMember(tdb, {
+      dealId: DEAL,
+      role: "superintendent",
+      memberName: "Ext Super",
+      memberEmail: "ext.super@example.com",
+    });
+    const recipients = await resolveCorrectiveActionRecipients(tdb, DEAL);
+    const superRow = recipients.find((r) => r.role === "superintendent");
+    expect(superRow).toBeTruthy();
+    expect(superRow!.userId).toBeNull();
+    expect(superRow!.email).toBe("ext.super@example.com");
+    expect(superRow!.name).toBe("Ext Super");
   });
 });
 

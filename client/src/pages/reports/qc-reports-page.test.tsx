@@ -85,6 +85,7 @@ beforeEach(() => {
         submittedAt: "2026-07-14T17:00:00.000Z",
         submittedByName: "Sam Reyes",
         pdfAvailable: true,
+        status: "corrective_action_open",
       },
     ],
     regions: ["Dallas"],
@@ -129,6 +130,28 @@ describe("QcReportsPage", () => {
       "Project",
       "Leadership",
     ]);
+  });
+
+  it("renders the Corrective Action status column + filter", async () => {
+    await act(async () => {
+      root.render(
+        <MemoryRouter initialEntries={["/projects/qc-reports?officeId=office-dallas"]}>
+          <QcReportsPage />
+        </MemoryRouter>,
+      );
+    });
+
+    const text = container.textContent ?? "";
+    // The column header + the open pill for the project row.
+    expect(text).toContain("Corrective Action");
+    expect(text).toContain("Open");
+
+    // A dedicated Any-status filter dropdown offering Open / Closed.
+    const caFilter = Array.from(container.querySelectorAll("select")).find((select) =>
+      Array.from(select.options).some((option) => option.textContent === "Any status"),
+    );
+    expect(caFilter).toBeTruthy();
+    expect(Array.from(caFilter!.options).map((o) => o.textContent)).toEqual(["Any status", "Open", "Closed"]);
   });
 
   it.each([

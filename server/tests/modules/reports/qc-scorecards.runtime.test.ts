@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
+import { sql } from "drizzle-orm";
 import { getQcScorecardsReport } from "../../../src/modules/reports/qc-scorecards-service.js";
 import { fieldScorecards } from "@trock-crm/shared/schema";
 import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
@@ -164,5 +165,34 @@ describe("getQcScorecardsReport", () => {
     expect((await getQcScorecardsReport(tdb, { ...JUNE, search: "ATL-2207" })).scorecards.map((s) => s.scorecardId)).toEqual([SC3]);
     expect((await getQcScorecardsReport(tdb, { ...JUNE, search: "Dana" })).scorecards.map((s) => s.scorecardId)).toEqual([SC3]);
     expect((await getQcScorecardsReport(tdb, { ...JUNE, search: "Leah" })).scorecards.map((s) => s.scorecardId)).toEqual([SC_LEADERSHIP]);
+  });
+});
+
+describe("getQcScorecardsReport — corrective-action status", () => {
+  // SC3 is the below-band Atlanta card. Mark it OPEN, and SC1 (in-window Dallas) CLOSED, to exercise the
+  // status column + the open/closed filter. Reset after so the other suites see plain `submitted` rows.
+  beforeAll(async () => {
+    await tdb.execute(sql`UPDATE field_scorecards SET status = 'corrective_action_open' WHERE id = ${SC3}`);
+    await tdb.execute(sql`UPDATE field_scorecards SET status = 'corrective_action_closed' WHERE id = ${SC1}`);
+  });
+  afterAll(async () => {
+    await tdb.execute(sql`UPDATE field_scorecards SET status = 'submitted' WHERE id IN (${SC3}, ${SC1})`);
+  });
+
+  it("emits the scorecard status on each row (default 'submitted')", async () => {
+    const { scorecards } = await getQcScorecardsReport(tdb, JUNE);
+    expect(scorecards.find((s) => s.scorecardId === SC3)!.status).toBe("corrective_action_open");
+    expect(scorecards.find((s) => s.scorecardId === SC1)!.status).toBe("corrective_action_closed");
+    expect(scorecards.find((s) => s.scorecardId === SC2)!.status).toBe("submitted");
+  });
+
+  it("narrows to open corrective-action cards with correctiveActionStatus=open", async () => {
+    const { scorecards } = await getQcScorecardsReport(tdb, { ...JUNE, correctiveActionStatus: "open" });
+    expect(scorecards.map((s) => s.scorecardId)).toEqual([SC3]);
+  });
+
+  it("narrows to closed corrective-action cards with correctiveActionStatus=closed", async () => {
+    const { scorecards } = await getQcScorecardsReport(tdb, { ...JUNE, correctiveActionStatus: "closed" });
+    expect(scorecards.map((s) => s.scorecardId)).toEqual([SC1]);
   });
 });

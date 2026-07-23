@@ -54,6 +54,16 @@ function genericRatingLabel(rating: string) {
 function kindLabel(kind: ScorecardKind) {
   return kind === "leadership" ? "Leadership" : "Project";
 }
+// Corrective-action status pill for the QC table column. A plain `submitted` card shows a dash.
+export function correctiveActionCell(status: string | undefined): { label: string; className: string } | null {
+  if (status === "corrective_action_open") {
+    return { label: "Open", className: "border-red-200 bg-red-50 text-brand-red" };
+  }
+  if (status === "corrective_action_closed") {
+    return { label: "Closed", className: "border-emerald-200 bg-emerald-50 text-emerald-700" };
+  }
+  return null;
+}
 function scoreOutOfTen(row: QcScorecardRow): number {
   return row.formVersion === 2 ? row.averageScore ?? row.totalScore / 10 : row.totalScore / 10;
 }
@@ -84,6 +94,7 @@ export default function QcReportsPage() {
   const [superintendent, setSuperintendent] = useState("");
   const [rating, setRating] = useState("");
   const [flaggedOnly, setFlaggedOnly] = useState(false);
+  const [correctiveActionStatus, setCorrectiveActionStatus] = useState<"" | "open" | "closed">("");
   const [search, setSearch] = useState("");
 
   // Debounce the search box so keystrokes don't spam the server-side query.
@@ -97,6 +108,7 @@ export default function QcReportsPage() {
   // window-wide option lists so the dropdowns never empty each other.
   const { scorecards, regions, superintendents, truncated, loading, error, refetch } = useQcScorecards({
     from, to, region, kind: kind || undefined, superintendent, rating, flaggedOnly, search: debouncedSearch,
+    correctiveActionStatus: correctiveActionStatus || undefined,
   });
   const rows = scorecards;
 
@@ -176,6 +188,14 @@ export default function QcReportsPage() {
           options={["elite", "on_standard", "needs_improvement", "corrective_action"]}
           renderOption={genericRatingLabel}
           allLabel="All ratings"
+        />
+        <FilterSelect
+          label="Corrective Action Status"
+          value={correctiveActionStatus}
+          onChange={(value) => setCorrectiveActionStatus(value as "" | "open" | "closed")}
+          options={["open", "closed"]}
+          renderOption={(v) => (v === "open" ? "Open" : "Closed")}
+          allLabel="Any status"
         />
         <div className="flex items-center gap-1.5">
           <span className="text-[10.5px] font-bold uppercase tracking-wider text-slate-400">Weeks</span>
@@ -314,6 +334,7 @@ function QcTable({ rows, onRowClick, compact }: { rows: QcScorecardRow[]; onRowC
           <Th className="text-right">Score</Th>
           <Th className="text-center">Rating</Th>
           <Th className="text-center">Flags</Th>
+          {!compact && <Th className="text-center">Corrective Action</Th>}
           {!compact && <Th>Submitted</Th>}
           <Th />
         </tr>
@@ -371,6 +392,18 @@ function QcTable({ rows, onRowClick, compact }: { rows: QcScorecardRow[]; onRowC
                 <span className="text-slate-300">—</span>
               )}
             </td>
+            {!compact && (
+              <td className="px-3.5 py-3 text-center">
+                {(() => {
+                  const ca = correctiveActionCell(r.status);
+                  return ca ? (
+                    <Badge variant="outline" className={`${ca.className} whitespace-nowrap`}>{ca.label}</Badge>
+                  ) : (
+                    <span className="text-slate-300">—</span>
+                  );
+                })()}
+              </td>
+            )}
             {!compact && <td className="px-3.5 py-3 text-[13px] text-slate-500">{[r.submittedByName, fmtDate(r.submittedAt)].filter(Boolean).join(" · ")}</td>}
             <td className="px-3.5 py-3 text-right">
               <button

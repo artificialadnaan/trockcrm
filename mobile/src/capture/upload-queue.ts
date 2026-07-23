@@ -52,7 +52,18 @@ function indexFile(ownerKey: string): string {
   return `${ownerDir(ownerKey)}index.json`;
 }
 
-export type DrainSummary = { succeeded: number; failed: number; remaining: number };
+export type DrainSummary = {
+  succeeded: number;
+  failed: number;
+  remaining: number;
+  /**
+   * Map of clientUploadId → confirmed server file id for every photo this drain successfully confirmed. Lets a
+   * caller that needs the real file id (e.g. the corrective-action response, which links evidence by file id)
+   * read it straight from the drain instead of re-uploading each photo a second time. Only covers photos
+   * confirmed in THIS drain — a photo confirmed by an earlier drain has already left the queue.
+   */
+  confirmedFileIds: Record<string, string>;
+};
 
 // Serialize every index READ-MODIFY-WRITE for this process. enqueue / removeQueuedUploads / drain-commit
 // each read a snapshot then write it back; run concurrently (remove-a-photo racing a submit's enqueue) they
@@ -524,9 +535,10 @@ export async function drainUploadQueue(
     targetFetcher?: Fetcher;
   } = {},
 ): Promise<DrainSummary> {
-  if (draining) return { succeeded: 0, failed: 0, remaining: await getQueuedCount(ownerKey) };
+  if (draining) return { succeeded: 0, failed: 0, remaining: await getQueuedCount(ownerKey), confirmedFileIds: {} };
   draining = true;
   let keptAwake = false;
+  const confirmedFileIds: Record<string, string> = {};
   try {
     // Self-heal interrupted enqueues (stuck staging rows + orphaned staging files) before planning, so a kill
     // mid-enqueue neither strands a photo nor leaks disk. Best-effort — never blocks the drain.
@@ -540,7 +552,7 @@ export async function drainUploadQueue(
     const plannedIds = planned.ids;
     // Nothing drainable, but report the ACTUAL queue size as `remaining` — terminal/failed items still sit
     // in the queue (surfaced/dismissed via the UI), so hardcoding 0 would hide them from the caller.
-    if (plannedIds.length === 0) return { succeeded: 0, failed: 0, remaining: planned.total };
+    if (plannedIds.length === 0) return { succeeded: 0, failed: 0, remaining: planned.total, confirmedFileIds };
 
     try {
       await activateKeepAwakeAsync(KEEP_AWAKE_TAG);
@@ -595,6 +607,16 @@ export async function drainUploadQueue(
         liveResults.push(r);
       });
       const { succeededIds, failedIds } = partitionResults(liveChunk, liveResults);
+      // Record each confirmed photo's server file id (keyed by clientUploadId) so a caller that needs it can
+      // read it from the summary instead of re-uploading. uploadCapture resolves to the FieldPhoto; a
+      // fulfilled result therefore carries `{ id }`.
+      liveChunk.forEach((item, i) => {
+        const r = liveResults[i];
+        if (r && r.status === "fulfilled") {
+          const fileId = (r.value as { id?: unknown } | undefined)?.id;
+          if (typeof fileId === "string") confirmedFileIds[item.clientUploadId] = fileId;
+        }
+      });
       await removeQueuedItems(ownerKey, succeededIds);
       await recordFailedAttempts(ownerKey, failedIds);
       succeeded += succeededIds.length;
@@ -602,7 +624,7 @@ export async function drainUploadQueue(
     }
 
     const remaining = await getQueuedCount(ownerKey);
-    const summary = { succeeded, failed, remaining };
+    const summary = { succeeded, failed, remaining, confirmedFileIds };
     opts.onProgress?.(summary);
     return summary;
   } finally {

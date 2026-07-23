@@ -1,7 +1,13 @@
-import { and, desc, eq, isNull, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
-import { fieldScorecards, fieldScorecardItems, fieldScorecardPhotos, files } from "@trock-crm/shared/schema";
+import {
+  fieldScorecards,
+  fieldScorecardItems,
+  fieldScorecardPhotos,
+  files,
+  scorecardCorrectiveActions,
+} from "@trock-crm/shared/schema";
 import {
   FIELD_SCORECARD_LEADERSHIP_SECTION_KEYS,
   FIELD_SCORECARD_SECTION_KEYS,
@@ -9,6 +15,7 @@ import {
   scorecardLeadershipRatingLabel,
   scorecardRatingLabel,
   scorecardV2RatingLabel,
+  type CorrectiveActionItemView,
   type FieldScorecardDetail,
   type FieldScorecardSummary,
   type ScorecardFormVersion,
@@ -103,7 +110,16 @@ export async function getDealScorecardDetail(
     })
     .from(fieldScorecardPhotos)
     .leftJoin(files, eq(files.id, fieldScorecardPhotos.fileId))
-    .where(eq(fieldScorecardPhotos.scorecardId, scorecardId));
+    .where(
+      and(
+        eq(fieldScorecardPhotos.scorecardId, scorecardId),
+        // ORIGINAL evidence only. A corrective-action RESPONSE photo (corrective_action_id set) is threaded
+        // under correctiveActions[] below; excluding it here keeps it from double-rendering in the Evidence
+        // grid AND avoids emitting a sectionKey: null row (a DTO violation — response photos have no section),
+        // matching the PDF/edit evidence reads.
+        isNull(fieldScorecardPhotos.correctiveActionId),
+      ),
+    );
 
   const photos = await Promise.all(
     photoRows.map(async (p) => ({
@@ -116,6 +132,11 @@ export async function getDealScorecardDetail(
     })),
   );
 
+  // A below-band scorecard seeds one corrective-action item per flagged issue; read them + their inline
+  // responses so the tab can thread each response under its original item (spec §9). A passing card has no
+  // rows → correctiveActions is []. Response photos resolve their URL through the same presigner as evidence.
+  const correctiveActions = await getScorecardCorrectiveActionThread(tenantDb, scorecardId, opts?.resolvePhotoUrl);
+
   return {
     ...toSummary(card),
     items,
@@ -127,7 +148,82 @@ export async function getDealScorecardDetail(
     pmSignature: card.pmSignature ?? null,
     // Leadership Project Summary free text; null for project cards.
     summary: card.summary ?? null,
+    correctiveActions,
   };
+}
+
+/**
+ * The corrective-action items for a scorecard (each flagged action item / critical deficiency) with their
+ * inline response (comment + responder + response photos), for the deal-tab thread. Unlike Plan 2's
+ * getCorrectiveActionItems (which 404s a scorecard with no items), this returns [] for a passing card so the
+ * detail read never throws. Response photos (corrective_action_id set) resolve their presigned URL.
+ */
+async function getScorecardCorrectiveActionThread(
+  tenantDb: TenantDb,
+  scorecardId: string,
+  resolvePhotoUrl?: (fileId: string) => Promise<string | null>,
+): Promise<CorrectiveActionItemView[]> {
+  const rows = await tenantDb
+    .select()
+    .from(scorecardCorrectiveActions)
+    .where(eq(scorecardCorrectiveActions.scorecardId, scorecardId))
+    // Group by kind (item_type), then order refs NUMERICALLY (mirrors getCorrectiveActionItems): an
+    // action-item item_ref is a numeric STRING, so a lexical sort gives 0,1,10,11,2,… once there are ≥11
+    // items. Zero-pad numeric refs so they sort numerically; deficiency KEY refs (non-numeric) fall through.
+    .orderBy(
+      scorecardCorrectiveActions.itemType,
+      sql`CASE WHEN ${scorecardCorrectiveActions.itemRef} ~ '^[0-9]+$' THEN lpad(${scorecardCorrectiveActions.itemRef}, 12, '0') ELSE ${scorecardCorrectiveActions.itemRef} END`,
+    );
+  if (rows.length === 0) return [];
+
+  const itemIds = rows.map((r) => r.id);
+  const photoRows = await tenantDb
+    .select({
+      id: fieldScorecardPhotos.id,
+      correctiveActionId: fieldScorecardPhotos.correctiveActionId,
+      fileId: fieldScorecardPhotos.fileId,
+      caption: files.description,
+    })
+    .from(fieldScorecardPhotos)
+    // INNER join on the active-file predicate: a LEFT join keeps the photo row (fileId still set) for a
+    // soft-deleted/inactive backing file, so resolvePhotoUrl would still run on a stale file → a broken photo
+    // in the deal thread. INNER dropping the link entirely when its file is inactive/soft-deleted.
+    .innerJoin(
+      files,
+      and(eq(files.id, fieldScorecardPhotos.fileId), eq(files.isActive, true), isNull(files.deletedAt)),
+    )
+    .where(inArray(fieldScorecardPhotos.correctiveActionId, itemIds));
+
+  const photosByItem = new Map<string, { id: string; fileId: string; caption: string | null }[]>();
+  for (const p of photoRows) {
+    if (!p.correctiveActionId) continue;
+    const list = photosByItem.get(p.correctiveActionId) ?? [];
+    list.push({ id: p.id, fileId: p.fileId, caption: p.caption ?? null });
+    photosByItem.set(p.correctiveActionId, list);
+  }
+
+  return Promise.all(
+    rows.map(async (r) => ({
+      id: r.id,
+      itemType: r.itemType,
+      itemRef: r.itemRef,
+      itemLabel: r.itemLabel,
+      status: r.status,
+      responseComment: r.responseComment ?? null,
+      respondedByUserId: r.respondedByUserId ?? null,
+      responderName: r.responderName ?? null,
+      responderEmail: r.responderEmail ?? null,
+      respondedAt: r.respondedAt ? r.respondedAt.toISOString() : null,
+      photos: await Promise.all(
+        (photosByItem.get(r.id) ?? []).map(async (p) => ({
+          id: p.id,
+          fileId: p.fileId,
+          url: resolvePhotoUrl ? await resolvePhotoUrl(p.fileId) : null,
+          caption: p.caption,
+        })),
+      ),
+    })),
+  );
 }
 
 /**
@@ -199,6 +295,7 @@ interface ScorecardRow {
   submittedAt: unknown;
   pdfR2Key: string | null;
   pdfGeneratedAt: unknown;
+  status?: string | null;
 }
 
 /** The rating-band label for the card's kind/version — leadership + V2 reuse the 1-10 bands. */
@@ -230,6 +327,9 @@ function toSummary(row: ScorecardRow): FieldScorecardSummary {
     // The stored PDF is rendered best-effort/async, so the key can still be null here. Signal availability
     // so the CRM tab gates the Download-PDF action (disabled "PDF generating…" until the artifact lands).
     hasPdf: Boolean(row.pdfR2Key ?? row.pdfGeneratedAt),
+    // Lifecycle status: `submitted` | `corrective_action_open` | `corrective_action_closed`. Drives the deal
+    // tab's open/closed badge + the QC dashboard status column. Older rows default to `submitted`.
+    status: row.status ?? "submitted",
   };
 }
 

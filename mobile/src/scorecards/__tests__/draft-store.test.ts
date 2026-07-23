@@ -16,7 +16,16 @@ jest.mock("expo-file-system/legacy", () => {
       return store.get(p)!;
     },
     writeAsStringAsync: async (p: string, data: string) => { store.set(p, data); },
-    deleteAsync: async (p: string) => { store.delete(p); dirs.delete(p); dirs.delete(norm(p)); },
+    deleteAsync: async (p: string) => {
+      store.delete(p);
+      dirs.delete(p);
+      dirs.delete(norm(p));
+      // Recursive-ish: real expo-file-system deletes a directory's contents. Drop any store keys / dirs that
+      // live UNDER the deleted directory path so deleting a per-draft photo dir reclaims its copied files.
+      const prefix = `${norm(p)}/`;
+      for (const key of [...store.keys()]) if (key.startsWith(prefix)) store.delete(key);
+      for (const dir of [...dirs]) if (dir.startsWith(prefix)) dirs.delete(dir);
+    },
     moveAsync: async ({ from, to }: { from: string; to: string }) => {
       if (!store.has(from)) throw new Error(`ENOENT move ${from}`);
       store.set(to, store.get(from)!);
@@ -34,6 +43,9 @@ import {
   listScorecardDraftOwners,
   listScorecardDraftsForUser,
   deleteScorecardDraft,
+  copyPhotoIntoDraft,
+  deleteDraftPhotoFile,
+  deleteDraftPhotoDir,
 } from "../draft-store";
 import type { ScorecardDraft, NewScorecardDraftPhoto, ExistingScorecardDraftPhoto } from "../draft";
 
@@ -240,5 +252,36 @@ describe("draft-store: stale-container photo uri rebasing (the James Helms resum
     );
     const loaded = await loadScorecardDraft(OWNER, "d1");
     expect(loaded?.photos[0].uri).toBe("file:///doc/scorecard-drafts/u1/d1/cu-1.jpg");
+  });
+});
+
+describe("draft-store: synthetic-copy cleanup (corrective-action response flow)", () => {
+  const OWNER = "u1";
+
+  it("deleteDraftPhotoFile removes an individual copied file", async () => {
+    fs.__store.set("file:///src/cam-shot.jpg", "bytes");
+    const uri = await copyPhotoIntoDraft(OWNER, "corrective-sc-item", "cu-1", "file:///src/cam-shot.jpg");
+    expect(fs.__store.has(uri)).toBe(true);
+
+    await deleteDraftPhotoFile(uri);
+    expect(fs.__store.has(uri)).toBe(false);
+  });
+
+  it("deleteDraftPhotoFile is best-effort — a missing file is a no-op, not a throw", async () => {
+    await expect(deleteDraftPhotoFile("file:///doc/scorecard-drafts/u1/nope/cu-x.jpg")).resolves.toBeUndefined();
+  });
+
+  it("deleteDraftPhotoDir reclaims every copied file under the synthetic draft dir", async () => {
+    fs.__store.set("file:///src/a.jpg", "a");
+    fs.__store.set("file:///src/b.jpg", "b");
+    const draftId = "corrective-sc-item";
+    const a = await copyPhotoIntoDraft(OWNER, draftId, "cu-a", "file:///src/a.jpg");
+    const b = await copyPhotoIntoDraft(OWNER, draftId, "cu-b", "file:///src/b.jpg");
+    expect(fs.__store.has(a)).toBe(true);
+    expect(fs.__store.has(b)).toBe(true);
+
+    await deleteDraftPhotoDir(OWNER, draftId);
+    expect(fs.__store.has(a)).toBe(false);
+    expect(fs.__store.has(b)).toBe(false);
   });
 });

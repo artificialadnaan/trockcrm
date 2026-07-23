@@ -15,6 +15,11 @@ import type * as schema from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
 import { billingAddressToAbsorb } from "../../lib/billing-address.js";
 import { transferAssociations } from "./association-service.js";
+import {
+  revokeCorrectiveActionTokensForRemovedMember,
+  type TeamMutationOffice,
+} from "../deals/team-service.js";
+import { restartCorrectiveActionNotificationCycleForDeal } from "../field/corrective-actions-service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -94,7 +99,12 @@ export async function mergeContacts(
   winnerId: string,
   loserId: string,
   resolvedBy: string,
-  queueEntryId?: string
+  queueEntryId?: string,
+  // Threaded from the merge route (id + `office_<slug>`) so a merge that repoints an active super/PM assignment
+  // to a winner with a DIFFERENT email can restart each affected deal's open corrective-action cycle (finding
+  // P2). Optional so legacy/direct callers still type-check; when absent the re-notify is skipped (the token
+  // revoke still runs), best-effort — matching the archive/email-edit paths.
+  office?: TeamMutationOffice,
 ) {
   if (winnerId === loserId) {
     throw new AppError(400, "Cannot merge a contact with itself");
@@ -186,6 +196,20 @@ export async function mergeContacts(
     .select()
     .from(dealTeamMembers)
     .where(eq(dealTeamMembers.contactId, loserId));
+
+  // Deals where the loser was an ACTIVE super/PM — the assignments the merge repoints (or drops on collision)
+  // to the winner. If the winner resolves to a DIFFERENT email than the loser, verify-time revalidation 403s
+  // the loser-email token already delivered for that deal's open corrective-action card while the sent stamp
+  // stays set → the winner is never (re)notified. Capture these deals BEFORE the repoint below; the restart
+  // after the merge writes re-sends a fresh link to the winner's email. Distinct deal ids only (finding P2).
+  const responderDealIds = Array.from(
+    new Set(
+      loserTeamRows
+        .filter((r) => r.isActive && (r.role === "superintendent" || r.role === "project_manager"))
+        .map((r) => r.dealId),
+    ),
+  );
+
   if (loserTeamRows.length > 0) {
     const winnerActiveRows = await tenantDb
       .select({ dealId: dealTeamMembers.dealId, role: dealTeamMembers.role })
@@ -247,6 +271,33 @@ export async function mergeContacts(
     .update(contacts)
     .set({ isActive: false })
     .where(eq(contacts.id, loserId));
+
+  // 8b. Restart the open corrective-action cycle on each deal where the loser was an active super/PM, when the
+  // winner resolves to a DIFFERENT email (finding P2). The winner's FINAL email is what it has after absorb:
+  // if the winner had no email it took the loser's (absorb.email) → same address, no stranding; otherwise the
+  // winner keeps its own email. Compare case-insensitively (getContactById + revalidation lower-case). When the
+  // emails match, the delivered token still resolves to the same active assignment → nothing to restart. When
+  // they differ, the loser-email token is now orphaned (loser soft-deleted, assignment repointed): revoke it and
+  // restart the cycle so the worker re-sends a working link to the winner's email. Best-effort: only when office
+  // was threaded (else responderDealIds is unused). Runs in the caller's tenant transaction (the merge route
+  // commits all of it together), mirroring the archive/email-edit paths.
+  const winnerFinalEmail = "email" in absorb ? absorb.email : winnerContact.email;
+  const loserEmailNorm = loserContact.email?.toLowerCase() ?? null;
+  const winnerEmailNorm = (winnerFinalEmail as string | null | undefined)?.toLowerCase() ?? null;
+  const responderEmailChanged = loserEmailNorm !== winnerEmailNorm;
+  if (office && responderEmailChanged && responderDealIds.length > 0) {
+    for (const dealId of responderDealIds) {
+      // The loser-email token no longer matches any active super/PM assignment on the deal (the loser is
+      // soft-deleted, its assignment now points at the winner). Revoke it so the stale link stops authorizing;
+      // the shared helper is a no-op when another active responder still resolves to the loser's email.
+      await revokeCorrectiveActionTokensForRemovedMember(tenantDb, dealId, {
+        userId: null,
+        contactId: null,
+        memberEmail: loserContact.email ?? null,
+      });
+      await restartCorrectiveActionNotificationCycleForDeal(tenantDb, { dealId, office });
+    }
+  }
 
   // 9. Update duplicate_queue entry if provided
   if (queueEntryId) {

@@ -56,7 +56,12 @@ import { AppError } from "../../middleware/error-handler.js";
 import { activeProjectWhere, assertActiveFieldProject, type FieldAccessContext } from "./projects-service.js";
 import { runInOffice, runInOfficeTransaction } from "./cross-office.js";
 import { resolveScorecardTeamEmails } from "../deals/team-service.js";
-import { markScorecardEditEvidenceLinked } from "./scorecard-evidence-upload.js";
+import {
+  markScorecardEditEvidenceLinked,
+  EDITABLE_SCORECARD_STATUSES,
+} from "./scorecard-evidence-upload.js";
+import { reconcileScorecardCorrectiveActions } from "./corrective-actions-service.js";
+import { isAssignedCorrectiveActionResponder } from "./corrective-action-recipients.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 type ScorecardRow = typeof fieldScorecards.$inferSelect;
@@ -91,6 +96,8 @@ export interface UpdateFieldScorecardInput {
   userId: string;
   userRole: FieldAccessContext["userRole"];
   scorecardId: string;
+  /** Owning office (id + slug) — used to enqueue the corrective-action notification if an edit opens it. */
+  office: { id: string; slug: string };
   expectedUpdatedAt: string;
   superintendentName?: string | null;
   pmName?: string | null;
@@ -159,6 +166,9 @@ interface ScorecardSummarySource {
 // job_type string — MUST match the worker's registerJobHandler(FIELD_SCORECARD_EMAIL_JOB, ...). The server
 // can't import from the worker package, so the string is duplicated (as with the other enqueue sites).
 const FIELD_SCORECARD_EMAIL_JOB = "field_scorecard_email";
+// The below-band corrective-action notification job (job_type "scorecard_corrective_action_email") is
+// enqueued by reconcileScorecardCorrectiveActions (corrective-actions-service.ts), shared by the create +
+// edit paths, so its constant lives there.
 const SCORECARD_PDF_DOWNLOAD_EXPIRY_SECONDS = 60 * 60;
 // Give the synchronous render + R2 upload (sub-second) a head start over the worker's poll, so the email
 // job normally finds the PDF already stored. If render/upload failed, the worker degrades to a
@@ -314,6 +324,31 @@ export async function createFieldScorecard(
       .values(photoLinks.map((p) => ({ scorecardId: card.id, sectionKey: p.sectionKey, deficiencyKey: p.deficiencyKey ?? null, fileId: p.fileId })));
   }
 
+  // Corrective-action follow-up: when the card trips the corrective-action band with at least one flagged
+  // item, open the stage, seed one tracked item per flagged issue (each action item + each critical
+  // deficiency), and enqueue the notification. Runs in this same transaction (the caller wraps
+  // createFieldScorecard in runInOfficeTransaction), so the status walk + seeded items + job commit
+  // atomically with the card. A below-band card with no action items and no deficiencies has nothing to
+  // walk, so it stays `submitted` (see spec §4.2: items drive the stage). This is the SAME reconcile the
+  // edit path runs, so the two can never drift; the freshly-inserted card is `submitted`.
+  await reconcileScorecardCorrectiveActions(tenantDb, {
+    scorecardId: card.id,
+    dealId: input.dealId,
+    office: input.office,
+    rating,
+    actionItems,
+    deficiencies,
+    currentStatus: "submitted",
+  });
+  // The reconcile above may have walked the freshly-inserted card into `corrective_action_open` (a below-band
+  // submit with a flagged item), but `card` still carries its pre-reconcile `submitted` status. Re-read the row
+  // so the returned summary reflects the reconciled status — the edit path does the same (reconciledCard).
+  const [reconciledCard] = await tenantDb
+    .select()
+    .from(fieldScorecards)
+    .where(eq(fieldScorecards.id, card.id))
+    .limit(1);
+
   // Durable outbox: enqueue the email job IN THIS TRANSACTION so it commits atomically with the scorecard.
   // The PDF is rendered + stored post-response (best-effort); if that fails or the process dies first, the
   // job still exists and the worker sends a no-attachment fallback — the notification is never dropped.
@@ -351,7 +386,7 @@ export async function createFieldScorecard(
     maxAttempts: 6,
   });
 
-  return { scorecard: toSummary(card, project.name, input.userId), created: true };
+  return { scorecard: toSummary(reconciledCard ?? card, project.name, input.userId), created: true };
 }
 
 /**
@@ -377,7 +412,17 @@ export async function updateFieldScorecard(
   if (card.submittedBy !== input.userId) {
     throw new AppError(403, "Only the person who submitted this scorecard can edit it.", "SCORECARD_EDIT_FORBIDDEN");
   }
-  if (card.status !== "submitted" || card.formVersion !== 2) {
+  // Editable statuses are the whole current-form lifecycle: `submitted` plus the two corrective-action
+  // states. An edit can raise a card out of the band (open → submitted) or add/remove flags while it is open
+  // or re-open a closed card — reconcileScorecardCorrectiveActions (below) walks the status + tracked items
+  // to match the freshly recomputed rating. The pre-edit status drives the enqueue-on-transition decision.
+  const preEditStatus = card.status;
+  if (
+    (preEditStatus !== "submitted" &&
+      preEditStatus !== "corrective_action_open" &&
+      preEditStatus !== "corrective_action_closed") ||
+    card.formVersion !== 2
+  ) {
     throw new AppError(422, "Only submitted current-form scorecards can be edited.", "SCORECARD_EDIT_UNSUPPORTED");
   }
 
@@ -438,14 +483,23 @@ export async function updateFieldScorecard(
     .select({
       id: fieldScorecardPhotos.id,
       fileId: fieldScorecardPhotos.fileId,
-      sectionKey: fieldScorecardPhotos.sectionKey,
+      // Original evidence always has a section_key; response photos (section_key null,
+      // corrective_action_id set) are excluded below, so COALESCE keeps this `string`.
+      sectionKey: sql<string>`COALESCE(${fieldScorecardPhotos.sectionKey}, '')`,
       deficiencyKey: fieldScorecardPhotos.deficiencyKey,
       isActive: files.isActive,
       deletedAt: files.deletedAt,
     })
     .from(fieldScorecardPhotos)
     .innerJoin(files, eq(files.id, fieldScorecardPhotos.fileId))
-    .where(eq(fieldScorecardPhotos.scorecardId, card.id));
+    .where(
+      and(
+        eq(fieldScorecardPhotos.scorecardId, card.id),
+        // The edit-replacement contract covers only the submitter's ORIGINAL evidence. Corrective-action
+        // response photos are a separate surface and must never be clobbered by a scorecard edit.
+        isNull(fieldScorecardPhotos.correctiveActionId),
+      ),
+    );
   const visibleCurrentPhotos = currentPhotos.filter((photo) => photo.isActive && photo.deletedAt === null);
   const editablePhotos = await resolveUpdatePhotoLinks(
     tenantDb,
@@ -531,15 +585,28 @@ export async function updateFieldScorecard(
 
   // Preserve retained scorecard-photo link ids (the mobile edit form uses them on the next save), while
   // removing omitted links and inserting newly uploaded evidence. Gallery files themselves are never deleted.
+  // The edit-replacement contract covers ONLY the submitter's original evidence. Corrective-action response
+  // photos (corrective_action_id set) are a separate surface — they never enter currentPhotos/retainedLinkIds
+  // (the read above excludes them), so a bare scorecard_id DELETE would clobber every response-photo link on a
+  // content edit made after a responder attaches evidence. Scope BOTH branches to corrective_action_id IS NULL
+  // so response photos survive.
   const retainedLinkIds = photos.flatMap((photo) => (photo.linkId ? [photo.linkId] : []));
   if (retainedLinkIds.length === 0) {
-    await tenantDb.delete(fieldScorecardPhotos).where(eq(fieldScorecardPhotos.scorecardId, card.id));
+    await tenantDb
+      .delete(fieldScorecardPhotos)
+      .where(
+        and(
+          eq(fieldScorecardPhotos.scorecardId, card.id),
+          isNull(fieldScorecardPhotos.correctiveActionId),
+        ),
+      );
   } else {
     await tenantDb
       .delete(fieldScorecardPhotos)
       .where(
         and(
           eq(fieldScorecardPhotos.scorecardId, card.id),
+          isNull(fieldScorecardPhotos.correctiveActionId),
           notInArray(fieldScorecardPhotos.id, retainedLinkIds),
         ),
       );
@@ -606,9 +673,9 @@ export async function updateFieldScorecard(
     throw new AppError(409, "The scorecard could not be updated. Please reload and try again.", "SCORECARD_EDIT_CONFLICT");
   }
 
-  // Do not create a second notification. If the original durable email is still waiting to run, keep its
-  // score text aligned with the newly edited PDF. A job already processing/completed keeps its original
-  // submission notification semantics.
+  // Do not create a second field-scorecard-completed notification. If the original durable email is still
+  // waiting to run, keep its score text aligned with the newly edited PDF. A job already processing/completed
+  // keeps its original submission notification semantics.
   await tenantDb.execute(sql`
     UPDATE public.job_queue
     SET payload = payload || jsonb_build_object(
@@ -621,7 +688,28 @@ export async function updateFieldScorecard(
       AND payload->>'scorecardId' = ${card.id}
   `);
 
-  return { scorecard: toSummary(updatedCard, project.name, input.userId) };
+  // Reconcile the corrective-action lifecycle against the recomputed rating + flagged items in THIS same
+  // edit transaction — the SAME shared helper the create path runs, so the two never drift. It may open the
+  // stage (edit dropped into the band), revert to `submitted` (edit lifted it back out), add/remove tracked
+  // items, auto-close (all flags resolved), or re-open a closed card (a fresh flag) — resetting the email
+  // stamp + re-enqueuing the notification only on a transition INTO open. preEditStatus is the status before
+  // this edit; the reconcile may write a NEWER status than updatedCard carries, so re-read it for the summary.
+  await reconcileScorecardCorrectiveActions(tenantDb, {
+    scorecardId: card.id,
+    dealId: card.dealId,
+    office: input.office,
+    rating,
+    actionItems,
+    deficiencies,
+    currentStatus: preEditStatus,
+  });
+  const [reconciledCard] = await tenantDb
+    .select()
+    .from(fieldScorecards)
+    .where(eq(fieldScorecards.id, card.id))
+    .limit(1);
+
+  return { scorecard: toSummary(reconciledCard ?? updatedCard, project.name, input.userId) };
 }
 
 export async function listFieldScorecardsForProject(
@@ -636,7 +724,19 @@ export async function listFieldScorecardsForProject(
     .from(fieldScorecards)
     .where(and(eq(fieldScorecards.dealId, dealId), eq(fieldScorecards.isActive, true)))
     .orderBy(desc(fieldScorecards.submittedAt));
-  return { scorecards: rows.map((row) => toSummary(row, project.name, access.userId)) };
+  // Corrective-action responder capability is a DEAL-level fact (the assigned super/PM on this deal, or an
+  // admin/director role) — identical for every card here — so resolve it ONCE. The mobile "Document the
+  // corrective action" CTA gates on this so it isn't shown to a browse-only field user who'd hit a 403 from
+  // the responder endpoint. Same authorization predicate the responder endpoint enforces (spec §7.1).
+  const canRespondToCorrectiveAction = await isAssignedCorrectiveActionResponder(tenantDb, dealId, {
+    id: access.userId,
+    role: access.userRole,
+  });
+  return {
+    scorecards: rows.map((row) =>
+      toSummary(row, project.name, access.userId, canRespondToCorrectiveAction),
+    ),
+  };
 }
 
 export async function listRecentFieldScorecards(
@@ -731,7 +831,17 @@ export async function getFieldScorecardDetail(
         isNull(files.deletedAt),
       ),
     )
-    .where(eq(fieldScorecardPhotos.scorecardId, id));
+    // Only ORIGINAL section evidence — a corrective-action RESPONSE photo has corrective_action_id set +
+    // section_key null. Mobile's evidence grouping discards null-section rows, so without this filter we'd
+    // presign dozens/hundreds of response photos as wasted work and return DTO-invalid evidence. Response
+    // photos load only through their own corrective-action thread (getCorrectiveActionItems). Mirrors the
+    // corrective_action_id IS NULL filter the PDF + deal-detail evidence queries already use.
+    .where(
+      and(
+        eq(fieldScorecardPhotos.scorecardId, id),
+        isNull(fieldScorecardPhotos.correctiveActionId),
+      ),
+    );
 
   // Resolve presigned URLs concurrently (order preserved by Promise.all) so detail latency doesn't scale
   // with the photo count.
@@ -809,7 +919,10 @@ export async function renderAndStoreFieldScorecardArtifacts(
     const photoRows = await db
       .select({
         fileId: files.id,
-        sectionKey: fieldScorecardPhotos.sectionKey,
+        // section_key is nullable as of migration 0193 (corrective-action RESPONSE photos have it null), but
+        // this query excludes those (corrective_action_id IS NULL) so only section-keyed ORIGINAL evidence
+        // remains — COALESCE keeps the downstream evidence type as `string`.
+        sectionKey: sql<string>`COALESCE(${fieldScorecardPhotos.sectionKey}, '')`,
         deficiencyKey: fieldScorecardPhotos.deficiencyKey,
         caption: files.description,
         r2Key: files.r2Key,
@@ -820,7 +933,13 @@ export async function renderAndStoreFieldScorecardArtifacts(
       })
       .from(fieldScorecardPhotos)
       .innerJoin(files, eq(files.id, fieldScorecardPhotos.fileId))
-      .where(eq(fieldScorecardPhotos.scorecardId, scorecardId))
+      .where(
+        and(
+          eq(fieldScorecardPhotos.scorecardId, scorecardId),
+          // Exclude corrective-action response photos — the scorecard PDF embeds only the original evidence.
+          isNull(fieldScorecardPhotos.correctiveActionId),
+        ),
+      )
       // Deterministic order (link time, then PK tie-breaker) so the downstream MAX_EVIDENCE_PHOTOS cap
       // always keeps/drops the SAME photos across renders, not an arbitrary Postgres physical-row order.
       .orderBy(fieldScorecardPhotos.createdAt, fieldScorecardPhotos.id);
@@ -955,7 +1074,16 @@ export async function renderAndStoreFieldScorecardArtifacts(
       })
       .from(fieldScorecardPhotos)
       .innerJoin(files, eq(files.id, fieldScorecardPhotos.fileId))
-      .where(eq(fieldScorecardPhotos.scorecardId, scorecardId))
+      .where(
+        and(
+          eq(fieldScorecardPhotos.scorecardId, scorecardId),
+          // MUST mirror the initial evidence read's filter: the PDF embeds ONLY original evidence, so a
+          // corrective-action RESPONSE photo (corrective_action_id set) is excluded here too. Without this,
+          // once any response photo exists the recheck fingerprint includes it while the initial fingerprint
+          // did not, so they never match → a spurious SCORECARD_EVIDENCE_CHANGED on every regeneration.
+          isNull(fieldScorecardPhotos.correctiveActionId),
+        ),
+      )
       .for("share", { of: files });
     if (scorecardEvidenceFingerprint(currentEvidenceRows) !== evidenceFingerprint) {
       throw new AppError(
@@ -1420,10 +1548,17 @@ function scorecardEditableContentEquals(input: {
   return JSON.stringify(current) === JSON.stringify(desired);
 }
 
+// The current-form editable lifecycle — MUST match the accepted statuses in updateFieldScorecard's guard
+// (`submitted` + the two corrective-action states). canEdit gates the mobile edit action; if it were narrower
+// than the edit guard, an open/closed V2 card could never reach the edit/reconciliation path. Defined once in
+// scorecard-evidence-upload.ts (the evidence-presign guard reuses the same set) and re-imported here to keep a
+// single source of truth for the editable lifecycle.
+
 function toSummary(
   row: ScorecardSummarySource,
   projectName = row.projectName ?? null,
   viewerUserId?: string,
+  canRespondToCorrectiveAction?: boolean,
 ): FieldScorecardSummary {
   const formVersion: ScorecardFormVersion = row.formVersion === 2 ? 2 : 1;
   const kind: ScorecardKind = row.kind === "leadership" ? "leadership" : "project";
@@ -1450,10 +1585,17 @@ function toSummary(
       Boolean(viewerUserId) &&
       row.submittedBy === viewerUserId &&
       formVersion === 2 &&
-      (row.status ?? "submitted") === "submitted",
+      EDITABLE_SCORECARD_STATUSES.has(row.status ?? "submitted"),
     // PDF is rendered/uploaded post-response (best-effort/async) — null right after submit until the
     // artifact lands. Surface availability so downstream (mobile + CRM) can gate the download action.
     hasPdf: Boolean(row.pdfR2Key ?? row.pdfGeneratedAt),
+    // Lifecycle status (submitted / corrective_action_open / corrective_action_closed) so the field
+    // Scorecards list can surface a "Corrective action required" affordance without a second fetch.
+    status: row.status ?? "submitted",
+    // Whether the REQUESTING user may document the corrective action (assigned super/PM or admin/director).
+    // Gates the mobile CTA so it isn't shown to a browsing-only field user who'd get a 403. Omitted (undefined)
+    // when the caller didn't compute it, so consumers fall back to their own conservative gate.
+    ...(canRespondToCorrectiveAction === undefined ? {} : { canRespondToCorrectiveAction }),
   };
 }
 

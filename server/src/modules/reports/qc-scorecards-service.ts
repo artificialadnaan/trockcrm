@@ -18,6 +18,9 @@ export interface QcScorecardsFilters {
   rating?: string | null;
   flaggedOnly?: boolean;
   search?: string | null;
+  // Narrow to open vs closed corrective-action scorecards. `open` → status = corrective_action_open;
+  // `closed` → status = corrective_action_closed. Any other/absent value = no corrective-action filter.
+  correctiveActionStatus?: "open" | "closed" | null;
 }
 
 export interface QcScorecardRow {
@@ -37,6 +40,9 @@ export interface QcScorecardRow {
   submittedAt: string;
   submittedByName: string | null;
   pdfAvailable: boolean;
+  // Lifecycle status: `submitted` | `corrective_action_open` | `corrective_action_closed`. Drives the QC
+  // dashboard's Corrective-Action column + filter.
+  status: string;
 }
 
 // High enough to be non-binding for a single office's week window (a real office rarely has this many
@@ -88,6 +94,13 @@ export async function getQcScorecardsReport(
   if (filters.kind) rowConditions.push(sql`COALESCE(sc.kind, 'project') = ${filters.kind}`);
   if (filters.rating) rowConditions.push(sql`sc.rating = ${filters.rating}`);
   if (filters.flaggedOnly) rowConditions.push(sql`COALESCE(array_length(sc.critical_deficiencies, 1), 0) > 0`);
+  // Corrective-action status filter (open vs closed). A legacy row with a null status is neither, so this
+  // narrows to exactly the below-band cards in the requested state.
+  if (filters.correctiveActionStatus === "open") {
+    rowConditions.push(sql`sc.status = 'corrective_action_open'`);
+  } else if (filters.correctiveActionStatus === "closed") {
+    rowConditions.push(sql`sc.status = 'corrective_action_closed'`);
+  }
   // Exact match, not a contains-ILIKE: the dropdown options are verbatim names from this same column, so a
   // substring predicate would over-match (selecting "Ann" would also return "Joann", "Sam Reyes" → "…Jr").
   if (filters.superintendent) rowConditions.push(sql`sc.superintendent_name = ${filters.superintendent}`);
@@ -126,6 +139,7 @@ export async function getQcScorecardsReport(
       sc.week_of::text AS "weekOf",
       sc.submitted_at AS "submittedAt",
       sc.submitted_by_name AS "submittedByName",
+      COALESCE(sc.status, 'submitted') AS "status",
       (sc.pdf_r2_key IS NOT NULL) AS "pdfAvailable"
     ${FROM}
     WHERE ${sql.join(rowConditions, sql` AND `)}
@@ -158,6 +172,7 @@ export async function getQcScorecardsReport(
       weekOf: typeof r.weekOf === "string" ? r.weekOf : String(r.weekOf),
       submittedAt: r.submittedAt instanceof Date ? r.submittedAt.toISOString() : String(r.submittedAt),
       submittedByName: r.submittedByName ?? null,
+      status: r.status ? String(r.status) : "submitted",
       pdfAvailable: r.pdfAvailable === true || r.pdfAvailable === "t" || r.pdfAvailable === 1,
     })),
   };

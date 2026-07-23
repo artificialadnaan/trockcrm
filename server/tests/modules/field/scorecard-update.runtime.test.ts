@@ -22,6 +22,8 @@ import {
   fieldScorecardItems,
   fieldScorecardPhotos,
   fieldScorecards,
+  scorecardCorrectiveActions,
+  scorecardCorrectiveActionTokens,
 } from "@trock-crm/shared/schema";
 import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
 
@@ -98,6 +100,7 @@ function updateInput(
     userId: OWNER,
     userRole: "field_contractor",
     scorecardId,
+    office: OFFICE,
     expectedUpdatedAt,
     superintendentName: "Updated Superintendent",
     pmName: "Updated PM",
@@ -170,6 +173,8 @@ beforeAll(async () => {
     fieldScorecardItems,
     fieldScorecardPhotos,
     fieldScorecardEditUploads,
+    scorecardCorrectiveActions,
+    scorecardCorrectiveActionTokens,
     dealTeamMembers,
     contacts,
   ]));
@@ -194,10 +199,13 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await tdb.execute(sql`DELETE FROM field_scorecard_edit_uploads`);
+  await tdb.execute(sql`DELETE FROM scorecard_corrective_action_tokens`);
+  await tdb.execute(sql`DELETE FROM scorecard_corrective_actions`);
   await tdb.execute(sql`DELETE FROM field_scorecard_photos`);
   await tdb.execute(sql`DELETE FROM field_scorecard_items`);
   await tdb.execute(sql`DELETE FROM field_scorecards`);
   await tdb.execute(sql`DELETE FROM public.job_queue`);
+  await tdb.execute(sql`DELETE FROM deal_team_members`);
   await tdb.execute(sql`DELETE FROM files WHERE id NOT IN (${FILE_1}, ${FILE_2}, ${FILE_3})`);
   await tdb.execute(sql`
     UPDATE files
@@ -427,6 +435,29 @@ describe("updateFieldScorecard authorization and visibility", () => {
     expect((await listFieldScorecardsForProject(tdb, OTHER_ACCESS, DEAL)).scorecards[0]?.canEdit).toBe(false);
     expect((await listRecentFieldScorecards(tdb, { viewerUserId: OWNER })).scorecards[0]?.canEdit).toBe(true);
     expect((await listRecentFieldScorecards(tdb, { viewerUserId: OTHER_USER })).scorecards[0]?.canEdit).toBe(false);
+  });
+
+  it("advertises canEdit for the submitter on open AND closed corrective-action cards (finding 3)", async () => {
+    // A below-band card opens in corrective_action_open. canEdit must be true for the submitter so the mobile
+    // edit action (gated on canEdit) can reach the edit/reconciliation path — the edit guard accepts this status.
+    const { scorecard } = await createFieldScorecard(tdb, projectSubmission({
+      clientSubmissionId: csid(13),
+      items: projectItems(5), // avg 5 → corrective_action_open
+      actionItems: ["Re-inspect slab 2"],
+    }));
+    expect(scorecard.status).toBe("corrective_action_open");
+    expect(scorecard.canEdit).toBe(true);
+    expect((await getFieldScorecardDetail(tdb, scorecard.id, OWNER_ACCESS)).canEdit).toBe(true);
+    expect((await listFieldScorecardsForProject(tdb, OWNER_ACCESS, DEAL)).scorecards[0]?.canEdit).toBe(true);
+    // A different user still can't edit it.
+    expect((await getFieldScorecardDetail(tdb, scorecard.id, OTHER_ACCESS)).canEdit).toBe(false);
+
+    // Drive the card to corrective_action_closed and confirm canEdit stays true for the submitter (re-open path).
+    await tdb.execute(
+      sql`UPDATE field_scorecards SET status = 'corrective_action_closed' WHERE id = ${scorecard.id}`,
+    );
+    expect((await getFieldScorecardDetail(tdb, scorecard.id, OWNER_ACCESS)).canEdit).toBe(true);
+    expect((await getFieldScorecardDetail(tdb, scorecard.id, OTHER_ACCESS)).canEdit).toBe(false);
   });
 
   it("denies a different UUID even when that user is an admin", async () => {
@@ -851,5 +882,144 @@ describe("updateFieldScorecard replacement and concurrency", () => {
     expect(detail.actionItems).toEqual([]);
     expect(detail.superintendentSignature).toBeNull();
     expect(detail.pmSignature).toBeNull();
+  });
+});
+
+describe("updateFieldScorecard preserves corrective-action response photos (finding 2)", () => {
+  const CA_FILE = "aaaaaaaa-0000-0000-0000-0000000000ca";
+
+  async function seedResponsePhoto(scorecardId: string, correctiveActionId: string) {
+    // A response photo file (a separate surface from the submitter's original evidence).
+    await tdb.execute(sql`
+      INSERT INTO files (id, deal_id, client_upload_id, uploaded_by, description, is_active, deleted_at)
+      VALUES (${CA_FILE}, ${DEAL}, 'ca-upload', ${OWNER}, 'Corrective-action evidence', true, NULL)
+      ON CONFLICT (id) DO NOTHING
+    `);
+    // A response-photo LINK: section_key NULL, corrective_action_id set (the §4.3 shape).
+    await tdb.insert(fieldScorecardPhotos).values({
+      scorecardId,
+      fileId: CA_FILE,
+      sectionKey: null,
+      deficiencyKey: null,
+      correctiveActionId,
+    });
+  }
+
+  async function responsePhotoCount(scorecardId: string): Promise<number> {
+    const res = await tdb.execute(sql`
+      SELECT COUNT(*)::int AS c FROM field_scorecard_photos
+      WHERE scorecard_id = ${scorecardId} AND corrective_action_id IS NOT NULL
+    `);
+    return (res.rows[0] as { c: number }).c;
+  }
+
+  it("a content edit does NOT delete a response photo link (retainedLinkIds branch)", async () => {
+    // Below-band card with an original evidence photo → one open corrective-action item. Attach a response
+    // photo to that item, then edit the card while RETAINING the original photo. The scoped DELETE must leave
+    // the response-photo link intact.
+    const { scorecard } = await createFieldScorecard(tdb, projectSubmission({
+      clientSubmissionId: csid(40),
+      items: projectItems(5), // avg 5 → corrective_action
+      actionItems: ["Re-inspect slab 2"],
+      photos: [{ sectionKey: "quality", clientUploadId: "upload-1" }],
+    }));
+    expect(scorecard.status).toBe("corrective_action_open");
+    const [ca] = (await tdb.execute(sql`
+      SELECT id FROM scorecard_corrective_actions WHERE scorecard_id = ${scorecard.id} LIMIT 1
+    `)).rows as { id: string }[];
+    await seedResponsePhoto(scorecard.id, ca.id);
+    expect(await responsePhotoCount(scorecard.id)).toBe(1);
+
+    const before = await getFieldScorecardDetail(tdb, scorecard.id, OWNER_ACCESS);
+    const originalPhoto = before.photos[0]!;
+    const at = scorecard.updatedAt!;
+    await updateFieldScorecard(tdb, updateInput(scorecard.id, at, {
+      items: projectItems(5),
+      actionItems: ["Re-inspect slab 2"],
+      // Retain the original evidence photo (non-empty retainedLinkIds branch).
+      photos: [{ scorecardPhotoId: originalPhoto.id, sectionKey: "quality", deficiencyKey: null }],
+    }));
+    // The response photo survived the edit.
+    expect(await responsePhotoCount(scorecard.id)).toBe(1);
+  });
+
+  it("a content edit that clears all ORIGINAL photos still keeps the response photo (empty retainedLinkIds branch)", async () => {
+    const { scorecard } = await createFieldScorecard(tdb, projectSubmission({
+      clientSubmissionId: csid(41),
+      items: projectItems(5),
+      actionItems: ["Verify hold points"],
+      photos: [{ sectionKey: "quality", clientUploadId: "upload-1" }],
+    }));
+    const [ca] = (await tdb.execute(sql`
+      SELECT id FROM scorecard_corrective_actions WHERE scorecard_id = ${scorecard.id} LIMIT 1
+    `)).rows as { id: string }[];
+    await seedResponsePhoto(scorecard.id, ca.id);
+    expect(await responsePhotoCount(scorecard.id)).toBe(1);
+
+    // Edit removes ALL original evidence (retainedLinkIds empty → the bare-scorecard DELETE branch).
+    const at = scorecard.updatedAt!;
+    await updateFieldScorecard(tdb, updateInput(scorecard.id, at, {
+      items: projectItems(5),
+      actionItems: ["Verify hold points"],
+      photos: [],
+    }));
+    // The bare DELETE branch is scoped to corrective_action_id IS NULL, so the response photo is untouched.
+    expect(await responsePhotoCount(scorecard.id)).toBe(1);
+    // And the original evidence photo IS gone (it was an original-surface link).
+    const after = await getFieldScorecardDetail(tdb, scorecard.id, OWNER_ACCESS);
+    expect(after.photos.every((p) => p.fileId !== "aaaaaaaa-0000-0000-0000-000000000001")).toBe(true);
+  });
+});
+
+describe("listFieldScorecardsForProject canRespondToCorrectiveAction flag (finding 8)", () => {
+  const SUPER_USER = "77777777-7777-7777-7777-777777777777";
+  const UNASSIGNED_REP = "88888888-8888-8888-8888-888888888888";
+
+  async function ensureUser(id: string, name: string, email: string) {
+    await tdb.execute(sql`
+      INSERT INTO public.users (id, display_name, email, is_active)
+      VALUES (${id}, ${name}, ${email}, true) ON CONFLICT (id) DO NOTHING
+    `);
+  }
+
+  it("is true for the assigned super and for admin/director, false for an unassigned rep", async () => {
+    await ensureUser(SUPER_USER, "Sam Super", "sam.super@trock.com");
+    await ensureUser(UNASSIGNED_REP, "Rep Riley", "riley@trock.com");
+    await createFieldScorecard(tdb, projectSubmission({ clientSubmissionId: csid(50) }));
+
+    // Assign SUPER_USER as the deal's superintendent (matched by user_id).
+    await tdb.insert(dealTeamMembers).values({
+      dealId: DEAL,
+      userId: SUPER_USER,
+      role: "superintendent",
+    });
+
+    // Assigned super → true.
+    const asSuper = await listFieldScorecardsForProject(
+      tdb,
+      { userId: SUPER_USER, userRole: "field_contractor" },
+      DEAL,
+    );
+    expect(asSuper.scorecards[0]?.canRespondToCorrectiveAction).toBe(true);
+
+    // admin (OTHER_ACCESS is admin) → true regardless of assignment.
+    const asAdmin = await listFieldScorecardsForProject(tdb, OTHER_ACCESS, DEAL);
+    expect(asAdmin.scorecards[0]?.canRespondToCorrectiveAction).toBe(true);
+
+    // director → true.
+    const asDirector = await listFieldScorecardsForProject(
+      tdb,
+      { userId: UNASSIGNED_REP, userRole: "director" },
+      DEAL,
+    );
+    expect(asDirector.scorecards[0]?.canRespondToCorrectiveAction).toBe(true);
+
+    // Unassigned non-management user (can browse the project) → false.
+    const asRep = await listFieldScorecardsForProject(
+      tdb,
+      { userId: UNASSIGNED_REP, userRole: "field_contractor" },
+      DEAL,
+    );
+    expect(asRep.scorecards[0]?.canRespondToCorrectiveAction).toBe(false);
   });
 });
