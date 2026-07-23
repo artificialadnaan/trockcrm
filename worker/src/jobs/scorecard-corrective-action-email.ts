@@ -420,8 +420,11 @@ export async function handleScorecardCorrectiveActionEmail(
       ORDER BY item_type, item_ref`,
     [scorecardId]
   );
-  const flaggedRows = flaggedRes.rows as any[];
-  const flagged: FlaggedItem[] = flaggedRows.map((r) => ({
+  // NOTE: flaggedRows/flagged are RE-READ + rebuilt from the live open set immediately before send (P2) so the
+  // emailed body + the stamp's emitted-id array never carry an item resolved after this initial load. Declared
+  // `let` so that fresh read can replace them.
+  let flaggedRows = flaggedRes.rows as any[];
+  let flagged: FlaggedItem[] = flaggedRows.map((r) => ({
     itemType: String(r.item_type),
     itemLabel: String(r.item_label),
   }));
@@ -470,21 +473,12 @@ export async function handleScorecardCorrectiveActionEmail(
   // `open` when this job runs, so the fingerprint DIFFERS across cycles; a genuine in-cycle retry reads the
   // same open-item set → the SAME fingerprint. Sorted so ordering can't perturb it. This fallback IS the
   // unstable-across-a-resolve case the nonce fixes, but it is the best available signal for legacy jobs and
-  // is strictly better than a cycle-stable key. If somehow there are no open rows (a race where every item
-  // was just resolved), the card would be closed and the handler already returned above, so this is only
-  // reached with a non-empty set.
-  const cycleFingerprint = crypto
-    .createHash("sha256")
-    .update(
-      flaggedRows
-        .map((r) => String(r.id))
-        .sort()
-        .join(","),
-    )
-    .digest("hex")
-    .slice(0, 16);
+  // is strictly better than a cycle-stable key.
+  //
+  // NOTE (P2): the fingerprint is deliberately computed AFTER the pre-send re-read (below) so it hashes the SAME
+  // fresh open set the body/stamp use — never a stale set. The `nonce` (preferred key) is read here since it does
+  // not depend on the open rows.
   const nonce = normalizeText(payload.cycleNonce);
-  const cycleDimension = nonce ?? cycleFingerprint;
 
   // Deal display fields for the email + link.
   const dealRes = await query(
@@ -550,6 +544,50 @@ export async function handleScorecardCorrectiveActionEmail(
     );
     return;
   }
+
+  // P2 (stale flagged-item list): RE-READ the open corrective-action rows here and REBUILD the email body from
+  // that FRESH set. The `flagged`/`flaggedRows` loaded near the top can go STALE: if — between that load and this
+  // send — ONE of several flagged items is resolved/removed while ANOTHER stays open, the has_open recheck above
+  // still passes (it only tests for the EXISTENCE of any open row) and the subset-guarded stamp still accepts the
+  // reduced open set. Continuing off the initial `flagged` would email the STALE list (naming an item the
+  // responder page no longer shows open) and stamp the cycle off that stale set. Building the body + the stamp's
+  // emitted-id array from the CURRENT open rows makes recipients get an accurate list. If the fresh set is now
+  // empty (every item resolved in a tighter race than the has_open recheck caught), bail via the same
+  // nothing-to-notify guard — never send the empty-fallback item text, never stamp (a later reopen re-notifies).
+  const freshFlaggedRes = await query(
+    `SELECT id, item_type, item_label FROM ${tenantSchema}.scorecard_corrective_actions
+      WHERE scorecard_id = $1::uuid AND status = 'open'
+      ORDER BY item_type, item_ref`,
+    [scorecardId]
+  );
+  flaggedRows = freshFlaggedRes.rows as any[];
+  if (flaggedRows.length === 0) {
+    logger.log(
+      "[CorrectiveActionEmail] Open items resolved between the flagged read and send - skipping (nothing to notify, not stamping)",
+      { scorecardId }
+    );
+    return;
+  }
+  flagged = flaggedRows.map((r) => ({
+    itemType: String(r.item_type),
+    itemLabel: String(r.item_label),
+  }));
+
+  // Per-cycle dimension for the CRM (no-token) idempotency key, computed from the FRESH open set (P2) so a legacy
+  // (no-nonce) job's key hashes exactly the ids it is emailing. The preferred `nonce` (read above) is unaffected
+  // by the open rows; the fingerprint fallback hashes the current open ids (sorted). The card is guaranteed to
+  // have ≥1 open row here (we bailed above on an empty fresh set).
+  const cycleFingerprint = crypto
+    .createHash("sha256")
+    .update(
+      flaggedRows
+        .map((r) => String(r.id))
+        .sort()
+        .join(","),
+    )
+    .digest("hex")
+    .slice(0, 16);
+  const cycleDimension = nonce ?? cycleFingerprint;
 
   // Send one email per recipient with the link appropriate to their ACTUAL field-login capability (finding 6).
   // A CRM user who can authenticate in T-Rock Cam (canFieldLogin) gets the in-app deep link; a CRM user who

@@ -115,6 +115,12 @@ function makeQuery(
     // so the scorecard is left unchanged (its original nonce/tokens intact) and the original job's retry can
     // still stamp/handle it.
     enqueueThrows?: boolean;
+    // P2 (stale flagged-item list): model a PARTIAL resolution — ONE of several flagged items is resolved/removed
+    // AFTER the worker's initial flagged read but BEFORE the send, while ANOTHER stays open. When set, the SECOND
+    // read of the open corrective-action rows (the pre-send re-read the fix adds) returns THIS reduced set instead
+    // of `flagged`, so the emailed body + the stamp's emitted-id array reflect only the still-open item(s). The
+    // FIRST read still returns `flagged` (the stale, larger set the worker initially loaded).
+    freshFlagged?: any[];
   } = {},
 ) {
   const inserts: { sql: string; params: any[] }[] = [];
@@ -142,6 +148,9 @@ function makeQuery(
   // provides one. The `SELECT DISTINCT dtm.role` assigned-roles query is intercepted by its own branch first,
   // so it never reaches this fall-through.
   let recipientResolveCalls = 0;
+  // P2: count reads of the open corrective-action rows so the SECOND read (the pre-send re-read the fix adds)
+  // can return a reduced `freshFlagged` set — modelling one item resolved between the initial load and the send.
+  let flaggedReadCalls = 0;
   const query = vi.fn(async (text: string, params: any[] = []) => {
     // Finding A: transaction control statements (BEGIN / COMMIT / ROLLBACK) issued by the atomic fresh-cycle
     // replacement. Captured so tests can assert the rollback path.
@@ -294,6 +303,12 @@ function makeQuery(
       return { rows };
     }
     if (/FROM \S*scorecard_corrective_actions/i.test(text)) {
+      flaggedReadCalls += 1;
+      // P2: the SECOND read of the open rows is the pre-send re-read. If the test models a partial resolution,
+      // return the reduced `freshFlagged` set there so the emailed body reflects only the still-open item(s).
+      if (flaggedReadCalls >= 2 && opts.freshFlagged) {
+        return { rows: opts.freshFlagged };
+      }
       return { rows: opts.flagged ?? FLAGGED };
     }
     if (/FROM \S*deals/i.test(text)) {
@@ -858,6 +873,92 @@ describe("scorecard corrective-action notification email", () => {
     expect(stampCalls[0][0]).toMatch(/corrective_action_open/i);
     expect(tokenDeletes).toHaveLength(0);
     expect(jobEnqueues).toHaveLength(0);
+  });
+
+  // ---- P2: the emailed item list must reflect the CURRENT open set at send time (no stale list) ----
+
+  it("emails only the still-open item when one flagged item is resolved after the initial read (P2)", async () => {
+    // Partial-resolution race: the worker loads the open items [ca-1, ca-2] to build the body, but before it
+    // sends, ca-1 is resolved/removed while ca-2 stays open. The round-14 pre-send recheck only tests for the
+    // EXISTENCE of any open row (has_open) so it still passes, and the subset-guarded stamp accepts the reduced
+    // open set — so unguarded the worker would email the STALE list (naming ca-1, which the responder page no
+    // longer shows open) AND stamp the cycle. The fix re-reads the open rows immediately before building/sending
+    // and builds the body from that FRESH set, so the delivered email lists only ca-2 — never the resolved ca-1.
+    const { query } = makeQuery({
+      recipients: [{ role: "superintendent", name: "Sam Super", email: "sam.super@trock.com", user_id: "u-1", can_field_login: true }],
+      assignedRoles: [{ role: "superintendent" }],
+      flagged: [
+        { id: "ca-1", item_type: "action_item", item_ref: "0", item_label: "Re-inspect slab 2" },
+        { id: "ca-2", item_type: "critical_deficiency", item_ref: "missed_hold_point", item_label: "Missed hold point" },
+      ],
+      // ca-1 was resolved between the initial read and the send; only ca-2 remains open at send time.
+      freshFlagged: [
+        { id: "ca-2", item_type: "critical_deficiency", item_ref: "missed_hold_point", item_label: "Missed hold point" },
+      ],
+    });
+    const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "m" });
+    const logger = makeLogger();
+
+    await handleScorecardCorrectiveActionEmail(payload, null, { query: query as any, sendEmail, env, logger });
+
+    expect(sendEmail).toHaveBeenCalledTimes(1);
+    const html = sendEmail.mock.calls[0][2] as string;
+    const text = sendEmail.mock.calls[0][3].text as string;
+    // The delivered email reflects only the still-open item ...
+    expect(text).toContain("Missed hold point");
+    expect(html).toContain("Missed hold point");
+    // ... and NEVER the resolved item (the stale list must not go out).
+    expect(text).not.toContain("Re-inspect slab 2");
+    expect(html).not.toContain("Re-inspect slab 2");
+    // The stamp's emitted-id array carries only the still-open id (so the subset guard reflects what was emailed).
+    const stampCalls = query.mock.calls.filter(([t]) => /UPDATE [\s\S]*field_scorecards\s+SET corrective_action_email_sent_at/i.test(t as string));
+    expect(stampCalls).toHaveLength(1);
+    expect(stampCalls[0][1]?.[1]).toEqual(["ca-2"]);
+  });
+
+  it("bails without sending or stamping when the LAST open item is resolved at the pre-send re-read (P2)", async () => {
+    // Edge of the same race: the initial flagged read saw [ca-1], but by the pre-send re-read every item was
+    // resolved → the fresh open set is EMPTY. The worker must bail via the empty/hidden guard: no stale email
+    // (which would name the resolved ca-1), no token mint, no stamp (a concurrently-completed action must not be
+    // announced or suppress a later reopen).
+    const { query, inserts, jobEnqueues } = makeQuery({
+      recipients: [{ role: "superintendent", name: "Sam Super", email: "sam.super@trock.com", user_id: "u-1", can_field_login: true }],
+      assignedRoles: [{ role: "superintendent" }],
+      flagged: [{ id: "ca-1", item_type: "action_item", item_ref: "0", item_label: "Re-inspect slab 2" }],
+      freshFlagged: [], // every item resolved by the pre-send re-read
+    });
+    const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "m" });
+    const logger = makeLogger();
+
+    await handleScorecardCorrectiveActionEmail(payload, null, { query: query as any, sendEmail, env, logger });
+
+    expect(sendEmail).not.toHaveBeenCalled();
+    expect(inserts).toHaveLength(0);
+    expect(jobEnqueues).toHaveLength(0);
+    const stampCalls = query.mock.calls.filter(([t]) => /UPDATE [\s\S]*field_scorecards\s+SET corrective_action_email_sent_at/i.test(t as string));
+    expect(stampCalls).toHaveLength(0);
+  });
+
+  it("emails the FULL list when the open set is unchanged between the initial read and send (P2 non-regression)", async () => {
+    // The unchanged case: the pre-send re-read returns the same open set the initial read did, so the full list
+    // is delivered exactly as before. (freshFlagged omitted → the second read returns the same `flagged`.)
+    const { query } = makeQuery({
+      recipients: [{ role: "superintendent", name: "Sam Super", email: "sam.super@trock.com", user_id: "u-1", can_field_login: true }],
+      assignedRoles: [{ role: "superintendent" }],
+      flagged: FLAGGED,
+    });
+    const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "m" });
+    const logger = makeLogger();
+
+    await handleScorecardCorrectiveActionEmail(payload, null, { query: query as any, sendEmail, env, logger });
+
+    expect(sendEmail).toHaveBeenCalledTimes(1);
+    const text = sendEmail.mock.calls[0][3].text as string;
+    expect(text).toContain("Re-inspect slab 2");
+    expect(text).toContain("Missed hold point");
+    const stampCalls = query.mock.calls.filter(([t]) => /UPDATE [\s\S]*field_scorecards\s+SET corrective_action_email_sent_at/i.test(t as string));
+    expect(stampCalls).toHaveLength(1);
+    expect(stampCalls[0][1]?.[1]).toEqual(FLAGGED.map((f) => f.id));
   });
 
   it("re-sends on a REOPEN cycle (stamp cleared) even though a prior-cycle token would still exist", async () => {
