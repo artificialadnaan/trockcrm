@@ -37,7 +37,10 @@ beforeAll(async () => {
       property_address text, property_city text, property_state text, bid_board_customer_name text,
       company_id uuid, primary_contact_id uuid, assigned_rep_id uuid,
       on_hold boolean DEFAULT false, is_change_order boolean DEFAULT false,
-      is_active boolean NOT NULL DEFAULT true, stage_id uuid, updated_at timestamptz DEFAULT now()
+      is_active boolean NOT NULL DEFAULT true, stage_id uuid,
+      awarded_amount numeric(14,2), bid_board_total_sales numeric(14,2),
+      bid_estimate numeric(14,2), dd_estimate numeric(14,2),
+      updated_at timestamptz DEFAULT now()
     );
 
     INSERT INTO pipeline_stage_config (id, slug) VALUES ('${ST.won}','won'), ('${ST.opp}','opportunity');

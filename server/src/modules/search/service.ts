@@ -36,6 +36,9 @@ export interface SearchResult {
   rank: number;
   // True when this deal result is a change-order child deal, so the UI can badge it. Deal results only.
   isChangeOrder?: boolean;
+  // Assigned rep display name + best-value deal amount (awarded>bbts>bid>dd, raw string). Deal results only.
+  assignedRepName?: string | null;
+  dealValue?: string | null;
 }
 
 export interface SearchResponse {
@@ -371,10 +374,16 @@ export async function searchDeals(tenantDb: TenantDb, query: string, limit: numb
       onHold: deals.onHold,
       isChangeOrder: deals.isChangeOrder,
       stageSlug: pipelineStageConfig.slug,
+      assignedRepName: users.displayName,
+      awardedAmount: deals.awardedAmount,
+      bidBoardTotalSales: deals.bidBoardTotalSales,
+      bidEstimate: deals.bidEstimate,
+      ddEstimate: deals.ddEstimate,
       relevance,
     })
     .from(deals)
     .leftJoin(pipelineStageConfig, eq(pipelineStageConfig.id, deals.stageId))
+    .leftJoin(users, eq(users.id, deals.assignedRepId))
     .where(
       and(
         buildDealSearchCondition(query),
@@ -405,7 +414,22 @@ export async function searchDeals(tenantDb: TenantDb, query: string, limit: numb
     deepLink: `/deals/${r.id}`,
     rank: Number(r.relevance ?? 0),
     isChangeOrder: r.isChangeOrder === true,
+    assignedRepName: r.assignedRepName ?? null,
+    // Deliberately the RAW best-value (awarded>bbts>bid>dd, canonical DEAL_VALUE_PRIORITY_CHAIN),
+    // NOT the on-hold-zeroed effective value: search is a display surface (on-hold already shows a
+    // badge), not a reporting aggregate. Matches the Won-metric email builder's snapshotBestValue.
+    dealValue: firstNonEmpty(r.awardedAmount, r.bidBoardTotalSales, r.bidEstimate, r.ddEstimate),
   }));
+}
+
+// Best-value amount for a deal search result: awarded_amount > bid_board_total_sales > bid_estimate
+// > dd_estimate. numeric(14,2) columns arrive as strings from pg; return the first present as a raw
+// string, else null. (Nullish-only: a legitimate "0" value is kept, not skipped.)
+function firstNonEmpty(...values: Array<string | number | null>): string | null {
+  for (const v of values) {
+    if (v != null && String(v).trim() !== "") return String(v);
+  }
+  return null;
 }
 
 /**
