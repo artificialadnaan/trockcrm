@@ -250,6 +250,11 @@ export const requestCorrectiveActionUploadUrl = (
 // Capture provenance (takenAt / latitude / longitude / addressSource) is threaded through the SAME field
 // names as the ordinary field-photo confirm (see confirmUpload), so the server records real capture-time +
 // location on the response file rather than nulls. Each field is sent only when present.
+//
+// `clientUploadId` is a STABLE per-photo idempotency key (the captured photo's own clientUploadId, unchanged
+// across a retry of the same photo). The server threads it into confirmUpload, which dedups on it — so a
+// lost-response retry with the SAME clientUploadId returns the already-created file row instead of failing on
+// an expired upload token. Omitted when absent.
 export const confirmCorrectiveActionUpload = (
   f: Fetcher,
   scorecardId: string,
@@ -257,6 +262,7 @@ export const confirmCorrectiveActionUpload = (
     uploadToken: string;
     objectKey: string;
     caption?: string | null;
+    clientUploadId?: string;
     takenAt?: string;
     latitude?: number;
     longitude?: number;
@@ -269,6 +275,7 @@ export const confirmCorrectiveActionUpload = (
       uploadToken: body.uploadToken,
       objectKey: body.objectKey,
       ...(body.caption != null ? { caption: body.caption } : {}),
+      ...(body.clientUploadId != null ? { clientUploadId: body.clientUploadId } : {}),
       ...(body.takenAt != null ? { takenAt: body.takenAt } : {}),
       ...(body.latitude != null ? { latitude: body.latitude } : {}),
       ...(body.longitude != null ? { longitude: body.longitude } : {}),

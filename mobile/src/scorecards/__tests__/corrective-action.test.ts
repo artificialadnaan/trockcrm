@@ -306,6 +306,31 @@ describe("submitCorrectiveActionItem", () => {
     expect(second.addressSource).toBeUndefined();
   });
 
+  // Finding 4 (P2) — the confirm must carry the captured photo's STABLE clientUploadId so a lost-response
+  // retry of the SAME photo is idempotent: the server dedups confirmUpload on clientUploadId and returns the
+  // already-created file row instead of a 400 expired-token error. It reuses the photo's OWN clientUploadId
+  // (unchanged across a retry), never a freshly minted per-attempt id.
+  it("threads each photo's stable clientUploadId into confirm", async () => {
+    await submitCorrectiveActionItem(fetcher, {
+      scorecardId: "sc-1",
+      itemId: "item-1",
+      dealId: "deal-1",
+      photos: [
+        photo("a", { clientUploadId: "cuid-a" }),
+        photo("b", { clientUploadId: "cuid-b" }),
+      ],
+      comment: "Corrected.",
+    });
+
+    expect(confirmCorrectiveActionUpload).toHaveBeenCalledTimes(2);
+    expect((confirmCorrectiveActionUpload as jest.Mock).mock.calls[0][2]).toMatchObject({
+      clientUploadId: "cuid-a",
+    });
+    expect((confirmCorrectiveActionUpload as jest.Mock).mock.calls[1][2]).toMatchObject({
+      clientUploadId: "cuid-b",
+    });
+  });
+
   // Finding B — a partial batch failure must DISCARD the ids that DID upload (already-confirmed files on the
   // deal) so the retry doesn't accumulate orphaned duplicates, while still not POSTing.
   it("with a partial batch failure: discards the succeeded fileIds and does NOT POST", async () => {

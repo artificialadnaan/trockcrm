@@ -177,6 +177,10 @@ async function uploadCorrectiveResponsePhoto(
     uploadToken: presign.uploadToken,
     objectKey: presign.objectKey,
     caption: caption ? caption : null,
+    // Stable per-photo idempotency key (reuses the captured photo's own clientUploadId — unchanged across a
+    // retry of the SAME photo). The server dedups confirmUpload on it, so a lost-response retry with the same
+    // token/objectKey returns the already-created file row instead of a 400 expired-token error.
+    clientUploadId: photo.clientUploadId,
     takenAt: photo.takenAt,
     latitude: photo.latitude,
     longitude: photo.longitude,

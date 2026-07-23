@@ -159,6 +159,27 @@ describe("confirmCorrectiveActionUpload", () => {
     });
   });
 
+  it("carries a stable clientUploadId when present and omits it when absent", async () => {
+    const { fetcher, calls } = recordingFetcher({ fileId: "file-1" });
+
+    await confirmCorrectiveActionUpload(fetcher, "sc-1", {
+      uploadToken: "up-token",
+      objectKey: "obj-key",
+      clientUploadId: "cuid-a",
+    });
+    await confirmCorrectiveActionUpload(fetcher, "sc-1", { uploadToken: "up-token", objectKey: "obj-key" });
+
+    expect(calls[0].opts).toEqual({
+      method: "POST",
+      body: { uploadToken: "up-token", objectKey: "obj-key", clientUploadId: "cuid-a" },
+    });
+    // No clientUploadId supplied → omitted from the wire body.
+    expect(calls[1].opts).toEqual({
+      method: "POST",
+      body: { uploadToken: "up-token", objectKey: "obj-key" },
+    });
+  });
+
   it("omits each provenance field individually when absent", async () => {
     const { fetcher, calls } = recordingFetcher({ fileId: "file-1" });
 
