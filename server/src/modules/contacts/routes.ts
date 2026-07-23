@@ -174,12 +174,22 @@ router.post(
         throw new AppError(400, "winnerId and loserId are required");
       }
 
+      // Thread the office (id + `office_<slug>`) so a merge that repoints an active super/PM assignment to a
+      // winner with a DIFFERENT email can restart each affected deal's open corrective-action cycle (finding
+      // P2). Same shape the PATCH/DELETE contact routes + deal team routes thread; undefined when either piece
+      // is missing → the restart is skipped (best-effort).
+      const teamOffice =
+        req.officeSlug && req.user!.activeOfficeId
+          ? { id: req.user!.activeOfficeId, slug: req.officeSlug }
+          : undefined;
+
       const result = await mergeContacts(
         req.tenantDb!,
         winnerId,
         loserId,
         req.user!.id,
-        req.params.id as string
+        req.params.id as string,
+        teamOffice,
       );
 
       await req.commitTransaction!();
