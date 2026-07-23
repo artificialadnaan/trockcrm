@@ -152,8 +152,11 @@ export interface SubmitCorrectiveActionResponseInput {
  * means the losing/stale path inserts nothing. It also makes a retry safe: once resolved the item is no longer
  * `open`, so a replayed request never re-inserts the photo links.
  *
- * Already-resolved outcome: when the item is no longer `open`, three cases:
- *   - NO photoFileIds → idempotent 200 no-op (a bare replay of a resolved item has nothing to discard).
+ * Already-resolved outcome: when the item is no longer `open`, the responder identity is checked FIRST, then:
+ *   - NO photoFileIds by the SAME responder → idempotent 200 no-op (a bare replay of the winner's own response
+ *     has nothing to discard). NO photoFileIds by a DIFFERENT responder → 409: a comment-only race loser must
+ *     learn its response was NOT stored (a silent 200 would make its client clear the comment + report a
+ *     phantom success even though only the winner's response persisted).
  *   - photoFileIds that are an EXACT REPLAY of the already-recorded response (SAME responder AND the item's
  *     already-linked response-photo file_ids EQUAL the supplied set) → idempotent success, no re-insert, no 409.
  *     This handles a lost-response retry: the first submission committed (item resolved, photos attached) and
@@ -212,11 +215,16 @@ export async function submitCorrectiveActionResponse(
 
   // If the item is no longer open (a concurrent responder won the race, OR a replayed request), do NOT insert
   // photos — the resolve below would be a no-op and any inserted photos would orphan onto the winner's
-  // finalized response.
+  // finalized response. The responder identity is checked FIRST (it gates BOTH the comment-only and the
+  // with-photos cases), then:
   //
   // Outcomes:
-  //   - no photoFileIds (a bare re-submit / replay of a resolved item): preserve the idempotent 200 no-op —
-  //     nothing was uploaded, so there is nothing to discard.
+  //   - no photoFileIds by the SAME responder (a bare re-submit / replay of the winner's own resolved item):
+  //     idempotent 200 no-op — nothing was uploaded, so there is nothing to discard.
+  //   - no photoFileIds by a DIFFERENT responder (a comment-only race LOSER — two responders each POSTed a
+  //     comment-only response and this one arrived after the winner resolved it): a CONFLICT (409, code
+  //     CORRECTIVE_ACTION_ALREADY_RESOLVED). A silent 200 here would make the loser's client clear its comment
+  //     and report success even though only the WINNER's response was stored.
   //   - photoFileIds supplied AND this is an EXACT REPLAY of the already-recorded response (same responder,
   //     and the item's already-linked response-photo file_ids EQUAL the supplied set): the FIRST submission
   //     committed (item resolved, photos attached) and only its HTTP response was lost, so the client retried
@@ -228,8 +236,6 @@ export async function submitCorrectiveActionResponse(
   //     (409, code CORRECTIVE_ACTION_ALREADY_RESOLVED) so the caller discards those now-orphaned uploads (web
   //     clears its pending-discard set / calls the discard endpoint; mobile deletes its local draft).
   if (item.status !== "open") {
-    if (photoFileIds.length === 0) return;
-
     // Same responder? A session caller (userId non-null) matches on responded_by_user_id; a token caller
     // (userId null) matches on responder_email (the token recipient's email).
     const sameResponder =
@@ -237,7 +243,11 @@ export async function submitCorrectiveActionResponse(
         ? item.respondedByUserId === input.respondedBy.userId
         : input.respondedBy.email !== null && item.responderEmail === input.respondedBy.email;
 
-    if (sameResponder) {
+    if (photoFileIds.length === 0) {
+      // A comment-only submission on a resolved item: an idempotent no-op ONLY for the winner (same responder);
+      // a DIFFERENT responder is a race loser and must get the conflict, not a phantom success.
+      if (sameResponder) return;
+    } else if (sameResponder) {
       // The response-photo file_ids ALREADY linked to THIS item (corrective_action_id = item.id).
       const linked = await db
         .select({ fileId: fieldScorecardPhotos.fileId })
@@ -251,8 +261,8 @@ export async function submitCorrectiveActionResponse(
       if (sameFileSet) return;
     }
 
-    // A genuine competing submission (different responder or different photo set) — signal the conflict so the
-    // caller discards its orphaned uploads.
+    // A genuine competing submission (different responder, or same responder with a different photo set) —
+    // signal the conflict so the caller discards its orphaned uploads / surfaces the lost race.
     throw new AppError(
       409,
       "This corrective action was already resolved; discard the uploaded photos.",

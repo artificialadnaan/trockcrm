@@ -233,6 +233,22 @@ function parseCaption(value: unknown): string | null {
   return value;
 }
 
+// A stable per-photo idempotency key the client generates once and re-sends on retry (finding P2). Forwarded
+// to confirmUpload so a lost-response retry (same key, token already consumed) returns the already-created
+// file row instead of an expired-token error → no re-upload / orphan. Cap its length (it persists to
+// files.client_upload_id) and require a non-empty string; anything else (absent / non-string / blank) is
+// legacy single-shot behavior and simply ignored (undefined).
+const MAX_CLIENT_UPLOAD_ID_LENGTH = 200;
+function parseClientUploadId(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  if (trimmed.length > MAX_CLIENT_UPLOAD_ID_LENGTH) {
+    throw new AppError(400, `clientUploadId must be at most ${MAX_CLIENT_UPLOAD_ID_LENGTH} characters.`);
+  }
+  return trimmed;
+}
+
 /**
  * Parse the OPTIONAL capture metadata (takenAt + GPS) off the upload-confirm body. The mobile capture flow
  * collects these per response photo; we thread them into confirmUpload so a response file carries the same
@@ -348,6 +364,9 @@ export function registerCorrectiveActionRoutes(fieldRoutes: Router): void {
         const uploadToken = typeof req.body?.uploadToken === "string" ? req.body.uploadToken : "";
         const objectKey = typeof req.body?.objectKey === "string" ? req.body.objectKey : "";
         const caption = parseCaption(req.body?.caption);
+        // Stable per-photo idempotency key (finding P2) — makes a lost-response confirm retry return the same
+        // fileId instead of an expired-token error. Absent/blank → legacy single-shot confirm.
+        const clientUploadId = parseClientUploadId(req.body?.clientUploadId);
         // Best-effort capture provenance (takenAt + GPS) collected by the mobile capture flow; malformed values
         // are dropped, never a 400, so a bad optional field can't fail an otherwise-valid photo upload.
         const captureMetadata = parseCaptureMetadata(req.body);
@@ -365,6 +384,7 @@ export function registerCorrectiveActionRoutes(fieldRoutes: Router): void {
               uploadToken,
               objectKey,
               caption,
+              clientUploadId,
               ...captureMetadata,
             }),
         );

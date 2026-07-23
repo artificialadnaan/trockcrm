@@ -8,6 +8,7 @@ import {
   fieldScorecards,
   fieldScorecardItems,
   fieldScorecardPhotos,
+  fieldScorecardEditUploads,
   scorecardCorrectiveActions,
   scorecardCorrectiveActionTokens,
   scorecardCorrectiveActionUploads,
@@ -123,6 +124,10 @@ beforeAll(async () => {
       fieldScorecards,
       fieldScorecardItems,
       fieldScorecardPhotos,
+      // confirmUpload's clientUploadId dedup path (finding P2 retry) SELECTs FOR UPDATE from
+      // field_scorecard_edit_uploads to reconcile any scorecard-edit binding; a corrective-action upload has no
+      // such binding row (the lookup no-ops), but the table must exist for the query to run.
+      fieldScorecardEditUploads,
       scorecardCorrectiveActions,
       scorecardCorrectiveActionTokens,
       scorecardCorrectiveActionUploads,
@@ -161,6 +166,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   sessionUser = { id: USER, role: "field_contractor" };
+  await tdb.execute(sql`DELETE FROM field_scorecard_edit_uploads`);
   await tdb.execute(sql`DELETE FROM scorecard_corrective_action_uploads`);
   await tdb.execute(sql`DELETE FROM scorecard_corrective_action_tokens`);
   await tdb.execute(sql`DELETE FROM scorecard_corrective_actions`);
@@ -281,6 +287,38 @@ describe("token-scoped corrective-action photo upload", () => {
     const resolved = resp.body.items.find((i: any) => i.id === itemId);
     expect(resolved.status).toBe("resolved");
     expect(resolved.photos.map((p: any) => p.fileId)).toContain(fileId);
+  });
+
+  it("is retryable via a stable clientUploadId: a retry after the token is consumed returns the SAME fileId, no duplicate file (finding P2)", async () => {
+    // The confirm consumes the process-local upload token on the first success. If the DB commit succeeds but
+    // the HTTP response is lost, the client's retry (with the SAME clientUploadId) must dedup on
+    // confirmUpload's client_upload_id path and return the already-created file row — NOT an expired-token
+    // error that would strand the fileId and cause a re-upload / orphan.
+    const urlRes = await request(app)
+      .post(`/scorecards/${scorecardId}/corrective-actions/upload/url`)
+      .send({ contentType: "image/jpeg", sizeBytes: 1024 });
+    expect(urlRes.status).toBe(200);
+
+    const clientUploadId = "ca-retry-0001";
+    const first = await request(app)
+      .post(`/scorecards/${scorecardId}/corrective-actions/upload`)
+      .send({ uploadToken: urlRes.body.uploadToken, objectKey: urlRes.body.objectKey, clientUploadId });
+    expect(first.status).toBe(201);
+    const fileId = first.body.fileId as string;
+    expect(typeof fileId).toBe("string");
+
+    // Retry with the SAME token (now consumed) + SAME clientUploadId → dedups to the existing row, no error.
+    const retry = await request(app)
+      .post(`/scorecards/${scorecardId}/corrective-actions/upload`)
+      .send({ uploadToken: urlRes.body.uploadToken, objectKey: urlRes.body.objectKey, clientUploadId });
+    expect(retry.status).toBe(201);
+    expect(retry.body.fileId).toBe(fileId);
+
+    // Exactly ONE file was created for this clientUploadId (no duplicate/orphan).
+    const rows = await tdb.execute(
+      sql`SELECT count(*)::int AS n FROM files WHERE client_upload_id = ${clientUploadId}`,
+    );
+    expect((rows.rows[0] as { n: number }).n).toBe(1);
   });
 
   it("persists a valid caption onto the file's description", async () => {

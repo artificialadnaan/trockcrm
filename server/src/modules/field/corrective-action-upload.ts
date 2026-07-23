@@ -134,6 +134,15 @@ export interface ConfirmCorrectiveActionUploadInput {
   latitude?: number;
   longitude?: number;
   addressSource?: "exif" | "live_gps";
+  /**
+   * Optional STABLE per-photo idempotency key the mobile/web client generates once and re-sends on retry.
+   * Threaded into confirmUpload, which consumes the process-local upload token on the first successful confirm
+   * but ALSO dedups on files.client_upload_id: so if the DB commit succeeds but the HTTP response is lost, a
+   * retry carrying the SAME clientUploadId returns the already-created file row instead of failing with an
+   * expired-token error (which would strand the fileId and cause a re-upload / orphan). Absent → legacy
+   * (single-shot, token-only) confirm.
+   */
+  clientUploadId?: string;
 }
 
 /**
@@ -184,6 +193,9 @@ export async function confirmCorrectiveActionUpload(
     latitude: input.latitude,
     longitude: input.longitude,
     addressSource: input.addressSource,
+    // Thread the stable per-photo idempotency key so a lost-response retry (same clientUploadId, token already
+    // consumed) dedups to the already-created file row rather than failing with an expired-token error.
+    clientUploadId: input.clientUploadId,
   });
   // Record DURABLE, unforgeable corrective-action ownership: one ledger row per file created via this flow.
   // discardCorrectiveActionUpload gates on an EXISTS here (file_id + scorecard_id) instead of the FORGEABLE

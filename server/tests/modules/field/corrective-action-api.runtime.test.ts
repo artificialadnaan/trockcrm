@@ -431,7 +431,7 @@ describe("submitCorrectiveActionResponse", () => {
     expect(orphan.rows).toHaveLength(0);
   });
 
-  it("a bare re-submit (NO photos) of an already-resolved item is an idempotent no-op, not a 409 (finding I)", async () => {
+  it("a bare re-submit (NO photos) by the SAME responder of an already-resolved item is an idempotent no-op, not a 409 (finding I / P2)", async () => {
     const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
     const [first] = await getCorrectiveActionItems(tdb, scorecard.id);
 
@@ -442,13 +442,14 @@ describe("submitCorrectiveActionResponse", () => {
       respondedBy: { userId: USER, name: "Sam", email: null },
     });
 
-    // A replayed submit for the resolved item that carries NO fresh uploads has nothing to discard → no-op.
+    // A replayed comment-only submit by the SAME responder (the winner) is an idempotent success — nothing to
+    // discard, no competing response.
     await expect(
       submitCorrectiveActionResponse(tdb, {
         scorecardId: scorecard.id,
         itemId: first.id,
         comment: "replay with no photos",
-        respondedBy: { userId: null, name: "Ext PM", email: "pm@x.com" },
+        respondedBy: { userId: USER, name: "Sam", email: null },
       }),
     ).resolves.toBeUndefined();
 
@@ -457,6 +458,46 @@ describe("submitCorrectiveActionResponse", () => {
     const resolved = items.find((i) => i.id === first.id)!;
     expect(resolved.status).toBe("resolved");
     expect(resolved.responseComment).toBe("resolved by the first responder");
+    expect(resolved.respondedByUserId).toBe(USER);
+  });
+
+  it("a bare re-submit (NO photos) by a DIFFERENT responder of an already-resolved item 409s (comment-only race loser) (finding P2)", async () => {
+    // Two responders (a super and a PM) submit COMMENT-ONLY responses for the same item concurrently. The
+    // winner resolves it; the LOSER hits the already-resolved branch. Because the loser is a DIFFERENT responder
+    // (not a same-responder replay), the loser must get a 409 CORRECTIVE_ACTION_ALREADY_RESOLVED — NOT a 200
+    // no-op that would make the loser's client clear its comment + report a phantom success.
+    const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
+    const [first] = await getCorrectiveActionItems(tdb, scorecard.id);
+
+    // The winner (session super) resolves it comment-only.
+    await submitCorrectiveActionResponse(tdb, {
+      scorecardId: scorecard.id,
+      itemId: first.id,
+      comment: "resolved by the super",
+      respondedBy: { userId: USER, name: "Sam", email: null },
+    });
+
+    // The loser (a DIFFERENT, token PM) submits comment-only after the winner resolved → 409.
+    let thrown: unknown;
+    try {
+      await submitCorrectiveActionResponse(tdb, {
+        scorecardId: scorecard.id,
+        itemId: first.id,
+        comment: "PM's comment that lost the race",
+        respondedBy: { userId: null, name: "Ext PM", email: "pm@x.com" },
+      });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(AppError);
+    expect((thrown as AppError).statusCode).toBe(409);
+    expect((thrown as AppError).code).toBe("CORRECTIVE_ACTION_ALREADY_RESOLVED");
+
+    // The winner's response is untouched (the loser's comment never overwrote it).
+    const items = await getCorrectiveActionItems(tdb, scorecard.id);
+    const resolved = items.find((i) => i.id === first.id)!;
+    expect(resolved.status).toBe("resolved");
+    expect(resolved.responseComment).toBe("resolved by the super");
     expect(resolved.respondedByUserId).toBe(USER);
   });
 
