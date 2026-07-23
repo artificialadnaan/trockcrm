@@ -75,6 +75,30 @@ export function shouldReclaimDraftDirOnSettle(args: { mounted: boolean; submitte
   return !args.mounted && !args.submittedOk;
 }
 
+/**
+ * Decide whether an in-flight PHOTO CAPTURE's OWN settle path must reclaim the synthetic per-item draft photo
+ * dir after the screen unmounted.
+ *
+ * `onCameraCapture` awaits GPS + `copyPhotoIntoDraft` (which `ensureDir`s and copies a full-size file) while
+ * `submitting` is false. If the user backs out — or force-quits — mid-capture, the unmount-cleanup effect
+ * runs with submitting=false and deletes the dir straight away; then the still-in-flight capture RE-CREATES
+ * the dir and finishes copying the file AFTER the component is gone → a permanent orphaned copy no later
+ * cleanup owns. So the capture's settle handler must reclaim the dir itself in exactly that case.
+ *
+ * Two extra conditions vs the submit predicate:
+ *  - `submittedOk`: a submit that already succeeded deleted the dir; never double-delete (can't realistically
+ *    overlap a capture, but keep the guard symmetric).
+ *  - `inFlightCaptures`: reclaim ONLY when this is the LAST capture to settle. If other captures are still
+ *    copying into the same dir, deleting now would re-orphan their files; the last one to finish reclaims.
+ */
+export function shouldReclaimDraftDirOnCaptureSettle(args: {
+  mounted: boolean;
+  submittedOk: boolean;
+  inFlightCaptures: number;
+}): boolean {
+  return !args.mounted && !args.submittedOk && args.inFlightCaptures <= 0;
+}
+
 export type CorrectiveResponseAction =
   | { type: "addPhoto"; photo: CorrectiveResponsePhoto }
   | { type: "removePhoto"; key: string }

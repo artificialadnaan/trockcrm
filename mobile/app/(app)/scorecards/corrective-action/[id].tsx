@@ -15,6 +15,7 @@ import type { CapturedShot } from "../../../../src/capture/CameraCapture";
 import {
   correctiveResponseReducer,
   emptyCorrectiveResponse,
+  shouldReclaimDraftDirOnCaptureSettle,
   shouldReclaimDraftDirOnSettle,
   submitCorrectiveActionItem,
   type CorrectiveResponsePhoto,
@@ -203,14 +204,28 @@ function CorrectiveActionItemCard({
   // on re-entry — so backing out / an app kill before submit orphans the copies. On unmount of an UNRESOLVED
   // item, reclaim the dir. Guards (read from a ref so the unmount closure sees the LATEST values, not the
   // mount-time snapshot): skip while a submit is in flight (its own success path cleans up + would race a
-  // delete-out-from-under), and skip once submitted OK (already cleaned). A resolved item never reaches this
-  // component branch (it early-returns ResolvedItemCard above), so there's nothing to clean there.
+  // delete-out-from-under), skip while a photo capture is in flight (it would re-create the dir + copy after
+  // the delete — the last capture's settle path reclaims instead), and skip once submitted OK (already
+  // cleaned). A resolved item never reaches this component branch (it early-returns ResolvedItemCard above),
+  // so there's nothing to clean there.
   // Also carry ownerKey/draftId in the ref so the empty-dep cleanup below reads the CURRENT values (not a
   // stale mount-time snapshot) and never re-fires on a prop change. ownerKey is stable this session (parent
   // locks it to session-stable values), but reading it from the ref keeps the teardown correct regardless.
   // `mounted` lets the in-flight submit's OWN settle path reclaim the dir when the user backed out / the app
   // was killed mid-submit and the submit then FAILED (unmount-cleanup skipped it because submitting was true).
-  const cleanupGuardRef = useRef({ submitting: false, submittedOk: false, mounted: true, ownerKey, draftId });
+  // `inFlightCaptures` does the SAME for photo capture: onCameraCapture awaits GPS + copyPhotoIntoDraft (which
+  // ensureDirs + copies a full-size file) while submitting=false, so the unmount-cleanup deletes the dir and
+  // the still-running capture then re-creates it + copies AFTER unmount. Track the in-flight captures so the
+  // LAST one to settle after an unmount reclaims that re-created dir (a synchronous ref, not lagging React
+  // state — the unmount closure + the capture's finally both read the CURRENT count).
+  const cleanupGuardRef = useRef({
+    submitting: false,
+    submittedOk: false,
+    mounted: true,
+    inFlightCaptures: 0,
+    ownerKey,
+    draftId,
+  });
   cleanupGuardRef.current.submitting = submitting;
   cleanupGuardRef.current.ownerKey = ownerKey;
   cleanupGuardRef.current.draftId = draftId;
@@ -220,10 +235,13 @@ function CorrectiveActionItemCard({
     // photos still referenced in reducer state. Empty deps + a ref read guarantees it fires solely on unmount.
     return () => {
       const g = cleanupGuardRef.current;
-      // Mark unmounted FIRST so an in-flight submit that settles after this can detect the screen is gone and
-      // reclaim the dir itself (this teardown skips the delete while submitting to avoid racing the success path).
+      // Mark unmounted FIRST so an in-flight submit OR photo capture that settles after this can detect the
+      // screen is gone and reclaim the dir itself. This teardown skips the delete while a submit is in flight
+      // (avoid racing the success path) AND while a capture is in flight (copyPhotoIntoDraft would just
+      // re-create the dir + copy a full-size file after we deleted it — the LAST capture's settle path
+      // reclaims the re-created dir instead).
       g.mounted = false;
-      if (g.submitting || g.submittedOk) return;
+      if (g.submitting || g.submittedOk || g.inFlightCaptures > 0) return;
       void deleteDraftPhotoDir(g.ownerKey, g.draftId);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -255,6 +273,11 @@ function CorrectiveActionItemCard({
     }
     const clientUploadId = newClientUploadId();
     setSavingPhotos((n) => n + 1);
+    // Count this capture as in flight on the guard ref (synchronous, not lagging React state) so if the screen
+    // unmounts mid-capture the settle path below can tell whether it's the LAST capture still copying into the
+    // dir before reclaiming. copyPhotoIntoDraft ensureDirs + copies the full-size file, so a capture that
+    // finishes after unmount re-creates the dir the unmount-cleanup already deleted.
+    cleanupGuardRef.current.inFlightCaptures += 1;
     try {
       const exif = extractExifMetadata(shot.exif);
       let latitude = exif.latitude;
@@ -289,6 +312,22 @@ function CorrectiveActionItemCard({
       setNotice({ tone: "error", text: "Couldn't save that photo — please retake it." });
     } finally {
       setSavingPhotos((n) => n - 1);
+      // Decrement FIRST so the reclaim check sees the true remaining count. If the screen has since unmounted
+      // (the user backed out / the app was killed mid-capture) and the submit didn't succeed, the unmount
+      // cleanup already deleted the dir with submitting=false — but this capture re-created it via
+      // copyPhotoIntoDraft and (on the try path) copied a full-size file into it. Reclaim that re-created dir,
+      // but only once this is the LAST in-flight capture so we never delete out from under a sibling still copying.
+      const g = cleanupGuardRef.current;
+      g.inFlightCaptures -= 1;
+      if (
+        shouldReclaimDraftDirOnCaptureSettle({
+          mounted: g.mounted,
+          submittedOk: g.submittedOk,
+          inFlightCaptures: g.inFlightCaptures,
+        })
+      ) {
+        void deleteDraftPhotoDir(g.ownerKey, g.draftId);
+      }
     }
   }
 

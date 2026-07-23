@@ -46,6 +46,7 @@ jest.mock("../../api/endpoints", () => ({
 import {
   correctiveResponseReducer,
   emptyCorrectiveResponse,
+  shouldReclaimDraftDirOnCaptureSettle,
   shouldReclaimDraftDirOnSettle,
   submitCorrectiveActionItem,
   type CorrectiveResponsePhoto,
@@ -107,6 +108,37 @@ describe("shouldReclaimDraftDirOnSettle", () => {
     expect(shouldReclaimDraftDirOnSettle({ mounted: false, submittedOk: true })).toBe(false);
     // Even the impossible mounted+ok combo must never double-delete.
     expect(shouldReclaimDraftDirOnSettle({ mounted: true, submittedOk: true })).toBe(false);
+  });
+});
+
+describe("shouldReclaimDraftDirOnCaptureSettle", () => {
+  // A photo CAPTURE that finishes AFTER the screen unmounted RE-CREATES the per-item dir (copyPhotoIntoDraft
+  // ensureDir + copy) once the unmount-cleanup already deleted it — so the capture's OWN settle path must
+  // reclaim the dir, but ONLY when it's the last capture still in flight and the submit didn't succeed.
+  it("reclaims when the screen unmounted mid-capture, the submit did NOT succeed, and no other capture is in flight", () => {
+    // The leak the P2 finding describes: the late capture re-created the dir + copied a full-size file after unmount.
+    expect(
+      shouldReclaimDraftDirOnCaptureSettle({ mounted: false, submittedOk: false, inFlightCaptures: 0 }),
+    ).toBe(true);
+  });
+
+  it("does NOT reclaim while the screen is still mounted (the mounted screen owns cleanup)", () => {
+    expect(
+      shouldReclaimDraftDirOnCaptureSettle({ mounted: true, submittedOk: false, inFlightCaptures: 0 }),
+    ).toBe(false);
+  });
+
+  it("does NOT reclaim a submit that SUCCEEDED (the dir is already gone / photos are durable server records)", () => {
+    expect(
+      shouldReclaimDraftDirOnCaptureSettle({ mounted: false, submittedOk: true, inFlightCaptures: 0 }),
+    ).toBe(false);
+  });
+
+  it("does NOT reclaim while other captures are still copying into the same dir (only the LAST one reclaims)", () => {
+    // Deleting now would re-orphan the files those still-copying captures are writing; wait for the last settle.
+    expect(
+      shouldReclaimDraftDirOnCaptureSettle({ mounted: false, submittedOk: false, inFlightCaptures: 1 }),
+    ).toBe(false);
   });
 });
 
