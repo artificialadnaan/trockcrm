@@ -1,10 +1,11 @@
 import React, { useRef, useState } from "react";
 import { Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
-import { useRouter } from "expo-router";
+import { useLocalSearchParams, useRouter } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { useAuth } from "../src/auth/AuthContext";
 import { ApiError } from "../src/api/client";
+import { resolvePostLoginHref } from "../src/navigation/return-to";
 import { theme } from "../src/theme/theme";
 import { Button, TextInput } from "../src/components/ui";
 import { Banner } from "../src/components/Banner";
@@ -13,6 +14,9 @@ import { BrandLogo } from "../src/components/BrandLogo";
 export default function Login() {
   const { signIn } = useAuth();
   const router = useRouter();
+  // The (app) layout stashes the blocked destination here when a deep link (e.g. corrective-action) forces a
+  // login; on success we return there, falling back to projects when there's no pending destination.
+  const { returnTo } = useLocalSearchParams<{ returnTo?: string }>();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -28,7 +32,7 @@ export default function Login() {
     setLoading(true);
     try {
       await signIn(email.trim(), password);
-      router.replace("/(app)/projects");
+      router.replace(resolvePostLoginHref(returnTo));
     } catch (e) {
       if (e instanceof ApiError && e.status === 423) {
         setError("Too many attempts — your account is temporarily locked. Try again in a few minutes.");

@@ -1,8 +1,9 @@
 import React from "react";
-import { Redirect, Tabs } from "expo-router";
+import { Redirect, Tabs, useGlobalSearchParams, usePathname } from "expo-router";
 import { ActivityIndicator, View } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { useAuth } from "../../src/auth/AuthContext";
+import { buildLoginReturnTo } from "../../src/navigation/return-to";
 import { theme } from "../../src/theme/theme";
 
 // Monochrome vector icons so the active tab icon inherits tabBarActiveTintColor
@@ -15,6 +16,12 @@ function TabIcon({ name, color }: { name: IoniconName; color: string }) {
 /** Authenticated tab shell (Projects / Capture / Profile) — replaces FieldLayout. */
 export default function AppLayout() {
   const { ready, token } = useAuth();
+  // Capture where the user was headed (e.g. the corrective-action deep link) so a required login can return
+  // them there. This is the single chokepoint for BOTH a cold-start deep link (app not running → OS opens
+  // the link → this layout mounts with no token) and a warm one (session expired mid-session). usePathname
+  // strips the (app) group segment; useGlobalSearchParams carries any query param (e.g. the link's token).
+  const pathname = usePathname();
+  const params = useGlobalSearchParams();
 
   if (!ready) {
     return (
@@ -23,7 +30,10 @@ export default function AppLayout() {
       </View>
     );
   }
-  if (!token) return <Redirect href="/login" />;
+  if (!token) {
+    const returnTo = buildLoginReturnTo(pathname, params);
+    return <Redirect href={returnTo ? { pathname: "/login", params: { returnTo } } : "/login"} />;
+  }
 
   return (
     <Tabs
