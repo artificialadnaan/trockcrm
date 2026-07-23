@@ -1,8 +1,20 @@
+import crypto from "crypto";
 import { describe, expect, it, vi } from "vitest";
 import {
   handleScorecardCorrectiveActionEmail,
   type ScorecardCorrectiveActionEmailPayload,
 } from "../../src/jobs/scorecard-corrective-action-email.js";
+
+// Mirror the worker's per-cycle fingerprint (sha256 over the sorted open corrective-action-item ids, first
+// 16 hex chars) so the CRM/no-token idempotency-key assertions can be derived from the same ids the mock
+// returns (finding 4).
+function cycleFingerprint(ids: string[]): string {
+  return crypto
+    .createHash("sha256")
+    .update([...ids].sort().join(","))
+    .digest("hex")
+    .slice(0, 16);
+}
 
 const SCORECARD = "11111111-1111-1111-1111-111111111111";
 const DEAL = "22222222-2222-2222-2222-222222222222";
@@ -20,14 +32,19 @@ function makeLogger() {
   return { log: vi.fn(), warn: vi.fn(), error: vi.fn() };
 }
 
-// A recipient set: one CRM user (superintendent) + one email-only member (project_manager).
+// A recipient set: one CRM user (superintendent, WITH an enabled field login) + one email-only member
+// (project_manager). can_field_login defaults to (user_id != null) unless the test overrides it — the SQL
+// computes it from an enabled/non-revoked user_local_auth join; a CRM user with a field login gets the deep
+// link, one without falls back to a token (finding 6).
 const RECIPIENTS = [
-  { role: "superintendent", name: "Sam Super", email: "sam.super@trock.com", user_id: "u-1" },
-  { role: "project_manager", name: "Dana Cole", email: "dana.cole@example.com", user_id: null },
+  { role: "superintendent", name: "Sam Super", email: "sam.super@trock.com", user_id: "u-1", can_field_login: true },
+  { role: "project_manager", name: "Dana Cole", email: "dana.cole@example.com", user_id: null, can_field_login: false },
 ];
+// Each open corrective-action row carries an id (used by the worker to derive the per-cycle fingerprint for
+// the CRM/no-token idempotency key — finding 4).
 const FLAGGED = [
-  { item_type: "action_item", item_ref: "0", item_label: "Re-inspect slab 2" },
-  { item_type: "critical_deficiency", item_ref: "missed_hold_point", item_label: "Missed hold point" },
+  { id: "ca-1", item_type: "action_item", item_ref: "0", item_label: "Re-inspect slab 2" },
+  { id: "ca-2", item_type: "critical_deficiency", item_ref: "missed_hold_point", item_label: "Missed hold point" },
 ];
 
 // Build a query mock routing on the SQL text. `sentAt` seeds the idempotency column.
@@ -100,7 +117,14 @@ function makeQuery(
       };
     }
     if (/FROM \S*deal_team_members/i.test(text)) {
-      return { rows: opts.recipients ?? RECIPIENTS };
+      // Default can_field_login when a test's inline recipient omits it: a CRM user (user_id set) is assumed
+      // to hold an enabled field login (→ deep link) unless the test explicitly says otherwise; an email-only
+      // member (user_id null) can never field-login. The SQL computes this from the user_local_auth join.
+      const rows = (opts.recipients ?? RECIPIENTS).map((r: any) => ({
+        ...r,
+        can_field_login: r.can_field_login ?? r.user_id != null,
+      }));
+      return { rows };
     }
     if (/FROM \S*scorecard_corrective_actions/i.test(text)) {
       return { rows: opts.flagged ?? FLAGGED };
@@ -149,8 +173,14 @@ describe("scorecard corrective-action notification email", () => {
     expect(pmCall[3].idempotencyKey).toContain(SCORECARD);
     expect(pmCall[3].idempotencyKey).toBe(`corrective-action-office_dallas-${SCORECARD}-token-${inserts[0].params[1]}`);
 
-    // The CRM user (no token) keeps a (scorecard, recipient) key — their deep link is cycle-stable.
-    expect(superCall[3].idempotencyKey).toBe(`corrective-action-office_dallas-${SCORECARD}-sam.super@trock.com`);
+    // The CRM user (no token) key is (scorecard, recipient) PLUS the per-cycle fingerprint (finding 4): their
+    // deep link is cycle-stable but the flagged-item email body changes each cycle, so the key must differ
+    // across cycles to avoid a Resend same-key/different-payload false-dedup. The fingerprint is a hash over
+    // the current open corrective-action-item ids (FLAGGED's ids).
+    const fp = cycleFingerprint(FLAGGED.map((f) => f.id));
+    expect(superCall[3].idempotencyKey).toBe(
+      `corrective-action-office_dallas-${SCORECARD}-sam.super@trock.com-cycle-${fp}`,
+    );
   });
 
   it("uses a DIFFERENT idempotency key for the same email-only recipient across two corrective-action cycles (finding 1)", async () => {
@@ -176,6 +206,89 @@ describe("scorecard corrective-action notification email", () => {
     expect(key1).toBe(`corrective-action-office_dallas-${SCORECARD}-token-${cycle1.inserts[0].params[1]}`);
     expect(key2).toBe(`corrective-action-office_dallas-${SCORECARD}-token-${cycle2.inserts[0].params[1]}`);
     expect(key1).not.toBe(key2);
+  });
+
+  it("scopes the CRM (no-token) key per CYCLE: two cycles differ, a same-cycle retry matches (finding 4)", async () => {
+    // A field-login CRM user gets a stable deep link but a per-cycle email PAYLOAD (the flagged-item list).
+    // The idempotency key must therefore differ ACROSS cycles (so Resend doesn't false-dedup the updated
+    // email) yet be STABLE within a cycle (so a genuine in-cycle retry still dedups the true duplicate). The
+    // per-cycle dimension is a fingerprint over the CURRENT open corrective-action-item ids — a reopen / new
+    // flag always inserts fresh-UUID open rows, so the fingerprint changes; an in-cycle retry reads the same
+    // open-item set → the same fingerprint.
+    const crmSuper = [
+      { role: "superintendent", name: "Sam Super", email: "sam.super@trock.com", user_id: "u-1", can_field_login: true },
+    ];
+    const assigned = [{ role: "superintendent" }];
+
+    // Cycle 1 open items: ids [ca-1].
+    const cycle1 = makeQuery({ recipients: crmSuper, assignedRoles: assigned, flagged: [{ id: "ca-1", item_type: "action_item", item_ref: "0", item_label: "Re-inspect slab 2" }] });
+    const send1 = vi.fn().mockResolvedValue({ success: true, messageId: "m1" });
+    await handleScorecardCorrectiveActionEmail(payload, null, { query: cycle1.query as any, sendEmail: send1, env, logger: makeLogger() });
+
+    // A SAME-cycle retry: identical open-item set [ca-1] → identical key (Resend dedups the true duplicate).
+    const cycle1Retry = makeQuery({ recipients: crmSuper, assignedRoles: assigned, flagged: [{ id: "ca-1", item_type: "action_item", item_ref: "0", item_label: "Re-inspect slab 2" }] });
+    const send1Retry = vi.fn().mockResolvedValue({ success: true, messageId: "m1r" });
+    await handleScorecardCorrectiveActionEmail(payload, null, { query: cycle1Retry.query as any, sendEmail: send1Retry, env, logger: makeLogger() });
+
+    // Cycle 2 (a reopen / new flag): a FRESH open row id [ca-2] (reconcile inserts fresh-UUID rows each cycle).
+    const cycle2 = makeQuery({ recipients: crmSuper, assignedRoles: assigned, flagged: [{ id: "ca-2", item_type: "action_item", item_ref: "1", item_label: "Re-inspect slab 5" }] });
+    const send2 = vi.fn().mockResolvedValue({ success: true, messageId: "m2" });
+    await handleScorecardCorrectiveActionEmail(payload, null, { query: cycle2.query as any, sendEmail: send2, env, logger: makeLogger() });
+
+    const key1 = send1.mock.calls[0][3].idempotencyKey as string;
+    const key1Retry = send1Retry.mock.calls[0][3].idempotencyKey as string;
+    const key2 = send2.mock.calls[0][3].idempotencyKey as string;
+
+    // No token minted for a field-login CRM user (deep link only).
+    expect(cycle1.inserts).toHaveLength(0);
+    // Same cycle → same key.
+    expect(key1).toBe(`corrective-action-office_dallas-${SCORECARD}-sam.super@trock.com-cycle-${cycleFingerprint(["ca-1"])}`);
+    expect(key1Retry).toBe(key1);
+    // Different cycle (different open-item ids) → different key.
+    expect(key2).toBe(`corrective-action-office_dallas-${SCORECARD}-sam.super@trock.com-cycle-${cycleFingerprint(["ca-2"])}`);
+    expect(key2).not.toBe(key1);
+  });
+
+  it("falls a CRM user with NO enabled field login back to a tokenized web link (finding 6)", async () => {
+    // A super/PM who is an ACTIVE CRM user (user_id set) but has no enabled field login (can_field_login
+    // false) cannot authenticate in T-Rock Cam — loginFieldUser requires an enabled user_local_auth row — so a
+    // bare deep link would strand them. They must instead get a minted recipient-bound token + web link (their
+    // public.users email is the recipient email, which verify-time revalidation matches to their own active
+    // assignment). A CRM user WITH an enabled field login still gets the deep link + no token.
+    const { query, inserts } = makeQuery({
+      recipients: [
+        { role: "superintendent", name: "Can Login", email: "can.login@trock.com", user_id: "u-can", can_field_login: true },
+        { role: "project_manager", name: "No Login", email: "no.login@trock.com", user_id: "u-no", can_field_login: false },
+      ],
+      assignedRoles: [{ role: "superintendent" }, { role: "project_manager" }],
+    });
+    const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "m" });
+    const logger = makeLogger();
+
+    await handleScorecardCorrectiveActionEmail(payload, null, { query: query as any, sendEmail, env, logger });
+
+    expect(sendEmail).toHaveBeenCalledTimes(2);
+    const canCall = sendEmail.mock.calls.find((c) => c[0] === "can.login@trock.com")!;
+    const noCall = sendEmail.mock.calls.find((c) => c[0] === "no.login@trock.com")!;
+
+    // The field-login user keeps the app deep link (no token minted for them).
+    expect((canCall[3].text as string)).toContain(`trockcam://scorecards/corrective-action/${SCORECARD}`);
+    // The non-field-login user falls back to the tokenized web link.
+    expect((noCall[3].text as string)).toContain(
+      `https://trockcrm.com/scorecards/${SCORECARD}/corrective-action?token=`,
+    );
+    expect((noCall[3].text as string)).not.toContain("trockcam://");
+
+    // Exactly ONE token minted — for the non-field-login CRM user (their public.users email), none for the
+    // field-login user.
+    expect(inserts).toHaveLength(1);
+    expect(inserts[0].params[2]).toBe("no.login@trock.com");
+    // The fallback recipient's key is the token-scoped (per-cycle) key, exactly like an email-only member.
+    expect(noCall[3].idempotencyKey).toBe(`corrective-action-office_dallas-${SCORECARD}-token-${inserts[0].params[1]}`);
+    // The field-login user's key is the CRM (no-token) per-cycle-fingerprint key.
+    expect(canCall[3].idempotencyKey).toBe(
+      `corrective-action-office_dallas-${SCORECARD}-can.login@trock.com-cycle-${cycleFingerprint(FLAGGED.map((f) => f.id))}`,
+    );
   });
 
   it("is idempotent: skips entirely when the scorecard was already notified", async () => {

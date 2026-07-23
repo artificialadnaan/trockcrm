@@ -39,6 +39,9 @@ interface ResolvedRecipient {
   name: string;
   email: string;
   userId: string | null;
+  /** True only when this CRM user can actually authenticate in T-Rock Cam (enabled, non-revoked field login).
+   *  A userId recipient who CANNOT gets the tokenized web fallback instead of the deep link (finding 6). */
+  canFieldLogin: boolean;
 }
 
 interface FlaggedItem {
@@ -60,18 +63,24 @@ function hashToken(rawToken: string): string {
  * seeds tracked items + enqueues this job in the SAME submit transaction (durable outbox). The handler
  * resolves the deal's superintendent + project_manager (hybrid: CRM users OR email-only members), and sends
  * ONE email per recipient:
- *   - a CRM user gets a TRock Cam deep link (trockcam://scorecards/corrective-action/<id>);
- *   - an email-only member gets a freshly-minted recipient-bound web token appended to the responder URL.
+ *   - a CRM user who can ACTUALLY field-login (an enabled, non-revoked user_local_auth row — mirrors
+ *     loginFieldUser + the field-auth middleware gate) gets a TRock Cam deep link
+ *     (trockcam://scorecards/corrective-action/<id>);
+ *   - an email-only member — OR a CRM user who CANNOT field-login (no enabled field login, so the deep link
+ *     would strand them at a login they can't pass; finding 6) — gets a freshly-minted recipient-bound web
+ *     token appended to the responder URL.
  *
  * Idempotent per scorecard via field_scorecards.corrective_action_email_sent_at (mirrors email_sent_at):
  * checked before sending, stamped once ONLY when every ASSIGNED super/PM role was delivered this run. An
  * assigned-but-unresolvable role — inactive identity or missing/invalid email — instead THROWS so the queue
  * retries (a normal return would COMPLETE the job and strand the un-notified role forever; finding 4). The
- * Resend idempotencyKey is scoped to the corrective-action CYCLE — for an email-only recipient it carries the
- * freshly-minted token hash (a reopen mints a fresh token → new key, so the new link is actually sent, not
- * false-deduped by Resend as a same-key/different-payload `invalid_idempotent_request`), and for a CRM user
- * (no token) it is per (scorecard, recipient) since their deep link is cycle-stable — so a re-delivery in the
- * crash window (sent, not yet stamped) or a throw-triggered retry doesn't double-email a recipient. Email-only
+ * Resend idempotencyKey is scoped to the corrective-action CYCLE for BOTH recipient kinds — for a token
+ * recipient it carries the freshly-minted token hash (a reopen mints a fresh token → new key), and for a CRM
+ * user (no token) it carries a per-cycle fingerprint (a hash over the current open corrective-action-item ids,
+ * which are fresh-UUID rows every cycle) so their updated flagged-item email is actually sent, not false-
+ * deduped by Resend as a same-key/different-payload `invalid_idempotent_request` (finding 4); WITHIN a cycle
+ * the key is stable so a re-delivery in the crash window (sent, not yet stamped) or a throw-triggered retry
+ * doesn't double-email a recipient. Email-only
  * tokens carry a delivered_at set only AFTER a successful send, so a retry reuses a DELIVERED token but
  * (re)sends an undelivered one — delivery is never inferred from mere token existence (finding 5).
  */
@@ -124,6 +133,13 @@ export async function handleScorecardCorrectiveActionEmail(
   // Resolve the deal's superintendent + project_manager (hybrid). Same selection as the server's
   // resolveCorrectiveActionRecipients (deal_team_members active rows; user/contact must be active; or an
   // email-only member with both fks null), reimplemented in raw SQL because the worker can't import server.
+  // canFieldLogin mirrors the server's field-login gate (loginFieldUser + the field-auth middleware): a CRM
+  // user can authenticate in T-Rock Cam only if they hold an ENABLED, NON-REVOKED user_local_auth row
+  // (loginFieldUser INNER-JOINs user_local_auth and rejects `!is_enabled`; the field middleware also rejects
+  // a set revoked_at). A userId recipient WITHOUT that can't log in → the deep link strands them, so they get
+  // the tokenized web fallback instead (finding 6). user_local_auth lives in public (schema/public/
+  // user-local-auth.ts). must_change_password is deliberately NOT a disqualifier here: loginFieldUser itself
+  // does not block it (they authenticate successfully), so it doesn't make them incapable of field-login.
   const recipientRes = await query(
     `SELECT DISTINCT ON (dtm.role)
             dtm.role AS role,
@@ -137,9 +153,12 @@ export async function handleScorecardCorrectiveActionEmail(
               CASE WHEN dtm.user_id IS NOT NULL AND u.is_active THEN u.email END,
               CASE WHEN dtm.contact_id IS NOT NULL AND c.is_active THEN c.email END,
               dtm.member_email
-            ) AS email
+            ) AS email,
+            (dtm.user_id IS NOT NULL AND u.is_active AND ula.user_id IS NOT NULL
+               AND ula.is_enabled = TRUE AND ula.revoked_at IS NULL) AS can_field_login
        FROM ${tenantSchema}.deal_team_members dtm
        LEFT JOIN public.users u ON dtm.user_id = u.id
+       LEFT JOIN public.user_local_auth ula ON dtm.user_id = ula.user_id
        LEFT JOIN ${tenantSchema}.contacts c ON dtm.contact_id = c.id
       WHERE dtm.deal_id = $1::uuid
         AND dtm.is_active = TRUE
@@ -162,7 +181,13 @@ export async function handleScorecardCorrectiveActionEmail(
       logger.warn("[CorrectiveActionEmail] Recipient has no resolvable email - skipping", { scorecardId, role });
       continue;
     }
-    recipients.push({ role, name: normalizeText(row.name) ?? email, email, userId: normalizeText(row.user_id) });
+    recipients.push({
+      role,
+      name: normalizeText(row.name) ?? email,
+      email,
+      userId: normalizeText(row.user_id),
+      canFieldLogin: row.can_field_login === true,
+    });
     resolvedRoles.add(role);
   }
 
@@ -208,17 +233,46 @@ export async function handleScorecardCorrectiveActionEmail(
   // Roles that ARE assigned but did NOT resolve into a deliverable recipient this run.
   const unresolvedAssignedRoles = [...assignedRoles].filter((role) => !resolvedRoles.has(role));
 
-  // Flagged items for the email body (the open corrective-action rows).
+  // Flagged items for the email body (the open corrective-action rows). We also select each row's id to
+  // derive the per-cycle fingerprint below (reuses this one query — no extra round-trip).
   const flaggedRes = await query(
-    `SELECT item_type, item_label FROM ${tenantSchema}.scorecard_corrective_actions
+    `SELECT id, item_type, item_label FROM ${tenantSchema}.scorecard_corrective_actions
       WHERE scorecard_id = $1::uuid AND status = 'open'
       ORDER BY item_type, item_ref`,
     [scorecardId]
   );
-  const flagged: FlaggedItem[] = (flaggedRes.rows as any[]).map((r) => ({
+  const flaggedRows = flaggedRes.rows as any[];
+  const flagged: FlaggedItem[] = flaggedRows.map((r) => ({
     itemType: String(r.item_type),
     itemLabel: String(r.item_label),
   }));
+
+  // Per-cycle fingerprint for the CRM (no-token) idempotency key. A CRM recipient's deep link is cycle-
+  // STABLE, but the email PAYLOAD (which lists the flagged items) changes every cycle — so a cycle-stable
+  // key would make Resend see the same key with a different payload → `invalid_idempotent_request`, which
+  // sendSystemEmailWithMetadata treats as an already-delivered success → the worker stamps the new cycle
+  // notified WITHOUT sending the updated email (the CRM assignee never learns of the new corrective action).
+  // (finding 4)
+  //
+  // The job row's id is NOT available to the handler (queue.ts processJob calls the handler with just
+  // (payload, officeId)), so we derive the cycle dimension from DB state instead: a hash over the CURRENT
+  // open corrective-action rows' ids. Every new cycle (a reopen, OR an already-open card that gained new
+  // work — reconcileScorecardCorrectiveActions requires toInsert.length > 0 for BOTH) INSERTS at least one
+  // brand-new row with a fresh random UUID that is `open` when this job runs, so the fingerprint DIFFERS
+  // across cycles; a genuine in-cycle retry reads the same open-item set → the SAME fingerprint (still
+  // dedups). Sorted so ordering can't perturb it. If somehow there are no open rows (a race where every
+  // item was just resolved), the card would be closed and the handler already returned above, so this is
+  // only reached with a non-empty set.
+  const cycleFingerprint = crypto
+    .createHash("sha256")
+    .update(
+      flaggedRows
+        .map((r) => String(r.id))
+        .sort()
+        .join(","),
+    )
+    .digest("hex")
+    .slice(0, 16);
 
   // Deal display fields for the email + link.
   const dealRes = await query(
@@ -245,18 +299,24 @@ export async function handleScorecardCorrectiveActionEmail(
   // re-mints and re-sends them a fresh, working link. Only the OFFICE tenant schema is interpolated (regex-
   // validated).
 
-  // Send one email per recipient with the link appropriate to their identity.
+  // Send one email per recipient with the link appropriate to their ACTUAL field-login capability (finding 6).
+  // A CRM user who can authenticate in T-Rock Cam (canFieldLogin) gets the in-app deep link; a CRM user who
+  // CANNOT (no enabled/non-revoked field login) — as well as every email-only member (userId === null) — gets
+  // the tokenized web link, because the deep link would otherwise strand them at a login they can't pass.
   for (const recipient of recipients) {
     let link: string;
     let mintedTokenHash: string | null = null;
-    if (recipient.userId) {
-      // CRM user → TRock Cam deep link (they respond in-app). The scheme + path must match the app exactly:
-      // the Expo config `scheme` is `trockcam` (app.config.ts) and the expo-router file route is
-      // app/(app)/scorecards/corrective-action/[id].tsx, so the deep link is
+    if (recipient.userId && recipient.canFieldLogin) {
+      // CRM user WITH an enabled field login → TRock Cam deep link (they respond in-app). The scheme + path
+      // must match the app exactly: the Expo config `scheme` is `trockcam` (app.config.ts) and the expo-router
+      // file route is app/(app)/scorecards/corrective-action/[id].tsx, so the deep link is
       // trockcam://scorecards/corrective-action/<id> (the `(app)` group is transparent in the URL).
       link = `trockcam://scorecards/corrective-action/${encodeURIComponent(scorecardId)}`;
     } else {
-      // Email-only → they respond via a tokenized web link. Reuse an existing token ONLY when it was actually
+      // Email-only member OR a CRM user who canNOT field-login → they respond via a tokenized web link (the
+      // recipient-bound token uses THIS recipient's email — a CRM user's public.users email is their own, and
+      // the verify-time revalidation authorizes them because that email matches their own active super/PM
+      // assignment on the deal). Reuse an existing token ONLY when it was actually
       // DELIVERED (delivered_at IS NOT NULL) — delivery ≠ token existence. The row is inserted BEFORE the send,
       // so a crash in that window (or a send failure whose cleanup delete didn't land) leaves an undelivered
       // token; skipping on mere existence would strand the recipient with a link they never got while the
@@ -304,21 +364,26 @@ export async function handleScorecardCorrectiveActionEmail(
     });
 
     // The Resend idempotency key must be UNIQUE PER CORRECTIVE-ACTION CYCLE, not just per (scorecard,
-    // recipient). A REOPEN deletes the prior cycle's tokens + re-enqueues a fresh job that mints a NEW token
-    // (new payload/link). If the key were cycle-stable, Resend would see the same key with a DIFFERENT payload
-    // and return `invalid_idempotent_request` — which sendSystemEmailWithMetadata treats as an already-
-    // delivered success — so the worker would stamp delivered_at / the scorecard while the email-only
-    // responder only holds the now-deleted old link: permanently stranded. Scoping the key to the freshly-
-    // minted token hash makes it differ every cycle (each cycle mints a random token → new hash), so the new
-    // payload is actually sent; WITHIN a cycle a retry reuses the same undelivered token (or, after a failed
-    // send, its replacement) and a genuine crash-window duplicate of a DELIVERED token is skipped before we
-    // reach here — so the only time this key is (re)built is at a real mint+send, where cycle-scoping is
-    // exactly right. CRM users mint no token (mintedTokenHash === null): their deep link is stable and a
-    // suppressed duplicate is never a strand (the app link is always valid), so the (scorecard, recipient)
-    // key correctly dedups their within-cycle retries.
+    // recipient) — for BOTH recipient kinds, because a new cycle changes the email PAYLOAD (the flagged-item
+    // list) even when the link is stable. A REOPEN deletes the prior cycle's tokens + re-enqueues a fresh job
+    // that mints a NEW token (new payload/link). If the key were cycle-stable, Resend would see the same key
+    // with a DIFFERENT payload and return `invalid_idempotent_request` — which sendSystemEmailWithMetadata
+    // treats as an already-delivered success — so the worker would stamp the new cycle notified WITHOUT
+    // sending the updated email.
+    //
+    //  - Token recipients (email-only): scope to the freshly-minted token hash. It differs every cycle (each
+    //    cycle mints a random token → new hash), so the new payload is actually sent; WITHIN a cycle a retry
+    //    reuses the same undelivered token (or, after a failed send, its replacement) and a genuine crash-
+    //    window duplicate of a DELIVERED token is skipped before we reach here — so this key is only (re)built
+    //    at a real mint+send, where cycle-scoping is exactly right.
+    //  - CRM users (no token, mintedTokenHash === null): their deep link is cycle-stable, but the email body
+    //    lists the flagged items, which change every cycle. So scope their key to the per-cycle fingerprint
+    //    (a hash over the current open corrective-action-item ids) — differs across cycles (each cycle inserts
+    //    fresh-UUID open rows) yet is stable across a within-cycle retry, so Resend still dedups the true
+    //    duplicate while the updated cycle's email is delivered. (finding 4)
     const idempotencyKey = mintedTokenHash
       ? `corrective-action-${tenantSchema}-${scorecardId}-token-${mintedTokenHash}`
-      : `corrective-action-${tenantSchema}-${scorecardId}-${recipient.email.toLowerCase()}`;
+      : `corrective-action-${tenantSchema}-${scorecardId}-${recipient.email.toLowerCase()}-cycle-${cycleFingerprint}`;
 
     let result: SendSystemEmailResult;
     try {
@@ -368,9 +433,11 @@ export async function handleScorecardCorrectiveActionEmail(
   // The throw is SAFE against double-notifying a recipient that DID send this run. The handler runs each query
   // via pool.query (NO wrapping transaction — see the worker queue: processJob calls the handler directly and
   // only writes the job_queue outcome on the thrown error), so every delivered_at stamp already written this
-  // run is committed and SURVIVES the throw. On the retry: an email-only recipient with a DELIVERED token is
-  // reuse-skipped above (no re-mint, no re-send, key never rebuilt); a CRM user is re-sent but under the
-  // per-recipient, cycle-stable idempotency key, so Resend dedups the true duplicate. Nobody is emailed twice.
+  // run is committed and SURVIVES the throw. On the retry: a token recipient (email-only, or a CRM user who
+  // fell back to a token) with a DELIVERED token is reuse-skipped above (no re-mint, no re-send, key never
+  // rebuilt); a field-login CRM user (deep link, no token) is re-sent but under the per-(scorecard,recipient)
+  // key scoped to the WITHIN-CYCLE-STABLE fingerprint, so Resend dedups the true duplicate. Nobody is emailed
+  // twice.
   if (unresolvedAssignedRoles.length > 0) {
     logger.warn(
       "[CorrectiveActionEmail] An assigned super/PM role is unresolvable (inactive identity or missing/invalid email) - throwing to retry (not stamping)",
