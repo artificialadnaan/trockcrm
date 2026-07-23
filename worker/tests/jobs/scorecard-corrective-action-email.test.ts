@@ -92,9 +92,19 @@ function makeQuery(
     formVersion?: number;
     kind?: string;
     rating?: string;
+    // P1 notification-cycle guard: the scorecard's STORED corrective_action_cycle_nonce (the ACTIVE cycle).
+    // The delivery-stamp UPDATE ANDs `(corrective_action_cycle_nonce IS NULL OR = $payloadNonce)`; when the
+    // stored nonce is non-null AND differs from the job's payload.cycleNonce (a superseded/stale-cycle job),
+    // the stamp matches 0 rows and does NOT stamp. When omitted (null), the stamp is unguarded on the nonce
+    // (the legacy-card fallback). Set this to model cycle B superseding cycle A's crashed job.
+    storedCycleNonce?: string | null;
   } = {},
 ) {
   const inserts: { sql: string; params: any[] }[] = [];
+  // reNotifyFreshCycle issues a nonce-only `UPDATE field_scorecards SET corrective_action_cycle_nonce` before
+  // the enqueue — captured separately from the delivery stamp so tests can assert the fresh cycle re-stamps
+  // the scorecard's active nonce.
+  const nonceUpdates: { sql: string; params: any[] }[] = [];
   const tokenDeletes: { sql: string; params: any[] }[] = [];
   const tokenDelivers: { sql: string; params: any[] }[] = [];
   // Re-enqueued corrective-action-email jobs (Part B): raw INSERT INTO public.job_queue rows.
@@ -144,10 +154,30 @@ function makeQuery(
       jobEnqueues.push({ sql: text, params });
       return { rows: [], rowCount: 1 };
     }
-    // The guarded final stamp: UPDATE field_scorecards SET corrective_action_email_sent_at = NOW() ... with a
-    // NOT EXISTS guard against a new open item (Part B). When the race is modeled, the guard rejects the stamp
-    // (0 rows); otherwise it stamps (1 row). Match this BEFORE the field_scorecards SELECT branches.
-    if (/UPDATE .*field_scorecards/i.test(text)) {
+    // reNotifyFreshCycle's nonce-only re-stamp: UPDATE field_scorecards SET corrective_action_cycle_nonce.
+    // Captured separately (NOT a delivery stamp) so the cycle-guard tests can assert the fresh cycle persists
+    // its new nonce. Match BEFORE the delivery-stamp branch.
+    if (/UPDATE [\s\S]*field_scorecards\s+SET corrective_action_cycle_nonce/i.test(text)) {
+      nonceUpdates.push({ sql: text, params });
+      return { rows: [], rowCount: 1 };
+    }
+    // The guarded final delivery stamp: UPDATE field_scorecards SET corrective_action_email_sent_at = NOW()
+    // ... with a NOT EXISTS guard against a new open item (Part B) AND (P1 cycle guard) an optional
+    // `corrective_action_cycle_nonce IS NULL OR = $3` clause. The stamp matches 0 rows when EITHER a new open
+    // item raced in (newOpenItemAppeared) OR the job's payload nonce ($3) no longer matches the scorecard's
+    // stored non-null nonce (storedCycleNonce) — a superseded/stale-cycle job. Match BEFORE the SELECT
+    // branches.
+    if (/UPDATE [\s\S]*field_scorecards\s+SET corrective_action_email_sent_at/i.test(text)) {
+      // Model the nonce guard: if the SQL carries the nonce clause ($3 present) and the stored nonce is
+      // non-null and differs from the payload nonce, the stamp rejects (0 rows).
+      const payloadNonce = params[2] as string | undefined;
+      const stored = opts.storedCycleNonce;
+      const nonceMismatch =
+        payloadNonce != null && stored != null && stored !== payloadNonce;
+      return { rows: [], rowCount: opts.newOpenItemAppeared || nonceMismatch ? 0 : 1 };
+    }
+    // Any OTHER field_scorecards UPDATE (defensive fallback) stamps 1 row.
+    if (/UPDATE [\s\S]*field_scorecards/i.test(text)) {
       return { rows: [], rowCount: opts.newOpenItemAppeared ? 0 : 1 };
     }
     // Finding 6 pre-send recheck: immediately before the send loop the handler re-selects the scorecard's LIVE
@@ -231,7 +261,7 @@ function makeQuery(
     }
     return { rows: [] };
   });
-  return { query, inserts, tokenDeletes, tokenDelivers, jobEnqueues };
+  return { query, inserts, tokenDeletes, tokenDelivers, jobEnqueues, nonceUpdates };
 }
 
 describe("scorecard corrective-action notification email", () => {
@@ -434,7 +464,7 @@ describe("scorecard corrective-action notification email", () => {
     expect(sendEmail).toHaveBeenCalledTimes(1);
     expect(sendEmail.mock.calls[0][0]).toBe("sam.super@trock.com");
     // Not stamped — a later requeue (after the PM's email is fixed) can still notify them.
-    const stampCalls = query.mock.calls.filter(([text]) => /UPDATE .*field_scorecards/i.test(text as string));
+    const stampCalls = query.mock.calls.filter(([text]) => /UPDATE [\s\S]*field_scorecards\s+SET corrective_action_email_sent_at/i.test(text as string));
     expect(stampCalls).toHaveLength(0);
   });
 
@@ -451,7 +481,7 @@ describe("scorecard corrective-action notification email", () => {
     await handleScorecardCorrectiveActionEmail(payload, null, { query: query as any, sendEmail, env, logger });
 
     expect(sendEmail).toHaveBeenCalledTimes(1);
-    const stampCalls = query.mock.calls.filter(([text]) => /UPDATE .*field_scorecards/i.test(text as string));
+    const stampCalls = query.mock.calls.filter(([text]) => /UPDATE [\s\S]*field_scorecards\s+SET corrective_action_email_sent_at/i.test(text as string));
     expect(stampCalls).toHaveLength(1);
   });
 
@@ -478,7 +508,7 @@ describe("scorecard corrective-action notification email", () => {
     expect(sendEmail).toHaveBeenCalledTimes(1);
     expect(sendEmail.mock.calls[0][0]).toBe("sam.super@trock.com");
     // Never stamped — a later requeue (once the PM's identity/email is fixed) still notifies the stranded PM.
-    const stampCalls = query.mock.calls.filter(([text]) => /UPDATE .*field_scorecards/i.test(text as string));
+    const stampCalls = query.mock.calls.filter(([text]) => /UPDATE [\s\S]*field_scorecards\s+SET corrective_action_email_sent_at/i.test(text as string));
     expect(stampCalls).toHaveLength(0);
   });
 
@@ -502,7 +532,7 @@ describe("scorecard corrective-action notification email", () => {
     expect(sendEmail).not.toHaveBeenCalled();
     expect(inserts).toHaveLength(0);
     expect(tokenDeletes).toHaveLength(0);
-    const stampCalls = query.mock.calls.filter(([text]) => /UPDATE .*field_scorecards/i.test(text as string));
+    const stampCalls = query.mock.calls.filter(([text]) => /UPDATE [\s\S]*field_scorecards\s+SET corrective_action_email_sent_at/i.test(text as string));
     expect(stampCalls).toHaveLength(0);
   });
 
@@ -627,7 +657,7 @@ describe("scorecard corrective-action notification email", () => {
 
     await handleScorecardCorrectiveActionEmail(payload, null, { query: query as any, sendEmail, env, logger });
 
-    const stampCalls = query.mock.calls.filter(([text]) => /UPDATE .*field_scorecards/i.test(text as string));
+    const stampCalls = query.mock.calls.filter(([text]) => /UPDATE [\s\S]*field_scorecards\s+SET corrective_action_email_sent_at/i.test(text as string));
     expect(stampCalls).toHaveLength(1);
     expect(stampCalls[0][0]).toMatch(/corrective_action_email_sent_at/i);
   });
@@ -647,7 +677,7 @@ describe("scorecard corrective-action notification email", () => {
     expect(inserts).toHaveLength(0);
     expect(tokenDeletes).toHaveLength(0);
     // No stamp on a no-recipient throw — a later assignment + requeue can still notify.
-    const stampCalls = query.mock.calls.filter(([text]) => /UPDATE .*field_scorecards/i.test(text as string));
+    const stampCalls = query.mock.calls.filter(([text]) => /UPDATE [\s\S]*field_scorecards\s+SET corrective_action_email_sent_at/i.test(text as string));
     expect(stampCalls).toHaveLength(0);
   });
 
@@ -665,7 +695,7 @@ describe("scorecard corrective-action notification email", () => {
       expect(inserts, `status=${status}`).toHaveLength(0);
       expect(tokenDeletes, `status=${status}`).toHaveLength(0);
       // No recipient resolution even happens — the handler returns right after the snapshot read.
-      const stampCalls = query.mock.calls.filter(([text]) => /UPDATE .*field_scorecards/i.test(text as string));
+      const stampCalls = query.mock.calls.filter(([text]) => /UPDATE [\s\S]*field_scorecards\s+SET corrective_action_email_sent_at/i.test(text as string));
       expect(stampCalls, `status=${status}`).toHaveLength(0);
     }
   });
@@ -694,7 +724,7 @@ describe("scorecard corrective-action notification email", () => {
     expect(inserts).toHaveLength(0);
     expect(tokenDeletes).toHaveLength(0);
     // No stamp of corrective_action_email_sent_at (a concurrently-completed action must not be announced).
-    const stampCalls = query.mock.calls.filter(([text]) => /UPDATE .*field_scorecards/i.test(text as string));
+    const stampCalls = query.mock.calls.filter(([text]) => /UPDATE [\s\S]*field_scorecards\s+SET corrective_action_email_sent_at/i.test(text as string));
     expect(stampCalls).toHaveLength(0);
     // No re-notify enqueue either.
     expect(jobEnqueues).toHaveLength(0);
@@ -733,7 +763,7 @@ describe("scorecard corrective-action notification email", () => {
     expect(tokenDeletes).toHaveLength(0);
     expect(jobEnqueues).toHaveLength(0);
     // NOT stamped — a concurrently-closed card must not be marked notified (which would suppress a later reopen).
-    const stampCalls = query.mock.calls.filter(([text]) => /UPDATE .*field_scorecards/i.test(text as string));
+    const stampCalls = query.mock.calls.filter(([text]) => /UPDATE [\s\S]*field_scorecards\s+SET corrective_action_email_sent_at/i.test(text as string));
     expect(stampCalls).toHaveLength(0);
     // The pre-send recheck (status + has_open) ran before the send loop.
     const preSendRecheck = query.mock.calls.filter(
@@ -762,7 +792,7 @@ describe("scorecard corrective-action notification email", () => {
     expect(sendEmail).not.toHaveBeenCalled();
     expect(inserts).toHaveLength(0);
     expect(jobEnqueues).toHaveLength(0);
-    const stampCalls = query.mock.calls.filter(([text]) => /UPDATE .*field_scorecards/i.test(text as string));
+    const stampCalls = query.mock.calls.filter(([text]) => /UPDATE [\s\S]*field_scorecards\s+SET corrective_action_email_sent_at/i.test(text as string));
     expect(stampCalls).toHaveLength(0);
   });
 
@@ -782,7 +812,7 @@ describe("scorecard corrective-action notification email", () => {
     await handleScorecardCorrectiveActionEmail(payload, null, { query: query as any, sendEmail, env, logger });
 
     expect(sendEmail).toHaveBeenCalledTimes(1);
-    const stampCalls = query.mock.calls.filter(([text]) => /UPDATE .*field_scorecards/i.test(text as string));
+    const stampCalls = query.mock.calls.filter(([text]) => /UPDATE [\s\S]*field_scorecards\s+SET corrective_action_email_sent_at/i.test(text as string));
     expect(stampCalls).toHaveLength(1);
     // The strengthened stamp requires the card still be open at stamp time (an empty open set must NOT stamp).
     expect(stampCalls[0][0]).toMatch(/corrective_action_open/i);
@@ -873,7 +903,7 @@ describe("scorecard corrective-action notification email", () => {
     expect(tokenDeletes).toHaveLength(1);
     expect(tokenDeletes[0].params[0]).toBe(inserts[0].params[1]); // deleted by the minted token_hash
     // No stamp on a failed batch.
-    const stampCalls = query.mock.calls.filter(([text]) => /UPDATE .*field_scorecards/i.test(text as string));
+    const stampCalls = query.mock.calls.filter(([text]) => /UPDATE [\s\S]*field_scorecards\s+SET corrective_action_email_sent_at/i.test(text as string));
     expect(stampCalls).toHaveLength(0);
   });
 
@@ -993,7 +1023,7 @@ describe("scorecard corrective-action notification email", () => {
     // The original email was still sent (about the OLD items) ...
     expect(sendEmail).toHaveBeenCalledTimes(1);
     // ... the guarded stamp affected 0 rows (sent_at NOT set) ...
-    const stampCalls = query.mock.calls.filter(([text]) => /UPDATE .*field_scorecards/i.test(text as string));
+    const stampCalls = query.mock.calls.filter(([text]) => /UPDATE [\s\S]*field_scorecards\s+SET corrective_action_email_sent_at/i.test(text as string));
     expect(stampCalls).toHaveLength(1); // the guarded UPDATE ran (and matched 0 rows)
     // ... the scorecard's outstanding tokens were cleared (so the fresh cycle re-mints) ...
     expect(tokenDeletes).toHaveLength(1);
@@ -1021,7 +1051,7 @@ describe("scorecard corrective-action notification email", () => {
 
     await handleScorecardCorrectiveActionEmail(payload, null, { query: query as any, sendEmail, env, logger });
 
-    const stampCalls = query.mock.calls.filter(([text]) => /UPDATE .*field_scorecards/i.test(text as string));
+    const stampCalls = query.mock.calls.filter(([text]) => /UPDATE [\s\S]*field_scorecards\s+SET corrective_action_email_sent_at/i.test(text as string));
     expect(stampCalls).toHaveLength(1);
     // The guarded stamp carries the emailed-id array as $2 so the NOT EXISTS guard can compare the live set.
     expect(stampCalls[0][1]?.[1]).toEqual(FLAGGED.map((f) => f.id));
@@ -1187,7 +1217,7 @@ describe("scorecard corrective-action notification email", () => {
     expect(sendEmail.mock.calls[0][0]).toBe("old.super@example.com");
     // ... but the card was NOT stamped (the guarded stamp UPDATE never ran — the recipient guard short-circuits
     // to re-notify BEFORE the open-item stamp) ...
-    const stampCalls = query.mock.calls.filter(([text]) => /UPDATE .*field_scorecards/i.test(text as string));
+    const stampCalls = query.mock.calls.filter(([text]) => /UPDATE [\s\S]*field_scorecards\s+SET corrective_action_email_sent_at/i.test(text as string));
     expect(stampCalls).toHaveLength(0);
     // ... the outstanding tokens were cleared (so the fresh cycle re-mints) ...
     expect(tokenDeletes).toHaveLength(1);
@@ -1214,9 +1244,141 @@ describe("scorecard corrective-action notification email", () => {
     await handleScorecardCorrectiveActionEmail(payload, null, { query: query as any, sendEmail, env, logger });
 
     expect(sendEmail).toHaveBeenCalledTimes(1);
-    const stampCalls = query.mock.calls.filter(([text]) => /UPDATE .*field_scorecards/i.test(text as string));
+    const stampCalls = query.mock.calls.filter(([text]) => /UPDATE [\s\S]*field_scorecards\s+SET corrective_action_email_sent_at/i.test(text as string));
     expect(stampCalls).toHaveLength(1);
     expect(tokenDeletes).toHaveLength(0);
     expect(jobEnqueues).toHaveLength(0);
+  });
+
+  // ---- P1: guard the delivery stamp with the ACTIVE notification cycle nonce ----
+
+  it("does NOT stamp when the job's cycleNonce no longer matches the scorecard's ACTIVE nonce (P1 cycle guard)", async () => {
+    // Crash scenario: a token-email worker (cycle A) crashed AFTER the provider accepted but BEFORE stamping.
+    // An edit/team-mutation then started cycle B — it deleted A's tokens and set a NEW
+    // corrective_action_cycle_nonce (B) on the scorecard. A's retry runs here carrying payload.cycleNonce = A.
+    // Its delivery stamp ANDs `corrective_action_cycle_nonce = A`, but the scorecard now stores B → 0 rows →
+    // the still-open scorecard is NOT stamped. This is what prevents cycle B's job from being suppressed
+    // (sent_at set) and the recipient being stranded on a DELETED cycle-A token.
+    const { query } = makeQuery({
+      recipients: [{ role: "superintendent", name: "Sam Super", email: "sam.super@trock.com", user_id: "u-1", can_field_login: true }],
+      assignedRoles: [{ role: "superintendent" }],
+      storedCycleNonce: "cycle-B-active", // the scorecard's ACTIVE nonce is now B
+    });
+    const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "m" });
+    const logger = makeLogger();
+
+    // A's retry carries the STALE cycle-A nonce.
+    await handleScorecardCorrectiveActionEmail(
+      { ...payload, cycleNonce: "cycle-A-stale" },
+      null,
+      { query: query as any, sendEmail, env, logger },
+    );
+
+    // The guarded stamp UPDATE ran but matched 0 rows (nonce mismatch) — the sent_at stamp was NOT written,
+    // so cycle B's matching-nonce job is free to send + stamp and the recipient is not stranded.
+    const stampCalls = query.mock.calls.filter(([text]) =>
+      /UPDATE [\s\S]*field_scorecards\s+SET corrective_action_email_sent_at/i.test(text as string),
+    );
+    expect(stampCalls).toHaveLength(1); // the guarded UPDATE ran ...
+    // ... and it carried the payload nonce as $3 so the DB can compare it to the stored active nonce.
+    expect(stampCalls[0][0]).toMatch(/corrective_action_cycle_nonce\s+IS\s+NULL\s+OR\s+corrective_action_cycle_nonce\s*=\s*\$3/i);
+    expect(stampCalls[0][1]?.[2]).toBe("cycle-A-stale");
+  });
+
+  it("STAMPS when the job's cycleNonce matches the scorecard's ACTIVE nonce (P1 cycle guard)", async () => {
+    // The current cycle's job: its payload.cycleNonce equals the scorecard's stored active nonce, so the
+    // nonce clause is satisfied and the stamp proceeds normally.
+    const { query } = makeQuery({
+      recipients: [{ role: "superintendent", name: "Sam Super", email: "sam.super@trock.com", user_id: "u-1", can_field_login: true }],
+      assignedRoles: [{ role: "superintendent" }],
+      storedCycleNonce: "cycle-current",
+    });
+    const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "m" });
+    const logger = makeLogger();
+
+    await handleScorecardCorrectiveActionEmail(
+      { ...payload, cycleNonce: "cycle-current" },
+      null,
+      { query: query as any, sendEmail, env, logger },
+    );
+
+    expect(sendEmail).toHaveBeenCalledTimes(1);
+    const stampCalls = query.mock.calls.filter(([text]) =>
+      /UPDATE [\s\S]*field_scorecards\s+SET corrective_action_email_sent_at/i.test(text as string),
+    );
+    expect(stampCalls).toHaveLength(1);
+    expect(stampCalls[0][1]?.[2]).toBe("cycle-current"); // the matching nonce passed as $3
+  });
+
+  it("STAMPS a legacy card whose stored nonce is NULL even when the job carries a nonce (P1 fallback)", async () => {
+    // A pre-0197 scorecard has corrective_action_cycle_nonce NULL. The nonce clause is
+    // `(corrective_action_cycle_nonce IS NULL OR = $3)`, so a NULL stored nonce still allows the stamp — the
+    // guard never regresses a card that predates the column.
+    const { query } = makeQuery({
+      recipients: [{ role: "superintendent", name: "Sam Super", email: "sam.super@trock.com", user_id: "u-1", can_field_login: true }],
+      assignedRoles: [{ role: "superintendent" }],
+      storedCycleNonce: null, // legacy card
+    });
+    const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "m" });
+    const logger = makeLogger();
+
+    await handleScorecardCorrectiveActionEmail(
+      { ...payload, cycleNonce: "some-cycle" },
+      null,
+      { query: query as any, sendEmail, env, logger },
+    );
+
+    const stampCalls = query.mock.calls.filter(([text]) =>
+      /UPDATE [\s\S]*field_scorecards\s+SET corrective_action_email_sent_at/i.test(text as string),
+    );
+    expect(stampCalls).toHaveLength(1);
+  });
+
+  it("omits the nonce clause entirely for a legacy in-flight job with NO payload cycleNonce (P1 fallback)", async () => {
+    // Jobs enqueued before this deploy carry no cycleNonce. The stamp UPDATE must NOT include the nonce clause
+    // (and pass no $3), so the pre-guard behavior is exactly preserved.
+    const { query } = makeQuery({
+      recipients: [{ role: "superintendent", name: "Sam Super", email: "sam.super@trock.com", user_id: "u-1", can_field_login: true }],
+      assignedRoles: [{ role: "superintendent" }],
+      storedCycleNonce: "cycle-B-active", // even a set active nonce must not block a legacy no-nonce job
+    });
+    const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "m" });
+    const logger = makeLogger();
+
+    // `payload` (no cycleNonce).
+    await handleScorecardCorrectiveActionEmail(payload, null, { query: query as any, sendEmail, env, logger });
+
+    const stampCalls = query.mock.calls.filter(([text]) =>
+      /UPDATE [\s\S]*field_scorecards\s+SET corrective_action_email_sent_at/i.test(text as string),
+    );
+    expect(stampCalls).toHaveLength(1);
+    // No nonce clause and no $3 param.
+    expect(stampCalls[0][0]).not.toMatch(/corrective_action_cycle_nonce/i);
+    expect(stampCalls[0][1]).toHaveLength(2);
+  });
+
+  it("a fresh worker re-notify persists the new cycle's nonce on the scorecard (so the fresh job can stamp)", async () => {
+    // When the worker itself starts a fresh cycle (reNotifyFreshCycle — e.g. a recipient reassignment or a new
+    // open item raced in), it mints a fresh nonce and must persist it as the scorecard's ACTIVE nonce AND put
+    // the SAME nonce on the enqueued job — otherwise the scorecard would still carry the superseded nonce and
+    // the fresh job could never stamp. Assert the nonce-only UPDATE ran with the same nonce the job carries.
+    const { query, jobEnqueues, nonceUpdates } = makeQuery({
+      recipients: [{ role: "superintendent", name: "Old Super", email: "old.super@example.com", user_id: null }],
+      assignedRoles: [{ role: "superintendent" }],
+      revalidatedRecipients: [{ role: "superintendent", name: "New Super", email: "new.super@example.com", user_id: null }],
+    });
+    const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "m" });
+    const logger = makeLogger();
+
+    await handleScorecardCorrectiveActionEmail(payload, null, { query: query as any, sendEmail, env, logger });
+
+    // The fresh cycle was enqueued and its nonce was persisted on the scorecard — and they match.
+    expect(jobEnqueues).toHaveLength(1);
+    expect(nonceUpdates).toHaveLength(1);
+    expect(nonceUpdates[0].params[0]).toBe(SCORECARD); // scorecard-scoped nonce update
+    const persistedNonce = nonceUpdates[0].params[1] as string;
+    const enqueuedNonce = JSON.parse(jobEnqueues[0].params[1] as string).cycleNonce as string;
+    expect(persistedNonce).toBe(enqueuedNonce);
+    expect(persistedNonce).toHaveLength(36); // a fresh UUID
   });
 });

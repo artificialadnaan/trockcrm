@@ -62,6 +62,14 @@ export const fieldScorecards = pgTable(
     // email_sent_at: the scorecard_corrective_action_email worker handler stamps this once after sending to
     // ALL recipients in one run, and skips if it's already set — so a job retry never re-notifies.
     correctiveActionEmailSentAt: timestamp("corrective_action_email_sent_at", { withTimezone: true }),
+    // The ACTIVE corrective-action notification cycle's nonce (migration 0197). Set to the SAME cycleNonce
+    // enqueued on every fresh cycle (reconcile transition-into-open / already-open-gained-work, AND
+    // restartCorrectiveActionNotificationCycleForDeal) in the same transaction. The worker's final delivery
+    // stamp requires the job's payload.cycleNonce to still match this — so a stale-cycle job (whose cycle was
+    // superseded by an edit/team-mutation before it stamped) updates 0 rows and does NOT stamp, and the
+    // current cycle's matching-nonce job stamps. Nullable: legacy cards + legacy in-flight jobs (no payload
+    // nonce) fall back to the pre-guard stamp behavior.
+    correctiveActionCycleNonce: uuid("corrective_action_cycle_nonce"),
     isActive: boolean("is_active").default(true).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),

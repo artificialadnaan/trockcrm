@@ -612,6 +612,60 @@ describe("updateFieldScorecard corrective-action reconcile", () => {
     expect(after.find((i) => i.item_label === "Brand new flag")!.status).toBe("open");
   });
 
+  it("a re-open persists the newly-enqueued cycleNonce on the scorecard (P1 cycle guard)", async () => {
+    // On a reopen the reconcile mints a fresh cycleNonce, enqueues it on the job, AND persists it as the
+    // scorecard's corrective_action_cycle_nonce — all in the same transaction. The worker's delivery stamp
+    // requires the two to still match, so a reopen must keep them equal (else the reopen's job could never
+    // stamp).
+    const { scorecard } = await createFieldScorecard(
+      tdb,
+      createInput({ items: v2Items(5), actionItems: ["Only flag"] }),
+    );
+    // Capture the ORIGINAL cycle's persisted nonce.
+    const nonceBefore = (
+      (await tdb.execute(
+        sql`SELECT corrective_action_cycle_nonce AS n FROM field_scorecards WHERE id = ${scorecard.id}`,
+      )).rows[0] as { n: string | null }
+    ).n;
+    expect(nonceBefore).toBeTruthy();
+
+    const [only] = await getItems(scorecard.id);
+    await resolveCorrectiveActionItem(tdb, {
+      scorecardId: scorecard.id,
+      itemId: only.id,
+      responseComment: "fixed",
+      respondedBy: { userId: OWNER, name: "Sam", email: null },
+    });
+    await tdb.execute(sql`UPDATE field_scorecards SET corrective_action_email_sent_at = now() WHERE id = ${scorecard.id}`);
+
+    // Edit re-opens the card with a fresh flag → a new cycle.
+    const at = await currentUpdatedAt(scorecard.id);
+    await updateFieldScorecard(
+      tdb,
+      updateInput(scorecard.id, at, { items: v2Items(5), actionItems: ["Only flag", "Brand new flag"] }),
+    );
+
+    // The most-recently enqueued corrective-action job's nonce.
+    const jobRes = await tdb.execute(sql`
+      SELECT payload FROM public.job_queue
+      WHERE job_type = 'scorecard_corrective_action_email'
+      ORDER BY id DESC LIMIT 1
+    `);
+    const enqueuedNonce = (jobRes.rows[0] as { payload: any }).payload.cycleNonce as string;
+
+    const nonceAfter = (
+      (await tdb.execute(
+        sql`SELECT corrective_action_cycle_nonce AS n FROM field_scorecards WHERE id = ${scorecard.id}`,
+      )).rows[0] as { n: string | null }
+    ).n;
+
+    // A fresh nonce was minted (differs from the original cycle) AND the scorecard's stored nonce equals the
+    // reopen job's enqueued nonce.
+    expect(nonceAfter).toBeTruthy();
+    expect(nonceAfter).not.toBe(nonceBefore);
+    expect(nonceAfter).toBe(enqueuedNonce);
+  });
+
   it("an edit that keeps the card open (no flag change) does NOT re-enqueue", async () => {
     const { scorecard } = await createFieldScorecard(
       tdb,

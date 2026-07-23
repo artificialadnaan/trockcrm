@@ -27,6 +27,9 @@ import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
 
 const DEAL = "11111111-1111-1111-1111-111111111111";
 const USER = "33333333-3333-3333-3333-333333333333";
+// A non-terminal (browsable) stage so the deal passes the active-scorecard/browsable-project gate
+// authorizeCorrectiveAction now applies (finding P2).
+const STAGE_ACTIVE = "cccccccc-0000-0000-0000-000000000001";
 const OFFICE = { id: "office-1", slug: "test" };
 
 let pg: PGlite;
@@ -96,7 +99,8 @@ let scorecardId: string;
 beforeAll(async () => {
   pg = new PGlite();
   await pg.exec(`
-    CREATE TABLE deals (id uuid PRIMARY KEY, name text, is_active boolean DEFAULT true);
+    CREATE TABLE public.pipeline_stage_config (id uuid PRIMARY KEY, name text, slug text, is_terminal boolean DEFAULT false);
+    CREATE TABLE deals (id uuid PRIMARY KEY, name text, is_active boolean DEFAULT true, stage_id uuid, bid_board_stage_slug text);
     CREATE TABLE files (
       id uuid PRIMARY KEY, deal_id uuid, client_upload_id text, uploaded_by uuid,
       description text, is_active boolean DEFAULT true, deleted_at timestamptz, created_at timestamptz DEFAULT now()
@@ -114,7 +118,10 @@ beforeAll(async () => {
       contacts,
     ]),
   );
-  await pg.exec(`INSERT INTO deals (id, name, is_active) VALUES ('${DEAL}', 'Maple St', true);`);
+  await pg.exec(
+    `INSERT INTO public.pipeline_stage_config (id, name, slug, is_terminal) VALUES ('${STAGE_ACTIVE}', 'Estimating', 'estimating', false);`,
+  );
+  await pg.exec(`INSERT INTO deals (id, name, is_active, stage_id) VALUES ('${DEAL}', 'Maple St', true, '${STAGE_ACTIVE}');`);
   tdb = drizzle(pg);
   app = makeApp();
 });

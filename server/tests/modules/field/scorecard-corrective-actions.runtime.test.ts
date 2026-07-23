@@ -286,6 +286,24 @@ describe("createFieldScorecard corrective-action email enqueue", () => {
     expect(nonces[0]).not.toBe(nonces[1]);
   });
 
+  it("persists the enqueued cycleNonce on the scorecard as corrective_action_cycle_nonce (P1 cycle guard)", async () => {
+    // The worker's delivery stamp requires the job's payload.cycleNonce to still match the scorecard's stored
+    // corrective_action_cycle_nonce (the ACTIVE cycle). So a fresh below-band submit must persist THAT SAME
+    // nonce on the scorecard in the same transaction — otherwise the notification job could never stamp.
+    const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
+    const jobs = await correctiveEmailJobs();
+    expect(jobs).toHaveLength(1);
+    const enqueuedNonce = jobs[0].payload.cycleNonce as string;
+    expect(enqueuedNonce).toBeTruthy();
+
+    const res = await tdb.execute(
+      sql`SELECT corrective_action_cycle_nonce AS n FROM field_scorecards WHERE id = ${scorecard.id}`,
+    );
+    const storedNonce = (res.rows[0] as { n: string | null }).n;
+    // The scorecard's stored active-cycle nonce equals the enqueued job's nonce.
+    expect(storedNonce).toBe(enqueuedNonce);
+  });
+
   it("enqueues NO corrective-action email job on a passing submit", async () => {
     await createFieldScorecard(tdb, passingSubmission());
     expect(await correctiveEmailJobs()).toHaveLength(0);

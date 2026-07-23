@@ -645,6 +645,17 @@ export async function handleScorecardCorrectiveActionEmail(
       `DELETE FROM ${tenantSchema}.scorecard_corrective_action_tokens WHERE scorecard_id = $1::uuid`,
       [scorecardId]
     );
+    // Mint the fresh cycle's nonce ONCE and use it in BOTH the enqueued job payload AND the scorecard's
+    // persisted corrective_action_cycle_nonce, so they stay equal — mirroring the server enqueue paths. The
+    // re-notified job's own stamp requires `corrective_action_cycle_nonce = payload.cycleNonce`; without
+    // stamping the new nonce here the scorecard would still carry the SUPERSEDED cycle's nonce and the fresh
+    // job could never stamp (permanently un-stampable). This UPDATE only touches the nonce column, so it is
+    // safe on the still-un-stamped card (sent_at stays NULL, so the fresh job re-sends).
+    const freshNonce = crypto.randomUUID();
+    await query(
+      `UPDATE ${tenantSchema}.field_scorecards SET corrective_action_cycle_nonce = $2::uuid WHERE id = $1::uuid`,
+      [scorecardId, freshNonce]
+    );
     await query(
       `INSERT INTO public.job_queue (job_type, payload, office_id, status, run_after, max_attempts)
        VALUES ($1, $2::jsonb, $3::uuid, 'pending', NOW() + ($4 || ' seconds')::interval, 6)`,
@@ -655,7 +666,7 @@ export async function handleScorecardCorrectiveActionEmail(
           scorecardId,
           dealId,
           officeId: payload.officeId ?? null,
-          cycleNonce: crypto.randomUUID(),
+          cycleNonce: freshNonce,
         }),
         payload.officeId ?? null,
         String(CORRECTIVE_ACTION_REENQUEUE_DELAY_SECONDS),
@@ -702,7 +713,23 @@ export async function handleScorecardCorrectiveActionEmail(
   // outside the emitted set), stamping an already-closed card as notified — the exact stale-notify + suppress-
   // reconcile bug. Requiring an open item at the stamp closes that hole even if the pre-send recheck's window
   // is beaten again.
+  //
+  // The stamp ALSO ties this job's payload.cycleNonce to the cycle currently AWAITING delivery (P1
+  // notification-cycle guard). Crash scenario: this worker crashes AFTER the provider accepts cycle A but
+  // BEFORE stamping; an edit/team-mutation then starts cycle B (deletes A's tokens, sets a NEW
+  // corrective_action_cycle_nonce on the scorecard). A's retry sees the provider's same-key response as
+  // delivered and, unguarded, would STAMP the still-open card → cycle B's job then skips (sent_at set) → the
+  // recipient's only delivered link holds a DELETED cycle-A token → permanently stranded. So when this job
+  // carries a cycleNonce (all post-deploy jobs do), the stamp additionally requires the scorecard's stored
+  // nonce to STILL equal it — a stale-cycle job (A) whose nonce no longer matches (now B's) updates 0 rows
+  // and does NOT stamp; cycle B's matching-nonce job stamps. Legacy fallback: a card whose stored nonce is
+  // NULL (pre-0197, never re-stamped) still allows the stamp so nothing regresses; and a legacy in-flight
+  // job with NO payload nonce omits the clause entirely (pre-guard behavior).
   const emailedIds = flaggedRows.map((r) => String(r.id));
+  const nonceClause = nonce
+    ? " AND (corrective_action_cycle_nonce IS NULL OR corrective_action_cycle_nonce = $3::uuid)"
+    : "";
+  const stampParams: unknown[] = nonce ? [scorecardId, emailedIds, nonce] : [scorecardId, emailedIds];
   const stampRes = await query(
     `UPDATE ${tenantSchema}.field_scorecards
         SET corrective_action_email_sent_at = NOW()
@@ -716,8 +743,8 @@ export async function handleScorecardCorrectiveActionEmail(
         AND NOT EXISTS (
           SELECT 1 FROM ${tenantSchema}.scorecard_corrective_actions
            WHERE scorecard_id = $1::uuid AND status = 'open' AND NOT (id = ANY($2::uuid[]))
-        )`,
-    [scorecardId, emailedIds]
+        )${nonceClause}`,
+    stampParams as any[]
   );
 
   // rowCount === 0 has two causes, distinguished by re-reading the card + its open set:

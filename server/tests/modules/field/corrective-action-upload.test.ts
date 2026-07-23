@@ -22,6 +22,9 @@ const DEAL = "11111111-1111-1111-1111-111111111111";
 // cannot be confirmed through scorecard A's route (cross-scorecard token confusion, finding #7).
 const DEAL_B = "aaaaaaaa-1111-1111-1111-111111111111";
 const USER = "33333333-3333-3333-3333-333333333333";
+// A non-terminal (browsable) pipeline stage so both deals pass the active-scorecard/browsable-project gate
+// (authorizeCorrectiveAction now applies it — finding P2).
+const STAGE_ACTIVE = "cccccccc-0000-0000-0000-000000000001";
 const OFFICE = { id: "office-1", slug: "test" };
 
 // The identity requireFieldContractor injects for the SESSION path.
@@ -99,8 +102,10 @@ let scorecardBId: string;
 beforeAll(async () => {
   pg = new PGlite();
   await pg.exec(`
+    CREATE TABLE public.pipeline_stage_config (id uuid PRIMARY KEY, name text, slug text, is_terminal boolean DEFAULT false);
     CREATE TABLE deals (
       id uuid PRIMARY KEY, name text, deal_number text, is_active boolean DEFAULT true,
+      stage_id uuid, bid_board_stage_slug text,
       property_address text, property_city text, property_state text, property_zip text
     );
     CREATE TABLE public.users (id uuid PRIMARY KEY, display_name text, email text, avatar_url text, is_active boolean DEFAULT true);
@@ -137,8 +142,11 @@ beforeAll(async () => {
   await pg.exec(
     `ALTER TABLE public.files ADD CONSTRAINT files_uploaded_by_fk FOREIGN KEY (uploaded_by) REFERENCES public.users(id);`,
   );
-  await pg.exec(`INSERT INTO deals (id, name, deal_number, is_active) VALUES ('${DEAL}', 'Maple St', 'DFW-1', true);`);
-  await pg.exec(`INSERT INTO deals (id, name, deal_number, is_active) VALUES ('${DEAL_B}', 'Oak Ave', 'DFW-2', true);`);
+  await pg.exec(
+    `INSERT INTO public.pipeline_stage_config (id, name, slug, is_terminal) VALUES ('${STAGE_ACTIVE}', 'Estimating', 'estimating', false);`,
+  );
+  await pg.exec(`INSERT INTO deals (id, name, deal_number, is_active, stage_id) VALUES ('${DEAL}', 'Maple St', 'DFW-1', true, '${STAGE_ACTIVE}');`);
+  await pg.exec(`INSERT INTO deals (id, name, deal_number, is_active, stage_id) VALUES ('${DEAL_B}', 'Oak Ave', 'DFW-2', true, '${STAGE_ACTIVE}');`);
   // The scorecard's submitter — a real active user; token uploads are attributed to this id (not a nil uuid).
   await pg.exec(
     `INSERT INTO public.users (id, display_name, email, is_active) VALUES ('${USER}', 'Sam Super', 'sam.super@trock.com', true);`,

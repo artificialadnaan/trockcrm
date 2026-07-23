@@ -475,9 +475,16 @@ export async function reconcileScorecardCorrectiveActions(
     toInsert.length > 0 &&
     correctiveActionEmailSentAt !== null;
   if (transitioningIntoOpen || alreadyOpenGainedWork) {
+    // Mint the per-cycle nonce ONCE and use it in BOTH places: (a) persisted on the scorecard as the ACTIVE
+    // cycle's nonce, and (b) the enqueued job's payload.cycleNonce. Keeping them equal is what lets the
+    // worker's final delivery stamp require `corrective_action_cycle_nonce = payload.cycleNonce` — a
+    // stale-cycle job (superseded by a later edit that minted a new nonce here) then updates 0 rows and does
+    // NOT stamp, so the current cycle's matching-nonce job is the one that stamps.
+    const cycleNonce = randomUUID();
+    // Reset the sent stamp AND stamp the active cycle nonce together (fresh cycle → the worker must send).
     await tx
       .update(fieldScorecards)
-      .set({ correctiveActionEmailSentAt: null })
+      .set({ correctiveActionEmailSentAt: null, correctiveActionCycleNonce: cycleNonce })
       .where(eq(fieldScorecards.id, input.scorecardId));
     // Starting a NEW notification cycle (a reopen, OR an already-open card that gained new work after its
     // original email sent), prior-cycle web tokens must not survive it. The worker's per-recipient reuse-skip
@@ -502,8 +509,10 @@ export async function reconcileScorecardCorrectiveActions(
         // for a job's lifetime — i.e. STABLE across a genuine queue retry. The worker keys off this instead
         // of hashing the currently-open corrective-action rows, whose ids shift if a responder resolves an
         // item between the send attempt and a retry (a different hash → a different key → Resend won't dedup
-        // → a duplicate email). See the worker handler's idempotency-key derivation.
-        cycleNonce: randomUUID(),
+        // → a duplicate email). See the worker handler's idempotency-key derivation. This is the SAME nonce
+        // persisted on the scorecard above (corrective_action_cycle_nonce), so the worker's delivery stamp
+        // can require it to still be the ACTIVE cycle at stamp time.
+        cycleNonce,
       },
       officeId: input.office.id,
       status: "pending",
@@ -550,18 +559,35 @@ export async function restartCorrectiveActionNotificationCycleForDeal(
 
   const scorecardIds = openScorecards.map((s) => s.id);
 
-  // Clear the sent stamp so the worker re-sends this cycle.
-  await tx
-    .update(fieldScorecards)
-    .set({ correctiveActionEmailSentAt: null, updatedAt: new Date() })
-    .where(inArray(fieldScorecards.id, scorecardIds));
+  // Mint one fresh per-cycle nonce per open scorecard and use it in BOTH the persisted
+  // corrective_action_cycle_nonce (the ACTIVE cycle) and that scorecard's enqueued job payload, so they stay
+  // equal. This is what lets the worker's delivery stamp require `corrective_action_cycle_nonce =
+  // payload.cycleNonce` — an in-flight stale-cycle job for this scorecard (its nonce no longer matches the one
+  // stamped here) updates 0 rows and does NOT stamp, so THIS restart's matching-nonce job is the one that
+  // stamps. The external signature is unchanged; the nonce is minted internally per scorecard.
+  const cycleNonceByScorecardId = new Map(scorecardIds.map((id) => [id, randomUUID()]));
+
+  // Clear the sent stamp (so the worker re-sends this cycle) AND stamp each scorecard's new ACTIVE cycle
+  // nonce. Per-row because the nonce differs per scorecard (a single bulk update can't set per-row values).
+  const now = new Date();
+  for (const scorecardId of scorecardIds) {
+    await tx
+      .update(fieldScorecards)
+      .set({
+        correctiveActionEmailSentAt: null,
+        correctiveActionCycleNonce: cycleNonceByScorecardId.get(scorecardId)!,
+        updatedAt: now,
+      })
+      .where(eq(fieldScorecards.id, scorecardId));
+  }
 
   // Drop prior-cycle tokens on these scorecards (see the reuse-skip rationale above).
   await tx
     .delete(scorecardCorrectiveActionTokens)
     .where(inArray(scorecardCorrectiveActionTokens.scorecardId, scorecardIds));
 
-  // Enqueue one fresh notification job per open scorecard — payload shape identical to the reconcile enqueue.
+  // Enqueue one fresh notification job per open scorecard — payload shape identical to the reconcile enqueue,
+  // carrying the SAME per-scorecard nonce persisted above.
   await tx.insert(jobQueue).values(
     scorecardIds.map((scorecardId) => ({
       jobType: SCORECARD_CORRECTIVE_ACTION_EMAIL_JOB,
@@ -570,7 +596,7 @@ export async function restartCorrectiveActionNotificationCycleForDeal(
         scorecardId,
         dealId: input.dealId,
         officeId: input.office.id,
-        cycleNonce: randomUUID(),
+        cycleNonce: cycleNonceByScorecardId.get(scorecardId)!,
       },
       officeId: input.office.id,
       status: "pending" as const,
