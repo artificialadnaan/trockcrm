@@ -351,6 +351,145 @@ describe("updateFieldScorecard corrective-action reconcile", () => {
     expect(await getStatus(scorecard.id)).toBe("corrective_action_open");
   });
 
+  it("re-adding a REMOVED-then-resolved deficiency reopens with a fresh open row (recurs, finding 2)", async () => {
+    // Flag a critical deficiency, resolve it → the card auto-closes. An edit REMOVES the deficiency (its
+    // resolved row must NOT persist as blocking history), then a LATER edit RE-ADDS the same deficiency. The
+    // recurring critical deficiency must reopen the card with a NEW open row — otherwise a stale resolved row
+    // would satisfy the membership check, leave openCount == 0, and silently keep the card closed (nobody
+    // notified, no response required).
+    const { scorecard } = await createFieldScorecard(
+      tdb,
+      createInput({ items: v2Items(5), criticalDeficiencies: ["missed_hold_point"] }),
+    );
+    const [def] = await getItems(scorecard.id);
+    expect(def.item_type).toBe("critical_deficiency");
+    await resolveCorrectiveActionItem(tdb, {
+      scorecardId: scorecard.id,
+      itemId: def.id,
+      responseComment: "corrected",
+      respondedBy: { userId: OWNER, name: "Sam", email: null },
+    });
+    expect(await getStatus(scorecard.id)).toBe("corrective_action_closed");
+
+    // Edit REMOVES the deficiency (still below band via a different flag so the card doesn't leave the band).
+    const at1 = await currentUpdatedAt(scorecard.id);
+    await updateFieldScorecard(
+      tdb,
+      updateInput(scorecard.id, at1, {
+        items: v2Items(5),
+        criticalDeficiencies: [],
+        actionItems: ["Keep card open"],
+      }),
+    );
+    // The removed deficiency's resolved row is dropped (no longer part of the assessment) — no stale history.
+    const mid = await getItems(scorecard.id);
+    expect(mid.some((i) => i.item_type === "critical_deficiency")).toBe(false);
+    expect(await getStatus(scorecard.id)).toBe("corrective_action_open");
+
+    // A LATER edit RE-ADDS the same deficiency → a FRESH open row + the card is corrective_action_open again.
+    const at2 = await currentUpdatedAt(scorecard.id);
+    await updateFieldScorecard(
+      tdb,
+      updateInput(scorecard.id, at2, {
+        items: v2Items(5),
+        criticalDeficiencies: ["missed_hold_point"],
+        actionItems: ["Keep card open"],
+      }),
+    );
+    const after = await getItems(scorecard.id);
+    const readded = after.find((i) => i.item_type === "critical_deficiency")!;
+    expect(readded).toBeTruthy();
+    expect(readded.status).toBe("open");
+    expect(readded.id).not.toBe(def.id); // a brand-new row, not the stale resolved one
+    expect(await getStatus(scorecard.id)).toBe("corrective_action_open");
+  });
+
+  it("a deficiency that STAYS flagged after resolution does NOT reopen on an unrelated edit (finding 2)", async () => {
+    // The normal case must be untouched: a deficiency that remains flagged keeps its resolved row and must
+    // NOT reopen on every edit. Resolve a deficiency, keep it flagged, edit an unrelated field → the resolved
+    // row survives (same id, still resolved) and the card stays closed.
+    const { scorecard } = await createFieldScorecard(
+      tdb,
+      createInput({ items: v2Items(5), criticalDeficiencies: ["missed_hold_point"] }),
+    );
+    const [def] = await getItems(scorecard.id);
+    await resolveCorrectiveActionItem(tdb, {
+      scorecardId: scorecard.id,
+      itemId: def.id,
+      responseComment: "corrected",
+      respondedBy: { userId: OWNER, name: "Sam", email: null },
+    });
+    expect(await getStatus(scorecard.id)).toBe("corrective_action_closed");
+
+    // An unrelated edit that KEEPS the deficiency flagged.
+    const at = await currentUpdatedAt(scorecard.id);
+    await updateFieldScorecard(
+      tdb,
+      updateInput(scorecard.id, at, {
+        items: v2Items(5),
+        criticalDeficiencies: ["missed_hold_point"],
+        pmName: "New PM",
+      }),
+    );
+    const after = await getItems(scorecard.id);
+    expect(after).toHaveLength(1);
+    expect(after[0].id).toBe(def.id); // same resolved row, not reseeded
+    expect(after[0].status).toBe("resolved");
+    // Still closed — a resolved-but-still-flagged deficiency must not reopen the card.
+    expect(await getStatus(scorecard.id)).toBe("corrective_action_closed");
+  });
+
+  it("re-adding a REMOVED-then-resolved action item reopens with a fresh open row (finding 2)", async () => {
+    // The analogous action-item bug: resolve an action item, REMOVE it (its resolved row must not persist),
+    // then RE-ADD the same label. Multiset (label+cardinality) matching must insert a fresh open row for the
+    // recurring item rather than treating the stale resolved row as satisfying the flag.
+    const { scorecard } = await createFieldScorecard(
+      tdb,
+      createInput({ items: v2Items(5), actionItems: ["Re-inspect slab 2"] }),
+    );
+    const [item] = await getItems(scorecard.id);
+    expect(item.item_type).toBe("action_item");
+    await resolveCorrectiveActionItem(tdb, {
+      scorecardId: scorecard.id,
+      itemId: item.id,
+      responseComment: "re-inspected",
+      respondedBy: { userId: OWNER, name: "Sam", email: null },
+    });
+    expect(await getStatus(scorecard.id)).toBe("corrective_action_closed");
+
+    // Edit REMOVES the action item (keeping the card below band via a deficiency so it stays in the band).
+    const at1 = await currentUpdatedAt(scorecard.id);
+    await updateFieldScorecard(
+      tdb,
+      updateInput(scorecard.id, at1, {
+        items: v2Items(5),
+        criticalDeficiencies: ["missed_hold_point"],
+        actionItems: [],
+      }),
+    );
+    // The removed action item's resolved row is dropped (no stale history for the label).
+    const mid = await getItems(scorecard.id);
+    expect(mid.some((i) => i.item_type === "action_item")).toBe(false);
+    expect(await getStatus(scorecard.id)).toBe("corrective_action_open");
+
+    // A LATER edit RE-ADDS the same action-item label → a FRESH open row.
+    const at2 = await currentUpdatedAt(scorecard.id);
+    await updateFieldScorecard(
+      tdb,
+      updateInput(scorecard.id, at2, {
+        items: v2Items(5),
+        criticalDeficiencies: ["missed_hold_point"],
+        actionItems: ["Re-inspect slab 2"],
+      }),
+    );
+    const after = await getItems(scorecard.id);
+    const readded = after.find((i) => i.item_type === "action_item")!;
+    expect(readded).toBeTruthy();
+    expect(readded.status).toBe("open");
+    expect(readded.id).not.toBe(item.id); // brand-new row, not the stale resolved one
+    expect(await getStatus(scorecard.id)).toBe("corrective_action_open");
+  });
+
   it("re-opening a CLOSED card (a fresh flag) resets the email stamp and re-enqueues", async () => {
     // Open with a single flag, resolve it → the card auto-closes.
     const { scorecard } = await createFieldScorecard(

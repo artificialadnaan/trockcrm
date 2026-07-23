@@ -226,18 +226,26 @@ export async function reconcileScorecardCorrectiveActions(
   }
 
   // Match freshly-flagged items to existing rows by their STABLE key, then reconcile: unmatched flags →
-  // insert as open; tracked OPEN rows with no matching flag → delete (else they block closure). Resolved rows
-  // are always preserved as history.
+  // insert as open; STILL-flagged-but-trimmed OPEN rows → delete (else they block closure); rows for a flag
+  // that is NO LONGER present at all (removed from this edit) → delete EVEN IF resolved. A STILL-flagged
+  // item's resolved row is preserved as history (it must not reopen on every edit); a REMOVED item's resolved
+  // row is dropped — it's no longer part of the scorecard's assessment, and keeping it would let a later
+  // re-add of the same flag find a stale resolved row that satisfies the membership check, insert NO open
+  // row, leave openCount == 0, and silently keep a recurring critical deficiency's card closed with nobody
+  // notified (the reopen-recurrence bug). Dropping the removed item's history is the intended trade-off.
   //
   // Deficiencies match by their KEY (item_ref) — a deficiency key is unique per card, so a plain key match
   // is correct. Action items match by LABEL AND CARDINALITY (a MULTISET): two action items with identical
   // text are TWO distinct flags and must yield TWO tracked rows. A plain by-label match would collapse both
   // onto one existing row, so the second flag would never be inserted — then resolving the single row could
   // close the card while a duplicate flag has no response. So for each label we match up to
-  // min(existingCount, flaggedCount) rows (those stay as-is), insert the surplus flags, and delete surplus
-  // OPEN rows (preferring to keep resolved rows as history when trimming duplicates).
+  // min(existingCount, flaggedCount) rows (those stay as-is), insert the surplus flags, and delete the
+  // surplus (deleting OPEN duplicates first, preserving resolved history — UNLESS the label is removed
+  // entirely (flaggedCount == 0), in which case every row for it is dropped, resolved history included).
   const toInsert: FlaggedItem[] = [];
-  const staleOpenIds: string[] = [];
+  // Rows to delete: OPEN rows trimmed while their flag is still present, PLUS both open AND resolved rows for
+  // a flag that is no longer present at all (a removed item) — see the reopen-recurrence rationale above.
+  const staleIds: string[] = [];
 
   // ── Deficiencies: unique-key match. ──────────────────────────────────────────
   const existingDeficiencyByRef = new Map(
@@ -251,8 +259,11 @@ export async function reconcileScorecardCorrectiveActions(
     if (!existingDeficiencyByRef.has(f.itemRef)) toInsert.push(f);
   }
   for (const row of existing) {
-    if (row.itemType !== "critical_deficiency" || row.status !== "open") continue;
-    if (!flaggedDeficiencyRefs.has(row.itemRef)) staleOpenIds.push(row.id);
+    if (row.itemType !== "critical_deficiency") continue;
+    // A deficiency ref no longer flagged in THIS edit (removed) → delete its row whether open OR resolved, so
+    // a later re-add inserts a fresh open row (reopening + re-notifying). A still-flagged deficiency's row is
+    // left untouched (a resolved one stays as history and must NOT reopen on an unrelated edit).
+    if (!flaggedDeficiencyRefs.has(row.itemRef)) staleIds.push(row.id);
   }
 
   // ── Action items: multiset (label + cardinality) match. ──────────────────────
@@ -286,21 +297,30 @@ export async function reconcileScorecardCorrectiveActions(
       toInsert.push({ itemType: "action_item", itemRef: String(nextActionRef++), itemLabel: label });
     }
   }
-  // Delete surplus OPEN existing rows per label (existingCount - flaggedCount, when positive). The bucket is
-  // resolved-first, so we walk from the END (open rows) to trim, never touching resolved history.
+  // Trim per label. Two cases:
+  //   - Label REMOVED entirely (flaggedCount == 0): delete ALL its rows, resolved history included, so a
+  //     later re-add of that label inserts a fresh open row (reopening) rather than matching a stale resolved
+  //     row that would leave openCount == 0. Mirror of the deficiency treatment (the reopen-recurrence fix).
+  //   - Label STILL present but over-supplied (existingCount > flaggedCount > 0): trim only the surplus,
+  //     deleting OPEN duplicates first and preserving resolved history (bucket is resolved-first, so we walk
+  //     from the END). A still-flagged label's resolved row must NOT reopen on every edit.
   for (const [label, bucket] of existingActionByLabel) {
     const flaggedCount = flaggedActionCountByLabel.get(label) ?? 0;
+    if (flaggedCount === 0) {
+      for (const row of bucket) staleIds.push(row.id);
+      continue;
+    }
     let surplus = bucket.length - flaggedCount;
     for (let i = bucket.length - 1; i >= 0 && surplus > 0; i--) {
       if (bucket[i].status === "open") {
-        staleOpenIds.push(bucket[i].id);
+        staleIds.push(bucket[i].id);
         surplus--;
       }
     }
   }
 
-  if (staleOpenIds.length > 0) {
-    await tx.delete(scorecardCorrectiveActions).where(inArray(scorecardCorrectiveActions.id, staleOpenIds));
+  if (staleIds.length > 0) {
+    await tx.delete(scorecardCorrectiveActions).where(inArray(scorecardCorrectiveActions.id, staleIds));
   }
   if (toInsert.length > 0) {
     await tx.insert(scorecardCorrectiveActions).values(
@@ -315,11 +335,13 @@ export async function reconcileScorecardCorrectiveActions(
   }
 
   // Recompute open/closed from the post-reconcile set: surviving resolved rows + surviving open rows + inserts.
+  // survivingOpen already restricts to status === "open", so deleted resolved rows (now also in staleIds) can't
+  // perturb it; anyItems subtracts every deleted row (open + resolved) from the pre-reconcile count.
   const survivingOpen = existing.filter(
-    (row) => row.status === "open" && !staleOpenIds.includes(row.id),
+    (row) => row.status === "open" && !staleIds.includes(row.id),
   ).length;
   const openCount = survivingOpen + toInsert.length;
-  const anyItems = existing.length - staleOpenIds.length + toInsert.length > 0;
+  const anyItems = existing.length - staleIds.length + toInsert.length > 0;
 
   let nextStatus: "corrective_action_open" | "corrective_action_closed";
   if (anyItems && openCount === 0) {
