@@ -131,6 +131,50 @@ describe("confirmCorrectiveActionUpload", () => {
       body: { uploadToken: "up-token", objectKey: "obj-key" },
     });
   });
+
+  it("carries capture provenance (takenAt / lat / lng / addressSource) when present", async () => {
+    const { fetcher, calls } = recordingFetcher({ fileId: "file-1" });
+
+    await confirmCorrectiveActionUpload(fetcher, "sc-1", {
+      uploadToken: "up-token",
+      objectKey: "obj-key",
+      caption: "Fixed the guardrail",
+      takenAt: "2026-07-22T18:00:00.000Z",
+      latitude: 32.7767,
+      longitude: -96.797,
+      addressSource: "exif",
+    });
+
+    expect(calls[0].opts).toEqual({
+      method: "POST",
+      body: {
+        uploadToken: "up-token",
+        objectKey: "obj-key",
+        caption: "Fixed the guardrail",
+        takenAt: "2026-07-22T18:00:00.000Z",
+        latitude: 32.7767,
+        longitude: -96.797,
+        addressSource: "exif",
+      },
+    });
+  });
+
+  it("omits each provenance field individually when absent", async () => {
+    const { fetcher, calls } = recordingFetcher({ fileId: "file-1" });
+
+    // Only latitude/longitude are known (no EXIF timestamp, no addressSource yet).
+    await confirmCorrectiveActionUpload(fetcher, "sc-1", {
+      uploadToken: "up-token",
+      objectKey: "obj-key",
+      latitude: 1.5,
+      longitude: 2.5,
+    });
+
+    expect(calls[0].opts).toEqual({
+      method: "POST",
+      body: { uploadToken: "up-token", objectKey: "obj-key", latitude: 1.5, longitude: 2.5 },
+    });
+  });
 });
 
 describe("discardCorrectiveActionPhoto", () => {

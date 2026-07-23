@@ -216,6 +216,41 @@ describe("submitCorrectiveActionItem", () => {
     expect((confirmCorrectiveActionUpload as jest.Mock).mock.calls[1][2]).toMatchObject({ caption: null });
   });
 
+  // Finding 7 — capture provenance (takenAt / lat / lng / addressSource) populated at shot time must reach the
+  // confirm so the server records real capture-time + location on the response file (not nulls), exactly like
+  // ordinary field photos. Each field is threaded through only when present.
+  it("threads each photo's capture metadata (takenAt / lat / lng / addressSource) into confirm", async () => {
+    await submitCorrectiveActionItem(fetcher, {
+      scorecardId: "sc-1",
+      itemId: "item-1",
+      dealId: "deal-1",
+      photos: [
+        photo("a", {
+          takenAt: "2026-07-22T18:00:00.000Z",
+          latitude: 32.7767,
+          longitude: -96.797,
+          addressSource: "exif",
+        }),
+        // A photo captured without any provenance (no EXIF, GPS denied) omits every field.
+        photo("b"),
+      ],
+      comment: "Corrected.",
+    });
+
+    expect(confirmCorrectiveActionUpload).toHaveBeenCalledTimes(2);
+    expect((confirmCorrectiveActionUpload as jest.Mock).mock.calls[0][2]).toMatchObject({
+      takenAt: "2026-07-22T18:00:00.000Z",
+      latitude: 32.7767,
+      longitude: -96.797,
+      addressSource: "exif",
+    });
+    const second = (confirmCorrectiveActionUpload as jest.Mock).mock.calls[1][2];
+    expect(second.takenAt).toBeUndefined();
+    expect(second.latitude).toBeUndefined();
+    expect(second.longitude).toBeUndefined();
+    expect(second.addressSource).toBeUndefined();
+  });
+
   // Finding B — a partial batch failure must DISCARD the ids that DID upload (already-confirmed files on the
   // deal) so the retry doesn't accumulate orphaned duplicates, while still not POSTing.
   it("with a partial batch failure: discards the succeeded fileIds and does NOT POST", async () => {

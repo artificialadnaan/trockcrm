@@ -109,6 +109,10 @@ export function correctiveResponseReducer(
  * NOTE: the response endpoint links evidence by fileId; the per-photo caption typed in PhotoCaptionEditor is
  * carried on the confirm (persisted to files.description) so it survives to the resolved view — the read
  * sources per-photo captions from files.description. A blank caption is omitted.
+ *
+ * Capture provenance (takenAt / latitude / longitude / addressSource) captured at shot time is ALSO threaded
+ * through the confirm — via the same field names as the ordinary field-photo confirm — so the server records
+ * real capture-time + location on the response file instead of nulls (each field only when present).
  */
 async function uploadCorrectiveResponsePhoto(
   fetcher: Fetcher,
@@ -133,6 +137,10 @@ async function uploadCorrectiveResponsePhoto(
     uploadToken: presign.uploadToken,
     objectKey: presign.objectKey,
     caption: caption ? caption : null,
+    takenAt: photo.takenAt,
+    latitude: photo.latitude,
+    longitude: photo.longitude,
+    addressSource: photo.addressSource,
   });
   return fileId;
 }

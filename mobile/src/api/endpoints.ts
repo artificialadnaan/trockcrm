@@ -246,10 +246,22 @@ export const requestCorrectiveActionUploadUrl = (
 // scorecard's office) and returns the fresh { fileId } the response POST's photoFileIds expects. An optional
 // `caption` is persisted to files.description so a description typed in PhotoCaptionEditor survives to the
 // resolved view (the read sources per-photo captions from files.description). Omitted when blank.
+//
+// Capture provenance (takenAt / latitude / longitude / addressSource) is threaded through the SAME field
+// names as the ordinary field-photo confirm (see confirmUpload), so the server records real capture-time +
+// location on the response file rather than nulls. Each field is sent only when present.
 export const confirmCorrectiveActionUpload = (
   f: Fetcher,
   scorecardId: string,
-  body: { uploadToken: string; objectKey: string; caption?: string | null },
+  body: {
+    uploadToken: string;
+    objectKey: string;
+    caption?: string | null;
+    takenAt?: string;
+    latitude?: number;
+    longitude?: number;
+    addressSource?: "exif" | "live_gps";
+  },
 ) =>
   f<CorrectiveActionConfirmUploadResponse>(`/field/scorecards/${scorecardId}/corrective-actions/upload`, {
     method: "POST",
@@ -257,6 +269,10 @@ export const confirmCorrectiveActionUpload = (
       uploadToken: body.uploadToken,
       objectKey: body.objectKey,
       ...(body.caption != null ? { caption: body.caption } : {}),
+      ...(body.takenAt != null ? { takenAt: body.takenAt } : {}),
+      ...(body.latitude != null ? { latitude: body.latitude } : {}),
+      ...(body.longitude != null ? { longitude: body.longitude } : {}),
+      ...(body.addressSource != null ? { addressSource: body.addressSource } : {}),
     },
   });
 
