@@ -831,7 +831,17 @@ export async function getFieldScorecardDetail(
         isNull(files.deletedAt),
       ),
     )
-    .where(eq(fieldScorecardPhotos.scorecardId, id));
+    // Only ORIGINAL section evidence — a corrective-action RESPONSE photo has corrective_action_id set +
+    // section_key null. Mobile's evidence grouping discards null-section rows, so without this filter we'd
+    // presign dozens/hundreds of response photos as wasted work and return DTO-invalid evidence. Response
+    // photos load only through their own corrective-action thread (getCorrectiveActionItems). Mirrors the
+    // corrective_action_id IS NULL filter the PDF + deal-detail evidence queries already use.
+    .where(
+      and(
+        eq(fieldScorecardPhotos.scorecardId, id),
+        isNull(fieldScorecardPhotos.correctiveActionId),
+      ),
+    );
 
   // Resolve presigned URLs concurrently (order preserved by Promise.all) so detail latency doesn't scale
   // with the photo count.

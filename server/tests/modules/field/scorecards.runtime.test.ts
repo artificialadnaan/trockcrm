@@ -351,6 +351,49 @@ describe("reads", () => {
     expect(noUrls.photos.every((p) => p.url === null)).toBe(true);
   });
 
+  it("excludes corrective-action RESPONSE photos from detail evidence (finding #8)", async () => {
+    // One ORIGINAL section-evidence photo + one corrective-action RESPONSE photo (corrective_action_id set,
+    // section_key null). getFieldScorecardDetail must return ONLY the section evidence — response photos load
+    // through their own corrective-action thread, and their null-section rows are DTO-invalid here.
+    const { scorecard } = await createFieldScorecard(
+      tdb,
+      submission({
+        clientSubmissionId: csid(30),
+        photos: [{ sectionKey: "quality", clientUploadId: "cu-1" }],
+      }),
+    );
+    // A corrective-action item to hang the response photo off of.
+    const caId = "eeeeeeee-0000-0000-0000-0000000000ca";
+    await tdb.execute(sql`
+      INSERT INTO scorecard_corrective_actions (id, scorecard_id, item_type, item_ref, item_label, status)
+      VALUES (${caId}, ${scorecard.id}, 'action_item', '0', 'Re-inspect', 'resolved')
+    `);
+    // A fresh response-photo file + link (section_key NULL, corrective_action_id set).
+    const respFile = "aaaaaaaa-0000-0000-0000-0000000000ca";
+    await tdb.execute(sql`
+      INSERT INTO files (id, deal_id, client_upload_id, uploaded_by, description, is_active, deleted_at)
+      VALUES (${respFile}, ${DEAL}, 'cu-response', ${USER}, 'Fixed', true, NULL)
+    `);
+    await tdb.execute(sql`
+      INSERT INTO field_scorecard_photos (scorecard_id, section_key, deficiency_key, file_id, corrective_action_id)
+      VALUES (${scorecard.id}, NULL, NULL, ${respFile}, ${caId})
+    `);
+
+    const presigned: string[] = [];
+    const detail = await getFieldScorecardDetail(tdb, scorecard.id, ACCESS, {
+      resolvePhotoUrl: async (fileId) => {
+        presigned.push(fileId);
+        return `https://cdn/${fileId}`;
+      },
+    });
+    // Only the ORIGINAL section-evidence photo — never the response photo.
+    expect(detail.photos).toHaveLength(1);
+    expect(detail.photos[0].fileId).not.toBe(respFile);
+    expect(detail.photos.map((p) => p.fileId)).not.toContain(respFile);
+    // The response photo is never presigned (no wasted work).
+    expect(presigned).not.toContain(respFile);
+  });
+
   it("returns weekOf as a YYYY-MM-DD string from the recent list", async () => {
     await createFieldScorecard(tdb, submission({ clientSubmissionId: csid(21), weekOf: "2026-06-30" }));
     const recent = await listRecentFieldScorecards(tdb, { limit: 10 });

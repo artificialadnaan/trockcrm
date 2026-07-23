@@ -139,12 +139,24 @@ export async function confirmCorrectiveActionUpload(
   // presigned URL while open, then confirmed after closure. Reject a confirm once the corrective action is
   // closed so a closed scorecard can never gain a new orphaned response file.
   await assertOpenCorrectiveAction(db, input.scorecardId);
-  // Resolve the deal (belt-and-suspenders; the caller already bound the token to this scorecard) AND the
-  // uploader — a session user id, or the scorecard's submitter for a token responder (never a nil uuid,
-  // which would FK-violate files.uploaded_by → public.users).
-  const { uploaderId } = await resolveScorecardUploader(db, input.scorecardId, input.sessionUserId);
+  // Resolve the ROUTE scorecard's authoritative deal AND the uploader — a session user id, or the
+  // scorecard's submitter for a token responder (never a nil uuid, which would FK-violate
+  // files.uploaded_by → public.users).
+  const { dealId, uploaderId } = await resolveScorecardUploader(
+    db,
+    input.scorecardId,
+    input.sessionUserId,
+  );
+  // Bind the confirm to THIS route's scorecard/deal so an upload token minted for a DIFFERENT deal/scorecard
+  // (same office) is REJECTED here rather than persisting the pending token's foreign dealId. confirmUpload
+  // asserts a supplied scorecardEditDealId equals the live pending token's dealId (400 SCORECARD_EDIT_UPLOAD
+  // _SCOPE on mismatch): the pending upload token carries the deal it was presigned against, so a token minted
+  // for scorecard B (deal B) confirmed through scorecard A's route (deal A ≠ deal B) fails — no file is
+  // created on B. Without this, A's open/authz checks pass yet confirmUpload would persist B's dealId,
+  // creating a file on B (attributed via A's uploader) after B closed / A-scoped access was revoked.
   const { file } = await confirmUpload(db, uploaderId, {
     uploadToken: input.uploadToken,
+    scorecardEditDealId: dealId,
   });
   // confirmUpload builds the file from the pending-upload row (no description slot), so persist the caption
   // onto files.description here — the corrective-action read sources photo captions from that column.

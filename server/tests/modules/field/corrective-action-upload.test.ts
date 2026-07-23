@@ -17,6 +17,9 @@ import {
 import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
 
 const DEAL = "11111111-1111-1111-1111-111111111111";
+// A SECOND deal + scorecard in the SAME office. Used to prove an upload token minted for scorecard B (deal B)
+// cannot be confirmed through scorecard A's route (cross-scorecard token confusion, finding #7).
+const DEAL_B = "aaaaaaaa-1111-1111-1111-111111111111";
 const USER = "33333333-3333-3333-3333-333333333333";
 const OFFICE = { id: "office-1", slug: "test" };
 
@@ -67,6 +70,7 @@ function makeApp() {
 
 let app: express.Express;
 let scorecardId: string;
+let scorecardBId: string;
 
 beforeAll(async () => {
   pg = new PGlite();
@@ -109,6 +113,7 @@ beforeAll(async () => {
     `ALTER TABLE public.files ADD CONSTRAINT files_uploaded_by_fk FOREIGN KEY (uploaded_by) REFERENCES public.users(id);`,
   );
   await pg.exec(`INSERT INTO deals (id, name, deal_number, is_active) VALUES ('${DEAL}', 'Maple St', 'DFW-1', true);`);
+  await pg.exec(`INSERT INTO deals (id, name, deal_number, is_active) VALUES ('${DEAL_B}', 'Oak Ave', 'DFW-2', true);`);
   // The scorecard's submitter — a real active user; token uploads are attributed to this id (not a nil uuid).
   await pg.exec(
     `INSERT INTO public.users (id, display_name, email, is_active) VALUES ('${USER}', 'Sam Super', 'sam.super@trock.com', true);`,
@@ -133,6 +138,12 @@ beforeEach(async () => {
     INSERT INTO deal_team_members (deal_id, user_id, role, is_active)
     VALUES (${DEAL}, ${USER}, 'superintendent', true)
   `);
+  // The session user is also the assigned super on deal B, so B's own presign passes (the cross-scorecard
+  // test needs a legitimately-minted B token, not an authz failure at presign).
+  await tdb.execute(sql`
+    INSERT INTO deal_team_members (deal_id, user_id, role, is_active)
+    VALUES (${DEAL_B}, ${USER}, 'superintendent', true)
+  `);
   // An email-only assigned PROJECT MANAGER whose email matches the token recipient used by the token tests.
   // The token path revalidates the token email against the deal's CURRENT active super/PM recipients.
   await tdb.execute(sql`
@@ -147,6 +158,16 @@ beforeEach(async () => {
   await tdb.execute(sql`
     INSERT INTO scorecard_corrective_actions (scorecard_id, item_type, item_ref, item_label, status)
     VALUES (${scorecardId}, 'action_item', '0', 'Re-inspect slab 2', 'open')
+  `);
+  // Scorecard B on deal B — its own OPEN corrective action, so B's presign succeeds.
+  scorecardBId = "22222222-2222-2222-2222-2222222222bb";
+  await tdb.execute(sql`
+    INSERT INTO field_scorecards (id, client_submission_id, deal_id, week_of, form_version, kind, total_score, rating, status, submitted_by)
+    VALUES (${scorecardBId}, '55555555-5555-5555-5555-000000000002', ${DEAL_B}, '2026-06-30', 1, 'project', 60, 'corrective_action', 'corrective_action_open', ${USER})
+  `);
+  await tdb.execute(sql`
+    INSERT INTO scorecard_corrective_actions (scorecard_id, item_type, item_ref, item_label, status)
+    VALUES (${scorecardBId}, 'action_item', '0', 'Re-inspect slab B', 'open')
   `);
 });
 
@@ -228,6 +249,31 @@ describe("token-scoped corrective-action photo upload", () => {
     expect(resolved.photos.map((p: any) => p.fileId)).toContain(fileId);
   });
 
+  it("persists a valid caption onto the file's description", async () => {
+    const urlRes = await request(app)
+      .post(`/scorecards/${scorecardId}/corrective-actions/upload/url`)
+      .send({ contentType: "image/jpeg", sizeBytes: 1024 });
+    expect(urlRes.status).toBe(200);
+    const confirmRes = await request(app)
+      .post(`/scorecards/${scorecardId}/corrective-actions/upload`)
+      .send({ uploadToken: urlRes.body.uploadToken, objectKey: urlRes.body.objectKey, caption: "Slab fixed" });
+    expect(confirmRes.status).toBe(201);
+    const rows = await tdb.execute(sql`SELECT description FROM files WHERE id = ${confirmRes.body.fileId}`);
+    expect(rows.rows[0].description).toBe("Slab fixed");
+  });
+
+  it("400s an oversized caption before any upload work (finding #3)", async () => {
+    const urlRes = await request(app)
+      .post(`/scorecards/${scorecardId}/corrective-actions/upload/url`)
+      .send({ contentType: "image/jpeg", sizeBytes: 1024 });
+    expect(urlRes.status).toBe(200);
+    // > MAX_RESPONSE_COMMENT_LENGTH (5000) — must be rejected, never persisted to files.description.
+    const confirmRes = await request(app)
+      .post(`/scorecards/${scorecardId}/corrective-actions/upload`)
+      .send({ uploadToken: urlRes.body.uploadToken, objectKey: urlRes.body.objectKey, caption: "x".repeat(5001) });
+    expect(confirmRes.status).toBe(400);
+  });
+
   it("401s an invalid token on the upload-url step", async () => {
     const res = await request(app)
       .post(`/scorecards/${scorecardId}/corrective-actions/upload/url?token=not-a-real-token`)
@@ -289,6 +335,29 @@ describe("token-scoped corrective-action photo upload", () => {
       .post(`/scorecards/${scorecardId}/corrective-actions/upload`)
       .send({ uploadToken: urlRes.body.uploadToken, objectKey: urlRes.body.objectKey });
     expect(confirmRes.status).toBe(409);
+  });
+
+  it("rejects confirming scorecard B's upload token through scorecard A's route (cross-scorecard token confusion, finding #7)", async () => {
+    // Presign an upload for scorecard B (deal B) — a legitimate token bound to deal B.
+    const urlResB = await request(app)
+      .post(`/scorecards/${scorecardBId}/corrective-actions/upload/url`)
+      .send({ contentType: "image/jpeg", sizeBytes: 1024 });
+    expect(urlResB.status).toBe(200);
+
+    const filesBefore = await tdb.execute(sql`SELECT count(*)::int AS n FROM files WHERE deal_id = ${DEAL_B}`);
+    const countBefore = (filesBefore.rows[0] as { n: number }).n;
+
+    // Confirm B's token through scorecard A's route. The caller is authorized for A, so A's open/authz checks
+    // pass — but confirmCorrectiveActionUpload now binds the confirm to A's authoritative deal, so B's
+    // deal-scoped pending token mismatches (deal A ≠ deal B) → confirmUpload rejects it (400
+    // SCORECARD_EDIT_UPLOAD_SCOPE). No file is created on deal B.
+    const confirmRes = await request(app)
+      .post(`/scorecards/${scorecardId}/corrective-actions/upload`)
+      .send({ uploadToken: urlResB.body.uploadToken, objectKey: urlResB.body.objectKey });
+    expect(confirmRes.status).toBe(400);
+
+    const filesAfter = await tdb.execute(sql`SELECT count(*)::int AS n FROM files WHERE deal_id = ${DEAL_B}`);
+    expect((filesAfter.rows[0] as { n: number }).n).toBe(countBefore);
   });
 });
 
