@@ -276,6 +276,56 @@ describe("buildWonMetricReductionEmail — enrichment", () => {
   });
 });
 
+describe("buildWonMetricReductionEmail — value/summary edge cases", () => {
+  const build = (event: Record<string, unknown>) =>
+    buildWonMetricReductionEmail({ event: event as never, impact: REASSIGN_IMPACT, frontendUrl: "https://trockcrm.com" });
+
+  it("skips a non-positive higher-priority amount and reports the effective value change", () => {
+    // awarded cleared to 0 but bid stays 80k -> effective Won value is 80k, not 0.
+    const email = build({
+      ...REASSIGN_EVENT,
+      reasonCode: "won_value_reduced",
+      actionLabel: "Won value changed",
+      changedFields: { awarded_amount: { from: 100000, to: 0 } },
+      newSnapshot: { awardedAmount: 0, bidEstimate: 80000 },
+      oldSnapshot: { awardedAmount: 100000, bidEstimate: 80000 },
+    });
+    expect(email.text).toContain("Amount: $80,000.00"); // falls through 0 to the positive estimate
+    expect(email.text).toContain("was lowered from $100,000.00 to $80,000.00"); // effective, not raw field
+  });
+
+  it("labels a Bid Board / Estimator-only stage change distinctly from a CRM stage change", () => {
+    const email = build({
+      ...REASSIGN_EVENT,
+      reasonCode: "won_stage_changed",
+      actionLabel: "Bid Board stage changed",
+      changedFields: { bid_board_stage_slug: { from: "won", to: "estimating" } },
+      newSnapshot: { awardedAmount: 50000 },
+      oldSnapshot: { awardedAmount: 50000 },
+    });
+    expect(email.html).toContain("Bid Board (Estimator Pipeline) Won stage"); // summary distinguishes it from CRM stage
+  });
+
+  it("does not invent a deal for a report_definition_change reduction", () => {
+    const email = build({
+      dealId: null,
+      dealName: null,
+      dealNumber: null,
+      reportMetricKey: "office.won_ytd",
+      definitionVersion: "won-v2",
+      releaseReference: "PR #950",
+      actionLabel: "Published Won metric definition changed",
+      reasonCode: "report_definition_change",
+      changedFields: {},
+      auditReference: {},
+      newSnapshot: {},
+      oldSnapshot: {},
+    });
+    expect(email.html).toContain("definition change");
+    expect(email.html).not.toContain("This deal");
+  });
+});
+
 describe("enableWonMetricReductionAlertDelivery", () => {
   it("opens the database gate and reports the number of backfilled events", async () => {
     const query = vi.fn().mockResolvedValue({ rows: [{ queued_count: "2" }] });

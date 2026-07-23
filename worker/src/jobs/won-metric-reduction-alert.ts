@@ -1099,16 +1099,17 @@ function resolveUserName(names: Map<string, string>, value: unknown): string | n
   return names.get(v.toLowerCase()) ?? null;
 }
 
-// Deal value from a mutation snapshot, in canonical DEAL_VALUE_PRIORITY_CHAIN order.
+// Deal value from a mutation snapshot, in canonical DEAL_VALUE_PRIORITY_CHAIN order. Positive-gated
+// to match the resolver (deal-value-sql.ts / deal-hold.ts): a 0/negative candidate is SKIPPED, not
+// shown, so it falls through to the next positive estimate.
 function snapshotBestValue(snapshot: unknown): number | null {
   const s = parseJson(snapshot);
   if (!isRecord(s)) return null;
-  return (
-    numericValue(s.awardedAmount) ??
-    numericValue(s.bidBoardTotalSales) ??
-    numericValue(s.bidEstimate) ??
-    numericValue(s.ddEstimate)
-  );
+  for (const key of ["awardedAmount", "bidBoardTotalSales", "bidEstimate", "ddEstimate"]) {
+    const v = numericValue(s[key]);
+    if (v != null && v > 0) return v;
+  }
+  return null;
 }
 
 function dealAmountFromSnapshot(newSnapshot: unknown, oldSnapshot: unknown): number | null {
@@ -1142,20 +1143,6 @@ function formatRepChange(changedFields: unknown, names: Map<string, string>): st
   return parts.length ? parts.join("; ") : null;
 }
 
-function valueFromTo(changedFields: unknown): { from: string; to: string } | null {
-  const parsed = parseJson(changedFields);
-  if (!isRecord(parsed)) return null;
-  for (const key of ["awarded_amount", "bid_board_total_sales", "bid_estimate", "dd_estimate"]) {
-    const c = parsed[key];
-    if (isRecord(c)) {
-      const from = numericValue(readValue(c, ["from", "old", "previous"]));
-      const to = numericValue(readValue(c, ["to", "new", "current"]));
-      return { from: from != null ? formatCurrency(from) : "—", to: to != null ? formatCurrency(to) : "—" };
-    }
-  }
-  return null;
-}
-
 function auditActorName(auditReference: unknown): string | null {
   const parsed = parseJson(auditReference);
   if (!isRecord(parsed)) return null;
@@ -1176,10 +1163,17 @@ function buildReductionSummary(input: {
   actorName: string | null;
 }): string | null {
   const { event, names, amount, locationText, actorName } = input;
+  const by = actorName ? ` by ${actorName}` : "";
+  // No deal behind this reduction (e.g. a published metric-definition change) — don't invent one.
+  if (!event.dealId) {
+    if (event.reasonCode === "report_definition_change") {
+      return `A published Won metric definition change reduced this figure${by}.`;
+    }
+    return null;
+  }
   const name = event.dealName ?? "This deal";
   const idParts = [event.dealNumber, amount != null ? formatCurrency(amount) : null, locationText].filter(Boolean);
   const idSuffix = idParts.length ? ` (${idParts.join(" · ")})` : "";
-  const by = actorName ? ` by ${actorName}` : "";
   const rep = repFromTo(event.changedFields, names, "assigned_rep_id");
   switch (event.reasonCode) {
     case "won_reassigned": {
@@ -1193,8 +1187,11 @@ function buildReductionSummary(input: {
       return `The estimator on Won deal ${name}${idSuffix} was reassigned${fromTo}${by}.`;
     }
     case "won_value_reduced": {
-      const vc = valueFromTo(event.changedFields);
-      const detail = vc ? ` from ${vc.from} to ${vc.to}` : "";
+      // Report the EFFECTIVE Won-value transition (positive-gated best value old->new), not the raw
+      // changed field: awarded $100 -> $0 with an unchanged $80 bid is a $100 -> $80 change, not $100 -> $0.
+      const oldVal = snapshotBestValue(event.oldSnapshot);
+      const newVal = snapshotBestValue(event.newSnapshot);
+      const detail = oldVal != null && newVal != null ? ` from ${formatCurrency(oldVal)} to ${formatCurrency(newVal)}` : "";
       return `The Won value of ${name}${idSuffix} was lowered${detail}${by}.`;
     }
     case "deal_deleted":
@@ -1205,8 +1202,14 @@ function buildReductionSummary(input: {
       return `Won deal ${name}${idSuffix} was placed on hold${by}, removing it from the Won figure.`;
     case "marked_test_data":
       return `${name}${idSuffix} was marked as test data${by}, excluding it from Won.`;
-    case "won_stage_changed":
-      return `${name}${idSuffix} was moved out of a Won stage${by}.`;
+    case "won_stage_changed": {
+      // A Bid Board / Estimator-Pipeline stage move (bid_board_stage_slug only, CRM stage_id unchanged)
+      // leaves the canonical company Won figure intact — say so, so recipients don't think CRM-Won was lost.
+      const parsed = parseJson(event.changedFields);
+      const bidBoardOnly = isRecord(parsed) && "bid_board_stage_slug" in parsed && !("stage_id" in parsed);
+      const stage = bidBoardOnly ? "a Bid Board (Estimator Pipeline) Won stage" : "a Won stage";
+      return `${name}${idSuffix} was moved out of ${stage}${by}.`;
+    }
     case "won_date_rebucketed":
       return `The Won close date of ${name}${idSuffix} changed${by}, moving it out of this period.`;
     default:

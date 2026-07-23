@@ -418,16 +418,19 @@ export async function searchDeals(tenantDb: TenantDb, query: string, limit: numb
     // Deliberately the RAW best-value (awarded>bbts>bid>dd, canonical DEAL_VALUE_PRIORITY_CHAIN),
     // NOT the on-hold-zeroed effective value: search is a display surface (on-hold already shows a
     // badge), not a reporting aggregate. Matches the Won-metric email builder's snapshotBestValue.
-    dealValue: firstNonEmpty(r.awardedAmount, r.bidBoardTotalSales, r.bidEstimate, r.ddEstimate),
+    dealValue: firstPositiveValue(r.awardedAmount, r.bidBoardTotalSales, r.bidEstimate, r.ddEstimate),
   }));
 }
 
 // Best-value amount for a deal search result: awarded_amount > bid_board_total_sales > bid_estimate
-// > dd_estimate. numeric(14,2) columns arrive as strings from pg; return the first present as a raw
-// string, else null. (Nullish-only: a legitimate "0" value is kept, not skipped.)
-function firstNonEmpty(...values: Array<string | number | null>): string | null {
+// > dd_estimate, positive-gated to match the canonical resolver (deal-value-sql.ts / deal-hold.ts):
+// a 0/negative candidate is SKIPPED so it falls through to the next positive estimate. numeric(14,2)
+// arrives as a string from pg; the first positive candidate is returned in its raw string form, else null.
+function firstPositiveValue(...values: Array<string | number | null>): string | null {
   for (const v of values) {
-    if (v != null && String(v).trim() !== "") return String(v);
+    if (v == null) continue;
+    const n = Number(v);
+    if (Number.isFinite(n) && n > 0) return String(v);
   }
   return null;
 }
