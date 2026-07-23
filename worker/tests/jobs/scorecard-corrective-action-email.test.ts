@@ -1,9 +1,15 @@
 import crypto from "crypto";
 import { describe, expect, it, vi } from "vitest";
+import { WON_DEAL_STAGE_SLUGS, LOST_DEAL_STAGE_SLUGS } from "@trock-crm/shared/types";
 import {
   handleScorecardCorrectiveActionEmail,
   type ScorecardCorrectiveActionEmailPayload,
 } from "../../src/jobs/scorecard-corrective-action-email.js";
+
+// A real Won-family slug and a real Lost slug from the SAME shared constants the worker binds as $2/$3, so the
+// cascade-regression tests exercise a genuine slug reaching the generated SQL (not a fabricated one).
+const WON_TERMINAL_SLUG = WON_DEAL_STAGE_SLUGS[0];
+const LOST_TERMINAL_SLUG = LOST_DEAL_STAGE_SLUGS[0];
 
 // Mirror the worker's per-cycle fingerprint (sha256 over the sorted open corrective-action-item ids, first
 // 16 hex chars) so the CRM/no-token idempotency-key assertions can be derived from the same ids the mock
@@ -104,6 +110,18 @@ function makeQuery(
     // hidden record yields ZERO rows. When true, the snapshot SELECT (the one that also reads
     // corrective_action_cycle_nonce) returns no row → the handler must RETURN without sending or stamping.
     hiddenScorecard?: boolean;
+    // P1 (round-14 cascade regression): instead of the boolean `hiddenScorecard` short-circuit, EVALUATE the
+    // opening snapshot's actual generated browsable predicate against the params it is called with. The mock
+    // parses the generated SQL to find which placeholder ($2/$3) sits inside `= ANY(...)` (the Won-family gate)
+    // and which sits inside `<> ALL(...)` (the Lost/terminal exclusion), binds each to the corresponding params
+    // array, and returns a row only when a TERMINAL deal in `evalDealStageSlug` is a member of the Won array
+    // (browsable) and NOT a member of the Lost array. This makes the test exercise the exact placeholder BINDING:
+    // with the cascading `.replace($1→$2).replace($2→$3)` bug, BOTH ANY() and ALL() collapse to $3 (Lost), so a
+    // Won slug is compared only against the Lost array → a terminal Won deal returns no row (silently dropped).
+    // The single-pass renumber binds Won→$2 / Lost→$3 correctly. `evalDealIsTerminal` defaults true (the
+    // interesting case: a terminal deal is browsable ONLY via the Won branch).
+    evalDealStageSlug?: string;
+    evalDealIsTerminal?: boolean;
     // Finding B: the corrective_action_cycle_nonce the OPENING snapshot SELECT returns (the scorecard's CURRENT
     // active cycle). Compared to payload.cycleNonce BEFORE recipients are resolved / anything is sent; a mismatch
     // (a superseded cycle-A job) must return early with NO send and NO stamp. Distinct from `storedCycleNonce`
@@ -263,6 +281,28 @@ function makeQuery(
       // the handler bails without sending or stamping. Recognize the joined snapshot by its is_active gate.
       if (opts.hiddenScorecard && /sc\.is_active\s*=\s*true/i.test(text)) {
         return { rows: [] };
+      }
+      // P1 (round-14 cascade regression): when a test provides evalDealStageSlug, EVALUATE the generated
+      // browsable predicate against the actual params, exercising the placeholder BINDING (not a boolean stub).
+      // Parse which $-placeholder sits inside `= ANY(...)` (Won gate) and which inside `<> ALL(...)` (Lost
+      // exclusion) directly from the generated SQL, then look those params up (params[n-1]). A terminal deal is
+      // browsable ONLY if its slug is a member of the Won-bound array AND not a member of the Lost-bound array.
+      if (opts.evalDealStageSlug !== undefined && /sc\.is_active\s*=\s*true/i.test(text)) {
+        const anyMatch = text.match(/=\s*ANY\(\$(\d+)::text\[\]\)/i);
+        const allMatch = text.match(/<>\s*ALL\(\$(\d+)::text\[\]\)/i);
+        const wonPlaceholder = anyMatch ? Number(anyMatch[1]) : NaN;
+        const lostPlaceholder = allMatch ? Number(allMatch[1]) : NaN;
+        // Resolve each placeholder to the array actually bound in the params list ($n → params[n-1]).
+        const wonArray = (params[wonPlaceholder - 1] as string[]) ?? [];
+        const lostArray = (params[lostPlaceholder - 1] as string[]) ?? [];
+        const slug = opts.evalDealStageSlug;
+        const isTerminal = opts.evalDealIsTerminal ?? true;
+        // Replicate the SQL: (NOT terminal OR slug ∈ wonArray) AND slug ∉ lostArray.
+        const passesTerminalOrWon = !isTerminal || wonArray.includes(slug);
+        const passesNotLost = !lostArray.includes(slug);
+        if (!(passesTerminalOrWon && passesNotLost)) {
+          return { rows: [] };
+        }
       }
       return {
         rows: [
@@ -1700,6 +1740,89 @@ describe("scorecard corrective-action notification email", () => {
     expect(snapshotSql).toMatch(/sc\.is_active\s*=\s*true/i);
     expect(snapshotSql).toMatch(/d\.is_active\s*=\s*true/i);
     expect(snapshotSql).toMatch(/is_terminal/i);
+  });
+
+  // ---- P1 (round-14 cascade regression): the browsable predicate's placeholder binding ----
+
+  it("treats a TERMINAL WON project as browsable and DOES send + stamp (P1 cascade regression)", async () => {
+    // The responder API intentionally treats a Won-terminal project as browsable, so the worker must too. The
+    // opening snapshot binds the Won-family slug array to the `= ANY(...)` placeholder and the Lost array to
+    // `<> ALL(...)`. The mock EVALUATES the generated predicate against the ACTUAL params (parsing which $-
+    // placeholder each array reaches), so this asserts the placeholder BINDING — not a boolean stub. Under the
+    // cascading `.replace($1→$2).replace($2→$3)` bug BOTH ANY() and ALL() collapse to $3 (the Lost array), so a
+    // Won slug is never compared against the Won array → the terminal deal returns no row → the handler silently
+    // completes without sending or stamping. The single-pass renumber binds Won→$2 correctly, so a real Won slug
+    // reaches the Won-position placeholder and the terminal deal is browsable → the email IS sent and stamped.
+    const { query, tokenDelivers } = makeQuery({
+      evalDealStageSlug: WON_TERMINAL_SLUG,
+      evalDealIsTerminal: true,
+      recipients: [{ role: "superintendent", name: "Sam Super", email: "sam.super@trock.com", user_id: "u-1", can_field_login: true }],
+      assignedRoles: [{ role: "superintendent" }],
+    });
+    const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "m" });
+    const logger = makeLogger();
+
+    await handleScorecardCorrectiveActionEmail(payload, null, { query: query as any, sendEmail, env, logger });
+
+    // The Won-terminal project is browsable → the corrective-action email IS sent ...
+    expect(sendEmail).toHaveBeenCalledTimes(1);
+    expect(sendEmail).toHaveBeenCalledWith(
+      "sam.super@trock.com",
+      expect.any(String),
+      expect.any(String),
+      expect.objectContaining({ text: expect.any(String) }),
+    );
+    // ... and the card IS stamped notified (the stamp UPDATE ran and matched a row) ...
+    const stampCalls = query.mock.calls.filter(([text]) =>
+      /UPDATE [\s\S]*field_scorecards\s+SET corrective_action_email_sent_at/i.test(text as string),
+    );
+    expect(stampCalls).toHaveLength(1);
+    // A deep-link CRM user mints no token, so no delivered-token stamp — but the send + stamp above prove the
+    // Won-terminal row was returned (not silently dropped by the cascade).
+    expect(tokenDelivers).toHaveLength(0);
+
+    // Prove the actual generated SQL binds the WON array to the `= ANY(...)` placeholder (position $2), NOT $3:
+    // the exact regression the cascade caused. Read the generated snapshot SQL + its params off the mock.
+    const snapshotCall = query.mock.calls.find(
+      ([text]) => /FROM \S*field_scorecards\s+sc/i.test(text as string) && /corrective_action_cycle_nonce/i.test(text as string),
+    )!;
+    const [snapshotSql, snapshotParams] = snapshotCall as [string, any[]];
+    const anyPlaceholder = Number((snapshotSql.match(/=\s*ANY\(\$(\d+)::text\[\]\)/i) ?? [])[1]);
+    const allPlaceholder = Number((snapshotSql.match(/<>\s*ALL\(\$(\d+)::text\[\]\)/i) ?? [])[1]);
+    // Distinct placeholders (the cascade collapsed both to the same number).
+    expect(anyPlaceholder).not.toEqual(allPlaceholder);
+    // The Won-position placeholder ($2) resolves to an array CONTAINING the Won slug; the Lost-position ($3)
+    // resolves to an array that does NOT — so the distinct Won slug genuinely reaches the Won placeholder.
+    expect(snapshotParams[anyPlaceholder - 1]).toContain(WON_TERMINAL_SLUG);
+    expect(snapshotParams[anyPlaceholder - 1]).not.toContain(LOST_TERMINAL_SLUG);
+    expect(snapshotParams[allPlaceholder - 1]).toContain(LOST_TERMINAL_SLUG);
+  });
+
+  it("treats a TERMINAL LOST project as hidden and does NOT send or stamp (P1 cascade regression)", async () => {
+    // The mirror case: a Lost/terminal deal is excluded by `<> ALL(lostArray)`, so the snapshot returns no row
+    // and the handler bails (no send, no stamp). This confirms the Lost array reaches the `<> ALL(...)`
+    // placeholder — evaluated against the real params — and is not swallowed by the fix.
+    const { query, inserts, jobEnqueues } = makeQuery({
+      evalDealStageSlug: LOST_TERMINAL_SLUG,
+      evalDealIsTerminal: true,
+      recipients: [{ role: "superintendent", name: "Sam Super", email: "sam.super@trock.com", user_id: "u-1", can_field_login: true }],
+      assignedRoles: [{ role: "superintendent" }],
+    });
+    const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "m" });
+    const logger = makeLogger();
+
+    await handleScorecardCorrectiveActionEmail(payload, null, { query: query as any, sendEmail, env, logger });
+
+    expect(sendEmail).not.toHaveBeenCalled();
+    expect(inserts).toHaveLength(0);
+    expect(jobEnqueues).toHaveLength(0);
+    const stampCalls = query.mock.calls.filter(([text]) =>
+      /UPDATE [\s\S]*field_scorecards\s+SET corrective_action_email_sent_at/i.test(text as string),
+    );
+    expect(stampCalls).toHaveLength(0);
+    // The handler returns right after the (empty) snapshot read — no recipient resolution.
+    const recipientCalls = query.mock.calls.filter(([text]) => /FROM \S*deal_team_members/i.test(text as string));
+    expect(recipientCalls).toHaveLength(0);
   });
 
   // ---- Finding D: a field-login capability change is a recipient change in the pre-stamp signature ----

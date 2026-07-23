@@ -267,6 +267,13 @@ export async function handleScorecardCorrectiveActionEmail(
   // hidden record (a soft-deleted scorecard is now a LEFT JOIN miss on is_active → not returned at all → the
   // "Scorecard not found" branch, which never stamps → a restore can still notify). $2/$3 = Won/Lost slug arrays.
   //
+  // The BROWSABLE_PROJECT_SQL fragment authors its placeholders as $1 (Won) / $2 (Lost), but here they occupy
+  // $2 / $3 (after $1 = scorecardId). Renumber in a SINGLE atomic pass — `.replace(/\$(\d+)/g, +1)` bumps $1→$2
+  // and $2→$3 in ONE scan. A CHAINED `.replace($1→$2).replace($2→$3)` would CASCADE: the first replace produces
+  // a fresh $2 that the second replace then rewrites to $3 alongside the original $2, collapsing BOTH the Won
+  // ANY(...) and the Lost ALL(...) onto $3 — a terminal Won project's slug would be tested only against the Lost
+  // array, never matched, so the row would be dropped and the notification silently skipped. Keep this a single pass.
+  //
   // Finding B: also load corrective_action_cycle_nonce here so a SUPERSEDED job (its payload nonce ≠ the
   // scorecard's current active nonce) can be skipped BEFORE resolving recipients or calling the provider — the
   // final delivery stamp already checks the nonce, but by then cycle A has already SENT (a fresh cycle B reset
@@ -279,7 +286,7 @@ export async function handleScorecardCorrectiveActionEmail(
        LEFT JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
       WHERE sc.id = $1::uuid
         AND sc.is_active = true
-        AND ${BROWSABLE_PROJECT_SQL.replace(/\$1/g, "$2").replace(/\$2/g, "$3")}
+        AND ${BROWSABLE_PROJECT_SQL.replace(/\$(\d+)/g, (_m, n) => "$" + (Number(n) + 1))}
       LIMIT 1`,
     [scorecardId, WON_BROWSABLE_SLUGS, LOST_EXCLUDED_SLUGS]
   );
