@@ -65,6 +65,19 @@ function makeQuery(
     // NOT EXISTS subquery is falsy because a not-emitted open row exists) AND the re-check SELECT reports the
     // card is still un-stamped with a new open item present → the worker re-enqueues a fresh cycle.
     newOpenItemAppeared?: boolean;
+    // Finding 1: model a super/PM REASSIGNMENT mid-run. The worker reads the recipient set at the top, then
+    // RE-RESOLVES it just before the stamp. When set, the SECOND recipient-resolution query (the pre-stamp
+    // revalidation) returns THIS set instead of `recipients` — a different signature → the worker must NOT
+    // stamp and instead re-notify a fresh cycle. The FIRST read still returns `recipients` (who was emailed).
+    revalidatedRecipients?: any[];
+    // Finding 5: version-aware score + rating in the snapshot the scorecard SELECT returns. total_score is the
+    // stored value (V2/leadership store average*10; V1 stores the 0–100 total); averageScore/formVersion/kind
+    // drive the display. Defaults: a V1 project card scoring 60/100.
+    totalScore?: number | null;
+    averageScore?: number | null;
+    formVersion?: number;
+    kind?: string;
+    rating?: string;
   } = {},
 ) {
   const inserts: { sql: string; params: any[] }[] = [];
@@ -75,6 +88,11 @@ function makeQuery(
   // existingTokenEmails model DELIVERED tokens: the reuse-skip query requires delivered_at IS NOT NULL, so
   // only a delivered token returns a row (an undelivered remnant returns nothing → the recipient is re-sent).
   const existing = new Set((opts.existingTokenEmails ?? []).map((e) => e.toLowerCase()));
+  // Count calls to the recipient-resolution query (SELECT DISTINCT ON (dtm.role) ... FROM deal_team_members)
+  // so the SECOND call — the pre-stamp revalidation (finding 1) — can return a reassigned set when the test
+  // provides one. The `SELECT DISTINCT dtm.role` assigned-roles query is intercepted by its own branch first,
+  // so it never reaches this fall-through.
+  let recipientResolveCalls = 0;
   const query = vi.fn(async (text: string, params: any[] = []) => {
     // Per-recipient DELIVERED-token existence check: SELECT 1 FROM ...tokens WHERE recipient_email = $2 ...
     // ... AND delivered_at IS NOT NULL.
@@ -135,20 +153,29 @@ function makeQuery(
             corrective_action_email_sent_at: opts.sentAt ?? null,
             deal_id: DEAL,
             project_number: "DFW-10432",
-            total_score: 60,
-            rating: "corrective_action",
-            form_version: 1,
-            kind: "project",
+            total_score: opts.totalScore === undefined ? 60 : opts.totalScore,
+            average_score: opts.averageScore ?? null,
+            rating: opts.rating ?? "corrective_action",
+            form_version: opts.formVersion ?? 1,
+            kind: opts.kind ?? "project",
             week_of: "2026-06-30",
           },
         ],
       };
     }
     if (/FROM \S*deal_team_members/i.test(text)) {
+      recipientResolveCalls += 1;
+      // The SECOND recipient-resolution call is the pre-stamp revalidation (finding 1). If the test supplies a
+      // reassigned set, return it there so its signature differs from the first (emailed) read.
+      const base =
+        recipientResolveCalls >= 2 && opts.revalidatedRecipients
+          ? opts.revalidatedRecipients
+          : (opts.recipients ?? RECIPIENTS);
       // Default can_field_login when a test's inline recipient omits it: a CRM user (user_id set) is assumed
       // to hold an enabled field login (→ deep link) unless the test explicitly says otherwise; an email-only
-      // member (user_id null) can never field-login. The SQL computes this from the user_local_auth join.
-      const rows = (opts.recipients ?? RECIPIENTS).map((r: any) => ({
+      // member (user_id null) can never field-login. The SQL computes this from the user_local_auth join
+      // (enabled + non-revoked + NOT must_change_password).
+      const rows = base.map((r: any) => ({
         ...r,
         can_field_login: r.can_field_login ?? r.user_id != null,
       }));
@@ -765,6 +792,196 @@ describe("scorecard corrective-action notification email", () => {
     // The guarded stamp carries the emailed-id array as $2 so the NOT EXISTS guard can compare the live set.
     expect(stampCalls[0][1]?.[1]).toEqual(FLAGGED.map((f) => f.id));
     // No re-notification machinery fired on the happy path.
+    expect(tokenDeletes).toHaveLength(0);
+    expect(jobEnqueues).toHaveLength(0);
+  });
+
+  // ---- Finding 2: a must_change_password CRM user falls back to the tokenized web link ----
+
+  it("routes a must_change_password CRM user to the web fallback, not the deep link (finding 2)", async () => {
+    // requireFieldContractor (server/src/middleware/field-auth.ts) rejects a request when
+    // user_local_auth.must_change_password is true (401 "Field app access requires password change") — even
+    // though loginFieldUser LETS such a user authenticate. So a must-change CRM assignee can log in but the
+    // corrective-action screen can never load → a bare deep link would strand them. The SQL's can_field_login
+    // now ANDs `must_change_password = FALSE`, so this user is classified NOT-field-capable (modeled here as
+    // can_field_login: false) → they get a minted token + web link, exactly like a no-field-login CRM user. A
+    // CRM user who is enabled AND not must-change (can_field_login: true) still gets the deep link + no token.
+    const { query, inserts } = makeQuery({
+      recipients: [
+        // Enabled, not must-change → deep link.
+        { role: "superintendent", name: "Fresh Login", email: "fresh@trock.com", user_id: "u-fresh", can_field_login: true },
+        // Must-change-password CRM user → not field-capable → token web fallback.
+        { role: "project_manager", name: "Must Change", email: "must.change@trock.com", user_id: "u-must", can_field_login: false },
+      ],
+      assignedRoles: [{ role: "superintendent" }, { role: "project_manager" }],
+    });
+    const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "m" });
+    const logger = makeLogger();
+
+    await handleScorecardCorrectiveActionEmail(payload, null, { query: query as any, sendEmail, env, logger });
+
+    expect(sendEmail).toHaveBeenCalledTimes(2);
+    const freshCall = sendEmail.mock.calls.find((c) => c[0] === "fresh@trock.com")!;
+    const mustCall = sendEmail.mock.calls.find((c) => c[0] === "must.change@trock.com")!;
+
+    // The enabled/non-must-change user keeps the app deep link (no token minted).
+    expect(freshCall[3].text as string).toContain(`trockcam://scorecards/corrective-action/${SCORECARD}`);
+    // The must-change user is minted a token + given the web link (no deep link).
+    expect(mustCall[3].text as string).toContain(
+      `https://trockcrm.com/scorecards/${SCORECARD}/corrective-action?token=`,
+    );
+    expect(mustCall[3].text as string).not.toContain("trockcam://");
+
+    // Exactly ONE token minted — for the must-change CRM user (their public.users email).
+    expect(inserts).toHaveLength(1);
+    expect(inserts[0].params[2]).toBe("must.change@trock.com");
+  });
+
+  it("the recipient-resolution SQL disqualifies must_change_password from can_field_login (finding 2)", async () => {
+    // Guard against a silent removal of the must_change_password clause: the can_field_login expression must AND
+    // `must_change_password = FALSE` on top of the enabled/non-revoked user_local_auth checks. Assert the SQL
+    // text so a future edit can't drop it and re-strand must-change users on a deep link.
+    const { query } = makeQuery();
+    const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "m" });
+    await handleScorecardCorrectiveActionEmail(payload, null, { query: query as any, sendEmail, env, logger: makeLogger() });
+
+    const recipientSql = query.mock.calls
+      .map(([text]) => text as string)
+      .find((t) => /SELECT DISTINCT ON \(dtm\.role\)/i.test(t) && /can_field_login/i.test(t))!;
+    expect(recipientSql).toBeTruthy();
+    expect(recipientSql).toMatch(/must_change_password\s*=\s*FALSE/i);
+    expect(recipientSql).toMatch(/is_enabled\s*=\s*TRUE/i);
+    expect(recipientSql).toMatch(/revoked_at\s+IS\s+NULL/i);
+  });
+
+  // ---- Finding 5: version-aware score + human rating label in the corrective email ----
+
+  it("renders a V2 scorecard score as X.X/10 with a human rating label, not the raw enum (finding 5)", async () => {
+    // A V2 (or leadership) card persists total_score as average*10 (a 6.5/10 average stored as 65). The
+    // corrective email must render 6.5/10 — NOT 65/100 — and show the human rating label ("Corrective Action
+    // Required"), never the raw `corrective_action` enum. average_score is preferred; here it's null so the
+    // handler falls back to total_score/10.
+    const { query } = makeQuery({
+      recipients: [{ role: "project_manager", name: "Dana Cole", email: "dana.cole@example.com", user_id: null }],
+      assignedRoles: [{ role: "project_manager" }],
+      totalScore: 65,
+      averageScore: null,
+      formVersion: 2,
+      kind: "project",
+      rating: "corrective_action",
+    });
+    const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "m" });
+    await handleScorecardCorrectiveActionEmail(payload, null, { query: query as any, sendEmail, env, logger: makeLogger() });
+
+    const call = sendEmail.mock.calls[0];
+    const text = call[3].text as string;
+    const subject = call[1] as string;
+    const html = call[2] as string;
+    // Score is X.X/10, not n/100.
+    expect(text).toContain("6.5/10");
+    expect(subject).toContain("6.5/10");
+    expect(text).not.toContain("65/100");
+    // Human rating label, not the enum.
+    expect(text).toContain("Corrective Action Required");
+    expect(html).toContain("Corrective Action Required");
+    expect(text).not.toContain("corrective_action");
+  });
+
+  it("prefers the stored average_score for a V2 card's X.X/10 score (finding 5)", async () => {
+    // When average_score is present it is used directly (matching the regular scorecard email), so a stored
+    // 7.2 renders 7.2/10 regardless of total_score rounding.
+    const { query } = makeQuery({
+      recipients: [{ role: "project_manager", name: "Dana Cole", email: "dana.cole@example.com", user_id: null }],
+      assignedRoles: [{ role: "project_manager" }],
+      totalScore: 72,
+      averageScore: 7.2,
+      formVersion: 2,
+      kind: "leadership",
+      rating: "corrective_action",
+    });
+    const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "m" });
+    await handleScorecardCorrectiveActionEmail(payload, null, { query: query as any, sendEmail, env, logger: makeLogger() });
+
+    const text = sendEmail.mock.calls[0][3].text as string;
+    expect(text).toContain("7.2/10");
+    expect(text).not.toContain("72/100");
+  });
+
+  it("renders a V1 scorecard score as n/100 (finding 5)", async () => {
+    // A V1 card stores the raw 0–100 total → render n/100 with the human rating label.
+    const { query } = makeQuery({
+      recipients: [{ role: "project_manager", name: "Dana Cole", email: "dana.cole@example.com", user_id: null }],
+      assignedRoles: [{ role: "project_manager" }],
+      totalScore: 72,
+      averageScore: null,
+      formVersion: 1,
+      kind: "project",
+      rating: "corrective_action",
+    });
+    const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "m" });
+    await handleScorecardCorrectiveActionEmail(payload, null, { query: query as any, sendEmail, env, logger: makeLogger() });
+
+    const call = sendEmail.mock.calls[0];
+    const text = call[3].text as string;
+    expect(text).toContain("72/100");
+    expect(text).not.toContain("7.2/10");
+    expect(text).toContain("Corrective Action Required");
+    expect(text).not.toContain("corrective_action");
+  });
+
+  // ---- Finding 1: revalidate the recipient set before stamping (reassignment race) ----
+
+  it("does NOT stamp and RE-ENQUEUES a fresh cycle when the super/PM recipient set changed since the read (finding 1)", async () => {
+    // A super reassignment lands AFTER the worker read/emailed the recipient set but BEFORE the stamp. The
+    // pre-stamp re-resolution returns a DIFFERENT recipient signature → the worker emailed the FORMER assignee
+    // (whose token/access is now revoked at verify time) and the NEW assignee was never notified. The worker
+    // must NOT stamp; it deletes the outstanding tokens and enqueues a fresh cycle (new cycleNonce) so the new
+    // assignee is notified.
+    const { query, tokenDeletes, jobEnqueues } = makeQuery({
+      recipients: [{ role: "superintendent", name: "Old Super", email: "old.super@example.com", user_id: null }],
+      assignedRoles: [{ role: "superintendent" }],
+      // The pre-stamp revalidation resolves a reassigned superintendent.
+      revalidatedRecipients: [{ role: "superintendent", name: "New Super", email: "new.super@example.com", user_id: null }],
+    });
+    const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "m" });
+    const logger = makeLogger();
+
+    await handleScorecardCorrectiveActionEmail(payload, null, { query: query as any, sendEmail, env, logger });
+
+    // The original email was still sent to the FORMER assignee (about the set the worker read) ...
+    expect(sendEmail).toHaveBeenCalledTimes(1);
+    expect(sendEmail.mock.calls[0][0]).toBe("old.super@example.com");
+    // ... but the card was NOT stamped (the guarded stamp UPDATE never ran — the recipient guard short-circuits
+    // to re-notify BEFORE the open-item stamp) ...
+    const stampCalls = query.mock.calls.filter(([text]) => /UPDATE .*field_scorecards/i.test(text as string));
+    expect(stampCalls).toHaveLength(0);
+    // ... the outstanding tokens were cleared (so the fresh cycle re-mints) ...
+    expect(tokenDeletes).toHaveLength(1);
+    expect(tokenDeletes[0].params[0]).toBe(SCORECARD);
+    // ... and a fresh corrective-action-email job was enqueued with a new cycleNonce.
+    expect(jobEnqueues).toHaveLength(1);
+    const enqPayload = JSON.parse(jobEnqueues[0].params[1] as string);
+    expect(enqPayload).toMatchObject({ tenantSchema: "office_dallas", scorecardId: SCORECARD, dealId: DEAL });
+    expect(typeof enqPayload.cycleNonce).toBe("string");
+    expect(enqPayload.cycleNonce).toHaveLength(36);
+  });
+
+  it("stamps normally when the recipient set is UNCHANGED since the read (finding 1)", async () => {
+    // No reassignment: the pre-stamp re-resolution returns the same signature, so the worker proceeds to the
+    // open-item-guarded stamp and stamps (no token delete, no re-enqueue). (revalidatedRecipients omitted →
+    // the second recipient read returns the same set as the first.)
+    const { query, tokenDeletes, jobEnqueues } = makeQuery({
+      recipients: [{ role: "superintendent", name: "Sam Super", email: "sam.super@trock.com", user_id: "u-1", can_field_login: true }],
+      assignedRoles: [{ role: "superintendent" }],
+    });
+    const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "m" });
+    const logger = makeLogger();
+
+    await handleScorecardCorrectiveActionEmail(payload, null, { query: query as any, sendEmail, env, logger });
+
+    expect(sendEmail).toHaveBeenCalledTimes(1);
+    const stampCalls = query.mock.calls.filter(([text]) => /UPDATE .*field_scorecards/i.test(text as string));
+    expect(stampCalls).toHaveLength(1);
     expect(tokenDeletes).toHaveLength(0);
     expect(jobEnqueues).toHaveLength(0);
   });

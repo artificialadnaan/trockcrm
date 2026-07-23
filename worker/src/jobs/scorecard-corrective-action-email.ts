@@ -6,6 +6,14 @@ import {
 } from "../lib/system-email.js";
 import { escapeHtml, normalizeText, isSafeTenantSchema } from "../lib/email-format.js";
 import { resolveFrontendUrl, TROCK_LOGO_EMAIL_URL } from "./project-number-email.js";
+import {
+  FIELD_SCORECARD_RATINGS,
+  scorecardRatingLabel,
+  scorecardV2RatingLabel,
+  type ScorecardRating,
+} from "@trock-crm/shared/types";
+
+const SCORECARD_RATING_SET = new Set<string>(FIELD_SCORECARD_RATINGS);
 
 export const SCORECARD_CORRECTIVE_ACTION_EMAIL_JOB = "scorecard_corrective_action_email";
 
@@ -50,8 +58,10 @@ interface ResolvedRecipient {
   name: string;
   email: string;
   userId: string | null;
-  /** True only when this CRM user can actually authenticate in T-Rock Cam (enabled, non-revoked field login).
-   *  A userId recipient who CANNOT gets the tokenized web fallback instead of the deep link (finding 6). */
+  /** True only when this CRM user can actually USE T-Rock Cam: an enabled, non-revoked field login that is NOT
+   *  flagged must_change_password (a must-change user authenticates but is bounced by requireFieldContractor on
+   *  every field request, so the deep-link screen can't load). A userId recipient who CANNOT gets the tokenized
+   *  web fallback instead of the deep link (finding 2 / finding 6). */
   canFieldLogin: boolean;
 }
 
@@ -64,9 +74,100 @@ function basicValidEmail(email: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 }
 
+/**
+ * The super/PM recipient-resolution SQL, parameterized by the tenant schema (regex-validated by the caller —
+ * identifiers can't be $-parametrized). Extracted so the pre-stamp RECIPIENT-set revalidation (finding 1)
+ * re-runs the EXACT same selection the worker emailed off of, and the two can't drift. Same selection as the
+ * server's resolveCorrectiveActionRecipients (deal_team_members active rows; user/contact must be active; or
+ * an email-only member with both fks null). $1 = deal id.
+ */
+function recipientResolutionSql(tenantSchema: string): string {
+  return `SELECT DISTINCT ON (dtm.role)
+            dtm.role AS role,
+            dtm.user_id AS user_id,
+            COALESCE(
+              CASE WHEN dtm.user_id IS NOT NULL AND u.is_active THEN u.display_name END,
+              CASE WHEN dtm.contact_id IS NOT NULL AND c.is_active THEN TRIM(CONCAT(c.first_name, ' ', c.last_name)) END,
+              dtm.member_name
+            ) AS name,
+            COALESCE(
+              CASE WHEN dtm.user_id IS NOT NULL AND u.is_active THEN u.email END,
+              CASE WHEN dtm.contact_id IS NOT NULL AND c.is_active THEN c.email END,
+              dtm.member_email
+            ) AS email,
+            (dtm.user_id IS NOT NULL AND u.is_active AND ula.user_id IS NOT NULL
+               AND ula.is_enabled = TRUE AND ula.revoked_at IS NULL
+               AND ula.must_change_password = FALSE) AS can_field_login
+       FROM ${tenantSchema}.deal_team_members dtm
+       LEFT JOIN public.users u ON dtm.user_id = u.id
+       LEFT JOIN public.user_local_auth ula ON dtm.user_id = ula.user_id
+       LEFT JOIN ${tenantSchema}.contacts c ON dtm.contact_id = c.id
+      WHERE dtm.deal_id = $1::uuid
+        AND dtm.is_active = TRUE
+        AND dtm.role IN ('superintendent', 'project_manager')
+        AND (
+          (dtm.user_id IS NOT NULL AND u.is_active)
+          OR (dtm.contact_id IS NOT NULL AND c.is_active)
+          OR (dtm.user_id IS NULL AND dtm.contact_id IS NULL)
+        )
+      ORDER BY dtm.role, dtm.created_at DESC`;
+}
+
+/**
+ * Reduce a recipient-query result to a stable, order-independent SIGNATURE of the set the worker will notify
+ * (or DID notify): the sorted `role:lower(email)` pairs of every row that resolves to a deliverable recipient
+ * (a valid email). Used to detect a super/PM REASSIGNMENT between the recipient read and the delivery stamp
+ * (finding 1): if the signature the worker emailed off of differs from a fresh re-resolution at stamp time, a
+ * recipient was added/removed/replaced — the former assignee was emailed (their token/access is now revoked at
+ * verify time) and the NEW assignee was not — so the run must NOT stamp; it re-notifies a fresh cycle instead.
+ * Deliberately excludes canFieldLogin/name: only WHO is addressed matters for whether the right people were
+ * reached (a link-flavor change alone doesn't re-notify).
+ */
+function recipientSignature(rows: any[]): string {
+  const pairs: string[] = [];
+  for (const row of rows) {
+    const email = normalizeText(row.email);
+    const role = row.role;
+    if (role !== "superintendent" && role !== "project_manager") continue;
+    if (!email || !basicValidEmail(email)) continue;
+    pairs.push(`${role}:${email.toLowerCase()}`);
+  }
+  return [...new Set(pairs)].sort().join(",");
+}
+
 /** sha256 hex of the raw token — matches the server's hashCorrectiveActionToken so verify roundtrips. */
 function hashToken(rawToken: string): string {
   return crypto.createHash("sha256").update(rawToken).digest("hex");
+}
+
+/**
+ * Version-aware score display + human rating label for the corrective-action email — mirrors the regular
+ * scorecard email (buildFieldScorecardEmail in field-scorecard-email.ts). V2/leadership cards persist
+ * total_score as `average * 10` (a 6.5/10 average stored as 65) alongside the true average in average_score,
+ * so they must render `X.X/10` (preferring the stored average, falling back to total_score/10) rather than
+ * `65/100`. V1 cards store a 0–100 total → `n/100`. The `rating` argument is the raw enum from the row; it is
+ * converted to the human label with the version-matching shared helper (V2/leadership → scorecardV2RatingLabel,
+ * V1 → scorecardRatingLabel) instead of leaking the enum. An unrecognized rating passes through as-is. (finding 5)
+ */
+export function deriveScorecardScoreAndRating(input: {
+  totalScore: number | null;
+  averageScore: number | null;
+  isTenPointForm: boolean;
+  rating: string | null;
+}): { scoreText: string; ratingLabel: string | null } {
+  const scoreText =
+    input.totalScore == null
+      ? "—"
+      : input.isTenPointForm
+        ? `${(input.averageScore ?? input.totalScore / 10).toFixed(1)}/10`
+        : `${input.totalScore}/100`;
+
+  let ratingLabel = input.rating;
+  if (input.rating && SCORECARD_RATING_SET.has(input.rating)) {
+    const rating = input.rating as ScorecardRating;
+    ratingLabel = input.isTenPointForm ? scorecardV2RatingLabel(rating) : scorecardRatingLabel(rating);
+  }
+  return { scoreText, ratingLabel };
 }
 
 /**
@@ -74,12 +175,12 @@ function hashToken(rawToken: string): string {
  * seeds tracked items + enqueues this job in the SAME submit transaction (durable outbox). The handler
  * resolves the deal's superintendent + project_manager (hybrid: CRM users OR email-only members), and sends
  * ONE email per recipient:
- *   - a CRM user who can ACTUALLY field-login (an enabled, non-revoked user_local_auth row — mirrors
- *     loginFieldUser + the field-auth middleware gate) gets a TRock Cam deep link
- *     (trockcam://scorecards/corrective-action/<id>);
- *   - an email-only member — OR a CRM user who CANNOT field-login (no enabled field login, so the deep link
- *     would strand them at a login they can't pass; finding 6) — gets a freshly-minted recipient-bound web
- *     token appended to the responder URL.
+ *   - a CRM user who can ACTUALLY use T-Rock Cam (an enabled, non-revoked, non-must-change-password
+ *     user_local_auth row — mirrors loginFieldUser + the field-auth middleware gate) gets a TRock Cam deep
+ *     link (trockcam://scorecards/corrective-action/<id>);
+ *   - an email-only member — OR a CRM user who CANNOT use the field app (no enabled field login, or one flagged
+ *     must_change_password, so the deep link would strand them at a login/gate they can't pass; findings 6 + 2)
+ *     — gets a freshly-minted recipient-bound web token appended to the responder URL.
  *
  * Idempotent per scorecard via field_scorecards.corrective_action_email_sent_at (mirrors email_sent_at):
  * checked before sending, stamped once ONLY when every ASSIGNED super/PM role was delivered this run. An
@@ -116,7 +217,7 @@ export async function handleScorecardCorrectiveActionEmail(
   // Idempotency + scorecard snapshot. tenantSchema is regex-validated above (isSafeTenantSchema), so
   // interpolating it as the schema qualifier is safe — identifiers can't be $-parametrized.
   const scorecardRes = await query(
-    `SELECT status, corrective_action_email_sent_at, deal_id, project_number, total_score, rating, form_version, kind, week_of
+    `SELECT status, corrective_action_email_sent_at, deal_id, project_number, total_score, average_score, rating, form_version, kind, week_of
        FROM ${tenantSchema}.field_scorecards WHERE id = $1::uuid LIMIT 1`,
     [scorecardId]
   );
@@ -146,43 +247,22 @@ export async function handleScorecardCorrectiveActionEmail(
   // resolveCorrectiveActionRecipients (deal_team_members active rows; user/contact must be active; or an
   // email-only member with both fks null), reimplemented in raw SQL because the worker can't import server.
   // canFieldLogin mirrors the server's field-login gate (loginFieldUser + the field-auth middleware): a CRM
-  // user can authenticate in T-Rock Cam only if they hold an ENABLED, NON-REVOKED user_local_auth row
-  // (loginFieldUser INNER-JOINs user_local_auth and rejects `!is_enabled`; the field middleware also rejects
-  // a set revoked_at). A userId recipient WITHOUT that can't log in → the deep link strands them, so they get
-  // the tokenized web fallback instead (finding 6). user_local_auth lives in public (schema/public/
-  // user-local-auth.ts). must_change_password is deliberately NOT a disqualifier here: loginFieldUser itself
-  // does not block it (they authenticate successfully), so it doesn't make them incapable of field-login.
-  const recipientRes = await query(
-    `SELECT DISTINCT ON (dtm.role)
-            dtm.role AS role,
-            dtm.user_id AS user_id,
-            COALESCE(
-              CASE WHEN dtm.user_id IS NOT NULL AND u.is_active THEN u.display_name END,
-              CASE WHEN dtm.contact_id IS NOT NULL AND c.is_active THEN TRIM(CONCAT(c.first_name, ' ', c.last_name)) END,
-              dtm.member_name
-            ) AS name,
-            COALESCE(
-              CASE WHEN dtm.user_id IS NOT NULL AND u.is_active THEN u.email END,
-              CASE WHEN dtm.contact_id IS NOT NULL AND c.is_active THEN c.email END,
-              dtm.member_email
-            ) AS email,
-            (dtm.user_id IS NOT NULL AND u.is_active AND ula.user_id IS NOT NULL
-               AND ula.is_enabled = TRUE AND ula.revoked_at IS NULL) AS can_field_login
-       FROM ${tenantSchema}.deal_team_members dtm
-       LEFT JOIN public.users u ON dtm.user_id = u.id
-       LEFT JOIN public.user_local_auth ula ON dtm.user_id = ula.user_id
-       LEFT JOIN ${tenantSchema}.contacts c ON dtm.contact_id = c.id
-      WHERE dtm.deal_id = $1::uuid
-        AND dtm.is_active = TRUE
-        AND dtm.role IN ('superintendent', 'project_manager')
-        AND (
-          (dtm.user_id IS NOT NULL AND u.is_active)
-          OR (dtm.contact_id IS NOT NULL AND c.is_active)
-          OR (dtm.user_id IS NULL AND dtm.contact_id IS NULL)
-        )
-      ORDER BY dtm.role, dtm.created_at DESC`,
-    [dealId]
-  );
+  // user can actually USE T-Rock Cam only if they hold an ENABLED, NON-REVOKED user_local_auth row AND are
+  // NOT flagged must_change_password. loginFieldUser INNER-JOINs user_local_auth and rejects `!is_enabled`,
+  // and the field middleware (requireFieldContractor, server/src/middleware/field-auth.ts) additionally
+  // rejects a set revoked_at AND a set must_change_password (401 "Field app access requires password
+  // change"). So even though loginFieldUser LETS a must-change user authenticate, that user is BOUNCED on
+  // their very next field API request — the corrective-action screen can never load for them — so the deep
+  // link would strand them exactly like a disabled login. Classify such a user NOT-field-capable → they fall
+  // to the tokenized web fallback (finding 2 / finding 6). must_change_password is boolean NOT NULL DEFAULT
+  // true (schema/public/user-local-auth.ts); the LEFT JOIN yields NULL only when NO row exists, but that case
+  // is already excluded by `ula.user_id IS NOT NULL` earlier in the AND-chain, so `= FALSE` is safe. A userId
+  // recipient WITHOUT an enabled/non-revoked/non-must-change login gets the tokenized web fallback instead.
+  // user_local_auth lives in public (schema/public/user-local-auth.ts).
+  const recipientRes = await query(recipientResolutionSql(tenantSchema), [dealId]);
+  // Signature of the set the worker is about to notify. Compared against a fresh re-resolution just before the
+  // stamp to detect a super/PM reassignment mid-run (finding 1).
+  const emailedRecipientSignature = recipientSignature(recipientRes.rows as any[]);
   const recipients: ResolvedRecipient[] = [];
   const resolvedRoles = new Set<RecipientRole>();
   for (const row of recipientRes.rows as any[]) {
@@ -304,8 +384,21 @@ export async function handleScorecardCorrectiveActionEmail(
   const projectNumber = normalizeText(scorecard.project_number) ?? normalizeText(dealRow.project_number);
 
   const frontendUrl = resolveFrontendUrl(env).replace(/\/+$/, "");
-  const ratingLabel = normalizeText(scorecard.rating);
-  const scoreText = scorecard.total_score == null ? "—" : `${Number(scorecard.total_score)}/100`;
+  // Version-aware score + human rating label, mirroring the regular scorecard email (buildFieldScorecardEmail):
+  // V2/leadership persist total_score as `average * 10` (so a 6.5/10 average is stored as 65) with the true
+  // average beside it in average_score — render those as `X.X/10` (preferring average_score, falling back to
+  // total_score/10). V1 stores a 0–100 total → render `n/100`. Leadership always persists form_version = 2
+  // (scorecard-submission.ts), so keying off form_version === 2 covers both V2 project and leadership. The
+  // `rating` column stores the raw enum (e.g. `corrective_action`); convert it to the human label using the
+  // matching helper (V2/leadership → scorecardV2RatingLabel, V1 → scorecardRatingLabel) rather than surfacing
+  // the enum. (finding 5)
+  const isTenPointForm = Number(scorecard.form_version) === 2 || scorecard.kind === "leadership";
+  const { scoreText, ratingLabel } = deriveScorecardScoreAndRating({
+    totalScore: scorecard.total_score == null ? null : Number(scorecard.total_score),
+    averageScore: scorecard.average_score == null ? null : Number(scorecard.average_score),
+    isTenPointForm,
+    rating: normalizeText(scorecard.rating),
+  });
 
   const sendEmail = deps.sendEmail ?? sendSystemEmailWithMetadata;
 
@@ -470,12 +563,64 @@ export async function handleScorecardCorrectiveActionEmail(
       `Assigned super/PM role(s) unresolvable on deal ${dealId} (${unresolvedAssignedRoles.join(", ")}) - retrying until identity/email is fixed`,
     );
   }
-  // Guarded delivery stamp (P1 notification-loss race). We emailed about the open corrective-action rows we
-  // READ into `flaggedRows` earlier. Between that read and this stamp, an edit can add a NEW open corrective-
-  // action row for this scorecard. The server-side reconcile, seeing corrective_action_email_sent_at STILL
-  // NULL, DELIBERATELY does not enqueue a fresh job — it assumes this pending worker will pick up the new item.
-  // But this worker captured the OLD item list, so an UNCONDITIONAL stamp would mark the card notified while
-  // the newly-added corrective action was never emailed → it stays open and is NEVER notified.
+  // Re-notify a FRESH corrective-action cycle WITHOUT stamping: delete the scorecard's outstanding tokens (so
+  // the next run re-mints — a surviving token would be reuse-skipped as "delivered this cycle") and enqueue a
+  // fresh corrective-action-email job that mirrors the server reconcile's enqueue shape (same jobType, a fresh
+  // cycleNonce, run_after a short delay, max_attempts 6). Shared by BOTH not-stamp guards below (a new open
+  // corrective-action item raced in, OR the super/PM recipient set changed since our read — finding 1), so the
+  // re-notify behavior can't drift between them.
+  const reNotifyFreshCycle = async (reason: string): Promise<void> => {
+    await query(
+      `DELETE FROM ${tenantSchema}.scorecard_corrective_action_tokens WHERE scorecard_id = $1::uuid`,
+      [scorecardId]
+    );
+    await query(
+      `INSERT INTO public.job_queue (job_type, payload, office_id, status, run_after, max_attempts)
+       VALUES ($1, $2::jsonb, $3::uuid, 'pending', NOW() + ($4 || ' seconds')::interval, 6)`,
+      [
+        SCORECARD_CORRECTIVE_ACTION_EMAIL_JOB,
+        JSON.stringify({
+          tenantSchema,
+          scorecardId,
+          dealId,
+          officeId: payload.officeId ?? null,
+          cycleNonce: crypto.randomUUID(),
+        }),
+        payload.officeId ?? null,
+        String(CORRECTIVE_ACTION_REENQUEUE_DELAY_SECONDS),
+      ]
+    );
+    logger.warn(
+      "[CorrectiveActionEmail] Re-enqueued a fresh notification cycle (not stamping this run)",
+      { scorecardId, dealId, reason }
+    );
+  };
+
+  // Guarded delivery stamp — RECIPIENT-set race (finding 1). We emailed the super/PM set resolved into
+  // `emailedRecipientSignature` at the TOP of this run. Between that read and this stamp the deal team can be
+  // reassigned (a super/PM added, removed, or swapped). If so, the worker emailed the FORMER assignee (whose
+  // token/access is now revoked by the verify-time assignment checks) and the NEW assignee was never notified;
+  // stamping here would set corrective_action_email_sent_at, so the server reconcile (which only enqueues when
+  // sent_at is NULL) would never re-notify and retries would skip → the new assignee is stranded. So RE-RESOLVE
+  // the current recipient set and compare its signature; if it CHANGED, do NOT stamp — re-notify a fresh cycle
+  // (delete tokens + enqueue with a new cycleNonce), exactly like the open-item-mismatch path. Cheap: one extra
+  // read of the same query. This runs BEFORE the open-item guard so a reassignment is handled even when the
+  // open set is unchanged.
+  const revalidateRes = await query(recipientResolutionSql(tenantSchema), [dealId]);
+  const currentRecipientSignature = recipientSignature(revalidateRes.rows as any[]);
+  if (currentRecipientSignature !== emailedRecipientSignature) {
+    await reNotifyFreshCycle(
+      `super/PM recipient set changed since the worker read it (emailed "${emailedRecipientSignature}", now "${currentRecipientSignature}")`,
+    );
+    return;
+  }
+
+  // Guarded delivery stamp — OPEN-ITEM race (P1 notification-loss). We emailed about the open corrective-action
+  // rows we READ into `flaggedRows` earlier. Between that read and this stamp, an edit can add a NEW open
+  // corrective-action row for this scorecard. The server-side reconcile, seeing corrective_action_email_sent_at
+  // STILL NULL, DELIBERATELY does not enqueue a fresh job — it assumes this pending worker will pick up the new
+  // item. But this worker captured the OLD item list, so an UNCONDITIONAL stamp would mark the card notified
+  // while the newly-added corrective action was never emailed → it stays open and is NEVER notified.
   //
   // So stamp ONLY when the CURRENT open set is a SUBSET of the ids we emailed about (no NEW open row appeared
   // since our read): the NOT EXISTS rejects the stamp if any open row's id is NOT in the emailed-id array.
@@ -497,10 +642,7 @@ export async function handleScorecardCorrectiveActionEmail(
   //       double-run); or
   //   (b) the guard REJECTED the stamp because a NEW open item appeared after our read while sent_at is still
   //       NULL → this worker emailed the OLD list, so the new corrective action must be (re)notified in a FRESH
-  //       cycle. Delete the scorecard's outstanding tokens (so the next run re-mints — a surviving token would
-  //       be reuse-skipped as "delivered this cycle") and enqueue a fresh corrective-action-email job that
-  //       mirrors the server reconcile's enqueue shape (same jobType, a fresh cycleNonce, run_after a short
-  //       delay, max_attempts 6). The new job reads the now-larger open set and notifies about the new item.
+  //       cycle. The new job reads the now-larger open set and notifies about the new item.
   if ((stampRes.rowCount ?? 0) === 0) {
     const recheck = await query(
       `SELECT corrective_action_email_sent_at,
@@ -514,31 +656,7 @@ export async function handleScorecardCorrectiveActionEmail(
     const recheckRow = recheck.rows[0] as any;
     if (recheckRow && !recheckRow.corrective_action_email_sent_at && recheckRow.has_new_open === true) {
       // Case (b): a new open item raced in and the card is still un-stamped. Re-notify the new cycle.
-      await query(
-        `DELETE FROM ${tenantSchema}.scorecard_corrective_action_tokens WHERE scorecard_id = $1::uuid`,
-        [scorecardId]
-      );
-      await query(
-        `INSERT INTO public.job_queue (job_type, payload, office_id, status, run_after, max_attempts)
-         VALUES ($1, $2::jsonb, $3::uuid, 'pending', NOW() + ($4 || ' seconds')::interval, 6)`,
-        [
-          SCORECARD_CORRECTIVE_ACTION_EMAIL_JOB,
-          JSON.stringify({
-            tenantSchema,
-            scorecardId,
-            dealId,
-            officeId: payload.officeId ?? null,
-            cycleNonce: crypto.randomUUID(),
-          }),
-          payload.officeId ?? null,
-          String(CORRECTIVE_ACTION_REENQUEUE_DELAY_SECONDS),
-        ]
-      );
-      logger.warn(
-        "[CorrectiveActionEmail] A new corrective-action item appeared after the worker read its flagged set - " +
-          "re-enqueued a fresh notification cycle (not stamping this run)",
-        { scorecardId, dealId }
-      );
+      await reNotifyFreshCycle("a new corrective-action item appeared after the worker read its flagged set");
     }
     // Case (a) — already stamped, no new item — falls through: nothing to do.
   }
