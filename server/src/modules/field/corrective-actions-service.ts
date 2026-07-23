@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { and, eq, inArray } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
@@ -371,6 +372,14 @@ export async function reconcileScorecardCorrectiveActions(
         scorecardId: input.scorecardId,
         dealId: input.dealId,
         officeId: input.office.id,
+        // Per-cycle nonce: a stable, persisted idempotency-cycle dimension for the worker's CRM (no-token)
+        // Resend key. A new nonce is minted for EACH enqueue (each corrective-action cycle — a fresh submit,
+        // a reopen, or an already-open card that gained work), so it DIFFERS across cycles yet is immutable
+        // for a job's lifetime — i.e. STABLE across a genuine queue retry. The worker keys off this instead
+        // of hashing the currently-open corrective-action rows, whose ids shift if a responder resolves an
+        // item between the send attempt and a retry (a different hash → a different key → Resend won't dedup
+        // → a duplicate email). See the worker handler's idempotency-key derivation.
+        cycleNonce: randomUUID(),
       },
       officeId: input.office.id,
       status: "pending",

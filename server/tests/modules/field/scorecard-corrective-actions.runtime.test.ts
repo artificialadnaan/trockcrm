@@ -247,9 +247,34 @@ describe("createFieldScorecard corrective-action email enqueue", () => {
     expect(job.payload.officeId).toBe("00000000-0000-0000-0000-0000000000f1");
     expect(job.office_id).toBe("00000000-0000-0000-0000-0000000000f1");
     expect(job.max_attempts).toBe(6);
+    // A stable, persisted per-cycle nonce is on the payload so the worker keys its CRM (no-token) Resend
+    // idempotency dedup off it (immutable across a genuine retry) instead of hashing the currently-open
+    // corrective-action rows (whose ids shift if an item is resolved between the send attempt and a retry).
+    expect(typeof job.payload.cycleNonce).toBe("string");
+    expect(job.payload.cycleNonce).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+    );
     // Delayed a short while so the notification email doesn't race an immediate poll (mirrors the
     // field_scorecard_email job). run_after is strictly in the future.
     expect(new Date(job.run_after).getTime()).toBeGreaterThan(Date.now());
+  });
+
+  it("gives two separate corrective-action cycles DIFFERENT cycleNonce values", async () => {
+    // A fresh below-band submit enqueues one job (cycle 1). A second, distinct below-band submit enqueues
+    // another (cycle 2). Each enqueue mints its own nonce, so the two cycles' nonces differ — the dimension
+    // that lets the worker distinguish cycles when the flagged-item set (and thus the email payload) changed.
+    const { scorecard: a } = await createFieldScorecard(tdb, belowBandSubmission());
+    const { scorecard: b } = await createFieldScorecard(
+      tdb,
+      belowBandSubmission({ clientSubmissionId: csid(410) }),
+    );
+    expect(a.id).not.toBe(b.id);
+    const jobs = await correctiveEmailJobs();
+    expect(jobs).toHaveLength(2);
+    const nonces = jobs.map((j) => j.payload.cycleNonce);
+    expect(nonces[0]).toBeTruthy();
+    expect(nonces[1]).toBeTruthy();
+    expect(nonces[0]).not.toBe(nonces[1]);
   });
 
   it("enqueues NO corrective-action email job on a passing submit", async () => {
