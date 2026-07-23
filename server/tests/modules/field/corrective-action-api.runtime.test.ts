@@ -460,6 +460,83 @@ describe("submitCorrectiveActionResponse", () => {
     expect(resolved.respondedByUserId).toBe(USER);
   });
 
+  it("rejects a fileId ALREADY linked as a response photo on THIS scorecard with a controlled 409 (not a 500) (finding P2)", async () => {
+    // A response photo (FILE_B) is uploaded (ledgered) then submitted on item 1 → it now has a
+    // field_scorecard_photos row on THIS scorecard AND its ledger row PERSISTS. Re-supplying that SAME
+    // fileId on item 2 passes the deal-membership + ledger checks (ledger rows are never deleted), so the
+    // insert would violate the unique (scorecard_id, file_id) index → an uncaught 500, leaving item 2 open.
+    // The submit must instead reject the already-linked file with a CONTROLLED error and leave item 2 open.
+    const items = await createFieldScorecard(tdb, belowBandSubmission()).then(({ scorecard }) =>
+      getCorrectiveActionItems(tdb, scorecard.id).then((its) => ({ scorecardId: scorecard.id, its })),
+    );
+    const scorecardId = items.scorecardId;
+    const [first, second] = items.its;
+
+    // Ledger FILE_B, then submit it as first's response photo (resolves item 1, links FILE_B).
+    await seedUploadLedger(scorecardId, [FILE_B]);
+    await submitCorrectiveActionResponse(tdb, {
+      scorecardId,
+      itemId: first.id,
+      comment: "resolved with a response photo",
+      photoFileIds: [FILE_B],
+      respondedBy: { userId: USER, name: "Sam", email: null },
+    });
+
+    // Now (mis)supply the SAME already-linked FILE_B for the still-open item 2. It is still ledgered, so it
+    // slips past the freshness gate; the code must catch the already-linked file BEFORE the insert.
+    let thrown: unknown;
+    try {
+      await submitCorrectiveActionResponse(tdb, {
+        scorecardId,
+        itemId: second.id,
+        comment: "reusing an already-linked file id",
+        photoFileIds: [FILE_B],
+        respondedBy: { userId: USER, name: "Sam", email: null },
+      });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(AppError);
+    // A controlled 4xx (not a 500 from the unique-index violation).
+    expect((thrown as AppError).statusCode).toBeLessThan(500);
+
+    // Item 2 is unaffected (still open); FILE_B is still linked ONCE (to item 1), never duplicated.
+    const after = await getCorrectiveActionItems(tdb, scorecardId);
+    expect(after.find((i) => i.id === second.id)!.status).toBe("open");
+    const links = await tdb.execute(
+      sql`SELECT corrective_action_id FROM field_scorecard_photos WHERE scorecard_id = ${scorecardId} AND file_id = ${FILE_B}`,
+    );
+    expect(links.rows).toHaveLength(1);
+    expect(links.rows[0].corrective_action_id).toBe(first.id);
+  });
+
+  it("a genuinely FRESH ledgered file still resolves after another item was resolved with a different file (finding P2 regression)", async () => {
+    // Guard the finding-P2 fix doesn't over-reject: a DISTINCT fresh ledgered file on a second item must
+    // still link + resolve normally.
+    const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
+    const [first, second] = await getCorrectiveActionItems(tdb, scorecard.id);
+
+    await seedUploadLedger(scorecard.id, [FILE_A, FILE_B]);
+    await submitCorrectiveActionResponse(tdb, {
+      scorecardId: scorecard.id,
+      itemId: first.id,
+      comment: "item 1 done",
+      photoFileIds: [FILE_A],
+      respondedBy: { userId: USER, name: "Sam", email: null },
+    });
+    await submitCorrectiveActionResponse(tdb, {
+      scorecardId: scorecard.id,
+      itemId: second.id,
+      comment: "item 2 done with a different fresh file",
+      photoFileIds: [FILE_B],
+      respondedBy: { userId: USER, name: "Sam", email: null },
+    });
+
+    const after = await getCorrectiveActionItems(tdb, scorecard.id);
+    expect(after.find((i) => i.id === first.id)!.photos.map((p) => p.fileId)).toEqual([FILE_A]);
+    expect(after.find((i) => i.id === second.id)!.photos.map((p) => p.fileId)).toEqual([FILE_B]);
+  });
+
   it("inserts a FRESH file as a NEW response photo (corrective_action_id set) that never appears as evidence", async () => {
     const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
     const [first] = await getCorrectiveActionItems(tdb, scorecard.id);

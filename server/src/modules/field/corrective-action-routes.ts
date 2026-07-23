@@ -17,6 +17,7 @@ import {
   resolveCorrectiveActionRecipients,
 } from "./corrective-action-recipients.js";
 import { getCorrectiveActionItems, submitCorrectiveActionResponse } from "./corrective-action-api.js";
+import { activeProjectWhere } from "./projects-service.js";
 import { getFileDownloadUrl } from "../files/service.js";
 import {
   requestCorrectiveActionUploadUrl,
@@ -61,6 +62,37 @@ function isWellFormedCorrectiveActionToken(token: string): boolean {
 }
 
 /**
+ * Gate corrective-action access on the SAME active-scorecard + browsable-project predicate every normal
+ * field-scorecard surface applies (getFieldScorecardDetail: `field_scorecards.is_active = true` AND
+ * assertActiveFieldProject's `activeProjectWhere`). Without this, a soft-deleted scorecard — or a scorecard
+ * whose deal was archived (`deals.is_active = false`) or moved to Lost/terminal — would still be reachable via
+ * an existing 30-day token OR an assigned session user through a direct deep link, even though the record is
+ * hidden from every other field read. resolveWriteOffice only proves WHICH office schema owns the id; it does
+ * NOT apply the active/browsable filter. Applied to BOTH the token and session paths so neither can bypass it.
+ *
+ * 404 (consistent with getFieldScorecardDetail / assertActiveFieldProject) when the scorecard is inactive or
+ * its project is not browsable, so a hidden record is indistinguishable from a nonexistent one.
+ */
+async function assertActiveCorrectiveActionScorecard(
+  db: FieldTenantDb,
+  scorecardId: string,
+): Promise<void> {
+  const res = await db.execute(sql`
+    SELECT 1
+    FROM field_scorecards sc
+    JOIN deals d ON d.id = sc.deal_id
+    LEFT JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
+    WHERE sc.id = ${scorecardId}
+      AND sc.is_active = true
+      AND ${activeProjectWhere()}
+    LIMIT 1
+  `);
+  if (res.rows.length === 0) {
+    throw new AppError(404, "Scorecard not found");
+  }
+}
+
+/**
  * Resolve the owning office of the route's scorecard, then authorize the caller against it:
  *   - token path: the `?token` must verify IN that office AND its scorecardId must equal the route :id
  *     (a token for scorecard A can't touch scorecard B) → an invalid/expired/cross-scorecard token is 401/403;
@@ -90,6 +122,9 @@ async function authorizeCorrectiveAction(
     // Verify the token AND revalidate the assignment in a SINGLE office transaction sharing one db handle
     // (previously two separate runInOffice opens with a duplicated deal_id lookup).
     const responder = await runInOffice(office, async (db) => {
+      // Even a valid, still-assigned token must not reach a soft-deleted scorecard or an archived/Lost deal —
+      // reuse the normal field-scorecard active/browsable gate (404, hidden ⇒ nonexistent).
+      await assertActiveCorrectiveActionScorecard(db, scorecardId);
       const verified = await verifyCorrectiveActionToken(db, token);
       if (!verified) throw new AppError(401, "This corrective-action link is invalid or has expired.");
       if (verified.scorecardId !== scorecardId) {
@@ -119,6 +154,9 @@ async function authorizeCorrectiveAction(
   const fieldUser = req.fieldUser;
   if (!fieldUser) throw new AppError(401, "Authentication required");
   await runInOffice(office, async (db) => {
+    // Same active/browsable gate as the token path: an assigned session user must not reach a soft-deleted
+    // scorecard or an archived/Lost deal via a direct deep link (404, hidden ⇒ nonexistent).
+    await assertActiveCorrectiveActionScorecard(db, scorecardId);
     const dealRes = await db.execute(
       sql`SELECT deal_id FROM field_scorecards WHERE id = ${scorecardId} LIMIT 1`,
     );

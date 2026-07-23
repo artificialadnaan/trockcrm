@@ -18,6 +18,7 @@ import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
 const DEAL = "11111111-1111-1111-1111-111111111111";
 const USER = "33333333-3333-3333-3333-333333333333";
 const STAGE_ACTIVE = "cccccccc-0000-0000-0000-000000000001";
+const STAGE_LOST = "cccccccc-0000-0000-0000-000000000002";
 const OFFICE = { id: "office-1", slug: "test" };
 
 // The identity requireFieldContractor injects for the SESSION path. Tests mutate this to exercise the
@@ -82,7 +83,11 @@ let itemIds: string[];
 beforeAll(async () => {
   pg = new PGlite();
   await pg.exec(`
-    CREATE TABLE deals (id uuid PRIMARY KEY, name text, is_active boolean DEFAULT true);
+    CREATE TABLE public.pipeline_stage_config (id uuid PRIMARY KEY, name text, slug text, is_terminal boolean DEFAULT false);
+    CREATE TABLE deals (
+      id uuid PRIMARY KEY, name text, is_active boolean DEFAULT true,
+      stage_id uuid, bid_board_stage_slug text
+    );
     CREATE TABLE files (
       id uuid PRIMARY KEY, deal_id uuid, client_upload_id text, uploaded_by uuid,
       description text, is_active boolean DEFAULT true, deleted_at timestamptz, created_at timestamptz DEFAULT now()
@@ -100,7 +105,12 @@ beforeAll(async () => {
       contacts,
     ]),
   );
-  await pg.exec(`INSERT INTO deals (id, name, is_active) VALUES ('${DEAL}', 'Maple St', true);`);
+  await pg.exec(`
+    INSERT INTO public.pipeline_stage_config (id, name, slug, is_terminal) VALUES
+      ('${STAGE_ACTIVE}', 'Estimating', 'estimating', false),
+      ('${STAGE_LOST}', 'Lost', 'lost', true);
+    INSERT INTO deals (id, name, is_active, stage_id) VALUES ('${DEAL}', 'Maple St', true, '${STAGE_ACTIVE}');
+  `);
   tdb = drizzle(pg);
   app = makeApp();
 });
@@ -117,6 +127,8 @@ beforeEach(async () => {
   await tdb.execute(sql`DELETE FROM scorecard_corrective_actions`);
   await tdb.execute(sql`DELETE FROM field_scorecards`);
   await tdb.execute(sql`DELETE FROM deal_team_members`);
+  // Reset the deal to its ACTIVE/browsable baseline (some tests archive it / move it to Lost).
+  await tdb.execute(sql`UPDATE deals SET is_active = true, stage_id = ${STAGE_ACTIVE} WHERE id = ${DEAL}`);
   // USER is the deal's assigned superintendent (active) → authorized on the session path.
   await tdb.execute(sql`
     INSERT INTO deal_team_members (deal_id, user_id, role, is_active)
@@ -243,6 +255,96 @@ describe("GET /scorecards/:id/corrective-actions", () => {
     expect(resolved.photos[0].url).toBe(`https://r2.example/${RESPONSE_FILE}`);
   });
 
+});
+
+describe("active-scorecard/browsable-project gate (finding P2)", () => {
+  // A recipient-bound token that verifies fine, and an assigned session super — both must be REJECTED once
+  // the scorecard is soft-deleted or its deal is archived / moved to Lost, matching every other field surface
+  // (getFieldScorecardDetail gates on field_scorecards.is_active + activeProjectWhere). Return 404 (hidden ⇒
+  // nonexistent). We assert on BOTH the read (GET) and a write (POST resolve) so no path bypasses the gate.
+  async function mintPmToken(): Promise<string> {
+    const { rawToken } = await mintCorrectiveActionToken(tdb, {
+      scorecardId,
+      recipientEmail: "pm@example.com",
+      role: "project_manager",
+      ttlDays: 30,
+    });
+    return rawToken;
+  }
+
+  it("404s a TOKEN once the scorecard is soft-deleted (is_active=false)", async () => {
+    const token = await mintPmToken();
+    await tdb.execute(sql`UPDATE field_scorecards SET is_active = false WHERE id = ${scorecardId}`);
+    const read = await request(app).get(
+      `/scorecards/${scorecardId}/corrective-actions?token=${encodeURIComponent(token)}`,
+    );
+    expect(read.status).toBe(404);
+    const write = await request(app)
+      .post(`/scorecards/${scorecardId}/corrective-actions/${itemIds[0]}?token=${encodeURIComponent(token)}`)
+      .send({ comment: "should be blocked" });
+    expect(write.status).toBe(404);
+    // The item was NOT resolved.
+    const item = await tdb.execute(sql`SELECT status FROM scorecard_corrective_actions WHERE id = ${itemIds[0]}`);
+    expect(item.rows[0].status).toBe("open");
+  });
+
+  it("404s a SESSION responder once the scorecard is soft-deleted (is_active=false)", async () => {
+    await tdb.execute(sql`UPDATE field_scorecards SET is_active = false WHERE id = ${scorecardId}`);
+    const read = await request(app).get(`/scorecards/${scorecardId}/corrective-actions`);
+    expect(read.status).toBe(404);
+    const write = await request(app)
+      .post(`/scorecards/${scorecardId}/corrective-actions/${itemIds[0]}`)
+      .send({ comment: "should be blocked" });
+    expect(write.status).toBe(404);
+    const item = await tdb.execute(sql`SELECT status FROM scorecard_corrective_actions WHERE id = ${itemIds[0]}`);
+    expect(item.rows[0].status).toBe("open");
+  });
+
+  it("404s a TOKEN once the deal is archived (deals.is_active=false)", async () => {
+    const token = await mintPmToken();
+    await tdb.execute(sql`UPDATE deals SET is_active = false WHERE id = ${DEAL}`);
+    const read = await request(app).get(
+      `/scorecards/${scorecardId}/corrective-actions?token=${encodeURIComponent(token)}`,
+    );
+    expect(read.status).toBe(404);
+  });
+
+  it("404s a SESSION responder once the deal is archived (deals.is_active=false)", async () => {
+    await tdb.execute(sql`UPDATE deals SET is_active = false WHERE id = ${DEAL}`);
+    const read = await request(app).get(`/scorecards/${scorecardId}/corrective-actions`);
+    expect(read.status).toBe(404);
+  });
+
+  it("404s a TOKEN once the deal is moved to Lost (terminal stage)", async () => {
+    const token = await mintPmToken();
+    await tdb.execute(sql`UPDATE deals SET stage_id = ${STAGE_LOST} WHERE id = ${DEAL}`);
+    const read = await request(app).get(
+      `/scorecards/${scorecardId}/corrective-actions?token=${encodeURIComponent(token)}`,
+    );
+    expect(read.status).toBe(404);
+  });
+
+  it("404s a SESSION responder once the deal is moved to Lost (terminal stage)", async () => {
+    await tdb.execute(sql`UPDATE deals SET stage_id = ${STAGE_LOST} WHERE id = ${DEAL}`);
+    const read = await request(app).get(`/scorecards/${scorecardId}/corrective-actions`);
+    expect(read.status).toBe(404);
+    const write = await request(app)
+      .post(`/scorecards/${scorecardId}/corrective-actions/${itemIds[0]}`)
+      .send({ comment: "should be blocked" });
+    expect(write.status).toBe(404);
+  });
+
+  it("still admits an ACTIVE scorecard on a browsable deal (token AND session)", async () => {
+    // Baseline sanity: with the deal active + non-terminal, BOTH paths still succeed (the gate isn't a
+    // blanket denial).
+    const token = await mintPmToken();
+    const tokenRead = await request(app).get(
+      `/scorecards/${scorecardId}/corrective-actions?token=${encodeURIComponent(token)}`,
+    );
+    expect(tokenRead.status).toBe(200);
+    const sessionRead = await request(app).get(`/scorecards/${scorecardId}/corrective-actions`);
+    expect(sessionRead.status).toBe(200);
+  });
 });
 
 describe("POST /scorecards/:id/corrective-actions/:itemId", () => {

@@ -278,6 +278,31 @@ export async function submitCorrectiveActionResponse(
       );
     }
 
+    // The ledger row PERSISTS after a photo is submitted (confirmCorrectiveActionUpload writes it, nothing
+    // deletes it), so the ledger check above is NOT sufficient to prove a file is UNLINKED: a fileId that was
+    // already submitted as a response photo on an earlier (resolved) item of THIS scorecard is still ledgered
+    // and would pass. Inserting it again would violate the unique index
+    // `field_scorecard_photos_card_file_key (scorecard_id, file_id)` → an uncaught 500, leaving this item
+    // unresolved. Reject any already-linked fileId here with a controlled 409 BEFORE the insert. (This also
+    // subsumes the same-scorecard EVIDENCE case, but that is already rejected by the ledger check above, which
+    // is stricter — a section-keyed evidence file has no ledger row for this scorecard.)
+    const alreadyLinked = await db
+      .select({ fileId: fieldScorecardPhotos.fileId })
+      .from(fieldScorecardPhotos)
+      .where(
+        and(
+          eq(fieldScorecardPhotos.scorecardId, input.scorecardId),
+          inArray(fieldScorecardPhotos.fileId, photoFileIds),
+        ),
+      );
+    if (alreadyLinked.length > 0) {
+      throw new AppError(
+        409,
+        "A response photo is already attached to this scorecard; upload a fresh photo.",
+        "CORRECTIVE_ACTION_PHOTO_ALREADY_LINKED",
+      );
+    }
+
     // Insert the fresh files as NEW response-photo rows in ONE batch (not a per-file round trip):
     // corrective_action_id set to this item, section/deficiency null (a response photo, per spec §4.3).
     // Never UPDATE/stamp an existing row. photoFileIds is non-empty here (guarded by the enclosing
