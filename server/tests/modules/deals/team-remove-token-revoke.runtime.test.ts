@@ -439,7 +439,7 @@ describe("responder reassignment re-notifies the deal's open corrective-action c
     expect((thisDealJobs.rows[0] as { c: number }).c).toBe(1);
   });
 
-  it("re-roling a super to PM (still a responder) does NOT re-notify (no responder left the role)", async () => {
+  it("re-roling a super to PM (a lateral responder swap) DOES re-notify (finding 2)", async () => {
     await tdb.execute(sql`UPDATE field_scorecards SET corrective_action_email_sent_at = now() WHERE id = ${SCORECARD}`);
     const member = await addTeamMember(tdb, {
       dealId: DEAL,
@@ -448,13 +448,14 @@ describe("responder reassignment re-notifies the deal's open corrective-action c
       memberEmail: EXT_PM_EMAIL,
     });
     await updateTeamMember(tdb, member.id, DEAL, { role: "project_manager" }, OFFICE);
-    // A lateral super↔PM swap keeps the responder (was-responder AND still-responder → neither a leave nor an
-    // enter) → no fresh cycle, sent stamp preserved, exactly ZERO jobs (restart fires once at most).
+    // A TRUE lateral super↔PM swap can expose an OLDER same-role assignee whose token was deleted by the newer
+    // assignment's cycle (DISTINCT ON role recipient resolution) → the fallback would be stranded. So a lateral
+    // swap restarts the cycle: sent stamp cleared, exactly ONE fresh job.
     const sentAt = await tdb.execute(
       sql`SELECT corrective_action_email_sent_at AS s FROM field_scorecards WHERE id = ${SCORECARD}`,
     );
-    expect((sentAt.rows[0] as { s: unknown }).s).not.toBeNull();
-    expect(await correctiveJobCount()).toBe(0);
+    expect((sentAt.rows[0] as { s: unknown }).s).toBeNull();
+    expect(await correctiveJobCount()).toBe(1);
   });
 });
 
@@ -539,7 +540,7 @@ describe("a responder ENTERING the team re-notifies the deal's open corrective-a
     expect(await correctiveJobCount()).toBe(1);
   });
 
-  it("a LATERAL super→PM swap restarts EXACTLY ONCE (not twice for both leave and enter)", async () => {
+  it("a LATERAL super→PM swap restarts EXACTLY ONCE (finding 2 — one job, not two)", async () => {
     await tdb.execute(sql`UPDATE field_scorecards SET corrective_action_email_sent_at = now() WHERE id = ${SCORECARD}`);
     const member = await addTeamMember(tdb, {
       dealId: DEAL,
@@ -549,9 +550,47 @@ describe("a responder ENTERING the team re-notifies the deal's open corrective-a
     });
     expect(await correctiveJobCount()).toBe(0);
 
-    // Was a responder AND still a responder after the swap → neither the leave path nor the enter path fires,
-    // so the cycle is NOT restarted at all (the same person keeps their token/authorization). Exactly zero jobs.
+    // A TRUE lateral swap restarts the cycle (the DISTINCT ON role fallback could otherwise be stranded), but via
+    // the SINGLE dedicated lateral branch — mutually exclusive with enter/leave — so EXACTLY ONE job, never two.
     await updateTeamMember(tdb, member.id, DEAL, { role: "project_manager" }, OFFICE);
+    expect(await correctiveJobCount()).toBe(1);
+  });
+
+  it("a LATERAL PM→super swap ALSO restarts the cycle exactly once (finding 2)", async () => {
+    await tdb.execute(sql`UPDATE field_scorecards SET corrective_action_email_sent_at = now() WHERE id = ${SCORECARD}`);
+    const member = await addTeamMember(tdb, {
+      dealId: DEAL,
+      role: "project_manager",
+      memberName: "Ext PM",
+      memberEmail: EXT_PM_EMAIL,
+    });
+    expect(await correctiveJobCount()).toBe(0);
+
+    await updateTeamMember(tdb, member.id, DEAL, { role: "superintendent" }, OFFICE);
+    const sentAt = await tdb.execute(
+      sql`SELECT corrective_action_email_sent_at AS s FROM field_scorecards WHERE id = ${SCORECARD}`,
+    );
+    expect((sentAt.rows[0] as { s: unknown }).s).toBeNull();
+    expect(await correctiveJobCount()).toBe(1);
+  });
+
+  it("a no-op update that KEEPS the responder role does NOT restart (finding 2 — not a lateral swap)", async () => {
+    await tdb.execute(sql`UPDATE field_scorecards SET corrective_action_email_sent_at = now() WHERE id = ${SCORECARD}`);
+    const member = await addTeamMember(tdb, {
+      dealId: DEAL,
+      role: "superintendent",
+      memberName: "Ext Super",
+      memberEmail: EXT_PM_EMAIL,
+    });
+    expect(await correctiveJobCount()).toBe(0);
+
+    // Re-setting the SAME role (superintendent → superintendent) is not a lateral swap → the role is unchanged, so
+    // no responder was exposed and no restart fires. A notes-only edit likewise keeps the role.
+    await updateTeamMember(tdb, member.id, DEAL, { role: "superintendent", notes: "touched" }, OFFICE);
+    const sentAt = await tdb.execute(
+      sql`SELECT corrective_action_email_sent_at AS s FROM field_scorecards WHERE id = ${SCORECARD}`,
+    );
+    expect((sentAt.rows[0] as { s: unknown }).s).not.toBeNull();
     expect(await correctiveJobCount()).toBe(0);
   });
 });

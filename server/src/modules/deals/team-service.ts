@@ -287,6 +287,16 @@ export async function updateTeamMember(
   const wasResponder = target.role === "superintendent" || target.role === "project_manager";
   const stillResponder =
     updated.isActive && (updated.role === "superintendent" || updated.role === "project_manager");
+  // A TRUE lateral responder-role change (superintendent ↔ project_manager) is wasResponder AND stillResponder
+  // AND the role actually changed between the two responder roles. Recipient resolution
+  // (resolveActiveScorecardTeamRows) is DISTINCT ON (role) ORDER BY created_at DESC — so moving e.g. the newest
+  // superintendent to PM EXPOSES an older superintendent whose prior-cycle token was deleted when the newer
+  // assignment started its cycle. That fallback is now the resolved superintendent but has no working link and
+  // still-set sent stamp, and the moved assignee's old token may fail current-recipient verification. So a
+  // lateral swap must ALSO restart the cycle. Excludes a no-op edit that keeps the same role (role unchanged →
+  // not a lateral swap → no restart), and never fires alongside the enter/leave branches (mutually exclusive).
+  const lateralResponderSwap =
+    wasResponder && stillResponder && updated.role !== target.role;
   if (wasResponder && !stillResponder) {
     await revokeCorrectiveActionTokensForRemovedMember(tenantDb, dealId, {
       userId: target.userId,
@@ -305,8 +315,18 @@ export async function updateTeamMember(
     // A member just ENTERED the responder roles (a non-responder re-roled INTO an active super/PM). They become
     // an authorized responder but the deal's open cards may have already stamped their notification as sent, so
     // the new responder would be authorized-but-silently-unnotified. Start a fresh cycle so they get a link —
-    // the enter counterpart of the leave-path restart. A LATERAL super↔PM swap is wasResponder AND stillResponder
-    // → it hits NEITHER branch, so it never double-restarts (the same person keeps their token/authorization).
+    // the enter counterpart of the leave-path restart.
+    // Best-effort: skipped when no office was threaded.
+    if (office) {
+      await restartCorrectiveActionNotificationCycleForDeal(tenantDb, { dealId, office });
+    }
+  } else if (lateralResponderSwap) {
+    // A TRUE lateral super↔PM swap (see above): it hits NEITHER the enter nor leave branch, but the DISTINCT ON
+    // (role) recipient resolution can now expose an OLDER same-role assignee whose token was deleted by the newer
+    // assignment's cycle — that fallback is stranded (authorized, no working link, sent stamp still set). Restart
+    // the deal's open-card cycle so every currently-resolved responder (the moved one AND any exposed fallback)
+    // gets a fresh link. Fires EXACTLY ONCE (mutually exclusive with the enter/leave branches). No token revoke
+    // here — the moved assignee is still a responder, and the restart re-issues links for whoever now resolves.
     // Best-effort: skipped when no office was threaded.
     if (office) {
       await restartCorrectiveActionNotificationCycleForDeal(tenantDb, { dealId, office });

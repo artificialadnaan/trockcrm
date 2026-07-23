@@ -3,7 +3,7 @@ import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
 import { sql } from "drizzle-orm";
 import { addTeamMember } from "../../../src/modules/deals/team-service.js";
-import { deleteContact } from "../../../src/modules/contacts/service.js";
+import { deleteContact, updateContact } from "../../../src/modules/contacts/service.js";
 import {
   mintCorrectiveActionToken,
   verifyCorrectiveActionToken,
@@ -62,6 +62,14 @@ beforeAll(async () => {
       scorecardCorrectiveActionTokens,
     ]),
   );
+  // updateContact reads getContactById, whose select carries subqueries over these auxiliary tables
+  // (linked-deals count / primary flag / last-touch). Create minimal shapes so the read succeeds.
+  await pg.exec(`
+    CREATE TABLE contact_deal_associations (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), contact_id uuid, deal_id uuid, is_primary boolean DEFAULT false);
+    CREATE TABLE activities (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), contact_id uuid, occurred_at timestamptz);
+    CREATE TABLE emails (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), contact_id uuid, sent_at timestamptz);
+    CREATE TABLE tasks (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), contact_id uuid, updated_at timestamptz);
+  `);
   await pg.exec(`INSERT INTO public.users (id, display_name, email, is_active) VALUES ('${USER}', 'Sam Super', 'sam.super@trock.com', true);`);
   tdb = drizzle(pg);
 });
@@ -255,5 +263,89 @@ describe("archiving a super/PM contact restarts each affected deal's open correc
       sql`SELECT corrective_action_email_sent_at AS s FROM field_scorecards WHERE id = ${SCORECARD_A}`,
     );
     expect((sentAt.rows[0] as { s: unknown }).s).not.toBeNull();
+  });
+});
+
+describe("changing a super/PM contact's EMAIL restarts each affected deal's open cycle (finding P2)", () => {
+  it("clears sent_at + prior-cycle tokens and enqueues a fresh job per affected deal's open card", async () => {
+    // Changing a super/PM contact's email 403s the old delivered token (recipient-email no longer matches the
+    // active assignment) while the new address never got a link. The email UPDATE must restart the cycle so the
+    // worker re-sends a working link to the NEW email. The PM_CONTACT is an active PM on TWO deals.
+    await tdb.execute(sql`UPDATE field_scorecards SET corrective_action_email_sent_at = now() WHERE id IN (${SCORECARD_A}, ${SCORECARD_B})`);
+    await addTeamMember(tdb, { dealId: DEAL_A, contactId: PM_CONTACT, role: "project_manager" });
+    await addTeamMember(tdb, { dealId: DEAL_B, contactId: PM_CONTACT, role: "superintendent" });
+    // A prior-cycle token keyed to the OLD email that the restart must clear.
+    await mintCorrectiveActionToken(tdb, {
+      scorecardId: SCORECARD_A,
+      recipientEmail: PM_EMAIL,
+      role: "project_manager",
+      ttlDays: 30,
+    });
+    expect(await correctiveJobCount()).toBe(0);
+
+    await updateContact(tdb, PM_CONTACT, { email: "pat.new@example.com" }, OFFICE);
+
+    // Both affected deals' open cards: sent stamp cleared, prior-cycle tokens dropped, one fresh job each.
+    const sentAt = await tdb.execute(
+      sql`SELECT id, corrective_action_email_sent_at AS s FROM field_scorecards WHERE id IN (${SCORECARD_A}, ${SCORECARD_B})`,
+    );
+    for (const row of sentAt.rows as { s: unknown }[]) expect(row.s).toBeNull();
+    const tokens = await tdb.execute(
+      sql`SELECT COUNT(*)::int AS c FROM scorecard_corrective_action_tokens WHERE scorecard_id = ${SCORECARD_A}`,
+    );
+    expect((tokens.rows[0] as { c: number }).c).toBe(0);
+    expect(await correctiveJobCount()).toBe(2);
+    const sids = (
+      await tdb.execute(sql`
+        SELECT payload->>'scorecardId' AS sid FROM public.job_queue WHERE job_type = 'scorecard_corrective_action_email'
+      `)
+    ).rows as { sid: string }[];
+    expect(sids.map((r) => r.sid).sort()).toEqual([SCORECARD_A, SCORECARD_B].sort());
+  });
+
+  it("an UNRELATED field change (no email change) does NOT restart the cycle", async () => {
+    await tdb.execute(sql`UPDATE field_scorecards SET corrective_action_email_sent_at = now() WHERE id = ${SCORECARD_A}`);
+    await addTeamMember(tdb, { dealId: DEAL_A, contactId: PM_CONTACT, role: "project_manager" });
+    expect(await correctiveJobCount()).toBe(0);
+
+    // A non-email edit (job title) leaves the recipient email intact → the delivered token still verifies → no
+    // restart, sent stamp untouched, no job.
+    await updateContact(tdb, PM_CONTACT, { jobTitle: "Site Lead" }, OFFICE);
+
+    expect(await correctiveJobCount()).toBe(0);
+    const sentAt = await tdb.execute(
+      sql`SELECT corrective_action_email_sent_at AS s FROM field_scorecards WHERE id = ${SCORECARD_A}`,
+    );
+    expect((sentAt.rows[0] as { s: unknown }).s).not.toBeNull();
+  });
+
+  it("changing the email of a NON-responder contact does NOT restart (not an active super/PM)", async () => {
+    await tdb.execute(sql`UPDATE field_scorecards SET corrective_action_email_sent_at = now() WHERE id = ${SCORECARD_A}`);
+    // OTHER_CONTACT is not on any deal team as a super/PM → an email change touches no responder assignment.
+    expect(await correctiveJobCount()).toBe(0);
+
+    await updateContact(tdb, OTHER_CONTACT, { email: "uma.new@example.com" }, OFFICE);
+
+    expect(await correctiveJobCount()).toBe(0);
+    const sentAt = await tdb.execute(
+      sql`SELECT corrective_action_email_sent_at AS s FROM field_scorecards WHERE id = ${SCORECARD_A}`,
+    );
+    expect((sentAt.rows[0] as { s: unknown }).s).not.toBeNull();
+  });
+
+  it("does NOT restart when NO office context was threaded (best-effort, skipped)", async () => {
+    await tdb.execute(sql`UPDATE field_scorecards SET corrective_action_email_sent_at = now() WHERE id = ${SCORECARD_A}`);
+    await addTeamMember(tdb, { dealId: DEAL_A, contactId: PM_CONTACT, role: "project_manager" });
+
+    // No office threaded → the restart is skipped. No job, stamp untouched (the email still changes).
+    await updateContact(tdb, PM_CONTACT, { email: "pat.noff@example.com" });
+
+    expect(await correctiveJobCount()).toBe(0);
+    const sentAt = await tdb.execute(
+      sql`SELECT corrective_action_email_sent_at AS s FROM field_scorecards WHERE id = ${SCORECARD_A}`,
+    );
+    expect((sentAt.rows[0] as { s: unknown }).s).not.toBeNull();
+    const updated = await tdb.execute(sql`SELECT email FROM contacts WHERE id = ${PM_CONTACT}`);
+    expect((updated.rows[0] as { email: string }).email).toBe("pat.noff@example.com");
   });
 });

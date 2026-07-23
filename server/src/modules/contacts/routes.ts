@@ -299,7 +299,14 @@ router.post("/", async (req, res, next) => {
 router.patch("/:id", async (req, res, next) => {
   try {
     validateEmailIfPresent(req.body.email);
-    const contact = await updateContact(req.tenantDb!, req.params.id, req.body);
+    // Thread the office (id + `office_<slug>`) so changing a super/PM contact's email can restart each affected
+    // deal's open corrective-action notification cycle (finding P2). Same shape the DELETE route + deal team
+    // routes thread; undefined when either piece is missing → the restart is skipped (best-effort).
+    const teamOffice =
+      req.officeSlug && req.user!.activeOfficeId
+        ? { id: req.user!.activeOfficeId, slug: req.officeSlug }
+        : undefined;
+    const contact = await updateContact(req.tenantDb!, req.params.id, req.body, teamOffice);
     await req.commitTransaction!();
     res.json({ contact });
   } catch (err) {

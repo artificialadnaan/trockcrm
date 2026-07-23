@@ -694,11 +694,20 @@ export async function createContact(
 
 /**
  * Update an existing contact.
+ *
+ * `office` (id + slug) is threaded from the PATCH route so CHANGING the email of a contact who is an active
+ * super/PM responder restarts each affected deal's open corrective-action notification cycle (finding P2). The
+ * verify-time recipient revalidation 403s a delivered token whose recipient email no longer matches an active
+ * super/PM assignment — so an email change instantly invalidates the old link while the new address never gets
+ * one. Mirroring the archive path (deleteContact), we resolve the affected deals BEFORE the update and restart
+ * AFTER, so the worker re-sends a working link to the contact's NEW email. Optional so direct/legacy callers
+ * that never change the email still type-check; when absent the restart is skipped (best-effort).
  */
 export async function updateContact(
   tenantDb: TenantDb,
   contactId: string,
-  input: UpdateContactInput
+  input: UpdateContactInput,
+  office?: TeamMutationOffice,
 ) {
   const existing = await getContactById(tenantDb, contactId);
   if (!existing) {
@@ -781,11 +790,43 @@ export async function updateContact(
     }
   }
 
+  // Detect an actual email CHANGE (finding P2). `input.email` is already normalized (lower/trim/null) above, and
+  // `existing.email` was normalized on its own prior write, so the strict compare is a real value change. If a
+  // super/PM responder's email changes, the delivered corrective-action token's recipient-email no longer matches
+  // their active assignment → verify-time revalidation 403s the old link while the new address never got one. So
+  // resolve the deals where this contact is an ACTIVE super/PM BEFORE the update, then restart each after (mirror
+  // the archive path). Distinct deal ids only.
+  const emailChanged = input.email !== undefined && input.email !== existing.email;
+  const responderDeals =
+    emailChanged && office
+      ? await tenantDb
+          .selectDistinct({ dealId: dealTeamMembers.dealId })
+          .from(dealTeamMembers)
+          .where(
+            and(
+              eq(dealTeamMembers.contactId, contactId),
+              eq(dealTeamMembers.isActive, true),
+              inArray(dealTeamMembers.role, ["superintendent", "project_manager"]),
+            ),
+          )
+      : [];
+
   const result = await tenantDb
     .update(contacts)
     .set(updates)
     .where(eq(contacts.id, contactId))
     .returning();
+
+  // Restart each affected deal's open corrective-action cycle AFTER the email write (finding P2): the worker
+  // re-sends a fresh link to the contact's NEW email, so an open item isn't stranded on a now-403ing old link.
+  // The restart clears the sent stamp + prior-cycle tokens and enqueues a fresh job per open card. Best-effort:
+  // only when office context was threaded (else responderDeals is empty). Runs in the caller's tenant
+  // transaction (the PATCH route commits both together).
+  if (office) {
+    for (const { dealId } of responderDeals) {
+      await restartCorrectiveActionNotificationCycleForDeal(tenantDb, { dealId, office });
+    }
+  }
 
   return result[0];
 }
