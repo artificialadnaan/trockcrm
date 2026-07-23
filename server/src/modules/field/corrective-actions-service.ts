@@ -159,8 +159,10 @@ export interface ReconcileCorrectiveActionsInput {
  * OPEN item whose flag is gone (a stale open item would block closure forever); LEAVE `resolved` items as
  * history. Then: if items exist and NONE are open → corrective_action_closed; else ensure
  * corrective_action_open. On a transition INTO open from a non-open status, (re)enqueue the notification
- * job AND reset corrective_action_email_sent_at = NULL so the worker sends; an already-open card does NOT
- * re-enqueue.
+ * job AND reset corrective_action_email_sent_at = NULL so the worker sends. An already-open card that
+ * MATERIALLY GAINS new open work (an edit inserted a fresh flag) ALSO starts a new cycle — but only if its
+ * original notification already sent (email_sent_at non-null); if the original job is still pending it reads
+ * items fresh at send time, so a second enqueue would double-send.
  *
  * NOT inBand (edit lifted the card above band / removed every flag): if currently corrective_action_open,
  * revert to `submitted` and DELETE the open items (now obsolete). A corrective_action_closed card is left
@@ -187,6 +189,16 @@ export async function reconcileScorecardCorrectiveActions(
     })
     .from(scorecardCorrectiveActions)
     .where(eq(scorecardCorrectiveActions.scorecardId, input.scorecardId));
+
+  // Read the current email-sent stamp: an already-open card that GAINS new flagged work must start a fresh
+  // notification cycle, but ONLY if the original notification already went out (stamp non-null). If the
+  // original job is still pending (stamp null) it reads items fresh at send time — so it'll already include
+  // the newly-added flags and a second enqueue would double-send.
+  const [{ correctiveActionEmailSentAt } = { correctiveActionEmailSentAt: null }] = await tx
+    .select({ correctiveActionEmailSentAt: fieldScorecards.correctiveActionEmailSentAt })
+    .from(fieldScorecards)
+    .where(eq(fieldScorecards.id, input.scorecardId))
+    .limit(1);
 
   if (!inBand) {
     // The edit lifted the card out of the band (or removed every flag). Drop still-open items (obsolete) and,
@@ -321,22 +333,34 @@ export async function reconcileScorecardCorrectiveActions(
       .where(eq(fieldScorecards.id, input.scorecardId));
   }
 
-  // A transition INTO open from a non-open state (fresh submit, or an edit re-opening a closed/submitted
-  // card) (re)enqueues the notification + clears the email stamp so the worker sends again. An already-open
-  // card does NOT re-enqueue (the original job is still the notification of record).
+  // Decide whether to (re)start a notification cycle. Two triggers, UNIFIED into one enqueue site:
+  //   1) transitioningIntoOpen — a transition INTO open from a non-open state (fresh submit, or an edit
+  //      re-opening a closed/submitted card). Always (re)notifies.
+  //   2) alreadyOpenGainedWork — an already-open card that MATERIALLY GAINS new open work (an edit
+  //      added/replaced a flag → toInsert.length > 0). Without this, recipients only ever got the email
+  //      describing the OLD flags and never learn of the newly-assigned corrective action. But only notify
+  //      if the ORIGINAL job already SENT (correctiveActionEmailSentAt non-null): if it's still pending it
+  //      reads items fresh at send time and will already include the new flags, so a second enqueue would
+  //      double-send.
   const transitioningIntoOpen =
     nextStatus === "corrective_action_open" && input.currentStatus !== "corrective_action_open";
-  if (transitioningIntoOpen) {
+  const alreadyOpenGainedWork =
+    nextStatus === "corrective_action_open" &&
+    input.currentStatus === "corrective_action_open" &&
+    toInsert.length > 0 &&
+    correctiveActionEmailSentAt !== null;
+  if (transitioningIntoOpen || alreadyOpenGainedWork) {
     await tx
       .update(fieldScorecards)
       .set({ correctiveActionEmailSentAt: null })
       .where(eq(fieldScorecards.id, input.scorecardId));
-    // A REOPEN starts a NEW notification cycle, so prior-cycle web tokens must not survive it. The worker's
-    // per-recipient reuse-skip treats a surviving unexpired token as "already delivered THIS cycle" and skips
-    // re-sending — which, across a reopen, would silently strand the email-only recipient on the old cycle's
-    // link while the job stamps the new cycle as sent. Deleting the outstanding tokens on the transition keeps
-    // that invariant true (a surviving token ⟺ a same-cycle delivery), so the worker re-mints + re-sends a
-    // fresh link on the reopen. A fresh submit has no tokens to delete, so this is a no-op there.
+    // Starting a NEW notification cycle (a reopen, OR an already-open card that gained new work after its
+    // original email sent), prior-cycle web tokens must not survive it. The worker's per-recipient reuse-skip
+    // treats a surviving unexpired token as "already delivered THIS cycle" and skips re-sending — which, across
+    // a new cycle, would silently strand the email-only recipient on the old cycle's link while the job stamps
+    // the new cycle as sent. Deleting the outstanding tokens here keeps that invariant true (a surviving token
+    // ⟺ a same-cycle delivery), so the worker re-mints + re-sends a fresh link. A fresh submit has no tokens to
+    // delete, so this is a no-op there.
     await tx
       .delete(scorecardCorrectiveActionTokens)
       .where(eq(scorecardCorrectiveActionTokens.scorecardId, input.scorecardId));

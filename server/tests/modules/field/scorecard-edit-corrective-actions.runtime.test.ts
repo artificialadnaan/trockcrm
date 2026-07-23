@@ -405,6 +405,70 @@ describe("updateFieldScorecard corrective-action reconcile", () => {
     expect(await correctiveJobCount()).toBe(1);
   });
 
+  it("an already-open card that GAINS a new flag AFTER its email sent starts a fresh cycle (finding J)", async () => {
+    // Open with one flag → the original notification enqueues. Simulate the worker having SENT it (stamp set)
+    // + a live prior-cycle web token. An edit that ADDS a second flag while still open must start a fresh
+    // cycle: clear the stamp, delete the outstanding token, and enqueue a second notification — otherwise the
+    // recipient never learns of the newly-assigned corrective action.
+    const { scorecard } = await createFieldScorecard(
+      tdb,
+      createInput({ items: v2Items(5), actionItems: ["First flag"] }),
+    );
+    expect(await getStatus(scorecard.id)).toBe("corrective_action_open");
+    expect(await correctiveJobCount()).toBe(1);
+    // The worker stamped the original notification as sent.
+    await tdb.execute(sql`UPDATE field_scorecards SET corrective_action_email_sent_at = now() WHERE id = ${scorecard.id}`);
+    // A prior-cycle web token for the email-only PM.
+    await tdb.insert(scorecardCorrectiveActionTokens).values({
+      scorecardId: scorecard.id,
+      tokenHash: "sent-cycle-hash",
+      recipientEmail: "pm@example.com",
+      role: "project_manager",
+      expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+    });
+
+    const at = await currentUpdatedAt(scorecard.id);
+    await updateFieldScorecard(
+      tdb,
+      updateInput(scorecard.id, at, { items: v2Items(5), actionItems: ["First flag", "Second flag"] }),
+    );
+    expect(await getStatus(scorecard.id)).toBe("corrective_action_open");
+    // Stamp cleared so the worker sends again; a second job enqueued; the stale token deleted.
+    expect(await getEmailSentAt(scorecard.id)).toBeNull();
+    expect(await correctiveJobCount()).toBe(2);
+    const tokens = await tdb.execute(
+      sql`SELECT COUNT(*)::int AS c FROM scorecard_corrective_action_tokens WHERE scorecard_id = ${scorecard.id}`,
+    );
+    expect((tokens.rows[0] as { c: number }).c).toBe(0);
+    // Both flags are open (the original was never resolved).
+    const after = await getItems(scorecard.id);
+    expect(after.filter((i) => i.status === "open")).toHaveLength(2);
+  });
+
+  it("an already-open card that gains a flag BEFORE its email sent does NOT enqueue a second (finding J)", async () => {
+    // Open with one flag → notification enqueued but the stamp is still NULL (the worker hasn't sent yet). An
+    // edit that adds a second flag must NOT enqueue a duplicate: the pending job reads items fresh at send time
+    // and will already include the new flag.
+    const { scorecard } = await createFieldScorecard(
+      tdb,
+      createInput({ items: v2Items(5), actionItems: ["First flag"] }),
+    );
+    expect(await correctiveJobCount()).toBe(1);
+    expect(await getEmailSentAt(scorecard.id)).toBeNull();
+
+    const at = await currentUpdatedAt(scorecard.id);
+    await updateFieldScorecard(
+      tdb,
+      updateInput(scorecard.id, at, { items: v2Items(5), actionItems: ["First flag", "Second flag"] }),
+    );
+    expect(await getStatus(scorecard.id)).toBe("corrective_action_open");
+    // Still exactly ONE job — the original (unsent) notification covers the added flag.
+    expect(await correctiveJobCount()).toBe(1);
+    expect(await getEmailSentAt(scorecard.id)).toBeNull();
+    const after = await getItems(scorecard.id);
+    expect(after.filter((i) => i.status === "open")).toHaveLength(2);
+  });
+
   it("preserves duplicate action-item MULTIPLICITY: two identical-label flags yield two open items (finding 3)", async () => {
     // A single flag; then an edit adds a SECOND action item with the IDENTICAL label. Multiset (label +
     // cardinality) matching must insert a second tracked row rather than collapsing both onto one — otherwise
