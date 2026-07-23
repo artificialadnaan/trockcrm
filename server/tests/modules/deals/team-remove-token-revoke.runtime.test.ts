@@ -448,11 +448,110 @@ describe("responder reassignment re-notifies the deal's open corrective-action c
       memberEmail: EXT_PM_EMAIL,
     });
     await updateTeamMember(tdb, member.id, DEAL, { role: "project_manager" }, OFFICE);
-    // A lateral super↔PM swap keeps the responder → no fresh cycle, sent stamp preserved.
+    // A lateral super↔PM swap keeps the responder (was-responder AND still-responder → neither a leave nor an
+    // enter) → no fresh cycle, sent stamp preserved, exactly ZERO jobs (restart fires once at most).
     const sentAt = await tdb.execute(
       sql`SELECT corrective_action_email_sent_at AS s FROM field_scorecards WHERE id = ${SCORECARD}`,
     );
     expect((sentAt.rows[0] as { s: unknown }).s).not.toBeNull();
+    expect(await correctiveJobCount()).toBe(0);
+  });
+});
+
+describe("a responder ENTERING the team re-notifies the deal's open corrective-action cards (finding 2)", () => {
+  it("ADDING an active email-only super to a deal with an open card enqueues a fresh cycle", async () => {
+    // A newly-added responder becomes authorized (the token/assignment IS the auth) but the original
+    // notification already stamped as sent — without an add-path restart the new responder is never emailed a
+    // link. Adding an ACTIVE super/PM must start a fresh cycle: clear sent_at, delete prior-cycle tokens, enqueue
+    // exactly one job for the deal's open card.
+    await tdb.execute(sql`UPDATE field_scorecards SET corrective_action_email_sent_at = now() WHERE id = ${SCORECARD}`);
+    // A prior-cycle token that must be cleared when the new cycle starts.
+    await mintCorrectiveActionToken(tdb, {
+      scorecardId: SCORECARD,
+      recipientEmail: "prior@example.com",
+      role: "project_manager",
+      ttlDays: 30,
+    });
+    expect(await correctiveJobCount()).toBe(0);
+
+    await addTeamMember(
+      tdb,
+      { dealId: DEAL, role: "superintendent", memberName: "New Super", memberEmail: EXT_PM_EMAIL },
+      OFFICE,
+    );
+
+    const sentAt = await tdb.execute(
+      sql`SELECT corrective_action_email_sent_at AS s FROM field_scorecards WHERE id = ${SCORECARD}`,
+    );
+    expect((sentAt.rows[0] as { s: unknown }).s).toBeNull();
+    const tokens = await tdb.execute(
+      sql`SELECT COUNT(*)::int AS c FROM scorecard_corrective_action_tokens WHERE scorecard_id = ${SCORECARD}`,
+    );
+    expect((tokens.rows[0] as { c: number }).c).toBe(0);
+    expect(await correctiveJobCount()).toBe(1);
+  });
+
+  it("ADDING a LINKED (staff-user) PM to a deal with an open card enqueues a fresh cycle", async () => {
+    await tdb.execute(sql`UPDATE field_scorecards SET corrective_action_email_sent_at = now() WHERE id = ${SCORECARD}`);
+    await addTeamMember(tdb, { dealId: DEAL, userId: USER, role: "project_manager" }, OFFICE);
+    expect(await correctiveJobCount()).toBe(1);
+  });
+
+  it("ADDING a NON-responder (foreman via a linked user) does NOT re-notify", async () => {
+    await tdb.execute(sql`UPDATE field_scorecards SET corrective_action_email_sent_at = now() WHERE id = ${SCORECARD}`);
+    // A foreman is not a responder → no authorization gained → no fresh cycle.
+    await addTeamMember(tdb, { dealId: DEAL, userId: USER, role: "foreman" }, OFFICE);
+    expect(await correctiveJobCount()).toBe(0);
+    const sentAt = await tdb.execute(
+      sql`SELECT corrective_action_email_sent_at AS s FROM field_scorecards WHERE id = ${SCORECARD}`,
+    );
+    expect((sentAt.rows[0] as { s: unknown }).s).not.toBeNull();
+  });
+
+  it("ADDING a responder with NO office context does NOT enqueue (best-effort, skipped)", async () => {
+    await tdb.execute(sql`UPDATE field_scorecards SET corrective_action_email_sent_at = now() WHERE id = ${SCORECARD}`);
+    await addTeamMember(tdb, {
+      dealId: DEAL,
+      role: "superintendent",
+      memberName: "New Super",
+      memberEmail: EXT_PM_EMAIL,
+    });
+    // No office threaded → the restart is skipped (like the leave path), so no job and the stamp is untouched.
+    expect(await correctiveJobCount()).toBe(0);
+    const sentAt = await tdb.execute(
+      sql`SELECT corrective_action_email_sent_at AS s FROM field_scorecards WHERE id = ${SCORECARD}`,
+    );
+    expect((sentAt.rows[0] as { s: unknown }).s).not.toBeNull();
+  });
+
+  it("re-roling a foreman INTO project_manager re-notifies the deal's open cards", async () => {
+    await tdb.execute(sql`UPDATE field_scorecards SET corrective_action_email_sent_at = now() WHERE id = ${SCORECARD}`);
+    // A LINKED foreman (a non-responder) re-roled INTO PM becomes an authorized responder → fresh cycle.
+    const member = await addTeamMember(tdb, { dealId: DEAL, userId: USER, role: "foreman" });
+    expect(await correctiveJobCount()).toBe(0);
+
+    await updateTeamMember(tdb, member.id, DEAL, { role: "project_manager" }, OFFICE);
+
+    const sentAt = await tdb.execute(
+      sql`SELECT corrective_action_email_sent_at AS s FROM field_scorecards WHERE id = ${SCORECARD}`,
+    );
+    expect((sentAt.rows[0] as { s: unknown }).s).toBeNull();
+    expect(await correctiveJobCount()).toBe(1);
+  });
+
+  it("a LATERAL super→PM swap restarts EXACTLY ONCE (not twice for both leave and enter)", async () => {
+    await tdb.execute(sql`UPDATE field_scorecards SET corrective_action_email_sent_at = now() WHERE id = ${SCORECARD}`);
+    const member = await addTeamMember(tdb, {
+      dealId: DEAL,
+      role: "superintendent",
+      memberName: "Ext Super",
+      memberEmail: EXT_PM_EMAIL,
+    });
+    expect(await correctiveJobCount()).toBe(0);
+
+    // Was a responder AND still a responder after the swap → neither the leave path nor the enter path fires,
+    // so the cycle is NOT restarted at all (the same person keeps their token/authorization). Exactly zero jobs.
+    await updateTeamMember(tdb, member.id, DEAL, { role: "project_manager" }, OFFICE);
     expect(await correctiveJobCount()).toBe(0);
   });
 });

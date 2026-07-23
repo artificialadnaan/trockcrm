@@ -51,6 +51,29 @@ vi.mock("../../../src/modules/field/cross-office.js", () => ({
   runInOfficeTransaction: vi.fn(async (_office: any, _userId: any, run: any) => run(tdb, OFFICE)),
 }));
 
+// confirmUpload (the REAL files-service) resolves a photo's address via resolvePhotoAddressMetadata, which in
+// prod calls the Google geocoder + a geocoding_cache table not present in this PGlite harness. Stub it to the
+// deterministic no-geocode / no-fallback shape the prod path yields (coords persisted as fixed-precision
+// strings, address null, addressSource = the passed source) so the metadata-threading assertion runs without
+// the external geocoding dependency. No coords → all-null (matches resolvePhotoAddressMetadata's empty branch).
+vi.mock("../../../src/modules/files/photo-geocoding.js", () => ({
+  resolvePhotoAddressMetadata: vi.fn(async (_db: any, _pending: any, input: any) => {
+    const hasPair = input?.latitude !== undefined && input?.longitude !== undefined;
+    if (!hasPair) {
+      return { latitude: null, longitude: null, geoLat: null, geoLng: null, address: null, addressSource: null, geocodedAt: null };
+    }
+    return {
+      latitude: input.latitude.toFixed(7),
+      longitude: input.longitude.toFixed(7),
+      geoLat: input.latitude.toString(),
+      geoLng: input.longitude.toString(),
+      address: null,
+      addressSource: input.addressSource ?? "exif",
+      geocodedAt: null,
+    };
+  }),
+}));
+
 const { registerCorrectiveActionRoutes } = await import(
   "../../../src/modules/field/corrective-action-routes.js"
 );
@@ -263,6 +286,74 @@ describe("token-scoped corrective-action photo upload", () => {
     expect(confirmRes.status).toBe(201);
     const rows = await tdb.execute(sql`SELECT description FROM files WHERE id = ${confirmRes.body.fileId}`);
     expect(rows.rows[0].description).toBe("Slab fixed");
+  });
+
+  it("persists capture metadata (takenAt/lat/lng/addressSource) onto the created file (finding 4)", async () => {
+    // The mobile capture flow collects takenAt + GPS per response photo; the confirm route must thread them into
+    // confirmUpload so the file carries the same capture-time/location provenance as an ordinary field photo
+    // (not null). R2/geocoding are unconfigured in tests, so with no deal address the addressSource falls back to
+    // the passed source and the coords persist as fixed-precision strings.
+    const urlRes = await request(app)
+      .post(`/scorecards/${scorecardId}/corrective-actions/upload/url`)
+      .send({ contentType: "image/jpeg", sizeBytes: 1024 });
+    expect(urlRes.status).toBe(200);
+    const confirmRes = await request(app)
+      .post(`/scorecards/${scorecardId}/corrective-actions/upload`)
+      .send({
+        uploadToken: urlRes.body.uploadToken,
+        objectKey: urlRes.body.objectKey,
+        takenAt: "2026-07-01T14:30:00.000Z",
+        latitude: 32.7767,
+        longitude: -96.797,
+        addressSource: "live_gps",
+      });
+    expect(confirmRes.status).toBe(201);
+    const rows = await tdb.execute(
+      sql`SELECT taken_at, latitude, longitude, address_source FROM files WHERE id = ${confirmRes.body.fileId}`,
+    );
+    const row = rows.rows[0] as {
+      taken_at: unknown;
+      latitude: string | null;
+      longitude: string | null;
+      address_source: string | null;
+    };
+    expect(row.taken_at).not.toBeNull();
+    expect(new Date(row.taken_at as string).toISOString()).toBe("2026-07-01T14:30:00.000Z");
+    expect(Number(row.latitude)).toBeCloseTo(32.7767, 4);
+    expect(Number(row.longitude)).toBeCloseTo(-96.797, 4);
+    expect(row.address_source).toBe("live_gps");
+  });
+
+  it("ignores malformed capture metadata (non-numeric coords / bad addressSource) without failing the upload (finding 4)", async () => {
+    const urlRes = await request(app)
+      .post(`/scorecards/${scorecardId}/corrective-actions/upload/url`)
+      .send({ contentType: "image/jpeg", sizeBytes: 1024 });
+    expect(urlRes.status).toBe(200);
+    const confirmRes = await request(app)
+      .post(`/scorecards/${scorecardId}/corrective-actions/upload`)
+      .send({
+        uploadToken: urlRes.body.uploadToken,
+        objectKey: urlRes.body.objectKey,
+        takenAt: 12345, // not a string → ignored
+        latitude: "not-a-number", // not a finite number → ignored
+        longitude: {}, // not a number → ignored
+        addressSource: "satellite", // not a supported source → ignored
+      });
+    // The upload still succeeds; the malformed metadata is simply dropped (no capture provenance persisted).
+    expect(confirmRes.status).toBe(201);
+    const rows = await tdb.execute(
+      sql`SELECT taken_at, latitude, longitude, address_source FROM files WHERE id = ${confirmRes.body.fileId}`,
+    );
+    const row = rows.rows[0] as {
+      taken_at: unknown;
+      latitude: string | null;
+      longitude: string | null;
+      address_source: string | null;
+    };
+    expect(row.taken_at).toBeNull();
+    expect(row.latitude).toBeNull();
+    expect(row.longitude).toBeNull();
+    expect(row.address_source).toBeNull();
   });
 
   it("400s an oversized caption before any upload work (finding #3)", async () => {

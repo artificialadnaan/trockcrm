@@ -195,6 +195,53 @@ function parseCaption(value: unknown): string | null {
   return value;
 }
 
+/**
+ * Parse the OPTIONAL capture metadata (takenAt + GPS) off the upload-confirm body. The mobile capture flow
+ * collects these per response photo; we thread them into confirmUpload so a response file carries the same
+ * taken-at/location provenance as an ordinary field photo. This metadata is best-effort — malformed values are
+ * silently IGNORED rather than 400'd (a bad optional field must never fail an otherwise-valid photo upload), so
+ * every field is validated defensively and dropped if it doesn't fit. Latitude/longitude are only forwarded as
+ * a PAIR (confirmUpload/resolvePhotoAddressMetadata rejects a lone coordinate with a 400); a lone or
+ * out-of-range coordinate is dropped so it can't fail the upload.
+ */
+function parseCaptureMetadata(body: any): {
+  takenAt?: string;
+  latitude?: number;
+  longitude?: number;
+  addressSource?: "exif" | "live_gps";
+} {
+  const out: { takenAt?: string; latitude?: number; longitude?: number; addressSource?: "exif" | "live_gps" } = {};
+
+  // takenAt: an ISO date string that parses to a real time.
+  if (typeof body?.takenAt === "string" && !Number.isNaN(Date.parse(body.takenAt))) {
+    out.takenAt = body.takenAt;
+  }
+
+  // latitude/longitude: forward ONLY as a valid, in-range pair (a lone/out-of-range coord would 400 downstream).
+  const lat = body?.latitude;
+  const lng = body?.longitude;
+  if (
+    typeof lat === "number" &&
+    Number.isFinite(lat) &&
+    lat >= -90 &&
+    lat <= 90 &&
+    typeof lng === "number" &&
+    Number.isFinite(lng) &&
+    lng >= -180 &&
+    lng <= 180
+  ) {
+    out.latitude = lat;
+    out.longitude = lng;
+  }
+
+  // addressSource: only the two supported provenance values (exif | live_gps); anything else is dropped.
+  if (body?.addressSource === "exif" || body?.addressSource === "live_gps") {
+    out.addressSource = body.addressSource;
+  }
+
+  return out;
+}
+
 /** Register the corrective-action read + response endpoints on the field router. */
 export function registerCorrectiveActionRoutes(fieldRoutes: Router): void {
   // Read the scorecard's corrective-action items + their inline responses. Session OR token auth.
@@ -263,6 +310,9 @@ export function registerCorrectiveActionRoutes(fieldRoutes: Router): void {
         const uploadToken = typeof req.body?.uploadToken === "string" ? req.body.uploadToken : "";
         const objectKey = typeof req.body?.objectKey === "string" ? req.body.objectKey : "";
         const caption = parseCaption(req.body?.caption);
+        // Best-effort capture provenance (takenAt + GPS) collected by the mobile capture flow; malformed values
+        // are dropped, never a 400, so a bad optional field can't fail an otherwise-valid photo upload.
+        const captureMetadata = parseCaptureMetadata(req.body);
         if (!uploadToken || !objectKey) {
           throw new AppError(400, "uploadToken and objectKey are required.");
         }
@@ -277,6 +327,7 @@ export function registerCorrectiveActionRoutes(fieldRoutes: Router): void {
               uploadToken,
               objectKey,
               caption,
+              ...captureMetadata,
             }),
         );
         res.status(201).json(result);

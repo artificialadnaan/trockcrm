@@ -3973,18 +3973,30 @@ router.post("/:id/team", async (req, res, next) => {
     const hasContact = Boolean(contactId);
     const trimmedMemberEmail = typeof memberEmail === "string" ? memberEmail.trim() : "";
 
+    // Thread the office (id + `office_<slug>`) so ADDING a super/PM can enqueue a fresh corrective-action
+    // notification cycle for the deal's open cards (the newly-assigned responder must be notified). Same shape
+    // the PATCH/DELETE handlers thread.
+    const teamOffice =
+      req.officeSlug && req.user!.activeOfficeId
+        ? { id: req.user!.activeOfficeId, slug: req.officeSlug }
+        : undefined;
+
     // Email-only member (spec §4.4): a super/PM who is NOT a CRM user or directory contact — just name +
     // email — so the corrective-action flow can notify + token-auth them. Only when NO linked identity is
     // provided AND an email is present; addTeamMember validates the role/email/name shape.
     if (!hasUser && !hasContact && trimmedMemberEmail) {
-      const member = await addTeamMember(req.tenantDb!, {
-        dealId: req.params.id,
-        memberName: typeof memberName === "string" ? memberName : null,
-        memberEmail: trimmedMemberEmail,
-        role,
-        assignedBy: req.user!.id,
-        notes,
-      });
+      const member = await addTeamMember(
+        req.tenantDb!,
+        {
+          dealId: req.params.id,
+          memberName: typeof memberName === "string" ? memberName : null,
+          memberEmail: trimmedMemberEmail,
+          role,
+          assignedBy: req.user!.id,
+          notes,
+        },
+        teamOffice,
+      );
       await req.commitTransaction!();
       res.status(201).json({ member });
       return;
@@ -4017,14 +4029,18 @@ router.post("/:id/team", async (req, res, next) => {
       if (!contact || !contact.isActive) throw new AppError(400, "Contact not found or inactive");
     }
 
-    const member = await addTeamMember(req.tenantDb!, {
-      dealId: req.params.id,
-      userId: hasUser ? userId : null,
-      contactId: hasContact ? contactId : null,
-      role,
-      assignedBy: req.user!.id,
-      notes,
-    });
+    const member = await addTeamMember(
+      req.tenantDb!,
+      {
+        dealId: req.params.id,
+        userId: hasUser ? userId : null,
+        contactId: hasContact ? contactId : null,
+        role,
+        assignedBy: req.user!.id,
+        notes,
+      },
+      teamOffice,
+    );
     await req.commitTransaction!();
     res.status(201).json({ member });
   } catch (err) {

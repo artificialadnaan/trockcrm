@@ -87,7 +87,11 @@ export async function getTeamMembers(tenantDb: TenantDb, dealId: string) {
   return rows.rows;
 }
 
-export async function addTeamMember(tenantDb: TenantDb, input: AddTeamMemberInput) {
+export async function addTeamMember(
+  tenantDb: TenantDb,
+  input: AddTeamMemberInput,
+  office?: TeamMutationOffice,
+) {
   if (!input.dealId) throw new AppError(400, "dealId is required");
   if (!input.role) throw new AppError(400, "role is required");
   const hasUser = Boolean(input.userId);
@@ -120,6 +124,7 @@ export async function addTeamMember(tenantDb: TenantDb, input: AddTeamMemberInpu
         notes: input.notes ?? null,
       })
       .returning();
+    await restartCycleForNewResponder(tenantDb, input.dealId, input.role, office);
     return emailResult[0];
   }
 
@@ -146,7 +151,28 @@ export async function addTeamMember(tenantDb: TenantDb, input: AddTeamMemberInpu
     })
     .returning();
 
+  await restartCycleForNewResponder(tenantDb, input.dealId, input.role, office);
   return result[0];
+}
+
+/**
+ * When a NEW super/PM is ADDED to a deal, they become an authorized corrective-action responder (the
+ * assignment/token IS the auth), but the deal's OPEN cards may have already stamped their notification as
+ * sent — the worker's per-send recipient revalidation only covers a change DURING an active send, not a
+ * responder who joins after the original cycle. So start a fresh notification cycle for the deal's open cards
+ * so the new responder actually gets a link. Only fires when the added role is a responder role (super/PM);
+ * best-effort — skipped when no office context was threaded (matches the leave/remove paths). Runs in the
+ * caller's tenant transaction (the POST route commits both together).
+ */
+async function restartCycleForNewResponder(
+  tenantDb: TenantDb,
+  dealId: string,
+  role: string,
+  office?: TeamMutationOffice,
+): Promise<void> {
+  if (!office) return;
+  if (role !== "superintendent" && role !== "project_manager") return;
+  await restartCorrectiveActionNotificationCycleForDeal(tenantDb, { dealId, office });
 }
 
 export async function updateTeamMember(
@@ -239,6 +265,16 @@ export async function updateTeamMember(
     // recipient revalidation only covers a change DURING an active send). Start a fresh notification cycle for
     // the deal's open corrective-action scorecards so the new responder gets a link. Best-effort: skipped when
     // no office context was threaded (the token revoke above still ran).
+    if (office) {
+      await restartCorrectiveActionNotificationCycleForDeal(tenantDb, { dealId, office });
+    }
+  } else if (!wasResponder && stillResponder) {
+    // A member just ENTERED the responder roles (a non-responder re-roled INTO an active super/PM). They become
+    // an authorized responder but the deal's open cards may have already stamped their notification as sent, so
+    // the new responder would be authorized-but-silently-unnotified. Start a fresh cycle so they get a link —
+    // the enter counterpart of the leave-path restart. A LATERAL super↔PM swap is wasResponder AND stillResponder
+    // → it hits NEITHER branch, so it never double-restarts (the same person keeps their token/authorization).
+    // Best-effort: skipped when no office was threaded.
     if (office) {
       await restartCorrectiveActionNotificationCycleForDeal(tenantDb, { dealId, office });
     }

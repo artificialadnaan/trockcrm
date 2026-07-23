@@ -156,15 +156,38 @@ describe("public corrective-action route rate limiting (finding 5)", () => {
     expect(res.body.items).toHaveLength(1);
   });
 
-  it("a burst of token-carrying requests from one IP is eventually capped (429) BEFORE the cross-office scan", async () => {
+  it("a FULL 50-photo response-sized burst from ONE legit token is NOT 429'd (finding 3)", async () => {
+    // A maximum supported response = 50 photos → 1 GET items + 50 presign + 50 confirm + 1 POST response = 102
+    // requests within a minute. The cap (110) is above that, and the bucket is keyed by IP+token, so a single
+    // legit responder working through a full max-size response must never be throttled. We approximate the burst
+    // with 102 GETs on THIS token's key (the limiter counts every route hit identically); none may 429.
     const rawToken = await mintToken();
     const path = `/scorecards/${scorecardId}/corrective-actions?token=${encodeURIComponent(rawToken)}`;
-    // Fire well past the 60/min cap. The store is module-level (shared across the process), so this test is
-    // written to tolerate prior token requests in this file: we only assert that SOME request 429s within the
-    // burst, and that the 429 short-circuited BEFORE resolveWriteOffice ran (the amplifier is capped).
+    for (let i = 0; i < 102; i++) {
+      const res = await request(app).get(path);
+      expect(res.status).not.toBe(429); // a full legitimate response never trips the limiter
+    }
+  });
+
+  it("a distinct legit token behind the SAME IP has its OWN bucket (not throttled by another responder's burst)", async () => {
+    // Keyed by IP+token: two responders behind one shared office IP each get a separate allowance. The burst
+    // above exhausted MOST of one token's budget; a request on a BRAND-NEW token (same IP) still authorizes.
+    const otherToken = await mintToken();
+    const res = await request(app).get(
+      `/scorecards/${scorecardId}/corrective-actions?token=${encodeURIComponent(otherToken)}`,
+    );
+    expect(res.status).toBe(200);
+    expect(res.body.items).toHaveLength(1);
+  });
+
+  it("an ABUSIVE over-cap flood on one bucket is eventually capped (429) BEFORE the cross-office scan", async () => {
+    const rawToken = await mintToken();
+    const path = `/scorecards/${scorecardId}/corrective-actions?token=${encodeURIComponent(rawToken)}`;
+    // Fire well past the 110/min cap on a SINGLE bucket (same IP+token). We only assert that SOME request 429s
+    // within the flood and that the 429 short-circuited BEFORE resolveWriteOffice ran (the amplifier is capped).
     let saw429 = false;
     let scanCallsAt429 = -1;
-    for (let i = 0; i < 80; i++) {
+    for (let i = 0; i < 160; i++) {
       resolveWriteOfficeSpy.mockClear();
       const res = await request(app).get(path);
       if (res.status === 429) {
@@ -179,8 +202,8 @@ describe("public corrective-action route rate limiting (finding 5)", () => {
   });
 
   it("does NOT rate-limit the (no-token) session path — it is skipped by the limiter", async () => {
-    // The session path carries no ?token, so the limiter's skip() bypasses it entirely; even after the burst
-    // above exhausted the token bucket for this IP, a session request still authorizes normally.
+    // The session path carries no ?token, so the limiter's skip() bypasses it entirely; even after the flood
+    // above exhausted a token bucket for this IP, a session request still authorizes normally.
     const res = await request(app).get(`/scorecards/${scorecardId}/corrective-actions`);
     expect(res.status).toBe(200);
     expect(res.body.items).toHaveLength(1);

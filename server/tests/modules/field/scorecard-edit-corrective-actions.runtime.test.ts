@@ -761,6 +761,60 @@ describe("updateFieldScorecard corrective-action reconcile", () => {
     expect(await getStatus(scorecard.id)).toBe("corrective_action_closed");
   });
 
+  it("trimming TWO RESOLVED duplicates to one deletes the surplus resolved row; re-adding reopens (finding 1-surplus)", async () => {
+    // Two identical-label action items, BOTH resolved. An edit dropping to a SINGLE copy leaves surplus == 1,
+    // but there are NO open rows to delete — the surplus-trim must ALSO delete the extra RESOLVED row so
+    // existingCount drops to the flagged count (1). Otherwise BOTH resolved rows survive, existingCount stays 2,
+    // and a later re-add of the duplicate inserts NO fresh open row → the recurring duplicate is never reopened
+    // or notified. History is still preferred (one resolved row is kept), only the SURPLUS resolved row goes.
+    const { scorecard } = await createFieldScorecard(
+      tdb,
+      createInput({ items: v2Items(5), actionItems: ["Verify hold points", "Verify hold points"] }),
+    );
+    const both = await getItems(scorecard.id);
+    expect(both).toHaveLength(2);
+    // Resolve BOTH duplicates → the card auto-closes.
+    for (const row of both) {
+      await resolveCorrectiveActionItem(tdb, {
+        scorecardId: scorecard.id,
+        itemId: row.id,
+        responseComment: "verified",
+        respondedBy: { userId: OWNER, name: "Sam", email: null },
+      });
+    }
+    expect(await getStatus(scorecard.id)).toBe("corrective_action_closed");
+
+    // Edit reduces the label to a SINGLE occurrence. flaggedCount(1) < existingCount(2), surplus == 1, but both
+    // rows are resolved → the surplus resolved row must be deleted, leaving exactly ONE resolved row.
+    const at1 = await currentUpdatedAt(scorecard.id);
+    await updateFieldScorecard(
+      tdb,
+      updateInput(scorecard.id, at1, { items: v2Items(5), actionItems: ["Verify hold points"] }),
+    );
+    const mid = await getItems(scorecard.id);
+    expect(mid).toHaveLength(1); // the surplus resolved row was deleted (not both, not neither)
+    expect(mid[0].status).toBe("resolved");
+    // Still closed (the one surviving row is resolved history, no open items).
+    expect(await getStatus(scorecard.id)).toBe("corrective_action_closed");
+
+    // A LATER edit RE-ADDS the duplicate (back to TWO). existingCount is now 1 (not 2), so a FRESH open row is
+    // inserted for the recurring flag → the card reopens.
+    const at2 = await currentUpdatedAt(scorecard.id);
+    await updateFieldScorecard(
+      tdb,
+      updateInput(scorecard.id, at2, {
+        items: v2Items(5),
+        actionItems: ["Verify hold points", "Verify hold points"],
+      }),
+    );
+    const after = await getItems(scorecard.id);
+    expect(after).toHaveLength(2);
+    // Exactly one open (the freshly-inserted recurring flag) + one resolved (the preserved history).
+    expect(after.filter((i) => i.status === "open")).toHaveLength(1);
+    expect(after.filter((i) => i.status === "resolved")).toHaveLength(1);
+    expect(await getStatus(scorecard.id)).toBe("corrective_action_open");
+  });
+
   it("a REOPEN deletes prior-cycle responder tokens so the worker re-mints a fresh link (finding 6)", async () => {
     // Open with a flag, mint a prior-cycle web token, resolve → close. Editing to add a NEW flag re-opens the
     // card; the reconcile must delete the stale token so the worker's per-recipient reuse-skip can't strand the

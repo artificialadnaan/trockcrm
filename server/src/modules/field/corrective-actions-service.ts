@@ -397,8 +397,14 @@ export async function reconcileScorecardCorrectiveActions(
   //     later re-add of that label inserts a fresh open row (reopening) rather than matching a stale resolved
   //     row that would leave openCount == 0. Mirror of the deficiency treatment (the reopen-recurrence fix).
   //   - Label STILL present but over-supplied (existingCount > flaggedCount > 0): trim only the surplus,
-  //     deleting OPEN duplicates first and preserving resolved history (bucket is resolved-first, so we walk
-  //     from the END). A still-flagged label's resolved row must NOT reopen on every edit.
+  //     deleting OPEN duplicates FIRST and preserving resolved history where possible (bucket is resolved-first,
+  //     so we walk from the END to hit the open rows first). But if the surplus is NOT fully covered by open
+  //     rows — e.g. BOTH duplicates were resolved and the label drops to one occurrence — the remaining surplus
+  //     MUST also delete the extra RESOLVED rows so existingCount falls to flaggedCount. Otherwise the surplus
+  //     resolved rows survive, existingCount stays too high, and a later re-add of the duplicate inserts NO
+  //     fresh open row → the recurring duplicate is never reopened/notified. "Prefer open, keep resolved
+  //     history when possible" still holds: at least (bucket.length - surplus) = flaggedCount rows survive, and
+  //     resolved rows are only removed once every open duplicate has already been taken.
   for (const [label, bucket] of existingActionByLabel) {
     const flaggedCount = flaggedActionCountByLabel.get(label) ?? 0;
     if (flaggedCount === 0) {
@@ -406,11 +412,12 @@ export async function reconcileScorecardCorrectiveActions(
       continue;
     }
     let surplus = bucket.length - flaggedCount;
+    // Walk from the END (open rows are last, since the bucket is resolved-first). Delete whatever is at the
+    // tail — open duplicates go before any resolved row is touched, but once the open duplicates are exhausted
+    // the still-positive surplus falls through onto the trailing resolved rows so the count reaches flaggedCount.
     for (let i = bucket.length - 1; i >= 0 && surplus > 0; i--) {
-      if (bucket[i].status === "open") {
-        staleIds.push(bucket[i].id);
-        surplus--;
-      }
+      staleIds.push(bucket[i].id);
+      surplus--;
     }
   }
 

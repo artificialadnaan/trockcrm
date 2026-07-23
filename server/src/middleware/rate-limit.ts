@@ -44,13 +44,26 @@ export const publicDueDiligencePostLimiter = rateLimit({
 // with only a ?token and are mounted under /api/field, which has NO apiLimiter. Their authorize step fans the
 // arbitrary scorecard UUID across EVERY active office schema (resolveWriteOffice), so an unauthenticated flood
 // carrying any nonempty token would generate one DB query per office per request — a cross-office-scan DoS
-// amplifier. Cap by IP (these callers are unauthenticated) BEFORE the authorize/scan runs. Keyed on req.ip
-// only, so it never rate-limits an authenticated session by user id. Generous enough for a real responder
-// working through a card's items + photo uploads, tight enough to blunt an amplification flood.
+// amplifier. Cap BEFORE the authorize/scan runs. Skips the (no-token) session path so authenticated/session
+// behavior is unchanged (it's already covered by the field-session middleware and isn't an amplifier).
+//
+// Sizing: ONE full supported response is 50 photos → 1 GET items + 50 presign (upload/url) + 50 confirm
+// (upload) + 1 POST response = 102 requests, all within a minute. A 60/min cap 429s partway through
+// (~photo 30). So set max well above one complete response (110) with headroom for a retry/refresh, while a
+// scanning flood — hundreds of GETs/min — still trips it. We also key by IP+token so two distinct LEGIT
+// responders behind ONE shared office IP (each with their own recipient-bound token) get SEPARATE buckets and
+// don't throttle each other; an anonymous scan varying the token can't grow its budget past the shared-IP
+// portion because a garbage/absent token collapses onto the IP-only bucket (the `unknown` token key).
 export const correctiveActionPublicLimiter = rateLimit({
   windowMs: 60 * 1000,
-  max: 60, // 60 req/min per IP
-  keyGenerator: (req: Request) => req.ip ?? "unknown",
+  max: 110, // ≥ one full 50-photo response (102 requests) + headroom, per IP+token
+  keyGenerator: (req: Request) => {
+    const ip = req.ip ?? "unknown";
+    const token = typeof req.query.token === "string" && req.query.token.trim() ? req.query.token.trim() : "";
+    // IP+token: distinct legit responders (distinct tokens) behind a shared IP get separate buckets. A missing
+    // token collapses to the IP-only bucket, so a tokenless/garbage scan can't multiply its allowance.
+    return token ? `${ip}:${token}` : ip;
+  },
   // Only limit the PUBLIC token path (a nonempty ?token, which reaches the cross-office scan unauthenticated).
   // A session request (no token) is skipped so authenticated/session behavior is unchanged — it's already
   // covered by the field-session middleware and is not a cross-office-scan amplifier.

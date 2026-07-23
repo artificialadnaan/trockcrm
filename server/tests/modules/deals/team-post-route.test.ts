@@ -75,13 +75,14 @@ function findRouteHandler(method: string, path: string) {
   return layer.route.stack.find((entry: any) => entry.method === method).handle;
 }
 
-async function postTeam(body: any) {
+async function postTeam(body: any, officeSlug?: string) {
   const handler = findRouteHandler("post", "/:id/team");
   const req = {
     params: { id: "deal-1" },
     query: {},
     body,
     tenantDb: {},
+    officeSlug,
     user: { id: "rep-1", role: "rep", officeId: "office-1", activeOfficeId: "office-1" },
     commitTransaction: vi.fn(async () => {}),
   } as any;
@@ -158,6 +159,23 @@ describe("POST /:id/team user assignment", () => {
     expect(teamMocks.addTeamMember).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ userId: USER_UUID, contactId: null, role: "project_manager" }),
+      // Third arg = the threaded office (id + `office_<slug>`) so an added responder can re-notify the deal's
+      // open cards. This harness's req sets no officeSlug, so teamOffice resolves to undefined here.
+      undefined,
+    );
+  });
+
+  it("threads the office (id + `office_<slug>`) into addTeamMember when officeSlug is present (finding 2)", async () => {
+    // The add path must pass the same { id: activeOfficeId, slug: officeSlug } the PATCH/DELETE handlers do, so
+    // adding a super/PM can enqueue a fresh corrective-action notification cycle for the deal's open cards.
+    usersMock.listUsers.mockResolvedValue([{ id: USER_UUID, isActive: true }] as any);
+    const { res, nextErr } = await postTeam({ userId: USER_UUID, role: "project_manager" }, "test");
+    expect(nextErr).toBeUndefined();
+    expect(res.statusCode).toBe(201);
+    expect(teamMocks.addTeamMember).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ userId: USER_UUID, role: "project_manager" }),
+      { id: "office-1", slug: "test" },
     );
   });
 
@@ -169,6 +187,7 @@ describe("POST /:id/team user assignment", () => {
     expect(teamMocks.addTeamMember).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ userId: USER_UUID, role: "estimator" }),
+      undefined,
     );
   });
 
@@ -204,6 +223,7 @@ describe("POST /:id/team email-only member (spec §4.4)", () => {
         memberEmail: "ext.super@example.com",
         role: "superintendent",
       }),
+      undefined,
     );
   });
 
@@ -220,6 +240,7 @@ describe("POST /:id/team email-only member (spec §4.4)", () => {
     expect(teamMocks.addTeamMember).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ userId: USER_UUID }),
+      undefined,
     );
   });
 });
@@ -233,6 +254,7 @@ describe("POST /:id/team contact assignment", () => {
     expect(teamMocks.addTeamMember).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ contactId: CONTACT_UUID, userId: null, role: "superintendent" }),
+      undefined,
     );
   });
 

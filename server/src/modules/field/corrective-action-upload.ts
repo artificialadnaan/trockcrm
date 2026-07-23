@@ -124,6 +124,16 @@ export interface ConfirmCorrectiveActionUploadInput {
    * mobile PhotoCaptionEditor is silently lost after submit.
    */
   caption?: string | null;
+  /**
+   * Optional capture metadata the mobile capture flow collects per response photo — the capture timestamp
+   * (ISO string) and GPS coordinates + their source. Threaded into confirmUpload so a corrective RESPONSE
+   * photo carries the same taken-at/location provenance as an ordinary field photo (otherwise these persist
+   * as null). All optional; malformed values are ignored by the route parser before reaching here.
+   */
+  takenAt?: string;
+  latitude?: number;
+  longitude?: number;
+  addressSource?: "exif" | "live_gps";
 }
 
 /**
@@ -167,6 +177,13 @@ export async function confirmCorrectiveActionUpload(
   const { file } = await confirmUpload(db, uploaderId, {
     uploadToken: input.uploadToken,
     scorecardEditDealId: dealId,
+    // Forward the mobile capture provenance so a response photo lands with its taken-at + GPS (mapped to
+    // confirmUpload's latitude/longitude/addressSource, which resolve the file's coords + reverse-geocoded
+    // address exactly like an ordinary field photo). Undefined fields are no-ops.
+    takenAt: input.takenAt,
+    latitude: input.latitude,
+    longitude: input.longitude,
+    addressSource: input.addressSource,
   });
   // Record DURABLE, unforgeable corrective-action ownership: one ledger row per file created via this flow.
   // discardCorrectiveActionUpload gates on an EXISTS here (file_id + scorecard_id) instead of the FORGEABLE
