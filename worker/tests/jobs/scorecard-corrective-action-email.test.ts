@@ -60,10 +60,11 @@ function makeQuery(
     assignedRoles?: any[];
     flagged?: any[];
     existingTokenEmails?: string[];
-    // Finding 3: model an UNDELIVERED-but-live token row (crash between INSERT and the delivered_at stamp): a
-    // map of lower-cased recipient email → the token_hash of that surviving row. The reuse query now selects
-    // token_hash + delivered_at for ANY live (unconsumed/unexpired) token, so an undelivered survivor is found
-    // and RE-USED (its hash becomes the idempotency key — no new token minted). Delivered survivors are still
+    // Finding 1: model an UNDELIVERED-but-live token row (crash between INSERT and the delivered_at stamp): a
+    // map of lower-cased recipient email → the token_hash of that surviving row. The reuse query selects
+    // token_hash + delivered_at for ANY live (unconsumed/unexpired) token; an undelivered survivor's raw value
+    // can't be reconstructed, so the handler MINTS A FRESH usable token (real ?token= link) and keys off the
+    // stable per-cycle key — it does NOT reuse the survivor's hash or send tokenless. Delivered survivors are
     // modeled by existingTokenEmails (they short-circuit / skip).
     undeliveredTokens?: Record<string, string>;
     // Finding 6: model the last-open-item-resolved-mid-run race. The snapshot read status = corrective_action_open
@@ -112,10 +113,10 @@ function makeQuery(
   // so it never reaches this fall-through.
   let recipientResolveCalls = 0;
   const query = vi.fn(async (text: string, params: any[] = []) => {
-    // Per-recipient LIVE-token reuse lookup (finding 3): SELECT token_hash, delivered_at FROM ...tokens WHERE
+    // Per-recipient LIVE-token lookup (finding 1): SELECT token_hash, delivered_at FROM ...tokens WHERE
     // recipient_email = $2 AND consumed_at IS NULL AND expires_at > NOW() (NO delivered_at filter). A DELIVERED
-    // survivor (existingTokenEmails) short-circuits/skips; an UNDELIVERED survivor (undeliveredTokens) is
-    // re-used — its hash becomes the idempotency key, no new token minted. No row → mint fresh.
+    // survivor (existingTokenEmails) short-circuits/skips; an UNDELIVERED survivor (undeliveredTokens) OR no row
+    // → mint a FRESH usable token (real ?token= link), keyed off the stable per-cycle key.
     if (/SELECT token_hash, delivered_at FROM \S*scorecard_corrective_action_tokens/i.test(text)) {
       const email = String(params[1] ?? "").toLowerCase();
       if (existing.has(email)) {
@@ -263,45 +264,53 @@ describe("scorecard corrective-action notification email", () => {
     expect(superCall[2]).toContain("Re-inspect slab 2");
     expect(superCall[2]).toContain("Missed hold point");
 
-    // Idempotency key is scoped to the corrective-action CYCLE. For the email-only PM it carries the freshly-
-    // minted token hash (so a reopen — which mints a fresh token — produces a DIFFERENT key, avoiding a Resend
-    // false-dedup that would strand them; see the two-cycle test below).
+    // Idempotency key is scoped to the corrective-action CYCLE via the SAME per-(scorecard, recipient) cycle
+    // key for BOTH recipient kinds (finding 1): the email-only PM's key is (scorecard, email) PLUS the per-cycle
+    // fingerprint — NOT the minted token hash. Scoping off the cycle (not the token) keeps the key stable across
+    // a crash-window retry that mints a fresh usable token, while a reopen (fresh cycle → fresh open rows/nonce)
+    // still produces a DIFFERENT key so the updated email is sent.
+    const fp = cycleFingerprint(FLAGGED.map((f) => f.id));
     expect(pmCall[3].idempotencyKey).toContain(SCORECARD);
-    expect(pmCall[3].idempotencyKey).toBe(`corrective-action-office_dallas-${SCORECARD}-token-${inserts[0].params[1]}`);
+    expect(pmCall[3].idempotencyKey).toBe(
+      `corrective-action-office_dallas-${SCORECARD}-dana.cole@example.com-cycle-${fp}`,
+    );
 
     // The CRM user (no token) key is (scorecard, recipient) PLUS the per-cycle fingerprint (finding 4): their
     // deep link is cycle-stable but the flagged-item email body changes each cycle, so the key must differ
     // across cycles to avoid a Resend same-key/different-payload false-dedup. The fingerprint is a hash over
     // the current open corrective-action-item ids (FLAGGED's ids).
-    const fp = cycleFingerprint(FLAGGED.map((f) => f.id));
     expect(superCall[3].idempotencyKey).toBe(
       `corrective-action-office_dallas-${SCORECARD}-sam.super@trock.com-cycle-${fp}`,
     );
   });
 
   it("uses a DIFFERENT idempotency key for the same email-only recipient across two corrective-action cycles (finding 1)", async () => {
-    // A reopen (open→resolve→close, then edit-reopen) deletes the prior cycle's tokens and mints a FRESH one.
-    // If the Resend idempotency key were cycle-stable (scorecard+email), Resend would see the same key with a
-    // different payload → invalid_idempotent_request → sendSystemEmailWithMetadata treats it as delivered → the
-    // worker stamps while the responder holds only the now-deleted old link (stranded). Scoping the key to the
-    // minted token hash makes it differ every cycle. Model each cycle as its own handler run (fresh stamp NULL,
-    // no surviving token) and assert the two email-only keys differ.
+    // A reopen (open→resolve→close, then edit-reopen) re-enqueues a fresh job (fresh cycleNonce) and inserts
+    // fresh-UUID open rows. The Resend idempotency key must differ across cycles (else Resend sees the same key
+    // with a different payload → invalid_idempotent_request → sendSystemEmailWithMetadata treats it as delivered
+    // → the worker stamps while the responder never got the updated link). The key is scoped to the per-cycle
+    // DIMENSION (cycleNonce, falling back to the open-row fingerprint), which is what differs across cycles — NOT
+    // the minted token hash (that would drift across a crash-window retry that re-mints, finding 1). Model two
+    // cycles as distinct cycleNonces and assert the two email-only keys differ.
     const emailOnlyPm = [{ role: "project_manager", name: "Dana Cole", email: "dana.cole@example.com", user_id: null }];
 
     const cycle1 = makeQuery({ recipients: emailOnlyPm, assignedRoles: [{ role: "project_manager" }], existingTokenEmails: [] });
     const send1 = vi.fn().mockResolvedValue({ success: true, messageId: "m1" });
-    await handleScorecardCorrectiveActionEmail(payload, null, { query: cycle1.query as any, sendEmail: send1, env, logger: makeLogger() });
+    await handleScorecardCorrectiveActionEmail({ ...payload, cycleNonce: "cycle-nonce-1" }, null, { query: cycle1.query as any, sendEmail: send1, env, logger: makeLogger() });
 
     const cycle2 = makeQuery({ recipients: emailOnlyPm, assignedRoles: [{ role: "project_manager" }], existingTokenEmails: [] });
     const send2 = vi.fn().mockResolvedValue({ success: true, messageId: "m2" });
-    await handleScorecardCorrectiveActionEmail(payload, null, { query: cycle2.query as any, sendEmail: send2, env, logger: makeLogger() });
+    await handleScorecardCorrectiveActionEmail({ ...payload, cycleNonce: "cycle-nonce-2" }, null, { query: cycle2.query as any, sendEmail: send2, env, logger: makeLogger() });
 
     const key1 = send1.mock.calls[0][3].idempotencyKey as string;
     const key2 = send2.mock.calls[0][3].idempotencyKey as string;
-    // Both are cycle-scoped to their own minted token hash — and those hashes are random-unique per cycle.
-    expect(key1).toBe(`corrective-action-office_dallas-${SCORECARD}-token-${cycle1.inserts[0].params[1]}`);
-    expect(key2).toBe(`corrective-action-office_dallas-${SCORECARD}-token-${cycle2.inserts[0].params[1]}`);
+    // Both are the per-(scorecard, recipient) cycle key scoped to their own cycleNonce — which differs per cycle.
+    expect(key1).toBe(`corrective-action-office_dallas-${SCORECARD}-dana.cole@example.com-cycle-cycle-nonce-1`);
+    expect(key2).toBe(`corrective-action-office_dallas-${SCORECARD}-dana.cole@example.com-cycle-cycle-nonce-2`);
     expect(key1).not.toBe(key2);
+    // A fresh usable token is minted each cycle (the link always carries a real ?token=, never tokenless).
+    expect(cycle1.inserts).toHaveLength(1);
+    expect(cycle2.inserts).toHaveLength(1);
   });
 
   it("scopes the CRM (no-token) key per CYCLE: two cycles differ, a same-cycle retry matches (finding 4)", async () => {
@@ -379,11 +388,15 @@ describe("scorecard corrective-action notification email", () => {
     // field-login user.
     expect(inserts).toHaveLength(1);
     expect(inserts[0].params[2]).toBe("no.login@trock.com");
-    // The fallback recipient's key is the token-scoped (per-cycle) key, exactly like an email-only member.
-    expect(noCall[3].idempotencyKey).toBe(`corrective-action-office_dallas-${SCORECARD}-token-${inserts[0].params[1]}`);
+    // The fallback recipient's key is the per-(scorecard, recipient) cycle-fingerprint key, exactly like an
+    // email-only member (finding 1: NOT the token hash).
+    const fp = cycleFingerprint(FLAGGED.map((f) => f.id));
+    expect(noCall[3].idempotencyKey).toBe(
+      `corrective-action-office_dallas-${SCORECARD}-no.login@trock.com-cycle-${fp}`,
+    );
     // The field-login user's key is the CRM (no-token) per-cycle-fingerprint key.
     expect(canCall[3].idempotencyKey).toBe(
-      `corrective-action-office_dallas-${SCORECARD}-can.login@trock.com-cycle-${cycleFingerprint(FLAGGED.map((f) => f.id))}`,
+      `corrective-action-office_dallas-${SCORECARD}-can.login@trock.com-cycle-${fp}`,
     );
   });
 
@@ -548,15 +561,18 @@ describe("scorecard corrective-action notification email", () => {
     expect(sendEmail.mock.calls.map((c) => c[0])).toEqual(["dana.cole@example.com"]);
   });
 
-  // ---- Finding 3: preserve token sends across the delivery-stamp crash window (reuse the surviving token) ----
+  // ---- Finding 1: keep the retry link USABLE across the delivery-stamp crash window ----
 
-  it("REUSES a surviving UNDELIVERED token's hash as the idempotency key on retry — no new token minted (finding 3)", async () => {
-    // The crash window: the provider ACCEPTED the email but the worker crashed before stamping delivered_at, so a
-    // live token survives with delivered_at NULL. The OLD behavior minted a FRESH token → new hash → new
-    // idempotency key → the provider could not dedup → the recipient got a SECOND email with a DIFFERENT link.
-    // The fix reuses the surviving token's existing hash as the idempotency key (stable across the crash window),
-    // so the provider dedups the true duplicate, and does NOT mint a new token.
+  it("mints a FRESH usable token (WITH a ?token= link) on a crash-window retry — never tokenless (finding 1)", async () => {
+    // The crash window: the provider may have ACCEPTED the email but the worker crashed before stamping
+    // delivered_at, so a live token survives with delivered_at NULL. The token's raw value is hashed at rest and
+    // can't be reconstructed, so it CANNOT rebuild a usable link. The round-11 behavior reused the surviving
+    // hash as the key AND sent a TOKENLESS link — an unusable link for the email-only recipient. The finding-1
+    // fix instead MINTS A FRESH usable token so the link always carries a real `?token=`, and scopes the Resend
+    // idempotency key to the STABLE per-cycle key (email + cycleNonce) — unchanged across the crash-retry
+    // regardless of which token instance backs the link — so the provider still dedups the true duplicate.
     const SURVIVING_HASH = "surviving-undelivered-hash-abc123";
+    const NONCE = "cycle-nonce-crash";
     const { query, inserts, tokenDelivers } = makeQuery({
       recipients: [{ role: "project_manager", name: "Dana Cole", email: "dana.cole@example.com", user_id: null }],
       assignedRoles: [{ role: "project_manager" }],
@@ -565,24 +581,29 @@ describe("scorecard corrective-action notification email", () => {
     const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "m" });
     const logger = makeLogger();
 
-    await handleScorecardCorrectiveActionEmail(payload, null, { query: query as any, sendEmail, env, logger });
+    await handleScorecardCorrectiveActionEmail({ ...payload, cycleNonce: NONCE }, null, { query: query as any, sendEmail, env, logger });
 
-    // The recipient was (re-)sent to — Resend dedups on the stable key, so this is safe.
+    // The recipient was (re-)sent to — Resend dedups on the stable cycle key, so this is safe.
     expect(sendEmail).toHaveBeenCalledTimes(1);
     expect(sendEmail.mock.calls[0][0]).toBe("dana.cole@example.com");
-    // The idempotency key carries the SURVIVING token's hash — the same key the first attempt used — so the
-    // provider dedups the true duplicate (no second email with a different link).
+    // The link ALWAYS carries a real ?token= (never a tokenless URL) — the whole point of finding 1.
+    const text = sendEmail.mock.calls[0][3].text as string;
+    expect(text).toMatch(new RegExp(`https://trockcrm\\.com/scorecards/${SCORECARD}/corrective-action\\?token=[A-Za-z0-9_-]+`));
+    // The idempotency key is the STABLE per-cycle key (email + cycleNonce) — NOT the surviving token hash — so it
+    // is unchanged across the crash-retry even though a fresh token is minted, and the provider dedups the dup.
     expect(sendEmail.mock.calls[0][3].idempotencyKey).toBe(
-      `corrective-action-office_dallas-${SCORECARD}-token-${SURVIVING_HASH}`,
+      `corrective-action-office_dallas-${SCORECARD}-dana.cole@example.com-cycle-${NONCE}`,
     );
-    // NO new token minted — the surviving row is reused.
-    expect(inserts).toHaveLength(0);
-    // The surviving token is stamped delivered (by its own hash) so the next retry short-circuits.
+    // A FRESH token IS minted (the survivor's raw value can't be reconstructed to rebuild a usable link).
+    expect(inserts).toHaveLength(1);
+    expect(inserts[0].params[2]).toBe("dana.cole@example.com");
+    // The freshly-minted token (NOT the surviving hash) is stamped delivered after the successful send.
     expect(tokenDelivers).toHaveLength(1);
-    expect(tokenDelivers[0].params[0]).toBe(SURVIVING_HASH);
+    expect(tokenDelivers[0].params[0]).toBe(inserts[0].params[1]);
+    expect(tokenDelivers[0].params[0]).not.toBe(SURVIVING_HASH);
   });
 
-  it("SKIPS (no re-send) when a surviving token is already DELIVERED (finding 3)", async () => {
+  it("SKIPS (no re-send) when a surviving token is already DELIVERED (finding 1)", async () => {
     // Round-4 behavior preserved: a live token with delivered_at NOT NULL short-circuits — no re-send, no mint.
     const { query, inserts, tokenDelivers } = makeQuery({
       recipients: [{ role: "project_manager", name: "Dana Cole", email: "dana.cole@example.com", user_id: null }],
