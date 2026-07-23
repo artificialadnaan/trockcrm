@@ -173,10 +173,11 @@ async function discardUploadedFileIds(fetcher: Fetcher, scorecardId: string, fil
  * already confirmed as persistent files rows on the deal — leaving them would orphan/duplicate on the retry)
  * and return photos_failed WITHOUT POSTing — so a partial upload never submits a response missing evidence.
  *
- * If the response POST 409s as CORRECTIVE_ACTION_ALREADY_RESOLVED, another responder resolved the item after
- * we uploaded — our fileIds did NOT attach, so we DISCARD them and return already_resolved (NOT a success):
- * the screen refreshes to show the other responder's resolution and tells the user, without claiming this as
- * their submission.
+ * If the response POST FAILS for ANY reason after the uploads confirmed (a 409 already-resolved race, or a
+ * network / 5xx / timeout), the fileIds did NOT attach, so we DISCARD them (best-effort) so a retry doesn't
+ * re-upload the same evidence and orphan duplicates on the deal. A CORRECTIVE_ACTION_ALREADY_RESOLVED 409 then
+ * returns already_resolved (NOT a success) — the screen refreshes to show the other responder's resolution and
+ * tells the user, without claiming this as their submission; every other error rethrows after the cleanup.
  *
  * Unlike the durable-queue field-capture path, this is eager (per-submit) and not offline-resilient: routing
  * through the scorecard's office is required for the fileIds to exist in the tenant the response POST reads.
@@ -220,10 +221,13 @@ export async function submitCorrectiveActionItem(
     });
     return { status: "resolved", items };
   } catch (error) {
-    // A concurrent responder already resolved this item — our uploads never attached. Reclaim them and
-    // surface a distinct status so the caller doesn't treat this lost race as its own success.
+    // The POST failed AFTER we confirmed the uploads — for ANY failure (409, network, 5xx, timeout) the
+    // fileIds never attached, so reclaim them (best-effort) before we do anything else. Otherwise a retry
+    // re-uploads the same photos and accumulates orphaned duplicate files on the deal.
+    await discardUploadedFileIds(fetcher, input.scorecardId, photoFileIds);
+    // A concurrent responder already resolved this item — surface a distinct status so the caller doesn't
+    // treat this lost race as its own success. Every other error rethrows (already cleaned up above).
     if (error instanceof ApiError && error.status === 409 && error.code === "CORRECTIVE_ACTION_ALREADY_RESOLVED") {
-      await discardUploadedFileIds(fetcher, input.scorecardId, photoFileIds);
       return { status: "already_resolved" };
     }
     throw error;

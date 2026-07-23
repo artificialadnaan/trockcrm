@@ -354,63 +354,69 @@ export default function ProjectDetailScreen() {
                     ? ", corrective action resolved"
                     : "";
               return (
-                <Pressable
-                  key={s.id}
-                  accessibilityRole="button"
-                  accessibilityLabel={`${isLeadership ? "Leadership scorecard" : "Scorecard"}, week of ${formatShortDate(s.weekOf)}, ${scoreText}, ${s.ratingLabel}${correctiveA11y}`}
-                  onPress={() => router.push({ pathname: "/(app)/scorecards/view/[id]", params: { id: s.id } })}
-                  style={({ pressed }) => [styles.reportRow, pressed && { opacity: 0.7 }]}
-                >
-                  <View style={{ flex: 1, gap: 4 }}>
-                    <Text style={styles.reportTitle} numberOfLines={1}>
-                      {isLeadership ? "Leadership · " : ""}Week of {formatShortDate(s.weekOf)}
-                      {s.submittedByName ? ` · ${s.submittedByName}` : ""}
-                      {s.criticalDeficiencyCount > 0
-                        ? ` · ${s.criticalDeficiencyCount} critical ${s.criticalDeficiencyCount === 1 ? "deficiency" : "deficiencies"}`
-                        : ""}
-                    </Text>
-                    <RatingBadge rating={s.rating} label={`${scoreText} · ${s.ratingLabel}`} />
-                    {/* Corrective-action affordance, gated on server authorization (canRespond). A viewer who
-                        CAN respond gets a TAPPABLE prompt (open card) / "Resolved" badge (closed card) that
-                        routes to the itemized response screen. A viewer who CANNOT respond sees the same
-                        status as read-only text with NO route — the responder endpoint would 403 them, so
-                        routing there would only produce a load error. Both tappable variants route to the
-                        response screen (read-only for a resolved card), not the detail view. */}
-                    {affordance === "open_tappable" ? (
-                      <Pressable
-                        accessibilityRole="button"
-                        accessibilityLabel="Document the corrective action"
-                        onPress={() => router.push({ pathname: "/(app)/scorecards/corrective-action/[id]", params: { id: s.id } })}
-                        style={({ pressed }) => [styles.correctivePrompt, pressed && { opacity: 0.75 }]}
-                      >
-                        <Ionicons name="alert-circle" size={16} color={theme.color.brandRed} />
-                        <Text style={styles.correctivePromptText}>Corrective action required</Text>
-                        <Text style={styles.correctiveChevron}>›</Text>
-                      </Pressable>
-                    ) : affordance === "open_status" ? (
-                      <View accessibilityRole="text" accessibilityLabel="Corrective action required" style={styles.correctiveStatus}>
-                        <Ionicons name="alert-circle" size={16} color={theme.color.brandRed} />
-                        <Text style={styles.correctivePromptText}>Corrective action required</Text>
-                      </View>
-                    ) : affordance === "closed_tappable" ? (
-                      <Pressable
-                        accessibilityRole="button"
-                        accessibilityLabel="Review the resolved corrective action"
-                        onPress={() => router.push({ pathname: "/(app)/scorecards/corrective-action/[id]", params: { id: s.id } })}
-                        style={({ pressed }) => [styles.correctiveResolved, pressed && { opacity: 0.75 }]}
-                      >
-                        <Ionicons name="checkmark-circle" size={14} color="#166534" />
-                        <Text style={styles.correctiveResolvedText}>Resolved</Text>
-                        <Text style={styles.correctiveResolvedChevron}>›</Text>
-                      </Pressable>
-                    ) : affordance === "closed_status" ? (
-                      <View accessibilityRole="text" accessibilityLabel="Corrective action resolved" style={styles.correctiveResolved}>
-                        <Ionicons name="checkmark-circle" size={14} color="#166534" />
-                        <Text style={styles.correctiveResolvedText}>Resolved</Text>
-                      </View>
-                    ) : null}
-                  </View>
-                </Pressable>
+                // The corrective controls are SIBLINGS of the row Pressable (not nested inside it): a nested
+                // Pressable's press still bubbles to the parent row's onPress on RN, so tapping "Corrective
+                // action required" would queue the responder route AND the parent's detail route → detail
+                // wins and the responder never shows. As siblings, only the tapped control's onPress fires.
+                <View key={s.id} style={styles.scorecardRowGroup}>
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel={`${isLeadership ? "Leadership scorecard" : "Scorecard"}, week of ${formatShortDate(s.weekOf)}, ${scoreText}, ${s.ratingLabel}${correctiveA11y}`}
+                    onPress={() => router.push({ pathname: "/(app)/scorecards/view/[id]", params: { id: s.id } })}
+                    style={({ pressed }) => [styles.reportRow, pressed && { opacity: 0.7 }]}
+                  >
+                    <View style={{ flex: 1, gap: 4 }}>
+                      <Text style={styles.reportTitle} numberOfLines={1}>
+                        {isLeadership ? "Leadership · " : ""}Week of {formatShortDate(s.weekOf)}
+                        {s.submittedByName ? ` · ${s.submittedByName}` : ""}
+                        {s.criticalDeficiencyCount > 0
+                          ? ` · ${s.criticalDeficiencyCount} critical ${s.criticalDeficiencyCount === 1 ? "deficiency" : "deficiencies"}`
+                          : ""}
+                      </Text>
+                      <RatingBadge rating={s.rating} label={`${scoreText} · ${s.ratingLabel}`} />
+                    </View>
+                  </Pressable>
+                  {/* Corrective-action affordance, gated on server authorization (canRespond). A viewer who
+                      CAN respond gets a TAPPABLE prompt (open card) / "Resolved" badge (closed card) that
+                      routes to the itemized response screen. A viewer who CANNOT respond sees the same
+                      status as read-only text with NO route — the responder endpoint would 403 them, so
+                      routing there would only produce a load error. Both tappable variants route to the
+                      response screen (read-only for a resolved card), not the detail view. Rendered as a
+                      SIBLING of the row Pressable above so a tap here can't bubble into the detail route. */}
+                  {affordance === "open_tappable" ? (
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel="Document the corrective action"
+                      onPress={() => router.push({ pathname: "/(app)/scorecards/corrective-action/[id]", params: { id: s.id } })}
+                      style={({ pressed }) => [styles.correctivePrompt, pressed && { opacity: 0.75 }]}
+                    >
+                      <Ionicons name="alert-circle" size={16} color={theme.color.brandRed} />
+                      <Text style={styles.correctivePromptText}>Corrective action required</Text>
+                      <Text style={styles.correctiveChevron}>›</Text>
+                    </Pressable>
+                  ) : affordance === "open_status" ? (
+                    <View accessibilityRole="text" accessibilityLabel="Corrective action required" style={styles.correctiveStatus}>
+                      <Ionicons name="alert-circle" size={16} color={theme.color.brandRed} />
+                      <Text style={styles.correctivePromptText}>Corrective action required</Text>
+                    </View>
+                  ) : affordance === "closed_tappable" ? (
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel="Review the resolved corrective action"
+                      onPress={() => router.push({ pathname: "/(app)/scorecards/corrective-action/[id]", params: { id: s.id } })}
+                      style={({ pressed }) => [styles.correctiveResolved, pressed && { opacity: 0.75 }]}
+                    >
+                      <Ionicons name="checkmark-circle" size={14} color="#166534" />
+                      <Text style={styles.correctiveResolvedText}>Resolved</Text>
+                      <Text style={styles.correctiveResolvedChevron}>›</Text>
+                    </Pressable>
+                  ) : affordance === "closed_status" ? (
+                    <View accessibilityRole="text" accessibilityLabel="Corrective action resolved" style={styles.correctiveResolved}>
+                      <Ionicons name="checkmark-circle" size={14} color="#166534" />
+                      <Text style={styles.correctiveResolvedText}>Resolved</Text>
+                    </View>
+                  ) : null}
+                </View>
               );
             })
           )}
@@ -469,6 +475,9 @@ const styles = StyleSheet.create({
     padding: theme.space.md,
   },
   reportTitle: { flex: 1, fontFamily: theme.font.medium, fontSize: 14, color: theme.color.textPrimary },
+  // Wraps the row Pressable + its corrective control as siblings. Column layout; the control's own
+  // marginTop supplies the gap below the row, so no container gap is needed here.
+  scorecardRowGroup: { flexDirection: "column" },
   correctivePrompt: {
     flexDirection: "row",
     alignItems: "center",

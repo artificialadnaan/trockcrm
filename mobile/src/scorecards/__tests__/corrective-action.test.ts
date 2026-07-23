@@ -299,7 +299,50 @@ describe("submitCorrectiveActionItem", () => {
         comment: "Corrected.",
       }),
     ).rejects.toThrow("Server error");
+    // No photos → nothing was confirmed → nothing to reclaim.
     expect(discardCorrectiveActionPhoto).not.toHaveBeenCalled();
+  });
+
+  // Finding 1 — a NON-409 submit failure (network / 5xx / timeout) must ALSO discard the just-confirmed
+  // fileIds before rethrowing, so a retry doesn't re-upload the same evidence and orphan duplicates on the
+  // deal. (Previously discard fired only on the 409 already-resolved path.)
+  it("with a non-409 response error AND uploaded photos: discards the confirmed fileIds, then rethrows", async () => {
+    (confirmCorrectiveActionUpload as jest.Mock)
+      .mockResolvedValueOnce({ fileId: "file-1" })
+      .mockResolvedValueOnce({ fileId: "file-2" });
+    (submitCorrectiveActionResponse as jest.Mock).mockRejectedValue(new ApiError("Server error", 500));
+
+    await expect(
+      submitCorrectiveActionItem(fetcher, {
+        scorecardId: "sc-1",
+        itemId: "item-1",
+        dealId: "deal-1",
+        photos: [photo("a"), photo("b")],
+        comment: "Corrected.",
+      }),
+    ).rejects.toThrow("Server error");
+
+    // Both confirmed-but-unattached ids are reclaimed BEFORE the error propagates.
+    expect(discardCorrectiveActionPhoto).toHaveBeenCalledTimes(2);
+    expect(discardCorrectiveActionPhoto).toHaveBeenCalledWith(fetcher, "sc-1", "file-1");
+    expect(discardCorrectiveActionPhoto).toHaveBeenCalledWith(fetcher, "sc-1", "file-2");
+  });
+
+  it("with a plain (non-ApiError) submit failure: still discards the confirmed fileIds, then rethrows", async () => {
+    (confirmCorrectiveActionUpload as jest.Mock).mockResolvedValueOnce({ fileId: "file-1" });
+    (submitCorrectiveActionResponse as jest.Mock).mockRejectedValue(new Error("network down"));
+
+    await expect(
+      submitCorrectiveActionItem(fetcher, {
+        scorecardId: "sc-1",
+        itemId: "item-1",
+        dealId: "deal-1",
+        photos: [photo("a")],
+        comment: "Corrected.",
+      }),
+    ).rejects.toThrow("network down");
+    expect(discardCorrectiveActionPhoto).toHaveBeenCalledTimes(1);
+    expect(discardCorrectiveActionPhoto).toHaveBeenCalledWith(fetcher, "sc-1", "file-1");
   });
 
   it("does NOT discard on a genuine success", async () => {

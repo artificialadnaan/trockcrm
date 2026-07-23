@@ -46,8 +46,10 @@ export default function CorrectiveActionScreen() {
   const qc = useQueryClient();
 
   const itemsQuery = useCorrectiveActions(id);
-  // The scorecard detail carries the dealId (upload target) + project name for the header context. The
-  // corrective-actions payload itself does not include the deal, so we read it here.
+  // The scorecard detail carries the project name (header context) + officeId, and the dealId used ONLY to
+  // invalidate the project's scorecards cache after a resolve. It is NOT required to submit — the response
+  // endpoints resolve the deal from the scorecard id server-side — so a slow/failed detail query never
+  // blocks Submit (see canRespond below).
   const scorecardQuery = useScorecard(id);
 
   const transcribeConfig = useQuery({
@@ -134,7 +136,12 @@ export default function CorrectiveActionScreen() {
                 dealId={dealId}
                 ownerKey={ownerKey}
                 voiceEnabled={voiceEnabled}
-                canRespond={Boolean(ownerKey) && Boolean(dealId)}
+                // Gate responses ONLY on the upload owner identity (user + office). ownerKey derives from the
+                // office (scorecard's, else the active office / tenant) — never from dealId — so it's ready
+                // even if the secondary scorecard-detail query is slow or failed. The corrective-action
+                // endpoints resolve the deal from the scorecard id server-side, so dealId is not needed to
+                // submit; gating on it would permanently disable Submit whenever that detail query lagged.
+                canRespond={Boolean(ownerKey)}
                 onResolved={() => {
                   if (user) {
                     void qc.invalidateQueries({ queryKey: qk.correctiveActions(user.id, id) });
@@ -207,13 +214,15 @@ function CorrectiveActionItemCard({
   const captionPhoto = state.photos.find((p) => p.key === captionKey) ?? null;
 
   async function onRemovePhoto(photo: CorrectiveResponsePhoto) {
-    // Cancel any queued/in-flight upload for this photo FIRST (a prior offline submit enqueued it under this
-    // clientUploadId). Awaiting removeQueuedUploadsAndWait guarantees a worker that already selected it can't
-    // still confirm — otherwise a later drain would upload evidence the user just pulled off the response.
-    // Only THEN delete the durable draft copy + drop it from state (same order for every removal path).
-    await removeQueuedUploadsAndWait(ownerKey, [photo.clientUploadId]).catch(() => undefined);
-    await deleteDraftPhotoFile(photo.uri);
+    // Drop it from submission state FIRST (synchronously) so a Submit tapped right after Remove can NEVER
+    // snapshot this photo — onSubmit reads state.photos, and the async cleanup below yields the event loop.
+    // Only then do the best-effort durable cleanup: cancel any queued/in-flight upload for this photo (a
+    // prior offline submit could have enqueued it under this clientUploadId) so a later drain can't confirm
+    // evidence the user just pulled off, then delete the durable draft copy. Both are best-effort — the photo
+    // is already gone from state, and orphaned queue/file cruft is reclaimed by the per-item dir teardown.
     dispatch({ type: "removePhoto", key: photo.key });
+    await removeQueuedUploadsAndWait(ownerKey, [photo.clientUploadId]).catch(() => undefined);
+    await deleteDraftPhotoFile(photo.uri).catch(() => undefined);
   }
 
   async function onCameraCapture(shot: CapturedShot, caption: string) {
@@ -375,7 +384,7 @@ function CorrectiveActionItemCard({
         />
       </View>
       {!canRespond ? (
-        <Text style={styles.metaSmall}>Preparing this project — pull to refresh if the response stays disabled.</Text>
+        <Text style={styles.metaSmall}>Preparing your session — pull to refresh if the response stays disabled.</Text>
       ) : null}
 
       {cameraOpen ? (
