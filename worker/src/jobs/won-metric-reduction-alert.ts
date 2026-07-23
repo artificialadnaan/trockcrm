@@ -507,7 +507,7 @@ export function buildWonMetricReductionEmail(input: {
   const changedFields = formatChangedFields(input.event.changedFields, names);
   const dealAmount = dealAmountFromSnapshot(input.event.newSnapshot, input.event.oldSnapshot);
   const locationText = formatDealLocation(input.dealLocation);
-  const repChangeText = formatRepChange(input.event.changedFields, names);
+  const repChangeText = formatRepChange(input.event.changedFields, names) ?? currentRepName(input.event, names);
   const summary = buildReductionSummary({
     event: input.event,
     names,
@@ -532,7 +532,7 @@ export function buildWonMetricReductionEmail(input: {
     figure,
     `Reason: ${reason}`,
     `Exact action: ${action}`,
-    dealName ? `Job: ${dealName}${dealNumber ? ` (${dealNumber})` : ""}` : null,
+    input.event.dealName ? `Job: ${input.event.dealName}${dealNumber ? ` (${dealNumber})` : ""}` : null,
     dealAmount != null ? `Amount: ${formatCurrency(dealAmount)}` : null,
     locationText ? `Location: ${locationText}` : null,
     repChangeText ? `Sales rep: ${repChangeText}` : null,
@@ -547,7 +547,7 @@ export function buildWonMetricReductionEmail(input: {
     ["Figure", figure] as [string, string],
     ["Reason", reason] as [string, string],
     ["Exact action", action] as [string, string],
-    ...(dealName ? ([["Job", dealNumber ? `${dealName} (${dealNumber})` : dealName]] as Array<[string, string]>) : []),
+    ...(input.event.dealName ? ([["Job", dealNumber ? `${input.event.dealName} (${dealNumber})` : input.event.dealName]] as Array<[string, string]>) : []),
     ...(dealAmount != null ? ([["Amount", formatCurrency(dealAmount)]] as Array<[string, string]>) : []),
     ...(locationText ? ([["Location", locationText]] as Array<[string, string]>) : []),
     ...(repChangeText ? ([["Sales rep", repChangeText]] as Array<[string, string]>) : []),
@@ -1112,8 +1112,24 @@ function snapshotBestValue(snapshot: unknown): number | null {
   return null;
 }
 
+// True when the snapshot actually carries value columns (even if they are 0), vs. an empty snapshot
+// (e.g. a deletion's `{}`) that carries none.
+function snapshotHasValueKeys(snapshot: unknown): boolean {
+  const s = parseJson(snapshot);
+  if (!isRecord(s)) return false;
+  return ["awardedAmount", "bidBoardTotalSales", "bidEstimate", "ddEstimate"].some((k) => s[k] != null);
+}
+
+// Effective Won value of a snapshot: the best positive candidate, or 0 when the snapshot IS populated
+// with value columns but every candidate is non-positive (a genuine reduce-to-zero), else null (no data).
+function effectiveSnapshotValue(snapshot: unknown): number | null {
+  const best = snapshotBestValue(snapshot);
+  if (best != null) return best;
+  return snapshotHasValueKeys(snapshot) ? 0 : null;
+}
+
 function dealAmountFromSnapshot(newSnapshot: unknown, oldSnapshot: unknown): number | null {
-  return snapshotBestValue(newSnapshot) ?? snapshotBestValue(oldSnapshot);
+  return effectiveSnapshotValue(newSnapshot) ?? effectiveSnapshotValue(oldSnapshot);
 }
 
 function formatDealLocation(loc?: { address: string | null; city: string | null; state: string | null } | null): string | null {
@@ -1141,6 +1157,27 @@ function formatRepChange(changedFields: unknown, names: Map<string, string>): st
   const est = repFromTo(changedFields, names, "estimator_user_id");
   if (est) parts.push(`Estimator: ${est.from} → ${est.to}`);
   return parts.length ? parts.join("; ") : null;
+}
+
+// The deal's current rep name (new snapshot, falling back to old) — used for the Sales-rep row on a
+// reduction that ISN'T a reassignment (no assigned_rep_id diff), so the row still names the owner.
+function currentRepName(event: WonMetricReductionEmailEvent, names: Map<string, string>): string | null {
+  for (const snap of [event.newSnapshot, event.oldSnapshot]) {
+    const s = parseJson(snap);
+    if (isRecord(s)) {
+      const name = resolveUserName(names, s.assignedRepId);
+      if (name) return name;
+    }
+  }
+  return null;
+}
+
+// A value column changed in the SAME event. Within a won_reassigned event this is the only way the
+// canonical company Won total also moved (stage/hold/active changes would pick a different reason).
+function changedFieldsHasValueChange(changedFields: unknown): boolean {
+  const parsed = parseJson(changedFields);
+  if (!isRecord(parsed)) return false;
+  return ["awarded_amount", "bid_board_total_sales", "bid_estimate", "dd_estimate"].some((k) => k in parsed);
 }
 
 function auditActorName(auditReference: unknown): string | null {
@@ -1178,7 +1215,14 @@ function buildReductionSummary(input: {
   switch (event.reasonCode) {
     case "won_reassigned": {
       const fromTo = rep ? ` from ${rep.from} → ${rep.to}` : "";
-      const moved = rep ? ` The Won credit moved to ${rep.to}; company Won is unchanged.` : "";
+      // Only a value change in the same event can move the canonical company Won on a reassignment;
+      // otherwise the credit merely moved rep-to-rep (company total unchanged).
+      const valueAlsoChanged = changedFieldsHasValueChange(event.changedFields);
+      const moved = rep
+        ? valueAlsoChanged
+          ? ` The Won credit moved to ${rep.to}.`
+          : ` The Won credit moved to ${rep.to}; company Won is unchanged.`
+        : "";
       return `Won deal ${name}${idSuffix} was reassigned${fromTo}${by}.${moved}`;
     }
     case "won_estimator_reassigned": {
@@ -1187,10 +1231,10 @@ function buildReductionSummary(input: {
       return `The estimator on Won deal ${name}${idSuffix} was reassigned${fromTo}${by}.`;
     }
     case "won_value_reduced": {
-      // Report the EFFECTIVE Won-value transition (positive-gated best value old->new), not the raw
-      // changed field: awarded $100 -> $0 with an unchanged $80 bid is a $100 -> $80 change, not $100 -> $0.
-      const oldVal = snapshotBestValue(event.oldSnapshot);
-      const newVal = snapshotBestValue(event.newSnapshot);
+      // Report the EFFECTIVE Won-value transition old->new, not the raw changed field: awarded $100 -> $0
+      // with an unchanged $80 bid is $100 -> $80; a full clear to $0 reads $100 -> $0 (not "no data").
+      const oldVal = effectiveSnapshotValue(event.oldSnapshot);
+      const newVal = effectiveSnapshotValue(event.newSnapshot);
       const detail = oldVal != null && newVal != null ? ` from ${formatCurrency(oldVal)} to ${formatCurrency(newVal)}` : "";
       return `The Won value of ${name}${idSuffix} was lowered${detail}${by}.`;
     }

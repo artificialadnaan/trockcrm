@@ -323,6 +323,53 @@ describe("buildWonMetricReductionEmail — value/summary edge cases", () => {
     });
     expect(email.html).toContain("definition change");
     expect(email.html).not.toContain("This deal");
+    expect(email.text).not.toContain("Job:"); // no fictitious "Job: Deal" row (R2-1)
+  });
+
+  it("shows the current rep on a non-reassignment reduction via the snapshot", () => {
+    const email = buildWonMetricReductionEmail({
+      event: {
+        ...REASSIGN_EVENT,
+        reasonCode: "placed_on_hold",
+        actionLabel: "Deal placed on hold",
+        changedFields: { on_hold: { from: false, to: true } },
+        newSnapshot: { awardedAmount: 50000, assignedRepId: REP_TO },
+        oldSnapshot: { awardedAmount: 50000, assignedRepId: REP_TO },
+      } as never,
+      impact: REASSIGN_IMPACT,
+      frontendUrl: "https://trockcrm.com",
+      userNames: REASSIGN_NAMES,
+    });
+    expect(email.text).toContain("Sales rep: Caleb Stone"); // R2-2: current rep, no reassignment diff
+  });
+
+  it("does not claim company Won is unchanged when a reassignment also changed the value", () => {
+    const email = buildWonMetricReductionEmail({
+      event: {
+        ...REASSIGN_EVENT,
+        changedFields: { assigned_rep_id: { from: REP_FROM, to: REP_TO }, awarded_amount: { from: 100000, to: 60000 } },
+        newSnapshot: { awardedAmount: 60000, assignedRepId: REP_TO },
+        oldSnapshot: { awardedAmount: 100000, assignedRepId: REP_FROM },
+      } as never,
+      impact: REASSIGN_IMPACT,
+      frontendUrl: "https://trockcrm.com",
+      userNames: REASSIGN_NAMES,
+    });
+    expect(email.html).toContain("reassigned");
+    expect(email.html).not.toContain("company Won is unchanged"); // R2-3: compound edit
+  });
+
+  it("represents a fully-cleared value as $0 instead of the old amount", () => {
+    const email = build({
+      ...REASSIGN_EVENT,
+      reasonCode: "won_value_reduced",
+      actionLabel: "Won value changed",
+      changedFields: { awarded_amount: { from: 100000, to: 0 } },
+      newSnapshot: { awardedAmount: 0 },
+      oldSnapshot: { awardedAmount: 100000 },
+    });
+    expect(email.text).toContain("Amount: $0.00"); // R2-4: populated all-zero snapshot -> $0
+    expect(email.text).toContain("was lowered from $100,000.00 to $0.00");
   });
 });
 
