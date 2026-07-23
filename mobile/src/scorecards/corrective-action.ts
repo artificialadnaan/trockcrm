@@ -59,6 +59,22 @@ export function emptyCorrectiveResponse(): CorrectiveResponseState {
   return { comment: "", photos: [] };
 }
 
+/**
+ * Decide whether an in-flight submit's OWN settle path must reclaim the synthetic per-item draft photo dir.
+ *
+ * The screen's unmount-cleanup effect deliberately SKIPS deleting the dir while a submit is in flight (so it
+ * never races the success path's delete). But if the user backs out — or force-quits — while the request is
+ * in flight, the component unmounts with submitting=true and the cleanup is skipped; when that request then
+ * FAILS (or is any non-success terminal state), the component is already unmounted, so its state-setting
+ * branches are no-ops and nothing reclaims the durable full-size photo copies → they leak in app document
+ * storage. This makes the settle path itself reclaim the dir in exactly that case: the screen is no longer
+ * mounted AND the submit did not succeed. When still mounted, the mounted screen owns cleanup (deleting here
+ * could race a still-referenced photo); a SUCCEEDED submit already deleted the dir, so never double-delete.
+ */
+export function shouldReclaimDraftDirOnSettle(args: { mounted: boolean; submittedOk: boolean }): boolean {
+  return !args.mounted && !args.submittedOk;
+}
+
 export type CorrectiveResponseAction =
   | { type: "addPhoto"; photo: CorrectiveResponsePhoto }
   | { type: "removePhoto"; key: string }

@@ -15,6 +15,7 @@ import type { CapturedShot } from "../../../../src/capture/CameraCapture";
 import {
   correctiveResponseReducer,
   emptyCorrectiveResponse,
+  shouldReclaimDraftDirOnSettle,
   submitCorrectiveActionItem,
   type CorrectiveResponsePhoto,
 } from "../../../../src/scorecards/corrective-action";
@@ -207,7 +208,9 @@ function CorrectiveActionItemCard({
   // Also carry ownerKey/draftId in the ref so the empty-dep cleanup below reads the CURRENT values (not a
   // stale mount-time snapshot) and never re-fires on a prop change. ownerKey is stable this session (parent
   // locks it to session-stable values), but reading it from the ref keeps the teardown correct regardless.
-  const cleanupGuardRef = useRef({ submitting: false, submittedOk: false, ownerKey, draftId });
+  // `mounted` lets the in-flight submit's OWN settle path reclaim the dir when the user backed out / the app
+  // was killed mid-submit and the submit then FAILED (unmount-cleanup skipped it because submitting was true).
+  const cleanupGuardRef = useRef({ submitting: false, submittedOk: false, mounted: true, ownerKey, draftId });
   cleanupGuardRef.current.submitting = submitting;
   cleanupGuardRef.current.ownerKey = ownerKey;
   cleanupGuardRef.current.draftId = draftId;
@@ -217,6 +220,9 @@ function CorrectiveActionItemCard({
     // photos still referenced in reducer state. Empty deps + a ref read guarantees it fires solely on unmount.
     return () => {
       const g = cleanupGuardRef.current;
+      // Mark unmounted FIRST so an in-flight submit that settles after this can detect the screen is gone and
+      // reclaim the dir itself (this teardown skips the delete while submitting to avoid racing the success path).
+      g.mounted = false;
       if (g.submitting || g.submittedOk) return;
       void deleteDraftPhotoDir(g.ownerKey, g.draftId);
     };
@@ -302,6 +308,18 @@ function CorrectiveActionItemCard({
     }
     setSubmitting(true);
     setNotice(null);
+    // Any NON-success settle path (pending/failed/already-resolved/thrown) must reclaim the synthetic per-item
+    // copy dir IF the screen has since unmounted — the user backed out (or the app was killed) while this
+    // request was in flight, so the unmount-cleanup effect skipped the delete (submitting was true) and its
+    // state setters below are no-ops. Without this the full-size durable copies leak in document storage
+    // indefinitely. While still mounted the setters + (for already_resolved) the resolved-card unmount handle
+    // cleanup; on genuine success the dir is already deleted (submittedOk) so this never double-deletes.
+    const reclaimIfAbandoned = () => {
+      const g = cleanupGuardRef.current;
+      if (shouldReclaimDraftDirOnSettle({ mounted: g.mounted, submittedOk: g.submittedOk })) {
+        void deleteDraftPhotoDir(g.ownerKey, g.draftId);
+      }
+    };
     try {
       const result = await submitCorrectiveActionItem(fetcher, {
         scorecardId,
@@ -313,19 +331,23 @@ function CorrectiveActionItemCard({
       if (result.status === "photos_pending") {
         setNotice({ tone: "error", text: `${result.remaining} photo${result.remaining === 1 ? "" : "s"} still uploading — they'll keep retrying. Try again shortly.` });
         setSubmitting(false);
+        reclaimIfAbandoned();
         return;
       }
       if (result.status === "photos_failed") {
         setNotice({ tone: "error", text: `${result.failed} photo${result.failed === 1 ? "" : "s"} couldn't upload after several tries. Remove and re-add ${result.failed === 1 ? "it" : "them"}, then submit.` });
         setSubmitting(false);
+        reclaimIfAbandoned();
         return;
       }
       if (result.status === "already_resolved") {
         // A concurrent responder resolved this item first — our uploads were discarded and did NOT attach.
         // Do NOT claim this as the user's submission: refresh so the parent swaps in the read-only resolved
         // card (whose unmount reclaims the synthetic draft dir), inform the user, and leave submittedOk unset.
+        // If the screen already unmounted mid-submit, that resolved-card swap never happens, so reclaim here.
         setNotice({ tone: "error", text: "This item was just resolved by someone else. Showing their response — your comment and photos were not submitted." });
         setSubmitting(false);
+        reclaimIfAbandoned();
         onResolved();
         return;
       }
@@ -341,6 +363,9 @@ function CorrectiveActionItemCard({
         text: error instanceof Error ? error.message : "Couldn't submit this response. Please try again.",
       });
       setSubmitting(false);
+      // Thrown mid-flight after an unmount → this is the leak the P2 finding calls out (a failed in-flight
+      // submit the unmount-cleanup deliberately skipped). Reclaim the abandoned dir.
+      reclaimIfAbandoned();
     }
   }
 

@@ -46,6 +46,7 @@ jest.mock("../../api/endpoints", () => ({
 import {
   correctiveResponseReducer,
   emptyCorrectiveResponse,
+  shouldReclaimDraftDirOnSettle,
   submitCorrectiveActionItem,
   type CorrectiveResponsePhoto,
 } from "../corrective-action";
@@ -84,6 +85,28 @@ describe("correctiveResponseReducer", () => {
     state = correctiveResponseReducer(state, { type: "addPhoto", photo: photo("a", { caption: "One" }) });
     state = correctiveResponseReducer(state, { type: "appendPhotoCaption", key: "a", text: "two" });
     expect(state.photos.find((p) => p.key === "a")?.caption).toBe("One two");
+  });
+});
+
+describe("shouldReclaimDraftDirOnSettle", () => {
+  // The synthetic per-item copy dir must be reclaimed by the in-flight submit's OWN settle path when the
+  // screen has already unmounted mid-submit (the unmount-cleanup effect skips deleting while submitting=true,
+  // so a later-failing in-flight submit is the only thing left to reclaim the durable photo copies).
+  it("reclaims when the screen unmounted mid-submit and the submit did NOT succeed", () => {
+    // A failed / abandoned in-flight submit after the screen unmounted → the leak the P2 finding describes.
+    expect(shouldReclaimDraftDirOnSettle({ mounted: false, submittedOk: false })).toBe(true);
+  });
+
+  it("does NOT reclaim while the screen is still mounted (the mounted screen owns cleanup)", () => {
+    // Still mounted: the branch's own setState + (for already_resolved) the resolved-card unmount reclaim it,
+    // and deleting here could race a delete-out-from-under a still-referenced photo.
+    expect(shouldReclaimDraftDirOnSettle({ mounted: true, submittedOk: false })).toBe(false);
+  });
+
+  it("does NOT reclaim a submit that SUCCEEDED (the success path already deleted the dir)", () => {
+    expect(shouldReclaimDraftDirOnSettle({ mounted: false, submittedOk: true })).toBe(false);
+    // Even the impossible mounted+ok combo must never double-delete.
+    expect(shouldReclaimDraftDirOnSettle({ mounted: true, submittedOk: true })).toBe(false);
   });
 });
 
