@@ -14,6 +14,7 @@ import {
 } from "@/hooks/use-search";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { formatCurrencyCompact } from "@/lib/deal-utils";
 
 const ENTITY_ICONS = { deal: Building2, company: Building2, contact: User, lead: Target, property: MapPin, file: FileText } as const;
 const ENTITY_COLORS = {
@@ -51,13 +52,20 @@ function ResultCard({ result }: { result: SearchResult }) {
       <Icon className="h-5 w-5 text-gray-400 flex-shrink-0" />
       <div className="flex-1 min-w-0">
         <div className="font-medium text-gray-900 truncate">{result.primaryLabel}</div>
-        {result.secondaryLabel && (
-          <div className="text-sm text-gray-500 truncate">
-            {result.secondaryLabel}
-            {result.tertiaryLabel && ` \u00B7 ${result.tertiaryLabel}`}
-          </div>
-        )}
+        {(() => {
+          // Deal-only assignedRepName appended to the number/location meta line; falsy parts drop
+          // out (no dangling separator), and non-deal results are unchanged.
+          const meta = [result.secondaryLabel, result.tertiaryLabel, result.assignedRepName].filter(Boolean);
+          return meta.length > 0 ? (
+            <div className="text-sm text-gray-500 truncate">{meta.join(" \u00B7 ")}</div>
+          ) : null;
+        })()}
       </div>
+      {result.dealValue != null && result.dealValue !== "" ? (
+        <span className="text-sm font-medium text-gray-700 flex-shrink-0 tabular-nums">
+          {formatCurrencyCompact(result.dealValue)}
+        </span>
+      ) : null}
       {result.status && STATUS_BADGES[result.status] ? (
         <Badge className={`text-xs ${STATUS_BADGES[result.status].className}`}>
           {STATUS_BADGES[result.status].label}
