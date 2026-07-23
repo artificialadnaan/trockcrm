@@ -351,7 +351,14 @@ router.patch("/:id/owner", async (req, res, next) => {
 router.delete("/:id", requireRole("admin", "director"), async (req, res, next) => {
   try {
     const contactId = req.params.id as string;
-    const contact = await deleteContact(req.tenantDb!, contactId, req.user!.role);
+    // Thread the office (id + `office_<slug>`) so archiving a super/PM contact can restart each affected deal's
+    // open corrective-action notification cycle (finding D). Same shape the deal team routes thread; undefined
+    // when either piece is missing → the restart is skipped (best-effort, the token revoke still runs).
+    const teamOffice =
+      req.officeSlug && req.user!.activeOfficeId
+        ? { id: req.user!.activeOfficeId, slug: req.officeSlug }
+        : undefined;
+    const contact = await deleteContact(req.tenantDb!, contactId, req.user!.role, teamOffice);
     if (contact) {
       await writeSoftDeleteAuditLog(req.tenantDb!, {
         actorUserId: req.user!.id,

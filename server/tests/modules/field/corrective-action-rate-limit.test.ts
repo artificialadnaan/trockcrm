@@ -15,13 +15,15 @@ import {
 } from "@trock-crm/shared/schema";
 import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
 
-// Finding #5: the PUBLIC corrective-action token routes (reachable with only a ?token) are mounted under
-// /api/field, which has NO apiLimiter, and their authorize step fans the arbitrary scorecard UUID across every
-// active office schema (resolveWriteOffice). An unauthenticated flood carrying any nonempty token is a
-// cross-office-scan DoS amplifier. The routes now carry an IP-keyed public limiter, applied BEFORE the
-// authorize/scan, that skips the (no-token) session path. This file proves: (a) a valid token request still
-// succeeds, and (b) a burst of token requests from one IP is eventually capped (429). We spy on
-// resolveWriteOffice to prove the scan is NOT reached once the limiter fires.
+// Finding #5 / round-11 A: the PUBLIC corrective-action token routes (reachable with only a ?token) are mounted
+// under /api/field, which has NO apiLimiter, and their authorize step fans the arbitrary scorecard UUID across
+// every active office schema (resolveWriteOffice). A forged ?token only has to pass the 43-char base64url SHAPE
+// gate to reach that scan (verification runs AFTER), so an attacker ROTATING the token is a cross-office-scan
+// DoS amplifier. The public limiter is keyed by IP ONLY (a shared per-IP ceiling token rotation cannot escape)
+// and caps EVERY request to these routes (tokenless included). This file proves: (a) a single valid token
+// request still succeeds; (b) one legit full 50-photo response burst is NOT capped; (c) a token-ROTATION flood
+// from one IP IS capped (429) — rotation no longer multiplies the budget; and (d) the 429 short-circuits BEFORE
+// resolveWriteOffice. We spy on resolveWriteOffice to prove the scan is NOT reached once the limiter fires.
 
 const DEAL = "11111111-1111-1111-1111-111111111111";
 const USER = "33333333-3333-3333-3333-333333333333";
@@ -64,6 +66,16 @@ const { registerCorrectiveActionRoutes } = await import(
 const { mintCorrectiveActionToken } = await import(
   "../../../src/modules/field/corrective-action-tokens.js"
 );
+// The public limiter is a module-level singleton with an in-memory store keyed by IP ONLY (finding A), so its
+// count now accumulates across tests in this file (they share one test-harness IP). Reset the limiter's known
+// IP keys before each test so per-test budgets are isolated. `resetKey` is a no-op for keys that don't exist.
+const { correctiveActionPublicLimiter } = await import("../../../src/middleware/rate-limit.js");
+const LIMITER_IP_KEYS = ["::ffff:127.0.0.1", "127.0.0.1", "::1", "::ffff:7f00:1", "unknown"];
+function resetLimiter() {
+  for (const key of LIMITER_IP_KEYS) {
+    (correctiveActionPublicLimiter as unknown as { resetKey?: (k: string) => void }).resetKey?.(key);
+  }
+}
 
 function makeApp() {
   const app = express();
@@ -113,6 +125,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   resolveWriteOfficeSpy.mockClear();
+  resetLimiter();
   await tdb.execute(sql`DELETE FROM scorecard_corrective_action_tokens`);
   await tdb.execute(sql`DELETE FROM scorecard_corrective_actions`);
   await tdb.execute(sql`DELETE FROM field_scorecards`);
@@ -158,9 +171,9 @@ describe("public corrective-action route rate limiting (finding 5)", () => {
 
   it("a FULL 50-photo response-sized burst from ONE legit token is NOT 429'd (finding 3)", async () => {
     // A maximum supported response = 50 photos → 1 GET items + 50 presign + 50 confirm + 1 POST response = 102
-    // requests within a minute. The cap (110) is above that, and the bucket is keyed by IP+token, so a single
-    // legit responder working through a full max-size response must never be throttled. We approximate the burst
-    // with 102 GETs on THIS token's key (the limiter counts every route hit identically); none may 429.
+    // requests within a minute. The cap (220) is well above that, so a single legit responder working through a
+    // full max-size response must never be throttled. We approximate the burst with 102 GETs on this IP (the
+    // limiter counts every route hit identically); none may 429.
     const rawToken = await mintToken();
     const path = `/scorecards/${scorecardId}/corrective-actions?token=${encodeURIComponent(rawToken)}`;
     for (let i = 0; i < 102; i++) {
@@ -169,25 +182,39 @@ describe("public corrective-action route rate limiting (finding 5)", () => {
     }
   });
 
-  it("a distinct legit token behind the SAME IP has its OWN bucket (not throttled by another responder's burst)", async () => {
-    // Keyed by IP+token: two responders behind one shared office IP each get a separate allowance. The burst
-    // above exhausted MOST of one token's budget; a request on a BRAND-NEW token (same IP) still authorizes.
-    const otherToken = await mintToken();
-    const res = await request(app).get(
-      `/scorecards/${scorecardId}/corrective-actions?token=${encodeURIComponent(otherToken)}`,
-    );
-    expect(res.status).toBe(200);
-    expect(res.body.items).toHaveLength(1);
+  it("a TOKEN-ROTATION flood from one IP is CAPPED (rotation cannot multiply the budget) — finding A", async () => {
+    // The whole point of round-11 finding A: an attacker who VARIES ?token on every request must NOT get a fresh
+    // bucket per token. With IP-only keying every rotated token shares ONE per-IP ceiling. Each request carries a
+    // DISTINCT freshly-minted token (all valid-shape), yet the flood is still eventually 429'd — proving rotation
+    // no longer resets the budget. Under the OLD IP+token key this loop would never 429 (each token = new bucket).
+    let saw429 = false;
+    let scanCallsAt429 = -1;
+    for (let i = 0; i < 260; i++) {
+      const rotatedToken = await mintToken(); // a brand-new, valid-shape token every iteration
+      resolveWriteOfficeSpy.mockClear();
+      const res = await request(app).get(
+        `/scorecards/${scorecardId}/corrective-actions?token=${encodeURIComponent(rotatedToken)}`,
+      );
+      if (res.status === 429) {
+        saw429 = true;
+        scanCallsAt429 = resolveWriteOfficeSpy.mock.calls.length;
+        break;
+      }
+    }
+    expect(saw429).toBe(true);
+    // The 429 fired from the limiter middleware, ahead of authorizeCorrectiveAction → resolveWriteOffice: the
+    // cross-office scan is short-circuited even though every request carried a distinct, valid-shape token.
+    expect(scanCallsAt429).toBe(0);
   });
 
   it("an ABUSIVE over-cap flood on one bucket is eventually capped (429) BEFORE the cross-office scan", async () => {
     const rawToken = await mintToken();
     const path = `/scorecards/${scorecardId}/corrective-actions?token=${encodeURIComponent(rawToken)}`;
-    // Fire well past the 110/min cap on a SINGLE bucket (same IP+token). We only assert that SOME request 429s
-    // within the flood and that the 429 short-circuited BEFORE resolveWriteOffice ran (the amplifier is capped).
+    // Fire well past the 220/min per-IP cap. We only assert that SOME request 429s within the flood and that the
+    // 429 short-circuited BEFORE resolveWriteOffice ran (the amplifier is capped).
     let saw429 = false;
     let scanCallsAt429 = -1;
-    for (let i = 0; i < 160; i++) {
+    for (let i = 0; i < 300; i++) {
       resolveWriteOfficeSpy.mockClear();
       const res = await request(app).get(path);
       if (res.status === 429) {
@@ -201,11 +228,14 @@ describe("public corrective-action route rate limiting (finding 5)", () => {
     expect(scanCallsAt429).toBe(0);
   });
 
-  it("does NOT rate-limit the (no-token) session path — it is skipped by the limiter", async () => {
-    // The session path carries no ?token, so the limiter's skip() bypasses it entirely; even after the flood
-    // above exhausted a token bucket for this IP, a session request still authorizes normally.
+  it("also caps the TOKENLESS path (the old skip is removed) but leaves normal single use working — finding A", async () => {
+    // The tokenless request still reaches these public routes, so it must be counted too (no skip). On a FRESH
+    // IP bucket a single tokenless GET authorizes normally; only a flood on that IP would 429. We assert normal
+    // single use works and that the limiter attaches its standard headers (proving it ran, not skipped).
     const res = await request(app).get(`/scorecards/${scorecardId}/corrective-actions`);
     expect(res.status).toBe(200);
     expect(res.body.items).toHaveLength(1);
+    // The limiter ran on this tokenless request (standardHeaders => RateLimit-* present) rather than skipping it.
+    expect(res.headers["ratelimit-limit"] ?? res.headers["ratelimit"]).toBeDefined();
   });
 });

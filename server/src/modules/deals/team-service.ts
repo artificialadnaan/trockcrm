@@ -111,6 +111,11 @@ export async function addTeamMember(
     if (!memberName) {
       throw new AppError(400, "A name is required for an email-only member.");
     }
+    // Dedup active email-only assignments (finding E): a partial unique index
+    // (deal_team_members_deal_email_role_uidx, migration 0196) forbids two ACTIVE email-only rows for the same
+    // (deal_id, lower(member_email), role). onConflictDoNothing makes a RETRIED add / the same email+role entered
+    // twice a no-op at the storage layer instead of a second active row. The other two identity indexes don't
+    // apply here (user_id AND contact_id are NULL), so a bare onConflictDoNothing only swallows THIS collision.
     const emailResult = await tenantDb
       .insert(dealTeamMembers)
       .values({
@@ -123,7 +128,30 @@ export async function addTeamMember(
         assignedBy: input.assignedBy ?? null,
         notes: input.notes ?? null,
       })
+      .onConflictDoNothing()
       .returning();
+
+    // A conflict (0 rows returned) means an identical active email-only assignment already exists — a duplicate
+    // add. Return that existing row and DO NOT restart the notification cycle (nothing changed; a no-op dup must
+    // not re-notify or reset any open card's sent stamp). Only a genuinely NEW row restarts the cycle.
+    if (emailResult.length === 0) {
+      const [existing] = await tenantDb
+        .select()
+        .from(dealTeamMembers)
+        .where(
+          and(
+            eq(dealTeamMembers.dealId, input.dealId),
+            eq(dealTeamMembers.role, input.role as any),
+            eq(dealTeamMembers.isActive, true),
+            sql`${dealTeamMembers.userId} IS NULL`,
+            sql`${dealTeamMembers.contactId} IS NULL`,
+            sql`LOWER(${dealTeamMembers.memberEmail}) = LOWER(${memberEmail})`,
+          ),
+        )
+        .limit(1);
+      return existing;
+    }
+
     await restartCycleForNewResponder(tenantDb, input.dealId, input.role, office);
     return emailResult[0];
   }
@@ -198,6 +226,10 @@ export async function updateTeamMember(
 
   // Read the PRE-update row: its role (to detect a super/PM LEAVING that role) + identity (to resolve the
   // recipient email for token revocation). Also validates existence before the estimator guard / update.
+  // FOR UPDATE (finding B): lock the target row so concurrent PATCHes on the SAME member serialize. Both derive
+  // wasResponder/stillResponder from this pre-image; without the lock, two overlapping role transitions could
+  // interleave and each restart the notification cycle (or one could revoke a token the other just re-authorized)
+  // off a stale read. The lock is taken in the caller's tenant transaction (the PATCH route commits both).
   const [target] = await tenantDb
     .select({
       userId: dealTeamMembers.userId,
@@ -207,7 +239,8 @@ export async function updateTeamMember(
     })
     .from(dealTeamMembers)
     .where(and(eq(dealTeamMembers.id, memberId), eq(dealTeamMembers.dealId, dealId)))
-    .limit(1);
+    .limit(1)
+    .for("update");
   if (!target) throw new AppError(404, "Team member not found");
 
   // Guard the CHANGE-TO-estimator path too (not just add): a contact-backed member (contact_id set /
@@ -288,12 +321,25 @@ export async function removeTeamMember(
   dealId: string,
   office?: TeamMutationOffice,
 ) {
+  // Idempotent removal (finding C): restrict the deactivation to ACTIVE rows so a RETRIED delete flips 0 rows.
+  // Without the is_active = TRUE predicate a retry re-matches the already-inactive row and returns it, re-running
+  // the token revoke + notification-cycle restart below — which could delete a REPLACEMENT responder's fresh
+  // token, reset every open card's sent stamp, and re-notify even though nothing changed. With the predicate the
+  // retry updates 0 rows → we 404 → the side effects are gated on the update having actually flipped a row.
   const result = await tenantDb
     .update(dealTeamMembers)
     .set({ isActive: false, updatedAt: new Date() })
-    .where(and(eq(dealTeamMembers.id, memberId), eq(dealTeamMembers.dealId, dealId)))
+    .where(
+      and(
+        eq(dealTeamMembers.id, memberId),
+        eq(dealTeamMembers.dealId, dealId),
+        eq(dealTeamMembers.isActive, true),
+      ),
+    )
     .returning();
 
+  // 0 rows flipped ⇒ either no such member OR it was already inactive (a retry). Either way the side effects must
+  // NOT run — a repeated remove is a no-op, not a fresh revoke/re-notify.
   if (result.length === 0) throw new AppError(404, "Team member not found");
 
   // Revoke any outstanding corrective-action web tokens for this recipient on the deal's scorecards.

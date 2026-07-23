@@ -7,6 +7,8 @@ import { AppError } from "../../middleware/error-handler.js";
 import { updateBreaksBillingAddress } from "../../lib/billing-address.js";
 import { buildContactSearchCondition } from "../search/unified-search.js";
 import { revokeCorrectiveActionTokensForRemovedMember } from "../deals/team-service.js";
+import type { TeamMutationOffice } from "../deals/team-service.js";
+import { restartCorrectiveActionNotificationCycleForDeal } from "../field/corrective-actions-service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 const INVALID_EMAIL_MESSAGE = "Please enter a valid email address.";
@@ -791,8 +793,18 @@ export async function updateContact(
 /**
  * Soft-delete a contact.
  * Only directors/admins can delete.
+ *
+ * `office` (id + slug) is threaded from the DELETE route so archiving a super/PM contact can restart each
+ * affected deal's open corrective-action notification cycle (finding D). Optional so legacy/direct callers that
+ * never trigger the re-notify still type-check; when absent the re-notify is skipped (the token revoke still
+ * runs) — best-effort, matching the team-member removal path.
  */
-export async function deleteContact(tenantDb: TenantDb, contactId: string, userRole: string) {
+export async function deleteContact(
+  tenantDb: TenantDb,
+  contactId: string,
+  userRole: string,
+  office?: TeamMutationOffice,
+) {
   if (userRole === "rep") {
     throw new AppError(403, "Only directors and admins can delete contacts");
   }
@@ -848,12 +860,24 @@ export async function deleteContact(tenantDb: TenantDb, contactId: string, userR
   // deactivation above so the contact's own now-inactive rows don't preserve their token; the shared helper is
   // a no-op when another ACTIVE super/PM on the deal still resolves to the same email (a shared-mailbox case).
   // verifyCorrectiveActionToken checks only hash + expiry, so this delete is the only server-side gate.
+  //
+  // Then restart each affected deal's open corrective-action cycle (finding D): archiving a super/PM contact is
+  // a responder removal, exactly like removeTeamMember. If the archived contact was the NEWEST super/PM and an
+  // OLDER active assignment remains, resolution falls back to the older assignee — but their prior token was
+  // deleted when the newer row was added, and `corrective_action_email_sent_at` is still set, so without a
+  // restart the fallback assignee is stranded (authorized but with no working link and no fresh email). The
+  // restart clears the sent stamp + prior-cycle tokens and enqueues a fresh notification job per open card, so
+  // the worker re-sends the fallback (or any remaining) responder a working link. Best-effort: skipped when no
+  // office context was threaded (the token revoke above still ran). Runs in the caller's tenant transaction.
   for (const { dealId } of responderDeals) {
     await revokeCorrectiveActionTokensForRemovedMember(tenantDb, dealId, {
       userId: null,
       contactId,
       memberEmail: null,
     });
+    if (office) {
+      await restartCorrectiveActionNotificationCycleForDeal(tenantDb, { dealId, office });
+    }
   }
 
   return result[0];

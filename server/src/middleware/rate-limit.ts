@@ -40,34 +40,38 @@ export const publicDueDiligencePostLimiter = rateLimit({
   message: "Too many decision attempts, please try again later",
 });
 
+// Normalize an IP to a stable rate-limit key. express-rate-limit ships an `ipKeyGenerator` helper that IPv6-
+// normalizes to a /64 subnet, but it is NOT exported in the installed v7 build (verified: `undefined`), so we
+// fall back to the raw req.ip. IPv4 is used verbatim; IPv6 is lower-cased so casing variants share one bucket.
+function correctiveActionIpKey(req: Request): string {
+  const raw = req.ip ?? "unknown";
+  return raw.includes(":") ? raw.toLowerCase() : raw;
+}
+
 // Public corrective-action token routes (GET items / POST response / upload url·confirm·discard) are reachable
 // with only a ?token and are mounted under /api/field, which has NO apiLimiter. Their authorize step fans the
-// arbitrary scorecard UUID across EVERY active office schema (resolveWriteOffice), so an unauthenticated flood
-// carrying any nonempty token would generate one DB query per office per request — a cross-office-scan DoS
-// amplifier. Cap BEFORE the authorize/scan runs. Skips the (no-token) session path so authenticated/session
-// behavior is unchanged (it's already covered by the field-session middleware and isn't an amplifier).
+// arbitrary scorecard UUID across EVERY active office schema (resolveWriteOffice), so a flood carrying any
+// nonempty token would generate one DB query per office per request — a cross-office-scan DoS amplifier. Cap
+// BEFORE the authorize/scan runs, on EVERY request to these routes (tokenless included).
+//
+// Key by IP ONLY — deliberately NOT IP+token. A forged ?token only has to pass the 43-char base64url SHAPE gate
+// to reach resolveWriteOffice (verification happens AFTER the scan), so an attacker rotating the token would get
+// a FRESH bucket per token under an IP+token key and never trip the cap — defeating the exact amplification this
+// limiter exists to stop. An IP-only bucket is a shared ceiling that token rotation cannot escape. We also DROP
+// the old tokenless `skip`: authorizeCorrectiveAction calls resolveWriteOffice UNCONDITIONALLY (before the
+// token/session branch), so a TOKENLESS/session request is ALSO a cross-office-scan amplifier and must be capped
+// too — the earlier belief that only the token path amplifies was wrong.
 //
 // Sizing: ONE full supported response is 50 photos → 1 GET items + 50 presign (upload/url) + 50 confirm
-// (upload) + 1 POST response = 102 requests, all within a minute. A 60/min cap 429s partway through
-// (~photo 30). So set max well above one complete response (110) with headroom for a retry/refresh, while a
-// scanning flood — hundreds of GETs/min — still trips it. We also key by IP+token so two distinct LEGIT
-// responders behind ONE shared office IP (each with their own recipient-bound token) get SEPARATE buckets and
-// don't throttle each other; an anonymous scan varying the token can't grow its budget past the shared-IP
-// portion because a garbage/absent token collapses onto the IP-only bucket (the `unknown` token key).
+// (upload) + 1 POST response = 102 requests within a minute. Two legit responders behind ONE shared office NAT
+// IP now SHARE this bucket (the trade-off of IP-only keying), so size for a couple of concurrent full responses:
+// 2 × 102 = 204, rounded up to 220/min for retry/refresh headroom. That comfortably clears legitimate
+// concurrent use while a scanning flood — hundreds of GETs/min from one IP, whatever the token — still trips it.
+export const CORRECTIVE_ACTION_PUBLIC_LIMIT = 220; // ≈ two full 50-photo responses (204) + headroom, per IP.
 export const correctiveActionPublicLimiter = rateLimit({
   windowMs: 60 * 1000,
-  max: 110, // ≥ one full 50-photo response (102 requests) + headroom, per IP+token
-  keyGenerator: (req: Request) => {
-    const ip = req.ip ?? "unknown";
-    const token = typeof req.query.token === "string" && req.query.token.trim() ? req.query.token.trim() : "";
-    // IP+token: distinct legit responders (distinct tokens) behind a shared IP get separate buckets. A missing
-    // token collapses to the IP-only bucket, so a tokenless/garbage scan can't multiply its allowance.
-    return token ? `${ip}:${token}` : ip;
-  },
-  // Only limit the PUBLIC token path (a nonempty ?token, which reaches the cross-office scan unauthenticated).
-  // A session request (no token) is skipped so authenticated/session behavior is unchanged — it's already
-  // covered by the field-session middleware and is not a cross-office-scan amplifier.
-  skip: (req: Request) => !(typeof req.query.token === "string" && req.query.token.trim()),
+  max: CORRECTIVE_ACTION_PUBLIC_LIMIT,
+  keyGenerator: correctiveActionIpKey,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: { message: "Too many requests, please try again later" } },

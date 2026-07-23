@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
 import { sql } from "drizzle-orm";
@@ -553,5 +553,88 @@ describe("a responder ENTERING the team re-notifies the deal's open corrective-a
     // so the cycle is NOT restarted at all (the same person keeps their token/authorization). Exactly zero jobs.
     await updateTeamMember(tdb, member.id, DEAL, { role: "project_manager" }, OFFICE);
     expect(await correctiveJobCount()).toBe(0);
+  });
+});
+
+describe("updateTeamMember locks the target row FOR UPDATE before deriving the role transition (finding B)", () => {
+  it("issues a SELECT ... FROM deal_team_members ... FOR UPDATE on the pre-update read", async () => {
+    // Concurrent PATCHes on the SAME member must serialize before the wasResponder/stillResponder decision +
+    // notification-cycle restart. Assert the pre-update SELECT carries a FOR UPDATE row lock (mirrors the
+    // set-deal-estimator / confirm-upload FOR-UPDATE assertions). We capture the generated SQL off the PGlite
+    // connection so we see the drizzle query-builder's emitted lock clause.
+    const member = await addTeamMember(tdb, { dealId: DEAL, userId: USER, role: "superintendent" });
+
+    const seen: string[] = [];
+    const origQuery = pg.query.bind(pg);
+    const spy = vi.spyOn(pg, "query").mockImplementation(((q: any, ...rest: any[]) => {
+      if (typeof q === "string") seen.push(q);
+      return origQuery(q, ...rest);
+    }) as any);
+    try {
+      // A role change (super → project_manager) exercises the full pre-update read + transition path.
+      await updateTeamMember(tdb, member.id, DEAL, { role: "project_manager" });
+    } finally {
+      spy.mockRestore();
+    }
+
+    const lockIdx = seen.findIndex(
+      (t) => /from\s+"?deal_team_members"?/i.test(t) && /for update/i.test(t),
+    );
+    expect(lockIdx).toBeGreaterThanOrEqual(0); // the target team-member row was locked FOR UPDATE
+  });
+});
+
+describe("removeTeamMember side effects run exactly once — idempotent DELETE (finding C)", () => {
+  it("a retried removeTeamMember of the same member is a no-op: no extra token deletes, no extra enqueue", async () => {
+    await tdb.execute(sql`UPDATE field_scorecards SET corrective_action_email_sent_at = now() WHERE id = ${SCORECARD}`);
+    const member = await addTeamMember(tdb, {
+      dealId: DEAL,
+      role: "superintendent",
+      memberName: "Ext Super",
+      memberEmail: EXT_PM_EMAIL,
+    });
+    // A prior-cycle token that the FIRST removal revokes.
+    await mintCorrectiveActionToken(tdb, {
+      scorecardId: SCORECARD,
+      recipientEmail: EXT_PM_EMAIL,
+      role: "superintendent",
+      ttlDays: 30,
+    });
+
+    // First removal: flips the row inactive, revokes the token, restarts the cycle (one job).
+    const first = await removeTeamMember(tdb, member.id, DEAL, OFFICE);
+    expect(first.is_active ?? (first as any).isActive).toBe(false);
+    expect(await correctiveJobCount()).toBe(1);
+    const tokensAfterFirst = await tdb.execute(
+      sql`SELECT COUNT(*)::int AS c FROM scorecard_corrective_action_tokens WHERE scorecard_id = ${SCORECARD}`,
+    );
+    expect((tokensAfterFirst.rows[0] as { c: number }).c).toBe(0);
+
+    // Simulate a NEW responder replacing the removed one: mint a fresh token + re-stamp the card as sent, so we
+    // can prove a RETRIED delete does NOT clobber the replacement's token or reset the sent stamp.
+    await mintCorrectiveActionToken(tdb, {
+      scorecardId: SCORECARD,
+      recipientEmail: "replacement@example.com",
+      role: "superintendent",
+      ttlDays: 30,
+    });
+    await tdb.execute(sql`UPDATE field_scorecards SET corrective_action_email_sent_at = now() WHERE id = ${SCORECARD}`);
+
+    // Retried removal of the SAME (already-inactive) member: the deactivation UPDATE now matches is_active=true
+    // rows only → 0 rows flipped → the side effects (token revoke + cycle restart) must NOT run again.
+    await expect(removeTeamMember(tdb, member.id, DEAL, OFFICE)).rejects.toMatchObject({ statusCode: 404 });
+
+    // No SECOND enqueue (still exactly one job from the first removal).
+    expect(await correctiveJobCount()).toBe(1);
+    // The replacement's fresh token survives (a retried DELETE did not re-run the revoke).
+    const tokensAfterRetry = await tdb.execute(
+      sql`SELECT COUNT(*)::int AS c FROM scorecard_corrective_action_tokens WHERE scorecard_id = ${SCORECARD} AND recipient_email = 'replacement@example.com'`,
+    );
+    expect((tokensAfterRetry.rows[0] as { c: number }).c).toBe(1);
+    // The re-stamped sent_at is NOT reset (no second cycle restart).
+    const sentAt = await tdb.execute(
+      sql`SELECT corrective_action_email_sent_at AS s FROM field_scorecards WHERE id = ${SCORECARD}`,
+    );
+    expect((sentAt.rows[0] as { s: unknown }).s).not.toBeNull();
   });
 });

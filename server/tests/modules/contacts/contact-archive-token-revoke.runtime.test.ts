@@ -36,11 +36,19 @@ const OTHER_EMAIL = "other.contact@example.com";
 let pg: PGlite;
 let tdb: any;
 
+const OFFICE = { id: "00000000-0000-0000-0000-0000000000f1", slug: "test" };
+
 beforeAll(async () => {
   pg = new PGlite();
   await pg.exec(`
     CREATE TABLE public.users (id uuid PRIMARY KEY, display_name text, email text, avatar_url text, is_active boolean DEFAULT true);
     CREATE TABLE public.companies (id uuid PRIMARY KEY, name text);
+    CREATE TABLE public.job_queue (
+      id bigserial PRIMARY KEY, job_type varchar(100) NOT NULL, payload jsonb NOT NULL, office_id uuid,
+      status text NOT NULL DEFAULT 'pending', attempts int NOT NULL DEFAULT 0, max_attempts int NOT NULL DEFAULT 3,
+      last_error text, started_processing_at timestamptz, run_after timestamptz NOT NULL DEFAULT now(),
+      created_at timestamptz NOT NULL DEFAULT now(), completed_at timestamptz
+    );
   `);
   await pg.exec(
     tenantSchemaSql("public", [
@@ -62,7 +70,15 @@ afterAll(async () => {
   await pg?.close?.();
 });
 
+async function correctiveJobCount(): Promise<number> {
+  const res = await tdb.execute(sql`
+    SELECT COUNT(*)::int AS c FROM public.job_queue WHERE job_type = 'scorecard_corrective_action_email'
+  `);
+  return (res.rows[0] as { c: number }).c;
+}
+
 beforeEach(async () => {
+  await tdb.execute(sql`DELETE FROM public.job_queue`);
   await tdb.execute(sql`DELETE FROM scorecard_corrective_action_tokens`);
   await tdb.execute(sql`DELETE FROM deal_team_members`);
   await tdb.execute(sql`DELETE FROM field_scorecards`);
@@ -169,5 +185,75 @@ describe("deleteContact revokes an archived contact-backed responder's correctiv
     await deleteContact(tdb, PM_CONTACT, "director");
 
     expect(await verifyCorrectiveActionToken(tdb, rawToken)).not.toBeNull();
+  });
+});
+
+describe("archiving a super/PM contact restarts each affected deal's open corrective-action cycle (finding D)", () => {
+  it("clears sent_at + prior-cycle tokens and enqueues a fresh job per affected deal's open card", async () => {
+    // Archiving a super/PM contact is a responder removal. If an older active assignment remains, resolution
+    // falls back to it — but the fallback's prior token was deleted when the newer row was added and the sent
+    // stamp is still set, so without a restart the fallback is stranded. Assert the restart clears the stamp,
+    // drops prior-cycle tokens, and enqueues one fresh job for each affected deal's open card.
+    await tdb.execute(sql`UPDATE field_scorecards SET corrective_action_email_sent_at = now() WHERE id = ${SCORECARD_A}`);
+    await addTeamMember(tdb, { dealId: DEAL_A, contactId: PM_CONTACT, role: "project_manager" });
+    // A prior-cycle token that the restart must clear.
+    await mintCorrectiveActionToken(tdb, {
+      scorecardId: SCORECARD_A,
+      recipientEmail: PM_EMAIL,
+      role: "project_manager",
+      ttlDays: 30,
+    });
+    expect(await correctiveJobCount()).toBe(0);
+
+    await deleteContact(tdb, PM_CONTACT, "director", OFFICE);
+
+    // The open card's sent stamp is cleared, its tokens are gone, and exactly one fresh job was enqueued.
+    const sentAt = await tdb.execute(
+      sql`SELECT corrective_action_email_sent_at AS s FROM field_scorecards WHERE id = ${SCORECARD_A}`,
+    );
+    expect((sentAt.rows[0] as { s: unknown }).s).toBeNull();
+    const tokens = await tdb.execute(
+      sql`SELECT COUNT(*)::int AS c FROM scorecard_corrective_action_tokens WHERE scorecard_id = ${SCORECARD_A}`,
+    );
+    expect((tokens.rows[0] as { c: number }).c).toBe(0);
+    expect(await correctiveJobCount()).toBe(1);
+    const job = await tdb.execute(
+      sql`SELECT office_id, status, max_attempts, payload FROM public.job_queue WHERE job_type = 'scorecard_corrective_action_email' LIMIT 1`,
+    );
+    const jr = job.rows[0] as { office_id: string; status: string; max_attempts: number; payload: any };
+    expect(jr.office_id).toBe(OFFICE.id);
+    expect(jr.payload.tenantSchema).toBe(`office_${OFFICE.slug}`);
+    expect(jr.payload.scorecardId).toBe(SCORECARD_A);
+    expect(jr.payload.dealId).toBe(DEAL_A);
+  });
+
+  it("restarts across EVERY deal the contact was a super/PM on (multiple deals)", async () => {
+    await tdb.execute(sql`UPDATE field_scorecards SET corrective_action_email_sent_at = now() WHERE id IN (${SCORECARD_A}, ${SCORECARD_B})`);
+    await addTeamMember(tdb, { dealId: DEAL_A, contactId: PM_CONTACT, role: "project_manager" });
+    await addTeamMember(tdb, { dealId: DEAL_B, contactId: PM_CONTACT, role: "superintendent" });
+
+    await deleteContact(tdb, PM_CONTACT, "admin", OFFICE);
+
+    // One fresh job per affected deal's open card (two deals → two jobs).
+    expect(await correctiveJobCount()).toBe(2);
+    const perDeal = await tdb.execute(sql`
+      SELECT payload->>'scorecardId' AS sid FROM public.job_queue WHERE job_type = 'scorecard_corrective_action_email'
+    `);
+    const sids = (perDeal.rows as { sid: string }[]).map((r) => r.sid).sort();
+    expect(sids).toEqual([SCORECARD_A, SCORECARD_B].sort());
+  });
+
+  it("does NOT restart when NO office context was threaded (best-effort, skipped)", async () => {
+    await tdb.execute(sql`UPDATE field_scorecards SET corrective_action_email_sent_at = now() WHERE id = ${SCORECARD_A}`);
+    await addTeamMember(tdb, { dealId: DEAL_A, contactId: PM_CONTACT, role: "project_manager" });
+
+    // No office threaded → the restart is skipped (the token revoke still runs). No job, stamp untouched.
+    await deleteContact(tdb, PM_CONTACT, "director");
+
+    expect(await correctiveJobCount()).toBe(0);
+    const sentAt = await tdb.execute(
+      sql`SELECT corrective_action_email_sent_at AS s FROM field_scorecards WHERE id = ${SCORECARD_A}`,
+    );
+    expect((sentAt.rows[0] as { s: unknown }).s).not.toBeNull();
   });
 });
