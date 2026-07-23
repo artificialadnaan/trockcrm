@@ -229,6 +229,7 @@ export function registerCorrectiveActionRoutes(fieldRoutes: Router): void {
         assertValidUuid(id, "id");
         const uploadToken = typeof req.body?.uploadToken === "string" ? req.body.uploadToken : "";
         const objectKey = typeof req.body?.objectKey === "string" ? req.body.objectKey : "";
+        const caption = typeof req.body?.caption === "string" ? req.body.caption : null;
         if (!uploadToken || !objectKey) {
           throw new AppError(400, "uploadToken and objectKey are required.");
         }
@@ -242,6 +243,7 @@ export function registerCorrectiveActionRoutes(fieldRoutes: Router): void {
               sessionUserId: responder.userId,
               uploadToken,
               objectKey,
+              caption,
             }),
         );
         res.status(201).json(result);

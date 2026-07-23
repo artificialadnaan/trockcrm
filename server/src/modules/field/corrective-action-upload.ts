@@ -117,6 +117,12 @@ export interface ConfirmCorrectiveActionUploadInput {
   sessionUserId: string | null;
   uploadToken: string;
   objectKey: string;
+  /**
+   * Optional per-photo caption. The corrective-action read sources photo captions from files.description, so
+   * we persist it on the file at creation (in the scorecard's office) — otherwise a caption typed in the
+   * mobile PhotoCaptionEditor is silently lost after submit.
+   */
+  caption?: string | null;
 }
 
 /**
@@ -140,6 +146,12 @@ export async function confirmCorrectiveActionUpload(
   const { file } = await confirmUpload(db, uploaderId, {
     uploadToken: input.uploadToken,
   });
+  // confirmUpload builds the file from the pending-upload row (no description slot), so persist the caption
+  // onto files.description here — the corrective-action read sources photo captions from that column.
+  const caption = input.caption?.trim();
+  if (caption) {
+    await db.execute(sql`UPDATE files SET description = ${caption} WHERE id = ${file.id}`);
+  }
   return { fileId: file.id };
 }
 
