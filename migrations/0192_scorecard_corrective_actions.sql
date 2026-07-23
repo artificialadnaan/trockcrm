@@ -59,7 +59,7 @@ BEGIN
     EXECUTE format(
       'ALTER TABLE %I.field_scorecard_photos
          ADD COLUMN IF NOT EXISTS corrective_action_id uuid
-         REFERENCES %I.scorecard_corrective_actions(id) ON DELETE SET NULL',
+         REFERENCES %I.scorecard_corrective_actions(id) ON DELETE CASCADE',
       schema_name, schema_name
     );
   END LOOP;
@@ -91,5 +91,5 @@ CREATE INDEX IF NOT EXISTS scorecard_corrective_actions_open_idx
   ON office_dallas.scorecard_corrective_actions (scorecard_id) WHERE status = 'open';
 ALTER TABLE office_dallas.field_scorecard_photos
   ADD COLUMN IF NOT EXISTS corrective_action_id uuid
-  REFERENCES office_dallas.scorecard_corrective_actions(id) ON DELETE SET NULL;
+  REFERENCES office_dallas.scorecard_corrective_actions(id) ON DELETE CASCADE;
 -- TENANT_SCHEMA_END

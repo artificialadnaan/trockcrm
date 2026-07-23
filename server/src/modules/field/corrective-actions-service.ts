@@ -131,6 +131,61 @@ export async function resolveCorrectiveActionItemTx(
   return true;
 }
 
+/** The shape of an existing scorecard_corrective_actions row as read by the reconcile SELECT. */
+interface ExistingCorrectiveActionRow {
+  id: string;
+  itemType: string;
+  itemRef: string;
+  itemLabel: string;
+  status: string;
+}
+
+/**
+ * Ids of RESOLVED rows whose item is NO LONGER FLAGGED in the current edit — the parallel of the in-band
+ * "removed item ⇒ delete its resolved row too" cleanup, factored out so BOTH reconcile paths purge stale
+ * resolved history identically.
+ *
+ * Why the not-inBand path needs this: without it, a resolved row for a removed flag survives when the card
+ * leaves the band. If the SAME deficiency/action is re-added later and the card drops back in-band, that stale
+ * resolved row satisfies the membership check → NO open row is inserted → openCount stays 0 → the card stays
+ * closed and nobody is notified of the recurring deficiency (the reopen-recurrence bug). Purging the removed
+ * items' resolved rows here means a later re-add always inserts a fresh open row (reopening + re-notifying).
+ *
+ * Match keys mirror the in-band reconcile exactly: a critical_deficiency is matched by its ref (unique per
+ * card); action_items match by LABEL AND CARDINALITY (a multiset) — a still-flagged label keeps up to
+ * flaggedCount resolved rows, the SURPLUS resolved rows (and every resolved row for a label flagged zero
+ * times) are removed. A STILL-flagged item's resolved row is PRESERVED so it does not reopen if the card later
+ * drops back in-band (a resolved-but-still-flagged item must stay resolved history).
+ */
+function resolvedIdsForNoLongerFlaggedItems(
+  existing: readonly ExistingCorrectiveActionRow[],
+  flaggedDeficiencyRefs: ReadonlySet<string>,
+  flaggedActionCountByLabel: ReadonlyMap<string, number>,
+): string[] {
+  const removed: string[] = [];
+
+  // Deficiencies: a resolved row whose ref is no longer flagged is stale history.
+  for (const row of existing) {
+    if (row.itemType !== "critical_deficiency" || row.status !== "resolved") continue;
+    if (!flaggedDeficiencyRefs.has(row.itemRef)) removed.push(row.id);
+  }
+
+  // Action items: per label, keep up to flaggedCount resolved rows (still-flagged history), delete the surplus.
+  const resolvedActionByLabel = new Map<string, ExistingCorrectiveActionRow[]>();
+  for (const row of existing) {
+    if (row.itemType !== "action_item" || row.status !== "resolved") continue;
+    const bucket = resolvedActionByLabel.get(row.itemLabel) ?? [];
+    bucket.push(row);
+    resolvedActionByLabel.set(row.itemLabel, bucket);
+  }
+  for (const [label, bucket] of resolvedActionByLabel) {
+    const keep = flaggedActionCountByLabel.get(label) ?? 0;
+    for (let i = keep; i < bucket.length; i++) removed.push(bucket[i].id);
+  }
+
+  return removed;
+}
+
 export interface ReconcileCorrectiveActionsInput {
   scorecardId: string;
   dealId: string;
@@ -166,8 +221,12 @@ export interface ReconcileCorrectiveActionsInput {
  * items fresh at send time, so a second enqueue would double-send.
  *
  * NOT inBand (edit lifted the card above band / removed every flag): if currently corrective_action_open,
- * revert to `submitted` and DELETE the open items (now obsolete). A corrective_action_closed card is left
- * untouched — its resolved rows are history.
+ * revert to `submitted` and DELETE the open items (now obsolete). ALSO purge RESOLVED rows for items no longer
+ * flagged in this edit — the same removed-item cleanup the in-band path applies, so a later re-add of that
+ * flag reopens with a fresh open row instead of matching a stale resolved row (the reopen-recurrence bug). A
+ * STILL-flagged item's resolved row is preserved (it must not reopen if the card later drops back in-band);
+ * when ALL flags are removed, every resolved row goes. Note the same intended history trade-off as the in-band
+ * path: a removed item's resolved history is dropped so recurrence re-notifies.
  */
 export async function reconcileScorecardCorrectiveActions(
   tx: TenantDb,
@@ -203,10 +262,36 @@ export async function reconcileScorecardCorrectiveActions(
 
   if (!inBand) {
     // The edit lifted the card out of the band (or removed every flag). Drop still-open items (obsolete) and,
-    // if the card was open, walk it back to `submitted`. Resolved items + a closed card are left as history.
+    // if the card was open, walk it back to `submitted`.
+    //
+    // Also purge RESOLVED rows for items that are NO LONGER FLAGGED in this edit — the SAME "removed item ⇒
+    // delete its resolved row too" cleanup the in-band path applies. Without it, a resolved row for a removed
+    // flag survives; re-adding that flag later (card back in-band) would find the stale resolved row, insert
+    // NO open row, and silently keep the card closed with nobody notified (the reopen-recurrence bug). A
+    // STILL-flagged item's resolved row is PRESERVED (it must not reopen if the card drops back in-band). When
+    // ALL flags are removed → every resolved row is stale → all go. The "still flagged" set comes from THIS
+    // edit's raw flags (enumerated regardless of band, since `flagged` is empty in the not-inBand branch).
+    const stillFlagged = enumerateFlaggedItems({
+      actionItems: input.actionItems,
+      criticalDeficiencies: input.deficiencies,
+    });
+    const flaggedDeficiencyRefs = new Set(
+      stillFlagged.filter((f) => f.itemType === "critical_deficiency").map((f) => f.itemRef),
+    );
+    const flaggedActionCountByLabel = new Map<string, number>();
+    for (const f of stillFlagged) {
+      if (f.itemType !== "action_item") continue;
+      flaggedActionCountByLabel.set(f.itemLabel, (flaggedActionCountByLabel.get(f.itemLabel) ?? 0) + 1);
+    }
+    const staleResolvedIds = resolvedIdsForNoLongerFlaggedItems(
+      existing,
+      flaggedDeficiencyRefs,
+      flaggedActionCountByLabel,
+    );
     const openIds = existing.filter((row) => row.status === "open").map((row) => row.id);
-    if (openIds.length > 0) {
-      await tx.delete(scorecardCorrectiveActions).where(inArray(scorecardCorrectiveActions.id, openIds));
+    const idsToDelete = [...openIds, ...staleResolvedIds];
+    if (idsToDelete.length > 0) {
+      await tx.delete(scorecardCorrectiveActions).where(inArray(scorecardCorrectiveActions.id, idsToDelete));
     }
     if (input.currentStatus === "corrective_action_open") {
       await tx

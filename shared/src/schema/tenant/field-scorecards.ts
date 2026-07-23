@@ -97,7 +97,11 @@ export const fieldScorecardPhotos = pgTable(
     sectionKey: varchar("section_key", { length: 40 }),
     /** V2 critical-deficiency evidence is attached to the exact selected deficiency. */
     deficiencyKey: varchar("deficiency_key", { length: 40 }),
-    /** Set on corrective-action response photos (FK -> scorecard_corrective_actions); null for scorecard evidence. */
+    // Set on corrective-action RESPONSE photos (FK -> scorecard_corrective_actions ON DELETE CASCADE, owned by
+    // migration 0192); null for original scorecard evidence. Bare uuid here (no .references()) to keep the
+    // field-scorecards convention — the migration owns the FK. CASCADE (not SET NULL): when a corrective-action
+    // row is deleted (a removed flag's row is purged on edit), its RESPONSE-photo LINK rows go with it, so a
+    // null-corrective_action_id row is never left behind to be mis-read as original section evidence.
     correctiveActionId: uuid("corrective_action_id"),
     fileId: uuid("file_id").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),

@@ -6,9 +6,10 @@ import { requestUploadUrl, confirmUpload, deleteFile } from "../files/service.js
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
-// Every corrective-action upload's original_filename is minted by requestCorrectiveActionUploadUrl below as
-// `corrective-action-<timestamp>.<ext>`. discardCorrectiveActionUpload uses this prefix to prove a file was
-// created via THIS flow (and is therefore safe to reclaim) — a plain project photo/document never matches it.
+// Friendly original_filename for a corrective-action upload: `corrective-action-<timestamp>.<ext>`. This is a
+// DISPLAY name only — it is NOT used to prove ownership, because the generic upload API accepts a
+// caller-supplied originalFilename (so the prefix is forgeable). Discard eligibility is proven by the durable
+// scorecard_corrective_action_uploads ledger row written on confirm (see discardCorrectiveActionUpload).
 const CORRECTIVE_ACTION_FILENAME_PREFIX = "corrective-action-";
 
 // files.uploaded_by is NOT NULL WITH a real FK to public.users(id) in prod (migration 0001) — the drizzle
@@ -158,6 +159,16 @@ export async function confirmCorrectiveActionUpload(
     uploadToken: input.uploadToken,
     scorecardEditDealId: dealId,
   });
+  // Record DURABLE, unforgeable corrective-action ownership: one ledger row per file created via this flow.
+  // discardCorrectiveActionUpload gates on an EXISTS here (file_id + scorecard_id) instead of the FORGEABLE
+  // original_filename prefix — the generic requestUploadUrl/updateFile API can set a caller-supplied filename
+  // but never writes this table, so a look-alike file can't be discarded. ON CONFLICT DO NOTHING keeps confirm
+  // idempotent (confirmUpload can idempotently re-confirm the same file → the same ledger row).
+  await db.execute(sql`
+    INSERT INTO scorecard_corrective_action_uploads (file_id, scorecard_id)
+    VALUES (${file.id}, ${input.scorecardId})
+    ON CONFLICT (file_id) DO NOTHING
+  `);
   // confirmUpload builds the file from the pending-upload row (no description slot), so persist the caption
   // onto files.description here — the corrective-action read sources photo captions from that column.
   const caption = input.caption?.trim();
@@ -182,15 +193,17 @@ export interface DiscardCorrectiveActionUploadInput {
  *
  * Eligibility (all must hold, else no delete):
  *   - the file belongs to THIS scorecard's deal (files.deal_id = scorecard.deal_id) and is still active;
- *   - it was created via the corrective-action upload flow (original_filename `corrective-action-…`) — a
- *     regular project photo/document never matches, so this can only ever reclaim its own uploads;
+ *   - it was created via the corrective-action upload flow, proven by a DURABLE ownership ledger row
+ *     (scorecard_corrective_action_uploads: file_id + scorecard_id) written by confirmCorrectiveActionUpload —
+ *     NOT the original_filename prefix, which the generic upload API lets a caller forge. A regular project
+ *     photo/document / a look-alike-named file has no ledger row, so this can only ever reclaim its own uploads;
  *   - it is NOT attached to any corrective action / not existing evidence: no field_scorecard_photos row
  *     references it (a submitted response photo has corrective_action_id set; scorecard evidence has a
  *     section_key row) — an attached file is a 409, never deleted.
  *
- * A file that doesn't exist / isn't on this deal / isn't a corrective-action upload is a 404 (no-op). An
- * already-attached file is a 409 (no-op). Otherwise the file is soft-deleted through the shared files-service
- * deleteFile path (is_active=false + deleted_at), the same delete used everywhere else.
+ * A file that doesn't exist / isn't on this deal / has no ownership ledger row for this scorecard is a 404
+ * (no-op). An already-attached file is a 409 (no-op). Otherwise the file is soft-deleted through the shared
+ * files-service deleteFile path (is_active=false + deleted_at), the same delete used everywhere else.
  */
 export async function discardCorrectiveActionUpload(
   db: TenantDb,
@@ -206,16 +219,19 @@ export async function discardCorrectiveActionUpload(
 
   const { dealId } = await resolveScorecard(db, input.scorecardId);
 
-  // Load the candidate file scoped to this scorecard's deal + the corrective-action flow. Anything outside
-  // that (foreign file, wrong deal, not a corrective-action upload, already soft-deleted) is a 404 no-op.
+  // Load the candidate file scoped to this scorecard's deal + the corrective-action flow. Ownership is proven
+  // by the DURABLE ledger row (scorecard_corrective_action_uploads: file_id + scorecard_id) written on confirm,
+  // NOT the forgeable original_filename prefix. Anything outside that (foreign file, wrong deal, no ledger row
+  // for THIS scorecard, already soft-deleted) is a 404 no-op.
   const fileRes = await db.execute(sql`
-    SELECT id
-    FROM files
-    WHERE id = ${input.fileId}
-      AND deal_id = ${dealId}
-      AND is_active = true
-      AND deleted_at IS NULL
-      AND original_filename LIKE ${CORRECTIVE_ACTION_FILENAME_PREFIX + "%"}
+    SELECT f.id
+    FROM files f
+    JOIN scorecard_corrective_action_uploads u
+      ON u.file_id = f.id AND u.scorecard_id = ${input.scorecardId}
+    WHERE f.id = ${input.fileId}
+      AND f.deal_id = ${dealId}
+      AND f.is_active = true
+      AND f.deleted_at IS NULL
     LIMIT 1
   `);
   if (fileRes.rows.length === 0) {

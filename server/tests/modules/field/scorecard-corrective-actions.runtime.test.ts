@@ -133,6 +133,15 @@ beforeAll(async () => {
   await pg.exec(
     `ALTER TABLE public.field_scorecards ADD CONSTRAINT field_scorecards_csid_uniq UNIQUE (client_submission_id);`,
   );
+  // tenantSchemaSql omits FOREIGN KEYS (it reproduces column types/PKs only), so add migration 0192's
+  // field_scorecard_photos.corrective_action_id -> scorecard_corrective_actions(id) ON DELETE CASCADE here to
+  // exercise the cascade: deleting a corrective-action row must delete its response-photo LINK rows.
+  await pg.exec(
+    `ALTER TABLE public.field_scorecard_photos
+       ADD CONSTRAINT field_scorecard_photos_corrective_action_fk
+       FOREIGN KEY (corrective_action_id)
+       REFERENCES public.scorecard_corrective_actions(id) ON DELETE CASCADE;`,
+  );
   await pg.exec(`
     INSERT INTO public.pipeline_stage_config (id, name, slug, is_terminal) VALUES
       ('${STAGE_ACTIVE}','Estimating','estimating',false);
@@ -400,5 +409,40 @@ describe("resolveCorrectiveActionItem closure", () => {
       respondedBy: { userId: USER, name: "Sam", email: null },
     });
     expect((await getScorecardRow(scorecard.id)).status).toBe("corrective_action_open");
+  });
+});
+
+describe("corrective_action_id FK ON DELETE CASCADE (finding 3)", () => {
+  it("deleting a corrective-action row cascades away its field_scorecard_photos LINK rows; files remain", async () => {
+    // Migration 0192's FK is ON DELETE CASCADE (not SET NULL): when a resolved corrective-action row is purged
+    // (a removed flag on edit — round 8), its attached RESPONSE-photo LINK rows must be deleted too. SET NULL
+    // would leave each link with BOTH corrective_action_id AND section_key null → the detail/PDF evidence
+    // queries mis-read it as ORIGINAL section evidence and the removed response could land in the PDF.
+    const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
+    const [item] = await getCorrectiveActions(scorecard.id);
+
+    // A backing gallery file (the underlying files row is NOT owned by the FK — it's keyed on corrective_action_id).
+    const fileId = "77777777-7777-7777-7777-777777777701";
+    await tdb.execute(sql`
+      INSERT INTO files (id, deal_id, uploaded_by, is_active)
+      VALUES (${fileId}, ${DEAL}, ${USER}, true)
+    `);
+    // A RESPONSE-photo LINK row: corrective_action_id set, section_key/deficiency_key null (spec §4.3).
+    const photoId = "88888888-8888-8888-8888-888888888801";
+    await tdb.execute(sql`
+      INSERT INTO field_scorecard_photos (id, scorecard_id, corrective_action_id, file_id)
+      VALUES (${photoId}, ${scorecard.id}, ${item.id}, ${fileId})
+    `);
+
+    // Deleting the corrective-action row cascades the LINK row away.
+    await tdb.execute(sql`DELETE FROM scorecard_corrective_actions WHERE id = ${item.id}`);
+
+    const links = await tdb.execute(
+      sql`SELECT id FROM field_scorecard_photos WHERE id = ${photoId}`,
+    );
+    expect(links.rows).toHaveLength(0);
+    // The underlying gallery file is untouched (the FK is on corrective_action_id, not file_id).
+    const remaining = await tdb.execute(sql`SELECT id FROM files WHERE id = ${fileId}`);
+    expect(remaining.rows).toHaveLength(1);
   });
 });

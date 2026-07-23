@@ -10,6 +10,7 @@ import {
   fieldScorecardPhotos,
   scorecardCorrectiveActions,
   scorecardCorrectiveActionTokens,
+  scorecardCorrectiveActionUploads,
   dealTeamMembers,
   contacts,
   files,
@@ -96,6 +97,7 @@ beforeAll(async () => {
       fieldScorecardPhotos,
       scorecardCorrectiveActions,
       scorecardCorrectiveActionTokens,
+      scorecardCorrectiveActionUploads,
       dealTeamMembers,
       contacts,
     ]),
@@ -128,6 +130,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   sessionUser = { id: USER, role: "field_contractor" };
+  await tdb.execute(sql`DELETE FROM scorecard_corrective_action_uploads`);
   await tdb.execute(sql`DELETE FROM scorecard_corrective_action_tokens`);
   await tdb.execute(sql`DELETE FROM scorecard_corrective_actions`);
   await tdb.execute(sql`DELETE FROM field_scorecard_photos`);
@@ -450,7 +453,8 @@ describe("token-scoped corrective-action photo discard", () => {
   });
 
   it("404s discarding a file that is not a corrective-action upload (foreign gallery file)", async () => {
-    // A plain project photo on the same deal — NOT minted via the corrective-action flow.
+    // A plain project photo on the same deal — NOT minted via the corrective-action flow, so it has NO
+    // ownership ledger row.
     const other = "88888888-8888-8888-8888-888888888888";
     await tdb.execute(sql`
       INSERT INTO files (id, category, display_name, system_filename, original_filename, mime_type,
@@ -463,6 +467,46 @@ describe("token-scoped corrective-action photo discard", () => {
     );
     expect(del.status).toBe(404);
     const rows = await tdb.execute(sql`SELECT is_active FROM files WHERE id = ${other}`);
+    expect(rows.rows[0].is_active).toBe(true);
+  });
+
+  it("writes an ownership ledger row on confirm; a ledger-backed file is discardable (finding #7)", async () => {
+    // Discard eligibility is proven by the DURABLE scorecard_corrective_action_uploads ledger, written by
+    // confirm — not the forgeable filename. Confirm writes exactly one ledger row (file_id + scorecard_id).
+    const { confirmRes } = await uploadPhoto("");
+    const fileId = confirmRes.body.fileId as string;
+    const ledger = await tdb.execute(
+      sql`SELECT scorecard_id FROM scorecard_corrective_action_uploads WHERE file_id = ${fileId}`,
+    );
+    expect(ledger.rows).toHaveLength(1);
+    expect((ledger.rows[0] as { scorecard_id: string }).scorecard_id).toBe(scorecardId);
+
+    const del = await request(app).delete(
+      `/scorecards/${scorecardId}/corrective-actions/upload/${fileId}`,
+    );
+    expect(del.status).toBe(200);
+    const rows = await tdb.execute(sql`SELECT is_active FROM files WHERE id = ${fileId}`);
+    expect(rows.rows[0].is_active).toBe(false);
+  });
+
+  it("404s discarding a look-alike file with a crafted corrective-action- filename but NO ledger row (finding #7)", async () => {
+    // The security fix: the generic upload API lets a caller supply original_filename, so the
+    // `corrective-action-` prefix is FORGEABLE. A file that mimics the prefix but was NEVER confirmed through
+    // this flow has no ownership ledger row → it is NOT discardable (404), so an authorized responder can't
+    // soft-delete an arbitrary unattached file on the deal by naming it to look like a corrective-action upload.
+    const forged = "99999999-8888-7777-6666-555544443333";
+    await tdb.execute(sql`
+      INSERT INTO files (id, category, display_name, system_filename, original_filename, mime_type,
+        file_size_bytes, file_extension, r2_key, r2_bucket, deal_id, uploaded_by, is_active)
+      VALUES (${forged}, 'photo', 'x.jpg', 'sys.jpg', 'corrective-action-1234.jpg', 'image/jpeg', 10, 'jpg',
+        ${"forged-key-" + Date.now()}, 'b', ${DEAL}, ${USER}, true)
+    `);
+    const del = await request(app).delete(
+      `/scorecards/${scorecardId}/corrective-actions/upload/${forged}`,
+    );
+    expect(del.status).toBe(404);
+    // The forged-name file is untouched — never soft-deleted.
+    const rows = await tdb.execute(sql`SELECT is_active FROM files WHERE id = ${forged}`);
     expect(rows.rows[0].is_active).toBe(true);
   });
 
