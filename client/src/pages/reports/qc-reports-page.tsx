@@ -309,7 +309,7 @@ function QcTable({ rows, onRowClick, compact }: { rows: QcScorecardRow[]; onRowC
       <thead>
         <tr className="border-b border-slate-100">
           <Th>Project</Th>
-          {!compact && <Th>Week of</Th>}
+          {!compact && <Th>Date</Th>}
           {!compact && <Th>Superintendent</Th>}
           <Th className="text-right">Score</Th>
           <Th className="text-center">Rating</Th>
@@ -334,7 +334,7 @@ function QcTable({ rows, onRowClick, compact }: { rows: QcScorecardRow[]; onRowC
             }}
             tabIndex={0}
             role="button"
-            aria-label={`Open ${kindLabel(r.kind).toLowerCase()} scorecard for ${r.projectName}, week of ${fmtWeek(r.weekOf)}`}
+            aria-label={`Open ${kindLabel(r.kind).toLowerCase()} scorecard for ${r.projectName}, dated ${fmtWeek(r.weekOf)}`}
             className={`cursor-pointer border-b border-slate-100 hover:bg-slate-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand-red/40 ${r.deficiencyCount > 0 ? "shadow-[inset_3px_0_0_var(--tw-shadow-color)] shadow-brand-red" : ""}`}
           >
             <td className="px-3.5 py-3">
@@ -437,7 +437,7 @@ function QcDetailSheet({ row, onClose }: { row: QcScorecardRow | null; onClose: 
             <SheetHeader className="shrink-0 border-b border-slate-100 px-6 py-5">
               <SheetTitle className="pr-8 leading-snug">{row.projectName}</SheetTitle>
               <div className="text-[12.5px] text-slate-500">
-                {[kindLabel(row.kind), row.projectNumber, `Week of ${fmtWeek(row.weekOf)}`, row.superintendentName ? `Supt. ${row.superintendentName}` : null].filter(Boolean).join(" · ")}
+                {[kindLabel(row.kind), row.projectNumber, fmtWeek(row.weekOf), row.superintendentName ? `Supt. ${row.superintendentName}` : null].filter(Boolean).join(" · ")}
               </div>
             </SheetHeader>
 
