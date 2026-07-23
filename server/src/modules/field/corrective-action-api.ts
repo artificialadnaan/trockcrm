@@ -266,17 +266,19 @@ export async function submitCorrectiveActionResponse(
       throw new AppError(400, "A response photo must be a new file, not existing scorecard evidence.");
     }
 
-    // Insert each fresh file as a NEW response-photo row: corrective_action_id set to this item, and
-    // section/deficiency null (a response photo, per spec §4.3). Never UPDATE/stamp an existing row.
-    for (const fileId of photoFileIds) {
-      await db.insert(fieldScorecardPhotos).values({
+    // Insert the fresh files as NEW response-photo rows in ONE batch (not a per-file round trip):
+    // corrective_action_id set to this item, section/deficiency null (a response photo, per spec §4.3).
+    // Never UPDATE/stamp an existing row. photoFileIds is non-empty here (guarded by the enclosing
+    // `if (photoFileIds.length > 0)`), so `.values([])` — which drizzle rejects — is never reached.
+    await db.insert(fieldScorecardPhotos).values(
+      photoFileIds.map((fileId) => ({
         scorecardId: input.scorecardId,
         sectionKey: null,
         deficiencyKey: null,
         fileId,
         correctiveActionId: input.itemId,
-      });
-    }
+      })),
+    );
   }
 
   // Resolve within the SAME (caller-supplied) transaction so a resolve failure rolls back the photo inserts.

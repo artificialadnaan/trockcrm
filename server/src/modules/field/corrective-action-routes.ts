@@ -165,6 +165,18 @@ function parseComment(value: unknown): string {
   return comment;
 }
 
+// A per-photo caption persists to files.description (an unbounded TEXT column), so cap it here — otherwise an
+// oversized/abusive caption on the upload-confirm body would persist megabytes. null/empty are allowed (an
+// optional caption); reuse the same generous bound as the response comment.
+function parseCaption(value: unknown): string | null {
+  if (value == null) return null;
+  if (typeof value !== "string") throw new AppError(400, "caption must be a string.");
+  if (value.length > MAX_RESPONSE_COMMENT_LENGTH) {
+    throw new AppError(400, `A caption must be at most ${MAX_RESPONSE_COMMENT_LENGTH} characters.`);
+  }
+  return value;
+}
+
 /** Register the corrective-action read + response endpoints on the field router. */
 export function registerCorrectiveActionRoutes(fieldRoutes: Router): void {
   // Read the scorecard's corrective-action items + their inline responses. Session OR token auth.
@@ -229,7 +241,7 @@ export function registerCorrectiveActionRoutes(fieldRoutes: Router): void {
         assertValidUuid(id, "id");
         const uploadToken = typeof req.body?.uploadToken === "string" ? req.body.uploadToken : "";
         const objectKey = typeof req.body?.objectKey === "string" ? req.body.objectKey : "";
-        const caption = typeof req.body?.caption === "string" ? req.body.caption : null;
+        const caption = parseCaption(req.body?.caption);
         if (!uploadToken || !objectKey) {
           throw new AppError(400, "uploadToken and objectKey are required.");
         }
