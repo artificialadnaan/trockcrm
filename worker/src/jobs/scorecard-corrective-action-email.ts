@@ -437,13 +437,45 @@ export async function handleScorecardCorrectiveActionEmail(
   // re-mints and re-sends them a fresh, working link. Only the OFFICE tenant schema is interpolated (regex-
   // validated).
 
+  // Re-validate closure IMMEDIATELY before sending (finding 6). The empty-flaggedRows guard above only catches
+  // closure that happened BEFORE the flagged-row query. But the LAST open item can be resolved AFTER that read
+  // (flaggedRows was NON-empty) yet BEFORE we send + stamp. In that window the card's current open set is empty,
+  // which trivially SATISFIES the stamp's `NOT EXISTS (... open AND NOT id=ANY($2))` subset guard — so an
+  // unconditional continue here would send a stale "corrective action required" email for an already-closed card
+  // AND stamp that closed card as notified (suppressing the server reconcile from ever re-notifying). So RE-SELECT
+  // the LIVE status + whether ANY open corrective-action row remains, right before the send loop; if the card is
+  // no longer `corrective_action_open` OR has zero open rows, RETURN without sending and without stamping (a later
+  // reopen re-enqueues and still notifies). One extra read; cheap.
+  const preSendRes = await query(
+    `SELECT status,
+            EXISTS (
+              SELECT 1 FROM ${tenantSchema}.scorecard_corrective_actions
+               WHERE scorecard_id = $1::uuid AND status = 'open'
+            ) AS has_open
+       FROM ${tenantSchema}.field_scorecards WHERE id = $1::uuid LIMIT 1`,
+    [scorecardId]
+  );
+  const preSendRow = preSendRes.rows[0] as { status?: string; has_open?: boolean } | undefined;
+  if (!preSendRow || preSendRow.status !== "corrective_action_open" || preSendRow.has_open !== true) {
+    logger.log(
+      "[CorrectiveActionEmail] Card closed/lifted between the flagged read and send - skipping (nothing to notify, not stamping)",
+      { scorecardId, status: preSendRow?.status, hasOpen: preSendRow?.has_open }
+    );
+    return;
+  }
+
   // Send one email per recipient with the link appropriate to their ACTUAL field-login capability (finding 6).
   // A CRM user who can authenticate in T-Rock Cam (canFieldLogin) gets the in-app deep link; a CRM user who
   // CANNOT (no enabled/non-revoked field login) — as well as every email-only member (userId === null) — gets
   // the tokenized web link, because the deep link would otherwise strand them at a login they can't pass.
   for (const recipient of recipients) {
     let link: string;
+    // The token hash this recipient's Resend idempotency key is scoped to (null for a deep-link CRM user). It
+    // is EITHER a freshly-minted hash OR a reused surviving-undelivered hash (finding 3).
     let mintedTokenHash: string | null = null;
+    // True only when a NEW token row was INSERTed this run — gates the on-failure cleanup delete so a REUSED
+    // surviving token (which the recipient may already hold a working link for) is never deleted (finding 3).
+    let tokenMintedThisRun = false;
     if (recipient.userId && recipient.canFieldLogin) {
       // CRM user WITH an enabled field login → TRock Cam deep link (they respond in-app). The scheme + path
       // must match the app exactly: the Expo config `scheme` is `trockcam` (app.config.ts) and the expo-router
@@ -454,41 +486,63 @@ export async function handleScorecardCorrectiveActionEmail(
       // Email-only member OR a CRM user who canNOT field-login → they respond via a tokenized web link (the
       // recipient-bound token uses THIS recipient's email — a CRM user's public.users email is their own, and
       // the verify-time revalidation authorizes them because that email matches their own active super/PM
-      // assignment on the deal). Reuse an existing token ONLY when it was actually
-      // DELIVERED (delivered_at IS NOT NULL) — delivery ≠ token existence. The row is inserted BEFORE the send,
-      // so a crash in that window (or a send failure whose cleanup delete didn't land) leaves an undelivered
-      // token; skipping on mere existence would strand the recipient with a link they never got while the
-      // scorecard is stamped sent. A delivered token means they were emailed on a prior attempt — we can't
-      // reconstruct the raw token to re-send them anyway — so reuse it (skip re-mint + re-send, never rebuilding
-      // the idempotency key for them), leaving their working link intact.
-      const existing = await query(
-        `SELECT 1 FROM ${tenantSchema}.scorecard_corrective_action_tokens
+      // assignment on the deal).
+      //
+      // Look up ANY LIVE token (unconsumed, unexpired) for this (scorecard, recipient) — regardless of
+      // delivered_at — and branch on its delivery state (finding 3):
+      //   - DELIVERED (delivered_at IS NOT NULL): they were emailed a working link on a prior attempt. We can't
+      //     reconstruct the raw token to re-send, so reuse-SKIP (no re-mint, no re-send, key never rebuilt),
+      //     leaving their delivered link intact. (round-4 behavior, preserved.)
+      //   - UNDELIVERED (delivered_at IS NULL): a crash left a surviving token after the provider may already
+      //     have ACCEPTED the send (the INSERT precedes the send; delivered_at is stamped only AFTER a success,
+      //     and a send FAILURE deletes the token). Minting a FRESH token here would produce a NEW hash → a NEW
+      //     idempotency key → the provider could NOT dedup → the recipient would get a SECOND email with a
+      //     DIFFERENT link. So instead RE-USE the surviving token's hash as the idempotency key (STABLE across
+      //     the crash window, so the provider dedups the true duplicate) and do NOT mint a new token. Because
+      //     the raw token can't be reconstructed, the link falls back to the tokenless web responder URL: in
+      //     the dominant accepted-but-crashed case the send is deduped (the recipient keeps their original
+      //     working link), and in the rare never-reached-the-provider case the reconcile re-notifies a fresh
+      //     cycle. The post-send stamp targets the SURVIVING hash so the next retry short-circuits (delivered).
+      const live = await query(
+        `SELECT token_hash, delivered_at FROM ${tenantSchema}.scorecard_corrective_action_tokens
           WHERE scorecard_id = $1::uuid AND LOWER(recipient_email) = LOWER($2)
-            AND consumed_at IS NULL AND expires_at > NOW() AND delivered_at IS NOT NULL
+            AND consumed_at IS NULL AND expires_at > NOW()
+          ORDER BY created_at DESC
           LIMIT 1`,
         [scorecardId, recipient.email]
       );
-      if ((existing.rows?.length ?? 0) > 0) {
+      const liveRow = live.rows?.[0] as { token_hash?: string; delivered_at?: unknown } | undefined;
+      if (liveRow && liveRow.delivered_at != null) {
         logger.log("[CorrectiveActionEmail] Recipient already has a DELIVERED token - reusing (no re-send)", {
           scorecardId,
           role: recipient.role,
         });
         continue;
       }
-      // No reuse: mint a FRESH token below. An earlier UNDELIVERED remnant (crash window) is harmless — it
-      // never authorizes reuse (delivered_at IS NULL) and token_hash is random-unique, so no collision — so we
-      // deliberately don't pre-delete it (keeps rotation strictly per-recipient, no blanket/scan delete).
-      const rawToken = crypto.randomBytes(32).toString("base64url");
-      const tokenHash = hashToken(rawToken);
-      const expiresAt = new Date(Date.now() + TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000);
-      await query(
-        `INSERT INTO ${tenantSchema}.scorecard_corrective_action_tokens
-           (scorecard_id, token_hash, recipient_email, role, expires_at)
-         VALUES ($1::uuid, $2, $3, $4, $5)`,
-        [scorecardId, tokenHash, recipient.email, recipient.role, expiresAt.toISOString()]
-      );
-      mintedTokenHash = tokenHash;
-      link = `${frontendUrl}/scorecards/${encodeURIComponent(scorecardId)}/corrective-action?token=${encodeURIComponent(rawToken)}`;
+      if (liveRow && normalizeText(liveRow.token_hash)) {
+        // Crash-window survivor: reuse its hash as the idempotency key so the provider dedups the true
+        // duplicate. No new token minted (finding 3). Tokenless link fallback — see the branch comment above.
+        mintedTokenHash = normalizeText(liveRow.token_hash);
+        link = `${frontendUrl}/scorecards/${encodeURIComponent(scorecardId)}/corrective-action`;
+        logger.log("[CorrectiveActionEmail] Reusing a surviving UNDELIVERED token's hash for idempotency (no re-mint)", {
+          scorecardId,
+          role: recipient.role,
+        });
+      } else {
+        // No live token at all → mint a FRESH one.
+        const rawToken = crypto.randomBytes(32).toString("base64url");
+        const tokenHash = hashToken(rawToken);
+        const expiresAt = new Date(Date.now() + TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000);
+        await query(
+          `INSERT INTO ${tenantSchema}.scorecard_corrective_action_tokens
+             (scorecard_id, token_hash, recipient_email, role, expires_at)
+           VALUES ($1::uuid, $2, $3, $4, $5)`,
+          [scorecardId, tokenHash, recipient.email, recipient.role, expiresAt.toISOString()]
+        );
+        mintedTokenHash = tokenHash;
+        tokenMintedThisRun = true;
+        link = `${frontendUrl}/scorecards/${encodeURIComponent(scorecardId)}/corrective-action?token=${encodeURIComponent(rawToken)}`;
+      }
     }
 
     const email = buildCorrectiveActionEmail({
@@ -509,11 +563,13 @@ export async function handleScorecardCorrectiveActionEmail(
     // treats as an already-delivered success — so the worker would stamp the new cycle notified WITHOUT
     // sending the updated email.
     //
-    //  - Token recipients (email-only): scope to the freshly-minted token hash. It differs every cycle (each
-    //    cycle mints a random token → new hash), so the new payload is actually sent; WITHIN a cycle a retry
-    //    reuses the same undelivered token (or, after a failed send, its replacement) and a genuine crash-
-    //    window duplicate of a DELIVERED token is skipped before we reach here — so this key is only (re)built
-    //    at a real mint+send, where cycle-scoping is exactly right.
+    //  - Token recipients (email-only): scope to the token hash — either the freshly-minted hash OR, on a
+    //    crash-window retry, the REUSED surviving-undelivered token's hash (finding 3). A fresh mint differs
+    //    every cycle (each cycle mints a random token → new hash) so the new payload is actually sent; a
+    //    crash-window retry reuses the SAME surviving hash so the key is STABLE across the crash window and the
+    //    provider dedups the true duplicate (instead of the old behavior of minting a new hash → new key →
+    //    second email with a different link). A genuine crash-window duplicate of a DELIVERED token is skipped
+    //    before we reach here.
     //  - CRM users (no token, mintedTokenHash === null): their deep link is cycle-stable, but the email body
     //    lists the flagged items, which change every cycle. So scope their key to the per-cycle DIMENSION —
     //    the server-minted `payload.cycleNonce` when present (retry-STABLE: immutable across a job's retries,
@@ -534,10 +590,12 @@ export async function handleScorecardCorrectiveActionEmail(
       });
       if (!result.success) throw new Error("Email provider returned unsuccessful result");
     } catch (err) {
-      // The send did not succeed. Delete the token we just minted for this recipient (if any) so its raw link
-      // — which never reached them — is not left dangling; the retry then re-mints + re-sends a fresh, working
-      // link. Delivered recipients' tokens are untouched (we never minted for them this run).
-      if (mintedTokenHash) {
+      // The send did not succeed. Delete ONLY a token MINTED this run (its raw link never reached anyone) so it
+      // is not left dangling; the retry then re-mints + re-sends a fresh, working link. A REUSED surviving token
+      // (finding 3) is NOT deleted — the recipient may already hold a working link for it from the prior
+      // attempt, and its stable hash must survive to keep the retry's idempotency key stable. Delivered
+      // recipients' tokens are likewise untouched (we never minted for them this run).
+      if (mintedTokenHash && tokenMintedThisRun) {
         await query(
           `DELETE FROM ${tenantSchema}.scorecard_corrective_action_tokens WHERE token_hash = $1`,
           [mintedTokenHash]
@@ -649,12 +707,24 @@ export async function handleScorecardCorrectiveActionEmail(
   //
   // So stamp ONLY when the CURRENT open set is a SUBSET of the ids we emailed about (no NEW open row appeared
   // since our read): the NOT EXISTS rejects the stamp if any open row's id is NOT in the emailed-id array.
+  //
+  // The stamp ALSO requires the card still be OPEN with ≥1 open item at stamp time (finding 6): status =
+  // 'corrective_action_open' AND EXISTS(any open row). Without this, an EMPTY current open set (every item
+  // resolved between our read and here) would TRIVIALLY satisfy the subset NOT EXISTS above (no open row is
+  // outside the emitted set), stamping an already-closed card as notified — the exact stale-notify + suppress-
+  // reconcile bug. Requiring an open item at the stamp closes that hole even if the pre-send recheck's window
+  // is beaten again.
   const emailedIds = flaggedRows.map((r) => String(r.id));
   const stampRes = await query(
     `UPDATE ${tenantSchema}.field_scorecards
         SET corrective_action_email_sent_at = NOW()
       WHERE id = $1::uuid
         AND corrective_action_email_sent_at IS NULL
+        AND status = 'corrective_action_open'
+        AND EXISTS (
+          SELECT 1 FROM ${tenantSchema}.scorecard_corrective_actions
+           WHERE scorecard_id = $1::uuid AND status = 'open'
+        )
         AND NOT EXISTS (
           SELECT 1 FROM ${tenantSchema}.scorecard_corrective_actions
            WHERE scorecard_id = $1::uuid AND status = 'open' AND NOT (id = ANY($2::uuid[]))

@@ -60,6 +60,19 @@ function makeQuery(
     assignedRoles?: any[];
     flagged?: any[];
     existingTokenEmails?: string[];
+    // Finding 3: model an UNDELIVERED-but-live token row (crash between INSERT and the delivered_at stamp): a
+    // map of lower-cased recipient email → the token_hash of that surviving row. The reuse query now selects
+    // token_hash + delivered_at for ANY live (unconsumed/unexpired) token, so an undelivered survivor is found
+    // and RE-USED (its hash becomes the idempotency key — no new token minted). Delivered survivors are still
+    // modeled by existingTokenEmails (they short-circuit / skip).
+    undeliveredTokens?: Record<string, string>;
+    // Finding 6: model the last-open-item-resolved-mid-run race. The snapshot read status = corrective_action_open
+    // at the top and flaggedRows was NON-empty, but by send time the team resolved the LAST item in-app. The
+    // handler re-selects the live status immediately before the send loop; when set, that pre-send recheck
+    // returns this status (defaults to corrective_action_closed) and reports zero open rows → the handler must
+    // RETURN without sending and without stamping.
+    closedBeforeSend?: boolean;
+    statusBeforeSend?: string;
     // Part B: model the notification-loss race — a NEW open corrective-action row appeared AFTER the worker read
     // its flagged set but BEFORE the final stamp. When true, the guarded stamp UPDATE affects 0 rows (its
     // NOT EXISTS subquery is falsy because a not-emitted open row exists) AND the re-check SELECT reports the
@@ -88,17 +101,30 @@ function makeQuery(
   // existingTokenEmails model DELIVERED tokens: the reuse-skip query requires delivered_at IS NOT NULL, so
   // only a delivered token returns a row (an undelivered remnant returns nothing → the recipient is re-sent).
   const existing = new Set((opts.existingTokenEmails ?? []).map((e) => e.toLowerCase()));
+  // Finding 3: lower-cased email → surviving UNDELIVERED token hash. Distinct from `existing` (delivered) so a
+  // test can model the crash-window survivor the reuse path must re-use (not re-mint).
+  const undelivered = new Map(
+    Object.entries(opts.undeliveredTokens ?? {}).map(([e, h]) => [e.toLowerCase(), h]),
+  );
   // Count calls to the recipient-resolution query (SELECT DISTINCT ON (dtm.role) ... FROM deal_team_members)
   // so the SECOND call — the pre-stamp revalidation (finding 1) — can return a reassigned set when the test
   // provides one. The `SELECT DISTINCT dtm.role` assigned-roles query is intercepted by its own branch first,
   // so it never reaches this fall-through.
   let recipientResolveCalls = 0;
   const query = vi.fn(async (text: string, params: any[] = []) => {
-    // Per-recipient DELIVERED-token existence check: SELECT 1 FROM ...tokens WHERE recipient_email = $2 ...
-    // ... AND delivered_at IS NOT NULL.
-    if (/SELECT 1 FROM \S*scorecard_corrective_action_tokens/i.test(text)) {
+    // Per-recipient LIVE-token reuse lookup (finding 3): SELECT token_hash, delivered_at FROM ...tokens WHERE
+    // recipient_email = $2 AND consumed_at IS NULL AND expires_at > NOW() (NO delivered_at filter). A DELIVERED
+    // survivor (existingTokenEmails) short-circuits/skips; an UNDELIVERED survivor (undeliveredTokens) is
+    // re-used — its hash becomes the idempotency key, no new token minted. No row → mint fresh.
+    if (/SELECT token_hash, delivered_at FROM \S*scorecard_corrective_action_tokens/i.test(text)) {
       const email = String(params[1] ?? "").toLowerCase();
-      return { rows: existing.has(email) ? [{ "?column?": 1 }] : [] };
+      if (existing.has(email)) {
+        return { rows: [{ token_hash: `delivered-hash-${email}`, delivered_at: "2026-07-01T00:00:00Z" }] };
+      }
+      if (undelivered.has(email)) {
+        return { rows: [{ token_hash: undelivered.get(email), delivered_at: null }] };
+      }
+      return { rows: [] };
     }
     if (/DELETE FROM .*scorecard_corrective_action_tokens/i.test(text)) {
       tokenDeletes.push({ sql: text, params });
@@ -122,6 +148,21 @@ function makeQuery(
     // (0 rows); otherwise it stamps (1 row). Match this BEFORE the field_scorecards SELECT branches.
     if (/UPDATE .*field_scorecards/i.test(text)) {
       return { rows: [], rowCount: opts.newOpenItemAppeared ? 0 : 1 };
+    }
+    // Finding 6 pre-send recheck: immediately before the send loop the handler re-selects the scorecard's LIVE
+    // status + a `has_open` EXISTS flag (any status = 'open' corrective-action row). Distinguished from every
+    // other field_scorecards SELECT by the `has_open` column (and it is NOT `has_new_open`). When the test
+    // models a mid-run closure, report the closed status + zero open rows so the handler bails without sending.
+    if (/has_open/i.test(text) && !/has_new_open/i.test(text) && /FROM \S*field_scorecards/i.test(text)) {
+      const closed = opts.closedBeforeSend === true;
+      return {
+        rows: [
+          {
+            status: closed ? (opts.statusBeforeSend ?? "corrective_action_closed") : "corrective_action_open",
+            has_open: !closed,
+          },
+        ],
+      };
     }
     // Part B re-check SELECT: reads corrective_action_email_sent_at + a `has_new_open` EXISTS flag to decide
     // whether a rowCount===0 stamp was a benign already-stamped double-run or the notification-loss race.
@@ -486,24 +527,76 @@ describe("scorecard corrective-action notification email", () => {
     expect(tokenDelivers).toHaveLength(0);
   });
 
-  it("RE-SENDS an email-only recipient whose token EXISTS but was never DELIVERED (finding 5: crash-safe)", async () => {
-    // A crash between INSERT and send left an UNDELIVERED token row. The reuse-skip requires delivered_at IS
-    // NOT NULL, so it does NOT skip: the recipient is re-minted + re-sent (not stranded on a link they never
-    // got). Modeled by existingTokenEmails being EMPTY — the delivered-token check returns no row.
+  it("MINTS a fresh token for an email-only recipient who holds NO live token (finding 5: crash-safe)", async () => {
+    // No live token row exists for the recipient (neither delivered nor undelivered) — e.g. a first send, or a
+    // failed send whose cleanup delete landed. The reuse lookup finds nothing → the recipient is minted + sent
+    // a fresh, working link. (The DISTINCT finding-3 case — a surviving UNDELIVERED token — is covered below.)
     const { query, inserts, tokenDelivers } = makeQuery({
       recipients: [{ role: "project_manager", name: "Dana Cole", email: "dana.cole@example.com", user_id: null }],
       assignedRoles: [{ role: "project_manager" }],
-      existingTokenEmails: [], // an undelivered remnant is invisible to the delivered-token reuse check
+      existingTokenEmails: [], // no delivered token
+      // undeliveredTokens omitted → no live token at all
     });
     const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "m" });
     const logger = makeLogger();
 
     await handleScorecardCorrectiveActionEmail(payload, null, { query: query as any, sendEmail, env, logger });
 
-    // Re-sent: a fresh token minted + delivered, the recipient emailed.
+    // Minted: a fresh token minted + delivered, the recipient emailed.
     expect(inserts).toHaveLength(1);
     expect(tokenDelivers).toHaveLength(1);
     expect(sendEmail.mock.calls.map((c) => c[0])).toEqual(["dana.cole@example.com"]);
+  });
+
+  // ---- Finding 3: preserve token sends across the delivery-stamp crash window (reuse the surviving token) ----
+
+  it("REUSES a surviving UNDELIVERED token's hash as the idempotency key on retry — no new token minted (finding 3)", async () => {
+    // The crash window: the provider ACCEPTED the email but the worker crashed before stamping delivered_at, so a
+    // live token survives with delivered_at NULL. The OLD behavior minted a FRESH token → new hash → new
+    // idempotency key → the provider could not dedup → the recipient got a SECOND email with a DIFFERENT link.
+    // The fix reuses the surviving token's existing hash as the idempotency key (stable across the crash window),
+    // so the provider dedups the true duplicate, and does NOT mint a new token.
+    const SURVIVING_HASH = "surviving-undelivered-hash-abc123";
+    const { query, inserts, tokenDelivers } = makeQuery({
+      recipients: [{ role: "project_manager", name: "Dana Cole", email: "dana.cole@example.com", user_id: null }],
+      assignedRoles: [{ role: "project_manager" }],
+      undeliveredTokens: { "dana.cole@example.com": SURVIVING_HASH },
+    });
+    const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "m" });
+    const logger = makeLogger();
+
+    await handleScorecardCorrectiveActionEmail(payload, null, { query: query as any, sendEmail, env, logger });
+
+    // The recipient was (re-)sent to — Resend dedups on the stable key, so this is safe.
+    expect(sendEmail).toHaveBeenCalledTimes(1);
+    expect(sendEmail.mock.calls[0][0]).toBe("dana.cole@example.com");
+    // The idempotency key carries the SURVIVING token's hash — the same key the first attempt used — so the
+    // provider dedups the true duplicate (no second email with a different link).
+    expect(sendEmail.mock.calls[0][3].idempotencyKey).toBe(
+      `corrective-action-office_dallas-${SCORECARD}-token-${SURVIVING_HASH}`,
+    );
+    // NO new token minted — the surviving row is reused.
+    expect(inserts).toHaveLength(0);
+    // The surviving token is stamped delivered (by its own hash) so the next retry short-circuits.
+    expect(tokenDelivers).toHaveLength(1);
+    expect(tokenDelivers[0].params[0]).toBe(SURVIVING_HASH);
+  });
+
+  it("SKIPS (no re-send) when a surviving token is already DELIVERED (finding 3)", async () => {
+    // Round-4 behavior preserved: a live token with delivered_at NOT NULL short-circuits — no re-send, no mint.
+    const { query, inserts, tokenDelivers } = makeQuery({
+      recipients: [{ role: "project_manager", name: "Dana Cole", email: "dana.cole@example.com", user_id: null }],
+      assignedRoles: [{ role: "project_manager" }],
+      existingTokenEmails: ["dana.cole@example.com"], // delivered survivor
+    });
+    const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "m" });
+    const logger = makeLogger();
+
+    await handleScorecardCorrectiveActionEmail(payload, null, { query: query as any, sendEmail, env, logger });
+
+    expect(sendEmail).not.toHaveBeenCalled();
+    expect(inserts).toHaveLength(0);
+    expect(tokenDelivers).toHaveLength(0);
   });
 
   it("stamps corrective_action_email_sent_at exactly once after sending", async () => {
@@ -589,6 +682,91 @@ describe("scorecard corrective-action notification email", () => {
       ([text]) => /SELECT status FROM \S*field_scorecards/i.test(text as string),
     );
     expect(statusRecheck.length).toBeGreaterThanOrEqual(1);
+  });
+
+  // ---- Finding 6: re-validate closure IMMEDIATELY before sending + require an open card at the stamp ----
+
+  it("does NOT send and does NOT stamp when the last open item is resolved AFTER the flagged read but before send (finding 6)", async () => {
+    // The empty-flaggedRows guard (finding 5) only covers closure BEFORE the flagged-row query. Here flaggedRows
+    // is read NON-empty, but the LAST open item is resolved AFTER that read and BEFORE the send loop. Without the
+    // pre-send recheck the worker would send a stale "corrective action required" email for an already-closed card
+    // AND the subset-guarded stamp (empty open set trivially satisfies the NOT EXISTS) would mark it notified. The
+    // handler must re-select the LIVE status immediately before the send loop and, seeing it is no longer
+    // corrective_action_open (zero open rows), RETURN without sending and without stamping.
+    const { query, inserts, tokenDeletes, jobEnqueues } = makeQuery({
+      status: "corrective_action_open", // top-of-run snapshot is still open
+      recipients: [{ role: "superintendent", name: "Sam Super", email: "sam.super@trock.com", user_id: "u-1", can_field_login: true }],
+      assignedRoles: [{ role: "superintendent" }],
+      flagged: FLAGGED, // NON-empty at the flagged read — the finding-5 empty guard does NOT fire
+      closedBeforeSend: true, // but by send time the card closed (the pre-send recheck reports non-open/no-open)
+    });
+    const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "m" });
+    const logger = makeLogger();
+
+    await handleScorecardCorrectiveActionEmail(payload, null, { query: query as any, sendEmail, env, logger });
+
+    // No stale corrective-action email went out.
+    expect(sendEmail).not.toHaveBeenCalled();
+    // Nothing minted, nothing deleted, no re-enqueue.
+    expect(inserts).toHaveLength(0);
+    expect(tokenDeletes).toHaveLength(0);
+    expect(jobEnqueues).toHaveLength(0);
+    // NOT stamped — a concurrently-closed card must not be marked notified (which would suppress a later reopen).
+    const stampCalls = query.mock.calls.filter(([text]) => /UPDATE .*field_scorecards/i.test(text as string));
+    expect(stampCalls).toHaveLength(0);
+    // The pre-send recheck (status + has_open) ran before the send loop.
+    const preSendRecheck = query.mock.calls.filter(
+      ([text]) => /has_open/i.test(text as string) && !/has_new_open/i.test(text as string),
+    );
+    expect(preSendRecheck.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("bails before sending when the pre-send recheck shows the card was lifted above-band (status submitted) (finding 6)", async () => {
+    // A mid-run edit lifts the card above-band (status → submitted) after the flagged read. The pre-send recheck
+    // reports a non-open status → the handler bails without sending or stamping, even though flaggedRows was
+    // non-empty when read.
+    const { query, inserts, jobEnqueues } = makeQuery({
+      status: "corrective_action_open",
+      recipients: [{ role: "superintendent", name: "Sam Super", email: "sam.super@trock.com", user_id: "u-1", can_field_login: true }],
+      assignedRoles: [{ role: "superintendent" }],
+      flagged: FLAGGED,
+      closedBeforeSend: true,
+      statusBeforeSend: "submitted",
+    });
+    const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "m" });
+    const logger = makeLogger();
+
+    await handleScorecardCorrectiveActionEmail(payload, null, { query: query as any, sendEmail, env, logger });
+
+    expect(sendEmail).not.toHaveBeenCalled();
+    expect(inserts).toHaveLength(0);
+    expect(jobEnqueues).toHaveLength(0);
+    const stampCalls = query.mock.calls.filter(([text]) => /UPDATE .*field_scorecards/i.test(text as string));
+    expect(stampCalls).toHaveLength(0);
+  });
+
+  it("still sends + stamps normally when the card is STILL open at the pre-send recheck (finding 6)", async () => {
+    // The normal open case: the pre-send recheck confirms the card is still corrective_action_open with open rows,
+    // so the send + stamp proceed. The stamp UPDATE additionally requires the card still has an open item /
+    // status corrective_action_open (so an empty open set can no longer trivially satisfy the guard).
+    const { query, tokenDeletes, jobEnqueues } = makeQuery({
+      status: "corrective_action_open",
+      recipients: [{ role: "superintendent", name: "Sam Super", email: "sam.super@trock.com", user_id: "u-1", can_field_login: true }],
+      assignedRoles: [{ role: "superintendent" }],
+      // closedBeforeSend omitted → the pre-send recheck reports still-open with open rows.
+    });
+    const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "m" });
+    const logger = makeLogger();
+
+    await handleScorecardCorrectiveActionEmail(payload, null, { query: query as any, sendEmail, env, logger });
+
+    expect(sendEmail).toHaveBeenCalledTimes(1);
+    const stampCalls = query.mock.calls.filter(([text]) => /UPDATE .*field_scorecards/i.test(text as string));
+    expect(stampCalls).toHaveLength(1);
+    // The strengthened stamp requires the card still be open at stamp time (an empty open set must NOT stamp).
+    expect(stampCalls[0][0]).toMatch(/corrective_action_open/i);
+    expect(tokenDeletes).toHaveLength(0);
+    expect(jobEnqueues).toHaveLength(0);
   });
 
   it("re-sends on a REOPEN cycle (stamp cleared) even though a prior-cycle token would still exist", async () => {
