@@ -299,7 +299,7 @@ describe("submitCorrectiveActionResponse", () => {
     expect(items.find((i) => i.id === first.id)!.status).toBe("open");
   });
 
-  it("a STALE submit after the item is already resolved inserts NO orphan photos (losing-path no-op)", async () => {
+  it("a STALE submit WITH photos after the item is already resolved 409s + inserts NO orphan photos (finding I)", async () => {
     const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
     const [first] = await getCorrectiveActionItems(tdb, scorecard.id);
 
@@ -313,15 +313,24 @@ describe("submitCorrectiveActionResponse", () => {
     });
 
     // A SECOND (stale) submit for the SAME now-resolved item — e.g. a concurrent responder or a replayed
-    // request — carries its OWN fresh photo (FILE_B). Because the item is no longer `open`, the resolve is a
-    // no-op AND the response photo must NOT be inserted (else it orphans onto the winner's finalized response).
-    await submitCorrectiveActionResponse(tdb, {
-      scorecardId: scorecard.id,
-      itemId: first.id,
-      comment: "stale submit from a losing responder",
-      photoFileIds: [FILE_B],
-      respondedBy: { userId: null, name: "Ext PM", email: "pm@x.com" },
-    });
+    // request — carries its OWN fresh photo (FILE_B). Because the item is no longer `open` AND photos were
+    // supplied, this must 409 (code CORRECTIVE_ACTION_ALREADY_RESOLVED) so the caller discards the orphaned
+    // upload — and the response photo must NOT be inserted (else it orphans onto the winner's response).
+    let thrown: unknown;
+    try {
+      await submitCorrectiveActionResponse(tdb, {
+        scorecardId: scorecard.id,
+        itemId: first.id,
+        comment: "stale submit from a losing responder",
+        photoFileIds: [FILE_B],
+        respondedBy: { userId: null, name: "Ext PM", email: "pm@x.com" },
+      });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(AppError);
+    expect((thrown as AppError).statusCode).toBe(409);
+    expect((thrown as AppError).code).toBe("CORRECTIVE_ACTION_ALREADY_RESOLVED");
 
     // The item keeps the WINNER's comment/responder (the stale resolve did not overwrite it).
     const items = await getCorrectiveActionItems(tdb, scorecard.id);
@@ -336,6 +345,35 @@ describe("submitCorrectiveActionResponse", () => {
       sql`SELECT id FROM field_scorecard_photos WHERE scorecard_id = ${scorecard.id} AND file_id = ${FILE_B}`,
     );
     expect(orphan.rows).toHaveLength(0);
+  });
+
+  it("a bare re-submit (NO photos) of an already-resolved item is an idempotent no-op, not a 409 (finding I)", async () => {
+    const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
+    const [first] = await getCorrectiveActionItems(tdb, scorecard.id);
+
+    await submitCorrectiveActionResponse(tdb, {
+      scorecardId: scorecard.id,
+      itemId: first.id,
+      comment: "resolved by the first responder",
+      respondedBy: { userId: USER, name: "Sam", email: null },
+    });
+
+    // A replayed submit for the resolved item that carries NO fresh uploads has nothing to discard → no-op.
+    await expect(
+      submitCorrectiveActionResponse(tdb, {
+        scorecardId: scorecard.id,
+        itemId: first.id,
+        comment: "replay with no photos",
+        respondedBy: { userId: null, name: "Ext PM", email: "pm@x.com" },
+      }),
+    ).resolves.toBeUndefined();
+
+    // The winner's response is preserved.
+    const items = await getCorrectiveActionItems(tdb, scorecard.id);
+    const resolved = items.find((i) => i.id === first.id)!;
+    expect(resolved.status).toBe("resolved");
+    expect(resolved.responseComment).toBe("resolved by the first responder");
+    expect(resolved.respondedByUserId).toBe(USER);
   });
 
   it("inserts a FRESH file as a NEW response photo (corrective_action_id set) that never appears as evidence", async () => {

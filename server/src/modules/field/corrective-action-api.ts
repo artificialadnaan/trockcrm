@@ -149,8 +149,13 @@ export interface SubmitCorrectiveActionResponseInput {
  * resolved it) would each insert their response photos, but only the FIRST resolve wins (the status-guarded
  * UPDATE is a no-op for the loser) — orphaning the loser's photos onto the winner's finalized response.
  * Re-reading the item's status under the lock and bailing when it is no longer `open` (BEFORE inserting)
- * means the losing/stale path inserts nothing and returns the same idempotent no-op. It also makes a retry
- * safe: once resolved the item is no longer `open`, so a replayed request never re-inserts the photo links.
+ * means the losing/stale path inserts nothing. It also makes a retry safe: once resolved the item is no longer
+ * `open`, so a replayed request never re-inserts the photo links.
+ *
+ * Already-resolved outcome: when the item is no longer `open` and the caller supplied photoFileIds (fresh
+ * uploads that did NOT attach), this throws AppError(409, code CORRECTIVE_ACTION_ALREADY_RESOLVED) so the
+ * caller can discard those now-orphaned uploads. When NO photoFileIds were supplied it is the idempotent 200
+ * no-op (a bare replay of a resolved item has nothing to discard).
  *
  * Strict belongs-checks: the item must belong to the scorecard, and every photoFileId must belong to the
  * scorecard's deal — a foreign/nonexistent file id is a 400, never silently linked.
@@ -196,10 +201,27 @@ export async function submitCorrectiveActionResponse(
     .limit(1);
   if (!item) throw new AppError(404, "Corrective-action item not found.");
 
-  // If the item is no longer open (a concurrent/stale submit lost the race), do NOT insert photos — the
-  // resolve below would be a no-op and any inserted photos would orphan onto the winner's response. Return
-  // cleanly (the caller re-reads the current thread), preserving the idempotent no-op result.
-  if (item.status !== "open") return;
+  // If the item is no longer open (a concurrent responder won the race, OR a replayed request), do NOT insert
+  // photos — the resolve below would be a no-op and any inserted photos would orphan onto the winner's
+  // finalized response.
+  //
+  // Two distinct outcomes:
+  //   - photoFileIds supplied (fresh uploads that did NOT get attached): the caller confirmed brand-new photos
+  //     that are now orphaned on the deal. Signal a CONFLICT (409, code CORRECTIVE_ACTION_ALREADY_RESOLVED) so
+  //     the caller can discard those uploads (web clears its pending-discard set / calls the discard endpoint;
+  //     mobile deletes its local draft) instead of leaking them.
+  //   - no photoFileIds (a bare re-submit / replay of a resolved item): preserve the idempotent 200 no-op —
+  //     nothing was uploaded, so there is nothing to discard.
+  if (item.status !== "open") {
+    if (photoFileIds.length > 0) {
+      throw new AppError(
+        409,
+        "This corrective action was already resolved; discard the uploaded photos.",
+        "CORRECTIVE_ACTION_ALREADY_RESOLVED",
+      );
+    }
+    return;
+  }
 
   if (photoFileIds.length > 0) {
     // Every file must belong to this scorecard's deal. Resolve the deal from the scorecard and assert
