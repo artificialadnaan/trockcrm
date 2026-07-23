@@ -14,6 +14,7 @@ import {
   fieldScorecardPhotos,
   scorecardCorrectiveActions,
   scorecardCorrectiveActionTokens,
+  scorecardCorrectiveActionUploads,
   dealTeamMembers,
   contacts,
 } from "@trock-crm/shared/schema";
@@ -96,6 +97,7 @@ beforeAll(async () => {
       fieldScorecardPhotos,
       scorecardCorrectiveActions,
       scorecardCorrectiveActionTokens,
+      scorecardCorrectiveActionUploads,
       dealTeamMembers,
       contacts,
     ]),
@@ -125,9 +127,24 @@ beforeEach(async () => {
   await tdb.execute(sql`DELETE FROM scorecard_corrective_actions`);
   await tdb.execute(sql`DELETE FROM field_scorecard_photos`);
   await tdb.execute(sql`DELETE FROM field_scorecard_items`);
+  await tdb.execute(sql`DELETE FROM scorecard_corrective_action_uploads`);
   await tdb.execute(sql`DELETE FROM field_scorecards`);
   await tdb.execute(sql`DELETE FROM public.job_queue`);
 });
+
+// A legitimate corrective-action response photo is created via confirmCorrectiveActionUpload, which writes a
+// durable ownership ledger row (scorecard_corrective_action_uploads: file_id + scorecard_id). The freshness
+// gate proves provenance off that ledger, so success-path tests must seed the ledger row(s) the confirm step
+// would have written for THIS scorecard.
+async function seedUploadLedger(scorecardId: string, fileIds: string[]): Promise<void> {
+  for (const fileId of fileIds) {
+    await tdb.execute(sql`
+      INSERT INTO scorecard_corrective_action_uploads (file_id, scorecard_id)
+      VALUES (${fileId}, ${scorecardId})
+      ON CONFLICT (file_id) DO NOTHING
+    `);
+  }
+}
 
 describe("getCorrectiveActionItems", () => {
   it("returns the scorecard's items with their (empty then filled) response fields", async () => {
@@ -174,6 +191,7 @@ describe("getCorrectiveActionItems", () => {
     const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
     const [first] = await getCorrectiveActionItems(tdb, scorecard.id);
     // Attach a fresh response photo (FILE_B) to the first item.
+    await seedUploadLedger(scorecard.id, [FILE_B]);
     await submitCorrectiveActionResponse(tdb, {
       scorecardId: scorecard.id,
       itemId: first.id,
@@ -202,6 +220,7 @@ describe("submitCorrectiveActionResponse", () => {
     const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
     const [first] = await getCorrectiveActionItems(tdb, scorecard.id);
 
+    await seedUploadLedger(scorecard.id, [FILE_A, FILE_B]);
     await submitCorrectiveActionResponse(tdb, {
       scorecardId: scorecard.id,
       itemId: first.id,
@@ -299,11 +318,76 @@ describe("submitCorrectiveActionResponse", () => {
     expect(items.find((i) => i.id === first.id)!.status).toBe("open");
   });
 
+  it("rejects a photo file id already linked on a SIBLING scorecard of the SAME deal (no cross-scorecard evidence recorded as fresh) (400)", async () => {
+    // Two scorecards on the SAME deal. FILE_B is already a photo on the SIBLING scorecard (section evidence
+    // there). Using it as a corrective-action RESPONSE photo on THIS scorecard passes the deal-membership
+    // check (same deal) but must be REJECTED: it is not a fresh upload for THIS scorecard (no ledger row here),
+    // so recording it as a fresh response photo would corrupt the response audit trail with foreign evidence.
+    const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
+    const { scorecard: sibling } = await createFieldScorecard(
+      tdb,
+      belowBandSubmission({ clientSubmissionId: csid(101) }),
+    );
+    expect(sibling.id).not.toBe(scorecard.id);
+    const [first] = await getCorrectiveActionItems(tdb, scorecard.id);
+
+    // FILE_B is an original evidence photo on the SIBLING scorecard (same deal, different scorecard).
+    await tdb.execute(sql`
+      INSERT INTO field_scorecard_photos (scorecard_id, section_key, deficiency_key, file_id, corrective_action_id)
+      VALUES (${sibling.id}, 'quality', NULL, ${FILE_B}, NULL)
+    `);
+
+    await expect(
+      submitCorrectiveActionResponse(tdb, {
+        scorecardId: scorecard.id,
+        itemId: first.id,
+        comment: "borrowing a sibling scorecard's photo",
+        photoFileIds: [FILE_B],
+        respondedBy: { userId: USER, name: "Sam", email: null },
+      }),
+    ).rejects.toBeInstanceOf(AppError);
+
+    // No second link was created on THIS scorecard, and the sibling's evidence row is untouched.
+    const here = await tdb.execute(
+      sql`SELECT id FROM field_scorecard_photos WHERE scorecard_id = ${scorecard.id} AND file_id = ${FILE_B}`,
+    );
+    expect(here.rows).toHaveLength(0);
+    const there = await tdb.execute(
+      sql`SELECT section_key, corrective_action_id FROM field_scorecard_photos WHERE scorecard_id = ${sibling.id} AND file_id = ${FILE_B}`,
+    );
+    expect(there.rows).toHaveLength(1);
+    expect(there.rows[0].section_key).toBe("quality");
+    expect(there.rows[0].corrective_action_id).toBeNull();
+    // The item stayed open (rejected before resolution).
+    const items = await getCorrectiveActionItems(tdb, scorecard.id);
+    expect(items.find((i) => i.id === first.id)!.status).toBe("open");
+  });
+
+  it("rejects a deal file that has NO corrective-action upload ledger row for this scorecard (not a fresh response upload) (400)", async () => {
+    // FILE_A belongs to the deal and is NOT existing evidence anywhere, but it was never uploaded through the
+    // corrective-action flow for THIS scorecard (no ledger row). It must be rejected — provenance is proven by
+    // the ledger, not mere deal membership, so an arbitrary project file can't be laundered into the response.
+    const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
+    const [first] = await getCorrectiveActionItems(tdb, scorecard.id);
+
+    await expect(
+      submitCorrectiveActionResponse(tdb, {
+        scorecardId: scorecard.id,
+        itemId: first.id,
+        comment: "attaching an arbitrary deal file",
+        photoFileIds: [FILE_A],
+        respondedBy: { userId: USER, name: "Sam", email: null },
+      }),
+    ).rejects.toBeInstanceOf(AppError);
+    expect(await getScorecardStatus(scorecard.id)).toBe("corrective_action_open");
+  });
+
   it("a STALE submit WITH photos after the item is already resolved 409s + inserts NO orphan photos (finding I)", async () => {
     const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
     const [first] = await getCorrectiveActionItems(tdb, scorecard.id);
 
     // First (winning) submit resolves the item with FILE_A as its response photo.
+    await seedUploadLedger(scorecard.id, [FILE_A]);
     await submitCorrectiveActionResponse(tdb, {
       scorecardId: scorecard.id,
       itemId: first.id,
@@ -387,7 +471,8 @@ describe("submitCorrectiveActionResponse", () => {
       VALUES (${scorecard.id}, 'quality', NULL, ${FILE_A}, NULL)
     `);
 
-    // FILE_B is fresh (no field_scorecard_photos row yet) → inserted as a NEW response photo row.
+    // FILE_B is fresh (no field_scorecard_photos row yet, ledger-backed) → inserted as a NEW response photo row.
+    await seedUploadLedger(scorecard.id, [FILE_B]);
     await submitCorrectiveActionResponse(tdb, {
       scorecardId: scorecard.id,
       itemId: first.id,

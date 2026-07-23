@@ -249,21 +249,33 @@ export async function submitCorrectiveActionResponse(
       throw new AppError(400, "One or more photos are not part of this project.");
     }
 
-    // A response photo MUST be a distinct fresh file. Reject any file that already has a
-    // field_scorecard_photos row for this scorecard — that is existing scorecard EVIDENCE, and stamping
-    // corrective_action_id on it would drop it from the PDF/evidence grid (those queries exclude
-    // corrective_action_id IS NOT NULL), letting a responder hijack/erase original evidence.
-    const existing = await db
-      .select({ fileId: fieldScorecardPhotos.fileId })
-      .from(fieldScorecardPhotos)
-      .where(
-        and(
-          eq(fieldScorecardPhotos.scorecardId, input.scorecardId),
-          inArray(fieldScorecardPhotos.fileId, photoFileIds),
-        ),
+    // A response photo MUST be a distinct fresh file uploaded FOR THIS SCORECARD via the corrective-action
+    // upload flow. Prove provenance off the durable ownership ledger (scorecard_corrective_action_uploads:
+    // file_id + scorecard_id), which confirmCorrectiveActionUpload writes for BOTH responder flows (web token
+    // AND mobile session both POST the same /corrective-actions/upload pair). A file id with no ledger row for
+    // THIS scorecard is rejected (400), which is strictly stronger than a same-scorecard field_scorecard_photos
+    // check: it catches
+    //   - original scorecard EVIDENCE (any scorecard, this deal) — stamping corrective_action_id would drop it
+    //     from the PDF/evidence grid (those queries exclude corrective_action_id IS NOT NULL) → hijack/erase;
+    //   - a photo already linked on a SIBLING scorecard of the SAME deal — it passes the deal-membership check
+    //     above but is NOT a fresh upload for this scorecard, so recording it as a fresh response photo would
+    //     corrupt the response audit trail with foreign evidence;
+    //   - any arbitrary project file that was never uploaded through this flow.
+    const ledgered = await db.execute(
+      sql`SELECT file_id FROM scorecard_corrective_action_uploads
+          WHERE scorecard_id = ${input.scorecardId}
+            AND file_id IN (${sql.join(
+              photoFileIds.map((id) => sql`${id}`),
+              sql`, `,
+            )})`,
+    );
+    const ledgeredIds = new Set((ledgered.rows as { file_id: string }[]).map((r) => r.file_id));
+    const unledgered = photoFileIds.filter((id) => !ledgeredIds.has(id));
+    if (unledgered.length > 0) {
+      throw new AppError(
+        400,
+        "A response photo must be a new file uploaded for this scorecard, not existing scorecard evidence.",
       );
-    if (existing.length > 0) {
-      throw new AppError(400, "A response photo must be a new file, not existing scorecard evidence.");
     }
 
     // Insert the fresh files as NEW response-photo rows in ONE batch (not a per-file round trip):
