@@ -460,6 +460,154 @@ describe("submitCorrectiveActionResponse", () => {
     expect(resolved.respondedByUserId).toBe(USER);
   });
 
+  it("an EXACT replay WITH photos of a resolved item (same responder + same linked fileIds) is idempotent success, no 409, no duplicate insert (finding P2)", async () => {
+    // A lost-response retry: the FIRST submission committed (item resolved, FILE_A + FILE_B attached) but its
+    // HTTP response was lost, so the client re-POSTs the SAME request. The exact files are already linked to
+    // this item → the replay must return SUCCESS (the route re-reads the refreshed thread), NOT a false 409,
+    // and must NOT re-insert the photo rows (which would also violate the unique (scorecard_id, file_id) index).
+    const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
+    const [first] = await getCorrectiveActionItems(tdb, scorecard.id);
+
+    await seedUploadLedger(scorecard.id, [FILE_A, FILE_B]);
+    await submitCorrectiveActionResponse(tdb, {
+      scorecardId: scorecard.id,
+      itemId: first.id,
+      comment: "resolved with two response photos",
+      photoFileIds: [FILE_A, FILE_B],
+      respondedBy: { userId: USER, name: "Sam", email: null },
+    });
+
+    // The SAME responder retries the SAME submission (order of fileIds differs — sets, not sequences).
+    await expect(
+      submitCorrectiveActionResponse(tdb, {
+        scorecardId: scorecard.id,
+        itemId: first.id,
+        comment: "resolved with two response photos",
+        photoFileIds: [FILE_B, FILE_A],
+        respondedBy: { userId: USER, name: "Sam", email: null },
+      }),
+    ).resolves.toBeUndefined();
+
+    // The item keeps the ORIGINAL response (comment/responder unchanged) and its EXACT two photos — no dup rows.
+    const items = await getCorrectiveActionItems(tdb, scorecard.id);
+    const resolved = items.find((i) => i.id === first.id)!;
+    expect(resolved.status).toBe("resolved");
+    expect(resolved.responseComment).toBe("resolved with two response photos");
+    expect(resolved.respondedByUserId).toBe(USER);
+    expect(resolved.photos.map((p) => p.fileId).sort()).toEqual([FILE_A, FILE_B].sort());
+    const links = await tdb.execute(
+      sql`SELECT file_id FROM field_scorecard_photos WHERE corrective_action_id = ${first.id}`,
+    );
+    expect(links.rows).toHaveLength(2);
+  });
+
+  it("an EXACT replay by a TOKEN responder (matched on email) of a resolved item is idempotent success, no 409 (finding P2)", async () => {
+    // The token (email-only) flow has no userId — the same-responder check falls back to responder_email.
+    const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
+    const [first] = await getCorrectiveActionItems(tdb, scorecard.id);
+
+    await seedUploadLedger(scorecard.id, [FILE_A]);
+    await submitCorrectiveActionResponse(tdb, {
+      scorecardId: scorecard.id,
+      itemId: first.id,
+      comment: "resolved by the external PM",
+      photoFileIds: [FILE_A],
+      respondedBy: { userId: null, name: "Ext PM", email: "pm@x.com" },
+    });
+
+    await expect(
+      submitCorrectiveActionResponse(tdb, {
+        scorecardId: scorecard.id,
+        itemId: first.id,
+        comment: "resolved by the external PM",
+        photoFileIds: [FILE_A],
+        respondedBy: { userId: null, name: "Ext PM", email: "pm@x.com" },
+      }),
+    ).resolves.toBeUndefined();
+
+    const links = await tdb.execute(
+      sql`SELECT file_id FROM field_scorecard_photos WHERE corrective_action_id = ${first.id}`,
+    );
+    expect(links.rows).toHaveLength(1);
+    expect((links.rows[0] as { file_id: string }).file_id).toBe(FILE_A);
+  });
+
+  it("a SAME-responder submit with a DIFFERENT photo set on a resolved item still 409s (not a replay) (finding P2)", async () => {
+    // Same responder, but the supplied fileIds differ from what is already linked → NOT an exact replay → 409.
+    // This proves the replay gate requires BOTH same-responder AND same-photo-set (the AND semantics).
+    const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
+    const [first] = await getCorrectiveActionItems(tdb, scorecard.id);
+
+    await seedUploadLedger(scorecard.id, [FILE_A, FILE_B]);
+    await submitCorrectiveActionResponse(tdb, {
+      scorecardId: scorecard.id,
+      itemId: first.id,
+      comment: "resolved with FILE_A",
+      photoFileIds: [FILE_A],
+      respondedBy: { userId: USER, name: "Sam", email: null },
+    });
+
+    // Same responder, but a DIFFERENT fresh file (FILE_B) that did NOT attach → competing/stale submit → 409.
+    let thrown: unknown;
+    try {
+      await submitCorrectiveActionResponse(tdb, {
+        scorecardId: scorecard.id,
+        itemId: first.id,
+        comment: "trying to add another photo after resolution",
+        photoFileIds: [FILE_B],
+        respondedBy: { userId: USER, name: "Sam", email: null },
+      });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(AppError);
+    expect((thrown as AppError).statusCode).toBe(409);
+    expect((thrown as AppError).code).toBe("CORRECTIVE_ACTION_ALREADY_RESOLVED");
+
+    // Only the winner's FILE_A is linked; FILE_B never became a row.
+    const links = await tdb.execute(
+      sql`SELECT file_id FROM field_scorecard_photos WHERE corrective_action_id = ${first.id}`,
+    );
+    expect((links.rows as { file_id: string }[]).map((r) => r.file_id)).toEqual([FILE_A]);
+  });
+
+  it("a DIFFERENT responder submitting the SAME photo set on a resolved item still 409s (not a replay) (finding P2)", async () => {
+    // The linked photo set matches, but a DIFFERENT responder submitted — NOT an exact replay → 409. Proves the
+    // same-photo-set alone is not enough; the responder identity must also match.
+    const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
+    const [first] = await getCorrectiveActionItems(tdb, scorecard.id);
+
+    await seedUploadLedger(scorecard.id, [FILE_A]);
+    await submitCorrectiveActionResponse(tdb, {
+      scorecardId: scorecard.id,
+      itemId: first.id,
+      comment: "resolved by the session responder",
+      photoFileIds: [FILE_A],
+      respondedBy: { userId: USER, name: "Sam", email: null },
+    });
+
+    // A token responder re-supplies the SAME already-linked FILE_A → different responder → 409, not a replay.
+    let thrown: unknown;
+    try {
+      await submitCorrectiveActionResponse(tdb, {
+        scorecardId: scorecard.id,
+        itemId: first.id,
+        comment: "external PM submitting the same file",
+        photoFileIds: [FILE_A],
+        respondedBy: { userId: null, name: "Ext PM", email: "pm@x.com" },
+      });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(AppError);
+    expect((thrown as AppError).statusCode).toBe(409);
+    expect((thrown as AppError).code).toBe("CORRECTIVE_ACTION_ALREADY_RESOLVED");
+
+    // The winner's response identity is untouched.
+    const items = await getCorrectiveActionItems(tdb, scorecard.id);
+    expect(items.find((i) => i.id === first.id)!.respondedByUserId).toBe(USER);
+  });
+
   it("rejects a fileId ALREADY linked as a response photo on THIS scorecard with a controlled 409 (not a 500) (finding P2)", async () => {
     // A response photo (FILE_B) is uploaded (ledgered) then submitted on item 1 → it now has a
     // field_scorecard_photos row on THIS scorecard AND its ledger row PERSISTS. Re-supplying that SAME

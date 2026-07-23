@@ -152,10 +152,16 @@ export interface SubmitCorrectiveActionResponseInput {
  * means the losing/stale path inserts nothing. It also makes a retry safe: once resolved the item is no longer
  * `open`, so a replayed request never re-inserts the photo links.
  *
- * Already-resolved outcome: when the item is no longer `open` and the caller supplied photoFileIds (fresh
- * uploads that did NOT attach), this throws AppError(409, code CORRECTIVE_ACTION_ALREADY_RESOLVED) so the
- * caller can discard those now-orphaned uploads. When NO photoFileIds were supplied it is the idempotent 200
- * no-op (a bare replay of a resolved item has nothing to discard).
+ * Already-resolved outcome: when the item is no longer `open`, three cases:
+ *   - NO photoFileIds → idempotent 200 no-op (a bare replay of a resolved item has nothing to discard).
+ *   - photoFileIds that are an EXACT REPLAY of the already-recorded response (SAME responder AND the item's
+ *     already-linked response-photo file_ids EQUAL the supplied set) → idempotent success, no re-insert, no 409.
+ *     This handles a lost-response retry: the first submission committed (item resolved, photos attached) and
+ *     the client re-sent the SAME request; a false 409 would make web claim a phantom lost race and mobile
+ *     re-upload the already-attached photos.
+ *   - photoFileIds that are NOT an exact replay (a DIFFERENT responder resolved it, or a DIFFERENT photo set —
+ *     fresh uploads that did NOT attach) → throws AppError(409, code CORRECTIVE_ACTION_ALREADY_RESOLVED) so the
+ *     caller can discard those now-orphaned uploads.
  *
  * Strict belongs-checks: the item must belong to the scorecard, and every photoFileId must belong to the
  * scorecard's deal — a foreign/nonexistent file id is a 400, never silently linked.
@@ -185,11 +191,14 @@ export async function submitCorrectiveActionResponse(
     .limit(1)
     .for("update");
 
-  // The item must belong to this scorecard (strict), and we read its status under the lock.
+  // The item must belong to this scorecard (strict), and we read its status + responder identity under the
+  // lock (the responder fields back the idempotent-replay check below).
   const [item] = await db
     .select({
       id: scorecardCorrectiveActions.id,
       status: scorecardCorrectiveActions.status,
+      respondedByUserId: scorecardCorrectiveActions.respondedByUserId,
+      responderEmail: scorecardCorrectiveActions.responderEmail,
     })
     .from(scorecardCorrectiveActions)
     .where(
@@ -205,22 +214,50 @@ export async function submitCorrectiveActionResponse(
   // photos — the resolve below would be a no-op and any inserted photos would orphan onto the winner's
   // finalized response.
   //
-  // Two distinct outcomes:
-  //   - photoFileIds supplied (fresh uploads that did NOT get attached): the caller confirmed brand-new photos
-  //     that are now orphaned on the deal. Signal a CONFLICT (409, code CORRECTIVE_ACTION_ALREADY_RESOLVED) so
-  //     the caller can discard those uploads (web clears its pending-discard set / calls the discard endpoint;
-  //     mobile deletes its local draft) instead of leaking them.
+  // Outcomes:
   //   - no photoFileIds (a bare re-submit / replay of a resolved item): preserve the idempotent 200 no-op —
   //     nothing was uploaded, so there is nothing to discard.
+  //   - photoFileIds supplied AND this is an EXACT REPLAY of the already-recorded response (same responder,
+  //     and the item's already-linked response-photo file_ids EQUAL the supplied set): the FIRST submission
+  //     committed (item resolved, photos attached) and only its HTTP response was lost, so the client retried
+  //     the SAME request. Those exact files are already attached — return an idempotent success (the route
+  //     re-reads and returns the refreshed thread) WITHOUT re-inserting or 409-ing. A false 409 here makes web
+  //     show "someone else resolved it" and mobile re-upload the same photos, reporting a phantom lost race.
+  //   - photoFileIds supplied but NOT an exact replay (a DIFFERENT responder resolved it, OR a DIFFERENT photo
+  //     set): a genuine competing/stale submission carrying fresh uploads that did NOT attach. Signal a CONFLICT
+  //     (409, code CORRECTIVE_ACTION_ALREADY_RESOLVED) so the caller discards those now-orphaned uploads (web
+  //     clears its pending-discard set / calls the discard endpoint; mobile deletes its local draft).
   if (item.status !== "open") {
-    if (photoFileIds.length > 0) {
-      throw new AppError(
-        409,
-        "This corrective action was already resolved; discard the uploaded photos.",
-        "CORRECTIVE_ACTION_ALREADY_RESOLVED",
-      );
+    if (photoFileIds.length === 0) return;
+
+    // Same responder? A session caller (userId non-null) matches on responded_by_user_id; a token caller
+    // (userId null) matches on responder_email (the token recipient's email).
+    const sameResponder =
+      input.respondedBy.userId !== null
+        ? item.respondedByUserId === input.respondedBy.userId
+        : input.respondedBy.email !== null && item.responderEmail === input.respondedBy.email;
+
+    if (sameResponder) {
+      // The response-photo file_ids ALREADY linked to THIS item (corrective_action_id = item.id).
+      const linked = await db
+        .select({ fileId: fieldScorecardPhotos.fileId })
+        .from(fieldScorecardPhotos)
+        .where(eq(fieldScorecardPhotos.correctiveActionId, item.id));
+      const linkedIds = new Set(linked.map((r) => r.fileId));
+      const suppliedIds = new Set(photoFileIds);
+      const sameFileSet =
+        linkedIds.size === suppliedIds.size && [...suppliedIds].every((id) => linkedIds.has(id));
+      // Exact replay of the recorded response → idempotent success (do not re-insert, do not 409).
+      if (sameFileSet) return;
     }
-    return;
+
+    // A genuine competing submission (different responder or different photo set) — signal the conflict so the
+    // caller discards its orphaned uploads.
+    throw new AppError(
+      409,
+      "This corrective action was already resolved; discard the uploaded photos.",
+      "CORRECTIVE_ACTION_ALREADY_RESOLVED",
+    );
   }
 
   if (photoFileIds.length > 0) {
