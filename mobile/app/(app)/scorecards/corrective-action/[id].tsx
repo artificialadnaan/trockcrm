@@ -72,8 +72,18 @@ export default function CorrectiveActionScreen() {
   const items = itemsQuery.data?.items ?? [];
   const scorecard = scorecardQuery.data?.scorecard;
   const dealId = scorecard?.dealId ?? "";
-  const officeId = scorecard?.officeId ?? activeOfficeId ?? user?.tenantId ?? null;
-  const ownerKey = uploadOwnerKey(user?.id, officeId ?? undefined);
+  // The draft ownerKey is ONLY a local on-disk namespace for the per-item copy dir (sanitizeOwnerKey builds
+  // the path). It must be STABLE for the screen's lifetime: a photo captured before the secondary
+  // scorecard-detail query resolves is copied under this key, and if the key later changed (an off-office
+  // card's real officeId arriving) the unmount-cleanup would delete that dir while the uri is still in reducer
+  // state → submit fails. So derive it from SESSION-STABLE values (user + active office / tenant) and
+  // deliberately NOT from scorecard.officeId — the corrective-action uploads are SCORECARD-scoped server-side
+  // (the server resolves the deal/office from the scorecard id), so the embedded office needn't match the
+  // card's real office. Lock in the first non-empty value via a ref so it never flips mid-session.
+  const ownerKeyRef = useRef<string>("");
+  const derivedOwnerKey = uploadOwnerKey(user?.id, activeOfficeId ?? user?.tenantId ?? undefined);
+  if (!ownerKeyRef.current && derivedOwnerKey) ownerKeyRef.current = derivedOwnerKey;
+  const ownerKey = ownerKeyRef.current || derivedOwnerKey;
 
   const errorStatus = (itemsQuery.error as { status?: number } | null | undefined)?.status;
   // The read endpoint 404s when the scorecard has no corrective actions (not below-band / unknown) — that's a
@@ -136,9 +146,9 @@ export default function CorrectiveActionScreen() {
                 dealId={dealId}
                 ownerKey={ownerKey}
                 voiceEnabled={voiceEnabled}
-                // Gate responses ONLY on the upload owner identity (user + office). ownerKey derives from the
-                // office (scorecard's, else the active office / tenant) — never from dealId — so it's ready
-                // even if the secondary scorecard-detail query is slow or failed. The corrective-action
+                // Gate responses ONLY on the upload owner identity (user + active office / tenant). ownerKey
+                // derives from SESSION-STABLE values — never from dealId or the scorecard's officeId — so it's
+                // ready even if the secondary scorecard-detail query is slow or failed. The corrective-action
                 // endpoints resolve the deal from the scorecard id server-side, so dealId is not needed to
                 // submit; gating on it would permanently disable Submit whenever that detail query lagged.
                 canRespond={Boolean(ownerKey)}
@@ -194,17 +204,24 @@ function CorrectiveActionItemCard({
   // mount-time snapshot): skip while a submit is in flight (its own success path cleans up + would race a
   // delete-out-from-under), and skip once submitted OK (already cleaned). A resolved item never reaches this
   // component branch (it early-returns ResolvedItemCard above), so there's nothing to clean there.
-  const cleanupGuardRef = useRef({ submitting: false, submittedOk: false });
+  // Also carry ownerKey/draftId in the ref so the empty-dep cleanup below reads the CURRENT values (not a
+  // stale mount-time snapshot) and never re-fires on a prop change. ownerKey is stable this session (parent
+  // locks it to session-stable values), but reading it from the ref keeps the teardown correct regardless.
+  const cleanupGuardRef = useRef({ submitting: false, submittedOk: false, ownerKey, draftId });
   cleanupGuardRef.current.submitting = submitting;
+  cleanupGuardRef.current.ownerKey = ownerKey;
+  cleanupGuardRef.current.draftId = draftId;
   useEffect(() => {
+    // Truly unmount-only (empty deps): the cleanup must NOT run when ownerKey/draftId change mid-session — a
+    // flip there (e.g. an off-office scorecard's real officeId arriving) would delete the dir out from under
+    // photos still referenced in reducer state. Empty deps + a ref read guarantees it fires solely on unmount.
     return () => {
       const g = cleanupGuardRef.current;
       if (g.submitting || g.submittedOk) return;
-      void deleteDraftPhotoDir(ownerKey, draftId);
+      void deleteDraftPhotoDir(g.ownerKey, g.draftId);
     };
-    // Owner+draftId are stable for this card; run the teardown once on unmount.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ownerKey, draftId]);
+  }, []);
 
   if (item.status !== "open") {
     return <ResolvedItemCard item={item} />;
