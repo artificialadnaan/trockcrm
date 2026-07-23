@@ -339,6 +339,31 @@ export async function handleScorecardCorrectiveActionEmail(
     itemLabel: String(r.item_label),
   }));
 
+  // Empty-open-set race (finding 5). We read `scorecard.status` at the TOP of this run, THEN queried the open
+  // corrective-action rows above. If the LAST open item is resolved AFTER that status read but BEFORE this
+  // flagged query, `flaggedRows` is now empty. Continuing would send a misleading "Corrective action required"
+  // email built on the empty-fallback item text ("see the CRM for the flagged items"), and the final
+  // subset-guarded stamp would trivially succeed (an empty current-open set satisfies the NOT EXISTS) — marking
+  // a concurrently-COMPLETED action as still required and stamping sent_at (which suppresses the server
+  // reconcile from ever re-notifying). So when there are zero open rows, RE-READ the scorecard's live status:
+  // if it is no longer `corrective_action_open` (the team resolved every item in-app → status flipped to
+  // corrective_action_closed, or an edit lifted the card above-band → 'submitted'), there is nothing to notify
+  // — RETURN WITHOUT sending and WITHOUT stamping, so a later reopen (which re-enqueues) still notifies. If the
+  // card is somehow STILL corrective_action_open with no open rows (a transient in-between state), also bail
+  // without sending/stamping — an email with the empty fallback item text must never go out.
+  if (flaggedRows.length === 0) {
+    const statusRecheck = await query(
+      `SELECT status FROM ${tenantSchema}.field_scorecards WHERE id = $1::uuid LIMIT 1`,
+      [scorecardId]
+    );
+    const currentStatus = statusRecheck.rows[0]?.status;
+    logger.log(
+      "[CorrectiveActionEmail] No open corrective-action items at send time - skipping (nothing to notify, not stamping)",
+      { scorecardId, currentStatus }
+    );
+    return;
+  }
+
   // Per-cycle dimension for the CRM (no-token) idempotency key. A CRM recipient's deep link is cycle-STABLE,
   // but the email PAYLOAD (which lists the flagged items) changes every cycle — so a cycle-stable key would
   // make Resend see the same key with a different payload → `invalid_idempotent_request`, which

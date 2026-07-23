@@ -556,6 +556,41 @@ describe("scorecard corrective-action notification email", () => {
     }
   });
 
+  it("does NOT send and does NOT stamp when the last open item is resolved before the flagged read (finding 5)", async () => {
+    // Race: the snapshot read `status = corrective_action_open` at the top of the run, but by the time the
+    // handler queries the open corrective-action rows the team resolved the LAST item in-app → the flagged set
+    // is EMPTY. Continuing would send a misleading "Corrective action required" email built on the empty-fallback
+    // item text, and the final subset-guarded stamp would trivially succeed (an empty current-open set satisfies
+    // the NOT EXISTS) — marking a concurrently-COMPLETED action as still required and suppressing any re-notify.
+    // The handler must instead RETURN without sending and without stamping.
+    const { query, inserts, tokenDeletes, jobEnqueues } = makeQuery({
+      status: "corrective_action_open", // passes the top-of-run open guard
+      recipients: [{ role: "superintendent", name: "Sam Super", email: "sam.super@trock.com", user_id: "u-1", can_field_login: true }],
+      assignedRoles: [{ role: "superintendent" }],
+      flagged: [], // the race: no open items remain at send time
+    });
+    const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "m" });
+    const logger = makeLogger();
+
+    await handleScorecardCorrectiveActionEmail(payload, null, { query: query as any, sendEmail, env, logger });
+
+    // No email built on the empty-fallback item text.
+    expect(sendEmail).not.toHaveBeenCalled();
+    // No token minted, none deleted.
+    expect(inserts).toHaveLength(0);
+    expect(tokenDeletes).toHaveLength(0);
+    // No stamp of corrective_action_email_sent_at (a concurrently-completed action must not be announced).
+    const stampCalls = query.mock.calls.filter(([text]) => /UPDATE .*field_scorecards/i.test(text as string));
+    expect(stampCalls).toHaveLength(0);
+    // No re-notify enqueue either.
+    expect(jobEnqueues).toHaveLength(0);
+    // The empty-open-set guard re-read the scorecard's live status before bailing.
+    const statusRecheck = query.mock.calls.filter(
+      ([text]) => /SELECT status FROM \S*field_scorecards/i.test(text as string),
+    );
+    expect(statusRecheck.length).toBeGreaterThanOrEqual(1);
+  });
+
   it("re-sends on a REOPEN cycle (stamp cleared) even though a prior-cycle token would still exist", async () => {
     // Finding 6: a reopen clears corrective_action_email_sent_at AND (server-side reconcile) deletes the prior
     // cycle's tokens, so the worker no longer finds a stale token to reuse-skip on. Model the post-reopen state:
