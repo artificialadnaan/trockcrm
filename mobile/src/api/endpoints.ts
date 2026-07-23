@@ -243,15 +243,32 @@ export const requestCorrectiveActionUploadUrl = (
   });
 
 // Step 2 (confirm) of the scorecard-scoped upload — creates the files row on the scorecard's deal (in the
-// scorecard's office) and returns the fresh { fileId } the response POST's photoFileIds expects.
+// scorecard's office) and returns the fresh { fileId } the response POST's photoFileIds expects. An optional
+// `caption` is persisted to files.description so a description typed in PhotoCaptionEditor survives to the
+// resolved view (the read sources per-photo captions from files.description). Omitted when blank.
 export const confirmCorrectiveActionUpload = (
   f: Fetcher,
   scorecardId: string,
-  body: { uploadToken: string; objectKey: string },
+  body: { uploadToken: string; objectKey: string; caption?: string | null },
 ) =>
   f<CorrectiveActionConfirmUploadResponse>(`/field/scorecards/${scorecardId}/corrective-actions/upload`, {
     method: "POST",
-    body: { uploadToken: body.uploadToken, objectKey: body.objectKey },
+    body: {
+      uploadToken: body.uploadToken,
+      objectKey: body.objectKey,
+      ...(body.caption != null ? { caption: body.caption } : {}),
+    },
+  });
+
+// Discard a corrective-action response photo that was uploaded (presign → PUT → confirm creates a persistent
+// files row on the scorecard's deal) but NOT yet attached to a submitted response. Used to reclaim orphans
+// when a concurrent upload batch partially fails (the succeeded fileIds are discarded before the retry) or
+// when the response POST 409s as CORRECTIVE_ACTION_ALREADY_RESOLVED (the uploads never attached). The server
+// only deletes an eligible file (this scorecard's deal + corrective-action flow + not yet attached); an
+// already-attached/absent file is a 404/409 no-op. Best-effort — callers should not block the UI on it.
+export const discardCorrectiveActionPhoto = (f: Fetcher, scorecardId: string, fileId: string) =>
+  f<{ discarded: boolean }>(`/field/scorecards/${scorecardId}/corrective-actions/upload/${fileId}`, {
+    method: "DELETE",
   });
 
 // The deal's assigned Superintendent + PM NAMES — used ONLY to best-effort pre-fill a new scorecard's

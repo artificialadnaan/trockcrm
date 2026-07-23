@@ -294,6 +294,15 @@ function CorrectiveActionItemCard({
         setSubmitting(false);
         return;
       }
+      if (result.status === "already_resolved") {
+        // A concurrent responder resolved this item first — our uploads were discarded and did NOT attach.
+        // Do NOT claim this as the user's submission: refresh so the parent swaps in the read-only resolved
+        // card (whose unmount reclaims the synthetic draft dir), inform the user, and leave submittedOk unset.
+        setNotice({ tone: "error", text: "This item was just resolved by someone else. Showing their response — your comment and photos were not submitted." });
+        setSubmitting(false);
+        onResolved();
+        return;
+      }
       // Resolved — reclaim the synthetic per-item copy dir (best-effort; the photos are now durable server
       // records), then let the parent refetch/invalidate swap in the read-only resolved view. Mark submittedOk
       // so the unmount teardown doesn't fire a second (racing) delete of the same dir.

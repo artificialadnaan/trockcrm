@@ -1,4 +1,9 @@
-import { getCorrectiveActions, submitCorrectiveActionResponse } from "../endpoints";
+import {
+  confirmCorrectiveActionUpload,
+  discardCorrectiveActionPhoto,
+  getCorrectiveActions,
+  submitCorrectiveActionResponse,
+} from "../endpoints";
 import type { Fetcher } from "../endpoints";
 import type { CorrectiveActionsResponse } from "../types";
 
@@ -83,5 +88,59 @@ describe("submitCorrectiveActionResponse", () => {
     await submitCorrectiveActionResponse(fetcher, "sc-1", "item-1", { comment: "Fixed." });
 
     expect(calls[0].opts).toEqual({ method: "POST", body: { comment: "Fixed." } });
+  });
+});
+
+describe("confirmCorrectiveActionUpload", () => {
+  it("POSTs the upload token + objectKey and carries a caption when present", async () => {
+    const { fetcher, calls } = recordingFetcher({ fileId: "file-1" });
+
+    await confirmCorrectiveActionUpload(fetcher, "sc-1", {
+      uploadToken: "up-token",
+      objectKey: "obj-key",
+      caption: "Fixed the guardrail",
+    });
+
+    expect(calls).toEqual([
+      {
+        path: "/field/scorecards/sc-1/corrective-actions/upload",
+        opts: {
+          method: "POST",
+          body: { uploadToken: "up-token", objectKey: "obj-key", caption: "Fixed the guardrail" },
+        },
+      },
+    ]);
+  });
+
+  it("omits the caption from the body when null or absent", async () => {
+    const { fetcher, calls } = recordingFetcher({ fileId: "file-1" });
+
+    await confirmCorrectiveActionUpload(fetcher, "sc-1", {
+      uploadToken: "up-token",
+      objectKey: "obj-key",
+      caption: null,
+    });
+    await confirmCorrectiveActionUpload(fetcher, "sc-1", { uploadToken: "up-token", objectKey: "obj-key" });
+
+    expect(calls[0].opts).toEqual({
+      method: "POST",
+      body: { uploadToken: "up-token", objectKey: "obj-key" },
+    });
+    expect(calls[1].opts).toEqual({
+      method: "POST",
+      body: { uploadToken: "up-token", objectKey: "obj-key" },
+    });
+  });
+});
+
+describe("discardCorrectiveActionPhoto", () => {
+  it("DELETEs the scorecard-scoped upload route for the given fileId", async () => {
+    const { fetcher, calls } = recordingFetcher({ discarded: true });
+
+    await discardCorrectiveActionPhoto(fetcher, "sc-1", "file-9");
+
+    expect(calls).toEqual([
+      { path: "/field/scorecards/sc-1/corrective-actions/upload/file-9", opts: { method: "DELETE" } },
+    ]);
   });
 });

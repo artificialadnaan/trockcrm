@@ -344,11 +344,20 @@ export default function ProjectDetailScreen() {
               // affordance is TAPPABLE only when the server says this viewer can respond (else it 403s → a
               // load error). correctiveAffordance encodes all four (open/closed × can/can't) cases.
               const affordance = correctiveAffordance(s.status, s.canRespondToCorrectiveAction === true);
+              // Derive the SPOKEN corrective wording from the same affordance value that drives the VISIBLE
+              // affordance below (open_* → "required", closed_* → "resolved", none → silent) so screen-reader
+              // semantics stay aligned with what's rendered rather than re-deriving from raw s.status.
+              const correctiveA11y =
+                affordance === "open_tappable" || affordance === "open_status"
+                  ? ", corrective action required"
+                  : affordance === "closed_tappable" || affordance === "closed_status"
+                    ? ", corrective action resolved"
+                    : "";
               return (
                 <Pressable
                   key={s.id}
                   accessibilityRole="button"
-                  accessibilityLabel={`${isLeadership ? "Leadership scorecard" : "Scorecard"}, week of ${formatShortDate(s.weekOf)}, ${scoreText}, ${s.ratingLabel}${s.status === "corrective_action_open" ? ", corrective action required" : s.status === "corrective_action_closed" ? ", corrective action resolved" : ""}`}
+                  accessibilityLabel={`${isLeadership ? "Leadership scorecard" : "Scorecard"}, week of ${formatShortDate(s.weekOf)}, ${scoreText}, ${s.ratingLabel}${correctiveA11y}`}
                   onPress={() => router.push({ pathname: "/(app)/scorecards/view/[id]", params: { id: s.id } })}
                   style={({ pressed }) => [styles.reportRow, pressed && { opacity: 0.7 }]}
                 >

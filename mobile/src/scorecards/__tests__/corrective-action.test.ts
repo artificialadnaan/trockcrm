@@ -39,6 +39,7 @@ jest.mock("../../api/endpoints", () => ({
     expiresIn: 900,
   })),
   confirmCorrectiveActionUpload: jest.fn(async (_f: unknown, _scorecardId: string) => ({ fileId: "file-x" })),
+  discardCorrectiveActionPhoto: jest.fn(async () => ({ discarded: true })),
   submitCorrectiveActionResponse: jest.fn(async () => ({ items: [{ id: "item-1", status: "resolved" }] })),
 }));
 
@@ -49,9 +50,11 @@ import {
   type CorrectiveResponsePhoto,
 } from "../corrective-action";
 import * as FileSystem from "expo-file-system/legacy";
+import { ApiError } from "../../api/client";
 import {
   requestCorrectiveActionUploadUrl,
   confirmCorrectiveActionUpload,
+  discardCorrectiveActionPhoto,
   submitCorrectiveActionResponse,
 } from "../../api/endpoints";
 
@@ -97,6 +100,7 @@ describe("submitCorrectiveActionItem", () => {
       expiresIn: 900,
     });
     (confirmCorrectiveActionUpload as jest.Mock).mockResolvedValue({ fileId: "file-x" });
+    (discardCorrectiveActionPhoto as jest.Mock).mockResolvedValue({ discarded: true });
     (submitCorrectiveActionResponse as jest.Mock).mockResolvedValue({
       items: [{ id: "item-1", status: "resolved" }],
     });
@@ -192,5 +196,121 @@ describe("submitCorrectiveActionItem", () => {
     });
     expect(result).toEqual({ status: "photos_failed", failed: 1 });
     expect(submitCorrectiveActionResponse).not.toHaveBeenCalled();
+  });
+
+  // Finding C — the per-photo caption typed in PhotoCaptionEditor must reach the confirm so it persists to
+  // files.description (the read sources captions there). Trimmed; a blank caption is omitted.
+  it("passes each photo's trimmed caption to confirm; omits a blank one", async () => {
+    await submitCorrectiveActionItem(fetcher, {
+      scorecardId: "sc-1",
+      itemId: "item-1",
+      dealId: "deal-1",
+      photos: [photo("a", { caption: "  Fixed the guardrail  " }), photo("b", { caption: "   " })],
+      comment: "Corrected.",
+    });
+    expect(confirmCorrectiveActionUpload).toHaveBeenCalledTimes(2);
+    expect((confirmCorrectiveActionUpload as jest.Mock).mock.calls[0][2]).toMatchObject({
+      caption: "Fixed the guardrail",
+    });
+    // A blank caption is passed as null (the endpoint omits it from the wire body).
+    expect((confirmCorrectiveActionUpload as jest.Mock).mock.calls[1][2]).toMatchObject({ caption: null });
+  });
+
+  // Finding B — a partial batch failure must DISCARD the ids that DID upload (already-confirmed files on the
+  // deal) so the retry doesn't accumulate orphaned duplicates, while still not POSTing.
+  it("with a partial batch failure: discards the succeeded fileIds and does NOT POST", async () => {
+    // Distinct fileId per confirm so we can assert exactly which succeeded id is reclaimed.
+    (confirmCorrectiveActionUpload as jest.Mock)
+      .mockResolvedValueOnce({ fileId: "file-ok" })
+      .mockResolvedValueOnce({ fileId: "file-never" });
+    // First photo's R2 PUT succeeds (→ confirmed file-ok), second photo's PUT fails (→ no confirm).
+    (FileSystem.uploadAsync as jest.Mock)
+      .mockResolvedValueOnce({ status: 200 })
+      .mockResolvedValueOnce({ status: 500 });
+
+    const result = await submitCorrectiveActionItem(fetcher, {
+      scorecardId: "sc-1",
+      itemId: "item-1",
+      dealId: "deal-1",
+      photos: [photo("a"), photo("b")],
+      comment: "Corrected.",
+    });
+
+    expect(result).toEqual({ status: "photos_failed", failed: 1 });
+    expect(submitCorrectiveActionResponse).not.toHaveBeenCalled();
+    // The one confirmed id is reclaimed; the failed photo never confirmed so has nothing to reclaim.
+    expect(discardCorrectiveActionPhoto).toHaveBeenCalledTimes(1);
+    expect(discardCorrectiveActionPhoto).toHaveBeenCalledWith(fetcher, "sc-1", "file-ok");
+  });
+
+  it("swallows discard errors on a partial batch failure and still reports photos_failed", async () => {
+    (FileSystem.uploadAsync as jest.Mock)
+      .mockResolvedValueOnce({ status: 200 })
+      .mockResolvedValueOnce({ status: 500 });
+    (discardCorrectiveActionPhoto as jest.Mock).mockRejectedValue(new Error("discard 404"));
+
+    const result = await submitCorrectiveActionItem(fetcher, {
+      scorecardId: "sc-1",
+      itemId: "item-1",
+      dealId: "deal-1",
+      photos: [photo("a"), photo("b")],
+      comment: "Corrected.",
+    });
+
+    expect(result).toEqual({ status: "photos_failed", failed: 1 });
+    expect(submitCorrectiveActionResponse).not.toHaveBeenCalled();
+  });
+
+  // Finding I — a concurrent responder resolved the item after our uploads; the POST 409s
+  // (CORRECTIVE_ACTION_ALREADY_RESOLVED) and our fileIds never attached. Discard them + surface a DISTINCT
+  // status (not a normal success).
+  it("with a 409 already-resolved response: discards the uploads and returns already_resolved", async () => {
+    (confirmCorrectiveActionUpload as jest.Mock)
+      .mockResolvedValueOnce({ fileId: "file-1" })
+      .mockResolvedValueOnce({ fileId: "file-2" });
+    (submitCorrectiveActionResponse as jest.Mock).mockRejectedValue(
+      new ApiError("Already resolved", 409, "CORRECTIVE_ACTION_ALREADY_RESOLVED"),
+    );
+
+    const result = await submitCorrectiveActionItem(fetcher, {
+      scorecardId: "sc-1",
+      itemId: "item-1",
+      dealId: "deal-1",
+      photos: [photo("a"), photo("b")],
+      comment: "Corrected.",
+    });
+
+    expect(result).toEqual({ status: "already_resolved" });
+    expect(submitCorrectiveActionResponse).toHaveBeenCalledTimes(1);
+    // Both uploaded-but-unattached ids are reclaimed.
+    expect(discardCorrectiveActionPhoto).toHaveBeenCalledTimes(2);
+    expect(discardCorrectiveActionPhoto).toHaveBeenCalledWith(fetcher, "sc-1", "file-1");
+    expect(discardCorrectiveActionPhoto).toHaveBeenCalledWith(fetcher, "sc-1", "file-2");
+  });
+
+  it("rethrows a non-409 response error (does NOT swallow it as already_resolved)", async () => {
+    (submitCorrectiveActionResponse as jest.Mock).mockRejectedValue(new ApiError("Server error", 500));
+    await expect(
+      submitCorrectiveActionItem(fetcher, {
+        scorecardId: "sc-1",
+        itemId: "item-1",
+        dealId: "deal-1",
+        photos: [],
+        comment: "Corrected.",
+      }),
+    ).rejects.toThrow("Server error");
+    expect(discardCorrectiveActionPhoto).not.toHaveBeenCalled();
+  });
+
+  it("does NOT discard on a genuine success", async () => {
+    await submitCorrectiveActionItem(fetcher, {
+      scorecardId: "sc-1",
+      itemId: "item-1",
+      dealId: "deal-1",
+      photos: [photo("a")],
+      comment: "Corrected.",
+    });
+    expect(submitCorrectiveActionResponse).toHaveBeenCalledTimes(1);
+    expect(discardCorrectiveActionPhoto).not.toHaveBeenCalled();
   });
 });

@@ -24,10 +24,12 @@
 import * as FileSystem from "expo-file-system/legacy";
 import {
   confirmCorrectiveActionUpload,
+  discardCorrectiveActionPhoto,
   requestCorrectiveActionUploadUrl,
   submitCorrectiveActionResponse,
   type Fetcher,
 } from "../api/endpoints";
+import { ApiError } from "../api/client";
 import type { CorrectiveActionItem } from "../api/types";
 import { compressForUpload } from "../capture/compress";
 import { runConcurrentUploads } from "../capture/concurrency";
@@ -104,8 +106,9 @@ export function correctiveResponseReducer(
  * accepted by the response POST even when the responder's active office differs (off-office project /
  * cross-office writes disabled). Mirrors the web responder's uploadCorrectiveActionPhoto.
  *
- * NOTE: the response endpoint links evidence by fileId and does not carry per-photo tags/GPS/caption on the
- * file itself (unlike the generic gallery upload) — the corrective-action response owns the caption/context.
+ * NOTE: the response endpoint links evidence by fileId; the per-photo caption typed in PhotoCaptionEditor is
+ * carried on the confirm (persisted to files.description) so it survives to the resolved view — the read
+ * sources per-photo captions from files.description. A blank caption is omitted.
  */
 async function uploadCorrectiveResponsePhoto(
   fetcher: Fetcher,
@@ -125,9 +128,11 @@ async function uploadCorrectiveResponsePhoto(
   if (put.status < 200 || put.status >= 300) {
     throw new Error(`Upload to storage failed (R2 returned ${put.status}).`);
   }
+  const caption = photo.caption.trim();
   const { fileId } = await confirmCorrectiveActionUpload(fetcher, scorecardId, {
     uploadToken: presign.uploadToken,
     objectKey: presign.objectKey,
+    caption: caption ? caption : null,
   });
   return fileId;
 }
@@ -143,14 +148,35 @@ export type SubmitCorrectiveActionItemInput = {
 export type SubmitCorrectiveActionItemResult =
   | { status: "resolved"; items: CorrectiveActionItem[] }
   | { status: "photos_pending"; remaining: number }
-  | { status: "photos_failed"; failed: number };
+  | { status: "photos_failed"; failed: number }
+  // The item was resolved by ANOTHER responder after this caller uploaded its photos — the response POST
+  // 409'd (CORRECTIVE_ACTION_ALREADY_RESOLVED) and the uploaded fileIds did NOT attach. Distinct from a
+  // genuine success: the screen must refresh + inform the user, not claim this as their submission.
+  | { status: "already_resolved" };
+
+/**
+ * Best-effort reclaim of corrective-action uploads that were confirmed (persistent files rows on the deal)
+ * but never attached to a submitted response — a partially-failed batch's succeeded ids, or all ids after a
+ * stale-submission 409. Swallows per-file discard errors so cleanup never masks the real result.
+ */
+async function discardUploadedFileIds(fetcher: Fetcher, scorecardId: string, fileIds: string[]): Promise<void> {
+  await Promise.all(
+    fileIds.map((fileId) => discardCorrectiveActionPhoto(fetcher, scorecardId, fileId).catch(() => undefined)),
+  );
+}
 
 /**
  * Upload this item's response photos through the SCORECARD-SCOPED corrective-action upload endpoints (which
  * resolve the SCORECARD'S owning office, NOT the responder's active office), then submit the response with the
  * resulting fileIds. Uploads run CONCURRENTLY (bounded by UPLOAD_CONCURRENCY); their fileIds keep the original
- * photo order. If ANY photo fails to upload we return photos_failed (the caller keeps the captured photos and
- * retries) and DO NOT POST — so a partial upload never submits a response missing evidence.
+ * photo order. If ANY photo fails to upload we DISCARD the fileIds of the uploads that DID succeed (they're
+ * already confirmed as persistent files rows on the deal — leaving them would orphan/duplicate on the retry)
+ * and return photos_failed WITHOUT POSTing — so a partial upload never submits a response missing evidence.
+ *
+ * If the response POST 409s as CORRECTIVE_ACTION_ALREADY_RESOLVED, another responder resolved the item after
+ * we uploaded — our fileIds did NOT attach, so we DISCARD them and return already_resolved (NOT a success):
+ * the screen refreshes to show the other responder's resolution and tells the user, without claiming this as
+ * their submission.
  *
  * Unlike the durable-queue field-capture path, this is eager (per-submit) and not offline-resilient: routing
  * through the scorecard's office is required for the fileIds to exist in the tenant the response POST reads.
@@ -169,17 +195,37 @@ export async function submitCorrectiveActionItem(
       (i) => uploadCorrectiveResponsePhoto(fetcher, input.scorecardId, input.photos[i]),
     );
     let failedCount = 0;
+    const succeededIds: string[] = [];
     settled.forEach((r, i) => {
-      if (r.status === "fulfilled") resolved[i] = r.value;
-      else failedCount += 1;
+      if (r.status === "fulfilled") {
+        resolved[i] = r.value;
+        succeededIds.push(r.value);
+      } else {
+        failedCount += 1;
+      }
     });
-    if (failedCount > 0) return { status: "photos_failed", failed: failedCount };
+    if (failedCount > 0) {
+      // Reclaim the ids that DID upload (confirmed files on the deal) so the retry doesn't accumulate
+      // orphaned duplicates. Best-effort; never blocks reporting the failure.
+      await discardUploadedFileIds(fetcher, input.scorecardId, succeededIds);
+      return { status: "photos_failed", failed: failedCount };
+    }
     photoFileIds.push(...resolved);
   }
 
-  const { items } = await submitCorrectiveActionResponse(fetcher, input.scorecardId, input.itemId, {
-    comment: input.comment,
-    photoFileIds,
-  });
-  return { status: "resolved", items };
+  try {
+    const { items } = await submitCorrectiveActionResponse(fetcher, input.scorecardId, input.itemId, {
+      comment: input.comment,
+      photoFileIds,
+    });
+    return { status: "resolved", items };
+  } catch (error) {
+    // A concurrent responder already resolved this item — our uploads never attached. Reclaim them and
+    // surface a distinct status so the caller doesn't treat this lost race as its own success.
+    if (error instanceof ApiError && error.status === 409 && error.code === "CORRECTIVE_ACTION_ALREADY_RESOLVED") {
+      await discardUploadedFileIds(fetcher, input.scorecardId, photoFileIds);
+      return { status: "already_resolved" };
+    }
+    throw error;
+  }
 }
