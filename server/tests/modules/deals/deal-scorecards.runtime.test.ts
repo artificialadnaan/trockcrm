@@ -240,6 +240,27 @@ describe("corrective-action thread on the detail (spec §9)", () => {
     expect(detail.correctiveActions).toEqual([]);
     expect(detail.status).toBe("submitted");
   });
+
+  it("drops a response photo whose backing file is soft-deleted from the thread (finding F)", async () => {
+    // The resolved item's response photo (CA_PHOTO_FILE) is active by default → it appears in the thread. Once
+    // its backing file is soft-deleted, the INNER-join photo query must DROP the link entirely (a LEFT join
+    // would keep the row with a stale fileId → a broken photo). An active file still appears.
+    const detailActive = await getDealScorecardDetail(tdb, DEAL, SC_NEWER, {
+      resolvePhotoUrl: async (fileId) => `url://${fileId}`,
+    });
+    expect(detailActive.correctiveActions!.find((i) => i.id === CA_ITEM_1)!.photos).toHaveLength(1);
+
+    await pg.exec(`UPDATE files SET is_active = false, deleted_at = NOW() WHERE id = '${CA_PHOTO_FILE}'`);
+    try {
+      const detail = await getDealScorecardDetail(tdb, DEAL, SC_NEWER, {
+        resolvePhotoUrl: async (fileId) => `url://${fileId}`,
+      });
+      // The soft-deleted response photo is gone — no broken/orphaned link on the resolved item.
+      expect(detail.correctiveActions!.find((i) => i.id === CA_ITEM_1)!.photos).toEqual([]);
+    } finally {
+      await pg.exec(`UPDATE files SET is_active = true, deleted_at = NULL WHERE id = '${CA_PHOTO_FILE}'`);
+    }
+  });
 });
 
 describe("deal scorecard PDF artifact download", () => {

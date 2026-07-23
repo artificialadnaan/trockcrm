@@ -185,7 +185,10 @@ async function getScorecardCorrectiveActionThread(
       caption: files.description,
     })
     .from(fieldScorecardPhotos)
-    .leftJoin(
+    // INNER join on the active-file predicate: a LEFT join keeps the photo row (fileId still set) for a
+    // soft-deleted/inactive backing file, so resolvePhotoUrl would still run on a stale file → a broken photo
+    // in the deal thread. INNER dropping the link entirely when its file is inactive/soft-deleted.
+    .innerJoin(
       files,
       and(eq(files.id, fieldScorecardPhotos.fileId), eq(files.isActive, true), isNull(files.deletedAt)),
     )
