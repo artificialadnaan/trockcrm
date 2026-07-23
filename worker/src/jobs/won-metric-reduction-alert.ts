@@ -190,11 +190,23 @@ export async function handleWonMetricReductionAlert(
     });
     return null;
   });
+  // Enrichment lookups are best-effort: a failure logs and the email still sends (with raw ids /
+  // no location), never dead-lettering the alert. They run before the per-recipient delivery loop.
+  const userNames = await resolveReductionUserNames(query, eventForDelivery).catch((error) => {
+    logger.warn("[WonMetricReductionAlert] Could not resolve rep names; sending with raw ids", { eventId, error });
+    return new Map<string, string>();
+  });
+  const dealLocation = await resolveDealLocation(query, eventForDelivery.tenantSchema, eventForDelivery.dealId).catch((error) => {
+    logger.warn("[WonMetricReductionAlert] Could not resolve deal location; sending without it", { eventId, error });
+    return null;
+  });
   const email = buildWonMetricReductionEmail({
     event: eventForDelivery,
     impact,
     officeId,
     frontendUrl: resolveFrontendUrl(env),
+    userNames,
+    dealLocation,
   });
   const sendEmail = deps.sendEmail ?? sendSystemEmailWithMetadata;
   let deferredOutcome: DeferredJobResult | null = null;
@@ -634,6 +646,64 @@ async function resolveOfficeId(query: PgQuery, tenantSchema: string): Promise<st
     [tenantSchema],
   );
   return normalizeUuid(result.rows[0]?.id) ?? null;
+}
+
+// Batch-resolve every user UUID that appears in changed_fields (from/to) and the snapshots
+// (assignedRepId/estimatorUserId) to a display name, so the email shows names not raw ids.
+async function resolveReductionUserNames(query: PgQuery, event: WonMetricReductionEvent): Promise<Map<string, string>> {
+  const ids = new Set<string>();
+  const add = (v: unknown) => {
+    if (typeof v === "string" && UUID_RE.test(v.trim())) ids.add(v.trim().toLowerCase());
+  };
+  const changed = parseJson(event.changedFields);
+  if (isRecord(changed)) {
+    for (const change of Object.values(changed)) {
+      if (isRecord(change)) {
+        add(change.from);
+        add(change.to);
+      }
+    }
+  }
+  for (const snap of [event.oldSnapshot, event.newSnapshot]) {
+    const s = parseJson(snap);
+    if (isRecord(s)) {
+      add(s.assignedRepId);
+      add(s.estimatorUserId);
+    }
+  }
+  if (ids.size === 0) return new Map();
+  const result = await query(
+    `SELECT id::text AS id, display_name FROM public.users WHERE id = ANY($1::uuid[])`,
+    [[...ids]],
+  );
+  const map = new Map<string, string>();
+  for (const row of result.rows) {
+    const id = normalizeUuid(row.id);
+    const name = normalizeText(row.display_name);
+    if (id && name) map.set(id, name);
+  }
+  return map;
+}
+
+// The deal's property location for the email "Location" row. Not captured in the trigger snapshot,
+// so read the live (soft-deleted deals keep the row) deal. Schema-name is guarded like the audit join.
+async function resolveDealLocation(
+  query: PgQuery,
+  tenantSchema: string,
+  dealId: string | null,
+): Promise<{ address: string | null; city: string | null; state: string | null } | null> {
+  if (!dealId || !isSafeTenantSchema(tenantSchema)) return null;
+  const result = await query(
+    `SELECT property_address, property_city, property_state FROM ${tenantSchema}.deals WHERE id = $1::uuid LIMIT 1`,
+    [dealId],
+  );
+  const row = result.rows[0];
+  if (!row) return null;
+  return {
+    address: normalizeText(row.property_address),
+    city: normalizeText(row.property_city),
+    state: normalizeText(row.property_state),
+  };
 }
 
 function normalizeEvent(row: any, fallbackId: string): WonMetricReductionEvent | null {

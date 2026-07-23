@@ -15,6 +15,9 @@ const TAKASHI_ID = "44444444-4444-4444-8444-444444444444";
 const ADNAAN_ID = "55555555-5555-4555-8555-555555555555";
 const TAKASHI = "takashi@trockgc.com";
 const ADNAAN = "adnaan@trockgc.com";
+const REP_FROM = "f5ade4ca-ee41-5188-b6d6-d58a2630e89c";
+const REP_TO = "e537cc4a-fc5e-46d4-901a-99a9bf5e2ec6";
+const REASSIGN_NAMES: Record<string, string> = { [REP_FROM]: "Chris Higingbotham", [REP_TO]: "Caleb Stone" };
 
 const BASE_EVENT = {
   event_id: EVENT_ID,
@@ -116,10 +119,21 @@ function makeQuery(options: { event?: Record<string, unknown>; sentRecipients?: 
       return { rows: [] };
     }
     if (sql.includes("FROM public.users")) {
+      if (sql.includes("display_name")) {
+        // Batched rep-name resolution by id (WHERE id = ANY($1)).
+        const ids = (params[0] as string[]) ?? [];
+        const rows = ids
+          .map((id) => ({ id: String(id).toLowerCase(), display_name: (REASSIGN_NAMES as Record<string, string>)[String(id).toLowerCase()] }))
+          .filter((row) => row.display_name);
+        return { rows };
+      }
       const email = String(params[0]).toLowerCase();
       if (email === TAKASHI) return { rows: [{ id: TAKASHI_ID }] };
       if (email === ADNAAN) return { rows: [{ id: ADNAAN_ID }] };
       return { rows: [] };
+    }
+    if (sql.includes("FROM office_dallas.deals") && sql.includes("property_state")) {
+      return { rows: [{ property_address: "50 Mount Zion Rd", property_city: "Atlanta", property_state: "GA" }] };
     }
     if (sql.includes("INSERT INTO office_dallas.notifications")) {
       notificationIds.add(String(params[0]));
@@ -196,10 +210,6 @@ describe("resolveWonMetricImpact", () => {
   });
 });
 
-const REP_FROM = "f5ade4ca-ee41-5188-b6d6-d58a2630e89c";
-const REP_TO = "e537cc4a-fc5e-46d4-901a-99a9bf5e2ec6";
-const NAMES = { [REP_FROM]: "Chris Higingbotham", [REP_TO]: "Caleb Stone" };
-
 const REASSIGN_EVENT = {
   dealId: DEAL_ID,
   dealName: "Terraces at Highbury Court",
@@ -234,7 +244,7 @@ describe("buildWonMetricReductionEmail — enrichment", () => {
       impact: REASSIGN_IMPACT,
       officeId: OFFICE_ID,
       frontendUrl: "https://trockcrm.com",
-      userNames: NAMES,
+      userNames: REASSIGN_NAMES,
       dealLocation: { address: "50 Mount Zion Rd", city: "Atlanta", state: "GA" },
     });
 
@@ -282,6 +292,46 @@ describe("enableWonMetricReductionAlertDelivery", () => {
 });
 
 describe("handleWonMetricReductionAlert", () => {
+  it("resolves rep UUIDs to names and adds the why-summary for a reassignment event", async () => {
+    const reassignEvent = {
+      ...BASE_EVENT,
+      action_label: "Won deal reassigned",
+      reason_code: "won_reassigned",
+      changed_fields: { assigned_rep_id: { from: REP_FROM, to: REP_TO } },
+      impacts: {
+        "assigned_rep.won_ytd": {
+          scope: "assigned_rep",
+          scopeId: REP_FROM,
+          metric: "won_ytd",
+          countBefore: 1,
+          countAfter: 0,
+          countDelta: -1,
+          before: 12322.86,
+          after: 0,
+          delta: -12322.86,
+          unit: "usd",
+        },
+      },
+      new_snapshot: { awardedAmount: 12322.86, assignedRepId: REP_TO },
+      old_snapshot: { awardedAmount: 12322.86, assignedRepId: REP_FROM },
+      deal_name: "Terraces at Highbury Court",
+      deal_number: "DFW-4-16326-af",
+      report_metric_key: "assigned_rep.won_ytd",
+    };
+    const { query } = makeQuery({ event: reassignEvent });
+    const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "resend-1" });
+
+    await handleWonMetricReductionAlert({ eventId: EVENT_ID }, null, { query, sendEmail, env: ENV, logger: silent });
+
+    const html = sendEmail.mock.calls[0][2] as string;
+    expect(html).toContain("Chris Higingbotham");
+    expect(html).toContain("Caleb Stone");
+    expect(html).not.toContain(REP_FROM);
+    expect(html).not.toContain(REP_TO);
+    expect(html).toContain("Atlanta, GA");
+    expect(html).toContain("reassigned");
+  });
+
   it("claims each recipient before sending, stamps receipts after delivery, and creates deterministic in-app cards", async () => {
     const { query, receipts, notificationIds, calls } = makeQuery();
     const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "resend-1" });
