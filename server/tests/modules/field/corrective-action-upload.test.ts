@@ -262,6 +262,34 @@ describe("token-scoped corrective-action photo upload", () => {
       .send({ contentType: "application/pdf", sizeBytes: 1024 });
     expect(res.status).toBe(400);
   });
+
+  it("409s a presign once the corrective action is CLOSED (finding H)", async () => {
+    // Close the corrective action: no open items + closed status. A still-assigned recipient's long-lived
+    // token must not keep minting upload URLs after closure.
+    await tdb.execute(sql`UPDATE scorecard_corrective_actions SET status = 'resolved' WHERE scorecard_id = ${scorecardId}`);
+    await tdb.execute(sql`UPDATE field_scorecards SET status = 'corrective_action_closed' WHERE id = ${scorecardId}`);
+    const res = await request(app)
+      .post(`/scorecards/${scorecardId}/corrective-actions/upload/url`)
+      .send({ contentType: "image/jpeg", sizeBytes: 1024 });
+    expect(res.status).toBe(409);
+  });
+
+  it("409s a CONFIRM once the corrective action closes between presign and confirm (finding H)", async () => {
+    // Presign while still open, then close the corrective action, then confirm — the confirm must be rejected
+    // so a closed scorecard never gains a new orphaned response file.
+    const urlRes = await request(app)
+      .post(`/scorecards/${scorecardId}/corrective-actions/upload/url`)
+      .send({ contentType: "image/jpeg", sizeBytes: 1024 });
+    expect(urlRes.status).toBe(200);
+
+    await tdb.execute(sql`UPDATE scorecard_corrective_actions SET status = 'resolved' WHERE scorecard_id = ${scorecardId}`);
+    await tdb.execute(sql`UPDATE field_scorecards SET status = 'corrective_action_closed' WHERE id = ${scorecardId}`);
+
+    const confirmRes = await request(app)
+      .post(`/scorecards/${scorecardId}/corrective-actions/upload`)
+      .send({ uploadToken: urlRes.body.uploadToken, objectKey: urlRes.body.objectKey });
+    expect(confirmRes.status).toBe(409);
+  });
 });
 
 describe("token-scoped corrective-action photo discard", () => {
@@ -323,6 +351,31 @@ describe("token-scoped corrective-action photo discard", () => {
     );
     expect(del.status).toBe(409);
     // The attached file MUST remain active (never dropped from the finalized response).
+    const rows = await tdb.execute(sql`SELECT is_active FROM files WHERE id = ${fileId}`);
+    expect(rows.rows[0].is_active).toBe(true);
+  });
+
+  it("runs the re-check + delete under the parent-scorecard lock; an attach wins the race (409) (finding E)", async () => {
+    // discardCorrectiveActionUpload takes the SAME parent-scorecard FOR UPDATE lock the submit path uses, so
+    // an attach that commits first is observed by the discard's is-attached re-check → 409, never a
+    // soft-delete of an already-attached file. Here the submit attaches the file first (serialized under the
+    // lock in prod); the discard then sees the attachment and rejects, leaving the file active.
+    const rawToken = await tokenFor(scorecardId);
+    const query = `?token=${encodeURIComponent(rawToken)}`;
+    const { confirmRes } = await uploadPhoto(query);
+    const fileId = confirmRes.body.fileId as string;
+
+    const items = await request(app).get(`/scorecards/${scorecardId}/corrective-actions${query}`);
+    const itemId = items.body.items[0].id;
+    const resp = await request(app)
+      .post(`/scorecards/${scorecardId}/corrective-actions/${itemId}${query}`)
+      .send({ comment: "attached under the lock", photoFileIds: [fileId] });
+    expect(resp.status).toBe(200);
+
+    const del = await request(app).delete(
+      `/scorecards/${scorecardId}/corrective-actions/upload/${fileId}${query}`,
+    );
+    expect(del.status).toBe(409);
     const rows = await tdb.execute(sql`SELECT is_active FROM files WHERE id = ${fileId}`);
     expect(rows.rows[0].is_active).toBe(true);
   });

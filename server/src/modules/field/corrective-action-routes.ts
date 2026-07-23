@@ -21,6 +21,7 @@ import {
   requestCorrectiveActionUploadUrl,
   confirmCorrectiveActionUpload,
   discardCorrectiveActionUpload,
+  resolveScorecard,
 } from "./corrective-action-upload.js";
 
 /** The responder identity threaded into a resolved item (a CRM user, or an email-only token recipient). */
@@ -68,23 +69,21 @@ async function authorizeCorrectiveAction(
   const token = rawToken(req);
 
   if (token) {
-    const verified = await runInOffice(office, (db) => verifyCorrectiveActionToken(db, token));
-    if (!verified) throw new AppError(401, "This corrective-action link is invalid or has expired.");
-    if (verified.scorecardId !== scorecardId) {
-      // A recipient-bound token grants access ONLY to its own scorecard's flow.
-      throw new AppError(403, "This link does not grant access to this scorecard.");
-    }
-    // Verify-time revalidation: a token verified by hash+expiry alone would keep working for its full TTL
-    // even after the assignment drifts (the recipient's email CHANGED, or the super/PM was reassigned) — the
-    // per-mutation archive/removal hooks don't cover an email CHANGE. So re-resolve the deal's CURRENT active
-    // superintendent/PM recipients and confirm the token's email still matches a live assignment. If not, the
-    // link no longer maps to an assigned responder → 403. (The mutation hooks stay as belt-and-suspenders.)
+    // Verify the token AND revalidate the assignment in a SINGLE office transaction sharing one db handle
+    // (previously two separate runInOffice opens with a duplicated deal_id lookup).
     const responder = await runInOffice(office, async (db) => {
-      const dealRes = await db.execute(
-        sql`SELECT deal_id FROM field_scorecards WHERE id = ${scorecardId} LIMIT 1`,
-      );
-      const dealId = (dealRes.rows[0] as { deal_id?: string } | undefined)?.deal_id;
-      if (!dealId) throw new AppError(404, "Scorecard not found");
+      const verified = await verifyCorrectiveActionToken(db, token);
+      if (!verified) throw new AppError(401, "This corrective-action link is invalid or has expired.");
+      if (verified.scorecardId !== scorecardId) {
+        // A recipient-bound token grants access ONLY to its own scorecard's flow.
+        throw new AppError(403, "This link does not grant access to this scorecard.");
+      }
+      // Verify-time revalidation: a token verified by hash+expiry alone would keep working for its full TTL
+      // even after the assignment drifts (the recipient's email CHANGED, or the super/PM was reassigned) — the
+      // per-mutation archive/removal hooks don't cover an email CHANGE. So re-resolve the deal's CURRENT active
+      // superintendent/PM recipients and confirm the token's email still matches a live assignment. If not, the
+      // link no longer maps to an assigned responder → 403. (The mutation hooks stay as belt-and-suspenders.)
+      const { dealId } = await resolveScorecard(db, scorecardId);
       const recipients = await resolveCorrectiveActionRecipients(db, dealId);
       const wanted = verified.recipientEmail.trim().toLowerCase();
       const match = recipients.find((r) => r.email.trim().toLowerCase() === wanted);

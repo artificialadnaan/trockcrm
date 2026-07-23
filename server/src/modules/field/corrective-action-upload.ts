@@ -79,6 +79,10 @@ export async function requestCorrectiveActionUploadUrl(
   if (input.sizeBytes > MAX_UPLOAD_BYTES) {
     throw new AppError(400, "Photo exceeds the maximum upload size.");
   }
+  // Gate presign on an OPEN corrective action. A still-assigned recipient's long-lived (30-day) token would
+  // otherwise keep minting upload URLs after the corrective action closed → permanent gallery/storage orphans
+  // (an upload can never be attached to a resolved item). Reject once there is no open item to respond to.
+  await assertOpenCorrectiveAction(db, input.scorecardId);
   const { dealId, uploaderId } = await resolveScorecardUploader(
     db,
     input.scorecardId,
@@ -125,6 +129,10 @@ export async function confirmCorrectiveActionUpload(
   db: TenantDb,
   input: ConfirmCorrectiveActionUploadInput,
 ): Promise<{ fileId: string }> {
+  // Gate confirm on an OPEN corrective action too (not just presign): a token holder could have obtained a
+  // presigned URL while open, then confirmed after closure. Reject a confirm once the corrective action is
+  // closed so a closed scorecard can never gain a new orphaned response file.
+  await assertOpenCorrectiveAction(db, input.scorecardId);
   // Resolve the deal (belt-and-suspenders; the caller already bound the token to this scorecard) AND the
   // uploader — a session user id, or the scorecard's submitter for a token responder (never a nil uuid,
   // which would FK-violate files.uploaded_by → public.users).
@@ -164,6 +172,14 @@ export async function discardCorrectiveActionUpload(
   db: TenantDb,
   input: DiscardCorrectiveActionUploadInput,
 ): Promise<{ discarded: true }> {
+  // Serialize this discard against submitCorrectiveActionResponse, which links photos under the SAME
+  // parent-scorecard FOR UPDATE lock. Without it, a concurrent submit could attach the file BETWEEN the
+  // is-attached re-check and the soft-delete below → we'd soft-delete an already-attached file (dropping it
+  // from the finalized response). Taking the lock up front (in the route's runInOfficeTransaction) makes the
+  // re-check + delete atomic w.r.t. any submit that would attach the same file. The route runs us inside that
+  // transaction, so we take the ambient lock here rather than opening a nested transaction.
+  await db.execute(sql`SELECT id FROM field_scorecards WHERE id = ${input.scorecardId} LIMIT 1 FOR UPDATE`);
+
   const { dealId } = await resolveScorecard(db, input.scorecardId);
 
   // Load the candidate file scoped to this scorecard's deal + the corrective-action flow. Anything outside
@@ -214,7 +230,7 @@ async function resolveScorecardUploader(
   return { dealId, uploaderId };
 }
 
-async function resolveScorecard(
+export async function resolveScorecard(
   db: TenantDb,
   scorecardId: string,
 ): Promise<{ dealId: string; submittedBy: string }> {
@@ -226,4 +242,28 @@ async function resolveScorecard(
   const submittedBy = row?.submitted_by;
   if (!dealId || !submittedBy) throw new AppError(404, "Scorecard not found.");
   return { dealId, submittedBy };
+}
+
+/**
+ * Assert the scorecard still has an OPEN corrective action — a status of `corrective_action_open` AND ≥1 open
+ * item. Response uploads (presign + confirm) are only valid while there is an open item to attach them to; a
+ * still-assigned recipient's long-lived token must not keep uploading response files after closure (they'd
+ * orphan permanently). A closed/reverted corrective action (or a scorecard with no open items) is a 409. GET
+ * reads of a closed response are unaffected — only the write paths gate on this.
+ */
+async function assertOpenCorrectiveAction(db: TenantDb, scorecardId: string): Promise<void> {
+  const res = await db.execute(sql`
+    SELECT 1
+    FROM field_scorecards s
+    WHERE s.id = ${scorecardId}
+      AND s.status = 'corrective_action_open'
+      AND EXISTS (
+        SELECT 1 FROM scorecard_corrective_actions ca
+        WHERE ca.scorecard_id = s.id AND ca.status = 'open'
+      )
+    LIMIT 1
+  `);
+  if (res.rows.length === 0) {
+    throw new AppError(409, "This corrective action is closed; response uploads are no longer accepted.");
+  }
 }
