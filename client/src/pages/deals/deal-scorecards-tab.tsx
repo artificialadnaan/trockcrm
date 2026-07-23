@@ -45,6 +45,30 @@ function formatRespondedAt(iso: string | null): string | null {
   return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 }
 
+// Match each ORIGINAL flagged item (a critical-deficiency key or an action-item text) to its seeded
+// corrective-action row, so the inline response threads directly beneath the item (spec §9). Mirrors how
+// the server correlates them (corrective-actions-service.ts): a deficiency matches by its key (stable
+// item_ref); an action item matches by LABEL AND CARDINALITY — the seed index (item_ref) is fragile, so a
+// duplicate label maps to distinct occurrences, each consumed once. Returns lookups the list renderers use.
+export function buildCorrectiveActionLookup(items: CorrectiveActionItemView[] | undefined): {
+  deficiencyByKey: Map<string, CorrectiveActionItemView>;
+  actionByLabel: Map<string, CorrectiveActionItemView[]>;
+} {
+  const deficiencyByKey = new Map<string, CorrectiveActionItemView>();
+  const actionByLabel = new Map<string, CorrectiveActionItemView[]>();
+  for (const item of items ?? []) {
+    if (item.itemType === "critical_deficiency") {
+      // First seed for a key wins (a stable key never duplicates in a well-formed card).
+      if (!deficiencyByKey.has(item.itemRef)) deficiencyByKey.set(item.itemRef, item);
+    } else if (item.itemType === "action_item") {
+      const bucket = actionByLabel.get(item.itemLabel) ?? [];
+      bucket.push(item);
+      actionByLabel.set(item.itemLabel, bucket);
+    }
+  }
+  return { deficiencyByKey, actionByLabel };
+}
+
 const SECTION_TITLE = new Map<string, string>(FIELD_SCORECARD_SECTIONS.map((s) => [s.key, s.title]));
 const SECTION_MAX = new Map<string, number>(FIELD_SCORECARD_SECTIONS.map((s) => [s.key, s.maxPoints]));
 const DEFICIENCY_LABEL = new Map<string, string>(FIELD_SCORECARD_CRITICAL_DEFICIENCIES.map((d) => [d.key, d.label]));
@@ -360,6 +384,17 @@ export function ScorecardDetailView({ detail }: { detail: FieldScorecardDetail }
   const isV2 = detail.formVersion === 2;
   const sectionTitle = isV2 ? V2_SECTION_TITLE : SECTION_TITLE;
   const deficiencyLabel = isV2 ? V2_DEFICIENCY_LABEL : DEFICIENCY_LABEL;
+  // The card tripped the corrective-action band iff the API returned a (possibly empty) list; build the
+  // key/label lookups once so each original deficiency / action item can thread its response inline.
+  const correctiveActions = detail.correctiveActions;
+  const hasCorrectiveActions = Array.isArray(correctiveActions);
+  const { deficiencyByKey, actionByLabel } = buildCorrectiveActionLookup(correctiveActions);
+  // Per-label occurrence counter so duplicate action labels each consume a distinct seeded row (multiset).
+  const actionLabelSeen = new Map<string, number>();
+  const resolvedCount = (correctiveActions ?? []).filter((i) => i.status === "resolved").length;
+  const totalCount = correctiveActions?.length ?? 0;
+  const allResolved =
+    detail.status === "corrective_action_closed" || (totalCount > 0 && resolvedCount === totalCount);
   return (
     <div className="space-y-4">
       <div>
@@ -379,16 +414,29 @@ export function ScorecardDetailView({ detail }: { detail: FieldScorecardDetail }
         </div>
       </div>
 
+      {hasCorrectiveActions && totalCount > 0 && (
+        <div className="flex items-center justify-between">
+          <h4 className="text-xs font-semibold uppercase tracking-wide text-gray-500">Corrective Actions</h4>
+          <span className={`text-xs font-medium ${allResolved ? "text-green-700" : "text-red-600"}`}>
+            {resolvedCount} / {totalCount} resolved
+          </span>
+        </div>
+      )}
+
       {detail.criticalDeficiencies.length > 0 && (
         <div>
           <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-red-600">Critical Deficiencies</h4>
           <ul className="list-inside list-disc space-y-1 text-sm text-gray-900">
-            {detail.criticalDeficiencies.map((key) => (
-              <li key={key}>
-                {deficiencyLabel.get(key) ?? key}
-                {detail.criticalDeficiencyNotes?.[key] ? <span className="ml-1 text-gray-500">— {detail.criticalDeficiencyNotes[key]}</span> : null}
-              </li>
-            ))}
+            {detail.criticalDeficiencies.map((key) => {
+              const ca = deficiencyByKey.get(key);
+              return (
+                <li key={key}>
+                  {deficiencyLabel.get(key) ?? key}
+                  {detail.criticalDeficiencyNotes?.[key] ? <span className="ml-1 text-gray-500">— {detail.criticalDeficiencyNotes[key]}</span> : null}
+                  {ca && <CorrectiveActionResponse item={ca} />}
+                </li>
+              );
+            })}
           </ul>
         </div>
       )}
@@ -397,15 +445,24 @@ export function ScorecardDetailView({ detail }: { detail: FieldScorecardDetail }
         <div>
           <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">Action Items</h4>
           <ol className="list-inside list-decimal space-y-1 text-sm text-gray-900">
-            {detail.actionItems.map((a, i) => (
-              <li key={i}>{a}</li>
-            ))}
+            {detail.actionItems.map((a, i) => {
+              // Consume seeded occurrences in order so duplicate labels thread under distinct occurrences.
+              const bucket = actionByLabel.get(a);
+              let ca: CorrectiveActionItemView | undefined;
+              if (bucket) {
+                const seen = actionLabelSeen.get(a) ?? 0;
+                ca = bucket[seen];
+                actionLabelSeen.set(a, seen + 1);
+              }
+              return (
+                <li key={i}>
+                  {a}
+                  {ca && <CorrectiveActionResponse item={ca} />}
+                </li>
+              );
+            })}
           </ol>
         </div>
-      )}
-
-      {detail.correctiveActions && detail.correctiveActions.length > 0 && (
-        <CorrectiveActionThread items={detail.correctiveActions} status={detail.status} />
       )}
 
       {isV2 && (
@@ -447,84 +504,62 @@ export function ScorecardDetailView({ detail }: { detail: FieldScorecardDetail }
   );
 }
 
-// The "reply thread": each flagged item (action item / critical deficiency) with its inline corrective-action
-// response — responder name + date + comment + response photos — under the original item (spec §9). Resolved
-// items show their response; still-open items show an "Awaiting response" hint. A closed scorecard reads as
-// the full before/after.
-export function CorrectiveActionThread({
-  items,
-  status,
-}: {
-  items: CorrectiveActionItemView[];
-  status?: string;
-}) {
-  const resolvedCount = items.filter((i) => i.status === "resolved").length;
-  const allResolved = status === "corrective_action_closed" || (items.length > 0 && resolvedCount === items.length);
+// The inline corrective-action RESPONSE threaded directly beneath its ORIGINAL flagged item (action item /
+// critical deficiency) — an open/resolved pill, then responder + date + comment + response photos (spec §9).
+// A resolved item reads as the before/after; a still-open item shows an "Awaiting response" hint. Rendered
+// under each original list item by ScorecardDetailView, so the flagged label is never duplicated.
+export function CorrectiveActionResponse({ item }: { item: CorrectiveActionItemView }) {
+  const respondedAt = formatRespondedAt(item.respondedAt);
+  const isResolved = item.status === "resolved";
   return (
-    <div>
-      <div className="mb-2 flex items-center justify-between">
-        <h4 className="text-xs font-semibold uppercase tracking-wide text-gray-500">Corrective Actions</h4>
-        <span className={`text-xs font-medium ${allResolved ? "text-green-700" : "text-red-600"}`}>
-          {resolvedCount} / {items.length} resolved
-        </span>
-      </div>
-      <div className="space-y-2">
-        {items.map((item) => {
-          const respondedAt = formatRespondedAt(item.respondedAt);
-          const isResolved = item.status === "resolved";
-          return (
-            <div key={item.id} className="rounded-md border border-gray-200 bg-white p-3">
-              <div className="flex items-start justify-between gap-2">
-                <p className="text-sm font-medium text-gray-900">{item.itemLabel}</p>
-                <Badge
-                  variant="outline"
-                  className={
-                    isResolved
-                      ? "shrink-0 bg-green-100 text-green-800 border-green-200"
-                      : "shrink-0 bg-amber-100 text-amber-800 border-amber-200"
-                  }
-                >
-                  {isResolved ? "Resolved" : "Open"}
-                </Badge>
-              </div>
-              {isResolved ? (
-                <div className="mt-2 border-l-2 border-gray-200 pl-3">
-                  <div className="flex items-center gap-2 text-xs text-gray-500">
-                    <span className="font-medium text-gray-700">
-                      {item.responderName ?? item.responderEmail ?? "Responder"}
-                    </span>
-                    {respondedAt && <span>· {respondedAt}</span>}
+    <div className="mt-1.5 rounded-md border border-gray-200 bg-white p-2.5">
+      <Badge
+        variant="outline"
+        className={
+          isResolved
+            ? "bg-green-100 text-green-800 border-green-200"
+            : "bg-amber-100 text-amber-800 border-amber-200"
+        }
+      >
+        {isResolved ? "Resolved" : "Open"}
+      </Badge>
+      {isResolved ? (
+        <div className="mt-2 border-l-2 border-gray-200 pl-3">
+          <div className="flex items-center gap-2 text-xs text-gray-500">
+            <span className="font-medium text-gray-700">
+              {item.responderName ?? item.responderEmail ?? "Responder"}
+            </span>
+            {respondedAt && <span>· {respondedAt}</span>}
+          </div>
+          {item.responseComment && (
+            <p className="mt-1 whitespace-pre-wrap text-sm text-gray-900">{item.responseComment}</p>
+          )}
+          {item.photos.length > 0 && (
+            <div className="mt-2 grid grid-cols-3 gap-2 sm:grid-cols-4">
+              {item.photos.map((p) =>
+                p.url ? (
+                  <a key={p.id} href={p.url} target="_blank" rel="noopener noreferrer" className="group block">
+                    <img
+                      src={p.url}
+                      alt={p.caption ?? "Corrective action photo"}
+                      className="aspect-square w-full rounded-md object-cover ring-1 ring-gray-200 group-hover:ring-gray-400"
+                    />
+                    {/* Persisted caption shown visually beneath the thumbnail, mirroring evidence-photo
+                        captions above (not just the img alt). */}
+                    {p.caption && <p className="mt-0.5 truncate text-[11px] text-gray-500">{p.caption}</p>}
+                  </a>
+                ) : (
+                  <div key={p.id} className="flex aspect-square items-center justify-center rounded-md bg-gray-100 text-[11px] text-gray-400">
+                    Unavailable
                   </div>
-                  {item.responseComment && (
-                    <p className="mt-1 whitespace-pre-wrap text-sm text-gray-900">{item.responseComment}</p>
-                  )}
-                  {item.photos.length > 0 && (
-                    <div className="mt-2 grid grid-cols-3 gap-2 sm:grid-cols-4">
-                      {item.photos.map((p) =>
-                        p.url ? (
-                          <a key={p.id} href={p.url} target="_blank" rel="noopener noreferrer" className="group block">
-                            <img
-                              src={p.url}
-                              alt={p.caption ?? "Corrective action photo"}
-                              className="aspect-square w-full rounded-md object-cover ring-1 ring-gray-200 group-hover:ring-gray-400"
-                            />
-                          </a>
-                        ) : (
-                          <div key={p.id} className="flex aspect-square items-center justify-center rounded-md bg-gray-100 text-[11px] text-gray-400">
-                            Unavailable
-                          </div>
-                        ),
-                      )}
-                    </div>
-                  )}
-                </div>
-              ) : (
-                <p className="mt-1 text-xs italic text-gray-400">Awaiting corrective-action response.</p>
+                ),
               )}
             </div>
-          );
-        })}
-      </div>
+          )}
+        </div>
+      ) : (
+        <p className="mt-1 text-xs italic text-gray-400">Awaiting corrective-action response.</p>
+      )}
     </div>
   );
 }
