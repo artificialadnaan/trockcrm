@@ -96,15 +96,31 @@ export async function requestCorrectiveActionUploadUrl(
   );
 }
 
-/** Step 2 (confirm) of the token-scoped response-photo upload — returns the fresh { fileId }. */
+/**
+ * Step 2 (confirm) of the token-scoped response-photo upload — returns the fresh { fileId }.
+ *
+ * `clientUploadId` is a STABLE, per-photo idempotency key (see uploadCorrectiveActionPhoto). It is threaded
+ * into the server's confirmUpload, which dedups on it: if the confirm's HTTP response is lost and the client
+ * retries with the SAME clientUploadId, the server returns the already-created file row instead of failing
+ * with an expired-token error. Optional so a legacy caller can omit it.
+ */
 export async function confirmCorrectiveActionUpload(
   scorecardId: string,
-  body: { uploadToken: string; objectKey: string },
+  body: { uploadToken: string; objectKey: string; clientUploadId?: string },
   token?: string,
 ): Promise<{ fileId: string }> {
   return api<{ fileId: string }>(
     withToken(`/field/scorecards/${scorecardId}/corrective-actions/upload`, token),
-    { method: "POST", json: { uploadToken: body.uploadToken, objectKey: body.objectKey }, ...tokenFieldCsrf(token) },
+    {
+      method: "POST",
+      json: {
+        uploadToken: body.uploadToken,
+        objectKey: body.objectKey,
+        // Omit the key entirely when absent so a legacy/no-id caller sends a minimal body.
+        ...(body.clientUploadId ? { clientUploadId: body.clientUploadId } : {}),
+      },
+      ...tokenFieldCsrf(token),
+    },
   );
 }
 
@@ -146,11 +162,18 @@ async function putToSignedUrl(file: File, uploadUrl: string, mimeType: string): 
  * Upload a response photo end-to-end: presign → PUT to R2 → confirm → { fileId }. The returned fileId is the
  * value to pass in submitCorrectiveActionResponse's photoFileIds. Passes the recipient token through when the
  * responder is email-only (no session).
+ *
+ * A STABLE per-photo `clientUploadId` is generated ONCE here (one per selected file) and sent on the confirm
+ * step. It is the idempotency key the server's confirmUpload dedups on: if the confirm's HTTP response is lost
+ * and this call's confirm is retried, it carries the SAME clientUploadId so the server returns the
+ * already-created file row instead of an expired-token error. An optional override lets a caller supply a
+ * persisted id so a whole-upload retry (fresh presign) reuses the same key rather than minting a new one.
  */
 export async function uploadCorrectiveActionPhoto(
   scorecardId: string,
   file: File,
   token?: string,
+  clientUploadId: string = crypto.randomUUID(),
 ): Promise<string> {
   const mimeType = file.type || "image/jpeg";
   const presign = await requestCorrectiveActionUploadUrl(
@@ -161,7 +184,7 @@ export async function uploadCorrectiveActionPhoto(
   await putToSignedUrl(file, presign.uploadUrl, mimeType);
   const { fileId } = await confirmCorrectiveActionUpload(
     scorecardId,
-    { uploadToken: presign.uploadToken, objectKey: presign.objectKey },
+    { uploadToken: presign.uploadToken, objectKey: presign.objectKey, clientUploadId },
     token,
   );
   return fileId;

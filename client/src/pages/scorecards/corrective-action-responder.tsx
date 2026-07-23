@@ -230,8 +230,13 @@ function ItemCard({
         // Upload with bounded concurrency (a few in flight) instead of one-at-a-time, but collect the results
         // by ORIGINAL INDEX so the resulting photos keep a deterministic order regardless of which PUT finishes
         // first. Per-file bookkeeping (pending-discard set + preview URL) happens as each upload resolves.
+        //
+        // Generate a STABLE per-photo clientUploadId ONCE here (one per accepted file, before the upload) so a
+        // lost-response retry of that file's confirm reuses the SAME idempotency key — the server's
+        // confirmUpload then returns the already-created file row instead of an expired-token error.
         const settled = await runBoundedConcurrency(accepted, UPLOAD_CONCURRENCY, async (file) => {
-          const fileId = await uploadCorrectiveActionPhoto(scorecardId, file, token);
+          const clientUploadId = crypto.randomUUID();
+          const fileId = await uploadCorrectiveActionPhoto(scorecardId, file, token, clientUploadId);
           // Mark it pending-discard-on-cleanup the instant it's confirmed (a persistent files row now exists).
           pendingFileIdsRef.current.add(fileId);
           const previewUrl = URL.createObjectURL(file);

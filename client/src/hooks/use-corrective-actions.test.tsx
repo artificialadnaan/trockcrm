@@ -25,9 +25,13 @@ const {
   submitCorrectiveActionResponse,
   requestCorrectiveActionUploadUrl,
   confirmCorrectiveActionUpload,
+  uploadCorrectiveActionPhoto,
   discardCorrectiveActionPhoto,
   useCorrectiveActions,
 } = await import("./use-corrective-actions");
+
+// A minimal, valid-shaped UUID matcher — the client generates the clientUploadId with crypto.randomUUID().
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function flushEffects() {
   return new Promise((resolve) => setTimeout(resolve, 0));
@@ -87,6 +91,68 @@ describe("corrective-action client API", () => {
       "/field/scorecards/sc-1/corrective-actions/upload?token=tok-abc",
       expect.objectContaining({ method: "POST", json: { uploadToken: "ut", objectKey: "k" }, fieldCsrf: true }),
     );
+  });
+
+  it("confirmCorrectiveActionUpload threads a provided clientUploadId into the confirm body (retryable idempotency key)", async () => {
+    apiMock.mockResolvedValue({ fileId: "file-9" });
+    await confirmCorrectiveActionUpload("sc-1", { uploadToken: "ut", objectKey: "k", clientUploadId: "cid-123" }, "tok-abc");
+    expect(apiMock).toHaveBeenCalledWith(
+      "/field/scorecards/sc-1/corrective-actions/upload?token=tok-abc",
+      expect.objectContaining({
+        method: "POST",
+        json: { uploadToken: "ut", objectKey: "k", clientUploadId: "cid-123" },
+        fieldCsrf: true,
+      }),
+    );
+  });
+
+  it("confirmCorrectiveActionUpload omits clientUploadId from the body when none is given (legacy caller)", async () => {
+    apiMock.mockResolvedValue({ fileId: "file-9" });
+    await confirmCorrectiveActionUpload("sc-1", { uploadToken: "ut", objectKey: "k" });
+    expect(apiMock.mock.calls[0][1].json).not.toHaveProperty("clientUploadId");
+  });
+
+  it("uploadCorrectiveActionPhoto generates a STABLE clientUploadId and sends it on the confirm step", async () => {
+    // Presign then confirm; capture the confirm body's clientUploadId.
+    apiMock.mockImplementation(async (path: string) => {
+      if (path.includes("/upload/url")) {
+        return { uploadUrl: "http://r2/put", objectKey: "obj-k", uploadToken: "ut-1", expiresIn: 3600 };
+      }
+      return { fileId: "file-1" };
+    });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, status: 200 }));
+
+    const file = new File([new Uint8Array([1, 2, 3])], "p.jpg", { type: "image/jpeg" });
+    const fileId = await uploadCorrectiveActionPhoto("sc-1", file, "tok-abc");
+    expect(fileId).toBe("file-1");
+
+    const confirmCall = apiMock.mock.calls.find(
+      ([path]) => path.includes("/corrective-actions/upload") && !path.includes("/upload/url"),
+    );
+    expect(confirmCall).toBeTruthy();
+    const sentId = confirmCall![1].json.clientUploadId as string;
+    // A stable, generated per-photo idempotency key (crypto.randomUUID shape) is sent on confirm.
+    expect(sentId).toMatch(UUID_RE);
+    vi.unstubAllGlobals();
+  });
+
+  it("uploadCorrectiveActionPhoto reuses a caller-supplied clientUploadId on confirm (retry keeps the same key)", async () => {
+    apiMock.mockImplementation(async (path: string) => {
+      if (path.includes("/upload/url")) {
+        return { uploadUrl: "http://r2/put", objectKey: "obj-k", uploadToken: "ut-1", expiresIn: 3600 };
+      }
+      return { fileId: "file-1" };
+    });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, status: 200 }));
+
+    const file = new File([new Uint8Array([1, 2, 3])], "p.jpg", { type: "image/jpeg" });
+    await uploadCorrectiveActionPhoto("sc-1", file, "tok-abc", "stable-cid-777");
+
+    const confirmCall = apiMock.mock.calls.find(
+      ([path]) => path.includes("/corrective-actions/upload") && !path.includes("/upload/url"),
+    );
+    expect(confirmCall![1].json.clientUploadId).toBe("stable-cid-777");
+    vi.unstubAllGlobals();
   });
 
   it("discardCorrectiveActionPhoto DELETEs the upload route with the token + field CSRF flag", async () => {

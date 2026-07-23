@@ -233,6 +233,31 @@ describe("CorrectiveActionResponderPage", () => {
     expect(revoke).toHaveBeenCalledWith("blob:preview-1");
   });
 
+  it("passes a STABLE per-photo clientUploadId to uploadCorrectiveActionPhoto for each selected file", async () => {
+    mocks.useCorrectiveActions.mockReturnValue({ items: [openItem], loading: false, error: null, errorStatus: null, refetch: vi.fn() });
+    mocks.uploadCorrectiveActionPhoto.mockImplementation(async () => `file-${Math.random()}`);
+
+    await renderAt("/scorecards/sc-1/corrective-action?token=tok");
+
+    const fileInput = container.querySelector('input[type="file"]') as HTMLInputElement;
+    const files = Array.from({ length: 2 }, (_, i) => new File([new Uint8Array([i])], `p${i}.jpg`, { type: "image/jpeg" }));
+    Object.defineProperty(fileInput, "files", { value: files, configurable: true });
+    await act(async () => {
+      fileInput.dispatchEvent(new Event("change", { bubbles: true }));
+      for (let i = 0; i < 20; i++) await Promise.resolve();
+    });
+
+    // Each selected file is uploaded with a 4th arg: a stable, per-photo clientUploadId (crypto.randomUUID
+    // shape). A lost-response retry of that file's confirm reuses the same key so the server dedups instead of
+    // failing with an expired-token error.
+    const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    expect(mocks.uploadCorrectiveActionPhoto).toHaveBeenCalledTimes(2);
+    const ids = mocks.uploadCorrectiveActionPhoto.mock.calls.map((c) => c[3] as string);
+    ids.forEach((id) => expect(id).toMatch(UUID_RE));
+    // Distinct per photo (one stable key each), not a single shared/empty id.
+    expect(new Set(ids).size).toBe(2);
+  });
+
   it("caps the combined photo selection at the server limit (50) before uploading", async () => {
     mocks.useCorrectiveActions.mockReturnValue({ items: [openItem], loading: false, error: null, errorStatus: null, refetch: vi.fn() });
     mocks.uploadCorrectiveActionPhoto.mockImplementation(async () => `file-${Math.random()}`);
