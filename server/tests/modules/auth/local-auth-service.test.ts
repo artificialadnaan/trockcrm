@@ -42,7 +42,8 @@ vi.mock("../../../src/lib/resend-client.js", () => ({
   sendSystemEmail: dbMocks.sendSystemEmail,
 }));
 
-const { getLocalAuthStatus, hashPassword, loginWithLocalPassword, sendUserInvite } = await import("../../../src/modules/auth/local-auth-service.js");
+const { getLocalAuthStatus, hashPassword, loginWithLocalPassword, sendUserInvite, revokeUserInvite } = await import("../../../src/modules/auth/local-auth-service.js");
+import type { RevokeRestartDeps } from "../../../src/modules/auth/local-auth-service.js";
 
 describe("local auth service", () => {
   beforeEach(() => {
@@ -218,5 +219,81 @@ describe("local auth service", () => {
       statusCode: 403,
       message: "Temporary invite has expired",
     });
+  });
+});
+
+// Wiring: revoking a user's field login must restart the open corrective-action cycle for each deal where that
+// user is an active super/PM, so the worker re-routes the now-field-login-less user to the tokenized web link.
+// The cross-office fan-out itself is exercised end-to-end against PGlite in
+// revoke-field-login-restart-cycle.runtime.test.ts; here we assert revokeUserInvite CALLS the restart with the
+// injected deps and that a restart failure never fails the revoke.
+describe("revokeUserInvite triggers a corrective-action re-notify", () => {
+  function makeRestartDeps(dealsByOffice: Record<string, string[]>) {
+    const offices = Object.keys(dealsByOffice).map((slug) => ({ id: `id-${slug}`, slug }));
+    const restartCycleForDeal = vi.fn().mockResolvedValue(undefined);
+    const deps: RevokeRestartDeps = {
+      listOffices: vi.fn().mockResolvedValue(offices),
+      // Faithful to the real runInOffice: hand the callback an officeDb whose selectDistinct returns THIS
+      // office's affected deals, so the function under test enumerates + restarts them.
+      runInOffice: vi.fn(async (office, run) => {
+        const officeDb = {
+          selectDistinct: () => ({
+            from: () => ({
+              where: async () => dealsByOffice[office.slug]!.map((dealId) => ({ dealId })),
+            }),
+          }),
+        };
+        await run(officeDb as never);
+      }),
+      restartCycleForDeal,
+    };
+    return { deps, restartCycleForDeal };
+  }
+
+  beforeEach(() => {
+    // revokeUserInvite: select(existing).limit → update().set().where → insert(event).values.
+    dbMocks.limit.mockResolvedValue([{ userId: "user-9" }]);
+    dbMocks.updateWhere.mockResolvedValue(undefined);
+    dbMocks.insertValues.mockResolvedValue(undefined);
+  });
+
+  it("restarts the cycle once per affected deal across every office", async () => {
+    const { deps, restartCycleForDeal } = makeRestartDeps({
+      alpha: ["deal-a1", "deal-a2"],
+      bravo: ["deal-b1"],
+    });
+
+    await revokeUserInvite({ userId: "user-9", actorUserId: "admin-1" }, deps);
+
+    expect(restartCycleForDeal).toHaveBeenCalledTimes(3);
+    const restartedDeals = restartCycleForDeal.mock.calls.map((c) => c[1].dealId).sort();
+    expect(restartedDeals).toEqual(["deal-a1", "deal-a2", "deal-b1"]);
+    // Each restart carries the office context (id + slug) the worker's tenant schema needs.
+    for (const call of restartCycleForDeal.mock.calls) {
+      expect(call[1].office).toMatchObject({ id: expect.any(String), slug: expect.any(String) });
+    }
+  });
+
+  it("does not restart when the user is an active super/PM on no deal", async () => {
+    const { deps, restartCycleForDeal } = makeRestartDeps({ alpha: [], bravo: [] });
+    await revokeUserInvite({ userId: "user-9", actorUserId: "admin-1" }, deps);
+    expect(restartCycleForDeal).not.toHaveBeenCalled();
+  });
+
+  it("still resolves (revoke succeeds) when the re-notify throws — best-effort, non-blocking", async () => {
+    const { deps } = makeRestartDeps({ alpha: ["deal-a1"] });
+    (deps.restartCycleForDeal as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("boom"));
+    // The revoke's own DB writes still ran, and the thrown re-notify is swallowed.
+    await expect(revokeUserInvite({ userId: "user-9", actorUserId: "admin-1" }, deps)).resolves.toBeUndefined();
+    expect(dbMocks.updateWhere).toHaveBeenCalled();
+  });
+
+  it("404s (and never re-notifies) when the user has no local login row", async () => {
+    const { deps, restartCycleForDeal } = makeRestartDeps({ alpha: ["deal-a1"] });
+    dbMocks.limit.mockResolvedValueOnce([]);
+    await expect(
+      revokeUserInvite({ userId: "user-9", actorUserId: "admin-1" }, deps),
+    ).rejects.toMatchObject({ statusCode: 404 });
+    expect(restartCycleForDeal).not.toHaveBeenCalled();
   });
 });

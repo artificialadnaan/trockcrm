@@ -1,11 +1,18 @@
 import crypto from "crypto";
 import { promisify } from "util";
-import { and, eq } from "drizzle-orm";
-import { userLocalAuth, userLocalAuthEvents, users } from "@trock-crm/shared/schema";
+import { and, eq, sql } from "drizzle-orm";
+import { dealTeamMembers, userLocalAuth, userLocalAuthEvents, users } from "@trock-crm/shared/schema";
 import { db } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { sendSystemEmail } from "../../lib/resend-client.js";
 import type { UserRole } from "@trock-crm/shared/types";
+import {
+  listActiveFieldOffices,
+  runInOfficeTransaction,
+  type FieldOffice,
+  type FieldTenantDb,
+} from "../field/cross-office.js";
+import { restartCorrectiveActionNotificationCycleForDeal } from "../field/corrective-actions-service.js";
 
 const scryptAsync = promisify(crypto.scrypt);
 const PASSWORD_MIN_LENGTH = 12;
@@ -371,10 +378,82 @@ export async function sendUserInvite(input: {
   };
 }
 
-export async function revokeUserInvite(input: {
-  userId: string;
-  actorUserId: string;
-}) {
+/**
+ * Injectable seams for {@link restartCorrectiveActionCyclesForRevokedFieldLogin} — the office enumeration, the
+ * per-office transaction runner, and the restart itself are dependencies so the cross-office fan-out (which
+ * needs the real pooled connection + search_path envelope) can be exercised against a single PGlite instance
+ * in a runtime test. Defaults resolve to the real cross-office helpers.
+ */
+export interface RevokeRestartDeps {
+  listOffices: () => Promise<FieldOffice[]>;
+  runInOffice: (office: FieldOffice, run: (officeDb: FieldTenantDb) => Promise<void>) => Promise<void>;
+  restartCycleForDeal: (
+    officeDb: FieldTenantDb,
+    input: { dealId: string; office: FieldOffice },
+  ) => Promise<void>;
+}
+
+function defaultRevokeRestartDeps(actorUserId: string): RevokeRestartDeps {
+  return {
+    listOffices: listActiveFieldOffices,
+    // Bind the per-office transaction to the ACTOR (the admin who revoked) so app.current_user_id / audit
+    // stamps a real user, mirroring the tenantMiddleware envelope every other corrective-action restart runs in.
+    runInOffice: (office, run) => runInOfficeTransaction(office, actorUserId, (officeDb) => run(officeDb)),
+    restartCycleForDeal: restartCorrectiveActionNotificationCycleForDeal,
+  };
+}
+
+/**
+ * When a user's FIELD-LOGIN capability is revoked (user_local_auth.is_enabled → false) while the user AND their
+ * deal-team assignment stay ACTIVE, a CRM super/PM responder can no longer open the trockcam:// deep link they
+ * were emailed — and, absent any team mutation, NOTHING restarts the notification cycle, so they never receive
+ * the tokenized web fallback. They are stranded: dead deep link, no working link, sent stamp still set.
+ *
+ * This restarts the OPEN corrective-action notification cycle for every deal on which the revoked user is an
+ * ACTIVE superintendent/project_manager, across ALL active offices (the user may be assigned in more than one).
+ * The worker's per-recipient routing re-resolves each recipient's field-login capability at send time
+ * (is_enabled = TRUE AND revoked_at IS NULL), so on the restarted cycle the now-revoked user correctly gets the
+ * tokenized web link instead of the deep link.
+ *
+ * Best-effort and NON-blocking: it runs AFTER the revoke has committed and any office failing is captured, not
+ * propagated (Promise.allSettled) — a re-notify hiccup must never fail the revoke itself. Idempotent per office
+ * because {@link restartCorrectiveActionNotificationCycleForDeal} is (fresh nonce, sent-stamp clear, one job).
+ */
+export async function restartCorrectiveActionCyclesForRevokedFieldLogin(
+  userId: string,
+  deps: RevokeRestartDeps,
+): Promise<void> {
+  const offices = await deps.listOffices();
+  await Promise.allSettled(
+    offices.map((office) =>
+      deps.runInOffice(office, async (officeDb) => {
+        // Deals in THIS office where the revoked user is an ACTIVE super/PM assignment. DISTINCT because a user
+        // could hold both responder roles on the same deal (one restart covers all its open cards regardless).
+        const rows = await officeDb
+          .selectDistinct({ dealId: dealTeamMembers.dealId })
+          .from(dealTeamMembers)
+          .where(
+            and(
+              eq(dealTeamMembers.userId, userId),
+              eq(dealTeamMembers.isActive, true),
+              sql`${dealTeamMembers.role} IN ('superintendent', 'project_manager')`,
+            ),
+          );
+        for (const { dealId } of rows) {
+          await deps.restartCycleForDeal(officeDb, { dealId, office });
+        }
+      }),
+    ),
+  );
+}
+
+export async function revokeUserInvite(
+  input: {
+    userId: string;
+    actorUserId: string;
+  },
+  restartDeps?: RevokeRestartDeps,
+) {
   const [existing] = await db
     .select({ userId: userLocalAuth.userId })
     .from(userLocalAuth)
@@ -407,6 +486,24 @@ export async function revokeUserInvite(input: {
     actorUserId: input.actorUserId,
     eventType: "invite_revoked",
   });
+
+  // The field-login capability is now revoked. Any deal where this user is an active superintendent/
+  // project_manager may have an OPEN corrective action whose notification already stamped as sent with a
+  // trockcam:// deep link the user can no longer open — and no team mutation will restart it. Restart those
+  // deals' cycles so the worker re-resolves the (now field-login-less) user to the tokenized web fallback.
+  // Runs AFTER the is_enabled=false write has committed so the worker's per-recipient re-resolve sees the
+  // revoked state. Best-effort and non-blocking: a re-notify failure must never fail the revoke itself.
+  try {
+    await restartCorrectiveActionCyclesForRevokedFieldLogin(
+      input.userId,
+      restartDeps ?? defaultRevokeRestartDeps(input.actorUserId),
+    );
+  } catch (err) {
+    console.error("[local-auth] corrective-action re-notify after revoke failed", {
+      userId: input.userId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 export async function listLocalAuthEvents(userId: string) {
