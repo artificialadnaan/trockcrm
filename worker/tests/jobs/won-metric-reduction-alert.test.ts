@@ -196,6 +196,76 @@ describe("resolveWonMetricImpact", () => {
   });
 });
 
+const REP_FROM = "f5ade4ca-ee41-5188-b6d6-d58a2630e89c";
+const REP_TO = "e537cc4a-fc5e-46d4-901a-99a9bf5e2ec6";
+const NAMES = { [REP_FROM]: "Chris Higingbotham", [REP_TO]: "Caleb Stone" };
+
+const REASSIGN_EVENT = {
+  dealId: DEAL_ID,
+  dealName: "Terraces at Highbury Court",
+  dealNumber: "DFW-4-16326-af",
+  reportMetricKey: "assigned_rep.won_ytd",
+  definitionVersion: null,
+  releaseReference: null,
+  actionLabel: "Won deal reassigned",
+  reasonCode: "won_reassigned",
+  changedFields: { assigned_rep_id: { from: REP_FROM, to: REP_TO } },
+  auditReference: { actorName: "Chris Higingbotham", auditLogIds: ["10893467"] },
+  newSnapshot: { awardedAmount: 12322.86, bidEstimate: 12322.86, ddEstimate: 12155.0, assignedRepId: REP_TO },
+  oldSnapshot: { awardedAmount: 12322.86, assignedRepId: REP_FROM },
+};
+
+const REASSIGN_IMPACT = {
+  metricKey: "assigned_rep.won_ytd",
+  before: 12322.86,
+  after: 0,
+  delta: -12322.86,
+  countBefore: 1,
+  countAfter: 0,
+  countDelta: -1,
+  unit: "usd",
+  isNegative: true,
+};
+
+describe("buildWonMetricReductionEmail — enrichment", () => {
+  it("resolves rep UUIDs to names, adds a why-summary and Job/Amount/Location rows", () => {
+    const email = buildWonMetricReductionEmail({
+      event: REASSIGN_EVENT,
+      impact: REASSIGN_IMPACT,
+      officeId: OFFICE_ID,
+      frontendUrl: "https://trockcrm.com",
+      userNames: NAMES,
+      dealLocation: { address: "50 Mount Zion Rd", city: "Atlanta", state: "GA" },
+    });
+
+    // Names, never raw UUIDs.
+    expect(email.html).toContain("Chris Higingbotham");
+    expect(email.html).toContain("Caleb Stone");
+    expect(email.html).not.toContain(REP_FROM);
+    expect(email.html).not.toContain(REP_TO);
+    // Why-summary sentence.
+    expect(email.html).toContain("reassigned");
+    expect(email.text).toContain("Chris Higingbotham → Caleb Stone");
+    // New rows.
+    expect(email.html).toContain("Terraces at Highbury Court");
+    expect(email.html).toContain("$12,322.86"); // Amount row (full currency)
+    expect(email.html).toContain("Atlanta, GA"); // Location row
+    // Existing behavior preserved.
+    expect(email.html).toContain("Open Terraces at Highbury Court");
+  });
+
+  it("falls back to the raw id when a rep uuid is unknown and never throws on missing enrichment", () => {
+    const email = buildWonMetricReductionEmail({
+      event: REASSIGN_EVENT,
+      impact: REASSIGN_IMPACT,
+      frontendUrl: "https://trockcrm.com",
+      // no userNames, no dealLocation
+    });
+    expect(email.html).toContain(REP_FROM); // unresolved id shown, not a crash
+    expect(email.html).toContain("$12,322.86"); // amount still derived from snapshot
+  });
+});
+
 describe("enableWonMetricReductionAlertDelivery", () => {
   it("opens the database gate and reports the number of backfilled events", async () => {
     const query = vi.fn().mockResolvedValue({ rows: [{ queued_count: "2" }] });
