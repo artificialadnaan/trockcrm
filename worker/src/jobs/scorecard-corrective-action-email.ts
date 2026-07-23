@@ -1,4 +1,5 @@
 import crypto from "crypto";
+import type { PoolClient } from "pg";
 import { pool } from "../db.js";
 import {
   sendSystemEmailWithMetadata,
@@ -11,9 +12,31 @@ import {
   scorecardRatingLabel,
   scorecardV2RatingLabel,
   type ScorecardRating,
+  WON_DEAL_STAGE_SLUGS,
+  LOST_DEAL_STAGE_SLUGS,
 } from "@trock-crm/shared/types";
 
 const SCORECARD_RATING_SET = new Set<string>(FIELD_SCORECARD_RATINGS);
+
+// The active/browsable-project SQL predicate the responder API applies before it will serve a corrective-action
+// flow (server/src/modules/field/corrective-action-routes.ts → assertActiveCorrectiveActionScorecard, which
+// reuses projects-service.ts activeProjectWhere). The worker can't import server code, so the predicate is
+// REPLICATED here from the SAME shared slug constants the server derives it from (WON_DEAL_STAGE_SLUGS /
+// LOST_DEAL_STAGE_SLUGS via projects-service's FIELD_WON_BROWSABLE_SLUGS / FIELD_LOST_EXCLUDED_SLUGS). A deal is
+// browsable when it is active AND (not terminal OR a Won-family stage) AND not a Lost/terminal stage. Callers
+// must join `deals d` (alias d) + `LEFT JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id`. $1/$2 are
+// the Won/Lost slug text[] arrays (passed as query params so the fragment carries no interpolated values).
+// DRIFT RISK: if the server changes activeProjectWhere's shape (e.g. adds a clause), this copy must be updated in
+// lockstep — it is only kept honest by shared slug constants + the finding-C tests, not by a compile-time link.
+const BROWSABLE_PROJECT_SQL = `
+    d.is_active = true
+    AND (
+      COALESCE(psc.is_terminal, false) = false
+      OR COALESCE(psc.slug, d.bid_board_stage_slug, '') = ANY($1::text[])
+    )
+    AND COALESCE(psc.slug, d.bid_board_stage_slug, '') <> ALL($2::text[])`;
+const WON_BROWSABLE_SLUGS = [...WON_DEAL_STAGE_SLUGS];
+const LOST_EXCLUDED_SLUGS = [...LOST_DEAL_STAGE_SLUGS];
 
 export const SCORECARD_CORRECTIVE_ACTION_EMAIL_JOB = "scorecard_corrective_action_email";
 
@@ -41,6 +64,11 @@ export interface ScorecardCorrectiveActionEmailPayload {
 
 interface HandlerDeps {
   query?: typeof pool.query;
+  /** Acquire a dedicated pooled client for a multi-statement TRANSACTION (finding A: the fresh-cycle
+   *  replacement must be atomic). Defaults to `pool.connect`. Tests that inject `query` do NOT need this — the
+   *  transaction routes its statements through the injected `query` so they stay observable, and BEGIN/COMMIT/
+   *  ROLLBACK go through it too. */
+  getClient?: () => Promise<PoolClient>;
   sendEmail?: (
     to: string | string[],
     subject: string,
@@ -115,13 +143,19 @@ function recipientResolutionSql(tenantSchema: string): string {
 
 /**
  * Reduce a recipient-query result to a stable, order-independent SIGNATURE of the set the worker will notify
- * (or DID notify): the sorted `role:lower(email)` pairs of every row that resolves to a deliverable recipient
- * (a valid email). Used to detect a super/PM REASSIGNMENT between the recipient read and the delivery stamp
- * (finding 1): if the signature the worker emailed off of differs from a fresh re-resolution at stamp time, a
- * recipient was added/removed/replaced — the former assignee was emailed (their token/access is now revoked at
- * verify time) and the NEW assignee was not — so the run must NOT stamp; it re-notifies a fresh cycle instead.
- * Deliberately excludes canFieldLogin/name: only WHO is addressed matters for whether the right people were
- * reached (a link-flavor change alone doesn't re-notify).
+ * (or DID notify): the sorted `role:lower(email):fieldLoginFlag` triples of every row that resolves to a
+ * deliverable recipient (a valid email). Used to detect a super/PM REASSIGNMENT — OR a field-login CAPABILITY
+ * change — between the recipient read and the delivery stamp (finding 1 + finding D): if the signature the
+ * worker emailed off of differs from a fresh re-resolution at stamp time, a recipient was added/removed/replaced
+ * OR an existing recipient's field-login capability flipped — so the run must NOT stamp; it re-notifies a fresh
+ * cycle instead.
+ *
+ * Finding D: canFieldLogin IS part of the signature. If a CRM recipient's field login is revoked
+ * (user_local_auth.is_enabled → false, or must_change_password set) mid-send, the worker emailed them only a
+ * trockcam:// deep link they can no longer open, with NO tokenized fallback. Including the capability makes that
+ * revocation register as a recipient change → the stamp is withheld and a fresh cycle re-notifies, now routing
+ * the revoked user to the web/token fallback (which the current-capability resolution produces). `name` is still
+ * excluded — a pure display-name edit doesn't change WHO/HOW anyone is reached.
  */
 function recipientSignature(rows: any[]): string {
   const pairs: string[] = [];
@@ -130,7 +164,8 @@ function recipientSignature(rows: any[]): string {
     const role = row.role;
     if (role !== "superintendent" && role !== "project_manager") continue;
     if (!email || !basicValidEmail(email)) continue;
-    pairs.push(`${role}:${email.toLowerCase()}`);
+    const canFieldLogin = row.can_field_login === true;
+    pairs.push(`${role}:${email.toLowerCase()}:${canFieldLogin ? "1" : "0"}`);
   }
   return [...new Set(pairs)].sort().join(",");
 }
@@ -214,17 +249,68 @@ export async function handleScorecardCorrectiveActionEmail(
 
   const env = deps.env ?? process.env;
   const query = deps.query ?? pool.query.bind(pool);
+  // Finding A: a dedicated pooled client for the atomic fresh-cycle replacement. When a test injects `deps.query`
+  // (no real pool), the transaction routes its statements — and BEGIN/COMMIT/ROLLBACK — through that SAME injected
+  // query so they stay observable to the test's assertions; otherwise it acquires a real client from the pool.
+  const usesInjectedQuery = deps.query != null;
+  const getClient = deps.getClient ?? pool.connect.bind(pool);
 
   // Idempotency + scorecard snapshot. tenantSchema is regex-validated above (isSafeTenantSchema), so
   // interpolating it as the schema qualifier is safe — identifiers can't be $-parametrized.
+  //
+  // Finding C: gate on the SAME active/browsable predicate the responder API applies before it will serve the
+  // corrective-action flow (assertActiveCorrectiveActionScorecard: `field_scorecards.is_active = true` AND
+  // activeProjectWhere over the joined deal). This delayed (120s) worker previously checked only `status`, so if
+  // the scorecard was soft-deleted, or its deal archived / moved to a Lost/terminal stage during the delay, it
+  // would still SEND + STAMP — but the responder then 404s, so the email CTA is dead on arrival. Joining the deal
+  // (+ psc) and requiring the record be active/browsable makes the worker return WITHOUT sending or stamping for a
+  // hidden record (a soft-deleted scorecard is now a LEFT JOIN miss on is_active → not returned at all → the
+  // "Scorecard not found" branch, which never stamps → a restore can still notify). $2/$3 = Won/Lost slug arrays.
+  //
+  // Finding B: also load corrective_action_cycle_nonce here so a SUPERSEDED job (its payload nonce ≠ the
+  // scorecard's current active nonce) can be skipped BEFORE resolving recipients or calling the provider — the
+  // final delivery stamp already checks the nonce, but by then cycle A has already SENT (a fresh cycle B reset
+  // sent_at to null), duplicating the email under a different idempotency key.
   const scorecardRes = await query(
-    `SELECT status, corrective_action_email_sent_at, deal_id, project_number, total_score, average_score, rating, form_version, kind, week_of
-       FROM ${tenantSchema}.field_scorecards WHERE id = $1::uuid LIMIT 1`,
-    [scorecardId]
+    `SELECT sc.status, sc.corrective_action_email_sent_at, sc.deal_id, sc.project_number, sc.total_score,
+            sc.average_score, sc.rating, sc.form_version, sc.kind, sc.week_of, sc.corrective_action_cycle_nonce
+       FROM ${tenantSchema}.field_scorecards sc
+       JOIN ${tenantSchema}.deals d ON d.id = sc.deal_id
+       LEFT JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
+      WHERE sc.id = $1::uuid
+        AND sc.is_active = true
+        AND ${BROWSABLE_PROJECT_SQL.replace(/\$1/g, "$2").replace(/\$2/g, "$3")}
+      LIMIT 1`,
+    [scorecardId, WON_BROWSABLE_SLUGS, LOST_EXCLUDED_SLUGS]
   );
   const scorecard = scorecardRes.rows[0];
   if (!scorecard) {
-    logger.warn("[CorrectiveActionEmail] Scorecard not found - skipping", { tenantSchema, scorecardId });
+    // Either genuinely nonexistent OR hidden (soft-deleted scorecard / archived-or-Lost deal) — indistinguishable
+    // here, exactly like the responder's 404. Return WITHOUT sending and WITHOUT stamping so a restore/reactivation
+    // (which the server reconcile re-notifies while sent_at is NULL) can still deliver the notification.
+    logger.warn("[CorrectiveActionEmail] Scorecard not found or not browsable - skipping (no send, no stamp)", {
+      tenantSchema,
+      scorecardId,
+    });
+    return;
+  }
+
+  // Finding B: skip a SUPERSEDED job BEFORE resolving recipients / sending. If cycle B starts while this cycle-A
+  // job is still pending, the server reset corrective_action_email_sent_at to NULL (so the sent-at check below
+  // passes) and set a NEW active nonce on the scorecard. Without this early gate, cycle A would SEND (under its
+  // own idempotency key) before its nonce is ever examined — only the final stamp compares it — so a field-login
+  // CRM recipient receives DUPLICATE corrective-action emails (cycle B sends under a different key). Comparing the
+  // payload nonce to the scorecard's CURRENT active nonce up front and returning on a mismatch means a stale-cycle
+  // job never sends. Legacy fallback (fail-safe, never re-notify-loses): if EITHER the payload carries no nonce
+  // (a pre-deploy in-flight job) OR the scorecard's stored nonce is NULL (a pre-column card), fall through to the
+  // existing behavior — the final nonce-guarded stamp still protects the crash-window crossover.
+  const payloadNonceEarly = normalizeText(payload.cycleNonce);
+  const storedNonceEarly = normalizeText(scorecard.corrective_action_cycle_nonce);
+  if (payloadNonceEarly && storedNonceEarly && payloadNonceEarly !== storedNonceEarly) {
+    logger.log(
+      "[CorrectiveActionEmail] Job cycleNonce superseded by a newer cycle - skipping (no send, no stamp)",
+      { scorecardId, payloadNonce: payloadNonceEarly, storedNonce: storedNonceEarly }
+    );
     return;
   }
   // The corrective action must still be OPEN to notify. This job runs after a delay, during which an edit may
@@ -641,37 +727,68 @@ export async function handleScorecardCorrectiveActionEmail(
   // corrective-action item raced in, OR the super/PM recipient set changed since our read — finding 1), so the
   // re-notify behavior can't drift between them.
   const reNotifyFreshCycle = async (reason: string): Promise<void> => {
-    await query(
-      `DELETE FROM ${tenantSchema}.scorecard_corrective_action_tokens WHERE scorecard_id = $1::uuid`,
-      [scorecardId]
-    );
     // Mint the fresh cycle's nonce ONCE and use it in BOTH the enqueued job payload AND the scorecard's
     // persisted corrective_action_cycle_nonce, so they stay equal — mirroring the server enqueue paths. The
     // re-notified job's own stamp requires `corrective_action_cycle_nonce = payload.cycleNonce`; without
     // stamping the new nonce here the scorecard would still carry the SUPERSEDED cycle's nonce and the fresh
-    // job could never stamp (permanently un-stampable). This UPDATE only touches the nonce column, so it is
+    // job could never stamp (permanently un-stampable). The nonce UPDATE only touches the nonce column, so it is
     // safe on the still-un-stamped card (sent_at stays NULL, so the fresh job re-sends).
     const freshNonce = crypto.randomUUID();
-    await query(
-      `UPDATE ${tenantSchema}.field_scorecards SET corrective_action_cycle_nonce = $2::uuid WHERE id = $1::uuid`,
-      [scorecardId, freshNonce]
-    );
-    await query(
-      `INSERT INTO public.job_queue (job_type, payload, office_id, status, run_after, max_attempts)
-       VALUES ($1, $2::jsonb, $3::uuid, 'pending', NOW() + ($4 || ' seconds')::interval, 6)`,
-      [
-        SCORECARD_CORRECTIVE_ACTION_EMAIL_JOB,
-        JSON.stringify({
-          tenantSchema,
-          scorecardId,
-          dealId,
-          officeId: payload.officeId ?? null,
-          cycleNonce: freshNonce,
-        }),
-        payload.officeId ?? null,
-        String(CORRECTIVE_ACTION_REENQUEUE_DELAY_SECONDS),
-      ]
-    );
+
+    // Finding A: run the token-DELETE + nonce-UPDATE + replacement-job INSERT inside ONE TRANSACTION. Previously
+    // these were three auto-committed statements: if the INSERT failed (or the worker exited) after the nonce
+    // UPDATE, the scorecard pointed at a fresh cycle with NO job — the OLD job's retry carries the now-superseded
+    // nonce (can't pass the stamp), its has_new_open recheck is false so it completes without re-scheduling, and
+    // provider idempotency may dedup its resend → the notification is permanently suppressed. Wrapping them in a
+    // transaction means a transient failure rolls back the nonce bump + token delete together, leaving the
+    // scorecard exactly as the original job found it so that job's retry can still stamp/handle it.
+    //
+    // The three statements route through `txQuery`: in production a dedicated pooled client (so BEGIN…COMMIT wrap
+    // real work); in tests the injected `deps.query` (so the captured deletes/nonce-updates/enqueues stay
+    // observable). BEGIN/COMMIT/ROLLBACK go through the SAME channel either way.
+    const client = usesInjectedQuery ? null : await getClient();
+    const txQuery: typeof query = client
+      ? (client.query.bind(client) as typeof query)
+      : query;
+    let began = false;
+    try {
+      await txQuery("BEGIN");
+      began = true;
+      await txQuery(
+        `DELETE FROM ${tenantSchema}.scorecard_corrective_action_tokens WHERE scorecard_id = $1::uuid`,
+        [scorecardId]
+      );
+      await txQuery(
+        `UPDATE ${tenantSchema}.field_scorecards SET corrective_action_cycle_nonce = $2::uuid WHERE id = $1::uuid`,
+        [scorecardId, freshNonce]
+      );
+      await txQuery(
+        `INSERT INTO public.job_queue (job_type, payload, office_id, status, run_after, max_attempts)
+         VALUES ($1, $2::jsonb, $3::uuid, 'pending', NOW() + ($4 || ' seconds')::interval, 6)`,
+        [
+          SCORECARD_CORRECTIVE_ACTION_EMAIL_JOB,
+          JSON.stringify({
+            tenantSchema,
+            scorecardId,
+            dealId,
+            officeId: payload.officeId ?? null,
+            cycleNonce: freshNonce,
+          }),
+          payload.officeId ?? null,
+          String(CORRECTIVE_ACTION_REENQUEUE_DELAY_SECONDS),
+        ]
+      );
+      await txQuery("COMMIT");
+    } catch (txErr) {
+      // Roll back so a mid-transaction failure (e.g. the enqueue INSERT throws) can't leave the scorecard on a
+      // fresh cycle with no job. The original job then treats this run as failed (we rethrow) and RETRIES, at
+      // which point the scorecard still carries the ORIGINAL cycle's nonce/tokens and the retry can stamp/handle
+      // it. ROLLBACK is best-effort — if it itself fails, still rethrow the original error.
+      if (began) await txQuery("ROLLBACK").catch(() => undefined);
+      throw txErr;
+    } finally {
+      client?.release();
+    }
     logger.warn(
       "[CorrectiveActionEmail] Re-enqueued a fresh notification cycle (not stamping this run)",
       { scorecardId, dealId, reason }

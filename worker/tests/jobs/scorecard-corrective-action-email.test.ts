@@ -98,9 +98,29 @@ function makeQuery(
     // the stamp matches 0 rows and does NOT stamp. When omitted (null), the stamp is unguarded on the nonce
     // (the legacy-card fallback). Set this to model cycle B superseding cycle A's crashed job.
     storedCycleNonce?: string | null;
+    // Finding C: model a HIDDEN scorecard/project — a soft-deleted scorecard (is_active=false), or a deal that
+    // was archived (deals.is_active=false) / moved to a Lost/terminal stage during the 120s delay. The worker's
+    // opening snapshot SELECT now joins deals+psc and applies the responder's active/browsable predicate, so a
+    // hidden record yields ZERO rows. When true, the snapshot SELECT (the one that also reads
+    // corrective_action_cycle_nonce) returns no row → the handler must RETURN without sending or stamping.
+    hiddenScorecard?: boolean;
+    // Finding B: the corrective_action_cycle_nonce the OPENING snapshot SELECT returns (the scorecard's CURRENT
+    // active cycle). Compared to payload.cycleNonce BEFORE recipients are resolved / anything is sent; a mismatch
+    // (a superseded cycle-A job) must return early with NO send and NO stamp. Distinct from `storedCycleNonce`
+    // (which models the value the final STAMP sees). Defaults to null (legacy/pre-column card → early gate falls
+    // through).
+    snapshotCycleNonce?: string | null;
+    // Finding A: make the fresh-cycle replacement's job_queue INSERT throw, modelling a transient failure mid-
+    // transaction. With the atomic fix the whole transaction (token DELETE + nonce UPDATE + INSERT) rolls back,
+    // so the scorecard is left unchanged (its original nonce/tokens intact) and the original job's retry can
+    // still stamp/handle it.
+    enqueueThrows?: boolean;
   } = {},
 ) {
   const inserts: { sql: string; params: any[] }[] = [];
+  // Finding A: capture the transaction control statements the atomic fresh-cycle replacement issues, so tests can
+  // assert BEGIN…COMMIT on the happy path and BEGIN…ROLLBACK (no COMMIT) when the enqueue throws.
+  const txMarkers: string[] = [];
   // reNotifyFreshCycle issues a nonce-only `UPDATE field_scorecards SET corrective_action_cycle_nonce` before
   // the enqueue — captured separately from the delivery stamp so tests can assert the fresh cycle re-stamps
   // the scorecard's active nonce.
@@ -123,6 +143,13 @@ function makeQuery(
   // so it never reaches this fall-through.
   let recipientResolveCalls = 0;
   const query = vi.fn(async (text: string, params: any[] = []) => {
+    // Finding A: transaction control statements (BEGIN / COMMIT / ROLLBACK) issued by the atomic fresh-cycle
+    // replacement. Captured so tests can assert the rollback path.
+    const trimmed = text.trim().toUpperCase();
+    if (trimmed === "BEGIN" || trimmed === "COMMIT" || trimmed === "ROLLBACK") {
+      txMarkers.push(trimmed);
+      return { rows: [] };
+    }
     // Per-recipient LIVE-token lookup (finding 1): SELECT token_hash, delivered_at FROM ...tokens WHERE
     // recipient_email = $2 AND consumed_at IS NULL AND expires_at > NOW() (NO delivered_at filter). A DELIVERED
     // survivor (existingTokenEmails) short-circuits/skips; an UNDELIVERED survivor (undeliveredTokens) OR no row
@@ -151,7 +178,11 @@ function makeQuery(
     }
     // Re-enqueue of a fresh corrective-action-email job (Part B): raw INSERT INTO public.job_queue.
     if (/INSERT INTO public\.job_queue/i.test(text)) {
+      // Finding A: model a transient failure of the replacement-job INSERT so the surrounding transaction must
+      // roll back the token DELETE + nonce UPDATE. Record the attempt (so the test can confirm the enqueue was
+      // reached inside the transaction) then throw.
       jobEnqueues.push({ sql: text, params });
+      if (opts.enqueueThrows) throw new Error("job_queue insert failed (transient)");
       return { rows: [], rowCount: 1 };
     }
     // reNotifyFreshCycle's nonce-only re-stamp: UPDATE field_scorecards SET corrective_action_cycle_nonce.
@@ -218,6 +249,12 @@ function makeQuery(
       return { rows };
     }
     if (/FROM \S*field_scorecards/i.test(text)) {
+      // Finding C: the opening snapshot SELECT joins deals + psc and applies the responder's active/browsable
+      // predicate (is_active + non-terminal-or-Won + not-Lost). A HIDDEN scorecard/project yields ZERO rows, so
+      // the handler bails without sending or stamping. Recognize the joined snapshot by its is_active gate.
+      if (opts.hiddenScorecard && /sc\.is_active\s*=\s*true/i.test(text)) {
+        return { rows: [] };
+      }
       return {
         rows: [
           {
@@ -231,6 +268,9 @@ function makeQuery(
             form_version: opts.formVersion ?? 1,
             kind: opts.kind ?? "project",
             week_of: "2026-06-30",
+            // Finding B: the scorecard's CURRENT active cycle nonce the handler compares to payload.cycleNonce
+            // before sending. Defaults null (legacy card → early gate falls through).
+            corrective_action_cycle_nonce: opts.snapshotCycleNonce ?? null,
           },
         ],
       };
@@ -261,7 +301,7 @@ function makeQuery(
     }
     return { rows: [] };
   });
-  return { query, inserts, tokenDeletes, tokenDelivers, jobEnqueues, nonceUpdates };
+  return { query, inserts, tokenDeletes, tokenDelivers, jobEnqueues, nonceUpdates, txMarkers };
 }
 
 describe("scorecard corrective-action notification email", () => {
@@ -1380,5 +1420,233 @@ describe("scorecard corrective-action notification email", () => {
     const enqueuedNonce = JSON.parse(jobEnqueues[0].params[1] as string).cycleNonce as string;
     expect(persistedNonce).toBe(enqueuedNonce);
     expect(persistedNonce).toHaveLength(36); // a fresh UUID
+  });
+
+  // ---- Finding A: the fresh-cycle replacement is ATOMIC (one transaction) ----
+
+  it("runs the fresh-cycle replacement (token delete + nonce update + enqueue) inside ONE transaction (finding A)", async () => {
+    // The reNotify path deletes the scorecard's tokens, bumps corrective_action_cycle_nonce, and inserts a
+    // replacement job. Those three writes must be one atomic unit: BEGIN → the three writes → COMMIT.
+    const { query, tokenDeletes, nonceUpdates, jobEnqueues, txMarkers } = makeQuery({
+      recipients: [{ role: "superintendent", name: "Old Super", email: "old.super@example.com", user_id: null }],
+      assignedRoles: [{ role: "superintendent" }],
+      // A recipient reassignment triggers reNotifyFreshCycle at the pre-stamp guard.
+      revalidatedRecipients: [{ role: "superintendent", name: "New Super", email: "new.super@example.com", user_id: null }],
+    });
+    const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "m" });
+    const logger = makeLogger();
+
+    await handleScorecardCorrectiveActionEmail(payload, null, { query: query as any, sendEmail, env, logger });
+
+    // The replacement fired as a committed transaction wrapping the three writes.
+    expect(txMarkers).toEqual(["BEGIN", "COMMIT"]);
+    expect(tokenDeletes).toHaveLength(1);
+    expect(nonceUpdates).toHaveLength(1);
+    expect(jobEnqueues).toHaveLength(1);
+  });
+
+  it("ROLLS BACK the nonce update + token delete when the replacement enqueue fails, and rethrows (finding A)", async () => {
+    // If the replacement job INSERT throws (or the worker exits) after the nonce UPDATE, a non-transactional
+    // implementation would leave the scorecard on a FRESH cycle with NO job — the original job's retry carries a
+    // now-superseded nonce (can't stamp), its has_new_open recheck is false so it completes without re-scheduling,
+    // and provider idempotency may dedup its resend → the notification is permanently suppressed. The atomic fix
+    // rolls the whole transaction back so the scorecard is unchanged and the original job's retry can still
+    // stamp/handle it. The handler rethrows so the queue retries.
+    const { query, jobEnqueues, txMarkers } = makeQuery({
+      recipients: [{ role: "superintendent", name: "Old Super", email: "old.super@example.com", user_id: null }],
+      assignedRoles: [{ role: "superintendent" }],
+      revalidatedRecipients: [{ role: "superintendent", name: "New Super", email: "new.super@example.com", user_id: null }],
+      enqueueThrows: true, // the replacement INSERT throws mid-transaction
+    });
+    const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "m" });
+    const logger = makeLogger();
+
+    await expect(
+      handleScorecardCorrectiveActionEmail(payload, null, { query: query as any, sendEmail, env, logger }),
+    ).rejects.toThrow(/job_queue insert failed/i);
+
+    // BEGIN was issued, the enqueue was attempted, then the transaction ROLLED BACK (no COMMIT) — so the nonce
+    // bump + token delete never commit and the scorecard is left as the original job found it.
+    expect(txMarkers).toContain("BEGIN");
+    expect(txMarkers).toContain("ROLLBACK");
+    expect(txMarkers).not.toContain("COMMIT");
+    expect(jobEnqueues).toHaveLength(1); // the enqueue was attempted inside the transaction
+    // The delivery stamp was never written (the reNotify path does not stamp).
+    const stampCalls = query.mock.calls.filter(([text]) => /UPDATE [\s\S]*field_scorecards\s+SET corrective_action_email_sent_at/i.test(text as string));
+    expect(stampCalls).toHaveLength(0);
+  });
+
+  // ---- Finding B: skip a SUPERSEDED job BEFORE resolving recipients / sending ----
+
+  it("returns WITHOUT sending when the payload cycleNonce is already superseded by a newer active cycle (finding B)", async () => {
+    // Cycle B started while this cycle-A job was still pending: the server reset corrective_action_email_sent_at
+    // to NULL (so the sent-at check passes) and set a NEW active nonce (B) on the scorecard. Without an early
+    // nonce gate, cycle A would SEND under its own idempotency key before the final stamp ever examines the
+    // nonce → the field-login CRM recipient gets DUPLICATE corrective-action emails (cycle B sends under a
+    // different key). The handler must compare payload.cycleNonce to the scorecard's CURRENT active nonce up
+    // front and RETURN on a mismatch: no recipient resolution, no send, no stamp.
+    const { query, inserts, jobEnqueues } = makeQuery({
+      recipients: [{ role: "superintendent", name: "Sam Super", email: "sam.super@trock.com", user_id: "u-1", can_field_login: true }],
+      assignedRoles: [{ role: "superintendent" }],
+      snapshotCycleNonce: "cycle-B-active", // the scorecard's CURRENT active nonce is B
+    });
+    const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "m" });
+    const logger = makeLogger();
+
+    // This is the STALE cycle-A job.
+    await handleScorecardCorrectiveActionEmail(
+      { ...payload, cycleNonce: "cycle-A-stale" },
+      null,
+      { query: query as any, sendEmail, env, logger },
+    );
+
+    // No send, no token mint, no stamp, no re-enqueue — the job simply steps aside for cycle B's job.
+    expect(sendEmail).not.toHaveBeenCalled();
+    expect(inserts).toHaveLength(0);
+    expect(jobEnqueues).toHaveLength(0);
+    const stampCalls = query.mock.calls.filter(([text]) => /UPDATE [\s\S]*field_scorecards\s+SET corrective_action_email_sent_at/i.test(text as string));
+    expect(stampCalls).toHaveLength(0);
+    // The early gate short-circuits BEFORE recipient resolution — the deal_team_members query never runs.
+    const recipientCalls = query.mock.calls.filter(([text]) => /FROM \S*deal_team_members/i.test(text as string));
+    expect(recipientCalls).toHaveLength(0);
+  });
+
+  it("still SENDS when the payload cycleNonce matches the scorecard's current active nonce (finding B)", async () => {
+    // The current cycle's own job: its payload nonce equals the scorecard's active nonce, so the early gate is a
+    // no-op and delivery proceeds normally.
+    const { query } = makeQuery({
+      recipients: [{ role: "superintendent", name: "Sam Super", email: "sam.super@trock.com", user_id: "u-1", can_field_login: true }],
+      assignedRoles: [{ role: "superintendent" }],
+      snapshotCycleNonce: "cycle-current",
+      storedCycleNonce: "cycle-current", // the final stamp's nonce guard is also satisfied
+    });
+    const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "m" });
+    const logger = makeLogger();
+
+    await handleScorecardCorrectiveActionEmail(
+      { ...payload, cycleNonce: "cycle-current" },
+      null,
+      { query: query as any, sendEmail, env, logger },
+    );
+
+    expect(sendEmail).toHaveBeenCalledTimes(1);
+    const stampCalls = query.mock.calls.filter(([text]) => /UPDATE [\s\S]*field_scorecards\s+SET corrective_action_email_sent_at/i.test(text as string));
+    expect(stampCalls).toHaveLength(1);
+  });
+
+  it("falls through the early nonce gate when the scorecard's active nonce is NULL (legacy card, finding B)", async () => {
+    // A pre-column scorecard has a NULL active nonce. The early gate must NOT fire (it would wrongly suppress a
+    // legitimate job) — it only skips when BOTH the payload nonce AND the stored nonce are present and differ.
+    const { query } = makeQuery({
+      recipients: [{ role: "superintendent", name: "Sam Super", email: "sam.super@trock.com", user_id: "u-1", can_field_login: true }],
+      assignedRoles: [{ role: "superintendent" }],
+      snapshotCycleNonce: null, // legacy card, no active nonce persisted
+    });
+    const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "m" });
+    const logger = makeLogger();
+
+    await handleScorecardCorrectiveActionEmail(
+      { ...payload, cycleNonce: "some-cycle" },
+      null,
+      { query: query as any, sendEmail, env, logger },
+    );
+
+    expect(sendEmail).toHaveBeenCalledTimes(1);
+  });
+
+  // ---- Finding C: skip notifications for HIDDEN scorecards / projects ----
+
+  it("does NOT send or stamp for a HIDDEN scorecard/project (soft-deleted / archived / Lost) (finding C)", async () => {
+    // The 120s delay lets a scorecard be soft-deleted, or its deal archived / moved to a Lost/terminal stage,
+    // before this worker runs. The responder API (round-13) 404s those, so an email CTA would be dead on arrival.
+    // The opening snapshot now applies the SAME active/browsable predicate the responder uses (is_active +
+    // non-terminal-or-Won + not-Lost); a hidden record returns zero rows → the handler must RETURN without
+    // sending and WITHOUT stamping (leaving the cycle unstamped so a restore can still notify).
+    const { query, inserts, jobEnqueues } = makeQuery({
+      hiddenScorecard: true,
+      recipients: [{ role: "superintendent", name: "Sam Super", email: "sam.super@trock.com", user_id: "u-1", can_field_login: true }],
+      assignedRoles: [{ role: "superintendent" }],
+    });
+    const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "m" });
+    const logger = makeLogger();
+
+    await handleScorecardCorrectiveActionEmail(payload, null, { query: query as any, sendEmail, env, logger });
+
+    expect(sendEmail).not.toHaveBeenCalled();
+    expect(inserts).toHaveLength(0);
+    expect(jobEnqueues).toHaveLength(0);
+    const stampCalls = query.mock.calls.filter(([text]) => /UPDATE [\s\S]*field_scorecards\s+SET corrective_action_email_sent_at/i.test(text as string));
+    expect(stampCalls).toHaveLength(0);
+    // No recipient resolution even happens — the handler returns right after the (empty) snapshot read.
+    const recipientCalls = query.mock.calls.filter(([text]) => /FROM \S*deal_team_members/i.test(text as string));
+    expect(recipientCalls).toHaveLength(0);
+  });
+
+  it("applies the active/browsable gate to the opening snapshot SELECT (finding C)", async () => {
+    // Guard against a silent removal of the browsable predicate: the opening scorecard snapshot must JOIN the
+    // deal (+ pipeline_stage_config) and require is_active + non-terminal-or-Won + not-Lost, mirroring the
+    // responder's assertActiveCorrectiveActionScorecard. Assert the SQL text so a future edit can't drop it.
+    const { query } = makeQuery();
+    const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "m" });
+    await handleScorecardCorrectiveActionEmail(payload, null, { query: query as any, sendEmail, env, logger: makeLogger() });
+
+    const snapshotSql = query.mock.calls
+      .map(([text]) => text as string)
+      .find((t) => /FROM \S*field_scorecards\s+sc/i.test(t) && /corrective_action_cycle_nonce/i.test(t))!;
+    expect(snapshotSql).toBeTruthy();
+    expect(snapshotSql).toMatch(/JOIN \S*deals d/i);
+    expect(snapshotSql).toMatch(/LEFT JOIN public\.pipeline_stage_config psc/i);
+    expect(snapshotSql).toMatch(/sc\.is_active\s*=\s*true/i);
+    expect(snapshotSql).toMatch(/d\.is_active\s*=\s*true/i);
+    expect(snapshotSql).toMatch(/is_terminal/i);
+  });
+
+  // ---- Finding D: a field-login capability change is a recipient change in the pre-stamp signature ----
+
+  it("does NOT stamp and RE-NOTIFIES when a recipient's canFieldLogin flips between the read and the stamp (finding D)", async () => {
+    // A CRM super was emailed a trockcam:// deep link (they had a field login at read time). Before the stamp,
+    // their field login is revoked (user_local_auth.is_enabled → false, or must_change_password set). Because the
+    // pre-stamp signature now INCLUDES canFieldLogin, the re-resolution's signature DIFFERS (same email/role, but
+    // capability 1 → 0), so the worker treats it as a recipient change: it does NOT stamp and re-notifies a fresh
+    // cycle (which, resolving the CURRENT capability, routes the now-revoked user to the web/token fallback).
+    const { query, tokenDeletes, jobEnqueues } = makeQuery({
+      recipients: [{ role: "superintendent", name: "Sam Super", email: "sam.super@trock.com", user_id: "u-1", can_field_login: true }],
+      assignedRoles: [{ role: "superintendent" }],
+      // Same email + role, but field login now revoked at the pre-stamp re-resolution.
+      revalidatedRecipients: [{ role: "superintendent", name: "Sam Super", email: "sam.super@trock.com", user_id: "u-1", can_field_login: false }],
+    });
+    const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "m" });
+    const logger = makeLogger();
+
+    await handleScorecardCorrectiveActionEmail(payload, null, { query: query as any, sendEmail, env, logger });
+
+    // The original email went out (deep link, off the read-time capability) ...
+    expect(sendEmail).toHaveBeenCalledTimes(1);
+    // ... but the card was NOT stamped — the capability change registered as a recipient change ...
+    const stampCalls = query.mock.calls.filter(([text]) => /UPDATE [\s\S]*field_scorecards\s+SET corrective_action_email_sent_at/i.test(text as string));
+    expect(stampCalls).toHaveLength(0);
+    // ... and a fresh cycle was enqueued (tokens cleared) so the revoked user is re-notified via the fallback.
+    expect(tokenDeletes).toHaveLength(1);
+    expect(jobEnqueues).toHaveLength(1);
+  });
+
+  it("STILL stamps when the recipient set AND every field-login capability are unchanged (finding D)", async () => {
+    // No reassignment and no capability change → the pre-stamp signature is identical → the worker stamps
+    // normally. (revalidatedRecipients omitted → the second recipient read returns the same set, same
+    // capability, as the first.)
+    const { query, tokenDeletes, jobEnqueues } = makeQuery({
+      recipients: [{ role: "superintendent", name: "Sam Super", email: "sam.super@trock.com", user_id: "u-1", can_field_login: true }],
+      assignedRoles: [{ role: "superintendent" }],
+    });
+    const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "m" });
+    const logger = makeLogger();
+
+    await handleScorecardCorrectiveActionEmail(payload, null, { query: query as any, sendEmail, env, logger });
+
+    expect(sendEmail).toHaveBeenCalledTimes(1);
+    const stampCalls = query.mock.calls.filter(([text]) => /UPDATE [\s\S]*field_scorecards\s+SET corrective_action_email_sent_at/i.test(text as string));
+    expect(stampCalls).toHaveLength(1);
+    expect(tokenDeletes).toHaveLength(0);
+    expect(jobEnqueues).toHaveLength(0);
   });
 });
