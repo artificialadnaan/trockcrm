@@ -13,11 +13,22 @@ export const SCORECARD_CORRECTIVE_ACTION_EMAIL_JOB = "scorecard_corrective_actio
 // corrective action; the flow allows multiple submissions until close, so the token is NOT single-use.
 const TOKEN_TTL_DAYS = 30;
 
+// Short delay before the re-notification job runs when a new corrective-action item raced in after this worker
+// read its flagged set (Part B). Mirrors the server reconcile's SCORECARD_EMAIL_RUN_AFTER_SECONDS (120s) so the
+// re-enqueued cycle behaves like a normal enqueue and lets any further in-flight edits settle before it reads.
+const CORRECTIVE_ACTION_REENQUEUE_DELAY_SECONDS = 120;
+
 export interface ScorecardCorrectiveActionEmailPayload {
   tenantSchema?: string;
   scorecardId?: string;
   dealId?: string;
   officeId?: string | null;
+  /** Stable per-cycle idempotency-cycle dimension for the CRM (no-token) Resend key. Minted ONCE per enqueue
+   *  (each corrective-action cycle) by the server and IMMUTABLE across a job's retries — so it differs across
+   *  cycles yet is stable across a genuine queue retry, even if a responder resolves an open item between the
+   *  send attempt and a retry. Optional because jobs enqueued before this deploy don't carry it (the handler
+   *  falls back to the live open-row fingerprint for those). */
+  cycleNonce?: string;
 }
 
 interface HandlerDeps {
@@ -76,9 +87,10 @@ function hashToken(rawToken: string): string {
  * retries (a normal return would COMPLETE the job and strand the un-notified role forever; finding 4). The
  * Resend idempotencyKey is scoped to the corrective-action CYCLE for BOTH recipient kinds — for a token
  * recipient it carries the freshly-minted token hash (a reopen mints a fresh token → new key), and for a CRM
- * user (no token) it carries a per-cycle fingerprint (a hash over the current open corrective-action-item ids,
- * which are fresh-UUID rows every cycle) so their updated flagged-item email is actually sent, not false-
- * deduped by Resend as a same-key/different-payload `invalid_idempotent_request` (finding 4); WITHIN a cycle
+ * user (no token) it carries the server-minted per-cycle `payload.cycleNonce` (a stable UUID, immutable across
+ * a job's retries; legacy in-flight jobs without it fall back to a hash over the current open corrective-
+ * action-item ids) so their updated flagged-item email is actually sent, not false-deduped by Resend as a
+ * same-key/different-payload `invalid_idempotent_request` (finding 4); WITHIN a cycle
  * the key is stable so a re-delivery in the crash window (sent, not yet stamped) or a throw-triggered retry
  * doesn't double-email a recipient. Email-only
  * tokens carry a delivered_at set only AFTER a successful send, so a retry reuses a DELIVERED token but
@@ -247,22 +259,28 @@ export async function handleScorecardCorrectiveActionEmail(
     itemLabel: String(r.item_label),
   }));
 
-  // Per-cycle fingerprint for the CRM (no-token) idempotency key. A CRM recipient's deep link is cycle-
-  // STABLE, but the email PAYLOAD (which lists the flagged items) changes every cycle — so a cycle-stable
-  // key would make Resend see the same key with a different payload → `invalid_idempotent_request`, which
+  // Per-cycle dimension for the CRM (no-token) idempotency key. A CRM recipient's deep link is cycle-STABLE,
+  // but the email PAYLOAD (which lists the flagged items) changes every cycle — so a cycle-stable key would
+  // make Resend see the same key with a different payload → `invalid_idempotent_request`, which
   // sendSystemEmailWithMetadata treats as an already-delivered success → the worker stamps the new cycle
   // notified WITHOUT sending the updated email (the CRM assignee never learns of the new corrective action).
   // (finding 4)
   //
-  // The job row's id is NOT available to the handler (queue.ts processJob calls the handler with just
-  // (payload, officeId)), so we derive the cycle dimension from DB state instead: a hash over the CURRENT
-  // open corrective-action rows' ids. Every new cycle (a reopen, OR an already-open card that gained new
-  // work — reconcileScorecardCorrectiveActions requires toInsert.length > 0 for BOTH) INSERTS at least one
-  // brand-new row with a fresh random UUID that is `open` when this job runs, so the fingerprint DIFFERS
-  // across cycles; a genuine in-cycle retry reads the same open-item set → the SAME fingerprint (still
-  // dedups). Sorted so ordering can't perturb it. If somehow there are no open rows (a race where every
-  // item was just resolved), the card would be closed and the handler already returned above, so this is
-  // only reached with a non-empty set.
+  // PREFERRED source: the server-minted `payload.cycleNonce` — a stable UUID minted ONCE per enqueue (each
+  // corrective-action cycle) and IMMUTABLE across a job's retries. This is retry-STABLE by construction: even
+  // if a responder resolves an open item between the send attempt and a retry (shrinking the live open set),
+  // the nonce is unchanged → the CRM key is unchanged → Resend still dedups the true duplicate (no double
+  // email). It also DIFFERS across cycles (the server mints a fresh nonce for a reopen / a card that gained
+  // work), so the updated cycle's email is actually sent.
+  //
+  // FALLBACK (jobs enqueued BEFORE this deploy, still in-flight, carry no cycleNonce): a hash over the CURRENT
+  // open corrective-action rows' ids. Every new cycle INSERTS at least one brand-new fresh-UUID row that is
+  // `open` when this job runs, so the fingerprint DIFFERS across cycles; a genuine in-cycle retry reads the
+  // same open-item set → the SAME fingerprint. Sorted so ordering can't perturb it. This fallback IS the
+  // unstable-across-a-resolve case the nonce fixes, but it is the best available signal for legacy jobs and
+  // is strictly better than a cycle-stable key. If somehow there are no open rows (a race where every item
+  // was just resolved), the card would be closed and the handler already returned above, so this is only
+  // reached with a non-empty set.
   const cycleFingerprint = crypto
     .createHash("sha256")
     .update(
@@ -273,6 +291,8 @@ export async function handleScorecardCorrectiveActionEmail(
     )
     .digest("hex")
     .slice(0, 16);
+  const nonce = normalizeText(payload.cycleNonce);
+  const cycleDimension = nonce ?? cycleFingerprint;
 
   // Deal display fields for the email + link.
   const dealRes = await query(
@@ -377,13 +397,16 @@ export async function handleScorecardCorrectiveActionEmail(
     //    window duplicate of a DELIVERED token is skipped before we reach here — so this key is only (re)built
     //    at a real mint+send, where cycle-scoping is exactly right.
     //  - CRM users (no token, mintedTokenHash === null): their deep link is cycle-stable, but the email body
-    //    lists the flagged items, which change every cycle. So scope their key to the per-cycle fingerprint
-    //    (a hash over the current open corrective-action-item ids) — differs across cycles (each cycle inserts
-    //    fresh-UUID open rows) yet is stable across a within-cycle retry, so Resend still dedups the true
-    //    duplicate while the updated cycle's email is delivered. (finding 4)
+    //    lists the flagged items, which change every cycle. So scope their key to the per-cycle DIMENSION —
+    //    the server-minted `payload.cycleNonce` when present (retry-STABLE: immutable across a job's retries,
+    //    so a responder resolving an item between the send attempt and a retry can't shift the key → no
+    //    Resend re-send → no duplicate email), else the live open-row fingerprint fallback for legacy
+    //    in-flight jobs. Either way it differs across cycles (a reopen mints a fresh nonce / inserts fresh
+    //    open rows) yet is stable across a within-cycle retry, so Resend still dedups the true duplicate while
+    //    the updated cycle's email is delivered. (finding 4 + the persisted-nonce retry-stability fix)
     const idempotencyKey = mintedTokenHash
       ? `corrective-action-${tenantSchema}-${scorecardId}-token-${mintedTokenHash}`
-      : `corrective-action-${tenantSchema}-${scorecardId}-${recipient.email.toLowerCase()}-cycle-${cycleFingerprint}`;
+      : `corrective-action-${tenantSchema}-${scorecardId}-${recipient.email.toLowerCase()}-cycle-${cycleDimension}`;
 
     let result: SendSystemEmailResult;
     try {
@@ -436,8 +459,8 @@ export async function handleScorecardCorrectiveActionEmail(
   // run is committed and SURVIVES the throw. On the retry: a token recipient (email-only, or a CRM user who
   // fell back to a token) with a DELIVERED token is reuse-skipped above (no re-mint, no re-send, key never
   // rebuilt); a field-login CRM user (deep link, no token) is re-sent but under the per-(scorecard,recipient)
-  // key scoped to the WITHIN-CYCLE-STABLE fingerprint, so Resend dedups the true duplicate. Nobody is emailed
-  // twice.
+  // key scoped to the RETRY-STABLE cycle dimension (the immutable `payload.cycleNonce`, or the within-cycle-
+  // stable fingerprint fallback), so Resend dedups the true duplicate. Nobody is emailed twice.
   if (unresolvedAssignedRoles.length > 0) {
     logger.warn(
       "[CorrectiveActionEmail] An assigned super/PM role is unresolvable (inactive identity or missing/invalid email) - throwing to retry (not stamping)",
@@ -447,12 +470,78 @@ export async function handleScorecardCorrectiveActionEmail(
       `Assigned super/PM role(s) unresolvable on deal ${dealId} (${unresolvedAssignedRoles.join(", ")}) - retrying until identity/email is fixed`,
     );
   }
-  await query(
+  // Guarded delivery stamp (P1 notification-loss race). We emailed about the open corrective-action rows we
+  // READ into `flaggedRows` earlier. Between that read and this stamp, an edit can add a NEW open corrective-
+  // action row for this scorecard. The server-side reconcile, seeing corrective_action_email_sent_at STILL
+  // NULL, DELIBERATELY does not enqueue a fresh job — it assumes this pending worker will pick up the new item.
+  // But this worker captured the OLD item list, so an UNCONDITIONAL stamp would mark the card notified while
+  // the newly-added corrective action was never emailed → it stays open and is NEVER notified.
+  //
+  // So stamp ONLY when the CURRENT open set is a SUBSET of the ids we emailed about (no NEW open row appeared
+  // since our read): the NOT EXISTS rejects the stamp if any open row's id is NOT in the emailed-id array.
+  const emailedIds = flaggedRows.map((r) => String(r.id));
+  const stampRes = await query(
     `UPDATE ${tenantSchema}.field_scorecards
         SET corrective_action_email_sent_at = NOW()
-      WHERE id = $1::uuid AND corrective_action_email_sent_at IS NULL`,
-    [scorecardId]
+      WHERE id = $1::uuid
+        AND corrective_action_email_sent_at IS NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM ${tenantSchema}.scorecard_corrective_actions
+           WHERE scorecard_id = $1::uuid AND status = 'open' AND NOT (id = ANY($2::uuid[]))
+        )`,
+    [scorecardId, emailedIds]
   );
+
+  // rowCount === 0 has two causes, distinguished by re-reading the card + its open set:
+  //   (a) it was ALREADY stamped (sent_at now non-null) with no new item → nothing to do (a benign in-cycle
+  //       double-run); or
+  //   (b) the guard REJECTED the stamp because a NEW open item appeared after our read while sent_at is still
+  //       NULL → this worker emailed the OLD list, so the new corrective action must be (re)notified in a FRESH
+  //       cycle. Delete the scorecard's outstanding tokens (so the next run re-mints — a surviving token would
+  //       be reuse-skipped as "delivered this cycle") and enqueue a fresh corrective-action-email job that
+  //       mirrors the server reconcile's enqueue shape (same jobType, a fresh cycleNonce, run_after a short
+  //       delay, max_attempts 6). The new job reads the now-larger open set and notifies about the new item.
+  if ((stampRes.rowCount ?? 0) === 0) {
+    const recheck = await query(
+      `SELECT corrective_action_email_sent_at,
+              EXISTS (
+                SELECT 1 FROM ${tenantSchema}.scorecard_corrective_actions
+                 WHERE scorecard_id = $1::uuid AND status = 'open' AND NOT (id = ANY($2::uuid[]))
+              ) AS has_new_open
+         FROM ${tenantSchema}.field_scorecards WHERE id = $1::uuid LIMIT 1`,
+      [scorecardId, emailedIds]
+    );
+    const recheckRow = recheck.rows[0] as any;
+    if (recheckRow && !recheckRow.corrective_action_email_sent_at && recheckRow.has_new_open === true) {
+      // Case (b): a new open item raced in and the card is still un-stamped. Re-notify the new cycle.
+      await query(
+        `DELETE FROM ${tenantSchema}.scorecard_corrective_action_tokens WHERE scorecard_id = $1::uuid`,
+        [scorecardId]
+      );
+      await query(
+        `INSERT INTO public.job_queue (job_type, payload, office_id, status, run_after, max_attempts)
+         VALUES ($1, $2::jsonb, $3::uuid, 'pending', NOW() + ($4 || ' seconds')::interval, 6)`,
+        [
+          SCORECARD_CORRECTIVE_ACTION_EMAIL_JOB,
+          JSON.stringify({
+            tenantSchema,
+            scorecardId,
+            dealId,
+            officeId: payload.officeId ?? null,
+            cycleNonce: crypto.randomUUID(),
+          }),
+          payload.officeId ?? null,
+          String(CORRECTIVE_ACTION_REENQUEUE_DELAY_SECONDS),
+        ]
+      );
+      logger.warn(
+        "[CorrectiveActionEmail] A new corrective-action item appeared after the worker read its flagged set - " +
+          "re-enqueued a fresh notification cycle (not stamping this run)",
+        { scorecardId, dealId }
+      );
+    }
+    // Case (a) — already stamped, no new item — falls through: nothing to do.
+  }
 }
 
 export function buildCorrectiveActionEmail(input: {

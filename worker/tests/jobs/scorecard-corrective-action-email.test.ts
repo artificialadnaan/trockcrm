@@ -60,11 +60,18 @@ function makeQuery(
     assignedRoles?: any[];
     flagged?: any[];
     existingTokenEmails?: string[];
+    // Part B: model the notification-loss race — a NEW open corrective-action row appeared AFTER the worker read
+    // its flagged set but BEFORE the final stamp. When true, the guarded stamp UPDATE affects 0 rows (its
+    // NOT EXISTS subquery is falsy because a not-emitted open row exists) AND the re-check SELECT reports the
+    // card is still un-stamped with a new open item present → the worker re-enqueues a fresh cycle.
+    newOpenItemAppeared?: boolean;
   } = {},
 ) {
   const inserts: { sql: string; params: any[] }[] = [];
   const tokenDeletes: { sql: string; params: any[] }[] = [];
   const tokenDelivers: { sql: string; params: any[] }[] = [];
+  // Re-enqueued corrective-action-email jobs (Part B): raw INSERT INTO public.job_queue rows.
+  const jobEnqueues: { sql: string; params: any[] }[] = [];
   // existingTokenEmails model DELIVERED tokens: the reuse-skip query requires delivered_at IS NOT NULL, so
   // only a delivered token returns a row (an undelivered remnant returns nothing → the recipient is re-sent).
   const existing = new Set((opts.existingTokenEmails ?? []).map((e) => e.toLowerCase()));
@@ -87,8 +94,29 @@ function makeQuery(
       tokenDelivers.push({ sql: text, params });
       return { rows: [] };
     }
+    // Re-enqueue of a fresh corrective-action-email job (Part B): raw INSERT INTO public.job_queue.
+    if (/INSERT INTO public\.job_queue/i.test(text)) {
+      jobEnqueues.push({ sql: text, params });
+      return { rows: [], rowCount: 1 };
+    }
+    // The guarded final stamp: UPDATE field_scorecards SET corrective_action_email_sent_at = NOW() ... with a
+    // NOT EXISTS guard against a new open item (Part B). When the race is modeled, the guard rejects the stamp
+    // (0 rows); otherwise it stamps (1 row). Match this BEFORE the field_scorecards SELECT branches.
     if (/UPDATE .*field_scorecards/i.test(text)) {
-      return { rows: [] };
+      return { rows: [], rowCount: opts.newOpenItemAppeared ? 0 : 1 };
+    }
+    // Part B re-check SELECT: reads corrective_action_email_sent_at + a `has_new_open` EXISTS flag to decide
+    // whether a rowCount===0 stamp was a benign already-stamped double-run or the notification-loss race.
+    // Distinguished from the initial snapshot SELECT by the has_new_open column. Reached only in the race.
+    if (/has_new_open/i.test(text) && /FROM \S*field_scorecards/i.test(text)) {
+      return {
+        rows: [
+          {
+            corrective_action_email_sent_at: opts.newOpenItemAppeared ? null : (opts.sentAt ?? null),
+            has_new_open: opts.newOpenItemAppeared === true,
+          },
+        ],
+      };
     }
     // The assigned-super/PM-roles query (finding 4) — SELECT DISTINCT dtm.role ... deal_team_members without a
     // JOIN. Distinguished from the recipient-resolution query by the absence of user_id/email columns; return
@@ -134,7 +162,7 @@ function makeQuery(
     }
     return { rows: [] };
   });
-  return { query, inserts, tokenDeletes, tokenDelivers };
+  return { query, inserts, tokenDeletes, tokenDelivers, jobEnqueues };
 }
 
 describe("scorecard corrective-action notification email", () => {
@@ -586,5 +614,158 @@ describe("scorecard corrective-action notification email", () => {
     // No stamp on a failed batch.
     const stampCalls = query.mock.calls.filter(([text]) => /UPDATE .*field_scorecards/i.test(text as string));
     expect(stampCalls).toHaveLength(0);
+  });
+
+  // ---- Part A: the CRM (no-token) key is driven by the persisted cycleNonce, not the live open-row hash ----
+
+  it("keys the CRM (no-token) email off payload.cycleNonce when present (retry-stable across a resolve)", async () => {
+    // The server now mints a stable per-cycle cycleNonce (immutable across a job's retries). When present, the
+    // CRM key's cycle component is the NONCE — NOT a hash over the currently-open corrective-action rows. This
+    // is the whole point of the fix: the key must NOT depend on the live open-item set (which shrinks if a
+    // responder resolves an item between the send attempt and a retry), only on the nonce.
+    const crmSuper = [
+      { role: "superintendent", name: "Sam Super", email: "sam.super@trock.com", user_id: "u-1", can_field_login: true },
+    ];
+    const assigned = [{ role: "superintendent" }];
+    const NONCE = "cycle-nonce-aaaa";
+
+    const { query, inserts } = makeQuery({ recipients: crmSuper, assignedRoles: assigned });
+    const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "m" });
+    await handleScorecardCorrectiveActionEmail(
+      { ...payload, cycleNonce: NONCE },
+      null,
+      { query: query as any, sendEmail, env, logger: makeLogger() },
+    );
+
+    // No token for a field-login CRM user; the key carries the NONCE, not the live-row fingerprint.
+    expect(inserts).toHaveLength(0);
+    const key = sendEmail.mock.calls[0][3].idempotencyKey as string;
+    expect(key).toBe(`corrective-action-office_dallas-${SCORECARD}-sam.super@trock.com-cycle-${NONCE}`);
+    // And it is emphatically NOT the old live-row-hash key.
+    expect(key).not.toBe(
+      `corrective-action-office_dallas-${SCORECARD}-sam.super@trock.com-cycle-${cycleFingerprint(FLAGGED.map((f) => f.id))}`,
+    );
+  });
+
+  it("produces the SAME CRM key across a retry even when the live open-item set changed (nonce, not rows)", async () => {
+    // The retry-stability guarantee: attempt 1 has open items [ca-1, ca-2]; before the retry a responder
+    // resolves ca-1, so attempt 2's live open set is just [ca-2]. With the OLD live-row hash the key would
+    // change (Resend would re-send → duplicate email). Because the SAME job carries the SAME immutable
+    // cycleNonce, the CRM key is IDENTICAL across both attempts → Resend dedups → no duplicate.
+    const crmSuper = [
+      { role: "superintendent", name: "Sam Super", email: "sam.super@trock.com", user_id: "u-1", can_field_login: true },
+    ];
+    const assigned = [{ role: "superintendent" }];
+    const NONCE = "cycle-nonce-retry";
+
+    const attempt1 = makeQuery({
+      recipients: crmSuper,
+      assignedRoles: assigned,
+      flagged: [
+        { id: "ca-1", item_type: "action_item", item_ref: "0", item_label: "Re-inspect slab 2" },
+        { id: "ca-2", item_type: "action_item", item_ref: "1", item_label: "Re-inspect slab 5" },
+      ],
+    });
+    const send1 = vi.fn().mockResolvedValue({ success: true, messageId: "m1" });
+    await handleScorecardCorrectiveActionEmail(
+      { ...payload, cycleNonce: NONCE },
+      null,
+      { query: attempt1.query as any, sendEmail: send1, env, logger: makeLogger() },
+    );
+
+    // A genuine RETRY of the SAME job (same nonce) — but ca-1 was resolved in the meantime, so the live open
+    // set is now just [ca-2].
+    const attempt2 = makeQuery({
+      recipients: crmSuper,
+      assignedRoles: assigned,
+      flagged: [{ id: "ca-2", item_type: "action_item", item_ref: "1", item_label: "Re-inspect slab 5" }],
+    });
+    const send2 = vi.fn().mockResolvedValue({ success: true, messageId: "m2" });
+    await handleScorecardCorrectiveActionEmail(
+      { ...payload, cycleNonce: NONCE },
+      null,
+      { query: attempt2.query as any, sendEmail: send2, env, logger: makeLogger() },
+    );
+
+    const key1 = send1.mock.calls[0][3].idempotencyKey as string;
+    const key2 = send2.mock.calls[0][3].idempotencyKey as string;
+    // Same nonce → same key, EVEN THOUGH the live open-item set differs between the two attempts.
+    expect(key1).toBe(`corrective-action-office_dallas-${SCORECARD}-sam.super@trock.com-cycle-${NONCE}`);
+    expect(key2).toBe(key1);
+  });
+
+  it("falls back to the live open-row fingerprint when payload.cycleNonce is absent (legacy in-flight job)", async () => {
+    // Jobs enqueued BEFORE this deploy carry no cycleNonce. The handler must still key CRM emails so a same-key
+    // /different-payload false-dedup can't happen — via the legacy live-row fingerprint. This is exactly the
+    // default `payload` (no cycleNonce), so the existing finding-4 tests already exercise the fallback; this
+    // test makes the fallback contract explicit.
+    const crmSuper = [
+      { role: "superintendent", name: "Sam Super", email: "sam.super@trock.com", user_id: "u-1", can_field_login: true },
+    ];
+    const { query } = makeQuery({ recipients: crmSuper, assignedRoles: [{ role: "superintendent" }] });
+    const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "m" });
+    await handleScorecardCorrectiveActionEmail(payload, null, { query: query as any, sendEmail, env, logger: makeLogger() });
+
+    const key = sendEmail.mock.calls[0][3].idempotencyKey as string;
+    expect(key).toBe(
+      `corrective-action-office_dallas-${SCORECARD}-sam.super@trock.com-cycle-${cycleFingerprint(FLAGGED.map((f) => f.id))}`,
+    );
+  });
+
+  // ---- Part B: the final stamp is guarded against a concurrent new corrective-action item ----
+
+  it("does NOT stamp and RE-ENQUEUES a fresh cycle when a new open item appears after the flagged read", async () => {
+    // The notification-loss race: the worker emailed about its captured flagged set, but a NEW open corrective-
+    // action row raced in before the stamp. The guarded UPDATE affects 0 rows; the re-check shows the card is
+    // still un-stamped WITH a new open item → the worker must NOT leave the card stamped-but-un-notified.
+    // Instead it deletes the outstanding tokens and enqueues a fresh corrective-action-email job (new cycle).
+    const { query, tokenDeletes, jobEnqueues } = makeQuery({
+      recipients: [{ role: "superintendent", name: "Sam Super", email: "sam.super@trock.com", user_id: "u-1", can_field_login: true }],
+      assignedRoles: [{ role: "superintendent" }],
+      newOpenItemAppeared: true,
+    });
+    const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "m" });
+    const logger = makeLogger();
+
+    await handleScorecardCorrectiveActionEmail(payload, null, { query: query as any, sendEmail, env, logger });
+
+    // The original email was still sent (about the OLD items) ...
+    expect(sendEmail).toHaveBeenCalledTimes(1);
+    // ... the guarded stamp affected 0 rows (sent_at NOT set) ...
+    const stampCalls = query.mock.calls.filter(([text]) => /UPDATE .*field_scorecards/i.test(text as string));
+    expect(stampCalls).toHaveLength(1); // the guarded UPDATE ran (and matched 0 rows)
+    // ... the scorecard's outstanding tokens were cleared (so the fresh cycle re-mints) ...
+    expect(tokenDeletes).toHaveLength(1);
+    expect(tokenDeletes[0].params[0]).toBe(SCORECARD); // scorecard-scoped delete
+    // ... and a fresh corrective-action-email job was enqueued with a NEW cycleNonce + the right jobType/office.
+    expect(jobEnqueues).toHaveLength(1);
+    const enq = jobEnqueues[0];
+    expect(enq.params[0]).toBe("scorecard_corrective_action_email");
+    const enqPayload = JSON.parse(enq.params[1] as string);
+    expect(enqPayload).toMatchObject({ tenantSchema: "office_dallas", scorecardId: SCORECARD, dealId: DEAL });
+    expect(typeof enqPayload.cycleNonce).toBe("string");
+    expect(enqPayload.cycleNonce).toHaveLength(36); // a fresh UUID
+  });
+
+  it("stamps normally and does NOT re-enqueue when the open set is unchanged since the flagged read", async () => {
+    // The happy path: no new item raced in. The guarded UPDATE stamps (1 row), so there is no re-check, no token
+    // delete, and no re-enqueue.
+    const { query, tokenDeletes, jobEnqueues } = makeQuery({
+      recipients: [{ role: "superintendent", name: "Sam Super", email: "sam.super@trock.com", user_id: "u-1", can_field_login: true }],
+      assignedRoles: [{ role: "superintendent" }],
+      // newOpenItemAppeared omitted → the stamp UPDATE returns rowCount 1.
+    });
+    const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "m" });
+    const logger = makeLogger();
+
+    await handleScorecardCorrectiveActionEmail(payload, null, { query: query as any, sendEmail, env, logger });
+
+    const stampCalls = query.mock.calls.filter(([text]) => /UPDATE .*field_scorecards/i.test(text as string));
+    expect(stampCalls).toHaveLength(1);
+    // The guarded stamp carries the emailed-id array as $2 so the NOT EXISTS guard can compare the live set.
+    expect(stampCalls[0][1]?.[1]).toEqual(FLAGGED.map((f) => f.id));
+    // No re-notification machinery fired on the happy path.
+    expect(tokenDeletes).toHaveLength(0);
+    expect(jobEnqueues).toHaveLength(0);
   });
 });
