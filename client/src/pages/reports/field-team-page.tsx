@@ -412,7 +412,15 @@ function AssignmentsSheet({ responder, onClose }: { responder: FieldResponder | 
   }, [id]);
 
   useEffect(() => {
-    if (!responder) return;
+    if (!responder) {
+      // Sheet closed: invalidate any in-flight request (bump the token so its resolution is dropped) and clear
+      // the previous deals, so a later open for a different responder never briefly renders these stale links.
+      requestTokenRef.current += 1;
+      setDeals(null);
+      setError(null);
+      setLoading(false);
+      return;
+    }
     void load();
   }, [responder, load, reloadKey]);
 

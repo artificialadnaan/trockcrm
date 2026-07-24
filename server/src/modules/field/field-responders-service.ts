@@ -102,8 +102,10 @@ export async function createFieldResponder(
   tenantDb: TenantDb,
   input: CreateFieldResponderInput,
 ): Promise<FieldResponder> {
-  const name = input.name?.trim() ?? "";
-  const email = input.email?.trim() ?? "";
+  // The route forwards req.body verbatim (no runtime typing), so name/email may not actually be strings. Coerce a
+  // non-string to "" here so it falls through to the 400 guards below rather than throwing a 500 on .trim().
+  const name = typeof input.name === "string" ? input.name.trim() : "";
+  const email = typeof input.email === "string" ? input.email.trim() : "";
   const role = input.role;
   if (!name) throw new AppError(400, "A name is required.");
   if (!email || !isValidMemberEmail(email)) throw new AppError(400, "A valid email is required.");
@@ -160,14 +162,16 @@ export async function updateFieldResponder(
   input: UpdateFieldResponderInput,
 ): Promise<FieldResponder> {
   const updates: Record<string, unknown> = {};
+  // As in create: a non-string name/email from the untyped body coerces to "" and hits the 400 guard rather than
+  // throwing a 500 on .trim().
   if (input.name !== undefined) {
-    const name = input.name?.trim() ?? "";
+    const name = typeof input.name === "string" ? input.name.trim() : "";
     if (!name) throw new AppError(400, "A name is required.");
     updates.name = name;
   }
   let nextEmail: string | null = null;
   if (input.email !== undefined) {
-    const email = input.email?.trim() ?? "";
+    const email = typeof input.email === "string" ? input.email.trim() : "";
     if (!email || !isValidMemberEmail(email)) throw new AppError(400, "A valid email is required.");
     updates.email = email;
     nextEmail = email;

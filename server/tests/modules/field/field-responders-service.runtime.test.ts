@@ -133,6 +133,13 @@ describe("createFieldResponder + listFieldResponders", () => {
     await expect(
       createFieldResponder(tdb, { name: "Z", email: "not-an-email", role: "superintendent" }),
     ).rejects.toMatchObject({ statusCode: 400 });
+    // Non-string name/email from the untyped request body must 400, not throw a 500 on .trim().
+    await expect(
+      createFieldResponder(tdb, { name: 123 as unknown as string, email: "n@example.com", role: "superintendent" }),
+    ).rejects.toMatchObject({ statusCode: 400 });
+    await expect(
+      createFieldResponder(tdb, { name: "N", email: { x: 1 } as unknown as string, role: "superintendent" }),
+    ).rejects.toMatchObject({ statusCode: 400 });
   });
 
   it("409s (FIELD_RESPONDER_EMAIL_DUPLICATE) on a case-insensitive duplicate ACTIVE email", async () => {
