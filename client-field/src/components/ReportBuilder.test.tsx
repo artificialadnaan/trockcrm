@@ -386,6 +386,8 @@ describe("ReportBuilder", () => {
     await gotoEditStep(node);
 
     await setSummary(node, "a".repeat(4995));
+    // Wait for the config-gated recorder to render before clicking it (matches the sibling tests).
+    await vi.waitFor(() => expect(node.querySelector('[data-testid="mock-voice"]')).toBeTruthy());
     (node.querySelector('[data-testid="mock-voice"]') as HTMLButtonElement).click();
 
     await vi.waitFor(() => expect(execSummaryInput(node)!.value.length).toBe(5000));

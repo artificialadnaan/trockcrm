@@ -193,4 +193,18 @@ describe("VoiceRecorder onBusyChange", () => {
 
     expect(onTranscript).not.toHaveBeenCalled();
   });
+
+  it("does not launch two recorders when the mic button is double-activated before it commits", async () => {
+    const getUserMedia = vi.fn().mockReturnValue(new Promise<MediaStream>(() => { /* never resolves */ }));
+    (navigator as unknown as { mediaDevices: { getUserMedia: unknown } }).mediaDevices.getUserMedia = getUserMedia;
+
+    render(<VoiceRecorder onTranscript={vi.fn()} onBusyChange={vi.fn()} />);
+    await vi.waitFor(() => expect(recorderButton()).toBeTruthy());
+
+    const button = recorderButton();
+    button.click();
+    button.click(); // second activation before React commits "starting"/disabled
+
+    expect(getUserMedia).toHaveBeenCalledTimes(1);
+  });
 });

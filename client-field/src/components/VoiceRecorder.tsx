@@ -28,6 +28,7 @@ export function VoiceRecorder({ disabled, onTranscript, onBusyChange }: VoiceRec
   const intervalRef = useRef<number | null>(null);
   const onBusyChangeRef = useRef(onBusyChange);
   const mountedRef = useRef(true);
+  const startingRef = useRef(false);
 
   useEffect(() => {
     // Set on SETUP (not just cleanup) so React.StrictMode's dev setup→cleanup→setup cycle leaves the flag
@@ -55,11 +56,16 @@ export function VoiceRecorder({ disabled, onTranscript, onBusyChange }: VoiceRec
 
   async function start() {
     setError(null);
-    if (state !== "idle") return; // guard re-entry during the async start window
+    // Synchronous ref lock: state updates are async/batched, so a fast double-activation could pass a
+    // state-only guard twice and launch two getUserMedia calls before React commits "starting" — the 2nd
+    // stream would orphan the 1st, leaving a live mic track unreachable by stop()/cleanup. The ref flips
+    // synchronously, so the second call bails immediately.
+    if (startingRef.current || state !== "idle") return;
     if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
       setError("Voice dictation is not available in this browser. Use the keyboard option instead.");
       return;
     }
+    startingRef.current = true;
 
     // Mark busy up-front so a parent gate (e.g. Generate) is engaged during the permission prompt / device
     // startup, before recording actually begins.
@@ -68,6 +74,7 @@ export function VoiceRecorder({ disabled, onTranscript, onBusyChange }: VoiceRec
     try {
       stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     } catch {
+      startingRef.current = false;
       setError("Microphone access is blocked. Enable microphone permission or use the keyboard option.");
       setState("idle");
       return;
@@ -76,6 +83,7 @@ export function VoiceRecorder({ disabled, onTranscript, onBusyChange }: VoiceRec
     // If we were torn down while permission was pending, release the mic immediately and do NOT start
     // recording — otherwise the live stream escapes cleanup and the mic stays on after the UI is gone.
     if (!mountedRef.current) {
+      startingRef.current = false;
       stream.getTracks().forEach((track) => track.stop());
       return;
     }
@@ -115,6 +123,8 @@ export function VoiceRecorder({ disabled, onTranscript, onBusyChange }: VoiceRec
       intervalRef.current = null;
       setError("Voice dictation could not start. Try again or use the keyboard option.");
       setState("idle");
+    } finally {
+      startingRef.current = false;
     }
   }
 
