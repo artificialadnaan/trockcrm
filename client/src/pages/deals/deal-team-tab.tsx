@@ -386,14 +386,28 @@ function AddMemberDialog({
 
   // Load the ACTIVE field-team roster once the dialog opens (only active responders are freshly assignable —
   // the server 400s a deactivated one). Refetched when reopened so a just-added responder from another session
-  // shows up.
+  // shows up. A sequence guard (mirrors the shared roster hook) drops out-of-order responses: closing/reopening
+  // before the first request settles leaves two in flight, and a slower older one must not clobber the current
+  // (active-only, current-office) roster — which could resurrect a just-deactivated responder or restore a prior
+  // office's rows. The cleanup bumps the sequence so any in-flight response is invalidated on close/reopen.
+  const rosterSeq = useRef(0);
   useEffect(() => {
     if (!open) return;
+    const seq = ++rosterSeq.current;
     setLoadingResponders(true);
     listFieldResponders({ includeInactive: false })
-      .then((rows) => setResponders(rows))
-      .catch(() => toast.error("Failed to load the field-team roster"))
-      .finally(() => setLoadingResponders(false));
+      .then((rows) => {
+        if (seq === rosterSeq.current) setResponders(rows);
+      })
+      .catch(() => {
+        if (seq === rosterSeq.current) toast.error("Failed to load the field-team roster");
+      })
+      .finally(() => {
+        if (seq === rosterSeq.current) setLoadingResponders(false);
+      });
+    return () => {
+      rosterSeq.current += 1;
+    };
   }, [open]);
 
   // Copied from the Billing tab's contact search+select: GET /contacts/search?q=…&limit=10 → { contacts }.

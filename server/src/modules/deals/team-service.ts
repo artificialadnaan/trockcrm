@@ -124,6 +124,11 @@ export async function addTeamMember(
     // resurface as the corrective-action recipient. So when this add carries a responderId and an ACTIVE row for
     // (deal, responder_id, role) already exists, refresh THAT row in place instead of inserting a duplicate.
     if (input.responderId) {
+      // FOR UPDATE locks the matched row for the request transaction, so a concurrent removeTeamMember can't set
+      // it inactive between this lookup and whichever path we take below (no-op return, refresh, or fall-through):
+      // its is_active flip would block until we commit. If the row was ALREADY deactivated when we get the lock,
+      // the is_active = TRUE predicate excludes it -> byResponder is undefined -> we go to the insert path. This is
+      // what makes the unchanged no-op return safe (it can't 201 a row that was concurrently removed).
       const [byResponder] = await tenantDb
         .select()
         .from(dealTeamMembers)
@@ -135,7 +140,8 @@ export async function addTeamMember(
             eq(dealTeamMembers.responderId, input.responderId),
           ),
         )
-        .limit(1);
+        .limit(1)
+        .for("update");
       if (byResponder) {
         const emailChanged = (byResponder.memberEmail ?? "").toLowerCase() !== memberEmail.toLowerCase();
         const nameChanged = (byResponder.memberName ?? "") !== memberName;
