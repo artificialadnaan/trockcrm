@@ -160,15 +160,21 @@ export async function addTeamMember(
           ),
         )
         .limit(1);
-      // Assign-from-roster dedup: if the existing active email-only assignment predates the roster (or was
-      // hand-typed) and carries NO responder_id, but this add came from the roster picker, link it so the
-      // "where assigned" view can join back to the roster person. Only a NEW link (existing.responderId is
-      // null) is written; we never overwrite an existing link or re-notify (this remains a no-op dup — the
-      // cycle restart below is intentionally skipped). member_name/email are left intact (recipient-stable).
-      if (existing && input.responderId && !existing.responderId) {
+      // Assign-from-roster dedup: this add came from the roster picker (input.responderId set) but an ACTIVE
+      // email-only row for the same (deal, email, role) already exists. Re-point that row to the roster person
+      // being assigned whenever its responder_id differs from the incoming one — covering BOTH a pre-roster /
+      // hand-typed row (responder_id NULL) AND a stale link to a DIFFERENT roster id. The latter is the
+      // email-reuse case: a responder is deactivated, a NEW roster person is created with the same email (the
+      // ACTIVE-only unique index permits it) and gets assigned here. Without re-pointing, the row would keep the
+      // deactivated predecessor's link — the new person would show 0 assignments while the retired one still
+      // "owns" the deal in the roster drill-down. We also refresh member_name/member_email to the assigned
+      // person (same email modulo case, so corrective-action recipient resolution — keyed on member_email — is
+      // unchanged). This is still a no-op dup at the notification layer: no NEW row, no re-notify, the cycle
+      // restart below is intentionally skipped. When the link already matches, there is nothing to do.
+      if (existing && input.responderId && existing.responderId !== input.responderId) {
         const [linked] = await tenantDb
           .update(dealTeamMembers)
-          .set({ responderId: input.responderId, updatedAt: new Date() })
+          .set({ responderId: input.responderId, memberName, memberEmail, updatedAt: new Date() })
           .where(eq(dealTeamMembers.id, existing.id))
           .returning();
         return linked ?? existing;

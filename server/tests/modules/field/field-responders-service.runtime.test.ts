@@ -60,6 +60,16 @@ const DEALS_DDL = `
   );
 `;
 
+// The email-only dedup partial unique index from migration 0196 (re-targeted at public). tenantSchemaSql omits
+// it, but the assign-from-roster dedup path in addTeamMember relies on it: a second ACTIVE email-only row for the
+// same (deal, lower(email), role) must conflict so the code takes the dedup/relink branch instead of inserting a
+// duplicate row. Required to exercise the responder-relink behavior below.
+const DTM_EMAIL_UIDX_DDL = `
+  CREATE UNIQUE INDEX IF NOT EXISTS deal_team_members_deal_email_role_uidx
+    ON public.deal_team_members (deal_id, lower(member_email), role)
+    WHERE user_id IS NULL AND contact_id IS NULL AND is_active = TRUE AND member_email IS NOT NULL;
+`;
+
 beforeAll(async () => {
   pg = new PGlite();
   // deal_team_members from the real Drizzle def (carries responder_id; tenantSchemaSql omits its FK/indexes,
@@ -68,6 +78,7 @@ beforeAll(async () => {
   await pg.exec(tenantSchemaSql("public", [dealTeamMembers]));
   await pg.exec(RESPONDERS_DDL);
   await pg.exec(DEALS_DDL);
+  await pg.exec(DTM_EMAIL_UIDX_DDL);
   tdb = drizzle(pg);
 });
 
@@ -206,6 +217,24 @@ describe("updateFieldResponder", () => {
       updateFieldResponder(tdb, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", { name: "Nope" }),
     ).rejects.toMatchObject({ statusCode: 404 });
   });
+
+  it("rejects a non-boolean isActive with 400 instead of silently deactivating", async () => {
+    const created = await createFieldResponder(tdb, {
+      name: "Stays Active",
+      email: "stays@example.com",
+      role: "superintendent",
+    });
+    // A malformed patch (null / string) must NOT coerce to false and deactivate the responder.
+    await expect(
+      updateFieldResponder(tdb, created.id, { isActive: null as unknown as boolean }),
+    ).rejects.toMatchObject({ statusCode: 400 });
+    await expect(
+      updateFieldResponder(tdb, created.id, { isActive: "true" as unknown as boolean }),
+    ).rejects.toMatchObject({ statusCode: 400 });
+    // Unchanged: still active.
+    const { responders } = await listFieldResponders(tdb);
+    expect(responders.find((r) => r.id === created.id)?.isActive).toBe(true);
+  });
 });
 
 describe("assignmentCount + listFieldResponderAssignments", () => {
@@ -287,5 +316,54 @@ describe("assign-from-roster via addTeamMember(responderId)", () => {
     const { deals } = await listFieldResponderAssignments(tdb, responder.id);
     expect(deals).toHaveLength(1);
     expect(deals[0]).toMatchObject({ dealId: DEAL, role: "superintendent" });
+  });
+
+  it("re-points an existing email-only row to the NEW responder when a deactivated one's email is reused", async () => {
+    // A is assigned to the deal from the roster, then deactivated. B is created with A's reused email (allowed
+    // once A is inactive) and assigned to the SAME deal + role. The existing email-only row must relink to B —
+    // otherwise B shows 0 assignments while retired A still "owns" the deal.
+    const a = await createFieldResponder(tdb, {
+      name: "Original Super",
+      email: "shared@example.com",
+      role: "superintendent",
+    });
+    const firstAssign = await addTeamMember(tdb, {
+      dealId: DEAL,
+      memberName: a.name,
+      memberEmail: a.email,
+      responderId: a.id,
+      role: a.role,
+    });
+    expect(firstAssign.responderId).toBe(a.id);
+
+    await updateFieldResponder(tdb, a.id, { isActive: false });
+    const b = await createFieldResponder(tdb, {
+      name: "Replacement Super",
+      email: "shared@example.com",
+      role: "superintendent",
+    });
+    expect(b.id).not.toBe(a.id);
+
+    // Re-assign the same deal/role from the roster picker for B — dedup fires, and the row re-points to B.
+    const relinked = await addTeamMember(tdb, {
+      dealId: DEAL,
+      memberName: b.name,
+      memberEmail: b.email,
+      responderId: b.id,
+      role: b.role,
+    });
+    expect(relinked.id).toBe(firstAssign.id); // same underlying row, not a duplicate
+    expect(relinked.responderId).toBe(b.id);
+    expect(relinked.memberName).toBe("Replacement Super");
+
+    // B now owns the assignment; deactivated A owns none.
+    const all = await listFieldResponders(tdb, { includeInactive: true });
+    expect(all.responders.find((r) => r.id === b.id)?.assignmentCount).toBe(1);
+    expect(all.responders.find((r) => r.id === a.id)?.assignmentCount).toBe(0);
+    const bDeals = await listFieldResponderAssignments(tdb, b.id);
+    expect(bDeals.deals).toHaveLength(1);
+    expect(bDeals.deals[0]).toMatchObject({ dealId: DEAL, role: "superintendent" });
+    const aDeals = await listFieldResponderAssignments(tdb, a.id);
+    expect(aDeals.deals).toHaveLength(0);
   });
 });

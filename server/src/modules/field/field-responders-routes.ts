@@ -10,10 +10,13 @@ import {
 
 // CRM routes for the field-responder roster (migration 0198). Mounted (in app.ts) under the tenant router at
 // `/api/field-responders`, so each request already carries auth + tenant scope (req.tenantDb / the per-request
-// office transaction that req.commitTransaction! commits). Reads (list / assignments) are visible to any CRM
-// role (admin/director/rep) because the assign-from-roster picker on the deal Team tab needs to read the roster;
-// writes (create / update / deactivate) are director/admin only — managing the roster is a leadership action,
-// mirroring who curates the corrective-action recipient list this roster feeds.
+// office transaction that req.commitTransaction! commits). The roster LIST is visible to any CRM role
+// (admin/director/rep) because the assign-from-roster picker on the deal Team tab needs to read it, and the
+// per-row assignmentCount is a harmless aggregate. The per-deal assignment DRILL-DOWN, however, names specific
+// deals across ALL reps, so it is director/admin only — a rep must not enumerate other reps' deals through the
+// roster (they can't through the deals API either). Writes (create / update / deactivate) are likewise
+// director/admin only — managing the roster is a leadership action, mirroring who curates the corrective-action
+// recipient list this roster feeds.
 
 const router = Router();
 
@@ -69,8 +72,9 @@ router.patch("/:id", requireDirector, async (req, res, next) => {
 });
 
 // GET /api/field-responders/:id/assignments — the ACTIVE deals this responder is currently the super / PM on
-// (the drill-down behind assignmentCount). 404 unknown id.
-router.get("/:id/assignments", requireAnyRole, async (req, res, next) => {
+// (the drill-down behind assignmentCount). Director/admin only: it enumerates specific deals across all reps.
+// 404 unknown id.
+router.get("/:id/assignments", requireDirector, async (req, res, next) => {
   try {
     const id = String(req.params.id);
     assertValidUuid(id, "id");

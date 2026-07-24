@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Loader2, Plus, Users, Pencil, ChevronRight, ArrowUpRight } from "lucide-react";
 import { toast } from "sonner";
 import { PageHeader } from "@/components/layout/page-header";
@@ -126,7 +126,11 @@ export default function FieldTeamPage() {
             </p>
           </div>
         ) : (
-          <table className="w-full border-collapse">
+          // overflow-x-auto so the 6-column table (with unbreakable emails) stays reachable on phone widths —
+          // the outer card is overflow-hidden for its rounded corners, which would otherwise clip the trailing
+          // columns with no way to scroll to them. min-w keeps it a real scroll region rather than squishing.
+          <div className="overflow-x-auto">
+          <table className="w-full min-w-[600px] border-collapse">
             <thead>
               <tr className="border-b border-slate-100">
                 <Th>Name</Th>
@@ -162,15 +166,21 @@ export default function FieldTeamPage() {
                   </td>
                   <td className="px-3.5 py-3 text-center">
                     {r.assignmentCount > 0 ? (
-                      <button
-                        type="button"
-                        onClick={() => setDrill(r)}
-                        className="inline-flex items-center gap-1 rounded-lg px-2 py-1 text-[13px] font-bold text-slate-800 hover:bg-slate-100"
-                        aria-label={`View the ${r.assignmentCount} deal${r.assignmentCount === 1 ? "" : "s"} ${r.name} is assigned to`}
-                      >
-                        {r.assignmentCount}
-                        <ChevronRight className="h-3.5 w-3.5 text-slate-400" />
-                      </button>
+                      canManage ? (
+                        <button
+                          type="button"
+                          onClick={() => setDrill(r)}
+                          className="inline-flex items-center gap-1 rounded-lg px-2 py-1 text-[13px] font-bold text-slate-800 hover:bg-slate-100"
+                          aria-label={`View the ${r.assignmentCount} deal${r.assignmentCount === 1 ? "" : "s"} ${r.name} is assigned to`}
+                        >
+                          {r.assignmentCount}
+                          <ChevronRight className="h-3.5 w-3.5 text-slate-400" />
+                        </button>
+                      ) : (
+                        // Reps see the aggregate count but not the per-deal drill-down — that list names deals
+                        // across all reps and is director/admin only (matches the requireDirector endpoint).
+                        <span className="text-[13px] font-bold text-slate-800">{r.assignmentCount}</span>
+                      )
                     ) : (
                       <span className="text-slate-300">—</span>
                     )}
@@ -192,6 +202,7 @@ export default function FieldTeamPage() {
               ))}
             </tbody>
           </table>
+          </div>
         )}
       </div>
 
@@ -376,20 +387,27 @@ function AssignmentsSheet({ responder, onClose }: { responder: FieldResponder | 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
+  // Monotonic request token: opening responder B while A's request is still in flight must not let A's slower
+  // response overwrite B's deals (which would show A's deals under B's name and link to the wrong deal). Each
+  // load bumps the token; a resolved response is applied only if it is still the latest.
+  const requestTokenRef = useRef(0);
   const id = responder?.id ?? null;
 
   const load = useCallback(async () => {
     if (!id) return;
+    const token = ++requestTokenRef.current;
     setLoading(true);
     setError(null);
     setDeals(null);
     try {
       const loaded = await getFieldResponderAssignments(id);
+      if (token !== requestTokenRef.current) return; // a newer responder was opened; drop this stale response
       setDeals(loaded);
     } catch (e) {
+      if (token !== requestTokenRef.current) return;
       setError(e instanceof Error ? e.message : "Couldn’t load assignments");
     } finally {
-      setLoading(false);
+      if (token === requestTokenRef.current) setLoading(false);
     }
   }, [id]);
 

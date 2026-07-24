@@ -179,7 +179,13 @@ export async function updateFieldResponder(
     updates.role = input.role;
   }
   if (input.isActive !== undefined) {
-    updates.isActive = input.isActive === true;
+    // Reject a non-boolean isActive (null, "true", 0, …) rather than silently coercing it to false — the route
+    // forwards req.body.isActive verbatim, and a malformed patch must not deactivate a responder as a side
+    // effect. A legitimate client always sends a real boolean.
+    if (typeof input.isActive !== "boolean") {
+      throw new AppError(400, "isActive must be true or false.");
+    }
+    updates.isActive = input.isActive;
   }
 
   const [existing] = await tenantDb
@@ -222,11 +228,27 @@ export async function updateFieldResponder(
   }
 
   updates.updatedAt = new Date();
-  const updated = await tenantDb
-    .update(fieldResponders)
-    .set(updates)
-    .where(eq(fieldResponders.id, id))
-    .returning();
+  let updated: (typeof fieldResponders.$inferSelect)[];
+  try {
+    updated = await tenantDb
+      .update(fieldResponders)
+      .set(updates)
+      .where(eq(fieldResponders.id, id))
+      .returning();
+  } catch (err) {
+    // TOCTOU backstop: two concurrent renames/reactivations targeting the same active email can both clear the
+    // pre-check SELECT above before either UPDATE lands. The partial unique index (field_responders_active_
+    // email_uidx) then rejects the loser with 23505 — the only unique constraint an UPDATE here can violate.
+    // Translate that into the same clean 409 an ordinary duplicate returns instead of leaking a generic 500.
+    if (isUniqueViolation(err)) {
+      throw new AppError(
+        409,
+        "A responder with this email already exists on the roster.",
+        "FIELD_RESPONDER_EMAIL_DUPLICATE",
+      );
+    }
+    throw err;
+  }
   if (updated.length === 0) throw new AppError(404, "Field responder not found.");
 
   return toFieldResponder({
@@ -315,4 +337,18 @@ export async function resolveResponderForAssignment(
   if (!row) throw new AppError(404, "Field responder not found.");
   if (!row.isActive) throw new AppError(400, "This field responder is deactivated and cannot be assigned.");
   return { id: row.id, name: row.name, email: row.email, role: row.role as FieldResponderRole };
+}
+
+/** True when a thrown DB error is a Postgres unique-violation (23505). Drizzle wraps driver errors in a
+ * DrizzleQueryError whose `.cause` carries the raw pg error, so walk the cause chain to detect it at either
+ * level (mirrors the isUniqueViolation helper in the deals rfp-vote service). */
+function isUniqueViolation(err: unknown): boolean {
+  let cur: unknown = err;
+  for (let depth = 0; depth < 5 && cur; depth += 1) {
+    if (cur !== null && typeof cur === "object" && (cur as { code?: string }).code === "23505") return true;
+    const msg = cur instanceof Error ? cur.message : String(cur);
+    if (/duplicate key value|unique constraint|field_responders_active_email_uidx/i.test(msg)) return true;
+    cur = cur !== null && typeof cur === "object" ? (cur as { cause?: unknown }).cause : undefined;
+  }
+  return false;
 }
