@@ -6,13 +6,16 @@ import { transcribeDescriptionAudio } from "../lib/photo-dictation";
 type VoiceRecorderProps = {
   disabled?: boolean;
   onTranscript: (text: string) => void;
+  /** Optional: fires true while recording or transcribing, false when idle — lets a parent block an action
+   * (e.g. submit/generate) that would otherwise drop an in-flight transcript. */
+  onBusyChange?: (busy: boolean) => void;
 };
 
 type RecorderState = "idle" | "recording" | "transcribing";
 
 const MAX_RECORDING_MS = 60_000;
 
-export function VoiceRecorder({ disabled, onTranscript }: VoiceRecorderProps) {
+export function VoiceRecorder({ disabled, onTranscript, onBusyChange }: VoiceRecorderProps) {
   const [state, setState] = useState<RecorderState>("idle");
   const [seconds, setSeconds] = useState(0);
   const [error, setError] = useState<string | null>(null);
@@ -21,12 +24,22 @@ export function VoiceRecorder({ disabled, onTranscript }: VoiceRecorderProps) {
   const chunksRef = useRef<BlobPart[]>([]);
   const timeoutRef = useRef<number | null>(null);
   const intervalRef = useRef<number | null>(null);
+  const onBusyChangeRef = useRef(onBusyChange);
 
   useEffect(() => () => {
     streamRef.current?.getTracks().forEach((track) => track.stop());
     if (timeoutRef.current) window.clearTimeout(timeoutRef.current);
     if (intervalRef.current) window.clearInterval(intervalRef.current);
   }, []);
+
+  // Keep the latest callback in a ref and notify the parent whenever busy-ness changes (recording OR
+  // transcribing), without re-firing when the parent re-renders with a new inline callback.
+  useEffect(() => {
+    onBusyChangeRef.current = onBusyChange;
+  });
+  useEffect(() => {
+    onBusyChangeRef.current?.(state !== "idle");
+  }, [state]);
 
   async function start() {
     setError(null);

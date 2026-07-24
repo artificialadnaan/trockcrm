@@ -3,13 +3,52 @@
  */
 import React from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { FieldPhoto } from "../lib/field-projects";
 import { ReportBuilder } from "./ReportBuilder";
 
 const apiMock = vi.hoisted(() => vi.fn());
+const getVoiceConfigMock = vi.hoisted(() => vi.fn());
+const transcribeMock = vi.hoisted(() => vi.fn());
 
 vi.mock("../lib/api", () => ({ api: apiMock }));
+
+vi.mock("../lib/photo-dictation", () => ({
+  getVoiceTranscriptionConfig: getVoiceConfigMock,
+  transcribeDescriptionAudio: transcribeMock,
+}));
+
+// Mock the child recorder so tests can drive its callbacks without a real MediaRecorder (jsdom has none):
+// one button fires onTranscript, two toggle the busy state the parent uses to guard Generate.
+vi.mock("./VoiceRecorder", async () => {
+  const ReactModule = await import("react");
+  return {
+    VoiceRecorder: ({ disabled, onTranscript, onBusyChange }: {
+      disabled?: boolean;
+      onTranscript: (text: string) => void;
+      onBusyChange?: (busy: boolean) => void;
+    }) =>
+      ReactModule.createElement(
+        ReactModule.Fragment,
+        null,
+        ReactModule.createElement(
+          "button",
+          { type: "button", "data-testid": "mock-voice", disabled, onClick: () => onTranscript("dictated summary") },
+          "voice",
+        ),
+        ReactModule.createElement(
+          "button",
+          { type: "button", "data-testid": "mock-voice-busy-on", onClick: () => onBusyChange?.(true) },
+          "busy-on",
+        ),
+        ReactModule.createElement(
+          "button",
+          { type: "button", "data-testid": "mock-voice-busy-off", onClick: () => onBusyChange?.(false) },
+          "busy-off",
+        ),
+      ),
+  };
+});
 
 let root: Root | null = null;
 let container: HTMLDivElement | null = null;
@@ -71,13 +110,74 @@ const photos: FieldPhoto[] = [
   },
 ];
 
+beforeEach(() => {
+  // Default: transcription configured (mic shown). Individual tests override to false.
+  getVoiceConfigMock.mockResolvedValue({ configured: true });
+  transcribeMock.mockResolvedValue({ transcript: "" });
+});
+
 afterEach(() => {
   root?.unmount();
   root = null;
   container?.remove();
   container = null;
   apiMock.mockReset();
+  getVoiceConfigMock.mockReset();
+  transcribeMock.mockReset();
 });
+
+function clickButton(node: HTMLElement, text: string) {
+  Array.from(node.querySelectorAll("button")).find((button) => button.textContent === text)?.click();
+}
+
+// React tracks controlled <textarea>/<input> value via the native setter, so setting `.value` directly is
+// ignored — we must go through the prototype setter and dispatch a bubbling input event.
+function setControlledValue(el: HTMLTextAreaElement | HTMLInputElement, value: string) {
+  const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+  Object.getOwnPropertyDescriptor(proto, "value")!.set!.call(el, value);
+  el.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+function execSummaryInput(node: HTMLElement) {
+  return node.querySelector('[data-testid="executive-summary-input"]') as HTMLTextAreaElement | null;
+}
+
+const previewResponse = {
+  cover: {
+    reportTitle: "Atlas Point Photo Report",
+    creatorName: "Adnaan Iqbal",
+    companyName: "TRock Construction",
+    reportDateLabel: "May 18, 2026",
+    projectName: "Atlas Point",
+    photoCount: 1,
+  },
+  sections: [
+    {
+      id: "section-1",
+      title: "Tag: roofing",
+      photos: [{
+        id: "photo-1",
+        displayName: "Front elevation",
+        description: "Front elevation crack",
+        takenAt: "2026-05-10T10:00:00.000Z",
+        createdAt: "2026-05-10T10:00:00.000Z",
+        uploaderName: "Adnaan",
+        imageUrl: "https://example.com/front.jpg",
+        tags: ["roofing", "urgent"],
+        projectName: "Atlas Point",
+      }],
+    },
+  ],
+};
+
+async function gotoEditStep(node: HTMLElement) {
+  apiMock.mockResolvedValueOnce(previewResponse);
+  await vi.waitFor(() => expect(node.textContent).toContain("Front elevation crack"));
+  clickButton(node, "Select all visible");
+  await vi.waitFor(() => expect(node.textContent).toContain("2 selected"));
+  clickButton(node, "Continue");
+  await vi.waitFor(() => expect(node.textContent).toContain("Edit Report"));
+}
 
 function renderBuilder(props?: Partial<React.ComponentProps<typeof ReportBuilder>>) {
   container = document.createElement("div");
@@ -185,5 +285,87 @@ describe("ReportBuilder", () => {
     await vi.waitFor(() => expect(onGenerated).toHaveBeenCalled());
     await vi.waitFor(() => expect(node.querySelector('a[href="https://example.com/report.pdf"]')).toBeTruthy());
     expect(node.querySelector('a[href="https://example.com/report.pdf"]')?.textContent ?? "").toContain("Open Atlas Point Photo Report");
+  });
+
+  it("includes a trimmed executive summary in the generate payload", async () => {
+    const node = renderBuilder();
+    await gotoEditStep(node);
+
+    const input = execSummaryInput(node);
+    expect(input).toBeTruthy();
+    setControlledValue(input!, "  Roof replaced; site cleared and inspected.  ");
+
+    apiMock.mockResolvedValueOnce({ report: { id: "report-1", title: "T", pdfUrl: "https://example.com/r.pdf" } });
+    clickButton(node, "Generate PDF");
+
+    await vi.waitFor(() => expect(apiMock).toHaveBeenCalledWith("/field/reports/generate", expect.objectContaining({
+      method: "POST",
+      json: expect.objectContaining({ executiveSummary: "Roof replaced; site cleared and inspected." }),
+    })));
+  });
+
+  it("sends a null executive summary when the field is blank", async () => {
+    const node = renderBuilder();
+    await gotoEditStep(node);
+
+    setControlledValue(execSummaryInput(node)!, "   ");
+
+    apiMock.mockResolvedValueOnce({ report: { id: "report-1", title: "T", pdfUrl: "https://example.com/r.pdf" } });
+    clickButton(node, "Generate PDF");
+
+    await vi.waitFor(() => expect(apiMock).toHaveBeenCalledWith("/field/reports/generate", expect.objectContaining({
+      json: expect.objectContaining({ executiveSummary: null }),
+    })));
+  });
+
+  it("appends a dictated transcript to the existing summary text", async () => {
+    const node = renderBuilder();
+    await gotoEditStep(node);
+
+    setControlledValue(execSummaryInput(node)!, "Existing note.");
+    await vi.waitFor(() => expect(node.querySelector('[data-testid="mock-voice"]')).toBeTruthy());
+    (node.querySelector('[data-testid="mock-voice"]') as HTMLButtonElement).click();
+
+    await vi.waitFor(() => expect(execSummaryInput(node)!.value).toBe("Existing note. dictated summary"));
+  });
+
+  it("shows the voice recorder only when transcription is configured", async () => {
+    getVoiceConfigMock.mockResolvedValue({ configured: false });
+    const node = renderBuilder();
+    await gotoEditStep(node);
+
+    await vi.waitFor(() => expect(node.textContent).toContain("Executive summary"));
+    expect(node.querySelector('[data-testid="mock-voice"]')).toBeFalsy();
+  });
+
+  it("renders the voice recorder when transcription is configured", async () => {
+    getVoiceConfigMock.mockResolvedValue({ configured: true });
+    const node = renderBuilder();
+    await gotoEditStep(node);
+
+    await vi.waitFor(() => expect(node.querySelector('[data-testid="mock-voice"]')).toBeTruthy());
+  });
+
+  it("clamps the appended summary to 5000 characters", async () => {
+    const node = renderBuilder();
+    await gotoEditStep(node);
+
+    setControlledValue(execSummaryInput(node)!, "a".repeat(4995));
+    (node.querySelector('[data-testid="mock-voice"]') as HTMLButtonElement).click();
+
+    await vi.waitFor(() => expect(execSummaryInput(node)!.value.length).toBe(5000));
+  });
+
+  it("blocks Generate PDF while a dictation is still transcribing", async () => {
+    const node = renderBuilder();
+    await gotoEditStep(node);
+
+    (node.querySelector('[data-testid="mock-voice-busy-on"]') as HTMLButtonElement).click();
+
+    await vi.waitFor(() => {
+      const generate = Array.from(node.querySelectorAll("button")).find((button) => button.textContent === "Generate PDF");
+      expect(generate).toBeTruthy();
+      expect((generate as HTMLButtonElement).disabled).toBe(true);
+    });
   });
 });
