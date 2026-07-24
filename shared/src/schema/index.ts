@@ -149,6 +149,7 @@ export { taskResolutionState, taskResolutionStatusEnum } from "./tenant/task-res
 export { notifications, notificationTypeEnum } from "./tenant/notifications.js";
 export { auditLog, auditActionEnum } from "./tenant/audit-log.js";
 export { dealTeamMembers, dealTeamRoleEnum } from "./tenant/deal-team-members.js";
+export { fieldResponders } from "./tenant/field-responders.js";
 export { dealSubscriptions } from "./tenant/deal-subscriptions.js";
 export { dealCompanycamProjects } from "./tenant/deal-companycam-projects.js";
 export { leadQualification } from "./tenant/lead-qualification.js";
