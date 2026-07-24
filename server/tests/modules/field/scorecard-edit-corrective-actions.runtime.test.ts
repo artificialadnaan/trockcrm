@@ -12,6 +12,7 @@ import { resolveCorrectiveActionItem } from "../../../src/modules/field/correcti
 import {
   contacts,
   dealTeamMembers,
+  fieldResponders,
   fieldScorecardEditUploads,
   fieldScorecardItems,
   fieldScorecardPhotos,
@@ -168,6 +169,7 @@ beforeAll(async () => {
       scorecardCorrectiveActions,
       scorecardCorrectiveActionTokens,
       dealTeamMembers,
+      fieldResponders,
       contacts,
     ]),
   );

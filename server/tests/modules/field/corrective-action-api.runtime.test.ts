@@ -16,6 +16,7 @@ import {
   scorecardCorrectiveActionTokens,
   scorecardCorrectiveActionUploads,
   dealTeamMembers,
+  fieldResponders,
   contacts,
 } from "@trock-crm/shared/schema";
 import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
@@ -99,6 +100,7 @@ beforeAll(async () => {
       scorecardCorrectiveActionTokens,
       scorecardCorrectiveActionUploads,
       dealTeamMembers,
+      fieldResponders,
       contacts,
     ]),
   );

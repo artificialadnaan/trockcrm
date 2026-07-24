@@ -1,6 +1,6 @@
 import { and, eq, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
-import { fieldResponders } from "@trock-crm/shared/schema";
+import { fieldResponders, dealTeamMembers } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import {
   isFieldResponderRole,
@@ -9,7 +9,7 @@ import {
   type FieldResponderRole,
 } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
-import { isValidMemberEmail } from "../deals/team-service.js";
+import { addTeamMember, isValidMemberEmail } from "../deals/team-service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -361,4 +361,75 @@ function isUniqueViolation(err: unknown): boolean {
     cur = cur !== null && typeof cur === "object" ? (cur as { cause?: unknown }).cause : undefined;
   }
   return false;
+}
+
+/**
+ * Resolve a scorecard's free-text super/PM NAME to a UNIQUE active roster person of that role (case-insensitive).
+ * Returns null when the name is blank, matches nothing, OR matches more than one active responder — we never
+ * guess which same-named person is meant. Powers the field-driven deal assignment below (the scorecard picker
+ * stores a name, and a name picked from the roster dropdown maps back to exactly one roster row).
+ */
+export async function resolveActiveResponderByName(
+  tenantDb: TenantDb,
+  name: string | null | undefined,
+  role: FieldResponderRole,
+): Promise<{ id: string; name: string; email: string; role: FieldResponderRole } | null> {
+  const trimmed = (name ?? "").trim();
+  if (!trimmed) return null;
+  const rows = await tenantDb
+    .select({
+      id: fieldResponders.id,
+      name: fieldResponders.name,
+      email: fieldResponders.email,
+      role: fieldResponders.role,
+    })
+    .from(fieldResponders)
+    .where(
+      and(
+        eq(fieldResponders.isActive, true),
+        eq(fieldResponders.role, role),
+        sql`LOWER(${fieldResponders.name}) = LOWER(${trimmed})`,
+      ),
+    )
+    .limit(2);
+  if (rows.length !== 1) return null; // 0 = no match; >1 = ambiguous same-name — don't guess
+  return { id: rows[0].id, name: rows[0].name, email: rows[0].email, role: rows[0].role as FieldResponderRole };
+}
+
+/**
+ * Field-driven deal assignment (scorecard → deal team). When a scorecard names a super/PM that maps to a UNIQUE
+ * active roster person AND the deal has NO active member of that role, assign them to the deal team so BOTH the
+ * completed-scorecard email and the corrective-action notification reach the person the field user picked on the
+ * scorecard dropdown. "Only if unset" — it fills an empty role, never overrides an existing Team-tab assignment.
+ * A custom/typed or ambiguous name resolves to null and is skipped (no wrong assignment, no wrong recipient). No
+ * cycle restart (office omitted): it runs inside the scorecard-submission transaction, and that submission's own
+ * corrective-action reconcile + the worker's send-time recipient resolution deliver the notification.
+ */
+export async function assignRosterResponderToDealIfUnset(
+  tenantDb: TenantDb,
+  dealId: string,
+  name: string | null | undefined,
+  role: FieldResponderRole,
+): Promise<void> {
+  const [existing] = await tenantDb
+    .select({ id: dealTeamMembers.id })
+    .from(dealTeamMembers)
+    .where(
+      and(
+        eq(dealTeamMembers.dealId, dealId),
+        eq(dealTeamMembers.role, role),
+        eq(dealTeamMembers.isActive, true),
+      ),
+    )
+    .limit(1);
+  if (existing) return; // only-if-unset: the deal already has a super/PM for this role — leave it untouched
+  const responder = await resolveActiveResponderByName(tenantDb, name, role);
+  if (!responder) return; // no unique roster match (custom name / same-name collision) — nothing to assign
+  await addTeamMember(tenantDb, {
+    dealId,
+    memberName: responder.name,
+    memberEmail: responder.email,
+    responderId: responder.id,
+    role,
+  });
 }

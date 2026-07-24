@@ -62,6 +62,7 @@ import {
 } from "./scorecard-evidence-upload.js";
 import { reconcileScorecardCorrectiveActions } from "./corrective-actions-service.js";
 import { isAssignedCorrectiveActionResponder } from "./corrective-action-recipients.js";
+import { assignRosterResponderToDealIfUnset } from "./field-responders-service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 type ScorecardRow = typeof fieldScorecards.$inferSelect;
@@ -323,6 +324,15 @@ export async function createFieldScorecard(
       .insert(fieldScorecardPhotos)
       .values(photoLinks.map((p) => ({ scorecardId: card.id, sectionKey: p.sectionKey, deficiencyKey: p.deficiencyKey ?? null, fileId: p.fileId })));
   }
+
+  // Field-driven deal assignment: if this scorecard names a super/PM that maps to a UNIQUE active roster person
+  // and the deal has no active member of that role yet, assign them to the deal team — so the person the field
+  // user picked on the scorecard dropdown becomes the deal's super/PM and therefore receives BOTH the
+  // completed-scorecard email (enqueued below) and the corrective-action notification (reconcile below). Runs
+  // BEFORE both so their recipient reads see the assignment. Only-if-unset (never overrides a Team-tab
+  // assignment); a custom/ambiguous name resolves to null and is skipped. In the submit transaction.
+  await assignRosterResponderToDealIfUnset(tenantDb, input.dealId, input.superintendentName, "superintendent");
+  await assignRosterResponderToDealIfUnset(tenantDb, input.dealId, input.pmName, "project_manager");
 
   // Corrective-action follow-up: when the card trips the corrective-action band with at least one flagged
   // item, open the stage, seed one tracked item per flagged issue (each action item + each critical

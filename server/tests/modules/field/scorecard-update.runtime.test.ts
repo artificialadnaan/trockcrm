@@ -18,6 +18,7 @@ import {
 import {
   contacts,
   dealTeamMembers,
+  fieldResponders,
   fieldScorecardEditUploads,
   fieldScorecardItems,
   fieldScorecardPhotos,
@@ -176,6 +177,7 @@ beforeAll(async () => {
     scorecardCorrectiveActions,
     scorecardCorrectiveActionTokens,
     dealTeamMembers,
+    fieldResponders,
     contacts,
   ]));
   await pg.exec("ALTER TABLE public.field_scorecards ADD CONSTRAINT field_scorecards_csid_uniq UNIQUE (client_submission_id)");

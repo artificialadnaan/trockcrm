@@ -9,6 +9,7 @@ import {
   createFieldResponder,
   updateFieldResponder,
   listFieldResponderAssignments,
+  assignRosterResponderToDealIfUnset,
 } from "../../../src/modules/field/field-responders-service.js";
 import { addTeamMember } from "../../../src/modules/deals/team-service.js";
 import { resolveCorrectiveActionRecipients } from "../../../src/modules/field/corrective-action-recipients.js";
@@ -498,5 +499,59 @@ describe("assign-from-roster via addTeamMember(responderId)", () => {
        WHERE deal_id = ${DEAL} AND role = 'superintendent' AND is_active = TRUE
     `);
     expect(Number((total.rows?.[0] as { count: number }).count)).toBe(2); // r + the hand-typed holder, no third row
+  });
+});
+
+describe("assignRosterResponderToDealIfUnset (scorecard name → deal team)", () => {
+  async function activeRoleCount(dealId: string, role: string): Promise<number> {
+    const c = await tdb.execute(sql`
+      SELECT COUNT(*)::int AS "count" FROM deal_team_members
+       WHERE deal_id = ${dealId} AND role = ${role} AND is_active = TRUE
+    `);
+    return Number((c.rows?.[0] as { count: number }).count);
+  }
+
+  it("assigns the deal's super from a UNIQUE roster-name match (case-insensitive) when the role is unset", async () => {
+    const r = await createFieldResponder(tdb, { name: "James Helms", email: "james@example.com", role: "superintendent" });
+    await assignRosterResponderToDealIfUnset(tdb, DEAL, "james helms", "superintendent"); // case-insensitive
+    const rows = await tdb.execute(sql`
+      SELECT responder_id AS "responderId", member_email AS "memberEmail", role
+        FROM deal_team_members WHERE deal_id = ${DEAL} AND role = 'superintendent' AND is_active = TRUE
+    `);
+    expect(rows.rows).toHaveLength(1);
+    expect(rows.rows[0]).toMatchObject({ responderId: r.id, memberEmail: "james@example.com", role: "superintendent" });
+  });
+
+  it("does NOT override an existing active super (only-if-unset)", async () => {
+    await createFieldResponder(tdb, { name: "Roster Super", email: "roster@example.com", role: "superintendent" });
+    await tdb.execute(sql`
+      INSERT INTO deal_team_members (deal_id, role, member_name, member_email, is_active)
+      VALUES (${DEAL}, 'superintendent', 'Existing Super', 'existing@example.com', TRUE)
+    `);
+    await assignRosterResponderToDealIfUnset(tdb, DEAL, "Roster Super", "superintendent");
+    const rows = await tdb.execute(sql`
+      SELECT member_email AS "memberEmail" FROM deal_team_members
+       WHERE deal_id = ${DEAL} AND role = 'superintendent' AND is_active = TRUE
+    `);
+    expect(rows.rows).toHaveLength(1);
+    expect(rows.rows[0]).toMatchObject({ memberEmail: "existing@example.com" }); // untouched
+  });
+
+  it("skips a custom name with no roster match", async () => {
+    await assignRosterResponderToDealIfUnset(tdb, DEAL, "Nobody On Roster", "superintendent");
+    expect(await activeRoleCount(DEAL, "superintendent")).toBe(0);
+  });
+
+  it("skips an AMBIGUOUS same-name roster match (never guesses)", async () => {
+    await createFieldResponder(tdb, { name: "Twin Name", email: "twin1@example.com", role: "superintendent" });
+    await createFieldResponder(tdb, { name: "Twin Name", email: "twin2@example.com", role: "superintendent" });
+    await assignRosterResponderToDealIfUnset(tdb, DEAL_TWO, "Twin Name", "superintendent");
+    expect(await activeRoleCount(DEAL_TWO, "superintendent")).toBe(0);
+  });
+
+  it("matches only within the requested role (a super name is not assigned as PM)", async () => {
+    await createFieldResponder(tdb, { name: "Super Only", email: "superonly@example.com", role: "superintendent" });
+    await assignRosterResponderToDealIfUnset(tdb, DEAL, "Super Only", "project_manager");
+    expect(await activeRoleCount(DEAL, "project_manager")).toBe(0);
   });
 });

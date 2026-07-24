@@ -10,6 +10,7 @@ import {
   fieldScorecardPhotos,
   scorecardCorrectiveActions,
   dealTeamMembers,
+  fieldResponders,
   contacts,
 } from "@trock-crm/shared/schema";
 import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
@@ -86,7 +87,7 @@ beforeAll(async () => {
     );
   `);
   await pg.exec(
-    tenantSchemaSql("public", [fieldScorecards, fieldScorecardItems, fieldScorecardPhotos, scorecardCorrectiveActions, dealTeamMembers, contacts]),
+    tenantSchemaSql("public", [fieldScorecards, fieldScorecardItems, fieldScorecardPhotos, scorecardCorrectiveActions, dealTeamMembers, fieldResponders, contacts]),
   );
   await pg.exec(
     `ALTER TABLE public.field_scorecards ADD CONSTRAINT field_scorecards_csid_uniq UNIQUE (client_submission_id);`,
