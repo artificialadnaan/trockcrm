@@ -525,7 +525,17 @@ function AddMemberDialog({
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        // Dismissing via the X / Escape / outside-click previously only flipped the parent flag, leaving
+        // selectedResponder + picker state stale for the next open — a since-deactivated or off-office responder
+        // could stay selected and 400/404 on submit. Reset every field on any close (Cancel/submit already did).
+        // The roster-load effect's cleanup separately invalidates any in-flight request.
+        if (!next) resetFields();
+        onOpenChange(next);
+      }}
+    >
       <DialogTrigger
         render={
           <Button size="sm">
