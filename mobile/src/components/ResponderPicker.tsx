@@ -6,8 +6,9 @@
 // convenience over free-text, never a gate: typing always works (offline / off-roster / a name the CRM
 // doesn't know), and when there's no roster (empty list or a load `error`) it renders just the TextInput.
 
-import React, { useState } from "react";
+import React, { useRef, useState } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
+import type { TextInput as RNTextInput } from "react-native";
 import { TextInput } from "./ui";
 import { theme } from "../theme/theme";
 import type { FieldResponderOption, FieldResponderRole } from "../api/types";
@@ -55,6 +56,7 @@ export function ResponderPicker({
   error?: string | null;
 }) {
   const [focused, setFocused] = useState(false);
+  const inputRef = useRef<RNTextInput>(null);
 
   // No roster to suggest from (failed load or empty office roster) → pure free-text field. Typing still works.
   const hasRoster = !error && responders.length > 0;
@@ -63,13 +65,18 @@ export function ResponderPicker({
 
   const pick = (name: string) => {
     onChange(name);
-    // Dismiss the list after a pick — behaves like a blur without needing the native keyboard to dismiss.
     setFocused(false);
+    // Blur the NATIVE input too, not just our `focused` flag. Both scorecard forms use
+    // keyboardShouldPersistTaps="handled", so the input stays focused after a suggestion press; without an
+    // explicit blur, tapping the (already-focused) input to edit emits no onFocus and the suggestions would stay
+    // hidden until the user focuses something else. Blurring dismisses the keyboard so the next tap re-opens them.
+    inputRef.current?.blur();
   };
 
   return (
     <View>
       <TextInput
+        ref={inputRef}
         value={value}
         onChangeText={onChange}
         onFocus={() => setFocused(true)}

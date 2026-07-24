@@ -122,4 +122,30 @@ describe("ResponderPicker", () => {
     expect(onChange).toHaveBeenLastCalledWith("jam");
     expect(queryByText("James Helms")).toBeNull();
   });
+
+  it("(d) stays reusable after a pick: re-focusing + editing reopens suggestions and a second pick works", () => {
+    // Guards the selection sequence: on a pick the picker clears `focused` and blurs the native input, so a
+    // later re-focus emits onFocus again and the menu comes back. (On device keyboardShouldPersistTaps="handled"
+    // keeps the row pressable through the tap, so no onBlur races the onPress — pressing the row is representative.)
+    const onChange = jest.fn();
+    const { getByLabelText, getByText, queryByText } = render(
+      <ControlledPicker onChange={onChange} responders={roster} />,
+    );
+    const input = getByLabelText(INPUT_LABEL);
+
+    // First selection.
+    fireEvent(input, "focus");
+    fireEvent.changeText(input, "jam");
+    fireEvent.press(getByText("James Helms"));
+    expect(onChange).toHaveBeenLastCalledWith("James Helms");
+    expect(queryByText("Jamal Wright")).toBeNull(); // menu closed after the pick
+
+    // The user re-focuses and edits — suggestions must reappear (they'd be stuck hidden if the picker didn't
+    // reset focus + blur on the prior pick), and a second selection must still work.
+    fireEvent(input, "focus");
+    fireEvent.changeText(input, "jam");
+    expect(getByText("Jamal Wright")).toBeTruthy();
+    fireEvent.press(getByText("Jamal Wright"));
+    expect(onChange).toHaveBeenLastCalledWith("Jamal Wright");
+  });
 });
