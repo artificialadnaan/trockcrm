@@ -11,7 +11,9 @@ type VoiceRecorderProps = {
   onBusyChange?: (busy: boolean) => void;
 };
 
-type RecorderState = "idle" | "recording" | "transcribing";
+// "starting" covers the async gap between the user tapping the mic and getUserMedia resolving (the permission
+// prompt / device warm-up): the recorder is already "busy" then, even though no audio is flowing yet.
+type RecorderState = "idle" | "starting" | "recording" | "transcribing";
 
 const MAX_RECORDING_MS = 60_000;
 
@@ -25,8 +27,10 @@ export function VoiceRecorder({ disabled, onTranscript, onBusyChange }: VoiceRec
   const timeoutRef = useRef<number | null>(null);
   const intervalRef = useRef<number | null>(null);
   const onBusyChangeRef = useRef(onBusyChange);
+  const mountedRef = useRef(true);
 
   useEffect(() => () => {
+    mountedRef.current = false;
     streamRef.current?.getTracks().forEach((track) => track.stop());
     if (timeoutRef.current) window.clearTimeout(timeoutRef.current);
     if (intervalRef.current) window.clearInterval(intervalRef.current);
@@ -46,39 +50,53 @@ export function VoiceRecorder({ disabled, onTranscript, onBusyChange }: VoiceRec
 
   async function start() {
     setError(null);
+    if (state !== "idle") return; // guard re-entry during the async start window
     if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
       setError("Voice dictation is not available in this browser. Use the keyboard option instead.");
       return;
     }
 
+    // Mark busy up-front so a parent gate (e.g. Generate) is engaged during the permission prompt / device
+    // startup, before recording actually begins.
+    setState("starting");
+    let stream: MediaStream;
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const recorder = new MediaRecorder(stream);
-      recorderRef.current = recorder;
-      streamRef.current = stream;
-      chunksRef.current = [];
-      setSeconds(0);
-      setState("recording");
-
-      recorder.addEventListener("dataavailable", (event) => {
-        if (event.data?.size) chunksRef.current.push(event.data);
-      });
-      recorder.addEventListener("stop", () => {
-        void finishRecording();
-      }, { once: true });
-
-      intervalRef.current = window.setInterval(() => {
-        setSeconds((current) => current + 1);
-      }, 1000);
-      timeoutRef.current = window.setTimeout(() => {
-        stop();
-      }, MAX_RECORDING_MS);
-
-      recorder.start();
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     } catch {
       setError("Microphone access is blocked. Enable microphone permission or use the keyboard option.");
       setState("idle");
+      return;
     }
+
+    // If we were torn down while permission was pending, release the mic immediately and do NOT start
+    // recording — otherwise the live stream escapes cleanup and the mic stays on after the UI is gone.
+    if (!mountedRef.current) {
+      stream.getTracks().forEach((track) => track.stop());
+      return;
+    }
+
+    const recorder = new MediaRecorder(stream);
+    recorderRef.current = recorder;
+    streamRef.current = stream;
+    chunksRef.current = [];
+    setSeconds(0);
+    setState("recording");
+
+    recorder.addEventListener("dataavailable", (event) => {
+      if (event.data?.size) chunksRef.current.push(event.data);
+    });
+    recorder.addEventListener("stop", () => {
+      void finishRecording();
+    }, { once: true });
+
+    intervalRef.current = window.setInterval(() => {
+      setSeconds((current) => current + 1);
+    }, 1000);
+    timeoutRef.current = window.setTimeout(() => {
+      stop();
+    }, MAX_RECORDING_MS);
+
+    recorder.start();
   }
 
   function stop() {
@@ -125,6 +143,8 @@ export function VoiceRecorder({ disabled, onTranscript, onBusyChange }: VoiceRec
 
   const recording = state === "recording";
   const transcribing = state === "transcribing";
+  const starting = state === "starting";
+  const pending = starting || transcribing;
 
   return (
     <div className="space-y-2">
@@ -132,7 +152,7 @@ export function VoiceRecorder({ disabled, onTranscript, onBusyChange }: VoiceRec
         <Button
           type="button"
           variant={recording ? "danger" : "ghost"}
-          disabled={disabled || transcribing}
+          disabled={disabled || pending}
           aria-label={recording ? "Stop voice dictation" : "Start voice dictation"}
           onClick={() => {
             if (recording) {
@@ -142,8 +162,8 @@ export function VoiceRecorder({ disabled, onTranscript, onBusyChange }: VoiceRec
             }
           }}
         >
-          {transcribing ? <LoaderCircle className="mr-2 h-4 w-4 animate-spin" /> : recording ? <Square className="mr-2 h-4 w-4" /> : <Mic className="mr-2 h-4 w-4" />}
-          {transcribing ? "Transcribing..." : recording ? `Stop (${seconds}s)` : "Voice"}
+          {pending ? <LoaderCircle className="mr-2 h-4 w-4 animate-spin" /> : recording ? <Square className="mr-2 h-4 w-4" /> : <Mic className="mr-2 h-4 w-4" />}
+          {transcribing ? "Transcribing..." : starting ? "Starting..." : recording ? `Stop (${seconds}s)` : "Voice"}
         </Button>
         {recording ? <span className="text-xs font-bold text-red-200">Recording now</span> : null}
       </div>

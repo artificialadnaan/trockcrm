@@ -100,9 +100,48 @@ describe("VoiceRecorder onBusyChange", () => {
     await vi.waitFor(() => expect(recorderButton()).toBeTruthy());
 
     recorderButton().click(); // start recording
-    await vi.waitFor(() => expect(onBusyChange).toHaveBeenCalledWith(true));
+    await vi.waitFor(() => expect(recorderButton().textContent).toContain("Stop")); // recording, button enabled
+    expect(onBusyChange).toHaveBeenCalledWith(true);
 
     recorderButton().click(); // stop -> transcribe -> back to idle
     await vi.waitFor(() => expect(onBusyChange).toHaveBeenLastCalledWith(false));
+  });
+
+  it("reports busy (true) as soon as dictation starts, before the mic permission resolves", async () => {
+    let resolveStream!: (stream: MediaStream) => void;
+    const pending = new Promise<MediaStream>((resolve) => { resolveStream = resolve; });
+    (navigator as unknown as { mediaDevices: { getUserMedia: unknown } }).mediaDevices.getUserMedia =
+      vi.fn().mockReturnValue(pending);
+
+    const onBusyChange = vi.fn();
+    render(<VoiceRecorder onTranscript={vi.fn()} onBusyChange={onBusyChange} />);
+    await vi.waitFor(() => expect(recorderButton()).toBeTruthy());
+    onBusyChange.mockClear(); // drop the mount-time false
+
+    recorderButton().click(); // start() -> permission still pending
+    await vi.waitFor(() => expect(onBusyChange).toHaveBeenCalledWith(true));
+
+    resolveStream({ getTracks: () => [{ stop: vi.fn() }] } as unknown as MediaStream);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+
+  it("releases the mic and does not start recording if it unmounts while permission is pending", async () => {
+    let resolveStream!: (stream: MediaStream) => void;
+    const pending = new Promise<MediaStream>((resolve) => { resolveStream = resolve; });
+    const track = { stop: vi.fn() };
+    (navigator as unknown as { mediaDevices: { getUserMedia: unknown } }).mediaDevices.getUserMedia =
+      vi.fn().mockReturnValue(pending);
+
+    render(<VoiceRecorder onTranscript={vi.fn()} onBusyChange={vi.fn()} />);
+    await vi.waitFor(() => expect(recorderButton()).toBeTruthy());
+
+    recorderButton().click(); // start() -> awaiting getUserMedia
+    root!.unmount(); // builder closed while permission pending
+    root = null;
+
+    resolveStream({ getTracks: () => [track] } as unknown as MediaStream); // permission granted late
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(track.stop).toHaveBeenCalled(); // mic released, not left live
   });
 });
