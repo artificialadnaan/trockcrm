@@ -77,6 +77,7 @@ import {
 import { assertPhotosBelongToDeal, generatePublicToken } from "../public-photo-tokens/service.js";
 import { publicPhotoShareUrl } from "../public-photo-tokens/public-share-url.js";
 import { resolveScorecardTeamNames } from "../deals/team-service.js";
+import { listFieldResponders } from "./field-responders-service.js";
 import {
   assertScorecardEvidenceUploadAccess,
   discardScorecardEditEvidence,
@@ -760,6 +761,33 @@ fieldRoutes.get("/projects/:dealId/team", requireFieldContractor, async (req, re
       "Project not found",
     );
     res.json({ superintendentName: value.superintendentName, pmName: value.pmName });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Active field-responder roster (superintendents + project managers) for the deal's office. Powers the scorecard
+// super/PM picker in T-Rock Cam so the app selects from the SAME roster the CRM Team tab shows (uniformity).
+// Deal-scoped (resolves the deal's office, cross-office-correct) and gated to a browsable field project, mirroring
+// the /team route above — so it can't leak the roster for a deal the field app deliberately hides. Active-only
+// (a deactivated responder must not be freshly selectable); the app keeps a free-text fallback for anyone not yet
+// on the roster, so this list is a convenience, not a hard constraint. Returns a lean shape (no assignmentCount).
+fieldRoutes.get("/projects/:dealId/responders", requireFieldContractor, async (req, res, next) => {
+  try {
+    const access = { userId: req.fieldUser!.id, userRole: req.fieldUser!.role };
+    const dealId = String(req.params.dealId);
+    assertValidUuid(dealId, "dealId");
+    const { value } = await withResolvedOffice(
+      "deal",
+      dealId,
+      async (officeDb) => {
+        await assertActiveFieldProject(officeDb, access, dealId);
+        const { responders } = await listFieldResponders(officeDb, { includeInactive: false });
+        return responders.map((r) => ({ id: r.id, name: r.name, email: r.email, role: r.role }));
+      },
+      "Project not found",
+    );
+    res.json({ responders: value });
   } catch (err) {
     next(err);
   }

@@ -70,6 +70,10 @@ const teamMocks = vi.hoisted(() => ({
   resolveScorecardTeamNames: vi.fn(),
 }));
 
+const fieldResponderMocks = vi.hoisted(() => ({
+  listFieldResponders: vi.fn(),
+}));
+
 const photoMocks = vi.hoisted(() => ({
   requestFieldPhotoUploadUrl: vi.fn(),
   confirmFieldPhotoUpload: vi.fn(),
@@ -117,6 +121,7 @@ vi.mock("../../../src/modules/field/photo-tags-service.js", () => tagMocks);
 vi.mock("../../../src/modules/field/photo-reports-service.js", () => reportMocks);
 vi.mock("../../../src/modules/field/scorecards-service.js", () => scorecardMocks);
 vi.mock("../../../src/modules/deals/team-service.js", () => teamMocks);
+vi.mock("../../../src/modules/field/field-responders-service.js", () => fieldResponderMocks);
 
 const { fieldRoutes } = await import("../../../src/modules/field/routes.js");
 const crossOfficeModule = await import("../../../src/modules/field/cross-office.js");
@@ -138,6 +143,12 @@ describe("field routes", () => {
     projectMocks.assertAccessibleFieldCaptureTarget.mockResolvedValue({ id: "lead-1", type: "lead" });
     projectMocks.assertActiveFieldProject.mockResolvedValue({ id: "deal-1", name: "Roof" });
     teamMocks.resolveScorecardTeamNames.mockResolvedValue({ superintendentName: "Sam Super", pmName: "Pat PM" });
+    fieldResponderMocks.listFieldResponders.mockResolvedValue({
+      responders: [
+        { id: "fr-1", name: "Sam Super", email: "sam@example.com", role: "superintendent", isActive: true, assignmentCount: 3 },
+        { id: "fr-2", name: "Pat PM", email: "pat@example.com", role: "project_manager", isActive: true, assignmentCount: 1 },
+      ],
+    });
     projectMocks.starFieldProject.mockResolvedValue({ starred: true });
     projectMocks.unstarFieldProject.mockResolvedValue({ starred: false });
     projectMocks.listFieldProjectPhotos.mockResolvedValue({ photos: [], pagination: { page: 1, limit: 200, total: 0, totalPages: 0 } });
@@ -649,6 +660,27 @@ describe("field routes", () => {
     teamMocks.resolveScorecardTeamNames.mockResolvedValueOnce({ superintendentName: null, pmName: null });
     const res = await invokeRoute("get", "/projects/:dealId/team", { params: { dealId: "deal-1" } });
     expect(res.body).toEqual({ superintendentName: null, pmName: null });
+  });
+
+  it("returns the deal's office roster (lean, active-only) via the field-scoped responders route", async () => {
+    const res = await invokeRoute("get", "/projects/:dealId/responders", { params: { dealId: "deal-1" } });
+
+    // Format-validated, gated to a browsable field project, then resolved + read in the DEAL's office.
+    expect(photoMocks.assertValidUuid).toHaveBeenCalledWith("deal-1", "dealId");
+    expect(projectMocks.assertActiveFieldProject).toHaveBeenCalledWith(
+      expect.anything(),
+      { userId: "admin-1", userRole: "admin" },
+      "deal-1",
+    );
+    // Active-only (a deactivated responder must not be freshly selectable in the app).
+    expect(fieldResponderMocks.listFieldResponders).toHaveBeenCalledWith(expect.anything(), { includeInactive: false });
+    // Lean shape only — isActive / assignmentCount are NOT leaked to the app.
+    expect(res.body).toEqual({
+      responders: [
+        { id: "fr-1", name: "Sam Super", email: "sam@example.com", role: "superintendent" },
+        { id: "fr-2", name: "Pat PM", email: "pat@example.com", role: "project_manager" },
+      ],
+    });
   });
 });
 

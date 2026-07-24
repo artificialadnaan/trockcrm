@@ -247,6 +247,15 @@ export type UpdateScorecardResponse = { scorecard: FieldScorecardSummary };
 // (with active user/contact identities), so the app just seeds these directly — no client-side role match.
 export type DealTeamResponse = { superintendentName: string | null; pmName: string | null };
 
+// ── Field responders (scorecard super/PM picker) ──────────────────────────────
+// The active field-responder roster (superintendents + project managers) for a deal's office, from
+// GET /field/projects/:dealId/responders → { responders: [{ id, name, email, role }] }. Powers the
+// scorecard Super/PM dropdown so the app selects from the same roster the CRM shows. Storage stays
+// NAME-ONLY — only the picked `name` is written to the draft's superintendentName/pmName strings.
+export type FieldResponderRole = "superintendent" | "project_manager";
+export type FieldResponderOption = { id: string; name: string; email: string; role: FieldResponderRole };
+export type FieldRespondersResponse = { responders: FieldResponderOption[] };
+
 // ── Corrective actions ────────────────────────────────────────────────────────
 // A response-evidence photo linked to a corrective-action item. Mirrors the server's
 // CorrectiveActionResponsePhoto (corrective-action-api.ts). The read endpoint now resolves a presigned `url`
