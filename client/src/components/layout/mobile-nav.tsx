@@ -57,6 +57,7 @@ const moreNavItems: MobileNavItem[] = [
   { to: "/tasks", icon: CheckSquare, label: "Tasks", roles: CRM_ROLES },
   { to: "/reports", icon: BarChart3, label: "Reports", roles: CRM_ROLES },
   { to: "/projects/qc-reports", icon: ClipboardCheck, label: "QC Reports", roles: CRM_ROLES },
+  { to: "/projects/field-team", icon: Users, label: "Field Team", roles: CRM_ROLES },
   { to: "/files", icon: FileImage, label: "Files", roles: CRM_ROLES },
   { to: "/email", icon: Mail, label: "Email", roles: CRM_ROLES },
   { to: "/photos/feed", icon: Image, label: "Feed", roles: FIELD_ROLES },

@@ -59,6 +59,7 @@ import { RepPackPage } from "@/pages/reports/rep-pack-page";
 import { SalesReviewPage } from "@/pages/sales-review/sales-review-page";
 import { ProjectsPage } from "@/pages/projects/projects-page";
 import QcReportsPage from "@/pages/reports/qc-reports-page";
+import FieldTeamPage from "@/pages/reports/field-team-page";
 import { ProcoreSyncPage } from "@/pages/admin/procore-sync-page";
 import { MigrationDashboardPage } from "@/pages/admin/migration/migration-dashboard-page";
 import { MigrationDealsPage } from "@/pages/admin/migration/migration-deals-page";
@@ -402,6 +403,14 @@ export function App() {
                 element={
                   <RequireRole allowedRoles={["admin", "director", "rep"]}>
                     <QcReportsPage />
+                  </RequireRole>
+                }
+              />
+              <Route
+                path="/projects/field-team"
+                element={
+                  <RequireRole allowedRoles={["admin", "director", "rep"]}>
+                    <FieldTeamPage />
                   </RequireRole>
                 }
               />

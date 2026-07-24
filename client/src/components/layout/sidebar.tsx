@@ -283,6 +283,9 @@ export function Sidebar() {
                     <NavLink to="/projects/qc-reports" className={subItemClass}>
                       <ClipboardCheck className="h-4 w-4" /> QC Reports
                     </NavLink>
+                    <NavLink to="/projects/field-team" className={subItemClass}>
+                      <Users className="h-4 w-4" /> Field Team
+                    </NavLink>
                   </div>
                 </div>
               </div>
