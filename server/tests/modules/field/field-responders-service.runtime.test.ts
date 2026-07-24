@@ -11,7 +11,7 @@ import {
   listFieldResponderAssignments,
   assignRosterResponderToDealIfUnset,
 } from "../../../src/modules/field/field-responders-service.js";
-import { addTeamMember } from "../../../src/modules/deals/team-service.js";
+import { addTeamMember, resolveScorecardTeamEmails } from "../../../src/modules/deals/team-service.js";
 import { resolveCorrectiveActionRecipients } from "../../../src/modules/field/corrective-action-recipients.js";
 
 // SERVICE behavior for the field-responder roster (migration 0198), exercised against PGlite. The schema helper
@@ -553,5 +553,21 @@ describe("assignRosterResponderToDealIfUnset (scorecard name → deal team)", ()
     await createFieldResponder(tdb, { name: "Super Only", email: "superonly@example.com", role: "superintendent" });
     await assignRosterResponderToDealIfUnset(tdb, DEAL, "Super Only", "project_manager");
     expect(await activeRoleCount(DEAL, "project_manager")).toBe(0);
+  });
+
+  it("makes the assigned (email-only) roster responder resolvable as the completed-scorecard email recipient", async () => {
+    // Regression for the completion-email half: assignRosterResponderToDealIfUnset creates an EMAIL-ONLY team
+    // row (null user/contact), which resolveScorecardTeamEmails must now include (it previously required an
+    // active user/contact and dropped the roster assignee's address).
+    await createFieldResponder(tdb, { name: "Email Only Super", email: "eo@example.com", role: "superintendent" });
+    await createFieldResponder(tdb, { name: "Email Only PM", email: "eopm@example.com", role: "project_manager" });
+    await assignRosterResponderToDealIfUnset(tdb, DEAL, "Email Only Super", "superintendent");
+    await assignRosterResponderToDealIfUnset(tdb, DEAL, "Email Only PM", "project_manager");
+
+    const emails = await resolveScorecardTeamEmails(tdb, DEAL);
+    expect(emails.superintendentEmail).toBe("eo@example.com");
+    expect(emails.superintendentName).toBe("Email Only Super");
+    expect(emails.projectManagerEmail).toBe("eopm@example.com");
+    expect(emails.projectManagerName).toBe("Email Only PM");
   });
 });

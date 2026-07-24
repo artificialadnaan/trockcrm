@@ -411,6 +411,15 @@ export async function assignRosterResponderToDealIfUnset(
   name: string | null | undefined,
   role: FieldResponderRole,
 ): Promise<void> {
+  // Serialize the vacancy-check-then-insert against a concurrent scorecard submission for the SAME (deal, role):
+  // a per-(deal, role) transaction-scoped advisory lock makes the second caller block until the first commits,
+  // so it then sees the newly-filled role and skips — rather than both passing an unlocked vacancy check and
+  // double-inserting. Held to commit (this runs in the scorecard-submission transaction); a no-op under the
+  // single-threaded test harness.
+  await tenantDb.execute(
+    sql`SELECT pg_advisory_xact_lock(hashtext(${dealId}::text), hashtext(${role}::text))`,
+  );
+
   const [existing] = await tenantDb
     .select({ id: dealTeamMembers.id })
     .from(dealTeamMembers)

@@ -592,18 +592,32 @@ async function resolveActiveScorecardTeamRows(
     sql`
       SELECT DISTINCT ON (dtm.role)
              dtm.role AS "role",
-             COALESCE(u.email, c.email) AS "email",
-             COALESCE(u.display_name, TRIM(CONCAT(c.first_name, ' ', c.last_name))) AS "name"
+             COALESCE(
+               CASE WHEN dtm.user_id IS NOT NULL AND u.is_active THEN u.email END,
+               CASE WHEN dtm.contact_id IS NOT NULL AND c.is_active THEN c.email END,
+               dtm.member_email
+             ) AS "email",
+             COALESCE(
+               CASE WHEN dtm.user_id IS NOT NULL AND u.is_active THEN u.display_name END,
+               CASE WHEN dtm.contact_id IS NOT NULL AND c.is_active THEN TRIM(CONCAT(c.first_name, ' ', c.last_name)) END,
+               dtm.member_name
+             ) AS "name"
       FROM deal_team_members dtm
       LEFT JOIN public.users u ON dtm.user_id = u.id
       LEFT JOIN contacts c ON dtm.contact_id = c.id
       WHERE dtm.deal_id = ${dealId}
         AND dtm.is_active = TRUE
         AND dtm.role IN ('superintendent', 'project_manager')
-        -- Skip rows whose linked identity is inactive: a deactivated staff user (public.users.is_active)
-        -- or an archived directory contact (contacts.is_active). DISTINCT ON then lands on the most-recent
-        -- row that is BOTH an active team row AND backed by an active user/contact.
-        AND ((dtm.user_id IS NOT NULL AND u.is_active) OR (dtm.contact_id IS NOT NULL AND c.is_active))
+        -- Eligible: an active team row backed by an active staff user OR active directory contact, OR an
+        -- email-only member (both fks null → a roster-assigned or hand-typed super/PM). DISTINCT ON then lands
+        -- on the most-recent eligible row. Mirrors resolveCorrectiveActionRecipients so the completed-scorecard
+        -- email + the field prefill reach the SAME person the corrective-action notification does — including a
+        -- roster responder assigned from the scorecard (an email-only row, previously excluded here).
+        AND (
+          (dtm.user_id IS NOT NULL AND u.is_active)
+          OR (dtm.contact_id IS NOT NULL AND c.is_active)
+          OR (dtm.user_id IS NULL AND dtm.contact_id IS NULL)
+        )
       ORDER BY dtm.role, dtm.created_at DESC
     `
   );
