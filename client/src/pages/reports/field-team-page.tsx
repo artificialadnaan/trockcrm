@@ -61,6 +61,15 @@ export default function FieldTeamPage() {
   const [addOpen, setAddOpen] = useState(false);
   const [drill, setDrill] = useState<FieldResponder | null>(null);
 
+  // Office switched (?officeId changed): the open drill/edit/add dialogs reference the PREVIOUS office's roster
+  // rows (which are being reloaded), and dealHref immediately starts attaching the new officeId — a stale drill
+  // would render the old office's assignments and link into the wrong scope. Reset them on any office change.
+  useEffect(() => {
+    setDrill(null);
+    setEditing(null);
+    setAddOpen(false);
+  }, [officeId]);
+
   const counts = useMemo(() => {
     const active = responders.filter((r) => r.isActive).length;
     const supers = responders.filter((r) => r.role === "superintendent").length;

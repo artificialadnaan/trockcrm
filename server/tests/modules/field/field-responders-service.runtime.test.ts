@@ -424,4 +424,79 @@ describe("assign-from-roster via addTeamMember(responderId)", () => {
     expect(superRecipient?.email).toBe("aged@example.com"); // B's (reused) email — the just-assigned responder
     expect(superRecipient?.userId).toBeNull(); // email-only responder
   });
+
+  it("dedups a re-assignment by responder id after a roster email edit (refresh, not a duplicate row)", async () => {
+    const r = await createFieldResponder(tdb, { name: "Mover", email: "e1@example.com", role: "superintendent" });
+    const first = await addTeamMember(tdb, {
+      dealId: DEAL,
+      memberName: r.name,
+      memberEmail: "e1@example.com",
+      responderId: r.id,
+      role: "superintendent",
+    });
+
+    // Roster email edited — does NOT cascade to the existing team row (v1 no-cascade), so the row still holds e1.
+    await updateFieldResponder(tdb, r.id, { email: "e2@example.com" });
+
+    // Re-assign the same responder from the roster (now carrying the new e2 email). Deduped by responder id: the
+    // existing row is refreshed in place to e2 rather than inserting a second active row that misses the email index.
+    const second = await addTeamMember(tdb, {
+      dealId: DEAL,
+      memberName: r.name,
+      memberEmail: "e2@example.com",
+      responderId: r.id,
+      role: "superintendent",
+    });
+    expect(second.id).toBe(first.id); // same row refreshed
+    expect(second.memberEmail).toBe("e2@example.com");
+
+    const activeRows = await tdb.execute(sql`
+      SELECT COUNT(*)::int AS "count" FROM deal_team_members
+       WHERE deal_id = ${DEAL} AND responder_id = ${r.id} AND is_active = TRUE
+    `);
+    expect(Number((activeRows.rows?.[0] as { count: number }).count)).toBe(1); // no duplicate
+    const { responders } = await listFieldResponders(tdb);
+    expect(responders.find((x) => x.id === r.id)?.assignmentCount).toBe(1);
+  });
+
+  it("keeps the existing responder row (no duplicate, no crash) when a refresh email would collide", async () => {
+    const r = await createFieldResponder(tdb, { name: "Mover2", email: "keep@example.com", role: "superintendent" });
+    const mine = await addTeamMember(tdb, {
+      dealId: DEAL,
+      memberName: r.name,
+      memberEmail: "keep@example.com",
+      responderId: r.id,
+      role: "superintendent",
+    });
+    // A DIFFERENT hand-typed super already holds the email r is about to be edited to.
+    await addTeamMember(tdb, {
+      dealId: DEAL,
+      memberName: "Someone Else",
+      memberEmail: "taken@example.com",
+      role: "superintendent",
+    });
+    await updateFieldResponder(tdb, r.id, { email: "taken@example.com" });
+
+    // Re-assign r with the now-colliding email, INSIDE an explicit transaction (as the real request runs). The
+    // pre-check keeps r's row and never trips the unique index, so the transaction COMMITS cleanly. A
+    // catch-the-23505-and-continue would instead poison the tx (aborted state) and make this .transaction()
+    // reject on COMMIT — so a clean resolve here is the regression guard for that.
+    const again = await tdb.transaction((tx: any) =>
+      addTeamMember(tx, {
+        dealId: DEAL,
+        memberName: r.name,
+        memberEmail: "taken@example.com",
+        responderId: r.id,
+        role: "superintendent",
+      }),
+    );
+    expect(again.id).toBe(mine.id);
+    expect(again.memberEmail).toBe("keep@example.com"); // unchanged — collision left the row intact
+
+    const total = await tdb.execute(sql`
+      SELECT COUNT(*)::int AS "count" FROM deal_team_members
+       WHERE deal_id = ${DEAL} AND role = 'superintendent' AND is_active = TRUE
+    `);
+    expect(Number((total.rows?.[0] as { count: number }).count)).toBe(2); // r + the hand-typed holder, no third row
+  });
 });
