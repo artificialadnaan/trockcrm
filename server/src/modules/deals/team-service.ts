@@ -31,6 +31,12 @@ export interface AddTeamMemberInput {
   // when neither userId nor contactId is set. Restricted to super/PM roles (see EMAIL_ONLY_TEAM_ROLES).
   memberName?: string | null;
   memberEmail?: string | null;
+  // Roster LINK (migration 0198): when the caller picked this assignment from the field_responders roster, this
+  // is that roster row's id. It rides the EXISTING email-only insert path (the caller passes the roster person's
+  // copied name+email as memberName/memberEmail) and is stamped onto responder_id so the "where assigned" view can
+  // join back to the roster. It does NOT change recipient resolution — that still resolves member_email. Only
+  // honored on the email-only shape (no user / no contact); ignored on a user/contact-linked add.
+  responderId?: string | null;
   role: string;
   assignedBy?: string;
   notes?: string;
@@ -111,30 +117,104 @@ export async function addTeamMember(
     if (!memberName) {
       throw new AppError(400, "A name is required for an email-only member.");
     }
-    // Dedup active email-only assignments (finding E): a partial unique index
-    // (deal_team_members_deal_email_role_uidx, migration 0196) forbids two ACTIVE email-only rows for the same
-    // (deal_id, lower(member_email), role). onConflictDoNothing makes a RETRIED add / the same email+role entered
-    // twice a no-op at the storage layer instead of a second active row. The other two identity indexes don't
-    // apply here (user_id AND contact_id are NULL), so a bare onConflictDoNothing only swallows THIS collision.
-    const emailResult = await tenantDb
-      .insert(dealTeamMembers)
-      .values({
-        dealId: input.dealId,
-        userId: null,
-        contactId: null,
-        memberName,
-        memberEmail,
-        role: input.role as any,
-        assignedBy: input.assignedBy ?? null,
-        notes: input.notes ?? null,
-      })
-      .onConflictDoNothing()
-      .returning();
+    // Assign-from-roster is deduped by RESPONDER, not just by the copied email. A roster email edit does NOT
+    // cascade to existing deal_team_members rows (v1 limitation), so re-assigning the same roster person after an
+    // email change would otherwise miss the (deal, lower(member_email), role) index and insert a SECOND active
+    // row for the same responder — duplicating the Team entry and leaving a stale-email row that could later
+    // resurface as the corrective-action recipient. So when this add carries a responderId and an ACTIVE row for
+    // (deal, responder_id, role) already exists, refresh THAT row in place instead of inserting a duplicate.
+    if (input.responderId) {
+      const [byResponder] = await tenantDb
+        .select()
+        .from(dealTeamMembers)
+        .where(
+          and(
+            eq(dealTeamMembers.dealId, input.dealId),
+            eq(dealTeamMembers.role, input.role as any),
+            eq(dealTeamMembers.isActive, true),
+            eq(dealTeamMembers.responderId, input.responderId),
+          ),
+        )
+        .limit(1);
+      if (byResponder) {
+        const emailChanged = (byResponder.memberEmail ?? "").toLowerCase() !== memberEmail.toLowerCase();
+        const nameChanged = (byResponder.memberName ?? "") !== memberName;
+        if (!emailChanged && !nameChanged) return byResponder; // already assigned, nothing changed — no-op dup
+        // If the new roster email is already held by a DIFFERENT active email-only row on this (deal, role), we
+        // cannot refresh onto it without tripping the email unique index. We deliberately do NOT try/catch that
+        // 23505: a unique violation inside the request transaction poisons it (aborted state), so a subsequent
+        // `return` + COMMIT would fail (see the same trap noted in field/scorecards-service.ts). Instead we
+        // pre-check and, on a collision, keep the existing responder row unchanged — the person stays assigned
+        // under their prior copied email (the documented v1 no-cascade limitation) — rather than duplicate or
+        // fail the whole re-assignment. The tiny residual TOCTOU (a concurrent insert of this email between the
+        // check and the update) would surface as a clean rolled-back error, never a silent bad commit.
+        if (emailChanged) {
+          const [collision] = await tenantDb
+            .select({ id: dealTeamMembers.id })
+            .from(dealTeamMembers)
+            .where(
+              and(
+                eq(dealTeamMembers.dealId, input.dealId),
+                eq(dealTeamMembers.role, input.role as any),
+                eq(dealTeamMembers.isActive, true),
+                sql`${dealTeamMembers.userId} IS NULL`,
+                sql`${dealTeamMembers.contactId} IS NULL`,
+                sql`LOWER(${dealTeamMembers.memberEmail}) = LOWER(${memberEmail})`,
+                sql`${dealTeamMembers.id} <> ${byResponder.id}`,
+              ),
+            )
+            .limit(1);
+          if (collision) return byResponder;
+        }
+        const now = new Date();
+        // An email change moves the recipient address: refresh + promote to newest-per-role + restart the cycle
+        // so the current address is notified. A name-only change is display-only — refresh without re-notifying.
+        const setValues = emailChanged
+          ? { memberName, memberEmail, createdAt: now, updatedAt: now }
+          : { memberName, updatedAt: now };
+        const [refreshed] = await tenantDb
+          .update(dealTeamMembers)
+          .set(setValues)
+          .where(eq(dealTeamMembers.id, byResponder.id))
+          .returning();
+        if (emailChanged) await restartCycleForNewResponder(tenantDb, input.dealId, input.role, office);
+        return refreshed ?? byResponder;
+      }
+    }
 
-    // A conflict (0 rows returned) means an identical active email-only assignment already exists — a duplicate
-    // add. Return that existing row and DO NOT restart the notification cycle (nothing changed; a no-op dup must
-    // not re-notify or reset any open card's sent stamp). Only a genuinely NEW row restarts the cycle.
-    if (emailResult.length === 0) {
+    // Insert the email-only member. The partial unique index deal_team_members_deal_email_role_uidx (migration
+    // 0196) forbids two ACTIVE email-only rows for the same (deal_id, lower(member_email), role), so a duplicate
+    // add is swallowed at storage (onConflictDoNothing) and we resolve/relink the existing row instead of
+    // inserting a second one. The bounded loop covers a CONCURRENT removal of that conflicting row between our
+    // conflict and the follow-up lookup: rather than return an empty success (0 rows inserted, nothing found to
+    // resolve), we retry the insert — the blocker is gone — a few times before surfacing a retryable 409.
+    const insertValues = {
+      dealId: input.dealId,
+      userId: null,
+      contactId: null,
+      memberName,
+      memberEmail,
+      // Roster LINK (migration 0198): stamp the field_responders id when this add came from the roster picker.
+      // null on a plain hand-typed email-only add. The storage/notify path is otherwise identical, so recipient
+      // resolution (member_email) is unchanged.
+      responderId: input.responderId ?? null,
+      role: input.role as any,
+      assignedBy: input.assignedBy ?? null,
+      notes: input.notes ?? null,
+    };
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const emailResult = await tenantDb
+        .insert(dealTeamMembers)
+        .values(insertValues)
+        .onConflictDoNothing()
+        .returning();
+      // A genuinely NEW row: start the notification cycle and return it.
+      if (emailResult.length > 0) {
+        await restartCycleForNewResponder(tenantDb, input.dealId, input.role, office);
+        return emailResult[0];
+      }
+
+      // 0 rows => a duplicate active email-only row already holds (deal, lower(email), role). Resolve it.
       const [existing] = await tenantDb
         .select()
         .from(dealTeamMembers)
@@ -149,11 +229,33 @@ export async function addTeamMember(
           ),
         )
         .limit(1);
-      return existing;
+      if (existing) {
+        // A DIFFERENT responder (or a hand-typed NULL link) holds this email on the deal. If this add is a roster
+        // assignment for a different responder, re-point + refresh + PROMOTE it to newest-per-role and restart
+        // the cycle — treat it as a fresh assignment (covers the email-reuse case: A deactivated, B recreated
+        // with A's email, B assigned). corrective-action recipient resolution is newest-per-role (DISTINCT ON
+        // (role) ORDER BY created_at DESC in resolveCorrectiveActionRecipients), so the promotion is what makes
+        // the re-pointed responder the effective recipient rather than assigned-but-never-notified. When the link
+        // already matches it's a true no-op dup — return untouched (no promotion, no re-notify).
+        if (input.responderId && existing.responderId !== input.responderId) {
+          const now = new Date();
+          const [linked] = await tenantDb
+            .update(dealTeamMembers)
+            .set({ responderId: input.responderId, memberName, memberEmail, createdAt: now, updatedAt: now })
+            .where(eq(dealTeamMembers.id, existing.id))
+            .returning();
+          await restartCycleForNewResponder(tenantDb, input.dealId, input.role, office);
+          return linked ?? existing;
+        }
+        return existing;
+      }
+      // The conflicting row was concurrently removed between the conflict and this lookup — loop and retry the
+      // insert (the blocker is gone). Bounded so a pathological repeat race can't spin forever.
     }
-
-    await restartCycleForNewResponder(tenantDb, input.dealId, input.role, office);
-    return emailResult[0];
+    throw new AppError(
+      409,
+      "Could not persist the assignment due to concurrent roster changes. Please retry.",
+    );
   }
 
   // Exactly one of the two linked identities — mirrors the deal_team_members_identity_check constraint.

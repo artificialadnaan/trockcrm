@@ -36,3 +36,32 @@ describe("DealTeamTab role picker (Estimator is user-only)", () => {
     expect(source).toContain("if (m === mode) return;");
   });
 });
+
+describe("DealTeamTab field-team roster picker (email mode)", () => {
+  const source = normalize(dealTeamTabSource);
+
+  it("submits { responderId } for a picked roster responder (not free-text name/email)", () => {
+    // Field-team mode assigns an existing active responder by id; the server copies name/email/role.
+    expect(source).toContain("json: { responderId: selectedResponder.id, notes: notes.trim() || null },");
+    // The old free-text memberName/memberEmail submit path is gone.
+    expect(source).not.toContain("memberName: memberName.trim(), memberEmail: memberEmail.trim()");
+  });
+
+  it("loads only ACTIVE responders for the picker (a deactivated one is not assignable)", () => {
+    expect(source).toContain("listFieldResponders({ includeInactive: false })");
+  });
+
+  it("gates the inline add-new-to-roster form on director/admin", () => {
+    // canManageRoster is the effective-role gate; the inline add form only renders for it.
+    expect(source).toContain('const canManageRoster = user?.role === "admin" || user?.role === "director";');
+    expect(source).toContain("{canManageRoster && !selectedResponder && (");
+  });
+
+  it("hides the role picker in field-team mode (the roster row's role is authoritative)", () => {
+    expect(source).toContain('{mode !== "email" && (');
+  });
+
+  it("surfaces the 409 duplicate-email inline when adding a new responder", () => {
+    expect(source).toContain("if (isFieldResponderEmailDuplicate(err)) {");
+  });
+});

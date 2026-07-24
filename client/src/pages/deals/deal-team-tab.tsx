@@ -19,7 +19,13 @@ import {
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
-import { getOwnerInitialColor } from "@trock-crm/shared/types";
+import { getOwnerInitialColor, type FieldResponder } from "@trock-crm/shared/types";
+import { useAuth } from "@/lib/auth";
+import {
+  listFieldResponders,
+  createFieldResponder,
+  isFieldResponderEmailDuplicate,
+} from "@/hooks/use-field-responders";
 
 type TeamRole =
   | "superintendent"
@@ -91,10 +97,15 @@ const ROLE_LABELS: Record<TeamRole, string> = {
   other: "Other",
 };
 
+// The third add mode ("email") is the FIELD-TEAM roster picker: pick an ACTIVE field_responder (migration 0198)
+// and assign them as an email-only corrective-action recipient by sending { responderId } — the roster row's
+// name/email/role are copied server-side, so no more retyping per deal. The mode value stays "email" so the
+// super/PM role restriction (rolesForMode) + segmented-toggle plumbing are unchanged.
 type AddMemberMode = "user" | "contact" | "email";
 
-// An email-only member exists ONLY to be a corrective-action recipient (spec §4.4/§6), so it is restricted
-// to the super/PM roles the corrective-action flow resolves. Mirrors the server EMAIL_ONLY_TEAM_ROLES gate.
+// A roster responder / email-only member exists ONLY to be a corrective-action recipient (spec §4.4/§6), so it
+// is restricted to the super/PM roles the corrective-action flow resolves. Mirrors the server
+// EMAIL_ONLY_TEAM_ROLES gate + the field_responders.role CHECK.
 const EMAIL_ONLY_ROLES: TeamRole[] = ["superintendent", "project_manager"];
 
 // A contact-backed estimator is rejected 400 by the server (an estimator must be a staff user, since
@@ -305,6 +316,11 @@ function AddMemberDialog({
   onOpenChange: (open: boolean) => void;
   onAdded: () => void;
 }) {
+  // Writes to the roster (Add new to roster) are director/admin only server-side (requireDirector); a rep can
+  // still PICK an existing active responder. Gate the inline add-form on the effective office role.
+  const { user } = useAuth();
+  const canManageRoster = user?.role === "admin" || user?.role === "director";
+
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [loadingUsers, setLoadingUsers] = useState(false);
   const [userId, setUserId] = useState("");
@@ -312,18 +328,40 @@ function AddMemberDialog({
   const [notes, setNotes] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
-  // A member is an app user, a CRM contact, OR an email-only external (spec §4.4). The server accepts
-  // { userId }, { contactId }, or { memberName, memberEmail }. Default to the existing user flow.
+  // A member is an app user, a CRM contact, OR a field-team roster responder (spec §4.4). The server accepts
+  // { userId }, { contactId }, or { responderId }. Default to the existing user flow.
   const [mode, setMode] = useState<AddMemberMode>("user");
   const [contactQuery, setContactQuery] = useState("");
   const [contactResults, setContactResults] = useState<ContactSuggestion[]>([]);
   const [selectedContact, setSelectedContact] = useState<ContactSuggestion | null>(null);
-  // Email-only member fields.
-  const [memberName, setMemberName] = useState("");
-  const [memberEmail, setMemberEmail] = useState("");
+
+  // Field-team roster picker (mode === "email"): the ACTIVE responders + the one the user selected. The role
+  // is the roster row's — no role picker in this mode. `responderQuery` filters the loaded list client-side.
+  const [responders, setResponders] = useState<FieldResponder[]>([]);
+  const [loadingResponders, setLoadingResponders] = useState(false);
+  const [responderQuery, setResponderQuery] = useState("");
+  const [selectedResponder, setSelectedResponder] = useState<FieldResponder | null>(null);
+  // Inline "Add new to roster" (director/admin only) fields.
+  const [addingResponder, setAddingResponder] = useState(false);
+  const [newResponderName, setNewResponderName] = useState("");
+  const [newResponderEmail, setNewResponderEmail] = useState("");
+  const [newResponderRole, setNewResponderRole] = useState<TeamRole>("superintendent");
+  const [newResponderError, setNewResponderError] = useState<string | null>(null);
+  const [savingResponder, setSavingResponder] = useState(false);
   // Same stale-response guard the Billing tab uses: bump on every keystroke so a slow earlier
   // /contacts/search response can't land after a newer query and overwrite it.
   const searchSeq = useRef(0);
+
+  // Clear just the roster-picker + inline-add fields (used on mode switch and full reset).
+  const resetResponderFields = () => {
+    setResponderQuery("");
+    setSelectedResponder(null);
+    setAddingResponder(false);
+    setNewResponderName("");
+    setNewResponderEmail("");
+    setNewResponderRole("superintendent");
+    setNewResponderError(null);
+  };
 
   const resetFields = () => {
     setUserId("");
@@ -333,8 +371,7 @@ function AddMemberDialog({
     setContactQuery("");
     setContactResults([]);
     setSelectedContact(null);
-    setMemberName("");
-    setMemberEmail("");
+    resetResponderFields();
     ++searchSeq.current;
   };
 
@@ -346,6 +383,18 @@ function AddMemberDialog({
       .catch(() => toast.error("Failed to load users"))
       .finally(() => setLoadingUsers(false));
   }, [dealId, open]);
+
+  // Load the ACTIVE field-team roster once the dialog opens (only active responders are freshly assignable —
+  // the server 400s a deactivated one). Refetched when reopened so a just-added responder from another session
+  // shows up.
+  useEffect(() => {
+    if (!open) return;
+    setLoadingResponders(true);
+    listFieldResponders({ includeInactive: false })
+      .then((rows) => setResponders(rows))
+      .catch(() => toast.error("Failed to load the field-team roster"))
+      .finally(() => setLoadingResponders(false));
+  }, [open]);
 
   // Copied from the Billing tab's contact search+select: GET /contacts/search?q=…&limit=10 → { contacts }.
   // Under 2 chars clears results; a sequence guard drops out-of-order responses.
@@ -366,13 +415,38 @@ function AddMemberDialog({
   };
 
   const handleSubmit = async () => {
+    // Field-team roster mode: pick an ACTIVE responder → send { responderId }. The roster row carries the
+    // role, so there is no role picker to validate here; the server copies name/email/role from the roster.
+    if (mode === "email") {
+      if (!selectedResponder) {
+        toast.error("Please pick a field-team responder");
+        return;
+      }
+      setSubmitting(true);
+      try {
+        await api(`/deals/${dealId}/team`, {
+          method: "POST",
+          json: { responderId: selectedResponder.id, notes: notes.trim() || null },
+        });
+        toast.success("Team member added");
+        onOpenChange(false);
+        resetFields();
+        onAdded();
+      } catch (err: unknown) {
+        toast.error(err instanceof Error ? err.message : "Failed to add team member");
+      } finally {
+        setSubmitting(false);
+      }
+      return;
+    }
+
     const validationError = validateAddMemberForm({
       mode,
       role,
       userId,
       hasSelectedContact: Boolean(selectedContact),
-      memberName,
-      memberEmail,
+      memberName: "",
+      memberEmail: "",
     });
     if (validationError) {
       toast.error(validationError);
@@ -383,9 +457,7 @@ function AddMemberDialog({
       const json =
         mode === "contact"
           ? { contactId: selectedContact!.id, role, notes: notes.trim() || null }
-          : mode === "email"
-            ? { memberName: memberName.trim(), memberEmail: memberEmail.trim(), role, notes: notes.trim() || null }
-            : { userId, role, notes: notes.trim() || null };
+          : { userId, role, notes: notes.trim() || null };
       await api(`/deals/${dealId}/team`, { method: "POST", json });
       toast.success("Team member added");
       onOpenChange(false);
@@ -395,6 +467,46 @@ function AddMemberDialog({
       toast.error(err instanceof Error ? err.message : "Failed to add team member");
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  // Inline "Add new to roster" (director/admin only): POST a new field_responder, then select it in the picker
+  // so the user can immediately assign them. A duplicate-email 409 surfaces inline on the email field.
+  const handleAddResponder = async () => {
+    setNewResponderError(null);
+    const trimmedName = newResponderName.trim();
+    const trimmedEmail = newResponderEmail.trim();
+    if (!trimmedName) {
+      setNewResponderError("Please enter a name");
+      return;
+    }
+    if (!isValidEmailOnlyMemberEmail(trimmedEmail)) {
+      setNewResponderError("Please enter a valid email");
+      return;
+    }
+    setSavingResponder(true);
+    try {
+      const created = await createFieldResponder({
+        name: trimmedName,
+        email: trimmedEmail,
+        // newResponderRole is constrained to the super/PM options in the picker below, matching the roster CHECK.
+        role: newResponderRole as "superintendent" | "project_manager",
+      });
+      setResponders((prev) => [created, ...prev.filter((r) => r.id !== created.id)]);
+      setSelectedResponder(created);
+      setAddingResponder(false);
+      setNewResponderName("");
+      setNewResponderEmail("");
+      setNewResponderRole("superintendent");
+      toast.success("Added to the field-team roster");
+    } catch (err: unknown) {
+      if (isFieldResponderEmailDuplicate(err)) {
+        setNewResponderError("A responder with this email already exists on the roster.");
+      } else {
+        setNewResponderError(err instanceof Error ? err.message : "Failed to add responder");
+      }
+    } finally {
+      setSavingResponder(false);
     }
   };
 
@@ -432,8 +544,7 @@ function AddMemberDialog({
                     setContactQuery("");
                     setContactResults([]);
                     setSelectedContact(null);
-                    setMemberName("");
-                    setMemberEmail("");
+                    resetResponderFields();
                     ++searchSeq.current;
                     // Estimator is user-only; email mode is super/PM-only. Clear a now-invalid role so the
                     // picker + submitted role stay consistent with what the server will accept.
@@ -447,7 +558,7 @@ function AddMemberDialog({
                       : "text-muted-foreground hover:bg-muted/50"
                   }`}
                 >
-                  {m === "user" ? "User" : m === "contact" ? "Contact" : "Email"}
+                  {m === "user" ? "User" : m === "contact" ? "Contact" : "Field Team"}
                 </button>
               ))}
             </div>
@@ -456,31 +567,148 @@ function AddMemberDialog({
           {mode === "email" ? (
             <div className="space-y-3">
               <p className="text-xs text-muted-foreground">
-                An external Superintendent or Project Manager with no CRM login. They receive corrective-action
-                notifications and respond via a secure link.
+                A Superintendent or Project Manager from the managed field-team roster. They receive
+                corrective-action notifications and respond via a secure link.
               </p>
               <div className="space-y-1.5">
-                <label htmlFor="team-member-name" className="text-sm font-medium">Name</label>
-                <input
-                  id="team-member-name"
-                  type="text"
-                  placeholder="Full name"
-                  value={memberName}
-                  onChange={(e) => setMemberName(e.target.value)}
-                  className="w-full rounded-md border px-2 py-1.5 text-sm"
-                />
+                <label htmlFor="team-responder-search" className="text-sm font-medium">Field-team responder</label>
+                {selectedResponder ? (
+                  <div className="flex items-center justify-between rounded-md border px-3 py-2 text-sm">
+                    <span className="min-w-0 truncate">
+                      <span className="font-medium">{selectedResponder.name}</span>
+                      <span className="text-muted-foreground"> · {selectedResponder.email}</span>
+                    </span>
+                    <div className="ml-2 flex flex-shrink-0 items-center gap-2">
+                      <Badge
+                        variant="outline"
+                        className={`text-[10px] font-bold uppercase tracking-wide ${ROLE_BADGE_CLASSES[selectedResponder.role]}`}
+                      >
+                        {ROLE_LABELS[selectedResponder.role]}
+                      </Badge>
+                      <button
+                        type="button"
+                        onClick={() => { setSelectedResponder(null); setResponderQuery(""); }}
+                        className="text-muted-foreground hover:text-red-600"
+                        aria-label="Clear selected responder"
+                      >
+                        <X className="h-4 w-4" />
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    <input
+                      id="team-responder-search"
+                      type="search"
+                      placeholder={loadingResponders ? "Loading roster…" : "Search the field-team roster…"}
+                      value={responderQuery}
+                      onChange={(e) => setResponderQuery(e.target.value)}
+                      disabled={loadingResponders}
+                      className="w-full rounded-md border px-2 py-1.5 text-sm"
+                    />
+                    {(() => {
+                      const q = responderQuery.trim().toLowerCase();
+                      const matches = q
+                        ? responders.filter(
+                            (r) => r.name.toLowerCase().includes(q) || r.email.toLowerCase().includes(q),
+                          )
+                        : responders;
+                      if (loadingResponders) return null;
+                      if (matches.length === 0) {
+                        return (
+                          <p className="mt-1 text-xs text-muted-foreground">
+                            {responders.length === 0
+                              ? "No responders on the roster yet."
+                              : "No responders match your search."}
+                          </p>
+                        );
+                      }
+                      return (
+                        <ul className="mt-1 max-h-52 divide-y overflow-y-auto rounded-md border">
+                          {matches.map((r) => (
+                            <li key={r.id}>
+                              <button
+                                type="button"
+                                className="flex w-full items-center justify-between gap-2 px-2 py-1.5 text-left text-sm hover:bg-muted/50"
+                                onClick={() => { setSelectedResponder(r); setResponderQuery(""); }}
+                              >
+                                <span className="min-w-0 truncate">
+                                  <span className="font-medium">{r.name}</span>
+                                  <span className="text-muted-foreground"> · {r.email}</span>
+                                </span>
+                                <Badge
+                                  variant="outline"
+                                  className={`flex-shrink-0 text-[10px] font-bold uppercase tracking-wide ${ROLE_BADGE_CLASSES[r.role]}`}
+                                >
+                                  {ROLE_LABELS[r.role]}
+                                </Badge>
+                              </button>
+                            </li>
+                          ))}
+                        </ul>
+                      );
+                    })()}
+                  </>
+                )}
               </div>
-              <div className="space-y-1.5">
-                <label htmlFor="team-member-email" className="text-sm font-medium">Email</label>
-                <input
-                  id="team-member-email"
-                  type="email"
-                  placeholder="name@example.com"
-                  value={memberEmail}
-                  onChange={(e) => setMemberEmail(e.target.value)}
-                  className="w-full rounded-md border px-2 py-1.5 text-sm"
-                />
-              </div>
+
+              {/* Inline "Add new to roster" — director/admin only (a rep just picks an existing responder). */}
+              {canManageRoster && !selectedResponder && (
+                addingResponder ? (
+                  <div className="space-y-2 rounded-md border border-dashed p-3">
+                    <p className="text-xs font-semibold text-muted-foreground">New roster responder</p>
+                    <input
+                      type="text"
+                      placeholder="Full name"
+                      value={newResponderName}
+                      onChange={(e) => { setNewResponderName(e.target.value); setNewResponderError(null); }}
+                      className="w-full rounded-md border px-2 py-1.5 text-sm"
+                      aria-label="New responder name"
+                    />
+                    <input
+                      type="email"
+                      placeholder="name@example.com"
+                      value={newResponderEmail}
+                      onChange={(e) => { setNewResponderEmail(e.target.value); setNewResponderError(null); }}
+                      className={`w-full rounded-md border px-2 py-1.5 text-sm ${newResponderError ? "border-[#CC0000]" : ""}`}
+                      aria-label="New responder email"
+                    />
+                    <Select value={newResponderRole} onValueChange={(v) => setNewResponderRole((v ?? "superintendent") as TeamRole)}>
+                      <SelectTrigger aria-label="New responder role">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {EMAIL_ONLY_ROLES.map((r) => (
+                          <SelectItem key={r} value={r}>{ROLE_LABELS[r]}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    {newResponderError && <p className="text-xs text-[#CC0000]">{newResponderError}</p>}
+                    <div className="flex justify-end gap-2">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => { setAddingResponder(false); setNewResponderError(null); }}
+                        disabled={savingResponder}
+                      >
+                        Cancel
+                      </Button>
+                      <Button type="button" size="sm" onClick={handleAddResponder} disabled={savingResponder}>
+                        {savingResponder ? "Adding…" : "Add to roster"}
+                      </Button>
+                    </div>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setAddingResponder(true)}
+                    className="inline-flex items-center gap-1 text-xs font-semibold text-[#CC0000] hover:underline"
+                  >
+                    <Plus className="h-3.5 w-3.5" /> Add new to roster
+                  </button>
+                )
+              )}
             </div>
           ) : mode === "user" ? (
             <div className="space-y-1.5">
@@ -548,21 +776,25 @@ function AddMemberDialog({
             </div>
           )}
 
-          <div className="space-y-1.5">
-            <label id="team-role-label" htmlFor="team-role-select" className="text-sm font-medium">Role</label>
-            <Select value={role} onValueChange={(v) => setRole((v ?? "") as TeamRole)}>
-              <SelectTrigger id="team-role-select" aria-labelledby="team-role-label">
-                <SelectValue placeholder="Select role" />
-              </SelectTrigger>
-              <SelectContent>
-                {rolesForMode(mode).map((r) => (
-                  <SelectItem key={r} value={r}>
-                    {ROLE_LABELS[r]}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
+          {/* The role picker is hidden in field-team mode — the roster row's role is authoritative and copied
+              server-side (the server ignores a client-sent role on a { responderId } add). */}
+          {mode !== "email" && (
+            <div className="space-y-1.5">
+              <label id="team-role-label" htmlFor="team-role-select" className="text-sm font-medium">Role</label>
+              <Select value={role} onValueChange={(v) => setRole((v ?? "") as TeamRole)}>
+                <SelectTrigger id="team-role-select" aria-labelledby="team-role-label">
+                  <SelectValue placeholder="Select role" />
+                </SelectTrigger>
+                <SelectContent>
+                  {rolesForMode(mode).map((r) => (
+                    <SelectItem key={r} value={r}>
+                      {ROLE_LABELS[r]}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          )}
 
           <div className="space-y-1.5">
             <label htmlFor="team-notes" className="text-sm font-medium">Notes (optional)</label>

@@ -8,6 +8,7 @@ import {
   check,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
+import { fieldResponders } from "./field-responders.js";
 
 export const dealTeamRoleEnum = pgEnum("deal_team_role", [
   "superintendent",
@@ -31,6 +32,14 @@ export const dealTeamMembers = pgTable(
     // with user_id AND contact_id both NULL, so the corrective-action flow can notify + token-auth them.
     memberName: text("member_name"),
     memberEmail: text("member_email"),
+    // Roster LINK (migration 0198): when this assignment was picked from the field_responders roster, this
+    // points at that roster row. Nullable — plain email-only / user / contact rows leave it NULL. ON DELETE
+    // SET NULL (owned by the migration): removing the roster person clears the link but leaves the
+    // assignment (which carries its own copied member_name+member_email) intact. Corrective-action recipient
+    // resolution is UNCHANGED — it resolves member_email, not the roster row.
+    responderId: uuid("responder_id").references(() => fieldResponders.id, {
+      onDelete: "set null",
+    }),
     role: dealTeamRoleEnum("role").notNull(),
     assignedBy: uuid("assigned_by"),
     notes: text("notes"),

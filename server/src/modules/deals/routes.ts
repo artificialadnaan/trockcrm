@@ -54,6 +54,7 @@ import {
   updateTeamMember,
   removeTeamMember,
 } from "./team-service.js";
+import { resolveResponderForAssignment } from "../field/field-responders-service.js";
 import { listUsers } from "../admin/users-service.js";
 import {
   getEstimate,
@@ -3966,9 +3967,14 @@ router.post("/:id/team", async (req, res, next) => {
     const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
     if (!deal) throw new AppError(404, "Deal not found");
 
-    const { userId, contactId, role, notes, memberName, memberEmail } = req.body;
-    if (!role) throw new AppError(400, "role is required");
-    if (!DEAL_TEAM_ROLES.includes(role)) throw new AppError(400, "Invalid role");
+    const { userId, contactId, role, notes, memberName, memberEmail, responderId } = req.body;
+    const hasResponder = typeof responderId === "string" && responderId.trim().length > 0;
+    // The roster person's role is authoritative on an assign-from-roster add — the client need not send a role
+    // (the roster row carries it). For every OTHER add mode a role is still required + must be a valid team role.
+    if (!hasResponder) {
+      if (!role) throw new AppError(400, "role is required");
+      if (!DEAL_TEAM_ROLES.includes(role)) throw new AppError(400, "Invalid role");
+    }
     const hasUser = Boolean(userId);
     const hasContact = Boolean(contactId);
     const trimmedMemberEmail = typeof memberEmail === "string" ? memberEmail.trim() : "";
@@ -3980,6 +3986,35 @@ router.post("/:id/team", async (req, res, next) => {
       req.officeSlug && req.user!.activeOfficeId
         ? { id: req.user!.activeOfficeId, slug: req.officeSlug }
         : undefined;
+
+    // Assign-from-roster (migration 0198): the caller picked an ACTIVE field_responders person by id. Resolve
+    // it, then create the assignment through the EXISTING email-only insert path with the roster person's copied
+    // name+email and role — plus responder_id so the "where assigned" view can join back to the roster. Recipient
+    // resolution is UNCHANGED (it resolves member_email). The roster role is authoritative; a client-sent role is
+    // ignored. assertValidUuid gives a clean 400 on a malformed id before any DB lookup.
+    if (hasResponder) {
+      if (hasUser || hasContact) {
+        throw new AppError(400, "Provide a responderId OR a user/contact, not both.");
+      }
+      assertValidUuid(responderId.trim(), "responderId");
+      const responder = await resolveResponderForAssignment(req.tenantDb!, responderId.trim());
+      const member = await addTeamMember(
+        req.tenantDb!,
+        {
+          dealId: req.params.id,
+          memberName: responder.name,
+          memberEmail: responder.email,
+          responderId: responder.id,
+          role: responder.role,
+          assignedBy: req.user!.id,
+          notes,
+        },
+        teamOffice,
+      );
+      await req.commitTransaction!();
+      res.status(201).json({ member });
+      return;
+    }
 
     // Email-only member (spec §4.4): a super/PM who is NOT a CRM user or directory contact — just name +
     // email — so the corrective-action flow can notify + token-auth them. Only when NO linked identity is
