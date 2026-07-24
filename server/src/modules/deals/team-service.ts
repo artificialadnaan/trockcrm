@@ -172,13 +172,19 @@ export async function addTeamMember(
         const setValues = emailChanged
           ? { memberName, memberEmail, createdAt: now, updatedAt: now }
           : { memberName, updatedAt: now };
+        // Guard is_active: if byResponder's row was concurrently deactivated between the lookup and here, match 0
+        // rows and fall through to the insert path (a fresh active row) rather than mutating an inactive row and
+        // returning it as if assigned.
         const [refreshed] = await tenantDb
           .update(dealTeamMembers)
           .set(setValues)
-          .where(eq(dealTeamMembers.id, byResponder.id))
+          .where(and(eq(dealTeamMembers.id, byResponder.id), eq(dealTeamMembers.isActive, true)))
           .returning();
-        if (emailChanged) await restartCycleForNewResponder(tenantDb, input.dealId, input.role, office);
-        return refreshed ?? byResponder;
+        if (refreshed) {
+          if (emailChanged) await restartCycleForNewResponder(tenantDb, input.dealId, input.role, office);
+          return refreshed;
+        }
+        // byResponder's row was concurrently deactivated — fall through to the insert loop (fresh active row).
       }
     }
 
@@ -239,13 +245,19 @@ export async function addTeamMember(
         // already matches it's a true no-op dup — return untouched (no promotion, no re-notify).
         if (input.responderId && existing.responderId !== input.responderId) {
           const now = new Date();
+          // Guard is_active in the WHERE: if this row was concurrently deactivated between the lookup and here,
+          // match 0 rows instead of mutating an inactive row (which would return 201 + restart notifications for
+          // an assignment that isn't actually active). On a miss, loop and retry the insert — the blocker is gone.
           const [linked] = await tenantDb
             .update(dealTeamMembers)
             .set({ responderId: input.responderId, memberName, memberEmail, createdAt: now, updatedAt: now })
-            .where(eq(dealTeamMembers.id, existing.id))
+            .where(and(eq(dealTeamMembers.id, existing.id), eq(dealTeamMembers.isActive, true)))
             .returning();
-          await restartCycleForNewResponder(tenantDb, input.dealId, input.role, office);
-          return linked ?? existing;
+          if (linked) {
+            await restartCycleForNewResponder(tenantDb, input.dealId, input.role, office);
+            return linked;
+          }
+          continue;
         }
         return existing;
       }
