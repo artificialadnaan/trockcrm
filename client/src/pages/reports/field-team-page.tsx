@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { Loader2, Plus, Users, Pencil, ChevronRight, ArrowUpRight } from "lucide-react";
 import { toast } from "sonner";
 import { PageHeader } from "@/components/layout/page-header";
@@ -47,8 +48,14 @@ export default function FieldTeamPage() {
   // admin/director). Gate the controls on the effective role so a rep sees a read-only roster.
   const canManage = user?.role === "admin" || user?.role === "director";
 
+  // Current cross-office scope (?officeId) — the api() layer forwards it as the x-office-id header. We thread it
+  // through so the roster reloads when the office changes and so drill-down deal links stay in-scope (a link that
+  // dropped officeId would open the deal under the user's default office and 404 when it lives only in scope).
+  const [searchParams] = useSearchParams();
+  const officeId = searchParams.get("officeId");
+
   const [showInactive, setShowInactive] = useState(false);
-  const { responders, loading, error, refetch } = useFieldResponders({ includeInactive: showInactive });
+  const { responders, loading, error, refetch } = useFieldResponders({ includeInactive: showInactive, officeId });
 
   const [editing, setEditing] = useState<FieldResponder | null>(null);
   const [addOpen, setAddOpen] = useState(false);
@@ -224,7 +231,7 @@ export default function FieldTeamPage() {
         />
       )}
 
-      <AssignmentsSheet responder={drill} onClose={() => setDrill(null)} />
+      <AssignmentsSheet responder={drill} officeId={officeId} onClose={() => setDrill(null)} />
     </div>
   );
 }
@@ -382,7 +389,19 @@ function ResponderFormDialog({
   );
 }
 
-function AssignmentsSheet({ responder, onClose }: { responder: FieldResponder | null; onClose: () => void }) {
+function AssignmentsSheet({
+  responder,
+  officeId,
+  onClose,
+}: {
+  responder: FieldResponder | null;
+  officeId: string | null;
+  onClose: () => void;
+}) {
+  // Keep the current cross-office scope on deal links so the drill-down opens the deal in the same office it was
+  // listed under (a bare /deals/:id would resolve to the user's default office and 404 an off-office deal).
+  const dealHref = (dealId: string) =>
+    `/deals/${dealId}${officeId ? `?officeId=${encodeURIComponent(officeId)}` : ""}`;
   const [deals, setDeals] = useState<FieldResponderAssignment[] | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -453,7 +472,7 @@ function AssignmentsSheet({ responder, onClose }: { responder: FieldResponder | 
                   {deals.map((d) => (
                     <li key={`${d.dealId}-${d.role}`}>
                       <a
-                        href={`/deals/${d.dealId}`}
+                        href={dealHref(d.dealId)}
                         className="flex items-center justify-between gap-3 rounded-lg border border-slate-200 bg-white px-3.5 py-3 hover:border-slate-300 hover:bg-slate-50"
                       >
                         <span className="min-w-0 flex-1 truncate text-[13.5px] font-semibold text-slate-900">{d.dealName}</span>

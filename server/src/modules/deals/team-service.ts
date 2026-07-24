@@ -161,22 +161,25 @@ export async function addTeamMember(
         )
         .limit(1);
       // Assign-from-roster dedup: this add came from the roster picker (input.responderId set) but an ACTIVE
-      // email-only row for the same (deal, email, role) already exists. Re-point that row to the roster person
-      // being assigned whenever its responder_id differs from the incoming one — covering BOTH a pre-roster /
-      // hand-typed row (responder_id NULL) AND a stale link to a DIFFERENT roster id. The latter is the
-      // email-reuse case: a responder is deactivated, a NEW roster person is created with the same email (the
-      // ACTIVE-only unique index permits it) and gets assigned here. Without re-pointing, the row would keep the
-      // deactivated predecessor's link — the new person would show 0 assignments while the retired one still
-      // "owns" the deal in the roster drill-down. We also refresh member_name/member_email to the assigned
-      // person (same email modulo case, so corrective-action recipient resolution — keyed on member_email — is
-      // unchanged). This is still a no-op dup at the notification layer: no NEW row, no re-notify, the cycle
-      // restart below is intentionally skipped. When the link already matches, there is nothing to do.
+      // email-only row for the same (deal, email, role) already exists. When the incoming responder differs from
+      // the existing link, treat it EXACTLY like a fresh assignment of that person — because it is one: the
+      // director just picked them from the roster. Re-point the row to the new responder, refresh its copied
+      // name/email, and PROMOTE it to newest for its role by bumping created_at. That promotion is load-bearing:
+      // corrective-action recipient resolution is newest-per-role (DISTINCT ON (role) ORDER BY created_at DESC in
+      // resolveCorrectiveActionRecipients), so without it a newer same-role row would keep the corrective link
+      // while the re-pointed responder merely shows as assigned — assigned-but-never-notified. This covers BOTH a
+      // pre-roster / hand-typed NULL link AND the email-reuse case (deactivate A, recreate B with A's email,
+      // assign B). Then restart the notification cycle so the responder actually receives links for the deal's
+      // open cards — identical to the insert path below. When the link already matches (a true no-op dup), fall
+      // through and return the existing row untouched (no promotion, no re-notify).
       if (existing && input.responderId && existing.responderId !== input.responderId) {
+        const now = new Date();
         const [linked] = await tenantDb
           .update(dealTeamMembers)
-          .set({ responderId: input.responderId, memberName, memberEmail, updatedAt: new Date() })
+          .set({ responderId: input.responderId, memberName, memberEmail, createdAt: now, updatedAt: now })
           .where(eq(dealTeamMembers.id, existing.id))
           .returning();
+        await restartCycleForNewResponder(tenantDb, input.dealId, input.role, office);
         return linked ?? existing;
       }
       return existing;

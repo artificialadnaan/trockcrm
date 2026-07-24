@@ -322,6 +322,11 @@ export async function listFieldResponderAssignments(
  * Returns the copyable name + email + role the team layer stamps onto the new email-only deal_team_members row
  * (so corrective-action recipient resolution stays unchanged — it resolves member_email, not the roster row).
  * 404s a missing responder; 400s a deactivated one (an inactive person must not be freshly assignable).
+ *
+ * FOR UPDATE locks the roster row for the duration of the caller's request transaction (the route resolves then
+ * inserts the team member, then commits — one tx). This serializes the active-check + assignment against a
+ * concurrent director PATCH that deactivates or renames the same responder: that update blocks until this tx
+ * commits, so we can't assign a responder that was concurrently deactivated, nor copy a stale name/email.
  */
 export async function resolveResponderForAssignment(
   tenantDb: TenantDb,
@@ -337,7 +342,8 @@ export async function resolveResponderForAssignment(
     })
     .from(fieldResponders)
     .where(eq(fieldResponders.id, responderId))
-    .limit(1);
+    .limit(1)
+    .for("update");
   if (!row) throw new AppError(404, "Field responder not found.");
   if (!row.isActive) throw new AppError(400, "This field responder is deactivated and cannot be assigned.");
   return { id: row.id, name: row.name, email: row.email, role: row.role as FieldResponderRole };

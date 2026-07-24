@@ -76,11 +76,15 @@ export interface UseFieldResponders {
 
 /**
  * Load the managed roster. `includeInactive` surfaces deactivated people too (the roster page's "show inactive"
- * toggle). A monotonic request id keeps only the newest response — flipping the toggle quickly can leave several
+ * toggle). `officeId` is the current cross-office scope (the ?officeId the api() layer already forwards as the
+ * x-office-id header): it's in the dependency list so switching offices on the same mounted route — including
+ * browser back/forward — re-runs the load against the new office instead of showing the prior office's roster.
+ * A monotonic request id keeps only the newest response — flipping the toggle / office quickly can leave several
  * requests in flight, and a slower older one must not clobber the current view.
  */
-export function useFieldResponders(opts?: { includeInactive?: boolean }): UseFieldResponders {
+export function useFieldResponders(opts?: { includeInactive?: boolean; officeId?: string | null }): UseFieldResponders {
   const includeInactive = opts?.includeInactive === true;
+  const officeId = opts?.officeId ?? null;
   const [responders, setResponders] = useState<FieldResponder[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -101,7 +105,8 @@ export function useFieldResponders(opts?: { includeInactive?: boolean }): UseFie
     } finally {
       if (requestId === requestIdRef.current) setLoading(false);
     }
-  }, [includeInactive]);
+    // officeId participates only as a re-fetch trigger — the request itself carries office via the api() header.
+  }, [includeInactive, officeId]);
 
   useEffect(() => {
     void refetch();

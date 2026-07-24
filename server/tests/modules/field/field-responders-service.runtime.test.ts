@@ -11,6 +11,7 @@ import {
   listFieldResponderAssignments,
 } from "../../../src/modules/field/field-responders-service.js";
 import { addTeamMember } from "../../../src/modules/deals/team-service.js";
+import { resolveCorrectiveActionRecipients } from "../../../src/modules/field/corrective-action-recipients.js";
 
 // SERVICE behavior for the field-responder roster (migration 0198), exercised against PGlite. The schema helper
 // (tenantSchemaSql) emits column types verbatim from the real Drizzle defs but OMITS indexes/FKs; migration 0198
@@ -70,6 +71,17 @@ const DTM_EMAIL_UIDX_DDL = `
     WHERE user_id IS NULL AND contact_id IS NULL AND is_active = TRUE AND member_email IS NOT NULL;
 `;
 
+// Empty users/contacts tables so resolveCorrectiveActionRecipients' LEFT JOINs resolve. The relink recipient test
+// uses only email-only rows (both fks NULL), so these stay empty — they just need to exist for the query to run.
+const USERS_CONTACTS_DDL = `
+  CREATE TABLE IF NOT EXISTS public.users (
+    id uuid PRIMARY KEY, display_name text, email text, is_active boolean NOT NULL DEFAULT true
+  );
+  CREATE TABLE IF NOT EXISTS public.contacts (
+    id uuid PRIMARY KEY, first_name text, last_name text, email text, is_active boolean NOT NULL DEFAULT true
+  );
+`;
+
 beforeAll(async () => {
   pg = new PGlite();
   // deal_team_members from the real Drizzle def (carries responder_id; tenantSchemaSql omits its FK/indexes,
@@ -79,6 +91,7 @@ beforeAll(async () => {
   await pg.exec(RESPONDERS_DDL);
   await pg.exec(DEALS_DDL);
   await pg.exec(DTM_EMAIL_UIDX_DDL);
+  await pg.exec(USERS_CONTACTS_DDL);
   tdb = drizzle(pg);
 });
 
@@ -372,5 +385,43 @@ describe("assign-from-roster via addTeamMember(responderId)", () => {
     expect(bDeals.deals[0]).toMatchObject({ dealId: DEAL, role: "superintendent" });
     const aDeals = await listFieldResponderAssignments(tdb, a.id);
     expect(aDeals.deals).toHaveLength(0);
+  });
+
+  it("promotes a relinked row to newest-per-role so the new responder becomes the corrective-action recipient", async () => {
+    // Row X: A assigned from the roster, then aged into the past so it is NOT the newest super row.
+    const a = await createFieldResponder(tdb, { name: "Aged Super", email: "aged@example.com", role: "superintendent" });
+    const rowX = await addTeamMember(tdb, {
+      dealId: DEAL,
+      memberName: a.name,
+      memberEmail: a.email,
+      responderId: a.id,
+      role: a.role,
+    });
+    await tdb.execute(sql`UPDATE deal_team_members SET created_at = '2020-01-01T00:00:00Z' WHERE id = ${rowX.id}`);
+
+    // Row Z: a DIFFERENT hand-typed email-only super assigned later — currently the newest, so the recipient.
+    await tdb.execute(sql`
+      INSERT INTO deal_team_members (deal_id, role, member_name, member_email, is_active, created_at)
+      VALUES (${DEAL}, 'superintendent', 'Newer Super', 'newer@example.com', TRUE, '2020-01-02T00:00:00Z')
+    `);
+    const before = await resolveCorrectiveActionRecipients(tdb, DEAL);
+    expect(before.find((r) => r.role === "superintendent")?.email).toBe("newer@example.com");
+
+    // Reuse A's email for B, then assign B from the roster: the relink re-points row X to B AND bumps its
+    // created_at to now, so it is now the newest super row and B — not the stale "newer@" row — is the recipient.
+    await updateFieldResponder(tdb, a.id, { isActive: false });
+    const b = await createFieldResponder(tdb, { name: "Replacement Super", email: "aged@example.com", role: "superintendent" });
+    await addTeamMember(tdb, {
+      dealId: DEAL,
+      memberName: b.name,
+      memberEmail: b.email,
+      responderId: b.id,
+      role: b.role,
+    });
+
+    const after = await resolveCorrectiveActionRecipients(tdb, DEAL);
+    const superRecipient = after.find((r) => r.role === "superintendent");
+    expect(superRecipient?.email).toBe("aged@example.com"); // B's (reused) email — the just-assigned responder
+    expect(superRecipient?.userId).toBeNull(); // email-only responder
   });
 });
