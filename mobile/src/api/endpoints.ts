@@ -32,6 +32,7 @@ import type {
   ScorecardDetailResponse,
   ScorecardDownloadResponse,
   DealTeamResponse,
+  FieldRespondersResponse,
   CorrectiveActionsResponse,
   CorrectiveActionUploadUrlResponse,
   CorrectiveActionConfirmUploadResponse,
@@ -301,3 +302,8 @@ export const discardCorrectiveActionPhoto = (f: Fetcher, scorecardId: string, fi
 // simply stay empty, as they were before.
 export const getDealTeam = (f: Fetcher, dealId: string) =>
   f<DealTeamResponse>(`/field/projects/${dealId}/team`);
+
+// Active field-responder roster (supers + PMs) for the deal's office — powers the scorecard super/PM picker so
+// the app selects from the same roster the CRM shows. Any failure degrades to free-text entry in the picker.
+export const getFieldResponders = (f: Fetcher, dealId: string) =>
+  f<FieldRespondersResponse>(`/field/projects/${dealId}/responders`);

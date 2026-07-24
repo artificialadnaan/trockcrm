@@ -48,6 +48,8 @@ import { scorecardEditorBusyMessage, scorecardEditorSubmitError, scorecardPhotoO
 import { loadScorecardDraft, saveScorecardDraft, deleteScorecardDraft, copyPhotoIntoDraft } from "../../../../src/scorecards/draft-store";
 import { submitScorecard } from "../../../../src/scorecards/submit";
 import { Button, EmptyState, LoadingState, SectionLabel, TextInput } from "../../../../src/components/ui";
+import { ResponderPicker } from "../../../../src/components/ResponderPicker";
+import { useFieldResponders } from "../../../../src/scorecards/useFieldResponders";
 import { Banner } from "../../../../src/components/Banner";
 import { ScreenHeader } from "../../../../src/components/ScreenHeader";
 import { RatingBadge } from "../../../../src/components/RatingBadge";
@@ -215,6 +217,7 @@ function LeadershipForm(props: {
   const { ownerKey, draftId, submitting, setSubmitting, notice, setNotice, voiceEnabled, onSubmitted, fetcher, draftOfficeFetcher } = props;
   const router = useRouter();
   const [draft, dispatch] = useReducer(scorecardDraftReducer, props.initial);
+  const { responders, error: respondersError } = useFieldResponders(draft.dealId);
   const [savingPhotos, setSavingPhotos] = useState(0);
   const [photoSectionKey, setPhotoSectionKey] = useState<LeadershipPhotoSectionKey | null>(null);
   const [captionPhotoKey, setCaptionPhotoKey] = useState<string | null>(null);
@@ -596,10 +599,10 @@ function LeadershipForm(props: {
             <Text style={styles.readonly}>{draft.evaluatorName?.trim() || "You"}</Text>
           </Field>
           <Field label="Project manager">
-            <TextInput value={draft.pmName} onChangeText={(value) => dispatch({ type: "setHeader", field: "pmName", value })} placeholder="Name" />
+            <ResponderPicker value={draft.pmName} onChange={(name) => dispatch({ type: "setHeader", field: "pmName", value: name })} role="project_manager" responders={responders} error={respondersError} />
           </Field>
           <Field label="Superintendent">
-            <TextInput value={draft.superintendentName} onChangeText={(value) => dispatch({ type: "setHeader", field: "superintendentName", value })} placeholder="Name" />
+            <ResponderPicker value={draft.superintendentName} onChange={(name) => dispatch({ type: "setHeader", field: "superintendentName", value: name })} role="superintendent" responders={responders} error={respondersError} />
           </Field>
         </View>
 

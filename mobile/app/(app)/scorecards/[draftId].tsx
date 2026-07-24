@@ -43,6 +43,8 @@ import { scorecardEditorBusyMessage, scorecardEditorSubmitError, scorecardPhotoO
 import { loadScorecardDraft, saveScorecardDraft, deleteScorecardDraft, copyPhotoIntoDraft } from "../../../src/scorecards/draft-store";
 import { submitScorecard } from "../../../src/scorecards/submit";
 import { Badge, Button, EmptyState, LoadingState, SectionLabel, TextInput } from "../../../src/components/ui";
+import { ResponderPicker } from "../../../src/components/ResponderPicker";
+import { useFieldResponders } from "../../../src/scorecards/useFieldResponders";
 import { Banner } from "../../../src/components/Banner";
 import { ScreenHeader } from "../../../src/components/ScreenHeader";
 import { RatingBadge } from "../../../src/components/RatingBadge";
@@ -914,6 +916,7 @@ function OverviewStep({
 }) {
   const average = scorecardDraftTotal(draft);
   const answered = Object.keys(draft.scores).length;
+  const { responders, error: respondersError } = useFieldResponders(draft.dealId);
   return (
     <View style={{ gap: theme.space.lg }}>
       <View style={styles.scoreWrap}>
@@ -926,10 +929,10 @@ function OverviewStep({
         <Field label="Project"><Text style={styles.readonly}>{draft.dealName}</Text></Field>
         {draft.projectNumber ? <Field label="Project number"><Text style={styles.readonly}>{draft.projectNumber}</Text></Field> : null}
         <Field label="Superintendent">
-          <TextInput value={draft.superintendentName} onChangeText={(value) => dispatch({ type: "setHeader", field: "superintendentName", value })} placeholder="Name" />
+          <ResponderPicker value={draft.superintendentName} onChange={(name) => dispatch({ type: "setHeader", field: "superintendentName", value: name })} role="superintendent" responders={responders} error={respondersError} />
         </Field>
         <Field label="Project manager">
-          <TextInput value={draft.pmName} onChangeText={(value) => dispatch({ type: "setHeader", field: "pmName", value })} placeholder="Name" />
+          <ResponderPicker value={draft.pmName} onChange={(name) => dispatch({ type: "setHeader", field: "pmName", value: name })} role="project_manager" responders={responders} error={respondersError} />
         </Field>
         <Field label="Week of">
           <Text style={styles.readonly}>
@@ -1071,15 +1074,16 @@ function ScoreSlider({ value, onChange }: { value: number; onChange: (value: num
 }
 
 function SetupStep({ draft, dispatch }: { draft: ScorecardDraft; dispatch: React.Dispatch<DraftAction> }) {
+  const { responders, error: respondersError } = useFieldResponders(draft.dealId);
   return (
     <View style={{ gap: theme.space.md }}>
       <Field label="Project"><Text style={styles.readonly}>{draft.dealName}</Text></Field>
       {draft.projectNumber ? <Field label="Project number"><Text style={styles.readonly}>{draft.projectNumber}</Text></Field> : null}
       <Field label="Superintendent">
-        <TextInput value={draft.superintendentName} onChangeText={(v) => dispatch({ type: "setHeader", field: "superintendentName", value: v })} placeholder="Name" />
+        <ResponderPicker value={draft.superintendentName} onChange={(name) => dispatch({ type: "setHeader", field: "superintendentName", value: name })} role="superintendent" responders={responders} error={respondersError} />
       </Field>
       <Field label="Project manager">
-        <TextInput value={draft.pmName} onChangeText={(v) => dispatch({ type: "setHeader", field: "pmName", value: v })} placeholder="Name" />
+        <ResponderPicker value={draft.pmName} onChange={(name) => dispatch({ type: "setHeader", field: "pmName", value: name })} role="project_manager" responders={responders} error={respondersError} />
       </Field>
       <Field label="Week of (YYYY-MM-DD)">
         <TextInput value={draft.weekOf} onChangeText={(v) => dispatch({ type: "setHeader", field: "weekOf", value: v })} placeholder="2026-06-30" autoCapitalize="none" />
