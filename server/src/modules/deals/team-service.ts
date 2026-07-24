@@ -31,6 +31,12 @@ export interface AddTeamMemberInput {
   // when neither userId nor contactId is set. Restricted to super/PM roles (see EMAIL_ONLY_TEAM_ROLES).
   memberName?: string | null;
   memberEmail?: string | null;
+  // Roster LINK (migration 0198): when the caller picked this assignment from the field_responders roster, this
+  // is that roster row's id. It rides the EXISTING email-only insert path (the caller passes the roster person's
+  // copied name+email as memberName/memberEmail) and is stamped onto responder_id so the "where assigned" view can
+  // join back to the roster. It does NOT change recipient resolution — that still resolves member_email. Only
+  // honored on the email-only shape (no user / no contact); ignored on a user/contact-linked add.
+  responderId?: string | null;
   role: string;
   assignedBy?: string;
   notes?: string;
@@ -124,6 +130,11 @@ export async function addTeamMember(
         contactId: null,
         memberName,
         memberEmail,
+        // Roster LINK (migration 0198): stamp the field_responders id when this add came from the roster
+        // picker (assign-from-roster). null on a plain email-only add. This is the ONLY difference from a
+        // hand-typed email-only member — the storage/notify path is otherwise identical, so recipient
+        // resolution (member_email) is unchanged.
+        responderId: input.responderId ?? null,
         role: input.role as any,
         assignedBy: input.assignedBy ?? null,
         notes: input.notes ?? null,
@@ -149,6 +160,19 @@ export async function addTeamMember(
           ),
         )
         .limit(1);
+      // Assign-from-roster dedup: if the existing active email-only assignment predates the roster (or was
+      // hand-typed) and carries NO responder_id, but this add came from the roster picker, link it so the
+      // "where assigned" view can join back to the roster person. Only a NEW link (existing.responderId is
+      // null) is written; we never overwrite an existing link or re-notify (this remains a no-op dup — the
+      // cycle restart below is intentionally skipped). member_name/email are left intact (recipient-stable).
+      if (existing && input.responderId && !existing.responderId) {
+        const [linked] = await tenantDb
+          .update(dealTeamMembers)
+          .set({ responderId: input.responderId, updatedAt: new Date() })
+          .where(eq(dealTeamMembers.id, existing.id))
+          .returning();
+        return linked ?? existing;
+      }
       return existing;
     }
 

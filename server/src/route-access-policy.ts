@@ -21,6 +21,7 @@ export const CRM_ONLY_TENANT_ROUTE_MOUNTS = [
   "/companycam",
   "/ai",
   "/usage",
+  "/field-responders",
 ] as const;
 
 export const FIELD_ACCESSIBLE_ROUTE_MOUNTS = [
