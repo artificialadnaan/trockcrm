@@ -5,6 +5,8 @@ import { api } from "../lib/api";
 import { BrandLogo } from "./BrandLogo";
 import { LazyThumb } from "./LazyThumb";
 import { Button, TextInput } from "./ui";
+import { VoiceRecorder } from "./VoiceRecorder";
+import { getVoiceTranscriptionConfig } from "../lib/photo-dictation";
 
 type ReportBuilderProps = {
   isOpen: boolean;
@@ -52,6 +54,16 @@ type EditableSection = {
   photos: Array<PreviewPhoto & { descriptionOverride: string }>;
 };
 
+const SUMMARY_MAX = 5000;
+
+/** Append a dictated transcript to the current summary, space-joined, clamped to the server's 5000-char cap. */
+function appendTranscript(current: string, transcript: string): string {
+  const addition = transcript.trim();
+  if (!addition) return current.slice(0, SUMMARY_MAX);
+  const joined = current.trim() ? `${current.trim()} ${addition}` : addition;
+  return joined.slice(0, SUMMARY_MAX);
+}
+
 function normalizeDate(value: string | null, fallback: string): string {
   return new Date(value ?? fallback).toISOString().slice(0, 10);
 }
@@ -68,6 +80,9 @@ export function ReportBuilder({ isOpen, projectId, projectName, creatorName, pho
   const [cover, setCover] = useState<PreviewResponse["cover"] | null>(null);
   const [sections, setSections] = useState<EditableSection[]>([]);
   const [generated, setGenerated] = useState<{ title: string; pdfUrl: string } | null>(null);
+  const [executiveSummary, setExecutiveSummary] = useState("");
+  const [voiceConfigured, setVoiceConfigured] = useState(false);
+  const [summaryDictating, setSummaryDictating] = useState(false);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -82,6 +97,20 @@ export function ReportBuilder({ isOpen, projectId, projectName, creatorName, pho
     setCover(null);
     setSections([]);
     setGenerated(null);
+    setExecutiveSummary("");
+    setSummaryDictating(false);
+  }, [isOpen]);
+
+  // Probe transcription config on open so the summary's dictation mic is only rendered when the server can
+  // transcribe (mirrors CapturePage; a failed/absent probe just hides the mic — typing always works).
+  useEffect(() => {
+    if (!isOpen) return;
+    let cancelled = false;
+    setVoiceConfigured(false);
+    getVoiceTranscriptionConfig()
+      .then((config) => { if (!cancelled) setVoiceConfigured(Boolean(config.configured)); })
+      .catch(() => { if (!cancelled) setVoiceConfigured(false); });
+    return () => { cancelled = true; };
   }, [isOpen]);
 
   const availableTags = useMemo(() => {
@@ -213,6 +242,7 @@ export function ReportBuilder({ isOpen, projectId, projectName, creatorName, pho
         json: {
           projectId,
           reportTitle: cover.reportTitle,
+          executiveSummary: executiveSummary.trim() ? executiveSummary.trim() : null,
           coverData: cover,
           sections: sections.map((section) => ({
             title: section.title,
@@ -355,6 +385,30 @@ export function ReportBuilder({ isOpen, projectId, projectName, creatorName, pho
                 <Button variant="ghost" onClick={() => setStep("select")}><ArrowLeft className="mr-2 h-4 w-4" />Back to selection</Button>
                 <Button variant="ghost" onClick={addSection}><Plus className="mr-2 h-4 w-4" />Add section</Button>
               </div>
+
+              <section className="space-y-2 rounded-2xl border border-border p-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-black uppercase tracking-wide text-muted-foreground">Executive summary</span>
+                  <span className="text-xs text-muted-foreground">{executiveSummary.length} / {SUMMARY_MAX}</span>
+                </div>
+                <p className="text-xs text-muted-foreground">Optional — a short overview shown after the cover page.</p>
+                <textarea
+                  data-testid="executive-summary-input"
+                  value={executiveSummary}
+                  onChange={(event) => setExecutiveSummary(event.target.value.slice(0, SUMMARY_MAX))}
+                  maxLength={SUMMARY_MAX}
+                  placeholder="Summarize the report — scope, key findings, and next steps."
+                  className="min-h-28 w-full rounded-md border border-border bg-white px-3 py-2 text-sm outline-none ring-primary/25 transition focus:ring-4"
+                />
+                {voiceConfigured ? (
+                  <VoiceRecorder
+                    disabled={loading}
+                    onBusyChange={setSummaryDictating}
+                    onTranscript={(text) => setExecutiveSummary((current) => appendTranscript(current, text))}
+                  />
+                ) : null}
+              </section>
+
               {sections.map((section, sectionIndex) => (
                 <section key={section.id} className="rounded-2xl border border-border p-3">
                   <div className="mb-3 flex items-center gap-2">
@@ -404,7 +458,7 @@ export function ReportBuilder({ isOpen, projectId, projectName, creatorName, pho
                   Open {generated.title}
                 </a>
               ) : <span className="text-sm text-muted-foreground">Generate the branded PDF after reviewing sections and descriptions.</span>}
-              <Button disabled={loading || !cover || sections.every((section) => section.photos.length === 0)} onClick={() => void generateReport()}>
+              <Button disabled={loading || !cover || summaryDictating || sections.every((section) => section.photos.length === 0)} onClick={() => void generateReport()}>
                 {loading ? "Generating..." : "Generate PDF"}
               </Button>
             </div>
