@@ -1,5 +1,5 @@
 import React, { useRef, useState } from "react";
-import { Image, Modal, Pressable, ScrollView, Share, StyleSheet, Text, View, useWindowDimensions } from "react-native";
+import { Modal, Pressable, Share, StyleSheet, Text, View, useWindowDimensions } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useAuth } from "../auth/AuthContext";
 import { shareProjectPhotos } from "../api/endpoints";
@@ -8,6 +8,7 @@ import { buildShareMessage } from "../projects/share-message";
 import { theme } from "../theme/theme";
 import { Button, SectionLabel } from "./ui";
 import { Banner } from "./Banner";
+import { PhotoPickerGrid } from "./PhotoPickerGrid";
 
 // Mirror the server cap (server/src/modules/field/routes.ts MAX_SHARE_PHOTOS) so a large gallery can't
 // post 201+ ids and get a 400 — we cap the selection client-side and tell the user.
@@ -168,45 +169,30 @@ export function PhotoShareModal({
           </View>
         ) : null}
 
-        <ScrollView contentContainerStyle={styles.body}>
-          <View style={styles.rowBetween}>
-            <SectionLabel>{selected.size} selected{atCap ? ` · max ${MAX_SHARE_PHOTOS}` : ""}</SectionLabel>
-            <Pressable onPress={toggleAll} hitSlop={8} disabled={busy}>
-              <Text style={styles.link}>{allSelected ? "Clear all" : "Select all"}</Text>
-            </Pressable>
-          </View>
-          <Text style={styles.hint}>
-            Anyone with the link can view the selected photos for 7 days — no login needed.
-            {photos.length > MAX_SHARE_PHOTOS ? ` Up to ${MAX_SHARE_PHOTOS} per link.` : ""}
-          </Text>
-          <View style={styles.grid}>
-            {photos.map((photo) => {
-              const isSelected = selected.has(photo.id);
-              return (
-                <Pressable
-                  key={photo.id}
-                  onPress={() => toggle(photo.id)}
-                  disabled={busy}
-                  style={[{ width: cell, height: cell }, busy && { opacity: 0.6 }]}
-                  accessibilityRole="button"
-                  accessibilityState={{ selected: isSelected }}
-                  accessibilityLabel={`${isSelected ? "Selected" : "Select"} ${photo.displayName || "photo"}`}
-                >
-                  {photo.imageUrl ? (
-                    <Image source={{ uri: photo.imageUrl }} style={styles.thumb} resizeMode="cover" />
-                  ) : (
-                    <View style={[styles.thumb, styles.placeholder]} />
-                  )}
-                  {isSelected ? (
-                    <View style={styles.check}>
-                      <Text style={styles.checkMark}>✓</Text>
-                    </View>
-                  ) : null}
+        <PhotoPickerGrid
+          photos={photos}
+          selected={selected}
+          onToggle={toggle}
+          cellSize={cell}
+          disabled={busy}
+          getAccessibilityLabel={(photo, isSelected) =>
+            `${isSelected ? "Selected" : "Select"} ${photo.displayName || "photo"}`
+          }
+          header={
+            <View style={styles.gridHeader}>
+              <View style={styles.rowBetween}>
+                <SectionLabel>{selected.size} selected{atCap ? ` · max ${MAX_SHARE_PHOTOS}` : ""}</SectionLabel>
+                <Pressable onPress={toggleAll} hitSlop={8} disabled={busy}>
+                  <Text style={styles.link}>{allSelected ? "Clear all" : "Select all"}</Text>
                 </Pressable>
-              );
-            })}
-          </View>
-        </ScrollView>
+              </View>
+              <Text style={styles.hint}>
+                Anyone with the link can view the selected photos for 7 days — no login needed.
+                {photos.length > MAX_SHARE_PHOTOS ? ` Up to ${MAX_SHARE_PHOTOS} per link.` : ""}
+              </Text>
+            </View>
+          }
+        />
 
         <View style={styles.footer}>
           <Button
@@ -232,26 +218,11 @@ const styles = StyleSheet.create({
   },
   headerTitle: { fontFamily: theme.font.bold, fontSize: 18, color: theme.color.textPrimary },
   headerAction: { fontFamily: theme.font.semibold, fontSize: 16, color: theme.color.brandRed, width: 56 },
-  body: { padding: theme.space.lg, gap: theme.space.md, paddingBottom: theme.space.xxl },
+  gridHeader: { gap: theme.space.md, marginBottom: theme.space.md },
   rowBetween: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
   link: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.brandRed },
   hint: { fontFamily: theme.font.body, fontSize: 13, color: theme.color.textMuted },
   urlText: { fontFamily: theme.font.body, fontSize: 12, color: theme.color.textMuted },
-  grid: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
-  thumb: { width: "100%", height: "100%", borderRadius: theme.radius.sm, backgroundColor: theme.color.surfaceMuted },
-  placeholder: { borderWidth: 1, borderColor: theme.color.border },
-  check: {
-    position: "absolute",
-    top: 6,
-    right: 6,
-    width: 26,
-    height: 26,
-    borderRadius: 13,
-    backgroundColor: theme.color.brandRed,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  checkMark: { color: theme.color.textInverse, fontFamily: theme.font.bold, fontSize: 14 },
   footer: {
     padding: theme.space.lg,
     borderTopWidth: 1,
