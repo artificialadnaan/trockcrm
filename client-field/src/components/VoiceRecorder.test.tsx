@@ -144,4 +144,53 @@ describe("VoiceRecorder onBusyChange", () => {
 
     expect(track.stop).toHaveBeenCalled(); // mic released, not left live
   });
+
+  it("still records under React.StrictMode (mounted flag is reset on setup, not left false)", async () => {
+    render(
+      <React.StrictMode>
+        <VoiceRecorder onTranscript={vi.fn()} onBusyChange={vi.fn()} />
+      </React.StrictMode>,
+    );
+    await vi.waitFor(() => expect(recorderButton()).toBeTruthy());
+
+    recorderButton().click();
+    await vi.waitFor(() => expect(recorderButton().textContent).toContain("Stop"));
+  });
+
+  it("returns to idle and releases the mic if the recorder fails to initialize", async () => {
+    const track = { stop: vi.fn() };
+    (navigator as unknown as { mediaDevices: { getUserMedia: unknown } }).mediaDevices.getUserMedia =
+      vi.fn().mockResolvedValue({ getTracks: () => [track] });
+    (globalThis as unknown as { MediaRecorder: unknown }).MediaRecorder = class {
+      constructor() { throw new Error("recording unsupported"); }
+    };
+
+    render(<VoiceRecorder onTranscript={vi.fn()} onBusyChange={vi.fn()} />);
+    await vi.waitFor(() => expect(recorderButton()).toBeTruthy());
+
+    recorderButton().click();
+    await vi.waitFor(() => expect(recorderButton().textContent).toContain("Voice")); // back to idle
+    expect(track.stop).toHaveBeenCalled();
+  });
+
+  it("does not deliver a transcript that resolves after the recorder unmounts", async () => {
+    let resolveTranscribe!: (result: { transcript: string }) => void;
+    transcribeMock.mockReturnValue(new Promise<{ transcript: string }>((resolve) => { resolveTranscribe = resolve; }));
+    const onTranscript = vi.fn();
+
+    render(<VoiceRecorder onTranscript={onTranscript} onBusyChange={vi.fn()} />);
+    await vi.waitFor(() => expect(recorderButton()).toBeTruthy());
+
+    recorderButton().click(); // start
+    await vi.waitFor(() => expect(recorderButton().textContent).toContain("Stop")); // recording
+    recorderButton().click(); // stop -> transcribing (pending)
+    await vi.waitFor(() => expect(recorderButton().textContent).toContain("Transcribing"));
+
+    root!.unmount(); // builder closed mid-transcription
+    root = null;
+    resolveTranscribe({ transcript: "late text" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(onTranscript).not.toHaveBeenCalled();
+  });
 });

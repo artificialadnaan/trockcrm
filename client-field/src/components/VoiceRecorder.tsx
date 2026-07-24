@@ -29,14 +29,19 @@ export function VoiceRecorder({ disabled, onTranscript, onBusyChange }: VoiceRec
   const onBusyChangeRef = useRef(onBusyChange);
   const mountedRef = useRef(true);
 
-  useEffect(() => () => {
-    mountedRef.current = false;
-    streamRef.current?.getTracks().forEach((track) => track.stop());
-    if (timeoutRef.current) window.clearTimeout(timeoutRef.current);
-    if (intervalRef.current) window.clearInterval(intervalRef.current);
-    // Guarantee a terminal "not busy" on unmount so a parent that gates on this (e.g. a Generate button)
-    // can never get stuck disabled if we unmount mid-recording/transcribing.
-    onBusyChangeRef.current?.(false);
+  useEffect(() => {
+    // Set on SETUP (not just cleanup) so React.StrictMode's dev setup→cleanup→setup cycle leaves the flag
+    // true — otherwise it stays false and every later getUserMedia result is treated as post-unmount.
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      streamRef.current?.getTracks().forEach((track) => track.stop());
+      if (timeoutRef.current) window.clearTimeout(timeoutRef.current);
+      if (intervalRef.current) window.clearInterval(intervalRef.current);
+      // Guarantee a terminal "not busy" on unmount so a parent that gates on this (e.g. a Generate button)
+      // can never get stuck disabled if we unmount mid-recording/transcribing.
+      onBusyChangeRef.current?.(false);
+    };
   }, []);
 
   // Keep the latest callback in a ref and notify the parent whenever busy-ness changes (recording OR
@@ -75,28 +80,42 @@ export function VoiceRecorder({ disabled, onTranscript, onBusyChange }: VoiceRec
       return;
     }
 
-    const recorder = new MediaRecorder(stream);
-    recorderRef.current = recorder;
-    streamRef.current = stream;
-    chunksRef.current = [];
-    setSeconds(0);
-    setState("recording");
+    // Recorder construction / start() can throw (inactive stream, unsupported recording). Keep it inside a
+    // guard so a failure returns to idle and releases the mic instead of leaving the UI stuck on "Starting…".
+    try {
+      const recorder = new MediaRecorder(stream);
+      recorderRef.current = recorder;
+      streamRef.current = stream;
+      chunksRef.current = [];
+      setSeconds(0);
 
-    recorder.addEventListener("dataavailable", (event) => {
-      if (event.data?.size) chunksRef.current.push(event.data);
-    });
-    recorder.addEventListener("stop", () => {
-      void finishRecording();
-    }, { once: true });
+      recorder.addEventListener("dataavailable", (event) => {
+        if (event.data?.size) chunksRef.current.push(event.data);
+      });
+      recorder.addEventListener("stop", () => {
+        void finishRecording();
+      }, { once: true });
 
-    intervalRef.current = window.setInterval(() => {
-      setSeconds((current) => current + 1);
-    }, 1000);
-    timeoutRef.current = window.setTimeout(() => {
-      stop();
-    }, MAX_RECORDING_MS);
+      intervalRef.current = window.setInterval(() => {
+        setSeconds((current) => current + 1);
+      }, 1000);
+      timeoutRef.current = window.setTimeout(() => {
+        stop();
+      }, MAX_RECORDING_MS);
 
-    recorder.start();
+      recorder.start();
+      setState("recording");
+    } catch {
+      stream.getTracks().forEach((track) => track.stop());
+      recorderRef.current = null;
+      streamRef.current = null;
+      if (timeoutRef.current) window.clearTimeout(timeoutRef.current);
+      if (intervalRef.current) window.clearInterval(intervalRef.current);
+      timeoutRef.current = null;
+      intervalRef.current = null;
+      setError("Voice dictation could not start. Try again or use the keyboard option.");
+      setState("idle");
+    }
   }
 
   function stop() {
@@ -133,9 +152,13 @@ export function VoiceRecorder({ disabled, onTranscript, onBusyChange }: VoiceRec
         mimeType,
         fileName: `photo-description-${Date.now()}.${mimeType.includes("mp4") ? "m4a" : "webm"}`,
       });
+      // If we were torn down mid-transcription, drop the result — delivering it would write dictation from an
+      // abandoned report into whatever report is open now (the parent state survives the modal close/reopen).
+      if (!mountedRef.current) return;
       onTranscript(result.transcript);
       setState("idle");
     } catch (err) {
+      if (!mountedRef.current) return;
       setError(err instanceof Error ? err.message : "Voice transcription failed.");
       setState("idle");
     }
