@@ -58,7 +58,9 @@ const SUMMARY_MAX = 5000;
 
 /** Append a dictated transcript to the current summary, space-joined, clamped to the server's 5000-char cap. */
 function appendTranscript(current: string, transcript: string): string {
-  const joined = current.trim() ? `${current.trim()} ${transcript}` : transcript;
+  const addition = transcript.trim();
+  if (!addition) return current.slice(0, SUMMARY_MAX);
+  const joined = current.trim() ? `${current.trim()} ${addition}` : addition;
   return joined.slice(0, SUMMARY_MAX);
 }
 

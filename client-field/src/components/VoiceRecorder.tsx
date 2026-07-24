@@ -30,6 +30,9 @@ export function VoiceRecorder({ disabled, onTranscript, onBusyChange }: VoiceRec
     streamRef.current?.getTracks().forEach((track) => track.stop());
     if (timeoutRef.current) window.clearTimeout(timeoutRef.current);
     if (intervalRef.current) window.clearInterval(intervalRef.current);
+    // Guarantee a terminal "not busy" on unmount so a parent that gates on this (e.g. a Generate button)
+    // can never get stuck disabled if we unmount mid-recording/transcribing.
+    onBusyChangeRef.current?.(false);
   }, []);
 
   // Keep the latest callback in a ref and notify the parent whenever busy-ness changes (recording OR

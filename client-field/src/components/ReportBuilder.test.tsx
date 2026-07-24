@@ -38,6 +38,11 @@ vi.mock("./VoiceRecorder", async () => {
         ),
         ReactModule.createElement(
           "button",
+          { type: "button", "data-testid": "mock-voice-empty", disabled, onClick: () => onTranscript("   ") },
+          "voice-empty",
+        ),
+        ReactModule.createElement(
+          "button",
           { type: "button", "data-testid": "mock-voice-busy-on", onClick: () => onBusyChange?.(true) },
           "busy-on",
         ),
@@ -140,6 +145,16 @@ function setControlledValue(el: HTMLTextAreaElement | HTMLInputElement, value: s
 
 function execSummaryInput(node: HTMLElement) {
   return node.querySelector('[data-testid="executive-summary-input"]') as HTMLTextAreaElement | null;
+}
+
+// Type into the summary AND wait for React to commit it before returning. Without the commit-wait, an
+// immediately-following action (clicking the mic to dictate) can read a not-yet-committed empty summary — a
+// test-only race (a real user types long before dictating). Mirrors the app's controlled-value flow.
+async function setSummary(node: HTMLElement, value: string) {
+  const input = execSummaryInput(node);
+  expect(input).toBeTruthy();
+  setControlledValue(input!, value);
+  await vi.waitFor(() => expect(execSummaryInput(node)!.value).toBe(value));
 }
 
 const previewResponse = {
@@ -291,9 +306,7 @@ describe("ReportBuilder", () => {
     const node = renderBuilder();
     await gotoEditStep(node);
 
-    const input = execSummaryInput(node);
-    expect(input).toBeTruthy();
-    setControlledValue(input!, "  Roof replaced; site cleared and inspected.  ");
+    await setSummary(node, "  Roof replaced; site cleared and inspected.  ");
 
     apiMock.mockResolvedValueOnce({ report: { id: "report-1", title: "T", pdfUrl: "https://example.com/r.pdf" } });
     clickButton(node, "Generate PDF");
@@ -308,7 +321,7 @@ describe("ReportBuilder", () => {
     const node = renderBuilder();
     await gotoEditStep(node);
 
-    setControlledValue(execSummaryInput(node)!, "   ");
+    await setSummary(node, "   ");
 
     apiMock.mockResolvedValueOnce({ report: { id: "report-1", title: "T", pdfUrl: "https://example.com/r.pdf" } });
     clickButton(node, "Generate PDF");
@@ -322,19 +335,41 @@ describe("ReportBuilder", () => {
     const node = renderBuilder();
     await gotoEditStep(node);
 
-    setControlledValue(execSummaryInput(node)!, "Existing note.");
+    await setSummary(node, "Existing note.");
     await vi.waitFor(() => expect(node.querySelector('[data-testid="mock-voice"]')).toBeTruthy());
     (node.querySelector('[data-testid="mock-voice"]') as HTMLButtonElement).click();
 
     await vi.waitFor(() => expect(execSummaryInput(node)!.value).toBe("Existing note. dictated summary"));
   });
 
-  it("shows the voice recorder only when transcription is configured", async () => {
-    getVoiceConfigMock.mockResolvedValue({ configured: false });
+  it("ignores an empty/whitespace transcript instead of adding a trailing space", async () => {
     const node = renderBuilder();
     await gotoEditStep(node);
 
-    await vi.waitFor(() => expect(node.textContent).toContain("Executive summary"));
+    await setSummary(node, "Existing note.");
+    await vi.waitFor(() => expect(node.querySelector('[data-testid="mock-voice-empty"]')).toBeTruthy());
+    (node.querySelector('[data-testid="mock-voice-empty"]') as HTMLButtonElement).click();
+
+    // Give any errant state update a chance to land, then assert the summary is untouched (no trailing space).
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(execSummaryInput(node)!.value).toBe("Existing note.");
+  });
+
+  it("hides the voice recorder until the probe confirms transcription is configured, and keeps it hidden when it is not", async () => {
+    // A deferred probe proves the mic is gated on the resolved config — not shown before, nor after a false result.
+    let resolveConfig!: (value: { configured: boolean }) => void;
+    getVoiceConfigMock.mockReturnValue(new Promise<{ configured: boolean }>((resolve) => { resolveConfig = resolve; }));
+
+    const node = renderBuilder();
+    await gotoEditStep(node);
+
+    // Before the probe resolves the mic must not be shown.
+    expect(node.querySelector('[data-testid="mock-voice"]')).toBeFalsy();
+
+    resolveConfig({ configured: false });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // Still hidden after a false result.
     expect(node.querySelector('[data-testid="mock-voice"]')).toBeFalsy();
   });
 
@@ -350,22 +385,27 @@ describe("ReportBuilder", () => {
     const node = renderBuilder();
     await gotoEditStep(node);
 
-    setControlledValue(execSummaryInput(node)!, "a".repeat(4995));
+    await setSummary(node, "a".repeat(4995));
     (node.querySelector('[data-testid="mock-voice"]') as HTMLButtonElement).click();
 
     await vi.waitFor(() => expect(execSummaryInput(node)!.value.length).toBe(5000));
   });
 
-  it("blocks Generate PDF while a dictation is still transcribing", async () => {
+  it("blocks Generate PDF while a dictation is transcribing, then re-enables it when it finishes", async () => {
     const node = renderBuilder();
     await gotoEditStep(node);
 
     (node.querySelector('[data-testid="mock-voice-busy-on"]') as HTMLButtonElement).click();
-
     await vi.waitFor(() => {
       const generate = Array.from(node.querySelectorAll("button")).find((button) => button.textContent === "Generate PDF");
       expect(generate).toBeTruthy();
       expect((generate as HTMLButtonElement).disabled).toBe(true);
+    });
+
+    (node.querySelector('[data-testid="mock-voice-busy-off"]') as HTMLButtonElement).click();
+    await vi.waitFor(() => {
+      const generate = Array.from(node.querySelectorAll("button")).find((button) => button.textContent === "Generate PDF");
+      expect((generate as HTMLButtonElement).disabled).toBe(false);
     });
   });
 });
