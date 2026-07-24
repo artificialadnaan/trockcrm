@@ -570,4 +570,22 @@ describe("assignRosterResponderToDealIfUnset (scorecard name → deal team)", ()
     expect(emails.projectManagerEmail).toBe("eopm@example.com");
     expect(emails.projectManagerName).toBe("Email Only PM");
   });
+
+  it("treats a role held only by a DEACTIVATED user as vacant and assigns the roster person", async () => {
+    // A super row exists (dtm.is_active) but points at a deactivated staff user — the recipient resolvers treat
+    // that role as vacant (they require an active identity), so the vacancy check must too, or the role would be
+    // left with no reachable recipient.
+    const goneUser = "99999999-9999-9999-9999-999999999999";
+    await tdb.execute(sql`INSERT INTO users (id, display_name, email, is_active) VALUES (${goneUser}, 'Gone User', 'gone@example.com', FALSE)`);
+    await tdb.execute(sql`
+      INSERT INTO deal_team_members (deal_id, role, user_id, is_active)
+      VALUES (${DEAL}, 'superintendent', ${goneUser}, TRUE)
+    `);
+    await createFieldResponder(tdb, { name: "Live Super", email: "live@example.com", role: "superintendent" });
+    await assignRosterResponderToDealIfUnset(tdb, DEAL, "Live Super", "superintendent");
+
+    // The email-only roster super is now the deliverable recipient (newest active row with a resolvable identity).
+    const emails = await resolveScorecardTeamEmails(tdb, DEAL);
+    expect(emails.superintendentEmail).toBe("live@example.com");
+  });
 });

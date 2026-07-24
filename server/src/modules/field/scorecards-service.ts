@@ -331,8 +331,8 @@ export async function createFieldScorecard(
   // completed-scorecard email (enqueued below) and the corrective-action notification (reconcile below). Runs
   // BEFORE both so their recipient reads see the assignment. Only-if-unset (never overrides a Team-tab
   // assignment); a custom/ambiguous name resolves to null and is skipped. In the submit transaction.
-  await assignRosterResponderToDealIfUnset(tenantDb, input.dealId, input.superintendentName, "superintendent");
-  await assignRosterResponderToDealIfUnset(tenantDb, input.dealId, input.pmName, "project_manager");
+  await assignRosterResponderToDealIfUnset(tenantDb, input.dealId, input.superintendentName, "superintendent", input.office);
+  await assignRosterResponderToDealIfUnset(tenantDb, input.dealId, input.pmName, "project_manager", input.office);
 
   // Corrective-action follow-up: when the card trips the corrective-action band with at least one flagged
   // item, open the stage, seed one tracked item per flagged issue (each action item + each critical
@@ -697,6 +697,13 @@ export async function updateFieldScorecard(
       AND status IN ('pending', 'dead')
       AND payload->>'scorecardId' = ${card.id}
   `);
+
+  // Field-driven deal assignment on EDIT too (mirrors the create path): if an edit sets/keeps a super/PM name
+  // that maps to a unique active roster person and the role has no deliverable member yet, assign them BEFORE
+  // the reconcile below — so an edit that drops the card into the band still reaches the picked person. Only-
+  // if-unset; custom/ambiguous names are skipped.
+  await assignRosterResponderToDealIfUnset(tenantDb, card.dealId, input.superintendentName, "superintendent", input.office);
+  await assignRosterResponderToDealIfUnset(tenantDb, card.dealId, input.pmName, "project_manager", input.office);
 
   // Reconcile the corrective-action lifecycle against the recomputed rating + flagged items in THIS same
   // edit transaction — the SAME shared helper the create path runs, so the two never drift. It may open the

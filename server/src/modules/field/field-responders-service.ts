@@ -1,6 +1,6 @@
 import { and, eq, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
-import { fieldResponders, dealTeamMembers } from "@trock-crm/shared/schema";
+import { fieldResponders } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import {
   isFieldResponderRole,
@@ -9,7 +9,7 @@ import {
   type FieldResponderRole,
 } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
-import { addTeamMember, isValidMemberEmail } from "../deals/team-service.js";
+import { addTeamMember, isValidMemberEmail, type TeamMutationOffice } from "../deals/team-service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -391,7 +391,11 @@ export async function resolveActiveResponderByName(
         sql`LOWER(${fieldResponders.name}) = LOWER(${trimmed})`,
       ),
     )
-    .limit(2);
+    .limit(2)
+    // Lock the matched roster row(s) through the caller's assign (same window as resolveResponderForAssignment's
+    // FOR UPDATE): a concurrent director deactivate/rename then can't slip between this read and addTeamMember and
+    // make us copy a stale name/email or assign a now-inactive responder.
+    .for("update");
   if (rows.length !== 1) return null; // 0 = no match; >1 = ambiguous same-name — don't guess
   return { id: rows[0].id, name: rows[0].name, email: rows[0].email, role: rows[0].role as FieldResponderRole };
 }
@@ -410,6 +414,7 @@ export async function assignRosterResponderToDealIfUnset(
   dealId: string,
   name: string | null | undefined,
   role: FieldResponderRole,
+  office?: TeamMutationOffice,
 ): Promise<void> {
   // Serialize the vacancy-check-then-insert against a concurrent scorecard submission for the SAME (deal, role):
   // a per-(deal, role) transaction-scoped advisory lock makes the second caller block until the first commits,
@@ -420,25 +425,42 @@ export async function assignRosterResponderToDealIfUnset(
     sql`SELECT pg_advisory_xact_lock(hashtext(${dealId}::text), hashtext(${role}::text))`,
   );
 
-  const [existing] = await tenantDb
-    .select({ id: dealTeamMembers.id })
-    .from(dealTeamMembers)
-    .where(
-      and(
-        eq(dealTeamMembers.dealId, dealId),
-        eq(dealTeamMembers.role, role),
-        eq(dealTeamMembers.isActive, true),
-      ),
-    )
-    .limit(1);
-  if (existing) return; // only-if-unset: the deal already has a super/PM for this role — leave it untouched
+  // "Unset" means no DELIVERABLE member for this role — mirror the recipient resolvers
+  // (resolveActiveScorecardTeamRows / resolveCorrectiveActionRecipients): a row counts as filled ONLY if it is
+  // an active team row backed by an ACTIVE user / ACTIVE contact, OR an email-only member. A row pointing at a
+  // deactivated user or archived contact is NOT a reachable recipient, so those resolvers treat the role as
+  // vacant — and so must we, or we'd skip and leave the role with no one the emails can reach.
+  const filled = await tenantDb.execute(sql`
+    SELECT 1
+      FROM deal_team_members dtm
+      LEFT JOIN public.users u ON dtm.user_id = u.id
+      LEFT JOIN contacts c ON dtm.contact_id = c.id
+     WHERE dtm.deal_id = ${dealId}
+       AND dtm.is_active = TRUE
+       AND dtm.role::text = ${role}
+       AND (
+         (dtm.user_id IS NOT NULL AND u.is_active)
+         OR (dtm.contact_id IS NOT NULL AND c.is_active)
+         OR (dtm.user_id IS NULL AND dtm.contact_id IS NULL)
+       )
+     LIMIT 1
+  `);
+  if ((filled.rows ?? []).length > 0) return; // a deliverable super/PM already exists — only-if-unset, leave it
+
   const responder = await resolveActiveResponderByName(tenantDb, name, role);
   if (!responder) return; // no unique roster match (custom name / same-name collision) — nothing to assign
-  await addTeamMember(tenantDb, {
-    dealId,
-    memberName: responder.name,
-    memberEmail: responder.email,
-    responderId: responder.id,
-    role,
-  });
+  await addTeamMember(
+    tenantDb,
+    {
+      dealId,
+      memberName: responder.name,
+      memberEmail: responder.email,
+      responderId: responder.id,
+      role,
+    },
+    // Pass office so restartCycleForNewResponder re-notifies any EXISTING open corrective-action cards on the
+    // deal (whose recipient was previously unresolvable) — the same re-notify Team-tab assigns get. The freshly
+    // submitted card is handled by this submission's own reconcile; the cycle-nonce guard prevents double-sends.
+    office,
+  );
 }
