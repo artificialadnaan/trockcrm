@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { View } from "react-native";
 import { fireEvent, render } from "@testing-library/react-native";
 import { PhotoPickerGrid } from "../PhotoPickerGrid";
 import type { FieldPhoto } from "../../api/types";
@@ -70,11 +71,65 @@ describe("PhotoPickerGrid", () => {
     expect(onToggleSpy).not.toHaveBeenCalled();
   });
 
-  it("virtualizes a large gallery — it does NOT mount a cell for every photo", () => {
-    // The whole point of the fix: a 200-photo project must not mount 200 <Image>s at once (the OOM cause).
-    const { queryAllByTestId } = render(<Host photos={makePhotos(200)} />);
-    const mounted = queryAllByTestId(/^photo-cell-/);
-    expect(mounted.length).toBeGreaterThan(0);
-    expect(mounted.length).toBeLessThan(200);
+  it("virtualizes — the mounted cell count is bounded and independent of gallery size", () => {
+    // The point of the fix: mount count must NOT grow with the gallery (that unbounded growth is the OOM).
+    const small = render(<Host photos={makePhotos(200)} />);
+    const smallCount = small.queryAllByTestId(/^photo-cell-/).length;
+    small.unmount();
+
+    const big = render(<Host photos={makePhotos(800)} />);
+    const bigCount = big.queryAllByTestId(/^photo-cell-/).length;
+
+    expect(smallCount).toBeGreaterThan(0);
+    expect(smallCount).toBeLessThan(200); // not every photo is mounted
+    expect(bigCount).toBe(smallCount); // 4x the gallery mounts the SAME window — the OOM-safety property
+  });
+
+  it("renders each thumbnail with expo-image (not core Image) using the thumbnail URL", () => {
+    const { getByTestId } = render(<Host photos={makePhotos(2)} />);
+    const image = getByTestId("photo-image-p0");
+    // expo-image normalizes `source` to an array of sources (core RN <Image> keeps the bare object).
+    expect(image.props.source).toEqual([{ uri: "https://example.test/thumb-0.jpg" }]);
+    // cachePolicy + recyclingKey are expo-image-only props — core RN <Image> has neither, so this fails
+    // if the grid ever regresses back to core Image (which re-introduces the decoded-bitmap OOM).
+    expect(image.props.cachePolicy).toBe("memory-disk");
+    expect(image.props.recyclingKey).toBe("p0");
+  });
+
+  it("renders a placeholder (no image) when a photo has no imageUrl", () => {
+    const photos = [{ id: "p0", displayName: "No image", imageUrl: null }] as unknown as FieldPhoto[];
+    const { queryByTestId, getByTestId } = render(<Host photos={photos} />);
+    expect(queryByTestId("photo-image-p0")).toBeNull();
+    expect(getByTestId("photo-cell-p0")).toBeTruthy(); // still a pressable cell
+  });
+
+  it("renders the header and footer inside the list", () => {
+    const { getByTestId } = render(
+      <PhotoPickerGrid
+        photos={makePhotos(2)}
+        selected={new Set()}
+        onToggle={jest.fn()}
+        cellSize={100}
+        header={<View testID="grid-header" />}
+        footer={<View testID="grid-footer" />}
+      />,
+    );
+    expect(getByTestId("grid-header")).toBeTruthy();
+    expect(getByTestId("grid-footer")).toBeTruthy();
+  });
+
+  it("uses the getAccessibilityLabel override when provided", () => {
+    const getLabel = jest.fn((photo: FieldPhoto, isSelected: boolean) => `custom ${photo.id} ${isSelected}`);
+    const { getByTestId } = render(
+      <PhotoPickerGrid
+        photos={makePhotos(1)}
+        selected={new Set()}
+        onToggle={jest.fn()}
+        cellSize={100}
+        getAccessibilityLabel={getLabel}
+      />,
+    );
+    expect(getByTestId("photo-cell-p0").props.accessibilityLabel).toBe("custom p0 false");
+    expect(getLabel).toHaveBeenCalledWith(expect.objectContaining({ id: "p0" }), false);
   });
 });

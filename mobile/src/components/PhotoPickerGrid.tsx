@@ -63,6 +63,7 @@ export function PhotoPickerGrid({
         >
           {item.imageUrl ? (
             <ExpoImage
+              testID={`photo-image-${item.id}`}
               source={{ uri: item.imageUrl }}
               style={styles.thumb}
               contentFit="cover"
@@ -103,9 +104,12 @@ export function PhotoPickerGrid({
       initialNumToRender={12}
       maxToRenderPerBatch={12}
       removeClippedSubviews
+      // With numColumns, FlatList batches items into rows and calls getItemLayout with the ROW index, so
+      // offset is rowHeight * index (NOT index/numColumns). Rows are equal height; the ListHeaderComponent
+      // is measured separately, so these offsets are content-relative and must not include its height.
       getItemLayout={(_data, index) => ({
         length: rowHeight,
-        offset: rowHeight * Math.floor(index / NUM_COLUMNS),
+        offset: rowHeight * index,
         index,
       })}
     />
