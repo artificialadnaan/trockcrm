@@ -31,16 +31,30 @@ import * as ts from "typescript";
  * `Animated.View` wrapper.
  *
  * KNOWN LIMIT — this is still a single-file syntactic check, not a type-checked whole-program one. It
- * resolves re-binding within a file (`const A = RN.Animated; <A.Image />`) but cannot follow a core
- * component that leaves a file as an ordinary local export and is imported elsewhere under a new name.
- * It does flag the re-export barrel form (`export { Image } from "react-native"`), which is the practical
- * version of that. Treat green as "no known route", not a proof.
+ * resolves re-binding chains within a file to a fixed point (`const A = B; const B = RN; <A.Image />`) but
+ * cannot follow a core component that leaves a file as an ordinary local export and is imported elsewhere
+ * under a new name. It does flag every re-export barrel form (`export { Image } from "react-native"`,
+ * `export *`, `export * as RN`), which is the practical version of that. Treat green as "no known route",
+ * not a proof.
  *
- * An adversarial audit generated 43 candidate evasions and executed each against this implementation.
- * Everything it confirmed against the previous text-matching version is covered here and pinned below,
- * except one: `const RN = require("react-native")` with NO terminating semicolon followed by JSX. That
- * source does not compile — TSX parses `require("react-native")` and the `<` of the next line as a
- * relational expression — so there is nothing to catch.
+ * An adversarial audit generated 43 candidate evasions and executed each against this implementation, and
+ * a second review round found nine more. Everything confirmed is covered here and pinned by a self-test,
+ * with three deliberate exceptions, all verified by execution rather than assumed:
+ *
+ *  1. `const RN = require("react-native")` with NO terminating semicolon followed by JSX. That source does
+ *     not compile — TSX reads `require(…)` and the next line's `<` as a relational expression — so there is
+ *     nothing to catch.
+ *  2. Dynamic import resolved through a promise callback: `import("react-native").then(RN => RN.Image)`,
+ *     or `.then(({ Image }) => Image)`. Following a module object into a callback parameter needs dataflow
+ *     this check does not do. The awaited forms (`await import(…)`, `const { Image } = await import(…)`)
+ *     ARE covered, and are what anyone would actually write.
+ *  3. Shadowing beyond function parameters. A parameter named after a tracked binding is handled (see
+ *     `shadowedByParameter`), because that was a live false positive. A block-scoped `const RN = notRN`
+ *     inside a function is not modelled — binding tracking is per-file, not per-scope. Erring here yields a
+ *     false POSITIVE (a failing build on safe code), not a missed crash.
+ *
+ * Closing 2 or 3 properly means a type-checked `ts.Program` with real symbol resolution, which is a large
+ * step up in cost for routes nothing in this codebase uses. Revisit if that stops being true.
  */
 
 const MOBILE_ROOT = path.resolve(__dirname, "../..");
@@ -97,7 +111,23 @@ function loaderCallModule(node: ts.Node): string | null {
   return arg && ts.isStringLiteralLike(arg) ? arg.text : null;
 }
 
-/** Strip `await`, parentheses and `as` casts so `(await import("react-native")).Image` reads as a member access. */
+/**
+ * Metro resolves JSX inside plain `.js` as happily as `.tsx`. Handing such a file ScriptKind.TS makes the
+ * parser reject the JSX and never build the member-access nodes, so the scan would silently see nothing —
+ * the JS coverage would be decorative. `.ts` must stay ScriptKind.TS so angle-bracket type assertions parse.
+ */
+function scriptKindFor(fileName: string): ts.ScriptKind {
+  if (fileName.endsWith(".tsx")) return ts.ScriptKind.TSX;
+  if (fileName.endsWith(".ts")) return ts.ScriptKind.TS;
+  if (/\.(jsx|js|mjs|cjs)$/.test(fileName)) return ts.ScriptKind.JSX;
+  return ts.ScriptKind.TSX;
+}
+
+/**
+ * Strip the wrappers that are transparent at runtime, so `(await import("react-native")).Image`,
+ * `<typeof import("react-native")>require("react-native")` and `require("react-native") satisfies X` all
+ * read as the underlying expression.
+ */
 function unwrap(node: ts.Expression): ts.Expression {
   let current: ts.Expression = node;
   for (;;) {
@@ -109,8 +139,27 @@ function unwrap(node: ts.Expression): ts.Expression {
       current = current.expression;
       continue;
     }
+    if (current.kind === ts.SyntaxKind.TypeAssertionExpression || current.kind === ts.SyntaxKind.SatisfiesExpression) {
+      current = (current as ts.TypeAssertion | ts.SatisfiesExpression).expression;
+      continue;
+    }
     return current;
   }
+}
+
+/**
+ * Is this identifier a function parameter rather than the module binding of the same name? Without this,
+ * `import * as RN from "react-native"; function read(RN: Data) { return RN.Image; }` fails the guard on
+ * code that never touches react-native. Only parameters are modelled — see the KNOWN LIMIT above.
+ */
+function shadowedByParameter(id: ts.Identifier): boolean {
+  for (let node: ts.Node | undefined = id.parent; node; node = node.parent) {
+    if (ts.isFunctionLike(node)
+      && node.parameters.some((p) => ts.isIdentifier(p.name) && p.name.text === id.text)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /** The accessed member name — `RN.Image` and `RN["Image"]` are the same property read. */
@@ -122,26 +171,32 @@ function memberName(node: ts.PropertyAccessExpression | ts.ElementAccessExpressi
 
 /** Every way this file can reach a core RN image component, as human-readable reasons (empty = clean). */
 export function coreImageReaches(contents: string, fileName = "probe.tsx"): string[] {
-  const kind = /\.(tsx|jsx)$/.test(fileName) || !/\.[cm]?[jt]s$/.test(fileName) ? ts.ScriptKind.TSX : ts.ScriptKind.TS;
-  const source = ts.createSourceFile(fileName, contents, ts.ScriptTarget.Latest, true, kind);
+  const source = ts.createSourceFile(fileName, contents, ts.ScriptTarget.Latest, true, scriptKindFor(fileName));
 
   const reasons = new Set<string>();
   const rnModule = new Set<string>(); // locals holding the whole react-native module
   const rnAnimated = new Set<string>(); // locals holding react-native's Animated
   const coreLocal = new Set<string>(); // locals holding a core Image/ImageBackground component
 
+  /** The core component a `require()`/`import()` of an image SUBPATH yields, rather than a module object. */
+  const loadedCoreImage = (node: ts.Expression): string | null => {
+    const mod = loaderCallModule(unwrap(node));
+    return mod === null ? null : coreImageModulePath(mod);
+  };
+
   /** Does this expression evaluate to the react-native module object? */
   const isRnModuleExpr = (node: ts.Expression): boolean => {
     const expr = unwrap(node);
-    if (ts.isIdentifier(expr)) return rnModule.has(expr.text);
+    if (ts.isIdentifier(expr)) return rnModule.has(expr.text) && !shadowedByParameter(expr);
     const mod = loaderCallModule(expr);
-    return mod !== null && isReactNativeModule(mod);
+    // An image subpath yields the COMPONENT, not the package — do not treat it as a namespace.
+    return mod !== null && isReactNativeModule(mod) && coreImageModulePath(mod) === null;
   };
 
   /** Does this expression evaluate to react-native's Animated? */
   const isRnAnimatedExpr = (node: ts.Expression): boolean => {
     const expr = unwrap(node);
-    if (ts.isIdentifier(expr)) return rnAnimated.has(expr.text);
+    if (ts.isIdentifier(expr)) return rnAnimated.has(expr.text) && !shadowedByParameter(expr);
     if (ts.isPropertyAccessExpression(expr) || ts.isElementAccessExpression(expr)) {
       return memberName(expr) === "Animated" && isRnModuleExpr(expr.expression);
     }
@@ -158,15 +213,27 @@ export function coreImageReaches(contents: string, fileName = "probe.tsx"): stri
     if (origin === "module" && imported === "Animated") rnAnimated.add(local);
   };
 
+  /** The statically-known property a destructuring element reads: `{ Image }`, `{ Image: X }`, `{ ["Image"]: X }`. */
+  const destructuredKey = (element: ts.BindingElement): string | null => {
+    const name = element.propertyName;
+    if (!name) return ts.isIdentifier(element.name) ? element.name.text : null;
+    if (ts.isIdentifier(name) || ts.isStringLiteralLike(name)) return name.text;
+    if (ts.isComputedPropertyName(name) && ts.isStringLiteralLike(name.expression)) return name.expression.text;
+    return null;
+  };
+
   const readBindingPattern = (pattern: ts.ObjectBindingPattern, origin: "module" | "animated", how: string) => {
     for (const element of pattern.elements) {
-      const imported = element.propertyName && ts.isIdentifier(element.propertyName)
-        ? element.propertyName.text
-        : ts.isIdentifier(element.name)
-          ? element.name.text
-          : null;
-      const local = ts.isIdentifier(element.name) ? element.name.text : imported;
-      if (imported && local) bindName(imported, local, origin, how);
+      const imported = destructuredKey(element);
+      if (!imported) continue;
+      // `const { Animated: { Image: X } } = require("react-native")` — recurse rather than stop at the nest.
+      if (ts.isObjectBindingPattern(element.name)) {
+        if (origin === "module" && imported === "Animated") {
+          readBindingPattern(element.name, "animated", "destructures Animated.");
+        }
+        continue;
+      }
+      if (ts.isIdentifier(element.name)) bindName(imported, element.name.text, origin, how);
     }
   };
 
@@ -196,13 +263,16 @@ export function coreImageReaches(contents: string, fileName = "probe.tsx"): stri
       }
     }
 
-    // A barrel re-publishes the identical component to every consumer.
-    if (ts.isExportDeclaration(node) && node.moduleSpecifier && ts.isStringLiteralLike(node.moduleSpecifier)
-      && isReactNativeModule(node.moduleSpecifier.text)) {
-      if (!node.exportClause) {
+    // A barrel re-publishes the identical component to every consumer. `export type` publishes no runtime
+    // value at all, so a type barrel must not be flagged.
+    if (ts.isExportDeclaration(node) && !node.isTypeOnly && node.moduleSpecifier
+      && ts.isStringLiteralLike(node.moduleSpecifier) && isReactNativeModule(node.moduleSpecifier.text)) {
+      if (!node.exportClause || ts.isNamespaceExport(node.exportClause)) {
+        // `export *` and `export * as RN` both hand a consumer everything, including Image.
         reasons.add('re-exports all of "react-native" (including Image) from this module');
       } else if (ts.isNamedExports(node.exportClause)) {
         for (const element of node.exportClause.elements) {
+          if (element.isTypeOnly) continue;
           const imported = (element.propertyName ?? element.name).text;
           if (CORE_IMAGE_NAMES.has(imported)) reasons.add(`re-exports ${imported} from "react-native"`);
         }
@@ -221,8 +291,14 @@ export function coreImageReaches(contents: string, fileName = "probe.tsx"): stri
       const fromModule = isRnModuleExpr(init);
       const fromAnimated = isRnAnimatedExpr(init);
 
+      // `const Image = require("react-native/Libraries/Image/Image")` binds the COMPONENT, not the package.
+      const loadedComponent = loadedCoreImage(init);
+
       if (ts.isIdentifier(node.name)) {
-        if (fromModule) rnModule.add(node.name.text);
+        if (loadedComponent) {
+          coreLocal.add(node.name.text);
+          reasons.add(`binds ${loadedComponent} from "react-native"`);
+        } else if (fromModule) rnModule.add(node.name.text);
         else if (fromAnimated) rnAnimated.add(node.name.text);
         else if (ts.isPropertyAccessExpression(init) || ts.isElementAccessExpression(init)) {
           const member = memberName(init);
@@ -249,8 +325,14 @@ export function coreImageReaches(contents: string, fileName = "probe.tsx"): stri
 
     ts.forEachChild(node, collect);
   };
-  collect(source);
-  collect(source);
+  // Iterate to a FIXED POINT, not a fixed number of passes. Each pass can only learn a binding whose
+  // right-hand side was already known, so a chain (`const A = B; const B = C; const C = RN`) needs one pass
+  // per link; two passes leave the head of a three-link chain unresolved. The sets only ever grow, so this
+  // terminates — bounded anyway, since each pass must add at least one name to continue.
+  for (let previous = -1; previous !== rnModule.size + rnAnimated.size + coreLocal.size + reasons.size; ) {
+    previous = rnModule.size + rnAnimated.size + coreLocal.size + reasons.size;
+    collect(source);
+  }
 
   // Usages that reach the component through a binding rather than naming it at import time.
   const inspect = (node: ts.Node): void => {
@@ -391,8 +473,53 @@ describe("no core react-native <Image> anywhere", () => {
         'import { Animated as A, Image as RNImage } from "react-native";\nA.createAnimatedComponent(RNImage)',
         "wraps core RNImage via createAnimatedComponent",
       ],
+      // Requiring the image subpath yields the COMPONENT, not the package — it must not be filed as a namespace.
+      ['const Image = require("react-native/Libraries/Image/Image");', 'binds Image from "react-native"'],
+      // Alias chains longer than two links: resolution runs to a fixed point, not a fixed pass count.
+      [
+        'import * as RN from "react-native";\nconst A = B;\nconst B = C;\nconst C = RN;\nconst I = A.Image;',
+        "reads Image off the react-native module",
+      ],
+      // Destructuring that is computed, or nested under Animated.
+      ['const { ["Image"]: CoreImage } = require("react-native");', 'binds Image from "react-native"'],
+      [
+        'const { Animated: { Image: CoreImage } } = require("react-native");',
+        'destructures Animated. Image from "react-native"',
+      ],
+      // `export * as RN` hands a consumer the whole namespace, Image included.
+      ['export * as RN from "react-native";', 're-exports all of "react-native" (including Image) from this module'],
     ])("flags %j", (source, expectedReason) => {
       expect(coreImageReaches(source)).toContain(expectedReason);
+    });
+
+    // Script kind is chosen per extension, so these need a filename to be meaningful.
+    it.each([
+      // Metro accepts JSX in plain .js. Parsing such a file as ScriptKind.TS silently yields no JSX nodes,
+      // which would make the whole .js/.jsx coverage decorative.
+      ['import * as RN from "react-native";\nexport const A = () => <RN.Image />;', "probe.js", "reads Image off the react-native module"],
+      ['import { Image } from "react-native";\nexport const A = () => <Image />;', "probe.jsx", 'binds Image from "react-native"'],
+      // Angle-bracket assertions only parse as .ts; `satisfies` is transparent at runtime in both.
+      [
+        'const RN = <typeof import("react-native")>require("react-native");\nconst I = RN.Image;',
+        "probe.ts",
+        "reads Image off the react-native module",
+      ],
+      [
+        'const RN = require("react-native") satisfies object;\nconst I = RN.Image;',
+        "probe.ts",
+        "reads Image off the react-native module",
+      ],
+    ])("flags %j in %s", (source, fileName, expectedReason) => {
+      expect(coreImageReaches(source, fileName)).toContain(expectedReason);
+    });
+
+    it.each([
+      // `export type` publishes no runtime value, so a type barrel exposes no component.
+      ['export type * from "react-native";', "probe.ts"],
+      ['export type { Image } from "react-native";', "probe.ts"],
+      ['export { type Image } from "react-native";', "probe.ts"],
+    ])("does not flag %j in %s", (source, fileName) => {
+      expect(coreImageReaches(source, fileName)).toEqual([]);
     });
 
     it.each([
@@ -415,6 +542,10 @@ describe("no core react-native <Image> anywhere", () => {
       // A type-only import cannot render.
       'import type { ImageStyle } from "react-native";\nimport { Image } from "expo-image";',
       'import { type ImageSourcePropType, View } from "react-native";',
+      // A parameter shadowing a namespace import is a different variable — flagging it would fail the
+      // build on code that never touches react-native.
+      'import * as RN from "react-native";\nexport function read(RN: Data) { return RN.Image; }',
+      'import { Animated } from "react-native";\nexport function f(Animated: X) { return Animated.Image; }',
     ])("does not flag %j", (source) => {
       expect(coreImageReaches(source)).toEqual([]);
     });
