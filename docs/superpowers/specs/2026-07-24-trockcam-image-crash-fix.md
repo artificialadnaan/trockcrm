@@ -79,7 +79,7 @@ URI, and there is no signature-scoped disk-cache cleanup.
 
 ## Testing
 
-Full mobile suite green at the time of this change (**48 suites / 551 tests**), `tsc` clean. (A point-in-time
+Full mobile suite green at the time of this change (**48 suites / 558 tests**), `tsc` clean. (A point-in-time
 count, recorded as evidence for this dated record — it is expected to drift as tests are added.)
 
 Per-component **"is expo-image" guards** (array-normalized `source` + `cachePolicy`) on `PhotoGrid` (new

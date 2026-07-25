@@ -55,6 +55,22 @@ import * as ts from "typescript";
  *
  * Closing 2 or 3 properly means a type-checked `ts.Program` with real symbol resolution, which is a large
  * step up in cost for routes nothing in this codebase uses. Revisit if that stops being true.
+ *
+ * WHERE THE LINE IS, AND WHY IT IS HERE. Review kept producing further evasions, and will continue to: the
+ * ways to name a module member in TS/JS are effectively unbounded for a syntactic checker, so "no more
+ * findings" is not a reachable state. The threat this guards against is not an adversary — it is a
+ * developer re-introducing `import { Image } from "react-native"` during ordinary work, or a migration
+ * sweep missing a file. Everything on that path is covered and pinned below.
+ *
+ * These are known and deliberately NOT covered, because writing them is already a conscious act that no
+ * amount of pattern-matching would stop, and each additional branch has empirically been a place for a new
+ * bug (three separate rounds here fixed a defect and introduced the next one):
+ *   - destructuring ASSIGNMENT rather than declaration: `let Image; ({ Image } = RN);`
+ *   - a conditional/logical initializer: `const M = cond ? RN : other; M.Image`
+ *   - a barrel that re-exports `Animated` for a consumer to reach `Animated.Image` through
+ *   - a value import consumed only in type position, which TypeScript erases (this one is a false
+ *     POSITIVE, and arguably correct to flag anyway — importing core Image at all is the footgun)
+ * Prefer adding a case here, with its reasoning, over quietly growing the matcher.
  */
 
 const MOBILE_ROOT = path.resolve(__dirname, "../..");
@@ -97,7 +113,11 @@ function isReactNativeModule(specifier: string): boolean {
  */
 function coreImageModulePath(specifier: string): string | null {
   if (!specifier.startsWith("react-native/")) return null;
-  const base = (specifier.split("/").pop() ?? "").replace(/\.(ios|android|native|web)?\.?[jt]sx?$/, "");
+  // Strip a platform suffix and/or an extension, in either combination: `Image`, `Image.ios`,
+  // `Image.ios.js`, `Image.js`. Metro resolves all of them to the same module.
+  const base = (specifier.split("/").pop() ?? "")
+    .replace(/\.[jt]sx?$/, "")
+    .replace(/\.(ios|android|native|web)$/, "");
   return CORE_IMAGE_NAMES.has(base) ? base : null;
 }
 
@@ -178,9 +198,17 @@ export function coreImageReaches(contents: string, fileName = "probe.tsx"): stri
   const rnAnimated = new Set<string>(); // locals holding react-native's Animated
   const coreLocal = new Set<string>(); // locals holding a core Image/ImageBackground component
 
-  /** The core component a `require()`/`import()` of an image SUBPATH yields, rather than a module object. */
+  /**
+   * The core component a `require()`/`import()` of an image SUBPATH yields, rather than a module object.
+   * `.default` is included because that is react-native's own idiom — index.js is literally
+   * `get Image() { return require('./Libraries/Image/Image').default; }`.
+   */
   const loadedCoreImage = (node: ts.Expression): string | null => {
-    const mod = loaderCallModule(unwrap(node));
+    let expr = unwrap(node);
+    if ((ts.isPropertyAccessExpression(expr) || ts.isElementAccessExpression(expr)) && memberName(expr) === "default") {
+      expr = unwrap(expr.expression);
+    }
+    const mod = loaderCallModule(expr);
     return mod === null ? null : coreImageModulePath(mod);
   };
 
@@ -267,14 +295,24 @@ export function coreImageReaches(contents: string, fileName = "probe.tsx"): stri
     // value at all, so a type barrel must not be flagged.
     if (ts.isExportDeclaration(node) && !node.isTypeOnly && node.moduleSpecifier
       && ts.isStringLiteralLike(node.moduleSpecifier) && isReactNativeModule(node.moduleSpecifier.text)) {
+      const spec = node.moduleSpecifier.text;
+      const subpathComponent = coreImageModulePath(spec);
       if (!node.exportClause || ts.isNamespaceExport(node.exportClause)) {
-        // `export *` and `export * as RN` both hand a consumer everything, including Image.
-        reasons.add('re-exports all of "react-native" (including Image) from this module');
+        // `export *` / `export * as RN` hand a consumer everything the module has. That only exposes an
+        // image component if the module IS the package root or the image module itself — starring an
+        // unrelated subpath (…/StyleSheet/StyleSheet) exposes nothing, and flagging it would fail the
+        // build on safe code.
+        if (spec === "react-native" || subpathComponent) {
+          reasons.add('re-exports all of "react-native" (including Image) from this module');
+        }
       } else if (ts.isNamedExports(node.exportClause)) {
         for (const element of node.exportClause.elements) {
           if (element.isTypeOnly) continue;
           const imported = (element.propertyName ?? element.name).text;
-          if (CORE_IMAGE_NAMES.has(imported)) reasons.add(`re-exports ${imported} from "react-native"`);
+          // From the image module itself, ANY value re-export republishes the component — including the
+          // idiomatic `export { default as Image }`.
+          if (subpathComponent) reasons.add(`re-exports ${subpathComponent} from "react-native"`);
+          else if (CORE_IMAGE_NAMES.has(imported)) reasons.add(`re-exports ${imported} from "react-native"`);
         }
       }
     }
@@ -488,6 +526,17 @@ describe("no core react-native <Image> anywhere", () => {
       ],
       // `export * as RN` hands a consumer the whole namespace, Image included.
       ['export * as RN from "react-native";', 're-exports all of "react-native" (including Image) from this module'],
+      // `.default` is react-native's own idiom for the image subpath (see index.js).
+      ['const Image = require("react-native/Libraries/Image/Image").default;', 'binds Image from "react-native"'],
+      // Platform suffixes resolve to the same module, with or without an extension.
+      ['import Image from "react-native/Libraries/Image/Image.ios";', 'binds Image from "react-native"'],
+      ['import Image from "react-native/Libraries/Image/Image.ios.js";', 'binds Image from "react-native"'],
+      // From the image module itself, any value re-export republishes the component.
+      [
+        'export { default as Image } from "react-native/Libraries/Image/Image";',
+        're-exports Image from "react-native"',
+      ],
+      ['export * from "react-native/Libraries/Image/Image";', 're-exports all of "react-native" (including Image) from this module'],
     ])("flags %j", (source, expectedReason) => {
       expect(coreImageReaches(source)).toContain(expectedReason);
     });
@@ -546,6 +595,9 @@ describe("no core react-native <Image> anywhere", () => {
       // build on code that never touches react-native.
       'import * as RN from "react-native";\nexport function read(RN: Data) { return RN.Image; }',
       'import { Animated } from "react-native";\nexport function f(Animated: X) { return Animated.Image; }',
+      // Starring an unrelated react-native subpath exposes no image component.
+      'export * from "react-native/Libraries/StyleSheet/StyleSheet";',
+      'export { default as StyleSheet } from "react-native/Libraries/StyleSheet/StyleSheet";',
     ])("does not flag %j", (source) => {
       expect(coreImageReaches(source)).toEqual([]);
     });
