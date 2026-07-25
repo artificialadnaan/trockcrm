@@ -48,10 +48,11 @@ import * as ts from "typescript";
  *     or `.then(({ Image }) => Image)`. Following a module object into a callback parameter needs dataflow
  *     this check does not do. The awaited forms (`await import(…)`, `const { Image } = await import(…)`)
  *     ARE covered, and are what anyone would actually write.
- *  3. Shadowing beyond function parameters. A parameter named after a tracked binding is handled (see
- *     `shadowedByParameter`), because that was a live false positive. A block-scoped `const RN = notRN`
- *     inside a function is not modelled — binding tracking is per-file, not per-scope. Erring here yields a
- *     false POSITIVE (a failing build on safe code), not a missed crash.
+ *  3. Shadowing beyond parameters and catch variables. Those two ARE handled, including destructured
+ *     forms (`function d({ RN })`, `catch (RN)`) — see `shadowedByLocalBinding`; each was a live false
+ *     positive. A block-scoped `const RN = notRN` inside a function is not modelled — binding tracking is
+ *     per-file, not per-scope. Erring here yields a false POSITIVE (a failing build on safe code), not a
+ *     missed crash.
  *
  * Closing 2 or 3 properly means a type-checked `ts.Program` with real symbol resolution, which is a large
  * step up in cost for routes nothing in this codebase uses. Revisit if that stops being true.
@@ -167,15 +168,24 @@ function unwrap(node: ts.Expression): ts.Expression {
   }
 }
 
+/** Does this binding name introduce `target`? Recurses, so `{ RN }` and `[, RN]` both count. */
+function bindsLocalName(name: ts.BindingName, target: string): boolean {
+  if (ts.isIdentifier(name)) return name.text === target;
+  return name.elements.some((el) => ts.isBindingElement(el) && bindsLocalName(el.name, target));
+}
+
 /**
- * Is this identifier a function parameter rather than the module binding of the same name? Without this,
- * `import * as RN from "react-native"; function read(RN: Data) { return RN.Image; }` fails the guard on
- * code that never touches react-native. Only parameters are modelled — see the KNOWN LIMIT above.
+ * Is this identifier a parameter or catch variable rather than the module binding of the same name?
+ * Without this, `import * as RN from "react-native"; function read(RN: Data) { return RN.Image; }` fails
+ * the guard on code that never touches react-native. Destructured parameters (`function d({ RN })`) and
+ * `catch (RN)` count too — both were live false positives. See the KNOWN LIMIT above for what is not
+ * modelled: an ordinary block-scoped `const RN = notRN` inside a function.
  */
-function shadowedByParameter(id: ts.Identifier): boolean {
+function shadowedByLocalBinding(id: ts.Identifier): boolean {
   for (let node: ts.Node | undefined = id.parent; node; node = node.parent) {
-    if (ts.isFunctionLike(node)
-      && node.parameters.some((p) => ts.isIdentifier(p.name) && p.name.text === id.text)) {
+    if (ts.isFunctionLike(node) && node.parameters.some((p) => bindsLocalName(p.name, id.text))) return true;
+    if (ts.isCatchClause(node) && node.variableDeclaration
+      && bindsLocalName(node.variableDeclaration.name, id.text)) {
       return true;
     }
   }
@@ -215,7 +225,7 @@ export function coreImageReaches(contents: string, fileName = "probe.tsx"): stri
   /** Does this expression evaluate to the react-native module object? */
   const isRnModuleExpr = (node: ts.Expression): boolean => {
     const expr = unwrap(node);
-    if (ts.isIdentifier(expr)) return rnModule.has(expr.text) && !shadowedByParameter(expr);
+    if (ts.isIdentifier(expr)) return rnModule.has(expr.text) && !shadowedByLocalBinding(expr);
     const mod = loaderCallModule(expr);
     // An image subpath yields the COMPONENT, not the package — do not treat it as a namespace.
     return mod !== null && isReactNativeModule(mod) && coreImageModulePath(mod) === null;
@@ -224,7 +234,7 @@ export function coreImageReaches(contents: string, fileName = "probe.tsx"): stri
   /** Does this expression evaluate to react-native's Animated? */
   const isRnAnimatedExpr = (node: ts.Expression): boolean => {
     const expr = unwrap(node);
-    if (ts.isIdentifier(expr)) return rnAnimated.has(expr.text) && !shadowedByParameter(expr);
+    if (ts.isIdentifier(expr)) return rnAnimated.has(expr.text) && !shadowedByLocalBinding(expr);
     if (ts.isPropertyAccessExpression(expr) || ts.isElementAccessExpression(expr)) {
       return memberName(expr) === "Animated" && isRnModuleExpr(expr.expression);
     }
@@ -296,9 +306,15 @@ export function coreImageReaches(contents: string, fileName = "probe.tsx"): stri
           const imported = (element.propertyName ?? element.name).text;
           // From the image module, `default` IS the component — the named form of the default import
           // already handled above, and the mirror of the `.default` require idiom.
-          if (asComponent && imported === "default") {
-            coreLocal.add(element.name.text);
-            reasons.add(`binds ${asComponent} from "react-native"`);
+          if (imported === "default") {
+            if (asComponent) {
+              coreLocal.add(element.name.text);
+              reasons.add(`binds ${asComponent} from "react-native"`);
+            } else {
+              // From the package root under CJS interop, `default` IS module.exports — the named spelling
+              // of `import RN from "react-native"`, which is already tracked as the module object.
+              rnModule.add(element.name.text);
+            }
             continue;
           }
           bindName(imported, element.name.text, "module", "binds");
@@ -364,7 +380,15 @@ export function coreImageReaches(contents: string, fileName = "probe.tsx"): stri
           }
         }
       } else if (ts.isObjectBindingPattern(node.name)) {
-        if (fromModule) readBindingPattern(node.name, "module", "binds");
+        if (loadedComponent) {
+          // `const { default: X } = require(".../Image")` — the destructured spelling of `.default`.
+          for (const element of node.name.elements) {
+            if (destructuredKey(element) === "default" && ts.isIdentifier(element.name)) {
+              coreLocal.add(element.name.text);
+              reasons.add(`binds ${loadedComponent} from "react-native"`);
+            }
+          }
+        } else if (fromModule) readBindingPattern(node.name, "module", "binds");
         else if (fromAnimated) readBindingPattern(node.name, "animated", "destructures Animated.");
       }
     }
@@ -558,6 +582,10 @@ describe("no core react-native <Image> anywhere", () => {
       ['const { ...RN } = require("react-native");\nconst I = RN.Image;', "reads Image off the react-native module"],
       ['import * as M from "react-native";\nconst { ...RN } = M;\nconst I = RN.ImageBackground;', "reads ImageBackground off the react-native module"],
       ['import { Animated } from "react-native";\nconst { ...A } = Animated;\nconst I = A.Image;', "renders Animated.Image"],
+      // The destructured spelling of `.default` off the image subpath.
+      ['const { default: X } = require("react-native/Libraries/Image/Image");', 'binds Image from "react-native"'],
+      // From the package root under CJS interop, `default` is module.exports.
+      ['import { default as RN } from "react-native";\nconst I = RN.Image;', "reads Image off the react-native module"],
     ])("flags %j", (source, expectedReason) => {
       expect(coreImageReaches(source)).toContain(expectedReason);
     });
@@ -619,6 +647,9 @@ describe("no core react-native <Image> anywhere", () => {
       // Starring an unrelated react-native subpath exposes no image component.
       'export * from "react-native/Libraries/StyleSheet/StyleSheet";',
       'export { default as StyleSheet } from "react-native/Libraries/StyleSheet/StyleSheet";',
+      // Destructured parameters and catch variables shadow just as plain ones do.
+      'import * as RN from "react-native";\nexport function d({ RN }: { RN: Meta }) { return RN.Image; }',
+      'import * as RN from "react-native";\nexport function f() { try { g(); } catch (RN) { return RN.Image; } }',
     ])("does not flag %j", (source) => {
       expect(coreImageReaches(source)).toEqual([]);
     });
