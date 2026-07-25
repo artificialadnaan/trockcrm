@@ -79,10 +79,11 @@ URI, and there is no signature-scoped disk-cache cleanup.
 
 ## Testing
 
-Full mobile suite green (47 suites / 501 tests), `tsc` clean.
+Full mobile suite green (48 suites / 505 tests), `tsc` clean.
 
 Per-component **"is expo-image" guards** (array-normalized `source` + `cachePolicy`) on `PhotoGrid` (new
-test — the untested primary surface), `ScorecardDetailView`, `ReviewTray`, and `PhotoCaptionEditor`.
+test — the untested primary surface), `ScorecardDetailView`, `ReviewTray`, and `PhotoCaptionEditor`, and a new `BrandLogo` test (it had none) covering the expo-image swap,
+`contentFit`, the dark/light surface mark selection, and the grouped-VoiceOver label.
 
 Those only lock components that already have a test, which is exactly how the route files slipped through —
 and `mobile/app` route files have no render tests at all. So the real lock is

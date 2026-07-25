@@ -42,6 +42,7 @@ export function BrandLogo({
         — a narrow window against that race, but the same one, on nearly every screen in the app.
       */}
       <ExpoImage
+        testID="brand-logo-mark"
         source={markSource}
         style={{ width: size, height: size }}
         contentFit="contain"
