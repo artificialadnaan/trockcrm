@@ -84,7 +84,11 @@ fine and then 403s on its first click. Both are covered by real-SQL tests agains
 - **Lock order is roster-then-card.** The edit takes the roster row's FOR KEY SHARE — the same lock its FK
   write needs anyway — BEFORE locking the card, because the assign-from-roster team POST goes roster-then-card
   and two opposed orders on that pair deadlock.
-- **A pick change on an already-notified open card restarts the notification cycle.** Otherwise the swap
+- **A pick change on an open card restarts the notification cycle UNCONDITIONALLY.** Not "if already sent",
+  not "if no job looks live" — every such test is a race, because the worker's re-resolve is not atomic with its
+  stamp: a job that re-read the old pick will block on the card row and stamp after the edit commits unless the
+  nonce moves. Restarting always is safe because the cycle nonce supersedes: the stale job returns early with no
+  send and no stamp. **A pick change on an already-notified open card restarts the notification cycle.** Otherwise the swap
   strands both people: the previous holder's token stops authorizing and the new pick was never emailed, while
   the sent stamp suppresses any further send. This reuses the existing cycle machinery
   (`reconcileScorecardCorrectiveActions`, `responderPickChanged`) — no new locks.
@@ -99,8 +103,14 @@ fine and then 403s on its first click. Both are covered by real-SQL tests agains
   That is a pre-existing bug, unchanged here, and worth its own PR — a pick makes the same person visible, which
   will make the inconsistency easier to notice.
 - The completed-scorecard recipient is frozen at submit for ordinary edits, matching how the deal-team
-  addresses have always behaved on that job. A pick CHANGE is the exception: it re-addresses the still-pending
-  job, so correcting a mis-picked superintendent seconds after filing reaches the right person.
+  addresses have always behaved on that job. A pick CHANGE is the exception: it re-addresses the job — and
+  REQUEUES it if it had dead-lettered — so correcting a mis-picked superintendent shortly after filing reaches
+  the right person. **Not covered: a job already `processing`.** The worker has loaded its payload by then, and
+  reaching the new pick would mean clearing `email_sent_at` and re-running, which re-sends the PDF to the whole
+  env recipient list (this job addresses one deduped union, not a person). That window is one job run and is
+  the pre-existing send-once behavior, not something the pick feature introduced; the corrective-action email,
+  the one a responder must act on, resolves at send time and is unaffected. Closing it needs a per-recipient
+  follow-up delivery this job type does not have — a deliberate piece of work, not a patch here.
 - The pick-changed restart triggers on id inequality rather than on a change to the RESOLVED recipient set, so
   clearing a pick whose person is also the deal-team super re-notifies the same people once. Worst case is a
   duplicate email carrying a fresh link, never a stranded card.

@@ -186,28 +186,6 @@ function resolvedIdsForNoLongerFlaggedItems(
   return removed;
 }
 
-/**
- * Whether a notification job for this scorecard is still going to run — pending (waiting on its delay/backoff)
- * or processing (in flight right now). Both re-resolve recipients at send time, so a change to WHO answers the
- * card needs no fresh cycle: they will address it themselves, and an in-flight run's pre-stamp revalidation
- * catches a set that moved mid-send.
- *
- * A `dead` job (attempts exhausted) or no job at all is the case this exists to distinguish: those leave
- * corrective_action_email_sent_at NULL with nothing left to deliver, which reads identically to "still coming"
- * if you only look at the stamp.
- */
-async function hasLiveCorrectiveActionJob(tx: TenantDb, scorecardId: string): Promise<boolean> {
-  const result = await tx.execute(sql`
-    SELECT 1
-      FROM public.job_queue
-     WHERE job_type = ${SCORECARD_CORRECTIVE_ACTION_EMAIL_JOB}
-       AND status IN ('pending', 'processing')
-       AND payload->>'scorecardId' = ${scorecardId}
-     LIMIT 1
-  `);
-  return ((result as { rows?: unknown[] }).rows ?? []).length > 0;
-}
-
 export interface ReconcileCorrectiveActionsInput {
   scorecardId: string;
   dealId: string;
@@ -510,25 +488,26 @@ export async function reconcileScorecardCorrectiveActions(
   //      nothing. Restarting the cycle re-mints + re-sends for the new recipient set — the same remedy
   //      restartCorrectiveActionNotificationCycleForDeal already applies to a Team-tab reassignment.
   //
-  //      The suppression here is NOT "already sent" but "somebody will still deliver this cycle": a job that is
-  //      pending or processing re-resolves recipients at send time, so it will address the new pick on its own
-  //      and a second enqueue would double-send. A sent stamp means no such job remains — and so does a job
-  //      that DEAD-LETTERED after exhausting its attempts, which leaves sent_at NULL with nothing left to run.
-  //      Gating on the stamp alone would read that dead cycle as "still coming" and suppress the restart, so
-  //      the newly picked responder would be permanently unnotified while the previous one's link has already
-  //      stopped authorizing — the card becomes unanswerable by anyone.
+  //      UNCONDITIONAL — unlike (2), this does NOT ask whether the email already went out or whether some job
+  //      might still deliver. Every "is a job still coming?" test is a race: the worker resolves recipients,
+  //      sends, then RE-resolves before stamping, and none of that is atomic with this transaction. A job that
+  //      re-read the OLD pick just before this edit commits will then block on the card row, acquire it after
+  //      the commit, and stamp successfully — because nothing rotated the cycle nonce. The old recipient is
+  //      left holding a link that now 403s, the new pick has neither token nor email, and the stamp suppresses
+  //      any further send: unanswerable by anyone.
   //
-  //      NOTE: (2) above still gates on the stamp alone and inherits the dead-job hole. Left as-is on purpose —
-  //      it is pre-existing and strictly milder there (the existing recipients keep working links and merely
-  //      miss the new item), whereas here it strands the card. Worth its own change, not a silent widening.
-  const responderChangeNeedsRestart =
+  //      Restarting unconditionally is safe precisely because the cycle nonce already exists to supersede: a
+  //      still-pending job whose payload nonce no longer matches the stored one returns early with NO send and
+  //      NO stamp, and an in-flight job's stamp updates 0 rows. So the fresh cycle is the only delivery, which
+  //      is what makes "a second enqueue would double-send" untrue here — that worry is what the nonce solved.
+  //
+  //      NOTE: (2) above still gates on the stamp and inherits the same race. Left as-is on purpose — it is
+  //      pre-existing and strictly milder there (the existing recipients keep working links and merely miss the
+  //      new item), whereas here it strands the card. Worth its own change, not a silent widening.
+  const alreadyOpenResponderChanged =
     nextStatus === "corrective_action_open" &&
     input.currentStatus === "corrective_action_open" &&
     input.responderPickChanged === true;
-  const alreadyOpenResponderChanged =
-    responderChangeNeedsRestart &&
-    (correctiveActionEmailSentAt !== null ||
-      !(await hasLiveCorrectiveActionJob(tx, input.scorecardId)));
   if (transitioningIntoOpen || alreadyOpenGainedWork || alreadyOpenResponderChanged) {
     // Mint the per-cycle nonce ONCE and use it in BOTH places: (a) persisted on the scorecard as the ACTIVE
     // cycle's nonce, and (b) the enqueued job's payload.cycleNonce. Keeping them equal is what lets the

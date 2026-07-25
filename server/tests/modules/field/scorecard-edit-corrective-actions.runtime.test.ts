@@ -1114,11 +1114,8 @@ describe("scorecard edit — picked field responder", () => {
     expect(nonceAfter).not.toBe(nonceBefore);
   });
 
-  it("DOES restart when the pick changes and the original notification job DEAD-lettered", async () => {
-    // A dead job leaves corrective_action_email_sent_at NULL with nothing left to run, which looks identical to
-    // "still pending" if you only check the stamp. Suppressing the restart there would leave the newly picked
-    // responder permanently unnotified while the previous one's link has already stopped authorizing — nobody
-    // can answer the card.
+  it("restarts when the pick changes and the original notification job DEAD-lettered", async () => {
+    // A dead job leaves corrective_action_email_sent_at NULL with nothing left to run.
     const { scorecard } = await createFieldScorecard(
       tdb,
       createInput({ items: v2Items(5), actionItems: ["Fix the rail"], superintendentResponderId: ROSTER_A }),
@@ -1143,7 +1140,11 @@ describe("scorecard edit — picked field responder", () => {
     expect(await correctiveJobCount()).toBe(jobsBefore + 1);
   });
 
-  it("does NOT re-enqueue when a PROCESSING job is mid-flight (it re-resolves at send time)", async () => {
+  it("restarts even while a PROCESSING job is mid-flight — the nonce supersedes it", async () => {
+    // The load-bearing race: that job may have re-resolved the OLD pick moments ago and be about to stamp. It
+    // will block on this edit's card lock and then stamp AFTER the commit unless the cycle nonce moves, leaving
+    // the old recipient with a 403ing link and the new pick with nothing. Rotating the nonce makes its stamp
+    // update 0 rows, so the fresh cycle is the only delivery.
     const { scorecard } = await createFieldScorecard(
       tdb,
       createInput({ items: v2Items(5), actionItems: ["Fix the rail"], superintendentResponderId: ROSTER_A }),
@@ -1164,12 +1165,12 @@ describe("scorecard edit — picked field responder", () => {
       }),
     );
 
-    expect(await correctiveJobCount()).toBe(jobsBefore);
+    expect(await correctiveJobCount()).toBe(jobsBefore + 1);
   });
 
-  it("does NOT re-enqueue when the pick changes while the FIRST notification is still pending", async () => {
-    // The pending job resolves recipients at send time, so it will already address the new pick. A second
-    // enqueue here would double-email.
+  it("restarts when the pick changes while the FIRST notification is still pending", async () => {
+    // The superseded pending job returns early with no send and no stamp (its payload nonce no longer matches
+    // the stored one), so this is one delivery to the right person, not two.
     const { scorecard } = await createFieldScorecard(
       tdb,
       createInput({ items: v2Items(5), actionItems: ["Fix the rail"], superintendentResponderId: ROSTER_A }),
@@ -1187,7 +1188,7 @@ describe("scorecard edit — picked field responder", () => {
       }),
     );
 
-    expect(await correctiveJobCount()).toBe(jobsBefore);
+    expect(await correctiveJobCount()).toBe(jobsBefore + 1);
     expect(await storedSuperLink(scorecard.id)).toBe(ROSTER_B);
   });
 
@@ -1353,6 +1354,46 @@ describe("scorecard edit — picked field responder", () => {
     const at = await currentUpdatedAt(scorecard.id);
     await updateFieldScorecard(tdb, updateInput(scorecard.id, at));
     expect((await payloadFor()).superintendentEmail).toBe("team.super@trock.test");
+  });
+
+  it("rotates the cycle nonce on a pick change so an in-flight job's stamp cannot land", async () => {
+    // The nonce is the mechanism that makes the unconditional restart safe: the superseded job early-returns
+    // (payload nonce != stored nonce) and, if it is already past that gate, its guarded stamp updates 0 rows.
+    const { scorecard } = await createFieldScorecard(
+      tdb,
+      createInput({ items: v2Items(5), actionItems: ["Fix the rail"], superintendentResponderId: ROSTER_A }),
+    );
+    const nonceOf = async () => (
+      (await tdb.execute(
+        sql`SELECT corrective_action_cycle_nonce AS n FROM field_scorecards WHERE id = ${scorecard.id}`,
+      )).rows[0] as { n: string | null }
+    ).n;
+    const before = await nonceOf();
+    await tdb.execute(sql`
+      UPDATE public.job_queue SET status = 'processing'
+       WHERE job_type = 'scorecard_corrective_action_email' AND payload->>'scorecardId' = ${scorecard.id}
+    `);
+
+    const at = await currentUpdatedAt(scorecard.id);
+    await updateFieldScorecard(
+      tdb,
+      updateInput(scorecard.id, at, {
+        items: v2Items(5),
+        actionItems: ["Fix the rail"],
+        superintendentResponderId: ROSTER_B,
+      }),
+    );
+
+    const after = await nonceOf();
+    expect(after).toBeTruthy();
+    expect(after).not.toBe(before);
+    // The freshly enqueued job carries the SAME nonce now stored, so it is the one that can stamp.
+    const jobRes = await tdb.execute(sql`
+      SELECT payload FROM public.job_queue
+       WHERE job_type = 'scorecard_corrective_action_email' AND payload->>'scorecardId' = ${scorecard.id}
+       ORDER BY id DESC LIMIT 1
+    `);
+    expect((jobRes.rows[0] as { payload: { cycleNonce: string } }).payload.cycleNonce).toBe(after);
   });
 
   it("does NOT restart the cycle for an edit that leaves the pick alone", async () => {
