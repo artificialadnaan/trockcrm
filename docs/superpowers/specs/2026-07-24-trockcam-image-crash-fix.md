@@ -79,7 +79,7 @@ URI, and there is no signature-scoped disk-cache cleanup.
 
 ## Testing
 
-Full mobile suite green at the time of this change (**48 suites / 519 tests**), `tsc` clean. (A point-in-time
+Full mobile suite green at the time of this change (**48 suites / 537 tests**), `tsc` clean. (A point-in-time
 count, recorded as evidence for this dated record — it is expected to drift as tests are added.)
 
 Per-component **"is expo-image" guards** (array-normalized `source` + `cachePolicy`) on `PhotoGrid` (new
@@ -88,11 +88,20 @@ test — the untested primary surface), `ScorecardDetailView`, `ReviewTray`, and
 
 Those only lock components that already have a test, which is exactly how the route files slipped through —
 and `mobile/app` route files have no render tests at all. So the real lock is
-`src/__tests__/no-core-rn-image.test.ts`, a **tree-wide invariant**: it walks every `.ts`/`.tsx` under
-`app/` and `src/` and fails on any route to the core component — named imports (incl. aliases),
-destructured/member `require` forms, `Animated.Image` **matched on the local binding** (so
-`import { Animated as RNAnimated }` + `<RNAnimated.Image />` is caught, not just the literal spelling),
-`createAnimatedComponent(Image)`, and `RN.Image` / `RN.Animated.Image` via a namespace/default module binding. It **self-tests** each detection route against a literal offending
+`src/__tests__/no-core-rn-image.test.ts`, a **tree-wide invariant**: it parses every source file under
+`app/` and `src/` with the TypeScript compiler and fails on any route to the core component — named
+imports (incl. aliases), destructured and member `require`/dynamic-`import` forms, deep subpaths like
+`react-native/Libraries/Image/Image`, re-export barrels, `Animated.Image` matched on the local binding,
+`createAnimatedComponent(Image)` when the argument really is a core binding, and `RN.Image` /
+`RN["Image"]` / `RN.Animated.Image` through a namespace, default or re-bound module local.
+
+It parses rather than greps because the regex version leaked five separate ways, every one found by
+review rather than by the guard — culminating in a fail-OPEN design flaw where an unparseable specifier
+was silently dropped, so a single comment inside an import list disarmed it. Text matching also produced
+the mirror failure, flagging an `Image` that appeared only in a comment. Against a syntax tree both
+classes disappear: comments are trivia, aliases and binding forms are structure, formatting is irrelevant.
+An adversarial audit then generated 43 candidate evasions and executed each against the implementation;
+everything it confirmed is now covered and pinned by a self-test. It **self-tests** each detection route against a literal offending
 snippet, plus negative cases. It also splices `Image` into the react-native import of EVERY real file in
 the tree and requires the guard to fire on each — because a parser that silently fails on our actual file
 shapes reports zero offenders just like a clean tree does, and synthetic snippets cannot detect that.
