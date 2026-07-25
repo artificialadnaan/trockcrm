@@ -13,12 +13,14 @@ function ControlledPicker({
   responders,
   error = null,
   initial = "",
+  responderId = null,
 }: {
   onChange: (name: string, responder: FieldResponderOption | null) => void;
   role?: FieldResponderRole;
   responders: FieldResponderOption[];
   error?: string | null;
   initial?: string;
+  responderId?: string | null;
 }) {
   const [value, setValue] = useState(initial);
   return (
@@ -31,6 +33,7 @@ function ControlledPicker({
       role={role}
       responders={responders}
       error={error}
+      responderId={responderId}
     />
   );
 }
@@ -52,9 +55,14 @@ describe("matchResponders", () => {
     expect(matchResponders(roster, "superintendent", "").map((r) => r.id)).toEqual(["u1", "u2"]);
   });
 
-  it("excludes an entry whose name exactly equals the current value (already picked)", () => {
-    expect(matchResponders(roster, "superintendent", "James Helms")).toEqual([]);
-    expect(matchResponders(roster, "superintendent", "james helms")).toEqual([]);
+  it("excludes an entry whose name exactly equals the current value ONLY when that pick is recorded", () => {
+    // With a pick recorded, the row has nothing to offer — the user already selected exactly it.
+    expect(matchResponders(roster, "superintendent", "James Helms", { hasPick: true })).toEqual([]);
+    expect(matchResponders(roster, "superintendent", "james helms", { hasPick: true })).toEqual([]);
+    // With NO pick recorded, the row MUST stay offered. Otherwise a user who types the name (or edits a picked
+    // name and undoes the edit, which clears the pick) can never record it: the card would display that
+    // person while routing its corrective action to the deal team, with no way to fix it from the form.
+    expect(matchResponders(roster, "superintendent", "James Helms").map((r) => r.id)).toEqual(["u1"]);
   });
 });
 
@@ -183,5 +191,30 @@ describe("ResponderPicker", () => {
     fireEvent(input, "focus");
     fireEvent.changeText(input, "James Helm");
     expect(onChange).toHaveBeenLastCalledWith("James Helm", null);
+  });
+
+  it("(g) a cleared pick can be re-picked — the exact-name row comes back once no pick is recorded", () => {
+    // The trap this closes: pick James Helms, type one character and delete it. The name reads "James Helms"
+    // again but the pick is gone, and with the exact-name row hidden there was no way to restore it — the card
+    // would show James while quietly routing its corrective action to the deal team.
+    const onChange = jest.fn();
+    const { getByLabelText, getByText } = render(
+      <ControlledPicker onChange={onChange} responders={roster} initial="James Helms" responderId={null} />,
+    );
+    const input = getByLabelText(INPUT_LABEL);
+
+    fireEvent(input, "focus");
+    expect(getByText("James Helms")).toBeTruthy();
+    fireEvent.press(getByText("James Helms"));
+    expect(onChange).toHaveBeenLastCalledWith("James Helms", roster[0]);
+  });
+
+  it("(h) with the pick recorded, the exact-name row stays hidden (nothing to re-offer)", () => {
+    const onChange = jest.fn();
+    const { getByLabelText, queryByText } = render(
+      <ControlledPicker onChange={onChange} responders={roster} initial="James Helms" responderId="u1" />,
+    );
+    fireEvent(getByLabelText(INPUT_LABEL), "focus");
+    expect(queryByText("James Helms")).toBeNull();
   });
 });

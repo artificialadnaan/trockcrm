@@ -10,6 +10,7 @@ import {
 } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
 import { isValidMemberEmail } from "../deals/team-service.js";
+import { restartCorrectiveActionNotificationCycleForResponder } from "./corrective-actions-service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -163,6 +164,13 @@ export async function updateFieldResponder(
   tenantDb: TenantDb,
   id: string,
   input: UpdateFieldResponderInput,
+  /**
+   * Owning office (id + slug). When supplied, a change that alters WHO this person is — or WHETHER they still
+   * resolve at all — re-notifies every open corrective-action card that PICKED them (see
+   * restartCorrectiveActionNotificationCycleForResponder). Optional/best-effort, matching the team-mutation
+   * routes: without office context the roster edit still applies, it just can't enqueue.
+   */
+  office?: { id: string; slug: string },
 ): Promise<FieldResponder> {
   const updates: Record<string, unknown> = {};
   // As in create: a non-string name/email from the untyped body coerces to "" and hits the 400 guard rather than
@@ -257,6 +265,20 @@ export async function updateFieldResponder(
     throw err;
   }
   if (updated.length === 0) throw new AppError(404, "Field responder not found.");
+
+  // Re-notify the cards this person answers for when the edit changed WHO IS REACHED or WHETHER THEY RESOLVE:
+  //   - is_active flipped  → the pick stops (or starts) winning;
+  //   - role changed       → the pick no longer matches the slot it was made for;
+  //   - email changed      → their outstanding token's recipient_email stops matching, so their link 403s.
+  // Each of those revokes the current holder at read time; without a restart the fallback super/PM is never
+  // told, and the sent stamp means nothing sends again. A pure NAME edit is excluded — it changes the label,
+  // not the routing. Compared against the PRE-update row so a no-op patch (same values) enqueues nothing.
+  const emailChanged = nextEmail != null && nextEmail.toLowerCase() !== existing.email.toLowerCase();
+  const roleChanged = updates.role !== undefined && updates.role !== existing.role;
+  const activeChanged = updates.isActive !== undefined && updates.isActive !== existing.isActive;
+  if (office && (emailChanged || roleChanged || activeChanged)) {
+    await restartCorrectiveActionNotificationCycleForResponder(tenantDb, { responderId: id, office });
+  }
 
   return toFieldResponder({
     ...updated[0],
@@ -380,12 +402,13 @@ export async function resolveScorecardResponderPick(
   tenantDb: TenantDb,
   responderId: string | null | undefined,
   role: FieldResponderRole,
+  opts?: { lockForFk?: boolean },
 ): Promise<ScorecardResponderPick | null> {
   // Shape-check before the query so this helper is TOTAL — a malformed id degrades to "no pick" instead of
   // throwing 22P02 (invalid input syntax for type uuid) out of a scorecard submit. The request parser already
   // filters to a uuid; this keeps the guarantee independent of which caller supplies the value.
   if (!responderId || !UUID_SHAPE.test(responderId)) return null;
-  const [row] = await tenantDb
+  const query = tenantDb
     .select({
       id: fieldResponders.id,
       name: fieldResponders.name,
@@ -400,6 +423,17 @@ export async function resolveScorecardResponderPick(
       ),
     )
     .limit(1);
+  // lockForFk takes the SAME row lock the FK write is going to take anyway (writing a non-null
+  // field_scorecards.*_responder_id makes Postgres grab FOR KEY SHARE on the referenced roster row) — just
+  // EARLIER. It adds no lock the transaction wasn't already going to hold; it only fixes the ORDER.
+  //
+  // Why that matters: the scorecard EDIT holds its card FOR UPDATE from the top, so acquiring the roster lock
+  // at the UPDATE statement means card -> roster. The assign-from-roster team POST goes the other way — roster
+  // FOR UPDATE (resolveResponderForAssignment), then the notification restart UPDATEs field_scorecards. Two
+  // opposed orders on the same pair is an ABBA deadlock: a director assigning from the roster while a field
+  // user saves an edit picking that person would abort one of them (40P01). Taking the roster lock before the
+  // card lock puts the edit in the same order as every other writer.
+  const [row] = await (opts?.lockForFk ? query.for("key share") : query);
   return row ?? null;
 }
 

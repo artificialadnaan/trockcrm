@@ -600,10 +600,10 @@ function LeadershipForm(props: {
             <Text style={styles.readonly}>{draft.evaluatorName?.trim() || "You"}</Text>
           </Field>
           <Field label="Project manager">
-            <ResponderPicker value={draft.pmName} onChange={(name, responder) => dispatch(responderPickAction("pmName", name, responder))} role="project_manager" responders={responders} error={respondersError} />
+            <ResponderPicker value={draft.pmName} onChange={(name, responder) => dispatch(responderPickAction("pmName", name, responder))} responderId={draft.pmResponderId} role="project_manager" responders={responders} error={respondersError} />
           </Field>
           <Field label="Superintendent">
-            <ResponderPicker value={draft.superintendentName} onChange={(name, responder) => dispatch(responderPickAction("superintendentName", name, responder))} role="superintendent" responders={responders} error={respondersError} />
+            <ResponderPicker value={draft.superintendentName} onChange={(name, responder) => dispatch(responderPickAction("superintendentName", name, responder))} responderId={draft.superintendentResponderId} role="superintendent" responders={responders} error={respondersError} />
           </Field>
         </View>
 

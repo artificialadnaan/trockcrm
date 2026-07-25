@@ -930,10 +930,10 @@ function OverviewStep({
         <Field label="Project"><Text style={styles.readonly}>{draft.dealName}</Text></Field>
         {draft.projectNumber ? <Field label="Project number"><Text style={styles.readonly}>{draft.projectNumber}</Text></Field> : null}
         <Field label="Superintendent">
-          <ResponderPicker value={draft.superintendentName} onChange={(name, responder) => dispatch(responderPickAction("superintendentName", name, responder))} role="superintendent" responders={responders} error={respondersError} />
+          <ResponderPicker value={draft.superintendentName} onChange={(name, responder) => dispatch(responderPickAction("superintendentName", name, responder))} responderId={draft.superintendentResponderId} role="superintendent" responders={responders} error={respondersError} />
         </Field>
         <Field label="Project manager">
-          <ResponderPicker value={draft.pmName} onChange={(name, responder) => dispatch(responderPickAction("pmName", name, responder))} role="project_manager" responders={responders} error={respondersError} />
+          <ResponderPicker value={draft.pmName} onChange={(name, responder) => dispatch(responderPickAction("pmName", name, responder))} responderId={draft.pmResponderId} role="project_manager" responders={responders} error={respondersError} />
         </Field>
         <Field label="Week of">
           <Text style={styles.readonly}>
@@ -1081,10 +1081,10 @@ function SetupStep({ draft, dispatch }: { draft: ScorecardDraft; dispatch: React
       <Field label="Project"><Text style={styles.readonly}>{draft.dealName}</Text></Field>
       {draft.projectNumber ? <Field label="Project number"><Text style={styles.readonly}>{draft.projectNumber}</Text></Field> : null}
       <Field label="Superintendent">
-        <ResponderPicker value={draft.superintendentName} onChange={(name, responder) => dispatch(responderPickAction("superintendentName", name, responder))} role="superintendent" responders={responders} error={respondersError} />
+        <ResponderPicker value={draft.superintendentName} onChange={(name, responder) => dispatch(responderPickAction("superintendentName", name, responder))} responderId={draft.superintendentResponderId} role="superintendent" responders={responders} error={respondersError} />
       </Field>
       <Field label="Project manager">
-        <ResponderPicker value={draft.pmName} onChange={(name, responder) => dispatch(responderPickAction("pmName", name, responder))} role="project_manager" responders={responders} error={respondersError} />
+        <ResponderPicker value={draft.pmName} onChange={(name, responder) => dispatch(responderPickAction("pmName", name, responder))} responderId={draft.pmResponderId} role="project_manager" responders={responders} error={respondersError} />
       </Field>
       <Field label="Week of (YYYY-MM-DD)">
         <TextInput value={draft.weekOf} onChangeText={(v) => dispatch({ type: "setHeader", field: "weekOf", value: v })} placeholder="2026-06-30" autoCapitalize="none" />

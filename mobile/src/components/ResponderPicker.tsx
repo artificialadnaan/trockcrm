@@ -29,13 +29,19 @@ export function matchResponders(
   responders: FieldResponderOption[],
   role: FieldResponderRole,
   query: string,
+  opts?: { hasPick?: boolean },
 ): FieldResponderOption[] {
   const q = query.trim().toLowerCase();
   return responders
     .filter((r) => r.role === role)
     .filter((r) => {
       const name = r.name.toLowerCase();
-      if (name === q) return false; // already exactly entered — nothing to suggest
+      // Hide the row whose name is already exactly entered — but ONLY when that name came from picking it.
+      // If the text merely spells a roster member with no pick recorded (the user typed it, or edited a picked
+      // name and undid the edit, which clears the pick), the row must stay offered: it is the only way to
+      // record the pick, and a hidden row would leave the card displaying that person's name while quietly
+      // routing its corrective action to the deal team instead.
+      if (name === q && opts?.hasPick) return false;
       return q.length === 0 || name.includes(q);
     })
     .slice(0, MAX_SUGGESTIONS);
@@ -52,6 +58,7 @@ export function ResponderPicker({
   role,
   responders,
   error,
+  responderId,
 }: {
   value: string;
   /**
@@ -63,13 +70,16 @@ export function ResponderPicker({
   role: FieldResponderRole;
   responders: FieldResponderOption[];
   error?: string | null;
+  /** The pick currently recorded for this field, if any — drives whether the exact-name row is still offered. */
+  responderId?: string | null;
 }) {
   const [focused, setFocused] = useState(false);
   const inputRef = useRef<RNTextInput>(null);
 
   // No roster to suggest from (failed load or empty office roster) → pure free-text field. Typing still works.
   const hasRoster = !error && responders.length > 0;
-  const suggestions = hasRoster && focused ? matchResponders(responders, role, value) : [];
+  const suggestions =
+    hasRoster && focused ? matchResponders(responders, role, value, { hasPick: !!responderId }) : [];
   const showSuggestions = suggestions.length > 0;
 
   // Report the WHOLE roster row, not just its name: the id travels with the exact name it belongs to, in one

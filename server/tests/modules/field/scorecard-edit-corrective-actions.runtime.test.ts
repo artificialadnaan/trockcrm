@@ -1031,6 +1031,8 @@ describe("scorecard edit — picked field responder", () => {
 
   beforeEach(async () => {
     await tdb.execute(sql`DELETE FROM field_responders`);
+    await tdb.execute(sql`DELETE FROM deal_team_members`);
+    await tdb.execute(sql`DELETE FROM contacts`);
     await tdb.execute(sql`
       INSERT INTO field_responders (id, name, email, role, is_active) VALUES
         (${ROSTER_A}, 'James Helms', 'james@trock.test', 'superintendent', true),
@@ -1134,6 +1136,64 @@ describe("scorecard edit — picked field responder", () => {
 
     expect(await correctiveJobCount()).toBe(jobsBefore);
     expect(await storedSuperLink(scorecard.id)).toBe(ROSTER_B);
+  });
+
+  it("re-addresses a still-pending completed-scorecard email when the pick is corrected", async () => {
+    // That email snapshots its recipients at submit and nothing re-resolves them at send time, so correcting a
+    // mis-picked superintendent seconds after filing would otherwise still email the wrong person.
+    const { scorecard } = await createFieldScorecard(
+      tdb,
+      createInput({ superintendentResponderId: ROSTER_A }),
+    );
+    const payloadFor = async () => {
+      const res = await tdb.execute(sql`
+        SELECT payload FROM public.job_queue
+         WHERE job_type = 'field_scorecard_email' AND payload->>'scorecardId' = ${scorecard.id}
+         ORDER BY id DESC LIMIT 1
+      `);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return (res.rows[0] as { payload: any }).payload;
+    };
+    expect((await payloadFor()).superintendentEmail).toBe("james@trock.test");
+
+    const at = await currentUpdatedAt(scorecard.id);
+    await updateFieldScorecard(tdb, updateInput(scorecard.id, at, { superintendentResponderId: ROSTER_B }));
+    expect((await payloadFor()).superintendentEmail).toBe("jamal@trock.test");
+  });
+
+  it("reverts a cleared pick to the deal-team address on that pending email", async () => {
+    // A CONTACT-backed team member, not an email-only one, on purpose: resolveActiveScorecardTeamRows (the
+    // completed-scorecard email's resolver) has no email-only branch, so an email-only super/PM is invisible to
+    // that email and would resolve to null here. That is a PRE-EXISTING gap this change does not touch — see
+    // docs/scorecard-responder-design.md, "Known gaps".
+    const teamContact = "77777777-7777-7777-7777-777777777771";
+    await tdb.execute(sql`
+      INSERT INTO contacts (id, first_name, last_name, email, category, is_active)
+      VALUES (${teamContact}, 'Team', 'Super', 'team.super@trock.test', 'client', true)
+    `);
+    await tdb.execute(sql`
+      INSERT INTO deal_team_members (deal_id, user_id, contact_id, role, is_active)
+      VALUES (${DEAL}, NULL, ${teamContact}, 'superintendent', true)
+    `);
+    const { scorecard } = await createFieldScorecard(
+      tdb,
+      createInput({ superintendentResponderId: ROSTER_A }),
+    );
+    const payloadFor = async () => {
+      const res = await tdb.execute(sql`
+        SELECT payload FROM public.job_queue
+         WHERE job_type = 'field_scorecard_email' AND payload->>'scorecardId' = ${scorecard.id}
+         ORDER BY id DESC LIMIT 1
+      `);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return (res.rows[0] as { payload: any }).payload;
+    };
+    expect((await payloadFor()).superintendentEmail).toBe("james@trock.test");
+
+    // The edit drops the pick entirely → the deal's Team-tab superintendent takes it back.
+    const at = await currentUpdatedAt(scorecard.id);
+    await updateFieldScorecard(tdb, updateInput(scorecard.id, at));
+    expect((await payloadFor()).superintendentEmail).toBe("team.super@trock.test");
   });
 
   it("does NOT restart the cycle for an edit that leaves the pick alone", async () => {

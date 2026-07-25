@@ -58,12 +58,19 @@ router.patch("/:id", requireDirector, async (req, res, next) => {
     const id = String(req.params.id);
     assertValidUuid(id, "id");
     const { name, email, role, isActive } = req.body ?? {};
-    const responder = await updateFieldResponder(req.tenantDb!, id, {
-      name,
-      email,
-      role,
-      isActive,
-    });
+    // Thread the office (id + `office_<slug>`) so deactivating / re-roling / re-addressing a roster person can
+    // re-notify the open corrective-action cards that PICKED them — the same shape the deal team-mutation
+    // handlers thread, and for the same reason: the change silently revokes their outstanding link.
+    const responderOffice =
+      req.officeSlug && req.user!.activeOfficeId
+        ? { id: req.user!.activeOfficeId, slug: req.officeSlug }
+        : undefined;
+    const responder = await updateFieldResponder(
+      req.tenantDb!,
+      id,
+      { name, email, role, isActive },
+      responderOffice,
+    );
     await req.commitTransaction!();
     res.json({ responder });
   } catch (err) {

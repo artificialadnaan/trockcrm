@@ -446,6 +446,12 @@ export async function updateFieldScorecard(
   tenantDb: TenantDb,
   input: UpdateFieldScorecardInput,
 ): Promise<{ scorecard: FieldScorecardSummary }> {
+  // BEFORE the card row lock, deliberately: this takes the same FOR KEY SHARE on the picked roster rows that
+  // the FK write below would take anyway, so this transaction locks roster-then-card — the same order the
+  // assign-from-roster team path uses. Acquiring it at the UPDATE instead would be card-then-roster, and the
+  // two opposed orders deadlock. See resolveScorecardResponderPick's lockForFk note.
+  const responderLinks = await resolveScorecardResponderLinks(tenantDb, input, { lockForFk: true });
+
   const [card] = await tenantDb
     .select()
     .from(fieldScorecards)
@@ -484,8 +490,6 @@ export async function updateFieldScorecard(
   );
   const superintendentName = input.superintendentName?.trim() || null;
   const pmName = input.pmName?.trim() || null;
-  // Same revalidation the create path runs — the edit replaces the picked links alongside the names.
-  const responderLinks = await resolveScorecardResponderLinks(tenantDb, input);
 
   const kind: ScorecardKind = card.kind === "leadership" ? "leadership" : "project";
   const formVersion: ScorecardFormVersion = 2;
@@ -741,6 +745,30 @@ export async function updateFieldScorecard(
       AND payload->>'scorecardId' = ${card.id}
   `);
 
+  // If this edit changed WHO was picked and the completed-scorecard email hasn't gone out yet, re-address it.
+  // That email snapshots its recipients at submit (nothing re-resolves them at send time), so correcting a
+  // mis-picked superintendent seconds after filing would otherwise still email the wrong person. Scoped to a
+  // pick change so an ordinary edit keeps the existing freeze semantics exactly; the same `status IN
+  // ('pending','dead')` predicate the score patch above uses means a job already claimed or sent is untouched.
+  const responderPickChanged =
+    (card.superintendentResponderId ?? null) !== responderLinks.superintendentResponderId ||
+    (card.pmResponderId ?? null) !== responderLinks.pmResponderId;
+  if (responderPickChanged) {
+    const teamEmails = await resolveScorecardTeamEmails(tenantDb, card.dealId);
+    const superintendentEmail = responderLinks.superintendent?.email ?? teamEmails.superintendentEmail;
+    const projectManagerEmail = responderLinks.pm?.email ?? teamEmails.projectManagerEmail;
+    await tenantDb.execute(sql`
+      UPDATE public.job_queue
+      SET payload = payload || jsonb_build_object(
+        'superintendentEmail', ${superintendentEmail}::text,
+        'projectManagerEmail', ${projectManagerEmail}::text
+      )
+      WHERE job_type = ${FIELD_SCORECARD_EMAIL_JOB}
+        AND status IN ('pending', 'dead')
+        AND payload->>'scorecardId' = ${card.id}
+    `);
+  }
+
   // Reconcile the corrective-action lifecycle against the recomputed rating + flagged items in THIS same
   // edit transaction — the SAME shared helper the create path runs, so the two never drift. It may open the
   // stage (edit dropped into the band), revert to `submitted` (edit lifted it back out), add/remove tracked
@@ -755,13 +783,10 @@ export async function updateFieldScorecard(
     actionItems,
     deficiencies,
     currentStatus: preEditStatus,
-    // `card` is the pre-edit row read FOR UPDATE at the top, so this compares what the card pointed at before
-    // this edit against what it points at now — a changed pick on an already-notified open card restarts the
-    // notification cycle so the newly picked responder is actually reached (and the previous one's now-dead
-    // link is replaced rather than silently stranded).
-    responderPickChanged:
-      (card.superintendentResponderId ?? null) !== responderLinks.superintendentResponderId ||
-      (card.pmResponderId ?? null) !== responderLinks.pmResponderId,
+    // Computed above from `card` (the pre-edit row read FOR UPDATE) vs what the card points at now. A changed
+    // pick on an already-notified open card restarts the notification cycle so the newly picked responder is
+    // actually reached, and the previous one's now-dead link is replaced rather than silently stranded.
+    responderPickChanged,
   });
   const [reconciledCard] = await tenantDb
     .select()
@@ -1552,6 +1577,7 @@ async function resolveUpdatePhotoLinks(
 async function resolveScorecardResponderLinks(
   tenantDb: TenantDb,
   input: { superintendentResponderId?: string | null; pmResponderId?: string | null },
+  opts?: { lockForFk?: boolean },
 ): Promise<ResolvedScorecardResponderLinks> {
   // Sequential, not Promise.all: both callers run inside an open office transaction on a single pooled
   // connection, and interleaving statements on one transaction client is not a pattern this codebase relies on.
@@ -1559,8 +1585,9 @@ async function resolveScorecardResponderLinks(
     tenantDb,
     input.superintendentResponderId,
     "superintendent",
+    opts,
   );
-  const pm = await resolveScorecardResponderPick(tenantDb, input.pmResponderId, "project_manager");
+  const pm = await resolveScorecardResponderPick(tenantDb, input.pmResponderId, "project_manager", opts);
   return {
     superintendent,
     pm,
