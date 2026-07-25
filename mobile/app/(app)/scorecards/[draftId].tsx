@@ -1,9 +1,10 @@
 import React, { Suspense, useCallback, useEffect, useReducer, useRef, useState } from "react";
-import { Image, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { usePreventRemove } from "@react-navigation/native";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { Image as ExpoImage } from "expo-image";
 import * as ImagePicker from "expo-image-picker";
 import * as FileSystem from "expo-file-system/legacy";
 import SignatureScreen, { type SignatureViewRef } from "react-native-signature-canvas";
@@ -1126,7 +1127,15 @@ function DraftPhotoThumbnail({
       </View>
     )
     : photo.uri
-      ? <Image source={{ uri: photo.uri }} style={styles.thumb} />
+      ? (
+        <ExpoImage
+          source={{ uri: photo.uri }}
+          style={styles.thumb}
+          contentFit="cover"
+          recyclingKey={photo.key}
+          cachePolicy="memory-disk"
+        />
+      )
       : <View style={styles.thumb} />;
   return (
     <View style={styles.thumbWrap}>

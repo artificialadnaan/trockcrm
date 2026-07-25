@@ -1,8 +1,9 @@
 import React, { Suspense, useCallback, useEffect, useReducer, useRef, useState } from "react";
-import { Image, KeyboardAvoidingView, Linking, Modal, Platform, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
+import { KeyboardAvoidingView, Linking, Modal, Platform, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { Image as ExpoImage } from "expo-image";
 import { theme } from "../../../../src/theme/theme";
 import { useAuth } from "../../../../src/auth/AuthContext";
 import { useCorrectiveActions, useScorecard } from "../../../../src/query/hooks";
@@ -518,7 +519,13 @@ function ResponsePhotoThumb({
   return (
     <View style={styles.thumbWrap}>
       <Pressable onPress={onEdit} accessibilityRole="button" accessibilityLabel="Edit photo description">
-        <Image source={{ uri: photo.uri }} style={styles.thumb} />
+        <ExpoImage
+          source={{ uri: photo.uri }}
+          style={styles.thumb}
+          contentFit="cover"
+          recyclingKey={photo.key}
+          cachePolicy="memory-disk"
+        />
       </Pressable>
       <Pressable onPress={onRemove} hitSlop={8} style={styles.thumbRemove} accessibilityRole="button" accessibilityLabel="Remove photo">
         <Text style={styles.thumbRemoveText}>✕</Text>
@@ -551,7 +558,13 @@ function ResolvedItemCard({ item }: { item: CorrectiveActionItem }) {
               accessibilityRole="imagebutton"
               accessibilityLabel={photo.caption ?? "Response photo"}
             >
-              <Image source={{ uri: photo.url! }} style={styles.thumb} resizeMode="cover" />
+              <ExpoImage
+                source={{ uri: photo.url! }}
+                style={styles.thumb}
+                contentFit="cover"
+                recyclingKey={photo.id}
+                cachePolicy="memory-disk"
+              />
             </Pressable>
           ))}
         </View>
