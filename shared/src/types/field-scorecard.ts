@@ -602,6 +602,14 @@ export interface FieldScorecardDetail extends FieldScorecardSummary {
   photos: FieldScorecardPhotoView[];
   superintendentSignature?: string | null;
   pmSignature?: string | null;
+  /**
+   * The field_responders roster person currently linked to each role on this card (null when the name was
+   * typed free-text). Surfaced on DETAIL — not on the summary — because the one consumer is the mobile edit
+   * form, which hydrates its draft from detail: without these the editor could not round-trip the pick, and
+   * every save would silently clear it. Optional so older API deployments don't break consumers.
+   */
+  superintendentResponderId?: string | null;
+  pmResponderId?: string | null;
   /** Leadership Project Summary free text. */
   summary?: string | null;
   /**

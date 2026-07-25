@@ -196,6 +196,14 @@ export interface ReconcileCorrectiveActionsInput {
   deficiencies: string[];
   /** The scorecard's status BEFORE this reconcile (drives the enqueue-on-transition decision). */
   currentStatus: string;
+  /**
+   * True when this edit CHANGED which field-responder the card points at for either role (its
+   * superintendent_responder_id / pm_responder_id). Recipient resolution is scorecard-scoped, so that swap
+   * changes WHO the corrective action is addressed to — the same class of event as a super/PM reassignment on
+   * the Team tab, which already restarts the notification cycle. Defaults false (the create path can't have
+   * changed anything).
+   */
+  responderPickChanged?: boolean;
 }
 
 /**
@@ -474,7 +482,19 @@ export async function reconcileScorecardCorrectiveActions(
     input.currentStatus === "corrective_action_open" &&
     toInsert.length > 0 &&
     correctiveActionEmailSentAt !== null;
-  if (transitioningIntoOpen || alreadyOpenGainedWork) {
+  //   3) alreadyOpenResponderChanged — an already-open card whose PICKED super/PM changed. Recipients resolve
+  //      per-card from that pick, so the swap both revokes the previous holder (their email no longer resolves,
+  //      and the verify-time revalidation 403s their outstanding link) and leaves the new person holding
+  //      nothing. Restarting the cycle re-mints + re-sends for the new recipient set — the same remedy
+  //      restartCorrectiveActionNotificationCycleForDeal already applies to a Team-tab reassignment. Gated on
+  //      the original email having SENT for the same reason as (2): a still-pending job re-resolves recipients
+  //      at send time, so it will already address the new pick and a second enqueue would double-send.
+  const alreadyOpenResponderChanged =
+    nextStatus === "corrective_action_open" &&
+    input.currentStatus === "corrective_action_open" &&
+    input.responderPickChanged === true &&
+    correctiveActionEmailSentAt !== null;
+  if (transitioningIntoOpen || alreadyOpenGainedWork || alreadyOpenResponderChanged) {
     // Mint the per-cycle nonce ONCE and use it in BOTH places: (a) persisted on the scorecard as the ACTIVE
     // cycle's nonce, and (b) the enqueued job's payload.cycleNonce. Keeping them equal is what lets the
     // worker's final delivery stamp require `corrective_action_cycle_nonce = payload.cycleNonce` — a

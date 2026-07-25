@@ -18,6 +18,7 @@ import {
   scorecardDraftToSubmission,
   resolveScorecardTeamNames,
   seedScorecardDraftTeam,
+  responderPickAction,
   MAX_SCORECARD_PHOTOS,
   type DraftAction,
   type ScorecardDraft,
@@ -95,6 +96,9 @@ describe("scoring", () => {
     ["score", { type: "setScore", sectionKey: "schedule", points: 7 }],
     ["note", { type: "setNote", sectionKey: "schedule", note: "Changed" }],
     ["header", { type: "setHeader", field: "pmName", value: "Changed PM" }],
+    // A roster pick changes the report exactly as much as typing the same name does, so it must invalidate the
+    // signatures too — otherwise picking at review time would keep approvals for content that has changed.
+    ["responder pick", { type: "setResponder", field: "pmName", value: "Picked PM", responderId: "resp-1" }],
     ["deficiency", { type: "toggleDeficiency", key: "safety_violation" }],
     ["action item", { type: "setActionItems", items: ["Changed action"] }],
     ["photo", {
@@ -105,6 +109,102 @@ describe("scoring", () => {
     const changed = scorecardDraftReducer(fullyScored(), action);
     expect(changed.superintendentSignature).toBe("");
     expect(changed.pmSignature).toBe("");
+  });
+
+  describe("picked field-responder link", () => {
+    // The whole safety property of this feature in the app: an id may exist ONLY alongside the exact name it
+    // was picked for. Everything below pins one half of that.
+    it("setResponder records the id with the name; setHeader on the same role clears it", () => {
+      const picked = scorecardDraftReducer(newDraft(), {
+        type: "setResponder",
+        field: "superintendentName",
+        value: "James Helms",
+        responderId: "resp-super",
+      });
+      expect(picked.superintendentName).toBe("James Helms");
+      expect(picked.superintendentResponderId).toBe("resp-super");
+
+      // One keystroke of editing and the pick is gone — the server then falls back to the deal's Team-tab super.
+      const edited = scorecardDraftReducer(picked, {
+        type: "setHeader",
+        field: "superintendentName",
+        value: "James Helm",
+      });
+      expect(edited.superintendentName).toBe("James Helm");
+      expect(edited.superintendentResponderId).toBeNull();
+    });
+
+    it("keeps the two roles independent — editing one name never clears the other's pick", () => {
+      let draft = scorecardDraftReducer(newDraft(), {
+        type: "setResponder",
+        field: "superintendentName",
+        value: "James Helms",
+        responderId: "resp-super",
+      });
+      draft = scorecardDraftReducer(draft, {
+        type: "setResponder",
+        field: "pmName",
+        value: "Tim Mitchell",
+        responderId: "resp-pm",
+      });
+      const editedSuper = scorecardDraftReducer(draft, {
+        type: "setHeader",
+        field: "superintendentName",
+        value: "Someone Else",
+      });
+      expect(editedSuper.superintendentResponderId).toBeNull();
+      expect(editedSuper.pmResponderId).toBe("resp-pm");
+    });
+
+    it("setHeader on weekOf touches neither pick", () => {
+      const picked = scorecardDraftReducer(newDraft(), {
+        type: "setResponder",
+        field: "pmName",
+        value: "Tim Mitchell",
+        responderId: "resp-pm",
+      });
+      const reweeked = scorecardDraftReducer(picked, {
+        type: "setHeader",
+        field: "weekOf",
+        value: "2026-07-27",
+      });
+      expect(reweeked.pmResponderId).toBe("resp-pm");
+    });
+
+    it("responderPickAction maps a roster press to setResponder and typing to setHeader", () => {
+      expect(responderPickAction("pmName", "Tim Mitchell", { id: "resp-pm" })).toEqual({
+        type: "setResponder",
+        field: "pmName",
+        value: "Tim Mitchell",
+        responderId: "resp-pm",
+      });
+      expect(responderPickAction("pmName", "Tim Mitch", null)).toEqual({
+        type: "setHeader",
+        field: "pmName",
+        value: "Tim Mitch",
+      });
+    });
+
+    it("submits the picked ids, and sends explicit nulls for a legacy draft that predates the fields", () => {
+      const picked = scorecardDraftReducer(fullyScored(), {
+        type: "setResponder",
+        field: "superintendentName",
+        value: "James Helms",
+        responderId: "resp-super",
+      });
+      const body = scorecardDraftToSubmission(picked);
+      expect(body.superintendentResponderId).toBe("resp-super");
+      expect(body.pmResponderId).toBeNull();
+
+      // Drafts persist as raw JSON with no migration hook, so a draft written before these fields existed
+      // resumes with them absent — the body must still STATE the (absent) pick rather than omit the key.
+      const legacy = { ...fullyScored() };
+      delete (legacy as Partial<ScorecardDraft>).superintendentResponderId;
+      delete (legacy as Partial<ScorecardDraft>).pmResponderId;
+      const legacyBody = scorecardDraftToSubmission(legacy);
+      expect(legacyBody.superintendentResponderId).toBeNull();
+      expect(legacyBody.pmResponderId).toBeNull();
+    });
   });
 
   it("preserves the other approval while collecting the second signature", () => {

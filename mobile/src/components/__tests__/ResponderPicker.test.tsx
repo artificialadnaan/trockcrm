@@ -4,7 +4,9 @@ import { ResponderPicker, matchResponders } from "../ResponderPicker";
 import type { FieldResponderOption, FieldResponderRole } from "../../api/types";
 
 // A tiny controlled host so the picker's `value` tracks typing exactly like the real (dispatch-backed) sites —
-// the suggestion filter reads `value`, so an uncontrolled render would freeze it at "". onChange is spied.
+// the suggestion filter reads `value`, so an uncontrolled render would freeze it at "". onChange is spied, and
+// it forwards BOTH arguments: the responder argument is the whole point of the picker (it is what lets the
+// draft record WHICH roster person was chosen), so a host that swallowed it would hide every regression in it.
 function ControlledPicker({
   onChange,
   role = "superintendent",
@@ -12,7 +14,7 @@ function ControlledPicker({
   error = null,
   initial = "",
 }: {
-  onChange: (name: string) => void;
+  onChange: (name: string, responder: FieldResponderOption | null) => void;
   role?: FieldResponderRole;
   responders: FieldResponderOption[];
   error?: string | null;
@@ -22,9 +24,9 @@ function ControlledPicker({
   return (
     <ResponderPicker
       value={value}
-      onChange={(name) => {
+      onChange={(name, responder) => {
         setValue(name);
-        onChange(name);
+        onChange(name, responder);
       }}
       role={role}
       responders={responders}
@@ -67,14 +69,14 @@ describe("ResponderPicker", () => {
     // Focus, then type a query that matches one super — the matching roster row is offered.
     fireEvent(input, "focus");
     fireEvent.changeText(input, "helms");
-    expect(onChange).toHaveBeenLastCalledWith("helms"); // free-text always live while typing
+    expect(onChange).toHaveBeenLastCalledWith("helms", null); // free-text always live while typing
 
     // A PM (wrong role for a superintendent picker) is never suggested.
     expect(queryByText("Tim Mitchell")).toBeNull();
 
     // Tapping the suggestion writes the responder's EXACT name (not the lowercase query).
     fireEvent.press(getByText("James Helms"));
-    expect(onChange).toHaveBeenLastCalledWith("James Helms");
+    expect(onChange).toHaveBeenLastCalledWith("James Helms", roster[0]);
 
     // Picking dismisses the list (the row no longer matches an exact value, and focus was cleared).
     expect(queryByText("James Helms")).toBeNull();
@@ -89,7 +91,7 @@ describe("ResponderPicker", () => {
     fireEvent(input, "focus");
     fireEvent.changeText(input, "Someone Not In Roster");
 
-    expect(onChange).toHaveBeenLastCalledWith("Someone Not In Roster");
+    expect(onChange).toHaveBeenLastCalledWith("Someone Not In Roster", null);
     // no roster row matches the off-roster query → no suggestions rendered
     expect(queryByText("James Helms")).toBeNull();
     expect(queryByText("Jamal Wright")).toBeNull();
@@ -104,7 +106,7 @@ describe("ResponderPicker", () => {
     fireEvent(input, "focus");
     fireEvent.changeText(input, "jam");
 
-    expect(onChange).toHaveBeenLastCalledWith("jam");
+    expect(onChange).toHaveBeenLastCalledWith("jam", null);
     // error set → no suggestions even though "jam" would otherwise match two supers
     expect(queryByText("James Helms")).toBeNull();
     expect(queryByText("Jamal Wright")).toBeNull();
@@ -119,7 +121,7 @@ describe("ResponderPicker", () => {
     fireEvent(input, "focus");
     fireEvent.changeText(input, "jam");
 
-    expect(onChange).toHaveBeenLastCalledWith("jam");
+    expect(onChange).toHaveBeenLastCalledWith("jam", null);
     expect(queryByText("James Helms")).toBeNull();
   });
 
@@ -137,7 +139,7 @@ describe("ResponderPicker", () => {
     fireEvent(input, "focus");
     fireEvent.changeText(input, "jam");
     fireEvent.press(getByText("James Helms"));
-    expect(onChange).toHaveBeenLastCalledWith("James Helms");
+    expect(onChange).toHaveBeenLastCalledWith("James Helms", roster[0]);
     expect(queryByText("Jamal Wright")).toBeNull(); // menu closed after the pick
 
     // The user re-focuses and edits — suggestions must reappear (they'd be stuck hidden if the picker didn't
@@ -146,6 +148,40 @@ describe("ResponderPicker", () => {
     fireEvent.changeText(input, "jam");
     expect(getByText("Jamal Wright")).toBeTruthy();
     fireEvent.press(getByText("Jamal Wright"));
-    expect(onChange).toHaveBeenLastCalledWith("Jamal Wright");
+    expect(onChange).toHaveBeenLastCalledWith("Jamal Wright", roster[1]);
+  });
+
+  it("(e) typing a roster member's EXACT name is still not a pick — the responder argument stays null", () => {
+    // The load-bearing case. Name-matching is what let the earlier attempt at this feature silently address a
+    // roster member the user never selected: they typed a name that happened to collide, and the server matched
+    // it. Only pressing a row may report a responder, so an id can never be inferred from typed text.
+    const onChange = jest.fn();
+    const { getByLabelText } = render(<ControlledPicker onChange={onChange} responders={roster} />);
+    const input = getByLabelText(INPUT_LABEL);
+
+    fireEvent(input, "focus");
+    fireEvent.changeText(input, "James Helms");
+
+    expect(onChange).toHaveBeenLastCalledWith("James Helms", null);
+  });
+
+  it("(f) editing after a pick reports null again, so the id cannot outlive the name it belonged to", () => {
+    // A pick followed by a keystroke must NOT leave the caller holding the picked responder: the trailing
+    // report is (editedText, null), which the draft reducer turns into a cleared responder id.
+    const onChange = jest.fn();
+    const { getByLabelText, getByText } = render(
+      <ControlledPicker onChange={onChange} responders={roster} />,
+    );
+    const input = getByLabelText(INPUT_LABEL);
+
+    fireEvent(input, "focus");
+    fireEvent.changeText(input, "jam");
+    fireEvent.press(getByText("James Helms"));
+    expect(onChange).toHaveBeenLastCalledWith("James Helms", roster[0]);
+
+    // One character of editing — a different person now, as far as the pick is concerned.
+    fireEvent(input, "focus");
+    fireEvent.changeText(input, "James Helm");
+    expect(onChange).toHaveBeenLastCalledWith("James Helm", null);
   });
 });

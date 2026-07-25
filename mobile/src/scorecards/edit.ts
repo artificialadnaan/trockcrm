@@ -8,6 +8,7 @@ import {
 } from "./scoring";
 import {
   isExistingScorecardDraftPhoto,
+  pickedResponderIds,
   type AnyScorecardSectionKey,
   type ScorecardDraft,
   type ScorecardDraftPhoto,
@@ -190,6 +191,11 @@ export function createScorecardEditDraft(
     weekOf: detail.weekOf,
     superintendentName: detail.superintendentName ?? "",
     pmName: detail.pmName ?? "",
+    // Carry the card's stored picks into the edit draft. The PUT is a full replacement, so without this an
+    // edit that never touches the names would still send them back as null and silently drop the picks —
+    // handing the card's corrective action back to the deal team behind the user's back.
+    superintendentResponderId: detail.superintendentResponderId ?? null,
+    pmResponderId: detail.pmResponderId ?? null,
     evaluatorName: detail.kind === "leadership" ? detail.submittedByName ?? "" : undefined,
     editingScorecardId: detail.id,
     editingOfficeId: detail.officeId ?? null,
@@ -563,6 +569,7 @@ export function scorecardDraftToUpdate(draft: ScorecardDraft): ScorecardUpdatePa
     expectedUpdatedAt: draft.editBaseUpdatedAt,
     superintendentName: draft.superintendentName.trim() || null,
     pmName: draft.pmName.trim() || null,
+    ...pickedResponderIds(draft),
     items: canonicalItems(draft),
     criticalDeficiencies,
     criticalDeficiencyNotes: leadership

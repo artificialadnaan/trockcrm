@@ -78,6 +78,35 @@ function detail(overrides: Partial<FieldScorecardDetail> = {}): FieldScorecardDe
 }
 
 describe("createScorecardEditDraft", () => {
+  it("round-trips the card's picked responders through an edit that never touches the names", () => {
+    // The PUT is a full replacement, so an edit form that didn't rehydrate these would send nulls and hand the
+    // card's corrective action back to the deal team — silently, on an edit the user made for another reason.
+    const draft = createScorecardEditDraft(
+      detail({ superintendentResponderId: "resp-super", pmResponderId: "resp-pm" }),
+      { id: "local-edit-picked", clientSubmissionId: "edit-attempt-picked", now: 1234 },
+    );
+    expect(draft.superintendentResponderId).toBe("resp-super");
+    expect(draft.pmResponderId).toBe("resp-pm");
+
+    const body = scorecardDraftToUpdate({
+      ...draft,
+      superintendentSignature: "data:image/png;base64,fresh-super",
+      pmSignature: "Fresh PM typed signature",
+    });
+    expect(body.superintendentResponderId).toBe("resp-super");
+    expect(body.pmResponderId).toBe("resp-pm");
+  });
+
+  it("hydrates a card with no picks as explicit nulls (falls back to the deal team server-side)", () => {
+    const draft = createScorecardEditDraft(detail(), {
+      id: "local-edit-unpicked",
+      clientSubmissionId: "edit-attempt-unpicked",
+      now: 1234,
+    });
+    expect(draft.superintendentResponderId).toBeNull();
+    expect(draft.pmResponderId).toBeNull();
+  });
+
   it("hydrates a V2 project edit while requiring fresh signatures", () => {
     const draft = createScorecardEditDraft(detail(), {
       id: "local-edit-1",
@@ -1276,6 +1305,10 @@ describe("scorecardDraftToUpdate", () => {
       expectedUpdatedAt: "2026-07-14T14:05:00.000Z",
       superintendentName: "New Superintendent",
       pmName: "New PM",
+      // Always stated, never omitted: the PUT is a full replacement, so a missing key would clear the card's
+      // picks server-side. This draft has no picks, so both normalize to explicit null.
+      superintendentResponderId: null,
+      pmResponderId: null,
       items: PROJECT_ITEMS.map((item) => ({
         sectionKey: item.sectionKey,
         points: item.points,

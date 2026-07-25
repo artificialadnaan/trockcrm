@@ -1,10 +1,14 @@
 // A name-entry field with a searchable dropdown backed by the CRM field-responder roster. PURELY
 // presentational (roster + error are passed in, not fetched) so it unit-tests without an AuthProvider.
 //
-// Storage stays NAME-ONLY: the bound `value` is the draft's superintendentName/pmName string and `onChange`
-// receives the plain name — whether the user picks a roster row OR types a custom name. The dropdown is a
-// convenience over free-text, never a gate: typing always works (offline / off-roster / a name the CRM
-// doesn't know), and when there's no roster (empty list or a load `error`) it renders just the TextInput.
+// The bound `value` is the draft's superintendentName/pmName string. `onChange` always receives the plain
+// name, and ALSO the roster row when — and only when — the name came from PICKING that row; typing hands back
+// `null`. That second argument is what lets the draft record WHICH roster person was chosen (their id rides to
+// the server and becomes the corrective-action recipient for the card), while keeping a typed name a typed
+// name: a free-text entry that happens to spell a roster member is not a pick and must not silently address
+// them. The dropdown is a convenience over free-text, never a gate: typing always works (offline / off-roster
+// / a name the CRM doesn't know), and when there's no roster (empty list or a load `error`) it renders just
+// the TextInput — so a null responder is a first-class outcome, not an error path.
 
 import React, { useRef, useState } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
@@ -50,7 +54,12 @@ export function ResponderPicker({
   error,
 }: {
   value: string;
-  onChange: (name: string) => void;
+  /**
+   * `responder` is the roster row ONLY when the name came from pressing that row; every free-text keystroke
+   * passes `null`. Callers must treat `null` as "clear the recorded pick" — never as "keep whatever was
+   * picked before" — or an id can outlive the name it belonged to.
+   */
+  onChange: (name: string, responder: FieldResponderOption | null) => void;
   role: FieldResponderRole;
   responders: FieldResponderOption[];
   error?: string | null;
@@ -63,8 +72,10 @@ export function ResponderPicker({
   const suggestions = hasRoster && focused ? matchResponders(responders, role, value) : [];
   const showSuggestions = suggestions.length > 0;
 
-  const pick = (name: string) => {
-    onChange(name);
+  // Report the WHOLE roster row, not just its name: the id travels with the exact name it belongs to, in one
+  // call, so no caller can end up holding an id for a different person's name.
+  const pick = (responder: FieldResponderOption) => {
+    onChange(responder.name, responder);
     setFocused(false);
     // Blur the NATIVE input too, not just our `focused` flag. Both scorecard forms use
     // keyboardShouldPersistTaps="handled", so the input stays focused after a suggestion press; without an
@@ -78,7 +89,10 @@ export function ResponderPicker({
       <TextInput
         ref={inputRef}
         value={value}
-        onChangeText={onChange}
+        // Typing is never a pick — always clear the recorded responder, even if the typed text happens to
+        // spell a roster member exactly. Name-matching is what made the earlier attempt at this feature
+        // able to email someone the user never chose.
+        onChangeText={(text) => onChange(text, null)}
         onFocus={() => setFocused(true)}
         onBlur={() => setFocused(false)}
         placeholder={`Name (${ROLE_LABEL[role].toLowerCase()})`}
@@ -91,7 +105,7 @@ export function ResponderPicker({
             <Pressable
               key={r.id}
               // onPress fires after onBlur; keep the value change here so the pick wins over the blur.
-              onPress={() => pick(r.name)}
+              onPress={() => pick(r)}
               accessibilityRole="button"
               accessibilityLabel={`Select ${r.name}`}
               style={({ pressed }) => [styles.row, pressed && styles.rowPressed]}

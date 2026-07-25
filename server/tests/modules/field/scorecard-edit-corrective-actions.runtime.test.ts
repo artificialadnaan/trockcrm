@@ -12,6 +12,7 @@ import { resolveCorrectiveActionItem } from "../../../src/modules/field/correcti
 import {
   contacts,
   dealTeamMembers,
+  fieldResponders,
   fieldScorecardEditUploads,
   fieldScorecardItems,
   fieldScorecardPhotos,
@@ -169,6 +170,7 @@ beforeAll(async () => {
       scorecardCorrectiveActionTokens,
       dealTeamMembers,
       contacts,
+      fieldResponders,
     ]),
   );
   await pg.exec(
@@ -1016,5 +1018,146 @@ describe("updateFieldScorecard corrective-action reconcile", () => {
     expect(await getStatus(scorecard.id)).toBe("submitted");
     // The now-stale resolved row is purged (no flags remain).
     expect(await getItems(scorecard.id)).toHaveLength(0);
+  });
+});
+
+// The picked field-responder link (field_scorecards.superintendent_responder_id / pm_responder_id) decides WHO
+// answers for a card, so an edit that changes it is a recipient change — the same class of event as a Team-tab
+// super/PM reassignment, which already restarts the notification cycle. These pin that the link survives the
+// edit path's no-op short-circuit and that a swap on an already-notified open card re-notifies.
+describe("scorecard edit — picked field responder", () => {
+  const ROSTER_A = "44444444-4444-4444-4444-444444444401";
+  const ROSTER_B = "44444444-4444-4444-4444-444444444402";
+
+  beforeEach(async () => {
+    await tdb.execute(sql`DELETE FROM field_responders`);
+    await tdb.execute(sql`
+      INSERT INTO field_responders (id, name, email, role, is_active) VALUES
+        (${ROSTER_A}, 'James Helms', 'james@trock.test', 'superintendent', true),
+        (${ROSTER_B}, 'Jamal Wright', 'jamal@trock.test', 'superintendent', true)
+    `);
+  });
+
+  async function storedSuperLink(id: string): Promise<string | null> {
+    const res = await tdb.execute(
+      sql`SELECT superintendent_responder_id AS r FROM field_scorecards WHERE id = ${id}`,
+    );
+    return (res.rows[0] as { r: string | null }).r;
+  }
+
+  it("persists a pick swap even when every other field is byte-identical", async () => {
+    // The no-op short-circuit (scorecardEditableContentEquals) skips the whole write when nothing changed. A
+    // pick swap keeps the DISPLAY NAME identical, so if the link weren't part of that comparison this edit
+    // would be silently discarded and the corrective action would keep going to the previous person.
+    const { scorecard } = await createFieldScorecard(
+      tdb,
+      createInput({ superintendentResponderId: ROSTER_A }),
+    );
+    expect(await storedSuperLink(scorecard.id)).toBe(ROSTER_A);
+
+    const at = await currentUpdatedAt(scorecard.id);
+    await updateFieldScorecard(tdb, updateInput(scorecard.id, at, { superintendentResponderId: ROSTER_B }));
+    expect(await storedSuperLink(scorecard.id)).toBe(ROSTER_B);
+  });
+
+  it("clears the link when an edit omits it (full replacement — a link never outlives its name)", async () => {
+    const { scorecard } = await createFieldScorecard(
+      tdb,
+      createInput({ superintendentResponderId: ROSTER_A }),
+    );
+    const at = await currentUpdatedAt(scorecard.id);
+    await updateFieldScorecard(tdb, updateInput(scorecard.id, at));
+    expect(await storedSuperLink(scorecard.id)).toBeNull();
+  });
+
+  it("restarts the notification cycle when the pick changes on an ALREADY-NOTIFIED open card", async () => {
+    // Without this the swap would strand both people: the previous holder's token stops authorizing (they no
+    // longer resolve) and the new pick was never emailed, while corrective_action_email_sent_at suppresses any
+    // further send.
+    const { scorecard } = await createFieldScorecard(
+      tdb,
+      createInput({ items: v2Items(5), actionItems: ["Fix the rail"], superintendentResponderId: ROSTER_A }),
+    );
+    expect(await getStatus(scorecard.id)).toBe("corrective_action_open");
+    // Simulate the worker having delivered the first cycle.
+    await tdb.execute(
+      sql`UPDATE field_scorecards SET corrective_action_email_sent_at = now() WHERE id = ${scorecard.id}`,
+    );
+    const nonceBefore = (
+      (await tdb.execute(
+        sql`SELECT corrective_action_cycle_nonce AS n FROM field_scorecards WHERE id = ${scorecard.id}`,
+      )).rows[0] as { n: string | null }
+    ).n;
+    const jobsBefore = await correctiveJobCount();
+
+    const at = await currentUpdatedAt(scorecard.id);
+    await updateFieldScorecard(
+      tdb,
+      updateInput(scorecard.id, at, {
+        items: v2Items(5),
+        actionItems: ["Fix the rail"], // SAME flags — only the responder changed
+        superintendentResponderId: ROSTER_B,
+      }),
+    );
+
+    expect(await getStatus(scorecard.id)).toBe("corrective_action_open");
+    expect(await getEmailSentAt(scorecard.id)).toBeNull(); // the worker will send again
+    expect(await correctiveJobCount()).toBe(jobsBefore + 1);
+    const nonceAfter = (
+      (await tdb.execute(
+        sql`SELECT corrective_action_cycle_nonce AS n FROM field_scorecards WHERE id = ${scorecard.id}`,
+      )).rows[0] as { n: string | null }
+    ).n;
+    expect(nonceAfter).toBeTruthy();
+    expect(nonceAfter).not.toBe(nonceBefore);
+  });
+
+  it("does NOT re-enqueue when the pick changes while the FIRST notification is still pending", async () => {
+    // The pending job resolves recipients at send time, so it will already address the new pick. A second
+    // enqueue here would double-email.
+    const { scorecard } = await createFieldScorecard(
+      tdb,
+      createInput({ items: v2Items(5), actionItems: ["Fix the rail"], superintendentResponderId: ROSTER_A }),
+    );
+    expect(await getEmailSentAt(scorecard.id)).toBeNull(); // never delivered
+    const jobsBefore = await correctiveJobCount();
+
+    const at = await currentUpdatedAt(scorecard.id);
+    await updateFieldScorecard(
+      tdb,
+      updateInput(scorecard.id, at, {
+        items: v2Items(5),
+        actionItems: ["Fix the rail"],
+        superintendentResponderId: ROSTER_B,
+      }),
+    );
+
+    expect(await correctiveJobCount()).toBe(jobsBefore);
+    expect(await storedSuperLink(scorecard.id)).toBe(ROSTER_B);
+  });
+
+  it("does NOT restart the cycle for an edit that leaves the pick alone", async () => {
+    const { scorecard } = await createFieldScorecard(
+      tdb,
+      createInput({ items: v2Items(5), actionItems: ["Fix the rail"], superintendentResponderId: ROSTER_A }),
+    );
+    await tdb.execute(
+      sql`UPDATE field_scorecards SET corrective_action_email_sent_at = now() WHERE id = ${scorecard.id}`,
+    );
+    const jobsBefore = await correctiveJobCount();
+
+    const at = await currentUpdatedAt(scorecard.id);
+    await updateFieldScorecard(
+      tdb,
+      updateInput(scorecard.id, at, {
+        items: v2Items(5),
+        actionItems: ["Fix the rail"],
+        superintendentResponderId: ROSTER_A, // unchanged
+        pmName: "Renamed PM", // some other content change so this isn't a no-op edit
+      }),
+    );
+
+    expect(await correctiveJobCount()).toBe(jobsBefore);
+    expect(await getEmailSentAt(scorecard.id)).not.toBeNull(); // stamp untouched
   });
 });

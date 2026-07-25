@@ -105,40 +105,75 @@ function basicValidEmail(email: string): boolean {
 /**
  * The super/PM recipient-resolution SQL, parameterized by the tenant schema (regex-validated by the caller —
  * identifiers can't be $-parametrized). Extracted so the pre-stamp RECIPIENT-set revalidation (finding 1)
- * re-runs the EXACT same selection the worker emailed off of, and the two can't drift. Same selection as the
- * server's resolveCorrectiveActionRecipients (deal_team_members active rows; user/contact must be active; or
- * an email-only member with both fks null). $1 = deal id.
+ * re-runs the EXACT same selection the worker emailed off of, and the two can't drift. $1 = deal id,
+ * $2 = scorecard id.
+ *
+ * SCORECARD-SCOPED, per role: the field user picks the superintendent / PM from the field_responders roster on
+ * the T-Rock Cam scorecard, and that pick — stored on the card as superintendent_responder_id / pm_responder_id
+ * — is who answers for THIS card. So each role resolves to
+ *   priority 0: the card's PICKED roster person, if that link still resolves to an ACTIVE field_responders row
+ *               OF THAT ROLE (a deactivated / re-roled / deleted-and-SET-NULL pick simply stops winning); else
+ *   priority 1: the deal's assigned super/PM — the original selection, unchanged: active deal_team_members rows;
+ *               user/contact-backed rows only when that identity is active; or an email-only member with both
+ *               fks null; newest row per role.
+ * DISTINCT ON (role) ORDER BY role, priority takes the pick when there is one and falls back otherwise.
+ *
+ * Roster people have no CRM identity (field_responders has no user_id), so a picked row carries user_id NULL and
+ * can_field_login FALSE — it always routes to the tokenized web link, exactly like a roster person assigned from
+ * the Team tab today. This mirrors the server's resolveScorecardCorrectiveActionRecipients, which the token
+ * verify-time revalidation uses; the two MUST agree or a link this job mints would 403 on its first click.
+ *
+ * Nothing here writes deal_team_members — the precedence is applied entirely at read time.
  */
-function recipientResolutionSql(tenantSchema: string): string {
-  return `SELECT DISTINCT ON (dtm.role)
-            dtm.role AS role,
-            dtm.user_id AS user_id,
-            COALESCE(
-              CASE WHEN dtm.user_id IS NOT NULL AND u.is_active THEN u.display_name END,
-              CASE WHEN dtm.contact_id IS NOT NULL AND c.is_active THEN TRIM(CONCAT(c.first_name, ' ', c.last_name)) END,
-              dtm.member_name
-            ) AS name,
-            COALESCE(
-              CASE WHEN dtm.user_id IS NOT NULL AND u.is_active THEN u.email END,
-              CASE WHEN dtm.contact_id IS NOT NULL AND c.is_active THEN c.email END,
-              dtm.member_email
-            ) AS email,
-            (dtm.user_id IS NOT NULL AND u.is_active AND ula.user_id IS NOT NULL
-               AND ula.is_enabled = TRUE AND ula.revoked_at IS NULL
-               AND ula.must_change_password = FALSE) AS can_field_login
-       FROM ${tenantSchema}.deal_team_members dtm
-       LEFT JOIN public.users u ON dtm.user_id = u.id
-       LEFT JOIN public.user_local_auth ula ON dtm.user_id = ula.user_id
-       LEFT JOIN ${tenantSchema}.contacts c ON dtm.contact_id = c.id
-      WHERE dtm.deal_id = $1::uuid
-        AND dtm.is_active = TRUE
-        AND dtm.role IN ('superintendent', 'project_manager')
-        AND (
-          (dtm.user_id IS NOT NULL AND u.is_active)
-          OR (dtm.contact_id IS NOT NULL AND c.is_active)
-          OR (dtm.user_id IS NULL AND dtm.contact_id IS NULL)
-        )
-      ORDER BY dtm.role, dtm.created_at DESC`;
+export function recipientResolutionSql(tenantSchema: string): string {
+  return `WITH candidates AS (
+            SELECT fr.role AS role,
+                   NULL::uuid AS user_id,
+                   fr.name AS name,
+                   fr.email AS email,
+                   FALSE AS can_field_login,
+                   0 AS priority,
+                   NULL::timestamptz AS created_at
+              FROM ${tenantSchema}.field_scorecards sc
+              JOIN ${tenantSchema}.field_responders fr
+                ON (fr.role = 'superintendent' AND fr.id = sc.superintendent_responder_id)
+                OR (fr.role = 'project_manager' AND fr.id = sc.pm_responder_id)
+             WHERE sc.id = $2::uuid
+               AND fr.is_active = TRUE
+            UNION ALL
+            SELECT dtm.role AS role,
+                   dtm.user_id AS user_id,
+                   COALESCE(
+                     CASE WHEN dtm.user_id IS NOT NULL AND u.is_active THEN u.display_name END,
+                     CASE WHEN dtm.contact_id IS NOT NULL AND c.is_active THEN TRIM(CONCAT(c.first_name, ' ', c.last_name)) END,
+                     dtm.member_name
+                   ) AS name,
+                   COALESCE(
+                     CASE WHEN dtm.user_id IS NOT NULL AND u.is_active THEN u.email END,
+                     CASE WHEN dtm.contact_id IS NOT NULL AND c.is_active THEN c.email END,
+                     dtm.member_email
+                   ) AS email,
+                   (dtm.user_id IS NOT NULL AND u.is_active AND ula.user_id IS NOT NULL
+                      AND ula.is_enabled = TRUE AND ula.revoked_at IS NULL
+                      AND ula.must_change_password = FALSE) AS can_field_login,
+                   1 AS priority,
+                   dtm.created_at AS created_at
+              FROM ${tenantSchema}.deal_team_members dtm
+              LEFT JOIN public.users u ON dtm.user_id = u.id
+              LEFT JOIN public.user_local_auth ula ON dtm.user_id = ula.user_id
+              LEFT JOIN ${tenantSchema}.contacts c ON dtm.contact_id = c.id
+             WHERE dtm.deal_id = $1::uuid
+               AND dtm.is_active = TRUE
+               AND dtm.role IN ('superintendent', 'project_manager')
+               AND (
+                 (dtm.user_id IS NOT NULL AND u.is_active)
+                 OR (dtm.contact_id IS NOT NULL AND c.is_active)
+                 OR (dtm.user_id IS NULL AND dtm.contact_id IS NULL)
+               )
+          )
+          SELECT DISTINCT ON (role) role, user_id, name, email, can_field_login
+            FROM candidates
+           ORDER BY role, priority, created_at DESC`;
 }
 
 /**
@@ -353,7 +388,7 @@ export async function handleScorecardCorrectiveActionEmail(
   // is already excluded by `ula.user_id IS NOT NULL` earlier in the AND-chain, so `= FALSE` is safe. A userId
   // recipient WITHOUT an enabled/non-revoked/non-must-change login gets the tokenized web fallback instead.
   // user_local_auth lives in public (schema/public/user-local-auth.ts).
-  const recipientRes = await query(recipientResolutionSql(tenantSchema), [dealId]);
+  const recipientRes = await query(recipientResolutionSql(tenantSchema), [dealId, scorecardId]);
   // Signature of the set the worker is about to notify. Compared against a fresh re-resolution just before the
   // stamp to detect a super/PM reassignment mid-run (finding 1).
   const emailedRecipientSignature = recipientSignature(recipientRes.rows as any[]);
@@ -403,6 +438,13 @@ export async function handleScorecardCorrectiveActionEmail(
   //     complete once that one role is delivered.
   // "Required" = every role that IS assigned. This is the minimal coherent rule: don't stamp until every
   // assigned super/PM role has been delivered; unassigned roles owe nothing. (finding 4)
+  //
+  // Deliberately still deal-team-derived even though recipients are now scorecard-scoped, because the two
+  // combine correctly at ROLE granularity: a role whose scorecard pick resolves lands in `resolvedRoles`, so a
+  // deal-team row that the pick merely SHADOWS is assigned-AND-resolved and never blocks the stamp; and a role
+  // whose pick has gone inactive falls back to that same deal-team row, so a genuinely unreachable assignee
+  // still blocks. Adding picked-but-unresolvable roles here instead would block forever on a deactivated
+  // roster person nobody can replace from the field app — a dead-letter, not a fix.
   const assignedRes = await query(
     `SELECT DISTINCT dtm.role AS role
        FROM ${tenantSchema}.deal_team_members dtm
@@ -850,7 +892,7 @@ export async function handleScorecardCorrectiveActionEmail(
   // (delete tokens + enqueue with a new cycleNonce), exactly like the open-item-mismatch path. Cheap: one extra
   // read of the same query. This runs BEFORE the open-item guard so a reassignment is handled even when the
   // open set is unchanged.
-  const revalidateRes = await query(recipientResolutionSql(tenantSchema), [dealId]);
+  const revalidateRes = await query(recipientResolutionSql(tenantSchema), [dealId, scorecardId]);
   const currentRecipientSignature = recipientSignature(revalidateRes.rows as any[]);
   if (currentRecipientSignature !== emailedRecipientSignature) {
     await reNotifyFreshCycle(

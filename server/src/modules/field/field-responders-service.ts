@@ -19,6 +19,9 @@ type TenantDb = NodePgDatabase<typeof schema>;
 // team layer forbids for email-only members anyway) can never inflate a responder's usage.
 const RESPONDER_ASSIGNMENT_ROLES = sql`('superintendent', 'project_manager')`;
 
+/** Canonical uuid shape — guards resolveValidResponderId against a 22P02 on a malformed id. */
+const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export interface CreateFieldResponderInput {
   name: string;
   email: string;
@@ -347,6 +350,57 @@ export async function resolveResponderForAssignment(
   if (!row) throw new AppError(404, "Field responder not found.");
   if (!row.isActive) throw new AppError(400, "This field responder is deactivated and cannot be assigned.");
   return { id: row.id, name: row.name, email: row.email, role: row.role as FieldResponderRole };
+}
+
+/** An ACTIVE roster row resolved for one scorecard slot — the id to store plus the address to notify. */
+export interface ScorecardResponderPick {
+  id: string;
+  name: string;
+  email: string;
+}
+
+/**
+ * Validate a responder id the SCORECARD path picked up from the client (field_scorecards.superintendent_
+ * responder_id / pm_responder_id). Returns the roster row only when the id names an ACTIVE row whose role
+ * matches the slot it was sent for; otherwise null. The name + email come back with it so the submit path can
+ * both store the link and address the completed-scorecard email off one read.
+ *
+ * Returns null rather than throwing on purpose. Unlike resolveResponderForAssignment (a deliberate director
+ * action, where a deactivated person deserves a 400), this link is an OPTIONAL hint attached to a field
+ * submission: a scorecard drafted in the truck can sit for days, and the picked person may be deactivated or
+ * have their role changed before it uploads. Rejecting the submit would strand the card — dropping the link
+ * degrades cleanly to the pre-existing behavior (fall back to the deal's Team-tab super/PM at send time).
+ *
+ * No FOR UPDATE: nothing is being assigned, so there is no assignment to serialize. The stored id is only a
+ * pointer — the roster row is re-read (and re-checked for ACTIVE) at send time, which is what actually decides
+ * the recipient. Taking a row lock here would drag the scorecard submit transaction into the roster's lock
+ * graph for no benefit — exactly the deadlock surface the closed PR #954 kept tripping over.
+ */
+export async function resolveScorecardResponderPick(
+  tenantDb: TenantDb,
+  responderId: string | null | undefined,
+  role: FieldResponderRole,
+): Promise<ScorecardResponderPick | null> {
+  // Shape-check before the query so this helper is TOTAL — a malformed id degrades to "no pick" instead of
+  // throwing 22P02 (invalid input syntax for type uuid) out of a scorecard submit. The request parser already
+  // filters to a uuid; this keeps the guarantee independent of which caller supplies the value.
+  if (!responderId || !UUID_SHAPE.test(responderId)) return null;
+  const [row] = await tenantDb
+    .select({
+      id: fieldResponders.id,
+      name: fieldResponders.name,
+      email: fieldResponders.email,
+    })
+    .from(fieldResponders)
+    .where(
+      and(
+        eq(fieldResponders.id, responderId),
+        eq(fieldResponders.isActive, true),
+        eq(fieldResponders.role, role),
+      ),
+    )
+    .limit(1);
+  return row ?? null;
 }
 
 /** True when a thrown DB error is a Postgres unique-violation (23505). Drizzle wraps driver errors in a

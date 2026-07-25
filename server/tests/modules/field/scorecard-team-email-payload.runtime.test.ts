@@ -11,6 +11,7 @@ import {
   scorecardCorrectiveActions,
   dealTeamMembers,
   contacts,
+  fieldResponders,
 } from "@trock-crm/shared/schema";
 import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
 
@@ -23,6 +24,10 @@ const CONTACT = "44444444-4444-4444-4444-444444444444";
 const USER_DEACTIVATED = "33333333-3333-3333-3333-3333333333de";
 const CONTACT_ARCHIVED = "44444444-4444-4444-4444-4444444444de";
 const STAGE_ACTIVE = "cccccccc-0000-0000-0000-000000000001";
+// Field-responder roster rows the scorecard picker can point at.
+const ROSTER_SUPER = "44444444-4444-4444-4444-444444444401";
+const ROSTER_PM = "44444444-4444-4444-4444-444444444402";
+const ROSTER_INACTIVE = "44444444-4444-4444-4444-444444444403";
 
 const MAX: Record<string, number> = {
   planning_precon: 10,
@@ -86,7 +91,7 @@ beforeAll(async () => {
     );
   `);
   await pg.exec(
-    tenantSchemaSql("public", [fieldScorecards, fieldScorecardItems, fieldScorecardPhotos, scorecardCorrectiveActions, dealTeamMembers, contacts]),
+    tenantSchemaSql("public", [fieldScorecards, fieldScorecardItems, fieldScorecardPhotos, scorecardCorrectiveActions, dealTeamMembers, contacts, fieldResponders]),
   );
   await pg.exec(
     `ALTER TABLE public.field_scorecards ADD CONSTRAINT field_scorecards_csid_uniq UNIQUE (client_submission_id);`,
@@ -170,5 +175,90 @@ describe("createFieldScorecard enqueues team emails", () => {
     expect(payload).toBeTruthy();
     expect(payload.superintendentEmail).toBe("sam.super@trock.com");
     expect(payload.projectManagerEmail).toBeNull();
+  });
+});
+
+describe("createFieldScorecard stores + honors the picked field responder", () => {
+  // The completed-scorecard email freezes its recipients into the payload at submit (nothing re-resolves them
+  // at send time), so the pick has to win HERE — unlike the corrective-action email, which resolves in the
+  // worker. Both halves follow the same rule: per role, a usable pick wins, else the deal's Team-tab super/PM.
+  beforeEach(async () => {
+    await tdb.execute(sql`DELETE FROM field_responders`);
+    await tdb.execute(sql`
+      INSERT INTO field_responders (id, name, email, role, is_active) VALUES
+        (${ROSTER_SUPER}, 'James Helms', 'james@trock.test', 'superintendent', true),
+        (${ROSTER_PM}, 'Tim Mitchell', 'tim@trock.test', 'project_manager', true),
+        (${ROSTER_INACTIVE}, 'Gone Guy', 'gone@trock.test', 'superintendent', false)
+    `);
+  });
+
+  async function storedLinks(): Promise<{ superintendent: string | null; pm: string | null }> {
+    const res = await tdb.execute(
+      sql`SELECT superintendent_responder_id, pm_responder_id FROM field_scorecards ORDER BY submitted_at DESC LIMIT 1`,
+    );
+    const row = res.rows[0] as
+      | { superintendent_responder_id: string | null; pm_responder_id: string | null }
+      | undefined;
+    return { superintendent: row?.superintendent_responder_id ?? null, pm: row?.pm_responder_id ?? null };
+  }
+
+  it("stores both links and addresses the completed-scorecard email to the picked people", async () => {
+    // The deal team says Dana + Sam; the field user picked James + Tim on the card. The pick wins for both.
+    await addTeamMember(tdb, { dealId: DEAL, contactId: CONTACT, role: "superintendent" });
+    await addTeamMember(tdb, { dealId: DEAL, userId: USER, role: "project_manager" });
+
+    await createFieldScorecard(
+      tdb,
+      submission({ superintendentResponderId: ROSTER_SUPER, pmResponderId: ROSTER_PM }),
+    );
+
+    expect(await storedLinks()).toEqual({ superintendent: ROSTER_SUPER, pm: ROSTER_PM });
+    const payload = await enqueuedPayload();
+    expect(payload.superintendentEmail).toBe("james@trock.test");
+    expect(payload.projectManagerEmail).toBe("tim@trock.test");
+  });
+
+  it("falls back to the deal team ONLY for the role without a pick", async () => {
+    await addTeamMember(tdb, { dealId: DEAL, contactId: CONTACT, role: "superintendent" });
+    await addTeamMember(tdb, { dealId: DEAL, userId: USER, role: "project_manager" });
+
+    await createFieldScorecard(tdb, submission({ superintendentResponderId: ROSTER_SUPER }));
+
+    expect(await storedLinks()).toEqual({ superintendent: ROSTER_SUPER, pm: null });
+    const payload = await enqueuedPayload();
+    expect(payload.superintendentEmail).toBe("james@trock.test");
+    expect(payload.projectManagerEmail).toBe("sam.super@trock.com");
+  });
+
+  it("drops an unusable link instead of rejecting the submit — the card still saves", async () => {
+    // A drafted-in-the-truck card can upload days later, by which time the picked person may be deactivated or
+    // re-roled. Stranding that submission would be far worse than quietly falling back to the deal team.
+    await addTeamMember(tdb, { dealId: DEAL, contactId: CONTACT, role: "superintendent" });
+
+    const result = await createFieldScorecard(
+      tdb,
+      submission({
+        superintendentResponderId: ROSTER_INACTIVE, // deactivated
+        pmResponderId: ROSTER_SUPER, // a superintendent sitting in the PM slot
+      }),
+    );
+
+    expect(result.created).toBe(true);
+    expect(await storedLinks()).toEqual({ superintendent: null, pm: null });
+    const payload = await enqueuedPayload();
+    expect(payload.superintendentEmail).toBe("dana.cole@example.com");
+    expect(payload.projectManagerEmail).toBeNull();
+  });
+
+  it("stores nothing for a malformed or unknown id rather than 500ing the submit", async () => {
+    const result = await createFieldScorecard(
+      tdb,
+      submission({
+        superintendentResponderId: "not-a-uuid",
+        pmResponderId: "44444444-4444-4444-4444-4444444444ff",
+      }),
+    );
+    expect(result.created).toBe(true);
+    expect(await storedLinks()).toEqual({ superintendent: null, pm: null });
   });
 });

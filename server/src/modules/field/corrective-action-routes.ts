@@ -14,7 +14,7 @@ import {
 import { verifyCorrectiveActionToken } from "./corrective-action-tokens.js";
 import {
   isAssignedCorrectiveActionResponder,
-  resolveCorrectiveActionRecipients,
+  resolveScorecardCorrectiveActionRecipients,
 } from "./corrective-action-recipients.js";
 import { getCorrectiveActionItems, submitCorrectiveActionResponse } from "./corrective-action-api.js";
 import { activeProjectWhere } from "./projects-service.js";
@@ -23,7 +23,6 @@ import {
   requestCorrectiveActionUploadUrl,
   confirmCorrectiveActionUpload,
   discardCorrectiveActionUpload,
-  resolveScorecard,
 } from "./corrective-action-upload.js";
 
 /** The responder identity threaded into a resolved item (a CRM user, or an email-only token recipient). */
@@ -133,11 +132,16 @@ async function authorizeCorrectiveAction(
       }
       // Verify-time revalidation: a token verified by hash+expiry alone would keep working for its full TTL
       // even after the assignment drifts (the recipient's email CHANGED, or the super/PM was reassigned) — the
-      // per-mutation archive/removal hooks don't cover an email CHANGE. So re-resolve the deal's CURRENT active
-      // superintendent/PM recipients and confirm the token's email still matches a live assignment. If not, the
-      // link no longer maps to an assigned responder → 403. (The mutation hooks stay as belt-and-suspenders.)
-      const { dealId } = await resolveScorecard(db, scorecardId);
-      const recipients = await resolveCorrectiveActionRecipients(db, dealId);
+      // per-mutation archive/removal hooks don't cover an email CHANGE. So re-resolve THIS SCORECARD's CURRENT
+      // recipients and confirm the token's email still matches a live assignment. If not, the link no longer
+      // maps to an assigned responder → 403. (The mutation hooks stay as belt-and-suspenders.)
+      //
+      // SCORECARD-scoped, not deal-scoped: the worker mints tokens for whoever this card resolves to, and for a
+      // card whose super/PM was picked from the field-responder roster that is the picked person — who need not
+      // be on deal_team_members at all. A deal-scoped revalidation here would 403 that link on its first click.
+      // Resolution still falls back to the deal team per role, so nothing is loosened for anyone else, and a
+      // pick that goes inactive/re-roled stops authorizing on the very next request.
+      const recipients = await resolveScorecardCorrectiveActionRecipients(db, scorecardId);
       const wanted = verified.recipientEmail.trim().toLowerCase();
       const match = recipients.find((r) => r.email.trim().toLowerCase() === wanted);
       if (!match) {
