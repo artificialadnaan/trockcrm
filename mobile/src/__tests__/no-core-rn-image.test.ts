@@ -54,26 +54,34 @@ function sourceFiles(dir: string): string[] {
   return out;
 }
 
-/** Split a `{ a, b as c }` binding list into the ORIGINAL names — an alias still resolves to the core component. */
-function destructuredNames(braceBody: string): string[] {
-  return braceBody
-    .split(",")
-    .map((specifier) => specifier.trim().split(/\s+as\s+|:/)[0].trim())
-    .filter(Boolean);
+/**
+ * One `{ … }` specifier as an imported→local pair. ESM aliases with `as`, destructuring with `:`; both
+ * matter, because the LOCAL name is what the JSX below uses while the IMPORTED name is what it resolves to.
+ * All captures are `\w+`, so names interpolated into regexes later cannot inject pattern syntax.
+ */
+function parseSpecifier(specifier: string): { imported: string; local: string } | null {
+  const match = specifier.trim().match(/^(\w+)(?:\s+as\s+(\w+)|\s*:\s*(\w+))?$/);
+  if (!match) return null; // e.g. `type ViewStyle` — a type import can't render
+  return { imported: match[1], local: match[2] ?? match[3] ?? match[1] };
 }
 
-/** Names a file pulls out of "react-native", via either `import { … }` or `const { … } = require(…)`. */
-function namedReactNativeBindings(contents: string): string[] {
-  const names: string[] = [];
+/** What a file pulls out of "react-native", via either `import { … }` or `const { … } = require(…)`. */
+function namedReactNativeBindings(contents: string): Array<{ imported: string; local: string }> {
+  const bindings: Array<{ imported: string; local: string }> = [];
   const patterns = [
     // Multi-line import blocks are the norm in this codebase, so match lazily across newlines.
     /import\s*\{([\s\S]*?)\}\s*from\s*["']react-native["']/g,
     /(?:const|let|var)\s*\{([\s\S]*?)\}\s*=\s*require\(\s*["']react-native["']\s*\)/g,
   ];
   for (const pattern of patterns) {
-    for (let m = pattern.exec(contents); m; m = pattern.exec(contents)) names.push(...destructuredNames(m[1]));
+    for (let m = pattern.exec(contents); m; m = pattern.exec(contents)) {
+      for (const specifier of m[1].split(",")) {
+        const parsed = parseSpecifier(specifier);
+        if (parsed) bindings.push(parsed);
+      }
+    }
   }
-  return names;
+  return bindings;
 }
 
 /** Local bindings holding the whole react-native module, so `<binding>.Image` reaches the core component. */
@@ -94,17 +102,25 @@ function reactNativeModuleBindings(contents: string): string[] {
 export function coreImageReaches(contents: string): string[] {
   const reasons: string[] = [];
 
-  for (const name of namedReactNativeBindings(contents)) {
-    if (CORE_IMAGE_NAMES.has(name)) reasons.push(`binds ${name} from "react-native"`);
+  for (const { imported, local } of namedReactNativeBindings(contents)) {
+    if (CORE_IMAGE_NAMES.has(imported)) reasons.push(`binds ${imported} from "react-native"`);
+
+    // `Animated.Image` is the same core component with an animated host wrapper — identical crash path.
+    // Match on the LOCAL name: `import { Animated as RNAnimated }` then `<RNAnimated.Image />` reaches it
+    // just as surely, and a literal `Animated.` match would sail straight past it.
+    if (imported !== "Animated") continue;
+    for (const hit of contents.match(new RegExp(`\\b${local}\\.${CORE_IMAGE}\\b`, "g")) ?? []) {
+      reasons.push(`renders ${hit}`);
+    }
+    for (const hit of contents.match(new RegExp(`\\b${local}\\.createAnimatedComponent\\(\\s*\\w+`, "g")) ?? []) {
+      const arg = hit.split("(")[1].trim();
+      if (CORE_IMAGE_NAMES.has(arg)) reasons.push(`wraps a core image via ${local}.createAnimatedComponent(${arg})`);
+    }
   }
 
-  // Animated.Image is the same core component with an animated host wrapper — identical crash path.
-  for (const hit of contents.match(new RegExp(`\\bAnimated\\.${CORE_IMAGE}\\b`, "g")) ?? []) {
-    reasons.push(`renders ${hit}`);
-  }
-
-  // Animated.createAnimatedComponent(Image) reaches it without ever writing `Animated.Image`.
-  for (const hit of contents.match(new RegExp(`createAnimatedComponent\\(\\s*${CORE_IMAGE}\\b`, "g")) ?? []) {
+  // A bare `createAnimatedComponent(Image)` — reached without ever writing `Animated.`, e.g. when the
+  // function itself was destructured off Animated or off a namespace import.
+  for (const hit of contents.match(new RegExp(`(?<!\\.)\\bcreateAnimatedComponent\\(\\s*${CORE_IMAGE}\\b`, "g")) ?? []) {
     reasons.push(`wraps a core image via ${hit.replace(/\s+/g, "")})`);
   }
 
@@ -113,9 +129,9 @@ export function coreImageReaches(contents: string): string[] {
     reasons.push(`reads .${hit.split(".").pop()} off require("react-native")`);
   }
 
-  // A whole-module binding lets `RN.Image` slip past the named-binding check.
+  // A whole-module binding lets `RN.Image` (or `RN.Animated.Image`) slip past the named-binding check.
   for (const binding of reactNativeModuleBindings(contents)) {
-    for (const hit of contents.match(new RegExp(`\\b${binding}\\.${CORE_IMAGE}\\b`, "g")) ?? []) {
+    for (const hit of contents.match(new RegExp(`\\b${binding}\\.(?:Animated\\.)?${CORE_IMAGE}\\b`, "g")) ?? []) {
       reasons.push(`renders ${hit} via the react-native module binding "${binding}"`);
     }
   }
@@ -154,9 +170,26 @@ describe("no core react-native <Image> anywhere", () => {
       ['const Img = require("react-native").Image;', 'reads .Image off require("react-native")'],
       ['import { Animated } from "react-native";\n<Animated.Image source={{ uri }} />', "renders Animated.Image"],
       [
+        'import { Animated as RNAnimated } from "react-native";\n<RNAnimated.Image source={{ uri }} />',
+        "renders RNAnimated.Image",
+      ],
+      [
+        'const { Animated: RNAnimated } = require("react-native");\n<RNAnimated.ImageBackground source={{ uri }} />',
+        "renders RNAnimated.ImageBackground",
+      ],
+      [
         'import { Animated, Image } from "react-native";\nAnimated.createAnimatedComponent( Image )',
+        "wraps a core image via Animated.createAnimatedComponent(Image)",
+      ],
+      [
+        'import { Animated as A, Image } from "react-native";\nA.createAnimatedComponent(Image)',
+        "wraps a core image via A.createAnimatedComponent(Image)",
+      ],
+      [
+        'const { createAnimatedComponent } = Animated;\ncreateAnimatedComponent(Image)',
         "wraps a core image via createAnimatedComponent(Image)",
       ],
+      ['import * as RN from "react-native";\n<RN.Animated.Image source={{ uri }} />', 'renders RN.Animated.Image via the react-native module binding "RN"'],
       ['import * as RN from "react-native";\n<RN.Image source={{ uri }} />', 'renders RN.Image via the react-native module binding "RN"'],
       ['import RN from "react-native";\n<RN.Image source={{ uri }} />', 'renders RN.Image via the react-native module binding "RN"'],
       [
@@ -171,8 +204,11 @@ describe("no core react-native <Image> anywhere", () => {
       'import { Image as ExpoImage } from "expo-image";\n<ExpoImage source={{ uri }} />',
       'import * as ImagePicker from "expo-image-picker";\nImagePicker.launchCameraAsync();',
       'import { Animated, StyleSheet } from "react-native";\n<Animated.View style={s.x} />',
+      // ZoomablePhoto's real shape: an aliased Animated wrapping an expo-image child.
+      'import { Animated as RNAnimated } from "react-native";\nimport { Image as ExpoImage } from "expo-image";\n<RNAnimated.View><ExpoImage source={{ uri }} /></RNAnimated.View>',
       'import { View } from "react-native";\nconst imageUrl = photo.imageUrl;',
       'const { View } = require("react-native");\nconst ImagePicker = require("expo-image-picker");',
+      'import { Animated } from "react-native";\nAnimated.createAnimatedComponent(View)',
     ])("does not flag %j", (source) => {
       expect(coreImageReaches(source)).toEqual([]);
     });

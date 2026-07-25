@@ -79,7 +79,8 @@ URI, and there is no signature-scoped disk-cache cleanup.
 
 ## Testing
 
-Full mobile suite green (48 suites / 505 tests), `tsc` clean.
+Full mobile suite green at the time of this change (**48 suites / 512 tests**), `tsc` clean. (A point-in-time
+count, recorded as evidence for this dated record — it is expected to drift as tests are added.)
 
 Per-component **"is expo-image" guards** (array-normalized `source` + `cachePolicy`) on `PhotoGrid` (new
 test — the untested primary surface), `ScorecardDetailView`, `ReviewTray`, and `PhotoCaptionEditor`, and a new `BrandLogo` test (it had none) covering the expo-image swap,
@@ -89,8 +90,9 @@ Those only lock components that already have a test, which is exactly how the ro
 and `mobile/app` route files have no render tests at all. So the real lock is
 `src/__tests__/no-core-rn-image.test.ts`, a **tree-wide invariant**: it walks every `.ts`/`.tsx` under
 `app/` and `src/` and fails on any route to the core component — named imports (incl. aliases),
-destructured/member `require` forms, `Animated.Image`, `createAnimatedComponent(Image)`, and `RN.Image` via
-a namespace/default module binding. It **self-tests** each detection route against a literal offending
+destructured/member `require` forms, `Animated.Image` **matched on the local binding** (so
+`import { Animated as RNAnimated }` + `<RNAnimated.Image />` is caught, not just the literal spelling),
+`createAnimatedComponent(Image)`, and `RN.Image` / `RN.Animated.Image` via a namespace/default module binding. It **self-tests** each detection route against a literal offending
 snippet, plus negative cases, so a silently broken regex cannot make it pass vacuously on a crashing tree.
 
 ## Notes
