@@ -252,6 +252,13 @@ export function coreImageReaches(contents: string, fileName = "probe.tsx"): stri
 
   const readBindingPattern = (pattern: ts.ObjectBindingPattern, origin: "module" | "animated", how: string) => {
     for (const element of pattern.elements) {
+      // `const { ...RN } = require("react-native")` — rest collects the whole object, so the local holds
+      // the module (or Animated) exactly as a namespace import would. Must be read before destructuredKey,
+      // which would otherwise treat the rest name as a property key.
+      if (element.dotDotDotToken && ts.isIdentifier(element.name)) {
+        (origin === "module" ? rnModule : rnAnimated).add(element.name.text);
+        continue;
+      }
       const imported = destructuredKey(element);
       if (!imported) continue;
       // `const { Animated: { Image: X } } = require("react-native")` — recurse rather than stop at the nest.
@@ -286,7 +293,15 @@ export function coreImageReaches(contents: string, fileName = "probe.tsx"): stri
       if (named && ts.isNamedImports(named)) {
         for (const element of named.elements) {
           if (element.isTypeOnly || clause?.isTypeOnly) continue; // a type can't render
-          bindName((element.propertyName ?? element.name).text, element.name.text, "module", "binds");
+          const imported = (element.propertyName ?? element.name).text;
+          // From the image module, `default` IS the component — the named form of the default import
+          // already handled above, and the mirror of the `.default` require idiom.
+          if (asComponent && imported === "default") {
+            coreLocal.add(element.name.text);
+            reasons.add(`binds ${asComponent} from "react-native"`);
+            continue;
+          }
+          bindName(imported, element.name.text, "module", "binds");
         }
       }
     }
@@ -537,6 +552,12 @@ describe("no core react-native <Image> anywhere", () => {
         're-exports Image from "react-native"',
       ],
       ['export * from "react-native/Libraries/Image/Image";', 're-exports all of "react-native" (including Image) from this module'],
+      // The named form of the default import from the image module — mirror of the `.default` require idiom.
+      ['import { default as Img } from "react-native/Libraries/Image/Image";', 'binds Image from "react-native"'],
+      // Rest collects the whole object, so the local holds the module exactly as a namespace import would.
+      ['const { ...RN } = require("react-native");\nconst I = RN.Image;', "reads Image off the react-native module"],
+      ['import * as M from "react-native";\nconst { ...RN } = M;\nconst I = RN.ImageBackground;', "reads ImageBackground off the react-native module"],
+      ['import { Animated } from "react-native";\nconst { ...A } = Animated;\nconst I = A.Image;', "renders Animated.Image"],
     ])("flags %j", (source, expectedReason) => {
       expect(coreImageReaches(source)).toContain(expectedReason);
     });
