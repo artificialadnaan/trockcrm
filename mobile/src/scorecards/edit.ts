@@ -82,6 +82,15 @@ function editableDetailFingerprint(detail: FieldScorecardDetail): string {
   return contentDigest(JSON.stringify({
     superintendentName: detail.superintendentName ?? null,
     pmName: detail.pmName ?? null,
+    // The picked responder links are editable content, so they belong in the conflict fingerprint alongside the
+    // names they route for. This fingerprint is what lets refreshScorecardEditPhotoUrls ADVANCE
+    // editBaseUpdatedAt on a revision it judges content-identical. Hashing only the names would call a
+    // server-side pick change identical whenever the label happened to match — another device switching to a
+    // same-named roster person, or clearing a pick while keeping the name — so the local draft would adopt the
+    // newer token while still holding the stale ids, and the next full-replacement save would sail past the
+    // 409 and silently overwrite the newer recipient routing.
+    superintendentResponderId: detail.superintendentResponderId ?? null,
+    pmResponderId: detail.pmResponderId ?? null,
     items,
     criticalDeficiencies: [...detail.criticalDeficiencies].sort(),
     criticalDeficiencyNotes: sortedRecord(detail.criticalDeficiencyNotes ?? {}),

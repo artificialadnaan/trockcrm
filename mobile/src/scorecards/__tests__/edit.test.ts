@@ -285,6 +285,48 @@ describe("refreshScorecardEditPhotoUrls", () => {
     expect(refreshed.editBaseUpdatedAt).toBe("2026-07-14T14:05:00.000Z");
   });
 
+  it("keeps the old token when another device changed only the PICKED responder", () => {
+    // The trap: another device switched this card to a DIFFERENT roster person who happens to share the
+    // displayed name (or cleared the pick while keeping the name). If the fingerprint hashed only the names it
+    // would call that revision content-identical, advance editBaseUpdatedAt to the server's newer token, and
+    // the next full-replacement save would sail past the 409 and silently overwrite the newer routing with
+    // this draft's stale ids. Holding the old token forces the expected conflict instead.
+    const picked = detail({ superintendentResponderId: "resp-a" });
+    const base = createScorecardEditDraft(picked, { id: "local", clientSubmissionId: "edit", now: 1 });
+    const refreshed = refreshScorecardEditPhotoUrls(base, detail({
+      updatedAt: "2026-07-14T14:15:00.000Z",
+      superintendentResponderId: "resp-b", // same displayed name, different person
+    }));
+
+    expect(refreshed.editBaseUpdatedAt).toBe("2026-07-14T14:05:00.000Z");
+    expect(refreshed.superintendentResponderId).toBe("resp-a");
+  });
+
+  it("keeps the old token when another device CLEARED the pick but kept the name", () => {
+    const picked = detail({ superintendentResponderId: "resp-a" });
+    const base = createScorecardEditDraft(picked, { id: "local", clientSubmissionId: "edit", now: 1 });
+    const refreshed = refreshScorecardEditPhotoUrls(base, detail({
+      updatedAt: "2026-07-14T14:15:00.000Z",
+      superintendentResponderId: null,
+    }));
+
+    expect(refreshed.editBaseUpdatedAt).toBe("2026-07-14T14:05:00.000Z");
+  });
+
+  it("still advances the token when the picks match (a genuinely content-identical revision)", () => {
+    const picked = detail({ superintendentResponderId: "resp-a" });
+    const base = createScorecardEditDraft(picked, { id: "local", clientSubmissionId: "edit", now: 1 });
+    const refreshed = refreshScorecardEditPhotoUrls(base, detail({
+      updatedAt: "2026-07-14T14:15:00.000Z",
+      superintendentResponderId: "resp-a",
+      photos: detail().photos.map((photo) => photo.id === "scorecard-photo-1"
+        ? { ...photo, url: "https://fresh.example/photo-1.jpg" }
+        : photo),
+    }));
+
+    expect(refreshed.editBaseUpdatedAt).toBe("2026-07-14T14:15:00.000Z");
+  });
+
   it("treats an older cached detail as a complete no-op", () => {
     const base = createScorecardEditDraft(detail(), { id: "local", clientSubmissionId: "edit", now: 1 });
     const signed = {

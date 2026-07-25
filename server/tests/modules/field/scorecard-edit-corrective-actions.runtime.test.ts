@@ -1114,6 +1114,59 @@ describe("scorecard edit — picked field responder", () => {
     expect(nonceAfter).not.toBe(nonceBefore);
   });
 
+  it("DOES restart when the pick changes and the original notification job DEAD-lettered", async () => {
+    // A dead job leaves corrective_action_email_sent_at NULL with nothing left to run, which looks identical to
+    // "still pending" if you only check the stamp. Suppressing the restart there would leave the newly picked
+    // responder permanently unnotified while the previous one's link has already stopped authorizing — nobody
+    // can answer the card.
+    const { scorecard } = await createFieldScorecard(
+      tdb,
+      createInput({ items: v2Items(5), actionItems: ["Fix the rail"], superintendentResponderId: ROSTER_A }),
+    );
+    expect(await getEmailSentAt(scorecard.id)).toBeNull();
+    await tdb.execute(sql`
+      UPDATE public.job_queue SET status = 'dead'
+       WHERE job_type = 'scorecard_corrective_action_email' AND payload->>'scorecardId' = ${scorecard.id}
+    `);
+    const jobsBefore = await correctiveJobCount();
+
+    const at = await currentUpdatedAt(scorecard.id);
+    await updateFieldScorecard(
+      tdb,
+      updateInput(scorecard.id, at, {
+        items: v2Items(5),
+        actionItems: ["Fix the rail"],
+        superintendentResponderId: ROSTER_B,
+      }),
+    );
+
+    expect(await correctiveJobCount()).toBe(jobsBefore + 1);
+  });
+
+  it("does NOT re-enqueue when a PROCESSING job is mid-flight (it re-resolves at send time)", async () => {
+    const { scorecard } = await createFieldScorecard(
+      tdb,
+      createInput({ items: v2Items(5), actionItems: ["Fix the rail"], superintendentResponderId: ROSTER_A }),
+    );
+    await tdb.execute(sql`
+      UPDATE public.job_queue SET status = 'processing'
+       WHERE job_type = 'scorecard_corrective_action_email' AND payload->>'scorecardId' = ${scorecard.id}
+    `);
+    const jobsBefore = await correctiveJobCount();
+
+    const at = await currentUpdatedAt(scorecard.id);
+    await updateFieldScorecard(
+      tdb,
+      updateInput(scorecard.id, at, {
+        items: v2Items(5),
+        actionItems: ["Fix the rail"],
+        superintendentResponderId: ROSTER_B,
+      }),
+    );
+
+    expect(await correctiveJobCount()).toBe(jobsBefore);
+  });
+
   it("does NOT re-enqueue when the pick changes while the FIRST notification is still pending", async () => {
     // The pending job resolves recipients at send time, so it will already address the new pick. A second
     // enqueue here would double-email.
