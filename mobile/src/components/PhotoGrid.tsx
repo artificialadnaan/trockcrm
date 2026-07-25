@@ -1,5 +1,6 @@
 import React from "react";
-import { Image, Pressable, StyleSheet, Text, View, useWindowDimensions } from "react-native";
+import { Pressable, StyleSheet, Text, View, useWindowDimensions } from "react-native";
+import { Image as ExpoImage } from "expo-image";
 import type { FieldPhoto } from "../api/types";
 import { categoryLabel } from "../projects/field-projects";
 import { theme } from "../theme/theme";
@@ -35,7 +36,14 @@ export function PhotoGrid({
               style={[styles.thumb, { height: size }]}
             >
               {photo.imageUrl ? (
-                <Image source={{ uri: photo.imageUrl }} style={styles.image} resizeMode="cover" />
+                <ExpoImage
+                  testID={`photo-grid-image-${photo.id}`}
+                  source={{ uri: photo.imageUrl }}
+                  style={styles.image}
+                  contentFit="cover"
+                  recyclingKey={photo.id}
+                  cachePolicy="memory-disk"
+                />
               ) : (
                 <View style={[styles.image, styles.placeholder]} />
               )}

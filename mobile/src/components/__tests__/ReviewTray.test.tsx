@@ -31,6 +31,12 @@ describe("ReviewTray (per-photo captions, no shared caption)", () => {
       <ReviewTray photos={photos} onSetCaption={onSetCaption} onAppendCaption={jest.fn()} onRemove={jest.fn()} />,
     );
 
+    // Thumbnails render via expo-image (array-normalized source + cachePolicy), NOT core RN <Image> — a revert
+    // to core Image re-introduces the Fabric image use-after-free crash while capturing.
+    const thumb = screen.getByTestId("review-photo-image-sp-1");
+    expect(thumb.props.source).toEqual([{ uri: "file://A.jpg" }]);
+    expect(thumb.props.cachePolicy).toBe("memory-disk");
+
     // Both photos start uncaptioned (controlled by props; onSetCaption is a spy so props don't change).
     // Edit the FIRST tile → the edit is bound to sp-1.
     fireEvent.press(screen.getAllByLabelText("Photo — add caption")[0]);

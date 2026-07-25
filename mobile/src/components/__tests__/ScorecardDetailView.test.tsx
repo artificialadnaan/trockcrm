@@ -94,7 +94,8 @@ describe("ScorecardDetailView", () => {
 
     expect(isScorecardSignatureImage(handwritten)).toBe(true);
     expect(isScorecardSignatureImage("Pat PM (typed legacy signature)")).toBe(false);
-    expect(screen.getByTestId("scorecard-signature-image-superintendent").props.source).toEqual({ uri: handwritten });
+    // expo-image normalizes `source` to an array of sources (core RN <Image> kept the bare object).
+    expect(screen.getByTestId("scorecard-signature-image-superintendent").props.source).toEqual([{ uri: handwritten }]);
     expect(screen.queryByText(handwritten)).toBeNull();
     expect(screen.getByText("Pat PM (typed legacy signature)")).toBeTruthy();
     expect(screen.queryByTestId("scorecard-signature-image-project-manager")).toBeNull();
