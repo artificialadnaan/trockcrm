@@ -225,8 +225,9 @@ function SignatureValue({
           source={{ uri: signature }}
           style={styles.signatureImage}
           contentFit="contain"
-          recyclingKey={signature}
-          cachePolicy="memory-disk"
+          // A handwritten signature is personal data delivered inline as a data: URL — keep it in memory only
+          // (there is no signature-scoped disk-cache cleanup, and disk-caching an inline data URI is pointless).
+          cachePolicy="memory"
         />
       ) : (
         <Text style={styles.signatureText}>{signature && !DATA_URL.test(signature) ? signature : "—"}</Text>
