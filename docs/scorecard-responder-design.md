@@ -75,6 +75,12 @@ fine and then 403s on its first click. Both are covered by real-SQL tests agains
   drops the picks back to the deal-team fallback.
 - **The ids are part of the edit's content-equality check.** A pick swap can leave the display name identical,
   so without this the no-op short-circuit would silently discard the change.
+- **The two `role` columns are different types.** `field_responders.role` is bare text (0198);
+  `deal_team_members.role` is the `deal_team_role` ENUM (0016). Postgres will not reconcile them in a UNION —
+  it raises `42804 UNION types text and deal_team_role cannot be matched` before resolving any recipient, which
+  breaks EVERY corrective-action email, not just picked cards. Both branches of the worker's candidate CTE cast
+  to `::text`. The PGlite harness creates the real enum on purpose: declaring it as text let this pass review
+  once, so the test is written to fail without the casts.
 - **Lock order is roster-then-card.** The edit takes the roster row's FOR KEY SHARE — the same lock its FK
   write needs anyway — BEFORE locking the card, because the assign-from-roster team POST goes roster-then-card
   and two opposed orders on that pair deadlock.
@@ -101,6 +107,11 @@ fine and then 403s on its first click. Both are covered by real-SQL tests agains
 - Worker tests are NOT in the CI gate — `worker/package.json` has no `test:ci`, so `npm run test:ci
   --workspaces --if-present` skips it. The worker half of this feature (the recipient SQL and its real-SQL
   test) is verified locally only, the same footing as mobile.
+- Creation takes `FOR KEY SHARE` on the picked roster rows so a concurrent hard-delete cannot fail the FK
+  insert (which would reject a field submission instead of degrading). It deliberately does NOT block a
+  director's PATCH — a plain UPDATE takes `FOR NO KEY UPDATE`, which does not conflict — so a deactivation
+  landing in that window still stores the link. Harmless: send-time resolution re-checks ACTIVE and falls back.
+  Blocking it would need a conflicting lock, i.e. the assignment-lock coupling that sank #954.
 - `revokeCorrectiveActionTokensForRemovedMember` is email-keyed and deal-scoped, so removing a Team-tab member
   whose email matches a picked responder revokes that token too. Every call site pairs the revoke with a cycle
   restart, which re-mints under the new resolution, so it self-heals.
