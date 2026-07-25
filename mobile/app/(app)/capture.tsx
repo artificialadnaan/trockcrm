@@ -1,8 +1,9 @@
 import React, { Suspense, useCallback, useEffect, useRef, useState } from "react";
-import { ActivityIndicator, AppState, Image, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { ActivityIndicator, AppState, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { Image as ExpoImage } from "expo-image";
 import * as ImagePicker from "expo-image-picker";
 import { Ionicons } from "@expo/vector-icons";
 import { theme } from "../../src/theme/theme";
@@ -1167,7 +1168,14 @@ export default function CaptureScreen() {
             {pending.map((photo) => (
               <View key={photo.id} style={styles.pendingRow}>
                 {photo.imageUrl ? (
-                  <Image source={{ uri: photo.imageUrl }} style={styles.pendingThumb} />
+                  <ExpoImage
+                    testID={`pending-photo-image-${photo.id}`}
+                    source={{ uri: photo.imageUrl }}
+                    style={styles.pendingThumb}
+                    contentFit="cover"
+                    recyclingKey={photo.id}
+                    cachePolicy="memory-disk"
+                  />
                 ) : (
                   <View style={[styles.pendingThumb, styles.placeholder]} />
                 )}

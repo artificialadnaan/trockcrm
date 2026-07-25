@@ -15,7 +15,7 @@ import { PhotoCaptionEditor } from "../PhotoCaptionEditor";
 describe("PhotoCaptionEditor", () => {
   it("edits the caption it was given, and renders the supplied label + footer", () => {
     const onChangeCaption = jest.fn();
-    const { getByLabelText, getByText } = render(
+    const { getByLabelText, getByTestId, getByText } = render(
       <PhotoCaptionEditor
         uri="file://A.jpg"
         caption="initial"
@@ -25,6 +25,11 @@ describe("PhotoCaptionEditor", () => {
         footer={<Text>Save & next</Text>}
       />,
     );
+
+    // The photo thumbnail renders via expo-image (not core RN <Image>, which crashes during rapid capture).
+    const thumb = getByTestId("caption-photo-image");
+    expect(thumb.props.source).toEqual([{ uri: "file://A.jpg" }]);
+    expect(thumb.props.cachePolicy).toBe("memory-disk");
 
     getByText("Add a note for this photo");
     getByText("Save & next");

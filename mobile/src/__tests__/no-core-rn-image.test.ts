@@ -1,0 +1,269 @@
+import fs from "fs";
+import path from "path";
+
+/**
+ * Tree-wide guard for the Fabric image use-after-free crash (PR #956).
+ *
+ * `ImageResponseObserverCoordinator::nativeImageResponseProgress` snapshots `observers_` under its mutex,
+ * unlocks, and *then* dereferences those RAW observer pointers. If a core RN <Image> unmounts in that
+ * window, the observer is already destroyed → EXC_BAD_ACCESS at 0x10. So no source file may reach a core
+ * react-native image component, by any route.
+ *
+ * There is NO allowlist, deliberately. The obvious exemption — "it's a statically bundled require() asset,
+ * so it loads synchronously" — is FALSE on Fabric: `RCTImageManager::requestImage` dispatch_asyncs *every*
+ * request onto its background serial queue, and `RCTBundleAssetImageLoader` still fires
+ * `progressHandler(1, 1)` from there, reaching the same coordinator. BrandLogo was exempted on exactly
+ * that bad premise and has since been migrated. If you think you have found a safe exception, re-read
+ * RCTImageManager.mm first.
+ *
+ * Per-component "is-it-expo-image" assertions only lock the components that happen to have a test — which
+ * is why the first pass of this migration swept `src/components` only and silently left five core <Image>
+ * renders in the `app/` route files, including the pending-captures strip on the capture screen itself.
+ * `mobile/app` route files have no render tests at all, so a tree-wide static check is the only thing that
+ * can cover them.
+ *
+ * `Animated.Image` is checked too, and not hypothetically: ZoomablePhoto renders the full-screen photo,
+ * already imports `Animated`, and *was* an `Animated.Image` until PR #888 moved the transform onto an
+ * `Animated.View` wrapper. It is matched on the LOCAL binding, so an aliased
+ * `import { Animated as RNAnimated }` is caught as readily as the literal spelling.
+ *
+ * KNOWN LIMIT — this is a static regex scan, not a type-aware one, so it cannot follow an arbitrary
+ * re-binding chain (`const A = RN.Animated; <A.Image />`). It covers every form that occurs in this
+ * codebase plus the plausible near-misses, and the self-tests below pin each one. Treat a green run as
+ * "no known route to the core component", not a proof — if you are reaching for an indirection this
+ * check does not see, you already know you are doing something the crash cares about.
+ */
+
+const MOBILE_ROOT = path.resolve(__dirname, "../..");
+const SCANNED_DIRS = ["app", "src"];
+const SOURCE_EXT = new Set([".ts", ".tsx"]);
+
+/** Image components from "react-native" that route through RCTImageManager. */
+const CORE_IMAGE = "(?:Image|ImageBackground)";
+const CORE_IMAGE_NAMES = new Set(["Image", "ImageBackground"]);
+
+function sourceFiles(dir: string): string[] {
+  const abs = path.join(MOBILE_ROOT, dir);
+  if (!fs.existsSync(abs)) return [];
+  const out: string[] = [];
+  const walk = (current: string) => {
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      const full = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        if (entry.name === "node_modules" || entry.name === "__tests__") continue;
+        walk(full);
+        continue;
+      }
+      if (SOURCE_EXT.has(path.extname(entry.name))) out.push(path.relative(MOBILE_ROOT, full));
+    }
+  };
+  walk(abs);
+  return out;
+}
+
+/**
+ * One `{ … }` specifier as an imported→local pair. ESM aliases with `as`, destructuring with `:`; both
+ * matter, because the LOCAL name is what the JSX below uses while the IMPORTED name is what it resolves to.
+ * All captures are `\w+`, so names interpolated into regexes later cannot inject pattern syntax.
+ */
+function parseSpecifier(specifier: string): { imported: string; local: string } | null {
+  const match = specifier.trim().match(/^(\w+)(?:\s+as\s+(\w+)|\s*:\s*(\w+))?$/);
+  if (!match) return null; // e.g. `type ViewStyle` — a type import can't render
+  return { imported: match[1], local: match[2] ?? match[3] ?? match[1] };
+}
+
+/** What a file pulls out of "react-native", via either `import { … }` or `const { … } = require(…)`. */
+function namedReactNativeBindings(contents: string): Array<{ imported: string; local: string }> {
+  const bindings: Array<{ imported: string; local: string }> = [];
+  const patterns = [
+    // `[^{}]` not `[\s\S]`: a specifier list contains no braces, and a dot-all lazy capture BACKTRACKS
+    // ACROSS an earlier declaration. Given
+    //     import { Image as ExpoImage } from "expo-image";
+    //     import { Image } from "react-native";
+    // it would start at the expo-image import, swallow `} from "expo-image"; import {` to reach the
+    // react-native tail, and hand parseSpecifier one unparseable blob — reporting NO offender for the
+    // exact core <Image> import this guard exists to catch. Excluding braces pins each declaration.
+    // (Newlines still match, so multi-line import blocks are unaffected.)
+    /import\s+(?:\w+\s*,\s*)?\{([^{}]*?)\}\s*from\s*["']react-native["']/g,
+    /(?:const|let|var)\s*\{([^{}]*?)\}\s*=\s*require\(\s*["']react-native["']\s*\)/g,
+  ];
+  for (const pattern of patterns) {
+    for (let m = pattern.exec(contents); m; m = pattern.exec(contents)) {
+      for (const specifier of m[1].split(",")) {
+        const parsed = parseSpecifier(specifier);
+        if (parsed) bindings.push(parsed);
+      }
+    }
+  }
+  return bindings;
+}
+
+/** Local bindings holding the whole react-native module, so `<binding>.Image` reaches the core component. */
+function reactNativeModuleBindings(contents: string): string[] {
+  const bindings: string[] = [];
+  const patterns = [
+    /import\s+\*\s+as\s+(\w+)\s+from\s*["']react-native["']/g, // import * as RN from "react-native"
+    /import\s+(\w+)\s*(?:,\s*\{[^{}]*?\}\s*)?from\s*["']react-native["']/g, // import RN from "react-native"
+    /(?:const|let|var)\s+(\w+)\s*=\s*require\(\s*["']react-native["']\s*\)\s*[;\n]/g, // const RN = require("react-native")
+  ];
+  for (const pattern of patterns) {
+    for (let m = pattern.exec(contents); m; m = pattern.exec(contents)) bindings.push(m[1]);
+  }
+  return bindings;
+}
+
+/** Every way this file can reach a core RN image component, as human-readable reasons (empty = clean). */
+export function coreImageReaches(contents: string): string[] {
+  const reasons: string[] = [];
+
+  for (const { imported, local } of namedReactNativeBindings(contents)) {
+    if (CORE_IMAGE_NAMES.has(imported)) reasons.push(`binds ${imported} from "react-native"`);
+
+    // `Animated.Image` is the same core component with an animated host wrapper — identical crash path.
+    // Match on the LOCAL name: `import { Animated as RNAnimated }` then `<RNAnimated.Image />` reaches it
+    // just as surely, and a literal `Animated.` match would sail straight past it.
+    if (imported !== "Animated") continue;
+    for (const hit of contents.match(new RegExp(`\\b${local}\\.${CORE_IMAGE}\\b`, "g")) ?? []) {
+      reasons.push(`renders ${hit}`);
+    }
+    for (const hit of contents.match(new RegExp(`\\b${local}\\.createAnimatedComponent\\(\\s*\\w+`, "g")) ?? []) {
+      const arg = hit.split("(")[1].trim();
+      if (CORE_IMAGE_NAMES.has(arg)) reasons.push(`wraps a core image via ${local}.createAnimatedComponent(${arg})`);
+    }
+  }
+
+  // A bare `createAnimatedComponent(Image)` — reached without ever writing `Animated.`, e.g. when the
+  // function itself was destructured off Animated or off a namespace import.
+  for (const hit of contents.match(new RegExp(`(?<!\\.)\\bcreateAnimatedComponent\\(\\s*${CORE_IMAGE}\\b`, "g")) ?? []) {
+    reasons.push(`wraps a core image via ${hit.replace(/\s+/g, "")})`);
+  }
+
+  // `require("react-native").Image` — no binding to find, the member access IS the reach.
+  for (const hit of contents.match(new RegExp(`require\\(\\s*["']react-native["']\\s*\\)\\.${CORE_IMAGE}\\b`, "g")) ?? []) {
+    reasons.push(`reads .${hit.split(".").pop()} off require("react-native")`);
+  }
+
+  // A whole-module binding lets `RN.Image` (or `RN.Animated.Image`) slip past the named-binding check.
+  for (const binding of reactNativeModuleBindings(contents)) {
+    for (const hit of contents.match(new RegExp(`\\b${binding}\\.(?:Animated\\.)?${CORE_IMAGE}\\b`, "g")) ?? []) {
+      reasons.push(`renders ${hit} via the react-native module binding "${binding}"`);
+    }
+  }
+
+  return reasons;
+}
+
+describe("no core react-native <Image> anywhere", () => {
+  const files = SCANNED_DIRS.flatMap(sourceFiles);
+
+  it("scans the whole mobile source tree", () => {
+    // Guards the walker itself: a broken path would make the assertion below vacuously pass.
+    expect(files.length).toBeGreaterThan(50);
+    expect(files).toContain("src/components/BrandLogo.tsx");
+    expect(files).toContain("app/(app)/capture.tsx");
+  });
+
+  it("renders every image through expo-image", () => {
+    const offenders: Record<string, string[]> = {};
+    for (const file of files) {
+      const reasons = coreImageReaches(fs.readFileSync(path.join(MOBILE_ROOT, file), "utf8"));
+      if (reasons.length > 0) offenders[file] = reasons;
+    }
+
+    expect(offenders).toEqual({});
+  });
+
+  it("would catch a core <Image> reintroduced into any real file's react-native import", () => {
+    // The assertion above passing proves nothing on its own — a parser that silently fails on our actual
+    // file shapes reports zero offenders too. (It nearly did: a lazy dot-all capture backtracked across an
+    // earlier import declaration and swallowed it, so `import { Image } from "react-native"` went
+    // unreported whenever any named import preceded it.) Synthetic snippets cannot catch that class of
+    // bug, because the shape that breaks it is a REAL file with several imports. So: take every real file
+    // that imports from react-native, splice `Image` into that import, and require the guard to fire.
+    const rnImport = /(import\s+(?:\w+\s*,\s*)?\{)([^{}]*?)(\}\s*from\s*["']react-native["'])/;
+    const withRnImport = files.filter((file) => rnImport.test(fs.readFileSync(path.join(MOBILE_ROOT, file), "utf8")));
+
+    expect(withRnImport.length).toBeGreaterThan(20); // a real sample, not a handful
+
+    const missed = withRnImport.filter((file) => {
+      const injected = fs
+        .readFileSync(path.join(MOBILE_ROOT, file), "utf8")
+        .replace(rnImport, "$1 Image,$2$3");
+      return !coreImageReaches(injected).includes('binds Image from "react-native"');
+    });
+
+    expect(missed).toEqual([]);
+  });
+
+  describe("the guard itself detects every route to the core component", () => {
+    // Without these, a silently-broken regex would let the assertion above pass on a crashing tree.
+    it.each([
+      ['import { Image } from "react-native";', 'binds Image from "react-native"'],
+      ['import { Image as RNImage } from "react-native";', 'binds Image from "react-native"'],
+      // Import ORDER must not matter. A lazy dot-all capture used to backtrack across the first
+      // declaration and swallow it, silently reporting nothing for the react-native import below.
+      [
+        'import { Image as ExpoImage } from "expo-image";\nimport { Image } from "react-native";',
+        'binds Image from "react-native"',
+      ],
+      [
+        'import { useQuery } from "@tanstack/react-query";\nimport * as FileSystem from "expo-file-system";\nimport { View, Image } from "react-native";',
+        'binds Image from "react-native"',
+      ],
+      ['import Default, { Image } from "react-native";', 'binds Image from "react-native"'],
+      // Same backtracking hazard for the require form, with a preceding destructuring declaration.
+      ['const { foo } = bar;\nconst { Image } = require("react-native");', 'binds Image from "react-native"'],
+      ['import {\n  View,\n  ImageBackground,\n} from "react-native";', 'binds ImageBackground from "react-native"'],
+      ['const { Image } = require("react-native");', 'binds Image from "react-native"'],
+      ['const { Image: RNImage } = require("react-native");', 'binds Image from "react-native"'],
+      ['const Img = require("react-native").Image;', 'reads .Image off require("react-native")'],
+      ['import { Animated } from "react-native";\n<Animated.Image source={{ uri }} />', "renders Animated.Image"],
+      [
+        'import { Animated as RNAnimated } from "react-native";\n<RNAnimated.Image source={{ uri }} />',
+        "renders RNAnimated.Image",
+      ],
+      [
+        'const { Animated: RNAnimated } = require("react-native");\n<RNAnimated.ImageBackground source={{ uri }} />',
+        "renders RNAnimated.ImageBackground",
+      ],
+      [
+        'import { Animated, Image } from "react-native";\nAnimated.createAnimatedComponent( Image )',
+        "wraps a core image via Animated.createAnimatedComponent(Image)",
+      ],
+      [
+        'import { Animated as A, Image } from "react-native";\nA.createAnimatedComponent(Image)',
+        "wraps a core image via A.createAnimatedComponent(Image)",
+      ],
+      [
+        'const { createAnimatedComponent } = Animated;\ncreateAnimatedComponent(Image)',
+        "wraps a core image via createAnimatedComponent(Image)",
+      ],
+      ['import * as RN from "react-native";\n<RN.Animated.Image source={{ uri }} />', 'renders RN.Animated.Image via the react-native module binding "RN"'],
+      ['import * as RN from "react-native";\n<RN.Image source={{ uri }} />', 'renders RN.Image via the react-native module binding "RN"'],
+      ['import RN from "react-native";\n<RN.Image source={{ uri }} />', 'renders RN.Image via the react-native module binding "RN"'],
+      [
+        'const RN = require("react-native");\n<RN.ImageBackground source={{ uri }} />',
+        'renders RN.ImageBackground via the react-native module binding "RN"',
+      ],
+    ])("flags %j", (source, expectedReason) => {
+      expect(coreImageReaches(source)).toContain(expectedReason);
+    });
+
+    it.each([
+      'import { Image as ExpoImage } from "expo-image";\n<ExpoImage source={{ uri }} />',
+      'import * as ImagePicker from "expo-image-picker";\nImagePicker.launchCameraAsync();',
+      'import { Animated, StyleSheet } from "react-native";\n<Animated.View style={s.x} />',
+      // ZoomablePhoto's real shape: an aliased Animated wrapping an expo-image child.
+      'import { Animated as RNAnimated } from "react-native";\nimport { Image as ExpoImage } from "expo-image";\n<RNAnimated.View><ExpoImage source={{ uri }} /></RNAnimated.View>',
+      'import { View } from "react-native";\nconst imageUrl = photo.imageUrl;',
+      'const { View } = require("react-native");\nconst ImagePicker = require("expo-image-picker");',
+      'import { Animated } from "react-native";\nAnimated.createAnimatedComponent(View)',
+      // The real shape of every migrated file: a clean react-native import alongside an expo-image one,
+      // in either order. Neither may be mistaken for the other.
+      'import { View } from "react-native";\nimport { Image as ExpoImage } from "expo-image";\n<ExpoImage source={{ uri }} />',
+      'import { Image as ExpoImage } from "expo-image";\nimport { View } from "react-native";\n<ExpoImage source={{ uri }} />',
+    ])("does not flag %j", (source) => {
+      expect(coreImageReaches(source)).toEqual([]);
+    });
+  });
+});

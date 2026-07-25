@@ -1,5 +1,6 @@
 import React from "react";
-import { Image, Pressable, StyleSheet, Text, View, useWindowDimensions } from "react-native";
+import { Pressable, StyleSheet, Text, View, useWindowDimensions } from "react-native";
+import { Image as ExpoImage } from "expo-image";
 import { theme } from "../theme/theme";
 import { Button, SectionLabel } from "./ui";
 import { RatingBadge } from "./RatingBadge";
@@ -218,12 +219,15 @@ function SignatureValue({
     <View style={styles.signatureValue}>
       <Text style={styles.signatureLabel}>{label}</Text>
       {isScorecardSignatureImage(signature) ? (
-        <Image
+        <ExpoImage
           testID={testId}
           accessibilityLabel={`${label} handwritten signature`}
           source={{ uri: signature }}
           style={styles.signatureImage}
-          resizeMode="contain"
+          contentFit="contain"
+          // A handwritten signature is personal data delivered inline as a data: URL — keep it in memory only
+          // (there is no signature-scoped disk-cache cleanup, and disk-caching an inline data URI is pointless).
+          cachePolicy="memory"
         />
       ) : (
         <Text style={styles.signatureText}>{signature && !DATA_URL.test(signature) ? signature : "—"}</Text>
@@ -309,11 +313,13 @@ function PhotoGrid({
           style={[styles.thumb, { width: thumb, height: thumb }]}
         >
           {photo.url ? (
-            <Image
+            <ExpoImage
               testID={`scorecard-photo-image-${photo.id}`}
               source={{ uri: photo.url }}
               style={styles.image}
-              resizeMode="cover"
+              contentFit="cover"
+              recyclingKey={photo.id}
+              cachePolicy="memory-disk"
             />
           ) : (
             <View testID={`scorecard-photo-placeholder-${photo.id}`} style={[styles.image, styles.placeholder]} />

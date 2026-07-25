@@ -1,7 +1,6 @@
 import React, { useEffect, useState } from "react";
 import {
   Alert,
-  Image,
   KeyboardAvoidingView,
   Modal,
   Platform,
@@ -11,6 +10,7 @@ import {
   View,
   useWindowDimensions,
 } from "react-native";
+import { Image as ExpoImage } from "expo-image";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { theme } from "../theme/theme";
@@ -102,7 +102,14 @@ export function ReviewTray({
               accessibilityLabel={hasCaption ? "Photo (captioned) — edit caption" : "Photo — add caption"}
               style={{ width: size, height: size }}
             >
-              <Image source={{ uri: photo.uri }} style={styles.thumb} />
+              <ExpoImage
+                testID={`review-photo-image-${photo.key}`}
+                source={{ uri: photo.uri }}
+                style={styles.thumb}
+                contentFit="cover"
+                recyclingKey={photo.key}
+                cachePolicy="memory-disk"
+              />
               {hasCaption ? (
                 <View style={styles.captionBadge}>
                   <Ionicons name="pencil" size={12} color={theme.color.brandRed} />

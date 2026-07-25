@@ -94,7 +94,11 @@ describe("ScorecardDetailView", () => {
 
     expect(isScorecardSignatureImage(handwritten)).toBe(true);
     expect(isScorecardSignatureImage("Pat PM (typed legacy signature)")).toBe(false);
-    expect(screen.getByTestId("scorecard-signature-image-superintendent").props.source).toEqual({ uri: handwritten });
+    // expo-image normalizes `source` to an array of sources (core RN <Image> kept the bare object).
+    const sig = screen.getByTestId("scorecard-signature-image-superintendent");
+    expect(sig.props.source).toEqual([{ uri: handwritten }]);
+    // Signatures are personal data — memory-only cache, never persisted to the shared image disk cache.
+    expect(sig.props.cachePolicy).toBe("memory");
     expect(screen.queryByText(handwritten)).toBeNull();
     expect(screen.getByText("Pat PM (typed legacy signature)")).toBeTruthy();
     expect(screen.queryByTestId("scorecard-signature-image-project-manager")).toBeNull();

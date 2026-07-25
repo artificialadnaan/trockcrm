@@ -1,5 +1,6 @@
 import React from "react";
-import { Image, StyleSheet, Text, View } from "react-native";
+import { StyleSheet, Text, View } from "react-native";
+import { Image as ExpoImage } from "expo-image";
 import { theme } from "../theme/theme";
 
 /**
@@ -31,10 +32,20 @@ export function BrandLogo({
     // Group the mark + wordmark into a single VoiceOver element so the logo
     // announces once ("T-Rock Cam"), not three times (mark, "T-ROCK", "CAM").
     <View style={styles.row} accessible accessibilityRole="image" accessibilityLabel="T-Rock Cam">
-      <Image
+      {/*
+        expo-image, not core <Image>, even though this is a bundled require() asset. A bundled asset is
+        NOT loaded synchronously on Fabric: RCTImageManager::requestImage dispatch_asyncs every request
+        onto its background serial queue, and RCTBundleAssetImageLoader still fires progressHandler(1,1)
+        from there — so it reaches ImageResponseObserverCoordinator::nativeImageResponseProgress, which
+        snapshots observers_ under the mutex and then dereferences those RAW pointers after unlocking.
+        ScreenHeader mounts this logo on the capture and tab screens, so it unmounts on every navigation
+        — a narrow window against that race, but the same one, on nearly every screen in the app.
+      */}
+      <ExpoImage
+        testID="brand-logo-mark"
         source={markSource}
         style={{ width: size, height: size }}
-        resizeMode="contain"
+        contentFit="contain"
       />
       {showWordmark ? (
         <View>

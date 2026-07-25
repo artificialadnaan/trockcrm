@@ -6,11 +6,12 @@
 // No signatures, no deficiencies. The project wizard at ../[draftId].tsx is untouched.
 
 import React, { Suspense, useCallback, useEffect, useReducer, useRef, useState } from "react";
-import { Image, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { usePreventRemove } from "@react-navigation/native";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { Image as ExpoImage } from "expo-image";
 import * as ImagePicker from "expo-image-picker";
 import { theme } from "../../../../src/theme/theme";
 import { useAuth } from "../../../../src/auth/AuthContext";
@@ -790,7 +791,15 @@ function EvidencePhotos(props: {
           const retained = isExistingScorecardDraftPhoto(photo);
           const captionEditable = isCaptionEditable(photo);
           const image = photo.uri
-            ? <Image source={{ uri: photo.uri }} style={styles.thumb} />
+            ? (
+              <ExpoImage
+                source={{ uri: photo.uri }}
+                style={styles.thumb}
+                contentFit="cover"
+                recyclingKey={photo.key}
+                cachePolicy="memory-disk"
+              />
+            )
             : <View style={styles.thumb} />;
           return (
             <View key={photo.key} style={styles.thumbWrap}>

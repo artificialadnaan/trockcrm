@@ -4,7 +4,6 @@ import {
   AccessibilityInfo,
   ActivityIndicator,
   type GestureResponderEvent,
-  Image,
   KeyboardAvoidingView,
   type LayoutChangeEvent,
   Modal,
@@ -16,6 +15,7 @@ import {
 } from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { CameraView, useCameraPermissions } from "expo-camera";
+import { Image as ExpoImage } from "expo-image";
 import {
   GestureHandlerRootView,
   PinchGestureHandler,
@@ -483,7 +483,15 @@ export default function CameraCapture({
                       {recent.length > 0 ? (
                         <View style={styles.strip}>
                           {recent.map((uri, i) => (
-                            <Image key={`${uri}-${i}`} source={{ uri }} style={styles.stripThumb} />
+                            <ExpoImage
+                              key={`${uri}-${i}`}
+                              testID={`recent-strip-image-${i}`}
+                              source={{ uri }}
+                              style={styles.stripThumb}
+                              contentFit="cover"
+                              recyclingKey={uri}
+                              cachePolicy="memory-disk"
+                            />
                           ))}
                         </View>
                       ) : null}

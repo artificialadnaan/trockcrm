@@ -1,5 +1,6 @@
 import React from "react";
-import { Image, StyleSheet, Text, View } from "react-native";
+import { StyleSheet, Text, View } from "react-native";
+import { Image as ExpoImage } from "expo-image";
 import { theme } from "../theme/theme";
 import { TextInput } from "./ui";
 import { VoiceRecorder } from "./VoiceRecorder";
@@ -46,7 +47,14 @@ export function PhotoCaptionEditor({
   return (
     <>
       <View style={styles.head}>
-        <Image source={{ uri }} style={styles.thumb} />
+        <ExpoImage
+          testID="caption-photo-image"
+          source={{ uri }}
+          style={styles.thumb}
+          contentFit="cover"
+          recyclingKey={uri}
+          cachePolicy="memory-disk"
+        />
         <View style={{ flex: 1 }}>
           <Text style={styles.label}>{label}</Text>
           {hint ? <Text style={styles.hint}>{hint}</Text> : null}
