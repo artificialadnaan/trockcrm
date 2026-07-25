@@ -24,7 +24,14 @@ import path from "path";
  *
  * `Animated.Image` is checked too, and not hypothetically: ZoomablePhoto renders the full-screen photo,
  * already imports `Animated`, and *was* an `Animated.Image` until PR #888 moved the transform onto an
- * `Animated.View` wrapper.
+ * `Animated.View` wrapper. It is matched on the LOCAL binding, so an aliased
+ * `import { Animated as RNAnimated }` is caught as readily as the literal spelling.
+ *
+ * KNOWN LIMIT — this is a static regex scan, not a type-aware one, so it cannot follow an arbitrary
+ * re-binding chain (`const A = RN.Animated; <A.Image />`). It covers every form that occurs in this
+ * codebase plus the plausible near-misses, and the self-tests below pin each one. Treat a green run as
+ * "no known route to the core component", not a proof — if you are reaching for an indirection this
+ * check does not see, you already know you are doing something the crash cares about.
  */
 
 const MOBILE_ROOT = path.resolve(__dirname, "../..");
