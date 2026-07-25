@@ -1,5 +1,6 @@
-import React, { useMemo, useState } from "react";
-import { Image, Modal, Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } from "react-native";
+import React, { useState } from "react";
+import { Modal, Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } from "react-native";
+import { Image as ExpoImage } from "expo-image";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useAuth } from "../auth/AuthContext";
 import { generateReport, previewReport } from "../api/endpoints";
@@ -7,6 +8,7 @@ import type { FieldPhoto, GeneratedReport, ReportGroupBy, ReportPreviewResponse 
 import { theme } from "../theme/theme";
 import { Button, Chip, SectionLabel, TextInput } from "./ui";
 import { Banner } from "./Banner";
+import { PhotoPickerGrid } from "./PhotoPickerGrid";
 import { VoiceRecorder } from "./VoiceRecorder";
 import { buildGenerateReportRequest } from "./report-builder-request";
 
@@ -179,45 +181,35 @@ export function ReportBuilder({
         ) : null}
 
         {step === "select" ? (
-          <ScrollView contentContainerStyle={styles.body}>
-            <View style={styles.rowBetween}>
-              <SectionLabel>{selected.size} selected</SectionLabel>
-              <Pressable onPress={toggleAll} hitSlop={8}>
-                <Text style={styles.link}>{allSelected ? "Clear all" : "Select all"}</Text>
-              </Pressable>
-            </View>
-            <View style={styles.grid}>
-              {photos.map((photo) => {
-                const isSelected = selected.has(photo.id);
-                return (
-                  <Pressable key={photo.id} onPress={() => toggle(photo.id)} style={{ width: cell, height: cell }}>
-                    {photo.imageUrl ? (
-                      <Image source={{ uri: photo.imageUrl }} style={styles.thumb} resizeMode="cover" />
-                    ) : (
-                      <View style={[styles.thumb, styles.placeholder]} />
-                    )}
-                    {isSelected ? (
-                      <View style={styles.check}>
-                        <Text style={styles.checkMark}>✓</Text>
-                      </View>
-                    ) : null}
-                  </Pressable>
-                );
-              })}
-            </View>
-
-            <SectionLabel>Group photos</SectionLabel>
-            <View style={styles.groupRow}>
-              {GROUP_OPTIONS.map((option) => (
-                <Chip
-                  key={option.value}
-                  label={option.label}
-                  selected={groupBy === option.value}
-                  onPress={() => setGroupBy(option.value)}
-                />
-              ))}
-            </View>
-          </ScrollView>
+          <PhotoPickerGrid
+            photos={photos}
+            selected={selected}
+            onToggle={toggle}
+            cellSize={cell}
+            header={
+              <View style={[styles.rowBetween, styles.gridHeader]}>
+                <SectionLabel>{selected.size} selected</SectionLabel>
+                <Pressable onPress={toggleAll} hitSlop={8}>
+                  <Text style={styles.link}>{allSelected ? "Clear all" : "Select all"}</Text>
+                </Pressable>
+              </View>
+            }
+            footer={
+              <View style={styles.gridFooter}>
+                <SectionLabel>Group photos</SectionLabel>
+                <View style={styles.groupRow}>
+                  {GROUP_OPTIONS.map((option) => (
+                    <Chip
+                      key={option.value}
+                      label={option.label}
+                      selected={groupBy === option.value}
+                      onPress={() => setGroupBy(option.value)}
+                    />
+                  ))}
+                </View>
+              </View>
+            }
+          />
         ) : (
           <ScrollView contentContainerStyle={styles.body} keyboardShouldPersistTaps="handled">
             <SectionLabel>Report title</SectionLabel>
@@ -252,7 +244,14 @@ export function ReportBuilder({
                 {section.photos.map((photo) => (
                   <View key={photo.id} style={styles.editPhoto}>
                     {photo.imageUrl ? (
-                      <Image source={{ uri: photo.imageUrl }} style={styles.editThumb} resizeMode="cover" />
+                      <ExpoImage
+                        source={{ uri: photo.imageUrl }}
+                        style={styles.editThumb}
+                        contentFit="cover"
+                        cachePolicy="memory-disk"
+                        recyclingKey={photo.id}
+                        transition={80}
+                      />
                     ) : (
                       <View style={[styles.editThumb, styles.placeholder]} />
                     )}
@@ -304,21 +303,9 @@ const styles = StyleSheet.create({
   link: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.brandRed },
   hint: { fontFamily: theme.font.body, fontSize: 13, color: theme.color.textMuted, marginTop: -4 },
   summaryInput: { minHeight: 110, textAlignVertical: "top", paddingTop: 10 },
-  grid: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
-  thumb: { width: "100%", height: "100%", borderRadius: theme.radius.sm, backgroundColor: theme.color.surfaceMuted },
   placeholder: { borderWidth: 1, borderColor: theme.color.border },
-  check: {
-    position: "absolute",
-    top: 6,
-    right: 6,
-    width: 26,
-    height: 26,
-    borderRadius: 13,
-    backgroundColor: theme.color.brandRed,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  checkMark: { color: theme.color.textInverse, fontFamily: theme.font.bold, fontSize: 14 },
+  gridHeader: { marginBottom: theme.space.md },
+  gridFooter: { marginTop: theme.space.lg, gap: theme.space.sm },
   groupRow: { flexDirection: "row", flexWrap: "wrap", gap: theme.space.sm },
   editPhoto: { flexDirection: "row", gap: theme.space.md, alignItems: "flex-start" },
   editThumb: { width: 72, height: 72, borderRadius: theme.radius.sm, backgroundColor: theme.color.surfaceMuted },
