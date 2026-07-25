@@ -9,7 +9,7 @@ import {
   type FieldResponderRole,
 } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
-import { addTeamMember, isValidMemberEmail, type TeamMutationOffice } from "../deals/team-service.js";
+import { addTeamMember, isValidMemberEmail } from "../deals/team-service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -405,16 +405,18 @@ export async function resolveActiveResponderByName(
  * active roster person AND the deal has NO active member of that role, assign them to the deal team so BOTH the
  * completed-scorecard email and the corrective-action notification reach the person the field user picked on the
  * scorecard dropdown. "Only if unset" — it fills an empty role, never overrides an existing Team-tab assignment.
- * A custom/typed or ambiguous name resolves to null and is skipped (no wrong assignment, no wrong recipient). No
- * cycle restart (office omitted): it runs inside the scorecard-submission transaction, and that submission's own
- * corrective-action reconcile + the worker's send-time recipient resolution deliver the notification.
+ * A custom/typed or ambiguous name resolves to null and is skipped (no wrong assignment, no wrong recipient).
+ * NO cycle restart from here (addTeamMember is called WITHOUT office): the scorecard's OWN reconcile + the
+ * worker's send-time recipient resolution already deliver the notification for the current card, and restarting
+ * the deal's OTHER open cards from inside a scorecard-submission/edit transaction — which already holds that
+ * scorecard's row lock — would deadlock against a concurrent edit of another card on the same deal (the restart
+ * locks every open scorecard). Team-tab assigns still restart (they hold no scorecard row lock).
  */
 export async function assignRosterResponderToDealIfUnset(
   tenantDb: TenantDb,
   dealId: string,
   name: string | null | undefined,
   role: FieldResponderRole,
-  office?: TeamMutationOffice,
 ): Promise<void> {
   // Serialize the vacancy-check-then-insert against a concurrent scorecard submission for the SAME (deal, role):
   // a per-(deal, role) transaction-scoped advisory lock makes the second caller block until the first commits,
@@ -425,11 +427,12 @@ export async function assignRosterResponderToDealIfUnset(
     sql`SELECT pg_advisory_xact_lock(hashtext(${dealId}::text), hashtext(${role}::text))`,
   );
 
-  // "Unset" means no DELIVERABLE member for this role — mirror the recipient resolvers
-  // (resolveActiveScorecardTeamRows / resolveCorrectiveActionRecipients): a row counts as filled ONLY if it is
-  // an active team row backed by an ACTIVE user / ACTIVE contact, OR an email-only member. A row pointing at a
-  // deactivated user or archived contact is NOT a reachable recipient, so those resolvers treat the role as
-  // vacant — and so must we, or we'd skip and leave the role with no one the emails can reach.
+  // "Unset" means no DELIVERABLE recipient for this role — compute the SAME resolved address the recipient
+  // resolvers (resolveActiveScorecardTeamRows / resolveCorrectiveActionRecipients) would send to, and treat the
+  // role as filled only if that address is non-blank. So a row is a no-op skip only when it actually reaches
+  // someone: an ACTIVE user/contact WITH an email, or an email-only member with a member_email. A deactivated
+  // user, an archived contact, OR an active-but-email-LESS user/contact/member all resolve to null → the role is
+  // vacant and we assign a deliverable roster recipient rather than leaving it unreachable.
   const filled = await tenantDb.execute(sql`
     SELECT 1
       FROM deal_team_members dtm
@@ -438,29 +441,24 @@ export async function assignRosterResponderToDealIfUnset(
      WHERE dtm.deal_id = ${dealId}
        AND dtm.is_active = TRUE
        AND dtm.role::text = ${role}
-       AND (
-         (dtm.user_id IS NOT NULL AND u.is_active)
-         OR (dtm.contact_id IS NOT NULL AND c.is_active)
-         OR (dtm.user_id IS NULL AND dtm.contact_id IS NULL)
-       )
+       AND NULLIF(TRIM(COALESCE(
+             CASE WHEN dtm.user_id IS NOT NULL AND u.is_active THEN u.email END,
+             CASE WHEN dtm.contact_id IS NOT NULL AND c.is_active THEN c.email END,
+             dtm.member_email
+           )), '') IS NOT NULL
      LIMIT 1
   `);
   if ((filled.rows ?? []).length > 0) return; // a deliverable super/PM already exists — only-if-unset, leave it
 
   const responder = await resolveActiveResponderByName(tenantDb, name, role);
   if (!responder) return; // no unique roster match (custom name / same-name collision) — nothing to assign
-  await addTeamMember(
-    tenantDb,
-    {
-      dealId,
-      memberName: responder.name,
-      memberEmail: responder.email,
-      responderId: responder.id,
-      role,
-    },
-    // Pass office so restartCycleForNewResponder re-notifies any EXISTING open corrective-action cards on the
-    // deal (whose recipient was previously unresolvable) — the same re-notify Team-tab assigns get. The freshly
-    // submitted card is handled by this submission's own reconcile; the cycle-nonce guard prevents double-sends.
-    office,
-  );
+  // No office → addTeamMember skips restartCycleForNewResponder (see the header: avoids the cross-scorecard
+  // deadlock). The current card is notified by this submission's own reconcile + send-time recipient resolution.
+  await addTeamMember(tenantDb, {
+    dealId,
+    memberName: responder.name,
+    memberEmail: responder.email,
+    responderId: responder.id,
+    role,
+  });
 }

@@ -588,4 +588,20 @@ describe("assignRosterResponderToDealIfUnset (scorecard name → deal team)", ()
     const emails = await resolveScorecardTeamEmails(tdb, DEAL);
     expect(emails.superintendentEmail).toBe("live@example.com");
   });
+
+  it("treats a role held by an active user with NO email as vacant (deliverability, not just is_active)", async () => {
+    // An ACTIVE user, but with a null email — the recipient resolvers drop it (nothing to send to), so the
+    // vacancy check must too, or the role stays unreachable.
+    const noEmailUser = "88888888-8888-8888-8888-888888888888";
+    await tdb.execute(sql`INSERT INTO users (id, display_name, email, is_active) VALUES (${noEmailUser}, 'No Email User', NULL, TRUE)`);
+    await tdb.execute(sql`
+      INSERT INTO deal_team_members (deal_id, role, user_id, is_active)
+      VALUES (${DEAL}, 'superintendent', ${noEmailUser}, TRUE)
+    `);
+    await createFieldResponder(tdb, { name: "Reachable Super", email: "reach@example.com", role: "superintendent" });
+    await assignRosterResponderToDealIfUnset(tdb, DEAL, "Reachable Super", "superintendent");
+
+    const emails = await resolveScorecardTeamEmails(tdb, DEAL);
+    expect(emails.superintendentEmail).toBe("reach@example.com");
+  });
 });
