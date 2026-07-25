@@ -62,6 +62,13 @@ export interface FieldScorecardEmailPayload {
   // the people responsible for THIS deal are notified even when the env list is unset. null = unassigned/no email.
   superintendentEmail?: string | null;
   projectManagerEmail?: string | null;
+  /**
+   * Rotates the provider idempotency key. Minted by the server ONLY when it re-addresses a still-pending job
+   * (an edit changed which field responder this card picked), because a pending/dead job is not proof nothing
+   * was sent — replaying the base key with changed recipients would be answered as already-delivered and the
+   * corrected send would be silently dropped. Absent on every job that was never re-addressed.
+   */
+  deliveryNonce?: string | null;
 }
 
 interface HandlerDeps {
@@ -106,6 +113,8 @@ export async function handleFieldScorecardEmail(
   }
 
   const env = deps.env ?? process.env;
+  // Set only when the server re-addressed this still-pending job (see the idempotencyKey note below).
+  const deliveryNonce = normalizeText(payload.deliveryNonce);
   // Final recipient list = the static env recipients + this deal's assigned superintendent / project-manager
   // emails (from the payload), de-duplicated case-insensitively. A configured super/PM alone is now enough to
   // send even when the env list is empty; only a TRULY empty union is a loud misconfiguration.
@@ -220,7 +229,19 @@ export async function handleFieldScorecardEmail(
     const sendEmail = deps.sendEmail ?? sendSystemEmailWithMetadata;
     const result = await sendEmail(recipients, email.subject, email.html, {
       text: email.text,
-      idempotencyKey: `field-scorecard-${tenantSchema}-${scorecardId}`,
+      // Scoped to the DELIVERY, not just the scorecard. The base key dedups the crash-window re-delivery
+      // (provider accepted, process died before email_sent_at was stamped, job back to pending). But a pending
+      // or dead job is NOT proof nothing was sent, so if the server RE-ADDRESSES that job — an edit corrected
+      // which field responder was picked — replaying the base key would hand Resend the same key with a
+      // different payload. Resend answers `invalid_idempotent_request`, which sendSystemEmailWithMetadata
+      // deliberately treats as already-delivered: the run would stamp email_sent_at and the newly picked
+      // responder would never be emailed. The server mints a fresh deliveryNonce whenever it changes the
+      // recipients, which rotates the key so the corrected send actually goes out. Worst case is a duplicate
+      // to the right people; the failure it replaces is silence. Absent (every legacy in-flight job, and every
+      // job never re-addressed) the key is byte-identical to before.
+      idempotencyKey: deliveryNonce
+        ? `field-scorecard-${tenantSchema}-${scorecardId}-delivery-${deliveryNonce}`
+        : `field-scorecard-${tenantSchema}-${scorecardId}`,
       attachments,
     });
     if (!result.success) throw new Error("Email provider returned unsuccessful result");

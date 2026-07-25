@@ -36,6 +36,23 @@ BEGIN
          REFERENCES %I.field_responders(id) ON DELETE SET NULL',
       schema_name, schema_name
     );
+    -- Reverse lookup: "which open cards did THIS roster person get picked for". A director deactivating,
+    -- re-roling, or re-addressing someone restarts the notification cycle for those cards, inside their PATCH
+    -- transaction — without an index that walks every scorecard ever filed, and scorecards only accumulate.
+    -- PARTIAL on NOT NULL: only picked cards are ever the answer, so the index stays a tiny fraction of the
+    -- table and costs effectively nothing on the far more common pick-free insert.
+    EXECUTE format(
+      'CREATE INDEX IF NOT EXISTS field_scorecards_superintendent_responder_idx
+         ON %I.field_scorecards (superintendent_responder_id)
+         WHERE superintendent_responder_id IS NOT NULL',
+      schema_name
+    );
+    EXECUTE format(
+      'CREATE INDEX IF NOT EXISTS field_scorecards_pm_responder_idx
+         ON %I.field_scorecards (pm_responder_id)
+         WHERE pm_responder_id IS NOT NULL',
+      schema_name
+    );
   END LOOP;
 END $tenant$;
 
@@ -47,4 +64,10 @@ ALTER TABLE office_dallas.field_scorecards
 ALTER TABLE office_dallas.field_scorecards
   ADD COLUMN IF NOT EXISTS pm_responder_id uuid
   REFERENCES office_dallas.field_responders(id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS field_scorecards_superintendent_responder_idx
+  ON office_dallas.field_scorecards (superintendent_responder_id)
+  WHERE superintendent_responder_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS field_scorecards_pm_responder_idx
+  ON office_dallas.field_scorecards (pm_responder_id)
+  WHERE pm_responder_id IS NOT NULL;
 -- TENANT_SCHEMA_END

@@ -250,6 +250,32 @@ describe("createFieldScorecard stores + honors the picked field responder", () =
     expect(payload.projectManagerEmail).toBeNull();
   });
 
+  it("the pick OWNS the display name — a mismatched name cannot survive beside a resolved id", async () => {
+    // Otherwise a client could pair Bob's id with the name "Alice" and the card + PDF would name Alice as the
+    // on-site superintendent while every email and response token went to Bob.
+    await createFieldScorecard(
+      tdb,
+      submission({ superintendentResponderId: ROSTER_SUPER, superintendentName: "Alice Impostor" }),
+    );
+    const res = await tdb.execute(
+      sql`SELECT superintendent_name, pm_name FROM field_scorecards ORDER BY submitted_at DESC LIMIT 1`,
+    );
+    expect((res.rows[0] as { superintendent_name: string }).superintendent_name).toBe("James Helms");
+    // The role WITHOUT a pick keeps whatever free text was submitted.
+    expect((res.rows[0] as { pm_name: string | null }).pm_name).toBeNull();
+  });
+
+  it("keeps the submitted free-text name when the pick does not resolve", async () => {
+    await createFieldScorecard(
+      tdb,
+      submission({ superintendentResponderId: ROSTER_INACTIVE, superintendentName: "Typed Name" }),
+    );
+    const res = await tdb.execute(
+      sql`SELECT superintendent_name FROM field_scorecards ORDER BY submitted_at DESC LIMIT 1`,
+    );
+    expect((res.rows[0] as { superintendent_name: string }).superintendent_name).toBe("Typed Name");
+  });
+
   it("stores nothing for a malformed or unknown id rather than 500ing the submit", async () => {
     const result = await createFieldScorecard(
       tdb,

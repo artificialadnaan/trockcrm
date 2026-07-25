@@ -1,5 +1,5 @@
 import { and, desc, eq, getTableColumns, inArray, isNull, lte, notInArray, sql } from "drizzle-orm";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
 import {
@@ -316,8 +316,13 @@ export async function createFieldScorecard(
       // Snapshot the SERVER-resolved canonical display number (project_number, else non-HubSpot
       // deal_number, else null) — never the client-sent value, which may be stale/spoofed/absent.
       projectNumber: project.projectNumber ?? null,
-      superintendentName: input.superintendentName ?? null,
-      pmName: input.pmName ?? null,
+      // A resolved pick OWNS its display name. Otherwise a client could pair Bob's responder id with the name
+      // "Alice" (or no name at all) and the card + PDF would identify Alice as the on-site superintendent while
+      // every email and response token went to Bob. The link is the authoritative answer to WHO, so derive the
+      // label from it rather than trusting the two fields to agree; the free-text name still stands whenever
+      // there is no pick.
+      superintendentName: responderLinks.superintendent?.name ?? input.superintendentName ?? null,
+      pmName: responderLinks.pm?.name ?? input.pmName ?? null,
       superintendentResponderId: responderLinks.superintendentResponderId,
       pmResponderId: responderLinks.pmResponderId,
       formVersion,
@@ -488,8 +493,10 @@ export async function updateFieldScorecard(
     { userId: input.userId, userRole: input.userRole },
     card.dealId,
   );
-  const superintendentName = input.superintendentName?.trim() || null;
-  const pmName = input.pmName?.trim() || null;
+  // Same rule as create: a resolved pick owns its display name, so the card can never show one person while
+  // routing to another. Falls back to the submitted free text for a role with no usable pick.
+  const superintendentName = responderLinks.superintendent?.name ?? (input.superintendentName?.trim() || null);
+  const pmName = responderLinks.pm?.name ?? (input.pmName?.trim() || null);
 
   const kind: ScorecardKind = card.kind === "leadership" ? "leadership" : "project";
   const formVersion: ScorecardFormVersion = 2;
@@ -757,11 +764,19 @@ export async function updateFieldScorecard(
     const teamEmails = await resolveScorecardTeamEmails(tenantDb, card.dealId);
     const superintendentEmail = responderLinks.superintendent?.email ?? teamEmails.superintendentEmail;
     const projectManagerEmail = responderLinks.pm?.email ?? teamEmails.projectManagerEmail;
+    // Mint a fresh deliveryNonce alongside the new addresses. `status IN ('pending','dead')` does NOT prove the
+    // email never went out: the provider can accept a send and the process die before email_sent_at is stamped,
+    // returning the job to pending. Replaying the worker's per-scorecard idempotency key with a changed payload
+    // is answered `invalid_idempotent_request`, which sendSystemEmailWithMetadata treats as already-delivered —
+    // so the run would stamp the card sent and the newly picked responder would never be emailed. The nonce
+    // rotates that key, making the corrected send a genuinely new delivery. (Same failure mode the sibling
+    // corrective-action job solved with its per-cycle nonce.)
     await tenantDb.execute(sql`
       UPDATE public.job_queue
       SET payload = payload || jsonb_build_object(
         'superintendentEmail', ${superintendentEmail}::text,
-        'projectManagerEmail', ${projectManagerEmail}::text
+        'projectManagerEmail', ${projectManagerEmail}::text,
+        'deliveryNonce', ${randomUUID()}::text
       )
       WHERE job_type = ${FIELD_SCORECARD_EMAIL_JOB}
         AND status IN ('pending', 'dead')

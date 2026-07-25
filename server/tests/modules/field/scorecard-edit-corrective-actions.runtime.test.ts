@@ -1156,9 +1156,43 @@ describe("scorecard edit — picked field responder", () => {
     };
     expect((await payloadFor()).superintendentEmail).toBe("james@trock.test");
 
+    const beforeNonce = (await payloadFor()).deliveryNonce;
+
     const at = await currentUpdatedAt(scorecard.id);
     await updateFieldScorecard(tdb, updateInput(scorecard.id, at, { superintendentResponderId: ROSTER_B }));
-    expect((await payloadFor()).superintendentEmail).toBe("jamal@trock.test");
+    const after = await payloadFor();
+    expect(after.superintendentEmail).toBe("jamal@trock.test");
+    // A fresh deliveryNonce must ride along. `status IN ('pending','dead')` is not proof the email never went
+    // out — the provider can accept a send and the process die before email_sent_at is stamped — and replaying
+    // the worker's per-scorecard key with changed recipients is answered as already-delivered, silently
+    // dropping the corrected send. The nonce rotates that key.
+    expect(after.deliveryNonce).toBeTruthy();
+    expect(after.deliveryNonce).not.toBe(beforeNonce);
+  });
+
+  it("names the card after the picked person, not the free text sent alongside the id", async () => {
+    const { scorecard } = await createFieldScorecard(
+      tdb,
+      createInput({ superintendentResponderId: ROSTER_A, superintendentName: "Alice Impostor" }),
+    );
+    const nameOf = async () => {
+      const res = await tdb.execute(
+        sql`SELECT superintendent_name AS n FROM field_scorecards WHERE id = ${scorecard.id}`,
+      );
+      return (res.rows[0] as { n: string }).n;
+    };
+    expect(await nameOf()).toBe("James Helms");
+
+    // The edit path applies the same rule.
+    const at = await currentUpdatedAt(scorecard.id);
+    await updateFieldScorecard(
+      tdb,
+      updateInput(scorecard.id, at, {
+        superintendentResponderId: ROSTER_B,
+        superintendentName: "Still Wrong",
+      }),
+    );
+    expect(await nameOf()).toBe("Jamal Wright");
   });
 
   it("reverts a cleared pick to the deal-team address on that pending email", async () => {

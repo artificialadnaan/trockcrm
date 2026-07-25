@@ -117,7 +117,11 @@ export function ResponderPicker({
               // onPress fires after onBlur; keep the value change here so the pick wins over the blur.
               onPress={() => pick(r)}
               accessibilityRole="button"
-              accessibilityLabel={`Select ${r.name}`}
+              // Include the email: only ACTIVE emails are unique on the roster, so two people can share a
+              // name, and pressing one vs the other now routes this card's corrective action to a different
+              // address. The email is already on screen for sighted users — without it here a screen-reader
+              // user has two identical "Select James Helms" buttons and no way to tell which is which.
+              accessibilityLabel={`Select ${r.name}, ${r.email}`}
               style={({ pressed }) => [styles.row, pressed && styles.rowPressed]}
             >
               <Text style={styles.rowName} numberOfLines={1}>

@@ -209,6 +209,24 @@ describe("ResponderPicker", () => {
     expect(onChange).toHaveBeenLastCalledWith("James Helms", roster[0]);
   });
 
+  it("(i) two same-name responders are distinguishable by screen reader and pick independently", () => {
+    // Only ACTIVE emails are unique on the roster, so two people can share a name. Pressing one vs the other
+    // now routes this card's corrective action to a different address, and the email is already on screen for
+    // sighted users — so the accessibility label has to carry it too, or VoiceOver offers two identical
+    // "Select James Helms" buttons.
+    const twins: FieldResponderOption[] = [
+      { id: "t1", name: "James Helms", email: "james.h@trock.test", role: "superintendent" },
+      { id: "t2", name: "James Helms", email: "jhelms@trock.test", role: "superintendent" },
+    ];
+    const onChange = jest.fn();
+    const { getByLabelText } = render(<ControlledPicker onChange={onChange} responders={twins} />);
+    fireEvent(getByLabelText(INPUT_LABEL), "focus");
+
+    expect(getByLabelText("Select James Helms, james.h@trock.test")).toBeTruthy();
+    fireEvent.press(getByLabelText("Select James Helms, jhelms@trock.test"));
+    expect(onChange).toHaveBeenLastCalledWith("James Helms", twins[1]);
+  });
+
   it("(h) with the pick recorded, the exact-name row stays hidden (nothing to re-offer)", () => {
     const onChange = jest.fn();
     const { getByLabelText, queryByText } = render(
