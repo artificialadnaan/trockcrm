@@ -79,7 +79,7 @@ URI, and there is no signature-scoped disk-cache cleanup.
 
 ## Testing
 
-Full mobile suite green at the time of this change (**48 suites / 512 tests**), `tsc` clean. (A point-in-time
+Full mobile suite green at the time of this change (**48 suites / 519 tests**), `tsc` clean. (A point-in-time
 count, recorded as evidence for this dated record — it is expected to drift as tests are added.)
 
 Per-component **"is expo-image" guards** (array-normalized `source` + `cachePolicy`) on `PhotoGrid` (new
@@ -93,7 +93,9 @@ and `mobile/app` route files have no render tests at all. So the real lock is
 destructured/member `require` forms, `Animated.Image` **matched on the local binding** (so
 `import { Animated as RNAnimated }` + `<RNAnimated.Image />` is caught, not just the literal spelling),
 `createAnimatedComponent(Image)`, and `RN.Image` / `RN.Animated.Image` via a namespace/default module binding. It **self-tests** each detection route against a literal offending
-snippet, plus negative cases, so a silently broken regex cannot make it pass vacuously on a crashing tree.
+snippet, plus negative cases. It also splices `Image` into the react-native import of EVERY real file in
+the tree and requires the guard to fire on each — because a parser that silently fails on our actual file
+shapes reports zero offenders just like a clean tree does, and synthetic snippets cannot detect that.
 
 ## Notes
 

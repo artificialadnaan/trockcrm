@@ -76,9 +76,16 @@ function parseSpecifier(specifier: string): { imported: string; local: string } 
 function namedReactNativeBindings(contents: string): Array<{ imported: string; local: string }> {
   const bindings: Array<{ imported: string; local: string }> = [];
   const patterns = [
-    // Multi-line import blocks are the norm in this codebase, so match lazily across newlines.
-    /import\s*\{([\s\S]*?)\}\s*from\s*["']react-native["']/g,
-    /(?:const|let|var)\s*\{([\s\S]*?)\}\s*=\s*require\(\s*["']react-native["']\s*\)/g,
+    // `[^{}]` not `[\s\S]`: a specifier list contains no braces, and a dot-all lazy capture BACKTRACKS
+    // ACROSS an earlier declaration. Given
+    //     import { Image as ExpoImage } from "expo-image";
+    //     import { Image } from "react-native";
+    // it would start at the expo-image import, swallow `} from "expo-image"; import {` to reach the
+    // react-native tail, and hand parseSpecifier one unparseable blob — reporting NO offender for the
+    // exact core <Image> import this guard exists to catch. Excluding braces pins each declaration.
+    // (Newlines still match, so multi-line import blocks are unaffected.)
+    /import\s+(?:\w+\s*,\s*)?\{([^{}]*?)\}\s*from\s*["']react-native["']/g,
+    /(?:const|let|var)\s*\{([^{}]*?)\}\s*=\s*require\(\s*["']react-native["']\s*\)/g,
   ];
   for (const pattern of patterns) {
     for (let m = pattern.exec(contents); m; m = pattern.exec(contents)) {
@@ -96,7 +103,7 @@ function reactNativeModuleBindings(contents: string): string[] {
   const bindings: string[] = [];
   const patterns = [
     /import\s+\*\s+as\s+(\w+)\s+from\s*["']react-native["']/g, // import * as RN from "react-native"
-    /import\s+(\w+)\s*(?:,\s*\{[\s\S]*?\}\s*)?from\s*["']react-native["']/g, // import RN from "react-native"
+    /import\s+(\w+)\s*(?:,\s*\{[^{}]*?\}\s*)?from\s*["']react-native["']/g, // import RN from "react-native"
     /(?:const|let|var)\s+(\w+)\s*=\s*require\(\s*["']react-native["']\s*\)\s*[;\n]/g, // const RN = require("react-native")
   ];
   for (const pattern of patterns) {
@@ -166,11 +173,46 @@ describe("no core react-native <Image> anywhere", () => {
     expect(offenders).toEqual({});
   });
 
+  it("would catch a core <Image> reintroduced into any real file's react-native import", () => {
+    // The assertion above passing proves nothing on its own — a parser that silently fails on our actual
+    // file shapes reports zero offenders too. (It nearly did: a lazy dot-all capture backtracked across an
+    // earlier import declaration and swallowed it, so `import { Image } from "react-native"` went
+    // unreported whenever any named import preceded it.) Synthetic snippets cannot catch that class of
+    // bug, because the shape that breaks it is a REAL file with several imports. So: take every real file
+    // that imports from react-native, splice `Image` into that import, and require the guard to fire.
+    const rnImport = /(import\s+(?:\w+\s*,\s*)?\{)([^{}]*?)(\}\s*from\s*["']react-native["'])/;
+    const withRnImport = files.filter((file) => rnImport.test(fs.readFileSync(path.join(MOBILE_ROOT, file), "utf8")));
+
+    expect(withRnImport.length).toBeGreaterThan(20); // a real sample, not a handful
+
+    const missed = withRnImport.filter((file) => {
+      const injected = fs
+        .readFileSync(path.join(MOBILE_ROOT, file), "utf8")
+        .replace(rnImport, "$1 Image,$2$3");
+      return !coreImageReaches(injected).includes('binds Image from "react-native"');
+    });
+
+    expect(missed).toEqual([]);
+  });
+
   describe("the guard itself detects every route to the core component", () => {
     // Without these, a silently-broken regex would let the assertion above pass on a crashing tree.
     it.each([
       ['import { Image } from "react-native";', 'binds Image from "react-native"'],
       ['import { Image as RNImage } from "react-native";', 'binds Image from "react-native"'],
+      // Import ORDER must not matter. A lazy dot-all capture used to backtrack across the first
+      // declaration and swallow it, silently reporting nothing for the react-native import below.
+      [
+        'import { Image as ExpoImage } from "expo-image";\nimport { Image } from "react-native";',
+        'binds Image from "react-native"',
+      ],
+      [
+        'import { useQuery } from "@tanstack/react-query";\nimport * as FileSystem from "expo-file-system";\nimport { View, Image } from "react-native";',
+        'binds Image from "react-native"',
+      ],
+      ['import Default, { Image } from "react-native";', 'binds Image from "react-native"'],
+      // Same backtracking hazard for the require form, with a preceding destructuring declaration.
+      ['const { foo } = bar;\nconst { Image } = require("react-native");', 'binds Image from "react-native"'],
       ['import {\n  View,\n  ImageBackground,\n} from "react-native";', 'binds ImageBackground from "react-native"'],
       ['const { Image } = require("react-native");', 'binds Image from "react-native"'],
       ['const { Image: RNImage } = require("react-native");', 'binds Image from "react-native"'],
@@ -216,6 +258,10 @@ describe("no core react-native <Image> anywhere", () => {
       'import { View } from "react-native";\nconst imageUrl = photo.imageUrl;',
       'const { View } = require("react-native");\nconst ImagePicker = require("expo-image-picker");',
       'import { Animated } from "react-native";\nAnimated.createAnimatedComponent(View)',
+      // The real shape of every migrated file: a clean react-native import alongside an expo-image one,
+      // in either order. Neither may be mistaken for the other.
+      'import { View } from "react-native";\nimport { Image as ExpoImage } from "expo-image";\n<ExpoImage source={{ uri }} />',
+      'import { Image as ExpoImage } from "expo-image";\nimport { View } from "react-native";\n<ExpoImage source={{ uri }} />',
     ])("does not flag %j", (source) => {
       expect(coreImageReaches(source)).toEqual([]);
     });
