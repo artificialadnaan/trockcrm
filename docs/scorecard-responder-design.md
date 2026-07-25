@@ -57,8 +57,10 @@ fine and then 403s on its first click. Both are covered by real-SQL tests agains
 ## Properties that fall out of resolve-at-read-time
 
 - **Deactivation is the revoke.** Because authorization re-reads the roster row on every request, deactivating
-  a picked responder kills their outstanding link immediately. There is no separate token-revocation hook for
-  the roster, and none is needed.
+  a picked responder kills their outstanding link immediately — no separate token-revocation hook needed. The
+  other half is not free, though: revoking without re-notifying strands the card, so the roster PATCH restarts
+  the notification cycle for every open card that picked the person whenever the edit changed `is_active`,
+  `role`, or `email` (a name edit changes the label, not who is reached, so it stays quiet).
 - **A pick is per card.** Being picked on this week's scorecard grants nothing on last week's.
 - **An unusable link degrades, never rejects.** A card drafted in the truck can upload days later, by which
   time the picked person may be deactivated, re-roled, or deleted. Rather than stranding the submission, the
@@ -73,6 +75,9 @@ fine and then 403s on its first click. Both are covered by real-SQL tests agains
   drops the picks back to the deal-team fallback.
 - **The ids are part of the edit's content-equality check.** A pick swap can leave the display name identical,
   so without this the no-op short-circuit would silently discard the change.
+- **Lock order is roster-then-card.** The edit takes the roster row's FOR KEY SHARE — the same lock its FK
+  write needs anyway — BEFORE locking the card, because the assign-from-roster team POST goes roster-then-card
+  and two opposed orders on that pair deadlock.
 - **A pick change on an already-notified open card restarts the notification cycle.** Otherwise the swap
   strands both people: the previous holder's token stops authorizing and the new pick was never emailed, while
   the sent stamp suppresses any further send. This reuses the existing cycle machinery
@@ -87,8 +92,15 @@ fine and then 403s on its first click. Both are covered by real-SQL tests agains
   branch**, so an email-only super/PM assigned from the Team tab is invisible to the completed-scorecard email.
   That is a pre-existing bug, unchanged here, and worth its own PR — a pick makes the same person visible, which
   will make the inconsistency easier to notice.
-- The completed-scorecard recipient is frozen at submit and is not refreshed when an edit changes the pick.
-  This matches how the deal-team addresses have always behaved on that job.
+- The completed-scorecard recipient is frozen at submit for ordinary edits, matching how the deal-team
+  addresses have always behaved on that job. A pick CHANGE is the exception: it re-addresses the still-pending
+  job, so correcting a mis-picked superintendent seconds after filing reaches the right person.
+- The pick-changed restart triggers on id inequality rather than on a change to the RESOLVED recipient set, so
+  clearing a pick whose person is also the deal-team super re-notifies the same people once. Worst case is a
+  duplicate email carrying a fresh link, never a stranded card.
+- Worker tests are NOT in the CI gate — `worker/package.json` has no `test:ci`, so `npm run test:ci
+  --workspaces --if-present` skips it. The worker half of this feature (the recipient SQL and its real-SQL
+  test) is verified locally only, the same footing as mobile.
 - `revokeCorrectiveActionTokensForRemovedMember` is email-keyed and deal-scoped, so removing a Team-tab member
   whose email matches a picked responder revokes that token too. Every call site pairs the revoke with a cycle
   restart, which re-mints under the new resolution, so it self-heals.
