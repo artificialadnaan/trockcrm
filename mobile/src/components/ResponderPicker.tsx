@@ -29,19 +29,21 @@ export function matchResponders(
   responders: FieldResponderOption[],
   role: FieldResponderRole,
   query: string,
-  opts?: { hasPick?: boolean },
+  opts?: { pickedId?: string | null },
 ): FieldResponderOption[] {
   const q = query.trim().toLowerCase();
   return responders
     .filter((r) => r.role === role)
     .filter((r) => {
       const name = r.name.toLowerCase();
-      // Hide the row whose name is already exactly entered — but ONLY when that name came from picking it.
-      // If the text merely spells a roster member with no pick recorded (the user typed it, or edited a picked
-      // name and undid the edit, which clears the pick), the row must stay offered: it is the only way to
-      // record the pick, and a hidden row would leave the card displaying that person's name while quietly
-      // routing its corrective action to the deal team instead.
-      if (name === q && opts?.hasPick) return false;
+      // Hide only the EXACT row that is already picked — matched by id, not by name.
+      //   - by name would hide the row whenever the text merely spells a roster member with no pick recorded
+      //     (typed, or a picked name edited and undone, which clears the pick), leaving no way to record the
+      //     pick at all: the card would display that person while routing its corrective action to the deal team.
+      //   - by name would ALSO hide a DIFFERENT person who happens to share the picked name — and since only
+      //     active emails are unique on the roster, same-name pairs are exactly the case where the user most
+      //     needs to switch between them.
+      if (r.id === opts?.pickedId && name === q) return false;
       return q.length === 0 || name.includes(q);
     })
     .slice(0, MAX_SUGGESTIONS);
@@ -79,7 +81,7 @@ export function ResponderPicker({
   // No roster to suggest from (failed load or empty office roster) → pure free-text field. Typing still works.
   const hasRoster = !error && responders.length > 0;
   const suggestions =
-    hasRoster && focused ? matchResponders(responders, role, value, { hasPick: !!responderId }) : [];
+    hasRoster && focused ? matchResponders(responders, role, value, { pickedId: responderId }) : [];
   const showSuggestions = suggestions.length > 0;
 
   // Report the WHOLE roster row, not just its name: the id travels with the exact name it belongs to, in one

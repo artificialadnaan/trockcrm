@@ -55,14 +55,25 @@ describe("matchResponders", () => {
     expect(matchResponders(roster, "superintendent", "").map((r) => r.id)).toEqual(["u1", "u2"]);
   });
 
-  it("excludes an entry whose name exactly equals the current value ONLY when that pick is recorded", () => {
-    // With a pick recorded, the row has nothing to offer — the user already selected exactly it.
-    expect(matchResponders(roster, "superintendent", "James Helms", { hasPick: true })).toEqual([]);
-    expect(matchResponders(roster, "superintendent", "james helms", { hasPick: true })).toEqual([]);
+  it("excludes an entry whose name exactly equals the current value ONLY when THAT row is the pick", () => {
+    // With that exact row picked, it has nothing to offer — the user already selected precisely it.
+    expect(matchResponders(roster, "superintendent", "James Helms", { pickedId: "u1" })).toEqual([]);
+    expect(matchResponders(roster, "superintendent", "james helms", { pickedId: "u1" })).toEqual([]);
     // With NO pick recorded, the row MUST stay offered. Otherwise a user who types the name (or edits a picked
     // name and undoes the edit, which clears the pick) can never record it: the card would display that
     // person while routing its corrective action to the deal team, with no way to fix it from the form.
     expect(matchResponders(roster, "superintendent", "James Helms").map((r) => r.id)).toEqual(["u1"]);
+  });
+
+  it("keeps a DIFFERENT same-named responder selectable while one of them is picked", () => {
+    // Only ACTIVE emails are unique, so two people can share a name — and that is exactly when the user needs
+    // to switch between them. Suppressing by name would hide both and strand the swap.
+    const twins = [
+      { id: "t1", name: "James Helms", email: "james.h@trock.test", role: "superintendent" as const },
+      { id: "t2", name: "James Helms", email: "jhelms@trock.test", role: "superintendent" as const },
+    ];
+    expect(matchResponders(twins, "superintendent", "James Helms", { pickedId: "t1" }).map((r) => r.id))
+      .toEqual(["t2"]);
   });
 });
 

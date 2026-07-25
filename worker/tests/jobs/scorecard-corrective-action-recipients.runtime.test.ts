@@ -41,6 +41,12 @@ beforeAll(async () => {
   pg = new PGlite();
   await pg.exec(`
     CREATE SCHEMA office_test;
+    -- The REAL production types, not convenient stand-ins. deal_team_members.role is the deal_team_role ENUM
+    -- (migration 0016) while field_responders.role is bare text (0198), and Postgres refuses to reconcile the
+    -- two in a UNION (42804). Declaring both as text here would let a missing ::text cast pass this suite and
+    -- then dead-letter every corrective-action email in production — which is exactly what it did once.
+    CREATE TYPE deal_team_role AS ENUM
+      ('superintendent','estimator','project_manager','client_services','operations','foreman','other');
     CREATE TABLE public.users (id uuid PRIMARY KEY, display_name text, email text, is_active boolean NOT NULL DEFAULT true);
     CREATE TABLE public.user_local_auth (
       user_id uuid PRIMARY KEY,
@@ -68,7 +74,7 @@ beforeAll(async () => {
       contact_id uuid,
       member_name text,
       member_email text,
-      role text NOT NULL,
+      role deal_team_role NOT NULL,
       is_active boolean NOT NULL DEFAULT true,
       created_at timestamptz NOT NULL DEFAULT NOW()
     );

@@ -126,8 +126,13 @@ function basicValidEmail(email: string): boolean {
  * Nothing here writes deal_team_members — the precedence is applied entirely at read time.
  */
 export function recipientResolutionSql(tenantSchema: string): string {
+  // Both branches cast role to TEXT. They are DIFFERENT types in production — field_responders.role is a bare
+  // text column with an IN-list CHECK (migration 0198), deal_team_members.role is the deal_team_role ENUM
+  // (migration 0016) — and Postgres will not reconcile text with an enum in a UNION: the whole query fails with
+  // 42804 "UNION types text and deal_team_role cannot be matched" before resolving a single recipient. That is
+  // not a picked-card-only failure: it would break EVERY corrective-action email, retrying to dead-letter.
   return `WITH candidates AS (
-            SELECT fr.role AS role,
+            SELECT fr.role::text AS role,
                    NULL::uuid AS user_id,
                    fr.name AS name,
                    fr.email AS email,
@@ -141,7 +146,7 @@ export function recipientResolutionSql(tenantSchema: string): string {
              WHERE sc.id = $2::uuid
                AND fr.is_active = TRUE
             UNION ALL
-            SELECT dtm.role AS role,
+            SELECT dtm.role::text AS role,
                    dtm.user_id AS user_id,
                    COALESCE(
                      CASE WHEN dtm.user_id IS NOT NULL AND u.is_active THEN u.display_name END,

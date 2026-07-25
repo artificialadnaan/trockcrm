@@ -294,9 +294,18 @@ export async function createFieldScorecard(
   const photoLinks = await resolvePhotoLinks(tenantDb, input, formVersion, kind, deficiencies);
   // Revalidate the picked roster links before they are stored: each must still be an ACTIVE field_responders
   // row of the MATCHING role, so a client can neither point the superintendent slot at a PM nor resurrect a
-  // deactivated person. An unusable id resolves to null (see resolveValidResponderId) — the card still saves
-  // and its recipients fall back to the deal team.
-  const responderLinks = await resolveScorecardResponderLinks(tenantDb, input);
+  // deactivated person. An unusable id resolves to null (see resolveScorecardResponderPick) — the card still
+  // saves and its recipients fall back to the deal team.
+  //
+  // lockForFk holds the referenced roster rows for the rest of this transaction (the same FOR KEY SHARE the FK
+  // insert below takes anyway, just earlier). That keeps the row that was validated here the row the insert
+  // references: a concurrent hard-delete would otherwise land between the two and fail the insert on the FK —
+  // turning "an unusable pick degrades to null" into a rejected field submission. It deliberately does NOT
+  // block a director's PATCH: a plain UPDATE takes FOR NO KEY UPDATE, which does not conflict with KEY SHARE,
+  // so the roster stays editable and this stays out of the assignment lock graph. A deactivation landing in
+  // that window therefore still stores the link — harmless, because send-time resolution re-checks ACTIVE and
+  // falls back to the deal team.
+  const responderLinks = await resolveScorecardResponderLinks(tenantDb, input, { lockForFk: true });
   // Week Of = the completion date, which the field app stamps LOCAL at SUBMIT time (submitScorecard →
   // todayLocalIso). Trust it rather than recomputing here: the server runs in UTC, so `new Date().toISOString()`
   // stamped the NEXT day for any evening submit west of UTC (8 PM CDT filed under tomorrow) AND can't see the
