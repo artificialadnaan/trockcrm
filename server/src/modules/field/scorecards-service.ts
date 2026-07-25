@@ -780,13 +780,33 @@ export async function updateFieldScorecard(
     // so the run would stamp the card sent and the newly picked responder would never be emailed. The nonce
     // rotates that key, making the corrected send a genuinely new delivery. (Same failure mode the sibling
     // corrective-action job solved with its per-cycle nonce.)
+    //
+    // BOUNDARY, deliberate: a job already `processing` is NOT re-addressed. The worker has loaded its payload
+    // by then, and the only way to reach the newly picked person afterwards would be to clear `email_sent_at`
+    // and re-run — which re-sends the PDF to the whole env recipient list, since this job addresses a single
+    // union rather than one person. This email is send-once by design and its recipients have ALWAYS been
+    // frozen at submit, so that window is the pre-existing behavior rather than a regression this introduces;
+    // the corrective-action email, which is the one a responder must act on, resolves at send time and is
+    // unaffected. Reaching the new pick in that window needs a per-recipient follow-up mechanism this job does
+    // not have — worth building deliberately, not as a side effect of this change.
+    //
+    // A DEAD row is also REQUEUED, not just re-addressed. The worker claims `status = 'pending' AND run_after
+    // <= NOW()`, so a dead row is never read again — re-addressing one without requeueing rewrites a payload
+    // nobody will ever load. The motivating case is precise: this job dead-letters when it can resolve NO
+    // recipient at all, which is exactly the state a user fixes by picking a roster responder. Requeue gives
+    // that correction somewhere to land. attempts resets only for the dead row (it earned a fresh budget on
+    // changed input); a still-pending row keeps its attempts and its backoff `run_after` untouched.
     await tenantDb.execute(sql`
       UPDATE public.job_queue
       SET payload = payload || jsonb_build_object(
-        'superintendentEmail', ${superintendentEmail}::text,
-        'projectManagerEmail', ${projectManagerEmail}::text,
-        'deliveryNonce', ${randomUUID()}::text
-      )
+            'superintendentEmail', ${superintendentEmail}::text,
+            'projectManagerEmail', ${projectManagerEmail}::text,
+            'deliveryNonce', ${randomUUID()}::text
+          ),
+          status = 'pending',
+          attempts = CASE WHEN status = 'dead' THEN 0 ELSE attempts END,
+          run_after = CASE WHEN status = 'dead' THEN NOW() ELSE run_after END,
+          last_error = CASE WHEN status = 'dead' THEN NULL ELSE last_error END
       WHERE job_type = ${FIELD_SCORECARD_EMAIL_JOB}
         AND status IN ('pending', 'dead')
         AND payload->>'scorecardId' = ${card.id}

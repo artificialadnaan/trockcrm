@@ -1223,6 +1223,78 @@ describe("scorecard edit — picked field responder", () => {
     expect(after.deliveryNonce).not.toBe(beforeNonce);
   });
 
+  it("REQUEUES a dead completion-email job when the pick is corrected", async () => {
+    // The worker claims `status = 'pending' AND run_after <= NOW()`, so a dead row is never read again —
+    // re-addressing one without requeueing rewrites a payload nobody will load. The motivating case: this job
+    // dead-letters when it can resolve NO recipient, which is exactly what picking a roster responder fixes.
+    const { scorecard } = await createFieldScorecard(tdb, createInput());
+    await tdb.execute(sql`
+      UPDATE public.job_queue SET status = 'dead', attempts = 6, last_error = 'no recipients',
+             run_after = now() + interval '1 hour'
+       WHERE job_type = 'field_scorecard_email' AND payload->>'scorecardId' = ${scorecard.id}
+    `);
+
+    const at = await currentUpdatedAt(scorecard.id);
+    await updateFieldScorecard(tdb, updateInput(scorecard.id, at, { superintendentResponderId: ROSTER_A }));
+
+    const res = await tdb.execute(sql`
+      SELECT status, attempts, last_error, run_after <= now() AS runnable, payload
+        FROM public.job_queue
+       WHERE job_type = 'field_scorecard_email' AND payload->>'scorecardId' = ${scorecard.id}
+    `);
+    const row = res.rows[0] as {
+      status: string; attempts: number; last_error: string | null; runnable: boolean; payload: { superintendentEmail: string };
+    };
+    expect(row.status).toBe("pending"); // claimable again
+    expect(row.attempts).toBe(0); // fresh budget on changed input
+    expect(row.last_error).toBeNull();
+    expect(row.runnable).toBe(true); // not stranded behind the old backoff
+    expect(row.payload.superintendentEmail).toBe("james@trock.test");
+  });
+
+  it("leaves a still-pending job's attempts and backoff alone while re-addressing it", async () => {
+    const { scorecard } = await createFieldScorecard(tdb, createInput());
+    await tdb.execute(sql`
+      UPDATE public.job_queue SET attempts = 3, run_after = now() + interval '30 minutes'
+       WHERE job_type = 'field_scorecard_email' AND payload->>'scorecardId' = ${scorecard.id}
+    `);
+
+    const at = await currentUpdatedAt(scorecard.id);
+    await updateFieldScorecard(tdb, updateInput(scorecard.id, at, { superintendentResponderId: ROSTER_A }));
+
+    const res = await tdb.execute(sql`
+      SELECT status, attempts, run_after > now() AS still_delayed, payload
+        FROM public.job_queue
+       WHERE job_type = 'field_scorecard_email' AND payload->>'scorecardId' = ${scorecard.id}
+    `);
+    const row = res.rows[0] as { status: string; attempts: number; still_delayed: boolean; payload: { superintendentEmail: string } };
+    expect(row.status).toBe("pending");
+    expect(row.attempts).toBe(3); // untouched — this row never failed terminally
+    expect(row.still_delayed).toBe(true); // its backoff is preserved
+    expect(row.payload.superintendentEmail).toBe("james@trock.test");
+  });
+
+  it("does NOT re-address a job already PROCESSING (send-once boundary, unchanged from before)", async () => {
+    const { scorecard } = await createFieldScorecard(tdb, createInput());
+    await tdb.execute(sql`
+      UPDATE public.job_queue SET status = 'processing'
+       WHERE job_type = 'field_scorecard_email' AND payload->>'scorecardId' = ${scorecard.id}
+    `);
+
+    const at = await currentUpdatedAt(scorecard.id);
+    await updateFieldScorecard(tdb, updateInput(scorecard.id, at, { superintendentResponderId: ROSTER_A }));
+
+    const res = await tdb.execute(sql`
+      SELECT status, payload FROM public.job_queue
+       WHERE job_type = 'field_scorecard_email' AND payload->>'scorecardId' = ${scorecard.id}
+    `);
+    const row = res.rows[0] as { status: string; payload: { superintendentEmail: string | null } };
+    // The worker has already loaded this payload; rewriting it would not change the send, and resurrecting it
+    // would need email_sent_at cleared — which re-sends the PDF to the whole env recipient list.
+    expect(row.status).toBe("processing");
+    expect(row.payload.superintendentEmail).toBeNull();
+  });
+
   it("names the card after the picked person, not the free text sent alongside the id", async () => {
     const { scorecard } = await createFieldScorecard(
       tdb,
