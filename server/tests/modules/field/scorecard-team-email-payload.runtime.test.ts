@@ -276,6 +276,36 @@ describe("createFieldScorecard stores + honors the picked field responder", () =
     expect((res.rows[0] as { superintendent_name: string }).superintendent_name).toBe("Typed Name");
   });
 
+  it("re-reads the roster at enqueue, so a mid-submit deactivation does not mail the completed card to them", async () => {
+    // FOR KEY SHARE deliberately does not block a director's PATCH, so a picked responder can be deactivated
+    // between the validating read and the enqueue. Because the corrective-action path re-resolves at SEND time
+    // and this one snapshots, a stale snapshot would mail the PDF to someone the corrective action has already
+    // stopped addressing. Simulated by deactivating the roster row after the read the service would cache.
+    await addTeamMember(tdb, { dealId: DEAL, contactId: CONTACT, role: "superintendent" });
+    await tdb.execute(sql`
+      CREATE OR REPLACE FUNCTION deactivate_picked() RETURNS trigger AS $$
+      BEGIN
+        UPDATE field_responders SET is_active = false WHERE id = NEW.superintendent_responder_id;
+        RETURN NEW;
+      END; $$ LANGUAGE plpgsql
+    `);
+    // Fires on the card INSERT — i.e. after the service's validating read, before it builds the email payload.
+    await tdb.execute(sql`
+      CREATE TRIGGER deactivate_picked_trg AFTER INSERT ON field_scorecards
+      FOR EACH ROW WHEN (NEW.superintendent_responder_id IS NOT NULL) EXECUTE FUNCTION deactivate_picked()
+    `);
+    try {
+      await createFieldScorecard(tdb, submission({ superintendentResponderId: ROSTER_SUPER }));
+      const payload = await enqueuedPayload();
+      // The re-read sees the committed deactivation and falls back to the deal team, matching what the
+      // corrective-action path will independently resolve at send time.
+      expect(payload.superintendentEmail).toBe("dana.cole@example.com");
+      expect(payload.superintendentEmail).not.toBe("james@trock.test");
+    } finally {
+      await tdb.execute(sql`DROP TRIGGER IF EXISTS deactivate_picked_trg ON field_scorecards`);
+    }
+  });
+
   it("stores nothing for a malformed or unknown id rather than 500ing the submit", async () => {
     const result = await createFieldScorecard(
       tdb,

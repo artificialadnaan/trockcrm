@@ -119,9 +119,12 @@ fine and then 403s on its first click. Both are covered by real-SQL tests agains
   test) is verified locally only, the same footing as mobile.
 - Creation takes `FOR KEY SHARE` on the picked roster rows so a concurrent hard-delete cannot fail the FK
   insert (which would reject a field submission instead of degrading). It deliberately does NOT block a
-  director's PATCH — a plain UPDATE takes `FOR NO KEY UPDATE`, which does not conflict — so a deactivation
-  landing in that window still stores the link. Harmless: send-time resolution re-checks ACTIVE and falls back.
-  Blocking it would need a conflicting lock, i.e. the assignment-lock coupling that sank #954.
+  director's PATCH — a plain UPDATE takes `FOR NO KEY UPDATE`, which does not conflict — so a deactivation can
+  land mid-submit. The stored link is harmless there (send-time resolution re-checks ACTIVE), but the
+  completed-scorecard email SNAPSHOTS its addresses, so that snapshot is taken from a RE-READ immediately
+  before the enqueue rather than from the earlier validating read. At READ COMMITTED that sees any PATCH which
+  has committed, leaving only the sliver where a PATCH commits after that statement and before this
+  transaction — closable only by a conflicting lock, i.e. the assignment-lock coupling that sank #954.
 - `revokeCorrectiveActionTokensForRemovedMember` is email-keyed and deal-scoped, so removing a Team-tab member
   whose email matches a picked responder revokes that token too. Every call site pairs the revoke with a cycle
   restart, which re-mints under the new resolution, so it self-heals.

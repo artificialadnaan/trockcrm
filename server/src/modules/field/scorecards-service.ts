@@ -408,13 +408,21 @@ export async function createFieldScorecard(
   // with the card + job (durable outbox).
   // ...with the SAME per-role precedence the corrective-action path applies: a superintendent/PM the field user
   // PICKED from the roster on this card is who the completed-scorecard email goes to, and the deal team is the
-  // fallback for a role with no usable pick. The picked rows were already resolved (and re-checked ACTIVE +
-  // role-matched) above, so this costs no extra read. Unlike the corrective-action email — which re-resolves in
-  // the worker at send time — this recipient set is SNAPSHOTTED into the payload here and never re-resolved, so
-  // it is the pick as it stood at submit, matching how the deal-team addresses have always been frozen.
+  // fallback for a role with no usable pick. Unlike the corrective-action email — which re-resolves in the
+  // worker at send time — this recipient set is SNAPSHOTTED into the payload here and never re-resolved.
+  //
+  // Which is why the picks are RE-READ here rather than reusing the rows resolved at the top of this function.
+  // FOR KEY SHARE deliberately does not block a director's PATCH, so a responder can be deactivated, re-roled,
+  // or re-addressed in between — and because the corrective-action path re-resolves at send time while this one
+  // does not, the stale snapshot would mail the completed scorecard + PDF to someone the corrective action has
+  // already stopped addressing. Reading at READ COMMITTED means this statement sees any PATCH that has
+  // COMMITTED, so the snapshot is correct for every ordering except a PATCH committing after this line and
+  // before this transaction does — a window only a conflicting lock could close, at the cost of putting the
+  // field submit back into the roster's lock graph.
   const teamEmails = await resolveScorecardTeamEmails(tenantDb, input.dealId);
-  const superintendentEmail = responderLinks.superintendent?.email ?? teamEmails.superintendentEmail;
-  const projectManagerEmail = responderLinks.pm?.email ?? teamEmails.projectManagerEmail;
+  const enqueueLinks = await resolveScorecardResponderLinks(tenantDb, input);
+  const superintendentEmail = enqueueLinks.superintendent?.email ?? teamEmails.superintendentEmail;
+  const projectManagerEmail = enqueueLinks.pm?.email ?? teamEmails.projectManagerEmail;
   await tenantDb.insert(jobQueue).values({
     jobType: FIELD_SCORECARD_EMAIL_JOB,
     payload: {
@@ -770,9 +778,14 @@ export async function updateFieldScorecard(
     (card.superintendentResponderId ?? null) !== responderLinks.superintendentResponderId ||
     (card.pmResponderId ?? null) !== responderLinks.pmResponderId;
   if (responderPickChanged) {
+    // Re-read for the same reason the create path does: `responderLinks` was resolved at the top of this
+    // function (before the card lock, for lock ordering), and a director's PATCH does not conflict with the
+    // KEY SHARE held on those rows. Re-resolving here snapshots the roster as of the latest possible statement
+    // rather than as of the start of the edit.
     const teamEmails = await resolveScorecardTeamEmails(tenantDb, card.dealId);
-    const superintendentEmail = responderLinks.superintendent?.email ?? teamEmails.superintendentEmail;
-    const projectManagerEmail = responderLinks.pm?.email ?? teamEmails.projectManagerEmail;
+    const enqueueLinks = await resolveScorecardResponderLinks(tenantDb, input);
+    const superintendentEmail = enqueueLinks.superintendent?.email ?? teamEmails.superintendentEmail;
+    const projectManagerEmail = enqueueLinks.pm?.email ?? teamEmails.projectManagerEmail;
     // Mint a fresh deliveryNonce alongside the new addresses. `status IN ('pending','dead')` does NOT prove the
     // email never went out: the provider can accept a send and the process die before email_sent_at is stamped,
     // returning the job to pending. Replaying the worker's per-scorecard idempotency key with a changed payload
