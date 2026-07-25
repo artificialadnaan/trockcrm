@@ -29,6 +29,12 @@ export const fieldScorecards = pgTable(
     projectNumber: text("project_number"),
     superintendentName: text("superintendent_name"),
     pmName: text("pm_name"),
+    // The field_responders roster person the field user PICKED for each role from the scorecard dropdown (null
+    // when the name was typed free-text, or nothing was picked). Separate from the display names above: recipient
+    // resolution PREFERS this link (roster email at send time), falling back to the deal's Team-tab super/PM when
+    // null. Bare uuid — the FK -> field_responders(id) ON DELETE SET NULL lives in migration 0199.
+    superintendentResponderId: uuid("superintendent_responder_id"),
+    pmResponderId: uuid("pm_responder_id"),
     /** 1 = original 100-point form; 2 = eight 1-10 categories with an average. */
     formVersion: smallint("form_version").default(1).notNull(),
     /** Discriminates the scorecard KIND sharing these tables: 'project' (default) | 'leadership'.

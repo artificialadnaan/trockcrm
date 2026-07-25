@@ -14,6 +14,10 @@ export interface ParsedScorecardSubmission {
   kind: ScorecardKind;
   superintendentName: string | null;
   pmName: string | null;
+  /** field_responders id when the super/PM was PICKED from the roster (null when typed/none). Shape-validated to
+   *  a uuid here; the service further checks it's an ACTIVE responder of the matching role before storing. */
+  superintendentResponderId: string | null;
+  pmResponderId: string | null;
   projectNumber: string | null;
   items: { sectionKey: string; points: number; note: string | null }[];
   criticalDeficiencies: string[];
@@ -30,6 +34,8 @@ export interface ParsedScorecardUpdate {
   expectedUpdatedAt: string;
   superintendentName: string | null;
   pmName: string | null;
+  superintendentResponderId: string | null;
+  pmResponderId: string | null;
   items: { sectionKey: string; points: number; note: string | null }[];
   criticalDeficiencies: string[];
   criticalDeficiencyNotes: Record<string, string>;
@@ -47,6 +53,16 @@ function strOrNull(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : null;
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// Lenient uuid parse for an OPTIONAL id: a well-formed uuid passes through, anything else (absent, malformed,
+// non-string) becomes null. Not a hard 400 — the picked-responder link is optional and the service revalidates
+// it against the active roster before storing, so a junk value simply means "no pick" rather than a rejection.
+function uuidOrNull(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const v = value.trim();
+  return UUID_RE.test(v) ? v : null;
 }
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
@@ -152,6 +168,8 @@ export function parseScorecardSubmission(body: unknown): ParsedScorecardSubmissi
     kind,
     superintendentName: strOrNull(b.superintendentName),
     pmName: strOrNull(b.pmName),
+    superintendentResponderId: uuidOrNull(b.superintendentResponderId),
+    pmResponderId: uuidOrNull(b.pmResponderId),
     projectNumber: strOrNull(b.projectNumber),
     items,
     criticalDeficiencies,
@@ -235,6 +253,8 @@ export function parseScorecardUpdate(body: unknown): ParsedScorecardUpdate {
     expectedUpdatedAt,
     superintendentName: strOrNull(b.superintendentName),
     pmName: strOrNull(b.pmName),
+    superintendentResponderId: uuidOrNull(b.superintendentResponderId),
+    pmResponderId: uuidOrNull(b.pmResponderId),
     items,
     criticalDeficiencies,
     criticalDeficiencyNotes,

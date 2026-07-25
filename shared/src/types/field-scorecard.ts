@@ -439,6 +439,10 @@ export interface ScorecardSubmissionInput {
   weekOf: string; // yyyy-mm-dd
   superintendentName?: string | null;
   pmName?: string | null;
+  /** field_responders id when the super/PM was PICKED from the roster dropdown (null/omitted when typed free-text
+   *  or not picked). Drives recipient resolution — the name fields stay as the display label. */
+  superintendentResponderId?: string | null;
+  pmResponderId?: string | null;
   projectNumber?: string | null;
   items: ScorecardSubmissionItem[];
   criticalDeficiencies: string[];
@@ -483,6 +487,10 @@ export interface ScorecardUpdateInput {
   expectedUpdatedAt: string;
   superintendentName?: string | null;
   pmName?: string | null;
+  /** field_responders id when the super/PM was PICKED from the roster dropdown on this edit (null/omitted when
+   *  typed free-text or not picked). */
+  superintendentResponderId?: string | null;
+  pmResponderId?: string | null;
   items: ScorecardSubmissionItem[];
   criticalDeficiencies: string[];
   criticalDeficiencyNotes?: Record<string, string>;
