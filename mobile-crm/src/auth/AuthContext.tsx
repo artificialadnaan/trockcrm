@@ -1,4 +1,5 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { AppState } from "react-native";
 import { apiFetch, ApiError, type ApiFetchOptions } from "../api/client";
 import * as authApi from "../api/endpoints/auth";
 import { chooseActiveOffice, type OfficeProbe } from "./office";
@@ -6,15 +7,42 @@ import { createPersistQueue } from "./persist-queue";
 import { clearSession, isAllowedRole, loadSession, saveSession, type Session } from "./session";
 import type { CrmUser } from "../api/types";
 
+/**
+ * How current is the session's server-side state?
+ *
+ *   "checking" — a revalidation is in flight and has not yet answered. Client-enforced gates must BLOCK
+ *                here, because a cached `requiresOnboarding: false` is exactly the value that is wrong.
+ *   "fresh"    — /auth/me answered; the session reflects the server.
+ *   "stale"    — running on the cached session because the check failed or is taking too long. Retried
+ *                automatically, and on every return to foreground.
+ */
+export type GateState = "checking" | "fresh" | "stale";
+
 type AuthState = {
   /** Null once restore has finished and there is no session. `undefined` means "still restoring". */
   session: Session | null | undefined;
+  /** Whether the session has been confirmed against the server this launch. See GateState. */
+  gate: GateState;
+  /** Re-run /auth/me now. Used by the onboarding screen, which is waiting for a flag to clear. */
+  revalidate: () => Promise<void>;
   signIn: (input: { email: string; password: string }) => Promise<void>;
   signOut: () => Promise<void>;
   setActiveOffice: (officeId: string | null) => Promise<void>;
   /** A ready-to-use fetcher carrying the current token + active office. */
   fetcher: authApi.Fetcher;
 };
+
+/**
+ * How long the app will wait for a first answer before proceeding on cached data.
+ *
+ * apiFetch's timeout is 30s, so without a bound an offline launch would hold every user on a spinner for
+ * half a minute — in an app whose whole purpose is to work from a roof with one bar. After the grace the
+ * cached session is used and revalidation continues in the background.
+ */
+const GATE_GRACE_MS = 3_000;
+
+/** How often to retry once we are knowingly running on stale data. */
+const REVALIDATE_RETRY_MS = 30_000;
 
 const AuthContext = createContext<AuthState | null>(null);
 
@@ -31,6 +59,7 @@ export class RoleNotAllowedError extends Error {
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [session, setSession] = useState<Session | null | undefined>(undefined);
+  const [gate, setGate] = useState<GateState>("checking");
 
   // Held in a ref as well as state so `fetcher` stays referentially stable: rebuilding it on every token
   // change would invalidate every TanStack Query key that closes over it and refetch the whole app.
@@ -49,27 +78,27 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
    * Serialises every SecureStore mutation and drops any a newer identity change has superseded — see
    * createPersistQueue. Held in a ref so it is created once and survives re-renders.
    */
-  const enqueuePersistRef = useRef<ReturnType<typeof createPersistQueue> | null>(null);
-  if (!enqueuePersistRef.current) {
-    enqueuePersistRef.current = createPersistQueue(() => authGenerationRef.current);
+  const persistRef = useRef<ReturnType<typeof createPersistQueue> | null>(null);
+  if (!persistRef.current) {
+    persistRef.current = createPersistQueue(() => authGenerationRef.current);
   }
-  const enqueuePersist = useCallback(
-    (generation: number, op: () => Promise<void>) => enqueuePersistRef.current!(generation, op),
-    [],
-  );
 
   const signOut = useCallback(async () => {
-    const generation = ++authGenerationRef.current;
+    authGenerationRef.current += 1;
     sessionRef.current = null;
     setSession(null);
+    // clear(), not save(): a queued sign-out must NOT be discarded because a sign-in has since advanced
+    // the generation. If that replacement save then fails, the new account is never published and the
+    // signed-out account's token is still on disk — the next launch restores an account somebody
+    // explicitly signed out of. See createPersistQueue.
     try {
-      await enqueuePersist(generation, clearSession);
+      await persistRef.current!.clear(clearSession);
     } catch {
       // clearSession already tried both delete and overwrite. In-memory state is signed out either way,
       // and swallowing here keeps callers that await signOut() and then navigate — the change-password
       // screen does exactly that — from being stranded on a dead screen by a keychain hiccup.
     }
-  }, [enqueuePersist]);
+  }, []);
 
   const fetcher = useCallback(
     <T,>(path: string, opts: ApiFetchOptions = {}) => {
@@ -94,56 +123,44 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     [signOut],
   );
 
-  // Restore on launch, then revalidate against the server. The stored token's own `exp` is checked
-  // locally first (cheap, offline-safe); /auth/me is what catches a deactivated user, a bumped
-  // token_version, or a role change — none of which a stored token can know about.
-  useEffect(() => {
-    let cancelled = false;
-    // The session that this restore is allowed to write back. If anything replaces the session while the
-    // request is in flight — a sign-out, or a sign-in as someone else — applying the response would
-    // resurrect a dead session, or worse, overwrite a NEWER account with the previous one.
-    let restoring: Session | null = null;
-    // Captured BEFORE the keychain read, because until that read returns there is no session object to
-    // compare identities against. The login screen is usable the whole time this is pending: a cold open
-    // straight to /login, a sign-in as B, then a slow read returning A would have replaced B with A.
+  /**
+   * Confirm the CURRENT session against the server.
+   *
+   * Runs on launch, on every return to foreground, on a retry timer while stale, and on demand from the
+   * onboarding screen. The stored token's own `exp` is checked locally first (cheap, offline-safe);
+   * /auth/me is what catches a deactivated user, a bumped token_version, a role change, or newly
+   * assigned cleanup work — none of which a stored token can know about.
+   *
+   * Running it repeatedly rather than once at launch is what makes the client-enforced onboarding gate
+   * trustworthy: a single launch request that failed transiently used to leave the user past the gate
+   * for the entire life of the process, with no retry and nothing on screen to indicate it.
+   */
+  const revalidate = useCallback(async (): Promise<void> => {
+    // The session this revalidation is allowed to write back. If anything replaces it while the request
+    // is in flight — a sign-out, or a sign-in as someone else — applying the response would resurrect a
+    // dead session, or worse, overwrite a NEWER account with the previous one.
+    const stored = sessionRef.current;
+    if (!stored) {
+      setGate("fresh");
+      return;
+    }
     const generation = authGenerationRef.current;
 
-    (async () => {
-      let stored: Session | null = null;
-      try {
-        stored = await loadSession();
-      } catch {
-        // SecureStore can reject (keychain unavailable, corrupted item). Settling to null sends the user
-        // to login; leaving `session` undefined would strand the index route on its spinner forever with
-        // no way to reach the login screen at all.
-        if (!cancelled && generation === authGenerationRef.current) setSession(null);
-        return;
-      }
-      if (cancelled || generation !== authGenerationRef.current) return;
-      if (!stored) {
-        setSession(null);
-        return;
-      }
-
-      restoring = stored;
-      sessionRef.current = stored;
-      setSession(stored);
-
-      // A SCOPED unauthorized handler, not the fetcher's global one. The global handler runs inside
-      // apiFetch — i.e. BEFORE the identity check below — so a late 401 belonging to this old token
-      // would sign out whatever session is current by then, including a different account the user has
-      // since signed into. This one only tears down the session it was actually issued for.
-      const scoped = <T,>(path: string, opts: ApiFetchOptions = {}) =>
-        fetcher<T>(path, {
-          ...opts,
-          onUnauthorized: () => {
-            if (!cancelled && sessionRef.current === restoring) void signOut();
-          },
-        });
+    // A SCOPED unauthorized handler, not the fetcher's global one. The global handler runs inside
+    // apiFetch — i.e. BEFORE the identity check below — so a late 401 belonging to this old token
+    // would sign out whatever session is current by then, including a different account the user has
+    // since signed into. This one only tears down the session it was actually issued for.
+    const scoped = <T,>(path: string, opts: ApiFetchOptions = {}) =>
+      fetcher<T>(path, {
+        ...opts,
+        onUnauthorized: () => {
+          if (sessionRef.current === stored) void signOut();
+        },
+      });
 
       try {
         const fresh = await authApi.me(scoped, stored.token);
-        if (cancelled || sessionRef.current !== restoring) return;
+        if (sessionRef.current !== stored) return;
         if (!isAllowedRole(fresh.role)) {
           await signOut();
           return;
@@ -183,11 +200,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
                 scoped<T>(path, { ...opts, officeId: stored!.activeOfficeId }),
               stored.token,
             );
-            if (cancelled || sessionRef.current !== restoring) return;
+            if (sessionRef.current !== stored) return;
             probe = "granted";
             effective = inOffice;
           } catch (err) {
-            if (cancelled || sessionRef.current !== restoring) return;
+            if (sessionRef.current !== stored) return;
             if (err instanceof ApiError && err.status === 401) return;
             // 403 is the definitive "no access to requested office". Anything else — offline, 5xx, or the
             // password-change gate answering before the office question — leaves it genuinely unknown.
@@ -225,20 +242,89 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         };
         sessionRef.current = merged;
         setSession(merged);
-        await enqueuePersist(generation, () => saveSession(merged));
+        setGate("fresh");
+        await persistRef.current!.save(generation, () => saveSession(merged));
       } catch (err) {
         // A 401 already triggered the scoped signOut above. Anything else — offline, 5xx, timeout — must
         // NOT sign the user out: the app opens on the cached session and screens surface their own
         // errors. Signing out on a flaky connection is exactly the wrong behaviour in the field.
-        if (cancelled) return;
+        if (sessionRef.current !== stored) return;
         if (err instanceof ApiError && err.status === 401) return;
+        // Knowingly running on cached data. The retry effect below picks this up, so a transient failure
+        // no longer leaves a client-enforced gate unverified for the whole life of the process.
+        setGate("stale");
       }
+  }, [fetcher, signOut]);
+
+  // Restore from the keychain on launch, publish, then confirm against the server.
+  useEffect(() => {
+    let cancelled = false;
+    // Captured BEFORE the keychain read, because until that read returns there is no session object to
+    // compare identities against. The login screen is usable the whole time this is pending: a cold open
+    // straight to /login, a sign-in as B, then a slow read returning A would have replaced B with A.
+    const generation = authGenerationRef.current;
+
+    (async () => {
+      let stored: Session | null = null;
+      try {
+        stored = await loadSession();
+      } catch {
+        // SecureStore can reject (keychain unavailable, corrupted item). Settling to null sends the user
+        // to login; leaving `session` undefined would strand the index route on its spinner forever with
+        // no way to reach the login screen at all.
+        if (!cancelled && generation === authGenerationRef.current) {
+          setSession(null);
+          setGate("fresh");
+        }
+        return;
+      }
+      if (cancelled || generation !== authGenerationRef.current) return;
+      if (!stored) {
+        setSession(null);
+        setGate("fresh");
+        return;
+      }
+
+      sessionRef.current = stored;
+      setSession(stored);
+      await revalidate();
     })();
 
     return () => {
       cancelled = true;
     };
-  }, [fetcher, signOut]);
+  }, [revalidate]);
+
+  // Bounded wait for the FIRST answer. Without it an offline launch would hold the app on a spinner for
+  // apiFetch's full 30s timeout — unusable in the field, which is the whole point of this app.
+  useEffect(() => {
+    if (gate !== "checking") return;
+    const timer = setTimeout(() => setGate((g) => (g === "checking" ? "stale" : g)), GATE_GRACE_MS);
+    return () => clearTimeout(timer);
+  }, [gate]);
+
+  // Retry while stale. `retryTick` exists because setGate("stale") on an already-stale gate is a no-op
+  // and would never re-arm this timer, so a failing revalidation would stop retrying after one attempt.
+  const [retryTick, setRetryTick] = useState(0);
+  useEffect(() => {
+    if (gate !== "stale" || !sessionRef.current) return;
+    const timer = setTimeout(() => setRetryTick((n) => n + 1), REVALIDATE_RETRY_MS);
+    return () => clearTimeout(timer);
+  }, [gate, retryTick]);
+  useEffect(() => {
+    if (retryTick === 0) return;
+    void revalidate();
+  }, [retryTick, revalidate]);
+
+  // Revalidate whenever the app comes back to the foreground. This is also what releases a user who left
+  // for the cleanup workspace in an external browser and came back: without it the provider never
+  // remounts, so `requiresOnboarding` stays true until they force-quit or sign out and back in.
+  useEffect(() => {
+    const sub = AppState.addEventListener("change", (next) => {
+      if (next === "active" && sessionRef.current) void revalidate();
+    });
+    return () => sub.remove();
+  }, [revalidate]);
 
   const signIn = useCallback(
     async (input: { email: string; password: string }) => {
@@ -259,12 +345,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       // Persist FIRST. If SecureStore rejects after we had already published the session, signIn still
       // rejects — so the login screen shows a failure and does not navigate, while the context and
       // fetcher are silently authenticated behind it. Writing first leaves nothing behind on failure.
-      await enqueuePersist(generation, () => saveSession(next));
+      await persistRef.current!.save(generation, () => saveSession(next));
       if (generation !== authGenerationRef.current) return;
       sessionRef.current = next;
       setSession(next);
     },
-    [enqueuePersist],
+    [],
   );
 
   const setActiveOffice = useCallback(
@@ -277,19 +363,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       try {
         // Not a new identity, so it does NOT bump the generation — it rides on the current one and is
         // skipped if a sign-out or sign-in overtakes it.
-        await enqueuePersist(authGenerationRef.current, () => saveSession(next));
+        await persistRef.current!.save(authGenerationRef.current, () => saveSession(next));
       } catch {
         // The switch has already been applied in memory and the app is usable in the new office. A
         // failed write only means the choice will not survive a relaunch — not a reason to reject here
         // and leave the caller with an unhandled rejection for a switch that visibly succeeded.
       }
     },
-    [enqueuePersist],
+    [],
   );
 
   const value = useMemo<AuthState>(
-    () => ({ session, signIn, signOut, setActiveOffice, fetcher }),
-    [session, signIn, signOut, setActiveOffice, fetcher],
+    () => ({ session, gate, revalidate, signIn, signOut, setActiveOffice, fetcher }),
+    [session, gate, revalidate, signIn, signOut, setActiveOffice, fetcher],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

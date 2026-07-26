@@ -1,28 +1,31 @@
 /**
- * Serialises SecureStore mutations and drops the ones a newer identity change has superseded.
+ * Serialises SecureStore mutations so an older write can never land on top of a newer one.
  *
- * Two problems, one mechanism:
+ * Sign-out publishes `null` immediately so the router can show login, leaving its keychain delete
+ * pending. A new account then signs in and saves. Without ordering, that delete can land AFTER the save
+ * and remove the new account's stored session — the app stays authenticated in memory, so nothing looks
+ * wrong until the next launch signs them out.
  *
- *   ORDERING — sign-out publishes `null` immediately so the router can show login. Its keychain delete
- *   is still pending. A new account signs in and saves. If those two writes are not serialised, the
- *   delete can land AFTER the save and remove the new account's stored session. The app stays
- *   authenticated in memory, so nothing looks wrong until the next launch signs them out.
+ * SAVES and CLEARS are treated differently, and the asymmetry is the whole point:
  *
- *   SUPERSESSION — even serialised, an operation belonging to a previous identity must not run at all.
- *   Each is tagged with the auth generation it was issued under; if the generation has moved on by the
- *   time its turn arrives, it is skipped.
+ *   save()  is SUPERSEDABLE. Writing an older session over a newer one is corruption, so a save whose
+ *           generation has been overtaken is skipped.
  *
- * `currentGeneration` is read at EXECUTION time, not at enqueue time. That is the whole point: the
- * decision has to reflect what has happened while the operation sat in the queue.
+ *   clear() is NOT. FIFO ordering already guarantees that any save enqueued after it runs after it, so a
+ *           clear can never clobber a newer session. Discarding it is what causes harm: if the
+ *           replacement save then FAILS, the new account is never published AND the signed-out account's
+ *           token is still on disk — so the next launch silently restores an account somebody explicitly
+ *           signed out of. On the shared field devices this queue exists to protect, that is a
+ *           credential exposure, and it is caused by the optimisation rather than prevented by it.
+ *
+ * `currentGeneration` is read at EXECUTION time, not enqueue time: the decision has to reflect what has
+ * happened while the operation sat in the queue.
  */
 export function createPersistQueue(currentGeneration: () => number) {
   let chain: Promise<unknown> = Promise.resolve();
 
-  return function enqueue(generation: number, op: () => Promise<void>): Promise<void> {
-    const run = chain.then(() => {
-      if (generation !== currentGeneration()) return undefined;
-      return op();
-    });
+  function enqueue(op: () => Promise<void>, shouldRun: () => boolean): Promise<void> {
+    const run = chain.then(() => (shouldRun() ? op() : undefined));
     // The chain must survive a rejection or every later write would be skipped for the life of the app.
     // `run` itself still rejects, so callers that care — signIn does — can react to a failed write.
     chain = run.then(
@@ -30,5 +33,16 @@ export function createPersistQueue(currentGeneration: () => number) {
       () => undefined,
     );
     return run.then(() => undefined);
+  }
+
+  return {
+    /** Persist a session. Skipped if a newer sign-in or sign-out has taken over since it was queued. */
+    save(generation: number, op: () => Promise<void>): Promise<void> {
+      return enqueue(op, () => generation === currentGeneration());
+    },
+    /** Erase the stored session. ALWAYS runs — see the note above on why this must not be superseded. */
+    clear(op: () => Promise<void>): Promise<void> {
+      return enqueue(op, () => true);
+    },
   };
 }

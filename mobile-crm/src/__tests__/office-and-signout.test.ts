@@ -146,15 +146,15 @@ describe("persist queue", () => {
   it("runs operations in order, never overlapping", async () => {
     const order: string[] = [];
     let generation = 0;
-    const enqueue = createPersistQueue(() => generation);
+    const queue = createPersistQueue(() => generation);
 
     const first = deferred();
-    const a = enqueue(0, async () => {
+    const a = queue.save(0, async () => {
       order.push("a:start");
       await first.promise;
       order.push("a:end");
     });
-    const b = enqueue(0, async () => {
+    const b = queue.save(0, async () => {
       order.push("b:start");
     });
 
@@ -165,42 +165,78 @@ describe("persist queue", () => {
     expect(order).toEqual(["a:start", "a:end", "b:start"]);
   });
 
-  it("skips an operation whose generation has been superseded while it waited", async () => {
+  it("skips a SAVE whose generation has been superseded while it waited", async () => {
+    // Writing an older session over a newer one is corruption, so this one must be dropped.
     let generation = 0;
-    const enqueue = createPersistQueue(() => generation);
+    const queue = createPersistQueue(() => generation);
     const blocker = deferred();
 
-    const held = enqueue(0, () => blocker.promise);
-    const staleOp = jest.fn().mockResolvedValue(undefined);
-    const stale = enqueue(0, staleOp);
+    const held = queue.save(0, () => blocker.promise);
+    const staleSave = jest.fn().mockResolvedValue(undefined);
+    const stale = queue.save(0, staleSave);
 
-    // A sign-in lands while the queue is blocked — the classic sequence this guard exists for.
-    generation = 1;
-
+    generation = 1; // a sign-in lands while the queue is blocked
     blocker.resolve();
     await Promise.all([held, stale]);
-    expect(staleOp).not.toHaveBeenCalled();
+    expect(staleSave).not.toHaveBeenCalled();
   });
 
-  it("runs an operation issued by the CURRENT generation", async () => {
+  it("still runs a CLEAR after a newer sign-in has advanced the generation", async () => {
+    // The one that matters. A queued sign-out skipped because sign-in moved the generation leaves the
+    // previous account's token on disk — and if the replacement save then fails, the new account is
+    // never published either, so the NEXT LAUNCH silently restores an account somebody explicitly
+    // signed out of. On a shared field device that is a credential exposure caused by the optimisation.
     let generation = 0;
-    const enqueue = createPersistQueue(() => generation);
+    const queue = createPersistQueue(() => generation);
+    const blocker = deferred();
+
+    const held = queue.save(0, () => blocker.promise);
+    const clearOp = jest.fn().mockResolvedValue(undefined);
+    const clear = queue.clear(clearOp);
+
+    generation = 1;
+    blocker.resolve();
+    await Promise.all([held, clear]);
+    expect(clearOp).toHaveBeenCalledTimes(1);
+  });
+
+  it("orders a sign-out clear ahead of the replacement save", async () => {
+    // FIFO is what makes it safe to run the clear unconditionally: the newer save lands after it.
+    const order: string[] = [];
+    let generation = 0;
+    const queue = createPersistQueue(() => generation);
+
+    const clear = queue.clear(async () => {
+      order.push("clear");
+    });
+    generation = 1;
+    const save = queue.save(1, async () => {
+      order.push("save");
+    });
+
+    await Promise.all([clear, save]);
+    expect(order).toEqual(["clear", "save"]);
+  });
+
+  it("runs a save issued by the CURRENT generation", async () => {
+    let generation = 0;
+    const queue = createPersistQueue(() => generation);
     generation = 1;
     const op = jest.fn().mockResolvedValue(undefined);
-    await enqueue(1, op);
+    await queue.save(1, op);
     expect(op).toHaveBeenCalledTimes(1);
   });
 
   it("keeps draining after a rejected operation", async () => {
     // A single keychain failure must not disable every later write for the life of the process.
     let generation = 0;
-    const enqueue = createPersistQueue(() => generation);
+    const queue = createPersistQueue(() => generation);
 
-    const failing = enqueue(0, () => Promise.reject(new Error("keychain unavailable")));
+    const failing = queue.save(0, () => Promise.reject(new Error("keychain unavailable")));
     await expect(failing).rejects.toThrow("keychain unavailable");
 
     const after = jest.fn().mockResolvedValue(undefined);
-    await enqueue(0, after);
+    await queue.save(0, after);
     expect(after).toHaveBeenCalledTimes(1);
   });
 
@@ -208,8 +244,8 @@ describe("persist queue", () => {
     // signIn depends on this: a failed save must reject so the login screen shows a failure rather than
     // navigating into an app whose session was never written.
     let generation = 0;
-    const enqueue = createPersistQueue(() => generation);
-    await expect(enqueue(0, () => Promise.reject(new Error("write failed")))).rejects.toThrow(
+    const queue = createPersistQueue(() => generation);
+    await expect(queue.save(0, () => Promise.reject(new Error("write failed")))).rejects.toThrow(
       "write failed",
     );
   });
