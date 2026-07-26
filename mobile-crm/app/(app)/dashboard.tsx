@@ -3,6 +3,7 @@ import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
 import { useAuth } from "../../src/auth/AuthContext";
+import { canAccessSurface } from "../../src/auth/surfaces";
 import { Row } from "../../src/components/Row";
 import { theme } from "../../src/theme/theme";
 
@@ -33,6 +34,10 @@ export default function DashboardScreen() {
           {user.isRfpReviewer ? <Row label="RFP reviewer" value="yes" /> : null}
         </View>
 
+        {/* Links are filtered by the same policy that guards the routes, so a role never sees an entry
+            that would bounce it straight back. The GROUP layouts are the enforcement; this is the
+            courtesy half, exactly as the web sidebar works. */}
+        {canAccessSurface(user.role, "deals") ? (
         <Pressable
           testID="open-deals"
           onPress={() => router.push("/(app)/deals")}
@@ -42,7 +47,9 @@ export default function DashboardScreen() {
         >
           <Text style={styles.primaryText}>Deals</Text>
         </Pressable>
+        ) : null}
 
+        {canAccessSurface(user.role, "contacts") ? (
         <Pressable
           testID="open-contacts"
           onPress={() => router.push("/(app)/contacts")}
@@ -52,6 +59,7 @@ export default function DashboardScreen() {
         >
           <Text style={styles.secondaryText}>Contacts</Text>
         </Pressable>
+        ) : null}
 
         <Text style={styles.note}>Email, tasks and reports land in later releases.</Text>
 
