@@ -18,6 +18,7 @@ import * as contactsApi from "../../../src/api/endpoints/contacts";
 import type { ContactListRow } from "../../../src/api/types";
 import { useAuth } from "../../../src/auth/AuthContext";
 import { useQueryScope } from "../../../src/auth/useOfficeId";
+import { telUrl } from "../../../src/contact-links";
 import { qk } from "../../../src/query/keys";
 import { theme } from "../../../src/theme/theme";
 
@@ -202,7 +203,7 @@ function ContactRow({ contact, onOpen }: { contact: ContactListRow; onOpen: () =
       {phone ? (
         <Pressable
           testID={`call-${contact.id}`}
-          onPress={() => void Linking.openURL(contactsApi.telUrl(phone)).catch(() => undefined)}
+          onPress={() => void Linking.openURL(telUrl(phone)).catch(() => undefined)}
           accessibilityRole="button"
           accessibilityLabel={`Call ${contact.firstName} ${contact.lastName}`}
           style={styles.callBtn}

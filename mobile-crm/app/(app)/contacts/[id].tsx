@@ -7,6 +7,7 @@ import { ApiError } from "../../../src/api/client";
 import * as contactsApi from "../../../src/api/endpoints/contacts";
 import { useAuth } from "../../../src/auth/AuthContext";
 import { useQueryScope } from "../../../src/auth/useOfficeId";
+import { mailtoUrl, smsUrl, telUrl } from "../../../src/contact-links";
 import { formatLocation } from "../../../src/format";
 import { qk } from "../../../src/query/keys";
 import { theme } from "../../../src/theme/theme";
@@ -40,12 +41,23 @@ export default function ContactDetailScreen() {
     );
   }
 
-  if (contactQuery.error || !contactQuery.data) {
+  // `!contactQuery.data`, NOT `error || !data`. TanStack keeps the loaded contact when a later refetch
+  // fails — reconnecting is the common trigger — and keying the blocking state on `error` threw away a
+  // perfectly good contact along with every call/text/email action on it, leaving only "Go back".
+  if (!contactQuery.data) {
     const offline = contactQuery.error instanceof ApiError && contactQuery.error.status === 0;
     return (
       <SafeAreaView style={styles.safe}>
         <View style={styles.center}>
           <Text style={styles.errorTitle}>{offline ? "You're offline" : "Couldn't load this contact"}</Text>
+          <Pressable
+            testID="contact-retry"
+            onPress={() => void contactQuery.refetch()}
+            accessibilityRole="button"
+            style={styles.backBtn}
+          >
+            <Text style={styles.backBtnText}>Try again</Text>
+          </Pressable>
           <Pressable onPress={() => router.back()} accessibilityRole="button" style={styles.backBtn}>
             <Text style={styles.backBtnText}>Go back</Text>
           </Pressable>
@@ -58,6 +70,8 @@ export default function ContactDetailScreen() {
   const company = contactsApi.contactCompanyName(contact);
   const phone = contactsApi.contactPhone(contact);
   const location = formatLocation(contact.city, contact.state);
+  // Data is on screen but the last refresh failed — say so without taking the screen away.
+  const refreshFailed = Boolean(contactQuery.error);
   // Reps see only the deals they own here — the server scopes this endpoint by assigned rep, unlike the
   // contact record itself, which is office-shared. An empty list does not mean the contact has no deals.
   // Soft-deleted deals are already dropped in getContactDeals; this narrows the type for the render.
@@ -72,6 +86,17 @@ export default function ContactDetailScreen() {
           <Text style={styles.back}>‹ Contacts</Text>
         </Pressable>
 
+        {refreshFailed ? (
+          <Pressable
+            testID="contact-refresh-retry"
+            onPress={() => void contactQuery.refetch()}
+            accessibilityRole="button"
+            style={styles.staleBanner}
+          >
+            <Text style={styles.staleText}>Showing saved data — couldn&apos;t refresh. Tap to retry.</Text>
+          </Pressable>
+        ) : null}
+
         <Text style={styles.name}>
           {contact.firstName} {contact.lastName}
         </Text>
@@ -79,29 +104,32 @@ export default function ContactDetailScreen() {
         {company ? <Text style={styles.company}>{company}</Text> : null}
 
         <View style={styles.actionRow}>
+          {/* Call uses the coalesced number — mobile first, landline second — and telUrl preserves any
+              stored extension as a dialer pause rather than folding it into the digits. */}
           {phone ? (
-            <>
-              {/* telUrl preserves a stored extension as a dialer pause; smsUrl drops it, because an
-                  extension cannot be texted. Stripping it outright dialled a different number. */}
-              <Action
-                testID="call-contact"
-                label="Call"
-                url={contactsApi.telUrl(phone)}
-                accessibilityLabel={`Call ${contact.firstName}`}
-              />
-              <Action
-                testID="text-contact"
-                label="Text"
-                url={contactsApi.smsUrl(phone)}
-                accessibilityLabel={`Text ${contact.firstName}`}
-              />
-            </>
+            <Action
+              testID="call-contact"
+              label="Call"
+              url={telUrl(phone)}
+              accessibilityLabel={`Call ${contact.firstName}`}
+            />
+          ) : null}
+          {/* Text comes from `mobile` ONLY. Reusing the coalesced number offered to text a landline for
+              every landline-only contact — common in this data — and the message silently goes nowhere.
+              An extension is never included either: extensions are a dialer concept. */}
+          {contact.mobile ? (
+            <Action
+              testID="text-contact"
+              label="Text"
+              url={smsUrl(contact.mobile)}
+              accessibilityLabel={`Text ${contact.firstName}`}
+            />
           ) : null}
           {contact.email ? (
             <Action
               testID="email-contact"
               label="Email"
-              url={`mailto:${contact.email}`}
+              url={mailtoUrl(contact.email)}
               accessibilityLabel={`Email ${contact.firstName}`}
             />
           ) : null}
@@ -128,7 +156,7 @@ export default function ContactDetailScreen() {
         <Section title="Deals">
           {dealsQuery.isLoading ? (
             <ActivityIndicator color={theme.color.brandRed} />
-          ) : dealsQuery.error ? (
+          ) : dealsQuery.error && associations.length === 0 ? (
             // A FAILED request is not an empty result. Rendering "no deals are linked" on a 5xx presents
             // a network failure as a fact about the contact, and a rep would act on it — calling someone
             // believing they have no live work when they may have several.
@@ -158,6 +186,18 @@ export default function ContactDetailScreen() {
               </Pressable>
             ))
           )}
+
+          {/* A background failure with rows already on screen: never replace them, just say so. */}
+          {associations.length > 0 && dealsQuery.error ? (
+            <Pressable
+              testID="retry-contact-deals-inline"
+              onPress={() => void dealsQuery.refetch()}
+              accessibilityRole="button"
+              style={styles.retry}
+            >
+              <Text style={styles.retryText}>Couldn&apos;t refresh deals — tap to retry</Text>
+            </Pressable>
+          ) : null}
         </Section>
       </ScrollView>
     </SafeAreaView>
@@ -245,6 +285,14 @@ const styles = StyleSheet.create({
   notes: { fontFamily: theme.font.regular, fontSize: 14, color: theme.color.textSecondary },
   emptyBody: { fontFamily: theme.font.regular, fontSize: 14, color: theme.color.textMuted },
   retry: { paddingVertical: theme.space.sm },
+  staleBanner: {
+    marginTop: theme.space.sm,
+    borderRadius: theme.radius.md,
+    backgroundColor: "#FEF3C7",
+    paddingHorizontal: theme.space.md,
+    paddingVertical: theme.space.sm,
+  },
+  staleText: { fontFamily: theme.font.semibold, fontSize: 13, color: "#92400E" },
   retryText: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.brandRed },
   dealRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingVertical: theme.space.sm },
   dealName: { flex: 1, fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.textPrimary },
