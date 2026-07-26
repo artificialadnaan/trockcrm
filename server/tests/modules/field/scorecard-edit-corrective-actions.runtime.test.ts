@@ -12,6 +12,7 @@ import { resolveCorrectiveActionItem } from "../../../src/modules/field/correcti
 import {
   contacts,
   dealTeamMembers,
+  fieldResponders,
   fieldScorecardEditUploads,
   fieldScorecardItems,
   fieldScorecardPhotos,
@@ -169,6 +170,7 @@ beforeAll(async () => {
       scorecardCorrectiveActionTokens,
       dealTeamMembers,
       contacts,
+      fieldResponders,
     ]),
   );
   await pg.exec(
@@ -1016,5 +1018,406 @@ describe("updateFieldScorecard corrective-action reconcile", () => {
     expect(await getStatus(scorecard.id)).toBe("submitted");
     // The now-stale resolved row is purged (no flags remain).
     expect(await getItems(scorecard.id)).toHaveLength(0);
+  });
+});
+
+// The picked field-responder link (field_scorecards.superintendent_responder_id / pm_responder_id) decides WHO
+// answers for a card, so an edit that changes it is a recipient change — the same class of event as a Team-tab
+// super/PM reassignment, which already restarts the notification cycle. These pin that the link survives the
+// edit path's no-op short-circuit and that a swap on an already-notified open card re-notifies.
+describe("scorecard edit — picked field responder", () => {
+  const ROSTER_A = "44444444-4444-4444-4444-444444444401";
+  const ROSTER_B = "44444444-4444-4444-4444-444444444402";
+
+  beforeEach(async () => {
+    await tdb.execute(sql`DELETE FROM field_responders`);
+    await tdb.execute(sql`DELETE FROM deal_team_members`);
+    await tdb.execute(sql`DELETE FROM contacts`);
+    await tdb.execute(sql`
+      INSERT INTO field_responders (id, name, email, role, is_active) VALUES
+        (${ROSTER_A}, 'James Helms', 'james@trock.test', 'superintendent', true),
+        (${ROSTER_B}, 'Jamal Wright', 'jamal@trock.test', 'superintendent', true)
+    `);
+  });
+
+  async function storedSuperLink(id: string): Promise<string | null> {
+    const res = await tdb.execute(
+      sql`SELECT superintendent_responder_id AS r FROM field_scorecards WHERE id = ${id}`,
+    );
+    return (res.rows[0] as { r: string | null }).r;
+  }
+
+  it("persists a pick swap even when every other field is byte-identical", async () => {
+    // The no-op short-circuit (scorecardEditableContentEquals) skips the whole write when nothing changed. A
+    // pick swap keeps the DISPLAY NAME identical, so if the link weren't part of that comparison this edit
+    // would be silently discarded and the corrective action would keep going to the previous person.
+    const { scorecard } = await createFieldScorecard(
+      tdb,
+      createInput({ superintendentResponderId: ROSTER_A }),
+    );
+    expect(await storedSuperLink(scorecard.id)).toBe(ROSTER_A);
+
+    const at = await currentUpdatedAt(scorecard.id);
+    await updateFieldScorecard(tdb, updateInput(scorecard.id, at, { superintendentResponderId: ROSTER_B }));
+    expect(await storedSuperLink(scorecard.id)).toBe(ROSTER_B);
+  });
+
+  it("clears the link when an edit omits it (full replacement — a link never outlives its name)", async () => {
+    const { scorecard } = await createFieldScorecard(
+      tdb,
+      createInput({ superintendentResponderId: ROSTER_A }),
+    );
+    const at = await currentUpdatedAt(scorecard.id);
+    await updateFieldScorecard(tdb, updateInput(scorecard.id, at));
+    expect(await storedSuperLink(scorecard.id)).toBeNull();
+  });
+
+  it("restarts the notification cycle when the pick changes on an ALREADY-NOTIFIED open card", async () => {
+    // Without this the swap would strand both people: the previous holder's token stops authorizing (they no
+    // longer resolve) and the new pick was never emailed, while corrective_action_email_sent_at suppresses any
+    // further send.
+    const { scorecard } = await createFieldScorecard(
+      tdb,
+      createInput({ items: v2Items(5), actionItems: ["Fix the rail"], superintendentResponderId: ROSTER_A }),
+    );
+    expect(await getStatus(scorecard.id)).toBe("corrective_action_open");
+    // Simulate the worker having delivered the first cycle.
+    await tdb.execute(
+      sql`UPDATE field_scorecards SET corrective_action_email_sent_at = now() WHERE id = ${scorecard.id}`,
+    );
+    const nonceBefore = (
+      (await tdb.execute(
+        sql`SELECT corrective_action_cycle_nonce AS n FROM field_scorecards WHERE id = ${scorecard.id}`,
+      )).rows[0] as { n: string | null }
+    ).n;
+    const jobsBefore = await correctiveJobCount();
+
+    const at = await currentUpdatedAt(scorecard.id);
+    await updateFieldScorecard(
+      tdb,
+      updateInput(scorecard.id, at, {
+        items: v2Items(5),
+        actionItems: ["Fix the rail"], // SAME flags — only the responder changed
+        superintendentResponderId: ROSTER_B,
+      }),
+    );
+
+    expect(await getStatus(scorecard.id)).toBe("corrective_action_open");
+    expect(await getEmailSentAt(scorecard.id)).toBeNull(); // the worker will send again
+    expect(await correctiveJobCount()).toBe(jobsBefore + 1);
+    const nonceAfter = (
+      (await tdb.execute(
+        sql`SELECT corrective_action_cycle_nonce AS n FROM field_scorecards WHERE id = ${scorecard.id}`,
+      )).rows[0] as { n: string | null }
+    ).n;
+    expect(nonceAfter).toBeTruthy();
+    expect(nonceAfter).not.toBe(nonceBefore);
+  });
+
+  it("restarts when the pick changes and the original notification job DEAD-lettered", async () => {
+    // A dead job leaves corrective_action_email_sent_at NULL with nothing left to run.
+    const { scorecard } = await createFieldScorecard(
+      tdb,
+      createInput({ items: v2Items(5), actionItems: ["Fix the rail"], superintendentResponderId: ROSTER_A }),
+    );
+    expect(await getEmailSentAt(scorecard.id)).toBeNull();
+    await tdb.execute(sql`
+      UPDATE public.job_queue SET status = 'dead'
+       WHERE job_type = 'scorecard_corrective_action_email' AND payload->>'scorecardId' = ${scorecard.id}
+    `);
+    const jobsBefore = await correctiveJobCount();
+
+    const at = await currentUpdatedAt(scorecard.id);
+    await updateFieldScorecard(
+      tdb,
+      updateInput(scorecard.id, at, {
+        items: v2Items(5),
+        actionItems: ["Fix the rail"],
+        superintendentResponderId: ROSTER_B,
+      }),
+    );
+
+    expect(await correctiveJobCount()).toBe(jobsBefore + 1);
+  });
+
+  it("restarts even while a PROCESSING job is mid-flight — the nonce supersedes it", async () => {
+    // The load-bearing race: that job may have re-resolved the OLD pick moments ago and be about to stamp. It
+    // will block on this edit's card lock and then stamp AFTER the commit unless the cycle nonce moves, leaving
+    // the old recipient with a 403ing link and the new pick with nothing. Rotating the nonce makes its stamp
+    // update 0 rows, so the fresh cycle is the only delivery.
+    const { scorecard } = await createFieldScorecard(
+      tdb,
+      createInput({ items: v2Items(5), actionItems: ["Fix the rail"], superintendentResponderId: ROSTER_A }),
+    );
+    await tdb.execute(sql`
+      UPDATE public.job_queue SET status = 'processing'
+       WHERE job_type = 'scorecard_corrective_action_email' AND payload->>'scorecardId' = ${scorecard.id}
+    `);
+    const jobsBefore = await correctiveJobCount();
+
+    const at = await currentUpdatedAt(scorecard.id);
+    await updateFieldScorecard(
+      tdb,
+      updateInput(scorecard.id, at, {
+        items: v2Items(5),
+        actionItems: ["Fix the rail"],
+        superintendentResponderId: ROSTER_B,
+      }),
+    );
+
+    expect(await correctiveJobCount()).toBe(jobsBefore + 1);
+  });
+
+  it("restarts when the pick changes while the FIRST notification is still pending", async () => {
+    // The superseded pending job returns early with no send and no stamp (its payload nonce no longer matches
+    // the stored one), so this is one delivery to the right person, not two.
+    const { scorecard } = await createFieldScorecard(
+      tdb,
+      createInput({ items: v2Items(5), actionItems: ["Fix the rail"], superintendentResponderId: ROSTER_A }),
+    );
+    expect(await getEmailSentAt(scorecard.id)).toBeNull(); // never delivered
+    const jobsBefore = await correctiveJobCount();
+
+    const at = await currentUpdatedAt(scorecard.id);
+    await updateFieldScorecard(
+      tdb,
+      updateInput(scorecard.id, at, {
+        items: v2Items(5),
+        actionItems: ["Fix the rail"],
+        superintendentResponderId: ROSTER_B,
+      }),
+    );
+
+    expect(await correctiveJobCount()).toBe(jobsBefore + 1);
+    expect(await storedSuperLink(scorecard.id)).toBe(ROSTER_B);
+  });
+
+  it("re-addresses a still-pending completed-scorecard email when the pick is corrected", async () => {
+    // That email snapshots its recipients at submit and nothing re-resolves them at send time, so correcting a
+    // mis-picked superintendent seconds after filing would otherwise still email the wrong person.
+    const { scorecard } = await createFieldScorecard(
+      tdb,
+      createInput({ superintendentResponderId: ROSTER_A }),
+    );
+    const payloadFor = async () => {
+      const res = await tdb.execute(sql`
+        SELECT payload FROM public.job_queue
+         WHERE job_type = 'field_scorecard_email' AND payload->>'scorecardId' = ${scorecard.id}
+         ORDER BY id DESC LIMIT 1
+      `);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return (res.rows[0] as { payload: any }).payload;
+    };
+    expect((await payloadFor()).superintendentEmail).toBe("james@trock.test");
+
+    const beforeNonce = (await payloadFor()).deliveryNonce;
+
+    const at = await currentUpdatedAt(scorecard.id);
+    await updateFieldScorecard(tdb, updateInput(scorecard.id, at, { superintendentResponderId: ROSTER_B }));
+    const after = await payloadFor();
+    expect(after.superintendentEmail).toBe("jamal@trock.test");
+    // A fresh deliveryNonce must ride along. `status IN ('pending','dead')` is not proof the email never went
+    // out — the provider can accept a send and the process die before email_sent_at is stamped — and replaying
+    // the worker's per-scorecard key with changed recipients is answered as already-delivered, silently
+    // dropping the corrected send. The nonce rotates that key.
+    expect(after.deliveryNonce).toBeTruthy();
+    expect(after.deliveryNonce).not.toBe(beforeNonce);
+  });
+
+  it("REQUEUES a dead completion-email job when the pick is corrected", async () => {
+    // The worker claims `status = 'pending' AND run_after <= NOW()`, so a dead row is never read again —
+    // re-addressing one without requeueing rewrites a payload nobody will load. The motivating case: this job
+    // dead-letters when it can resolve NO recipient, which is exactly what picking a roster responder fixes.
+    const { scorecard } = await createFieldScorecard(tdb, createInput());
+    await tdb.execute(sql`
+      UPDATE public.job_queue SET status = 'dead', attempts = 6, last_error = 'no recipients',
+             run_after = now() + interval '1 hour'
+       WHERE job_type = 'field_scorecard_email' AND payload->>'scorecardId' = ${scorecard.id}
+    `);
+
+    const at = await currentUpdatedAt(scorecard.id);
+    await updateFieldScorecard(tdb, updateInput(scorecard.id, at, { superintendentResponderId: ROSTER_A }));
+
+    const res = await tdb.execute(sql`
+      SELECT status, attempts, last_error, run_after <= now() AS runnable, payload
+        FROM public.job_queue
+       WHERE job_type = 'field_scorecard_email' AND payload->>'scorecardId' = ${scorecard.id}
+    `);
+    const row = res.rows[0] as {
+      status: string; attempts: number; last_error: string | null; runnable: boolean; payload: { superintendentEmail: string };
+    };
+    expect(row.status).toBe("pending"); // claimable again
+    expect(row.attempts).toBe(0); // fresh budget on changed input
+    expect(row.last_error).toBeNull();
+    expect(row.runnable).toBe(true); // not stranded behind the old backoff
+    expect(row.payload.superintendentEmail).toBe("james@trock.test");
+  });
+
+  it("leaves a still-pending job's attempts and backoff alone while re-addressing it", async () => {
+    const { scorecard } = await createFieldScorecard(tdb, createInput());
+    await tdb.execute(sql`
+      UPDATE public.job_queue SET attempts = 3, run_after = now() + interval '30 minutes'
+       WHERE job_type = 'field_scorecard_email' AND payload->>'scorecardId' = ${scorecard.id}
+    `);
+
+    const at = await currentUpdatedAt(scorecard.id);
+    await updateFieldScorecard(tdb, updateInput(scorecard.id, at, { superintendentResponderId: ROSTER_A }));
+
+    const res = await tdb.execute(sql`
+      SELECT status, attempts, run_after > now() AS still_delayed, payload
+        FROM public.job_queue
+       WHERE job_type = 'field_scorecard_email' AND payload->>'scorecardId' = ${scorecard.id}
+    `);
+    const row = res.rows[0] as { status: string; attempts: number; still_delayed: boolean; payload: { superintendentEmail: string } };
+    expect(row.status).toBe("pending");
+    expect(row.attempts).toBe(3); // untouched — this row never failed terminally
+    expect(row.still_delayed).toBe(true); // its backoff is preserved
+    expect(row.payload.superintendentEmail).toBe("james@trock.test");
+  });
+
+  it("does NOT re-address a job already PROCESSING (send-once boundary, unchanged from before)", async () => {
+    const { scorecard } = await createFieldScorecard(tdb, createInput());
+    await tdb.execute(sql`
+      UPDATE public.job_queue SET status = 'processing'
+       WHERE job_type = 'field_scorecard_email' AND payload->>'scorecardId' = ${scorecard.id}
+    `);
+
+    const at = await currentUpdatedAt(scorecard.id);
+    await updateFieldScorecard(tdb, updateInput(scorecard.id, at, { superintendentResponderId: ROSTER_A }));
+
+    const res = await tdb.execute(sql`
+      SELECT status, payload FROM public.job_queue
+       WHERE job_type = 'field_scorecard_email' AND payload->>'scorecardId' = ${scorecard.id}
+    `);
+    const row = res.rows[0] as { status: string; payload: { superintendentEmail: string | null } };
+    // The worker has already loaded this payload; rewriting it would not change the send, and resurrecting it
+    // would need email_sent_at cleared — which re-sends the PDF to the whole env recipient list.
+    expect(row.status).toBe("processing");
+    expect(row.payload.superintendentEmail).toBeNull();
+  });
+
+  it("names the card after the picked person, not the free text sent alongside the id", async () => {
+    const { scorecard } = await createFieldScorecard(
+      tdb,
+      createInput({ superintendentResponderId: ROSTER_A, superintendentName: "Alice Impostor" }),
+    );
+    const nameOf = async () => {
+      const res = await tdb.execute(
+        sql`SELECT superintendent_name AS n FROM field_scorecards WHERE id = ${scorecard.id}`,
+      );
+      return (res.rows[0] as { n: string }).n;
+    };
+    expect(await nameOf()).toBe("James Helms");
+
+    // The edit path applies the same rule.
+    const at = await currentUpdatedAt(scorecard.id);
+    await updateFieldScorecard(
+      tdb,
+      updateInput(scorecard.id, at, {
+        superintendentResponderId: ROSTER_B,
+        superintendentName: "Still Wrong",
+      }),
+    );
+    expect(await nameOf()).toBe("Jamal Wright");
+  });
+
+  it("reverts a cleared pick to the deal-team address on that pending email", async () => {
+    // A CONTACT-backed team member, not an email-only one, on purpose: resolveActiveScorecardTeamRows (the
+    // completed-scorecard email's resolver) has no email-only branch, so an email-only super/PM is invisible to
+    // that email and would resolve to null here. That is a PRE-EXISTING gap this change does not touch — see
+    // docs/scorecard-responder-design.md, "Known gaps".
+    const teamContact = "77777777-7777-7777-7777-777777777771";
+    await tdb.execute(sql`
+      INSERT INTO contacts (id, first_name, last_name, email, category, is_active)
+      VALUES (${teamContact}, 'Team', 'Super', 'team.super@trock.test', 'client', true)
+    `);
+    await tdb.execute(sql`
+      INSERT INTO deal_team_members (deal_id, user_id, contact_id, role, is_active)
+      VALUES (${DEAL}, NULL, ${teamContact}, 'superintendent', true)
+    `);
+    const { scorecard } = await createFieldScorecard(
+      tdb,
+      createInput({ superintendentResponderId: ROSTER_A }),
+    );
+    const payloadFor = async () => {
+      const res = await tdb.execute(sql`
+        SELECT payload FROM public.job_queue
+         WHERE job_type = 'field_scorecard_email' AND payload->>'scorecardId' = ${scorecard.id}
+         ORDER BY id DESC LIMIT 1
+      `);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return (res.rows[0] as { payload: any }).payload;
+    };
+    expect((await payloadFor()).superintendentEmail).toBe("james@trock.test");
+
+    // The edit drops the pick entirely → the deal's Team-tab superintendent takes it back.
+    const at = await currentUpdatedAt(scorecard.id);
+    await updateFieldScorecard(tdb, updateInput(scorecard.id, at));
+    expect((await payloadFor()).superintendentEmail).toBe("team.super@trock.test");
+  });
+
+  it("rotates the cycle nonce on a pick change so an in-flight job's stamp cannot land", async () => {
+    // The nonce is the mechanism that makes the unconditional restart safe: the superseded job early-returns
+    // (payload nonce != stored nonce) and, if it is already past that gate, its guarded stamp updates 0 rows.
+    const { scorecard } = await createFieldScorecard(
+      tdb,
+      createInput({ items: v2Items(5), actionItems: ["Fix the rail"], superintendentResponderId: ROSTER_A }),
+    );
+    const nonceOf = async () => (
+      (await tdb.execute(
+        sql`SELECT corrective_action_cycle_nonce AS n FROM field_scorecards WHERE id = ${scorecard.id}`,
+      )).rows[0] as { n: string | null }
+    ).n;
+    const before = await nonceOf();
+    await tdb.execute(sql`
+      UPDATE public.job_queue SET status = 'processing'
+       WHERE job_type = 'scorecard_corrective_action_email' AND payload->>'scorecardId' = ${scorecard.id}
+    `);
+
+    const at = await currentUpdatedAt(scorecard.id);
+    await updateFieldScorecard(
+      tdb,
+      updateInput(scorecard.id, at, {
+        items: v2Items(5),
+        actionItems: ["Fix the rail"],
+        superintendentResponderId: ROSTER_B,
+      }),
+    );
+
+    const after = await nonceOf();
+    expect(after).toBeTruthy();
+    expect(after).not.toBe(before);
+    // The freshly enqueued job carries the SAME nonce now stored, so it is the one that can stamp.
+    const jobRes = await tdb.execute(sql`
+      SELECT payload FROM public.job_queue
+       WHERE job_type = 'scorecard_corrective_action_email' AND payload->>'scorecardId' = ${scorecard.id}
+       ORDER BY id DESC LIMIT 1
+    `);
+    expect((jobRes.rows[0] as { payload: { cycleNonce: string } }).payload.cycleNonce).toBe(after);
+  });
+
+  it("does NOT restart the cycle for an edit that leaves the pick alone", async () => {
+    const { scorecard } = await createFieldScorecard(
+      tdb,
+      createInput({ items: v2Items(5), actionItems: ["Fix the rail"], superintendentResponderId: ROSTER_A }),
+    );
+    await tdb.execute(
+      sql`UPDATE field_scorecards SET corrective_action_email_sent_at = now() WHERE id = ${scorecard.id}`,
+    );
+    const jobsBefore = await correctiveJobCount();
+
+    const at = await currentUpdatedAt(scorecard.id);
+    await updateFieldScorecard(
+      tdb,
+      updateInput(scorecard.id, at, {
+        items: v2Items(5),
+        actionItems: ["Fix the rail"],
+        superintendentResponderId: ROSTER_A, // unchanged
+        pmName: "Renamed PM", // some other content change so this isn't a no-op edit
+      }),
+    );
+
+    expect(await correctiveJobCount()).toBe(jobsBefore);
+    expect(await getEmailSentAt(scorecard.id)).not.toBeNull(); // stamp untouched
   });
 });

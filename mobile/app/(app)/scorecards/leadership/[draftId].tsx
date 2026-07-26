@@ -39,6 +39,7 @@ import {
   isExistingScorecardDraftPhoto,
   isScorecardDraftPhotoCaptionEditable,
   validateScorecardDraft,
+  responderPickAction,
   MAX_SCORECARD_PHOTOS,
   type ScorecardDraft,
   type ScorecardDraftPhoto,
@@ -600,10 +601,10 @@ function LeadershipForm(props: {
             <Text style={styles.readonly}>{draft.evaluatorName?.trim() || "You"}</Text>
           </Field>
           <Field label="Project manager">
-            <ResponderPicker value={draft.pmName} onChange={(name) => dispatch({ type: "setHeader", field: "pmName", value: name })} role="project_manager" responders={responders} error={respondersError} />
+            <ResponderPicker value={draft.pmName} onChange={(name, responder) => dispatch(responderPickAction("pmName", name, responder))} responderId={draft.pmResponderId} role="project_manager" responders={responders} error={respondersError} />
           </Field>
           <Field label="Superintendent">
-            <ResponderPicker value={draft.superintendentName} onChange={(name) => dispatch({ type: "setHeader", field: "superintendentName", value: name })} role="superintendent" responders={responders} error={respondersError} />
+            <ResponderPicker value={draft.superintendentName} onChange={(name, responder) => dispatch(responderPickAction("superintendentName", name, responder))} responderId={draft.superintendentResponderId} role="superintendent" responders={responders} error={respondersError} />
           </Field>
         </View>
 

@@ -78,6 +78,35 @@ function detail(overrides: Partial<FieldScorecardDetail> = {}): FieldScorecardDe
 }
 
 describe("createScorecardEditDraft", () => {
+  it("round-trips the card's picked responders through an edit that never touches the names", () => {
+    // The PUT is a full replacement, so an edit form that didn't rehydrate these would send nulls and hand the
+    // card's corrective action back to the deal team — silently, on an edit the user made for another reason.
+    const draft = createScorecardEditDraft(
+      detail({ superintendentResponderId: "resp-super", pmResponderId: "resp-pm" }),
+      { id: "local-edit-picked", clientSubmissionId: "edit-attempt-picked", now: 1234 },
+    );
+    expect(draft.superintendentResponderId).toBe("resp-super");
+    expect(draft.pmResponderId).toBe("resp-pm");
+
+    const body = scorecardDraftToUpdate({
+      ...draft,
+      superintendentSignature: "data:image/png;base64,fresh-super",
+      pmSignature: "Fresh PM typed signature",
+    });
+    expect(body.superintendentResponderId).toBe("resp-super");
+    expect(body.pmResponderId).toBe("resp-pm");
+  });
+
+  it("hydrates a card with no picks as explicit nulls (falls back to the deal team server-side)", () => {
+    const draft = createScorecardEditDraft(detail(), {
+      id: "local-edit-unpicked",
+      clientSubmissionId: "edit-attempt-unpicked",
+      now: 1234,
+    });
+    expect(draft.superintendentResponderId).toBeNull();
+    expect(draft.pmResponderId).toBeNull();
+  });
+
   it("hydrates a V2 project edit while requiring fresh signatures", () => {
     const draft = createScorecardEditDraft(detail(), {
       id: "local-edit-1",
@@ -254,6 +283,48 @@ describe("refreshScorecardEditPhotoUrls", () => {
 
     expect(refreshed.photos[0]).toMatchObject({ caption: "Canonical updated description" });
     expect(refreshed.editBaseUpdatedAt).toBe("2026-07-14T14:05:00.000Z");
+  });
+
+  it("keeps the old token when another device changed only the PICKED responder", () => {
+    // The trap: another device switched this card to a DIFFERENT roster person who happens to share the
+    // displayed name (or cleared the pick while keeping the name). If the fingerprint hashed only the names it
+    // would call that revision content-identical, advance editBaseUpdatedAt to the server's newer token, and
+    // the next full-replacement save would sail past the 409 and silently overwrite the newer routing with
+    // this draft's stale ids. Holding the old token forces the expected conflict instead.
+    const picked = detail({ superintendentResponderId: "resp-a" });
+    const base = createScorecardEditDraft(picked, { id: "local", clientSubmissionId: "edit", now: 1 });
+    const refreshed = refreshScorecardEditPhotoUrls(base, detail({
+      updatedAt: "2026-07-14T14:15:00.000Z",
+      superintendentResponderId: "resp-b", // same displayed name, different person
+    }));
+
+    expect(refreshed.editBaseUpdatedAt).toBe("2026-07-14T14:05:00.000Z");
+    expect(refreshed.superintendentResponderId).toBe("resp-a");
+  });
+
+  it("keeps the old token when another device CLEARED the pick but kept the name", () => {
+    const picked = detail({ superintendentResponderId: "resp-a" });
+    const base = createScorecardEditDraft(picked, { id: "local", clientSubmissionId: "edit", now: 1 });
+    const refreshed = refreshScorecardEditPhotoUrls(base, detail({
+      updatedAt: "2026-07-14T14:15:00.000Z",
+      superintendentResponderId: null,
+    }));
+
+    expect(refreshed.editBaseUpdatedAt).toBe("2026-07-14T14:05:00.000Z");
+  });
+
+  it("still advances the token when the picks match (a genuinely content-identical revision)", () => {
+    const picked = detail({ superintendentResponderId: "resp-a" });
+    const base = createScorecardEditDraft(picked, { id: "local", clientSubmissionId: "edit", now: 1 });
+    const refreshed = refreshScorecardEditPhotoUrls(base, detail({
+      updatedAt: "2026-07-14T14:15:00.000Z",
+      superintendentResponderId: "resp-a",
+      photos: detail().photos.map((photo) => photo.id === "scorecard-photo-1"
+        ? { ...photo, url: "https://fresh.example/photo-1.jpg" }
+        : photo),
+    }));
+
+    expect(refreshed.editBaseUpdatedAt).toBe("2026-07-14T14:15:00.000Z");
   });
 
   it("treats an older cached detail as a complete no-op", () => {
@@ -1276,6 +1347,10 @@ describe("scorecardDraftToUpdate", () => {
       expectedUpdatedAt: "2026-07-14T14:05:00.000Z",
       superintendentName: "New Superintendent",
       pmName: "New PM",
+      // Always stated, never omitted: the PUT is a full replacement, so a missing key would clear the card's
+      // picks server-side. This draft has no picks, so both normalize to explicit null.
+      superintendentResponderId: null,
+      pmResponderId: null,
       items: PROJECT_ITEMS.map((item) => ({
         sectionKey: item.sectionKey,
         points: item.points,

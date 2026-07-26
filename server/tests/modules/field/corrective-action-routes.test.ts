@@ -12,6 +12,7 @@ import {
   scorecardCorrectiveActionTokens,
   dealTeamMembers,
   contacts,
+  fieldResponders,
 } from "@trock-crm/shared/schema";
 import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
 
@@ -20,6 +21,8 @@ const USER = "33333333-3333-3333-3333-333333333333";
 const STAGE_ACTIVE = "cccccccc-0000-0000-0000-000000000001";
 const STAGE_LOST = "cccccccc-0000-0000-0000-000000000002";
 const OFFICE = { id: "office-1", slug: "test" };
+// A field-responder roster row the scorecard picker can point at (never on deal_team_members).
+const ROSTER_SUPER = "44444444-4444-4444-4444-444444444401";
 
 // The identity requireFieldContractor injects for the SESSION path. Tests mutate this to exercise the
 // spec §7.1 gate: an assigned super/PM user, a management role (admin/director), or an unauthorized role.
@@ -103,6 +106,7 @@ beforeAll(async () => {
       scorecardCorrectiveActionTokens,
       dealTeamMembers,
       contacts,
+      fieldResponders,
     ]),
   );
   await pg.exec(`
@@ -127,6 +131,7 @@ beforeEach(async () => {
   await tdb.execute(sql`DELETE FROM scorecard_corrective_actions`);
   await tdb.execute(sql`DELETE FROM field_scorecards`);
   await tdb.execute(sql`DELETE FROM deal_team_members`);
+  await tdb.execute(sql`DELETE FROM field_responders`);
   // Reset the deal to its ACTIVE/browsable baseline (some tests archive it / move it to Lost).
   await tdb.execute(sql`UPDATE deals SET is_active = true, stage_id = ${STAGE_ACTIVE} WHERE id = ${DEAL}`);
   // USER is the deal's assigned superintendent (active) → authorized on the session path.
@@ -185,6 +190,99 @@ describe("GET /scorecards/:id/corrective-actions", () => {
   it("403s a rep NOT on the deal team", async () => {
     sessionUser = { id: "44444444-4444-4444-4444-444444444444", role: "rep" };
     const res = await request(app).get(`/scorecards/${scorecardId}/corrective-actions`);
+    expect(res.status).toBe(403);
+  });
+
+  it("authorizes a token minted for the card's PICKED responder, who is NOT on the deal team", async () => {
+    // The load-bearing authz case for the scorecard picker. The worker mints tokens for whoever the CARD
+    // resolves to, and for a picked responder that is a roster person with no deal_team_members row at all.
+    // A deal-scoped revalidation here would 403 that link on its first click: the email sends, the recipient
+    // taps it, and the corrective action is unreachable.
+    await tdb.execute(sql`
+      INSERT INTO field_responders (id, name, email, role, is_active)
+      VALUES (${ROSTER_SUPER}, 'James Helms', 'james@trock.test', 'superintendent', true)
+    `);
+    await tdb.execute(sql`
+      UPDATE field_scorecards SET superintendent_responder_id = ${ROSTER_SUPER} WHERE id = ${scorecardId}
+    `);
+    const { rawToken } = await mintCorrectiveActionToken(tdb, {
+      scorecardId,
+      recipientEmail: "james@trock.test",
+      role: "superintendent",
+      ttlDays: 30,
+    });
+    const res = await request(app).get(
+      `/scorecards/${scorecardId}/corrective-actions?token=${encodeURIComponent(rawToken)}`,
+    );
+    expect(res.status).toBe(200);
+    expect(res.body.items).toHaveLength(2);
+  });
+
+  it("403s a roster person's token once they are DEACTIVATED — the re-read IS the revocation", async () => {
+    // There is no separate revoke hook for the roster. Because authorization re-resolves the pick on every
+    // request, deactivating someone kills their outstanding link immediately rather than 30 days later.
+    await tdb.execute(sql`
+      INSERT INTO field_responders (id, name, email, role, is_active)
+      VALUES (${ROSTER_SUPER}, 'James Helms', 'james@trock.test', 'superintendent', true)
+    `);
+    await tdb.execute(sql`
+      UPDATE field_scorecards SET superintendent_responder_id = ${ROSTER_SUPER} WHERE id = ${scorecardId}
+    `);
+    const { rawToken } = await mintCorrectiveActionToken(tdb, {
+      scorecardId,
+      recipientEmail: "james@trock.test",
+      role: "superintendent",
+      ttlDays: 30,
+    });
+    await tdb.execute(sql`UPDATE field_responders SET is_active = false WHERE id = ${ROSTER_SUPER}`);
+    const res = await request(app).get(
+      `/scorecards/${scorecardId}/corrective-actions?token=${encodeURIComponent(rawToken)}`,
+    );
+    expect(res.status).toBe(403);
+  });
+
+  it("403s a roster person's token on a SIBLING card that did not pick them", async () => {
+    // Picks are per-card, so authorization must be too: being picked on this week's scorecard grants nothing
+    // on last week's.
+    await tdb.execute(sql`
+      INSERT INTO field_responders (id, name, email, role, is_active)
+      VALUES (${ROSTER_SUPER}, 'James Helms', 'james@trock.test', 'superintendent', true)
+    `);
+    const sibling = "22222222-2222-2222-2222-2222222222bb";
+    await tdb.execute(sql`
+      INSERT INTO field_scorecards (id, client_submission_id, deal_id, week_of, form_version, kind, total_score, rating, status, submitted_by)
+      VALUES (${sibling}, '55555555-5555-5555-5555-0000000000bb', ${DEAL}, '2026-06-23', 1, 'project', 60, 'corrective_action', 'corrective_action_open', ${USER})
+    `);
+    await tdb.execute(sql`
+      UPDATE field_scorecards SET superintendent_responder_id = ${ROSTER_SUPER} WHERE id = ${scorecardId}
+    `);
+    const { rawToken } = await mintCorrectiveActionToken(tdb, {
+      scorecardId: sibling,
+      recipientEmail: "james@trock.test",
+      role: "superintendent",
+      ttlDays: 30,
+    });
+    const res = await request(app).get(
+      `/scorecards/${sibling}/corrective-actions?token=${encodeURIComponent(rawToken)}`,
+    );
+    expect(res.status).toBe(403);
+  });
+
+  it("still 403s an arbitrary roster person who was never picked on any card", async () => {
+    // The pick — not roster membership — is what grants access. Being on the roster must not be a skeleton key.
+    await tdb.execute(sql`
+      INSERT INTO field_responders (id, name, email, role, is_active)
+      VALUES (${ROSTER_SUPER}, 'James Helms', 'james@trock.test', 'superintendent', true)
+    `);
+    const { rawToken } = await mintCorrectiveActionToken(tdb, {
+      scorecardId,
+      recipientEmail: "james@trock.test",
+      role: "superintendent",
+      ttlDays: 30,
+    });
+    const res = await request(app).get(
+      `/scorecards/${scorecardId}/corrective-actions?token=${encodeURIComponent(rawToken)}`,
+    );
     expect(res.status).toBe(403);
   });
 

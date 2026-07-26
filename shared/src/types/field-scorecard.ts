@@ -439,6 +439,10 @@ export interface ScorecardSubmissionInput {
   weekOf: string; // yyyy-mm-dd
   superintendentName?: string | null;
   pmName?: string | null;
+  /** field_responders id when the super/PM was PICKED from the roster dropdown (null/omitted when typed free-text
+   *  or not picked). Drives recipient resolution — the name fields stay as the display label. */
+  superintendentResponderId?: string | null;
+  pmResponderId?: string | null;
   projectNumber?: string | null;
   items: ScorecardSubmissionItem[];
   criticalDeficiencies: string[];
@@ -483,6 +487,10 @@ export interface ScorecardUpdateInput {
   expectedUpdatedAt: string;
   superintendentName?: string | null;
   pmName?: string | null;
+  /** field_responders id when the super/PM was PICKED from the roster dropdown on this edit (null/omitted when
+   *  typed free-text or not picked). */
+  superintendentResponderId?: string | null;
+  pmResponderId?: string | null;
   items: ScorecardSubmissionItem[];
   criticalDeficiencies: string[];
   criticalDeficiencyNotes?: Record<string, string>;
@@ -594,6 +602,14 @@ export interface FieldScorecardDetail extends FieldScorecardSummary {
   photos: FieldScorecardPhotoView[];
   superintendentSignature?: string | null;
   pmSignature?: string | null;
+  /**
+   * The field_responders roster person currently linked to each role on this card (null when the name was
+   * typed free-text). Surfaced on DETAIL — not on the summary — because the one consumer is the mobile edit
+   * form, which hydrates its draft from detail: without these the editor could not round-trip the pick, and
+   * every save would silently clear it. Optional so older API deployments don't break consumers.
+   */
+  superintendentResponderId?: string | null;
+  pmResponderId?: string | null;
   /** Leadership Project Summary free text. */
   summary?: string | null;
   /**

@@ -1,10 +1,14 @@
 // A name-entry field with a searchable dropdown backed by the CRM field-responder roster. PURELY
 // presentational (roster + error are passed in, not fetched) so it unit-tests without an AuthProvider.
 //
-// Storage stays NAME-ONLY: the bound `value` is the draft's superintendentName/pmName string and `onChange`
-// receives the plain name — whether the user picks a roster row OR types a custom name. The dropdown is a
-// convenience over free-text, never a gate: typing always works (offline / off-roster / a name the CRM
-// doesn't know), and when there's no roster (empty list or a load `error`) it renders just the TextInput.
+// The bound `value` is the draft's superintendentName/pmName string. `onChange` always receives the plain
+// name, and ALSO the roster row when — and only when — the name came from PICKING that row; typing hands back
+// `null`. That second argument is what lets the draft record WHICH roster person was chosen (their id rides to
+// the server and becomes the corrective-action recipient for the card), while keeping a typed name a typed
+// name: a free-text entry that happens to spell a roster member is not a pick and must not silently address
+// them. The dropdown is a convenience over free-text, never a gate: typing always works (offline / off-roster
+// / a name the CRM doesn't know), and when there's no roster (empty list or a load `error`) it renders just
+// the TextInput — so a null responder is a first-class outcome, not an error path.
 
 import React, { useRef, useState } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
@@ -25,13 +29,21 @@ export function matchResponders(
   responders: FieldResponderOption[],
   role: FieldResponderRole,
   query: string,
+  opts?: { pickedId?: string | null },
 ): FieldResponderOption[] {
   const q = query.trim().toLowerCase();
   return responders
     .filter((r) => r.role === role)
     .filter((r) => {
       const name = r.name.toLowerCase();
-      if (name === q) return false; // already exactly entered — nothing to suggest
+      // Hide only the EXACT row that is already picked — matched by id, not by name.
+      //   - by name would hide the row whenever the text merely spells a roster member with no pick recorded
+      //     (typed, or a picked name edited and undone, which clears the pick), leaving no way to record the
+      //     pick at all: the card would display that person while routing its corrective action to the deal team.
+      //   - by name would ALSO hide a DIFFERENT person who happens to share the picked name — and since only
+      //     active emails are unique on the roster, same-name pairs are exactly the case where the user most
+      //     needs to switch between them.
+      if (r.id === opts?.pickedId && name === q) return false;
       return q.length === 0 || name.includes(q);
     })
     .slice(0, MAX_SUGGESTIONS);
@@ -48,23 +60,34 @@ export function ResponderPicker({
   role,
   responders,
   error,
+  responderId,
 }: {
   value: string;
-  onChange: (name: string) => void;
+  /**
+   * `responder` is the roster row ONLY when the name came from pressing that row; every free-text keystroke
+   * passes `null`. Callers must treat `null` as "clear the recorded pick" — never as "keep whatever was
+   * picked before" — or an id can outlive the name it belonged to.
+   */
+  onChange: (name: string, responder: FieldResponderOption | null) => void;
   role: FieldResponderRole;
   responders: FieldResponderOption[];
   error?: string | null;
+  /** The pick currently recorded for this field, if any — drives whether the exact-name row is still offered. */
+  responderId?: string | null;
 }) {
   const [focused, setFocused] = useState(false);
   const inputRef = useRef<RNTextInput>(null);
 
   // No roster to suggest from (failed load or empty office roster) → pure free-text field. Typing still works.
   const hasRoster = !error && responders.length > 0;
-  const suggestions = hasRoster && focused ? matchResponders(responders, role, value) : [];
+  const suggestions =
+    hasRoster && focused ? matchResponders(responders, role, value, { pickedId: responderId }) : [];
   const showSuggestions = suggestions.length > 0;
 
-  const pick = (name: string) => {
-    onChange(name);
+  // Report the WHOLE roster row, not just its name: the id travels with the exact name it belongs to, in one
+  // call, so no caller can end up holding an id for a different person's name.
+  const pick = (responder: FieldResponderOption) => {
+    onChange(responder.name, responder);
     setFocused(false);
     // Blur the NATIVE input too, not just our `focused` flag. Both scorecard forms use
     // keyboardShouldPersistTaps="handled", so the input stays focused after a suggestion press; without an
@@ -78,7 +101,10 @@ export function ResponderPicker({
       <TextInput
         ref={inputRef}
         value={value}
-        onChangeText={onChange}
+        // Typing is never a pick — always clear the recorded responder, even if the typed text happens to
+        // spell a roster member exactly. Name-matching is what made the earlier attempt at this feature
+        // able to email someone the user never chose.
+        onChangeText={(text) => onChange(text, null)}
         onFocus={() => setFocused(true)}
         onBlur={() => setFocused(false)}
         placeholder={`Name (${ROLE_LABEL[role].toLowerCase()})`}
@@ -91,9 +117,13 @@ export function ResponderPicker({
             <Pressable
               key={r.id}
               // onPress fires after onBlur; keep the value change here so the pick wins over the blur.
-              onPress={() => pick(r.name)}
+              onPress={() => pick(r)}
               accessibilityRole="button"
-              accessibilityLabel={`Select ${r.name}`}
+              // Include the email: only ACTIVE emails are unique on the roster, so two people can share a
+              // name, and pressing one vs the other now routes this card's corrective action to a different
+              // address. The email is already on screen for sighted users — without it here a screen-reader
+              // user has two identical "Select James Helms" buttons and no way to tell which is which.
+              accessibilityLabel={`Select ${r.name}, ${r.email}`}
               style={({ pressed }) => [styles.row, pressed && styles.rowPressed]}
             >
               <Text style={styles.rowName} numberOfLines={1}>

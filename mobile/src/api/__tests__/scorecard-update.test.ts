@@ -12,6 +12,8 @@ describe("updateScorecard", () => {
       expectedUpdatedAt: "2026-07-14T12:34:56.000Z",
       superintendentName: "Sam Superintendent",
       pmName: "Pat Manager",
+      superintendentResponderId: null,
+      pmResponderId: null,
       items: [
         { sectionKey: "planning_precon", points: 8, note: null },
         { sectionKey: "jobsite_5s", points: 8, note: null },

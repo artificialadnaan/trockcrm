@@ -71,6 +71,16 @@ export interface ScorecardDraft {
   superintendentName: string;
   pmName: string;
   /**
+   * The field-responder roster id behind the name above, set ONLY when that name was chosen from the picker
+   * (`setResponder`) and cleared by any other edit to the name (`setHeader`). Non-null means "this exact
+   * roster person answers for this card" — the server addresses the corrective-action + completed-scorecard
+   * email to them instead of the deal's Team-tab super/PM. Optional because drafts persist as raw JSON with
+   * no migration hook: a draft written before this field existed resumes with them absent, which correctly
+   * reads as "no pick" and falls back to the deal team.
+   */
+  superintendentResponderId?: string | null;
+  pmResponderId?: string | null;
+  /**
    * Auto-recorded name of the submitting user (the Evaluator) — leadership only. Seeded from the current
    * user's name and shown READ-ONLY in the header (the Evaluator is whoever submits: the server stamps
    * submittedByName from the field user, which IS the evaluator). The project card has no evaluator field.
@@ -141,6 +151,18 @@ export type DraftAction =
   | { type: "setNote"; sectionKey: AnyScorecardSectionKey; note: string }
   | { type: "appendNote"; sectionKey: AnyScorecardSectionKey; text: string }
   | { type: "setHeader"; field: "superintendentName" | "pmName" | "weekOf"; value: string }
+  /**
+   * A roster PICK: sets the name and its responder id in ONE transition. Kept separate from `setHeader`
+   * (which clears the id) so an id can only ever become non-null together with the exact name it belongs to —
+   * autosave persists whole draft snapshots, so a two-dispatch version would leave a durable window where the
+   * stored name and id disagree.
+   */
+  | {
+      type: "setResponder";
+      field: "superintendentName" | "pmName";
+      value: string;
+      responderId: string;
+    }
   | { type: "setSummary"; value: string }
   | { type: "appendSummary"; text: string }
   | { type: "toggleDeficiency"; key: ScorecardCriticalDeficiencyKey }
@@ -168,6 +190,9 @@ export interface ScorecardSubmissionPayload {
   weekOf: string;
   superintendentName: string | null;
   pmName: string | null;
+  /** The picked roster person per role (null when typed). Drives who the server emails about this card. */
+  superintendentResponderId: string | null;
+  pmResponderId: string | null;
   items: { sectionKey: AnyScorecardSectionKey; points: number; note: string | null }[];
   criticalDeficiencies: string[];
   actionItems: string[];
@@ -201,6 +226,12 @@ export interface ScorecardUpdatePayload {
   expectedUpdatedAt: string;
   superintendentName: string | null;
   pmName: string | null;
+  /**
+   * The picked roster person per role, on the SAME full-replacement contract as the names: omitting these
+   * would clear the card's picks on every edit save, so they are always sent.
+   */
+  superintendentResponderId: string | null;
+  pmResponderId: string | null;
   items: { sectionKey: AnyScorecardSectionKey; points: number; note: string | null }[];
   criticalDeficiencies: string[];
   criticalDeficiencyNotes: Record<string, string>;
@@ -431,7 +462,28 @@ export function scorecardDraftReducer(draft: ScorecardDraft, action: DraftAction
       return reportMutation(draft, { notes: { ...draft.notes, [action.sectionKey]: next } });
     }
     case "setHeader":
-      return reportMutation(draft, { [action.field]: action.value });
+      // Editing a super/PM name by ANY route other than a roster pick drops the recorded responder. This is the
+      // single choke point every keystroke funnels through, so the id physically cannot outlive its name —
+      // putting the clear in the screens' onChange closures instead would let a future call site opt out of it.
+      // A cleared id just means "no pick", which falls back to the deal's Team-tab super/PM server-side.
+      return reportMutation(draft, {
+        [action.field]: action.value,
+        ...(action.field === "superintendentName"
+          ? { superintendentResponderId: null }
+          : action.field === "pmName"
+            ? { pmResponderId: null }
+            : {}),
+      });
+    case "setResponder":
+      // The only way an id becomes non-null. Goes through reportMutation like setHeader so a project card's
+      // signatures are re-collected after the name changes — picking from the roster is as much a report
+      // mutation as typing the same name would be.
+      return reportMutation(draft, {
+        [action.field]: action.value,
+        ...(action.field === "superintendentName"
+          ? { superintendentResponderId: action.responderId }
+          : { pmResponderId: action.responderId }),
+      });
     case "setSummary":
       return reportMutation(draft, { summary: action.value });
     case "appendSummary": {
@@ -650,6 +702,36 @@ export function validateScorecardDraft(draft: ScorecardDraft): DraftValidation {
   };
 }
 
+/**
+ * Map one ResponderPicker `onChange` into the right draft action. Every picker instance on both scorecard
+ * screens routes through this, so the "a roster press sets the id, anything else clears it" rule lives in ONE
+ * place instead of being re-derived in each inline JSX handler.
+ */
+export function responderPickAction(
+  field: "superintendentName" | "pmName",
+  name: string,
+  responder: { id: string } | null,
+): DraftAction {
+  return responder
+    ? { type: "setResponder", field, value: name, responderId: responder.id }
+    : { type: "setHeader", field, value: name };
+}
+
+/**
+ * The picked-responder ids as a submittable pair. Shared by all three body builders (project POST, leadership
+ * POST, and the edit PUT in edit.ts) so a role can never be sent by one path and forgotten by another. A draft
+ * written before these fields existed has them `undefined`; normalize to explicit `null` so the body always
+ * states the pick rather than leaving the server to guess.
+ */
+export function pickedResponderIds(
+  draft: Pick<ScorecardDraft, "superintendentResponderId" | "pmResponderId">,
+): { superintendentResponderId: string | null; pmResponderId: string | null } {
+  return {
+    superintendentResponderId: draft.superintendentResponderId ?? null,
+    pmResponderId: draft.pmResponderId ?? null,
+  };
+}
+
 /** Build the POST /field/scorecards payload. Call only when validateScorecardDraft().canSubmit. */
 export function scorecardDraftToSubmission(draft: ScorecardDraft): ScorecardSubmissionPayload {
   if (draft.kind === "leadership") return leadershipDraftToSubmission(draft);
@@ -660,6 +742,7 @@ export function scorecardDraftToSubmission(draft: ScorecardDraft): ScorecardSubm
     weekOf: draft.weekOf,
     superintendentName: draft.superintendentName.trim() || null,
     pmName: draft.pmName.trim() || null,
+    ...pickedResponderIds(draft),
     items: FIELD_SCORECARD_SECTION_KEYS.map((k) => ({
       sectionKey: k,
       points: draft.scores[k] ?? 0,
@@ -695,6 +778,7 @@ function leadershipDraftToSubmission(draft: ScorecardDraft): ScorecardSubmission
     weekOf: draft.weekOf,
     superintendentName: draft.superintendentName.trim() || null,
     pmName: draft.pmName.trim() || null,
+    ...pickedResponderIds(draft),
     items: FIELD_SCORECARD_LEADERSHIP_SECTION_KEYS.map((k) => ({
       sectionKey: k,
       points: draft.scores[k] ?? 0,

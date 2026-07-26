@@ -222,6 +222,13 @@ export type FieldScorecardDetail = FieldScorecardSummary & {
   criticalDeficiencyNotes?: Record<string, string>;
   superintendentSignature?: string | null;
   pmSignature?: string | null;
+  /**
+   * The field-responder roster person currently linked to each role on this card (null when the name was
+   * typed). The edit form rehydrates these so a full-replacement PUT round-trips the pick instead of
+   * clearing it. Optional so an older API deployment that doesn't emit them still parses.
+   */
+  superintendentResponderId?: string | null;
+  pmResponderId?: string | null;
   items: FieldScorecardItemView[];
   criticalDeficiencies: string[];
   actionItems: string[];
@@ -250,8 +257,10 @@ export type DealTeamResponse = { superintendentName: string | null; pmName: stri
 // ── Field responders (scorecard super/PM picker) ──────────────────────────────
 // The active field-responder roster (superintendents + project managers) for a deal's office, from
 // GET /field/projects/:dealId/responders → { responders: [{ id, name, email, role }] }. Powers the
-// scorecard Super/PM dropdown so the app selects from the same roster the CRM shows. Storage stays
-// NAME-ONLY — only the picked `name` is written to the draft's superintendentName/pmName strings.
+// scorecard Super/PM dropdown so the app selects from the same roster the CRM shows. Picking a row stores the
+// roster `id` alongside the name on the draft (typing stores the name only), and that id travels with the
+// submission: the server then routes this card's corrective-action + completed-scorecard email to the picked
+// person instead of the deal's Team-tab super/PM.
 export type FieldResponderRole = "superintendent" | "project_manager";
 export type FieldResponderOption = { id: string; name: string; email: string; role: FieldResponderRole };
 export type FieldRespondersResponse = { responders: FieldResponderOption[] };

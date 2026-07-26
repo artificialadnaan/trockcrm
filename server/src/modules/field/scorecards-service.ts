@@ -1,5 +1,5 @@
 import { and, desc, eq, getTableColumns, inArray, isNull, lte, notInArray, sql } from "drizzle-orm";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
 import {
@@ -62,6 +62,10 @@ import {
 } from "./scorecard-evidence-upload.js";
 import { reconcileScorecardCorrectiveActions } from "./corrective-actions-service.js";
 import { isAssignedCorrectiveActionResponder } from "./corrective-action-recipients.js";
+import {
+  resolveScorecardResponderPick,
+  type ScorecardResponderPick,
+} from "./field-responders-service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 type ScorecardRow = typeof fieldScorecards.$inferSelect;
@@ -80,6 +84,14 @@ export interface CreateFieldScorecardInput {
   kind?: ScorecardKind;
   superintendentName?: string | null;
   pmName?: string | null;
+  /**
+   * The field_responders roster person the field user PICKED for each role in the T-Rock Cam dropdown (null
+   * when they typed a free-text name instead). Revalidated here against the ACTIVE roster + matching role
+   * before storage; an unusable id degrades to null, never a rejected submit. Drives corrective-action +
+   * completed-scorecard recipient resolution at SEND time, ahead of the deal's Team-tab super/PM.
+   */
+  superintendentResponderId?: string | null;
+  pmResponderId?: string | null;
   projectNumber?: string | null;
   items: { sectionKey: string; points: number; note?: string | null }[];
   criticalDeficiencies: string[];
@@ -101,6 +113,15 @@ export interface UpdateFieldScorecardInput {
   expectedUpdatedAt: string;
   superintendentName?: string | null;
   pmName?: string | null;
+  /**
+   * The picked roster person per role on THIS edit. The edit is a full replacement of the pair (name + link),
+   * exactly like the names above: a client that omits these clears the stored link. That is the safe
+   * direction — a link must never outlive the name it was picked for (an older app build re-typing the
+   * superintendent would otherwise leave the previous person still receiving the corrective action), and a
+   * cleared link simply falls back to the deal's Team-tab super/PM.
+   */
+  superintendentResponderId?: string | null;
+  pmResponderId?: string | null;
   items: { sectionKey: string; points: number; note?: string | null }[];
   criticalDeficiencies: string[];
   criticalDeficiencyNotes?: Record<string, string>;
@@ -112,6 +133,14 @@ export interface UpdateFieldScorecardInput {
   superintendentSignature?: string | null;
   pmSignature?: string | null;
   summary?: string | null;
+}
+
+/** The revalidated picked-responder links for one scorecard: the rows to notify + the ids to store. */
+interface ResolvedScorecardResponderLinks {
+  superintendent: ScorecardResponderPick | null;
+  pm: ScorecardResponderPick | null;
+  superintendentResponderId: string | null;
+  pmResponderId: string | null;
 }
 
 type ValidatedItem = {
@@ -263,6 +292,20 @@ export async function createFieldScorecard(
   }
 
   const photoLinks = await resolvePhotoLinks(tenantDb, input, formVersion, kind, deficiencies);
+  // Revalidate the picked roster links before they are stored: each must still be an ACTIVE field_responders
+  // row of the MATCHING role, so a client can neither point the superintendent slot at a PM nor resurrect a
+  // deactivated person. An unusable id resolves to null (see resolveScorecardResponderPick) — the card still
+  // saves and its recipients fall back to the deal team.
+  //
+  // lockForFk holds the referenced roster rows for the rest of this transaction (the same FOR KEY SHARE the FK
+  // insert below takes anyway, just earlier). That keeps the row that was validated here the row the insert
+  // references: a concurrent hard-delete would otherwise land between the two and fail the insert on the FK —
+  // turning "an unusable pick degrades to null" into a rejected field submission. It deliberately does NOT
+  // block a director's PATCH: a plain UPDATE takes FOR NO KEY UPDATE, which does not conflict with KEY SHARE,
+  // so the roster stays editable and this stays out of the assignment lock graph. A deactivation landing in
+  // that window therefore still stores the link — harmless, because send-time resolution re-checks ACTIVE and
+  // falls back to the deal team.
+  const responderLinks = await resolveScorecardResponderLinks(tenantDb, input, { lockForFk: true });
   // Week Of = the completion date, which the field app stamps LOCAL at SUBMIT time (submitScorecard →
   // todayLocalIso). Trust it rather than recomputing here: the server runs in UTC, so `new Date().toISOString()`
   // stamped the NEXT day for any evening submit west of UTC (8 PM CDT filed under tomorrow) AND can't see the
@@ -282,8 +325,15 @@ export async function createFieldScorecard(
       // Snapshot the SERVER-resolved canonical display number (project_number, else non-HubSpot
       // deal_number, else null) — never the client-sent value, which may be stale/spoofed/absent.
       projectNumber: project.projectNumber ?? null,
-      superintendentName: input.superintendentName ?? null,
-      pmName: input.pmName ?? null,
+      // A resolved pick OWNS its display name. Otherwise a client could pair Bob's responder id with the name
+      // "Alice" (or no name at all) and the card + PDF would identify Alice as the on-site superintendent while
+      // every email and response token went to Bob. The link is the authoritative answer to WHO, so derive the
+      // label from it rather than trusting the two fields to agree; the free-text name still stands whenever
+      // there is no pick.
+      superintendentName: responderLinks.superintendent?.name ?? input.superintendentName ?? null,
+      pmName: responderLinks.pm?.name ?? input.pmName ?? null,
+      superintendentResponderId: responderLinks.superintendentResponderId,
+      pmResponderId: responderLinks.pmResponderId,
       formVersion,
       kind,
       summary,
@@ -356,7 +406,23 @@ export async function createFieldScorecard(
   // active deal_team_members rows → linked user/contact email). Nulls when a role is unassigned or has no
   // email — the worker just skips that CC. Read inside the submit txn so the recipients commit atomically
   // with the card + job (durable outbox).
+  // ...with the SAME per-role precedence the corrective-action path applies: a superintendent/PM the field user
+  // PICKED from the roster on this card is who the completed-scorecard email goes to, and the deal team is the
+  // fallback for a role with no usable pick. Unlike the corrective-action email — which re-resolves in the
+  // worker at send time — this recipient set is SNAPSHOTTED into the payload here and never re-resolved.
+  //
+  // Which is why the picks are RE-READ here rather than reusing the rows resolved at the top of this function.
+  // FOR KEY SHARE deliberately does not block a director's PATCH, so a responder can be deactivated, re-roled,
+  // or re-addressed in between — and because the corrective-action path re-resolves at send time while this one
+  // does not, the stale snapshot would mail the completed scorecard + PDF to someone the corrective action has
+  // already stopped addressing. Reading at READ COMMITTED means this statement sees any PATCH that has
+  // COMMITTED, so the snapshot is correct for every ordering except a PATCH committing after this line and
+  // before this transaction does — a window only a conflicting lock could close, at the cost of putting the
+  // field submit back into the roster's lock graph.
   const teamEmails = await resolveScorecardTeamEmails(tenantDb, input.dealId);
+  const enqueueLinks = await resolveScorecardResponderLinks(tenantDb, input);
+  const superintendentEmail = enqueueLinks.superintendent?.email ?? teamEmails.superintendentEmail;
+  const projectManagerEmail = enqueueLinks.pm?.email ?? teamEmails.projectManagerEmail;
   await tenantDb.insert(jobQueue).values({
     jobType: FIELD_SCORECARD_EMAIL_JOB,
     payload: {
@@ -372,8 +438,8 @@ export async function createFieldScorecard(
       averageScore,
       ratingLabel: ratingLabelFor(kind, formVersion, rating),
       submittedByName: input.submittedByName ?? null,
-      superintendentEmail: teamEmails.superintendentEmail,
-      projectManagerEmail: teamEmails.projectManagerEmail,
+      superintendentEmail,
+      projectManagerEmail,
       // The immutable artifact key is content-addressed and therefore unknown until after commit/render.
       // The worker reads field_scorecards.pdf_r2_key as the authority; keep this legacy payload field null
       // rather than advertising a deterministic key that no render will upload.
@@ -402,6 +468,12 @@ export async function updateFieldScorecard(
   tenantDb: TenantDb,
   input: UpdateFieldScorecardInput,
 ): Promise<{ scorecard: FieldScorecardSummary }> {
+  // BEFORE the card row lock, deliberately: this takes the same FOR KEY SHARE on the picked roster rows that
+  // the FK write below would take anyway, so this transaction locks roster-then-card — the same order the
+  // assign-from-roster team path uses. Acquiring it at the UPDATE instead would be card-then-roster, and the
+  // two opposed orders deadlock. See resolveScorecardResponderPick's lockForFk note.
+  const responderLinks = await resolveScorecardResponderLinks(tenantDb, input, { lockForFk: true });
+
   const [card] = await tenantDb
     .select()
     .from(fieldScorecards)
@@ -438,8 +510,10 @@ export async function updateFieldScorecard(
     { userId: input.userId, userRole: input.userRole },
     card.dealId,
   );
-  const superintendentName = input.superintendentName?.trim() || null;
-  const pmName = input.pmName?.trim() || null;
+  // Same rule as create: a resolved pick owns its display name, so the card can never show one person while
+  // routing to another. Falls back to the submitted free text for a role with no usable pick.
+  const superintendentName = responderLinks.superintendent?.name ?? (input.superintendentName?.trim() || null);
+  const pmName = responderLinks.pm?.name ?? (input.pmName?.trim() || null);
 
   const kind: ScorecardKind = card.kind === "leadership" ? "leadership" : "project";
   const formVersion: ScorecardFormVersion = 2;
@@ -546,6 +620,11 @@ export async function updateFieldScorecard(
     desired: {
       superintendentName,
       pmName,
+      // The picked links are editable content in their own right: a re-save that keeps the display name but
+      // swaps WHO was picked (or drops the pick for a typed name) changes who gets the corrective action, so
+      // it must not be mistaken for an idempotent no-op retry and skipped.
+      superintendentResponderId: responderLinks.superintendentResponderId,
+      pmResponderId: responderLinks.pmResponderId,
       items,
       criticalDeficiencies: deficiencies,
       criticalDeficiencyNotes: deficiencyNotes,
@@ -651,6 +730,8 @@ export async function updateFieldScorecard(
     .set({
       superintendentName,
       pmName,
+      superintendentResponderId: responderLinks.superintendentResponderId,
+      pmResponderId: responderLinks.pmResponderId,
       summary,
       averageScore: String(averageScore),
       superintendentSignature,
@@ -688,6 +769,63 @@ export async function updateFieldScorecard(
       AND payload->>'scorecardId' = ${card.id}
   `);
 
+  // If this edit changed WHO was picked and the completed-scorecard email hasn't gone out yet, re-address it.
+  // That email snapshots its recipients at submit (nothing re-resolves them at send time), so correcting a
+  // mis-picked superintendent seconds after filing would otherwise still email the wrong person. Scoped to a
+  // pick change so an ordinary edit keeps the existing freeze semantics exactly; the same `status IN
+  // ('pending','dead')` predicate the score patch above uses means a job already claimed or sent is untouched.
+  const responderPickChanged =
+    (card.superintendentResponderId ?? null) !== responderLinks.superintendentResponderId ||
+    (card.pmResponderId ?? null) !== responderLinks.pmResponderId;
+  if (responderPickChanged) {
+    // Re-read for the same reason the create path does: `responderLinks` was resolved at the top of this
+    // function (before the card lock, for lock ordering), and a director's PATCH does not conflict with the
+    // KEY SHARE held on those rows. Re-resolving here snapshots the roster as of the latest possible statement
+    // rather than as of the start of the edit.
+    const teamEmails = await resolveScorecardTeamEmails(tenantDb, card.dealId);
+    const enqueueLinks = await resolveScorecardResponderLinks(tenantDb, input);
+    const superintendentEmail = enqueueLinks.superintendent?.email ?? teamEmails.superintendentEmail;
+    const projectManagerEmail = enqueueLinks.pm?.email ?? teamEmails.projectManagerEmail;
+    // Mint a fresh deliveryNonce alongside the new addresses. `status IN ('pending','dead')` does NOT prove the
+    // email never went out: the provider can accept a send and the process die before email_sent_at is stamped,
+    // returning the job to pending. Replaying the worker's per-scorecard idempotency key with a changed payload
+    // is answered `invalid_idempotent_request`, which sendSystemEmailWithMetadata treats as already-delivered —
+    // so the run would stamp the card sent and the newly picked responder would never be emailed. The nonce
+    // rotates that key, making the corrected send a genuinely new delivery. (Same failure mode the sibling
+    // corrective-action job solved with its per-cycle nonce.)
+    //
+    // BOUNDARY, deliberate: a job already `processing` is NOT re-addressed. The worker has loaded its payload
+    // by then, and the only way to reach the newly picked person afterwards would be to clear `email_sent_at`
+    // and re-run — which re-sends the PDF to the whole env recipient list, since this job addresses a single
+    // union rather than one person. This email is send-once by design and its recipients have ALWAYS been
+    // frozen at submit, so that window is the pre-existing behavior rather than a regression this introduces;
+    // the corrective-action email, which is the one a responder must act on, resolves at send time and is
+    // unaffected. Reaching the new pick in that window needs a per-recipient follow-up mechanism this job does
+    // not have — worth building deliberately, not as a side effect of this change.
+    //
+    // A DEAD row is also REQUEUED, not just re-addressed. The worker claims `status = 'pending' AND run_after
+    // <= NOW()`, so a dead row is never read again — re-addressing one without requeueing rewrites a payload
+    // nobody will ever load. The motivating case is precise: this job dead-letters when it can resolve NO
+    // recipient at all, which is exactly the state a user fixes by picking a roster responder. Requeue gives
+    // that correction somewhere to land. attempts resets only for the dead row (it earned a fresh budget on
+    // changed input); a still-pending row keeps its attempts and its backoff `run_after` untouched.
+    await tenantDb.execute(sql`
+      UPDATE public.job_queue
+      SET payload = payload || jsonb_build_object(
+            'superintendentEmail', ${superintendentEmail}::text,
+            'projectManagerEmail', ${projectManagerEmail}::text,
+            'deliveryNonce', ${randomUUID()}::text
+          ),
+          status = 'pending',
+          attempts = CASE WHEN status = 'dead' THEN 0 ELSE attempts END,
+          run_after = CASE WHEN status = 'dead' THEN NOW() ELSE run_after END,
+          last_error = CASE WHEN status = 'dead' THEN NULL ELSE last_error END
+      WHERE job_type = ${FIELD_SCORECARD_EMAIL_JOB}
+        AND status IN ('pending', 'dead')
+        AND payload->>'scorecardId' = ${card.id}
+    `);
+  }
+
   // Reconcile the corrective-action lifecycle against the recomputed rating + flagged items in THIS same
   // edit transaction — the SAME shared helper the create path runs, so the two never drift. It may open the
   // stage (edit dropped into the band), revert to `submitted` (edit lifted it back out), add/remove tracked
@@ -702,6 +840,10 @@ export async function updateFieldScorecard(
     actionItems,
     deficiencies,
     currentStatus: preEditStatus,
+    // Computed above from `card` (the pre-edit row read FOR UPDATE) vs what the card points at now. A changed
+    // pick on an already-notified open card restarts the notification cycle so the newly picked responder is
+    // actually reached, and the previous one's now-dead link is replaced rather than silently stranded.
+    responderPickChanged,
   });
   const [reconciledCard] = await tenantDb
     .select()
@@ -866,6 +1008,9 @@ export async function getFieldScorecardDetail(
     photos,
     superintendentSignature: card.superintendentSignature ?? null,
     pmSignature: card.pmSignature ?? null,
+    // Let the mobile edit form rehydrate the picked roster links; an edit that omits them clears the pick.
+    superintendentResponderId: card.superintendentResponderId ?? null,
+    pmResponderId: card.pmResponderId ?? null,
     summary: card.summary ?? null,
   };
 }
@@ -1480,6 +1625,34 @@ async function resolveUpdatePhotoLinks(
   return resolved;
 }
 
+/**
+ * Revalidate the client-supplied picked-responder links for BOTH roles. Shared by create + update so the two
+ * paths can never drift on what counts as a usable link: the id must name an ACTIVE roster row whose role
+ * matches the slot. Anything else (absent, unknown, deactivated, wrong role, malformed) becomes null — the
+ * card saves and its recipients fall back to the deal's Team-tab super/PM.
+ */
+async function resolveScorecardResponderLinks(
+  tenantDb: TenantDb,
+  input: { superintendentResponderId?: string | null; pmResponderId?: string | null },
+  opts?: { lockForFk?: boolean },
+): Promise<ResolvedScorecardResponderLinks> {
+  // Sequential, not Promise.all: both callers run inside an open office transaction on a single pooled
+  // connection, and interleaving statements on one transaction client is not a pattern this codebase relies on.
+  const superintendent = await resolveScorecardResponderPick(
+    tenantDb,
+    input.superintendentResponderId,
+    "superintendent",
+    opts,
+  );
+  const pm = await resolveScorecardResponderPick(tenantDb, input.pmResponderId, "project_manager", opts);
+  return {
+    superintendent,
+    pm,
+    superintendentResponderId: superintendent?.id ?? null,
+    pmResponderId: pm?.id ?? null,
+  };
+}
+
 function scorecardEditableContentEquals(input: {
   card: ScorecardRow;
   currentItems: Array<{ sectionKey: string; points: number; note: string | null }>;
@@ -1487,6 +1660,8 @@ function scorecardEditableContentEquals(input: {
   desired: {
     superintendentName: string | null;
     pmName: string | null;
+    superintendentResponderId: string | null;
+    pmResponderId: string | null;
     items: ValidatedItem[];
     criticalDeficiencies: string[];
     criticalDeficiencyNotes: Record<string, string>;
@@ -1518,6 +1693,8 @@ function scorecardEditableContentEquals(input: {
   const current = {
     superintendentName: input.card.superintendentName ?? null,
     pmName: input.card.pmName ?? null,
+    superintendentResponderId: input.card.superintendentResponderId ?? null,
+    pmResponderId: input.card.pmResponderId ?? null,
     items: itemShape(input.currentItems),
     criticalDeficiencies: [...(input.card.criticalDeficiencies ?? [])].sort(),
     criticalDeficiencyNotes: sortedRecord(input.card.criticalDeficiencyNotes ?? {}),
@@ -1533,6 +1710,8 @@ function scorecardEditableContentEquals(input: {
   const desired = {
     superintendentName: input.desired.superintendentName,
     pmName: input.desired.pmName,
+    superintendentResponderId: input.desired.superintendentResponderId,
+    pmResponderId: input.desired.pmResponderId,
     items: itemShape(input.desired.items),
     criticalDeficiencies: [...input.desired.criticalDeficiencies].sort(),
     criticalDeficiencyNotes: sortedRecord(input.desired.criticalDeficiencyNotes),

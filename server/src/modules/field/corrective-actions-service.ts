@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, or, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
 import {
@@ -196,6 +196,14 @@ export interface ReconcileCorrectiveActionsInput {
   deficiencies: string[];
   /** The scorecard's status BEFORE this reconcile (drives the enqueue-on-transition decision). */
   currentStatus: string;
+  /**
+   * True when this edit CHANGED which field-responder the card points at for either role (its
+   * superintendent_responder_id / pm_responder_id). Recipient resolution is scorecard-scoped, so that swap
+   * changes WHO the corrective action is addressed to — the same class of event as a super/PM reassignment on
+   * the Team tab, which already restarts the notification cycle. Defaults false (the create path can't have
+   * changed anything).
+   */
+  responderPickChanged?: boolean;
 }
 
 /**
@@ -474,7 +482,33 @@ export async function reconcileScorecardCorrectiveActions(
     input.currentStatus === "corrective_action_open" &&
     toInsert.length > 0 &&
     correctiveActionEmailSentAt !== null;
-  if (transitioningIntoOpen || alreadyOpenGainedWork) {
+  //   3) alreadyOpenResponderChanged — an already-open card whose PICKED super/PM changed. Recipients resolve
+  //      per-card from that pick, so the swap both revokes the previous holder (their email no longer resolves,
+  //      and the verify-time revalidation 403s their outstanding link) and leaves the new person holding
+  //      nothing. Restarting the cycle re-mints + re-sends for the new recipient set — the same remedy
+  //      restartCorrectiveActionNotificationCycleForDeal already applies to a Team-tab reassignment.
+  //
+  //      UNCONDITIONAL — unlike (2), this does NOT ask whether the email already went out or whether some job
+  //      might still deliver. Every "is a job still coming?" test is a race: the worker resolves recipients,
+  //      sends, then RE-resolves before stamping, and none of that is atomic with this transaction. A job that
+  //      re-read the OLD pick just before this edit commits will then block on the card row, acquire it after
+  //      the commit, and stamp successfully — because nothing rotated the cycle nonce. The old recipient is
+  //      left holding a link that now 403s, the new pick has neither token nor email, and the stamp suppresses
+  //      any further send: unanswerable by anyone.
+  //
+  //      Restarting unconditionally is safe precisely because the cycle nonce already exists to supersede: a
+  //      still-pending job whose payload nonce no longer matches the stored one returns early with NO send and
+  //      NO stamp, and an in-flight job's stamp updates 0 rows. So the fresh cycle is the only delivery, which
+  //      is what makes "a second enqueue would double-send" untrue here — that worry is what the nonce solved.
+  //
+  //      NOTE: (2) above still gates on the stamp and inherits the same race. Left as-is on purpose — it is
+  //      pre-existing and strictly milder there (the existing recipients keep working links and merely miss the
+  //      new item), whereas here it strands the card. Worth its own change, not a silent widening.
+  const alreadyOpenResponderChanged =
+    nextStatus === "corrective_action_open" &&
+    input.currentStatus === "corrective_action_open" &&
+    input.responderPickChanged === true;
+  if (transitioningIntoOpen || alreadyOpenGainedWork || alreadyOpenResponderChanged) {
     // Mint the per-cycle nonce ONCE and use it in BOTH places: (a) persisted on the scorecard as the ACTIVE
     // cycle's nonce, and (b) the enqueued job's payload.cycleNonce. Keeping them equal is what lets the
     // worker's final delivery stamp require `corrective_action_cycle_nonce = payload.cycleNonce` — a
@@ -547,7 +581,7 @@ export async function restartCorrectiveActionNotificationCycleForDeal(
   input: { dealId: string; office: { id: string; slug: string } },
 ): Promise<void> {
   const openScorecards = await tx
-    .select({ id: fieldScorecards.id })
+    .select({ id: fieldScorecards.id, dealId: fieldScorecards.dealId })
     .from(fieldScorecards)
     .where(
       and(
@@ -555,7 +589,56 @@ export async function restartCorrectiveActionNotificationCycleForDeal(
         eq(fieldScorecards.status, "corrective_action_open"),
       ),
     );
+  await restartCorrectiveActionCyclesForCards(tx, openScorecards, input.office);
+}
+
+/**
+ * The same fresh-cycle restart, driven by a FIELD RESPONDER rather than a deal: every OPEN corrective-action
+ * scorecard that PICKED this roster person for either role.
+ *
+ * Recipient resolution reads `field_responders` at send + verify time, so deactivating a picked person, moving
+ * them between roles, or changing their email silently changes WHO answers a card — and, for the outstanding
+ * link, revokes it (the token's email no longer matches a resolved recipient, so the next click 403s). Without
+ * this the card is left unanswerable: the previous holder is locked out, the fallback deal-team super/PM was
+ * never emailed, and `corrective_action_email_sent_at` suppresses any further send. This is the roster's
+ * counterpart to the restart every deal_team_members mutation already performs, and it runs in the director's
+ * own PATCH transaction so the roster edit and the re-notify commit together.
+ *
+ * A NAME edit deliberately does NOT come through here: it changes the display label, not who is reached or how
+ * (the worker's recipient signature excludes `name` for the same reason).
+ */
+export async function restartCorrectiveActionNotificationCycleForResponder(
+  tx: TenantDb,
+  input: { responderId: string; office: { id: string; slug: string } },
+): Promise<void> {
+  const openScorecards = await tx
+    .select({ id: fieldScorecards.id, dealId: fieldScorecards.dealId })
+    .from(fieldScorecards)
+    .where(
+      and(
+        eq(fieldScorecards.status, "corrective_action_open"),
+        or(
+          eq(fieldScorecards.superintendentResponderId, input.responderId),
+          eq(fieldScorecards.pmResponderId, input.responderId),
+        ),
+      ),
+    );
+  await restartCorrectiveActionCyclesForCards(tx, openScorecards, input.office);
+}
+
+/**
+ * Start a fresh notification cycle for an explicit set of open corrective-action cards. Shared by the deal- and
+ * responder-scoped entry points above so the two can never drift on the nonce/token/enqueue trio, which the
+ * worker's delivery stamp depends on being applied together.
+ */
+async function restartCorrectiveActionCyclesForCards(
+  tx: TenantDb,
+  openScorecards: Array<{ id: string; dealId: string }>,
+  office: { id: string; slug: string },
+): Promise<void> {
   if (openScorecards.length === 0) return;
+  const input = { office };
+  const dealIdByScorecardId = new Map(openScorecards.map((s) => [s.id, s.dealId]));
 
   const scorecardIds = openScorecards.map((s) => s.id);
 
@@ -594,7 +677,8 @@ export async function restartCorrectiveActionNotificationCycleForDeal(
       payload: {
         tenantSchema: `office_${input.office.slug}`,
         scorecardId,
-        dealId: input.dealId,
+        // Per CARD, not per call: the responder-scoped restart can span several deals at once.
+        dealId: dealIdByScorecardId.get(scorecardId)!,
         officeId: input.office.id,
         cycleNonce: cycleNonceByScorecardId.get(scorecardId)!,
       },

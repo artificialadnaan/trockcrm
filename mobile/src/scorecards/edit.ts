@@ -8,6 +8,7 @@ import {
 } from "./scoring";
 import {
   isExistingScorecardDraftPhoto,
+  pickedResponderIds,
   type AnyScorecardSectionKey,
   type ScorecardDraft,
   type ScorecardDraftPhoto,
@@ -81,6 +82,15 @@ function editableDetailFingerprint(detail: FieldScorecardDetail): string {
   return contentDigest(JSON.stringify({
     superintendentName: detail.superintendentName ?? null,
     pmName: detail.pmName ?? null,
+    // The picked responder links are editable content, so they belong in the conflict fingerprint alongside the
+    // names they route for. This fingerprint is what lets refreshScorecardEditPhotoUrls ADVANCE
+    // editBaseUpdatedAt on a revision it judges content-identical. Hashing only the names would call a
+    // server-side pick change identical whenever the label happened to match — another device switching to a
+    // same-named roster person, or clearing a pick while keeping the name — so the local draft would adopt the
+    // newer token while still holding the stale ids, and the next full-replacement save would sail past the
+    // 409 and silently overwrite the newer recipient routing.
+    superintendentResponderId: detail.superintendentResponderId ?? null,
+    pmResponderId: detail.pmResponderId ?? null,
     items,
     criticalDeficiencies: [...detail.criticalDeficiencies].sort(),
     criticalDeficiencyNotes: sortedRecord(detail.criticalDeficiencyNotes ?? {}),
@@ -190,6 +200,11 @@ export function createScorecardEditDraft(
     weekOf: detail.weekOf,
     superintendentName: detail.superintendentName ?? "",
     pmName: detail.pmName ?? "",
+    // Carry the card's stored picks into the edit draft. The PUT is a full replacement, so without this an
+    // edit that never touches the names would still send them back as null and silently drop the picks —
+    // handing the card's corrective action back to the deal team behind the user's back.
+    superintendentResponderId: detail.superintendentResponderId ?? null,
+    pmResponderId: detail.pmResponderId ?? null,
     evaluatorName: detail.kind === "leadership" ? detail.submittedByName ?? "" : undefined,
     editingScorecardId: detail.id,
     editingOfficeId: detail.officeId ?? null,
@@ -563,6 +578,7 @@ export function scorecardDraftToUpdate(draft: ScorecardDraft): ScorecardUpdatePa
     expectedUpdatedAt: draft.editBaseUpdatedAt,
     superintendentName: draft.superintendentName.trim() || null,
     pmName: draft.pmName.trim() || null,
+    ...pickedResponderIds(draft),
     items: canonicalItems(draft),
     criticalDeficiencies,
     criticalDeficiencyNotes: leadership

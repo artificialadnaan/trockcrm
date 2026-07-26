@@ -100,3 +100,42 @@ describe("field scorecard email artifact safety", () => {
     expect(sendEmail.mock.calls[0][3].attachments).toBeUndefined();
   });
 });
+
+// The completed-scorecard email is deduped at the provider by a per-scorecard idempotency key. That key has to
+// follow the DELIVERY, not just the card: a pending or dead job is NOT proof nothing was sent (the provider can
+// accept a send and the process die before email_sent_at is stamped, returning the job to pending). If the
+// server then RE-ADDRESSES that job — an edit corrected which field responder the card picked — replaying the
+// base key with a changed payload is answered `invalid_idempotent_request`, which sendSystemEmailWithMetadata
+// deliberately treats as already-delivered. The corrected send would be silently dropped and the card stamped
+// sent. The server mints a deliveryNonce on every re-address to rotate the key.
+describe("field scorecard email idempotency key", () => {
+  const BASE = "field-scorecard-office_dallas-11111111-1111-1111-1111-111111111111";
+
+  async function keyFor(extra: Partial<FieldScorecardEmailPayload>): Promise<string> {
+    const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "m" });
+    await handleFieldScorecardEmail(
+      { ...payload, ...extra },
+      null,
+      {
+        query: queryWithCurrentKey(null) as never,
+        getPdf: vi.fn().mockResolvedValue(null),
+        sendEmail,
+        env,
+        logger,
+      },
+    );
+    return sendEmail.mock.calls[0][3].idempotencyKey as string;
+  }
+
+  it("is byte-identical to the pre-existing key when the job was never re-addressed", async () => {
+    expect(await keyFor({})).toBe(BASE);
+  });
+
+  it("rotates once the server stamps a deliveryNonce", async () => {
+    expect(await keyFor({ deliveryNonce: "nonce-abc" })).toBe(`${BASE}-delivery-nonce-abc`);
+  });
+
+  it("gives a different key per re-address, so a second correction also delivers", async () => {
+    expect(await keyFor({ deliveryNonce: "nonce-1" })).not.toBe(await keyFor({ deliveryNonce: "nonce-2" }));
+  });
+});

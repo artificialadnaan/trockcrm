@@ -275,6 +275,29 @@ function makeQuery(
         (opts.recipients ?? RECIPIENTS).map((r: any) => ({ role: r.role }));
       return { rows };
     }
+    // Recipient resolution. Matched BEFORE the field_scorecards snapshot branch below and keyed on
+    // can_field_login, because the query is now scorecard-scoped: its candidate CTE names BOTH
+    // field_scorecards (to read the card's picked responder links) and deal_team_members, so a bare
+    // `FROM field_scorecards` test would swallow it and hand back the snapshot row instead of recipients.
+    // can_field_login appears only here — the assigned-roles query (handled above) and the snapshot lack it.
+    if (/can_field_login/i.test(text) && /FROM \S*deal_team_members/i.test(text)) {
+      recipientResolveCalls += 1;
+      // The SECOND recipient-resolution call is the pre-stamp revalidation (finding 1). If the test supplies a
+      // reassigned set, return it there so its signature differs from the first (emailed) read.
+      const base =
+        recipientResolveCalls >= 2 && opts.revalidatedRecipients
+          ? opts.revalidatedRecipients
+          : (opts.recipients ?? RECIPIENTS);
+      // Default can_field_login when a test's inline recipient omits it: a CRM user (user_id set) is assumed
+      // to hold an enabled field login (→ deep link) unless the test explicitly says otherwise; an email-only
+      // member (user_id null) can never field-login. The SQL computes this from the user_local_auth join
+      // (enabled + non-revoked + NOT must_change_password).
+      const rows = base.map((r: any) => ({
+        ...r,
+        can_field_login: r.can_field_login ?? r.user_id != null,
+      }));
+      return { rows };
+    }
     if (/FROM \S*field_scorecards/i.test(text)) {
       // Finding C: the opening snapshot SELECT joins deals + psc and applies the responder's active/browsable
       // predicate (is_active + non-terminal-or-Won + not-Lost). A HIDDEN scorecard/project yields ZERO rows, so
@@ -323,24 +346,6 @@ function makeQuery(
           },
         ],
       };
-    }
-    if (/FROM \S*deal_team_members/i.test(text)) {
-      recipientResolveCalls += 1;
-      // The SECOND recipient-resolution call is the pre-stamp revalidation (finding 1). If the test supplies a
-      // reassigned set, return it there so its signature differs from the first (emailed) read.
-      const base =
-        recipientResolveCalls >= 2 && opts.revalidatedRecipients
-          ? opts.revalidatedRecipients
-          : (opts.recipients ?? RECIPIENTS);
-      // Default can_field_login when a test's inline recipient omits it: a CRM user (user_id set) is assumed
-      // to hold an enabled field login (→ deep link) unless the test explicitly says otherwise; an email-only
-      // member (user_id null) can never field-login. The SQL computes this from the user_local_auth join
-      // (enabled + non-revoked + NOT must_change_password).
-      const rows = base.map((r: any) => ({
-        ...r,
-        can_field_login: r.can_field_login ?? r.user_id != null,
-      }));
-      return { rows };
     }
     if (/FROM \S*scorecard_corrective_actions/i.test(text)) {
       flaggedReadCalls += 1;
@@ -1292,7 +1297,7 @@ describe("scorecard corrective-action notification email", () => {
 
     const recipientSql = query.mock.calls
       .map(([text]) => text as string)
-      .find((t) => /SELECT DISTINCT ON \(dtm\.role\)/i.test(t) && /can_field_login/i.test(t))!;
+      .find((t) => /SELECT DISTINCT ON \(role\)/i.test(t) && /can_field_login/i.test(t))!;
     expect(recipientSql).toBeTruthy();
     expect(recipientSql).toMatch(/must_change_password\s*=\s*FALSE/i);
     expect(recipientSql).toMatch(/is_enabled\s*=\s*TRUE/i);
