@@ -117,4 +117,34 @@ describe("authMiddleware", () => {
     expect(mocks.getUserById).not.toHaveBeenCalled();
     expect(req.user).toBeUndefined();
   });
+
+  // The surface matrix. Adding surface:"mobile" (the native CRM app, /api/auth/mobile-login) required NO
+  // change to this middleware, because the guard is a field-only denylist. These cases pin that: the two
+  // accepted audiences must keep working and the rejected one must stay rejected, so a future edit to the
+  // guard cannot quietly sever the web CRM or quietly admit a field token.
+  it("accepts a surface-less token — exactly what the WEB CRM login mints today", async () => {
+    // /api/auth/local/login signs { userId, email, officeId, role, tokenVersion, authMethod } with no
+    // surface claim at all. If this ever fails, every web CRM user is logged out.
+    mocks.verifyJwt.mockReturnValue({ userId: "user-1", authMethod: "local" });
+    const req = createRequest();
+    const next = vi.fn() as NextFunction;
+
+    await authMiddleware(req, createResponse(), next);
+
+    expect(next).toHaveBeenCalledWith();
+    expect(req.user).toMatchObject({ id: "user-1", role: "rep" });
+  });
+
+  it("accepts surface:'mobile' tokens (the native CRM app) on CRM routes", async () => {
+    mocks.verifyJwt.mockReturnValue({ userId: "user-1", authMethod: "local", surface: "mobile" });
+    const req = createRequest();
+    const next = vi.fn() as NextFunction;
+
+    await authMiddleware(req, createResponse(), next);
+
+    expect(next).toHaveBeenCalledWith();
+    // A mobile token resolves to the same user with the same effective role as the web token above —
+    // "mobile" is a provenance label, not a reduced-privilege session.
+    expect(req.user).toMatchObject({ id: "user-1", role: "rep" });
+  });
 });
