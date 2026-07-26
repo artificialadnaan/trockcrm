@@ -23,6 +23,14 @@ export const theme = {
     borderSubtle: "#EEF1F4",
     surface: "#FFFFFF",
     surfaceMuted: "#F5F6F8",
+    /**
+     * Status badge tones. Defined here rather than inline so the "On hold" and "At risk" badges cannot
+     * drift between the card and the detail screen — they were the same three hex literals copy-pasted
+     * into two files, which is how two surfaces end up disagreeing about what amber means.
+     */
+    amberSurface: "#FEF3C7",
+    amberText: "#92400E",
+    redSurface: "#FEE2E2",
     amber: "#F59E0B",
     blue: "#3B82F6",
     green: "#22C55E",
