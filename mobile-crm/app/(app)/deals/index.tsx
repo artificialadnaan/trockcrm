@@ -88,6 +88,15 @@ export default function DealsListScreen() {
 
   const offline = query.error instanceof ApiError && query.error.status === 0;
 
+  /**
+   * TanStack keeps every successfully-loaded page when a LATER fetch fails, and still sets `error`. So
+   * `error` alone must not drive the full-screen state: a failed page-3 request, or a failed pull-to-
+   * refresh, would replace a list the rep is reading — and on a phone that is their whole screen. The
+   * full-screen error belongs to the case where nothing loaded at all; everything else goes inline.
+   */
+  const hasRows = deals.length > 0;
+  const backgroundError = query.error && hasRows ? query.error : null;
+
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
       <View style={styles.header}>
@@ -130,7 +139,7 @@ export default function DealsListScreen() {
         <View style={styles.center}>
           <ActivityIndicator color={theme.color.brandRed} />
         </View>
-      ) : query.error ? (
+      ) : query.error && !hasRows ? (
         // A retry BUTTON, not "pull to retry" — this branch replaces the FlatList, so there is no
         // RefreshControl mounted to pull on. The earlier copy advertised a gesture that did not exist.
         <View style={styles.center}>
@@ -176,6 +185,23 @@ export default function DealsListScreen() {
           ListFooterComponent={
             query.isFetchingNextPage ? (
               <ActivityIndicator color={theme.color.brandRed} style={styles.footer} />
+            ) : backgroundError ? (
+              // Retry the operation that actually failed: another page, or the refresh. Calling refetch()
+              // for a failed page would silently reload page 1 and leave the gap the rep hit.
+              <Pressable
+                testID="deals-page-retry"
+                onPress={() =>
+                  void (query.isFetchNextPageError ? query.fetchNextPage() : query.refetch())
+                }
+                accessibilityRole="button"
+                style={styles.footerRetry}
+              >
+                <Text style={styles.retryText}>
+                  {query.isFetchNextPageError
+                    ? "Couldn't load more — tap to retry"
+                    : "Couldn't refresh — tap to retry"}
+                </Text>
+              </Pressable>
             ) : null
           }
           renderItem={({ item }) => (
@@ -239,6 +265,7 @@ const styles = StyleSheet.create({
   },
   list: { padding: theme.space.lg, paddingTop: theme.space.sm, gap: theme.space.md },
   footer: { paddingVertical: theme.space.lg },
+  footerRetry: { paddingVertical: theme.space.lg, alignItems: "center" },
   center: { flex: 1, alignItems: "center", justifyContent: "center", padding: theme.space.xl, gap: theme.space.sm },
   errorTitle: { fontFamily: theme.font.bold, fontSize: 17, color: theme.color.inkNavy },
   errorBody: { fontFamily: theme.font.regular, fontSize: 14, color: theme.color.textSecondary, textAlign: "center" },
