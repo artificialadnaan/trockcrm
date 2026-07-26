@@ -1,4 +1,4 @@
-import { chooseActiveOffice } from "../auth/office";
+import { chooseActiveOffice, isOfficeConfirmed } from "../auth/office";
 import { createPersistQueue } from "../auth/persist-queue";
 
 /**
@@ -61,6 +61,40 @@ describe("chooseActiveOffice", () => {
   });
 });
 
+describe("isOfficeConfirmed", () => {
+  const PRIMARY = "office-primary";
+  const SECONDARY = "office-secondary";
+
+  it("confirms the common case where no probe was needed", () => {
+    // THE regression. signIn seeds activeOfficeId from the login response, so on every subsequent launch
+    // the stored office equals the home office and no probe runs. Reading that absence as doubt marked
+    // essentially every session unconfirmed: the gate never left "stale", it retried every 30 seconds
+    // forever, the onboarding fields were never refreshed from /auth/me, and the onboarding screen showed
+    // "Couldn't reach the server" while /auth/me was in fact succeeding.
+    expect(isOfficeConfirmed({ activeOfficeId: PRIMARY, serverOfficeId: PRIMARY, probe: null })).toBe(true);
+  });
+
+  it("confirms when no office is kept at all", () => {
+    // Falls back to the home office, which is exactly what the header-less /auth/me describes.
+    expect(isOfficeConfirmed({ activeOfficeId: null, serverOfficeId: PRIMARY, probe: null })).toBe(true);
+  });
+
+  it("confirms a secondary office only once its probe is granted", () => {
+    expect(
+      isOfficeConfirmed({ activeOfficeId: SECONDARY, serverOfficeId: PRIMARY, probe: "granted" }),
+    ).toBe(true);
+  });
+
+  it.each(["unknown", "revoked", null] as const)(
+    "does not confirm a secondary office on probe %p",
+    (probe) => {
+      // The onboarding fields are computed per-office server-side, so an unconfirmed secondary office
+      // must not adopt home-office answers — that is how a gate opens on the wrong office's data.
+      expect(isOfficeConfirmed({ activeOfficeId: SECONDARY, serverOfficeId: PRIMARY, probe })).toBe(false);
+    },
+  );
+});
+
 describe("clearSession durability", () => {
   const KEY = "trock.crm.session.v1";
 
@@ -119,6 +153,27 @@ describe("clearSession durability", () => {
       getItemAsync: jest.fn().mockResolvedValue(written),
     });
     await expect(reader.loadSession()).resolves.toBeNull();
+  });
+
+  it("never lets a failed cleanup escape loadSession", async () => {
+    // clearSession rejects when BOTH the delete and the tombstone fail. loadSession calls it for a
+    // corrupt record, and letting that reject escape would turn "the stored record was unreadable" into
+    // a throw from the one function the rest of this file promises will fail safe.
+    const session = withStore({
+      deleteItemAsync: jest.fn().mockRejectedValue(new Error("delete failed")),
+      setItemAsync: jest.fn().mockRejectedValue(new Error("write failed")),
+      getItemAsync: jest.fn().mockResolvedValue("{ not json"),
+    });
+    await expect(session.loadSession()).resolves.toBeNull();
+  });
+
+  it("also fails safe for a structurally invalid record", async () => {
+    const session = withStore({
+      deleteItemAsync: jest.fn().mockRejectedValue(new Error("delete failed")),
+      setItemAsync: jest.fn().mockRejectedValue(new Error("write failed")),
+      getItemAsync: jest.fn().mockResolvedValue(JSON.stringify({ token: "", user: null })),
+    });
+    await expect(session.loadSession()).resolves.toBeNull();
   });
 
   it("rejects only when both the delete and the overwrite fail", async () => {

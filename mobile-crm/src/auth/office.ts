@@ -41,3 +41,28 @@ export function chooseActiveOffice(input: {
   // reverting presents another office's data as the user's own — the failure with no error attached.
   return probe === "revoked" ? null : storedActiveOfficeId;
 }
+
+/**
+ * Did /auth/me actually answer for the office this session will use?
+ *
+ * The header-less /auth/me answers for the user's HOME office, and its office-scoped fields
+ * (`requiresOnboarding`, the effective `role`) describe that office only. So "confirmed" means the
+ * active office after reconciliation is one that response covers:
+ *
+ *   - no office kept                → falls back to the home office ✓
+ *   - the kept office IS the home office → same response, no probe needed. The ABSENCE of a probe here
+ *                                          is not doubt, and treating it as doubt marked every ordinary
+ *                                          session unconfirmed — signIn seeds activeOfficeId from the
+ *                                          login response, so it equals the home office on every launch.
+ *   - a genuine secondary office    → only a granted probe confirms it
+ */
+export function isOfficeConfirmed(input: {
+  activeOfficeId: string | null;
+  serverOfficeId: string | null;
+  probe: OfficeProbe | null;
+}): boolean {
+  const { activeOfficeId, serverOfficeId, probe } = input;
+  if (!activeOfficeId) return true;
+  if (activeOfficeId === serverOfficeId) return true;
+  return probe === "granted";
+}

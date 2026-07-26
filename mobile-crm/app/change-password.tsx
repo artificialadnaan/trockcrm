@@ -173,6 +173,11 @@ export default function ChangePasswordScreen() {
             value={current}
             onChangeText={setCurrent}
             secureTextEntry
+            // Explicit names + content types: the adjacent <Text> does not label a TextInput for a
+            // screen reader, and without the hints iOS offers to save the OLD password as the new one.
+            accessibilityLabel="Current password"
+            textContentType="password"
+            autoComplete="current-password"
             autoCapitalize="none"
             style={formStyles.input}
           />
@@ -183,6 +188,9 @@ export default function ChangePasswordScreen() {
             value={next}
             onChangeText={setNext}
             secureTextEntry
+            accessibilityLabel="New password"
+            textContentType="newPassword"
+            autoComplete="new-password"
             autoCapitalize="none"
             style={formStyles.input}
           />
@@ -193,6 +201,9 @@ export default function ChangePasswordScreen() {
             value={confirm}
             onChangeText={setConfirm}
             secureTextEntry
+            accessibilityLabel="Confirm new password"
+            textContentType="newPassword"
+            autoComplete="new-password"
             autoCapitalize="none"
             style={formStyles.input}
           />

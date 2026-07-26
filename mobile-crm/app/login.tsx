@@ -79,12 +79,16 @@ export default function LoginScreen() {
           <Text style={formStyles.label}>Email</Text>
           <TextInput
             testID="login-email"
+            // The adjacent <Text> does not label a TextInput for a screen reader — RN has no implicit
+            // label association — so without this the field is announced as an unlabelled text box.
+            accessibilityLabel="Email"
             value={email}
             onChangeText={setEmail}
             autoCapitalize="none"
             autoCorrect={false}
             keyboardType="email-address"
             textContentType="emailAddress"
+            autoComplete="email"
             style={formStyles.input}
             placeholderTextColor={theme.color.textMuted}
             placeholder="you@trockgc.com"
@@ -93,12 +97,14 @@ export default function LoginScreen() {
           <Text style={formStyles.label}>Password</Text>
           <TextInput
             testID="login-password"
+            accessibilityLabel="Password"
             value={secret}
             onChangeText={setSecret}
             secureTextEntry
             autoCapitalize="none"
             autoCorrect={false}
             textContentType="password"
+            autoComplete="current-password"
             style={formStyles.input}
             placeholderTextColor={theme.color.textMuted}
             onSubmitEditing={onSubmit}

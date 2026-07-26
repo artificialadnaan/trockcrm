@@ -1,6 +1,9 @@
 {
   "name": "trock-crm-mobile",
   "version": "1.0.0",
+  "engines": {
+    "node": ">=20.19.4"
+  },
   "private": true,
   "main": "index.ts",
   "scripts": {

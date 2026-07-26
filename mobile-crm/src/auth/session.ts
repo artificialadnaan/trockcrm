@@ -96,11 +96,14 @@ export async function loadSession(): Promise<Session | null> {
   try {
     parsed = JSON.parse(raw);
   } catch {
-    await clearSession();
+    // Best-effort cleanup, and it must STAY best-effort. clearSession rejects when both the delete and
+    // the tombstone write fail, and letting that escape would turn "the stored record was corrupt" into
+    // a throw from a function the rest of this file promises will fail safe.
+    await clearSession().catch(() => undefined);
     return null;
   }
   if (!isValidSession(parsed)) {
-    await clearSession();
+    await clearSession().catch(() => undefined);
     return null;
   }
   // A token that LOOKS expired routes to login, but is NOT deleted. This check trusts the device clock;

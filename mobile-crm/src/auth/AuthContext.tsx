@@ -2,7 +2,7 @@ import React, { createContext, useCallback, useContext, useEffect, useMemo, useR
 import { AppState } from "react-native";
 import { apiFetch, ApiError, type ApiFetchOptions } from "../api/client";
 import * as authApi from "../api/endpoints/auth";
-import { chooseActiveOffice, type OfficeProbe } from "./office";
+import { chooseActiveOffice, isOfficeConfirmed, type OfficeProbe } from "./office";
 import { createSerialRunner } from "../lib/serial";
 import { createPersistQueue } from "./persist-queue";
 import { hasAnyCrmSurface } from "./surfaces";
@@ -258,7 +258,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
          * and if cleanup is pending only in the secondary office, that answer is `false`, which opens the
          * gate. Keep the cached office-scoped values instead, and stay "stale" so the retry keeps running.
          */
-        const officeConfirmed = !keepActive || probe === "granted";
+        // See isOfficeConfirmed: the absence of a probe is not doubt when no probe was needed.
+        const officeConfirmed = isOfficeConfirmed({
+          activeOfficeId: keepActive,
+          serverOfficeId: serverOffice,
+          probe,
+        });
         const officeScopedGate = officeConfirmed
           ? {}
           : {
@@ -269,11 +274,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
         const merged: Session = {
           ...stored,
-          user: !keepActive
-            ? { ...stored.user, ...fresh }
-            : probe === "granted"
-              ? { ...stored.user, ...effective }
-              : { ...stored.user, ...fresh, ...officeScopedGate },
+          user: officeConfirmed
+            ? // `effective` only differs from `fresh` when a probe ran and was granted.
+              { ...stored.user, ...(probe === "granted" ? effective : fresh) }
+            : { ...stored.user, ...fresh, ...officeScopedGate },
           activeOfficeId: keepActive,
         };
         sessionRef.current = merged;
