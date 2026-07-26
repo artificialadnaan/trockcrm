@@ -1,6 +1,7 @@
 import React from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { useRouter } from "expo-router";
 import { useAuth } from "../../src/auth/AuthContext";
 import { Row } from "../../src/components/Row";
 import { theme } from "../../src/theme/theme";
@@ -11,6 +12,7 @@ import { theme } from "../../src/theme/theme";
  * arrives with the deals work.
  */
 export default function DashboardScreen() {
+  const router = useRouter();
   const { session, signOut } = useAuth();
   if (!session) return null;
 
@@ -31,9 +33,17 @@ export default function DashboardScreen() {
           {user.isRfpReviewer ? <Row label="RFP reviewer" value="yes" /> : null}
         </View>
 
-        <Text style={styles.note}>
-          Deals, contacts and notes land in the next releases. This screen confirms the session works.
-        </Text>
+        <Pressable
+          testID="open-deals"
+          onPress={() => router.push("/(app)/deals")}
+          accessibilityRole="button"
+          accessibilityLabel="Open deals"
+          style={styles.primary}
+        >
+          <Text style={styles.primaryText}>Deals</Text>
+        </Pressable>
+
+        <Text style={styles.note}>Contacts and the rest of the CRM land in later releases.</Text>
 
         <Pressable
           testID="sign-out"
@@ -74,6 +84,14 @@ const styles = StyleSheet.create({
     fontSize: 13,
     color: theme.color.textMuted,
   },
+  primary: {
+    marginTop: theme.space.lg,
+    backgroundColor: theme.color.brandRed,
+    borderRadius: theme.radius.md,
+    paddingVertical: theme.space.lg,
+    alignItems: "center",
+  },
+  primaryText: { fontFamily: theme.font.bold, fontSize: 16, color: theme.color.textInverse },
   signOut: {
     marginTop: theme.space.xxl,
     borderWidth: 1,

@@ -12,4 +12,7 @@ export const qk = {
   contacts: (officeId: string | null, params?: Record<string, unknown>) =>
     ["contacts", officeId, params ?? {}] as const,
   contact: (officeId: string | null, id: string) => ["contact", officeId, id] as const,
+  stages: (officeId: string | null) => ["stages", officeId] as const,
+  dealActivities: (officeId: string | null, dealId: string) =>
+    ["deal-activities", officeId, dealId] as const,
 } as const;
