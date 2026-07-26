@@ -4,9 +4,20 @@ import type { DealListItem, PipelineStage } from "../api/types";
 import { formatDate, formatLocation, formatMoney } from "../format";
 import { theme } from "../theme/theme";
 
+/**
+ * The fields the value display reads. `effectiveValue` is the SERVER's number; the raw money columns are
+ * kept only as a fallback for a payload that predates it.
+ */
 type ValueFields = Pick<
   DealListItem,
-  "awardedAmount" | "bidEstimate" | "ddEstimate" | "bidBoardTotalSales" | "stageSlug" | "workflowRoute"
+  | "effectiveValue"
+  | "effectiveOnHold"
+  | "awardedAmount"
+  | "bidEstimate"
+  | "ddEstimate"
+  | "bidBoardTotalSales"
+  | "stageSlug"
+  | "workflowRoute"
 >;
 
 /**
@@ -24,8 +35,6 @@ const ESTIMATING_STAGE_SLUGS = new Set(["estimating", "estimate_in_progress"]);
  *
  * Route-aware, matching isGenuineEstimatingDealStageSlug. Both slugs map to `service_estimating` on the
  * service route, which is deliberately NOT estimating, so the service route short-circuits to false.
- * Testing `stageSlug === "estimating"` alone misclassified every deal still carrying the supported
- * legacy `estimate_in_progress` alias, showing a LOWER value on mobile than the web app shows.
  */
 export function isGenuineEstimatingStage(
   stageSlug: string | null | undefined,
@@ -36,16 +45,23 @@ export function isGenuineEstimatingStage(
 }
 
 /**
- * The canonical deal value, mirroring client/src/lib/deal-utils.ts resolveBestEstimate.
+ * The deal value to display.
  *
- * FOUR money columns participate, not two, and each candidate must be > 0 — a stored "0.00" is not a
- * value. The order is normally awarded > bid_board > bid > dd, but on the genuine `estimating` stage DD
- * OUTRANKS the in-progress bid: awarded > dd > bid_board > bid.
+ * PREFERS the server's `effectiveValue`, which already applies the canonical hold rule — a deal that is
+ * effectively on hold is worth 0, and "effectively" ORs the stored flag with a close target more than 90
+ * America/Chicago days out, exempting terminal deals. Recomputing that on device would be a second
+ * implementation of a rule that has moved repeatedly; the earlier local resolver showed a full awarded
+ * amount right next to an "On hold" badge, disagreeing with both the web UI and the server's own totals.
  *
- * Considering only awarded and bid — as this first did — showed a lower number, or "—", on every
- * estimating and Bid Board deal that had a tracked value. Wrong money on a sales tool is worse than none.
+ * The local fallback below runs only for a payload without the field, and deliberately zeroes on the
+ * stored `onHold`/`effectiveOnHold` flag so it errs toward the canonical answer rather than away from it.
  */
 export function resolveDealValue(deal: ValueFields): number {
+  if (typeof deal.effectiveValue === "number" && Number.isFinite(deal.effectiveValue)) {
+    return deal.effectiveValue;
+  }
+  if (deal.effectiveOnHold === true) return 0;
+
   const isEstimating = isGenuineEstimatingStage(deal.stageSlug, deal.workflowRoute);
   const candidates = isEstimating
     ? [deal.awardedAmount, deal.ddEstimate, deal.bidBoardTotalSales, deal.bidEstimate]
@@ -117,7 +133,9 @@ export function DealCard({
             <Text style={styles.stagePillText}>{stageName}</Text>
           </View>
         ) : null}
-        {deal.onHold ? (
+        {/* The EFFECTIVE flag, so the badge and the $0 always agree — a deal auto-parked by a
+            far-future close target is held even though `onHold` is false. */}
+        {(deal.effectiveOnHold ?? deal.onHold) ? (
           <View style={[styles.pill, styles.holdPill]}>
             <Text style={styles.holdPillText}>On hold</Text>
           </View>

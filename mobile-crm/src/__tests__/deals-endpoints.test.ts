@@ -169,6 +169,8 @@ describe("stage filter parameter", () => {
 
 describe("displayAmount — the canonical value priority", () => {
   const empty = {
+    effectiveValue: null,
+    effectiveOnHold: null,
     awardedAmount: null,
     bidEstimate: null,
     ddEstimate: null,
@@ -268,5 +270,52 @@ describe("showsAtRisk", () => {
     // The flag alone is not sufficient — severity and status both participate. Recomputing the rule on
     // device would drift from the web app, which has changed it repeatedly.
     expect(showsAtRisk({ atRisk: atRisk as AtRiskResult | null })).toBe(false);
+  });
+});
+
+describe("displayAmount — the server's effective value wins", () => {
+  const empty = {
+    effectiveValue: null,
+    effectiveOnHold: null,
+    awardedAmount: null,
+    bidEstimate: null,
+    ddEstimate: null,
+    bidBoardTotalSales: null,
+    stageSlug: null,
+    workflowRoute: null,
+  };
+
+  it("shows the server's effectiveValue in preference to the raw columns", () => {
+    // The server has already applied the canonical hold rule. Preferring the local resolver would show a
+    // full awarded amount next to an "On hold" badge — money that disagrees with the web UI AND with the
+    // server's own pipeline totals.
+    expect(displayAmount({ ...empty, effectiveValue: 0, awardedAmount: "250000.00" })).toBe("—");
+  });
+
+  it("shows a non-zero effectiveValue even when the raw columns would pick a different one", () => {
+    expect(
+      displayAmount({ ...empty, effectiveValue: 180000, awardedAmount: "250000.00" }),
+    ).toBe("$180,000");
+  });
+
+  it("zeroes on the effective hold flag when no effectiveValue is present", () => {
+    // Fallback path for a payload predating the field: err toward the canonical answer, not away.
+    expect(
+      displayAmount({ ...empty, effectiveOnHold: true, awardedAmount: "250000.00" }),
+    ).toBe("—");
+  });
+
+  it("falls back to the local resolver only when the server sent neither", () => {
+    expect(displayAmount({ ...empty, awardedAmount: "250000.00" })).toBe("$250,000");
+  });
+
+  it("does not treat a non-numeric effectiveValue as authoritative", () => {
+    expect(
+      displayAmount({
+        ...empty,
+        effectiveValue: Number.NaN,
+        awardedAmount: "250000.00",
+      }),
+    ).toBe("$250,000");
   });
 });

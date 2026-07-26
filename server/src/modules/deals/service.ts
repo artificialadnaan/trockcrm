@@ -72,6 +72,7 @@ import { listDealChangeOrders, softDeleteChangeOrderChildren, sumDealChangeOrder
 import { loadRfpVoteDetail, type RfpVoteView } from "./rfp-vote-detail.js";
 import { isServiceRfp } from "./rfp-vote-service.js";
 import { computeRfpVoteState } from "@trock-crm/shared/lib/rfpVoteState";
+import { getEffectiveDealValue, isDealValueEffectivelyOnHold } from "@trock-crm/shared/types";
 import { isCompleteBillingAddress } from "../../lib/billing-address.js";
 import { recordDescriptionHistoryChange } from "./deal-description-history.js";
 import { buildArchivedDescription } from "./archive-description.js";
@@ -170,6 +171,19 @@ export function attachAtRiskResult<T extends {
 
   return {
     ...deal,
+    // The DISPLAY stage: a Bid Board-owned deal can advance (or close) in Bid Board while its CRM
+    // stageSlug still reads "opportunity". The web detail already switches to bidBoardStageSlug; this
+    // exposes the same resolved value so non-web clients cannot drift from it.
+    displayStageSlug: stageSlug,
+    // The canonical hold + value verdicts, computed here so every client shows the same money.
+    //
+    // getEffectiveDealValue zeroes an effectively-held deal, and "effectively held" is not just the
+    // stored on_hold flag — it ORs in a close target more than 90 CT-days out, exempts terminal deals,
+    // and resolves "today" against the America/Chicago calendar day. Re-deriving that on a device would
+    // be a second implementation of a rule that has moved repeatedly, and the failure mode is wrong
+    // money next to an On Hold badge rather than an error. Clients read these; they do not recompute.
+    effectiveOnHold: isDealValueEffectivelyOnHold(deal as never),
+    effectiveValue: getEffectiveDealValue(deal as never),
     atRisk: getDealAtRiskResult(
       {
         stageSlug,

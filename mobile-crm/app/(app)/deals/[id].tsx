@@ -156,7 +156,8 @@ export default function DealDetailScreen() {
 
         <View style={styles.badgeRow}>
           <Text style={styles.amount}>{displayAmount(deal)}</Text>
-          {deal.onHold ? <Badge label="On hold" tone="amber" /> : null}
+          {/* Effective, not stored: a far-future close target parks a deal whose onHold is false. */}
+          {(deal.effectiveOnHold ?? deal.onHold) ? <Badge label="On hold" tone="amber" /> : null}
           {showsAtRisk(deal) ? <Badge label="At risk" tone="red" /> : null}
         </View>
 
@@ -183,7 +184,9 @@ export default function DealDetailScreen() {
         ) : null}
 
         <Section title="Details">
-          <Row label="Stage" value={deal.stageSlug ?? "—"} />
+          {/* displayStageSlug is bid-board-aware: an owned deal can advance or close in Bid Board
+              while its CRM stageSlug still reads an earlier stage. The web detail switches the same way. */}
+          <Row label="Stage" value={deal.displayStageSlug ?? deal.stageSlug ?? "—"} />
           <Row label="Days in stage" value={stageDays === null ? "—" : String(stageDays)} />
           <Row label="Close date" value={formatDate(deal.expectedCloseDate)} />
           {location ? <Row label="Location" value={location} /> : null}

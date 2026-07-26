@@ -118,6 +118,22 @@ export type DealListItem = {
   onHold: boolean | null;
   isActive: boolean | null;
   atRisk: AtRiskResult | null;
+  /**
+   * SERVER verdicts. Do not recompute either of these on device.
+   *
+   * "Effectively on hold" is not just the stored `on_hold` flag: it ORs in a close target more than 90
+   * calendar days out, exempts terminal deals, and resolves "today" against the America/Chicago calendar
+   * day. `effectiveValue` is the canonical four-column value with that hold rule applied — a held deal is
+   * worth 0. Deriving this locally would be a second implementation of a rule that has moved repeatedly,
+   * and its failure mode is wrong money beside an On Hold badge, not an error. See attachAtRiskResult.
+   */
+  effectiveOnHold: boolean | null;
+  effectiveValue: number | null;
+  /**
+   * The stage to DISPLAY. A Bid Board-owned deal can advance, or close, in Bid Board while its CRM
+   * `stageSlug` still reads an earlier stage; the web detail already switches to bidBoardStageSlug.
+   */
+  displayStageSlug: string | null;
 };
 
 export type DealListResponse = {
