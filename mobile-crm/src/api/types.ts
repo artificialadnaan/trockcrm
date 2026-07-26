@@ -294,18 +294,6 @@ export type ContactListResponse = {
 };
 
 /**
- * A row from GET /companies/:id/contacts. companies/service.ts:476-487 selects the raw contact columns
- * plus owner fields ONLY — it performs no company join and computes no aggregates, so the
- * `linkedCompanyName`, `isPrimary`, `linkedDealsCount` and `lastTouchAt` that ContactListRow promises are
- * all absent. Reusing that type here would have rendered a permanent "0 linked deals" as though it were
- * a fact about the contact.
- */
-export type CompanyContactRow = ContactBase & {
-  ownerUserId: string | null;
-  ownerUserName: string | null;
-};
-
-/**
  * The deal carried by a contact association is the RAW tenant.deals row (passed through
  * redactDealResponse), NOT a list row: contacts/association-service.ts:26-34 selects `deals` whole with
  * no joins and no derived fields. So there is no `stageSlug`, no server `atRisk` verdict, and none of the
