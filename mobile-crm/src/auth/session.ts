@@ -116,6 +116,30 @@ export async function loadSession(): Promise<Session | null> {
   };
 }
 
+/**
+ * Written over the session when deletion fails. `loadSession` structurally rejects it (no token, no
+ * user), so it is as good as deleted — and, unlike a delete, it only needs the keychain to accept a
+ * WRITE, which can succeed when a delete does not.
+ */
+const TOMBSTONE = "{}";
+
+/**
+ * Sign-out must be DURABLE. `deleteItemAsync` can reject — a locked or temporarily unavailable keychain
+ * is the common case — and a rejection that only clears in-memory state leaves the token on disk, so the
+ * next launch silently restores the session the user just signed out of. On a shared field device that
+ * hands the account to whoever opens the app next.
+ *
+ * So: delete, and if that fails, overwrite. Only when both fail does this reject, and the caller is then
+ * responsible for still clearing its own state.
+ */
 export async function clearSession(): Promise<void> {
-  await SecureStore.deleteItemAsync(KEY);
+  try {
+    await SecureStore.deleteItemAsync(KEY);
+  } catch (err) {
+    try {
+      await SecureStore.setItemAsync(KEY, TOMBSTONE);
+    } catch {
+      throw err;
+    }
+  }
 }

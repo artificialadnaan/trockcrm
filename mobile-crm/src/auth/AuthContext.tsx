@@ -1,6 +1,7 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { apiFetch, ApiError, type ApiFetchOptions } from "../api/client";
 import * as authApi from "../api/endpoints/auth";
+import { chooseActiveOffice } from "./office";
 import { clearSession, isAllowedRole, loadSession, saveSession, type Session } from "./session";
 import type { CrmUser } from "../api/types";
 
@@ -38,7 +39,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const signOut = useCallback(async () => {
     sessionRef.current = null;
     setSession(null);
-    await clearSession();
+    try {
+      await clearSession();
+    } catch {
+      // clearSession already tried both delete and overwrite. In-memory state is signed out either way,
+      // and swallowing here keeps callers that await signOut() and then navigate — the change-password
+      // screen does exactly that — from being stranded on a dead screen by a keychain hiccup.
+    }
   }, []);
 
   const fetcher = useCallback(
@@ -49,8 +56,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         officeId: current?.activeOfficeId ?? current?.user.officeId ?? null,
         // Only a 401 tears down the session — see the client's onUnauthorized doc. A 403 is an
         // authorization failure on one action and must NOT sign the user out.
+        //
+        // SCOPED to the session that issued this request. Requests outlive the session that started
+        // them: a screen's request fires, the user signs out and signs in as someone else, and the first
+        // response arrives carrying a 401 for the OLD token. Signing out on "whatever is current now"
+        // ejects the account that just signed in — on shared field devices this is a routine sequence,
+        // not a rare race.
         onUnauthorized: () => {
-          void signOut();
+          if (current && sessionRef.current === current) void signOut();
         },
         ...opts,
       });
@@ -89,21 +102,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       sessionRef.current = stored;
       setSession(stored);
 
+      // A SCOPED unauthorized handler, not the fetcher's global one. The global handler runs inside
+      // apiFetch — i.e. BEFORE the identity check below — so a late 401 belonging to this old token
+      // would sign out whatever session is current by then, including a different account the user has
+      // since signed into. This one only tears down the session it was actually issued for.
+      const scoped = <T,>(path: string, opts: ApiFetchOptions = {}) =>
+        fetcher<T>(path, {
+          ...opts,
+          onUnauthorized: () => {
+            if (!cancelled && sessionRef.current === restoring) void signOut();
+          },
+        });
+
       try {
-        // A SCOPED unauthorized handler, not the fetcher's global one. The global handler runs inside
-        // apiFetch — i.e. BEFORE the identity check below — so a late 401 belonging to this old token
-        // would sign out whatever session is current by then, including a different account the user has
-        // since signed into. This one only tears down the session it was actually issued for.
-        const fresh = await authApi.me(
-          (path, opts) =>
-            fetcher(path, {
-              ...opts,
-              onUnauthorized: () => {
-                if (!cancelled && sessionRef.current === restoring) void signOut();
-              },
-            }),
-          stored.token,
-        );
+        const fresh = await authApi.me(scoped, stored.token);
         if (cancelled || sessionRef.current !== restoring) return;
         if (!isAllowedRole(fresh.role)) {
           await signOut();
@@ -111,12 +123,39 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         }
 
         // Reconcile the ACTIVE OFFICE too, not just the user. `activeOfficeId` is a persisted secondary
-        // office; if an admin moved the user's primary office or revoked that grant, keeping it would
-        // send a stale x-office-id on every subsequent request and 403 the whole app. Drop it whenever
-        // the server no longer reports it, and fall back to the office the server does report.
+        // office; if an admin revoked that grant, keeping it would send a stale x-office-id on every
+        // subsequent request and 403 the whole app.
+        //
+        // But /auth/me is answered deliberately WITHOUT x-office-id, so the office it reports is always
+        // the user's PRIMARY one. Comparing a secondary office against that never matches, which would
+        // silently drop a legitimately-selected secondary office on EVERY launch. accessible-offices is
+        // the list that actually says whether the grant still stands, so only a mismatch pays for it.
         const serverOffice = fresh.activeOfficeId ?? fresh.officeId ?? null;
-        const keepActive =
-          stored.activeOfficeId && stored.activeOfficeId === serverOffice ? stored.activeOfficeId : null;
+
+        // Only a stored office that DIFFERS from the primary one costs a lookup — see chooseActiveOffice.
+        let accessibleOfficeIds: string[] | null = null;
+        if (stored.activeOfficeId && stored.activeOfficeId !== serverOffice) {
+          try {
+            const offices = await authApi.accessibleOffices(
+              // No x-office-id here either: if the grant WAS revoked, sending it would 403 the very call
+              // whose job is to find that out.
+              <T,>(path: string, opts: ApiFetchOptions = {}) => scoped<T>(path, { ...opts, officeId: null }),
+              stored.token,
+            );
+            if (cancelled || sessionRef.current !== restoring) return;
+            accessibleOfficeIds = offices.map((o) => o.id);
+          } catch (err) {
+            if (cancelled || sessionRef.current !== restoring) return;
+            if (err instanceof ApiError && err.status === 401) return;
+            // Leave it null — "could not determine", which chooseActiveOffice treats as keep-what-you-had.
+          }
+        }
+
+        const keepActive = chooseActiveOffice({
+          storedActiveOfficeId: stored.activeOfficeId,
+          serverOfficeId: serverOffice,
+          accessibleOfficeIds,
+        });
 
         const merged: Session = {
           ...stored,

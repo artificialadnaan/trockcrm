@@ -12,8 +12,10 @@ import {
 } from "react-native";
 import { Redirect, useRouter } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { ApiError } from "../src/api/client";
+import { ApiError, type ApiFetchOptions } from "../src/api/client";
+import * as authApi from "../src/api/endpoints/auth";
 import { useAuth } from "../src/auth/AuthContext";
+import { isTokenExpired } from "../src/auth/session";
 import { formStyles } from "../src/theme/formStyles";
 import { theme } from "../src/theme/theme";
 
@@ -26,8 +28,14 @@ import { theme } from "../src/theme/theme";
  * /api/auth/local/change-password is one of only three routes authMiddleware still permits while a
  * change is pending, and it accepts the Bearer token.
  */
-/** Matches the server's floor. A client-side check only saves a round trip; the server still decides. */
-const MIN_PASSWORD_LENGTH = 8;
+/**
+ * Matches the server's floor exactly — `PASSWORD_MIN_LENGTH = 12` in
+ * server/src/modules/auth/local-auth-service.ts, enforced by validatePasswordPolicy.
+ *
+ * A LOWER client floor is worse than none: it enables the button, tells the user eight characters are
+ * enough, and then hands back a server rejection for a rule the screen itself said they had met.
+ */
+const MIN_PASSWORD_LENGTH = 12;
 
 export default function ChangePasswordScreen() {
   const router = useRouter();
@@ -51,6 +59,38 @@ export default function ChangePasswordScreen() {
     !sameAsCurrent &&
     !busy;
 
+  /**
+   * Is a 401 from this form about the SESSION, or about the password the user just typed?
+   *
+   * The server gives no code to tell them apart: a wrong current password throws
+   * `AppError(401, "Current password is incorrect")` (local-auth-service.ts:564) and an expired bearer
+   * token throws `AppError(401, "Invalid or expired token")` (middleware/auth.ts) — BOTH uncoded. Only a
+   * deactivated or version-bumped session carries SESSION_INVALIDATED, so keying solely on that code
+   * strands an expired-token user here: no sign-out, no navigation, and a "wrong password" message for a
+   * password that was right.
+   *
+   * Matching on the message text would break the moment someone rewords it. Ask the server instead.
+   */
+  async function sessionIsDead(): Promise<boolean> {
+    if (!session) return true;
+    // Free fast path for the ordinary case — no request needed to know a 30-day token has run out.
+    if (isTokenExpired(session.token)) return true;
+    try {
+      await authApi.me(
+        <T,>(path: string, opts: ApiFetchOptions = {}) =>
+          // A no-op unauthorized handler: this probe decides what happens, and letting the fetcher's
+          // handler sign out first would race the navigation below.
+          fetcher<T>(path, { ...opts, onUnauthorized: () => {} }),
+        session.token,
+      );
+      return false;
+    } catch (err) {
+      // Only a 401 proves the session is dead. Offline or 5xx tells us nothing, and signing out on a
+      // flaky connection would discard a perfectly good session.
+      return err instanceof ApiError && err.status === 401;
+    }
+  }
+
   async function onSubmit() {
     if (!canSubmit) return;
     setBusy(true);
@@ -72,9 +112,9 @@ export default function ChangePasswordScreen() {
       router.replace("/login");
     } catch (err) {
       if (err instanceof ApiError) {
-        // errorHandler stamps SESSION_INVALIDATED on a dead/!active session; a wrong current password
-        // carries no such code. That is the only signal separating "retry" from "you are logged out".
-        if (err.status === 401 && err.code === "SESSION_INVALIDATED") {
+        // SESSION_INVALIDATED is definitive; an uncoded 401 is ambiguous and gets probed. See
+        // sessionIsDead above for why the code alone is not enough.
+        if (err.status === 401 && (err.code === "SESSION_INVALIDATED" || (await sessionIsDead()))) {
           await signOut();
           router.replace("/login");
           return;
