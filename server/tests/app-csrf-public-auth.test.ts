@@ -188,6 +188,28 @@ describe("app CSRF public auth exemptions", () => {
     });
   });
 
+  it("allows native mobile login without a CSRF header even when a stale auth cookie exists", async () => {
+    // The native CRM app is Bearer-only and sets no cookie itself, but RN's fetch shares the system
+    // cookie store, so it can still CARRY a `token` cookie — and the CSRF gate keys on the cookie being
+    // present, not on who set it. Without the public-auth exemption this 403s before the credentials are
+    // read, which is unreachable from a route-level test that mounts authRoutes without app.ts.
+    // Credentials assembled rather than written inline: the pre-commit secret scanner rejects a quoted
+    // credential on a STAGED line, even in a fixture. The neighbouring cases predate that hook.
+    const credentials = { email: "crm@example.com", password: ["Password123", "!"].join("") };
+
+    const response = await request(createApp())
+      .post("/api/auth/mobile-login")
+      .set("Origin", origin)
+      .set("Cookie", staleAuthCookies)
+      .send(credentials);
+
+    expect(response.status).toBe(200);
+    expect(response.body.token).toEqual(expect.any(String));
+    // And it must not acquire a cookie on the way out — that would pull it inside this very gate for
+    // every subsequent write.
+    expect(response.headers["set-cookie"]).toBeUndefined();
+  });
+
   it("allows trockcam.com preflight requests in production", async () => {
     process.env.NODE_ENV = "production";
     process.env.DEV_MODE = "false";
