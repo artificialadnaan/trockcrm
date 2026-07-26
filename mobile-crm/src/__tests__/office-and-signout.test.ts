@@ -152,28 +152,47 @@ describe("clearSession durability", () => {
       deleteItemAsync: jest.fn().mockResolvedValue(undefined),
       getItemAsync: jest.fn().mockResolvedValue(written),
     });
-    await expect(reader.loadSession()).resolves.toBeNull();
+    const loaded = await reader.loadSession();
+    expect(loaded.session).toBeNull();
   });
 
-  it("never lets a failed cleanup escape loadSession", async () => {
-    // clearSession rejects when BOTH the delete and the tombstone fail. loadSession calls it for a
-    // corrupt record, and letting that reject escape would turn "the stored record was unreadable" into
-    // a throw from the one function the rest of this file promises will fail safe.
+  it.each([
+    ["unparseable JSON", "{ not json"],
+    ["a structurally invalid record", JSON.stringify({ token: "", user: null })],
+    ["a tombstone", "{}"],
+  ])("reports %s as corrupt WITHOUT touching storage", async (_case, raw) => {
+    // loadSession is pure with respect to storage. It used to clean up inline, which meant an unqueued
+    // delete from a stale restore could land after a successful sign-in's queued save and erase the
+    // account that had just signed in — the login screen is usable the whole time that read is running.
+    // Ordering now belongs to the one place that already owns it, so this asserts the SEPARATION.
+    const deleteItemAsync = jest.fn().mockResolvedValue(undefined);
+    const setItemAsync = jest.fn().mockResolvedValue(undefined);
     const session = withStore({
-      deleteItemAsync: jest.fn().mockRejectedValue(new Error("delete failed")),
-      setItemAsync: jest.fn().mockRejectedValue(new Error("write failed")),
-      getItemAsync: jest.fn().mockResolvedValue("{ not json"),
+      deleteItemAsync,
+      setItemAsync,
+      getItemAsync: jest.fn().mockResolvedValue(raw),
     });
-    await expect(session.loadSession()).resolves.toBeNull();
+
+    await expect(session.loadSession()).resolves.toEqual({ session: null, corrupt: true });
+    expect(deleteItemAsync).not.toHaveBeenCalled();
+    expect(setItemAsync).not.toHaveBeenCalled();
   });
 
-  it("also fails safe for a structurally invalid record", async () => {
+  it("does not mark an EXPIRED token corrupt — it must not be deleted", async () => {
+    // The device clock is not an authority. A fast clock judging a server-valid token expired must send
+    // the user to login, not destroy the record; a later launch with a corrected clock restores it.
+    const expired = `header.${Buffer.from(JSON.stringify({ exp: 1 })).toString("base64url")}.sig`;
     const session = withStore({
-      deleteItemAsync: jest.fn().mockRejectedValue(new Error("delete failed")),
-      setItemAsync: jest.fn().mockRejectedValue(new Error("write failed")),
-      getItemAsync: jest.fn().mockResolvedValue(JSON.stringify({ token: "", user: null })),
+      deleteItemAsync: jest.fn().mockResolvedValue(undefined),
+      getItemAsync: jest.fn().mockResolvedValue(
+        JSON.stringify({
+          token: expired,
+          user: { id: "u1", email: "r@x.com", role: "rep", officeId: "o1" },
+          activeOfficeId: null,
+        }),
+      ),
     });
-    await expect(session.loadSession()).resolves.toBeNull();
+    await expect(session.loadSession()).resolves.toEqual({ session: null, corrupt: false });
   });
 
   it("rejects only when both the delete and the overwrite fail", async () => {

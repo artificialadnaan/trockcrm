@@ -366,9 +366,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const generation = authGenerationRef.current;
 
     (async () => {
-      let stored: Session | null = null;
+      let loaded: Awaited<ReturnType<typeof loadSession>> | null = null;
       try {
-        stored = await loadSession();
+        loaded = await loadSession();
       } catch {
         // SecureStore can reject (keychain unavailable, corrupted item). Settling to null sends the user
         // to login; leaving `session` undefined would strand the index route on its spinner forever with
@@ -380,6 +380,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         return;
       }
       if (cancelled || generation !== authGenerationRef.current) return;
+
+      // Clean up an unusable record through the QUEUE, and generation-guarded, so it can never outlive
+      // the identity it belongs to. loadSession no longer touches storage itself: the login screen is
+      // usable while that read is in flight, so an unqueued delete could land after a successful
+      // sign-in's save and erase the account that had just signed in. Guarded like a save rather than a
+      // sign-out, because unlike a user-initiated sign-out this cleanup is only valid for the identity
+      // being restored — a newer sign-in has already overwritten the record it wanted to remove.
+      if (loaded.corrupt) {
+        void persistRef.current!.save(generation, () => clearSession()).catch(() => undefined);
+      }
+
+      const stored = loaded.session;
       if (!stored) {
         setSession(null);
         setGate("fresh");

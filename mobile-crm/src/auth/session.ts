@@ -89,33 +89,45 @@ export async function saveSession(session: Session): Promise<void> {
   await SecureStore.setItemAsync(KEY, JSON.stringify(session));
 }
 
-export async function loadSession(): Promise<Session | null> {
+/**
+ * The outcome of reading the stored session.
+ *
+ * `corrupt` means a record was present but unusable — bad JSON, or structurally not a session. The
+ * caller is expected to clean it up THROUGH THE PERSISTENCE QUEUE rather than have this function do it:
+ * the login screen is usable while this read is in flight, so an unqueued delete from a stale restore
+ * could land after a successful sign-in's queued save and erase the account that just signed in.
+ * Reading and writing are separated here so that ordering is the caller's to get right, once, in the
+ * one place that already owns it.
+ */
+export type LoadedSession = { session: Session | null; corrupt: boolean };
+
+/** Reads and validates the stored session. PURE with respect to storage — it never writes or deletes. */
+export async function loadSession(): Promise<LoadedSession> {
   const raw = await SecureStore.getItemAsync(KEY);
-  if (!raw) return null;
+  if (!raw) return { session: null, corrupt: false };
+
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch {
-    // Best-effort cleanup, and it must STAY best-effort. clearSession rejects when both the delete and
-    // the tombstone write fail, and letting that escape would turn "the stored record was corrupt" into
-    // a throw from a function the rest of this file promises will fail safe.
-    await clearSession().catch(() => undefined);
-    return null;
+    return { session: null, corrupt: true };
   }
-  if (!isValidSession(parsed)) {
-    await clearSession().catch(() => undefined);
-    return null;
-  }
-  // A token that LOOKS expired routes to login, but is NOT deleted. This check trusts the device clock;
-  // a fast or wrong clock could judge a server-valid token expired, and a destructive delete would log
-  // the user out irreversibly even after the clock corrects. The server's 401 remains the only authority
-  // that clears a session — if the clock self-corrects, a later launch restores the still-valid token.
-  if (isTokenExpired(parsed.token)) return null;
+  if (!isValidSession(parsed)) return { session: null, corrupt: true };
+
+  // A token that LOOKS expired routes to login, but is NOT corrupt and must NOT be deleted. This check
+  // trusts the device clock; a fast or wrong clock could judge a server-valid token expired, and a
+  // destructive delete would log the user out irreversibly even after the clock corrects. The server's
+  // 401 remains the only authority that clears a session — if the clock self-corrects, a later launch
+  // restores the still-valid token.
+  if (isTokenExpired(parsed.token)) return { session: null, corrupt: false };
 
   return {
-    token: parsed.token,
-    user: parsed.user,
-    activeOfficeId: typeof parsed.activeOfficeId === "string" ? parsed.activeOfficeId : null,
+    session: {
+      token: parsed.token,
+      user: parsed.user,
+      activeOfficeId: typeof parsed.activeOfficeId === "string" ? parsed.activeOfficeId : null,
+    },
+    corrupt: false,
   };
 }
 
