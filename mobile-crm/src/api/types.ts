@@ -225,3 +225,101 @@ export type ActivityListResponse = {
   activities: Activity[];
   pagination?: { page: number; limit: number; total: number; totalPages: number };
 };
+
+/* ────────────────────────────────────────────────────────────────────────────────────────────────
+ * Contacts and companies
+ *
+ * The server exposes THREE different shapes for a single contact, and they are not interchangeable:
+ *   GET /contacts        list rows   — carry ownerUserName, isPrimary, linkedDealsCount, lastTouchAt
+ *   GET /contacts/:id    detail row  — DOES NOT carry any owner field at all
+ *   POST/PATCH responses raw row     — carry ownerId, but none of the computed/joined fields
+ * Modelling them as one type would make `owner` look available on a screen where it is always
+ * undefined. They are kept separate deliberately.
+ * ──────────────────────────────────────────────────────────────────────────────────────────────── */
+
+/** Required on create. snake_case tokens; see CONTACT_CATEGORY_LABELS for display. */
+export type ContactCategory =
+  | "client"
+  | "subcontractor"
+  | "architect"
+  | "property_manager"
+  | "regional_manager"
+  | "vendor"
+  | "consultant"
+  | "influencer"
+  | "other";
+
+type ContactBase = {
+  id: string;
+  firstName: string;
+  lastName: string;
+  email: string | null;
+  phone: string | null;
+  mobile: string | null;
+  jobTitle: string | null;
+  category: ContactCategory | string;
+  role: string | null;
+  city: string | null;
+  state: string | null;
+  companyId: string | null;
+  /** Free text, often null or stale on imported contacts — prefer linkedCompanyName. */
+  companyName: string | null;
+  isActive: boolean | null;
+};
+
+/** A row from GET /contacts. */
+export type ContactListRow = ContactBase & {
+  linkedCompanyName: string | null;
+  ownerUserName: string | null;
+  isPrimary: boolean;
+  linkedDealsCount: number;
+  lastTouchAt: string | null;
+};
+
+/** A row from GET /contacts/:id. Note the ABSENCE of owner fields — the endpoint does not select them. */
+export type ContactDetail = ContactBase & {
+  linkedCompanyName: string | null;
+  isPrimary: boolean;
+  linkedDealsCount: number;
+  lastTouchAt: string | null;
+  address: string | null;
+  zip: string | null;
+  notes: string | null;
+  lastContactedAt: string | null;
+};
+
+export type ContactListResponse = {
+  contacts: ContactListRow[];
+  pagination?: { page: number; limit: number; total: number; totalPages: number };
+};
+
+export type CompanyListRow = {
+  id: string;
+  name: string;
+  category: string | null;
+  city: string | null;
+  state: string | null;
+  isActive: boolean | null;
+};
+
+export type CompanyDetail = CompanyListRow & {
+  address: string | null;
+  zip: string | null;
+  website: string | null;
+  phone: string | null;
+  notes: string | null;
+  contactCount?: number;
+  dealCount?: number;
+};
+
+export type CompanyListResponse = {
+  companies: CompanyListRow[];
+  pagination?: { page: number; limit: number; total: number; totalPages: number };
+};
+
+/** GET /contacts/:id/deals returns associations, each wrapping the deal — not a bare deal list. */
+export type ContactDealAssociation = {
+  id: string;
+  role?: string | null;
+  deal: DealListItem | null;
+};
