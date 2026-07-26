@@ -77,6 +77,30 @@ export default function DealsListScreen() {
     return map;
   }, [stagesQuery.data]);
 
+  // Also by SLUG, because the display stage is a slug rather than an id.
+  const stageNameBySlug = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const stage of stagesQuery.data ?? []) map.set(stage.slug, stage.name);
+    return map;
+  }, [stagesQuery.data]);
+
+  /**
+   * The stage label for a card.
+   *
+   * Prefers the server's `displayStageSlug`, which is bid-board-aware: an owned deal can advance — or
+   * close — in Bid Board while its CRM `stageId` still points at an earlier stage, so keying the label
+   * off the id alone let the list call a closed deal "Opportunity" while the detail screen and the
+   * server verdict both said otherwise. Falls back to the id when the slug is absent or is a Bid Board
+   * stage with no CRM pipeline row to name it.
+   */
+  function stageLabelFor(deal: { displayStageSlug: string | null; stageId: string | null }) {
+    if (deal.displayStageSlug) {
+      const bySlug = stageNameBySlug.get(deal.displayStageSlug);
+      if (bySlug) return bySlug;
+    }
+    return deal.stageId ? stageNameById.get(deal.stageId) : undefined;
+  }
+
   const deals = useMemo(() => (query.data?.pages ?? []).flatMap((p) => p.deals), [query.data]);
   const total = query.data?.pages[0]?.pagination.total;
 
@@ -215,7 +239,7 @@ export default function DealsListScreen() {
           renderItem={({ item }) => (
             <DealCard
               deal={item}
-              stageName={item.stageId ? stageNameById.get(item.stageId) : undefined}
+              stageName={stageLabelFor(item)}
               onPress={(deal) => router.push(`/(app)/deals/${deal.id}`)}
             />
           )}
