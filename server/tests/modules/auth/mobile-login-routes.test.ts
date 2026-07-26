@@ -112,15 +112,24 @@ describe("POST /api/auth/mobile-login", () => {
     expect(claims).toMatchObject({ userId: "user-1", officeId: "office-dallas", role: "rep" });
   });
 
-  it("sets NO auth cookie and issues NO csrf token — the client must stay Bearer-only", async () => {
-    // A token cookie would drag this client inside the global CSRF gate in app.ts, which engages only
-    // when a `token` cookie is present, and every native write would then need a CSRF header.
+  it("issues no session cookie and no csrf token, and CLEARS any stale auth cookie", async () => {
+    // Two distinct reasons, both load-bearing:
+    //  - Setting a token cookie would drag this client inside app.ts's CSRF gate, which engages only when
+    //    a `token` cookie is present, so every native write would then need a CSRF header.
+    //  - CLEARING one matters more: authMiddleware reads `req.cookies?.token || req.headers.authorization`,
+    //    so a stale cookie OUT-RANKS the Bearer token we just minted and would authenticate requests as
+    //    whoever that cookie belongs to.
     mockLoginSuccess();
     const res = await request(createTestApp())
       .post("/api/auth/mobile-login")
       .send({ email: TEST_EMAIL, password: TEST_SECRET });
 
-    expect(res.headers["set-cookie"]).toBeUndefined();
+    const cookies = res.headers["set-cookie"] ?? [];
+    // Every directive must be a CLEAR (empty value), never an assignment.
+    for (const cookie of cookies) {
+      expect(cookie).toMatch(/^[^=]+=;/);
+    }
+    expect(cookies.some((c: string) => /^token=.+/.test(c) && !/^token=;/.test(c))).toBe(false);
     expect(res.body.csrfToken).toBeUndefined();
   });
 

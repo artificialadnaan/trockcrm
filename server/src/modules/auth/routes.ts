@@ -314,6 +314,19 @@ router.post("/mobile-login", authLimiter, async (req, res, next) => {
 
     const { token, user } = await loginMobileUser({ email, password });
 
+    // Clear every auth-cookie variant — the same set logout clears.
+    //
+    // This is not tidiness, it is what makes the returned token actually the credential in play.
+    // authMiddleware reads `req.cookies?.token || req.headers.authorization`, i.e. the COOKIE WINS. A
+    // native client is Bearer-only but can still carry a cookie (RN's fetch shares the system cookie
+    // store, so any webview opened against this host leaves one behind), and a stale one would silently
+    // out-rank the token we just minted — authenticating every request as whoever that cookie belongs to,
+    // not as the user who just signed in. It would also keep tripping the cookie-triggered CSRF gate on
+    // every write. Clearing at the moment we hand out a Bearer token closes both.
+    for (const clear of logoutCookieClearsForRequest(req)) {
+      res.cookie(clear.name, "", clear.options);
+    }
+
     // withOnboardingGate supplies isRfpVoter / isRfpReviewer / requiresOnboarding — the same flags the web
     // client gates its RFP screens on, so the app can hide exactly what the web hides. The server
     // endpoints still enforce those allowlists as the hard boundary.

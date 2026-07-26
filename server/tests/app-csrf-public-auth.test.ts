@@ -205,9 +205,12 @@ describe("app CSRF public auth exemptions", () => {
 
     expect(response.status).toBe(200);
     expect(response.body.token).toEqual(expect.any(String));
-    // And it must not acquire a cookie on the way out — that would pull it inside this very gate for
-    // every subsequent write.
-    expect(response.headers["set-cookie"]).toBeUndefined();
+    // The stale cookie must be CLEARED on the way out, not merely tolerated: authMiddleware reads
+    // `req.cookies?.token || req.headers.authorization`, so leaving it in place would let it out-rank the
+    // Bearer token just issued and run subsequent requests as whoever that cookie belongs to.
+    const cookies = response.headers["set-cookie"] ?? [];
+    expect(cookies.some((c: string) => /^token=;/.test(c))).toBe(true);
+    expect(cookies.some((c: string) => /^token=.+/.test(c) && !/^token=;/.test(c))).toBe(false);
   });
 
   it("allows trockcam.com preflight requests in production", async () => {
