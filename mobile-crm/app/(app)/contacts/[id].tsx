@@ -112,6 +112,10 @@ export default function ContactDetailScreen() {
           {phone ? <Row label="Phone" value={phone} /> : null}
           {contact.email ? <Row label="Email" value={contact.email} /> : null}
           {location ? <Row label="Location" value={location} /> : null}
+          {/* This count comes from buildContactLinkedDealsCountSql, which filters d.is_active = true —
+              the same predicate getContactDeals now applies — but is NOT rep-scoped, while the Deals
+              section below is. For a rep the two can therefore differ, deliberately: the count is what
+              the office has, the list is what this user may open. The empty state says so in words. */}
           <Row label="Linked deals" value={String(contact.linkedDealsCount ?? 0)} />
         </Section>
 
