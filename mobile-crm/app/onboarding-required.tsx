@@ -1,0 +1,103 @@
+import React from "react";
+import { ActivityIndicator, Linking, Pressable, StyleSheet, Text, View } from "react-native";
+import { Redirect, useRouter } from "expo-router";
+import { SafeAreaView } from "react-native-safe-area-context";
+import { useAuth } from "../src/auth/AuthContext";
+import { theme } from "../src/theme/theme";
+
+/**
+ * The onboarding (migration cleanup) gate, mirroring the web app's OnboardingRequiredPage.
+ *
+ * This gate is CLIENT-ENFORCED on both surfaces. The server annotates the user with
+ * `requiresOnboarding` (auth/service.ts:130, when pendingCleanupCount > 0) but does NOT block CRM
+ * endpoints on it — so an app that ignores the flag does not get errors, it gets full access, and the
+ * mandatory cleanup flow is simply skipped. Mobile has to reproduce the block or it becomes the way
+ * around it.
+ *
+ * Unlike the web version this does NOT auto-redirect. The cleanup workspace is a separate web app; on a
+ * phone, throwing the user into an external browser with no way back is worse than showing them what is
+ * required and letting them choose — including choosing to sign out on a shared device.
+ */
+export default function OnboardingRequiredScreen() {
+  const { session, signOut } = useAuth();
+  const router = useRouter();
+
+  if (session === undefined) {
+    return (
+      <SafeAreaView style={styles.safe}>
+        <View style={styles.center}>
+          <ActivityIndicator color={theme.color.brandRed} />
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  if (!session) return <Redirect href="/login" />;
+  // Cleared since this session was cached — nothing left to do here, and staying would trap the user.
+  if (!session.user.requiresOnboarding) return <Redirect href="/(app)/dashboard" />;
+
+  const pending = session.user.onboardingPendingCount ?? 0;
+  const cleanupUrl = session.user.cleanupUrl ?? null;
+
+  return (
+    <SafeAreaView style={styles.safe}>
+      <View style={styles.body}>
+        <Text style={styles.kicker}>Onboarding required</Text>
+        <Text style={styles.title}>Finish cleanup before using the CRM</Text>
+        <Text style={styles.copy}>
+          Your migration cleanup queue has {pending} pending item{pending === 1 ? "" : "s"}. Complete it in
+          the cleanup workspace on a computer, then reopen this app.
+        </Text>
+
+        {cleanupUrl ? (
+          <Pressable
+            testID="open-cleanup"
+            onPress={() => void Linking.openURL(cleanupUrl).catch(() => undefined)}
+            accessibilityRole="button"
+            style={styles.button}
+          >
+            <Text style={styles.buttonText}>Open cleanup workspace</Text>
+          </Pressable>
+        ) : null}
+
+        {/* Shared devices again: without this, one account waiting on cleanup blocks everyone else. */}
+        <Pressable
+          testID="onboarding-sign-out"
+          onPress={async () => {
+            await signOut();
+            router.replace("/login");
+          }}
+          accessibilityRole="button"
+          style={styles.signOut}
+        >
+          <Text style={styles.signOutText}>Sign out</Text>
+        </Pressable>
+      </View>
+    </SafeAreaView>
+  );
+}
+
+const styles = StyleSheet.create({
+  safe: { flex: 1, backgroundColor: theme.color.surfaceMuted },
+  center: { flex: 1, alignItems: "center", justifyContent: "center" },
+  body: { flex: 1, justifyContent: "center", padding: theme.space.xl, gap: theme.space.md },
+  kicker: {
+    fontFamily: theme.font.bold,
+    fontSize: 12,
+    letterSpacing: 1,
+    textTransform: "uppercase",
+    color: theme.color.brandRed,
+  },
+  title: { fontFamily: theme.font.bold, fontSize: 26, color: theme.color.inkNavy },
+  copy: { fontFamily: theme.font.regular, fontSize: 15, lineHeight: 22, color: theme.color.textSecondary },
+  button: {
+    marginTop: theme.space.md,
+    backgroundColor: theme.color.brandRed,
+    borderRadius: theme.radius.md,
+    paddingVertical: theme.space.md,
+    alignItems: "center",
+  },
+  buttonText: { fontFamily: theme.font.bold, fontSize: 15, color: theme.color.textInverse },
+  signOut: { marginTop: theme.space.sm, alignItems: "center", paddingVertical: theme.space.md },
+  signOutText: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.textSecondary },
+});

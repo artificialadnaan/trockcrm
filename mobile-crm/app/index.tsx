@@ -25,6 +25,13 @@ export default function Index() {
   // and the change-password endpoint, so landing on the dashboard would show a wall of errors.
   if (session.user.mustChangePassword) return <Redirect href="/change-password" />;
 
+  // The onboarding gate, in the same order the web app applies it (client/src/App.tsx:157-161).
+  //
+  // This one is CLIENT-enforced: the server sets requiresOnboarding but does not block CRM endpoints on
+  // it, so skipping the check here does not produce errors — it produces full access, and the mobile app
+  // silently becomes the way around a mandatory cleanup flow.
+  if (session.user.requiresOnboarding) return <Redirect href="/onboarding-required" />;
+
   return <Redirect href="/(app)/dashboard" />;
 }
 

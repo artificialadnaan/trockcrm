@@ -32,8 +32,15 @@ export type CrmUser = {
    * app must route to the change-password screen rather than land on the dashboard.
    */
   mustChangePassword?: boolean;
+  /**
+   * True while the user still has pending migration-cleanup items (auth/service.ts:130). Unlike
+   * mustChangePassword this is NOT enforced server-side — CRM endpoints answer normally — so a client
+   * that ignores it does not get errors, it gets full access, and becomes the way around the gate.
+   */
   requiresOnboarding?: boolean;
   onboardingPendingCount?: number;
+  /** Where the cleanup workspace lives. Absent in some deployments, so the button is conditional. */
+  cleanupUrl?: string;
   isRfpVoter?: boolean;
   isRfpReviewer?: boolean;
 };

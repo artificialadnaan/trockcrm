@@ -201,11 +201,26 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           probe,
         });
 
+        /**
+         * Which user record describes the office requests will actually be sent under?
+         *
+         *   - office dropped        → the home-office `fresh`, which is exactly right.
+         *   - probe granted         → the in-office response, carrying the office-effective role.
+         *   - probe unknown/absent  → the office was KEPT without confirmation, so the home-office role
+         *                             does not describe it. Merging `fresh` would overwrite a cached
+         *                             role_override with the home role while every request still sends
+         *                             the secondary office id — the displayed role and client-side
+         *                             permission gates would then disagree with what authMiddleware
+         *                             actually enforces. Keep the cached role instead; a stale role is
+         *                             better than a confidently wrong one.
+         */
         const merged: Session = {
           ...stored,
-          // `effective` is the in-office user when a secondary office was kept, and the home-office user
-          // otherwise — so role and activeOfficeId always describe the office requests will actually use.
-          user: { ...stored.user, ...(keepActive ? effective : fresh) },
+          user: !keepActive
+            ? { ...stored.user, ...fresh }
+            : probe === "granted"
+              ? { ...stored.user, ...effective }
+              : { ...stored.user, ...fresh, role: stored.user.role },
           activeOfficeId: keepActive,
         };
         sessionRef.current = merged;
