@@ -28,6 +28,12 @@ type AuthState = {
   gate: GateState;
   /** Re-run /auth/me now. Used by the onboarding screen, which is waiting for a flag to clear. */
   revalidate: () => Promise<void>;
+  /**
+   * True when a sign-out could not erase the stored credential. The account is signed out in memory, but
+   * the token is still on the device and the next launch would restore it — so the login screen says so
+   * rather than letting the user walk away believing the phone is clear.
+   */
+  signOutIncomplete: boolean;
   signIn: (input: { email: string; password: string }) => Promise<void>;
   signOut: () => Promise<void>;
   setActiveOffice: (officeId: string | null) => Promise<void>;
@@ -46,6 +52,9 @@ const GATE_GRACE_MS = 3_000;
 
 /** How often to retry once we are knowingly running on stale data. */
 const REVALIDATE_RETRY_MS = 30_000;
+
+/** How often to retry erasing a credential whose erasure failed. */
+const SIGN_OUT_RETRY_MS = 15_000;
 
 const AuthContext = createContext<AuthState | null>(null);
 
@@ -75,6 +84,7 @@ export class NoAccessibleSurfaceError extends Error {
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [session, setSession] = useState<Session | null | undefined>(undefined);
   const [gate, setGate] = useState<GateState>("checking");
+  const [signOutIncomplete, setSignOutIncomplete] = useState(false);
 
   /**
    * The QueryClient is a process-wide singleton and outlives any session, so it must be emptied whenever
@@ -124,12 +134,51 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     // explicitly signed out of. See createPersistQueue.
     try {
       await persistRef.current!.clear(clearSession);
+      setSignOutIncomplete(false);
     } catch {
-      // clearSession already tried both delete and overwrite. In-memory state is signed out either way,
-      // and swallowing here keeps callers that await signOut() and then navigate — the change-password
-      // screen does exactly that — from being stranded on a dead screen by a keychain hiccup.
+      // BOTH the delete and the tombstone write failed, so a valid token is still on this device and the
+      // next launch would restore the account that was just signed out.
+      //
+      // signOut still RESOLVES: callers navigate to login immediately afterwards, and stranding a user
+      // on a dead authenticated screen does not make the keychain any more writable. But the failure is
+      // not discarded — it is flagged so the login screen can say the device was not fully cleared, and
+      // retried below, which is the part that can actually still succeed.
+      setSignOutIncomplete(true);
     }
   }, [queryClient]);
+
+  /**
+   * Keep trying to erase a credential whose erasure failed.
+   *
+   * A keychain that refuses a write is usually refusing temporarily — locked, or briefly unavailable —
+   * so the realistic outcome is that one of these retries succeeds while the user is still standing
+   * there. Retried on a timer and on every return to foreground, because unlocking the device is exactly
+   * the event that tends to fix it.
+   */
+  useEffect(() => {
+    if (!signOutIncomplete) return;
+
+    let cancelled = false;
+    const attempt = () => {
+      if (cancelled || sessionRef.current) return;
+      void persistRef.current!
+        .clear(clearSession)
+        .then(() => {
+          if (!cancelled) setSignOutIncomplete(false);
+        })
+        .catch(() => undefined);
+    };
+
+    const timer = setInterval(attempt, SIGN_OUT_RETRY_MS);
+    const sub = AppState.addEventListener("change", (next) => {
+      if (next === "active") attempt();
+    });
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+      sub.remove();
+    };
+  }, [signOutIncomplete]);
 
   const fetcher = useCallback(
     <T,>(path: string, opts: ApiFetchOptions = {}) => {
@@ -507,8 +556,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   );
 
   const value = useMemo<AuthState>(
-    () => ({ session, gate, revalidate, signIn, signOut, setActiveOffice, fetcher }),
-    [session, gate, revalidate, signIn, signOut, setActiveOffice, fetcher],
+    () => ({ session, gate, revalidate, signOutIncomplete, signIn, signOut, setActiveOffice, fetcher }),
+    [session, gate, revalidate, signOutIncomplete, signIn, signOut, setActiveOffice, fetcher],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

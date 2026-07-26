@@ -41,7 +41,7 @@ function messageFor(err: unknown): string {
 
 export default function LoginScreen() {
   const router = useRouter();
-  const { signIn } = useAuth();
+  const { signIn, signOutIncomplete } = useAuth();
   const [email, setEmail] = useState("");
   const [secret, setSecret] = useState("");
   const [busy, setBusy] = useState(false);
@@ -73,6 +73,18 @@ export default function LoginScreen() {
           {error ? (
             <View style={formStyles.errorBox} accessibilityRole="alert">
               <Text style={formStyles.errorText}>{error}</Text>
+            </View>
+          ) : null}
+
+          {/* The previous sign-out could not erase the stored credential, so it is still on this device
+              and a relaunch would restore that account. Saying nothing would let someone hand the phone
+              over believing it was cleared — the one situation where silence is the actual harm. */}
+          {signOutIncomplete ? (
+            <View testID="sign-out-incomplete" style={formStyles.errorBox} accessibilityRole="alert">
+              <Text style={formStyles.errorText}>
+                The previous account could not be fully removed from this device. Keep the app open — it
+                is still retrying — and avoid handing this phone to someone else until this clears.
+              </Text>
             </View>
           ) : null}
 
