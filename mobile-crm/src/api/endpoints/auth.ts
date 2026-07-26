@@ -46,6 +46,11 @@ export async function me(fetcher: Fetcher, token: string): Promise<CrmUser> {
  * Offices this user may switch into. Multi-office is schema-per-tenant on the server (search_path is set
  * per request from x-office-id), so switching office changes which database schema every subsequent
  * query reads — which is why the switcher has to be explicit and visible rather than inferred.
+ *
+ * NOT used by session restore. Confirming a stored secondary office goes through an office-scoped
+ * /auth/me instead, which answers the grant question AND returns that office's effective role in one
+ * request — and, unlike this endpoint, is exempt from the forced-password-change gate. This stays for
+ * the office switcher, which needs the list itself rather than a yes/no on one office.
  */
 export async function accessibleOffices(fetcher: Fetcher, token: string): Promise<AccessibleOffice[]> {
   const res = await fetcher<{ offices: AccessibleOffice[] }>("/auth/accessible-offices", { token });

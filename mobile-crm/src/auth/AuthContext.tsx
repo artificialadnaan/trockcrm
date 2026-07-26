@@ -101,6 +101,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     authGenerationRef.current += 1;
     sessionRef.current = null;
     setSession(null);
+    // Nothing left to verify. Without this the gate keeps the previous session's value, so a stale one
+    // would leave the retry timer arming against a session that no longer exists.
+    setGate("fresh");
     // clear(), not save(): a queued sign-out must NOT be discarded because a sign-in has since advanced
     // the generation. If that replacement save then fails, the new account is never published and the
     // signed-out account's token is still on disk — the next launch restores an account somebody
@@ -189,8 +192,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         //
         // But /auth/me is answered deliberately WITHOUT x-office-id, so the office it reports is always
         // the user's PRIMARY one. Comparing a secondary office against that never matches, which would
-        // silently drop a legitimately-selected secondary office on EVERY launch. accessible-offices is
-        // the list that actually says whether the grant still stands, so only a mismatch pays for it.
+        // silently drop a legitimately-selected secondary office on EVERY launch. Only a genuine
+        // mismatch pays for the office-scoped probe below.
         const serverOffice = fresh.activeOfficeId ?? fresh.officeId ?? null;
 
         /**
@@ -428,6 +431,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       if (generation !== authGenerationRef.current) return;
       sessionRef.current = next;
       setSession(next);
+      // The login response IS a fresh server answer — /auth/mobile-login returns withOnboardingGate's
+      // output, the same shape /auth/me does. Without setting this, a new sign-in inherits whatever the
+      // PREVIOUS session left behind: a stale gate would show "Couldn't reach the server" on the
+      // onboarding screen moments after a login that plainly reached it.
+      setGate("fresh");
     },
     [],
   );
