@@ -121,18 +121,26 @@ export default function ContactsListScreen() {
             <Text style={styles.retryText}>Try again</Text>
           </Pressable>
         </View>
-      ) : contacts.length === 0 ? (
-        <View style={styles.center}>
-          <Text style={styles.emptyTitle}>No contacts</Text>
-          <Text style={styles.emptyBody}>
-            {submitted ? "Nothing matched that search." : "This office has no contacts yet."}
-          </Text>
-        </View>
       ) : (
         <FlatList
           data={contacts}
           keyExtractor={(c) => c.id}
-          contentContainerStyle={styles.list}
+          // `flexGrow` so the empty state centres in the viewport while the list still scrolls — which is
+          // what keeps pull-to-refresh reachable with zero rows.
+          contentContainerStyle={[styles.list, contacts.length === 0 && styles.listEmpty]}
+          // The empty state lives INSIDE the list rather than replacing it. Swapping in a plain View
+          // unmounted the RefreshControl with it, leaving no way to refetch — and refetchOnWindowFocus is
+          // off, so the screen stayed empty for as long as it was mounted, even after someone else
+          // created the contact being searched for.
+          ListEmptyComponent={
+            <View style={styles.center}>
+              <Text style={styles.emptyTitle}>No contacts</Text>
+              <Text style={styles.emptyBody}>
+                {submitted ? "Nothing matched that search." : "This office has no contacts yet."}
+              </Text>
+              <Text style={styles.emptyBody}>Pull down to refresh.</Text>
+            </View>
+          }
           onEndReachedThreshold={0.5}
           onEndReached={() => {
             if (query.hasNextPage && !query.isFetchingNextPage) void query.fetchNextPage();
@@ -259,6 +267,7 @@ const styles = StyleSheet.create({
     backgroundColor: theme.color.surface,
   },
   list: { padding: theme.space.lg, paddingTop: theme.space.sm, gap: theme.space.md },
+  listEmpty: { flexGrow: 1 },
   card: {
     flexDirection: "row",
     alignItems: "center",
