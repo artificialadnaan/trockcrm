@@ -1,8 +1,9 @@
 import React, { useState } from "react";
-import { ActivityIndicator, Linking, Pressable, StyleSheet, Text, View } from "react-native";
+import { ActivityIndicator, Pressable, StyleSheet, Text, View } from "react-native";
 import { Redirect, useRouter } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useAuth } from "../src/auth/AuthContext";
+import { openLink } from "../src/lib/open-link";
 import { theme } from "../src/theme/theme";
 
 /**
@@ -22,6 +23,7 @@ export default function OnboardingRequiredScreen() {
   const { session, gate, revalidate, signOut } = useAuth();
   const router = useRouter();
   const [checking, setChecking] = useState(false);
+  const [linkError, setLinkError] = useState<string | null>(null);
 
   async function checkAgain() {
     setChecking(true);
@@ -46,7 +48,17 @@ export default function OnboardingRequiredScreen() {
   // Cleared since this session was cached — nothing left to do here, and staying would trap the user.
   if (!session.user.requiresOnboarding) return <Redirect href="/(app)/dashboard" />;
 
-  const pending = session.user.onboardingPendingCount ?? 0;
+  /**
+   * A NEGATIVE count is the server's fail-closed sentinel, not a queue size.
+   *
+   * getUserOnboardingGateStatus returns { requiresOnboarding: true, onboardingPendingCount: -1 } when it
+   * cannot query the gate at all (auth/service.ts:133-140). Passing that through rendered "-1 pending
+   * items" on the one screen a blocked user is stuck reading — which reads as a bug in their account
+   * rather than a temporary server problem, and gives them nothing to act on.
+   */
+  const rawPending = session.user.onboardingPendingCount;
+  const pendingKnown = typeof rawPending === "number" && rawPending >= 0;
+  const pending = pendingKnown ? rawPending : 0;
   const cleanupUrl = session.user.cleanupUrl ?? null;
 
   return (
@@ -55,14 +67,17 @@ export default function OnboardingRequiredScreen() {
         <Text style={styles.kicker}>Onboarding required</Text>
         <Text style={styles.title}>Finish cleanup before using the CRM</Text>
         <Text style={styles.copy}>
-          Your migration cleanup queue has {pending} pending item{pending === 1 ? "" : "s"}. Complete it in
-          the cleanup workspace on a computer, then reopen this app.
+          {pendingKnown
+            ? `Your migration cleanup queue has ${pending} pending item${pending === 1 ? "" : "s"}. ` +
+              "Complete it in the cleanup workspace on a computer, then reopen this app."
+            : "We couldn't check your cleanup queue just now, so access is held until we can. " +
+              "Try again in a moment, or open the cleanup workspace on a computer."}
         </Text>
 
         {cleanupUrl ? (
           <Pressable
             testID="open-cleanup"
-            onPress={() => void Linking.openURL(cleanupUrl).catch(() => undefined)}
+            onPress={() => void openLink(cleanupUrl, setLinkError)}
             accessibilityRole="button"
             style={styles.button}
           >
@@ -88,6 +103,12 @@ export default function OnboardingRequiredScreen() {
             <Text style={styles.secondaryText}>I&apos;ve finished — check again</Text>
           )}
         </Pressable>
+
+        {linkError ? (
+          <Text testID="cleanup-link-error" style={styles.note}>
+            {linkError}
+          </Text>
+        ) : null}
 
         {gate === "stale" ? (
           <Text style={styles.note}>Couldn&apos;t reach the server. Reconnect and check again.</Text>

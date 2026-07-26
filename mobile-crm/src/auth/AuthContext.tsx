@@ -1,4 +1,5 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { AppState } from "react-native";
 import { apiFetch, ApiError, type ApiFetchOptions } from "../api/client";
 import * as authApi from "../api/endpoints/auth";
@@ -75,6 +76,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [session, setSession] = useState<Session | null | undefined>(undefined);
   const [gate, setGate] = useState<GateState>("checking");
 
+  /**
+   * The QueryClient is a process-wide singleton and outlives any session, so it must be emptied whenever
+   * the identity changes.
+   *
+   * Query keys are user-scoped (see useQueryScope), which prevents a direct collision — but gcTime is 30
+   * minutes and staleTime 60 seconds, so the previous account's rows sit in memory long after they sign
+   * out, and any key that is NOT user-scoped would serve them without a request. On a shared job-site
+   * phone that is the difference between "signed out" and "signed out except for what is still cached".
+   */
+  const queryClient = useQueryClient();
+
   // Held in a ref as well as state so `fetcher` stays referentially stable: rebuilding it on every token
   // change would invalidate every TanStack Query key that closes over it and refetch the whole app.
   const sessionRef = useRef<Session | null>(null);
@@ -104,6 +116,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     // Nothing left to verify. Without this the gate keeps the previous session's value, so a stale one
     // would leave the retry timer arming against a session that no longer exists.
     setGate("fresh");
+    // Signed out means signed out — including whatever this account's screens left in the cache.
+    queryClient.clear();
     // clear(), not save(): a queued sign-out must NOT be discarded because a sign-in has since advanced
     // the generation. If that replacement save then fails, the new account is never published and the
     // signed-out account's token is still on disk — the next launch restores an account somebody
@@ -115,7 +129,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       // and swallowing here keeps callers that await signOut() and then navigate — the change-password
       // screen does exactly that — from being stranded on a dead screen by a keychain hiccup.
     }
-  }, []);
+  }, [queryClient]);
 
   const fetcher = useCallback(
     <T,>(path: string, opts: ApiFetchOptions = {}) => {
@@ -178,10 +192,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       try {
         const fresh = await authApi.me(scoped, stored.token);
         if (sessionRef.current !== stored) return;
-        // A role can change server-side after sign-in. Both checks belong here, not just the first: a
-        // user demoted to `construction` still passes requireCrmUser but reaches no surface in this app,
-        // so leaving them signed in means an authenticated shell with every screen hidden.
-        if (!isAllowedRole(fresh.role) || !hasAnyCrmSurface(fresh.role)) {
+        // The HARD server boundary only. This first /auth/me deliberately carries no x-office-id, so
+        // `fresh.role` is the HOME-office role — which is not necessarily the role requests will run
+        // under. The surface check therefore waits until after office reconciliation below; deciding it
+        // here would sign out a user whose home role has no surface but whose selected office grants
+        // rep, and would admit one whose permitted home role is overridden to construction in the
+        // office they are actually working in.
+        if (!isAllowedRole(fresh.role)) {
           await signOut();
           return;
         }
@@ -283,6 +300,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             : { ...stored.user, ...fresh, ...officeScopedGate },
           activeOfficeId: keepActive,
         };
+        // NOW the role is the one requests will actually run under — post-override, post-reconciliation.
+        // A user whose effective role reaches no surface would otherwise sit in an authenticated shell
+        // with every screen hidden.
+        if (!hasAnyCrmSurface(merged.user.role)) {
+          await signOut();
+          return;
+        }
+
         sessionRef.current = merged;
         setSession(merged);
         // "fresh" ONLY when the office the session will actually use was confirmed. Marking an
@@ -424,6 +449,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       // Claim the generation BEFORE writing, so any restore or sign-out still in flight is superseded
       // rather than allowed to overwrite this account.
       const generation = ++authGenerationRef.current;
+      // A sign-in can REPLACE an existing identity without a sign-out in between (the change-password
+      // flow does exactly that), so the cache has to be cleared on this path too.
+      queryClient.clear();
       // Persist FIRST. If SecureStore rejects after we had already published the session, signIn still
       // rejects — so the login screen shows a failure and does not navigate, while the context and
       // fetcher are silently authenticated behind it. Writing first leaves nothing behind on failure.
@@ -437,7 +465,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       // onboarding screen moments after a login that plainly reached it.
       setGate("fresh");
     },
-    [],
+    [queryClient],
   );
 
   const setActiveOffice = useCallback(
@@ -447,6 +475,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const next: Session = { ...current, activeOfficeId: officeId };
       sessionRef.current = next;
       setSession(next);
+      // The header changed, so the cached role / requiresOnboarding / pending count now describe the
+      // WRONG office — they are computed per-office server-side. Until this resolves, the surface and
+      // onboarding gates would be running against the office the user just left, which can admit them
+      // to the new one before its own gate is known. Block on it, then confirm.
+      setGate("checking");
+      void revalidate();
       try {
         // Not a new identity, so it does NOT bump the generation — it rides on the current one and is
         // skipped if a sign-out or sign-in overtakes it.
@@ -457,7 +491,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         // and leave the caller with an unhandled rejection for a switch that visibly succeeded.
       }
     },
-    [],
+    [revalidate],
   );
 
   const value = useMemo<AuthState>(

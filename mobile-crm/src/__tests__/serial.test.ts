@@ -79,3 +79,37 @@ describe("createSerialRunner", () => {
     await expect(run(async () => 42)).resolves.toBe(42);
   });
 });
+
+describe("openLink reports success as well as failure", () => {
+  afterEach(() => jest.resetModules());
+
+  function withLinking(openURL: jest.Mock) {
+    jest.resetModules();
+    jest.doMock("react-native", () => ({ Linking: { openURL } }));
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    return require("../lib/open-link") as typeof import("../lib/open-link");
+  }
+
+  it("reports null on success so a previous failure is cleared", async () => {
+    // Without this a single transient handoff failure stuck permanently: the button kept reading
+    // "Can't call" even after a retry that plainly opened the dialer.
+    const { openLink } = withLinking(jest.fn().mockResolvedValue(undefined));
+    const report = jest.fn();
+    await openLink("tel:2145551212", report);
+    expect(report).toHaveBeenCalledWith(null);
+  });
+
+  it("clears on a retry that succeeds after a failure", async () => {
+    const openURL = jest
+      .fn()
+      .mockRejectedValueOnce(new Error("no handler"))
+      .mockResolvedValueOnce(undefined);
+    const { openLink } = withLinking(openURL);
+    const seen: Array<string | null> = [];
+    const report = (m: string | null) => void seen.push(m);
+
+    await openLink("tel:2145551212", report);
+    await openLink("tel:2145551212", report);
+    expect(seen).toEqual(["Couldn't call from this device.", null]);
+  });
+});
