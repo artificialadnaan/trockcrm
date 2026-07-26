@@ -1,4 +1,5 @@
 import { chooseActiveOffice } from "../auth/office";
+import { createPersistQueue } from "../auth/persist-queue";
 
 /**
  * Two review findings live here, and both are silent-wrong rather than loud-wrong:
@@ -18,67 +19,44 @@ describe("chooseActiveOffice", () => {
   const SECONDARY = "office-secondary";
 
   it("keeps a secondary office that is still granted", () => {
-    // The regression case. serverOfficeId is the PRIMARY office (that is all /auth/me can report), so a
-    // naive equality check returns null here and silently switches the user's office on every launch.
+    // The regression case. serverOfficeId is the PRIMARY office (that is all a header-less /auth/me can
+    // report), so a naive equality check returns null here and silently switches the office every launch.
     expect(
-      chooseActiveOffice({
-        storedActiveOfficeId: SECONDARY,
-        serverOfficeId: PRIMARY,
-        accessibleOfficeIds: [PRIMARY, SECONDARY],
-      }),
+      chooseActiveOffice({ storedActiveOfficeId: SECONDARY, serverOfficeId: PRIMARY, probe: "granted" }),
     ).toBe(SECONDARY);
   });
 
   it("drops a secondary office whose grant was revoked", () => {
-    // Keeping it would send a stale x-office-id on every request and 403 the entire app.
+    // Only a 403 from the office-scoped probe produces "revoked". Keeping it would send a stale
+    // x-office-id on every request and 403 the entire app.
     expect(
-      chooseActiveOffice({
-        storedActiveOfficeId: SECONDARY,
-        serverOfficeId: PRIMARY,
-        accessibleOfficeIds: [PRIMARY],
-      }),
+      chooseActiveOffice({ storedActiveOfficeId: SECONDARY, serverOfficeId: PRIMARY, probe: "revoked" }),
     ).toBeNull();
   });
 
-  it("treats an empty grant list as definitive, not as unknown", () => {
+  it("keeps the stored office when the probe could not answer", () => {
+    // "unknown" is offline / 5xx / a different gate answering first — NOT a revocation. Reverting on a
+    // flaky connection would show another office's Postgres schema with nothing on screen to say why.
     expect(
-      chooseActiveOffice({
-        storedActiveOfficeId: SECONDARY,
-        serverOfficeId: PRIMARY,
-        accessibleOfficeIds: [],
-      }),
-    ).toBeNull();
-  });
-
-  it("keeps the stored office when the grant lookup could not be made", () => {
-    // null means "offline or 5xx", NOT "no offices". Reverting on a flaky connection would show another
-    // office's data with nothing on screen to say why.
-    expect(
-      chooseActiveOffice({
-        storedActiveOfficeId: SECONDARY,
-        serverOfficeId: PRIMARY,
-        accessibleOfficeIds: null,
-      }),
+      chooseActiveOffice({ storedActiveOfficeId: SECONDARY, serverOfficeId: PRIMARY, probe: "unknown" }),
     ).toBe(SECONDARY);
   });
 
-  it("needs no lookup at all when the stored office is the one the server reports", () => {
+  it("keeps the stored office when no probe was made at all", () => {
     expect(
-      chooseActiveOffice({
-        storedActiveOfficeId: PRIMARY,
-        serverOfficeId: PRIMARY,
-        accessibleOfficeIds: null,
-      }),
+      chooseActiveOffice({ storedActiveOfficeId: SECONDARY, serverOfficeId: PRIMARY, probe: null }),
+    ).toBe(SECONDARY);
+  });
+
+  it("needs no probe when the stored office is the one the server reports", () => {
+    expect(
+      chooseActiveOffice({ storedActiveOfficeId: PRIMARY, serverOfficeId: PRIMARY, probe: null }),
     ).toBe(PRIMARY);
   });
 
-  it.each([null, undefined])("returns null when nothing was stored (%p)", (stored) => {
+  it("returns null when nothing was stored", () => {
     expect(
-      chooseActiveOffice({
-        storedActiveOfficeId: (stored ?? null) as string | null,
-        serverOfficeId: PRIMARY,
-        accessibleOfficeIds: [PRIMARY],
-      }),
+      chooseActiveOffice({ storedActiveOfficeId: null, serverOfficeId: PRIMARY, probe: "granted" }),
     ).toBeNull();
   });
 });
@@ -150,5 +128,89 @@ describe("clearSession durability", () => {
 
     // Surfaces the ORIGINAL delete failure, which is the one that describes what actually went wrong.
     await expect(session.clearSession()).rejects.toThrow("delete failed");
+  });
+});
+
+describe("persist queue", () => {
+  /** A deferred promise, so a test can control exactly when an operation completes. */
+  function deferred() {
+    let resolve!: () => void;
+    let reject!: (err: Error) => void;
+    const promise = new Promise<void>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    return { promise, resolve, reject };
+  }
+
+  it("runs operations in order, never overlapping", async () => {
+    const order: string[] = [];
+    let generation = 0;
+    const enqueue = createPersistQueue(() => generation);
+
+    const first = deferred();
+    const a = enqueue(0, async () => {
+      order.push("a:start");
+      await first.promise;
+      order.push("a:end");
+    });
+    const b = enqueue(0, async () => {
+      order.push("b:start");
+    });
+
+    first.resolve();
+    await Promise.all([a, b]);
+    // b must not begin before a finishes: an interleaved delete and save is exactly how a newer
+    // account's stored session gets removed by an older account's pending clear.
+    expect(order).toEqual(["a:start", "a:end", "b:start"]);
+  });
+
+  it("skips an operation whose generation has been superseded while it waited", async () => {
+    let generation = 0;
+    const enqueue = createPersistQueue(() => generation);
+    const blocker = deferred();
+
+    const held = enqueue(0, () => blocker.promise);
+    const staleOp = jest.fn().mockResolvedValue(undefined);
+    const stale = enqueue(0, staleOp);
+
+    // A sign-in lands while the queue is blocked — the classic sequence this guard exists for.
+    generation = 1;
+
+    blocker.resolve();
+    await Promise.all([held, stale]);
+    expect(staleOp).not.toHaveBeenCalled();
+  });
+
+  it("runs an operation issued by the CURRENT generation", async () => {
+    let generation = 0;
+    const enqueue = createPersistQueue(() => generation);
+    generation = 1;
+    const op = jest.fn().mockResolvedValue(undefined);
+    await enqueue(1, op);
+    expect(op).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps draining after a rejected operation", async () => {
+    // A single keychain failure must not disable every later write for the life of the process.
+    let generation = 0;
+    const enqueue = createPersistQueue(() => generation);
+
+    const failing = enqueue(0, () => Promise.reject(new Error("keychain unavailable")));
+    await expect(failing).rejects.toThrow("keychain unavailable");
+
+    const after = jest.fn().mockResolvedValue(undefined);
+    await enqueue(0, after);
+    expect(after).toHaveBeenCalledTimes(1);
+  });
+
+  it("propagates the failure to the caller that issued it", async () => {
+    // signIn depends on this: a failed save must reject so the login screen shows a failure rather than
+    // navigating into an app whose session was never written.
+    let generation = 0;
+    const enqueue = createPersistQueue(() => generation);
+    await expect(enqueue(0, () => Promise.reject(new Error("write failed")))).rejects.toThrow(
+      "write failed",
+    );
   });
 });

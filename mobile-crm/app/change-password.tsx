@@ -79,7 +79,7 @@ export default function ChangePasswordScreen() {
       await authApi.me(
         <T,>(path: string, opts: ApiFetchOptions = {}) =>
           // A no-op unauthorized handler: this probe decides what happens, and letting the fetcher's
-          // handler sign out first would race the navigation below.
+          // handler sign out first would race the navigation below. `me()` already sends officeId: null.
           fetcher<T>(path, { ...opts, onUnauthorized: () => {} }),
         session.token,
       );
@@ -99,6 +99,13 @@ export default function ChangePasswordScreen() {
       await fetcher("/auth/local/change-password", {
         method: "POST",
         body: { currentPassword: current, newPassword: next },
+        // NO x-office-id. Changing a password is a global auth action, but authMiddleware resolves the
+        // office header BEFORE it applies this route's change-password exemption (middleware/auth.ts
+        // 73-81 vs 97-105). So a session still carrying a revoked secondary office gets
+        // 403 "No access to requested office" before the password handler is ever reached — and cannot
+        // clear that office either, because accessible-offices is itself blocked by the same gate. The
+        // account would be permanently unable to complete a change the app insists on.
+        officeId: null,
         // A 401 here is ambiguous: the server returns it BOTH for a wrong current password and for a
         // dead bearer token (authMiddleware rejects before the handler runs). Signing out on the first
         // would eject a forced-change user for one typo; NOT signing out on the second would strand them
@@ -211,9 +218,32 @@ export default function ChangePasswordScreen() {
               <Text style={formStyles.buttonText}>Update password</Text>
             )}
           </Pressable>
+
+          {/* Without this the screen is a trap. A forced-change session routes here exclusively, a wrong
+              current password deliberately does NOT sign the user out, and relaunching restores the
+              session and lands here again — so on a shared device one account stuck on this form locks
+              every other person out of the app entirely. */}
+          <Pressable
+            testID="change-password-sign-out"
+            onPress={async () => {
+              await signOut();
+              router.replace("/login");
+            }}
+            disabled={busy}
+            accessibilityRole="button"
+            accessibilityLabel="Sign out"
+            style={styles.signOut}
+          >
+            <Text style={styles.signOutText}>Sign out</Text>
+          </Pressable>
         </ScrollView>
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
 }
 
+
+const styles = StyleSheet.create({
+  signOut: { marginTop: theme.space.lg, alignItems: "center", paddingVertical: theme.space.md },
+  signOutText: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.textSecondary },
+});

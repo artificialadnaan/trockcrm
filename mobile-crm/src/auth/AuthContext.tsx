@@ -1,7 +1,8 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { apiFetch, ApiError, type ApiFetchOptions } from "../api/client";
 import * as authApi from "../api/endpoints/auth";
-import { chooseActiveOffice } from "./office";
+import { chooseActiveOffice, type OfficeProbe } from "./office";
+import { createPersistQueue } from "./persist-queue";
 import { clearSession, isAllowedRole, loadSession, saveSession, type Session } from "./session";
 import type { CrmUser } from "../api/types";
 
@@ -36,17 +37,39 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const sessionRef = useRef<Session | null>(null);
   sessionRef.current = session ?? null;
 
+  /**
+   * Bumped by every deliberate identity change (sign-in, sign-out). Async work captures it BEFORE it
+   * starts and re-checks afterwards, which object identity alone cannot do: the launch restore reads the
+   * keychain before it has a session object to compare against, so a sign-in that lands mid-read would
+   * otherwise be silently overwritten by whatever the slow read returns.
+   */
+  const authGenerationRef = useRef(0);
+
+  /**
+   * Serialises every SecureStore mutation and drops any a newer identity change has superseded — see
+   * createPersistQueue. Held in a ref so it is created once and survives re-renders.
+   */
+  const enqueuePersistRef = useRef<ReturnType<typeof createPersistQueue> | null>(null);
+  if (!enqueuePersistRef.current) {
+    enqueuePersistRef.current = createPersistQueue(() => authGenerationRef.current);
+  }
+  const enqueuePersist = useCallback(
+    (generation: number, op: () => Promise<void>) => enqueuePersistRef.current!(generation, op),
+    [],
+  );
+
   const signOut = useCallback(async () => {
+    const generation = ++authGenerationRef.current;
     sessionRef.current = null;
     setSession(null);
     try {
-      await clearSession();
+      await enqueuePersist(generation, clearSession);
     } catch {
       // clearSession already tried both delete and overwrite. In-memory state is signed out either way,
       // and swallowing here keeps callers that await signOut() and then navigate — the change-password
       // screen does exactly that — from being stranded on a dead screen by a keychain hiccup.
     }
-  }, []);
+  }, [enqueuePersist]);
 
   const fetcher = useCallback(
     <T,>(path: string, opts: ApiFetchOptions = {}) => {
@@ -80,6 +103,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     // request is in flight — a sign-out, or a sign-in as someone else — applying the response would
     // resurrect a dead session, or worse, overwrite a NEWER account with the previous one.
     let restoring: Session | null = null;
+    // Captured BEFORE the keychain read, because until that read returns there is no session object to
+    // compare identities against. The login screen is usable the whole time this is pending: a cold open
+    // straight to /login, a sign-in as B, then a slow read returning A would have replaced B with A.
+    const generation = authGenerationRef.current;
 
     (async () => {
       let stored: Session | null = null;
@@ -89,10 +116,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         // SecureStore can reject (keychain unavailable, corrupted item). Settling to null sends the user
         // to login; leaving `session` undefined would strand the index route on its spinner forever with
         // no way to reach the login screen at all.
-        if (!cancelled) setSession(null);
+        if (!cancelled && generation === authGenerationRef.current) setSession(null);
         return;
       }
-      if (cancelled) return;
+      if (cancelled || generation !== authGenerationRef.current) return;
       if (!stored) {
         setSession(null);
         return;
@@ -132,39 +159,58 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         // the list that actually says whether the grant still stands, so only a mismatch pays for it.
         const serverOffice = fresh.activeOfficeId ?? fresh.officeId ?? null;
 
-        // Only a stored office that DIFFERS from the primary one costs a lookup — see chooseActiveOffice.
-        let accessibleOfficeIds: string[] | null = null;
+        /**
+         * Probe a stored SECONDARY office with a second /auth/me, this time carrying x-office-id.
+         *
+         * One request answers both questions authoritatively:
+         *   - authMiddleware checks office access first and 403s a revoked grant, so the status IS the
+         *     grant check; and
+         *   - when it succeeds, the `role` it returns is the office-EFFECTIVE role, because
+         *     user_office_access.role_override is applied for the requested office (middleware/auth.ts
+         *     73-81). /auth/me without the header can only ever report the home-office role, so merging
+         *     that over the cached user showed a rep who is an admin in this office as a rep — while
+         *     their requests were being authorised as an admin.
+         *
+         * Also survives a forced password change, which /auth/accessible-offices does not: only
+         * /auth/me, /auth/logout and /auth/local/change-password are exempt from that gate.
+         */
+        let probe: OfficeProbe | null = null;
+        let effective = fresh;
         if (stored.activeOfficeId && stored.activeOfficeId !== serverOffice) {
           try {
-            const offices = await authApi.accessibleOffices(
-              // No x-office-id here either: if the grant WAS revoked, sending it would 403 the very call
-              // whose job is to find that out.
-              <T,>(path: string, opts: ApiFetchOptions = {}) => scoped<T>(path, { ...opts, officeId: null }),
+            const inOffice = await authApi.me(
+              <T,>(path: string, opts: ApiFetchOptions = {}) =>
+                scoped<T>(path, { ...opts, officeId: stored!.activeOfficeId }),
               stored.token,
             );
             if (cancelled || sessionRef.current !== restoring) return;
-            accessibleOfficeIds = offices.map((o) => o.id);
+            probe = "granted";
+            effective = inOffice;
           } catch (err) {
             if (cancelled || sessionRef.current !== restoring) return;
             if (err instanceof ApiError && err.status === 401) return;
-            // Leave it null — "could not determine", which chooseActiveOffice treats as keep-what-you-had.
+            // 403 is the definitive "no access to requested office". Anything else — offline, 5xx, or the
+            // password-change gate answering before the office question — leaves it genuinely unknown.
+            probe = err instanceof ApiError && err.status === 403 ? "revoked" : "unknown";
           }
         }
 
         const keepActive = chooseActiveOffice({
           storedActiveOfficeId: stored.activeOfficeId,
           serverOfficeId: serverOffice,
-          accessibleOfficeIds,
+          probe,
         });
 
         const merged: Session = {
           ...stored,
-          user: { ...stored.user, ...fresh },
+          // `effective` is the in-office user when a secondary office was kept, and the home-office user
+          // otherwise — so role and activeOfficeId always describe the office requests will actually use.
+          user: { ...stored.user, ...(keepActive ? effective : fresh) },
           activeOfficeId: keepActive,
         };
         sessionRef.current = merged;
         setSession(merged);
-        await saveSession(merged);
+        await enqueuePersist(generation, () => saveSession(merged));
       } catch (err) {
         // A 401 already triggered the scoped signOut above. Anything else — offline, 5xx, timeout — must
         // NOT sign the user out: the app opens on the cached session and screens surface their own
@@ -179,34 +225,52 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     };
   }, [fetcher, signOut]);
 
-  const signIn = useCallback(async (input: { email: string; password: string }) => {
-    const result = await authApi.login(apiFetch, input);
-    if (!isAllowedRole(result.user.role)) {
-      // The server also refuses field_contractor at /api/auth/mobile-login; this is the client-side
-      // mirror so the message is specific instead of a bare 403 on the first screen.
-      throw new RoleNotAllowedError();
-    }
-    const next: Session = {
-      token: result.token,
-      user: result.user,
-      activeOfficeId: result.user.activeOfficeId ?? null,
-    };
-    // Persist FIRST. If SecureStore rejects after we had already published the session, signIn still
-    // rejects — so the login screen shows a failure and does not navigate, while the context and fetcher
-    // are silently authenticated behind it. Writing first means a storage failure leaves nothing behind.
-    await saveSession(next);
-    sessionRef.current = next;
-    setSession(next);
-  }, []);
+  const signIn = useCallback(
+    async (input: { email: string; password: string }) => {
+      const result = await authApi.login(apiFetch, input);
+      if (!isAllowedRole(result.user.role)) {
+        // The server also refuses field_contractor at /api/auth/mobile-login; this is the client-side
+        // mirror so the message is specific instead of a bare 403 on the first screen.
+        throw new RoleNotAllowedError();
+      }
+      const next: Session = {
+        token: result.token,
+        user: result.user,
+        activeOfficeId: result.user.activeOfficeId ?? null,
+      };
+      // Claim the generation BEFORE writing, so any restore or sign-out still in flight is superseded
+      // rather than allowed to overwrite this account.
+      const generation = ++authGenerationRef.current;
+      // Persist FIRST. If SecureStore rejects after we had already published the session, signIn still
+      // rejects — so the login screen shows a failure and does not navigate, while the context and
+      // fetcher are silently authenticated behind it. Writing first leaves nothing behind on failure.
+      await enqueuePersist(generation, () => saveSession(next));
+      if (generation !== authGenerationRef.current) return;
+      sessionRef.current = next;
+      setSession(next);
+    },
+    [enqueuePersist],
+  );
 
-  const setActiveOffice = useCallback(async (officeId: string | null) => {
-    const current = sessionRef.current;
-    if (!current) return;
-    const next: Session = { ...current, activeOfficeId: officeId };
-    sessionRef.current = next;
-    setSession(next);
-    await saveSession(next);
-  }, []);
+  const setActiveOffice = useCallback(
+    async (officeId: string | null) => {
+      const current = sessionRef.current;
+      if (!current) return;
+      const next: Session = { ...current, activeOfficeId: officeId };
+      sessionRef.current = next;
+      setSession(next);
+      try {
+        // Not a new identity, so it does NOT bump the generation — it rides on the current one and is
+        // skipped if a sign-out or sign-in overtakes it.
+        await enqueuePersist(authGenerationRef.current, () => saveSession(next));
+      } catch {
+        // The switch has already been applied in memory and the app is usable in the new office. A
+        // failed write only means the choice will not survive a relaunch — not a reason to reject here
+        // and leave the caller with an unhandled rejection for a switch that visibly succeeded.
+      }
+    },
+    [enqueuePersist],
+  );
 
   const value = useMemo<AuthState>(
     () => ({ session, signIn, signOut, setActiveOffice, fetcher }),
