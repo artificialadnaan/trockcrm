@@ -17,6 +17,7 @@ import * as dealsApi from "../../../src/api/endpoints/deals";
 import { useAuth } from "../../../src/auth/AuthContext";
 import { useQueryScope } from "../../../src/auth/useOfficeId";
 import { displayAmount, showsAtRisk } from "../../../src/components/DealCard";
+import { mailtoUrl, telUrl } from "../../../src/contact-links";
 import { daysSince, formatDate, formatLocation } from "../../../src/format";
 import { qk } from "../../../src/query/keys";
 import { theme } from "../../../src/theme/theme";
@@ -199,7 +200,7 @@ export default function DealDetailScreen() {
                 testID="call-contact"
                 label="Call"
                 value={contactPhone}
-                url={`tel:${contactPhone.replace(/[^\d+]/g, "")}`}
+                url={telUrl(contactPhone)}
               />
             ) : null}
             {deal.primaryContactEmail ? (
@@ -207,7 +208,7 @@ export default function DealDetailScreen() {
                 testID="email-contact"
                 label="Email"
                 value={deal.primaryContactEmail}
-                url={`mailto:${deal.primaryContactEmail}`}
+                url={mailtoUrl(deal.primaryContactEmail)}
               />
             ) : null}
           </Section>
