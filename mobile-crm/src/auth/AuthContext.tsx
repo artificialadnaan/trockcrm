@@ -3,7 +3,9 @@ import { AppState } from "react-native";
 import { apiFetch, ApiError, type ApiFetchOptions } from "../api/client";
 import * as authApi from "../api/endpoints/auth";
 import { chooseActiveOffice, type OfficeProbe } from "./office";
+import { createSerialRunner } from "../lib/serial";
 import { createPersistQueue } from "./persist-queue";
+import { hasAnyCrmSurface } from "./surfaces";
 import { clearSession, isAllowedRole, loadSession, saveSession, type Session } from "./session";
 import type { CrmUser } from "../api/types";
 
@@ -54,6 +56,18 @@ export class RoleNotAllowedError extends Error {
   constructor() {
     super("This account cannot sign in to the CRM app.");
     this.name = "RoleNotAllowedError";
+  }
+}
+
+/**
+ * Thrown when the account is a valid CRM user but its role reaches none of this app's surfaces — today,
+ * `construction`, which the web grants only Capture/Feed/Tickets. Distinct from RoleNotAllowedError so
+ * the login screen can point them at T-Rock Cam instead of implying their credentials are wrong.
+ */
+export class NoAccessibleSurfaceError extends Error {
+  constructor() {
+    super("This account doesn't have access to the CRM app. Use T-Rock Cam for field work.");
+    this.name = "NoAccessibleSurfaceError";
   }
 }
 
@@ -135,7 +149,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
    * trustworthy: a single launch request that failed transiently used to leave the user past the gate
    * for the entire life of the process, with no retry and nothing on screen to indicate it.
    */
-  const revalidate = useCallback(async (): Promise<void> => {
+  const runRevalidation = useCallback(async (): Promise<void> => {
     // The session this revalidation is allowed to write back. If anything replaces it while the request
     // is in flight — a sign-out, or a sign-in as someone else — applying the response would resurrect a
     // dead session, or worse, overwrite a NEWER account with the previous one.
@@ -161,7 +175,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       try {
         const fresh = await authApi.me(scoped, stored.token);
         if (sessionRef.current !== stored) return;
-        if (!isAllowedRole(fresh.role)) {
+        // A role can change server-side after sign-in. Both checks belong here, not just the first: a
+        // user demoted to `construction` still passes requireCrmUser but reaches no surface in this app,
+        // so leaving them signed in means an authenticated shell with every screen hidden.
+        if (!isAllowedRole(fresh.role) || !hasAnyCrmSurface(fresh.role)) {
           await signOut();
           return;
         }
@@ -231,19 +248,52 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
          *                             actually enforces. Keep the cached role instead; a stale role is
          *                             better than a confidently wrong one.
          */
+        /**
+         * The ONBOARDING fields are office-scoped, and that changes what an unconfirmed office means.
+         *
+         * withOnboardingGate resolves the office slug to a tenant SCHEMA and counts pending cleanup
+         * inside it (auth/service.ts:68-130), so `requiresOnboarding` from the header-less /auth/me
+         * describes the HOME office only. When a secondary office is kept without a successful probe,
+         * copying those fields over would answer a question about office A with a fact about office B —
+         * and if cleanup is pending only in the secondary office, that answer is `false`, which opens the
+         * gate. Keep the cached office-scoped values instead, and stay "stale" so the retry keeps running.
+         */
+        const officeConfirmed = !keepActive || probe === "granted";
+        const officeScopedGate = officeConfirmed
+          ? {}
+          : {
+              requiresOnboarding: stored.user.requiresOnboarding,
+              onboardingPendingCount: stored.user.onboardingPendingCount,
+              role: stored.user.role,
+            };
+
         const merged: Session = {
           ...stored,
           user: !keepActive
             ? { ...stored.user, ...fresh }
             : probe === "granted"
               ? { ...stored.user, ...effective }
-              : { ...stored.user, ...fresh, role: stored.user.role },
+              : { ...stored.user, ...fresh, ...officeScopedGate },
           activeOfficeId: keepActive,
         };
         sessionRef.current = merged;
         setSession(merged);
-        setGate("fresh");
-        await persistRef.current!.save(generation, () => saveSession(merged));
+        // "fresh" ONLY when the office the session will actually use was confirmed. Marking an
+        // unconfirmed secondary office fresh both opens the gate on home-office data and disables the
+        // retry timer, so nothing would ever correct it.
+        setGate(officeConfirmed ? "fresh" : "stale");
+
+        // Persist OUTSIDE the try below, and guarded on its own. `sessionRef.current` is now `merged`, so
+        // the catch's identity check would treat the provider's own update as a session replacement and
+        // swallow a keychain failure — leaving memory fresh, disk holding the previous onboarding, role
+        // and office state, and no retry. The next offline launch would restore that obsolete state.
+        try {
+          await persistRef.current!.save(generation, () => saveSession(merged));
+        } catch {
+          // The confirmed in-memory session STANDS — rolling it back would discard good server state over
+          // a storage problem. Only the write is retried, via the stale path.
+          if (sessionRef.current === merged) setGate("stale");
+        }
       } catch (err) {
         // A 401 already triggered the scoped signOut above. Anything else — offline, 5xx, timeout — must
         // NOT sign the user out: the app opens on the cached session and screens surface their own
@@ -255,6 +305,25 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setGate("stale");
       }
   }, [fetcher, signOut]);
+
+  /**
+   * Public entry point: SERIALISED so overlapping callers cannot discard each other's results.
+   *
+   * Four things now trigger revalidation — launch, the stale retry, the foreground listener, and the
+   * onboarding screen's button — and without sequencing two can be in flight at once. Both capture the
+   * same `stored`, the first response to land replaces sessionRef.current, and the second then fails its
+   * own identity check and is thrown away *even though it is newer*. If onboarding was assigned or
+   * cleared between the two requests, the older answer wins and marks the gate fresh.
+   *
+   * Chaining makes the newest invocation the last to run, and each one re-reads sessionRef.current when
+   * its turn arrives, so it sees whatever the previous one wrote.
+   */
+  const revalidateRunnerRef = useRef<ReturnType<typeof createSerialRunner> | null>(null);
+  if (!revalidateRunnerRef.current) revalidateRunnerRef.current = createSerialRunner();
+  const revalidate = useCallback(
+    (): Promise<void> => revalidateRunnerRef.current!(runRevalidation),
+    [runRevalidation],
+  );
 
   // Restore from the keychain on launch, publish, then confirm against the server.
   useEffect(() => {
@@ -333,6 +402,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         // The server also refuses field_contractor at /api/auth/mobile-login; this is the client-side
         // mirror so the message is specific instead of a bare 403 on the first screen.
         throw new RoleNotAllowedError();
+      }
+      if (!hasAnyCrmSurface(result.user.role)) {
+        // Passes the server's CRM boundary but reaches none of this app's surfaces — `construction`
+        // today. Letting them in would land them in an app with every screen hidden; the web grants that
+        // role only Capture/Feed/Tickets, and T-Rock Cam already covers the field work.
+        throw new NoAccessibleSurfaceError();
       }
       const next: Session = {
         token: result.token,

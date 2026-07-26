@@ -1,3 +1,5 @@
+import { createSerialRunner } from "../lib/serial";
+
 /**
  * Serialises SecureStore mutations so an older write can never land on top of a newer one.
  *
@@ -22,17 +24,13 @@
  * happened while the operation sat in the queue.
  */
 export function createPersistQueue(currentGeneration: () => number) {
-  let chain: Promise<unknown> = Promise.resolve();
+  // Ordering comes from the shared runner; this module adds only the supersession policy.
+  const run = createSerialRunner();
 
   function enqueue(op: () => Promise<void>, shouldRun: () => boolean): Promise<void> {
-    const run = chain.then(() => (shouldRun() ? op() : undefined));
-    // The chain must survive a rejection or every later write would be skipped for the life of the app.
-    // `run` itself still rejects, so callers that care — signIn does — can react to a failed write.
-    chain = run.then(
-      () => undefined,
-      () => undefined,
-    );
-    return run.then(() => undefined);
+    return run(async () => {
+      if (shouldRun()) await op();
+    });
   }
 
   return {

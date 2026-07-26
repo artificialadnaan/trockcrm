@@ -13,13 +13,16 @@ import {
 import { useRouter } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { ApiError } from "../src/api/client";
-import { RoleNotAllowedError, useAuth } from "../src/auth/AuthContext";
+import { NoAccessibleSurfaceError, RoleNotAllowedError, useAuth } from "../src/auth/AuthContext";
 import { formStyles } from "../src/theme/formStyles";
 import { theme } from "../src/theme/theme";
 
 /** Turn a failure into something a rep on a roof can act on, rather than a status code. */
 function messageFor(err: unknown): string {
   if (err instanceof RoleNotAllowedError) return err.message;
+  // Valid credentials, valid CRM user, but no surface in THIS app — say so and name the app they want,
+  // rather than a generic failure that reads as "your password is wrong".
+  if (err instanceof NoAccessibleSurfaceError) return err.message;
   if (err instanceof ApiError) {
     // status 0 covers BOTH a transport failure and a build with no API host configured. They need
     // different words: retrying fixes the first and can never fix the second, so a misconfigured
