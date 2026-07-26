@@ -90,19 +90,45 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setSession(stored);
 
       try {
-        const fresh = await authApi.me(fetcher, stored.token);
+        // A SCOPED unauthorized handler, not the fetcher's global one. The global handler runs inside
+        // apiFetch — i.e. BEFORE the identity check below — so a late 401 belonging to this old token
+        // would sign out whatever session is current by then, including a different account the user has
+        // since signed into. This one only tears down the session it was actually issued for.
+        const fresh = await authApi.me(
+          (path, opts) =>
+            fetcher(path, {
+              ...opts,
+              onUnauthorized: () => {
+                if (!cancelled && sessionRef.current === restoring) void signOut();
+              },
+            }),
+          stored.token,
+        );
         if (cancelled || sessionRef.current !== restoring) return;
         if (!isAllowedRole(fresh.role)) {
           await signOut();
           return;
         }
-        const merged: Session = { ...stored, user: { ...stored.user, ...fresh } };
+
+        // Reconcile the ACTIVE OFFICE too, not just the user. `activeOfficeId` is a persisted secondary
+        // office; if an admin moved the user's primary office or revoked that grant, keeping it would
+        // send a stale x-office-id on every subsequent request and 403 the whole app. Drop it whenever
+        // the server no longer reports it, and fall back to the office the server does report.
+        const serverOffice = fresh.activeOfficeId ?? fresh.officeId ?? null;
+        const keepActive =
+          stored.activeOfficeId && stored.activeOfficeId === serverOffice ? stored.activeOfficeId : null;
+
+        const merged: Session = {
+          ...stored,
+          user: { ...stored.user, ...fresh },
+          activeOfficeId: keepActive,
+        };
         sessionRef.current = merged;
         setSession(merged);
         await saveSession(merged);
       } catch (err) {
-        // A 401 already triggered signOut via onUnauthorized. Anything else — offline, 5xx, timeout —
-        // must NOT sign the user out: the app opens on the cached session and screens surface their own
+        // A 401 already triggered the scoped signOut above. Anything else — offline, 5xx, timeout — must
+        // NOT sign the user out: the app opens on the cached session and screens surface their own
         // errors. Signing out on a flaky connection is exactly the wrong behaviour in the field.
         if (cancelled) return;
         if (err instanceof ApiError && err.status === 401) return;
@@ -126,9 +152,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       user: result.user,
       activeOfficeId: result.user.activeOfficeId ?? null,
     };
+    // Persist FIRST. If SecureStore rejects after we had already published the session, signIn still
+    // rejects — so the login screen shows a failure and does not navigate, while the context and fetcher
+    // are silently authenticated behind it. Writing first means a storage failure leaves nothing behind.
+    await saveSession(next);
     sessionRef.current = next;
     setSession(next);
-    await saveSession(next);
   }, []);
 
   const setActiveOffice = useCallback(async (officeId: string | null) => {

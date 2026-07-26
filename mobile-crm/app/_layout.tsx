@@ -19,10 +19,13 @@ const queryClient = new QueryClient({
 });
 
 export default function RootLayout() {
-  const [fontsLoaded] = useFonts({ Inter_400Regular, Inter_600SemiBold, Inter_700Bold });
+  const [fontsLoaded, fontError] = useFonts({ Inter_400Regular, Inter_600SemiBold, Inter_700Bold });
 
-  // Render nothing until fonts resolve, so text doesn't reflow from system font to Inter on first paint.
-  if (!fontsLoaded) return null;
+  // Hold the first paint until fonts resolve, so text doesn't reflow from the system font to Inter.
+  // But `useFonts` also reports FAILURE, and gating on `loaded` alone would leave the app on a blank
+  // screen forever if a font asset failed to load. Proceeding with system fonts is far better than
+  // showing nothing: the app is legible, just not on-brand.
+  if (!fontsLoaded && !fontError) return null;
 
   return (
     <QueryClientProvider client={queryClient}>

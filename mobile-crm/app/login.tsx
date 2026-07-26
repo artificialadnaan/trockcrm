@@ -14,6 +14,7 @@ import { useRouter } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { ApiError } from "../src/api/client";
 import { RoleNotAllowedError, useAuth } from "../src/auth/AuthContext";
+import { formStyles } from "../src/theme/formStyles";
 import { theme } from "../src/theme/theme";
 
 /** Turn a failure into something a rep on a roof can act on, rather than a status code. */
@@ -60,19 +61,19 @@ export default function LoginScreen() {
   }
 
   return (
-    <SafeAreaView style={styles.safe}>
-      <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === "ios" ? "padding" : undefined}>
-        <ScrollView contentContainerStyle={styles.body} keyboardShouldPersistTaps="handled">
+    <SafeAreaView style={formStyles.safe}>
+      <KeyboardAvoidingView style={formStyles.flex} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+        <ScrollView contentContainerStyle={formStyles.body} keyboardShouldPersistTaps="handled">
           <Text style={styles.title}>T-Rock CRM</Text>
-          <Text style={styles.subtitle}>Sign in with your CRM account.</Text>
+          <Text style={formStyles.subtitle}>Sign in with your CRM account.</Text>
 
           {error ? (
-            <View style={styles.errorBox} accessibilityRole="alert">
-              <Text style={styles.errorText}>{error}</Text>
+            <View style={formStyles.errorBox} accessibilityRole="alert">
+              <Text style={formStyles.errorText}>{error}</Text>
             </View>
           ) : null}
 
-          <Text style={styles.label}>Email</Text>
+          <Text style={formStyles.label}>Email</Text>
           <TextInput
             testID="login-email"
             value={email}
@@ -81,12 +82,12 @@ export default function LoginScreen() {
             autoCorrect={false}
             keyboardType="email-address"
             textContentType="emailAddress"
-            style={styles.input}
+            style={formStyles.input}
             placeholderTextColor={theme.color.textMuted}
             placeholder="you@trockgc.com"
           />
 
-          <Text style={styles.label}>Password</Text>
+          <Text style={formStyles.label}>Password</Text>
           <TextInput
             testID="login-password"
             value={secret}
@@ -95,7 +96,7 @@ export default function LoginScreen() {
             autoCapitalize="none"
             autoCorrect={false}
             textContentType="password"
-            style={styles.input}
+            style={formStyles.input}
             placeholderTextColor={theme.color.textMuted}
             onSubmitEditing={onSubmit}
             returnKeyType="go"
@@ -107,12 +108,12 @@ export default function LoginScreen() {
             disabled={!canSubmit}
             accessibilityRole="button"
             accessibilityLabel="Sign in"
-            style={[styles.button, !canSubmit && styles.buttonDisabled]}
+            style={[formStyles.button, !canSubmit && formStyles.buttonDisabled]}
           >
             {busy ? (
               <ActivityIndicator color={theme.color.textInverse} />
             ) : (
-              <Text style={styles.buttonText}>Sign in</Text>
+              <Text style={formStyles.buttonText}>Sign in</Text>
             )}
           </Pressable>
         </ScrollView>
@@ -121,50 +122,7 @@ export default function LoginScreen() {
   );
 }
 
+// Login's headline is larger than the shared form title — the only intentional divergence.
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: theme.color.surface },
-  flex: { flex: 1 },
-  body: { padding: theme.space.xl, gap: theme.space.sm, flexGrow: 1, justifyContent: "center" },
   title: { fontFamily: theme.font.bold, fontSize: 28, color: theme.color.inkNavy },
-  subtitle: {
-    fontFamily: theme.font.regular,
-    fontSize: 15,
-    color: theme.color.textSecondary,
-    marginBottom: theme.space.lg,
-  },
-  label: {
-    fontFamily: theme.font.semibold,
-    fontSize: 13,
-    color: theme.color.textSecondary,
-    marginTop: theme.space.md,
-  },
-  input: {
-    borderWidth: 1,
-    borderColor: theme.color.border,
-    borderRadius: theme.radius.md,
-    paddingHorizontal: theme.space.md,
-    paddingVertical: theme.space.md,
-    fontFamily: theme.font.regular,
-    fontSize: 16,
-    color: theme.color.textPrimary,
-    backgroundColor: theme.color.surface,
-  },
-  button: {
-    marginTop: theme.space.xl,
-    backgroundColor: theme.color.brandRed,
-    borderRadius: theme.radius.md,
-    paddingVertical: theme.space.lg,
-    alignItems: "center",
-  },
-  buttonDisabled: { opacity: 0.5 },
-  buttonText: { fontFamily: theme.font.bold, fontSize: 16, color: theme.color.textInverse },
-  errorBox: {
-    backgroundColor: "#FEF2F2",
-    borderColor: theme.color.brandRed,
-    borderWidth: 1,
-    borderRadius: theme.radius.md,
-    padding: theme.space.md,
-    marginBottom: theme.space.sm,
-  },
-  errorText: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.brandRedDeep },
 });

@@ -81,7 +81,14 @@ export async function apiFetch<T = unknown>(path: string, opts: ApiFetchOptions 
   if (UNSAFE_METHODS.has(method.toUpperCase())) headers["x-requested-with"] = "XMLHttpRequest";
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  // Both the timeout and a caller's own signal abort the SAME controller, so `controller.signal.aborted`
+  // alone cannot say which fired — and reporting a deliberate unmount cancellation as "Request timed out"
+  // sends screens down an error path for something that is not an error. Track the cause explicitly.
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
   if (signal) {
     if (signal.aborted) controller.abort();
     else signal.addEventListener("abort", () => controller.abort(), { once: true });
@@ -96,7 +103,10 @@ export async function apiFetch<T = unknown>(path: string, opts: ApiFetchOptions 
       signal: controller.signal,
     });
   } catch (e) {
-    if (controller.signal.aborted) throw new ApiError("Request timed out", 408);
+    if (timedOut) throw new ApiError("Request timed out", 408);
+    // Caller-initiated cancellation. Status 0 keeps it in the transport-failure bucket callers already
+    // handle, with a message that does not claim the server was slow.
+    if (controller.signal.aborted) throw new ApiError("Request cancelled", 0);
     // Wrap transport-level failures (offline, DNS, refused) as ApiError(0) so
     // callers only ever handle one error type.
     throw new ApiError(e instanceof Error ? e.message : "Network request failed", 0);
