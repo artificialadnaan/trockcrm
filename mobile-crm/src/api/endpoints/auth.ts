@@ -4,6 +4,11 @@ import type { ApiFetchOptions } from "../client";
 /**
  * Endpoint modules take the fetcher by injection rather than importing apiFetch directly, so they are
  * unit-testable with no network and no module mocking. Mirrors mobile/src/api/endpoints.ts.
+ *
+ * NOTE ON ENVELOPES: the CRM auth routes are not uniform. /auth/mobile-login returns {token, user} at the
+ * top level, but /auth/me returns {user, csrfToken?} and /auth/accessible-offices returns {offices}.
+ * Unwrapping happens HERE so the rest of the app sees plain values — and so a wrong assumption is a
+ * one-line fix in one place rather than scattered across screens.
  */
 export type Fetcher = <T>(path: string, opts?: ApiFetchOptions) => Promise<T>;
 
@@ -25,10 +30,16 @@ export async function login(
 /**
  * Revalidate a stored session against the server on launch. The local expiry check in session.ts only
  * reads the JWT's `exp`; this is what catches a deactivated user, a bumped token_version, or a role
- * change — all of which the server enforces per-request but which a stored token cannot know about.
+ * change — none of which a stored token can know about.
+ *
+ * Sends NO x-office-id. The stored session's office may be stale: if an admin moved the user's primary
+ * office or revoked a secondary-office grant, that header is rejected before /auth/me can tell us the
+ * current one — the exact call whose job is to resolve the staleness would be the one blocked by it.
+ * Omitting the header lets the server fall back to the user's own office.
  */
 export async function me(fetcher: Fetcher, token: string): Promise<CrmUser> {
-  return fetcher<CrmUser>("/auth/me", { token });
+  const res = await fetcher<{ user: CrmUser }>("/auth/me", { token, officeId: null });
+  return res.user;
 }
 
 /**
@@ -37,5 +48,6 @@ export async function me(fetcher: Fetcher, token: string): Promise<CrmUser> {
  * query reads — which is why the switcher has to be explicit and visible rather than inferred.
  */
 export async function accessibleOffices(fetcher: Fetcher, token: string): Promise<AccessibleOffice[]> {
-  return fetcher<AccessibleOffice[]>("/auth/accessible-offices", { token });
+  const res = await fetcher<{ offices: AccessibleOffice[] }>("/auth/accessible-offices", { token });
+  return res.offices ?? [];
 }

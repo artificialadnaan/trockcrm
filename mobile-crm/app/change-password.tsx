@@ -10,7 +10,7 @@ import {
   TextInput,
   View,
 } from "react-native";
-import { useRouter } from "expo-router";
+import { Redirect, useRouter } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { ApiError } from "../src/api/client";
 import { useAuth } from "../src/auth/AuthContext";
@@ -35,7 +35,9 @@ export default function ChangePasswordScreen() {
   const [error, setError] = useState<string | null>(null);
 
   const mismatch = confirm.length > 0 && next !== confirm;
-  const canSubmit = current.length > 0 && next.length > 0 && !mismatch && !busy;
+  // confirm must be NON-EMPTY, not merely non-mismatching: with an empty confirm, `mismatch` is false,
+  // so the typo safeguard would be skipped entirely and a mistyped password could lock the user out.
+  const canSubmit = current.length > 0 && next.length > 0 && confirm.length > 0 && !mismatch && !busy;
 
   async function onSubmit() {
     if (!canSubmit) return;
@@ -45,6 +47,10 @@ export default function ChangePasswordScreen() {
       await fetcher("/auth/local/change-password", {
         method: "POST",
         body: { currentPassword: current, newPassword: next },
+        // A 401 here means the CURRENT PASSWORD was wrong, not that the session died — the server returns
+        // 401 for a bad current password. The default handler would sign the user out on one typo,
+        // stranding a forced-change user who then cannot retry. Suppress it and show the error instead.
+        onUnauthorized: () => {},
       });
       // The flag lives on the server; the simplest correct way to pick up the cleared state is to sign
       // out and back in, rather than mutating a cached user object and hoping it matches.
@@ -58,7 +64,10 @@ export default function ChangePasswordScreen() {
     }
   }
 
-  if (!session) return null;
+  // No layout guard sits above this top-level route (unlike the (app) group), so returning null on a
+  // signed-out session would leave a permanently blank screen — reachable by opening the route directly,
+  // or by any path that clears the session while it is mounted.
+  if (!session) return <Redirect href="/login" />;
 
   return (
     <SafeAreaView style={styles.safe}>

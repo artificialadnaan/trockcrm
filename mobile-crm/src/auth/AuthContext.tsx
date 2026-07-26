@@ -63,21 +63,35 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   // token_version, or a role change — none of which a stored token can know about.
   useEffect(() => {
     let cancelled = false;
+    // The session that this restore is allowed to write back. If anything replaces the session while the
+    // request is in flight — a sign-out, or a sign-in as someone else — applying the response would
+    // resurrect a dead session, or worse, overwrite a NEWER account with the previous one.
+    let restoring: Session | null = null;
 
     (async () => {
-      const stored = await loadSession();
+      let stored: Session | null = null;
+      try {
+        stored = await loadSession();
+      } catch {
+        // SecureStore can reject (keychain unavailable, corrupted item). Settling to null sends the user
+        // to login; leaving `session` undefined would strand the index route on its spinner forever with
+        // no way to reach the login screen at all.
+        if (!cancelled) setSession(null);
+        return;
+      }
       if (cancelled) return;
       if (!stored) {
         setSession(null);
         return;
       }
 
+      restoring = stored;
       sessionRef.current = stored;
       setSession(stored);
 
       try {
         const fresh = await authApi.me(fetcher, stored.token);
-        if (cancelled) return;
+        if (cancelled || sessionRef.current !== restoring) return;
         if (!isAllowedRole(fresh.role)) {
           await signOut();
           return;

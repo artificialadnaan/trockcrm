@@ -67,3 +67,15 @@ jobs:
       - name: Test
         run: npm test
         working-directory: mobile-crm
+
+      # Typecheck and Jest both pass happily on an app that cannot actually produce a bundle — a Metro
+      # resolution error, a bad Babel config, a missing asset or a native-module mismatch surfaces only
+      # here. Without this step a broken app gets a green gate and the failure is not discovered until
+      # someone burns an EAS build on it.
+      - name: Bundle (expo export)
+        run: npm run build:export
+        working-directory: mobile-crm
+        env:
+          # Any syntactically valid host works: this step proves the bundle BUILDS, and reaches no network.
+          # The real host is supplied as an EAS build env var and is never committed.
+          EXPO_PUBLIC_API_BASE_URL: https://api.ci.invalid

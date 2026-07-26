@@ -20,9 +20,13 @@ import { theme } from "../src/theme/theme";
 function messageFor(err: unknown): string {
   if (err instanceof RoleNotAllowedError) return err.message;
   if (err instanceof ApiError) {
-    // 0 is the client's transport-failure code (offline, DNS, refused) — the common job-site case, and
-    // worth distinguishing from "wrong password" so nobody retypes a correct one five times.
-    if (err.status === 0) return "Can't reach the server. Check your connection and try again.";
+    // status 0 covers BOTH a transport failure and a build with no API host configured. They need
+    // different words: retrying fixes the first and can never fix the second, so a misconfigured
+    // TestFlight build must not read as an ordinary outage.
+    if (err.status === 0) {
+      if (err.message.startsWith("EXPO_PUBLIC_API_BASE_URL")) return err.message;
+      return "Can't reach the server. Check your connection and try again.";
+    }
     if (err.status === 401) return "Incorrect email or password.";
     if (err.status === 423) return "Too many attempts. Try again in a few minutes.";
     if (err.status === 403) return err.message;
