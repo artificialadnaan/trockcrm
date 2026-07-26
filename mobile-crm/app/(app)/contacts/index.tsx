@@ -64,6 +64,15 @@ export default function ContactsListScreen() {
 
   const offline = query.error instanceof ApiError && query.error.status === 0;
 
+  /**
+   * TanStack keeps every successfully-loaded page when a LATER fetch fails, and still sets `error`. So
+   * `error` alone must not drive the full-screen state: a failed page-3 request, or a failed pull-to-
+   * refresh, would replace a list the user is reading — and on a phone that is their whole screen.
+   * The full-screen error belongs to the case where nothing loaded at all; everything else goes inline.
+   */
+  const hasRows = contacts.length > 0;
+  const backgroundError = query.error && hasRows ? query.error : null;
+
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
       <View style={styles.header}>
@@ -91,7 +100,7 @@ export default function ContactsListScreen() {
         <View style={styles.center}>
           <ActivityIndicator color={theme.color.brandRed} />
         </View>
-      ) : query.error ? (
+      ) : query.error && !hasRows ? (
         // A retry BUTTON: this branch replaces the FlatList, so there is no RefreshControl left to pull.
         <View style={styles.center}>
           <Text style={styles.emptyTitle}>{offline ? "You're offline" : "Couldn't load contacts"}</Text>
@@ -130,6 +139,23 @@ export default function ContactsListScreen() {
           ListFooterComponent={
             query.isFetchingNextPage ? (
               <ActivityIndicator color={theme.color.brandRed} style={styles.footer} />
+            ) : backgroundError ? (
+              // Retry the operation that actually failed: another page, or the refresh. Calling refetch()
+              // for a failed page would silently reload page 1 and leave the gap the user hit.
+              <Pressable
+                testID="contacts-page-retry"
+                onPress={() =>
+                  void (query.isFetchNextPageError ? query.fetchNextPage() : query.refetch())
+                }
+                accessibilityRole="button"
+                style={styles.footerRetry}
+              >
+                <Text style={styles.retryText}>
+                  {query.isFetchNextPageError
+                    ? "Couldn't load more — tap to retry"
+                    : "Couldn't refresh — tap to retry"}
+                </Text>
+              </Pressable>
             ) : null
           }
           refreshControl={
@@ -208,6 +234,7 @@ const styles = StyleSheet.create({
     color: theme.color.textMuted,
   },
   footer: { paddingVertical: theme.space.lg },
+  footerRetry: { paddingVertical: theme.space.lg, alignItems: "center" },
   retryBtn: {
     marginTop: theme.space.sm,
     borderWidth: 1,
