@@ -362,7 +362,8 @@ function ContactAction({
   label: string;
   value: string;
   url: string;
-  onFailure: (message: string) => void;
+  // Nullable: openLink reports null on success, which clears a previous failure.
+  onFailure: (message: string | null) => void;
 }) {
   return (
     <Pressable

@@ -127,13 +127,14 @@ describe("openLink failure reporting", () => {
     return require("../lib/open-link") as typeof import("../lib/open-link");
   }
 
-  it("reports nothing when the link opens", async () => {
+  it("reports null when the link opens, clearing any previous failure", async () => {
     const openURL = jest.fn().mockResolvedValue(undefined);
     const { openLink } = withLinking(openURL);
-    const onFailure = jest.fn();
-    await openLink("tel:2145551212", onFailure);
+    const report = jest.fn();
+    await openLink("tel:2145551212", report);
     expect(openURL).toHaveBeenCalledWith("tel:2145551212");
-    expect(onFailure).not.toHaveBeenCalled();
+    // NOT "never called": reporting success is what stops a one-off failure sticking on the button.
+    expect(report).toHaveBeenCalledWith(null);
   });
 
   it.each([
@@ -144,9 +145,9 @@ describe("openLink failure reporting", () => {
     // The previous `.catch(() => undefined)` was a success-looking failure: the rep taps Call, nothing
     // happens, and nothing distinguishes a missing dialer from a slow one.
     const { openLink } = withLinking(jest.fn().mockRejectedValue(new Error("no handler")));
-    const onFailure = jest.fn();
-    await openLink(url, onFailure);
-    expect(onFailure).toHaveBeenCalledWith(`Couldn't ${verb} from this device.`);
+    const report = jest.fn();
+    await openLink(url, report);
+    expect(report).toHaveBeenCalledWith(`Couldn't ${verb} from this device.`);
   });
 
   it("never rethrows — a failed link must not crash the screen", async () => {
