@@ -160,24 +160,32 @@ export default function DealsListScreen() {
             <Text style={styles.retryText}>Try again</Text>
           </Pressable>
         </View>
-      ) : deals.length === 0 ? (
-        <View style={styles.center}>
-          <Text style={styles.errorTitle}>No deals</Text>
-          <Text style={styles.errorBody}>
-            {submittedSearch
-              ? "Nothing matched that search."
-              : scope === "mine"
-                ? "Nothing assigned to you yet. Try the All tab."
-                : scope === "watched"
-                  ? "You're not watching any deals yet."
-                  : "There are no deals in this office."}
-          </Text>
-        </View>
       ) : (
         <FlatList
           data={deals}
           keyExtractor={(d) => d.id}
-          contentContainerStyle={styles.list}
+          // `flexGrow` so the empty state centres in the viewport while the list still scrolls — which is
+          // what keeps pull-to-refresh reachable with zero rows.
+          contentContainerStyle={[styles.list, deals.length === 0 && styles.listEmpty]}
+          // The empty state lives INSIDE the list rather than replacing it. Swapping in a plain View
+          // unmounted the RefreshControl with it, so a rep whose filter legitimately returns nothing had
+          // no way to refresh — and refetchOnWindowFocus is off, so the screen stayed empty for as long
+          // as it was mounted, even after someone else created the deal they were waiting for.
+          ListEmptyComponent={
+            <View style={styles.center}>
+              <Text style={styles.errorTitle}>No deals</Text>
+              <Text style={styles.errorBody}>
+                {submittedSearch
+                  ? "Nothing matched that search."
+                  : scope === "mine"
+                    ? "Nothing assigned to you yet. Try the All tab."
+                    : scope === "watched"
+                      ? "You're not watching any deals yet."
+                      : "There are no deals in this office."}
+              </Text>
+              <Text style={styles.errorBody}>Pull down to refresh.</Text>
+            </View>
+          }
           onEndReachedThreshold={0.5}
           onEndReached={() => {
             if (query.hasNextPage && !query.isFetchingNextPage) void query.fetchNextPage();
@@ -264,6 +272,7 @@ const styles = StyleSheet.create({
     color: theme.color.textMuted,
   },
   list: { padding: theme.space.lg, paddingTop: theme.space.sm, gap: theme.space.md },
+  listEmpty: { flexGrow: 1 },
   footer: { paddingVertical: theme.space.lg },
   footerRetry: { paddingVertical: theme.space.lg, alignItems: "center" },
   center: { flex: 1, alignItems: "center", justifyContent: "center", padding: theme.space.xl, gap: theme.space.sm },
