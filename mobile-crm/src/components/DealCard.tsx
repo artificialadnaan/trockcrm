@@ -1,6 +1,7 @@
 import React from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import type { DealListItem, PipelineStage } from "../api/types";
+import { Badge } from "./Badge";
 import { formatDate, formatLocation, formatMoney } from "../format";
 import { theme } from "../theme/theme";
 
@@ -136,14 +137,10 @@ export function DealCard({
         {/* The EFFECTIVE flag, so the badge and the $0 always agree — a deal auto-parked by a
             far-future close target is held even though `onHold` is false. */}
         {(deal.effectiveOnHold ?? deal.onHold) ? (
-          <View style={[styles.pill, styles.holdPill]}>
-            <Text style={styles.holdPillText}>On hold</Text>
-          </View>
+          <Badge label="On hold" tone="amber" />
         ) : null}
         {showsAtRisk(deal) ? (
-          <View style={[styles.pill, styles.riskPill]}>
-            <Text style={styles.riskPillText}>At risk</Text>
-          </View>
+          <Badge label="At risk" tone="red" />
         ) : null}
         {deal.expectedCloseDate ? (
           <Text style={styles.closeDate}>Close {formatDate(deal.expectedCloseDate)}</Text>
@@ -181,10 +178,5 @@ const styles = StyleSheet.create({
     paddingVertical: 3,
   },
   stagePillText: { fontFamily: theme.font.semibold, fontSize: 12, color: theme.color.textSecondary },
-  pill: { borderRadius: theme.radius.pill, paddingHorizontal: theme.space.md, paddingVertical: 3 },
-  holdPill: { backgroundColor: "#FEF3C7" },
-  holdPillText: { fontFamily: theme.font.semibold, fontSize: 12, color: "#92400E" },
-  riskPill: { backgroundColor: "#FEE2E2" },
-  riskPillText: { fontFamily: theme.font.semibold, fontSize: 12, color: theme.color.brandRedDeep },
   closeDate: { fontFamily: theme.font.regular, fontSize: 12, color: theme.color.textMuted },
 });

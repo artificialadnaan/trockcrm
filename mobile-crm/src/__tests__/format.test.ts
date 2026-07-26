@@ -116,3 +116,41 @@ describe("contact link URLs", () => {
     expect(mailtoUrl("rep@trockgc.com")).toBe("mailto:rep@trockgc.com");
   });
 });
+
+describe("openLink failure reporting", () => {
+  afterEach(() => jest.resetModules());
+
+  function withLinking(openURL: jest.Mock) {
+    jest.resetModules();
+    jest.doMock("react-native", () => ({ Linking: { openURL } }));
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    return require("../lib/open-link") as typeof import("../lib/open-link");
+  }
+
+  it("reports nothing when the link opens", async () => {
+    const openURL = jest.fn().mockResolvedValue(undefined);
+    const { openLink } = withLinking(openURL);
+    const onFailure = jest.fn();
+    await openLink("tel:2145551212", onFailure);
+    expect(openURL).toHaveBeenCalledWith("tel:2145551212");
+    expect(onFailure).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["tel:2145551212", "call"],
+    ["sms:2145551212", "text"],
+    ["mailto:rep@trockgc.com", "email"],
+  ])("names the action that failed for %s", async (url, verb) => {
+    // The previous `.catch(() => undefined)` was a success-looking failure: the rep taps Call, nothing
+    // happens, and nothing distinguishes a missing dialer from a slow one.
+    const { openLink } = withLinking(jest.fn().mockRejectedValue(new Error("no handler")));
+    const onFailure = jest.fn();
+    await openLink(url, onFailure);
+    expect(onFailure).toHaveBeenCalledWith(`Couldn't ${verb} from this device.`);
+  });
+
+  it("never rethrows — a failed link must not crash the screen", async () => {
+    const { openLink } = withLinking(jest.fn().mockRejectedValue(new Error("boom")));
+    await expect(openLink("tel:1", jest.fn())).resolves.toBeUndefined();
+  });
+});

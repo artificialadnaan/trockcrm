@@ -1,7 +1,6 @@
 import React, { useMemo, useState } from "react";
 import {
   ActivityIndicator,
-  Linking,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -17,7 +16,10 @@ import * as dealsApi from "../../../src/api/endpoints/deals";
 import { useAuth } from "../../../src/auth/AuthContext";
 import { useQueryScope } from "../../../src/auth/useOfficeId";
 import { displayAmount, showsAtRisk } from "../../../src/components/DealCard";
+import { Badge } from "../../../src/components/Badge";
+import { Row } from "../../../src/components/Row";
 import { mailtoUrl, telUrl } from "../../../src/contact-links";
+import { openLink } from "../../../src/lib/open-link";
 import { daysSince, formatDate, formatLocation } from "../../../src/format";
 import { qk } from "../../../src/query/keys";
 import { theme } from "../../../src/theme/theme";
@@ -30,6 +32,8 @@ export default function DealDetailScreen() {
   const scope = useQueryScope();
   const queryClient = useQueryClient();
   const [note, setNote] = useState("");
+  // A dialer or mail composer that refuses to open must SAY so — see openLink.
+  const [linkError, setLinkError] = useState<string | null>(null);
 
   const dealQuery = useQuery({
     queryKey: qk.deal(scope, dealId),
@@ -204,6 +208,7 @@ export default function DealDetailScreen() {
                 label="Call"
                 value={contactPhone}
                 url={telUrl(contactPhone)}
+                onFailure={setLinkError}
               />
             ) : null}
             {deal.primaryContactEmail ? (
@@ -212,7 +217,13 @@ export default function DealDetailScreen() {
                 label="Email"
                 value={deal.primaryContactEmail}
                 url={mailtoUrl(deal.primaryContactEmail)}
+                onFailure={setLinkError}
               />
+            ) : null}
+            {linkError ? (
+              <Text testID="contact-link-error" style={styles.linkError}>
+                {linkError}
+              </Text>
             ) : null}
           </Section>
         ) : null}
@@ -340,47 +351,30 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   );
 }
 
-function Row({ label, value }: { label: string; value: string }) {
-  return (
-    <View style={styles.row}>
-      <Text style={styles.rowLabel}>{label}</Text>
-      <Text style={styles.rowValue}>{value}</Text>
-    </View>
-  );
-}
-
 function ContactAction({
   testID,
   label,
   value,
   url,
+  onFailure,
 }: {
   testID: string;
   label: string;
   value: string;
   url: string;
+  onFailure: (message: string) => void;
 }) {
   return (
     <Pressable
       testID={testID}
-      onPress={() => void Linking.openURL(url).catch(() => undefined)}
+      onPress={() => void openLink(url, onFailure)}
       accessibilityRole="button"
       accessibilityLabel={`${label} ${value}`}
-      style={styles.row}
+      style={styles.contactRow}
     >
-      <Text style={styles.rowLabel}>{label}</Text>
+      <Text style={styles.contactLabel}>{label}</Text>
       <Text style={[styles.rowValue, styles.link]}>{value}</Text>
     </Pressable>
-  );
-}
-
-function Badge({ label, tone }: { label: string; tone: "amber" | "red" }) {
-  return (
-    <View style={[styles.badge, tone === "amber" ? styles.badgeAmber : styles.badgeRed]}>
-      <Text style={[styles.badgeText, tone === "amber" ? styles.badgeTextAmber : styles.badgeTextRed]}>
-        {label}
-      </Text>
-    </View>
   );
 }
 
@@ -393,9 +387,6 @@ const styles = StyleSheet.create({
   company: { fontFamily: theme.font.semibold, fontSize: 15, color: theme.color.textSecondary },
   badgeRow: { flexDirection: "row", alignItems: "center", gap: theme.space.sm, marginTop: theme.space.xs },
   amount: { fontFamily: theme.font.bold, fontSize: 20, color: theme.color.textPrimary },
-  badge: { borderRadius: theme.radius.pill, paddingHorizontal: theme.space.md, paddingVertical: 3 },
-  badgeAmber: { backgroundColor: "#FEF3C7" },
-  badgeRed: { backgroundColor: "#FEE2E2" },
   badgeText: { fontFamily: theme.font.semibold, fontSize: 12 },
   badgeTextAmber: { color: "#92400E" },
   badgeTextRed: { color: theme.color.brandRedDeep },
@@ -426,8 +417,14 @@ const styles = StyleSheet.create({
     padding: theme.space.lg,
     gap: theme.space.sm,
   },
-  row: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: theme.space.md },
-  rowLabel: { fontFamily: theme.font.regular, fontSize: 14, color: theme.color.textSecondary },
+  contactRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    gap: theme.space.md,
+  },
+  contactLabel: { fontFamily: theme.font.regular, fontSize: 14, color: theme.color.textSecondary },
+  linkError: { fontFamily: theme.font.regular, fontSize: 13, color: theme.color.brandRedDeep },
   rowValue: { flexShrink: 1, textAlign: "right", fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.textPrimary },
   link: { color: theme.color.brandRed },
   noteInput: {
