@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useMemo, useState } from "react";
 import {
   ActivityIndicator,
   FlatList,
@@ -12,46 +12,70 @@ import {
 } from "react-native";
 import { useRouter } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery } from "@tanstack/react-query";
 import { ApiError } from "../../../src/api/client";
 import * as contactsApi from "../../../src/api/endpoints/contacts";
 import type { ContactListRow } from "../../../src/api/types";
 import { useAuth } from "../../../src/auth/AuthContext";
-import { useOfficeId } from "../../../src/auth/useOfficeId";
+import { useQueryScope } from "../../../src/auth/useOfficeId";
 import { qk } from "../../../src/query/keys";
 import { theme } from "../../../src/theme/theme";
 
-/** Strip formatting for the dialer; keep a leading + for international numbers. */
-function telUrl(phone: string): string {
-  return `tel:${phone.replace(/[^\d+]/g, "")}`;
-}
+const PAGE_SIZE = 50;
+
+/**
+ * contacts/service.ts:469 applies its search predicate only for trimmed terms of 2+ characters. A single
+ * character comes back as the UNFILTERED first page, which reads as "that letter matched everyone".
+ */
+const MIN_SEARCH_LENGTH = 2;
 
 export default function ContactsListScreen() {
   const router = useRouter();
   const { fetcher } = useAuth();
-  const officeId = useOfficeId();
+  const cacheScope = useQueryScope();
   const [search, setSearch] = useState("");
   const [submitted, setSubmitted] = useState("");
 
-  const params = { search: submitted || undefined, limit: 50 };
-  const query = useQuery({
-    queryKey: qk.contacts(officeId, params),
-    queryFn: () => contactsApi.listContacts(fetcher, params),
+  const tooShort = search.trim().length > 0 && search.trim().length < MIN_SEARCH_LENGTH;
+
+  const params = useMemo(() => ({ search: submitted || undefined, limit: PAGE_SIZE }), [submitted]);
+
+  const query = useInfiniteQuery({
+    queryKey: qk.contacts(cacheScope, params),
+    initialPageParam: 1,
+    queryFn: ({ pageParam }) => contactsApi.listContacts(fetcher, { ...params, page: pageParam }),
+    // A fixed limit with no next-page logic capped the whole directory at 50 rows — and offices have far
+    // more than that, so a contact simply could not be reached by scrolling.
+    getNextPageParam: (last) => {
+      const p = last.pagination;
+      if (!p) return undefined;
+      return p.page < p.totalPages ? p.page + 1 : undefined;
+    },
   });
 
-  const contacts = query.data?.contacts ?? [];
+  const contacts = useMemo(() => (query.data?.pages ?? []).flatMap((p) => p.contacts), [query.data]);
+  const total = query.data?.pages[0]?.pagination?.total;
+
+  function submitSearch() {
+    const trimmed = search.trim();
+    if (trimmed.length > 0 && trimmed.length < MIN_SEARCH_LENGTH) return;
+    setSubmitted(trimmed);
+  }
+
+  const offline = query.error instanceof ApiError && query.error.status === 0;
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
       <View style={styles.header}>
         <Text style={styles.title}>Contacts</Text>
+        {total !== undefined ? <Text style={styles.count}>{total} total</Text> : null}
       </View>
 
       <TextInput
         testID="contacts-search"
         value={search}
         onChangeText={setSearch}
-        onSubmitEditing={() => setSubmitted(search.trim())}
+        onSubmitEditing={submitSearch}
         returnKeyType="search"
         placeholder="Search name, company or email"
         placeholderTextColor={theme.color.textMuted}
@@ -59,18 +83,33 @@ export default function ContactsListScreen() {
         autoCorrect={false}
         style={styles.search}
       />
+      {tooShort ? (
+        <Text style={styles.searchHint}>Type at least {MIN_SEARCH_LENGTH} characters to search.</Text>
+      ) : null}
 
       {query.isLoading ? (
         <View style={styles.center}>
           <ActivityIndicator color={theme.color.brandRed} />
         </View>
       ) : query.error ? (
+        // A retry BUTTON: this branch replaces the FlatList, so there is no RefreshControl left to pull.
         <View style={styles.center}>
-          <Text style={styles.emptyTitle}>
-            {query.error instanceof ApiError && query.error.status === 0
-              ? "You're offline"
-              : "Couldn't load contacts"}
+          <Text style={styles.emptyTitle}>{offline ? "You're offline" : "Couldn't load contacts"}</Text>
+          <Text style={styles.emptyBody}>
+            {offline
+              ? "Reconnect and try again."
+              : query.error instanceof ApiError
+                ? query.error.message
+                : "Something went wrong."}
           </Text>
+          <Pressable
+            testID="contacts-retry"
+            onPress={() => void query.refetch()}
+            accessibilityRole="button"
+            style={styles.retryBtn}
+          >
+            <Text style={styles.retryText}>Try again</Text>
+          </Pressable>
         </View>
       ) : contacts.length === 0 ? (
         <View style={styles.center}>
@@ -84,6 +123,15 @@ export default function ContactsListScreen() {
           data={contacts}
           keyExtractor={(c) => c.id}
           contentContainerStyle={styles.list}
+          onEndReachedThreshold={0.5}
+          onEndReached={() => {
+            if (query.hasNextPage && !query.isFetchingNextPage) void query.fetchNextPage();
+          }}
+          ListFooterComponent={
+            query.isFetchingNextPage ? (
+              <ActivityIndicator color={theme.color.brandRed} style={styles.footer} />
+            ) : null
+          }
           refreshControl={
             <RefreshControl refreshing={query.isRefetching} onRefresh={() => void query.refetch()} />
           }
@@ -128,7 +176,7 @@ function ContactRow({ contact, onOpen }: { contact: ContactListRow; onOpen: () =
       {phone ? (
         <Pressable
           testID={`call-${contact.id}`}
-          onPress={() => void Linking.openURL(telUrl(phone)).catch(() => undefined)}
+          onPress={() => void Linking.openURL(contactsApi.telUrl(phone)).catch(() => undefined)}
           accessibilityRole="button"
           accessibilityLabel={`Call ${contact.firstName} ${contact.lastName}`}
           style={styles.callBtn}
@@ -143,8 +191,32 @@ function ContactRow({ contact, onOpen }: { contact: ContactListRow; onOpen: () =
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: theme.color.surfaceMuted },
-  header: { paddingHorizontal: theme.space.lg, paddingTop: theme.space.sm },
+  header: {
+    paddingHorizontal: theme.space.lg,
+    paddingTop: theme.space.sm,
+    flexDirection: "row",
+    alignItems: "baseline",
+    justifyContent: "space-between",
+  },
   title: { fontFamily: theme.font.bold, fontSize: 26, color: theme.color.inkNavy },
+  count: { fontFamily: theme.font.regular, fontSize: 13, color: theme.color.textMuted },
+  searchHint: {
+    marginHorizontal: theme.space.lg,
+    marginBottom: theme.space.sm,
+    fontFamily: theme.font.regular,
+    fontSize: 13,
+    color: theme.color.textMuted,
+  },
+  footer: { paddingVertical: theme.space.lg },
+  retryBtn: {
+    marginTop: theme.space.sm,
+    borderWidth: 1,
+    borderColor: theme.color.brandRed,
+    borderRadius: theme.radius.md,
+    paddingHorizontal: theme.space.xl,
+    paddingVertical: theme.space.md,
+  },
+  retryText: { fontFamily: theme.font.bold, fontSize: 14, color: theme.color.brandRed },
   search: {
     margin: theme.space.lg,
     marginBottom: theme.space.sm,

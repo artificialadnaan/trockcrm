@@ -114,3 +114,97 @@ describe("categoryLabel", () => {
     expect(contacts.categoryLabel(value as string | null)).toBe("");
   });
 });
+
+describe("GET /companies pagination shape", () => {
+  it("reads the TOP-LEVEL total/page/limit, which is not where /contacts puts them", async () => {
+    // companies/service.ts returns { companies, total, page, limit, ... } — flat. Reading a `pagination`
+    // object (the /contacts convention) yielded undefined for every field, so a caller could never learn
+    // there was a second page. Two sibling endpoints, two conventions, no type error either way.
+    const { fetcher } = recording({
+      companies: [{ id: "co1" }],
+      total: 214,
+      page: 2,
+      limit: 50,
+      pipelineTotal: "0",
+      staleCount: 0,
+    });
+    const res = await contacts.listCompanies(fetcher, { page: 2 });
+    expect(res.total).toBe(214);
+    expect(res.page).toBe(2);
+    expect(res.limit).toBe(50);
+  });
+});
+
+describe("GET /contacts/:id/deals", () => {
+  function association(id: string, deal: Record<string, unknown> | null) {
+    return { id, deal };
+  }
+
+  it("drops soft-deleted deals", async () => {
+    // association-service.ts joins tenant.deals with NO is_active predicate — the only read path in the
+    // app that doesn't. A deleted deal keeps its association row and comes back looking live, giving the
+    // rep a tappable row that opens a detail screen for a deal that no longer exists.
+    const { fetcher } = recording({
+      associations: [
+        association("a1", { id: "d1", name: "Live", isActive: true }),
+        association("a2", { id: "d2", name: "Deleted", isActive: false }),
+      ],
+    });
+    const res = await contacts.getContactDeals(fetcher, "c1");
+    expect(res.map((a) => a.deal?.id)).toEqual(["d1"]);
+  });
+
+  it("keeps a deal whose isActive is absent rather than hiding it", async () => {
+    // `!== false`, not `=== true`: an omitted or redacted flag is unknown, and hiding real work on a
+    // missing field is a worse failure than showing one stale row.
+    const { fetcher } = recording({
+      associations: [association("a1", { id: "d1", name: "No flag" })],
+    });
+    await expect(contacts.getContactDeals(fetcher, "c1")).resolves.toHaveLength(1);
+  });
+
+  it("drops associations with no deal at all", async () => {
+    const { fetcher } = recording({ associations: [association("a1", null)] });
+    await expect(contacts.getContactDeals(fetcher, "c1")).resolves.toHaveLength(0);
+  });
+});
+
+describe("phone extensions", () => {
+  it.each([
+    ["214-555-1212 ext 3", "2145551212", "3"],
+    ["214-555-1212 ext. 3", "2145551212", "3"],
+    ["214-555-1212 x104", "2145551212", "104"],
+    ["(214) 555-1212 extension 22", "2145551212", "22"],
+    ["214-555-1212 #45", "2145551212", "45"],
+  ])("splits %s", (input, number, extension) => {
+    expect(contacts.phoneParts(input)).toEqual({ number, extension });
+  });
+
+  it.each([
+    ["214-555-1212", "2145551212"],
+    ["+1 (214) 555-1212", "+12145551212"],
+    ["  214.555.1212  ", "2145551212"],
+  ])("leaves %s alone when there is no extension", (input, number) => {
+    expect(contacts.phoneParts(input)).toEqual({ number, extension: null });
+  });
+
+  it("does not fold the extension into the number", () => {
+    // The original sanitiser stripped every non-digit, turning this into the ELEVEN-digit 21455512123 —
+    // a different number entirely. Tapping Call then dialled a stranger, with nothing on screen to say so.
+    expect(contacts.telUrl("214-555-1212 ext 3")).not.toBe("tel:21455512123");
+  });
+
+  it("dials the extension after a pause", () => {
+    // Commas are the dialer's pause convention; the digits after them are sent as DTMF once connected.
+    expect(contacts.telUrl("214-555-1212 ext 3")).toBe("tel:2145551212,,3");
+  });
+
+  it("keeps a plain number plain", () => {
+    expect(contacts.telUrl("+1 (214) 555-1212")).toBe("tel:+12145551212");
+  });
+
+  it("never puts an extension in an SMS URL", () => {
+    // You cannot text an extension; including it would address the message to a nonexistent number.
+    expect(contacts.smsUrl("214-555-1212 ext 3")).toBe("sms:2145551212");
+  });
+});

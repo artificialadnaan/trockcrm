@@ -293,6 +293,18 @@ export type ContactListResponse = {
   pagination?: { page: number; limit: number; total: number; totalPages: number };
 };
 
+/**
+ * A row from GET /companies/:id/contacts. companies/service.ts:476-487 selects the raw contact columns
+ * plus owner fields ONLY — it performs no company join and computes no aggregates, so the
+ * `linkedCompanyName`, `isPrimary`, `linkedDealsCount` and `lastTouchAt` that ContactListRow promises are
+ * all absent. Reusing that type here would have rendered a permanent "0 linked deals" as though it were
+ * a fact about the contact.
+ */
+export type CompanyContactRow = ContactBase & {
+  ownerUserId: string | null;
+  ownerUserName: string | null;
+};
+
 export type CompanyListRow = {
   id: string;
   name: string;
@@ -312,14 +324,44 @@ export type CompanyDetail = CompanyListRow & {
   dealCount?: number;
 };
 
+/**
+ * GET /companies puts its pagination at the TOP LEVEL — `{ companies, total, page, limit, ... }` — not
+ * inside a `pagination` object the way /contacts does (companies/service.ts:148-155). Declaring the
+ * contacts shape here made every paging field read as undefined, which is invisible until a second page
+ * is needed and then simply never arrives.
+ */
 export type CompanyListResponse = {
   companies: CompanyListRow[];
-  pagination?: { page: number; limit: number; total: number; totalPages: number };
+  total?: number;
+  page?: number;
+  limit?: number;
+};
+
+/**
+ * The deal carried by a contact association is the RAW tenant.deals row (passed through
+ * redactDealResponse), NOT a list row: contacts/association-service.ts:26-34 selects `deals` whole with
+ * no joins and no derived fields. So there is no `stageSlug`, no server `atRisk` verdict, and none of the
+ * joined company/property columns a DealListItem promises. Typing it as DealListItem invited code to read
+ * fields that are always undefined — and undefined renders as a blank, not as an error.
+ */
+export type AssociatedDeal = {
+  id: string;
+  name: string | null;
+  /** Soft-delete flag. A false here means the deal is deleted and must not be shown or opened. */
+  isActive: boolean | null;
+  stageId: string | null;
+  onHold: boolean | null;
+  workflowRoute: string | null;
+  expectedCloseDate: string | null;
+  awardedAmount: string | null;
+  bidEstimate: string | null;
+  ddEstimate: string | null;
+  bidBoardTotalSales: string | null;
 };
 
 /** GET /contacts/:id/deals returns associations, each wrapping the deal — not a bare deal list. */
 export type ContactDealAssociation = {
   id: string;
   role?: string | null;
-  deal: DealListItem | null;
+  deal: AssociatedDeal | null;
 };

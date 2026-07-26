@@ -6,30 +6,26 @@ import { useQuery } from "@tanstack/react-query";
 import { ApiError } from "../../../src/api/client";
 import * as contactsApi from "../../../src/api/endpoints/contacts";
 import { useAuth } from "../../../src/auth/AuthContext";
-import { useOfficeId } from "../../../src/auth/useOfficeId";
+import { useQueryScope } from "../../../src/auth/useOfficeId";
 import { formatLocation } from "../../../src/format";
 import { qk } from "../../../src/query/keys";
 import { theme } from "../../../src/theme/theme";
-
-function dialable(phone: string): string {
-  return phone.replace(/[^\d+]/g, "");
-}
 
 export default function ContactDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const contactId = typeof id === "string" ? id : "";
   const router = useRouter();
   const { fetcher } = useAuth();
-  const officeId = useOfficeId();
+  const cacheScope = useQueryScope();
 
   const contactQuery = useQuery({
-    queryKey: qk.contact(officeId, contactId),
+    queryKey: qk.contact(cacheScope, contactId),
     queryFn: () => contactsApi.getContact(fetcher, contactId),
     enabled: contactId.length > 0,
   });
 
   const dealsQuery = useQuery({
-    queryKey: qk.contactDeals(officeId, contactId),
+    queryKey: qk.contactDeals(cacheScope, contactId),
     queryFn: () => contactsApi.getContactDeals(fetcher, contactId),
     enabled: contactId.length > 0,
   });
@@ -64,7 +60,10 @@ export default function ContactDetailScreen() {
   const location = formatLocation(contact.city, contact.state);
   // Reps see only the deals they own here — the server scopes this endpoint by assigned rep, unlike the
   // contact record itself, which is office-shared. An empty list does not mean the contact has no deals.
-  const associations = (dealsQuery.data ?? []).filter((a) => a.deal);
+  // Soft-deleted deals are already dropped in getContactDeals; this narrows the type for the render.
+  const associations = (dealsQuery.data ?? []).filter(
+    (a): a is typeof a & { deal: NonNullable<typeof a.deal> } => Boolean(a.deal),
+  );
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
@@ -82,16 +81,18 @@ export default function ContactDetailScreen() {
         <View style={styles.actionRow}>
           {phone ? (
             <>
+              {/* telUrl preserves a stored extension as a dialer pause; smsUrl drops it, because an
+                  extension cannot be texted. Stripping it outright dialled a different number. */}
               <Action
                 testID="call-contact"
                 label="Call"
-                url={`tel:${dialable(phone)}`}
+                url={contactsApi.telUrl(phone)}
                 accessibilityLabel={`Call ${contact.firstName}`}
               />
               <Action
                 testID="text-contact"
                 label="Text"
-                url={`sms:${dialable(phone)}`}
+                url={contactsApi.smsUrl(phone)}
                 accessibilityLabel={`Text ${contact.firstName}`}
               />
             </>
@@ -123,19 +124,31 @@ export default function ContactDetailScreen() {
         <Section title="Deals">
           {dealsQuery.isLoading ? (
             <ActivityIndicator color={theme.color.brandRed} />
+          ) : dealsQuery.error ? (
+            // A FAILED request is not an empty result. Rendering "no deals are linked" on a 5xx presents
+            // a network failure as a fact about the contact, and a rep would act on it — calling someone
+            // believing they have no live work when they may have several.
+            <Pressable
+              testID="retry-contact-deals"
+              onPress={() => void dealsQuery.refetch()}
+              accessibilityRole="button"
+              style={styles.retry}
+            >
+              <Text style={styles.retryText}>Couldn&apos;t load deals — tap to retry</Text>
+            </Pressable>
           ) : associations.length === 0 ? (
             <Text style={styles.emptyBody}>No deals you can see are linked to this contact.</Text>
           ) : (
             associations.map((assoc) => (
               <Pressable
                 key={assoc.id}
-                testID={`contact-deal-${assoc.deal!.id}`}
-                onPress={() => router.push(`/(app)/deals/${assoc.deal!.id}`)}
+                testID={`contact-deal-${assoc.deal.id}`}
+                onPress={() => router.push(`/(app)/deals/${assoc.deal.id}`)}
                 accessibilityRole="button"
                 style={styles.dealRow}
               >
                 <Text style={styles.dealName} numberOfLines={1}>
-                  {assoc.deal!.name ?? "Untitled deal"}
+                  {assoc.deal.name ?? "Untitled deal"}
                 </Text>
                 <Text style={styles.dealChevron}>›</Text>
               </Pressable>
@@ -227,6 +240,8 @@ const styles = StyleSheet.create({
   rowValue: { flexShrink: 1, textAlign: "right", fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.textPrimary },
   notes: { fontFamily: theme.font.regular, fontSize: 14, color: theme.color.textSecondary },
   emptyBody: { fontFamily: theme.font.regular, fontSize: 14, color: theme.color.textMuted },
+  retry: { paddingVertical: theme.space.sm },
+  retryText: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.brandRed },
   dealRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingVertical: theme.space.sm },
   dealName: { flex: 1, fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.textPrimary },
   dealChevron: { fontFamily: theme.font.bold, fontSize: 18, color: theme.color.textMuted },
