@@ -1,5 +1,6 @@
 import type {
   Activity,
+  ActivityListResponse,
   DealDetail,
   DealListResponse,
   DealScope,
@@ -38,14 +39,16 @@ export async function listDeals(fetcher: Fetcher, params: ListDealsParams = {}):
   });
 }
 
-/** The detail read: the deal plus resolved company, primary contact and watch state. */
+/** GET /deals/:id/detail → { deal }. Returning the envelope leaves every field undefined. */
 export async function getDealDetail(fetcher: Fetcher, dealId: string): Promise<DealDetail> {
-  return fetcher<DealDetail>(`/deals/${dealId}/detail`);
+  const res = await fetcher<{ deal: DealDetail }>(`/deals/${dealId}/detail`);
+  return res.deal;
 }
 
-/** Pipeline stage config — for the stage picker and for mapping stageId to a name on list rows. */
+/** GET /deals/stages → { stages }. Iterating the envelope as an array THROWS and crashes the list. */
 export async function listStages(fetcher: Fetcher): Promise<PipelineStage[]> {
-  return fetcher<PipelineStage[]>("/deals/stages");
+  const res = await fetcher<{ stages: PipelineStage[] }>("/deals/stages");
+  return res.stages ?? [];
 }
 
 /**
@@ -59,9 +62,10 @@ export async function preflightStage(
   dealId: string,
   targetStageId: string,
 ): Promise<StageGateResult> {
+  // The server requires `targetStageId` and 400s without it — `stageId` is silently not the contract.
   return fetcher<StageGateResult>(`/deals/${dealId}/stage/preflight`, {
     method: "POST",
-    body: { stageId: targetStageId },
+    body: { targetStageId },
   });
 }
 
@@ -72,7 +76,7 @@ export async function preflightStage(
 export async function moveStage(
   fetcher: Fetcher,
   dealId: string,
-  input: { stageId: string; lostReasonId?: string; lostNotes?: string },
+  input: { targetStageId: string; overrideReason?: string; lostReasonId?: string; lostNotes?: string },
 ): Promise<unknown> {
   return fetcher(`/deals/${dealId}/stage`, { method: "POST", body: input });
 }
@@ -85,12 +89,10 @@ export async function unwatchDeal(fetcher: Fetcher, dealId: string): Promise<unk
   return fetcher(`/deals/${dealId}/watch`, { method: "DELETE" });
 }
 
-/** A deal's timeline. Passing dealId scopes it to that deal rather than the caller's own activity feed. */
+/** GET /activities → { activities, ... }. Scoped to one deal by the dealId param. */
 export async function listActivities(fetcher: Fetcher, dealId: string): Promise<Activity[]> {
-  const res = await fetcher<Activity[] | { activities: Activity[] }>("/activities", { query: { dealId } });
-  // Tolerate either envelope. The auth routes proved this codebase is not uniform about it, and guessing
-  // wrong here renders an empty timeline rather than throwing — the silent kind of wrong.
-  return Array.isArray(res) ? res : (res.activities ?? []);
+  const res = await fetcher<ActivityListResponse>("/activities", { query: { dealId } });
+  return res.activities ?? [];
 }
 
 /**
@@ -99,7 +101,13 @@ export async function listActivities(fetcher: Fetcher, dealId: string): Promise<
  */
 export async function createActivity(
   fetcher: Fetcher,
-  input: { dealId: string; activityType: string; subject?: string; notes: string },
+  input: { dealId: string; type: string; subject?: string; body: string },
 ): Promise<Activity> {
-  return fetcher<Activity>("/activities", { method: "POST", body: input });
+  // The server reads `type` and `body` and 400s when `type` is absent. Sending activityType/notes made
+  // every note submission fail — the headline interaction of the whole app, silently broken.
+  const res = await fetcher<{ activity: Activity }>("/activities", {
+    method: "POST",
+    body: { type: input.type, subject: input.subject, body: input.body, dealId: input.dealId },
+  });
+  return res.activity;
 }

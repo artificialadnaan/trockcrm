@@ -107,6 +107,11 @@ export type DealListItem = {
   propertyState: string | null;
   awardedAmount: string | null;
   bidEstimate: string | null;
+  // Both participate in the canonical value priority — omitting them made estimating and Bid Board deals
+  // display a lower value, or "—", despite having a tracked one.
+  ddEstimate: string | null;
+  bidBoardTotalSales: string | null;
+  workflowRoute: string | null;
   expectedCloseDate: string | null;
   stageEnteredAt: string | null;
   updatedAt: string | null;
@@ -165,13 +170,24 @@ export type StageGateResult = {
   blockReason: string | null;
 };
 
-/** A timeline entry on a deal. `POST /activities` is the 15-second note the whole app is built around. */
+/**
+ * A timeline entry. The server's field names are `type` and `body` — NOT `activityType`/`notes`. Naming
+ * them anything else here renders a blank timeline on a request that succeeded, which is the failure mode
+ * you only notice in TestFlight.
+ */
 export type Activity = {
   id: string;
   dealId: string | null;
-  activityType: string;
+  type: string;
   subject: string | null;
-  notes: string | null;
+  body: string | null;
+  occurredAt: string | null;
   createdAt: string | null;
-  createdByName: string | null;
+  performedByUserName: string | null;
+  responsibleUserName: string | null;
+};
+
+export type ActivityListResponse = {
+  activities: Activity[];
+  pagination?: { page: number; limit: number; total: number };
 };

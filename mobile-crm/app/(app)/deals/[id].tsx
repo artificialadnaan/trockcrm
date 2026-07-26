@@ -15,7 +15,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError } from "../../../src/api/client";
 import * as dealsApi from "../../../src/api/endpoints/deals";
 import { useAuth } from "../../../src/auth/AuthContext";
-import { useOfficeId } from "../../../src/auth/useOfficeId";
+import { useQueryScope } from "../../../src/auth/useOfficeId";
 import { displayAmount, showsAtRisk } from "../../../src/components/DealCard";
 import { daysSince, formatDate, formatLocation } from "../../../src/format";
 import { qk } from "../../../src/query/keys";
@@ -26,28 +26,31 @@ export default function DealDetailScreen() {
   const dealId = typeof id === "string" ? id : "";
   const router = useRouter();
   const { fetcher } = useAuth();
-  const officeId = useOfficeId();
+  const scope = useQueryScope();
   const queryClient = useQueryClient();
   const [note, setNote] = useState("");
 
   const dealQuery = useQuery({
-    queryKey: qk.deal(officeId, dealId),
+    queryKey: qk.deal(scope, dealId),
     queryFn: () => dealsApi.getDealDetail(fetcher, dealId),
     enabled: dealId.length > 0,
   });
 
   const activitiesQuery = useQuery({
-    queryKey: qk.dealActivities(officeId, dealId),
+    queryKey: qk.dealActivities(scope, dealId),
     queryFn: () => dealsApi.listActivities(fetcher, dealId),
     enabled: dealId.length > 0,
   });
 
   const logNote = useMutation({
     mutationFn: (notes: string) =>
-      dealsApi.createActivity(fetcher, { dealId, activityType: "note", notes }),
-    onSuccess: async () => {
-      setNote("");
-      await queryClient.invalidateQueries({ queryKey: qk.dealActivities(officeId, dealId) });
+      dealsApi.createActivity(fetcher, { dealId, type: "note", body: notes }),
+    onSuccess: async (_result, submitted) => {
+      // Clear ONLY what was actually sent. A rep can keep typing while a slow save is in flight, and
+      // blanking the field unconditionally would silently delete everything written after the request
+      // began — losing exactly the observation they opened the app to record.
+      setNote((current) => (current === submitted ? "" : current));
+      await queryClient.invalidateQueries({ queryKey: qk.dealActivities(scope, dealId) });
     },
   });
 
@@ -55,7 +58,10 @@ export default function DealDetailScreen() {
     mutationFn: (next: boolean) =>
       next ? dealsApi.watchDeal(fetcher, dealId) : dealsApi.unwatchDeal(fetcher, dealId),
     onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: qk.deal(officeId, dealId) });
+      await queryClient.invalidateQueries({ queryKey: qk.deal(scope, dealId) });
+      // The Watched list is derived from this flag, so it must be invalidated too — otherwise an
+      // already-mounted list keeps showing an unwatched deal (or hiding a newly watched one).
+      await queryClient.invalidateQueries({ queryKey: ["deals"] });
     },
   });
 
@@ -84,7 +90,10 @@ export default function DealDetailScreen() {
   }
 
   const deal = dealQuery.data;
-  const stageDays = daysSince(deal.stageEnteredAt);
+  // The SERVER's effective stage age, which excludes paused (on-hold) time and uses the right stage-entry
+  // timestamp for Bid Board-owned deals. Computing it from stageEnteredAt keeps counting paused days and
+  // would show a materially different age than the web app for the same deal.
+  const stageDays = deal.atRisk?.effectiveStageAgeDays ?? daysSince(deal.stageEnteredAt);
   const location = formatLocation(deal.propertyCity, deal.propertyState);
 
   return (
@@ -185,18 +194,30 @@ export default function DealDetailScreen() {
         <Section title="Activity">
           {activitiesQuery.isLoading ? (
             <ActivityIndicator color={theme.color.brandRed} />
+          ) : activitiesQuery.error ? (
+            // A failed timeline request is NOT an empty timeline. Claiming "nothing logged" on a 5xx
+            // presents a failure as authoritative CRM data, and a rep would believe it.
+            <Pressable
+              testID="retry-activities"
+              onPress={() => void activitiesQuery.refetch()}
+              accessibilityRole="button"
+              style={styles.retry}
+            >
+              <Text style={styles.retryText}>Couldn&apos;t load activity — tap to retry</Text>
+            </Pressable>
           ) : (activitiesQuery.data ?? []).length === 0 ? (
             <Text style={styles.emptyActivity}>Nothing logged yet.</Text>
           ) : (
             (activitiesQuery.data ?? []).map((a) => (
               <View key={a.id} style={styles.activity}>
                 <Text style={styles.activityMeta}>
-                  {a.activityType}
-                  {a.createdByName ? ` · ${a.createdByName}` : ""}
-                  {a.createdAt ? ` · ${formatDate(a.createdAt)}` : ""}
+                  {a.type}
+                  {a.performedByUserName ? ` · ${a.performedByUserName}` : ""}
+                  {a.occurredAt ?? a.createdAt ? ` · ${formatDate(a.occurredAt ?? a.createdAt)}` : ""}
                 </Text>
                 {a.subject ? <Text style={styles.activitySubject}>{a.subject}</Text> : null}
-                {a.notes ? <Text style={styles.activityNotes}>{a.notes}</Text> : null}
+                {/* The note text lives in `body`. Reading `notes` rendered every entry blank. */}
+                {a.body ? <Text style={styles.activityNotes}>{a.body}</Text> : null}
               </View>
             ))
           )}
@@ -325,6 +346,14 @@ const styles = StyleSheet.create({
   },
   saveNoteDisabled: { opacity: 0.5 },
   saveNoteText: { fontFamily: theme.font.bold, fontSize: 15, color: theme.color.textInverse },
+  retry: {
+    borderWidth: 1,
+    borderColor: theme.color.border,
+    borderRadius: theme.radius.md,
+    paddingVertical: theme.space.md,
+    alignItems: "center",
+  },
+  retryText: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.brandRed },
   emptyActivity: { fontFamily: theme.font.regular, fontSize: 14, color: theme.color.textMuted },
   activity: { gap: 2, paddingVertical: theme.space.sm },
   activityMeta: { fontFamily: theme.font.regular, fontSize: 12, color: theme.color.textMuted },

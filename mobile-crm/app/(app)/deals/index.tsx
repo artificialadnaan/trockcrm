@@ -11,12 +11,12 @@ import {
 } from "react-native";
 import { useRouter } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { ApiError } from "../../../src/api/client";
 import * as dealsApi from "../../../src/api/endpoints/deals";
 import type { DealScope } from "../../../src/api/types";
 import { useAuth } from "../../../src/auth/AuthContext";
-import { useOfficeId } from "../../../src/auth/useOfficeId";
+import { useQueryScope } from "../../../src/auth/useOfficeId";
 import { DealCard } from "../../../src/components/DealCard";
 import { qk } from "../../../src/query/keys";
 import { theme } from "../../../src/theme/theme";
@@ -27,10 +27,19 @@ const SCOPES: Array<{ key: DealScope; label: string }> = [
   { key: "watched", label: "Watched" },
 ];
 
+const PAGE_SIZE = 50;
+
+/**
+ * The server applies its search predicate only for trimmed terms of 2+ characters. Sending a single
+ * character returns the UNFILTERED first page, which looks exactly like "that one letter matched 400
+ * unrelated deals" — so the client holds it back and says why.
+ */
+const MIN_SEARCH_LENGTH = 2;
+
 export default function DealsListScreen() {
   const router = useRouter();
   const { fetcher } = useAuth();
-  const officeId = useOfficeId();
+  const cacheScope = useQueryScope();
   const [scope, setScope] = useState<DealScope>("mine");
   const [search, setSearch] = useState("");
 
@@ -38,18 +47,25 @@ export default function DealsListScreen() {
   // per character against a rate-limited API (300/min/user) and thrash the cache.
   const [submittedSearch, setSubmittedSearch] = useState("");
 
+  const tooShort = search.trim().length > 0 && search.trim().length < MIN_SEARCH_LENGTH;
+
   const params = useMemo(
-    () => ({ scope, search: submittedSearch || undefined, limit: 50 }),
+    () => ({ scope, search: submittedSearch || undefined, limit: PAGE_SIZE }),
     [scope, submittedSearch],
   );
 
-  const query = useQuery({
-    queryKey: qk.deals(officeId, params),
-    queryFn: () => dealsApi.listDeals(fetcher, params),
+  const query = useInfiniteQuery({
+    queryKey: qk.deals(cacheScope, params),
+    initialPageParam: 1,
+    queryFn: ({ pageParam }) => dealsApi.listDeals(fetcher, { ...params, page: pageParam }),
+    // Stop when the server says there are no further pages. Without this the list silently capped at the
+    // first 50 while the header cheerfully reported a larger total.
+    getNextPageParam: (last) =>
+      last.pagination.page < last.pagination.totalPages ? last.pagination.page + 1 : undefined,
   });
 
   const stagesQuery = useQuery({
-    queryKey: qk.stages(officeId),
+    queryKey: qk.stages(cacheScope),
     queryFn: () => dealsApi.listStages(fetcher),
     // Stage config is effectively static per office; refetching it per visit is wasted budget.
     staleTime: 30 * 60_000,
@@ -61,13 +77,22 @@ export default function DealsListScreen() {
     return map;
   }, [stagesQuery.data]);
 
-  const deals = query.data?.deals ?? [];
+  const deals = useMemo(() => (query.data?.pages ?? []).flatMap((p) => p.deals), [query.data]);
+  const total = query.data?.pages[0]?.pagination.total;
+
+  function submitSearch() {
+    const trimmed = search.trim();
+    if (trimmed.length > 0 && trimmed.length < MIN_SEARCH_LENGTH) return;
+    setSubmittedSearch(trimmed);
+  }
+
+  const offline = query.error instanceof ApiError && query.error.status === 0;
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
       <View style={styles.header}>
         <Text style={styles.title}>Deals</Text>
-        {query.data ? <Text style={styles.count}>{query.data.pagination.total} total</Text> : null}
+        {total !== undefined ? <Text style={styles.count}>{total} total</Text> : null}
       </View>
 
       <View style={styles.scopeRow}>
@@ -89,7 +114,7 @@ export default function DealsListScreen() {
         testID="deals-search"
         value={search}
         onChangeText={setSearch}
-        onSubmitEditing={() => setSubmittedSearch(search.trim())}
+        onSubmitEditing={submitSearch}
         returnKeyType="search"
         placeholder="Search deals"
         placeholderTextColor={theme.color.textMuted}
@@ -97,18 +122,62 @@ export default function DealsListScreen() {
         autoCorrect={false}
         style={styles.search}
       />
+      {tooShort ? (
+        <Text style={styles.searchHint}>Type at least {MIN_SEARCH_LENGTH} characters to search.</Text>
+      ) : null}
 
-      <Body
-        loading={query.isLoading}
-        error={query.error}
-        empty={deals.length === 0}
-        scope={scope}
-        searching={submittedSearch.length > 0}
-      >
+      {query.isLoading ? (
+        <View style={styles.center}>
+          <ActivityIndicator color={theme.color.brandRed} />
+        </View>
+      ) : query.error ? (
+        // A retry BUTTON, not "pull to retry" — this branch replaces the FlatList, so there is no
+        // RefreshControl mounted to pull on. The earlier copy advertised a gesture that did not exist.
+        <View style={styles.center}>
+          <Text style={styles.errorTitle}>{offline ? "You're offline" : "Couldn't load deals"}</Text>
+          <Text style={styles.errorBody}>
+            {offline
+              ? "Reconnect and try again."
+              : query.error instanceof ApiError
+                ? query.error.message
+                : "Something went wrong."}
+          </Text>
+          <Pressable
+            testID="deals-retry"
+            onPress={() => void query.refetch()}
+            accessibilityRole="button"
+            style={styles.retryBtn}
+          >
+            <Text style={styles.retryText}>Try again</Text>
+          </Pressable>
+        </View>
+      ) : deals.length === 0 ? (
+        <View style={styles.center}>
+          <Text style={styles.errorTitle}>No deals</Text>
+          <Text style={styles.errorBody}>
+            {submittedSearch
+              ? "Nothing matched that search."
+              : scope === "mine"
+                ? "Nothing assigned to you yet. Try the All tab."
+                : scope === "watched"
+                  ? "You're not watching any deals yet."
+                  : "There are no deals in this office."}
+          </Text>
+        </View>
+      ) : (
         <FlatList
           data={deals}
           keyExtractor={(d) => d.id}
           contentContainerStyle={styles.list}
+          onEndReachedThreshold={0.5}
+          onEndReached={() => {
+            if (query.hasNextPage && !query.isFetchingNextPage) void query.fetchNextPage();
+          }}
+          ListFooterComponent={
+            query.isFetchingNextPage ? (
+              <ActivityIndicator color={theme.color.brandRed} style={styles.footer} />
+            ) : null
+          }
           renderItem={({ item }) => (
             <DealCard
               deal={item}
@@ -120,70 +189,9 @@ export default function DealsListScreen() {
             <RefreshControl refreshing={query.isRefetching} onRefresh={() => void query.refetch()} />
           }
         />
-      </Body>
+      )}
     </SafeAreaView>
   );
-}
-
-function Body({
-  loading,
-  error,
-  empty,
-  scope,
-  searching,
-  children,
-}: {
-  loading: boolean;
-  error: unknown;
-  empty: boolean;
-  scope: DealScope;
-  searching: boolean;
-  children: React.ReactNode;
-}) {
-  if (loading) {
-    return (
-      <View style={styles.center}>
-        <ActivityIndicator color={theme.color.brandRed} />
-      </View>
-    );
-  }
-
-  if (error) {
-    // Transport failure (status 0) is the job-site case and deserves its own words — "offline" is
-    // actionable, "request failed" is not.
-    const offline = error instanceof ApiError && error.status === 0;
-    return (
-      <View style={styles.center}>
-        <Text style={styles.errorTitle}>{offline ? "You're offline" : "Couldn't load deals"}</Text>
-        <Text style={styles.errorBody}>
-          {offline
-            ? "Showing nothing until you reconnect. Pull to retry once you have signal."
-            : error instanceof ApiError
-              ? error.message
-              : "Something went wrong."}
-        </Text>
-      </View>
-    );
-  }
-
-  if (empty) {
-    return (
-      <View style={styles.center}>
-        <Text style={styles.errorTitle}>No deals</Text>
-        <Text style={styles.errorBody}>
-          {searching
-            ? "Nothing matched that search."
-            : scope === "mine"
-              ? "Nothing assigned to you yet. Try the All tab."
-              : scope === "watched"
-                ? "You're not watching any deals yet."
-                : "There are no deals in this office."}
-        </Text>
-      </View>
-    );
-  }
-
-  return <>{children}</>;
 }
 
 const styles = StyleSheet.create({
@@ -222,8 +230,25 @@ const styles = StyleSheet.create({
     color: theme.color.textPrimary,
     backgroundColor: theme.color.surface,
   },
+  searchHint: {
+    marginHorizontal: theme.space.lg,
+    marginBottom: theme.space.sm,
+    fontFamily: theme.font.regular,
+    fontSize: 13,
+    color: theme.color.textMuted,
+  },
   list: { padding: theme.space.lg, paddingTop: theme.space.sm, gap: theme.space.md },
+  footer: { paddingVertical: theme.space.lg },
   center: { flex: 1, alignItems: "center", justifyContent: "center", padding: theme.space.xl, gap: theme.space.sm },
   errorTitle: { fontFamily: theme.font.bold, fontSize: 17, color: theme.color.inkNavy },
   errorBody: { fontFamily: theme.font.regular, fontSize: 14, color: theme.color.textSecondary, textAlign: "center" },
+  retryBtn: {
+    marginTop: theme.space.sm,
+    borderWidth: 1,
+    borderColor: theme.color.brandRed,
+    borderRadius: theme.radius.md,
+    paddingHorizontal: theme.space.xl,
+    paddingVertical: theme.space.md,
+  },
+  retryText: { fontFamily: theme.font.bold, fontSize: 14, color: theme.color.brandRed },
 });

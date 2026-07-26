@@ -1,18 +1,25 @@
 /**
- * TanStack Query key factory. Every key is scoped by officeId because offices are separate Postgres
- * schemas — the same deal id in two offices is two different records, so an unscoped cache would serve
- * one office's data after switching to another.
+ * TanStack Query key factory.
+ *
+ * Every key is scoped by a SCOPE STRING of "userId:officeId", for two independent reasons:
+ *   - offices are separate Postgres schemas, so the same id in two offices is two different records; and
+ *   - the QueryClient is module-level and signOut does not clear it, so without the user in the key a
+ *     second account signing in on the same device can be served the FIRST account's cached rows with no
+ *     request at all — including owner-scoped "mine" results and viewer-filtered detail.
+ * Build it with `useQueryScope()`; never assemble a key from officeId alone.
  */
+export type QueryScope = string;
+
 export const qk = {
   me: () => ["me"] as const,
   offices: () => ["offices"] as const,
-  deals: (officeId: string | null, params?: Record<string, unknown>) =>
-    ["deals", officeId, params ?? {}] as const,
-  deal: (officeId: string | null, id: string) => ["deal", officeId, id] as const,
-  contacts: (officeId: string | null, params?: Record<string, unknown>) =>
-    ["contacts", officeId, params ?? {}] as const,
-  contact: (officeId: string | null, id: string) => ["contact", officeId, id] as const,
-  stages: (officeId: string | null) => ["stages", officeId] as const,
-  dealActivities: (officeId: string | null, dealId: string) =>
-    ["deal-activities", officeId, dealId] as const,
+  deals: (scope: QueryScope, params?: Record<string, unknown>) =>
+    ["deals", scope, params ?? {}] as const,
+  deal: (scope: QueryScope, id: string) => ["deal", scope, id] as const,
+  contacts: (scope: QueryScope, params?: Record<string, unknown>) =>
+    ["contacts", scope, params ?? {}] as const,
+  contact: (scope: QueryScope, id: string) => ["contact", scope, id] as const,
+  stages: (scope: QueryScope) => ["stages", scope] as const,
+  dealActivities: (scope: QueryScope, dealId: string) =>
+    ["deal-activities", scope, dealId] as const,
 } as const;

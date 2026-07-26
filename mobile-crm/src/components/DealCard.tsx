@@ -4,15 +4,37 @@ import type { DealListItem, PipelineStage } from "../api/types";
 import { formatDate, formatLocation, formatMoney } from "../format";
 import { theme } from "../theme/theme";
 
+type ValueFields = Pick<
+  DealListItem,
+  "awardedAmount" | "bidEstimate" | "ddEstimate" | "bidBoardTotalSales" | "stageSlug" | "workflowRoute"
+>;
+
 /**
- * The best available amount for a list row.
+ * The canonical deal value, mirroring client/src/lib/deal-utils.ts resolveBestEstimate.
  *
- * A deal carries several money columns and which one is meaningful depends on how far along it is: an
- * awarded amount only exists once it is won, so a bid estimate is the honest number before that. Showing
- * "—" on a deal that has an estimate would read as "no value", which is a different claim.
+ * FOUR money columns participate, not two, and each candidate must be > 0 — a stored "0.00" is not a
+ * value. The order is normally awarded > bid_board > bid > dd, but on the genuine `estimating` stage DD
+ * OUTRANKS the in-progress bid: awarded > dd > bid_board > bid.
+ *
+ * Considering only awarded and bid — as this first did — showed a lower number, or "—", on every
+ * estimating and Bid Board deal that had a tracked value. Wrong money on a sales tool is worse than none.
  */
-export function displayAmount(deal: Pick<DealListItem, "awardedAmount" | "bidEstimate">): string {
-  return formatMoney(deal.awardedAmount ?? deal.bidEstimate);
+export function resolveDealValue(deal: ValueFields): number {
+  const isEstimating = deal.stageSlug === "estimating" && deal.workflowRoute !== "service";
+  const candidates = isEstimating
+    ? [deal.awardedAmount, deal.ddEstimate, deal.bidBoardTotalSales, deal.bidEstimate]
+    : [deal.awardedAmount, deal.bidBoardTotalSales, deal.bidEstimate, deal.ddEstimate];
+
+  for (const raw of candidates) {
+    const value = parseFloat(raw ?? "0");
+    if (Number.isFinite(value) && value > 0) return value;
+  }
+  return 0;
+}
+
+export function displayAmount(deal: ValueFields): string {
+  const value = resolveDealValue(deal);
+  return value > 0 ? formatMoney(value) : "—";
 }
 
 /**
