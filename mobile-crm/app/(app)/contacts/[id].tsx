@@ -1,5 +1,5 @@
-import React from "react";
-import { ActivityIndicator, Linking, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import React, { useState } from "react";
+import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useQuery } from "@tanstack/react-query";
@@ -8,6 +8,7 @@ import * as contactsApi from "../../../src/api/endpoints/contacts";
 import { useAuth } from "../../../src/auth/AuthContext";
 import { useQueryScope } from "../../../src/auth/useOfficeId";
 import { mailtoUrl, smsUrl, telUrl } from "../../../src/contact-links";
+import { openLink } from "../../../src/lib/open-link";
 import { formatLocation } from "../../../src/format";
 import { qk } from "../../../src/query/keys";
 import { theme } from "../../../src/theme/theme";
@@ -18,6 +19,8 @@ export default function ContactDetailScreen() {
   const router = useRouter();
   const { fetcher } = useAuth();
   const cacheScope = useQueryScope();
+  // Surfaced under the action row — see openLink on why a silent failure is not acceptable here.
+  const [linkError, setLinkError] = useState<string | null>(null);
 
   const contactQuery = useQuery({
     queryKey: qk.contact(cacheScope, contactId),
@@ -112,6 +115,7 @@ export default function ContactDetailScreen() {
               label="Call"
               url={telUrl(phone)}
               accessibilityLabel={`Call ${contact.firstName}`}
+              onFailure={setLinkError}
             />
           ) : null}
           {/* Text comes from `mobile` ONLY. Reusing the coalesced number offered to text a landline for
@@ -123,6 +127,7 @@ export default function ContactDetailScreen() {
               label="Text"
               url={smsUrl(contact.mobile)}
               accessibilityLabel={`Text ${contact.firstName}`}
+              onFailure={setLinkError}
             />
           ) : null}
           {contact.email ? (
@@ -131,9 +136,15 @@ export default function ContactDetailScreen() {
               label="Email"
               url={mailtoUrl(contact.email)}
               accessibilityLabel={`Email ${contact.firstName}`}
+              onFailure={setLinkError}
             />
           ) : null}
         </View>
+        {linkError ? (
+          <Text testID="contact-link-error" style={styles.linkError}>
+            {linkError}
+          </Text>
+        ) : null}
 
         <Section title="Details">
           {contact.category ? <Row label="Category" value={contactsApi.categoryLabel(contact.category)} /> : null}
@@ -209,16 +220,18 @@ function Action({
   label,
   url,
   accessibilityLabel,
+  onFailure,
 }: {
   testID: string;
   label: string;
   url: string;
   accessibilityLabel: string;
+  onFailure: (message: string) => void;
 }) {
   return (
     <Pressable
       testID={testID}
-      onPress={() => void Linking.openURL(url).catch(() => undefined)}
+      onPress={() => void openLink(url, onFailure)}
       accessibilityRole="button"
       accessibilityLabel={accessibilityLabel}
       style={styles.action}
@@ -284,6 +297,7 @@ const styles = StyleSheet.create({
   rowValue: { flexShrink: 1, textAlign: "right", fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.textPrimary },
   notes: { fontFamily: theme.font.regular, fontSize: 14, color: theme.color.textSecondary },
   emptyBody: { fontFamily: theme.font.regular, fontSize: 14, color: theme.color.textMuted },
+  linkError: { fontFamily: theme.font.regular, fontSize: 13, color: theme.color.brandRedDeep },
   retry: { paddingVertical: theme.space.sm },
   staleBanner: {
     marginTop: theme.space.sm,

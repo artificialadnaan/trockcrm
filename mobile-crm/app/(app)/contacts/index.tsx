@@ -2,7 +2,6 @@ import React, { useMemo, useState } from "react";
 import {
   ActivityIndicator,
   FlatList,
-  Linking,
   Pressable,
   RefreshControl,
   StyleSheet,
@@ -19,6 +18,7 @@ import type { ContactListRow } from "../../../src/api/types";
 import { useAuth } from "../../../src/auth/AuthContext";
 import { useQueryScope } from "../../../src/auth/useOfficeId";
 import { telUrl } from "../../../src/contact-links";
+import { openLink } from "../../../src/lib/open-link";
 import { qk } from "../../../src/query/keys";
 import { theme } from "../../../src/theme/theme";
 
@@ -180,6 +180,8 @@ export default function ContactsListScreen() {
 }
 
 function ContactRow({ contact, onOpen }: { contact: ContactListRow; onOpen: () => void }) {
+  // A dialer that refuses to open must SAY so rather than look like a tap that missed.
+  const [linkError, setLinkError] = useState<string | null>(null);
   const company = contactsApi.contactCompanyName(contact);
   const phone = contactsApi.contactPhone(contact);
 
@@ -211,13 +213,13 @@ function ContactRow({ contact, onOpen }: { contact: ContactListRow; onOpen: () =
       {phone ? (
         <Pressable
           testID={`call-${contact.id}`}
-          onPress={() => void Linking.openURL(telUrl(phone)).catch(() => undefined)}
+          onPress={() => void openLink(telUrl(phone), setLinkError)}
           accessibilityRole="button"
           accessibilityLabel={`Call ${contact.firstName} ${contact.lastName}`}
           style={styles.callBtn}
           hitSlop={8}
         >
-          <Text style={styles.callText}>Call</Text>
+          <Text style={styles.callText}>{linkError ? "Can't call" : "Call"}</Text>
         </Pressable>
       ) : null}
     </View>
