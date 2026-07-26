@@ -10,6 +10,32 @@ type ValueFields = Pick<
 >;
 
 /**
+ * Slugs that canonicalize to the genuine normal-route `estimating` stage.
+ *
+ * Mirrors LEGACY_DEAL_STAGE_TO_CANONICAL_STAGE.normal in shared/src/types/workflow.ts:241-245. This is a
+ * MIRROR rather than an import because mobile-crm is a standalone Expo app — deliberately not an npm
+ * workspace, so Metro resolves from its own node_modules and cannot reach shared/. Kept to just the
+ * aliases that land on `estimating`, so the drift surface is one line rather than a whole table.
+ */
+const ESTIMATING_STAGE_SLUGS = new Set(["estimating", "estimate_in_progress"]);
+
+/**
+ * Is this the genuine normal-route estimating stage — the one where DD outranks the in-progress bid?
+ *
+ * Route-aware, matching isGenuineEstimatingDealStageSlug. Both slugs map to `service_estimating` on the
+ * service route, which is deliberately NOT estimating, so the service route short-circuits to false.
+ * Testing `stageSlug === "estimating"` alone misclassified every deal still carrying the supported
+ * legacy `estimate_in_progress` alias, showing a LOWER value on mobile than the web app shows.
+ */
+export function isGenuineEstimatingStage(
+  stageSlug: string | null | undefined,
+  workflowRoute: string | null | undefined,
+): boolean {
+  if (workflowRoute === "service") return false;
+  return Boolean(stageSlug && ESTIMATING_STAGE_SLUGS.has(stageSlug));
+}
+
+/**
  * The canonical deal value, mirroring client/src/lib/deal-utils.ts resolveBestEstimate.
  *
  * FOUR money columns participate, not two, and each candidate must be > 0 — a stored "0.00" is not a
@@ -20,7 +46,7 @@ type ValueFields = Pick<
  * estimating and Bid Board deal that had a tracked value. Wrong money on a sales tool is worse than none.
  */
 export function resolveDealValue(deal: ValueFields): number {
-  const isEstimating = deal.stageSlug === "estimating" && deal.workflowRoute !== "service";
+  const isEstimating = isGenuineEstimatingStage(deal.stageSlug, deal.workflowRoute);
   const candidates = isEstimating
     ? [deal.awardedAmount, deal.ddEstimate, deal.bidBoardTotalSales, deal.bidEstimate]
     : [deal.awardedAmount, deal.bidBoardTotalSales, deal.bidEstimate, deal.ddEstimate];

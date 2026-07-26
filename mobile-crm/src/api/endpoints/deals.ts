@@ -11,7 +11,12 @@ import type { Fetcher } from "./auth";
 
 export type ListDealsParams = {
   scope?: DealScope;
-  stageId?: string;
+  /**
+   * Plural, and an array, because that is the server's contract: GET /api/deals reads a COMMA-SEPARATED
+   * `stageIds` (deals/routes.ts:895) and does not look at `stageId` at all. Sending the singular name
+   * filtered nothing and quietly returned every stage — a filter that appears applied and is not.
+   */
+  stageIds?: string[];
   search?: string;
   page?: number;
   limit?: number;
@@ -27,11 +32,12 @@ export type ListDealsParams = {
  * not a valid page on the server.
  */
 export async function listDeals(fetcher: Fetcher, params: ListDealsParams = {}): Promise<DealListResponse> {
-  const { scope, stageId, search, page, limit } = params;
+  const { scope, stageIds, search, page, limit } = params;
   return fetcher<DealListResponse>("/deals", {
     query: {
       scope,
-      stageId,
+      // Comma-joined, per the route's `(req.query.stageIds as string).split(",")`.
+      stageIds: stageIds && stageIds.length > 0 ? stageIds.join(",") : undefined,
       search: search?.trim() || undefined,
       page: page && page > 0 ? page : undefined,
       limit,
@@ -89,10 +95,27 @@ export async function unwatchDeal(fetcher: Fetcher, dealId: string): Promise<unk
   return fetcher(`/deals/${dealId}/watch`, { method: "DELETE" });
 }
 
-/** GET /activities → { activities, ... }. Scoped to one deal by the dealId param. */
-export async function listActivities(fetcher: Fetcher, dealId: string): Promise<Activity[]> {
-  const res = await fetcher<ActivityListResponse>("/activities", { query: { dealId } });
-  return res.activities ?? [];
+/**
+ * GET /activities → { activities, pagination }. Scoped to one deal by the dealId param.
+ *
+ * Returns the WHOLE response, pagination included. The server defaults to 50 rows per page
+ * (activities/service.ts:129), so discarding the envelope made every activity beyond the 50th
+ * permanently unreachable while the timeline looked complete — a deal's history silently truncated at a
+ * boundary nothing on screen mentions.
+ */
+export async function listActivities(
+  fetcher: Fetcher,
+  dealId: string,
+  params: { page?: number; limit?: number } = {},
+): Promise<ActivityListResponse> {
+  const res = await fetcher<ActivityListResponse>("/activities", {
+    query: {
+      dealId,
+      page: params.page && params.page > 0 ? params.page : undefined,
+      limit: params.limit,
+    },
+  });
+  return { activities: res.activities ?? [], pagination: res.pagination };
 }
 
 /**

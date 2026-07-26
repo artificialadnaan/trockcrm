@@ -2184,6 +2184,11 @@ export async function getDealDetail(
       // client_email/client_phone). Not otherwise projected by the detail select.
       primaryContactEmail: contacts.email,
       primaryContactPhone: contacts.phone,
+      // Additive: the contacts table has a separate `mobile` column and every other contact surface
+      // coalesces the two (contact-list-page.tsx uses `phone ?? mobile`). Projecting only `phone` left a
+      // mobile-only contact with no reachable number on any consumer of this detail read. Added rather
+      // than COALESCEd into primaryContactPhone so existing consumers see no change in what they read.
+      primaryContactMobile: contacts.mobile,
       primaryContactOwnerUserId: contacts.ownerId,
       primaryContactOwnerUserName: sql<string | null>`(SELECT display_name FROM public.users WHERE id = ${contacts.ownerId})`,
       billingContactName: sql<string | null>`NULLIF(TRIM(CONCAT_WS(' ', ${billingContact.firstName}, ${billingContact.lastName})), '')`,

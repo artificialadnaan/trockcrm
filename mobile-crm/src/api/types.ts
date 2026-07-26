@@ -137,6 +137,12 @@ export type DealDetail = DealListItem & {
   primaryContactName: string | null;
   primaryContactEmail: string | null;
   primaryContactPhone: string | null;
+  /**
+   * Projected alongside `primaryContactPhone` so a mobile-only contact stays callable. The contacts
+   * table carries both columns and every other contact surface coalesces them; the deal detail select
+   * projected only `phone`, so a contact reachable ONLY on a mobile number showed no call action at all.
+   */
+  primaryContactMobile: string | null;
   propertyAddress: string | null;
   projectType: string | null;
   createdAt: string | null;
@@ -189,5 +195,5 @@ export type Activity = {
 
 export type ActivityListResponse = {
   activities: Activity[];
-  pagination?: { page: number; limit: number; total: number };
+  pagination?: { page: number; limit: number; total: number; totalPages: number };
 };

@@ -120,7 +120,50 @@ describe("listActivities", () => {
 
   it("unwraps { activities }", async () => {
     const { fetcher } = recording({ activities: [{ id: "a1" }, { id: "a2" }] });
-    await expect(deals.listActivities(fetcher, "d1")).resolves.toHaveLength(2);
+    const res = await deals.listActivities(fetcher, "d1");
+    expect(res.activities).toHaveLength(2);
+  });
+
+  it("keeps the pagination envelope instead of discarding it", async () => {
+    // The server pages this at 50 (activities/service.ts:129). Returning a bare array threw the page
+    // metadata away, so the screen had no way to know a deal's history continued — and every activity
+    // past the 50th was unreachable while the timeline looked complete.
+    const { fetcher } = recording({
+      activities: [{ id: "a1" }],
+      pagination: { page: 1, limit: 50, total: 120, totalPages: 3 },
+    });
+    const res = await deals.listActivities(fetcher, "d1");
+    expect(res.pagination).toEqual({ page: 1, limit: 50, total: 120, totalPages: 3 });
+  });
+
+  it("requests a specific page", async () => {
+    const { fetcher, calls } = recording({ activities: [] });
+    await deals.listActivities(fetcher, "d1", { page: 3 });
+    expect((calls[0].opts.query as Record<string, unknown>).page).toBe(3);
+  });
+
+  it("drops page 0 rather than transmitting it", async () => {
+    const { fetcher, calls } = recording({ activities: [] });
+    await deals.listActivities(fetcher, "d1", { page: 0 });
+    expect((calls[0].opts.query as Record<string, unknown>).page).toBeUndefined();
+  });
+});
+
+describe("stage filter parameter", () => {
+  it("sends the server's comma-separated stageIds, not stageId", async () => {
+    // GET /api/deals reads only `stageIds` (deals/routes.ts:895). Sending the singular name was ignored
+    // outright, so the list returned every stage while appearing to be filtered.
+    const { fetcher, calls } = recording({ deals: [], pagination: {} });
+    await deals.listDeals(fetcher, { stageIds: ["s1", "s2"] });
+    const query = calls[0].opts.query as Record<string, unknown>;
+    expect(query.stageIds).toBe("s1,s2");
+    expect(query).not.toHaveProperty("stageId");
+  });
+
+  it("omits the parameter entirely for an empty selection", async () => {
+    const { fetcher, calls } = recording({ deals: [], pagination: {} });
+    await deals.listDeals(fetcher, { stageIds: [] });
+    expect((calls[0].opts.query as Record<string, unknown>).stageIds).toBeUndefined();
   });
 });
 
@@ -153,6 +196,33 @@ describe("displayAmount — the canonical value priority", () => {
     expect(
       displayAmount({ ...empty, stageSlug: "estimating", ddEstimate: "120000.00", bidEstimate: "90000.00" }),
     ).toBe("$120,000");
+  });
+
+  it("treats the legacy estimate_in_progress alias as estimating", () => {
+    // shared/src/types/workflow.ts maps this alias to `estimating` on the normal route, so a deal still
+    // carrying it must use the DD-first order. Testing `stageSlug === "estimating"` alone showed a LOWER
+    // number on mobile than the web app showed for the same deal.
+    expect(
+      displayAmount({
+        ...empty,
+        stageSlug: "estimate_in_progress",
+        ddEstimate: "120000.00",
+        bidEstimate: "90000.00",
+      }),
+    ).toBe("$120,000");
+  });
+
+  it("does not apply the override to the legacy alias on the service route", () => {
+    // Both slugs map to `service_estimating` there, which is deliberately NOT estimating.
+    expect(
+      displayAmount({
+        ...empty,
+        stageSlug: "estimate_in_progress",
+        workflowRoute: "service",
+        ddEstimate: "120000.00",
+        bidEstimate: "90000.00",
+      }),
+    ).toBe("$90,000");
   });
 
   it("does not apply the estimating override on the service route", () => {

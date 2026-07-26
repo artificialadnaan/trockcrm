@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useMemo, useState } from "react";
 import {
   ActivityIndicator,
   Linking,
@@ -11,7 +11,7 @@ import {
 } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError } from "../../../src/api/client";
 import * as dealsApi from "../../../src/api/endpoints/deals";
 import { useAuth } from "../../../src/auth/AuthContext";
@@ -36,11 +36,24 @@ export default function DealDetailScreen() {
     enabled: dealId.length > 0,
   });
 
-  const activitiesQuery = useQuery({
+  const activitiesQuery = useInfiniteQuery({
     queryKey: qk.dealActivities(scope, dealId),
-    queryFn: () => dealsApi.listActivities(fetcher, dealId),
+    initialPageParam: 1,
+    // The server pages this at 50 (activities/service.ts:129). Without a load-more, a deal's history
+    // simply stopped at the 50th entry while the timeline looked complete.
+    queryFn: ({ pageParam }) => dealsApi.listActivities(fetcher, dealId, { page: pageParam }),
+    getNextPageParam: (last) => {
+      const p = last.pagination;
+      if (!p) return undefined;
+      return p.page < p.totalPages ? p.page + 1 : undefined;
+    },
     enabled: dealId.length > 0,
   });
+
+  const activities = useMemo(
+    () => (activitiesQuery.data?.pages ?? []).flatMap((p) => p.activities),
+    [activitiesQuery.data],
+  );
 
   const logNote = useMutation({
     mutationFn: (notes: string) =>
@@ -49,7 +62,11 @@ export default function DealDetailScreen() {
       // Clear ONLY what was actually sent. A rep can keep typing while a slow save is in flight, and
       // blanking the field unconditionally would silently delete everything written after the request
       // began — losing exactly the observation they opened the app to record.
-      setNote((current) => (current === submitted ? "" : current));
+      //
+      // Compared TRIMMED on both sides: the mutation is given note.trim(), so a note typed with a
+      // trailing space never matched the raw field and stayed put after a successful save — inviting the
+      // rep to submit the same note twice.
+      setNote((current) => (current.trim() === submitted ? "" : current));
       await queryClient.invalidateQueries({ queryKey: qk.dealActivities(scope, dealId) });
     },
   });
@@ -75,12 +92,24 @@ export default function DealDetailScreen() {
     );
   }
 
-  if (dealQuery.error || !dealQuery.data) {
+  // `!dealQuery.data`, NOT `dealQuery.error || !dealQuery.data`. TanStack keeps the previous data when a
+  // later refetch fails — including the one this screen fires itself after a watch toggle — so keying the
+  // blocking state on `error` replaced a fully usable deal with "Couldn't load this deal" and a Go back
+  // button. The stale-data case is signalled inline instead; see refreshFailed below.
+  if (!dealQuery.data) {
     const offline = dealQuery.error instanceof ApiError && dealQuery.error.status === 0;
     return (
       <SafeAreaView style={styles.safe}>
         <View style={styles.center}>
           <Text style={styles.errorTitle}>{offline ? "You're offline" : "Couldn't load this deal"}</Text>
+          <Pressable
+            testID="deal-retry"
+            onPress={() => void dealQuery.refetch()}
+            accessibilityRole="button"
+            style={styles.backBtn}
+          >
+            <Text style={styles.backBtnText}>Try again</Text>
+          </Pressable>
           <Pressable onPress={() => router.back()} accessibilityRole="button" style={styles.backBtn}>
             <Text style={styles.backBtnText}>Go back</Text>
           </Pressable>
@@ -95,13 +124,31 @@ export default function DealDetailScreen() {
   // would show a materially different age than the web app for the same deal.
   const stageDays = deal.atRisk?.effectiveStageAgeDays ?? daysSince(deal.stageEnteredAt);
   const location = formatLocation(deal.propertyCity, deal.propertyState);
+  // Data is on screen but the last refresh failed — say so without taking the screen away.
+  const refreshFailed = Boolean(dealQuery.error);
+  // Both columns, coalesced the way every other contact surface does. Projecting only `phone` hid the
+  // call action entirely for a contact reachable only on a mobile number.
+  const contactPhone = deal.primaryContactPhone ?? deal.primaryContactMobile;
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
-      <ScrollView contentContainerStyle={styles.body}>
+      {/* Without "handled", the first tap on Save only dismisses the keyboard and never reaches the
+          button — so the rep's opening tap on the app's primary action silently does nothing. */}
+      <ScrollView contentContainerStyle={styles.body} keyboardShouldPersistTaps="handled">
         <Pressable onPress={() => router.back()} accessibilityRole="button" accessibilityLabel="Back">
           <Text style={styles.back}>‹ Deals</Text>
         </Pressable>
+
+        {refreshFailed ? (
+          <Pressable
+            testID="deal-refresh-retry"
+            onPress={() => void dealQuery.refetch()}
+            accessibilityRole="button"
+            style={styles.staleBanner}
+          >
+            <Text style={styles.staleText}>Showing saved data — couldn&apos;t refresh. Tap to retry.</Text>
+          </Pressable>
+        ) : null}
 
         <Text style={styles.name}>{deal.name ?? "Untitled deal"}</Text>
         {deal.companyName ? <Text style={styles.company}>{deal.companyName}</Text> : null}
@@ -122,6 +169,17 @@ export default function DealDetailScreen() {
         >
           <Text style={styles.watchText}>{deal.isWatching ? "★ Watching" : "☆ Watch"}</Text>
         </Pressable>
+        {/* A silent failure here is indistinguishable from success: the button re-enables with its old
+            label, so the rep believes they are watching a deal they are not, and stops checking it. */}
+        {watch.error ? (
+          <Text testID="watch-error" style={styles.watchError}>
+            {watch.error instanceof ApiError && watch.error.status === 0
+              ? "Couldn't update — you appear to be offline."
+              : watch.error instanceof ApiError
+                ? watch.error.message
+                : "Couldn't update your watch setting."}
+          </Text>
+        ) : null}
 
         <Section title="Details">
           <Row label="Stage" value={deal.stageSlug ?? "—"} />
@@ -136,12 +194,12 @@ export default function DealDetailScreen() {
           <Section title="Primary contact">
             <Row label="Name" value={deal.primaryContactName} />
             {/* Tap-to-call and tap-to-email are the whole point of a contact on a phone. */}
-            {deal.primaryContactPhone ? (
+            {contactPhone ? (
               <ContactAction
                 testID="call-contact"
                 label="Call"
-                value={deal.primaryContactPhone}
-                url={`tel:${deal.primaryContactPhone.replace(/[^\d+]/g, "")}`}
+                value={contactPhone}
+                url={`tel:${contactPhone.replace(/[^\d+]/g, "")}`}
               />
             ) : null}
             {deal.primaryContactEmail ? (
@@ -194,9 +252,12 @@ export default function DealDetailScreen() {
         <Section title="Activity">
           {activitiesQuery.isLoading ? (
             <ActivityIndicator color={theme.color.brandRed} />
-          ) : activitiesQuery.error ? (
+          ) : activitiesQuery.error && activities.length === 0 ? (
             // A failed timeline request is NOT an empty timeline. Claiming "nothing logged" on a 5xx
             // presents a failure as authoritative CRM data, and a rep would believe it.
+            //
+            // Gated on `activities.length === 0`: once entries are loaded, a failed refetch or a failed
+            // load-more must not delete the history already on screen. That case shows below instead.
             <Pressable
               testID="retry-activities"
               onPress={() => void activitiesQuery.refetch()}
@@ -205,10 +266,10 @@ export default function DealDetailScreen() {
             >
               <Text style={styles.retryText}>Couldn&apos;t load activity — tap to retry</Text>
             </Pressable>
-          ) : (activitiesQuery.data ?? []).length === 0 ? (
+          ) : activities.length === 0 ? (
             <Text style={styles.emptyActivity}>Nothing logged yet.</Text>
           ) : (
-            (activitiesQuery.data ?? []).map((a) => (
+            activities.map((a) => (
               <View key={a.id} style={styles.activity}>
                 <Text style={styles.activityMeta}>
                   {a.type}
@@ -221,6 +282,45 @@ export default function DealDetailScreen() {
               </View>
             ))
           )}
+
+          {/* Older history is reachable rather than silently truncated at the server's 50-row page. */}
+          {activities.length > 0 && activitiesQuery.hasNextPage ? (
+            <Pressable
+              testID="load-more-activities"
+              onPress={() => {
+                if (!activitiesQuery.isFetchingNextPage) void activitiesQuery.fetchNextPage();
+              }}
+              disabled={activitiesQuery.isFetchingNextPage}
+              accessibilityRole="button"
+              style={styles.retry}
+            >
+              {activitiesQuery.isFetchingNextPage ? (
+                <ActivityIndicator color={theme.color.brandRed} />
+              ) : (
+                <Text style={styles.retryText}>Load older activity</Text>
+              )}
+            </Pressable>
+          ) : null}
+
+          {/* A background failure with rows already on screen: never replace them, just say so. */}
+          {activities.length > 0 && activitiesQuery.error ? (
+            <Pressable
+              testID="retry-activities-inline"
+              onPress={() =>
+                void (activitiesQuery.isFetchNextPageError
+                  ? activitiesQuery.fetchNextPage()
+                  : activitiesQuery.refetch())
+              }
+              accessibilityRole="button"
+              style={styles.retry}
+            >
+              <Text style={styles.retryText}>
+                {activitiesQuery.isFetchNextPageError
+                  ? "Couldn't load older activity — tap to retry"
+                  : "Couldn't refresh activity — tap to retry"}
+              </Text>
+            </Pressable>
+          ) : null}
         </Section>
       </ScrollView>
     </SafeAreaView>
@@ -338,6 +438,20 @@ const styles = StyleSheet.create({
     color: theme.color.textPrimary,
   },
   noteError: { fontFamily: theme.font.regular, fontSize: 13, color: theme.color.brandRedDeep },
+  watchError: {
+    marginTop: theme.space.xs,
+    fontFamily: theme.font.regular,
+    fontSize: 13,
+    color: theme.color.brandRedDeep,
+  },
+  staleBanner: {
+    marginTop: theme.space.sm,
+    borderRadius: theme.radius.md,
+    backgroundColor: "#FEF3C7",
+    paddingHorizontal: theme.space.md,
+    paddingVertical: theme.space.sm,
+  },
+  staleText: { fontFamily: theme.font.semibold, fontSize: 13, color: "#92400E" },
   saveNote: {
     backgroundColor: theme.color.brandRed,
     borderRadius: theme.radius.md,
