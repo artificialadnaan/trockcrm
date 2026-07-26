@@ -35,8 +35,4 @@ export const qk = {
     ["deal-activities", scope, dealId] as const,
   contactDeals: (scope: QueryScope, contactId: string) =>
     ["contact-deals", scope, contactId] as const,
-  companies: (scope: QueryScope, params?: Record<string, unknown>) =>
-    ["companies", scope, params ?? {}] as const,
-  company: (scope: QueryScope, id: string) => ["company", scope, id] as const,
-  companyContacts: (scope: QueryScope, id: string) => ["company-contacts", scope, id] as const,
 } as const;

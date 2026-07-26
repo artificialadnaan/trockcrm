@@ -1,7 +1,4 @@
 import type {
-  CompanyContactRow,
-  CompanyDetail,
-  CompanyListResponse,
   ContactDealAssociation,
   ContactDetail,
   ContactListResponse,
@@ -69,52 +66,6 @@ export async function getContactDeals(
 /** POST /contacts/:id/assign-to-me → { contact }, the raw row. Returns the raw shape, not ContactDetail. */
 export async function assignContactToMe(fetcher: Fetcher, contactId: string): Promise<unknown> {
   return fetcher(`/contacts/${contactId}/assign-to-me`, { method: "POST" });
-}
-
-/**
- * GET /companies → the service result directly, whose paging fields sit at the TOP LEVEL:
- * `{ companies, total, page, limit, pipelineTotal, staleCount }` (companies/service.ts:148-155).
- *
- * This is NOT the shape /contacts uses — that one nests everything under `pagination` and adds
- * `totalPages`. Reading a `pagination` object here silently discarded every paging field, so a caller
- * could never tell there was a second page.
- */
-export async function listCompanies(
-  fetcher: Fetcher,
-  params: { search?: string; page?: number; limit?: number } = {},
-): Promise<CompanyListResponse> {
-  const { search, page, limit } = params;
-  const res = await fetcher<CompanyListResponse>("/companies", {
-    query: {
-      search: search?.trim() || undefined,
-      page: page && page > 0 ? page : undefined,
-      limit,
-    },
-  });
-  return { companies: res.companies ?? [], total: res.total, page: res.page, limit: res.limit };
-}
-
-/** GET /companies/:id → { company }, already merged with its stats server-side. */
-export async function getCompany(fetcher: Fetcher, companyId: string): Promise<CompanyDetail> {
-  const res = await fetcher<{ company: CompanyDetail }>(`/companies/${companyId}`);
-  return res.company;
-}
-
-/**
- * GET /companies/:id/contacts → { contacts }.
- *
- * NOT the same row shape as the contacts list, despite the identical envelope: this one selects the raw
- * contact columns plus owner fields and nothing else (companies/service.ts:476-487). No
- * `linkedCompanyName`, no `isPrimary`, no `linkedDealsCount`, no `lastTouchAt`. Typing it as
- * ContactListRow made those read as undefined, which renders as a blank or a confident "0" rather than
- * as the missing data it is.
- */
-export async function getCompanyContacts(
-  fetcher: Fetcher,
-  companyId: string,
-): Promise<CompanyContactRow[]> {
-  const res = await fetcher<{ contacts: CompanyContactRow[] }>(`/companies/${companyId}/contacts`);
-  return res.contacts ?? [];
 }
 
 /**

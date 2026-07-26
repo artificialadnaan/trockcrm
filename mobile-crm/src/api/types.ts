@@ -305,38 +305,6 @@ export type CompanyContactRow = ContactBase & {
   ownerUserName: string | null;
 };
 
-export type CompanyListRow = {
-  id: string;
-  name: string;
-  category: string | null;
-  city: string | null;
-  state: string | null;
-  isActive: boolean | null;
-};
-
-export type CompanyDetail = CompanyListRow & {
-  address: string | null;
-  zip: string | null;
-  website: string | null;
-  phone: string | null;
-  notes: string | null;
-  contactCount?: number;
-  dealCount?: number;
-};
-
-/**
- * GET /companies puts its pagination at the TOP LEVEL — `{ companies, total, page, limit, ... }` — not
- * inside a `pagination` object the way /contacts does (companies/service.ts:148-155). Declaring the
- * contacts shape here made every paging field read as undefined, which is invisible until a second page
- * is needed and then simply never arrives.
- */
-export type CompanyListResponse = {
-  companies: CompanyListRow[];
-  total?: number;
-  page?: number;
-  limit?: number;
-};
-
 /**
  * The deal carried by a contact association is the RAW tenant.deals row (passed through
  * redactDealResponse), NOT a list row: contacts/association-service.ts:26-34 selects `deals` whole with

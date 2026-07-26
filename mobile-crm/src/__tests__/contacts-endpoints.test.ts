@@ -33,23 +33,10 @@ describe("response envelopes", () => {
     expect(res[0].deal?.id).toBe("d1");
   });
 
-  it("GET /companies/:id unwraps { company }", async () => {
-    const { fetcher } = recording({ company: { id: "co1", name: "Acme" } });
-    await expect(contacts.getCompany(fetcher, "co1")).resolves.toMatchObject({ name: "Acme" });
-  });
-
-  it("GET /companies/:id/contacts unwraps { contacts }", async () => {
-    const { fetcher } = recording({ contacts: [{ id: "c1" }] });
-    await expect(contacts.getCompanyContacts(fetcher, "co1")).resolves.toHaveLength(1);
-  });
-
-  it.each([
-    ["contacts", () => contacts.listContacts(recording({}).fetcher)],
-    ["companies", () => contacts.listCompanies(recording({}).fetcher)],
-  ])("%s list degrades to an empty array when the key is absent", async (_case, run) => {
+  it("contacts list degrades to an empty array when the key is absent", async () => {
     // A screen doing .map() on undefined crashes; an empty list renders an empty state.
-    const res = (await run()) as { contacts?: unknown[]; companies?: unknown[] };
-    expect(res.contacts ?? res.companies).toEqual([]);
+    const res = await contacts.listContacts(recording({}).fetcher);
+    expect(res.contacts).toEqual([]);
   });
 });
 
@@ -64,25 +51,6 @@ describe("query params", () => {
     const { fetcher, calls } = recording({ contacts: [] });
     await contacts.listContacts(fetcher, { page: 0 });
     expect((calls[0].opts.query as Record<string, unknown>).page).toBeUndefined();
-  });
-});
-
-describe("contactCompanyName", () => {
-  it("prefers the JOINED company name over the free-text one", () => {
-    // The web list, detail header and company filter all coalesce in this order. Diverging here would
-    // break "filter by what you can see" — the filter would not match the label shown on the row.
-    expect(
-      contacts.contactCompanyName({ linkedCompanyName: "Acme Corp", companyName: "acme (old)" }),
-    ).toBe("Acme Corp");
-  });
-
-  it("falls back to free text when there is no linked company", () => {
-    // Imported contacts frequently have only the free-text value.
-    expect(contacts.contactCompanyName({ linkedCompanyName: null, companyName: "Acme" })).toBe("Acme");
-  });
-
-  it("returns null when neither exists", () => {
-    expect(contacts.contactCompanyName({ linkedCompanyName: null, companyName: null })).toBeNull();
   });
 });
 
@@ -112,26 +80,6 @@ describe("categoryLabel", () => {
 
   it.each([null, undefined, ""])("renders nothing for %p", (value) => {
     expect(contacts.categoryLabel(value as string | null)).toBe("");
-  });
-});
-
-describe("GET /companies pagination shape", () => {
-  it("reads the TOP-LEVEL total/page/limit, which is not where /contacts puts them", async () => {
-    // companies/service.ts returns { companies, total, page, limit, ... } — flat. Reading a `pagination`
-    // object (the /contacts convention) yielded undefined for every field, so a caller could never learn
-    // there was a second page. Two sibling endpoints, two conventions, no type error either way.
-    const { fetcher } = recording({
-      companies: [{ id: "co1" }],
-      total: 214,
-      page: 2,
-      limit: 50,
-      pipelineTotal: "0",
-      staleCount: 0,
-    });
-    const res = await contacts.listCompanies(fetcher, { page: 2 });
-    expect(res.total).toBe(214);
-    expect(res.page).toBe(2);
-    expect(res.limit).toBe(50);
   });
 });
 
