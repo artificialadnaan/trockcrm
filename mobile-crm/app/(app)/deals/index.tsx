@@ -18,6 +18,7 @@ import type { DealScope } from "../../../src/api/types";
 import { useAuth } from "../../../src/auth/AuthContext";
 import { useQueryScope } from "../../../src/auth/useOfficeId";
 import { DealCard } from "../../../src/components/DealCard";
+import { RetryNotice } from "../../../src/components/RetryNotice";
 import { stageLabelFor } from "../../../src/stage-label";
 import { qk } from "../../../src/query/keys";
 import { theme } from "../../../src/theme/theme";
@@ -94,7 +95,12 @@ export default function DealsListScreen() {
   // non-empty list. Keying on row count treated "loaded, and empty" as "never loaded", and replaced a
   // refreshable empty state with the blocking initial-load error.
   const everLoaded = query.data !== undefined;
-  const backgroundError = query.error && everLoaded ? query.error : null;
+  // Split by WHICH fetch failed, because that decides where the notice has to go. A failed refresh must
+  // appear at the top next to the gesture — after a pull the user is still at the top, so a footer
+  // message sits below a full page, off-screen, and the refresh looks like it worked while stale data
+  // stays up. A failed load-more belongs in the footer, which is where the user already is.
+  const pageError = query.error && everLoaded && query.isFetchNextPageError ? query.error : null;
+  const refreshError = query.error && everLoaded && !query.isFetchNextPageError ? query.error : null;
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
@@ -189,26 +195,27 @@ export default function DealsListScreen() {
           onEndReached={() => {
             if (query.hasNextPage && !query.isFetchingNextPage) void query.fetchNextPage();
           }}
+          ListHeaderComponent={
+            refreshError ? (
+              <RetryNotice
+                testID="deals-refresh-retry"
+                message="Couldn't refresh — showing saved deals. Tap to retry."
+                onRetry={() => void query.refetch()}
+                placement="top"
+              />
+            ) : null
+          }
           ListFooterComponent={
             query.isFetchingNextPage ? (
               <ActivityIndicator color={theme.color.brandRed} style={styles.footer} />
-            ) : backgroundError ? (
-              // Retry the operation that actually failed: another page, or the refresh. Calling refetch()
-              // for a failed page would silently reload page 1 and leave the gap the rep hit.
-              <Pressable
+            ) : pageError ? (
+              // fetchNextPage, not refetch: reloading page 1 would silently leave the gap the rep hit.
+              <RetryNotice
                 testID="deals-page-retry"
-                onPress={() =>
-                  void (query.isFetchNextPageError ? query.fetchNextPage() : query.refetch())
-                }
-                accessibilityRole="button"
-                style={styles.footerRetry}
-              >
-                <Text style={styles.retryText}>
-                  {query.isFetchNextPageError
-                    ? "Couldn't load more — tap to retry"
-                    : "Couldn't refresh — tap to retry"}
-                </Text>
-              </Pressable>
+                message="Couldn't load more — tap to retry"
+                onRetry={() => void query.fetchNextPage()}
+                placement="bottom"
+              />
             ) : null
           }
           renderItem={({ item }) => (
@@ -273,7 +280,6 @@ const styles = StyleSheet.create({
   list: { padding: theme.space.lg, paddingTop: theme.space.sm, gap: theme.space.md },
   listEmpty: { flexGrow: 1 },
   footer: { paddingVertical: theme.space.lg },
-  footerRetry: { paddingVertical: theme.space.lg, alignItems: "center" },
   center: { flex: 1, alignItems: "center", justifyContent: "center", padding: theme.space.xl, gap: theme.space.sm },
   errorTitle: { fontFamily: theme.font.bold, fontSize: 17, color: theme.color.inkNavy },
   errorBody: { fontFamily: theme.font.regular, fontSize: 14, color: theme.color.textSecondary, textAlign: "center" },
