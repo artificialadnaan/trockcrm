@@ -1,4 +1,4 @@
-import { accessibleSurfaces, canAccessSurface, hasAnyCrmSurface } from "../auth/surfaces";
+import { CRM_SURFACES, accessibleSurfaces, canAccessSurface, hasAnyCrmSurface } from "../auth/surfaces";
 
 /**
  * The CRM surface policy, mirroring client/src/components/layout/sidebar.tsx:65-71.
@@ -24,7 +24,10 @@ describe("CRM surface policy", () => {
     expect(hasAnyCrmSurface("construction")).toBe(false);
   });
 
-  it.each(["contacts", "deals", "companies"] as const)("refuses construction the %s surface", (surface) => {
+  // DERIVED from CRM_SURFACES, not hand-listed. The hand-written version was missing `leads` — the one
+  // surface added since it was written, which is exactly how a per-item list goes quietly incomplete
+  // while still passing. A refusal list that does not enumerate itself protects only what it remembers.
+  it.each(CRM_SURFACES)("refuses construction the %s surface", (surface) => {
     expect(canAccessSurface("construction", surface)).toBe(false);
   });
 
