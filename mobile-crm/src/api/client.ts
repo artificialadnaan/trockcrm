@@ -174,8 +174,13 @@ export async function apiFetch<T = unknown>(path: string, opts: ApiFetchOptions 
         // a compatibility fallback for the handful of routes that still return one.
         if (!code && typeof parsed.code === "string") code = parsed.code;
       } catch {
-        /* keep default message */
+        /* keep default message — a body that is absent or not JSON still has a usable status */
       }
+      // ...but a body that TIMED OUT is not a server error with a readable status; it is a stalled
+      // connection that happened to be carrying an error page. Reporting it as the original 4xx/5xx
+      // would send screens down an error path for a failure the request never actually finished
+      // observing. Same precedence as the success path above.
+      if (bodyTimedOut) throw new ApiError("Request timed out", 408);
       throw new ApiError(message, res.status, code);
     }
 
@@ -200,6 +205,11 @@ export async function apiFetch<T = unknown>(path: string, opts: ApiFetchOptions 
       // as ApiError(status = 200) told every screen the request had succeeded and the payload was
       // malformed, so the offline checks (`status === 0`) missed it and a rep on a site with no signal was
       // shown a server-fault message for a connectivity problem.
+      // The body DEADLINE, checked before the generic abort handling — it fires by aborting the shared
+      // controller, so `signal.aborted` is true either way and a plain abort check would report every
+      // stalled body as a user cancellation. Callers branch hard on this: 408 drives retry-and-say-so,
+      // status 0 drives the offline copy, and a cancellation is meant to be silent.
+      if (bodyTimedOut) throw new ApiError("Request timed out", 408);
       if (controller.signal.aborted) throw new ApiError("Request cancelled", 0);
       throw new ApiError(e instanceof Error ? e.message : "Network request failed", 0);
     }
