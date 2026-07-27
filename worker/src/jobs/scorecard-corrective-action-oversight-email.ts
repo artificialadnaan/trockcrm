@@ -80,6 +80,9 @@ interface ScorecardRow {
   status: string | null;
   pdf_r2_key: string | null;
   pdf_render_version: number | null;
+  /** The scorecard updated_at the stored PDF was rendered from (migration 0200); null pre-migration. */
+  pdf_content_generation: Date | string | null;
+  updated_at: Date | string | null;
   corrective_action_oversight_opened_at: Date | null;
   corrective_action_oversight_closed_at: Date | null;
 }
@@ -136,6 +139,7 @@ export async function handleScorecardCorrectiveActionOversightEmail(
   const scorecardResult = await query(
     `SELECT sc.deal_id, sc.project_number, sc.week_of, sc.total_score, sc.average_score, sc.rating,
             sc.form_version, sc.status, sc.pdf_r2_key, sc.pdf_render_version,
+            sc.pdf_content_generation, sc.updated_at,
             sc.corrective_action_oversight_opened_at, sc.corrective_action_oversight_closed_at,
             d.name AS deal_name
        FROM ${tenantSchema}.field_scorecards sc
@@ -159,6 +163,23 @@ export async function handleScorecardCorrectiveActionOversightEmail(
       scorecardId,
       phase,
     });
+    return;
+  }
+
+  // SEND-TIME STATE GUARD, mirroring the responder job. Both jobs run ~120s after enqueue, and the card can
+  // move within that window:
+  //   - an edit lifting it above band walks it to `submitted` and deletes every item, so an unguarded
+  //     `opened` job would announce a corrective action that no longer exists;
+  //   - a single-item corrective action answered in-app closes the card, so an unguarded `opened` job would
+  //     announce it as open while listing every item Resolved, immediately followed by the completed notice.
+  // Return WITHOUT sending and WITHOUT stamping: the stamp stays available for a genuinely matching state,
+  // and a real reopen clears it anyway.
+  const expectedStatus = phase === "opened" ? "corrective_action_open" : "corrective_action_closed";
+  if (scorecard.status !== expectedStatus) {
+    logger.log(
+      "[CorrectiveActionOversightEmail] Scorecard is no longer in the state this notice describes - skipping (no send, no stamp)",
+      { scorecardId, phase, expectedStatus, actualStatus: scorecard.status },
+    );
     return;
   }
 
@@ -266,6 +287,23 @@ async function loadPdfAttachment(
     );
     return undefined;
   }
+  // The right RENDERER is not enough — the stored bytes must also be the CURRENT content. The post-commit
+  // refresh that regenerates the PDF after a response is best-effort (an R2 blip or a restart makes it a
+  // no-op), so a v3 artifact rendered BEFORE the response still shows every item Open. Attaching that to an
+  // email headed "Corrective Action Completed" would be the very defect this feature fixes, one level down.
+  // Same comparison the server's staleness check makes (migration 0200), at millisecond precision because
+  // node-postgres yields millisecond Dates while Postgres retains microseconds.
+  if (!isStoredPdfCurrent(scorecard)) {
+    logger.warn(
+      "[CorrectiveActionOversightEmail] Stored PDF predates the corrective-action response - sending without attachment (the CRM link regenerates on download)",
+      {
+        scorecardId,
+        renderedGeneration: scorecard.pdf_content_generation,
+        currentGeneration: scorecard.updated_at,
+      },
+    );
+    return undefined;
+  }
   const getPdf = deps.getPdf ?? getObjectBuffer;
   try {
     const buffer = await getPdf(pdfR2Key);
@@ -292,6 +330,24 @@ async function loadPdfAttachment(
     });
     return undefined;
   }
+}
+
+/**
+ * Whether the stored PDF was rendered from the scorecard's CURRENT content. A null rendered generation is a
+ * pre-migration artifact and therefore not provably current; a null current generation means we cannot tell,
+ * and an un-provable attachment is not worth the risk of contradicting the email's own headline.
+ */
+function isStoredPdfCurrent(scorecard: ScorecardRow): boolean {
+  const rendered = toEpochMillis(scorecard.pdf_content_generation);
+  const current = toEpochMillis(scorecard.updated_at);
+  if (rendered == null || current == null) return false;
+  return rendered === current;
+}
+
+function toEpochMillis(value: Date | string | null): number | null {
+  if (value == null) return null;
+  const ms = value instanceof Date ? value.getTime() : new Date(value).getTime();
+  return Number.isNaN(ms) ? null : ms;
 }
 
 function dedupe(emails: string[]): string[] {

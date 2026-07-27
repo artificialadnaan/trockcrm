@@ -32,6 +32,21 @@ const SCORECARD_CORRECTIVE_ACTION_OVERSIGHT_EMAIL_JOB = "scorecard_corrective_ac
 // field_scorecard_email delay). run_after is a short while in the future so the email doesn't race the poll.
 const SCORECARD_EMAIL_RUN_AFTER_SECONDS = 120;
 
+/**
+ * A STRICTLY INCREASING scorecard generation token.
+ *
+ * `field_scorecards.updated_at` is the PDF artifact's staleness token (migration 0200) AND the single-flight
+ * key for finalizeFieldScorecardArtifacts. A bare `new Date()` can land in the SAME millisecond as the write
+ * before it — two responders answering the final two items typically commit microseconds apart — and then:
+ *   - the publish CAS (`date_trunc('milliseconds', updated_at) = <read generation>`) still passes, so a render
+ *     that read the PRE-second-resolve state stamps its stale bytes as current; and
+ *   - needsScorecardPdfRegeneration sees rendered == current and never repairs it, permanently.
+ *   - the second finalize builds the same single-flight key and coalesces onto the stale in-flight render.
+ * Matches the expression scorecard evidence invalidation already uses for exactly this reason
+ * (modules/files/service.ts) and the +1ms guard on the scorecard edit path (scorecards-service.ts).
+ */
+const NEXT_GENERATION = sql`GREATEST(${fieldScorecards.updatedAt} + interval '1 millisecond', NOW())`;
+
 export interface ResolveCorrectiveActionInput {
   scorecardId: string;
   itemId: string;
@@ -142,8 +157,8 @@ export async function resolveCorrectiveActionItemTx(
     .update(fieldScorecards)
     .set(
       closing
-        ? { status: "corrective_action_closed", updatedAt: new Date() }
-        : { updatedAt: new Date() },
+        ? { status: "corrective_action_closed", updatedAt: NEXT_GENERATION }
+        : { updatedAt: NEXT_GENERATION },
     )
     .where(eq(fieldScorecards.id, input.scorecardId));
 
@@ -382,7 +397,7 @@ export async function reconcileScorecardCorrectiveActions(
     ) {
       await tx
         .update(fieldScorecards)
-        .set({ status: "submitted", updatedAt: new Date() })
+        .set({ status: "submitted", updatedAt: NEXT_GENERATION })
         .where(eq(fieldScorecards.id, input.scorecardId));
       // The corrective-action cycle no longer exists (the edit lifted the card out of the band / removed every
       // flag), so its outstanding recipient-bound web tokens must not keep authorizing the responder flow or the
@@ -530,8 +545,22 @@ export async function reconcileScorecardCorrectiveActions(
   if (input.currentStatus !== nextStatus) {
     await tx
       .update(fieldScorecards)
-      .set({ status: nextStatus, updatedAt: new Date() })
+      .set({ status: nextStatus, updatedAt: NEXT_GENERATION })
       .where(eq(fieldScorecards.id, input.scorecardId));
+  }
+
+  // An EDIT can close the card too, not just a responder answering the last item: deleting the text of the
+  // only still-open flag leaves `anyItems` true with `openCount === 0`, so this reconcile flips the card to
+  // corrective_action_closed. Without an enqueue here, oversight — which was told the corrective action
+  // opened — would never learn it completed, and nothing would ever enqueue for it again.
+  //
+  // Distinct from the CANCEL path (an edit lifting the card above band), which walks it to `submitted` and
+  // deletes its items in the not-in-band branch above; that is not a completion and stays silent.
+  if (nextStatus === "corrective_action_closed" && input.currentStatus !== "corrective_action_closed") {
+    await enqueueCorrectiveActionOversightClosed(tx, {
+      office: input.office,
+      scorecardId: input.scorecardId,
+    });
   }
 
   // Decide whether to (re)start a notification cycle. Two triggers, UNIFIED into one enqueue site:
@@ -589,11 +618,15 @@ export async function reconcileScorecardCorrectiveActions(
       .set({
         correctiveActionEmailSentAt: null,
         correctiveActionCycleNonce: cycleNonce,
-        // A fresh cycle must re-notify OVERSIGHT too, not just the responders. Clearing here but not at the
-        // restart helper (or vice versa) leaves a reopen re-notifying responders while oversight stays
-        // silent. See migration 0201.
-        correctiveActionOversightOpenedAt: null,
-        correctiveActionOversightClosedAt: null,
+        // The OVERSIGHT stamps clear ONLY on a genuine (re)open — NOT on the other two triggers of this
+        // block. Both `alreadyOpenGainedWork` and `alreadyOpenResponderChanged` require the card to have
+        // been ALREADY open, so from oversight's point of view nothing new happened: it was told once when
+        // the corrective action opened and will be told once when it completes. Clearing here would re-send
+        // "opened" every time an edit adds a flag or corrects a mis-picked superintendent — exactly the
+        // inbox noise this feature avoids, and the same reason the restart helpers don't clear them.
+        ...(transitioningIntoOpen
+          ? { correctiveActionOversightOpenedAt: null, correctiveActionOversightClosedAt: null }
+          : {}),
       })
       .where(eq(fieldScorecards.id, input.scorecardId));
     // Starting a NEW notification cycle (a reopen, OR an already-open card that gained new work after its
@@ -633,21 +666,26 @@ export async function reconcileScorecardCorrectiveActions(
     // Tell OVERSIGHT the corrective action opened — a separate job carrying the SAME cycleNonce, so both
     // notifications agree on which cycle they belong to. Never a CC on the job above: that one embeds a
     // per-recipient token authorizing a response, which must not reach an oversight inbox.
-    await tx.insert(jobQueue).values({
-      jobType: SCORECARD_CORRECTIVE_ACTION_OVERSIGHT_EMAIL_JOB,
-      payload: {
-        tenantSchema: `office_${input.office.slug}`,
-        scorecardId: input.scorecardId,
-        dealId: input.dealId,
+    //
+    // Gated on transitioningIntoOpen ALONE, matching the stamp clearing above. The other two triggers of
+    // this block operate on a card that was already open, which is not news for oversight.
+    if (transitioningIntoOpen) {
+      await tx.insert(jobQueue).values({
+        jobType: SCORECARD_CORRECTIVE_ACTION_OVERSIGHT_EMAIL_JOB,
+        payload: {
+          tenantSchema: `office_${input.office.slug}`,
+          scorecardId: input.scorecardId,
+          dealId: input.dealId,
+          officeId: input.office.id,
+          phase: "opened",
+          cycleNonce,
+        },
         officeId: input.office.id,
-        phase: "opened",
-        cycleNonce,
-      },
-      officeId: input.office.id,
-      status: "pending",
-      runAfter: new Date(Date.now() + SCORECARD_EMAIL_RUN_AFTER_SECONDS * 1000),
-      maxAttempts: 6,
-    });
+        status: "pending",
+        runAfter: new Date(Date.now() + SCORECARD_EMAIL_RUN_AFTER_SECONDS * 1000),
+        maxAttempts: 6,
+      });
+    }
   }
 }
 

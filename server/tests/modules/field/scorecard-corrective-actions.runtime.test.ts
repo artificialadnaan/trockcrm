@@ -704,3 +704,139 @@ describe("corrective-action oversight email enqueue", () => {
     expect(new Date((row.rows[0] as any).corrective_action_oversight_opened_at).getTime()).toBe(stampedAt.getTime());
   });
 });
+
+describe("corrective-action oversight — review-round regressions", () => {
+  async function oversightJobs(): Promise<{ payload: any }[]> {
+    const res = await tdb.execute(sql`
+      SELECT payload FROM public.job_queue
+      WHERE job_type = 'scorecard_corrective_action_oversight_email' ORDER BY id
+    `);
+    return res.rows as any[];
+  }
+  async function stamps(id: string) {
+    const res = await tdb.execute(sql`
+      SELECT corrective_action_oversight_opened_at AS opened, corrective_action_oversight_closed_at AS closed
+      FROM field_scorecards WHERE id = ${id}
+    `);
+    return res.rows[0] as { opened: string | null; closed: string | null };
+  }
+  async function getUpdatedAt(id: string): Promise<Date> {
+    const res = await tdb.execute(sql`SELECT updated_at FROM field_scorecards WHERE id = ${id}`);
+    return new Date((res.rows[0] as any).updated_at);
+  }
+
+  it("does NOT re-notify oversight when an edit ADDS a flag to an already-open card", async () => {
+    // The responder cycle legitimately restarts (they must learn of the new flag), but the corrective
+    // action never left open, so oversight already knows. Re-sending "opened" here is inbox noise.
+    const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
+    const stampedAt = new Date("2026-07-27T12:00:00.000Z");
+    await tdb.execute(sql`
+      UPDATE field_scorecards
+         SET corrective_action_oversight_opened_at = ${stampedAt}, corrective_action_email_sent_at = NOW()
+       WHERE id = ${scorecard.id}
+    `);
+    await tdb.execute(sql`DELETE FROM public.job_queue`);
+
+    await tdb.transaction(async (tx) => {
+      await reconcileScorecardCorrectiveActions(tx as any, {
+        scorecardId: scorecard.id,
+        dealId: DEAL,
+        office: OFFICE,
+        rating: "corrective_action",
+        currentStatus: "corrective_action_open",
+        deficiencies: ["missed_hold_point"],
+        actionItems: ["Re-inspect slab 2", "Verify hold points", "NEW: re-torque anchors"],
+      } as any);
+    });
+
+    // The RESPONDER cycle restarted...
+    const responder = await tdb.execute(sql`
+      SELECT 1 FROM public.job_queue WHERE job_type = 'scorecard_corrective_action_email'
+    `);
+    expect(responder.rows.length).toBe(1);
+    // ...but oversight was neither re-enqueued nor un-stamped.
+    expect(await oversightJobs()).toHaveLength(0);
+    expect(new Date((await stamps(scorecard.id)).opened!).getTime()).toBe(stampedAt.getTime());
+  });
+
+  it("does NOT re-notify oversight when the picked responder changes on an already-open card", async () => {
+    const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
+    const stampedAt = new Date("2026-07-27T12:00:00.000Z");
+    await tdb.execute(sql`
+      UPDATE field_scorecards SET corrective_action_oversight_opened_at = ${stampedAt} WHERE id = ${scorecard.id}
+    `);
+    await tdb.execute(sql`DELETE FROM public.job_queue`);
+
+    await tdb.transaction(async (tx) => {
+      await reconcileScorecardCorrectiveActions(tx as any, {
+        scorecardId: scorecard.id,
+        dealId: DEAL,
+        office: OFFICE,
+        rating: "corrective_action",
+        currentStatus: "corrective_action_open",
+        deficiencies: ["missed_hold_point"],
+        actionItems: ["Re-inspect slab 2", "Verify hold points"],
+        responderPickChanged: true,
+      } as any);
+    });
+
+    expect(await oversightJobs()).toHaveLength(0);
+    expect(new Date((await stamps(scorecard.id)).opened!).getTime()).toBe(stampedAt.getTime());
+  });
+
+  it("enqueues a 'closed' oversight job when an EDIT closes the card, not only a responder", async () => {
+    // Removing the last still-open flag closes the card through reconcile. Without an enqueue here the
+    // watchers who were told it opened would never learn it completed, and nothing would enqueue later.
+    const { scorecard } = await createFieldScorecard(
+      tdb,
+      belowBandSubmission({ actionItems: ["Keep this", "Drop this"], criticalDeficiencies: [] }),
+    );
+    const items = await getCorrectiveActions(scorecard.id);
+    const keep = items.find((i) => i.item_label === "Keep this")!;
+    await resolveCorrectiveActionItem(tdb, {
+      scorecardId: scorecard.id,
+      itemId: keep.id,
+      responseComment: "fixed",
+      respondedBy: { userId: USER, name: "Sam", email: null },
+    });
+    expect((await getScorecardRow(scorecard.id)).status).toBe("corrective_action_open");
+    await tdb.execute(sql`DELETE FROM public.job_queue`);
+
+    await tdb.transaction(async (tx) => {
+      await reconcileScorecardCorrectiveActions(tx as any, {
+        scorecardId: scorecard.id,
+        dealId: DEAL,
+        office: OFFICE,
+        rating: "corrective_action",
+        currentStatus: "corrective_action_open",
+        deficiencies: [],
+        actionItems: ["Keep this"],
+      } as any);
+    });
+
+    expect((await getScorecardRow(scorecard.id)).status).toBe("corrective_action_closed");
+    const jobs = await oversightJobs();
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0].payload.phase).toBe("closed");
+  });
+
+  it("advances updated_at STRICTLY, even past a future-dated generation", async () => {
+    // updated_at is the PDF staleness token and the finalize single-flight key. A bare new Date() can land
+    // in the same millisecond as the write before it, letting a render that read the OLD state stamp its
+    // stale bytes as current — permanently, since the staleness check then sees rendered == current.
+    const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
+    const items = await getCorrectiveActions(scorecard.id);
+    const future = new Date(Date.now() + 60_000);
+    await tdb.execute(sql`UPDATE field_scorecards SET updated_at = ${future} WHERE id = ${scorecard.id}`);
+
+    await resolveCorrectiveActionItem(tdb, {
+      scorecardId: scorecard.id,
+      itemId: items[0].id,
+      responseComment: "fixed",
+      respondedBy: { userId: USER, name: "Sam", email: null },
+    });
+
+    // A bare NOW() would move the generation BACKWARDS here, re-colliding with an already-rendered token.
+    expect((await getUpdatedAt(scorecard.id)).getTime()).toBeGreaterThan(future.getTime());
+  });
+});

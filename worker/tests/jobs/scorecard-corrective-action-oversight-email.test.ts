@@ -7,6 +7,7 @@ import {
 const SCORECARD = "11111111-1111-1111-1111-111111111111";
 const DEAL = "22222222-2222-2222-2222-222222222222";
 const CYCLE = "99999999-9999-9999-9999-999999999999";
+const GENERATION = new Date("2026-07-27T14:00:00.000Z");
 
 const env = {
   NODE_ENV: "production",
@@ -60,6 +61,9 @@ interface ScorecardOverrides {
   closedAt?: Date | null;
   pdfR2Key?: string | null;
   pdfRenderVersion?: number;
+  status?: string;
+  pdfContentGeneration?: Date | null;
+  updatedAt?: Date;
 }
 
 /** Query mock routing on SQL text — no DB. Captures the stamp UPDATE for assertion. */
@@ -84,9 +88,12 @@ function makeQuery(
             average_score: "2.3",
             rating: "corrective_action",
             form_version: 2,
-            status: "corrective_action_open",
+            status: over.status ?? "corrective_action_open",
             pdf_r2_key: over.pdfR2Key === undefined ? `sc.${"a".repeat(64)}.v3.pdf` : over.pdfR2Key,
             pdf_render_version: over.pdfRenderVersion ?? 3,
+            pdf_content_generation:
+              over.pdfContentGeneration === undefined ? GENERATION : over.pdfContentGeneration,
+            updated_at: over.updatedAt ?? GENERATION,
             corrective_action_oversight_opened_at: over.openedAt ?? null,
             corrective_action_oversight_closed_at: over.closedAt ?? null,
           },
@@ -129,7 +136,7 @@ describe("handleScorecardCorrectiveActionOversightEmail", () => {
   });
 
   it("sends the completed notice with the corrective-action-bearing PDF attached", async () => {
-    const { query } = makeQuery();
+    const { query } = makeQuery({ status: "corrective_action_closed" });
     const sendEmail = makeSend();
     const getPdf = vi.fn(async () => Buffer.from("%PDF-1.4 fake"));
 
@@ -156,7 +163,7 @@ describe("handleScorecardCorrectiveActionOversightEmail", () => {
   it("refuses to attach a pre-v3 artifact, which would show the card WITHOUT the corrective action", async () => {
     // Attaching a v2 PDF to a "completed" email would show a scorecard with no corrective action on it —
     // exactly the defect this feature fixes. Better to send with no attachment and a CRM link.
-    const { query } = makeQuery({ pdfRenderVersion: 2 });
+    const { query } = makeQuery({ pdfRenderVersion: 2, status: "corrective_action_closed" });
     const sendEmail = makeSend();
     const getPdf = vi.fn(async () => Buffer.from("%PDF-1.4 fake"));
 
@@ -176,7 +183,7 @@ describe("handleScorecardCorrectiveActionOversightEmail", () => {
   });
 
   it("degrades to a no-attachment send when the PDF object is unavailable", async () => {
-    const { query } = makeQuery();
+    const { query } = makeQuery({ status: "corrective_action_closed" });
     const sendEmail = makeSend();
     const getPdf = vi.fn(async () => {
       throw new Error("NoSuchKey");
@@ -270,7 +277,7 @@ describe("handleScorecardCorrectiveActionOversightEmail", () => {
   });
 
   it("treats the two phases independently — an opened stamp does not suppress the closed notice", async () => {
-    const { query } = makeQuery({ openedAt: new Date("2026-07-27T12:00:00.000Z"), closedAt: null });
+    const { query } = makeQuery({ openedAt: new Date("2026-07-27T12:00:00.000Z"), closedAt: null, status: "corrective_action_closed" });
     const sendEmail = makeSend();
 
     await handleScorecardCorrectiveActionOversightEmail(payload({ phase: "closed" }), null, {
@@ -386,5 +393,98 @@ describe("handleScorecardCorrectiveActionOversightEmail", () => {
     });
 
     expect(sendEmail).not.toHaveBeenCalled();
+  });
+
+  it("skips an 'opened' notice for a card that left the corrective-action state (no send, no stamp)", async () => {
+    // Both jobs run ~120s after enqueue. An edit lifting the card above band walks it to `submitted` and
+    // deletes every item, so an unguarded job would announce a corrective action that no longer exists.
+    const { query, stampUpdates } = makeQuery({ status: "submitted" });
+    const sendEmail = makeSend();
+
+    await handleScorecardCorrectiveActionOversightEmail(payload(), null, {
+      query: query as never,
+      sendEmail: sendEmail as never,
+      env,
+      logger: makeLogger(),
+    });
+
+    expect(sendEmail).not.toHaveBeenCalled();
+    expect(stampUpdates).toHaveLength(0);
+  });
+
+  it("skips an 'opened' notice for a card already CLOSED before the job ran", async () => {
+    // A single-item corrective action answered in-app inside the window. An unguarded job would announce
+    // it as open while listing every item Resolved, immediately followed by the completed notice.
+    const { query, stampUpdates } = makeQuery({ status: "corrective_action_closed" });
+    const sendEmail = makeSend();
+
+    await handleScorecardCorrectiveActionOversightEmail(payload(), null, {
+      query: query as never,
+      sendEmail: sendEmail as never,
+      env,
+      logger: makeLogger(),
+    });
+
+    expect(sendEmail).not.toHaveBeenCalled();
+    expect(stampUpdates).toHaveLength(0);
+  });
+
+  it("skips a 'closed' notice for a card that has REOPENED", async () => {
+    const { query, stampUpdates } = makeQuery({ status: "corrective_action_open" });
+    const sendEmail = makeSend();
+
+    await handleScorecardCorrectiveActionOversightEmail(payload({ phase: "closed" }), null, {
+      query: query as never,
+      sendEmail: sendEmail as never,
+      env,
+      logger: makeLogger(),
+    });
+
+    expect(sendEmail).not.toHaveBeenCalled();
+    expect(stampUpdates).toHaveLength(0);
+  });
+
+  it("does NOT attach a v3 PDF that predates the corrective-action response", async () => {
+    // The post-commit refresh is best-effort; an R2 blip leaves a v3 artifact rendered BEFORE the response,
+    // which still shows every item Open. Attaching that under "Corrective Action Completed" would be the
+    // very defect this feature fixes, one level down.
+    const { query } = makeQuery({
+      status: "corrective_action_closed",
+      pdfContentGeneration: new Date("2026-07-27T13:00:00.000Z"),
+      updatedAt: new Date("2026-07-27T14:00:00.000Z"),
+    });
+    const sendEmail = makeSend();
+    const getPdf = vi.fn(async () => Buffer.from("%PDF-1.4 stale"));
+
+    await handleScorecardCorrectiveActionOversightEmail(payload({ phase: "closed" }), null, {
+      query: query as never,
+      sendEmail: sendEmail as never,
+      getPdf: getPdf as never,
+      env,
+      logger: makeLogger(),
+    });
+
+    expect(getPdf).not.toHaveBeenCalled();
+    expect(sendEmail).toHaveBeenCalledOnce();
+    const [, , , options] = sendEmail.mock.calls[0] as unknown as [
+      string[], string, string, { attachments?: unknown[] },
+    ];
+    expect(options.attachments).toBeUndefined();
+  });
+
+  it("does NOT attach a pre-migration artifact with a null rendered generation", async () => {
+    const { query } = makeQuery({ status: "corrective_action_closed", pdfContentGeneration: null });
+    const sendEmail = makeSend();
+    const getPdf = vi.fn(async () => Buffer.from("%PDF-1.4"));
+
+    await handleScorecardCorrectiveActionOversightEmail(payload({ phase: "closed" }), null, {
+      query: query as never,
+      sendEmail: sendEmail as never,
+      getPdf: getPdf as never,
+      env,
+      logger: makeLogger(),
+    });
+
+    expect(getPdf).not.toHaveBeenCalled();
   });
 });
