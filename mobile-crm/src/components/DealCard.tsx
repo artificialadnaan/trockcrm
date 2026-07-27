@@ -95,7 +95,7 @@ export function showsAtRisk(deal: Pick<DealListItem, "atRisk">): boolean {
   return Boolean(r && r.isAtRisk && r.status === "at_risk" && r.severity !== "none");
 }
 
-export function DealCard({
+function DealCardComponent({
   deal,
   stageName,
   onPress,
@@ -183,5 +183,14 @@ const styles = StyleSheet.create({
     paddingVertical: 3,
   },
   stagePillText: { fontFamily: theme.font.semibold, fontSize: 12, color: theme.color.textSecondary },
-  closeDate: { fontFamily: theme.font.regular, fontSize: 12, color: theme.color.textMuted },
+  // textSecondary, not textMuted: #8A95A3 on white is ~3:1, under the 4.5:1 floor for normal
+  // text, and at 12px on a phone outdoors it is the first thing to become unreadable.
+  closeDate: { fontFamily: theme.font.regular, fontSize: 12, color: theme.color.textSecondary },
 });
+
+/**
+ * Memoised: the list re-renders on every keystroke in the search field, and without this each mounted
+ * card re-rendered with identical props. Paired with a stable renderItem — memo is useless if the
+ * callback identity changes every render.
+ */
+export const DealCard = React.memo(DealCardComponent);

@@ -38,7 +38,7 @@ beforeAll(async () => {
   await pg.exec(`
     CREATE TABLE deals (
       id uuid PRIMARY KEY, company_id uuid, is_active boolean NOT NULL DEFAULT true,
-      stage_id uuid, bid_board_stage_slug text, expected_close_date date,
+      stage_id uuid, bid_board_stage_slug text, expected_close_date date, bid_due_date timestamptz,
       on_hold boolean NOT NULL DEFAULT false, forecast_revenue numeric, awarded_amount numeric,
       bid_board_total_sales numeric, bid_estimate numeric, dd_estimate numeric
     );

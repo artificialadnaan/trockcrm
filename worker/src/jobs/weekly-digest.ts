@@ -1,20 +1,10 @@
 import {
-  closeTargetFarOutSqlPredicate,
   getDealAtRiskResult,
-  LOST_DEAL_STAGE_SLUGS,
   reportableDealSqlPredicate,
-  WON_DEAL_STAGE_SLUGS,
   type WorkflowRoute,
 } from "@trock-crm/shared/types";
 import { pool } from "../db.js";
-
-// A Bid Board-owned deal can be terminal (won/lost) in bid_board_stage_slug while its CRM stage_id still
-// joins to a non-terminal stage — its realized value must be PRESERVED, never auto-parked by a far-out
-// forecast date (mirrors the server terminal exemption).
-const TERMINAL_BID_BOARD_SLUG_LIST = [...WON_DEAL_STAGE_SLUGS, ...LOST_DEAL_STAGE_SLUGS]
-  .map((slug) => `'${slug.replace(/'/g, "''")}'`)
-  .join(", ");
-const BID_BOARD_TERMINAL_SQL = `COALESCE(d.bid_board_stage_slug, '') IN (${TERMINAL_BID_BOARD_SLUG_LIST})`;
+import { workerEffectiveCurrentDealValueSql } from "./deal-value-sql.js";
 
 const SERVER_MODULE_ROOT =
   process.env.NODE_ENV === "production" ? "../../../server/dist/modules" : "../../../server/src/modules";
@@ -22,18 +12,11 @@ const SERVER_EVALUATOR_MODULE = `${SERVER_MODULE_ROOT}/tasks/rules/evaluator.js`
 const SERVER_TASK_RULES_MODULE = `${SERVER_MODULE_ROOT}/tasks/rules/config.js` as string;
 const SERVER_TASK_PERSISTENCE_MODULE = `${SERVER_MODULE_ROOT}/tasks/rules/persistence.js` as string;
 const REPORTABLE_DEAL_SQL = reportableDealSqlPredicate("d");
-const currentDealValueSql = `COALESCE(
-  CASE WHEN d.bid_board_total_sales > 0 THEN d.bid_board_total_sales END,
-  CASE WHEN d.bid_estimate > 0 THEN d.bid_estimate END,
-  CASE WHEN d.dd_estimate > 0 THEN d.dd_estimate END,
-  CASE WHEN d.awarded_amount > 0 THEN d.awarded_amount END,
-  0
-)`;
-// "Total active pipeline value" sums a CRM-non-terminal population, so it must zero a far-out (90+ day)
-// auto-held deal to $0 — matching the deals list/kanban totals — EXCEPT a Bid Board-mirrored terminal deal,
-// whose realized value is preserved. The stored on_hold case is already excluded by REPORTABLE_DEAL_SQL in
-// the WHERE, so only the far-out leg is added here (Codex P2).
-const effectiveCurrentDealValueSql = `CASE WHEN NOT (${BID_BOARD_TERMINAL_SQL}) AND (${closeTargetFarOutSqlPredicate("d")}) THEN 0 ELSE ${currentDealValueSql} END`;
+// Built by the shared worker leaf module (deal-value-sql.ts) rather than rebuilt here:
+// rep-performance-rollup needs the identical string, and the cross-surface reconciliation test executes
+// THAT builder instead of a hand-copied paste, so the digest can no longer drift off the shared hold rule
+// unnoticed.
+const effectiveCurrentDealValueSql = workerEffectiveCurrentDealValueSql("d");
 
 async function loadTaskRuleDependencies() {
   const [{ evaluateTaskRules }, { TASK_RULES }, { createTenantTaskRulePersistence }] = (await Promise.all([
@@ -50,6 +33,8 @@ interface DigestAtRiskDealRow {
   workflow_route: string | null;
   stage_entered_at: string | Date | null;
   expected_close_date: string | Date | null;
+  /** The estimating auto-park horizon (2026-07-27) — see AtRiskDealInput.bidDueDate. */
+  bid_due_date: string | Date | null;
   on_hold: boolean | null;
   on_hold_started_at: string | Date | null;
   on_hold_accumulated_seconds: string | number | bigint | null;
@@ -79,6 +64,9 @@ function countDigestAtRiskDeals(rows: DigestAtRiskDealRow[], now: Date): number 
         // close target) quiets the stale nag too, so the weekly digest stale count mirrors the deals
         // list/dashboard/detail — plus the 90+ day auto-held exclusion.
         expectedCloseDate: row.expected_close_date,
+        // Estimating deals auto-park off the BID due date, not the project close target (2026-07-27), so
+        // this job never nags about a deal every in-app surface already reads as parked and worth $0.
+        bidDueDate: row.bid_due_date,
         applyCloseTargetSuppression: true,
         onHold: row.on_hold,
         onHoldStartedAt: row.on_hold_started_at,
@@ -154,6 +142,7 @@ export async function runWeeklyDigest(): Promise<void> {
                latest_current_stage_entered_at.entered_at
              ) AS stage_entered_at,
              d.expected_close_date,
+             d.bid_due_date,
              d.on_hold,
              d.on_hold_started_at,
              d.on_hold_accumulated_seconds,

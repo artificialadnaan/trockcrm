@@ -44,7 +44,8 @@ import {
 
 // Team scope is parked (PR #512) and not configured anywhere, so it is not offered here. The pills are
 // Mine | All plus the two deals-only filter pseudo-scopes Watched and On Hold. "On Hold" matches deals
-// that are explicitly held OR have a close target more than 90 days out (effectiveOnHoldSqlPredicate). The shared
+// that are explicitly held OR have a hold horizon date more than 90 days out (effectiveOnHoldSqlPredicate) —
+// that horizon is the close target in every stage except estimating, where it is the bid due date. The shared
 // PipelineScope union still includes "team" for URL coercion (see DealListPage); do not change it.
 const SCOPE_OPTIONS = [
   { value: "mine", label: "Mine" },

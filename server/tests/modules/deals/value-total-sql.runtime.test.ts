@@ -12,7 +12,9 @@ import { aliasedStageAwareEffectiveDealValueSql } from "../../../src/modules/dea
  *  - ALL rows (open AND Won) use the SAME unified awarded-first chain (awarded → bid_board → bid → dd)
  *    as of the 2026-06-18 convention shift — open and Won no longer diverge by value;
  *  - on_hold rows are 0 (matching the list's $0 display, while still being counted/summed);
- *  - $0 / all-null rows contribute 0.
+ *  - $0 / all-null rows contribute 0;
+ *  - an ESTIMATING row auto-parks off its BID due date rather than its close target (2026-07-27), and the
+ *    SQL (pipeline_stage_config subselect) and the client (route-aware slug) must agree on that row-for-row.
  * The per-row assertion (SQL value == getEffectiveDealValue) is the byte-for-byte guarantee;
  * the SUM assertion proves the aggregate the card reads.
  */
@@ -60,21 +62,38 @@ const ROWS = [
   // far-out forecast date -> realized/preserved, NOT auto-parked to $0 (Codex P2 — BB-mirror in the value
   // CASE's open branch). Client classifies it terminal via bidBoardStageSlug.
   { id: "bb_mirror_far", stage_id: "opportunity", stageSlug: "opportunity", bidBoardStageSlug: "won", on_hold: false, bid_board_total_sales: 175000, bid_estimate: 0, dd_estimate: 0, awarded_amount: 0, expected_close_date: "2099-12-31", expected: 175000 },
+  // ESTIMATING with a NEAR close target but a FAR BID due date -> auto-parked to $0 (2026-07-27). Under the
+  // old close-target-only rule this row was worth its full DD value, so this is the direction that removes
+  // dollars from every pipeline total.
+  { id: "est_far_bid", stage_id: "estimating", stageSlug: "estimating", on_hold: false, bid_board_total_sales: 0, bid_estimate: 0, dd_estimate: 220000, awarded_amount: 0, expected_close_date: "2026-08-01", bid_due_date: "2099-12-31T00:00:00.000Z", expected: 0 },
+  // ESTIMATING with a FAR close target but a NEAR BID due date -> RELEASED back to full value. Under the old
+  // rule the far-out close target parked it at $0; a live bid is not a parked deal.
+  { id: "est_near_bid", stage_id: "estimating", stageSlug: "estimating", on_hold: false, bid_board_total_sales: 0, bid_estimate: 0, dd_estimate: 190000, awarded_amount: 0, expected_close_date: "2099-12-31", bid_due_date: "2026-08-01T00:00:00.000Z", expected: 190000 },
+  // ESTIMATING with NO bid due date -> falls back to the close target, reproducing the old behaviour exactly
+  // (the NULL policy: bid_due_date is null on ~91% of prod deals, so "no bid date => never park" would
+  // release millions of stale forecast dollars).
+  { id: "est_null_bid", stage_id: "estimating", stageSlug: "estimating", on_hold: false, bid_board_total_sales: 0, bid_estimate: 0, dd_estimate: 160000, awarded_amount: 0, expected_close_date: "2099-12-31", expected: 0 },
 ];
 
-const EXPECTED_TOTAL = ROWS.reduce((sum, row) => sum + row.expected, 0); // 2,060,000
+const EXPECTED_TOTAL = ROWS.reduce((sum, row) => sum + row.expected, 0); // 2,250,000
 
 let db: PGlite;
 
 beforeAll(async () => {
   db = new PGlite();
   await db.exec(`
+    -- pipeline_stage_config lives ONLY in \`public\` in prod, and the shared effective-on-hold predicate
+    -- subselects it to detect the estimating stage (whose auto-park horizon is bid_due_date, not the close
+    -- target). PGlite's default schema IS public, so a bare CREATE TABLE reproduces prod's placement.
+    CREATE TABLE pipeline_stage_config (id text PRIMARY KEY, slug text NOT NULL);
+    INSERT INTO pipeline_stage_config (id, slug) VALUES
+      ('opportunity', 'opportunity'), ('estimating', 'estimating'), ('won', 'won'), ('lost', 'lost');
     CREATE TABLE deals (
       id text PRIMARY KEY, sales_source_user_id uuid,
       stage_id text NOT NULL,
       bid_board_stage_slug text,
       on_hold boolean NOT NULL DEFAULT false,
-      expected_close_date date,
+      expected_close_date date, bid_due_date timestamptz,
       bid_board_total_sales numeric,
       bid_estimate numeric,
       dd_estimate numeric,
@@ -83,9 +102,9 @@ beforeAll(async () => {
   `);
   for (const r of ROWS) {
     await db.query(
-      `INSERT INTO deals (id, stage_id, bid_board_stage_slug, on_hold, expected_close_date, bid_board_total_sales, bid_estimate, dd_estimate, awarded_amount)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-      [r.id, r.stage_id, ("bidBoardStageSlug" in r ? (r as { bidBoardStageSlug?: string }).bidBoardStageSlug : null) ?? null, r.on_hold, ("expected_close_date" in r ? r.expected_close_date : null) ?? null, r.bid_board_total_sales, r.bid_estimate, r.dd_estimate, r.awarded_amount]
+      `INSERT INTO deals (id, stage_id, bid_board_stage_slug, on_hold, expected_close_date, bid_due_date, bid_board_total_sales, bid_estimate, dd_estimate, awarded_amount)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+      [r.id, r.stage_id, ("bidBoardStageSlug" in r ? (r as { bidBoardStageSlug?: string }).bidBoardStageSlug : null) ?? null, r.on_hold, ("expected_close_date" in r ? r.expected_close_date : null) ?? null, ("bid_due_date" in r ? (r as { bid_due_date?: string }).bid_due_date : null) ?? null, r.bid_board_total_sales, r.bid_estimate, r.dd_estimate, r.awarded_amount]
     );
   }
 });
@@ -117,6 +136,7 @@ describe("value-total SQL — running-total card reconciliation (#4)", () => {
       const clientValue = getEffectiveDealValue({
         onHold: r.on_hold,
         expectedCloseDate: ("expected_close_date" in r ? r.expected_close_date : null) ?? null,
+        bidDueDate: ("bid_due_date" in r ? (r as { bid_due_date?: string }).bid_due_date : null) ?? null,
         stageSlug: r.stageSlug,
         bidBoardStageSlug: ("bidBoardStageSlug" in r ? (r as { bidBoardStageSlug?: string }).bidBoardStageSlug : null) ?? null,
         workflowRoute: "normal",
@@ -127,8 +147,8 @@ describe("value-total SQL — running-total card reconciliation (#4)", () => {
       });
       clientSum += clientValue;
       // per-row: the value the list DISPLAYS == the value the card SUMS, for every classification.
-      expect(sqlById.get(r.id)).toBe(clientValue);
-      expect(clientValue).toBe(r.expected);
+      expect(sqlById.get(r.id), `row ${r.id}`).toBe(clientValue);
+      expect(clientValue, `row ${r.id}`).toBe(r.expected);
     }
     // and the aggregate the card reads reconciles to the per-row display sum.
     expect(clientSum).toBe(EXPECTED_TOTAL);

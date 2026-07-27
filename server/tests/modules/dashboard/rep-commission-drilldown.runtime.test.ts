@@ -86,7 +86,7 @@ beforeAll(async () => {
       is_active boolean NOT NULL DEFAULT true, is_test_data boolean NOT NULL DEFAULT false,
       is_change_order boolean NOT NULL DEFAULT false,
       on_hold boolean NOT NULL DEFAULT false, contract_signed_at timestamptz, contract_signed_date date,
-      won_closed_date date, actual_close_date date, project_number text, expected_close_date date, stage_entered_at timestamptz, updated_at timestamptz,
+      won_closed_date date, actual_close_date date, project_number text, expected_close_date date, bid_due_date timestamptz, stage_entered_at timestamptz, updated_at timestamptz,
       created_at timestamptz, awarded_amount numeric, bid_board_total_sales numeric, bid_estimate numeric,
       dd_estimate numeric, change_order_total numeric
     );

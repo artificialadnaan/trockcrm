@@ -37,6 +37,10 @@ async function matched(input: DealFilterBarInput, ctx: DealFilterContext = {}): 
 beforeAll(async () => {
   db = new PGlite();
   await db.exec(`
+    -- pipeline_stage_config lives ONLY in \`public\` in prod, and the shared effective-on-hold predicate
+    -- subselects it to detect the estimating stage (whose auto-park horizon is bid_due_date, not the close
+    -- target). PGlite's default schema IS public, so a bare CREATE TABLE reproduces prod's placement.
+    CREATE TABLE pipeline_stage_config (id text PRIMARY KEY, slug text NOT NULL);
     CREATE TABLE deals (
       id text PRIMARY KEY,
       stage_id text NOT NULL DEFAULT 'open',
@@ -47,7 +51,7 @@ beforeAll(async () => {
       project_type_id text,
       workflow_route text NOT NULL DEFAULT 'normal',
       is_active boolean NOT NULL DEFAULT true,
-      on_hold boolean NOT NULL DEFAULT false, expected_close_date date,
+      on_hold boolean NOT NULL DEFAULT false, expected_close_date date, bid_due_date timestamptz,
       won_closed_date date,
       lost_at timestamptz,
       stage_entered_at timestamptz,
@@ -107,10 +111,14 @@ describe("FilterBar backend dimensions — real SQL via the #546 predicate regis
       expect(await matched({ assignedRepId: "rep-a" })).toContain("rep_a");
       expect(await matched({ assignedRepId: "rep-a" })).not.toContain("rep_b");
     });
-    it("also matches deals the person ESTIMATED, not just ones they own (assigned_rep OR estimator)", async () => {
+    it("matches ONLY deals the person owns — estimating one for someone else does not surface it", async () => {
+      // Reversal of the estimator-OR behaviour (#620). deals.estimator_user_id is populated far beyond the
+      // real estimators because it feeds the estimator report, so an estimator arm put dozens of another
+      // rep's deals into a rep-filtered view — in production, 60 deals/$10.2M against the director
+      // dashboard's 42/$6.8M for the same person. The estimator field and its report are untouched.
       const byA = await matched({ assignedRepId: "rep-a" });
       expect(byA).toContain("rep_a"); // owned as assigned rep
-      expect(byA).toContain("estimated_by_a"); // estimated by rep-a (assigned to rep-b)
+      expect(byA).not.toContain("estimated_by_a"); // estimated by rep-a but OWNED by rep-b
       const byB = await matched({ assignedRepId: "rep-b" });
       expect(byB).toContain("rep_b");
       expect(byB).toContain("estimated_by_a"); // rep-b owns it as the assigned rep
@@ -120,7 +128,7 @@ describe("FilterBar backend dimensions — real SQL via the #546 predicate regis
       expect(ids).toContain("unassigned");
       expect(ids).not.toContain("rep_a");
       expect(ids).not.toContain("rep_b");
-      expect(ids).not.toContain("estimated_by_a"); // estimator must NOT widen the Unassigned bucket
+      expect(ids).not.toContain("estimated_by_a"); // owned by rep-b, so never in the Unassigned bucket
     });
     it("unset rep omits the predicate (no narrowing)", async () => {
       expect((await matched({})).length).toBeGreaterThan(1);

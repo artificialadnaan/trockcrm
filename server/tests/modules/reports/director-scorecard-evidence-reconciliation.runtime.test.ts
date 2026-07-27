@@ -51,7 +51,7 @@ beforeAll(async () => {
       on_hold_started_at timestamptz, on_hold_accumulated_seconds numeric, on_hold_accumulated_seconds_at_stage_entry numeric,
       won_closed_date date, lost_at timestamptz, contract_signed_at timestamptz, actual_close_date date, updated_at timestamptz,
       stage_entered_at timestamptz, bid_board_stage_slug text, bid_board_stage_entered_at timestamptz, workflow_route text,
-      company_id uuid, region_id uuid, project_type_id uuid, project_type text, expected_close_date date,
+      company_id uuid, region_id uuid, project_type_id uuid, project_type text, expected_close_date date, bid_due_date timestamptz,
       last_activity_at timestamptz, office_code text,
       bid_board_total_sales numeric, bid_estimate numeric, dd_estimate numeric, awarded_amount numeric
     );

@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useCallback, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   FlatList,
@@ -14,7 +14,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { ApiError } from "../../../src/api/client";
 import * as dealsApi from "../../../src/api/endpoints/deals";
-import type { DealScope } from "../../../src/api/types";
+import type { DealListItem, DealScope } from "../../../src/api/types";
 import { useAuth } from "../../../src/auth/AuthContext";
 import { useQueryScope } from "../../../src/auth/useOfficeId";
 import { DealCard } from "../../../src/components/DealCard";
@@ -78,6 +78,25 @@ export default function DealsListScreen() {
   const stageIndex = useMemo(() => buildStageIndex(stagesQuery.data), [stagesQuery.data]);
 
   const deals = useMemo(() => (query.data?.pages ?? []).flatMap((p) => p.deals), [query.data]);
+
+  // Stable identity so memoised rows are not invalidated on every keystroke in the search field. With an
+  // inline arrow every card re-rendered on each render of this screen, which on a paginated list is the
+  // whole viewport per character typed.
+  // Hoisted out of renderDeal so it is one stable function for the life of the screen. Inline, every
+  // card received a BRAND-NEW onPress on each render, which defeats DealCard's React.memo entirely —
+  // the memo compares props, and a fresh closure never equals the last one. On a paginated list that is
+  // the whole viewport re-rendering per keystroke in the search field, which is exactly when it hurts.
+  const handleDealPress = useCallback(
+    (deal: DealListItem) => router.push(`/(app)/deals/${deal.id}`),
+    [router],
+  );
+
+  const renderDeal = useCallback(
+    ({ item }: { item: DealListItem }) => (
+      <DealCard deal={item} stageName={stageLabelFor(item, stageIndex)} onPress={handleDealPress} />
+    ),
+    [stageIndex, handleDealPress],
+  );
   const total = query.data?.pages[0]?.pagination.total;
 
   function submitSearch() {
@@ -106,6 +125,20 @@ export default function DealsListScreen() {
     error: query.error,
     isFetchNextPageError: query.isFetchNextPageError,
   });
+  // A failed /deals/stages is NOT an empty stage config. Labels degrade to humanized slugs, which is
+  // deliberate and readable — but silently, so the rep has no idea the names are approximations and no
+  // way to get the real ones back.
+  /**
+   * Two different situations, and only one of them means the labels on screen are raw slugs.
+   *
+   * TanStack keeps the last good data when a background refetch fails, so `error` alone covers both "we
+   * never got the stage names" and "we have them, the refresh just failed". The banner said raw stages
+   * were being shown in BOTH cases — telling a rep the perfectly correct names in front of them were
+   * fallbacks. Wrong in a way that erodes trust in every other label the app shows.
+   */
+  const stagesUnavailable = Boolean(stagesQuery.error) && stagesQuery.data === undefined;
+  const stagesRefreshFailed = Boolean(stagesQuery.error) && stagesQuery.data !== undefined;
+  const stagesFailed = stagesUnavailable || stagesRefreshFailed;
   const refreshError = listState.kind === "loaded" && listState.refreshFailed;
   const pageError = listState.kind === "loaded" && listState.pageFailed;
 
@@ -215,16 +248,41 @@ export default function DealsListScreen() {
           }
           onEndReachedThreshold={0.5}
           onEndReached={() => {
+            // NOT after a page failure. onEndReached fires repeatedly while the user sits at the bottom,
+            // so without this a failed load-more retries on every scroll tick — hammering an endpoint
+            // that is already failing, and fighting the explicit retry the footer offers.
+            if (pageError) return;
             if (query.hasNextPage && !query.isFetchingNextPage) void query.fetchNextPage();
           }}
           ListHeaderComponent={
-            refreshError ? (
-              <RetryNotice
-                testID="deals-refresh-retry"
-                message="Couldn't refresh — showing saved deals. Tap to retry."
-                onRetry={() => void query.refetch()}
-                placement="top"
-              />
+            /* BOTH, not either. These are two independent endpoints with independent retries, and the
+               exclusive ternary tied the stage-name recovery to the deals error clearing first: with
+               /deals still down and /deals/stages back up, the only control that could restore real
+               stage names was hidden, leaving the rep on raw slugs with no way to fix it. A retry for
+               a failure the user can actually clear should not be gated on an unrelated one. */
+            refreshError || stagesFailed ? (
+              <>
+                {refreshError ? (
+                  <RetryNotice
+                    testID="deals-refresh-retry"
+                    message="Couldn't refresh — showing saved deals. Tap to retry."
+                    onRetry={() => void query.refetch()}
+                    placement="top"
+                  />
+                ) : null}
+                {stagesFailed ? (
+                  <RetryNotice
+                    testID="deals-stages-retry"
+                    message={
+                      stagesUnavailable
+                        ? "Couldn't load stage names — showing raw stages. Tap to retry."
+                        : "Couldn't refresh stage names — showing the saved ones. Tap to retry."
+                    }
+                    onRetry={() => void stagesQuery.refetch()}
+                    placement="top"
+                  />
+                ) : null}
+              </>
             ) : null
           }
           ListFooterComponent={
@@ -240,13 +298,7 @@ export default function DealsListScreen() {
               />
             ) : null
           }
-          renderItem={({ item }) => (
-            <DealCard
-              deal={item}
-              stageName={stageLabelFor(item, stageIndex)}
-              onPress={(deal) => router.push(`/(app)/deals/${deal.id}`)}
-            />
-          )}
+          renderItem={renderDeal}
           refreshControl={
             <RefreshControl refreshing={query.isRefetching} onRefresh={() => void query.refetch()} />
           }

@@ -78,6 +78,8 @@ export type DashboardAtRiskSummaryRow = {
   workflowRoute?: WorkflowRoute | null;
   stageEnteredAt?: string | Date | null;
   expectedCloseDate?: string | Date | null;
+  /** The estimating auto-park horizon (2026-07-27) — see AtRiskDealInput.bidDueDate. */
+  bidDueDate?: string | Date | null;
   onHold?: boolean | null;
   onHoldStartedAt?: string | Date | null;
   onHoldAccumulatedSeconds?: number | string | bigint | null;
@@ -139,6 +141,9 @@ function buildDashboardAtRiskEvaluations(
         workflowRoute: row.workflowRoute ?? "normal",
         stageEnteredAt: row.stageEnteredAt ?? null,
         expectedCloseDate: row.expectedCloseDate ?? null,
+        // Estimating rows auto-park off the BID due date (2026-07-27), so the dashboard at-risk count and
+        // the dashboard pipeline $ (which runs the shared SQL predicate) agree on which deals are parked.
+        bidDueDate: row.bidDueDate ?? null,
         // Honor a postponement (near today-or-future close target) so the dashboard KPI/list/per-rep counts
         // match the deal-detail "Postponed" state, not just the 90+ day auto-hold.
         applyCloseTargetSuppression: true,
@@ -2796,6 +2801,7 @@ export async function getDashboardAtRiskRows(
       d.bid_board_stage_status AS mirrored_stage_status,
       d.workflow_route,
       d.expected_close_date,
+      d.bid_due_date,
       COALESCE(NULLIF(TRIM(d.region_classification), ''), TRIM(CONCAT_WS(', ', d.property_city, d.property_state)), 'Unassigned region') AS region_classification,
       COALESCE(d.bid_board_stage_entered_at, d.stage_entered_at, latest_current_stage_entered_at.entered_at) AS stage_entered_at,
       d.on_hold,
@@ -2833,6 +2839,7 @@ export async function getDashboardAtRiskRows(
     workflowRoute: (row.workflow_route ?? "normal") as WorkflowRoute,
     stageEnteredAt: row.stage_entered_at ?? null,
     expectedCloseDate: row.expected_close_date ?? null,
+    bidDueDate: row.bid_due_date ?? null,
     onHold: Boolean(row.on_hold),
     onHoldStartedAt: row.on_hold_started_at ?? null,
     onHoldAccumulatedSeconds: row.on_hold_accumulated_seconds ?? 0,

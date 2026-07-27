@@ -19,7 +19,9 @@ import { useAuth } from "../../../src/auth/AuthContext";
 import { useQueryScope } from "../../../src/auth/useOfficeId";
 import { displayAmount, showsAtRisk } from "../../../src/components/DealCard";
 import { Badge } from "../../../src/components/Badge";
+import { RetryNotice } from "../../../src/components/RetryNotice";
 import { Row } from "../../../src/components/Row";
+import { resolveListState } from "../../../src/list-state";
 import { mailtoUrl, telUrl } from "../../../src/contact-links";
 import { buildStageIndex, stageLabelFor } from "../../../src/stage-label";
 import { openLink } from "../../../src/lib/open-link";
@@ -31,7 +33,10 @@ export default function DealDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const dealId = typeof id === "string" ? id : "";
   const router = useRouter();
+  // Back needs a destination: this screen is reachable by deep link and by restored
+  // navigation state, where goBack() is a no-op and the control would do nothing.
   const goBack = useGoBack("/(app)/deals");
+  // `session` is this branch's addition — the change-order lock and the ownership gate both need it.
   const { fetcher, session } = useAuth();
   const scope = useQueryScope();
   const queryClient = useQueryClient();
@@ -67,6 +72,15 @@ export default function DealDetailScreen() {
     queryKey: qk.stages(scope),
     queryFn: () => dealsApi.listStages(fetcher),
     staleTime: 30 * 60_000,
+  });
+
+  // The SAME state machine the lists use — see resolveListState for the four ways this branching has
+  // been got wrong. It was hand-rolled here, which is exactly the duplication that module exists to end.
+  const activityState = resolveListState({
+    isLoading: activitiesQuery.isLoading,
+    data: activitiesQuery.data,
+    error: activitiesQuery.error,
+    isFetchNextPageError: activitiesQuery.isFetchNextPageError,
   });
 
   const activities = useMemo(
@@ -166,9 +180,12 @@ export default function DealDetailScreen() {
   const location = formatLocation(deal.propertyCity, deal.propertyState);
   // Data is on screen but the last refresh failed — say so without taking the screen away.
   const refreshFailed = Boolean(dealQuery.error);
-  // Both columns, coalesced the way every other contact surface does. Projecting only `phone` hid the
-  // call action entirely for a contact reachable only on a mobile number.
-  const contactPhone = deal.primaryContactPhone ?? deal.primaryContactMobile;
+  // MOBILE FIRST, matching contactPhone() on the contact surfaces. This read `phone ?? mobile`, so the
+  // same person could be called on a different number depending on which screen you started from — and
+  // the deal detail would pick the landline while the contact screen picked the mobile. The reason the
+  // contacts helper prefers mobile is the reason it should win here too: it is the one that reaches
+  // someone standing on a roof.
+  const contactPhone = deal.primaryContactMobile ?? deal.primaryContactPhone;
   // Shared with the list, so the two can never disagree about which stage a deal is in.
   const stageLabel = stageLabelFor(deal, buildStageIndex(stagesQuery.data)) ?? "—";
 
@@ -322,9 +339,24 @@ export default function DealDetailScreen() {
         </Section>
 
         <Section title="Activity">
-          {activitiesQuery.isLoading ? (
+          {/* A failed background REFRESH belongs at the top of the section, beside the heading — not
+              under the timeline. The two failures are read in different places: a refresh fails while
+              the user is looking at the newest entries at the top, so a notice below fifty rows is
+              off-screen and the stale data reads as freshly loaded. A failed LOAD-MORE is the opposite
+              — the user is at the bottom, which is where that one stays. Same reasoning RetryNotice's
+              `placement` encodes; both were bottom, so only one of them was right. */}
+          {activityState.kind === "loaded" && activityState.refreshFailed ? (
+            <RetryNotice
+              testID="retry-activities-inline"
+              message="Couldn't refresh activity — tap to retry"
+              onRetry={() => void activitiesQuery.refetch()}
+              placement="top"
+            />
+          ) : null}
+
+          {activityState.kind === "loading" ? (
             <ActivityIndicator color={theme.color.brandRed} />
-          ) : activitiesQuery.error && activitiesQuery.data === undefined ? (
+          ) : activityState.kind === "blocking-error" ? (
             // A failed timeline request is NOT an empty timeline. Claiming "nothing logged" on a 5xx
             // presents a failure as authoritative CRM data, and a rep would believe it.
             //
@@ -357,8 +389,13 @@ export default function DealDetailScreen() {
             ))
           )}
 
-          {/* Older history is reachable rather than silently truncated at the server's 50-row page. */}
-          {activities.length > 0 && activitiesQuery.hasNextPage ? (
+          {/* Older history is reachable rather than silently truncated at the server's 50-row page.
+              HIDDEN once a page fetch has failed: hasNextPage stays true after a failure, so this sat
+              directly above the RetryNotice offering the same action in different words — two controls,
+              one of them not acknowledging that anything went wrong. The notice is the retry while a
+              failure is outstanding; this returns as soon as one succeeds. */}
+          {activities.length > 0 && activitiesQuery.hasNextPage &&
+          !(activityState.kind === "loaded" && activityState.pageFailed) ? (
             <Pressable
               testID="load-more-activities"
               onPress={() => {
@@ -376,29 +413,18 @@ export default function DealDetailScreen() {
             </Pressable>
           ) : null}
 
-          {/* A background failure once the timeline has loaded: never replace what is on screen, just
-              say so. Gated on `data !== undefined` rather than on row count — the blocking branch above
-              already keys on that, and requiring rows here meant a deal with NO activity reported its
-              failed refresh nowhere at all: no notice, no retry, just the unchanged "Nothing logged
-              yet". Silently wrong in exactly the state the empty message claims to be authoritative
-              about. */}
-          {activitiesQuery.data !== undefined && activitiesQuery.error ? (
-            <Pressable
-              testID="retry-activities-inline"
-              onPress={() =>
-                void (activitiesQuery.isFetchNextPageError
-                  ? activitiesQuery.fetchNextPage()
-                  : activitiesQuery.refetch())
-              }
-              accessibilityRole="button"
-              style={styles.retry}
-            >
-              <Text style={styles.retryText}>
-                {activitiesQuery.isFetchNextPageError
-                  ? "Couldn't load older activity — tap to retry"
-                  : "Couldn't refresh activity — tap to retry"}
-              </Text>
-            </Pressable>
+          {/* A failed load-more, at the bottom where the user asked for it. Gated on `data !== undefined`
+              rather than on row count — the blocking branch above already keys on that, and requiring
+              rows here meant a deal with NO activity reported its failed refresh nowhere at all: no
+              notice, no retry, just the unchanged "Nothing logged yet". Silently wrong in exactly the
+              state the empty message claims to be authoritative about. */}
+          {activityState.kind === "loaded" && activityState.pageFailed ? (
+            <RetryNotice
+              testID="retry-activities-page"
+              message="Couldn't load older activity — tap to retry"
+              onRetry={() => void activitiesQuery.fetchNextPage()}
+              placement="bottom"
+            />
           ) : null}
         </Section>
       </ScrollView>
@@ -545,7 +571,9 @@ const styles = StyleSheet.create({
   retryText: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.brandRed },
   emptyActivity: { fontFamily: theme.font.regular, fontSize: 14, color: theme.color.textMuted },
   activity: { gap: 2, paddingVertical: theme.space.sm },
-  activityMeta: { fontFamily: theme.font.regular, fontSize: 12, color: theme.color.textMuted },
+  // textSecondary, not textMuted: #8A95A3 on white is ~3:1, under the 4.5:1 floor for normal
+  // text, and at 12px on a phone outdoors it is the first thing to become unreadable.
+  activityMeta: { fontFamily: theme.font.regular, fontSize: 12, color: theme.color.textSecondary },
   activitySubject: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.textPrimary },
   activityNotes: { fontFamily: theme.font.regular, fontSize: 14, color: theme.color.textSecondary },
   errorTitle: { fontFamily: theme.font.bold, fontSize: 17, color: theme.color.inkNavy },
