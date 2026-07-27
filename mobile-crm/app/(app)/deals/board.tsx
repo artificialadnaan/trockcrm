@@ -9,7 +9,7 @@ import {
   Text,
   View,
 } from "react-native";
-import { useRouter } from "expo-router";
+import { useLocalSearchParams, useRouter } from "expo-router";
 import { useGoBack } from "../../../src/lib/go-back";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useQuery } from "@tanstack/react-query";
@@ -42,7 +42,15 @@ export default function PipelineBoardScreen() {
   const goBack = useGoBack("/(app)/deals");
   const { session, fetcher } = useAuth();
   const cacheScope = useQueryScope();
-  const [scope, setScope] = useState<pipelineApi.PipelineScope>("mine");
+  /**
+   * Seeded from the route, so returning here from a stage drill-down keeps the population the rep was
+   * looking at. Defaulting to "mine" regardless meant backing out of an "all" stage list silently
+   * changed which deals were on screen — the same set-swap the drill-down carries scope to avoid.
+   */
+  const params = useLocalSearchParams<{ scope?: string }>();
+  const initialScope: pipelineApi.PipelineScope =
+    params.scope === "all" || params.scope === "watched" ? params.scope : "mine";
+  const [scope, setScope] = useState<pipelineApi.PipelineScope>(initialScope);
   const [activeStageId, setActiveStageId] = useState<string | null>(null);
 
   const board = useQuery({

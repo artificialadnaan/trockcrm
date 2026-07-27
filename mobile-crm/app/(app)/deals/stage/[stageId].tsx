@@ -36,7 +36,11 @@ export default function StageDealsScreen() {
 
   const router = useRouter();
 
-  const goBack = useGoBack("/(app)/deals/board");
+  // Carries the SCOPE. Without it, a deep-linked "all" stage list fell back to a board defaulted to
+  // "mine" — a different population under the same heading, which is precisely what passing scope into
+  // this screen exists to prevent. Building the href after `scope` is resolved, so the fallback and the
+  // list can never disagree.
+  const goBack = useGoBack(`/(app)/deals/board?scope=${scope}`);
   const { session, fetcher } = useAuth();
   const cacheScope = useQueryScope();
 

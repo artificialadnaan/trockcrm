@@ -968,6 +968,7 @@ type DealStageWorkspaceRow = {
   bid_due_date: string | null;
   is_bid_board_owned: boolean;
   is_change_order: boolean;
+  is_active: boolean | null;
   bid_board_stage_slug: string | null;
   bid_board_stage_entered_at: string | null;
   on_hold: boolean;
@@ -1652,6 +1653,16 @@ function mapDealStageWorkspaceRow(
     bidDueDate: row.bid_due_date,
     isBidBoardOwned: row.is_bid_board_owned,
     isChangeOrder: row.is_change_order,
+    /**
+     * The lifecycle flag, carried so a client can tell an ARCHIVED row from a live one.
+     *
+     * `is_active = false` is this codebase's soft-delete marker, and the Lost column deliberately keeps
+     * those rows in its reporting population — but getDealById hides them by default, so a client that
+     * cannot see this flag renders an archived card as openable and the tap lands on a 404. The board
+     * already receives it through the list shape; the stage drill-down did not, which made the client's
+     * archived guard silently inert on exactly the surface the all-time board links into.
+     */
+    isActive: row.is_active,
     bidBoardStageSlug: row.bid_board_stage_slug,
     bidBoardStageEnteredAt: row.bid_board_stage_entered_at,
     onHold: row.on_hold,
@@ -3872,6 +3883,7 @@ export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePage
       d.bid_due_date,
       d.is_bid_board_owned,
       d.is_change_order,
+      d.is_active,
       d.bid_board_stage_slug,
       d.bid_board_stage_entered_at,
       d.on_hold,
