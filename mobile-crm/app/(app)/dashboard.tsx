@@ -1,67 +1,115 @@
 import React from "react";
-import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
+import { Ionicons } from "@expo/vector-icons";
+import { useQuery } from "@tanstack/react-query";
+import * as dealsApi from "../../src/api/endpoints/deals";
 import { useAuth } from "../../src/auth/AuthContext";
+import { useOffices } from "../../src/auth/useOffices";
+import { useQueryScope } from "../../src/auth/useOfficeId";
 import { canAccessSurface } from "../../src/auth/surfaces";
-import { Row } from "../../src/components/Row";
+import { ScreenHeader } from "../../src/components/ScreenHeader";
+import { qk } from "../../src/query/keys";
 import { theme } from "../../src/theme/theme";
 
 /**
- * Landing screen for the auth spine. Deliberately thin: it proves a real authenticated session end to
- * end (token in the keychain, office resolved, sign-out) without pretending to be the dashboard, which
- * arrives with the deals work.
+ * Home.
+ *
+ * What this replaced was a debug screen: the words "Signed in", the role string, the office UUID, and
+ * two link buttons. It told a rep nothing they came to the app to find out, and printed an internal
+ * identifier where a person expects the name of the place they work.
+ *
+ * What a rep opening this on a job site actually wants is: which office am I in, how much is on my plate,
+ * and is anything slipping. Everything here answers one of those.
  */
 export default function DashboardScreen() {
   const router = useRouter();
-  const { session, signOut } = useAuth();
-  if (!session) return null;
+  const { session, signOut, fetcher } = useAuth();
+  const { activeOfficeName, canSwitchOffice } = useOffices();
+  const scope = useQueryScope();
 
+  const mine = useQuery({
+    queryKey: qk.deals(scope, { scope: "mine", summary: true }),
+    // limit 1: this is a COUNT, and the totals ride in the pagination envelope. Pulling a full page to
+    // count it would be paying for fifty rows nobody renders.
+    queryFn: () => dealsApi.listDeals(fetcher, { scope: "mine", limit: 1 }),
+    enabled: Boolean(session),
+  });
+
+  if (!session) return null;
   const { user } = session;
-  const officeId = session.activeOfficeId ?? user.officeId;
+
+  const total = mine.data?.pagination.total;
+  const atRiskHint = mine.data?.deals.filter((d) => d.atRisk?.isAtRisk).length ?? 0;
 
   return (
-    <SafeAreaView style={styles.safe}>
-      <ScrollView contentContainerStyle={styles.body}>
-        <Text style={styles.eyebrow}>Signed in</Text>
-        <Text style={styles.name}>{user.displayName}</Text>
-        <Text style={styles.meta}>{user.email}</Text>
+    <SafeAreaView style={styles.safe} edges={["top"]}>
+      <ScreenHeader
+        title={firstNameOf(user.displayName)}
+        // The office NAME. This rendered `activeOfficeId` — a UUID, which tells a user nothing and tells
+        // a user who works across two offices nothing about which one they are looking at.
+        context={activeOfficeName ?? undefined}
+      />
+      <ScrollView
+        contentContainerStyle={styles.body}
+        refreshControl={
+          <RefreshControl refreshing={mine.isRefetching} onRefresh={() => void mine.refetch()} />
+        }
+      >
+        <Text style={styles.email}>{user.email}</Text>
 
-        <View style={styles.card}>
-          <Row label="Role" value={user.role} />
-          <Row label="Office" value={officeId} />
-          {user.isRfpVoter ? <Row label="RFP voter" value="yes" /> : null}
-          {user.isRfpReviewer ? <Row label="RFP reviewer" value="yes" /> : null}
+        {canAccessSurface(user.role, "deals") ? (
+          <Pressable
+            testID="home-my-deals"
+            onPress={() => router.push("/(app)/deals")}
+            accessibilityRole="button"
+            accessibilityLabel="Open my deals"
+            style={styles.statCard}
+          >
+            <Text style={styles.statLabel}>Assigned to you</Text>
+            <Text style={styles.statValue}>{total === undefined ? "—" : total}</Text>
+            <Text style={styles.statHint}>
+              {total === undefined
+                ? "Pull to refresh"
+                : total === 0
+                  ? "Nothing assigned yet"
+                  : atRiskHint > 0
+                    ? `${atRiskHint} flagged at risk on this page`
+                    : "Tap to open your pipeline"}
+            </Text>
+          </Pressable>
+        ) : null}
+
+        <View style={styles.grid}>
+          {canAccessSurface(user.role, "deals") ? (
+            <NavCard
+              testID="open-deals"
+              icon="briefcase-outline"
+              label="Deals"
+              onPress={() => router.push("/(app)/deals")}
+            />
+          ) : null}
+          {canAccessSurface(user.role, "contacts") ? (
+            <NavCard
+              testID="open-contacts"
+              icon="people-outline"
+              label="Contacts"
+              onPress={() => router.push("/(app)/contacts")}
+            />
+          ) : null}
         </View>
 
-        {/* Links are filtered by the same policy that guards the routes, so a role never sees an entry
-            that would bounce it straight back. The GROUP layouts are the enforcement; this is the
-            courtesy half, exactly as the web sidebar works. */}
-        {canAccessSurface(user.role, "deals") ? (
-        <Pressable
-          testID="open-deals"
-          onPress={() => router.push("/(app)/deals")}
-          accessibilityRole="button"
-          accessibilityLabel="Open deals"
-          style={styles.primary}
-        >
-          <Text style={styles.primaryText}>Deals</Text>
-        </Pressable>
+        {canSwitchOffice ? (
+          <Text style={styles.note}>
+            You have access to more than one office. Office switching arrives with the next release.
+          </Text>
         ) : null}
 
-        {canAccessSurface(user.role, "contacts") ? (
-        <Pressable
-          testID="open-contacts"
-          onPress={() => router.push("/(app)/contacts")}
-          accessibilityRole="button"
-          accessibilityLabel="Open contacts"
-          style={styles.secondary}
-        >
-          <Text style={styles.secondaryText}>Contacts</Text>
-        </Pressable>
-        ) : null}
-
-        <Text style={styles.note}>Email, tasks and reports land in later releases.</Text>
+        <Text style={styles.scopeNote}>
+          This release covers deals, contacts and notes. Leads, tasks, email and reports are still to
+          come — if something is missing it is not built yet rather than broken.
+        </Text>
 
         <Pressable
           testID="sign-out"
@@ -77,57 +125,78 @@ export default function DashboardScreen() {
   );
 }
 
+/** "Adnaan Iqbal" → "Adnaan". A greeting, not a record header. */
+function firstNameOf(displayName: string): string {
+  const first = displayName.trim().split(/\s+/)[0];
+  return first || displayName;
+}
+
+function NavCard({
+  testID,
+  icon,
+  label,
+  onPress,
+}: {
+  testID: string;
+  icon: React.ComponentProps<typeof Ionicons>["name"];
+  label: string;
+  onPress: () => void;
+}) {
+  return (
+    <Pressable
+      testID={testID}
+      onPress={onPress}
+      accessibilityRole="button"
+      accessibilityLabel={label}
+      style={styles.navCard}
+    >
+      <Ionicons name={icon} size={22} color={theme.color.brandRed} />
+      <Text style={styles.navLabel}>{label}</Text>
+    </Pressable>
+  );
+}
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: theme.color.surfaceMuted },
-  body: { padding: theme.space.xl, gap: theme.space.sm },
-  eyebrow: { fontFamily: theme.font.semibold, fontSize: 12, color: theme.color.textMuted, letterSpacing: 1 },
-  name: { fontFamily: theme.font.bold, fontSize: 24, color: theme.color.inkNavy },
-  meta: { fontFamily: theme.font.regular, fontSize: 14, color: theme.color.textSecondary },
-  card: {
-    marginTop: theme.space.lg,
+  body: { padding: theme.space.lg, gap: theme.space.md, paddingBottom: theme.space.xxl },
+  email: { fontFamily: theme.font.regular, fontSize: 13, color: theme.color.textMuted },
+  statCard: {
     backgroundColor: theme.color.surface,
     borderRadius: theme.radius.lg,
     borderWidth: 1,
     borderColor: theme.color.border,
     padding: theme.space.lg,
-    gap: theme.space.sm,
+    gap: theme.space.xs,
   },
-  row: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
-  rowLabel: { fontFamily: theme.font.regular, fontSize: 14, color: theme.color.textSecondary },
-  rowValue: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.textPrimary },
-  note: {
-    marginTop: theme.space.lg,
-    fontFamily: theme.font.regular,
-    fontSize: 13,
+  statLabel: {
+    fontFamily: theme.font.semibold,
+    fontSize: 12,
+    letterSpacing: 1,
+    textTransform: "uppercase",
     color: theme.color.textMuted,
   },
-  primary: {
-    marginTop: theme.space.lg,
-    backgroundColor: theme.color.brandRed,
-    borderRadius: theme.radius.md,
-    paddingVertical: theme.space.lg,
-    alignItems: "center",
-  },
-  primaryText: { fontFamily: theme.font.bold, fontSize: 16, color: theme.color.textInverse },
-  secondary: {
-    marginTop: theme.space.md,
-    borderWidth: 1,
-    borderColor: theme.color.inkNavy,
-    borderRadius: theme.radius.md,
-    paddingVertical: theme.space.lg,
-    alignItems: "center",
+  statValue: { fontFamily: theme.font.bold, fontSize: 34, color: theme.color.inkNavy },
+  statHint: { fontFamily: theme.font.regular, fontSize: 13, color: theme.color.textSecondary },
+  grid: { flexDirection: "row", gap: theme.space.md },
+  navCard: {
+    flex: 1,
     backgroundColor: theme.color.surface,
-  },
-  secondaryText: { fontFamily: theme.font.bold, fontSize: 16, color: theme.color.inkNavy },
-  signOut: {
-    marginTop: theme.space.xxl,
+    borderRadius: theme.radius.lg,
     borderWidth: 1,
     borderColor: theme.color.border,
-    borderRadius: theme.radius.md,
-    paddingVertical: theme.space.md,
+    paddingVertical: theme.space.lg,
     alignItems: "center",
-    backgroundColor: theme.color.surface,
+    gap: theme.space.sm,
   },
-  signOutText: { fontFamily: theme.font.semibold, fontSize: 15, color: theme.color.textPrimary },
+  navLabel: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.textPrimary },
+  note: { fontFamily: theme.font.regular, fontSize: 13, color: theme.color.textMuted },
+  scopeNote: {
+    marginTop: theme.space.sm,
+    fontFamily: theme.font.regular,
+    fontSize: 12,
+    lineHeight: 18,
+    color: theme.color.textMuted,
+  },
+  signOut: { marginTop: theme.space.lg, alignItems: "center", paddingVertical: theme.space.md },
+  signOutText: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.textSecondary },
 });

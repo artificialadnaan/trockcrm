@@ -1,13 +1,18 @@
 import React from "react";
 import { ActivityIndicator, View } from "react-native";
-import { Redirect, Stack } from "expo-router";
+import { Redirect, Tabs } from "expo-router";
+import { Ionicons } from "@expo/vector-icons";
 import { useAuth } from "../../src/auth/AuthContext";
+import { canAccessSurface } from "../../src/auth/surfaces";
 import { formStyles } from "../../src/theme/formStyles";
 import { theme } from "../../src/theme/theme";
 
 /**
- * Authenticated shell. The tab bar arrives with the feature screens in later PRs; this PR ships the
- * auth spine and one landing screen, so a Stack is enough and avoids a tab bar with a single tab.
+ * The authenticated shell: auth gates, then the tab bar.
+ *
+ * Gates run in a deliberate order — restoring, signed-out, forced password change, onboarding — and each
+ * one owns exactly one redirect. The tab bar renders only once every gate has passed, so no tab can be
+ * reached by a session that should have been sent elsewhere.
  */
 export default function AppLayout() {
   const { session, gate } = useAuth();
@@ -39,7 +44,53 @@ export default function AppLayout() {
   // gate that only guards the front door is not a gate.
   if (session.user.requiresOnboarding) return <Redirect href="/onboarding-required" />;
 
-  return <Stack screenOptions={{ headerShown: false }} />;
+  /**
+   * TABS, not a Stack. The app shipped as a single Stack with a landing screen that linked onward, so
+   * every surface was two taps deep and there was no way to tell where you were. A tab bar is what turns
+   * a set of screens into an app — and it is the thing a rep uses one-handed on a roof.
+   *
+   * Tabs are filtered by the SAME policy that guards the route groups, so a role never sees a tab that
+   * would bounce it back to the dashboard. Enforcement stays in the group layouts; this is the courtesy
+   * half, exactly as the web sidebar is arranged.
+   */
+  return (
+    <Tabs
+      screenOptions={{
+        headerShown: false,
+        tabBarActiveTintColor: theme.color.brandRed,
+        tabBarInactiveTintColor: theme.color.textMuted,
+        tabBarStyle: {
+          backgroundColor: theme.color.surface,
+          borderTopColor: theme.color.borderSubtle,
+        },
+        tabBarLabelStyle: { fontFamily: theme.font.semibold, fontSize: 11 },
+      }}
+    >
+      <Tabs.Screen
+        name="dashboard"
+        options={{
+          title: "Home",
+          tabBarIcon: ({ color, size }) => <Ionicons name="home-outline" color={color} size={size} />,
+        }}
+      />
+      <Tabs.Screen
+        name="deals"
+        options={{
+          title: "Deals",
+          href: canAccessSurface(session.user.role, "deals") ? undefined : null,
+          tabBarIcon: ({ color, size }) => <Ionicons name="briefcase-outline" color={color} size={size} />,
+        }}
+      />
+      <Tabs.Screen
+        name="contacts"
+        options={{
+          title: "Contacts",
+          href: canAccessSurface(session.user.role, "contacts") ? undefined : null,
+          tabBarIcon: ({ color, size }) => <Ionicons name="people-outline" color={color} size={size} />,
+        }}
+      />
+    </Tabs>
+  );
 }
 
 function Restoring() {

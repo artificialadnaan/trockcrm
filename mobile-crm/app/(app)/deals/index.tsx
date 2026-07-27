@@ -17,6 +17,8 @@ import * as dealsApi from "../../../src/api/endpoints/deals";
 import type { DealListItem, DealScope } from "../../../src/api/types";
 import { useAuth } from "../../../src/auth/AuthContext";
 import { useQueryScope } from "../../../src/auth/useOfficeId";
+import { useOffices } from "../../../src/auth/useOffices";
+import { ScreenHeader } from "../../../src/components/ScreenHeader";
 import { DealCard } from "../../../src/components/DealCard";
 import { RetryNotice } from "../../../src/components/RetryNotice";
 import { resolveListState } from "../../../src/list-state";
@@ -43,6 +45,7 @@ export default function DealsListScreen() {
   const router = useRouter();
   const { fetcher } = useAuth();
   const cacheScope = useQueryScope();
+  const { activeOfficeName } = useOffices();
   const [scope, setScope] = useState<DealScope>("mine");
   const [search, setSearch] = useState("");
 
@@ -129,10 +132,11 @@ export default function DealsListScreen() {
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
-      <View style={styles.header}>
-        <Text style={styles.title}>Deals</Text>
-        {total !== undefined ? <Text style={styles.count}>{total} total</Text> : null}
-      </View>
+      <ScreenHeader
+        title="Deals"
+        context={activeOfficeName ?? undefined}
+        right={total !== undefined ? <Text style={styles.count}>{total} total</Text> : undefined}
+      />
 
       <View style={styles.scopeRow}>
         {SCOPES.map((s) => (
