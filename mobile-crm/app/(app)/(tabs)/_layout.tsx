@@ -51,6 +51,20 @@ export default function TabsLayout() {
           tabBarIcon: ({ color, size }) => <Ionicons name="briefcase-outline" color={color} size={size} />,
         }}
       />
+      {/* Leads is a TAB, not a screen pushed over the tab bar.
+          Every other list in this app is a tab, and the leads list was the one exception — pushed from
+          the dashboard onto the (app) stack, which covers the tab bar with a header-less stack that has
+          no back control of its own. A rep arriving there by deep link, or by a restored navigation
+          state, had no visible route back to anywhere: canGoBack() is false, so even a Back control
+          would have been inert. Being a tab is the fix the rest of the app already uses. */}
+      <Tabs.Screen
+        name="leads"
+        options={{
+          title: "Leads",
+          href: canAccessSurface(session.user.role, "leads") ? undefined : null,
+          tabBarIcon: ({ color, size }) => <Ionicons name="clipboard-outline" color={color} size={size} />,
+        }}
+      />
       <Tabs.Screen
         name="contacts"
         options={{

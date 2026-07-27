@@ -3,11 +3,24 @@ import { API_BASE_URL, API_BASE_URL_MISSING_MESSAGE } from "../config";
 export class ApiError extends Error {
   status: number;
   code?: string;
-  constructor(message: string, status: number, code?: string) {
+  /**
+   * The PARSED error body, when the server sent one.
+   *
+   * Some routes answer a non-2xx with a payload that is the POINT of the response rather than a
+   * description of a failure — /leads/:id/stage-transition returns 409 carrying the itemised list of
+   * what a lead still needs, each entry saying whether it can be fixed inline or only on the full
+   * record. This class used to read that body for a message and a code and then drop it, so the only
+   * caller who wanted the rest had nothing to reconstruct it from and rendered a generic fallback.
+   *
+   * Kept as `unknown`: it is whatever that route returns, and a caller that wants it knows its shape.
+   */
+  body?: unknown;
+  constructor(message: string, status: number, code?: string, body?: unknown) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.code = code;
+    this.body = body;
   }
 }
 
@@ -155,6 +168,7 @@ export async function apiFetch<T = unknown>(path: string, opts: ApiFetchOptions 
       if (res.status === 401) onUnauthorized?.();
       let message = `Request failed (${res.status})`;
       let code: string | undefined;
+      let parsedBody: unknown;
       try {
         const parsed = (await res.json()) as {
           error?: { message?: string; code?: string } | string;
@@ -173,6 +187,7 @@ export async function apiFetch<T = unknown>(path: string, opts: ApiFetchOptions 
         // Prefer the standard error.code envelope emitted by the server's errorHandler; a top-level code is
         // a compatibility fallback for the handful of routes that still return one.
         if (!code && typeof parsed.code === "string") code = parsed.code;
+        parsedBody = parsed;
       } catch {
         /* keep default message — a body that is absent or not JSON still has a usable status */
       }
@@ -181,7 +196,7 @@ export async function apiFetch<T = unknown>(path: string, opts: ApiFetchOptions 
       // would send screens down an error path for a failure the request never actually finished
       // observing. Same precedence as the success path above.
       if (bodyTimedOut) throw new ApiError("Request timed out", 408);
-      throw new ApiError(message, res.status, code);
+      throw new ApiError(message, res.status, code, parsedBody);
     }
 
     if (res.status === 204) return undefined as T;

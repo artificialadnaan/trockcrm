@@ -2,16 +2,21 @@ import React from "react";
 import { StyleSheet, Text, View } from "react-native";
 import { theme } from "../theme/theme";
 
-export type BadgeTone = "amber" | "red";
+export type BadgeTone = "amber" | "red" | "green";
 
 /**
- * A status pill — "On hold", "At risk". Shared so the two tones stay identical across the deals card and
- * the detail screen, which previously hardcoded the same hex literals separately.
+ * A status pill — "On hold", "At risk", "Converted". Shared so the tones stay identical across the deals
+ * card, the leads card and the detail screens, which previously hardcoded the same hex literals
+ * separately.
+ *
+ * Keyed by an explicit map rather than nested ternaries: with two tones a ternary was fine, and the
+ * moment a third arrived it would have become the kind of expression where adding a fourth quietly
+ * lands in the wrong branch.
  */
 export function Badge({ label, tone }: { label: string; tone: BadgeTone }) {
   return (
-    <View style={[styles.pill, tone === "amber" ? styles.amber : styles.red]}>
-      <Text style={[styles.text, tone === "amber" ? styles.amberText : styles.redText]}>{label}</Text>
+    <View style={[styles.pill, TONE_STYLES[tone].pill]}>
+      <Text style={[styles.text, TONE_STYLES[tone].text]}>{label}</Text>
     </View>
   );
 }
@@ -23,4 +28,13 @@ const styles = StyleSheet.create({
   amberText: { color: theme.color.amberText },
   red: { backgroundColor: theme.color.redSurface },
   redText: { color: theme.color.brandRedDeep },
+  // Tinted from the palette's green rather than a new literal, so it sits with the other two.
+  green: { backgroundColor: "#DCFCE7" },
+  greenText: { color: "#166534" },
 });
+
+const TONE_STYLES: Record<BadgeTone, { pill: object; text: object }> = {
+  amber: { pill: styles.amber, text: styles.amberText },
+  red: { pill: styles.red, text: styles.redText },
+  green: { pill: styles.green, text: styles.greenText },
+};

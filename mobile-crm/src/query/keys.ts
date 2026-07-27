@@ -30,7 +30,12 @@ export const qk = {
   contacts: (scope: QueryScope, params?: Record<string, unknown>) =>
     ["contacts", scope, params ?? {}] as const,
   contact: (scope: QueryScope, id: string) => ["contact", scope, id] as const,
+  leads: (scope: QueryScope, params?: Record<string, unknown>) =>
+    ["leads", scope, params ?? {}] as const,
+  lead: (scope: QueryScope, id: string) => ["lead", scope, id] as const,
   stages: (scope: QueryScope) => ["stages", scope] as const,
+  /** Lead stages are a SEPARATE workflow family from deal stages — different endpoint, different rows. */
+  leadStages: (scope: QueryScope) => ["lead-stages", scope] as const,
   dealActivities: (scope: QueryScope, dealId: string) =>
     ["deal-activities", scope, dealId] as const,
   contactDeals: (scope: QueryScope, contactId: string) =>
