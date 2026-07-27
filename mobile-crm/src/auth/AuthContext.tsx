@@ -84,7 +84,15 @@ export class NoAccessibleSurfaceError extends Error {
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [session, setSession] = useState<Session | null | undefined>(undefined);
   const [gate, setGate] = useState<GateState>("checking");
-  const [signOutIncomplete, setSignOutIncomplete] = useState(false);
+  /**
+   * A sign-out whose credential erasure failed, tagged with the generation it belonged to.
+   *
+   * The generation matters: the retry below is valid ONLY for that identity. Once a newer sign-in has
+   * saved, it has overwritten the very record the retry wants to remove, so retrying would delete the
+   * NEW account's session instead of the old one's.
+   */
+  const [failedClear, setFailedClear] = useState<{ generation: number } | null>(null);
+  const signOutIncomplete = failedClear !== null;
 
   /**
    * The QueryClient is a process-wide singleton and outlives any session, so it must be emptied whenever
@@ -120,7 +128,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }
 
   const signOut = useCallback(async () => {
-    authGenerationRef.current += 1;
+    const generation = ++authGenerationRef.current;
     sessionRef.current = null;
     setSession(null);
     // Nothing left to verify. Without this the gate keeps the previous session's value, so a stale one
@@ -134,7 +142,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     // explicitly signed out of. See createPersistQueue.
     try {
       await persistRef.current!.clear(clearSession);
-      setSignOutIncomplete(false);
+      setFailedClear(null);
     } catch {
       // BOTH the delete and the tombstone write failed, so a valid token is still on this device and the
       // next launch would restore the account that was just signed out.
@@ -143,7 +151,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       // on a dead authenticated screen does not make the keychain any more writable. But the failure is
       // not discarded — it is flagged so the login screen can say the device was not fully cleared, and
       // retried below, which is the part that can actually still succeed.
-      setSignOutIncomplete(true);
+      setFailedClear({ generation });
     }
   }, [queryClient]);
 
@@ -156,15 +164,22 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
    * the event that tends to fix it.
    */
   useEffect(() => {
-    if (!signOutIncomplete) return;
+    if (!failedClear) return;
+    const { generation } = failedClear;
 
     let cancelled = false;
     const attempt = () => {
-      if (cancelled || sessionRef.current) return;
+      if (cancelled) return;
+      // save(), NOT clear(). clear() runs unconditionally by design — correct for a user-initiated
+      // sign-out, wrong here. Checking `sessionRef.current` first is not enough: a sign-in landing
+      // between that check and the queued operation would see an unconditional clear delete the NEW
+      // account's session. The generation guard closes that window, and a superseding sign-in has
+      // already overwritten the record this retry wanted to remove, so being skipped is the right
+      // outcome rather than a missed erasure.
       void persistRef.current!
-        .clear(clearSession)
+        .save(generation, clearSession)
         .then(() => {
-          if (!cancelled) setSignOutIncomplete(false);
+          if (!cancelled) setFailedClear(null);
         })
         .catch(() => undefined);
     };
@@ -178,7 +193,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       clearInterval(timer);
       sub.remove();
     };
-  }, [signOutIncomplete]);
+  }, [failedClear]);
 
   const fetcher = useCallback(
     <T,>(path: string, opts: ApiFetchOptions = {}) => {
@@ -518,6 +533,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       // fetcher are silently authenticated behind it. Writing first leaves nothing behind on failure.
       await persistRef.current!.save(generation, () => saveSession(next));
       if (generation !== authGenerationRef.current) return;
+      // This save wrote over the same key the failed erasure could not clear, so the previous account's
+      // token is genuinely gone now. Leaving the flag set would warn about a device that is no longer
+      // holding anything.
+      setFailedClear(null);
       sessionRef.current = next;
       setSession(next);
       // The login response IS a fresh server answer — /auth/mobile-login returns withOnboardingGate's

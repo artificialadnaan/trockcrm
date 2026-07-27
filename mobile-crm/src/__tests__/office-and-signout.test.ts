@@ -324,3 +324,42 @@ describe("persist queue", () => {
     );
   });
 });
+
+describe("failed-erasure retry semantics", () => {
+  /**
+   * The retry for a credential erasure that failed must be generation-guarded, NOT unconditional.
+   *
+   * createPersistQueue.clear() runs unconditionally by design — right for a user-initiated sign-out,
+   * wrong for this retry. Guarding on "is anyone signed in right now?" before enqueuing is not enough:
+   * a sign-in landing between that check and the queued operation would watch an unconditional clear
+   * delete the NEW account's session. These pin the property the retry depends on.
+   */
+  it("skips the retry once a newer sign-in has taken the generation", async () => {
+    let generation = 1;
+    const queue = createPersistQueue(() => generation);
+    const erase = jest.fn().mockResolvedValue(undefined);
+
+    generation = 2; // someone signed in after the failed sign-out
+    await queue.save(1, erase);
+
+    // Being skipped is CORRECT: that sign-in's save already overwrote the record this wanted to remove,
+    // so running it would erase the new account instead.
+    expect(erase).not.toHaveBeenCalled();
+  });
+
+  it("still runs the retry while that identity is the current one", async () => {
+    let generation = 1;
+    const queue = createPersistQueue(() => generation);
+    const erase = jest.fn().mockResolvedValue(undefined);
+    await queue.save(1, erase);
+    expect(erase).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not resolve the flag when the retry itself fails again", async () => {
+    let generation = 1;
+    const queue = createPersistQueue(() => generation);
+    await expect(
+      queue.save(1, () => Promise.reject(new Error("keychain still locked"))),
+    ).rejects.toThrow("keychain still locked");
+  });
+});
