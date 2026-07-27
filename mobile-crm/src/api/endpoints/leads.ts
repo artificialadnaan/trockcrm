@@ -358,6 +358,15 @@ export function mergeLeadDetail(previous: LeadDetail | undefined, updated: LeadR
  * The route's `status` filter is a single equality (service.ts:1469), so "converted OR disqualified"
  * is not expressible in one call. Two calls, each capped independently, then merged on the same
  * updatedAt axis the server sorts by. Tombstones are excluded by construction rather than by cleanup.
+ *
+ * Promise.all, so a half-failure is a FAILURE. If the disqualified request fails and the converted one
+ * succeeds, rendering the successful half shows a complete-looking list that is quietly missing a whole
+ * category — the rep concludes there are no disqualified leads. The screen already has an honest
+ * "couldn't load" state with a retry; a silent half-answer has none.
+ *
+ * Still capped, and the cap is still a cap: 100 converted plus 100 disqualified merge down to the 100
+ * most recent overall, so a very long tail is reachable only by search. That is the same limit the Open
+ * tab has and the same one the endpoint imposes — it is not made worse by splitting the request.
  */
 export async function listClosedLeads(
   fetcher: Fetcher,
