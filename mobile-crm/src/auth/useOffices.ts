@@ -41,5 +41,14 @@ export function useOffices() {
     /** Only worth offering a switcher when there is somewhere to switch to. */
     canSwitchOffice: offices.length > 1,
     isLoading: query.isLoading,
+    /**
+     * EXPOSED so a screen's pull-to-refresh can include it.
+     *
+     * `retry: 1` and no refetchOnWindowFocus means that once both attempts fail, nothing retries this
+     * on its own. The dashboard could then refresh its deal count all day and the office name would
+     * stay blank — leaving a multi-office rep looking at office-scoped totals with no indication which
+     * office they belong to, and no way to find out short of restarting the app.
+     */
+    refetch: query.refetch,
   };
 }

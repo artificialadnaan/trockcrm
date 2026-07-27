@@ -24,7 +24,11 @@ export default function TabsLayout() {
       screenOptions={{
         headerShown: false,
         tabBarActiveTintColor: theme.color.brandRed,
-        tabBarInactiveTintColor: theme.color.textMuted,
+        // textSecondary, NOT textMuted. On the white tab bar, #8A95A3 is 3.04:1 against the background
+        // and these labels are 11pt — below the 4.5:1 floor for normal text, which on a phone held at
+        // arm's length on a job site is exactly where it matters. #4B5563 is 7.6:1 and still reads as
+        // clearly inactive next to the brand-red active state.
+        tabBarInactiveTintColor: theme.color.textSecondary,
         tabBarStyle: {
           backgroundColor: theme.color.surface,
           borderTopColor: theme.color.borderSubtle,

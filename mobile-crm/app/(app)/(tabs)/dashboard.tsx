@@ -8,6 +8,7 @@ import * as dealsApi from "../../../src/api/endpoints/deals";
 import { useAuth } from "../../../src/auth/AuthContext";
 import { useOffices } from "../../../src/auth/useOffices";
 import { useQueryScope } from "../../../src/auth/useOfficeId";
+import { ApiError } from "../../../src/api/client";
 import { canAccessSurface } from "../../../src/auth/surfaces";
 import { ScreenHeader } from "../../../src/components/ScreenHeader";
 import { qk } from "../../../src/query/keys";
@@ -26,7 +27,7 @@ import { theme } from "../../../src/theme/theme";
 export default function DashboardScreen() {
   const router = useRouter();
   const { session, signOut, fetcher } = useAuth();
-  const { activeOfficeName, canSwitchOffice } = useOffices();
+  const { activeOfficeName, canSwitchOffice, refetch: refetchOffices } = useOffices();
   const scope = useQueryScope();
 
   const mine = useQuery({
@@ -43,6 +44,9 @@ export default function DashboardScreen() {
   const { user } = session;
 
   const total = mine.data?.pagination.total;
+  // An error is only worth reporting once the query has stopped trying; mid-retry it is not news.
+  const countFailed = Boolean(mine.error) && !mine.isFetching;
+  const countOffline = mine.error instanceof ApiError && mine.error.status === 0;
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
@@ -55,7 +59,13 @@ export default function DashboardScreen() {
       <ScrollView
         contentContainerStyle={styles.body}
         refreshControl={
-          <RefreshControl refreshing={mine.isRefetching} onRefresh={() => void mine.refetch()} />
+          <RefreshControl
+            refreshing={mine.isRefetching}
+            // BOTH. Pulling to refresh a screen means "get me the current state of this screen", and the
+            // office name is part of that — refreshing only the count left a transient offices failure
+            // permanently stuck, since nothing else retries it.
+            onRefresh={() => void Promise.all([mine.refetch(), refetchOffices()])}
+          />
         }
       >
         <Text style={styles.email}>{user.email}</Text>
@@ -76,12 +86,20 @@ export default function DashboardScreen() {
             {/* No at-risk count here. It was derived from this query's rows — a limit:1 page — so it
                 could only ever be 0 or 1 regardless of the real number. A wrong count is worse than
                 none, and counting properly would mean pulling the whole set just to measure it. */}
-            <Text style={styles.statHint}>
-              {total === undefined
-                ? "Pull to refresh"
-                : total === 0
-                  ? "Nothing assigned to you yet"
-                  : "Tap to open your pipeline"}
+            {/* Three states, not two. `total === undefined` covered "still loading" and "the request
+                failed" with the same "Pull to refresh", and a failure AFTER a success is worse still:
+                TanStack keeps the previous data, so the old number stayed on screen, the spinner just
+                stopped, and nothing said the figure was stale. A rep plans their day off this count. */}
+            <Text style={[styles.statHint, countFailed && styles.statHintStale]}>
+              {countFailed
+                ? countOffline
+                  ? "You're offline — this may be out of date. Pull to retry."
+                  : "Couldn't refresh — this may be out of date. Pull to retry."
+                : total === undefined
+                  ? "Pull to refresh"
+                  : total === 0
+                    ? "Nothing assigned to you yet"
+                    : "Tap to open your pipeline"}
             </Text>
           </Pressable>
         ) : null}
@@ -181,6 +199,7 @@ const styles = StyleSheet.create({
     color: theme.color.textMuted,
   },
   statValue: { fontFamily: theme.font.bold, fontSize: 34, color: theme.color.inkNavy },
+  statHintStale: { color: theme.color.amberText },
   statHint: { fontFamily: theme.font.regular, fontSize: 13, color: theme.color.textSecondary },
   grid: { flexDirection: "row", gap: theme.space.md },
   navCard: {
