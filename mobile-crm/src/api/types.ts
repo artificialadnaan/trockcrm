@@ -56,3 +56,172 @@ export type AccessibleOffice = {
   name: string;
   slug?: string;
 };
+
+/* ────────────────────────────────────────────────────────────────────────────────────────────────
+ * Deals
+ *
+ * Two conventions inherited from Postgres that are easy to get wrong and silent when you do:
+ *   - money columns are `numeric`, which serialises to a STRING ("125000.00"), never a number.
+ *     Typing them as number compiles fine and then renders "NaN" on a phone.
+ *   - `date` columns are "YYYY-MM-DD" strings; `timestamptz` are ISO-8601 with a Z.
+ * ──────────────────────────────────────────────────────────────────────────────────────────────── */
+
+/** Which slice of deals to list. The server coerces anything unrecognised to "mine" with a 200. */
+export type DealScope = "mine" | "all" | "watched";
+
+/**
+ * At-risk is computed SERVER-side (stage age vs a per-stage threshold, with hold time excluded and
+ * postponement suppression applied). Never recompute it on device — the rules have moved repeatedly and a
+ * second implementation would disagree with the web app.
+ */
+/**
+ * The server's at-risk verdict. `status` and `severity` are typed as OPEN unions — the known values,
+ * plus `(string & {})` so an unrecognised one still assigns.
+ *
+ * Deliberately not a closed union: this app cannot import the server's enum (see the header note), so a
+ * closed list would be a hand-copy that silently starts lying the moment a value is added server-side.
+ * Open unions give autocomplete and catch typos in comparisons — which is what actually goes wrong here
+ * — without pretending to know the full set.
+ */
+export type AtRiskStatus = "at_risk" | "ok" | "postponed" | "suppressed" | (string & {});
+export type AtRiskSeverity = "none" | "low" | "medium" | "high" | (string & {});
+
+export type AtRiskResult = {
+  isAtRisk: boolean;
+  status: AtRiskStatus;
+  severity: AtRiskSeverity;
+  reason?: string | null;
+  effectiveStageAgeDays: number | null;
+  thresholdDays: number | null;
+};
+
+export type PipelineStage = {
+  id: string;
+  name: string;
+  slug: string;
+  displayOrder: number;
+  isTerminal: boolean;
+  isActivePipeline: boolean;
+  color: string | null;
+};
+
+/** One row in the deals list. Narrow on purpose: tenant.deals has ~153 columns, we render a handful. */
+export type DealListItem = {
+  id: string;
+  name: string | null;
+  description: string | null;
+  dealNumber: string | null;
+  stageId: string | null;
+  stageSlug: string | null;
+  companyId: string | null;
+  companyName: string | null;
+  propertyCity: string | null;
+  propertyState: string | null;
+  awardedAmount: string | null;
+  bidEstimate: string | null;
+  // Both participate in the canonical value priority — omitting them made estimating and Bid Board deals
+  // display a lower value, or "—", despite having a tracked one.
+  ddEstimate: string | null;
+  bidBoardTotalSales: string | null;
+  workflowRoute: string | null;
+  expectedCloseDate: string | null;
+  stageEnteredAt: string | null;
+  updatedAt: string | null;
+  onHold: boolean | null;
+  isActive: boolean | null;
+  atRisk: AtRiskResult | null;
+  /**
+   * SERVER verdicts. Do not recompute either of these on device.
+   *
+   * "Effectively on hold" is not just the stored `on_hold` flag: it ORs in a close target more than 90
+   * calendar days out, exempts terminal deals, and resolves "today" against the America/Chicago calendar
+   * day. `effectiveValue` is the canonical four-column value with that hold rule applied — a held deal is
+   * worth 0. Deriving this locally would be a second implementation of a rule that has moved repeatedly,
+   * and its failure mode is wrong money beside an On Hold badge, not an error. See attachAtRiskResult.
+   */
+  effectiveOnHold: boolean | null;
+  effectiveValue: number | null;
+  /**
+   * The stage to DISPLAY. A Bid Board-owned deal can advance, or close, in Bid Board while its CRM
+   * `stageSlug` still reads an earlier stage; the web detail already switches to bidBoardStageSlug.
+   */
+  displayStageSlug: string | null;
+};
+
+export type DealListResponse = {
+  deals: DealListItem[];
+  pagination: {
+    page: number;
+    limit: number;
+    total: number;
+    activeCount: number;
+    totalPages: number;
+  };
+};
+
+export type DealDetail = DealListItem & {
+  assignedRepId: string | null;
+  assignedRepName: string | null;
+  primaryContactName: string | null;
+  primaryContactEmail: string | null;
+  primaryContactPhone: string | null;
+  /**
+   * Projected alongside `primaryContactPhone` so a mobile-only contact stays callable. The contacts
+   * table carries both columns and every other contact surface coalesces them; the deal detail select
+   * projected only `phone`, so a contact reachable ONLY on a mobile number showed no call action at all.
+   */
+  primaryContactMobile: string | null;
+  propertyAddress: string | null;
+  projectType: string | null;
+  createdAt: string | null;
+  isWatching: boolean;
+};
+
+/** One requirement the stage gate checks. `satisfied` is what the UI ticks off. */
+export type ChecklistItem = {
+  key: string;
+  label: string;
+  satisfied: boolean;
+};
+
+/**
+ * The preflight verdict. This is the whole point of the two-step stage move: a rep sees exactly what is
+ * missing BEFORE committing, instead of an opaque 400 after.
+ */
+export type StageGateResult = {
+  allowed: boolean;
+  isBackwardMove: boolean;
+  isTerminal: boolean;
+  targetStage: { id: string; name: string; slug: string };
+  currentStage: { id: string; name: string; slug: string };
+  missingRequirements: { fields: string[]; documents: string[]; approvals: string[] };
+  effectiveChecklist: {
+    fields: ChecklistItem[];
+    attachments: ChecklistItem[];
+    approvals: ChecklistItem[];
+  };
+  requiresOverride: boolean;
+  blockReason: string | null;
+};
+
+/**
+ * A timeline entry. The server's field names are `type` and `body` — NOT `activityType`/`notes`. Naming
+ * them anything else here renders a blank timeline on a request that succeeded, which is the failure mode
+ * you only notice in TestFlight.
+ */
+export type Activity = {
+  id: string;
+  dealId: string | null;
+  type: string;
+  subject: string | null;
+  body: string | null;
+  occurredAt: string | null;
+  createdAt: string | null;
+  performedByUserName: string | null;
+  responsibleUserName: string | null;
+};
+
+export type ActivityListResponse = {
+  activities: Activity[];
+  pagination?: { page: number; limit: number; total: number; totalPages: number };
+};
