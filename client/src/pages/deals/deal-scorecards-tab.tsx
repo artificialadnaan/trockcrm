@@ -14,6 +14,8 @@ import {
   type FieldScorecardDetail,
   type CorrectiveActionItemView,
   type ScorecardRating,
+  isRenderableSignatureDataUrl,
+  typedSignatureFallback,
 } from "@trock-crm/shared/types";
 import { isApiError } from "@/lib/api";
 import { useDealScorecards, fetchDealScorecardDetail, downloadDealScorecardPdf } from "@/hooks/use-deal-scorecards";
@@ -469,8 +471,8 @@ export function ScorecardDetailView({ detail }: { detail: FieldScorecardDetail }
         <div>
           <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">Signatures</h4>
           <div className="space-y-1 text-sm text-gray-900">
-            <p>Superintendent: {detail.superintendentSignature || "—"}</p>
-            <p>Project manager: {detail.pmSignature || "—"}</p>
+            <SignatureBlock label="Superintendent" value={detail.superintendentSignature} />
+            <SignatureBlock label="Project manager" value={detail.pmSignature} />
           </div>
         </div>
       )}
@@ -499,6 +501,32 @@ export function ScorecardDetailView({ detail }: { detail: FieldScorecardDetail }
             )}
           </div>
         </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * One signature line. Mirrors the PDF's drawSignature exactly — both route through the shared
+ * classification predicate, so a signature this renders as an image is one the PDF also draws.
+ *
+ * Three cases: a handwritten data-URL capture draws as an image; a legacy typed name renders as text; and
+ * anything else — including a data URL of a type we will not render — falls back to an em dash. That last
+ * case is the bug this replaced: the raw `data:image/png;base64,…` payload was printed as a text node.
+ */
+function SignatureBlock({ label, value }: { label: string; value: string | null | undefined }) {
+  const typed = typedSignatureFallback(value);
+  return (
+    <div className="flex items-center gap-2">
+      <span className="shrink-0 text-gray-500">{label}:</span>
+      {isRenderableSignatureDataUrl(value) ? (
+        <img
+          src={value as string}
+          alt={`${label} signature`}
+          className="h-12 max-w-[220px] object-contain"
+        />
+      ) : (
+        <span className={typed ? "text-gray-900" : "text-gray-400"}>{typed ?? "—"}</span>
       )}
     </div>
   );

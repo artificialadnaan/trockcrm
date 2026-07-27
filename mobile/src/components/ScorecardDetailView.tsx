@@ -20,7 +20,15 @@ const GRID_COLUMNS = 3;
 const SIGNATURE_IMAGE_DATA_URL = /^data:image\/(?:png|jpe?g);base64,/i;
 const DATA_URL = /^data:/i;
 
-/** Handwritten signatures are stored as image data URLs; older records may contain a typed name instead. */
+/**
+ * Handwritten signatures are stored as image data URLs; older records may contain a typed name instead.
+ *
+ * The web CRM and the server PDF renderer share this rule via shared/types/field-scorecard-signature.ts.
+ * `mobile/` is a non-workspace Expo app and cannot import @trock-crm/shared, so this is a deliberate
+ * third copy. It is intentionally slightly more permissive — it does not validate the base64 body — which
+ * degrades a malformed payload to a broken image rather than to raw text. Keep the three in step: any
+ * change to the accepted media types belongs in all of them.
+ */
 export function isScorecardSignatureImage(value: string | null | undefined): boolean {
   return SIGNATURE_IMAGE_DATA_URL.test(value?.trim() ?? "");
 }
