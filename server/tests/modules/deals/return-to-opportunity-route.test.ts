@@ -156,6 +156,20 @@ describe("POST /api/deals/:id/return-to-opportunity — input handling", () => {
     expect(serviceMocks.returnDealToOpportunity.mock.calls[0][1].acknowledgedCommissionTotal).toBe("12340.5");
   });
 
+  it("passes the acknowledged ROW COUNT through, and nulls a non-integer rather than guessing", async () => {
+    await request(createApp("admin"))
+      .post("/api/deals/deal-1/return-to-opportunity")
+      .send({ reason: "x", acknowledgedCommissionTotal: "1.00", acknowledgedCommissionRowCount: "2" });
+    expect(serviceMocks.returnDealToOpportunity.mock.calls[0][1].acknowledgedCommissionRowCount).toBe(2);
+
+    serviceMocks.returnDealToOpportunity.mockClear();
+    await request(createApp("admin"))
+      .post("/api/deals/deal-1/return-to-opportunity")
+      .send({ reason: "x", acknowledgedCommissionTotal: "1.00", acknowledgedCommissionRowCount: "two" });
+    // Null, not NaN or 0 — the service must refuse an unparseable acknowledgement, not treat it as "0 rows".
+    expect(serviceMocks.returnDealToOpportunity.mock.calls[0][1].acknowledgedCommissionRowCount).toBeNull();
+  });
+
   it("returns the void summary so the client can word its toast accurately", async () => {
     serviceMocks.returnDealToOpportunity.mockResolvedValueOnce({
       deal: { id: "deal-1", name: "Palm Villas", hubspotDealId: null },

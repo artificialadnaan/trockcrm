@@ -362,6 +362,20 @@ export async function changeDealStage(
     dealUpdates.bidBoardDetachReason = null;
   }
 
+  // Non-null only when THIS move actually cleared a LIVE detach marker. Read off the pre-update row
+  // because the UPDATE below nulls the column, and keyed on `=== null` (not truthiness) so it can only
+  // be set by the re-attach branch above — an unrelated stage move leaves the property `undefined`.
+  //
+  // Why it is audited at all: "Move back to Opportunity" writes an audit_log row naming
+  // bidBoardDetachedAt null→<ts>, so without this the trail reads "this deal was severed from Bid Board
+  // sync" with no record of it ever coming back — and re-attachment is exactly the event an auditor
+  // asking "why is the Bid Board updating this deal again?" needs to find. deal_stage_history records
+  // the forward move, but a stage row does not say the sync linkage was restored.
+  const clearedDetachMarkerAt =
+    dealUpdates.bidBoardDetachedAt === null && currentDeal[0].bidBoardDetachedAt != null
+      ? new Date(currentDeal[0].bidBoardDetachedAt).toISOString()
+      : null;
+
   // Always clear ALL terminal fields before setting new ones.
   // This prevents stale data when moving between terminal stages
   // (e.g., Closed Won -> Closed Lost) or reopening.
@@ -461,6 +475,11 @@ export async function changeDealStage(
         // Record the inline forecast-date change too, mirroring the normal deal-update audit path, so a
         // close-date set/change made during a stage advance isn't invisible in the trail.
         ...(expectedCloseDateAuditChange ? { expectedCloseDate: expectedCloseDateAuditChange } : {}),
+        // The counterpart to the detach's own audit row: re-attaching to Bid Board sync is as auditable
+        // as severing it, and the two must be findable in the same place.
+        ...(clearedDetachMarkerAt
+          ? { bidBoardDetachedAt: { from: clearedDetachMarkerAt, to: null } }
+          : {}),
       },
       metadata: {
         overrideReason: overrideReason ?? null,

@@ -179,9 +179,12 @@ describe("ReturnToOpportunityDialog", () => {
       buttonByText("Move back to Opportunity")!.click();
     });
 
+    // Both displayed numbers are echoed: the total AND the row count. A total on its own does not pin
+    // the set of rows the operator agreed to destroy.
     expect(mocks.returnDealToOpportunity).toHaveBeenCalledWith("deal-1", {
       reason: "Award rescinded",
       acknowledgedCommissionTotal: "26250.00",
+      acknowledgedCommissionRowCount: 2,
     });
     expect(mocks.onSuccess).toHaveBeenCalledWith(
       expect.objectContaining({ commissionRowsVoided: 2 })
@@ -212,6 +215,7 @@ describe("ReturnToOpportunityDialog", () => {
     expect(mocks.returnDealToOpportunity).toHaveBeenCalledWith("deal-1", {
       reason: "Needs re-scoping",
       acknowledgedCommissionTotal: undefined,
+      acknowledgedCommissionRowCount: undefined,
     });
   });
 

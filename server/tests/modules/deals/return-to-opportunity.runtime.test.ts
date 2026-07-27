@@ -13,6 +13,7 @@ import { drizzle } from "drizzle-orm/pglite";
 import {
   auditLog,
   dealApprovals,
+  dealChangeOrders,
   dealHistory,
   dealSignedCommissions,
   dealStageHistory,
@@ -156,6 +157,7 @@ beforeAll(async () => {
       dealSignedCommissions,
       dealStageHistory,
       dealApprovals,
+      dealChangeOrders,
       dealHistory,
       jobQueue,
       tasks,
@@ -334,6 +336,7 @@ describe("returnDealToOpportunity — Won deals void commission", () => {
       userRole: "admin",
       reason: "Award was rescinded by the client.",
       acknowledgedCommissionTotal: "26250.00",
+      acknowledgedCommissionRowCount: 2,
       auditContext,
     });
 
@@ -400,6 +403,7 @@ describe("returnDealToOpportunity — Won deals void commission", () => {
         reason: "stale dialog",
         // What the operator saw before a concurrent recompute moved the number.
         acknowledgedCommissionTotal: "9999.00",
+        acknowledgedCommissionRowCount: 1,
         auditContext,
       })
     ).rejects.toMatchObject({ statusCode: 409, code: "MOVE_BACK_COMMISSION_ACK_REQUIRED" });
@@ -436,6 +440,7 @@ describe("returnDealToOpportunity — Won deals void commission", () => {
         userRole: "admin",
         reason: "Award rescinded",
         acknowledgedCommissionTotal: "18750.00",
+        acknowledgedCommissionRowCount: 1,
         auditContext,
       });
     } finally {
@@ -488,6 +493,7 @@ describe("returnDealToOpportunity — Won deals void commission", () => {
           userRole: "admin",
           reason: "Award rescinded",
           acknowledgedCommissionTotal: "18750.00",
+          acknowledgedCommissionRowCount: 1,
           auditContext,
         })
       ).rejects.toMatchObject({ statusCode: 409, code: "MOVE_BACK_COMMISSION_CHANGED" });
@@ -510,6 +516,51 @@ describe("returnDealToOpportunity — Won deals void commission", () => {
     );
     expect(rows).toHaveLength(1);
     expect(rows[0].amount).toBe("18750.00");
+  });
+
+  it("refuses when the total matches but the ROW COUNT does not — a total alone does not pin the set", async () => {
+    const D = U("d106");
+    await seedBidBoardDeal(D, { stageId: WON_STAGE, contractSignedDate: "2026-03-01" });
+    // The live book is 2 rows; the operator's dialog said 1. The money is identical either way, so the
+    // total check passes — but the SET the operator agreed to destroy is not the set on the deal.
+    await seedCommission(D, REP, "9375.00", "owner");
+    await seedCommission(D, DIRECTOR, "9375.00", "estimator");
+
+    await expect(
+      returnDealToOpportunity(tdb, {
+        dealId: D,
+        userId: ADMIN,
+        userRole: "admin",
+        reason: "stale row count",
+        acknowledgedCommissionTotal: "18750.00",
+        acknowledgedCommissionRowCount: 1,
+        auditContext,
+      })
+    ).rejects.toMatchObject({ statusCode: 409, code: "MOVE_BACK_COMMISSION_ACK_REQUIRED" });
+
+    const { rows } = await pg.query(`SELECT id FROM public.deal_signed_commissions WHERE deal_id = '${D}'`);
+    expect(rows).toHaveLength(2);
+    expect((await dealRow(D)).bid_board_detached_at).toBeNull();
+  });
+
+  it("refuses when the row count is omitted entirely", async () => {
+    const D = U("d107");
+    await seedBidBoardDeal(D, { stageId: WON_STAGE, contractSignedDate: "2026-03-01" });
+    await seedCommission(D, REP, "18750.00");
+
+    await expect(
+      returnDealToOpportunity(tdb, {
+        dealId: D,
+        userId: ADMIN,
+        userRole: "admin",
+        reason: "total only",
+        acknowledgedCommissionTotal: "18750.00",
+        auditContext,
+      })
+    ).rejects.toMatchObject({ statusCode: 409, code: "MOVE_BACK_COMMISSION_ACK_REQUIRED" });
+
+    const { rows } = await pg.query(`SELECT id FROM public.deal_signed_commissions WHERE deal_id = '${D}'`);
+    expect(rows).toHaveLength(1);
   });
 
   it("refuses when no acknowledgement is supplied at all", async () => {
@@ -545,6 +596,7 @@ describe("returnDealToOpportunity — permissions and state blocks", () => {
         userRole: "director",
         reason: "director attempt",
         acknowledgedCommissionTotal: "18750.00",
+        acknowledgedCommissionRowCount: 1,
         auditContext,
       })
     ).rejects.toMatchObject({ statusCode: 403, code: "MOVE_BACK_COMMISSION_ROLE_NOT_ALLOWED" });
@@ -622,6 +674,31 @@ describe("returnDealToOpportunity — permissions and state blocks", () => {
     ).rejects.toMatchObject({ statusCode: 409, code: "MOVE_BACK_ALREADY_OPPORTUNITY" });
 
     expect((await dealRow(D)).rfp_approval_status).toBe("approved");
+  });
+
+  it("409s a parent carrying a LEGACY deal_change_orders row, not just child-deal COs", async () => {
+    const D = U("d209");
+    await seedBidBoardDeal(D, { stageId: WON_STAGE, contractSignedDate: "2026-03-01" });
+    // The un-migrated representation: value-only, no backing deal. listDealChangeOrders and
+    // getDealChangeOrdersTotal both UNION it with child deals, so it still contributes to the deal's
+    // contract value — counting only children would move the parent to Opportunity underneath it.
+    await pg.exec(
+      `INSERT INTO public.deal_change_orders (deal_id, signed_date, amount, description, created_by)
+       VALUES ('${D}', '2026-04-01', 25000.00, 'Legacy CO', '${ADMIN}')`
+    );
+
+    await expect(
+      returnDealToOpportunity(tdb, {
+        dealId: D,
+        userId: ADMIN,
+        userRole: "admin",
+        reason: "legacy change order",
+        auditContext,
+      })
+    ).rejects.toMatchObject({ statusCode: 409, code: "MOVE_BACK_HAS_CHANGE_ORDERS" });
+
+    expect((await dealRow(D)).bid_board_detached_at).toBeNull();
+    expect((await dealRow(D)).stage_id).toBe(WON_STAGE);
   });
 
   it("409s an ARCHIVED deal — restore it first, rather than reviving it through a stage move", async () => {
@@ -754,6 +831,7 @@ describe("re-attaching a detached deal", () => {
       targetStageId: ESTIMATING_STAGE,
       userId: ADMIN,
       userRole: "admin",
+      auditContext,
     });
 
     const row = await dealRow(D);
@@ -762,6 +840,55 @@ describe("re-attaching a detached deal", () => {
     expect(row.bid_board_detached_by).toBeNull();
     expect(row.bid_board_detach_reason).toBeNull();
     expect(row.is_bid_board_owned).toBe(true);
+
+    // The re-attach is as auditable as the detach. The move-back writes an audit_log row naming
+    // bidBoardDetachedAt null→<ts>; without a matching row here the trail says the deal was severed
+    // from Bid Board sync and never says it came back, which is the question an auditor actually has
+    // when they find the Bid Board updating a deal someone deliberately disconnected.
+    const { rows: audits } = await pg.query<{ changes: Record<string, { from: unknown; to: unknown }> }>(
+      `SELECT changes FROM public.audit_log
+        WHERE record_id = '${D}' AND table_name = 'deals'
+          AND changes ? 'bidBoardDetachedAt'
+        ORDER BY created_at`
+    );
+    const reattach = audits.find((a) => a.changes.bidBoardDetachedAt.to === null);
+    expect(reattach, "the re-attach must leave its own audit row").toBeDefined();
+    expect(reattach!.changes.bidBoardDetachedAt.from).toEqual(expect.any(String));
+  });
+
+  it("does not fabricate a re-attach audit entry on an ordinary forward move", async () => {
+    const D = U("d502");
+    await seedBidBoardDeal(D, { stageId: OPP_STAGE });
+
+    vi.mocked(validateStageGate).mockImplementation(async () => ({
+      allowed: true,
+      isBackwardMove: false,
+      isTerminal: false,
+      targetStage: STAGES[ESTIMATING_STAGE],
+      currentStage: STAGES[OPP_STAGE],
+      missingRequirements: {
+        fields: [], documents: [], approvals: [],
+        effectiveChecklist: { fields: [], attachments: [], approvals: [] },
+      },
+      effectiveChecklist: { fields: [], attachments: [], approvals: [] },
+      requiresOverride: false,
+      overrideType: null,
+      blockReason: null,
+    }) as never);
+
+    await changeDealStage(tdb, {
+      dealId: D,
+      targetStageId: ESTIMATING_STAGE,
+      userId: ADMIN,
+      userRole: "admin",
+      auditContext,
+    });
+
+    const { rows } = await pg.query(
+      `SELECT id FROM public.audit_log
+        WHERE record_id = '${D}' AND table_name = 'deals' AND changes ? 'bidBoardDetachedAt'`
+    );
+    expect(rows).toHaveLength(0);
   });
 });
 
@@ -849,6 +976,7 @@ describe("previewReturnToOpportunity", () => {
       userRole: "admin",
       reason: "CRM-only deal",
       acknowledgedCommissionTotal: "18750.00",
+      acknowledgedCommissionRowCount: 1,
       auditContext,
     });
     expect(result.wasBidBoardLinked).toBe(false);

@@ -459,48 +459,89 @@ function dealMatchSelectSql(schemaName: string, detached = false): string {
        AND d.bid_board_detached_at IS ${detached ? "NOT NULL" : "NULL"}`;
 }
 
-async function findDealMatches(
-  client: { query: Function },
+/**
+ * The three identity tiers, in DESCENDING confidence, as (sql, params) pairs so each can be run against
+ * attached or detached deals without the tier logic being written twice.
+ *  1. procore_bid_id — the Bid Board's own key.
+ *  2. project_number / deal_number / bid_board_project_number, canonicalized.
+ *  3. name + bid_board_created_at, for a deal with no bid_board_project_number.
+ */
+function dealMatchTiers(
   schemaName: string,
-  row: NormalizedBidBoardRow,
-  opts: { detached?: boolean } = {}
-): Promise<DealMatch[]> {
-  const detached = opts.detached === true;
+  row: NormalizedBidBoardRow
+): Array<{ sql: (detached: boolean) => string; params: unknown[] }> {
+  const tiers: Array<{ sql: (detached: boolean) => string; params: unknown[] }> = [];
+
   if (row.bidBoardProjectId) {
-    const byBidBoardId = await client.query(
-      `${dealMatchSelectSql(schemaName, detached)}
+    tiers.push({
+      sql: (detached) => `${dealMatchSelectSql(schemaName, detached)}
        AND d.procore_bid_id = $1::bigint`,
-      [row.bidBoardProjectId]
-    );
-    if (byBidBoardId.rows.length > 0) return byBidBoardId.rows;
+      params: [row.bidBoardProjectId],
+    });
   }
 
   const projectNumber = normalizeBidBoardProjectNumber(row.bidBoardProjectNumber);
   if (projectNumber) {
-    const byProject = await client.query(
-      `${dealMatchSelectSql(schemaName, detached)}
+    tiers.push({
+      sql: (detached) => `${dealMatchSelectSql(schemaName, detached)}
        AND (
             ${canonicalProjectNumberSql("d.project_number")} = $1 OR
             ${canonicalProjectNumberSql("d.deal_number")} = $1 OR
             ${canonicalProjectNumberSql("d.bid_board_project_number")} = $1
        )`,
-      [projectNumber]
-    );
-    if (byProject.rows.length > 0) return byProject.rows;
+      params: [projectNumber],
+    });
   }
 
   if (row.bidBoardCreatedAt) {
-    const byComposite = await client.query(
-      `${dealMatchSelectSql(schemaName, detached)}
+    tiers.push({
+      sql: (detached) => `${dealMatchSelectSql(schemaName, detached)}
         AND d.bid_board_project_number IS NULL
         AND LOWER(TRIM(d.name)) = LOWER(TRIM($1))
         AND d.bid_board_created_at = $2::timestamptz`,
-      [row.name, row.bidBoardCreatedAt]
-    );
-    return byComposite.rows;
+      params: [row.name, row.bidBoardCreatedAt],
+    });
   }
 
-  return [];
+  return tiers;
+}
+
+/**
+ * Resolve an export row to a CRM deal, TIER BY TIER, checking attached and detached deals at the SAME
+ * tier before dropping to a weaker one.
+ *
+ * The ordering is the whole point. Running every attached tier first and only then looking for detached
+ * deals loses tier PRIORITY: an export row whose exact `procore_bid_id` belongs to a detached deal would
+ * fall through tier 1 and could then bind to a DIFFERENT deal on the weaker project-number or
+ * name+created-at tiers — overwriting that deal's name, estimate and stage with another project's data.
+ * A detached hit at a higher-confidence tier is the answer; it means "this row belongs to a deal that
+ * was deliberately disconnected", and the search must stop there rather than keep shopping.
+ *
+ * Cost: one extra indexed lookup (the partial `deals_bid_board_detached_idx`) per tier that misses,
+ * which is bounded at three and only paid by rows that do not match on their strongest identity.
+ */
+async function resolveDealMatches(
+  client: { query: Function },
+  schemaName: string,
+  row: NormalizedBidBoardRow
+): Promise<{ matches: DealMatch[]; detached: DealMatch[] }> {
+  for (const tier of dealMatchTiers(schemaName, row)) {
+    const attached = await client.query(tier.sql(false), tier.params);
+    if (attached.rows.length > 0) return { matches: attached.rows, detached: [] };
+
+    const detached = await client.query(tier.sql(true), tier.params);
+    if (detached.rows.length > 0) return { matches: [], detached: detached.rows };
+  }
+
+  return { matches: [], detached: [] };
+}
+
+async function findDealMatches(
+  client: { query: Function },
+  schemaName: string,
+  row: NormalizedBidBoardRow
+): Promise<DealMatch[]> {
+  return (await resolveDealMatches(client, schemaName, row)).matches;
 }
 
 export async function findDealIds(client: { query: Function }, schemaName: string, row: NormalizedBidBoardRow) {
@@ -1083,25 +1124,28 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
         continue;
       }
 
-      const matches = await findDealMatches(client, schemaName, normalized);
+      // Tier-by-tier across attached AND detached deals (see resolveDealMatches). A detached deal is
+      // deliberately invisible to the matcher, but it must be reported as a deliberate SKIP rather than
+      // as "no CRM deal matched": folding it into noMatch would (a) lie to the operator, (b) flip every
+      // run from here on to 'completed_with_unmatched', and (c) fill unmatched_project_numbers with rows
+      // nobody should act on. The warning it gets instead is the actionable one — the project is still
+      // sitting on the Bid Board and needs deleting by hand, which the CRM cannot do.
+      const { matches, detached: detachedMatches } = await resolveDealMatches(
+        client,
+        schemaName,
+        normalized
+      );
+      if (detachedMatches.length > 0) {
+        metrics.skippedDetached++;
+        // toDateOnlyString, not String(...).slice(0,10) — node-pg hands back a Date for timestamptz,
+        // whose default string form is "Mon Jul 20 2026 …", so a naive slice prints a weekday.
+        const detachedAt = toDateOnlyString(detachedMatches[0].bid_board_detached_at);
+        warnings.push(
+          `Skipped Bid Board Project # ${normalized.bidBoardProjectNumber} (${normalized.name}): CRM deal ${detachedMatches[0].id} was moved back to Opportunity${detachedAt ? ` on ${detachedAt}` : ""} and is detached from Bid Board sync. Delete this project from the Bid Board.`
+        );
+        continue;
+      }
       if (matches.length === 0) {
-        // Before calling it unmatched, re-run the SAME tiers against DETACHED deals. A deal moved back
-        // to Opportunity is deliberately invisible to the matcher, and reporting that as "no CRM deal
-        // matched" would (a) lie to the operator, (b) flip every run from here on to
-        // 'completed_with_unmatched', and (c) fill unmatched_project_numbers with rows nobody should
-        // act on. The warning it gets instead is the actionable one: the project is still sitting on
-        // the Bid Board and needs deleting by hand — the CRM cannot delete it.
-        const detachedMatches = await findDealMatches(client, schemaName, normalized, { detached: true });
-        if (detachedMatches.length > 0) {
-          metrics.skippedDetached++;
-          // toDateOnlyString, not String(...).slice(0,10) — node-pg hands back a Date for timestamptz,
-          // whose default string form is "Mon Jul 20 2026 …", so a naive slice prints a weekday.
-          const detachedAt = toDateOnlyString(detachedMatches[0].bid_board_detached_at);
-          warnings.push(
-            `Skipped Bid Board Project # ${normalized.bidBoardProjectNumber} (${normalized.name}): CRM deal ${detachedMatches[0].id} was moved back to Opportunity${detachedAt ? ` on ${detachedAt}` : ""} and is detached from Bid Board sync. Delete this project from the Bid Board.`
-          );
-          continue;
-        }
         metrics.noMatch++;
         if (unmatchedProjectNumbers.length < MAX_UNMATCHED_PROJECT_NUMBERS) {
           unmatchedProjectNumbers.push(normalized.bidBoardProjectNumber);

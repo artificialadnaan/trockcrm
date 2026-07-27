@@ -943,13 +943,18 @@ export async function getReturnToOpportunityPreview(dealId: string) {
 }
 
 /**
- * `acknowledgedCommissionTotal` is the number the dialog SHOWED the operator, echoed back. The server
- * refuses the move when it no longer matches the live sum, so a stale dialog can never destroy an
- * amount nobody agreed to.
+ * `acknowledgedCommissionTotal` + `acknowledgedCommissionRowCount` are the two numbers the dialog SHOWED
+ * the operator ("$26,250.00 across 2 rows"), echoed back. The server refuses the move when either no
+ * longer matches the live rows, so a stale dialog can never destroy an amount — or a set of rows —
+ * nobody agreed to.
  */
 export async function returnDealToOpportunity(
   dealId: string,
-  input: { reason: string; acknowledgedCommissionTotal?: string | null }
+  input: {
+    reason: string;
+    acknowledgedCommissionTotal?: string | null;
+    acknowledgedCommissionRowCount?: number | null;
+  }
 ) {
   return api<{
     commissionRowsVoided: number;

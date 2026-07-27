@@ -3723,6 +3723,19 @@ router.post(
           : typeof req.body?.acknowledgedCommissionTotal === "number"
             ? String(req.body.acknowledgedCommissionTotal)
             : null;
+      // The row count the dialog displayed next to the total. Both are checked server-side; a
+      // non-numeric or absent value stays null so the service refuses rather than guesses.
+      const rawAcknowledgedRowCount = req.body?.acknowledgedCommissionRowCount;
+      const parsedAcknowledgedRowCount =
+        typeof rawAcknowledgedRowCount === "number"
+          ? rawAcknowledgedRowCount
+          : typeof rawAcknowledgedRowCount === "string" && rawAcknowledgedRowCount.trim() !== ""
+            ? Number(rawAcknowledgedRowCount)
+            : null;
+      const acknowledgedCommissionRowCount =
+        parsedAcknowledgedRowCount != null && Number.isInteger(parsedAcknowledgedRowCount)
+          ? parsedAcknowledgedRowCount
+          : null;
 
       const result = await returnDealToOpportunity(req.tenantDb!, {
         dealId,
@@ -3730,6 +3743,7 @@ router.post(
         userRole: req.user!.role,
         reason,
         acknowledgedCommissionTotal,
+        acknowledgedCommissionRowCount,
         auditContext: buildRouteAuditContext(req),
       });
 

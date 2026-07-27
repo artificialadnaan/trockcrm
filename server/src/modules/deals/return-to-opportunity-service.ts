@@ -1,6 +1,11 @@
 import { and, eq, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
-import { dealHistory, dealSignedCommissions, deals } from "@trock-crm/shared/schema";
+import {
+  dealChangeOrders,
+  dealHistory,
+  dealSignedCommissions,
+  deals,
+} from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import {
   commissionAckKey,
@@ -48,6 +53,15 @@ export interface ReturnToOpportunityInput {
    * and "delete a payout the operator never saw".
    */
   acknowledgedCommissionTotal?: string | null;
+  /**
+   * The ROW COUNT the dialog showed alongside the total ("$26,250.00 across 2 rows"), echoed back.
+   * Required whenever the deal carries commission, for the same reason as the total: a total on its own
+   * does not pin the SET being destroyed. Commission can be re-attributed between preview and submit —
+   * an additive estimator/sales-source mint landing while an in-place recompute lowers another row can
+   * leave the sum unchanged while the rows underneath it are different — and the operator confirmed
+   * both numbers, so both are checked.
+   */
+  acknowledgedCommissionRowCount?: number | null;
   auditContext?: AuditContext;
 }
 
@@ -241,9 +255,21 @@ function buildHistoryQualifier(
   return parts.length > 0 ? ` (${parts.join("; ")})` : "";
 }
 
-/** Active change-order CHILD deals hanging off this deal (they stay Won and keep their own commission). */
+/**
+ * Change orders that must block the parent's move back, counted the SAME way the rest of the app counts
+ * them — `listDealChangeOrders` / `getDealChangeOrdersTotal` both UNION the two representations:
+ *  • active change-order CHILD deals (the current model — Won, with their own commission rows), and
+ *  • un-migrated legacy `deal_change_orders` rows (value-only, no backing deal).
+ *
+ * Counting only children would let a deal with a legacy row through, clearing the parent's Won/signed
+ * state while a change order still contributes to its contract value — precisely the state the
+ * HAS_CHANGE_ORDERS block exists to prevent. Prod is currently 0 legacy rows in all three office schemas
+ * and there is no INSERT path left into that table (`addDealChangeOrder` creates a child deal), so this
+ * arm is defence-in-depth rather than load-bearing — but a destructive action should not be the one
+ * place whose definition of "has change orders" is narrower than every read surface.
+ */
 async function countActiveChangeOrders(tenantDb: TenantDb, dealId: string) {
-  const [row] = await tenantDb
+  const [childRow] = await tenantDb
     .select({ rowCount: sql<number>`count(*)::int` })
     .from(deals)
     .where(
@@ -253,7 +279,12 @@ async function countActiveChangeOrders(tenantDb: TenantDb, dealId: string) {
         eq(deals.isActive, true)
       )
     );
-  return Number(row?.rowCount ?? 0);
+  const [legacyRow] = await tenantDb
+    .select({ rowCount: sql<number>`count(*)::int` })
+    .from(dealChangeOrders)
+    .where(eq(dealChangeOrders.dealId, dealId));
+
+  return Number(childRow?.rowCount ?? 0) + Number(legacyRow?.rowCount ?? 0);
 }
 
 async function loadDealOrThrow(tenantDb: TenantDb, dealId: string, forUpdate: boolean) {
@@ -389,7 +420,14 @@ export async function returnDealToOpportunity(
   if (commission.rowCount > 0) {
     const acknowledged = commissionAckKey(input.acknowledgedCommissionTotal);
     const live = commissionAckKey(commission.total);
-    if (input.acknowledgedCommissionTotal == null || acknowledged !== live) {
+    // BOTH numbers the dialog displayed, not just the money. A total on its own does not pin the set:
+    // an additive estimator / sales-source mint landing while an in-place recompute lowers another row
+    // can hold the sum steady while the rows underneath it change, and "2 rows" is as much a part of
+    // what the operator agreed to destroy as "$26,250.00".
+    const rowCountAcknowledged =
+      input.acknowledgedCommissionRowCount != null &&
+      Number(input.acknowledgedCommissionRowCount) === commission.rowCount;
+    if (input.acknowledgedCommissionTotal == null || acknowledged !== live || !rowCountAcknowledged) {
       throw new AppError(
         409,
         `This deal has ${commission.rowCount} booked commission row(s) totalling ${live}. ` +

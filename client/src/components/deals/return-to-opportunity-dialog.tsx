@@ -101,10 +101,12 @@ export function ReturnToOpportunityDialog({
     try {
       const result = await returnDealToOpportunity(dealId, {
         reason: reason.trim(),
-        // Echo the exact total this dialog displayed. Sent only when there IS commission to void, so
-        // an ordinary pre-Won move doesn't carry a meaningless "0".
+        // Echo BOTH numbers this dialog displayed — the total and the row count. Sent only when there
+        // IS commission to void, so an ordinary pre-Won move doesn't carry a meaningless "0".
         acknowledgedCommissionTotal:
           preview.commissionRowCount > 0 ? preview.commissionTotal : undefined,
+        acknowledgedCommissionRowCount:
+          preview.commissionRowCount > 0 ? preview.commissionRowCount : undefined,
       });
       onSuccess(result);
       onOpenChange(false);

@@ -231,6 +231,31 @@ describe("Bid Board sync cannot re-claim a deal that was moved back to Opportuni
     });
   }
 
+  // TIER PRIORITY. The detached lookup runs at the SAME tier as the attached one, before dropping to a
+  // weaker tier — otherwise a row whose strongest identity (procore_bid_id) belongs to a detached deal
+  // falls through and binds to a DIFFERENT deal on a weaker tier, overwriting that deal's name, stage
+  // and estimate with another project's data. That is worse than either outcome the feature intends.
+  it("stops at a DETACHED tier-1 identity instead of falling through to a different deal at tier 2", async () => {
+    const before = await dealRow(ATTACHED);
+
+    // procore_bid_id 222222 is the DETACHED deal's; the Project # is the ATTACHED deal's.
+    const result = await ingestBidBoardRows({
+      office_slug: "test",
+      rows: [wonRow({ "Bid Board Project ID": "222222", "Project #": "DFW-1-00001-aa" })],
+    });
+
+    const attached = await dealRow(ATTACHED);
+    expect(attached.stage_id).toBe(ST_ESTIMATING);
+    expect(attached.name).toBe("Attached Tower");
+    expect(String(attached.bid_estimate)).toBe(String(before.bid_estimate));
+    expect(attached.bid_board_status).toBeNull();
+
+    expect(result.metrics.skippedDetached).toBe(1);
+    expect(result.metrics.matched).toBe(0);
+    expect(result.metrics.stageUpdated).toBe(0);
+    expect(result.warnings.join(" ")).toContain(DETACHED);
+  });
+
   it("still syncs a normal ATTACHED deal in the very same payload (the guard is not a blanket off-switch)", async () => {
     const result = await ingestBidBoardRows({
       office_slug: "test",
