@@ -975,6 +975,17 @@ const SELECT_CLASS =
  * listing 12 — the same rule reaching one surface and not the other. Here the same values are sent to
  * both endpoints, which route them through one server-side predicate builder.
  */
+function FacetsRetryNotice({ onRetry }: { onRetry: () => void }) {
+  return (
+    <div className="flex items-end gap-2">
+      <p className="text-xs text-gray-500 pb-2">Filter options unavailable.</p>
+      <Button variant="outline" size="sm" onClick={onRetry} className="h-9 text-xs">
+        Retry
+      </Button>
+    </div>
+  );
+}
+
 function FeedFilterControls({
   facets,
   uploader,
@@ -1092,6 +1103,9 @@ export function PhotoFeedPage() {
   // Bumped whenever the photo LIBRARY changes (not the selection) — an unassigned-photo assignment, or
   // the user loading newly-polled photos. Drives the facets refetch.
   const [libraryVersion, setLibraryVersion] = useState(0);
+  const [facetsError, setFacetsError] = useState(false);
+  // Bumped by the retry control; separate from libraryVersion so a retry does not imply the library moved.
+  const [facetsAttempt, setFacetsAttempt] = useState(0);
 
   // ── Photos tab state ──
   const [projectFilterId, setProjectFilterId] = useState("");
@@ -1245,13 +1259,21 @@ export function PhotoFeedPage() {
     let cancelled = false;
     void api<FeedFacets>("/files/photos/feed/facets")
       .then((data) => {
-        if (!cancelled) setFacets(data);
+        if (cancelled) return;
+        setFacets(data);
+        setFacetsError(false);
       })
-      .catch((err) => console.error("Failed to fetch photo feed facets:", err));
+      .catch((err) => {
+        console.error("Failed to fetch photo feed facets:", err);
+        // Surfaced, not swallowed: a transient failure here leaves every option list EMPTY, and nothing
+        // else refetches unless the library happens to change. Without a retry the uploader, phase and
+        // project filters are simply unusable until a full page reload, with no explanation on screen.
+        if (!cancelled) setFacetsError(true);
+      });
     return () => {
       cancelled = true;
     };
-  }, [libraryVersion]);
+  }, [libraryVersion, facetsAttempt]);
 
   // No client-side narrowing left: sort, filters, ownership, search and paging are ALL resolved by the
   // server, so the rows on screen and the count above them always describe the same set.
@@ -1264,14 +1286,19 @@ export function PhotoFeedPage() {
   const hasSharedFilters = Boolean(dateFrom || dateTo || uploaderFilter || categoryFilter || sourceFilter);
   const hasPhotosTabFilters = hasSharedFilters || Boolean(projectFilterId);
 
-  function clearFilters() {
+  /**
+   * `includeProject` is the whole point of the parameter. The Project selector is rendered only on the
+   * Photos tab, so clearing from the PROJECTS tab must leave it alone — otherwise the action silently
+   * mutates a selection the user cannot see and did not ask about. Clearing from the Photos tab, where
+   * the control is on screen, does reset it.
+   */
+  function clearFilters(includeProject: boolean) {
     setDateFrom("");
     setDateTo("");
     setUploaderFilter("");
     setCategoryFilter("");
     setSourceFilter("");
-    // Only reachable from the Photos tab, where the control that sets it is on screen.
-    setProjectFilterId("");
+    if (includeProject) setProjectFilterId("");
   }
 
   return (
@@ -1411,11 +1438,12 @@ export function PhotoFeedPage() {
                 dateTo={dateTo}
                 onDateToChange={setDateTo}
               />
+              {facetsError && <FacetsRetryNotice onRetry={() => setFacetsAttempt((n) => n + 1)} />}
               {hasSharedFilters && (
                 <Button
                   variant="ghost"
                   size="sm"
-                  onClick={clearFilters}
+                  onClick={() => clearFilters(false)}
                   className="text-xs text-gray-500 hover:text-gray-700 h-9"
                 >
                   Clear Filters
@@ -1524,11 +1552,12 @@ export function PhotoFeedPage() {
                 dateTo={dateTo}
                 onDateToChange={setDateTo}
               />
+              {facetsError && <FacetsRetryNotice onRetry={() => setFacetsAttempt((n) => n + 1)} />}
               {hasPhotosTabFilters && (
                 <Button
                   variant="ghost"
                   size="sm"
-                  onClick={clearFilters}
+                  onClick={() => clearFilters(true)}
                   className="text-xs text-gray-500 hover:text-gray-700 h-9"
                 >
                   Clear Filters

@@ -539,3 +539,77 @@ describe("PhotoFeedPage — facets follow the library", () => {
     }
   });
 });
+
+describe("PhotoFeedPage — Clear Filters does not touch off-screen state", () => {
+  // The flip side of making the indicator tab-specific: clearing from the PROJECTS tab must also leave
+  // the Photos tab's project selection alone, since that control is not on screen there.
+  it("keeps the Photos-tab project selection when clearing from the Projects tab", async () => {
+    await renderPage();
+    const tab = (label: string) =>
+      Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.trim().startsWith(label));
+    const clearButton = () =>
+      Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.includes("Clear Filters"));
+
+    await act(async () => { tab("Photos")!.click(); });
+    await act(async () => { await Promise.resolve(); });
+    await changeSelect(selectByLabel("Project"), "d1");
+    expect(selectByLabel("Project").value).toBe("d1");
+
+    // On Projects, set a shared filter so Clear Filters appears, then use it.
+    await act(async () => { tab("Projects")!.click(); });
+    await act(async () => { await Promise.resolve(); });
+    await changeSelect(selectByLabel("Uploaded By"), "u1");
+    await act(async () => { clearButton()!.click(); });
+    await act(async () => { await Promise.resolve(); });
+    expect(selectByLabel("Uploaded By").value).toBe("");
+
+    // Back on Photos: the selection the user made there survived.
+    await act(async () => { tab("Photos")!.click(); });
+    await act(async () => { await Promise.resolve(); });
+    expect(selectByLabel("Project").value).toBe("d1");
+
+    // ...and clearing FROM the Photos tab, where the control is visible, does reset it.
+    await changeSelect(selectByLabel("Uploaded By"), "u1");
+    await act(async () => { clearButton()!.click(); });
+    await act(async () => { await Promise.resolve(); });
+    expect(selectByLabel("Project").value).toBe("");
+  });
+});
+
+describe("PhotoFeedPage — facet loading failures are recoverable", () => {
+  // A transient facets failure leaves every option list empty, and nothing else refetches unless the
+  // library happens to change — so without a retry the new filters are unusable until a full reload.
+  it("surfaces a retry when the facets request fails, and recovers on retry", async () => {
+    let failFacets = true;
+    mocks.api.mockImplementation(async (path: string) => {
+      if (path.startsWith("/files/photos/project-stats")) {
+        projectStatsCalls.push(path);
+        return { projects: PROJECTS, pagination: { limit: 100, total: 2, nextCursor: null } };
+      }
+      if (path.startsWith("/files/photos/feed/facets")) {
+        if (failFacets) throw new Error("facets down");
+        return {
+          uploaders: [{ id: "u1", name: "Alice Uploader" }],
+          photoCategories: ["construction"],
+          projects: [{ id: "d1", name: "Mine Alpha" }],
+        };
+      }
+      if (path.startsWith("/files/photos/feed/count")) return { count: 0 };
+      return { photos: [], pagination: { page: 1, limit: 40, total: 0, totalPages: 0 } };
+    });
+
+    await renderPage();
+    expect(container.textContent).toContain("Filter options unavailable");
+    // The uploader dropdown really is empty apart from its placeholder.
+    expect(selectByLabel("Uploaded By").options.length).toBe(1);
+
+    failFacets = false;
+    const retry = Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.trim() === "Retry");
+    expect(retry).toBeDefined();
+    await act(async () => { retry!.click(); });
+    await act(async () => { await Promise.resolve(); });
+
+    expect(container.textContent).not.toContain("Filter options unavailable");
+    expect(selectByLabel("Uploaded By").options.length).toBe(2);
+  });
+});

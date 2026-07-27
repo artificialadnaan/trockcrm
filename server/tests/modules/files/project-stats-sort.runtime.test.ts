@@ -152,6 +152,41 @@ describe("getProjectPhotoStats sorting", () => {
     expect(new Set(seen).size).toBe(9);
   });
 
+  /**
+   * Under `recent` the sortValue is cast to `::timestamptz`, so it needs the same treatment the uuid half
+   * already had. A calendar-only check accepts "99:00:00" — well-formed shape, impossible time — and
+   * Postgres then rejects it, turning a hand-edited cursor into a 500 from the one function whose whole
+   * contract is "restart the list". (The count sorts validate as bigint, which is why these have to be
+   * exercised under `recent` specifically.)
+   */
+  it("restarts the list for a recency cursor whose TIME fields are out of range", async () => {
+    const validUuid = "00000000-0000-4000-8000-000000000005";
+    for (const bad of [
+      "2026-07-01 99:00:00+00",
+      "2026-07-01 12:61:00+00",
+      "2026-07-01 12:00:99+00",
+      "2026-07-01 12:00:00+99",
+      "2026-02-30 12:00:00+00",
+      "not-a-timestamp",
+    ]) {
+      const cursor = Buffer.from(`${bad}\u0000${validUuid}`).toString("base64url");
+      const { projects } = await getProjectPhotoStats(tdb as never, { sort: "recent", limit: 3, cursor });
+      // Restarted from the top of the recency ordering rather than throwing.
+      expect(projects.map((p) => p.dealName)).toEqual(["Project 3", "Project 5", "Project 7"]);
+    }
+  });
+
+  it("accepts a well-formed recency cursor and resumes after it", async () => {
+    const first = await getProjectPhotoStats(tdb as never, { sort: "recent", limit: 3 });
+    const next = await getProjectPhotoStats(tdb as never, {
+      sort: "recent",
+      limit: 3,
+      cursor: first.pagination.nextCursor!,
+    });
+    expect(next.projects.map((p) => p.dealName)).not.toContain("Project 3");
+    expect(next.projects.length).toBe(3);
+  });
+
   it("restarts the list for a malformed or stale cursor instead of erroring", async () => {
     const validUuid = "00000000-0000-4000-8000-000000000005";
     for (const bad of [
@@ -164,6 +199,7 @@ describe("getProjectPhotoStats sorting", () => {
       // 500 where the documented behaviour is "restart the list".
       Buffer.from(`not-a-number\u0000${validUuid}`).toString("base64url"),
       Buffer.from(`2026-02-30 00:00:00+00\u0000${validUuid}`).toString("base64url"),
+
       Buffer.from(`99999999999999999999999\u0000${validUuid}`).toString("base64url"),
     ]) {
       const { projects } = await getProjectPhotoStats(tdb as never, { sort: "most_photos", limit: 3, cursor: bad });
@@ -421,5 +457,57 @@ describe("getProjectPhotoStats phase normalization across photo_category and sub
     expect(facets.photoCategories).toContain("preconstruction");
     // ...and never offers the source flag as though it were a phase.
     expect(facets.photoCategories).not.toContain("companycam");
+  });
+});
+
+/**
+ * The facets are the dropdown's contents, so they have to describe the SAME rows the feed shows. When
+ * a photo gains a new version the original row stays `is_active`, and the row predicate excludes it via
+ * the superseded-version check — but the facet scope used to check only `is_active`. A superseded row
+ * could therefore contribute an uploader or phase that no visible feed row matches, so selecting it
+ * returned an unexplained empty result. Self-cleaning; production holds zero versioned photos today, so
+ * this seeds the case rather than observing it.
+ */
+describe("getPhotoFeedFacets superseded-version scope", () => {
+  const VER_KEY_PREFIX = "ver/";
+  const VER_DEAL = "00000000-0000-4000-8000-000000077777";
+  const ROOT_ID = "00000000-0000-4000-8000-000000077001";
+  const GHOST_USER = "00000000-0000-4000-8000-0000000770aa";
+
+  beforeAll(async () => {
+    await pg.exec(`
+      INSERT INTO users (id, display_name) VALUES ('${GHOST_USER}', 'Superseded Only');
+      INSERT INTO deals (id, name, deal_number, assigned_rep_id, property_city, property_state, source_lead_id)
+      VALUES ('${VER_DEAL}', 'Project Versioned', 'TR-VER', '${REP}', 'Waco', 'TX', NULL);
+    `);
+    // v1: uploaded by a user who appears NOWHERE else, and carrying a phase of its own.
+    await pg.exec(`
+      INSERT INTO files (id, deal_id, category, subcategory, photo_category, r2_key, system_filename, original_filename, display_name, mime_type, file_extension, file_size_bytes, r2_bucket, folder_path, uploaded_by, taken_at, is_active, version)
+      VALUES ('${ROOT_ID}', '${VER_DEAL}', 'photo', NULL, 'site_visit', '${VER_KEY_PREFIX}v1.jpg', 'v1.jpg', 'orig.jpg', 'v1', 'image/jpeg', '.jpg', 10, 'trockcrm', 'Photos', '${GHOST_USER}', '2026-05-10T00:00:00Z', true, 1);
+    `);
+    // v2 supersedes it, uploaded by someone else and with no phase.
+    await pg.exec(`
+      INSERT INTO files (deal_id, parent_file_id, category, subcategory, photo_category, r2_key, system_filename, original_filename, display_name, mime_type, file_extension, file_size_bytes, r2_bucket, folder_path, uploaded_by, taken_at, is_active, version)
+      VALUES ('${VER_DEAL}', '${ROOT_ID}', 'photo', NULL, NULL, '${VER_KEY_PREFIX}v2.jpg', 'v2.jpg', 'orig.jpg', 'v2', 'image/jpeg', '.jpg', 10, 'trockcrm', 'Photos', '${USER_A}', '2026-05-11T00:00:00Z', true, 2);
+    `);
+  });
+
+  afterAll(async () => {
+    await pg.exec(`DELETE FROM files WHERE r2_key LIKE '${VER_KEY_PREFIX}%';`);
+    await pg.exec(`DELETE FROM deals WHERE id = '${VER_DEAL}';`);
+    await pg.exec(`DELETE FROM users WHERE id = '${GHOST_USER}';`);
+  });
+
+  it("does not advertise an uploader that only a superseded row has", async () => {
+    const facets = await getPhotoFeedFacets(tdb as never);
+    expect(facets.uploaders.map((u) => u.name)).not.toContain("Superseded Only");
+  });
+
+  it("does not advertise a phase that only a superseded row has", async () => {
+    const facets = await getPhotoFeedFacets(tdb as never);
+    expect(facets.photoCategories).not.toContain("site_visit");
+    // Sanity: the option really would have been offered without the exclusion — the row exists and is active.
+    const { projects } = await getProjectPhotoStats(tdb as never, { photoCategory: "site_visit" });
+    expect(projects.length).toBe(0);
   });
 });

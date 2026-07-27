@@ -63,31 +63,37 @@ export interface PhotoFeedFilters {
  * listed 12 of them. One builder makes that divergence structurally impossible — a new filter cannot be
  * added to one surface and forgotten on the other.
  */
+/**
+ * Superseded-version exclusion, shared by the row predicate AND the facet scope.
+ *
+ * DELIBERATELY the cheap child-check, NOT the canonical latestActiveVersionCondition() the deal timeline
+ * uses — a measured trade, not an oversight. The canonical form COALESCEs `parent_file_id` on BOTH
+ * sides, so neither side is a plain column and `files_version_chain_idx` cannot serve it; it degrades to
+ * a hash anti-join over the whole photo table. Measured on production (EXPLAIN ANALYZE, 31,621
+ * deal-linked photos, 2026-07-27):
+ *     canonical form ......... 125 ms   (Hash Anti Join, 61k-row hash build)
+ *     this form ...............  65 ms   (Index Scan on files_version_chain_idx, 0 rows)
+ *     the code this replaced ..  69 ms
+ * The feed is a cross-deal aggregate over every photo in the tenant, so it pays that on every sort and
+ * filter change; the deal timeline pays it over one deal and is right to prefer exactness. It also buys
+ * nothing today: production holds ZERO versioned photos.
+ *
+ * Named and shared so the FACET scope cannot drift from the row scope. When it did, a superseded row
+ * could contribute an uploader or phase to a dropdown that no visible feed row matches — selecting it
+ * would return an unexplained empty result.
+ *
+ * Known limitation, inherited unchanged: in a 3+ version family this excludes only the ROOT, so an
+ * intermediate v2 still reads as latest. If versioning becomes common, add an index on
+ * ((COALESCE(parent_file_id, id)), version) WHERE is_active and switch to the canonical helper.
+ */
+const notSupersededSql = sql`NOT EXISTS (SELECT 1 FROM files f2 WHERE f2.parent_file_id = files.id AND f2.is_active = true)`;
+
 function buildFeedPhotoConditions(filters: PhotoFeedFilters): SQL[] {
   const conditions: SQL[] = [
     eq(files.category, "photo"),
     eq(files.isActive, true),
-    // Superseded-version exclusion. DELIBERATELY the cheap child-check, NOT the canonical
-    // latestActiveVersionCondition() the deal timeline uses — this is a measured trade, not an
-    // oversight.
-    //
-    // The canonical form compares COALESCE(parent_file_id, id) on BOTH sides, so neither side is a
-    // plain column and `files_version_chain_idx (parent_file_id, version) WHERE parent_file_id IS NOT
-    // NULL` cannot serve it: it degrades to a hash anti-join over the whole photo table. Measured on
-    // production (EXPLAIN ANALYZE, 31,621 deal-linked photos, 2026-07-27):
-    //     canonical form ......... 125 ms   (Hash Anti Join, 61k-row hash build)
-    //     this form ...............  65 ms   (Index Scan on files_version_chain_idx, 0 rows)
-    //     the code this replaced ..  69 ms
-    // The feed is a cross-deal aggregate over every photo in the tenant, so it pays that cost on every
-    // sort and filter change; the deal timeline pays it over one deal's photos and is right to prefer
-    // exactness. It also buys nothing here today: production holds ZERO versioned photos (0 rows with
-    // parent_file_id set, 0 above version 1), and keeping this form means the Photos tab's counts are
-    // byte-for-byte what they were before this change.
-    //
-    // Known limitation, inherited unchanged: in a 3+ version family this only excludes the ROOT, so an
-    // intermediate v2 still reads as latest. If versioning ever becomes common, the fix is an index on
-    // ((COALESCE(parent_file_id, id)), version) WHERE is_active — then switch to the canonical helper.
-    sql`NOT EXISTS (SELECT 1 FROM files f2 WHERE f2.parent_file_id = files.id AND f2.is_active = true)`,
+    // Superseded-version exclusion — see notSupersededSql above for why it is the cheap child-check.
+    notSupersededSql,
   ];
 
   if (filters.dealId) conditions.push(eq(files.dealId, filters.dealId));
@@ -257,10 +263,17 @@ export function encodeProjectCursor(cursor: ProjectPhotoCursor): string {
  * regex or the round-trip refuses is treated as a malformed cursor and the list restarts.
  */
 function isPostgresTimestampText(value: string): boolean {
-  const match = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(\.\d+)?([+-]\d{2}(:?\d{2})?|Z)?$/.exec(value);
+  // Every field is RANGE-BOUNDED in the pattern itself. An unbounded `\d{2}` for the hour would accept
+  // "99:00:00", which looks well-formed, passes a calendar-only check, and is then rejected by Postgres
+  // at the ::timestamptz cast — a 500 from the one function whose contract is "restart the list".
+  const match =
+    /^(\d{4})-(\d{2})-(\d{2})[ T]([01]\d|2[0-3]):([0-5]\d):([0-5]\d)(\.\d{1,6})?([+-](?:0\d|1[0-5])(?::?[0-5]\d)?|Z)?$/.exec(
+      value,
+    );
   if (!match) return false;
   const [, year, month, day] = match;
-  // Reject calendar overflow the way Postgres does, rather than the way Date.parse does.
+  // Calendar overflow too (2026-02-30), which no regex can express — rejected the way Postgres does
+  // rather than the way Date.parse does (it silently rolls over and reports success).
   const probe = new Date(`${year}-${month}-${day}T00:00:00Z`);
   return !Number.isNaN(probe.getTime()) && probe.toISOString().slice(0, 10) === `${year}-${month}-${day}`;
 }
@@ -570,7 +583,14 @@ export async function getPhotoFeedFacets(tenantDb: TenantDb): Promise<{
   photoCategories: string[];
   projects: Array<{ id: string; name: string }>;
 }> {
-  const scope = and(eq(files.category, "photo"), eq(files.isActive, true), sql`${files.dealId} IS NOT NULL`);
+  // SAME superseded-version exclusion as the row predicate. Without it the dropdowns are derived from a
+  // slightly larger set than the feed itself, so an option could exist that matches nothing.
+  const scope = and(
+    eq(files.category, "photo"),
+    eq(files.isActive, true),
+    notSupersededSql,
+    sql`${files.dealId} IS NOT NULL`,
+  );
 
   // Sequential, not Promise.all — tenantDb is a single transaction-bound pg client.
   const uploaderRows = await tenantDb
