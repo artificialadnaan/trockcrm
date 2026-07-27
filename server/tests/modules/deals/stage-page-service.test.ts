@@ -278,6 +278,134 @@ describe("listDealStagePage", () => {
     expect(rowSql).toContain("coalesce(d.is_test_data, false) = false");
   });
 
+  /**
+   * boardPopulation — the drill-down borrows the board's row set.
+   *
+   * getDealsForPipeline applies the "Bid Board mirror has not closed yet" predicate in ONE of its three
+   * branches: the open-stage `else`. Won and Lost columns deliberately keep their mirrored-terminal rows,
+   * because for a settled deal a terminal bid_board_stage_slug is the CORRECT state, not a stale mirror.
+   *
+   * These four cases pin both halves of that, on the count query as well as the row query — the header
+   * total is computed from the same conditions array, so a predicate that leaks into a terminal page
+   * would shrink the number AND the list together and look self-consistent while contradicting the board
+   * that linked to it.
+   */
+  const MIRRORED_TERMINAL_PREDICATE = "coalesce(d.bid_board_stage_slug, '') not in";
+
+  /**
+   * The WHERE clause alone — asserting on the whole statement is a false signal here.
+   *
+   * The effective-value expression carries its own `coalesce(d.bid_board_stage_slug, '') not in (...)`
+   * (the terminal exemption from the far-future auto-park), and it appears in the SELECT list of the
+   * count query and in the ORDER BY of the row query. A plain `toContain` on the full text therefore
+   * matches whether or not a row is being filtered, which is the only thing these cases are about.
+   */
+  function whereClauseSql(sqlText: string) {
+    const fromIndex = sqlText.indexOf("from deals d");
+    const afterFrom = fromIndex >= 0 ? sqlText.slice(fromIndex) : sqlText;
+    const whereIndex = afterFrom.indexOf(" where ");
+    if (whereIndex < 0) return "";
+    const body = afterFrom.slice(whereIndex + " where ".length);
+    const orderIndex = body.indexOf(" order by ");
+    return orderIndex >= 0 ? body.slice(0, orderIndex) : body;
+  }
+
+  const runStagePage = async (
+    stage: { id: string; slug: string; name: string; displayOrder: number; isTerminal: boolean },
+    extra: Record<string, unknown>
+  ) => {
+    dbState.responses = [[stage]];
+    const tenantDb = {
+      select: createOfficeScopeSelectMock(),
+      execute: vi.fn()
+        .mockResolvedValueOnce({ rows: [{ total_count: "0", active_count: "0", total_value: "0" }] })
+        .mockResolvedValueOnce({ rows: [] }),
+    } as any;
+    const { listDealStagePage } = await import("../../../src/modules/deals/service.js");
+    await listDealStagePage(tenantDb, {
+      role: "admin",
+      userId: "admin-1",
+      activeOfficeId: "office-1",
+      scope: "all",
+      stageId: stage.id,
+      page: 1,
+      pageSize: 25,
+      sort: "newest",
+      ...extra,
+    } as any);
+    return {
+      countSql: whereClauseSql(extractSqlText(tenantDb.execute.mock.calls[0]?.[0]).toLowerCase()),
+      rowSql: whereClauseSql(extractSqlText(tenantDb.execute.mock.calls[1]?.[0]).toLowerCase()),
+    };
+  };
+
+  const ESTIMATING_STAGE = {
+    id: "stage-estimating",
+    slug: "estimating",
+    name: "Estimating",
+    displayOrder: 4,
+    isTerminal: false,
+  };
+  const WON_STAGE = { id: "stage-won", slug: "won", name: "Won", displayOrder: 7, isTerminal: true };
+  const LOST_STAGE = { id: "stage-lost", slug: "lost", name: "Lost", displayOrder: 8, isTerminal: true };
+
+  it("applies the board's mirrored-terminal predicate to an OPEN stage page when boardPopulation is set", async () => {
+    const { countSql, rowSql } = await runStagePage(ESTIMATING_STAGE, { boardPopulation: true });
+    expect(countSql).toContain(MIRRORED_TERMINAL_PREDICATE);
+    expect(rowSql).toContain(MIRRORED_TERMINAL_PREDICATE);
+  });
+
+  it("leaves the open stage page untouched when boardPopulation is not requested", async () => {
+    // The web deals workspace calls this endpoint without the flag and must keep its existing row set.
+    const { countSql, rowSql } = await runStagePage(ESTIMATING_STAGE, {});
+    expect(countSql).not.toContain(MIRRORED_TERMINAL_PREDICATE);
+    expect(rowSql).not.toContain(MIRRORED_TERMINAL_PREDICATE);
+  });
+
+  it("does NOT apply the mirrored-terminal predicate to a Won drill-down, matching the Won column", async () => {
+    // A Bid Board-synchronized Won deal has a terminal slug in both stage_id and bid_board_stage_slug.
+    // The board's Won column counts it; filtering it out here would empty the list the rep just tapped.
+    const { countSql, rowSql } = await runStagePage(WON_STAGE, { boardPopulation: true });
+    expect(countSql).not.toContain(MIRRORED_TERMINAL_PREDICATE);
+    expect(rowSql).not.toContain(MIRRORED_TERMINAL_PREDICATE);
+  });
+
+  it("does NOT apply the mirrored-terminal predicate to a Lost drill-down either", async () => {
+    const { countSql, rowSql } = await runStagePage(LOST_STAGE, { boardPopulation: true });
+    expect(countSql).not.toContain(MIRRORED_TERMINAL_PREDICATE);
+    expect(rowSql).not.toContain(MIRRORED_TERMINAL_PREDICATE);
+  });
+
+  /**
+   * The soft-delete half of the board's population, which the SCOPE already owns.
+   *
+   * Pinned because the per-branch code makes it look absent: listDealStagePage's own Won/Lost/open
+   * branches never mention is_active, and buildDealWorkspaceScope supplies it as the first element of
+   * the same conditions array. Anyone comparing this endpoint's branches against the board's will
+   * "find" a missing guard and add a redundant second copy — this states where the rule actually is.
+   */
+  const ACTIVE_PREDICATE = "d.is_active = true";
+
+  it("scopes an OPEN stage page to live rows, with or without the flag", async () => {
+    for (const extra of [{ boardPopulation: true }, {}]) {
+      const { countSql, rowSql } = await runStagePage(ESTIMATING_STAGE, extra);
+      expect(countSql).toContain(ACTIVE_PREDICATE);
+      expect(rowSql).toContain(ACTIVE_PREDICATE);
+    }
+  });
+
+  it("scopes a Won drill-down to live rows — a soft-deleted Won deal is a deleted deal", async () => {
+    const { countSql, rowSql } = await runStagePage(WON_STAGE, { boardPopulation: true });
+    expect(countSql).toContain(ACTIVE_PREDICATE);
+    expect(rowSql).toContain(ACTIVE_PREDICATE);
+  });
+
+  it("does NOT scope a Lost drill-down that way — that column retains archived deals on purpose", async () => {
+    const { countSql, rowSql } = await runStagePage(LOST_STAGE, { boardPopulation: true });
+    expect(countSql).not.toContain(ACTIVE_PREDICATE);
+    expect(rowSql).not.toContain(ACTIVE_PREDICATE);
+  });
+
   it("uses positive awarded-first fallback for won terminal stage totals and value sorting", async () => {
     dbState.responses = [
       [{ id: "stage-won", slug: "service_complete", name: "Service Complete", displayOrder: 8, isTerminal: true }],

@@ -3740,10 +3740,10 @@ export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePage
     sql`d.stage_id IN (${sqlList(stageIds)})`,
     excludeTestDataCondition("d"),
     /**
-     * OPT-IN board-equivalent population.
+     * OPT-IN board-equivalent population — OPEN stages only.
      *
      * getDealsForPipeline drops open-stage deals whose Bid Board mirror has already reached a terminal
-     * stage (nonTerminalMirroredStageCondition, :3450), and this endpoint never did — so a drill-down
+     * stage (nonTerminalMirroredStageCondition, :3579), and this endpoint never did — so a drill-down
      * opened from "Showing X of Y — see all" could list deals the board had not counted, under an open
      * stage they have in fact moved past.
      *
@@ -3751,8 +3751,27 @@ export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePage
      * workspace, which has not asked for the board's population, and silently removing rows from a
      * surface this change set does not touch is not a fix, it is a second surprise. Callers that link
      * FROM the board opt in; everyone else is byte-identical to before.
+     *
+     * And gated on `!isTerminalStagePage`, because the board applies this predicate in exactly ONE of
+     * its three branches. Won and Lost columns do not (:3532 / :3566) — a Won deal synchronized from the
+     * Bid Board carries a terminal slug in BOTH stage_id and bid_board_stage_slug, which is the correct,
+     * settled state, not a stale mirror. Applying it to a terminal drill-down would delete precisely the
+     * rows that belong there: the board counts them, the "see all" list and its total would not, and a
+     * fully Bid-Board-sourced Won column would open empty. Mirroring the board means mirroring where it
+     * branches, not just what it filters — copying the predicate without its guard inverts this fix on
+     * the two columns most likely to be tapped.
      */
-    ...(input.boardPopulation ? [aliasedNonTerminalMirroredStageCondition("d")] : []),
+    ...(input.boardPopulation && !isTerminalStagePage
+      ? [aliasedNonTerminalMirroredStageCondition("d")]
+      : []),
+    /**
+     * The soft-delete half of the board's population needs NOTHING here — buildDealWorkspaceScope
+     * (:1586-1597) already branches exactly as the board does: `is_active = true` for open stages
+     * (unless an explicit status owns the axis) and for Won (unless status=inactive, the administrator
+     * diagnostic view), and deliberately not for Lost, whose column retains soft-deleted deals for
+     * reporting. Adding it again here would be a second, redundant copy of a rule that is already
+     * correct — recorded because comparing the per-branch code alone makes it look missing.
+     */
   ];
 
   if (isWonTerminalStage) {
