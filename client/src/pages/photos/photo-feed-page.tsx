@@ -1089,6 +1089,8 @@ export function PhotoFeedPage() {
   const [projectSort, setProjectSort] = useState<ProjectSort>("recent");
   // A failed request must not leave rows from a DIFFERENT query on screen pretending to be this one.
   const [projectError, setProjectError] = useState(false);
+  // True while a first-page (replacement) request is in flight — see fetchProjectStats.
+  const [projectsReplacing, setProjectsReplacing] = useState(true);
   // The search box now drives a server query, so debounce it — otherwise every keystroke is a
   // cross-deal photo aggregate.
   const [debouncedSearch, setDebouncedSearch] = useState("");
@@ -1171,6 +1173,11 @@ export function PhotoFeedPage() {
       const seq = ++projectRequestSeq.current;
       const isFirstPage = !cursor;
       setProjectsLoading(true);
+      // A first-page request REPLACES the list. Until it lands, the rows on screen answer the PREVIOUS
+      // query — visible and clickable underneath the controls the user just changed. Tracked separately
+      // from `projectsLoading` because a load-more must keep its rows: that request adds to the list
+      // rather than replacing it.
+      if (isFirstPage) setProjectsReplacing(true);
       try {
         const params = new URLSearchParams(projectStatsQuery);
         if (cursor) params.set("cursor", cursor);
@@ -1219,7 +1226,10 @@ export function PhotoFeedPage() {
         // MORE. `projectNextCursor` is untouched, so the retry resumes from the same position.
         // Deliberately NOT terminal — a transient error must never be mistaken for the end of the list.
       } finally {
-        if (seq === projectRequestSeq.current) setProjectsLoading(false);
+        if (seq === projectRequestSeq.current) {
+          setProjectsLoading(false);
+          setProjectsReplacing(false);
+        }
       }
     },
     [projectStatsQuery],
@@ -1452,7 +1462,7 @@ export function PhotoFeedPage() {
             </div>
 
             {/* Project list */}
-            {projectsLoading && projectStats.length === 0 ? (
+            {projectsReplacing ? (
               <div className="flex items-center justify-center py-20">
                 <Loader2 className="h-8 w-8 animate-spin text-gray-400" />
               </div>

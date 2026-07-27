@@ -88,13 +88,31 @@ export interface PhotoFeedFilters {
  */
 const notSupersededSql = sql`NOT EXISTS (SELECT 1 FROM files f2 WHERE f2.parent_file_id = files.id AND f2.is_active = true)`;
 
-function buildFeedPhotoConditions(filters: PhotoFeedFilters): SQL[] {
+/**
+ * `requireDeal` is the ONLY sanctioned difference between the feed's row scope and any other scope
+ * derived from it — expressed as a parameter on the shared builder rather than as a second hand-written
+ * condition, because hand-maintaining two predicates that must agree has now failed twice in this file:
+ * once when the facet scope omitted the superseded-version exclusion, and again when the fix for that
+ * added `deal_id IS NOT NULL` to the facets while `getPhotoFeed` has no deal requirement at all — so an
+ * uploader or phase belonging only to an unassigned or lead-linked photo appeared in the GRID but not in
+ * its own dropdown. Production holds 29,564 such photos across 4 uploaders, so that is not a corner case.
+ *
+ * Anything that needs to differ goes here as a named option. Nothing gets a second copy of the base rule.
+ */
+interface FeedScopeOptions {
+  /** Restrict to deal-linked photos. Only the PROJECT-shaped readers want this. */
+  requireDeal?: boolean;
+}
+
+function buildFeedPhotoConditions(filters: PhotoFeedFilters, options: FeedScopeOptions = {}): SQL[] {
   const conditions: SQL[] = [
     eq(files.category, "photo"),
     eq(files.isActive, true),
     // Superseded-version exclusion — see notSupersededSql above for why it is the cheap child-check.
     notSupersededSql,
   ];
+
+  if (options.requireDeal) conditions.push(sql`${files.dealId} IS NOT NULL`);
 
   if (filters.dealId) conditions.push(eq(files.dealId, filters.dealId));
   if (filters.uploadedBy) conditions.push(eq(files.uploadedBy, filters.uploadedBy));
@@ -418,7 +436,7 @@ export async function getProjectPhotoStats(
   // inside the strip CTE (which selects `FROM files` and never joins `deals`); the deal-level narrowing
   // below would not resolve there. The strip is already confined to the page's deal ids, so it does not
   // need them.
-  const photoWhere = and(...buildFeedPhotoConditions(options), sql`${files.dealId} IS NOT NULL`)!;
+  const photoWhere = and(...buildFeedPhotoConditions(options, { requireDeal: true }))!;
   const projectConditions: SQL[] = [photoWhere];
   if (options.assignedRepId) projectConditions.push(eq(deals.assignedRepId, options.assignedRepId));
   if (options.search) {
@@ -442,6 +460,19 @@ export async function getProjectPhotoStats(
   // comparison direction has to match the ORDER BY — a `<` where the ordering ascends silently returns
   // the rows already delivered. `deal_id` breaks the tie, and its `>` is the same in all three because
   // the tiebreak is always ascending.
+  //
+  // ACCEPTED LIMITATION — the cursor is stable, the ORDERING KEY is not. `count(*)` and `max(taken_at)`
+  // both move when photos are uploaded, so a project that gains photos mid-scroll can jump AHEAD of an
+  // already-issued cursor and then fail this predicate for the rest of the walk: the user reaches the end
+  // without seeing it. No cursor scheme fixes this; it needs an ordering SNAPSHOT or a client-side
+  // refresh-and-merge of earlier pages.
+  //
+  // Deliberately not built, on severity. This is an INTERNAL list and the worst case is that someone
+  // scrolling misses a project that changed while they scrolled — a refresh shows it. The same class on
+  // the public share viewer was worth chasing because there it meant a CLIENT silently received fewer
+  // photos than were sent; that is a different order of consequence, and that surface is out of scope
+  // for this PR anyway. What keyset DOES remove here is the shifting-window class, where an unrelated
+  // write drops a row the user was entitled to see — see the runtime test that pins it.
   //
   // `files.created_at` is NOT NULL, so `max(COALESCE(taken_at, created_at))` is never NULL for a group
   // that exists — the NULLS LAST above is defensive, and the cursor never has to encode a null.
@@ -583,14 +614,13 @@ export async function getPhotoFeedFacets(tenantDb: TenantDb): Promise<{
   photoCategories: string[];
   projects: Array<{ id: string; name: string }>;
 }> {
-  // SAME superseded-version exclusion as the row predicate. Without it the dropdowns are derived from a
-  // slightly larger set than the feed itself, so an option could exist that matches nothing.
-  const scope = and(
-    eq(files.category, "photo"),
-    eq(files.isActive, true),
-    notSupersededSql,
-    sql`${files.dealId} IS NOT NULL`,
-  );
+  // Literally the feed's own row predicate, with no filters applied — not a re-statement of it. An
+  // option that cannot match a feed row (or a feed row whose uploader has no option) is exactly what
+  // hand-maintaining a second copy produced, twice.
+  const scope = and(...buildFeedPhotoConditions({}))!;
+  // The PROJECT picker is the one facet that legitimately needs a deal, because it lists deals. Same
+  // builder, one named option — so it cannot drift from the rest either.
+  const projectScope = and(...buildFeedPhotoConditions({}, { requireDeal: true }))!;
 
   // Sequential, not Promise.all — tenantDb is a single transaction-bound pg client.
   const uploaderRows = await tenantDb
@@ -617,7 +647,7 @@ export async function getPhotoFeedFacets(tenantDb: TenantDb): Promise<{
     .selectDistinct({ id: files.dealId, name: deals.name })
     .from(files)
     .innerJoin(deals, eq(deals.id, files.dealId))
-    .where(scope);
+    .where(projectScope);
 
   return {
     uploaders: uploaderRows

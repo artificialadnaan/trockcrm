@@ -473,10 +473,11 @@ describe("getPhotoFeedFacets superseded-version scope", () => {
   const VER_DEAL = "00000000-0000-4000-8000-000000077777";
   const ROOT_ID = "00000000-0000-4000-8000-000000077001";
   const GHOST_USER = "00000000-0000-4000-8000-0000000770aa";
+  const UNASSIGNED_USER = "00000000-0000-4000-8000-0000000770bb";
 
   beforeAll(async () => {
     await pg.exec(`
-      INSERT INTO users (id, display_name) VALUES ('${GHOST_USER}', 'Superseded Only');
+      INSERT INTO users (id, display_name) VALUES ('${GHOST_USER}', 'Superseded Only'), ('${UNASSIGNED_USER}', 'Unassigned Only');
       INSERT INTO deals (id, name, deal_number, assigned_rep_id, property_city, property_state, source_lead_id)
       VALUES ('${VER_DEAL}', 'Project Versioned', 'TR-VER', '${REP}', 'Waco', 'TX', NULL);
     `);
@@ -484,6 +485,11 @@ describe("getPhotoFeedFacets superseded-version scope", () => {
     await pg.exec(`
       INSERT INTO files (id, deal_id, category, subcategory, photo_category, r2_key, system_filename, original_filename, display_name, mime_type, file_extension, file_size_bytes, r2_bucket, folder_path, uploaded_by, taken_at, is_active, version)
       VALUES ('${ROOT_ID}', '${VER_DEAL}', 'photo', NULL, 'site_visit', '${VER_KEY_PREFIX}v1.jpg', 'v1.jpg', 'orig.jpg', 'v1', 'image/jpeg', '.jpg', 10, 'trockcrm', 'Photos', '${GHOST_USER}', '2026-05-10T00:00:00Z', true, 1);
+    `);
+    // A photo with NO deal at all — the shape getPhotoFeed happily returns and the facets must match.
+    await pg.exec(`
+      INSERT INTO files (deal_id, category, subcategory, photo_category, r2_key, system_filename, original_filename, display_name, mime_type, file_extension, file_size_bytes, r2_bucket, folder_path, uploaded_by, taken_at, is_active, version)
+      VALUES (NULL, 'photo', NULL, NULL, '${VER_KEY_PREFIX}orphan.jpg', 'orphan.jpg', 'orig.jpg', 'orphan', 'image/jpeg', '.jpg', 10, 'trockcrm', 'Photos', '${UNASSIGNED_USER}', '2026-05-12T00:00:00Z', true, 1);
     `);
     // v2 supersedes it, uploaded by someone else and with no phase.
     await pg.exec(`
@@ -495,12 +501,25 @@ describe("getPhotoFeedFacets superseded-version scope", () => {
   afterAll(async () => {
     await pg.exec(`DELETE FROM files WHERE r2_key LIKE '${VER_KEY_PREFIX}%';`);
     await pg.exec(`DELETE FROM deals WHERE id = '${VER_DEAL}';`);
-    await pg.exec(`DELETE FROM users WHERE id = '${GHOST_USER}';`);
+    await pg.exec(`DELETE FROM users WHERE id IN ('${GHOST_USER}', '${UNASSIGNED_USER}');`);
   });
 
   it("does not advertise an uploader that only a superseded row has", async () => {
     const facets = await getPhotoFeedFacets(tdb as never);
     expect(facets.uploaders.map((u) => u.name)).not.toContain("Superseded Only");
+  });
+
+  /**
+   * The mirror-image mistake, and the reason the facet scope is now the feed's own predicate rather than
+   * a second hand-written one. `getPhotoFeed` has NO deal requirement, so unassigned and lead-linked
+   * photos appear in the Photos grid (29,564 of them in production, across 4 uploaders). A facet scope
+   * that required a deal therefore hid their uploader from its own dropdown.
+   */
+  it("keeps an uploader that only unassigned photos have — the grid shows them, so the filter must offer them", async () => {
+    const facets = await getPhotoFeedFacets(tdb as never);
+    expect(facets.uploaders.map((u) => u.name)).toContain("Unassigned Only");
+    // ...while the PROJECT picker still legitimately requires a deal, since it lists deals.
+    expect(facets.projects.every((project) => Boolean(project.id))).toBe(true);
   });
 
   it("does not advertise a phase that only a superseded row has", async () => {

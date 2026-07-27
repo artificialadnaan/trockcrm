@@ -613,3 +613,42 @@ describe("PhotoFeedPage — facet loading failures are recoverable", () => {
     expect(selectByLabel("Uploaded By").options.length).toBe(2);
   });
 });
+
+describe("PhotoFeedPage — stale rows during a replacement request", () => {
+  // Changing sort/search/ownership/filters starts a REPLACEMENT. Until it lands, the rows on screen
+  // answer the previous query — and they stay clickable, so a user can navigate to a deal from a list
+  // that no longer matches the controls above it.
+  it("hides the previous query's rows while a first-page request is in flight", async () => {
+    let release: (() => void) | null = null;
+    let holdNext = false;
+    mocks.api.mockImplementation(async (path: string) => {
+      if (path.startsWith("/files/photos/project-stats")) {
+        projectStatsCalls.push(path);
+        if (holdNext) {
+          await new Promise<void>((resolve) => { release = resolve; });
+        }
+        return { projects: PROJECTS, pagination: { limit: 100, total: 2, nextCursor: null } };
+      }
+      if (path.startsWith("/files/photos/feed/facets")) {
+        return { uploaders: [{ id: "u1", name: "Alice" }], photoCategories: [], projects: [] };
+      }
+      if (path.startsWith("/files/photos/feed/count")) return { count: 0 };
+      return { photos: [], pagination: { page: 1, limit: 40, total: 0, totalPages: 0 } };
+    });
+
+    await renderPage();
+    expect(container.textContent).toContain("Mine Alpha");
+
+    holdNext = true;
+    await changeSelect(selectByLabel("Sort By"), "most_photos");
+
+    // Mid-flight: the old rows are gone rather than sitting under the new sort.
+    expect(container.textContent).not.toContain("Mine Alpha");
+    expect(container.querySelector(".animate-spin")).not.toBeNull();
+
+    holdNext = false;
+    await act(async () => { release?.(); await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+    expect(container.textContent).toContain("Mine Alpha");
+  });
+});
