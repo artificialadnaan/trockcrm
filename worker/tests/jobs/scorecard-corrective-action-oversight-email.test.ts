@@ -64,6 +64,8 @@ interface ScorecardOverrides {
   status?: string;
   pdfContentGeneration?: Date | null;
   updatedAt?: Date;
+  /** false => the guarded stamp UPDATE matches no row (superseded mid-send). */
+  stampMatches?: boolean;
 }
 
 /** Query mock routing on SQL text — no DB. Captures the stamp UPDATE for assertion. */
@@ -103,7 +105,8 @@ function makeQuery(
     if (sql.includes("scorecard_corrective_actions ca")) return { rows: ITEMS };
     if (sql.includes("UPDATE office_dallas.field_scorecards")) {
       stampUpdates.push({ sql, params });
-      return { rows: [] };
+      // rowCount 0 models a guarded UPDATE that matched nothing (stamp already set, or the cycle moved on).
+      return { rows: [], rowCount: over.stampMatches === false ? 0 : 1 };
     }
     return { rows: [] };
   });
@@ -507,5 +510,90 @@ describe("handleScorecardCorrectiveActionOversightEmail", () => {
       .find((text) => text.includes("scorecard_corrective_actions ca"))!;
     expect(itemsSql).toContain("f.is_active = TRUE");
     expect(itemsSql).toContain("f.deleted_at IS NULL");
+  });
+
+  it("scopes the STAMP to the payload cycle, so a superseded send cannot mark a newer cycle notified", async () => {
+    // Greptile P1: cycle A's send is in flight; a reopen clears the stamp and mints nonce B. Without a nonce
+    // clause on the stamp, A's worker writes the stamp and cycle B's queued job then sees it set and skips —
+    // oversight is never told about the reopen, permanently, because nothing clears it again until the NEXT
+    // reopen. The SKIP guard stays nonce-free on purpose; only this write is cycle-aware.
+    const { query, stampUpdates } = makeQuery();
+    const sendEmail = makeSend();
+
+    await handleScorecardCorrectiveActionOversightEmail(payload(), null, {
+      query: query as never,
+      sendEmail: sendEmail as never,
+      env,
+      logger: makeLogger(),
+    });
+
+    expect(stampUpdates).toHaveLength(1);
+    expect(stampUpdates[0].sql).toContain("corrective_action_cycle_nonce = $2::uuid");
+    expect(stampUpdates[0].sql).toContain("corrective_action_cycle_nonce IS NULL");
+    expect(stampUpdates[0].params).toEqual([SCORECARD, CYCLE]);
+  });
+
+  it("omits the nonce clause when the job carries no cycle nonce (legacy in-flight job)", async () => {
+    const { query, stampUpdates } = makeQuery();
+    const sendEmail = makeSend();
+
+    await handleScorecardCorrectiveActionOversightEmail(payload({ cycleNonce: undefined }), null, {
+      query: query as never,
+      sendEmail: sendEmail as never,
+      env,
+      logger: makeLogger(),
+    });
+
+    expect(stampUpdates[0].sql).not.toContain("corrective_action_cycle_nonce");
+    expect(stampUpdates[0].params).toEqual([SCORECARD]);
+  });
+
+  it("logs rather than throwing when the stamp is superseded mid-send", async () => {
+    // The email did go out and accurately described the older cycle; the current cycle's own job still has a
+    // null stamp and will notify. Throwing here would retry a send that already happened.
+    const { query } = makeQuery({ stampMatches: false });
+    const sendEmail = makeSend();
+    const logger = makeLogger();
+
+    await expect(
+      handleScorecardCorrectiveActionOversightEmail(payload(), null, {
+        query: query as never,
+        sendEmail: sendEmail as never,
+        env,
+        logger,
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(sendEmail).toHaveBeenCalledOnce();
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining("Sent but not stamped"),
+      expect.anything(),
+    );
+  });
+
+  it("refuses to attach a v3-stamped row whose stored key is not a content-addressed artifact", async () => {
+    // The version column alone is not proof the stored OBJECT matches it. The sibling field-scorecard email
+    // validates the digest + revision suffix for the same reason; the two jobs must agree on what counts as
+    // a current artifact.
+    const { query } = makeQuery({
+      status: "corrective_action_closed",
+      pdfR2Key: "office_dallas/deals/DFW-1/documents/scorecards/legacy.pdf",
+    });
+    const sendEmail = makeSend();
+    const getPdf = vi.fn(async () => Buffer.from("%PDF-1.4 legacy"));
+
+    await handleScorecardCorrectiveActionOversightEmail(payload({ phase: "closed" }), null, {
+      query: query as never,
+      sendEmail: sendEmail as never,
+      getPdf: getPdf as never,
+      env,
+      logger: makeLogger(),
+    });
+
+    expect(getPdf).not.toHaveBeenCalled();
+    const [, , , options] = sendEmail.mock.calls[0] as unknown as [
+      string[], string, string, { attachments?: unknown[] },
+    ];
+    expect(options.attachments).toBeUndefined();
   });
 });

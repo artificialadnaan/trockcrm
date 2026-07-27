@@ -21,3 +21,8 @@ tmp/
 
 # Per-rep close-date export workbooks (real customer deal data — never commit)
 close-date-exports/
+
+# Prod-data reversibility snapshots taken before a one-off write/backfill. These contain LIVE record data
+# (ids, project numbers, recipient emails) by construction, so they are kept locally for rollback and must
+# never be committed — git history cannot be un-published. Narrative audit notes in .audit/ stay tracked.
+.audit/backfills/

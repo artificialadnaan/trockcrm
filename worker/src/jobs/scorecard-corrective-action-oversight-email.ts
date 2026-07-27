@@ -37,6 +37,18 @@ const MIN_PDF_RENDER_VERSION_WITH_CORRECTIVE_ACTIONS = 3;
 // so keep the raw PDF under ~20 MB. A larger PDF is delivered as a CRM link instead.
 const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 
+/**
+ * True only for the immutable `${scorecardId}.${sha256}.v${version}.pdf` shape the artifact publisher emits.
+ * Mirrors the identical guard in field-scorecard-email.ts — the two scorecard email jobs must agree on what
+ * counts as a current artifact.
+ */
+function isCurrentScorecardPdfArtifactKey(r2Key: string, renderVersion: number): boolean {
+  if (!Number.isInteger(renderVersion) || renderVersion < MIN_PDF_RENDER_VERSION_WITH_CORRECTIVE_ACTIONS) {
+    return false;
+  }
+  return new RegExp(`\\.[a-f0-9]{64}\\.v${renderVersion}\\.pdf$`).test(r2Key);
+}
+
 export type CorrectiveActionOversightPhase = "opened" | "closed";
 
 export interface ScorecardCorrectiveActionOversightEmailPayload {
@@ -46,9 +58,10 @@ export interface ScorecardCorrectiveActionOversightEmailPayload {
   officeId?: string | null;
   phase?: CorrectiveActionOversightPhase;
   /**
-   * The cycle nonce active at enqueue. Used ONLY as the Resend idempotency-key dimension, so a genuine
-   * reopen sends again while a queue retry does not. Deliberately NEVER compared against the scorecard's
-   * stored corrective_action_cycle_nonce — see the dedup note in the handler.
+   * The cycle nonce active at enqueue. Two uses, deliberately asymmetric: it is the Resend idempotency-key
+   * dimension (so a genuine reopen sends again while a queue retry does not), and it scopes the delivery
+   * STAMP to the cycle this job describes. It is never consulted by the already-notified SKIP check — see
+   * the dedup note in the handler for why those two need different rules.
    */
   cycleNonce?: string;
 }
@@ -246,7 +259,10 @@ export async function handleScorecardCorrectiveActionOversightEmail(
     link: `${resolveFrontendUrl(env)}/deals/${scorecard.deal_id ?? ""}?tab=scorecards`,
   });
 
-  const cycleDimension = normalizeText(payload.cycleNonce) ?? "none";
+  // The raw payload nonce (null when absent) drives the stamp guard; the "none" fallback is only ever the
+  // Resend key's dimension, never a value compared against a uuid column.
+  const cycleNonceValue = normalizeText(payload.cycleNonce) ?? null;
+  const cycleDimension = cycleNonceValue ?? "none";
   const sendEmail = deps.sendEmail ?? sendSystemEmailWithMetadata;
   const result = await sendEmail(recipients, email.subject, email.html, {
     text: email.text,
@@ -264,13 +280,37 @@ export async function handleScorecardCorrectiveActionOversightEmail(
     );
   }
 
-  await query(
+  // The STAMP is cycle-aware even though the SKIP guard above deliberately is not. They answer different
+  // questions and need different rules:
+  //
+  //   - "has oversight been told about this cycle?" (the skip) must NOT consult the nonce, because the
+  //     responder worker's self-repair path rotates it without starting a new business cycle — gating there
+  //     would strand a legitimately pending notice.
+  //   - "does my send still describe the CURRENT cycle?" (this stamp) MUST consult it. Otherwise: cycle A's
+  //     send is in flight, a reopen clears the stamp and mints nonce B, then A's worker stamps the row —
+  //     and cycle B's queued job sees a non-null stamp and skips. Oversight is never told about the reopen,
+  //     permanently, because nothing clears the stamp again until the NEXT reopen.
+  //
+  // Same clause shape the responder job uses (migration 0197): a NULL stored nonce (legacy row) or a job
+  // carrying no payload nonce omits the comparison, preserving pre-guard behaviour.
+  const nonceClause = cycleNonceValue
+    ? " AND (corrective_action_cycle_nonce IS NULL OR corrective_action_cycle_nonce = $2::uuid)"
+    : "";
+  const stamped = await query(
     `UPDATE ${tenantSchema}.field_scorecards
         SET ${column} = NOW()
       WHERE id = $1::uuid
-        AND ${column} IS NULL`,
-    [scorecardId],
+        AND ${column} IS NULL${nonceClause}`,
+    cycleNonceValue ? [scorecardId, cycleNonceValue] : [scorecardId],
   );
+  if (!stamped.rowCount) {
+    // Superseded mid-send. The email went out describing the older cycle, which is accurate for what it
+    // said; the CURRENT cycle's own job still has a null stamp and will notify.
+    logger.warn(
+      "[CorrectiveActionOversightEmail] Sent but not stamped - the cycle moved on mid-send; the current cycle's job will notify",
+      { scorecardId, phase, payloadCycleNonce: cycleNonceValue },
+    );
+  }
   logger.log("[CorrectiveActionOversightEmail] Notified oversight", {
     scorecardId,
     phase,
@@ -287,7 +327,16 @@ async function loadPdfAttachment(
 ): Promise<SendSystemEmailAttachment[] | undefined> {
   const pdfR2Key = normalizeText(scorecard.pdf_r2_key);
   const renderVersion = Number(scorecard.pdf_render_version ?? 0);
-  if (!pdfR2Key || renderVersion < MIN_PDF_RENDER_VERSION_WITH_CORRECTIVE_ACTIONS) {
+  if (
+    !pdfR2Key ||
+    renderVersion < MIN_PDF_RENDER_VERSION_WITH_CORRECTIVE_ACTIONS ||
+    // The stamped VERSION alone is not proof the stored OBJECT matches it. Validate the content-addressed
+    // key shape too, exactly as the sibling field-scorecard email does: the publisher emits immutable
+    // `${scorecardId}.${sha256}.v${version}.pdf`, so a key that does not carry the digest and the matching
+    // revision is not a v3 artifact regardless of what the version column says. Cheap defence against any
+    // path that updates one of the two without the other.
+    !isCurrentScorecardPdfArtifactKey(pdfR2Key, renderVersion)
+  ) {
     logger.warn(
       "[CorrectiveActionOversightEmail] No corrective-action-bearing PDF - sending without attachment (available in the CRM)",
       { scorecardId, pdfR2Key, renderVersion },
