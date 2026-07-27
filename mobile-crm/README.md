@@ -77,14 +77,14 @@ Blocked on account access, not code:
 
 1. **App icon and splash.** `app.config.ts` intentionally declares neither, so Expo's defaults apply.
    Reusing `mobile/assets` would put T-Rock Cam's mark on the CRM app.
-2. **App Store Connect record** for `com.trockgc.trockcrm` — yields the `ascAppId`, which is the ONE
-   field `eas.json` deliberately omits. `appleTeamId` is committed (it is the same team as T-Rock Cam);
-   `ascAppId` identifies a specific App Store listing, and guessing or copying T-Rock Cam's would aim a
-   submission at the wrong app. Add it under `submit.production.ios` once the record exists, or pass it
-   to `eas submit` directly.
-3. **`eas init`** under owner `adnaan.iqbal` — yields the `EAS_PROJECT_ID`. There is no committed
-   default, so builds must supply it via the environment until the project exists.
-4. **`EXPO_TOKEN`** repo secret, for the build workflow.
-5. **`EXPO_PUBLIC_API_BASE_URL`** as an EAS build environment variable.
+2. ~~App Store Connect record~~ — **done 2026-07-27.** `ascAppId` `6795188442` is in `eas.json`.
+3. ~~`eas init`~~ — **done 2026-07-27.** Project `129671d5-0cdb-4df5-992e-91301502bb99`
+   (`@adnaan.iqbal/trockcrm-mobile`), committed as the default in `app.config.ts`. It has to be
+   committed rather than passed by env: EAS evaluates the config on its own build servers, where the
+   variable cannot be set, and the id is what tells it which project's variables to load.
+4. **`EXPO_PUBLIC_API_BASE_URL`** as an EAS build environment variable — the production API host. Not
+   committed anywhere on purpose.
+5. **`EXPO_TOKEN`** repo secret — only needed once builds run from CI. Builds from a developer machine
+   use the logged-in `eas` CLI, so this is NOT required for the first TestFlight build.
 
 No new server environment variables are required — `mobile-login` reuses `JWT_SECRET`.

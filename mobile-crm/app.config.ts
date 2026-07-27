@@ -7,15 +7,19 @@ import type { ExpoConfig, ConfigContext } from "expo/config";
  * different App Store Connect record, different TestFlight. The two share nothing at runtime, including
  * their SecureStore session keys — see src/auth/session.ts.
  *
- * EAS_PROJECT_ID has NO committed default, unlike T-Rock Cam's. The EAS project does not exist yet
- * (`eas init` is a blocked-on-account step), and a placeholder id here would either fail confusingly or,
- * worse, point builds at T-Rock Cam's project. Builds supply it via the environment until it is created.
+ * EAS_PROJECT_ID is committed as a default, matching T-Rock Cam. It is an identifier, not a secret, and
+ * it HAS to be committed: EAS evaluates this config on its own build servers, where the environment
+ * variable cannot be set — knowing which project's variables to load is precisely what the id is for.
+ * The env var remains an override for anyone pointing a build at a different project.
+ *
+ * It had no default until the project existed (`eas init`, 2026-07-27), because a placeholder would have
+ * failed confusingly or, worse, aimed builds at T-Rock Cam's project.
  *
  * Deliberately minimal plugin set: expo-router, expo-secure-store, expo-font. This app captures nothing —
  * no camera, location, media library or microphone — so it declares no NSUsageDescription for any of
  * them. Every unnecessary permission string is a question at App Review with no feature behind it.
  */
-const EAS_PROJECT_ID = process.env.EAS_PROJECT_ID?.trim();
+const EAS_PROJECT_ID = process.env.EAS_PROJECT_ID?.trim() || "129671d5-0cdb-4df5-992e-91301502bb99";
 
 export default ({ config }: ConfigContext): ExpoConfig => ({
   ...config,
@@ -42,6 +46,6 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
   },
   owner: "adnaan.iqbal",
   extra: {
-    eas: EAS_PROJECT_ID ? { projectId: EAS_PROJECT_ID } : undefined,
+    eas: { projectId: EAS_PROJECT_ID },
   },
 });
