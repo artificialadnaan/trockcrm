@@ -49,6 +49,14 @@ describe("lead envelopes", () => {
     expect(calls[0].path).toBe("/leads/stages");
   });
 
+  it("sends `name` to rename the successor deal — `dealName` is silently ignored", async () => {
+    // The conversion service reads input.name; the route forwards unknown keys untranslated, so the
+    // wrong one produced a SUCCESSFUL conversion whose deal quietly kept the lead's name.
+    const { fetcher, calls } = recording({ lead: { id: "l1" }, deal: { id: "d1" } });
+    await leads.convertLead(fetcher, "l1", { name: "Palm Villas re-roof" });
+    expect(calls[0].opts.body).toEqual({ name: "Palm Villas re-roof" });
+  });
+
   it("POST /leads/:id/convert returns lead AND deal at the TOP LEVEL, with no envelope", async () => {
     const { fetcher } = recording({ lead: { id: "l1" }, deal: { id: "d1", dealNumber: "TR-2026-0007" } });
     const res = await leads.convertLead(fetcher, "l1");
@@ -90,6 +98,17 @@ describe("list query shape", () => {
     expect((calls[0].opts.query as Record<string, unknown>).limit).toBe(100);
   });
 
+  /**
+   * BOTH conversion and disqualification set is_active = false, and the route defaults to true — so the
+   * server's default silently hides every terminal lead, making the converted/disqualified badges and
+   * the converted-deal link unreachable, and `status: "converted"` return nothing.
+   */
+  it("asks for inactive rows too, or terminal leads are invisible", async () => {
+    const { fetcher, calls } = recording({ leads: [] });
+    await leads.listLeads(fetcher);
+    expect((calls[0].opts.query as Record<string, unknown>).isActive).toBe("all");
+  });
+
   it("never sends a page — this endpoint has no pagination to send one to", async () => {
     const { fetcher, calls } = recording({ leads: [] });
     await leads.listLeads(fetcher, { scope: "all" });
@@ -117,6 +136,39 @@ describe("stage transition", () => {
       expect(res.code).toBe("MISSING_REQUIREMENTS");
       expect(res.targetStageId).toBe("s2");
     }
+  });
+
+  /**
+   * The itemised list is the POINT of the 409, and the first version of this adapter threw it away —
+   * rebuilding a refusal with `missing: []`, so the detail screen's entire requirements view could
+   * never receive data and always fell through to a generic message.
+   */
+  it("returns the SERVER's refusal, itemised requirements and all", async () => {
+    const serverRefusal = {
+      ok: false,
+      reason: "missing_requirements",
+      code: "MISSING_REQUIREMENTS",
+      targetStageId: "s2",
+      resolution: "detail",
+      missing: [
+        { key: "leadScoping.roofType", label: "Roof type", resolution: "detail" },
+        { key: "estimatedValue", label: "Estimated value", resolution: "inline" },
+      ],
+    };
+    const fetcher = throwing(new ApiError("Missing requirements", 409, "MISSING_REQUIREMENTS", serverRefusal));
+    const res = await leads.transitionLeadStage(fetcher, "l1", { targetStageId: "s2" });
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.missing).toHaveLength(2);
+      expect(res.missing?.[0]).toMatchObject({ label: "Roof type", resolution: "detail" });
+    }
+  });
+
+  it("still yields a refusal when the 409 body could not be read", async () => {
+    // A 409 is a refusal whether or not we could parse why — it must never read as a success.
+    const fetcher = throwing(new ApiError("Conflict", 409, undefined, undefined));
+    const res = await leads.transitionLeadStage(fetcher, "l1", { targetStageId: "s2" });
+    expect(res.ok).toBe(false);
   });
 
   it("still throws on a real failure — a 500 is not a refusal", async () => {

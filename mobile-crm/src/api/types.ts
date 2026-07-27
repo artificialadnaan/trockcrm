@@ -362,11 +362,24 @@ export type LeadListItem = {
   projectType: { id: string; name: string } | null;
   property: { id: string; name: string | null; address: string | null; city: string | null; state: string | null } | null;
   estimatedValue: string | number | null;
+  /**
+   * THREE source columns, and which one is populated depends on a server flag.
+   *
+   * Under lead-edit-v2 a lead's source is written to sourceCategory/sourceDetail and the legacy `source`
+   * column is deliberately left null — so reading `source` alone shows "—" for every lead created since
+   * that flag went on, despite the record plainly having a source.
+   */
   source: string | null;
+  sourceCategory: string | null;
+  sourceDetail: string | null;
   /** The outcome-aware display axis the server also FILTERS on — already YYYY-MM-DD or null. */
   displayDate: string | null;
   createdAt: string | null;
   updatedAt: string | null;
+  /** Lifecycle timestamps. The DETAIL response has these; it does not have the list's `displayDate`. */
+  convertedAt?: string | null;
+  disqualifiedAt?: string | null;
+  stageEnteredAt?: string | null;
   /** Set once the lead has been converted; the pair is how a converted lead links to its deal. */
   convertedDealId: string | null;
   convertedDealNumber: string | null;

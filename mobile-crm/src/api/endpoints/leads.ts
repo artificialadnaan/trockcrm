@@ -12,7 +12,13 @@ import type { Fetcher } from "./auth";
  * assuming one endpoint's shape matched the next.
  */
 
-export type LeadScope = "mine" | "team" | "all" | "watched";
+/**
+ * NO "watched". `readListScope` (leads/routes.ts:165-167) coerces anything that is not mine/team/all to
+ * "mine" — silently, with a 200 — so a Watched pill would have shown the rep their own leads under
+ * someone else's label. Deals genuinely supports the scope; leads does not, and copying the deals
+ * scope list across was the mistake. Adding it means a server-side subscription predicate first.
+ */
+export type LeadScope = "mine" | "team" | "all";
 export type LeadStatus = "open" | "converted" | "disqualified";
 
 export type ListLeadsParams = {
@@ -21,6 +27,13 @@ export type ListLeadsParams = {
   status?: LeadStatus;
   stageIds?: string[];
   limit?: number;
+  /**
+   * Lifecycle visibility. The route defaults to `true` (leads/routes.ts:205-209), and BOTH conversion
+   * and disqualification set `is_active = false` — so the default silently excludes every terminal
+   * lead. Without "all", a `status: "converted"` filter returns nothing, and the converted/disqualified
+   * badges and the converted-deal link have no row that can reach them.
+   */
+  isActive?: "all" | "true" | "false";
 };
 
 /**
@@ -47,6 +60,10 @@ export async function listLeads(fetcher: Fetcher, params: ListLeadsParams = {}):
       // Comma-joined — the route does `(req.query.stageIds as string).split(",")` (routes.ts:189).
       stageIds: params.stageIds && params.stageIds.length > 0 ? params.stageIds.join(",") : undefined,
       limit: params.limit ?? LEADS_PAGE_LIMIT,
+      // "all" by DEFAULT here, unlike the server's default: this screen shows terminal leads
+      // deliberately — a converted lead is how a rep finds the deal it became — and the cards badge
+      // them, so excluding them would leave that UI permanently unreachable.
+      isActive: params.isActive ?? "all",
     },
   });
   return res.leads ?? [];
@@ -76,13 +93,32 @@ export async function listLeadStages(fetcher: Fetcher): Promise<LeadStage[]> {
   return res.stages ?? [];
 }
 
+/**
+ * The preflight verdict — a GATE result, and NOT the transition result.
+ *
+ * These are different shapes from different functions: preflight returns `allowed` / `currentStage` /
+ * `targetStage` / `missingRequirements`, while the transition returns `{ ok }` plus a lead or a
+ * refusal. Typing preflight as the transition result made `ok` read as `undefined` for every caller —
+ * an always-falsy check that looks like a refusal and is actually a type error.
+ */
+export type LeadStageGateResult = {
+  allowed: boolean;
+  currentStage?: { id: string; name: string; slug: string } | null;
+  targetStage?: { id: string; name: string; slug: string } | null;
+  blockReason?: string | null;
+  missingRequirements?: {
+    effectiveChecklist?: { fields?: Array<{ key: string; label: string; satisfied: boolean }> };
+    fields?: string[];
+  };
+};
+
 /** POST /leads/:id/stage/preflight — what a transition would require, without performing it. */
 export async function preflightLeadStage(
   fetcher: Fetcher,
   leadId: string,
   targetStageId: string,
-): Promise<LeadTransitionResult> {
-  return fetcher<LeadTransitionResult>(`/leads/${leadId}/stage/preflight`, {
+): Promise<LeadStageGateResult> {
+  return fetcher<LeadStageGateResult>(`/leads/${leadId}/stage/preflight`, {
     method: "POST",
     body: { targetStageId },
   });
@@ -114,8 +150,21 @@ export async function transitionLeadStage(
     });
   } catch (err) {
     if (err instanceof ApiError && err.status === 409) {
-      // The body is not surfaced through ApiError, so reconstruct the refusal from what it does carry.
-      // Callers branch on `ok`, and a refusal with no detail is still a refusal — never a success.
+      /**
+       * THE SERVER'S OWN REFUSAL, not a reconstruction of it.
+       *
+       * The 409 body IS the result — `{ ok:false, reason, code, targetStageId, resolution, missing }` —
+       * and `missing` is the whole point: an itemised list of what the lead still needs, each entry
+       * saying whether it can be fixed inline or only on the full record. The first version of this
+       * rebuilt a refusal with `missing: []`, which meant the detail screen's entire itemised-refusal
+       * view could never receive data and always fell through to its generic "open it on the web"
+       * message. A UI that cannot be reached is worse than one that was never built.
+       */
+      const body = err.body as LeadTransitionRefusal | undefined;
+      if (body && body.ok === false) return body;
+
+      // Only when the body was absent or unparseable — the shape still has to be a refusal, because a
+      // 409 is a refusal whether or not we could read why.
       return {
         ok: false,
         reason: "missing_requirements",
@@ -136,7 +185,13 @@ export async function transitionLeadStage(
 export async function convertLead(
   fetcher: Fetcher,
   leadId: string,
-  input: { dealName?: string } = {},
+  /**
+   * `name`, NOT `dealName`. The conversion service reads `input.name` to override the successor deal's
+   * name (conversion-service.ts:316) and never looks at `dealName`. The route forwards unknown body
+   * properties untranslated, so the wrong key produced a SUCCESSFUL conversion whose deal silently kept
+   * the lead's name — the failure mode with no error to notice.
+   */
+  input: { name?: string } = {},
 ): Promise<{ lead: LeadDetail; deal: { id: string; dealNumber?: string | null } }> {
   return fetcher<{ lead: LeadDetail; deal: { id: string; dealNumber?: string | null } }>(
     `/leads/${leadId}/convert`,

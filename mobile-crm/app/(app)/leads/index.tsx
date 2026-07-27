@@ -23,10 +23,17 @@ import { resolveListState } from "../../../src/list-state";
 import { qk } from "../../../src/query/keys";
 import { theme } from "../../../src/theme/theme";
 
+/**
+ * NO "Watched" here, unlike the deals list.
+ *
+ * `readListScope` coerces anything that is not mine/team/all to "mine", silently and with a 200, so a
+ * Watched pill would have shown the rep their OWN leads under someone else's label — a filter that
+ * looks applied and is not. Copying the deals scope list across was the mistake; leads has no
+ * subscription predicate server-side.
+ */
 const SCOPES: Array<{ key: leadsApi.LeadScope; label: string }> = [
   { key: "mine", label: "Mine" },
   { key: "all", label: "All" },
-  { key: "watched", label: "Watched" },
 ];
 
 /** Matches the deals list: the server only applies its search predicate at 2+ trimmed characters. */

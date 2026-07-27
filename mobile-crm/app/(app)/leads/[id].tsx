@@ -21,7 +21,7 @@ export default function LeadDetailScreen() {
   // Back needs a destination: this screen is reachable by deep link and by restored navigation state,
   // where goBack() is a no-op and the control would render, be tappable, and do nothing.
   const goBack = useGoBack("/(app)/leads");
-  const { fetcher } = useAuth();
+  const { fetcher, session } = useAuth();
   const scope = useQueryScope();
   const queryClient = useQueryClient();
 
@@ -117,6 +117,49 @@ export default function LeadDetailScreen() {
   const location = formatLocation(lead.property?.city, lead.property?.state);
   const refreshFailed = Boolean(leadQuery.error);
 
+  /**
+   * OWNERSHIP, exactly as on the deals move screen.
+   *
+   * The transition route calls assertLeadOwnerAccess with NO admin or director override
+   * (leads/routes.ts:525-527), so a director or admin looking at someone else's lead — reachable
+   * through the All scope, and through Mine's created/subscribed visibility — gets a hard 403. Showing
+   * them the stage buttons is an invitation to that failure; saying so up front is the whole reason
+   * this pattern exists.
+   */
+  const isOwner = Boolean(session?.user.id && lead.assignedRepId === session.user.id);
+
+  /**
+   * The stage NAME, resolved here rather than read off the row.
+   *
+   * getLeadById decorates through decorateLeads WITHOUT the stage-name map that listLeads passes
+   * (service.ts:1388 vs :1517), so `stageName` is null on every detail response — the header silently
+   * omitted the current stage while the stages query sat right there holding it.
+   */
+  const stageName =
+    lead.stageName ??
+    (lead.stageId ? (stagesQuery.data ?? []).find((s) => s.id === lead.stageId)?.name : undefined);
+
+  /**
+   * The date, from fields this endpoint actually returns.
+   *
+   * `displayDate` is computed in the LIST query's SELECT; the detail selects the raw row and has no such
+   * column, so reading it rendered "—" on every detail screen. Outcome-aware, matching the axis the list
+   * displays and the server filters on: the date a lead ENDED if it ended, otherwise when it entered its
+   * stage, otherwise when it was created.
+   */
+  const detailDate =
+    lead.displayDate ?? lead.convertedAt ?? lead.disqualifiedAt ?? lead.stageEnteredAt ?? lead.createdAt;
+
+  /**
+   * The source, across all three columns.
+   *
+   * Under lead-edit-v2 the source is written to sourceCategory/sourceDetail and the legacy `source`
+   * column is left null, so reading `source` alone showed "—" for every lead created since that flag
+   * went on. Category first with its detail, then the legacy value.
+   */
+  const sourceLabel =
+    [lead.sourceCategory, lead.sourceDetail].filter(Boolean).join(" · ") || lead.source || "—";
+
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
       <ScrollView contentContainerStyle={styles.body}>
@@ -126,7 +169,7 @@ export default function LeadDetailScreen() {
 
         <Text style={styles.title}>{lead.name ?? "Untitled lead"}</Text>
         <View style={styles.badges}>
-          {lead.stageName ? <Text style={styles.stage}>{lead.stageName}</Text> : null}
+          {stageName ? <Text style={styles.stage}>{stageName}</Text> : null}
           {lead.status === "converted" ? <Badge label="Converted" tone="green" /> : null}
           {lead.status === "disqualified" ? <Badge label="Disqualified" tone="amber" /> : null}
         </View>
@@ -159,12 +202,20 @@ export default function LeadDetailScreen() {
           <Row label="Property" value={lead.property?.name ?? lead.property?.address ?? "—"} />
           <Row label="Location" value={location || "—"} />
           <Row label="Assigned rep" value={lead.assignedRepName ?? "—"} />
-          <Row label="Source" value={lead.source ?? "—"} />
-          <Row label="Date" value={lead.displayDate ? formatDate(lead.displayDate) : "—"} />
+          <Row label="Source" value={sourceLabel} />
+          <Row label="Date" value={detailDate ? formatDate(detailDate) : "—"} />
         </Section>
 
         <Section title="Move stage">
-          {!open ? (
+          {!isOwner ? (
+            /* Said up front rather than after a 403. The route is strictly owner-only with no admin or
+               director bypass, which surprises people who have one everywhere else. */
+            <Text testID="lead-not-owner" style={styles.help}>
+              {lead.assignedRepName
+                ? `Only ${lead.assignedRepName}, the assigned rep, can change this lead's stage.`
+                : "Only the assigned rep can change this lead's stage."}
+            </Text>
+          ) : !open ? (
             /* Converted and disqualified leads keep a name, a stage and a rep, so nothing about the row
                says it cannot be worked. The server refuses the transition; saying so up front beats
                offering buttons that all fail. */
