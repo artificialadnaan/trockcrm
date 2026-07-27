@@ -152,6 +152,11 @@ function nonTerminalMirroredStageCondition() {
   return sql`COALESCE(${deals.bidBoardStageSlug}, '') NOT IN (${sqlStringList(TERMINAL_STAGE_SLUGS)})`;
 }
 
+/** The same predicate against an aliased `deals` (the stage page selects `from deals d`). */
+function aliasedNonTerminalMirroredStageCondition(alias: string) {
+  return sql`COALESCE(${sql.raw(alias)}.bid_board_stage_slug, '') NOT IN (${sqlStringList(TERMINAL_STAGE_SLUGS)})`;
+}
+
 function normalizeAtRiskViewerRole(role: string | null | undefined): UserRole | null {
   return USER_ROLES.includes(role as UserRole) ? (role as UserRole) : null;
 }
@@ -922,6 +927,11 @@ export interface DealBoardInput {
 
 export interface DealStagePageInput extends DealBoardInput {
   stageId: string;
+  /**
+   * Reproduce the BOARD's population — drops open rows whose Bid Board mirror has already closed.
+   * Off by default so the web workspace, which also uses this endpoint, is unchanged.
+   */
+  boardPopulation?: boolean;
   page: number;
   pageSize: number;
   sort?: StagePageSort;
@@ -3729,6 +3739,20 @@ export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePage
     scope,
     sql`d.stage_id IN (${sqlList(stageIds)})`,
     excludeTestDataCondition("d"),
+    /**
+     * OPT-IN board-equivalent population.
+     *
+     * getDealsForPipeline drops open-stage deals whose Bid Board mirror has already reached a terminal
+     * stage (nonTerminalMirroredStageCondition, :3450), and this endpoint never did — so a drill-down
+     * opened from "Showing X of Y — see all" could list deals the board had not counted, under an open
+     * stage they have in fact moved past.
+     *
+     * Behind a flag rather than applied unconditionally: this endpoint also backs the WEB deals
+     * workspace, which has not asked for the board's population, and silently removing rows from a
+     * surface this change set does not touch is not a fix, it is a second surprise. Callers that link
+     * FROM the board opt in; everyone else is byte-identical to before.
+     */
+    ...(input.boardPopulation ? [aliasedNonTerminalMirroredStageCondition("d")] : []),
   ];
 
   if (isWonTerminalStage) {

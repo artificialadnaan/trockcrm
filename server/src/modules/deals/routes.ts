@@ -624,6 +624,10 @@ function readStageInput(req: Parameters<typeof router.get>[1] extends never ? ne
   return {
     ...readBoardInput(req),
     stageId: req.params.stageId,
+    // Opt-in: reproduce the BOARD's population (drops open rows whose Bid Board mirror already closed)
+    // so a drill-down opened from the board lists what the board counted. Default off — the web
+    // workspace uses this endpoint too and its behaviour is unchanged.
+    boardPopulation: req.query.boardPopulation === "true",
     page: parseNumber(req.query.page) ?? 1,
     pageSize: parseNumber(req.query.pageSize) ?? 25,
     sort: normalizeStagePageSort(req.query.sort as string | undefined),

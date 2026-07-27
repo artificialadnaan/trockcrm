@@ -135,6 +135,16 @@ export async function getStagePage(
       // them, or the drill-down contradicts the board that linked to it.
       ...TERMINAL_ALL_TIME,
       /**
+       * The board's POPULATION, not just its date window.
+       *
+       * getDealsForPipeline drops open-stage deals whose Bid Board mirror has already reached a
+       * terminal stage; this endpoint did not, so "Showing X of Y — see all" could open a list holding
+       * deals the board never counted, filed under an open stage they have moved past. Added to the
+       * server as an opt-in flag rather than applied unconditionally, because the web workspace uses
+       * the same endpoint and did not ask for the board's rules.
+       */
+      boardPopulation: "true",
+      /**
        * KNOWN DIVERGENCE, deliberately not papered over: this route's POPULATION is not identical to
        * the board's. getDealsForPipeline restricts open and Won columns to active rows and drops open
        * CRM rows whose Bid Board mirror has already closed; listDealStagePage applies neither unless a

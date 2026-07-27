@@ -252,6 +252,14 @@ describe("getStagePage wire contract", () => {
     expect(query.lost_all_time).toBe("true");
   });
 
+  it("asks for the BOARD's population, not just its date window", async () => {
+    // getDealsForPipeline drops open rows whose Bid Board mirror already closed; without this the
+    // drill-down lists deals the board never counted, under a stage they have moved past.
+    const { fetcher, calls } = recording({ rows: [] });
+    await pipeline.getStagePage(fetcher, "stage-1", { scope: "mine" });
+    expect((calls[0].opts.query as Record<string, string>).boardPopulation).toBe("true");
+  });
+
   it("degrades to an empty list rather than undefined", async () => {
     const { fetcher } = recording({});
     const res = await pipeline.getStagePage(fetcher, "stage-1", { scope: "mine" });

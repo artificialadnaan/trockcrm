@@ -60,7 +60,36 @@ export default function PipelineBoardScreen() {
     staleTime: 60_000,
   });
 
-  const columns = board.data?.pipelineColumns ?? [];
+  const rawColumns = board.data?.pipelineColumns ?? [];
+
+  /**
+   * DISAMBIGUATED, not merged.
+   *
+   * /deals/pipeline returns active raw stages from BOTH workflow families, and migration 0045 seeds the
+   * service pipeline with names that collide exactly with the standard ones — two stages both called
+   * "Estimate Under Review". Rendered raw, an office with the service pipeline gets two identical chips
+   * with its cards and counts split between them, and no way to tell which is which.
+   *
+   * The web merges them, but it does so PER DEAL: buildCanonicalDealBoardColumns dedupes every card,
+   * recomputes a canonical slug from each deal's own workflowRoute and bid-board state, and regroups.
+   * That is not a column-level operation, and hand-mirroring it here would be the fourth mirrored rule
+   * in this app — the previous three were each wrong on their first attempt, and a wrong canonical
+   * merge silently files cards under the wrong stage, which is harder to notice than duplicate chips.
+   *
+   * So the columns are labelled rather than combined: the split stays visible and becomes legible. The
+   * real fix is the server returning canonical columns, and it is flagged as such.
+   */
+  const columns = useMemo(() => {
+    const nameCounts = new Map<string, number>();
+    for (const column of rawColumns) {
+      nameCounts.set(column.stage.name, (nameCounts.get(column.stage.name) ?? 0) + 1);
+    }
+    return rawColumns.map((column) =>
+      (nameCounts.get(column.stage.name) ?? 0) > 1 && column.stage.workflowFamily === "service_deal"
+        ? { ...column, stage: { ...column.stage, name: `${column.stage.name} (Service)` } }
+        : column,
+    );
+  }, [rawColumns]);
   const selected = useMemo(
     () => columns.find((c) => c.stage.id === activeStageId) ?? columns[0] ?? null,
     [columns, activeStageId],
