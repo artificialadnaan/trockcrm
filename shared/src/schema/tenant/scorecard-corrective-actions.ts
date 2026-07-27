@@ -24,7 +24,7 @@ export const scorecardCorrectiveActions = pgTable(
     itemRef: text("item_ref").notNull(),
     /** Denormalized human label captured at seed time (action text / deficiency label). */
     itemLabel: text("item_label").notNull(),
-    /** 'open' | 'resolved' */
+    /** 'open' | 'submitted' | 'approved' | 'rejected' — see shared/types/corrective-action-status. */
     status: text("status").default("open").notNull(),
     responseComment: text("response_comment"),
     respondedByUserId: uuid("responded_by_user_id"),
@@ -41,10 +41,13 @@ export const scorecardCorrectiveActions = pgTable(
       table.itemRef,
     ),
     index("scorecard_corrective_actions_scorecard_idx").on(table.scorecardId),
-    // Partial index over open items — mirrors migration 0192's scorecard_corrective_actions_open_idx so
-    // db:generate sees parity. Backs the closure check (any `open` rows left for this scorecard?).
-    index("scorecard_corrective_actions_open_idx")
+    // Partial index over OUTSTANDING items — mirrors migration 0202's
+    // scorecard_corrective_actions_outstanding_idx so db:generate sees parity. Backs the closure check
+    // (is anything left for the responder to do?). `rejected` belongs here alongside `open`: the approver
+    // sent it back, so it is still outstanding. Keep in step with
+    // CORRECTIVE_ACTION_OUTSTANDING_STATUSES in shared/types/corrective-action-status.
+    index("scorecard_corrective_actions_outstanding_idx")
       .on(table.scorecardId)
-      .where(sql`${table.status} = 'open'`),
+      .where(sql`${table.status} IN ('open', 'rejected')`),
   ],
 );

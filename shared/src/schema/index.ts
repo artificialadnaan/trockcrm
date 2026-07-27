@@ -169,6 +169,7 @@ export {
 } from "./tenant/field-scorecards.js";
 export { scorecardCorrectiveActions } from "./tenant/scorecard-corrective-actions.js";
 export { scorecardCorrectiveActionTokens } from "./tenant/scorecard-corrective-action-tokens.js";
+export { scorecardCorrectiveActionEvents } from "./tenant/scorecard-corrective-action-events.js";
 export { scorecardCorrectiveActionUploads } from "./tenant/scorecard-corrective-action-uploads.js";
 export {
   projects,

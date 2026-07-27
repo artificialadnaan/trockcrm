@@ -147,6 +147,13 @@ export const fieldScorecardPhotos = pgTable(
     // row is deleted (a removed flag's row is purged on edit), its RESPONSE-photo LINK rows go with it, so a
     // null-corrective_action_id row is never left behind to be mis-read as original section evidence.
     correctiveActionId: uuid("corrective_action_id"),
+    /**
+     * The specific response ATTEMPT these photos document (migration 0202), so "the photos from attempt 2"
+     * stays answerable after attempt 3. Null for original evidence and for every pre-approval response
+     * photo; correctiveActionId still means "photos for this item" in aggregate. ON DELETE SET NULL, not
+     * CASCADE: losing an event row must not delete the photo LINK, which the item-level id still governs.
+     */
+    correctiveActionEventId: uuid("corrective_action_event_id"),
     fileId: uuid("file_id").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },
