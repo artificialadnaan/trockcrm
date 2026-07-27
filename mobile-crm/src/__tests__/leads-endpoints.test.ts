@@ -103,10 +103,22 @@ describe("list query shape", () => {
    * server's default silently hides every terminal lead, making the converted/disqualified badges and
    * the converted-deal link unreachable, and `status: "converted"` return nothing.
    */
-  it("asks for inactive rows too, or terminal leads are invisible", async () => {
+  /**
+   * ACTIVE by default. Defaulting to "all" made terminal leads reachable and created a worse problem:
+   * the route caps at 100 rows by updatedAt and a lead is updated at the moment it converts, so a busy
+   * week of conversions can fill the response and push older OPEN leads out of a list with no
+   * pagination — making the actionable ones the unreachable ones.
+   */
+  it("defaults to ACTIVE so terminal rows cannot evict open leads", async () => {
     const { fetcher, calls } = recording({ leads: [] });
     await leads.listLeads(fetcher);
-    expect((calls[0].opts.query as Record<string, unknown>).isActive).toBe("all");
+    expect((calls[0].opts.query as Record<string, unknown>).isActive).toBe("true");
+  });
+
+  it("reaches terminal leads when they are asked for explicitly", async () => {
+    const { fetcher, calls } = recording({ leads: [] });
+    await leads.listLeads(fetcher, { isActive: "false" });
+    expect((calls[0].opts.query as Record<string, unknown>).isActive).toBe("false");
   });
 
   it("never sends a page — this endpoint has no pagination to send one to", async () => {

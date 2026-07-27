@@ -36,6 +36,19 @@ const SCOPES: Array<{ key: leadsApi.LeadScope; label: string }> = [
   { key: "all", label: "All" },
 ];
 
+/**
+ * Open vs closed, as an explicit choice rather than a default.
+ *
+ * The list defaults to ACTIVE because the route caps at 100 rows by updatedAt, and a terminal lead is
+ * updated at the moment it closes — so mixing them in lets a week of conversions push older open leads
+ * out of a list that has no pagination. Closed leads are still worth reaching (a converted lead is how
+ * a rep finds the deal it became), so they get their own filter instead of crowding the default one.
+ */
+const LIFECYCLES: Array<{ key: "true" | "false"; label: string }> = [
+  { key: "true", label: "Open" },
+  { key: "false", label: "Closed" },
+];
+
 /** Matches the deals list: the server only applies its search predicate at 2+ trimmed characters. */
 const MIN_SEARCH_LENGTH = 2;
 
@@ -44,14 +57,15 @@ export default function LeadsListScreen() {
   const { fetcher } = useAuth();
   const cacheScope = useQueryScope();
   const [scope, setScope] = useState<leadsApi.LeadScope>("mine");
+  const [lifecycle, setLifecycle] = useState<"true" | "false">("true");
   const [search, setSearch] = useState("");
   const [submittedSearch, setSubmittedSearch] = useState("");
 
   const tooShort = search.trim().length > 0 && search.trim().length < MIN_SEARCH_LENGTH;
 
   const params = useMemo(
-    () => ({ scope, search: submittedSearch || undefined }),
-    [scope, submittedSearch],
+    () => ({ scope, search: submittedSearch || undefined, isActive: lifecycle }),
+    [scope, submittedSearch, lifecycle],
   );
 
   /**
@@ -145,6 +159,23 @@ export default function LeadsListScreen() {
         ))}
       </View>
 
+      <View style={styles.scopeRow}>
+        {LIFECYCLES.map((l) => (
+          <Pressable
+            key={l.key}
+            testID={`lead-lifecycle-${l.key}`}
+            onPress={() => setLifecycle(l.key)}
+            accessibilityRole="button"
+            accessibilityState={{ selected: lifecycle === l.key }}
+            style={[styles.scopePill, lifecycle === l.key && styles.scopePillActive]}
+          >
+            <Text style={[styles.scopeText, lifecycle === l.key && styles.scopeTextActive]}>
+              {l.label}
+            </Text>
+          </Pressable>
+        ))}
+      </View>
+
       <TextInput
         testID="leads-search"
         value={search}
@@ -179,6 +210,9 @@ export default function LeadsListScreen() {
         <FlatList
           data={leads}
           keyExtractor={(l) => l.id}
+          // Without this, the first tap on a search result is eaten dismissing the keyboard and the rep
+          // has to tap twice with no explanation. The deals list already does this for the same flow.
+          keyboardShouldPersistTaps="handled"
           contentContainerStyle={[styles.list, leads.length === 0 && styles.listEmpty]}
           refreshControl={
             <RefreshControl refreshing={query.isRefetching} onRefresh={() => void query.refetch()} />
@@ -199,9 +233,11 @@ export default function LeadsListScreen() {
               <Text style={styles.errorBody}>
                 {submittedSearch
                   ? `Nothing matches "${submittedSearch}".`
-                  : scope === "mine"
-                    ? "Nothing is assigned to you. Try the All tab."
-                    : "There are no leads in this office yet."}
+                  : lifecycle === "false"
+                    ? "No converted or disqualified leads here."
+                    : scope === "mine"
+                      ? "Nothing is assigned to you. Try the All tab."
+                      : "There are no open leads in this office."}
               </Text>
             </View>
           }

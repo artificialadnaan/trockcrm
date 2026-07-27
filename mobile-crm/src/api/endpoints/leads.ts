@@ -60,10 +60,20 @@ export async function listLeads(fetcher: Fetcher, params: ListLeadsParams = {}):
       // Comma-joined — the route does `(req.query.stageIds as string).split(",")` (routes.ts:189).
       stageIds: params.stageIds && params.stageIds.length > 0 ? params.stageIds.join(",") : undefined,
       limit: params.limit ?? LEADS_PAGE_LIMIT,
-      // "all" by DEFAULT here, unlike the server's default: this screen shows terminal leads
-      // deliberately — a converted lead is how a rep finds the deal it became — and the cards badge
-      // them, so excluding them would leave that UI permanently unreachable.
-      isActive: params.isActive ?? "all",
+      /**
+       * ACTIVE by default; terminal records only when explicitly asked for.
+       *
+       * The first version defaulted to "all" so the converted/disqualified badges and the
+       * converted-deal link were reachable. That fixed one problem and created a worse one: the route
+       * caps at 100 rows ordered by updatedAt, and a terminal lead is updated at the moment it is
+       * converted — so a busy week of conversions can fill the entire response and push older OPEN
+       * leads out of it. This screen has no pagination, so those leads become unreachable, and the
+       * unreachable ones would be the actionable ones.
+       *
+       * Terminal leads stay reachable through the explicit Closed filter instead, which is a smaller
+       * loss than an actionable lead the rep cannot get to at all.
+       */
+      isActive: params.isActive ?? "true",
     },
   });
   return res.leads ?? [];

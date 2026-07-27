@@ -70,6 +70,17 @@ export default function LeadDetailScreen() {
        * is measured from. The same "make it concurrent" instinct is correct in one screen and
        * corrupting in the other; what differs is whether anything is still on screen to press.
        */
+      /**
+       * COMMIT the server's own updated lead first, then invalidate.
+       *
+       * `invalidateQueries` swallows refetch errors by default, so awaiting it resolves even when the
+       * refetch FAILED — leaving the cache on the old stageId while `isPending` goes false. The screen
+       * then re-enables the same move and a second tap resubmits an already-completed transition, which
+       * the server accepts and which rewrites stage_entered_at, resetting the stage age every SLA reads.
+       * Awaiting was necessary and not sufficient; the response already contains the new lead, so the
+       * cache is written from it rather than hoping a network round-trip succeeds.
+       */
+      queryClient.setQueryData(qk.lead(scope, leadId), result.lead);
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: qk.lead(scope, leadId) }),
         queryClient.invalidateQueries({ queryKey: ["leads", scope] }),
@@ -87,6 +98,20 @@ export default function LeadDetailScreen() {
         setTransitionError(
           "The move may or may not have gone through — refreshing. Check the stage before trying again.",
         );
+        await Promise.all([
+          queryClient.invalidateQueries({ queryKey: qk.lead(scope, leadId) }),
+          queryClient.invalidateQueries({ queryKey: ["leads", scope] }),
+        ]);
+        return;
+      }
+      /**
+       * A 409 that is NOT a requirements refusal is a stale-screen conflict — most often the lead was
+       * converted or disqualified by someone else after this screen loaded. The message alone left the
+       * cached lead looking open and the move control live, so every retry repeated the same conflict.
+       * Refreshing turns it into a screen that now shows the truth.
+       */
+      if (err instanceof ApiError && err.status === 409) {
+        setTransitionError(err.message);
         await Promise.all([
           queryClient.invalidateQueries({ queryKey: qk.lead(scope, leadId) }),
           queryClient.invalidateQueries({ queryKey: ["leads", scope] }),
@@ -233,20 +258,23 @@ export default function LeadDetailScreen() {
         </Section>
 
         <Section title="Move stage">
-          {!isOwner ? (
+          {/* TERMINAL first, ownership second. A converted lead assigned to someone else is refused for
+              BOTH reasons, and leading with ownership said "only the assigned rep can change this" —
+              which is false, since the server refuses them too. The more fundamental reason goes first
+              because it is the one that does not depend on who is asking. */}
+          {!open ? (
+            /* Converted and disqualified leads keep a name, a stage and a rep, so nothing about the row
+               says it cannot be worked. */
+            <Text testID="lead-terminal" style={styles.help}>
+              This lead is {lead.status}. Its stage can no longer be changed.
+            </Text>
+          ) : !isOwner ? (
             /* Said up front rather than after a 403. The route is strictly owner-only with no admin or
                director bypass, which surprises people who have one everywhere else. */
             <Text testID="lead-not-owner" style={styles.help}>
               {lead.assignedRepName
                 ? `Only ${lead.assignedRepName}, the assigned rep, can change this lead's stage.`
                 : "Only the assigned rep can change this lead's stage."}
-            </Text>
-          ) : !open ? (
-            /* Converted and disqualified leads keep a name, a stage and a rep, so nothing about the row
-               says it cannot be worked. The server refuses the transition; saying so up front beats
-               offering buttons that all fail. */
-            <Text style={styles.help}>
-              This lead is {lead.status}. Its stage can no longer be changed.
             </Text>
           ) : stagesQuery.isLoading ? (
             <ActivityIndicator color={theme.color.brandRed} />
@@ -295,11 +323,19 @@ export default function LeadDetailScreen() {
           {refusal ? (
             <View testID="lead-transition-refusal" style={styles.refusalBox}>
               <Text style={styles.refusalTitle}>Can&apos;t move yet</Text>
+              <Text style={styles.refusalItem}>
+                {(refusal.missing ?? []).length > 0
+                  ? "Set these on the full lead record, then try again:"
+                  : ""}
+              </Text>
               {(refusal.missing ?? []).length > 0 ? (
                 (refusal.missing ?? []).map((item) => (
+                  /* Both resolutions point at the full record, because THIS screen has no editor and
+                     the transition adapter does not send the server's inlinePatch. Repeating the
+                     server's "inline" hint would promise a remedy that does not exist here — the rep
+                     would look for a field that is not on the screen. */
                   <Text key={item.key} style={styles.refusalItem}>
                     • {item.label}
-                    {item.resolution === "detail" ? " (set this on the full lead record)" : ""}
                   </Text>
                 ))
               ) : (
