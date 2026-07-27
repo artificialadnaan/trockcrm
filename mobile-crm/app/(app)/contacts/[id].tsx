@@ -167,10 +167,14 @@ export default function ContactDetailScreen() {
         <Section title="Deals">
           {dealsQuery.isLoading ? (
             <ActivityIndicator color={theme.color.brandRed} />
-          ) : dealsQuery.error && associations.length === 0 ? (
+          ) : dealsQuery.error && dealsQuery.data === undefined ? (
             // A FAILED request is not an empty result. Rendering "no deals are linked" on a 5xx presents
             // a network failure as a fact about the contact, and a rep would act on it — calling someone
             // believing they have no live work when they may have several.
+            //
+            // Gated on `data === undefined`, not on row count: a contact with genuinely no visible deals
+            // HAS loaded, so a later failed refetch belongs inline below rather than replacing the real
+            // empty state. Same distinction as both lists and the activity timeline.
             <Pressable
               testID="retry-contact-deals"
               onPress={() => void dealsQuery.refetch()}
