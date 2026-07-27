@@ -122,12 +122,25 @@ export async function resolveCorrectiveActionItemTx(
       ),
     );
 
-  if (stillOpen.length === 0) {
-    await tx
-      .update(fieldScorecards)
-      .set({ status: "corrective_action_closed", updatedAt: new Date() })
-      .where(eq(fieldScorecards.id, input.scorecardId));
-  }
+  // Advance the scorecard generation on EVERY winning resolve, not only on the auto-close.
+  //
+  // The stored PDF artifact's staleness is keyed on updated_at (migration 0200), so without this a response
+  // to item 1 of 3 would leave the download serving the pre-corrective-action PDF — the reported bug. It is
+  // also what makes finalizeFieldScorecardArtifacts' single-flight key (updated_at) start a FRESH render
+  // rather than coalescing onto a stale in-flight one.
+  //
+  // Only reached when `updated.length > 0` — an idempotent re-resolve returned false above — so a duplicate
+  // submit does not churn the artifact.
+  const closing = stillOpen.length === 0;
+  await tx
+    .update(fieldScorecards)
+    .set(
+      closing
+        ? { status: "corrective_action_closed", updatedAt: new Date() }
+        : { updatedAt: new Date() },
+    )
+    .where(eq(fieldScorecards.id, input.scorecardId));
+
   return true;
 }
 

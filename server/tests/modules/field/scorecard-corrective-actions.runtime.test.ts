@@ -464,3 +464,76 @@ describe("corrective_action_id FK ON DELETE CASCADE (finding 3)", () => {
     expect(remaining.rows).toHaveLength(1);
   });
 });
+
+describe("resolve advances the scorecard content generation", () => {
+  async function getUpdatedAt(id: string): Promise<Date> {
+    const res = await tdb.execute(sql`SELECT updated_at FROM field_scorecards WHERE id = ${id}`);
+    return new Date((res.rows[0] as { updated_at: string | Date }).updated_at);
+  }
+
+  it("advances updated_at when a NON-final item is resolved", async () => {
+    // The reported bug: resolving item 1 of N left updated_at untouched, so the download path still
+    // considered the submit-time PDF current and served a scorecard with no corrective action on it.
+    const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
+    const items = await getCorrectiveActions(scorecard.id);
+    expect(items.length).toBeGreaterThan(1);
+    const before = await getUpdatedAt(scorecard.id);
+
+    await resolveCorrectiveActionItem(tdb, {
+      scorecardId: scorecard.id,
+      itemId: items[0].id,
+      responseComment: "fixed",
+      respondedBy: { userId: USER, name: "Sam", email: null },
+    });
+
+    expect((await getUpdatedAt(scorecard.id)).getTime()).toBeGreaterThan(before.getTime());
+    // Still open — only one of several items answered.
+    expect((await getScorecardRow(scorecard.id)).status).toBe("corrective_action_open");
+  });
+
+  it("advances updated_at on the final item alongside the auto-close", async () => {
+    const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
+    const items = await getCorrectiveActions(scorecard.id);
+    for (const item of items.slice(0, -1)) {
+      await resolveCorrectiveActionItem(tdb, {
+        scorecardId: scorecard.id,
+        itemId: item.id,
+        responseComment: "fixed",
+        respondedBy: { userId: USER, name: "Sam", email: null },
+      });
+    }
+    const before = await getUpdatedAt(scorecard.id);
+
+    await resolveCorrectiveActionItem(tdb, {
+      scorecardId: scorecard.id,
+      itemId: items[items.length - 1].id,
+      responseComment: "fixed",
+      respondedBy: { userId: USER, name: "Sam", email: null },
+    });
+
+    expect((await getUpdatedAt(scorecard.id)).getTime()).toBeGreaterThan(before.getTime());
+    expect((await getScorecardRow(scorecard.id)).status).toBe("corrective_action_closed");
+  });
+
+  it("does NOT advance updated_at on an idempotent re-resolve", async () => {
+    // A no-op must not invalidate the artifact — otherwise a duplicate submit re-renders the PDF for free.
+    const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
+    const items = await getCorrectiveActions(scorecard.id);
+    await resolveCorrectiveActionItem(tdb, {
+      scorecardId: scorecard.id,
+      itemId: items[0].id,
+      responseComment: "fixed",
+      respondedBy: { userId: USER, name: "Sam", email: null },
+    });
+    const afterFirst = await getUpdatedAt(scorecard.id);
+
+    await resolveCorrectiveActionItem(tdb, {
+      scorecardId: scorecard.id,
+      itemId: items[0].id,
+      responseComment: "again",
+      respondedBy: { userId: USER, name: "Sam", email: null },
+    });
+
+    expect((await getUpdatedAt(scorecard.id)).getTime()).toBe(afterFirst.getTime());
+  });
+});

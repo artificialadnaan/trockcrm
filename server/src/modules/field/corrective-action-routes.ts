@@ -17,6 +17,7 @@ import {
   resolveScorecardCorrectiveActionRecipients,
 } from "./corrective-action-recipients.js";
 import { getCorrectiveActionItems, submitCorrectiveActionResponse } from "./corrective-action-api.js";
+import { finalizeFieldScorecardArtifacts } from "./scorecards-service.js";
 import { activeProjectWhere } from "./projects-service.js";
 import { getFileDownloadUrl } from "../files/service.js";
 import {
@@ -460,6 +461,16 @@ export function registerCorrectiveActionRoutes(fieldRoutes: Router): void {
           });
           return getCorrectiveActionItems(db, id, { resolvePhotoUrl: correctiveActionPhotoUrlResolver(db) });
         });
+
+        // Refresh the stored PDF so a download taken right after a response already carries the
+        // corrective-action record. POST-COMMIT and best-effort by design: R2 I/O must never hold the
+        // transaction open, and a failure here is harmless because needsScorecardPdfRegeneration now sees
+        // the advanced generation and re-renders on demand. This only shortens the window in which a
+        // downloader pays for the render.
+        void finalizeFieldScorecardArtifacts(office, responder.userId ?? "", id).catch((err) => {
+          console.error("[CorrectiveAction] Post-response PDF refresh failed", { scorecardId: id, err });
+        });
+
         res.json({ items });
       } catch (err) {
         next(err);
