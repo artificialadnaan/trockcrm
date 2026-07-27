@@ -6,6 +6,7 @@ import {
   getEffectiveStageAgeDays,
   getEffectiveStageAgeSeconds,
   getHoldStateAtStageEntry,
+  isDealValueEffectivelyOnHold,
   resolveEffectiveStageEnteredAt,
 } from "./deal-hold.js";
 
@@ -540,5 +541,99 @@ describe("estimating-stage value rule — DD outranks bid (2026-06-18)", () => {
     expect(
       getEffectiveDealValue({ onHold: true, stageSlug: "estimating", ddEstimate: "800000" })
     ).toBe(0);
+  });
+});
+
+describe("estimating-stage hold rule — the BID due date is the auto-park horizon (2026-07-27)", () => {
+  // Same fixed instant the effective-hold cases above use, so the 90-day horizon is deterministic.
+  // CT-today = 2026-06-01, so the horizon lands on 2026-08-30.
+  const FIXED_NOW = new Date("2026-06-01T12:00:00.000Z");
+
+  it("zeros an estimating deal whose BID is far out even though its close target is near", () => {
+    const deal = {
+      onHold: false,
+      stageSlug: "estimating",
+      expectedCloseDate: "2026-06-15",
+      // Stored at UTC midnight, exactly as deals.bid_due_date arrives on the wire.
+      bidDueDate: "2027-01-01T00:00:00.000Z",
+      bidEstimate: "875000",
+      ddEstimate: "800000",
+    };
+    expect(isDealValueEffectivelyOnHold(deal, FIXED_NOW)).toBe(true);
+    expect(getEffectiveDealValue(deal, FIXED_NOW)).toBe(0);
+    // The SAME row in any other stage keeps today's close-target rule and its full (bid-first) value.
+    const nonEstimating = { ...deal, stageSlug: "estimate_sent_to_client" };
+    expect(isDealValueEffectivelyOnHold(nonEstimating, FIXED_NOW)).toBe(false);
+    expect(getEffectiveDealValue(nonEstimating, FIXED_NOW)).toBe(875000);
+  });
+
+  it("RELEASES an estimating deal whose BID is near even though its close target is far out", () => {
+    const deal = {
+      onHold: false,
+      stageSlug: "estimating",
+      expectedCloseDate: "2026-12-01",
+      bidDueDate: "2026-06-15T00:00:00.000Z",
+      bidEstimate: "875000",
+      ddEstimate: "800000",
+    };
+    expect(isDealValueEffectivelyOnHold(deal, FIXED_NOW)).toBe(false);
+    // DD-over-bid still applies in this stage — the hold rule and the value chain are independent.
+    expect(getEffectiveDealValue(deal, FIXED_NOW)).toBe(800000);
+    // Outside estimating the far-out close target still parks it.
+    expect(isDealValueEffectivelyOnHold({ ...deal, stageSlug: "contract" }, FIXED_NOW)).toBe(true);
+  });
+
+  it("falls back to the close target when an estimating deal has no bid due date", () => {
+    expect(
+      isDealValueEffectivelyOnHold(
+        { onHold: false, stageSlug: "estimating", expectedCloseDate: "2026-12-01", bidDueDate: null },
+        FIXED_NOW
+      )
+    ).toBe(true);
+    expect(
+      isDealValueEffectivelyOnHold(
+        { onHold: false, stageSlug: "estimating", expectedCloseDate: "2026-06-15", bidDueDate: null },
+        FIXED_NOW
+      )
+    ).toBe(false);
+  });
+
+  it("EXCLUDES service_estimating — a service-route deal keeps the close-target rule", () => {
+    // A service-route record carrying the bare "estimating" slug canonicalizes to service_estimating,
+    // which is deliberately out of scope for this rule (same boundary as the DD-over-bid chain).
+    const serviceDeal = {
+      onHold: false,
+      stageSlug: "estimating",
+      workflowRoute: "service",
+      expectedCloseDate: "2026-06-15",
+      bidDueDate: "2027-01-01T00:00:00.000Z",
+      bidEstimate: "875000",
+    };
+    expect(isDealValueEffectivelyOnHold(serviceDeal, FIXED_NOW)).toBe(false);
+    expect(
+      isDealValueEffectivelyOnHold({ ...serviceDeal, stageSlug: "service_estimating" }, FIXED_NOW)
+    ).toBe(false);
+    // ...while the legacy normal-route alias IS in scope.
+    expect(
+      isDealValueEffectivelyOnHold(
+        { ...serviceDeal, stageSlug: "estimate_in_progress", workflowRoute: "normal" },
+        FIXED_NOW
+      )
+    ).toBe(true);
+  });
+
+  it("a Bid Board-terminal estimating deal keeps its realized value despite a far-out bid due date", () => {
+    // 15 of 16 active Dallas estimating deals are Bid Board-owned; one can go won/lost in the mirror while
+    // its CRM stage still reads estimating. Realized value must never be auto-parked.
+    const deal = {
+      onHold: false,
+      stageSlug: "estimating",
+      bidBoardStageSlug: "sent_to_production",
+      expectedCloseDate: "2026-06-15",
+      bidDueDate: "2027-01-01T00:00:00.000Z",
+      awardedAmount: "925000",
+    };
+    expect(isDealValueEffectivelyOnHold(deal, FIXED_NOW)).toBe(false);
+    expect(getEffectiveDealValue(deal, FIXED_NOW)).toBe(925000);
   });
 });

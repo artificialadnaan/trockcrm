@@ -29,6 +29,11 @@ type DealValueLike = {
   // zeroed even without the stored flag. Optional: a caller whose deal type lacks it falls back to the
   // stored on_hold leg only (graceful — the far-out leg simply never fires).
   expectedCloseDate?: string | Date | null;
+  // The BID due date. In the genuine 'estimating' stage ONLY it replaces expectedCloseDate as the auto-park
+  // horizon (2026-07-27) — see isDealEffectivelyOnHold. A caller whose payload omits it keeps the
+  // close-target rule, so a card that forgets to select bid_due_date silently reads FULL VALUE while the
+  // server rollup reads $0; any surface rendering estimating deals must supply it.
+  bidDueDate?: string | Date | null;
   awardedAmount?: string | number | null;
   bidBoardTotalSales?: string | number | null;
   bidEstimate?: string | number | null;
@@ -135,7 +140,8 @@ export function getHoldStateAtStageEntry(
 
 /**
  * Whether a deal's value reads as on hold for ZEROING purposes: the stored on_hold flag OR — for an OPEN
- * deal only — a close target past the 90-day horizon. A WON deal is realized, so the far-future leg never
+ * deal only — a hold horizon date past the 90-day mark (the close target, or the BID due date while the
+ * deal sits in the genuine 'estimating' stage). A WON deal is realized, so the far-future leg never
  * applies (its `expected_close_date` may still be far out if it was won early; only its stored flag
  * zeros it). This is the won-aware twin of the server's stage-aware value SQL: card display
  * (getEffectiveDealValue) and the On Hold badge both read it, so the card's $0 and badge always agree
@@ -159,6 +165,12 @@ export function isDealValueEffectivelyOnHold(deal: DealValueLike, now: Date = ne
   return isDealEffectivelyOnHold({
     onHold: deal.onHold,
     expectedCloseDate: deal.expectedCloseDate,
+    // In the genuine 'estimating' stage the auto-park horizon is measured from the BID due date, not the
+    // project close target (2026-07-27). Classified with the SAME route-aware helper getRawDealValue uses
+    // for the DD-over-bid chain, so a card's $0 and its DD-first value can never disagree about what
+    // "estimating" means.
+    bidDueDate: deal.bidDueDate,
+    isEstimating: isGenuineEstimatingDealStageSlug(stageSlug, workflowRoute),
     now,
     isTerminal,
   });

@@ -9,6 +9,7 @@ import {
 } from "./sla-policy.js";
 import {
   CANONICAL_TERMINAL_DEAL_STAGE_SLUGS,
+  ESTIMATING_STAGE_SLUG,
   isCanonicalDealStageSlug,
   toCanonicalDealStageSlug,
   type CanonicalDealStageSlug,
@@ -55,6 +56,15 @@ export interface AtRiskDealInput {
   onHoldAccumulatedSecondsAtStageEntry?: number | null;
   /** The deal's close target (= expected_close_date); drives close-target suppression / auto-on-hold. */
   expectedCloseDate?: string | Date | null;
+  /**
+   * The deal's BID due date (`deals.bid_due_date`). Used ONLY for the 90+ day auto-on-hold exclusion, and
+   * ONLY while the deal is in the genuine 'estimating' stage, where it replaces the close target as the
+   * auto-park horizon (2026-07-27). It deliberately does NOT feed the shorter close-target SLA
+   * suppression, which stays keyed on expected_close_date in every stage. A caller that forgets to select
+   * it does not error — the row silently keeps the old close-target rule, so every at-risk row source
+   * must forward it.
+   */
+  bidDueDate?: string | Date | null;
   /**
    * Whether a today-or-future close target inside the auto-hold window should suppress risk.
    * Defaults to true for deal-detail style SLA messaging. Callers that only want the 90+ day
@@ -272,6 +282,12 @@ export function getDealAtRiskResult(
   const effectiveOnHold = isDealEffectivelyOnHold({
     onHold: deal.onHold,
     expectedCloseDate: deal.expectedCloseDate,
+    // Estimating deals auto-park off the BID due date (2026-07-27). canonicalStageSlug is already
+    // route-canonicalized (estimate_in_progress folds in, service_estimating does not), so it is the same
+    // classification the value/hold SQL makes — an estimating deal that reads $0 on the board must also be
+    // quiet in at-risk, or the "relevant and quick" list nags about a deal it says is parked.
+    bidDueDate: deal.bidDueDate,
+    isEstimating: canonicalStageSlug === ESTIMATING_STAGE_SLUG,
     now,
     isTerminal: isTerminalStage,
   });
