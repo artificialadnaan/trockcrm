@@ -139,6 +139,11 @@ export default function ContactsListScreen() {
         <FlatList
           data={contacts}
           keyExtractor={(c) => c.id}
+          // The search field sits directly above this list, so after a search the keyboard is still up.
+          // RN's default here is "never", which spends the first tap dismissing it — so opening a contact,
+          // or the one-tap Call this screen exists to provide, silently needs two taps. That is the
+          // headline interaction of the screen, failing in the state a user is most often in.
+          keyboardShouldPersistTaps="handled"
           // `flexGrow` so the empty state centres in the viewport while the list still scrolls — which is
           // what keeps pull-to-refresh reachable with zero rows.
           contentContainerStyle={[styles.list, contacts.length === 0 && styles.listEmpty]}
