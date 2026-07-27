@@ -63,6 +63,13 @@ export const fieldScorecards = pgTable(
     pdfGeneratedAt: timestamp("pdf_generated_at", { withTimezone: true }),
     /** Renderer revision used for the stored PDF artifact. Version 1 covers legacy/unversioned PDFs. */
     pdfRenderVersion: smallint("pdf_render_version").default(1).notNull(),
+    /**
+     * The scorecard `updated_at` the stored PDF artifact was rendered from (migration 0200). Written in the
+     * same guarded CAS UPDATE that publishes pdf_r2_key. needsScorecardPdfRegeneration compares it against
+     * the live updated_at, so any content change — including a corrective-action response — invalidates the
+     * cached artifact. NULL on every pre-migration row, which reads as stale.
+     */
+    pdfContentGeneration: timestamp("pdf_content_generation", { withTimezone: true }),
     emailSentAt: timestamp("email_sent_at", { withTimezone: true }),
     // Idempotency stamp for the below-band corrective-action notification (migration 0193). Mirrors
     // email_sent_at: the scorecard_corrective_action_email worker handler stamps this once after sending to
