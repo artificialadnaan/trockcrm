@@ -12,7 +12,9 @@ import { handleRfpRequestDelivery } from "../../src/jobs/rfp-request-delivery.js
  * Lives in worker/tests/jobs/ because worker/vitest.config.ts only collects `tests/**` — the sibling
  * suite at worker/src/jobs/rfp-request-delivery.test.ts is never executed.
  */
-function makeDb(dealRows?: Array<{ rfp_approval_status: string | null }>) {
+function makeDb(
+  dealRows?: Array<{ rfp_approval_status: string | null; rfp_approval_request_event_id?: string | null }>
+) {
   const query = vi.fn(async (sql: string) => {
     if (sql.includes("SELECT slug FROM public.offices")) return { rows: [{ slug: "dallas" }] };
     // Default {rows: []} means "this mock cannot see the deal", which must NOT suppress delivery —
@@ -20,7 +22,8 @@ function makeDb(dealRows?: Array<{ rfp_approval_status: string | null }>) {
     if (sql.includes("SELECT rfp_approval_status")) return { rows: dealRows ?? [] };
     return { rows: [] };
   });
-  return { query };
+  // The worker takes its advisory lock on a dedicated connection; hand back the same recording mock.
+  return { query, connect: async () => ({ query, release: () => {} }) };
 }
 
 function makePayload() {
@@ -30,7 +33,7 @@ function makePayload() {
     body: {
       sourceSystem: "trock_crm",
       sourceDealId: "deal-1",
-      sourceEventId: "event-1",
+      sourceEventId: "crm:deal-stage:opportunity:round-1",
       deal: { name: "Deal", projectNumber: "DFW-1", projectType: "4" },
       attachments: [],
     },
@@ -43,7 +46,7 @@ describe("handleRfpRequestDelivery — stale-round guard", () => {
   });
 
   it("does NOT deliver when the RFP cycle was cleared while the job sat queued", async () => {
-    const db = makeDb([{ rfp_approval_status: null }]);
+    const db = makeDb([{ rfp_approval_status: null, rfp_approval_request_event_id: null }]);
     const fetchImpl = vi.fn(async () => new Response("{}", { status: 201 }));
 
     await handleRfpRequestDelivery(makePayload(), "office-1", {
@@ -59,7 +62,9 @@ describe("handleRfpRequestDelivery — stale-round guard", () => {
   });
 
   it("still delivers for a deal genuinely awaiting its request", async () => {
-    const db = makeDb([{ rfp_approval_status: "pending_outbox" }]);
+    const db = makeDb([
+      { rfp_approval_status: "pending_outbox", rfp_approval_request_event_id: "round-1" },
+    ]);
     const fetchImpl = vi.fn(
       async () => new Response(JSON.stringify({ requestId: 9, token: "t" }), { status: 201 })
     );
@@ -80,7 +85,9 @@ describe("handleRfpRequestDelivery — stale-round guard", () => {
       [201, "rfp_approval_status = 'pending'"],
       [409, "rfp_approval_status = 'conflict'"],
     ] as const) {
-      const db = makeDb([{ rfp_approval_status: "pending_outbox" }]);
+      const db = makeDb([
+        { rfp_approval_status: "pending_outbox", rfp_approval_request_event_id: "round-1" },
+      ]);
       const fetchImpl = vi.fn(async () => new Response("{}", { status }));
 
       await handleRfpRequestDelivery(makePayload(), "office-1", {
@@ -92,6 +99,66 @@ describe("handleRfpRequestDelivery — stale-round guard", () => {
       const write = db.query.mock.calls.map((c) => String(c[0])).find((s) => s.includes(marker));
       expect(write, `expected a write for HTTP ${status}`).toBeDefined();
       expect(write).toContain("rfp_approval_status IN ('pending_outbox', 'pending')");
+      // Status is not identity — the write must also be bound to the round that created this job.
+      expect(write).toContain("rfp_approval_request_event_id");
     }
+  });
+
+  // STATUS IS NOT IDENTITY. A move-back followed by a FRESH RFP trigger puts the new round back into
+  // pending_outbox, so a status-only guard would accept the stale response and overwrite the new
+  // round's request id/token. rfp_bidboard_create already binds its recheck this way.
+  it("does NOT deliver when a FRESH round has opened since this job was built", async () => {
+    const db = makeDb([
+      { rfp_approval_status: "pending_outbox", rfp_approval_request_event_id: "round-2" },
+    ]);
+    const fetchImpl = vi.fn(async () => new Response("{}", { status: 201 }));
+
+    await handleRfpRequestDelivery(makePayload(), "office-1", {
+      db,
+      fetchImpl: fetchImpl as never,
+      secret: "secret",
+    });
+
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("fails OPEN when the round cannot be determined on either side", async () => {
+    // An over-eager guard here would silently stop every delivery — far worse than the drift it
+    // prevents — so an unknown round on either side must still send.
+    const db = makeDb([
+      { rfp_approval_status: "pending_outbox", rfp_approval_request_event_id: null },
+    ]);
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ requestId: 1 }), { status: 201 }));
+
+    await handleRfpRequestDelivery(makePayload(), "office-1", {
+      db,
+      fetchImpl: fetchImpl as never,
+      secret: "secret",
+    });
+
+    expect(fetchImpl).toHaveBeenCalled();
+  });
+
+  // The pre-send recheck runs under the SAME deal-scoped advisory lock the move-back's job
+  // cancellation takes, so authorization and cancellation serialize instead of racing.
+  it("authorizes the send under the shared advisory lock", async () => {
+    const db = makeDb([
+      { rfp_approval_status: "pending_outbox", rfp_approval_request_event_id: "round-1" },
+    ]);
+    const fetchImpl = vi.fn(async () => new Response("{}", { status: 201 }));
+
+    await handleRfpRequestDelivery(makePayload(), "office-1", {
+      db,
+      fetchImpl: fetchImpl as never,
+      secret: "secret",
+    });
+
+    const calls = db.query.mock.calls.map((c) => String(c[0]));
+    const lockIdx = calls.findIndex((sql) => sql.includes("pg_advisory_xact_lock"));
+    const readIdx = calls.findIndex((sql) => sql.includes("SELECT rfp_approval_status"));
+    expect(lockIdx).toBeGreaterThan(-1);
+    // Locked BEFORE the read, and the lock's namespace is the one the server cancellation uses.
+    expect(lockIdx).toBeLessThan(readIdx);
+    expect(String(db.query.mock.calls[lockIdx]?.[1]?.[0])).toContain("deal_rfp_delivery:");
   });
 });

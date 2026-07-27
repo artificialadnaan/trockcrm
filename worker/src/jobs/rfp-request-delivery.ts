@@ -11,6 +11,13 @@ type PoolLike = Queryable & {
   connect?: () => Promise<Queryable & { release: () => void }>;
 };
 
+/**
+ * Advisory-lock namespace shared with "Move back to Opportunity"'s job cancellation, so a cancellation
+ * and a send-authorization for the same deal serialize instead of racing. Distinct from the commission
+ * lock namespace: these are different invariants and must not block each other.
+ */
+export const DEAL_RFP_DELIVERY_LOCK_NAMESPACE = "deal_rfp_delivery:";
+
 type OfficeSchemaOptions = {
   requireActive?: boolean;
 };
@@ -60,7 +67,8 @@ async function updateDealPending(
   db: Queryable,
   schemaName: string,
   dealId: string,
-  body: Record<string, any>
+  body: Record<string, any>,
+  roundEventId: string | null
 ) {
   await db.query(
     `UPDATE ${quoteIdent(schemaName)}.deals
@@ -83,14 +91,22 @@ async function updateDealPending(
             rfp_override_error = NULL,
             updated_at = NOW()
       WHERE id = $3
-        -- ROUND GUARD. This job carries a payload snapshot and writes back BY DEAL ID, so without it a
-        -- delivery that was already in flight repopulates an RFP cycle that has since been cleared —
-        -- "Move back to Opportunity" nulls the whole cycle, and a non-null status is precisely what
-        -- re-arms the bid-board-created resurrection guard, letting a later callback re-attach a deal
-        -- the operator deliberately disconnected. Only a deal still AWAITING this delivery may be
-        -- advanced by it; pending is included so an idempotent replay can still refresh the request id.
-        AND rfp_approval_status IN ('pending_outbox', 'pending')`,
-    [body.requestId ?? body.id ?? null, body.token ?? null, dealId]
+        -- ROUND GUARD, two predicates that do different jobs.
+        --
+        -- (1) STATUS: this job writes back BY DEAL ID from a payload snapshot, so a delivery already in
+        -- flight would repopulate an RFP cycle since cleared by "Move back to Opportunity" — and a
+        -- non-null status is what re-arms the bid-board-created resurrection guard.
+        --
+        -- (2) ROUND IDENTITY: status alone is not identity. A move-back FOLLOWED BY a fresh trigger puts
+        -- the NEW round back into pending_outbox, so a stale response would satisfy the status predicate
+        -- and overwrite the new round's request id/token with the old one's. rfp_bidboard_create already
+        -- binds its recheck this way; this mirrors it. FAIL-OPEN when either side is unknown (a payload
+        -- with no parseable sourceEventId, or a deal with no round stamped): an over-eager guard here
+        -- would silently stop every delivery, which is far worse than the drift it prevents.
+        AND rfp_approval_status IN ('pending_outbox', 'pending')
+        AND ($4::text IS NULL OR rfp_approval_request_event_id IS NULL
+             OR rfp_approval_request_event_id::text = $4::text)`,
+    [body.requestId ?? body.id ?? null, body.token ?? null, dealId, roundEventId]
   );
 }
 
@@ -98,7 +114,8 @@ async function updateDealConflict(
   db: Queryable,
   schemaName: string,
   dealId: string,
-  body: Record<string, any>
+  body: Record<string, any>,
+  roundEventId: string | null
 ) {
   await db.query(
     `UPDATE ${quoteIdent(schemaName)}.deals
@@ -108,10 +125,12 @@ async function updateDealConflict(
             rfp_last_attempt_error = NULL,
             updated_at = NOW()
       WHERE id = $3
-        -- Same round guard as the success path: a conflict verdict for a cycle that no longer exists
-        -- must not resurrect it as 'conflict'.
-        AND rfp_approval_status IN ('pending_outbox', 'pending')`,
-    [body.error ?? "conflict", JSON.stringify(body.conflict ?? body), dealId]
+        -- Same two-part round guard as the success path: a conflict verdict must neither resurrect a
+        -- cleared cycle nor mark a DIFFERENT, later round conflicted.
+        AND rfp_approval_status IN ('pending_outbox', 'pending')
+        AND ($4::text IS NULL OR rfp_approval_request_event_id IS NULL
+             OR rfp_approval_request_event_id::text = $4::text)`,
+    [body.error ?? "conflict", JSON.stringify(body.conflict ?? body), dealId, roundEventId]
   );
 }
 
@@ -144,19 +163,63 @@ export async function handleRfpRequestDelivery(
 
   const schemaName = await resolveOfficeSchema(db, officeId);
 
-  // Re-read before POSTing. The write-back guards below stop a stale delivery from corrupting the deal,
-  // but only skipping the request stops it from creating an ORPHAN RFP submission in SyncHub for a deal
-  // whose cycle was cancelled — one the operator would then have to chase down externally. The server
-  // cancels still-queued jobs inside the move-back transaction; this covers the job it could not reach
-  // because the worker had already claimed it.
-  const current = await db.query(
-    `SELECT rfp_approval_status FROM ${quoteIdent(schemaName)}.deals WHERE id = $1`,
-    [payload.dealId]
-  );
-  const currentStatus = current.rows[0]?.rfp_approval_status ?? null;
-  if (current.rows.length > 0 && currentStatus !== "pending_outbox" && currentStatus !== "pending") {
+  // The round this job was built for. Mirrors rfp_bidboard_create's binding; null when the payload
+  // predates the format or is malformed, in which case every round check below fails OPEN.
+  const roundEventId =
+    /^crm:deal-stage:opportunity:(.+)$/.exec(String((payload.body as any)?.sourceEventId ?? ""))?.[1] ??
+    null;
+
+  // AUTHORIZE THE SEND under the deal's advisory lock, then POST outside it.
+  //
+  // The write-back guards below stop a stale delivery from corrupting the deal, but only declining to
+  // send stops an ORPHAN RFP submission being created in SyncHub for a cancelled cycle — one the
+  // operator would have to chase down externally. "Move back to Opportunity" cancels still-queued jobs
+  // inside its own transaction; this covers the job it could not reach because this worker had already
+  // claimed it.
+  //
+  // Taking the SAME deal-scoped advisory lock that action holds is what makes the check meaningful
+  // rather than advisory: an unlocked read could observe `pending_outbox` a microsecond before the
+  // move-back commits and send anyway. Serialising on the lock means we either read the pre-move state
+  // and send while the move-back waits, or we wait and then read the cleared cycle and skip. Held only
+  // across the read — a database transaction must not span an outbound HTTP call.
+  const authClient: Queryable & { release?: () => void } = db.connect ? await db.connect() : db;
+  let authorized = true;
+  let observedStatus: string | null = null;
+  let observedRound: string | null = null;
+  try {
+    await authClient.query("BEGIN");
+    await authClient.query("SELECT pg_advisory_xact_lock(hashtext($1))", [
+      `${DEAL_RFP_DELIVERY_LOCK_NAMESPACE}${payload.dealId}`,
+    ]);
+    const current = await authClient.query(
+      `SELECT rfp_approval_status, rfp_approval_request_event_id
+         FROM ${quoteIdent(schemaName)}.deals WHERE id = $1`,
+      [payload.dealId]
+    );
+    if (current.rows.length > 0) {
+      observedStatus = current.rows[0].rfp_approval_status ?? null;
+      observedRound = current.rows[0].rfp_approval_request_event_id ?? null;
+      const awaiting = observedStatus === "pending_outbox" || observedStatus === "pending";
+      // Fail-open on an unknown round, exactly as the SQL guards do.
+      const sameRound = roundEventId == null || observedRound == null || observedRound === roundEventId;
+      authorized = awaiting && sameRound;
+    }
+    await authClient.query("COMMIT");
+  } catch (err) {
+    // Fail OPEN on a recheck error (DB blip / schema resolve), matching rfp_bidboard_create: better to
+    // attempt a legitimate send, since the write-back guards still reject a stale response.
+    await authClient.query("ROLLBACK").catch(() => {});
+    console.warn(
+      `[Worker:rfp_request_delivery] Pre-send recheck failed for deal ${payload.dealId}; proceeding (write-back guards still apply):`,
+      err
+    );
+  } finally {
+    authClient.release?.();
+  }
+
+  if (!authorized) {
     console.info(
-      `[Worker:rfp_request_delivery] Skipping delivery for deal ${payload.dealId}: RFP cycle is no longer awaiting delivery (status=${currentStatus ?? "cleared"})`
+      `[Worker:rfp_request_delivery] Skipping delivery for deal ${payload.dealId}: no longer awaiting THIS round (status=${observedStatus ?? "cleared"}, round=${observedRound ?? "null"} vs payload=${roundEventId ?? "null"})`
     );
     return;
   }
@@ -179,7 +242,7 @@ export async function handleRfpRequestDelivery(
   const responseBody = await parseResponseBody(response);
 
   if (response.status === 201 || response.status === 200) {
-    await updateDealPending(db, schemaName, payload.dealId, responseBody);
+    await updateDealPending(db, schemaName, payload.dealId, responseBody, roundEventId);
     if (response.status === 200) {
       console.info(`[Worker:rfp_request_delivery] Idempotent replay accepted for deal ${payload.dealId}`);
     }
@@ -187,7 +250,7 @@ export async function handleRfpRequestDelivery(
   }
 
   if (response.status === 409) {
-    await updateDealConflict(db, schemaName, payload.dealId, responseBody);
+    await updateDealConflict(db, schemaName, payload.dealId, responseBody, roundEventId);
     return;
   }
 

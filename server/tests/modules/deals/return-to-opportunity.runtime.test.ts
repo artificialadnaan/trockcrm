@@ -594,6 +594,55 @@ describe("returnDealToOpportunity — Won deals void commission", () => {
   });
 });
 
+// A reseed/import deal can carry contract_signed_at with contract_signed_date NULL — the shape the
+// effective-date helper exists to coalesce. The audit must name the column that actually changed.
+describe("returnDealToOpportunity — the contract audit names the real columns", () => {
+  it("records contractSignedAt (not contractSignedDate) for an _at-only deal", async () => {
+    const D = U("d801");
+    await seedBidBoardDeal(D, { stageId: WON_STAGE });
+    await pg.exec(
+      `UPDATE public.deals SET contract_signed_date = NULL, contract_signed_at = '2026-03-01T00:00:00Z'
+        WHERE id = '${D}'`
+    );
+
+    await returnDealToOpportunity(tdb, {
+      dealId: D, userId: ADMIN, userRole: "admin", reason: "Void the legacy signed shape",
+      acknowledgedCommissionTotal: "0", acknowledgedCommissionRowCount: 0, auditContext,
+    });
+
+    const { rows } = await pg.query<{ changes: Record<string, { from: unknown; to: unknown }> }>(
+      `SELECT changes FROM public.audit_log
+        WHERE record_id = '${D}' AND table_name = 'deals'
+          AND full_row ->> 'source' = 'return_to_opportunity'`
+    );
+    // The column that was really cleared…
+    expect(rows[0].changes.contractSignedAt).toBeDefined();
+    expect(rows[0].changes.contractSignedAt.to).toBeNull();
+    // …and NOT a column that was already null.
+    expect(rows[0].changes.contractSignedDate).toBeUndefined();
+    expect((await dealRow(D)).contract_signed_at).toBeNull();
+  });
+
+  it("records contractSignedDate for an ordinary date-only deal", async () => {
+    const D = U("d802");
+    await seedBidBoardDeal(D, { stageId: WON_STAGE, contractSignedDate: "2026-03-01" });
+    await pg.exec(`UPDATE public.deals SET contract_signed_at = NULL WHERE id = '${D}'`);
+
+    await returnDealToOpportunity(tdb, {
+      dealId: D, userId: ADMIN, userRole: "admin", reason: "Ordinary shape",
+      acknowledgedCommissionTotal: "0", acknowledgedCommissionRowCount: 0, auditContext,
+    });
+
+    const { rows } = await pg.query<{ changes: Record<string, { from: unknown; to: unknown }> }>(
+      `SELECT changes FROM public.audit_log
+        WHERE record_id = '${D}' AND table_name = 'deals'
+          AND full_row ->> 'source' = 'return_to_opportunity'`
+    );
+    expect(rows[0].changes.contractSignedDate.from).toBe("2026-03-01");
+    expect(rows[0].changes.contractSignedAt).toBeUndefined();
+  });
+});
+
 describe("returnDealToOpportunity — permissions and state blocks", () => {
   it("403s a DIRECTOR on a deal with booked commission, leaving the money intact", async () => {
     const D = U("d201");
@@ -721,6 +770,78 @@ describe("returnDealToOpportunity — permissions and state blocks", () => {
     expect(row.is_bid_board_owned).toBe(false);
     expect(row.bid_board_project_number).toBeNull();
     expect(row.rfp_approval_status).toBeNull();
+  });
+
+  // APPROVAL INVALIDATION across all three paths. The rule belongs to this action, so it must hold
+  // regardless of which stage the deal came from — delegating it to changeDealStage's reopen
+  // classification left the most common path uncovered.
+  //
+  // CASE 3, the likely-common one: a NON-TERMINAL source. The stage genuinely changes (so the
+  // already-at-Opportunity branch does not apply) but changeDealStage's
+  // `isReopen = currentStage.isTerminal && !targetStage.isTerminal` is FALSE because estimating is not
+  // terminal — so before the fix NOTHING invalidated. That is an authorization bypass: validateStageGate
+  // matches approvals on (deal_id, target_stage_id, status='approved'), so the surviving row silently
+  // satisfies the gate when the deal is later re-advanced to that same stage.
+  it("invalidates approvals when moving back from a NON-TERMINAL stage (neither path covered this)", async () => {
+    const D = U("d213");
+    await seedBidBoardDeal(D); // estimating — not terminal
+    await pg.exec(
+      `INSERT INTO public.deal_approvals (deal_id, target_stage_id, required_role, status, requested_by)
+       VALUES ('${D}', '${WON_STAGE}', 'director', 'approved', '${ADMIN}')`
+    );
+
+    await returnDealToOpportunity(tdb, {
+      dealId: D, userId: ADMIN, userRole: "admin", reason: "Mid-pipeline move back", auditContext,
+    });
+
+    const { rows } = await pg.query<{ status: string; notes: string | null }>(
+      `SELECT status, notes FROM public.deal_approvals WHERE deal_id = '${D}'`
+    );
+    expect(rows[0].status).toBe("rejected");
+    expect(rows[0].notes).toContain("move back to Opportunity");
+  });
+
+  // CASE 1: a TERMINAL source, where changeDealStage's own reopen cleanup also fires. The two overlap
+  // harmlessly — whichever runs first moves the rows out of 'approved' and the other matches none — but
+  // the outcome is pinned here so the seam between the two owners is covered rather than assumed.
+  it("invalidates approvals when moving back from a TERMINAL stage", async () => {
+    const D = U("d214");
+    await seedBidBoardDeal(D, { stageId: WON_STAGE, contractSignedDate: "2026-03-01" });
+    await pg.exec(
+      `INSERT INTO public.deal_approvals (deal_id, target_stage_id, required_role, status, requested_by)
+       VALUES ('${D}', '${WON_STAGE}', 'director', 'approved', '${ADMIN}')`
+    );
+
+    await returnDealToOpportunity(tdb, {
+      dealId: D, userId: ADMIN, userRole: "admin", reason: "Award rescinded",
+      acknowledgedCommissionTotal: "0", acknowledgedCommissionRowCount: 0, auditContext,
+    });
+
+    const { rows } = await pg.query<{ status: string }>(
+      `SELECT status FROM public.deal_approvals WHERE deal_id = '${D}'`
+    );
+    expect(rows[0].status).toBe("rejected");
+  });
+
+  // CASE 2: changeDealStage returns through a same-stage no-op BEFORE its reopen cleanup, so the
+  // already-at-Opportunity case would otherwise skip approval invalidation entirely.
+  it("invalidates approvals even when Opportunity is ALREADY the current stage", async () => {
+    const D = U("d212");
+    await seedBidBoardDeal(D, { stageId: OPP_STAGE });
+    await pg.exec(
+      `INSERT INTO public.deal_approvals (deal_id, target_stage_id, required_role, status, requested_by)
+       VALUES ('${D}', '${WON_STAGE}', 'director', 'approved', '${ADMIN}')`
+    );
+
+    await returnDealToOpportunity(tdb, {
+      dealId: D, userId: ADMIN, userRole: "admin", reason: "Mirror parked it here still owned", auditContext,
+    });
+
+    const { rows } = await pg.query<{ status: string; notes: string | null }>(
+      `SELECT status, notes FROM public.deal_approvals WHERE deal_id = '${D}'`
+    );
+    expect(rows[0].status).toBe("rejected");
+    expect(rows[0].notes).toContain("move back to Opportunity");
   });
 
   // The same stage can also retain MONEY: a Won deal walked backward by the mirror keeps its signed date
@@ -918,6 +1039,26 @@ describe("returnDealToOpportunity — queued RFP work is cancelled with the cycl
       expect(job.status).toBe("completed");
       expect(job.payload.cancelledBy).toBe("return_to_opportunity");
     }
+    expect((await dealRow(D)).rfp_approval_status).toBeNull();
+  });
+
+  it("neutralizes an ALREADY-DEAD job so the dead-letter sweep can't restore send_failed", async () => {
+    const D = U("d604");
+    await seedBidBoardDeal(D);
+    await queueRfpJob(D, "rfp_request_delivery", "dead");
+
+    await returnDealToOpportunity(tdb, {
+      dealId: D, userId: ADMIN, userRole: "admin", reason: "Dead job must not resurrect the cycle", auditContext,
+    });
+
+    const [job] = await jobRows(D);
+    // Status stays 'dead' on purpose: the RFP retry route resolves a dead delivery row by deal id to
+    // rebuild its payload, and flipping the status would 404 that flow.
+    expect(job.status).toBe("dead");
+    // dealHandled is the opt-out BOTH sweeps already honour, so the sweep skips this row instead of
+    // stamping rfp_approval_status = 'send_failed' onto the deal we just cleared.
+    expect(job.payload.dealHandled).toBe(true);
+    expect(job.payload.cancelledBy).toBe("return_to_opportunity");
     expect((await dealRow(D)).rfp_approval_status).toBeNull();
   });
 

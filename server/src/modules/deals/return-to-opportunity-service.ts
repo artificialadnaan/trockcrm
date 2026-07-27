@@ -1,6 +1,7 @@
 import { and, eq, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
+  dealApprovals,
   dealChangeOrders,
   dealHistory,
   dealSignedCommissions,
@@ -202,22 +203,43 @@ function buildRfpCycleReset() {
  * `rfp_bidboard_create` is cancelled for the same reason one step further along: it would create a Bid
  * Board project for a deal the operator has just disconnected, handing them a second one to delete.
  *
- * Marked `completed`, NOT `dead`: the dead-letter sweep claims dead `rfp_request_delivery` rows and
- * stamps the deal `send_failed` — repopulating the very field we are clearing. The payload marker keeps
- * a cancelled job distinguishable from a genuinely delivered one.
+ * `pending` rows are marked `completed`, NOT `dead`: the dead-letter sweep claims dead
+ * `rfp_request_delivery` rows and stamps the deal `send_failed` — repopulating the very field we are
+ * clearing. The `cancelledBy` marker keeps a cancelled job distinguishable from a delivered one.
  *
- * Only `pending` rows are reachable here; a job the worker has already CLAIMED is beyond this
- * transaction, which is why the worker also refuses to write RFP state back onto a deal that is no
- * longer awaiting delivery (worker/src/jobs/rfp-request-delivery.ts). Neither half suffices alone.
+ * ALREADY-DEAD rows are the other half of that same hazard, and they need the opposite treatment. A job
+ * that died before the move-back is untouched by a pending-only update, and the sweep would later stamp
+ * `send_failed` onto the cleared deal. They keep `status = 'dead'` — the RFP retry route resolves a
+ * dead delivery row by deal id to rebuild its payload, and flipping the status would 404 that flow —
+ * and instead get `dealHandled = true`, which is precisely the opt-out both sweeps already honour
+ * (`payload->>'dealHandled'` NOT IN (NULL,'false','claimed')). Neutralising the sweep without touching
+ * the row's status is the smaller, more surgical edit.
+ *
+ * A job the worker has already CLAIMED is beyond this transaction either way, which is why the worker
+ * also refuses to write RFP state back onto a deal that is no longer in the round the job was built for
+ * (worker/src/jobs/rfp-request-delivery.ts). Neither half suffices alone.
  */
 async function cancelQueuedRfpJobs(tenantDb: TenantDb, dealId: string): Promise<number> {
+  // Serialize with the delivery worker's send-authorization, which takes this same lock across its
+  // pre-send recheck (worker/src/jobs/rfp-request-delivery.ts). Without it the worker can observe
+  // `pending_outbox` a microsecond before this transaction commits and POST anyway, creating an orphan
+  // SyncHub submission for a cycle that no longer exists. With it the two serialize: either the worker
+  // authorizes and this cancellation waits, or this commits first and the worker reads the cleared
+  // cycle and declines to send. Transaction-scoped, released at COMMIT/ROLLBACK.
+  await tenantDb.execute(
+    sql`select pg_advisory_xact_lock(hashtext(${`deal_rfp_delivery:${dealId}`}))`
+  );
+
   const result = await tenantDb.execute(sql`
     UPDATE public.job_queue
-       SET status = 'completed',
-           completed_at = NOW(),
-           payload = jsonb_set(payload, '{cancelledBy}', '"return_to_opportunity"'::jsonb, true)
+       SET status = CASE WHEN status = 'pending' THEN 'completed'::job_status ELSE status END,
+           completed_at = CASE WHEN status = 'pending' THEN NOW() ELSE completed_at END,
+           payload = jsonb_set(
+             jsonb_set(payload, '{cancelledBy}', '"return_to_opportunity"'::jsonb, true),
+             '{dealHandled}', 'true'::jsonb, true
+           )
      WHERE job_type IN ('rfp_request_delivery', 'rfp_bidboard_create')
-       AND status = 'pending'
+       AND status IN ('pending', 'dead')
        AND payload->>'dealId' = ${dealId}
   `);
   return (result as unknown as { rowCount?: number }).rowCount ?? 0;
@@ -612,6 +634,37 @@ export async function returnDealToOpportunity(
     );
   }
 
+  // APPROVAL INVALIDATION — UNCONDITIONAL, and owned by this action.
+  //
+  // "The retired cycle's approvals are void" is a property of moving a deal back, not something to
+  // inherit from changeDealStage's terminal-specific reopen classification. Delegating it left a gap in
+  // the most common path. The three cases:
+  //
+  //   1. terminal -> Opportunity (Won/Lost): changeDealStage's `isReopen` is true, so it invalidates.
+  //   2. already AT Opportunity: changeDealStage returns through its same-stage no-op (line ~178)
+  //      before any of that runs.
+  //   3. NON-TERMINAL -> Opportunity (estimating, proposal, negotiation…): the stage genuinely changes,
+  //      but `isReopen = currentStage.isTerminal && !targetStage.isTerminal` is FALSE because the source
+  //      is not terminal — so NOTHING invalidated. This is the likely-common path: the action's headline
+  //      property is that it works from any stage, and most deals moved back are mid-pipeline.
+  //
+  // Case 3 is an authorization bypass, not untidiness: validateStageGate matches approvals on
+  // (deal_id, target_stage_id, status='approved'), so an approval granted to enter stage X survives the
+  // move back and silently satisfies the gate when the deal is later re-advanced to X — no one
+  // re-approves work this action explicitly tore down.
+  //
+  // Overlapping with changeDealStage on case 1 is deliberate and free: it runs first for a real reopen,
+  // so this UPDATE matches zero rows. Idempotent by construction, and far cheaper than a split rule
+  // applied by two owners under different predicates with a gap between them.
+  await tenantDb
+    .update(dealApprovals)
+    .set({
+      status: "rejected",
+      resolvedAt: now,
+      notes: "Auto-invalidated on move back to Opportunity",
+    })
+    .where(and(eq(dealApprovals.dealId, input.dealId), eq(dealApprovals.status, "approved")));
+
   // Now the ordinary stage change: it owns deal_stage_history (with is_backward_move + the override
   // reason), the terminal-field clear (won_closed_date / actual_close_date / lost_*), the approval
   // invalidation on reopen, the stage timers and the domain events. Deliberately NOT re-implemented
@@ -659,8 +712,21 @@ export async function returnDealToOpportunity(
         ...(commissionRowsVoided > 0
           ? { commissionVoidedTotal: { from: commission.total, to: "0" } }
           : {}),
-        ...(contractSignedDateCleared && eligibility.voidsCommission
-          ? { contractSignedDate: { from: contractSignedDateCleared, to: null } }
+        // Per-COLUMN, not the collapsed effective date. A reseed/import deal can carry contract_signed_at
+        // with contract_signed_date NULL (the effective-date helper coalesces the two precisely because
+        // that shape exists), and the detach clears both — so recording a contractSignedDate change on
+        // such a deal named a column that was already null and never recorded the timestamp actually
+        // mutated. On the destructive signed-contract path the trail has to name what really changed.
+        ...(eligibility.voidsCommission && deal.contractSignedDate
+          ? { contractSignedDate: { from: deal.contractSignedDate, to: null } }
+          : {}),
+        ...(eligibility.voidsCommission && deal.contractSignedAt
+          ? {
+              contractSignedAt: {
+                from: new Date(deal.contractSignedAt).toISOString(),
+                to: null,
+              },
+            }
           : {}),
       },
       metadata: {
