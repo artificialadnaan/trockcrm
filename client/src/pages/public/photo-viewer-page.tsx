@@ -91,6 +91,9 @@ export function PublicPhotoViewerPage() {
   // without ever swapping the loaded gallery for a spinner.
   const [loadingMore, setLoadingMore] = useState(false);
   const [pageError, setPageError] = useState(false);
+  // Set once the server has served its last page. Authoritative over the `photos.length < total`
+  // arithmetic, which can never close its gap after a mid-scroll upload or delete — see loadPage.
+  const [endReached, setEndReached] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
   const gridRef = useRef<HTMLDivElement | null>(null);
@@ -113,6 +116,13 @@ export function PublicPhotoViewerPage() {
   // request is in flight.
   const nextPageRef = useRef(1);
   const fetchingRef = useRef(false);
+  // Which token the in-flight request belongs to. The route is `/p/:token` WITHOUT a key, so React
+  // Router reuses this component across a param change and a request started for the previous token
+  // would otherwise resolve into the new token's state — the old deal name, the old photos, and a
+  // nextPage cursor counted against a different total. No in-app link navigates between two `/p/`
+  // routes today (a share link is always opened as a fresh document), so this is hardening rather than
+  // a live defect; it is here because the guard is what makes the invariant survive the next link.
+  const requestTokenRef = useRef<string | undefined>(token);
 
   // The grid element only exists once there is something to render, so measurement has to wait for the
   // first page. Named rather than inlined so it can sit in a dep array without tripping exhaustive-deps.
@@ -124,10 +134,14 @@ export function PublicPhotoViewerPage() {
       fetchingRef.current = true;
       setPageError(false);
       setLoadingMore(true);
+      // Captured BEFORE the await; every commit below is gated on it still being the live token.
+      const requestToken = token;
+      const isStale = () => requestTokenRef.current !== requestToken;
       try {
         const response = await api<PublicViewerResponse>(
           `/public/photo-viewer/${encodeURIComponent(token ?? "")}?page=${pageNum}`,
         );
+        if (isStale()) return;
         setDeal(response.deal);
         setTotal(response.pagination?.total ?? response.photos.length);
         setPhotos((prev) => {
@@ -139,6 +153,21 @@ export function PublicPhotoViewerPage() {
           return [...prev, ...response.photos.filter((photo) => !seen.has(photo.id))];
         });
         nextPageRef.current = pageNum + 1;
+        // THE SERVER decides when the gallery ends, not the arithmetic `photos.length < total`.
+        //
+        // Those two can disagree, and when they do the difference never closes: OFFSET paging over a
+        // live deal shifts rows under the cursor, so a photo uploaded mid-scroll pushes one across a
+        // page boundary and the dedupe above drops the repeat, while a deleted photo makes a page skip
+        // one outright. Either way the gallery ends with `photos.length < total` after the last real
+        // page. Left to `hasMore` alone the prefetch effect would then request page N+1 forever —
+        // each empty response clears `loadingMore`, which re-fires the effect, which requests the next
+        // page: an unbounded request loop from a customer's browser against an UNAUTHENTICATED
+        // endpoint. Honouring totalPages (and an empty page, for a response with no pagination block)
+        // makes the end a fact the server reports rather than a count the client infers.
+        const totalPages = response.pagination?.totalPages;
+        if (response.photos.length === 0 || totalPages === undefined || pageNum >= totalPages) {
+          setEndReached(true);
+        }
       } catch {
         // A failed FIRST page is fatal (the link itself is bad). A failed LATER page is recoverable and
         // must SAY so: nextPageRef is only advanced on success, so the retry re-requests the same page.
@@ -146,18 +175,27 @@ export function PublicPhotoViewerPage() {
         // cannot re-fire because none of its inputs change when a fetch fails, so one transient blip on
         // a 3000-photo share silently under-delivered it, which is the exact failure this change set
         // exists to remove.
+        if (isStale()) return;
         if (pageNum === 1) setError("This photo link is no longer valid.");
         else setPageError(true);
       } finally {
-        fetchingRef.current = false;
-        setLoading(false);
-        setLoadingMore(false);
+        // Also gated: `fetchingRef` and the spinners now belong to the CURRENT token's request, so a
+        // late loser clearing them would both hide a live spinner and unlock a second concurrent fetch.
+        if (!isStale()) {
+          fetchingRef.current = false;
+          setLoading(false);
+          setLoadingMore(false);
+        }
       }
     },
     [token],
   );
 
   useEffect(() => {
+    // Publish the live token before the first fetch: anything still in flight for the previous one is
+    // stale from this point on and will drop its result.
+    requestTokenRef.current = token;
+    setDeal(null);
     setPhotos([]);
     setTotal(0);
     setError(null);
@@ -165,8 +203,9 @@ export function PublicPhotoViewerPage() {
     nextPageRef.current = 1;
     fetchingRef.current = false;
     setPageError(false);
+    setEndReached(false);
     void loadPage(1);
-  }, [loadPage]);
+  }, [loadPage, token]);
 
   // Column COUNT comes from the viewport breakpoint (matching the Tailwind classes the fallback grid
   // uses); tile SIZE comes from the grid element's own width, which is padded and max-widthed. Both are
@@ -204,7 +243,10 @@ export function PublicPhotoViewerPage() {
 
   const virtualRows = virtualizer.getVirtualItems();
   const lastVisibleRow = virtualRows.length > 0 ? virtualRows[virtualRows.length - 1].index : 0;
-  const hasMore = photos.length < total;
+  // `!endReached` is the load-bearing half — the count alone is what loops forever once the two
+  // disagree (see loadPage). The count is kept as the second condition so the control still disappears
+  // the instant a share is fully loaded, without waiting on a response to say so.
+  const hasMore = !endReached && photos.length < total;
 
   useEffect(() => {
     if (!measured || !hasMore || loading || loadingMore || pageError) return;

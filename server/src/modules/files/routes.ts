@@ -635,8 +635,15 @@ function optionalQueryString(value: unknown): string | undefined {
  * the two surfaces end up reporting different totals for the same selection).
  * Unknown enum values are dropped rather than rejected: these arrive from bookmarked/shared URLs, and a
  * stale `?source=…` should degrade to "unfiltered", not 400 the page.
+ *
+ * Dates go through `parseFileDateParam` for the same reason the `photoCategory` predicate compares the
+ * cast column: the filter reaches SQL as `${value}::timestamptz`, so an unparseable string raises PG
+ * 22007 and surfaces as a 500. That hazard already existed on `/photos/feed`, but this parser is what
+ * routes the same params into `/photos/project-stats`, which took no filters at all before — validating
+ * here keeps a stale bookmark degrading to "unfiltered" on BOTH tabs instead of adding a second surface
+ * that 500s.
  */
-function parseFeedFilterQuery(query: express.Request["query"]): PhotoFeedFilters {
+export function parseFeedFilterQuery(query: express.Request["query"]): PhotoFeedFilters {
   const source = optionalQueryString(query.source);
   return {
     dealId: optionalQueryString(query.dealId),
@@ -644,8 +651,8 @@ function parseFeedFilterQuery(query: express.Request["query"]): PhotoFeedFilters
     subcategory: optionalQueryString(query.subcategory),
     photoCategory: optionalQueryString(query.photoCategory),
     source: PHOTO_FEED_SOURCES.includes(source as PhotoFeedSource) ? (source as PhotoFeedSource) : undefined,
-    dateFrom: optionalQueryString(query.dateFrom),
-    dateTo: optionalQueryString(query.dateTo),
+    dateFrom: parseFileDateParam(query.dateFrom),
+    dateTo: parseFileDateParam(query.dateTo),
     page: query.page ? parseInt(query.page as string, 10) : undefined,
     limit: query.limit ? parseInt(query.limit as string, 10) : undefined,
   };

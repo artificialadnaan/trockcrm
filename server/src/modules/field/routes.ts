@@ -396,14 +396,17 @@ const MAX_SHARE_PHOTOS = 3000;
 // oversight — `share-photo-caps.test.ts` asserts they are independent.
 const MAX_DOWNLOAD_PHOTOS = 200;
 
-// Photos in one generated PDF. Unlike the share link, report rendering is O(N) SEQUENTIAL full-res R2
-// GETs inside the HTTP request (pdf-layout drawPhotoEntry -> loadPhotoBuffer), so a large selection is a
-// request timeout, not just a big response. The share cap never protected this route (it takes its ids
-// from a different body shape and had NO length check at all) — but raising the share cap to 3000
-// teaches users that selections that size are legitimate, and the report picker is the next place they
-// will try it. Mirrors the scorecard PDF's MAX_EVIDENCE_PHOTOS precedent.
-const MAX_REPORT_PHOTOS = 500;
-
+// NOT capped here: the photo-report routes (/reports/preview, /reports/generate). They take their ids
+// from a different body shape, have never had a length check, and this change set does not touch what
+// they render — so a cap on them is a separate decision, not a consequence of raising the share cap.
+// An earlier revision of this PR added MAX_REPORT_PHOTOS = 500. It was removed for two measured
+// reasons. (1) It could not do the job: generateFieldPhotoReport rebuilds each section from its own
+// photoIds and the renderer draws every OCCURRENCE, so a union-of-ids budget is not a bound on the work
+// (Codex, PR #970). (2) 500 sits below real usage — production office_dallas holds a 660-photo project
+// (Granada Place) that people actively generate photo reports from, so "select all" there would have
+// started 400-ing. The underlying hazard (unbounded sequential full-res R2 GETs buffered into one PDF;
+// the largest rendered report in production is ~950 MB) is real and PRE-EXISTING, and deserves its own
+// change with the owner picking the bound — most likely a byte budget rather than a photo count.
 function parseSharePhotoIds(raw: unknown, maxPhotos: number, limitMessage: string): string[] {
   if (!Array.isArray(raw) || raw.length === 0) {
     throw new AppError(400, "photoIds must be a non-empty array of photo ids.");
@@ -417,22 +420,6 @@ function parseSharePhotoIds(raw: unknown, maxPhotos: number, limitMessage: strin
   }
   ids.forEach((id) => assertValidUuid(id, "photoId"));
   return ids;
-}
-
-/**
- * Total photos a report request may reference across ALL of its sections. Counted over the union rather
- * than per section, because the renderer walks every section in one pass — ten 100-photo sections cost
- * exactly as much as one 1000-photo section.
- */
-function assertReportPhotoBudget(photoIdLists: Array<unknown>): void {
-  const unique = new Set<string>();
-  for (const list of photoIdLists) {
-    if (!Array.isArray(list)) continue;
-    for (const value of list) unique.add(String(value));
-  }
-  if (unique.size > MAX_REPORT_PHOTOS) {
-    throw new AppError(400, `A photo report can include at most ${MAX_REPORT_PHOTOS} photos. Selected: ${unique.size}.`);
-  }
 }
 
 fieldRoutes.post("/projects/:dealId/share", requireFieldContractor, async (req, res, next) => {
@@ -857,7 +844,6 @@ fieldRoutes.get("/reports/:reportId/download", requireFieldContractor, async (re
 fieldRoutes.post("/reports/preview", requireFieldContractor, async (req, res, next) => {
   try {
     const projectId = String(req.body.projectId);
-    assertReportPhotoBudget([req.body.photoIds]);
     const result = await runFieldDealWrite(req, { dealId: projectId }, (db) =>
       previewFieldPhotoReport(db, {
         userId: req.fieldUser!.id,
@@ -879,9 +865,6 @@ fieldRoutes.post("/reports/preview", requireFieldContractor, async (req, res, ne
 fieldRoutes.post("/reports/generate", requireFieldContractor, async (req, res, next) => {
   try {
     const projectId = String(req.body.projectId);
-    assertReportPhotoBudget(
-      Array.isArray(req.body.sections) ? req.body.sections.map((section: any) => section?.photoIds) : [],
-    );
     const result = await runFieldDealWrite(req, { dealId: projectId }, (db, office) =>
       generateFieldPhotoReport(db, {
         userId: req.fieldUser!.id,

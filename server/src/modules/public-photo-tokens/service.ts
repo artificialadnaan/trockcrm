@@ -468,7 +468,14 @@ export async function getPublicPhotoViewer(
   const limit = Number.isFinite(options.limit) && (options.limit as number) >= 1
     ? Math.min(Math.floor(options.limit as number), PUBLIC_VIEWER_MAX_PER_PAGE)
     : PUBLIC_VIEWER_DEFAULT_PER_PAGE;
-  const token = await verifyAndConsumeToken(rawToken);
+  // ONE access per visit, not one per page. `access_count` is surfaced to the sender as "N accesses"
+  // in the share panel, and before this change a viewer load was exactly one request. Now that the
+  // gallery pages, counting every page would have made a single recipient scrolling a 3000-photo share
+  // read as ~50 separate visits — the metric would grow with the SIZE of the share rather than with
+  // interest in it. Page 1 is the visit; pages 2+ validate read-only, for the same reason the per-photo
+  // asset endpoint already uses resolvePublicPhotoToken. Both helpers 404 identically on a revoked or
+  // expired link, so this does not widen what a stale link can reach.
+  const token = page === 1 ? await verifyAndConsumeToken(rawToken) : await resolvePublicPhotoToken(rawToken);
   return withPublicPhotoTenant(token.tenantId, async (tenantDb) => {
     const dealResult = await tenantDb.execute(sql`
       SELECT

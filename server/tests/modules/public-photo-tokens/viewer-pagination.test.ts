@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { PgDialect } from "drizzle-orm/pg-core";
 
 /**
  * The public viewer used to call `getDealPhotoTimeline(…, 1, 500)` and return `{ deal, photos }` with no
@@ -404,5 +405,47 @@ describe("stale stored thumbnail", () => {
 
     expect(asset).toMatchObject({ kind: "jpeg-buffer" });
     expect(generateThumbnailBufferMock).toHaveBeenCalledOnce();
+  });
+});
+
+/**
+ * `access_count` is shown to the sender in the share panel as "N accesses". Before the viewer paged,
+ * one recipient opening a link was exactly one request, so the number meant what it said. Paging turned
+ * a single visit into up to 50 requests, and counting each of them would have made the metric scale
+ * with the SIZE of the share rather than with interest in it — a 3000-photo link would read as ~50
+ * visits the moment one person scrolled it.
+ */
+describe("public viewer access counting", () => {
+  /** Renders the SQL text handed to db.execute for the token lookup. */
+  function tokenLookupSql(): string {
+    return new PgDialect().sqlToQuery(executeMock.mock.calls[0][0]).sql;
+  }
+
+  it("counts page 1 as one access (UPDATE ... access_count + 1)", async () => {
+    const { getPublicPhotoViewer } = await import("../../../src/modules/public-photo-tokens/service.js");
+    primeTenant();
+    primeTimeline(1);
+
+    await getPublicPhotoViewer("raw-token", { assetBaseUrl: ASSET_BASE, page: 1 });
+
+    const sqlText = tokenLookupSql();
+    expect(sqlText).toContain("access_count");
+    expect(sqlText).toMatch(/update/i);
+  });
+
+  it("does NOT re-count pages 2+ — one visit is one access, however many pages it takes", async () => {
+    const { getPublicPhotoViewer } = await import("../../../src/modules/public-photo-tokens/service.js");
+    primeTenant();
+    primeTimeline(9);
+
+    await getPublicPhotoViewer("raw-token", { assetBaseUrl: ASSET_BASE, page: 9 });
+
+    const sqlText = tokenLookupSql();
+    // Read-only validation, the same helper the per-photo asset endpoint already uses for this reason.
+    expect(sqlText).not.toContain("access_count");
+    expect(sqlText).toMatch(/select/i);
+    // Still fully gated: a revoked or expired link 404s on this path exactly as it does on page 1.
+    expect(sqlText).toContain("revoked_at");
+    expect(sqlText).toContain("expires_at");
   });
 });
