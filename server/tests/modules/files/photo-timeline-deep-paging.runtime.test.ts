@@ -81,7 +81,11 @@ describe("deep paging over a large gallery with tied timestamps", () => {
     // No duplicates and no gaps: the union of the pages is the whole gallery.
     expect(seen.length).toBe(PHOTO_COUNT);
     expect(new Set(seen).size).toBe(PHOTO_COUNT);
-  });
+    // Walks EVERY page of a seeded gallery against a real database, which lands at ~21s locally — just
+    // over vitest's 20s default. It passed in isolation and failed in a full run, which is the shape of
+    // a test that fails in CI roughly whenever the machine is busy. Given headroom rather than left to
+    // flake, since an intermittent red here says nothing about the code.
+  }, 120000);
 
   it("is stable — refetching the same page returns the same photos in the same order", async () => {
     const a = await getDealPhotoTimeline(tdb as never, DEAL, 8, PAGE_SIZE);

@@ -51,4 +51,35 @@ describe("parseFeedFilterQuery", () => {
   it("ignores repeated query params rather than handing an array to eq()", () => {
     expect(parseFeedFilterQuery({ dealId: ["a", "b"] } as never).dealId).toBeUndefined();
   });
+
+  // `dealId` and `uploadedBy` are compared against uuid COLUMNS, so a malformed value raises PG 22P02
+  // and the generic handler turns it into a 500. These two are REJECTED rather than dropped: the caller
+  // asked to narrow to one project, and silently returning the whole library as if it were filtered is
+  // worse than saying no.
+  it("400s a malformed dealId / uploadedBy instead of letting PG 22P02 become a 500", () => {
+    expect(() => parseFeedFilterQuery({ dealId: "not-a-uuid" } as never)).toThrow(/dealId must be a valid uuid/);
+    expect(() => parseFeedFilterQuery({ uploadedBy: "unknown" } as never)).toThrow(
+      /uploadedBy must be a valid uuid/,
+    );
+    // A 400, not a 500 — that is the whole point.
+    try {
+      parseFeedFilterQuery({ dealId: "nope" } as never);
+    } catch (err) {
+      expect((err as { statusCode?: number }).statusCode).toBe(400);
+    }
+  });
+
+  it("accepts a well-formed uuid in either case, and leaves an absent one absent", () => {
+    const lower = "3f2504e0-4f89-11d3-9a0c-0305e82c3301";
+    expect(parseFeedFilterQuery({ dealId: lower } as never).dealId).toBe(lower);
+    expect(parseFeedFilterQuery({ uploadedBy: lower.toUpperCase() } as never).uploadedBy).toBe(
+      lower.toUpperCase(),
+    );
+    expect(parseFeedFilterQuery({} as never).dealId).toBeUndefined();
+    // A well-formed uuid that no longer exists is the real stale-bookmark case: it must NOT throw, it
+    // just filters to nothing.
+    expect(parseFeedFilterQuery({ dealId: "00000000-0000-0000-0000-000000000000" } as never).dealId).toBe(
+      "00000000-0000-0000-0000-000000000000",
+    );
+  });
 });

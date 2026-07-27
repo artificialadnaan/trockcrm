@@ -116,6 +116,9 @@ export function PublicPhotoViewerPage() {
   // request is in flight.
   const nextPageRef = useRef(1);
   const fetchingRef = useRef(false);
+  // Every photo id already appended. Doubles as the dedupe set and as the "did this page contribute
+  // anything?" signal that terminates paging — see loadPage.
+  const seenPhotoIdsRef = useRef<Set<string>>(new Set());
   // Which token the in-flight request belongs to. The route is `/p/:token` WITHOUT a key, so React
   // Router reuses this component across a param change and a request started for the previous token
   // would otherwise resolve into the new token's state — the old deal name, the old photos, and a
@@ -144,15 +147,19 @@ export function PublicPhotoViewerPage() {
         if (isStale()) return;
         setDeal(response.deal);
         setTotal(response.pagination?.total ?? response.photos.length);
-        setPhotos((prev) => {
-          if (pageNum === 1) return response.photos;
-          // Dedupe on append. The server orders by timestamp with an id tiebreaker so pages don't
-          // overlap, but a duplicate key here would crash the render — cheap insurance on a page a
-          // customer sees.
-          const seen = new Set(prev.map((photo) => photo.id));
-          return [...prev, ...response.photos.filter((photo) => !seen.has(photo.id))];
-        });
+
+        // Dedupe against a ref rather than inside the state updater. The server orders by timestamp
+        // with an id tiebreaker so pages don't overlap in a still deal, but a duplicate React key would
+        // crash the render on a page a customer sees. Keeping the seen-set here (not derived inside the
+        // updater) is what lets the termination check below know how many ids a page actually
+        // CONTRIBUTED, which is the only signal that survives totalPages shifting mid-browse.
+        const seen = pageNum === 1 ? new Set<string>() : seenPhotoIdsRef.current;
+        const freshPhotos = response.photos.filter((photo) => !seen.has(photo.id));
+        for (const photo of freshPhotos) seen.add(photo.id);
+        seenPhotoIdsRef.current = seen;
+        setPhotos((prev) => (pageNum === 1 ? freshPhotos : [...prev, ...freshPhotos]));
         nextPageRef.current = pageNum + 1;
+
         // THE SERVER decides when the gallery ends, not the arithmetic `photos.length < total`.
         //
         // Those two can disagree, and when they do the difference never closes: OFFSET paging over a
@@ -162,10 +169,20 @@ export function PublicPhotoViewerPage() {
         // page. Left to `hasMore` alone the prefetch effect would then request page N+1 forever —
         // each empty response clears `loadingMore`, which re-fires the effect, which requests the next
         // page: an unbounded request loop from a customer's browser against an UNAUTHENTICATED
-        // endpoint. Honouring totalPages (and an empty page, for a response with no pagination block)
-        // makes the end a fact the server reports rather than a count the client infers.
+        // endpoint.
+        //
+        // TWO independent stops, because neither covers the other:
+        //   - totalPages — the server's own statement of where the gallery ends. Undefined means a
+        //     response with no pagination block, which we also treat as terminal.
+        //   - a page that contributed NO new ids. totalPages is itself computed from a `total` that
+        //     moves while photos are being added, so it can keep growing ahead of a cursor that is
+        //     already re-reading rows it has seen; a page of pure duplicates is the end regardless of
+        //     what the arithmetic claims.
+        // Neither is set from the catch below, so a TRANSIENT failure can never reach this terminal
+        // state — that would trade the retry bug this change set fixes for a silent truncation.
         const totalPages = response.pagination?.totalPages;
-        if (response.photos.length === 0 || totalPages === undefined || pageNum >= totalPages) {
+        const contributedNothing = pageNum > 1 && freshPhotos.length === 0;
+        if (contributedNothing || totalPages === undefined || pageNum >= totalPages) {
           setEndReached(true);
         }
       } catch {
@@ -202,6 +219,7 @@ export function PublicPhotoViewerPage() {
     setLoading(true);
     nextPageRef.current = 1;
     fetchingRef.current = false;
+    seenPhotoIdsRef.current = new Set();
     setPageError(false);
     setEndReached(false);
     void loadPage(1);

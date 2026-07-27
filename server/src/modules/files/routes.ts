@@ -629,25 +629,52 @@ function optionalQueryString(value: unknown): string | undefined {
   return trimmed.length > 0 ? trimmed : undefined;
 }
 
+const UUID_QUERY_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Absent stays absent; present-but-malformed is a 400 rather than a 500 from a failed uuid cast.
+ *
+ * Checked locally rather than by importing field/photos-service's `assertValidUuid`: that module pulls
+ * in the public-photo-token service, the upload workflow and the field projects service behind it, which
+ * is a lot of graph (and a plausible import cycle, since it imports files/service.js) to acquire one
+ * regex. `procore/routes.ts` and `internal-rfp/routes.ts` already keep their own local `isUuid` for the
+ * same reason.
+ */
+function optionalUuidQueryParam(raw: unknown, field: string): string | undefined {
+  const value = optionalQueryString(raw);
+  if (value === undefined) return undefined;
+  if (!UUID_QUERY_PATTERN.test(value)) throw new AppError(400, `${field} must be a valid uuid.`);
+  return value;
+}
+
 /**
  * One parser for BOTH photo-feed tabs, so the Projects tab and the Photos tab can never interpret the
  * same query string differently (a filter honoured on one tab and dropped on the other is exactly how
  * the two surfaces end up reporting different totals for the same selection).
- * Unknown enum values are dropped rather than rejected: these arrive from bookmarked/shared URLs, and a
- * stale `?source=…` should degrade to "unfiltered", not 400 the page.
  *
- * Dates go through `parseFileDateParam` for the same reason the `photoCategory` predicate compares the
- * cast column: the filter reaches SQL as `${value}::timestamptz`, so an unparseable string raises PG
- * 22007 and surfaces as a 500. That hazard already existed on `/photos/feed`, but this parser is what
- * routes the same params into `/photos/project-stats`, which took no filters at all before — validating
- * here keeps a stale bookmark degrading to "unfiltered" on BOTH tabs instead of adding a second surface
- * that 500s.
+ * Two different failure policies here, on purpose:
+ *
+ * DROPPED — the enum dimensions and the dates. These name a VALUE within a dimension, so a stale
+ * `?source=…` or `?dateFrom=…` from a bookmarked or shared URL should degrade to "unfiltered" rather
+ * than 400 a page the user did not do anything wrong to reach. Dates go through `parseFileDateParam`
+ * for the same reason the `photoCategory` predicate compares the cast COLUMN: the filter reaches SQL as
+ * `${value}::timestamptz`, so an unparseable string raises PG 22007 and surfaces as a 500.
+ *
+ * REJECTED — `dealId` and `uploadedBy`. These are compared against uuid COLUMNS (`files.deal_id`,
+ * `files.uploaded_by`), so a malformed value raises PG 22P02 and the generic handler turns it into a
+ * 500. Dropping them silently would be worse than 400-ing: the caller asked to narrow to one project
+ * and would get the WHOLE library back, presented as if it were filtered. A well-formed uuid that no
+ * longer exists still degrades quietly to an empty result, which is the stale-bookmark case that
+ * actually happens.
+ *
+ * Both hazards predate this change on `/photos/feed`, but this parser is what routes the same params
+ * into `/photos/project-stats`, which took no filters at all before.
  */
 export function parseFeedFilterQuery(query: express.Request["query"]): PhotoFeedFilters {
   const source = optionalQueryString(query.source);
   return {
-    dealId: optionalQueryString(query.dealId),
-    uploadedBy: optionalQueryString(query.uploadedBy),
+    dealId: optionalUuidQueryParam(query.dealId, "dealId"),
+    uploadedBy: optionalUuidQueryParam(query.uploadedBy, "uploadedBy"),
     subcategory: optionalQueryString(query.subcategory),
     photoCategory: optionalQueryString(query.photoCategory),
     source: PHOTO_FEED_SOURCES.includes(source as PhotoFeedSource) ? (source as PhotoFeedSource) : undefined,

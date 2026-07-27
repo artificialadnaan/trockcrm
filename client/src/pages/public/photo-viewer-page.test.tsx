@@ -246,6 +246,91 @@ describe("PublicPhotoViewerPage", () => {
     expect(apiMock).toHaveBeenCalledTimes(1);
   });
 
+  // The second, independent stop. `totalPages` is derived from a `total` that grows while photos are
+  // being uploaded, so it can stay ahead of a cursor that is already re-reading rows it has seen — the
+  // server keeps claiming another page and every one of them is duplicates. A page that contributes no
+  // new ids is the end whatever the arithmetic says. Here totalPages is 3, so the totalPages stop alone
+  // would NOT catch this.
+  it("stops when a page contributes only ids it already has, even if the server claims more pages", async () => {
+    const photoA = basePhoto;
+    const photoB = { id: "photo-2", imageUrl: "https://example.test/2.jpg", fullImageUrl: null };
+    let calls = 0;
+    apiMock.mockImplementation(async () => {
+      calls += 1;
+      if (calls > 4) throw new Error("runaway paging");
+      return {
+        deal: baseDeal,
+        // Page 2 re-serves page 1 — the shape an OFFSET cursor produces when rows are inserted ahead
+        // of it. Every id is already known.
+        photos: [photoA, photoB],
+        pagination: { page: calls, limit: 2, total: 6, totalPages: 3 },
+      };
+    });
+
+    // Queried as an element, not via textContent: "Loading more photos…" contains "more photos" too, so
+    // a text assertion would pass on the transient in-flight state and prove nothing.
+    const loadMoreButton = () =>
+      Array.from(node.querySelectorAll<HTMLButtonElement>("button")).find((button) =>
+        button.textContent?.includes("Load more photos"),
+      );
+
+    const node = renderPage();
+    await vi.waitFor(() => expect(node.querySelectorAll('img[alt^="Shared photo"]').length).toBe(2));
+    // Page 1 said totalPages 3, so the control is offered.
+    await vi.waitFor(() => expect(loadMoreButton()).not.toBeUndefined());
+
+    loadMoreButton()?.click();
+
+    // Page 2 arrives as pure duplicates. Wait for the request to SETTLE before judging the control.
+    await vi.waitFor(() => expect(calls).toBe(2));
+    await vi.waitFor(() => expect(node.textContent).not.toContain("Loading more photos"));
+
+    // totalPages is 3 and only 2 of 6 photos are loaded, so every count-based signal still says "more".
+    // Only the contributed-nothing stop can end the gallery here.
+    expect(loadMoreButton()).toBeUndefined();
+    expect(node.querySelectorAll('img[alt^="Shared photo"]').length).toBe(2);
+    for (let tick = 0; tick < 5; tick += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    expect(calls).toBe(2);
+  });
+
+  // The two paging fixes point in opposite directions and must compose: a page that FAILS is retryable,
+  // a page that legitimately ends the gallery is not. If a transient failure could reach the terminal
+  // "no more pages" state, the retry bug would have been traded for a silent truncation — the exact
+  // failure this change set exists to remove.
+  it("keeps a failed page retryable — a transient error is not a terminal end-of-gallery", async () => {
+    let calls = 0;
+    apiMock.mockImplementation(async () => {
+      calls += 1;
+      if (calls === 2) throw new Error("network blip");
+      return {
+        deal: baseDeal,
+        photos: [{ id: `photo-p${calls}`, imageUrl: `https://example.test/${calls}.jpg`, fullImageUrl: null }],
+        pagination: { page: calls === 1 ? 1 : 2, limit: 1, total: 3, totalPages: 3 },
+      };
+    });
+
+    const node = renderPage();
+    await vi.waitFor(() => expect(node.textContent).toContain("Load more photos"));
+
+    Array.from(node.querySelectorAll<HTMLButtonElement>("button"))
+      .find((button) => button.textContent?.includes("Load more photos"))
+      ?.click();
+
+    // The failure surfaces as a retry, NOT as the end of the gallery.
+    await vi.waitFor(() => expect(node.textContent).toContain("Try again"));
+    expect(node.textContent).toContain("Couldn't load the rest of these photos");
+
+    Array.from(node.querySelectorAll<HTMLButtonElement>("button"))
+      .find((button) => button.textContent?.includes("Try again"))
+      ?.click();
+
+    // Retry re-requests the SAME page (nextPageRef never advanced) and the gallery grows.
+    await vi.waitFor(() => expect(node.querySelectorAll('img[alt^="Shared photo"]').length).toBe(2));
+    expect(calls).toBe(3);
+  });
+
   // The virtualized branch, which jsdom otherwise never reaches (no ResizeObserver, no layout). Stubbing
   // both is what makes the scroll-driven prefetch — and therefore the runaway-request loop — reachable
   // in a test at all.

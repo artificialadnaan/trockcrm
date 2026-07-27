@@ -494,6 +494,19 @@ export async function getPublicPhotoViewer(
     // paging already bounds that waste to the page size, whereas re-implementing the scope is exactly
     // where `latestActiveVersionCondition` or `deleted_at IS NULL` gets dropped — and on THIS surface a
     // dropped predicate means a revoked or superseded photo reappearing on a public link.
+    //
+    // KNOWN LIMITATION — OFFSET paging over a set that can change underneath it. If a photo on an
+    // already-loaded page is deleted before the next page is fetched, every later row shifts left while
+    // the next request still skips the original offset, so one still-active photo is stepped over and
+    // never delivered. The recipient sees a gallery one photo short with nothing indicating it.
+    //
+    // Not fixed here, deliberately. A stable cursor is the right answer, but getDealPhotoTimeline is
+    // shared with the field project timeline and the photo-report selector, so changing its paging
+    // contract reaches two surfaces this change set does not touch — and this PR inherited the OFFSET
+    // model rather than introducing it. What this PR DID introduce, and has fixed, is the unbounded
+    // request loop that the same drift used to cause on the client (see photo-viewer-page.tsx): the
+    // gallery now stops when the SERVER says it is done, so drift costs at most a missing tile instead
+    // of an endless retry against an unauthenticated endpoint.
     const timeline = await getDealPhotoTimeline(tenantDb, token.dealId, page, limit, {
       ...filters,
       includeDeleted: false,
@@ -639,11 +652,6 @@ function releasePublicThumbnailPermit(): void {
   else activePublicThumbnails -= 1;
 }
 
-// A STORED thumbnail is our own 600px/q70 output — tens of KB. Buffering it needs no permit, but it
-// still gets a ceiling far below MAX_TRANSCODE_BYTES so a mis-pointed key can't pull a full-size
-// original into memory on an uncapped path.
-const MAX_STORED_THUMBNAIL_BYTES = 4 * 1024 * 1024;
-
 /**
  * Grid-sized JPEG for a photo, or null to fall back to the full-res path.
  *
@@ -672,10 +680,32 @@ async function resolvePublicThumbnail(photo: {
 }): Promise<PublicPhotoAsset | null> {
   if (photo.thumbnail_r2_key) {
     try {
-      // ~40 KB — buffering it costs nothing and lets it reuse the "already clean, send as-is" branch
-      // instead of running a JPEG stripper over bytes sharp already emitted metadata-free.
-      const { buffer } = await getObjectBuffer(photo.thumbnail_r2_key, { maxBytes: MAX_STORED_THUMBNAIL_BYTES });
-      return { kind: "jpeg-buffer", buffer, contentType: "image/jpeg", filename: "photo.jpg" };
+      /**
+       * STREAMED, not buffered.
+       *
+       * Buffering here looked free — a stored thumbnail is ~40 KB — but it sat on the one path with no
+       * admission control at all, on a router mounted WITHOUT apiLimiter. Concurrency is set by whoever
+       * holds the link, so N simultaneous tile requests meant N simultaneous buffers, each allowed up to
+       * several megabytes. The permit below exists to stop exactly that amplification on the
+       * render path, and this path walked around it.
+       *
+       * Putting it under the same permit would be worse than leaving it: a denied permit returns null,
+       * and the caller then falls back to the FULL-RES original — answering "too much memory in flight"
+       * by sending a 0.58 MB file instead of a 40 KB one. Streaming removes the amplification outright
+       * rather than rationing it, and needs no permit because nothing accumulates.
+       *
+       * The route pipes `jpeg-stream` through pipeStrippedJpeg, which is a no-op pass here — these are
+       * sharp's own re-encodes and already metadata-free — but running it costs nothing on a ~40 KB
+       * object and keeps ONE rule for every streamed byte on this endpoint rather than a variant-shaped
+       * exception that a later change could get wrong.
+       */
+      const object = await getObjectStream(photo.thumbnail_r2_key);
+      return {
+        kind: "jpeg-stream",
+        stream: object.stream,
+        contentType: "image/jpeg",
+        filename: "photo.jpg",
+      };
     } catch (err) {
       // A thumbnail_r2_key can outlive its object (thumbnail generation is best-effort and the R2
       // write is not transactional with the row). Falling through to render one on demand — and

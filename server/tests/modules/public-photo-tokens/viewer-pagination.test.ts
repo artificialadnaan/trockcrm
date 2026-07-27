@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { PgDialect } from "drizzle-orm/pg-core";
 
 /**
@@ -92,6 +92,14 @@ function primeTimeline(page: number) {
     pagination: { page, limit: PAGE_SIZE, total: TOTAL_PHOTOS, totalPages: Math.ceil(TOTAL_PHOTOS / PAGE_SIZE) },
   });
 }
+
+// The first `await import()` in this file pays the whole module-graph transform — the token service
+// pulls in files/service and everything behind it. Billing that to whichever test happens to run first
+// put it against the 15s testTimeout, which a cold cache can genuinely exceed. Warming it in a hook
+// bills it to the 30s hookTimeout instead, so a cold run cannot flake the suite.
+beforeAll(async () => {
+  await import("../../../src/modules/public-photo-tokens/service.js");
+});
 
 beforeEach(() => {
   executeMock.mockReset();
@@ -220,15 +228,28 @@ describe("thumbnail variant on the asset proxy", () => {
       .mockResolvedValueOnce({ rows: [] });
   }
 
-  it("streams the stored thumbnail when one exists, with no re-encode", async () => {
+  // STREAMS, never buffers. This is the one thumbnail path with no admission control — a stored
+  // thumbnail needs no permit because nothing accumulates — and the router it sits on is mounted
+  // WITHOUT apiLimiter, so concurrency is set by whoever holds the link. Buffering here would have let a
+  // burst hold one multi-megabyte allocation per in-flight tile, which is the exact memory amplification
+  // the permit below the stored path exists to prevent. Putting it under that permit instead would be
+  // worse: a denied permit falls back to the FULL-RES original, answering "too much memory in flight" by
+  // sending more bytes.
+  it("STREAMS the stored thumbnail — never buffers it, and never re-encodes it", async () => {
     const { getPublicPhotoAsset } = await import("../../../src/modules/public-photo-tokens/service.js");
     primeAsset({ ...JPEG_ROW, thumbnail_r2_key: "office_dallas/deals/TR-1/photos/thumbs/roof.jpg" });
-    getObjectBufferMock.mockResolvedValueOnce({ buffer: Buffer.from("stored-thumb") });
+    getObjectStreamMock.mockResolvedValueOnce({
+      stream: (async function* () {
+        yield new Uint8Array([1]);
+      })(),
+    });
 
     const asset = await getPublicPhotoAsset("raw-token", "photo-1", { variant: "thumb" });
 
-    expect(asset).toMatchObject({ kind: "jpeg-buffer", contentType: "image/jpeg" });
-    expect(getObjectBufferMock.mock.calls[0][0]).toContain("/thumbs/");
+    expect(asset).toMatchObject({ kind: "jpeg-stream", contentType: "image/jpeg" });
+    expect(getObjectStreamMock.mock.calls[0][0]).toContain("/thumbs/");
+    // The load-bearing assertion: nothing was pulled into memory on the way out.
+    expect(getObjectBufferMock).not.toHaveBeenCalled();
     // The stored thumbnail is already a sharp re-encode, so it needs no second render.
     expect(generateThumbnailBufferMock).not.toHaveBeenCalled();
   });
@@ -396,15 +417,20 @@ describe("stale stored thumbnail", () => {
 
     // Thumbnail generation is best-effort and its R2 write is not transactional with the row, so a
     // key can point at an object that was never written (or was removed). That must not 500 a tile.
-    getObjectBufferMock
-      .mockRejectedValueOnce(new Error("NoSuchKey"))
-      .mockResolvedValueOnce({ buffer: Buffer.from("original-bytes") });
+    // The stored thumbnail is STREAMED, so the miss surfaces from getObjectStream; the on-demand
+    // render that rescues it is the one path that legitimately buffers (under a permit).
+    getObjectStreamMock.mockRejectedValueOnce(new Error("NoSuchKey"));
+    getObjectBufferMock.mockResolvedValueOnce({ buffer: Buffer.from("original-bytes") });
     generateThumbnailBufferMock.mockResolvedValueOnce(Buffer.from("rendered-thumb"));
 
     const asset = await getPublicPhotoAsset("raw-token", "photo-1", { variant: "thumb" });
 
     expect(asset).toMatchObject({ kind: "jpeg-buffer" });
     expect(generateThumbnailBufferMock).toHaveBeenCalledOnce();
+    // The stale key was tried first, then the original — the fallback order that keeps a customer's
+    // tile from 500-ing.
+    expect(getObjectStreamMock.mock.calls[0][0]).toContain("/thumbs/");
+    expect(getObjectBufferMock.mock.calls[0][0]).not.toContain("/thumbs/");
   });
 });
 
