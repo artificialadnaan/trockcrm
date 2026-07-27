@@ -20,7 +20,7 @@ import { useQueryScope } from "../../../src/auth/useOfficeId";
 import { DealCard } from "../../../src/components/DealCard";
 import { RetryNotice } from "../../../src/components/RetryNotice";
 import { resolveListState } from "../../../src/list-state";
-import { stageLabelFor } from "../../../src/stage-label";
+import { buildStageIndex, stageLabelFor } from "../../../src/stage-label";
 import { qk } from "../../../src/query/keys";
 import { theme } from "../../../src/theme/theme";
 
@@ -74,6 +74,9 @@ export default function DealsListScreen() {
     staleTime: 30 * 60_000,
   });
 
+  // Built ONCE per stages payload, not per row — stageLabelFor is called inside renderItem.
+  const stageIndex = useMemo(() => buildStageIndex(stagesQuery.data), [stagesQuery.data]);
+
   const deals = useMemo(() => (query.data?.pages ?? []).flatMap((p) => p.deals), [query.data]);
   const total = query.data?.pages[0]?.pagination.total;
 
@@ -101,7 +104,6 @@ export default function DealsListScreen() {
     isLoading: query.isLoading,
     data: query.data,
     error: query.error,
-    rowCount: deals.length,
     isFetchNextPageError: query.isFetchNextPageError,
   });
   const refreshError = listState.kind === "loaded" && listState.refreshFailed;
@@ -231,7 +233,7 @@ export default function DealsListScreen() {
           renderItem={({ item }) => (
             <DealCard
               deal={item}
-              stageName={stageLabelFor(item, stagesQuery.data)}
+              stageName={stageLabelFor(item, stageIndex)}
               onPress={(deal) => router.push(`/(app)/deals/${deal.id}`)}
             />
           )}

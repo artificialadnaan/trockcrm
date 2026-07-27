@@ -24,10 +24,13 @@ export type ListState =
   | { kind: "loading" }
   /** Nothing ever loaded and the request failed — the only case that may take over the screen. */
   | { kind: "blocking-error" }
-  /** Data loaded. `rows` may be zero; that is an answer, not an absence. */
+  /**
+   * Data loaded — including a loaded result of zero rows, which is an answer rather than an absence.
+   * The screens render that case through FlatList's own ListEmptyComponent, so this deliberately does
+   * NOT restate it as a field: an unconsumed flag looks load-bearing and tested when it is neither.
+   */
   | {
       kind: "loaded";
-      isEmpty: boolean;
       /** A failed refresh/revalidate. Belongs at the TOP, next to the pull gesture. */
       refreshFailed: boolean;
       /** A failed load-more. Belongs in the FOOTER, where the user is when it happens. */
@@ -39,10 +42,9 @@ export function resolveListState(input: {
   /** `undefined` means no request has ever succeeded. An empty array is a successful load. */
   data: unknown;
   error: unknown;
-  rowCount: number;
   isFetchNextPageError: boolean;
 }): ListState {
-  const { isLoading, data, error, rowCount, isFetchNextPageError } = input;
+  const { isLoading, data, error, isFetchNextPageError } = input;
   if (isLoading) return { kind: "loading" };
 
   // `data === undefined`, never rowCount: "loaded, and empty" is not "never loaded".
@@ -51,7 +53,6 @@ export function resolveListState(input: {
 
   return {
     kind: "loaded",
-    isEmpty: rowCount === 0,
     // Both are independent of rowCount — an empty list can fail to refresh just as a full one can, and
     // that failure has to be reported somewhere.
     refreshFailed: Boolean(error) && !isFetchNextPageError,

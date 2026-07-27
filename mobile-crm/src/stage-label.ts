@@ -31,18 +31,30 @@ export function humanizeStageSlug(slug: string): string {
  * Also degrades sanely when /deals/stages fails while the deals request succeeds: every card keeps a
  * label from its own slug instead of the whole column going blank.
  */
-export function stageLabelFor(
-  deal: { displayStageSlug?: string | null; stageSlug?: string | null; stageId?: string | null },
-  stages: readonly PipelineStage[] | undefined,
-): string | undefined {
+export type StageIndex = { bySlug: Map<string, string>; byId: Map<string, string> };
+
+/**
+ * Build the slug→name and id→name lookups ONCE.
+ *
+ * Separate from stageLabelFor because the list calls that per row inside renderItem: constructing both
+ * Maps there rebuilt them for every card on every render, which is O(rows × stages) and two allocations
+ * per row — on the screen that paginates to hundreds of rows on a phone.
+ */
+export function buildStageIndex(stages: readonly PipelineStage[] | undefined): StageIndex {
   const bySlug = new Map<string, string>();
   const byId = new Map<string, string>();
   for (const stage of stages ?? []) {
     bySlug.set(stage.slug, stage.name);
     byId.set(stage.id, stage.name);
   }
+  return { bySlug, byId };
+}
 
+export function stageLabelFor(
+  deal: { displayStageSlug?: string | null; stageSlug?: string | null; stageId?: string | null },
+  index: StageIndex,
+): string | undefined {
   const displaySlug = deal.displayStageSlug ?? deal.stageSlug ?? null;
-  if (displaySlug) return bySlug.get(displaySlug) ?? humanizeStageSlug(displaySlug);
-  return deal.stageId ? byId.get(deal.stageId) : undefined;
+  if (displaySlug) return index.bySlug.get(displaySlug) ?? humanizeStageSlug(displaySlug);
+  return deal.stageId ? index.byId.get(deal.stageId) : undefined;
 }

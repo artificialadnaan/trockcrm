@@ -19,7 +19,7 @@ import { displayAmount, showsAtRisk } from "../../../src/components/DealCard";
 import { Badge } from "../../../src/components/Badge";
 import { Row } from "../../../src/components/Row";
 import { mailtoUrl, telUrl } from "../../../src/contact-links";
-import { stageLabelFor } from "../../../src/stage-label";
+import { buildStageIndex, stageLabelFor } from "../../../src/stage-label";
 import { openLink } from "../../../src/lib/open-link";
 import { daysSince, formatDate, formatLocation } from "../../../src/format";
 import { qk } from "../../../src/query/keys";
@@ -155,7 +155,7 @@ export default function DealDetailScreen() {
   // call action entirely for a contact reachable only on a mobile number.
   const contactPhone = deal.primaryContactPhone ?? deal.primaryContactMobile;
   // Shared with the list, so the two can never disagree about which stage a deal is in.
-  const stageLabel = stageLabelFor(deal, stagesQuery.data) ?? "—";
+  const stageLabel = stageLabelFor(deal, buildStageIndex(stagesQuery.data)) ?? "—";
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
