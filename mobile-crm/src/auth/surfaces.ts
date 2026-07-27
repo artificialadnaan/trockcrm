@@ -14,10 +14,12 @@
  * Kept as DATA rather than scattered `role === "rep"` checks so the policy is one table to compare
  * against the sidebar, and so granting a surface later is a one-line change in a single place.
  */
-export type CrmSurface = "deals" | "contacts" | "companies";
+export type CrmSurface = "deals" | "leads" | "contacts" | "companies";
 
 const SURFACE_ROLES: Record<CrmSurface, readonly string[]> = {
   deals: ["admin", "director", "rep"],
+  // sidebar.tsx:66 — same three roles as deals.
+  leads: ["admin", "director", "rep"],
   contacts: ["admin", "director", "rep"],
   companies: ["admin", "director", "rep"],
 };

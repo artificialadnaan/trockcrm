@@ -11,7 +11,9 @@ import { accessibleSurfaces, canAccessSurface, hasAnyCrmSurface } from "../auth/
  */
 describe("CRM surface policy", () => {
   it.each(["admin", "director", "rep"])("grants %s every current surface", (role) => {
-    expect(accessibleSurfaces(role)).toEqual(["deals", "contacts", "companies"]);
+    // Exact list, in SURFACE_ROLES order — the point is that adding a surface is a deliberate act that
+    // has to be acknowledged here, not something that quietly widens what a role can reach.
+    expect(accessibleSurfaces(role)).toEqual(["deals", "leads", "contacts", "companies"]);
     expect(hasAnyCrmSurface(role)).toBe(true);
   });
 

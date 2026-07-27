@@ -334,3 +334,83 @@ export type ContactDealAssociation = {
   role?: string | null;
   deal: AssociatedDeal | null;
 };
+
+/**
+ * A lead row as the LIST returns it.
+ *
+ * Narrow on purpose, same reasoning as DealListItem: the server sends every column of tenant.leads via
+ * getTableColumns(leads) plus a decoration pass, and a phone renders a handful.
+ *
+ * `projectType` is an OBJECT here and a STRING on writes. The list decorator resolves the id against
+ * projectTypeMap and attaches the row (service.ts:702), while POST/PATCH take `projectTypeId`. Reading
+ * this as a name renders "[object Object]"; sending it back as one is a 400.
+ */
+export type LeadListItem = {
+  id: string;
+  name: string | null;
+  stageId: string | null;
+  stageName: string | null;
+  status: string | null;
+  isActive: boolean | null;
+  assignedRepId: string | null;
+  assignedRepName: string | null;
+  companyId: string | null;
+  companyName: string | null;
+  primaryContactName: string | null;
+  primaryContactTitle: string | null;
+  projectTypeId: string | null;
+  projectType: { id: string; name: string } | null;
+  property: { id: string; name: string | null; address: string | null; city: string | null; state: string | null } | null;
+  estimatedValue: string | number | null;
+  source: string | null;
+  /** The outcome-aware display axis the server also FILTERS on — already YYYY-MM-DD or null. */
+  displayDate: string | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+  /** Set once the lead has been converted; the pair is how a converted lead links to its deal. */
+  convertedDealId: string | null;
+  convertedDealNumber: string | null;
+};
+
+/** The detail read adds these on top of the list shape. */
+export type LeadDetail = LeadListItem & {
+  isWatching?: boolean;
+  description?: string | null;
+  notes?: string | null;
+  expectedCloseDate?: string | null;
+  /**
+   * ONLY present when the server's lead-edit-v2 flag is on (leads/routes.ts:289-305). Its absence is a
+   * server configuration, not an error and not an empty questionnaire — rendering "no questions" for it
+   * would state something this client cannot know.
+   */
+  leadQuestionnaire?: unknown;
+};
+
+/** A lead-family pipeline stage. Same table as deal stages, different workflow family. */
+export type LeadStage = {
+  id: string;
+  name: string;
+  slug: string;
+  displayOrder: number;
+  isTerminal: boolean;
+  isActivePipeline: boolean;
+  workflowFamily: string | null;
+  color: string | null;
+};
+
+/**
+ * The stage-transition result. THE RESULT IS THE BODY — there is no envelope — and a refusal arrives as
+ * HTTP 409 carrying this same shape (leads/routes.ts:539).
+ */
+export type LeadTransitionRefusal = {
+  ok: false;
+  reason: string;
+  code?: string | null;
+  targetStageId?: string | null;
+  /** Where the WHOLE transition must be resolved when the per-field hints are not enough. */
+  resolution?: "detail" | "inline" | null;
+  /** What the lead still needs. Each entry says whether it can be fixed inline or only on the record. */
+  missing?: Array<{ key: string; label: string; resolution: "detail" | "inline" }>;
+};
+
+export type LeadTransitionResult = { ok: true; lead: LeadDetail } | LeadTransitionRefusal;

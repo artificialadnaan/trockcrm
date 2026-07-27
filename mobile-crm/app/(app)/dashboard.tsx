@@ -49,6 +49,18 @@ export default function DashboardScreen() {
         </Pressable>
         ) : null}
 
+        {canAccessSurface(user.role, "leads") ? (
+        <Pressable
+          testID="open-leads"
+          onPress={() => router.push("/(app)/leads")}
+          accessibilityRole="button"
+          accessibilityLabel="Open leads"
+          style={styles.secondary}
+        >
+          <Text style={styles.secondaryText}>Leads</Text>
+        </Pressable>
+        ) : null}
+
         {canAccessSurface(user.role, "contacts") ? (
         <Pressable
           testID="open-contacts"
