@@ -60,8 +60,13 @@ export default function OnboardingRequiredScreen() {
     try {
       const url = new URL(raw);
       if (url.protocol === "https:") return raw;
+      // `[::1]` with the brackets: WHATWG URL keeps them in `hostname` for an IPv6 literal, so a plain
+      // "::1" comparison never matches and a dev box on IPv6 loopback loses the button entirely.
       const isLoopback =
-        url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "::1";
+        url.hostname === "localhost" ||
+        url.hostname === "127.0.0.1" ||
+        url.hostname === "::1" ||
+        url.hostname === "[::1]";
       return __DEV__ && url.protocol === "http:" && isLoopback ? raw : null;
     } catch {
       return null;

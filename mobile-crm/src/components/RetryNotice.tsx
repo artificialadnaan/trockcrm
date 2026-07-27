@@ -32,12 +32,28 @@ export function RetryNotice({
       testID={testID}
       onPress={onRetry}
       accessibilityRole="button"
-      accessibilityLabel={`${message}. Tap to retry.`}
+      accessibilityLabel={accessibilityLabelFor(message)}
       style={[styles.notice, placement === "top" ? styles.top : styles.bottom]}
     >
       <Text style={styles.text}>{message}</Text>
     </Pressable>
   );
+}
+
+/**
+ * The spoken label, without saying "tap to retry" twice.
+ *
+ * Most call sites already end their message with the instruction because it is useful VISUALLY, and the
+ * label appended a second copy — VoiceOver read "tap to retry. Tap to retry." The visible text is left
+ * exactly as the caller wrote it; only the announcement is de-duplicated, so fixing this cannot change
+ * what anyone sees. Matching on the phrase rather than requiring every caller to drop it keeps the two
+ * from drifting the next time a notice is added.
+ */
+export function accessibilityLabelFor(message: string): string {
+  const trimmed = message.trim();
+  const alreadyInstructs = /tap to (retry|try again)\.?$/i.test(trimmed);
+  if (alreadyInstructs) return trimmed.endsWith(".") ? trimmed : `${trimmed}.`;
+  return `${trimmed.replace(/\.?$/, "")}. Tap to retry.`;
 }
 
 const styles = StyleSheet.create({

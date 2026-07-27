@@ -123,7 +123,17 @@ export default function DealsListScreen() {
   // A failed /deals/stages is NOT an empty stage config. Labels degrade to humanized slugs, which is
   // deliberate and readable — but silently, so the rep has no idea the names are approximations and no
   // way to get the real ones back.
-  const stagesFailed = Boolean(stagesQuery.error);
+  /**
+   * Two different situations, and only one of them means the labels on screen are raw slugs.
+   *
+   * TanStack keeps the last good data when a background refetch fails, so `error` alone covers both "we
+   * never got the stage names" and "we have them, the refresh just failed". The banner said raw stages
+   * were being shown in BOTH cases — telling a rep the perfectly correct names in front of them were
+   * fallbacks. Wrong in a way that erodes trust in every other label the app shows.
+   */
+  const stagesUnavailable = Boolean(stagesQuery.error) && stagesQuery.data === undefined;
+  const stagesRefreshFailed = Boolean(stagesQuery.error) && stagesQuery.data !== undefined;
+  const stagesFailed = stagesUnavailable || stagesRefreshFailed;
   const refreshError = listState.kind === "loaded" && listState.refreshFailed;
   const pageError = listState.kind === "loaded" && listState.pageFailed;
 
@@ -248,7 +258,11 @@ export default function DealsListScreen() {
                 {stagesFailed ? (
                   <RetryNotice
                     testID="deals-stages-retry"
-                    message="Couldn't load stage names — showing raw stages. Tap to retry."
+                    message={
+                      stagesUnavailable
+                        ? "Couldn't load stage names — showing raw stages. Tap to retry."
+                        : "Couldn't refresh stage names — showing the saved ones. Tap to retry."
+                    }
                     onRetry={() => void stagesQuery.refetch()}
                     placement="top"
                   />

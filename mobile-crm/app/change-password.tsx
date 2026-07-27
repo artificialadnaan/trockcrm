@@ -243,14 +243,21 @@ export default function ChangePasswordScreen() {
             style={formStyles.input}
           />
           {/* accessibilityLiveRegion covers Android; the useEffect above covers iOS, which ignores it.
-              Both read from validationHints so the announced text and the visible text cannot diverge. */}
-          <View accessible accessibilityLiveRegion="polite">
-            {validationHints.map((hint) => (
-              <Text key={hint} style={formStyles.hint}>
-                {hint}
-              </Text>
-            ))}
-          </View>
+              Both read from validationHints so the announced text and the visible text cannot diverge.
+
+              RENDERED ONLY WHEN THERE ARE HINTS. `accessible` collapses a view into ONE accessibility
+              element, so an always-mounted empty group is an unlabelled focus stop sitting in the middle
+              of the form — VoiceOver and TalkBack users hit it on every pass, including the whole time
+              the password is valid, and it announces nothing at all. */}
+          {validationHints.length > 0 ? (
+            <View accessible accessibilityLiveRegion="polite">
+              {validationHints.map((hint) => (
+                <Text key={hint} style={formStyles.hint}>
+                  {hint}
+                </Text>
+              ))}
+            </View>
+          ) : null}
 
           <Pressable
             testID="change-password-submit"
