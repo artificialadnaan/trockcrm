@@ -9,6 +9,7 @@ import {
   View,
 } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
+import { useGoBack } from "../../../src/lib/go-back";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError } from "../../../src/api/client";
@@ -30,6 +31,7 @@ export default function DealDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const dealId = typeof id === "string" ? id : "";
   const router = useRouter();
+  const goBack = useGoBack("/(app)/deals");
   const { fetcher, session } = useAuth();
   const scope = useQueryScope();
   const queryClient = useQueryClient();
@@ -92,19 +94,25 @@ export default function DealDetailScreen() {
     mutationFn: (next: boolean) =>
       next ? dealsApi.watchDeal(fetcher, dealId) : dealsApi.unwatchDeal(fetcher, dealId),
     onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: qk.deal(scope, dealId) });
-      // The Watched list is derived from this flag, so it must be invalidated too — otherwise an
-      // already-mounted list keeps showing an unwatched deal (or hiding a newly watched one).
+      // CONCURRENT. invalidateQueries resolves only once the active queries have refetched, and
+      // watch.isPending stays true for the whole handler — so awaiting four in series left the star
+      // disabled for four sequential round trips after the toggle had already succeeded. The move screen
+      // was made concurrent one commit ago and this was left serial in the same breath, having just
+      // gained two more entries.
       //
-      // Scoped: a bare ["deals"] prefix-matches EVERY user/office/role variant sitting in the cache, so
-      // toggling one watch would refetch lists that this action cannot have changed.
-      await queryClient.invalidateQueries({ queryKey: ["deals", scope] });
-      // The board and the stage drill-down are ALSO derived from the watch flag via their Mine/Watched
-      // scopes, and this PR added both. They are separate cache prefixes, stay mounted underneath the
-      // detail, and refetchOnWindowFocus is off — so without these an unwatched deal sits visibly on the
-      // Watched board, and a newly watched one is missing from it, until a manual pull.
-      await queryClient.invalidateQueries({ queryKey: ["pipeline", scope] });
-      await queryClient.invalidateQueries({ queryKey: ["stage-deals", scope] });
+      // All four are derived from the watch flag: the deal itself, the Watched list, and — via their
+      // Mine/Watched scopes — the board and the stage drill-down. Those two are separate cache prefixes
+      // that stay mounted underneath this screen, and refetchOnWindowFocus is off, so without them an
+      // unwatched deal sits visibly on the Watched board until a manual pull.
+      //
+      // SCOPED, not a bare ["deals"]: that prefix-matches every user/office/role variant in the cache,
+      // so one toggle would refetch lists this action cannot have changed.
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: qk.deal(scope, dealId) }),
+        queryClient.invalidateQueries({ queryKey: ["deals", scope] }),
+        queryClient.invalidateQueries({ queryKey: ["pipeline", scope] }),
+        queryClient.invalidateQueries({ queryKey: ["stage-deals", scope] }),
+      ]);
     },
   });
 
@@ -142,7 +150,7 @@ export default function DealDetailScreen() {
               <Text style={styles.backBtnText}>Try again</Text>
             </Pressable>
           ) : null}
-          <Pressable onPress={() => router.back()} accessibilityRole="button" style={styles.backBtn}>
+          <Pressable onPress={() => goBack()} accessibilityRole="button" style={styles.backBtn}>
             <Text style={styles.backBtnText}>Go back</Text>
           </Pressable>
         </View>
@@ -169,7 +177,7 @@ export default function DealDetailScreen() {
       {/* Without "handled", the first tap on Save only dismisses the keyboard and never reaches the
           button — so the rep's opening tap on the app's primary action silently does nothing. */}
       <ScrollView contentContainerStyle={styles.body} keyboardShouldPersistTaps="handled">
-        <Pressable onPress={() => router.back()} accessibilityRole="button" accessibilityLabel="Back">
+        <Pressable onPress={() => goBack()} accessibilityRole="button" accessibilityLabel="Back">
           <Text style={styles.back}>‹ Deals</Text>
         </Pressable>
 

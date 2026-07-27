@@ -11,6 +11,7 @@ import {
   View,
 } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
+import { useGoBack } from "../../../src/lib/go-back";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError } from "../../../src/api/client";
@@ -55,6 +56,7 @@ export default function MoveStageScreen() {
   const { dealId: rawId } = useLocalSearchParams<{ dealId: string }>();
   const dealId = typeof rawId === "string" ? rawId : "";
   const router = useRouter();
+  const goBack = useGoBack("/(app)/deals");
   const { session, fetcher } = useAuth();
   const scope = useQueryScope();
   const queryClient = useQueryClient();
@@ -96,6 +98,13 @@ export default function MoveStageScreen() {
     gcTime: 0,
   });
 
+  // Derived ONCE, above the queries that consume them. `targetStage(...)` was called twice inside the
+  // lost-reasons `enabled` — with a non-null assertion on the second — and eligibleStageTargets twice per
+  // render further down. The duplication is also where the two could disagree.
+  const stages = stagesQuery.data ?? [];
+  const target = targetStage(stages, targetStageId);
+  const isLostMove = Boolean(target && pipelineApi.isLostOutcomeStageSlug(target.slug));
+
   const lostReasons = useQuery({
     // SCOPED BY OFFICE. Lost reasons are tenant rows and offices are separate Postgres schemas, so the
     // ids are only meaningful inside the office that issued them. Cached under a bare key with a
@@ -107,14 +116,13 @@ export default function MoveStageScreen() {
     staleTime: 60 * 60_000,
     // Only fetched once a Lost target is actually selected — it is a different router mount and most
     // moves never need it.
-    enabled: Boolean(targetStage(stagesQuery.data, targetStageId)?.slug &&
-      pipelineApi.isLostOutcomeStageSlug(targetStage(stagesQuery.data, targetStageId)!.slug)),
+    enabled: isLostMove,
   });
 
   const deal = dealQuery.data;
-  const stages = stagesQuery.data ?? [];
-  const target = targetStage(stages, targetStageId);
-  const isLostMove = Boolean(target && pipelineApi.isLostOutcomeStageSlug(target.slug));
+  // One list, used by both the empty-state check and the grid. Computed here rather than above because
+  // it needs `deal` (for its stage and workflow route), which is only resolved past the guards below.
+  const targets = deal ? eligibleStageTargets(stages, deal) : [];
 
   // OWNERSHIP, not the preflight verdict. See the module note above.
   const isOwner = deal ? pipelineApi.canMoveStage(deal, session?.user.id) : false;
@@ -195,7 +203,7 @@ export default function MoveStageScreen() {
       // ["stage-deals"] is in that list because the drill-down is a SIBLING route that stays mounted
       // underneath this screen when the move was started from it — without it, returning shows a cached
       // list with the deal still in the stage it just left.
-      router.back();
+      goBack();
     },
     onError: (err) => {
       // A dropped connection on a POST is INDETERMINATE, not a rollback. The request may have reached
@@ -256,7 +264,7 @@ export default function MoveStageScreen() {
               )}
             </Pressable>
           ) : null}
-          <Pressable onPress={() => router.back()} accessibilityRole="button" style={styles.secondary}>
+          <Pressable onPress={() => goBack()} accessibilityRole="button" style={styles.secondary}>
             <Text style={styles.secondaryText}>Go back</Text>
           </Pressable>
         </View>
@@ -268,7 +276,7 @@ export default function MoveStageScreen() {
     <SafeAreaView style={styles.safe} edges={["top"]}>
       <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === "ios" ? "padding" : undefined}>
         <ScrollView contentContainerStyle={styles.body} keyboardShouldPersistTaps="handled">
-          <Pressable onPress={() => router.back()} accessibilityRole="button">
+          <Pressable onPress={() => goBack()} accessibilityRole="button">
             <Text style={styles.back}>‹ Cancel</Text>
           </Pressable>
 
@@ -330,7 +338,7 @@ export default function MoveStageScreen() {
                 placement="top"
               />
             ) : null}
-            {eligibleStageTargets(stages, deal).length === 0 ? (
+            {targets.length === 0 ? (
               /* Loaded fine, and there is genuinely nowhere to go — every other stage is retired, or
                  belongs to the other workflow family. An empty grid said nothing at all, leaving the rep
                  to conclude the screen was broken. */
@@ -339,7 +347,7 @@ export default function MoveStageScreen() {
               </Text>
             ) : (
             <View style={styles.stageGrid}>
-              {eligibleStageTargets(stages, deal).map((s) => (
+              {targets.map((s) => (
                 <Pressable
                   key={s.id}
                   testID={`move-target-${s.slug}`}

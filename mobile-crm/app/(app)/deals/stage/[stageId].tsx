@@ -1,6 +1,7 @@
 import React from "react";
 import { ActivityIndicator, FlatList, Pressable, RefreshControl, StyleSheet, Text, View } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
+import { useGoBack } from "../../../../src/lib/go-back";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useInfiniteQuery } from "@tanstack/react-query";
 import { ApiError } from "../../../../src/api/client";
@@ -34,6 +35,8 @@ export default function StageDealsScreen() {
     params.scope === "all" || params.scope === "watched" ? params.scope : "mine";
 
   const router = useRouter();
+
+  const goBack = useGoBack("/(app)/deals/board");
   const { session, fetcher } = useAuth();
   const cacheScope = useQueryScope();
 
@@ -69,7 +72,7 @@ export default function StageDealsScreen() {
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
       <View style={styles.header}>
-        <Pressable onPress={() => router.back()} accessibilityRole="button" hitSlop={8}>
+        <Pressable onPress={() => goBack()} accessibilityRole="button" hitSlop={8}>
           <Text style={styles.back}>‹ Board</Text>
         </Pressable>
         <Text style={styles.title} numberOfLines={1}>

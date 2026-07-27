@@ -10,6 +10,7 @@ import {
   View,
 } from "react-native";
 import { useRouter } from "expo-router";
+import { useGoBack } from "../../../src/lib/go-back";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useQuery } from "@tanstack/react-query";
 import { ApiError } from "../../../src/api/client";
@@ -38,6 +39,7 @@ const SCOPES: Array<{ key: pipelineApi.PipelineScope; label: string }> = [
 
 export default function PipelineBoardScreen() {
   const router = useRouter();
+  const goBack = useGoBack("/(app)/deals");
   const { session, fetcher } = useAuth();
   const cacheScope = useQueryScope();
   const [scope, setScope] = useState<pipelineApi.PipelineScope>("mine");
@@ -73,7 +75,7 @@ export default function PipelineBoardScreen() {
           carry one; this was the screen that didn't. */}
       <Pressable
         testID="board-back"
-        onPress={() => router.back()}
+        onPress={() => goBack()}
         accessibilityRole="button"
         accessibilityLabel="Back to deals"
         hitSlop={8}
