@@ -134,6 +134,21 @@ export async function getStagePage(
       // readStageInput spreads readBoardInput, so this route honours the same flags — and must be given
       // them, or the drill-down contradicts the board that linked to it.
       ...TERMINAL_ALL_TIME,
+      /**
+       * KNOWN DIVERGENCE, deliberately not papered over: this route's POPULATION is not identical to
+       * the board's. getDealsForPipeline restricts open and Won columns to active rows and drops open
+       * CRM rows whose Bid Board mirror has already closed; listDealStagePage applies neither unless a
+       * `status` is sent, so a drill-down can include soft-deleted rows the board never counted.
+       *
+       * No value of `status` fixes it. "active" ALSO excludes effectively-held cards, which the board's
+       * totalCount includes — so it would trade "shows too many" for "shows too few", and the count the
+       * rep tapped would still not match. The Bid Board mirror rule is not expressible from a client at
+       * all. Picking one would be choosing which contradiction to ship.
+       *
+       * The real fix is server-side: either the stage endpoint mirrors the board predicate, or it gains
+       * a lifecycle value meaning "active, held included". Until then the drill-down shows ITS OWN
+       * total in its header rather than echoing the board's, so the screen is at least self-consistent.
+       */
     },
   });
   return {

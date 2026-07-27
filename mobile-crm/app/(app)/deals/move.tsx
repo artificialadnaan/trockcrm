@@ -147,6 +147,17 @@ export default function MoveStageScreen() {
   const preflightAnswered = verdict !== undefined;
 
   /**
+   * A verdict that is on screen but STALE must not authorise a commit.
+   *
+   * TanStack keeps the previous data when a refetch fails, so `preflightAnswered` stays true while the
+   * screen is simultaneously rendering "Couldn't check the requirements" and its retry. Confirm then
+   * went live off a verdict computed before whatever changed, sending the commit on exactly the
+   * information the retry exists to replace. Third time in this file that `isError` and
+   * `data === undefined` have had to be told apart — they answer different questions.
+   */
+  const preflightStale = preflight.isError;
+
+  /**
    * The inline close-date gate — the one blocker this screen can clear itself.
    *
    * Without it, a stage advance whose ONLY missing requirement is expectedCloseDate was a dead end on
@@ -170,6 +181,7 @@ export default function MoveStageScreen() {
     isOwner &&
     Boolean(targetStageId) &&
     preflightAnswered &&
+    !preflightStale &&
     // A blocked verdict still passes when the inline date is the sole blocker AND a usable value is in
     // hand — the POST revalidates with it, so the stale verdict must not veto its own remedy.
     (!blocked || closeDateResolvesGate) &&
@@ -210,10 +222,22 @@ export default function MoveStageScreen() {
       // the server and committed with only the response lost, so "Nothing was changed" is a claim this
       // client is not in a position to make — and a rep who believes it will move the deal a second
       // time. Say what is actually known, and refresh so the screen behind shows whichever way it went.
-      if (err instanceof ApiError && err.status === 0) {
+      /**
+       * BOTH indeterminate transport outcomes, not just one.
+       *
+       * status 0 is the connection dropping; 408 is the client's own 30s timeout firing. Neither says
+       * anything about whether the server committed — a timeout in particular fires most often when the
+       * request DID arrive and the response is merely slow. Handling only status 0 meant a timed-out
+       * move reported a generic failure and left every cache stale, so the rep carried on from a stage
+       * the deal may no longer be in.
+       */
+      if (err instanceof ApiError && (err.status === 0 || err.status === 408)) {
         setSubmitError(
-          "Lost connection before the server answered — the move may or may not have gone through. " +
-            "Check the deal's stage before trying again.",
+          err.status === 408
+            ? "The server didn't answer in time — the move may or may not have gone through. " +
+              "Check the deal's stage before trying again."
+            : "Lost connection before the server answered — the move may or may not have gone through. " +
+              "Check the deal's stage before trying again.",
         );
         void Promise.all([
           queryClient.invalidateQueries({ queryKey: qk.deal(scope, dealId) }),
