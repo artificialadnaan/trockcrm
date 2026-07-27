@@ -43,6 +43,9 @@ export const MAX_EVIDENCE_PHOTOS = 60;
 export const MAX_CORRECTIVE_ACTION_PHOTOS = 24;
 // Bound one response comment so a long dictation cannot run away; the full text lives in the CRM.
 const CORRECTIVE_ACTION_COMMENT_MAX_HEIGHT = 72;
+// Label (11pt) + status chip (9pt) + attribution (9pt) + the 4pt gap before the comment, rounded up. The
+// page-break guard adds CORRECTIVE_ACTION_COMMENT_MAX_HEIGHT on top for a resolved item.
+const CORRECTIVE_ACTION_LABEL_BLOCK_HEIGHT = 46;
 // Bound each critical-deficiency description on the summary page so one long (up to 4000-char) note can't
 // blow the layout across pages; the same note also appears (bounded) as the evidence-group subtitle.
 const DEFICIENCY_NOTE_MAX_HEIGHT = 54;
@@ -85,6 +88,9 @@ export interface ScorecardPdfInput {
   omittedEvidenceCount?: number;
   /** The scorecard's corrective-action items (below-band cards only). Empty/absent renders no section. */
   correctiveActions?: ScorecardPdfCorrectiveAction[];
+  /** Response photos already dropped upstream (capped before download) — added to the render-side cap's
+   *  omitted count so the "available in the CRM" note reflects the true total. Mirrors omittedEvidenceCount. */
+  omittedCorrectiveActionPhotoCount?: number;
 }
 
 export interface ScorecardPdfPhoto {
@@ -230,7 +236,9 @@ export function buildScorecardPdfData(input: ScorecardPdfInput): ScorecardPdfDat
   // Apply the response-photo cap ACROSS the whole report, in the order items render, so the kept set is
   // deterministic rather than dependent on which item happened to be read first.
   let correctiveActionPhotoBudget = MAX_CORRECTIVE_ACTION_PHOTOS;
-  let omittedCorrectiveActionPhotoCount = 0;
+  // Seed with whatever the caller already dropped before downloading bytes, so the "available in the CRM"
+  // note reflects the TRUE total rather than only what this render discarded.
+  let omittedCorrectiveActionPhotoCount = Math.max(0, input.omittedCorrectiveActionPhotoCount ?? 0);
   const cappedCorrectiveActions = orderedCorrectiveActions.map((item) => {
     const kept = item.photos.slice(0, Math.max(0, correctiveActionPhotoBudget));
     omittedCorrectiveActionPhotoCount += item.photos.length - kept.length;
@@ -675,8 +683,17 @@ export function typedSignatureFallback(signature: string | null): string | null 
  */
 function drawCorrectiveAction(doc: PDFKit.PDFDocument, item: ScorecardPdfCorrectiveAction): void {
   const resolved = item.status === "resolved";
-  // Keep the label with at least its status line rather than orphaning it at a page foot.
-  if (doc.y + 64 > PAGE.height - PAGE.margin) doc.addPage();
+  // Reserve the WHOLE text block, not just the heading.
+  //
+  // PDFKit disables auto-pagination for any text drawn with an explicit `height` (its LineWrapper caps at
+  // startY + height and never calls continueOnNewPage), and the comment below is drawn exactly that way to
+  // bound a long dictation. So an under-reserved guard does not merely orphan a heading — the comment flows
+  // straight through the bottom margin to the page edge, and the trailing hairline is then stroked outside
+  // the media box and silently dropped. Reserve label + status + attribution + the comment box.
+  const textBlockHeight = resolved
+    ? CORRECTIVE_ACTION_LABEL_BLOCK_HEIGHT + CORRECTIVE_ACTION_COMMENT_MAX_HEIGHT
+    : CORRECTIVE_ACTION_LABEL_BLOCK_HEIGHT;
+  if (doc.y + textBlockHeight > PAGE.height - PAGE.margin) doc.addPage();
 
   doc.font("Helvetica-Bold").fontSize(11).fillColor(BRAND_BLACK).text(item.itemLabel, PAGE.margin, doc.y, {
     width: CONTENT_WIDTH,

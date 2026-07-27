@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { inflateSync } from "node:zlib";
 import { describe, expect, it } from "vitest";
 import {
   buildScorecardPdfData,
@@ -387,5 +388,131 @@ describe("corrective-action section", () => {
 
     const pdf = await renderFieldScorecardPdf(data);
     expect(pdf.byteLength).toBeGreaterThan(1000);
+  });
+});
+
+
+/**
+ * Every text-positioning y-coordinate in the document's content streams, in PDF user space (bottom-left
+ * origin, so the 48pt bottom margin is y = 48 and anything lower has overflowed the printable area).
+ * PDFKit Flate-compresses its content streams, so they must be inflated before the operators are visible.
+ */
+function textYPositions(pdf: Buffer): number[] {
+  const raw = pdf.toString("latin1");
+  const ys: number[] = [];
+  const streamRe = /stream\r?\n/g;
+  let match: RegExpExecArray | null;
+  while ((match = streamRe.exec(raw)) !== null) {
+    const start = match.index + match[0].length;
+    const end = raw.indexOf("endstream", start);
+    if (end < 0) continue;
+    const body = Buffer.from(raw.slice(start, end), "latin1");
+    let text: string;
+    try {
+      text = inflateSync(body).toString("latin1");
+    } catch {
+      continue; // not a Flate stream (e.g. an embedded image) — skip it.
+    }
+    for (const tm of text.matchAll(/1 0 0 1 (-?[\d.]+) (-?[\d.]+) Tm/g)) {
+      ys.push(Number(tm[2]));
+    }
+  }
+  return ys;
+}
+
+describe("corrective-action page-break safety", () => {
+  const base = {
+    dealName: "Harbor Point",
+    projectNumber: "DFW-99999",
+    weekOf: "2026-07-27",
+    superintendentName: "Sam Super",
+    pmName: "Pat Manager",
+    submittedByName: "Sam Super",
+    submittedAt: "2026-07-27T12:00:00.000Z",
+    totalScore: 23,
+    formVersion: 2 as const,
+    rating: "corrective_action" as const,
+    items: [],
+    criticalDeficiencyKeys: [] as string[],
+    actionItems: [] as string[],
+  };
+
+  /**
+   * PDFKit disables auto-pagination for text drawn with an explicit `height`, which the response comment
+   * uses to bound a long dictation. An under-reserved page-break guard therefore lets the comment flow past
+   * the bottom margin to the page edge and drops the trailing hairline outside the media box.
+   *
+   * Walk the whole section with many resolved items carrying long comments — every item lands at a
+   * different starting y, so this sweeps the vulnerable window rather than guessing one offset.
+   */
+  it("never draws a response comment past the bottom margin", async () => {
+    const data = buildScorecardPdfData({
+      ...base,
+      correctiveActions: Array.from({ length: 14 }, (_, i) => ({
+        itemType: "action_item",
+        itemRef: String(i),
+        itemLabel: `Corrective item ${i}`,
+        status: "resolved",
+        responderName: "Pat Manager",
+        respondedAt: "2026-07-27T13:00:00.000Z",
+        // ~500 chars: long enough to fill the bounded comment box.
+        responseComment: "Re-poured and cured, then re-inspected with the safety lead. ".repeat(9),
+        photos: [],
+      })),
+    });
+
+    const pdf = await renderFieldScorecardPdf(data);
+
+    // Every text-positioning operator in the content streams must sit inside the printable area. PDF user
+    // space is bottom-left origin, so the 48pt bottom margin is y = 48; anything below that has overflowed.
+    const yPositions = textYPositions(pdf);
+    expect(yPositions.length).toBeGreaterThan(20);
+    expect(yPositions.filter((y) => y < 48)).toEqual([]);
+  });
+
+  it("never draws a response comment past the bottom margin for a mix of open and resolved items", async () => {
+    const data = buildScorecardPdfData({
+      ...base,
+      correctiveActions: Array.from({ length: 20 }, (_, i) => ({
+        itemType: "action_item",
+        itemRef: String(i),
+        itemLabel: `Item ${i}`,
+        status: i % 3 === 0 ? "open" : "resolved",
+        responderName: i % 3 === 0 ? null : "Pat Manager",
+        respondedAt: i % 3 === 0 ? null : "2026-07-27T13:00:00.000Z",
+        responseComment: i % 3 === 0 ? null : "Corrected on site and verified. ".repeat(12),
+        photos: [],
+      })),
+    });
+
+    const pdf = await renderFieldScorecardPdf(data);
+    const yPositions = textYPositions(pdf);
+    expect(yPositions.length).toBeGreaterThan(20);
+    expect(yPositions.filter((y) => y < 48)).toEqual([]);
+  });
+
+  it("adds an upstream pre-cap omission to the render-side count", async () => {
+    // The artifact job caps response photos BEFORE downloading bytes (so a photo beyond the cap cannot 503
+    // the whole download). Its omitted count must reach the "available in the CRM" note, or the note would
+    // report only what this render discarded.
+    const data = buildScorecardPdfData({
+      ...base,
+      omittedCorrectiveActionPhotoCount: 7,
+      correctiveActions: [
+        {
+          itemType: "action_item",
+          itemRef: "0",
+          itemLabel: "Item",
+          status: "resolved",
+          responderName: "Pat",
+          respondedAt: "2026-07-27T13:00:00.000Z",
+          responseComment: "done",
+          photos: [{ caption: "a", image: null }],
+        },
+      ],
+    });
+
+    expect(data.omittedCorrectiveActionPhotoCount).toBe(7);
+    expect(data.correctiveActions[0].photos).toHaveLength(1);
   });
 });

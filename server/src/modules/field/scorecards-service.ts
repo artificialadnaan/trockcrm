@@ -13,7 +13,12 @@ import {
   scorecardCorrectiveActions,
 } from "@trock-crm/shared/schema";
 import { generateDownloadUrl, headObjectStrict, putObject } from "../../lib/r2-client.js";
-import { buildScorecardPdfData, renderFieldScorecardPdf, MAX_EVIDENCE_PHOTOS } from "./scorecard-pdf.js";
+import {
+  buildScorecardPdfData,
+  renderFieldScorecardPdf,
+  MAX_CORRECTIVE_ACTION_PHOTOS,
+  MAX_EVIDENCE_PHOTOS,
+} from "./scorecard-pdf.js";
 import {
   CURRENT_SCORECARD_PDF_RENDER_VERSION,
   coalesceScorecardPdfFinalization,
@@ -1171,15 +1176,30 @@ export async function renderAndStoreFieldScorecardArtifacts(
   }
   // Corrective-action RESPONSE photos resolve through the SAME pipeline, so a transient storage failure
   // stays retryable and a permanently-bad object renders a placeholder rather than making the whole report
-  // unexportable. Capped in buildScorecardPdfData; the row set here is already bounded by the item count.
+  // unexportable.
+  //
+  // Cap BEFORE downloading bytes, exactly as the evidence path does. Nothing upstream bounds how many
+  // photos a response may carry (submitCorrectiveActionResponse validates ownership, not count), so
+  // resolving every row first would fetch and transcode tiles the renderer discards — and, worse, a
+  // transient failure on a photo BEYOND the cap would 503 the whole download for an image that was never
+  // going to appear. Slice in the SAME order the renderer consumes the budget (item order, then link time)
+  // so the kept set matches what buildScorecardPdfData would have kept.
+  const responsePhotoRowsInRenderOrder = sortResponsePhotosForRender(
+    correctiveActionPhotoRows,
+    correctiveActionRows,
+  );
+  const responsePhotosToLoad = responsePhotoRowsInRenderOrder.slice(0, MAX_CORRECTIVE_ACTION_PHOTOS);
+  const omittedCorrectiveActionPhotoCount =
+    responsePhotoRowsInRenderOrder.length - responsePhotosToLoad.length;
+
   const loadResponsePhoto = async (photo: typeof correctiveActionPhotoRows[number]) => ({
     correctiveActionId: photo.correctiveActionId as string,
     caption: photo.caption ?? null,
     resolution: await resolveScorecardEvidenceImage(photo),
   });
   const correctiveActionPhotos: Awaited<ReturnType<typeof loadResponsePhoto>>[] = [];
-  for (let index = 0; index < correctiveActionPhotoRows.length; index += PDF_EVIDENCE_DOWNLOAD_CONCURRENCY) {
-    const batch = correctiveActionPhotoRows.slice(index, index + PDF_EVIDENCE_DOWNLOAD_CONCURRENCY);
+  for (let index = 0; index < responsePhotosToLoad.length; index += PDF_EVIDENCE_DOWNLOAD_CONCURRENCY) {
+    const batch = responsePhotosToLoad.slice(index, index + PDF_EVIDENCE_DOWNLOAD_CONCURRENCY);
     correctiveActionPhotos.push(...await Promise.all(batch.map(loadResponsePhoto)));
   }
 
@@ -1231,6 +1251,7 @@ export async function renderAndStoreFieldScorecardArtifacts(
       image: photo.resolution.image,
     })),
     omittedEvidenceCount,
+    omittedCorrectiveActionPhotoCount,
     correctiveActions: correctiveActionRows.map((row) => ({
       itemType: row.itemType,
       itemRef: row.itemRef,
@@ -1887,4 +1908,36 @@ function scorecardContentChangedError(): AppError {
 function toIso(value: unknown): string {
   if (value instanceof Date) return value.toISOString();
   return String(value);
+}
+
+/**
+ * Corrective-action RESPONSE photo rows in the order the PDF renders them: by item (action items ahead of
+ * critical deficiencies, then NUMERIC item_ref — "10" follows "2"), then by link time within an item.
+ *
+ * The render-side photo budget is spent in exactly this order, so slicing here keeps the same photos the
+ * renderer would have kept. Sorting the ROWS is cheap; it is the byte downloads the cap exists to avoid.
+ * Rows whose parent item is missing sort last — they cannot render, so they are the first to be dropped.
+ */
+function sortResponsePhotosForRender<T extends { correctiveActionId: string | null }>(
+  photoRows: T[],
+  itemRows: Array<{ id: string; itemType: string; itemRef: string }>,
+): T[] {
+  const rankById = new Map<string, number>();
+  [...itemRows]
+    .sort((left, right) => {
+      if (left.itemType !== right.itemType) return left.itemType === "action_item" ? -1 : 1;
+      const leftNum = Number(left.itemRef);
+      const rightNum = Number(right.itemRef);
+      if (Number.isFinite(leftNum) && Number.isFinite(rightNum)) return leftNum - rightNum;
+      return left.itemRef.localeCompare(right.itemRef);
+    })
+    .forEach((item, index) => rankById.set(item.id, index));
+
+  // The incoming rows already arrive ordered by (created_at, id); Array.prototype.sort is stable, so that
+  // ordering is preserved within each item.
+  return [...photoRows].sort(
+    (left, right) =>
+      (rankById.get(left.correctiveActionId ?? "") ?? Number.MAX_SAFE_INTEGER) -
+      (rankById.get(right.correctiveActionId ?? "") ?? Number.MAX_SAFE_INTEGER),
+  );
 }

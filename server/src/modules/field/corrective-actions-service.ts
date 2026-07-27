@@ -44,8 +44,14 @@ const SCORECARD_EMAIL_RUN_AFTER_SECONDS = 120;
  *   - the second finalize builds the same single-flight key and coalesces onto the stale in-flight render.
  * Matches the expression scorecard evidence invalidation already uses for exactly this reason
  * (modules/files/service.ts) and the +1ms guard on the scorecard edit path (scorecards-service.ts).
+ *
+ * Built per call rather than held in a module-level constant: a top-level `sql` template dereferences
+ * `fieldScorecards.updatedAt` at IMPORT time, which throws for any consumer that partially mocks
+ * `@trock-crm/shared/schema` — and this module is reachable from the auth and deal import graphs.
  */
-const NEXT_GENERATION = sql`GREATEST(${fieldScorecards.updatedAt} + interval '1 millisecond', NOW())`;
+function nextGeneration() {
+  return sql`GREATEST(${fieldScorecards.updatedAt} + interval '1 millisecond', NOW())`;
+}
 
 export interface ResolveCorrectiveActionInput {
   scorecardId: string;
@@ -157,8 +163,8 @@ export async function resolveCorrectiveActionItemTx(
     .update(fieldScorecards)
     .set(
       closing
-        ? { status: "corrective_action_closed", updatedAt: NEXT_GENERATION }
-        : { updatedAt: NEXT_GENERATION },
+        ? { status: "corrective_action_closed", updatedAt: nextGeneration() }
+        : { updatedAt: nextGeneration() },
     )
     .where(eq(fieldScorecards.id, input.scorecardId));
 
@@ -397,7 +403,7 @@ export async function reconcileScorecardCorrectiveActions(
     ) {
       await tx
         .update(fieldScorecards)
-        .set({ status: "submitted", updatedAt: NEXT_GENERATION })
+        .set({ status: "submitted", updatedAt: nextGeneration() })
         .where(eq(fieldScorecards.id, input.scorecardId));
       // The corrective-action cycle no longer exists (the edit lifted the card out of the band / removed every
       // flag), so its outstanding recipient-bound web tokens must not keep authorizing the responder flow or the
@@ -545,7 +551,7 @@ export async function reconcileScorecardCorrectiveActions(
   if (input.currentStatus !== nextStatus) {
     await tx
       .update(fieldScorecards)
-      .set({ status: nextStatus, updatedAt: NEXT_GENERATION })
+      .set({ status: nextStatus, updatedAt: nextGeneration() })
       .where(eq(fieldScorecards.id, input.scorecardId));
   }
 
