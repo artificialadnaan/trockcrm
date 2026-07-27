@@ -188,12 +188,91 @@ describe("getDealDetail — canonical verdicts reach the response", () => {
   });
 
   it("keeps effectiveOnHold and effectiveValue consistent with each other", async () => {
-    // They are computed from ONE timestamp precisely so they cannot disagree across a calendar
-    // boundary — held must mean zero, and zero from this rule must mean held.
-    for (const overrides of [{}, { onHold: true }, { expectedCloseDate: isoDay(200) }]) {
+    // EXPECTED values per case, not a conditional. `if (effectiveOnHold) expect(value).toBe(0)` passes
+    // vacuously the moment a regression makes effectiveOnHold false — the assertion simply stops
+    // running, and the test stays green while reporting nothing.
+    const cases = [
+      { overrides: {}, onHold: false, value: 250000 },
+      { overrides: { onHold: true }, onHold: true, value: 0 },
+      { overrides: { expectedCloseDate: isoDay(200) }, onHold: true, value: 0 },
+    ];
+    for (const { overrides, onHold, value } of cases) {
       const tenantDb = createFakeTenantDb({ deals: [dealRow(overrides)] });
       const detail = await getDealDetail(tenantDb as never, "deal-1", "director", "director-1");
-      if (detail?.effectiveOnHold) expect(detail?.effectiveValue).toBe(0);
+      expect(detail?.effectiveOnHold).toBe(onHold);
+      expect(detail?.effectiveValue).toBe(value);
+    }
+  });
+
+  /**
+   * The two tests below replace a claim with a check.
+   *
+   * The consistency test above asserted the verdicts agree, and its comment said they agree "because
+   * they are computed from ONE timestamp" — but it never crossed a calendar boundary, so it passed
+   * identically whether or not that was true. It described the fix instead of testing it, which is worse
+   * than no coverage: it reads as protection while providing none. Both review bots caught this, and
+   * they were right about something stronger than they claimed — the shared timestamp was not in the
+   * code at all.
+   *
+   * Splitting it in two keeps each half deterministic:
+   *   1. that two readings across CT midnight genuinely DO disagree — the consequence being prevented;
+   *   2. that the service hands both helpers the SAME instant — the mechanism preventing it.
+   * A stepping global clock would test both at once, but getDealDetail reads the clock in several
+   * places, so which reading landed on which day would depend on unrelated code — a flaky test dressed
+   * up as a strict one.
+   */
+  it("two readings across CT midnight really do disagree at the 90-day boundary", async () => {
+    const { isDealValueEffectivelyOnHold, getEffectiveDealValue } = await import(
+      "@trock-crm/shared/types"
+    );
+
+    // March 2026 is CDT (UTC-5), so CT midnight is 05:00:00Z: 04:59:30Z is 23:59:30 the previous CT
+    // evening, and 05:00:30Z is 30 seconds into the next CT day — a boundary a real request straddles.
+    const beforeMidnightCt = new Date("2026-03-11T04:59:30.000Z");
+    const afterMidnightCt = new Date("2026-03-11T05:00:30.000Z");
+
+    // Held iff days-to-target > 90, so a target 91 days from the EARLIER CT day flips as the day rolls.
+    const deal = {
+      onHold: false,
+      stageSlug: "opportunity",
+      workflowRoute: "normal",
+      expectedCloseDate: "2026-06-09",
+      // bidEstimate, not estimatedValue — the value resolver reads
+      // awarded > bid_board > bid > dd and has no estimatedValue candidate at all.
+      bidEstimate: 250000,
+    };
+
+    expect(isDealValueEffectivelyOnHold(deal as never, beforeMidnightCt)).toBe(true);
+    expect(isDealValueEffectivelyOnHold(deal as never, afterMidnightCt)).toBe(false);
+
+    // Which is exactly the contradiction: held by one clock, full value by the other.
+    expect(getEffectiveDealValue(deal as never, afterMidnightCt)).toBe(250000);
+  });
+
+  it("passes ONE shared instant to both verdict helpers", async () => {
+    const holdModule = await import("@trock-crm/shared/types");
+    const onHoldSpy = vi.spyOn(holdModule, "isDealValueEffectivelyOnHold");
+    const valueSpy = vi.spyOn(holdModule, "getEffectiveDealValue");
+
+    try {
+      const tenantDb = createFakeTenantDb({ deals: [dealRow()] });
+      await getDealDetail(tenantDb as never, "deal-1", "director", "director-1");
+
+      expect(onHoldSpy).toHaveBeenCalled();
+      expect(valueSpy).toHaveBeenCalled();
+
+      const onHoldNow = onHoldSpy.mock.calls[0][1];
+      const valueNow = valueSpy.mock.calls[0][1];
+
+      // Defined, not merely equal: calling both bare leaves each to its own `new Date()` default, which
+      // arrives here as undefined and would otherwise satisfy a bare equality check.
+      expect(onHoldNow).toBeInstanceOf(Date);
+      // The SAME object. Two Dates a microsecond apart are not equal, but they are also not the point:
+      // one instant, passed twice, is the only shape that cannot drift.
+      expect(valueNow).toBe(onHoldNow);
+    } finally {
+      onHoldSpy.mockRestore();
+      valueSpy.mockRestore();
     }
   });
 

@@ -85,6 +85,9 @@ export async function apiFetch<T = unknown>(path: string, opts: ApiFetchOptions 
   // alone cannot say which fired — and reporting a deliberate unmount cancellation as "Request timed out"
   // sends screens down an error path for something that is not an error. Track the cause explicitly.
   let timedOut = false;
+  // Armed only once the headers are in — see the body deadline below.
+  let bodyTimedOut = false;
+  let bodyTimer: ReturnType<typeof setTimeout> | undefined;
   const timer = setTimeout(() => {
     timedOut = true;
     controller.abort();
@@ -98,65 +101,120 @@ export async function apiFetch<T = unknown>(path: string, opts: ApiFetchOptions 
     else signal.addEventListener("abort", onExternalAbort, { once: true });
   }
 
-  let res: Response;
+  // The abort listener is removed in an OUTER finally so it stays live through the BODY read, not
+  // just the headers. A caller that aborts while a slow or large body is still streaming was
+  // previously ignored: the listener had already been detached when fetch() resolved, so the
+  // internal controller never saw the abort and the read ran to completion. That mattered more once
+  // a failed body read stopped being reported as a successful-but-malformed response — the
+  // cancellation path below can only classify an abort it actually received.
   try {
-    res = await fetch(`${API_BASE_URL}/api${path}${buildQuery(query)}`, {
-      method,
-      headers,
-      body: body !== undefined ? JSON.stringify(body) : undefined,
-      signal: controller.signal,
-    });
-  } catch (e) {
-    if (timedOut) throw new ApiError("Request timed out", 408);
-    // Caller-initiated cancellation. Status 0 keeps it in the transport-failure bucket callers already
-    // handle, with a message that does not claim the server was slow.
-    if (controller.signal.aborted) throw new ApiError("Request cancelled", 0);
-    // Wrap transport-level failures (offline, DNS, refused) as ApiError(0) so
-    // callers only ever handle one error type.
-    throw new ApiError(e instanceof Error ? e.message : "Network request failed", 0);
-  } finally {
-    clearTimeout(timer);
-    signal?.removeEventListener("abort", onExternalAbort);
-  }
-
-  if (!res.ok) {
-    // ONLY a 401 (auth failure) clears the session. A 403 is authorization (CSRF/RBAC/permission) and
-    // must surface as an error without signing the user out — see onUnauthorized's doc above.
-    if (res.status === 401) onUnauthorized?.();
-    let message = `Request failed (${res.status})`;
-    let code: string | undefined;
+    let res: Response;
     try {
-      const parsed = (await res.json()) as {
-        error?: { message?: string; code?: string } | string;
-        code?: string;
-      };
-      const err = (parsed as { error?: unknown }).error;
-      if (typeof err === "string") message = err;
-      else if (err && typeof err === "object") {
-        if (typeof (err as { message?: unknown }).message === "string") {
-          message = (err as { message: string }).message;
-        }
-        if (typeof (err as { code?: unknown }).code === "string") {
-          code = (err as { code: string }).code;
-        }
-      }
-      // Prefer the standard error.code envelope emitted by the server's errorHandler; a top-level code is
-      // a compatibility fallback for the handful of routes that still return one.
-      if (!code && typeof parsed.code === "string") code = parsed.code;
-    } catch {
-      /* keep default message */
+      res = await fetch(`${API_BASE_URL}/api${path}${buildQuery(query)}`, {
+        method,
+        headers,
+        body: body !== undefined ? JSON.stringify(body) : undefined,
+        signal: controller.signal,
+      });
+    } catch (e) {
+      if (timedOut) throw new ApiError("Request timed out", 408);
+      // Caller-initiated cancellation. Status 0 keeps it in the transport-failure bucket callers already
+      // handle, with a message that does not claim the server was slow.
+      if (controller.signal.aborted) throw new ApiError("Request cancelled", 0);
+      // Wrap transport-level failures (offline, DNS, refused) as ApiError(0) so
+      // callers only ever handle one error type.
+      throw new ApiError(e instanceof Error ? e.message : "Network request failed", 0);
+    } finally {
+      // The HEADER timer stops here and a fresh BODY timer is armed below. Two deadlines rather than
+      // one, because they measure different things: this one is time-to-response, and the server has
+      // now answered.
+      clearTimeout(timer);
     }
-    throw new ApiError(message, res.status, code);
-  }
 
-  if (res.status === 204) return undefined as T;
-  try {
-    return (await res.json()) as T;
-  } catch {
-    // A 2xx with an empty or non-JSON body — a proxy's HTML error page, a truncated response, a route
-    // that forgot to serialise. Raw, this throws a SyntaxError, which is NOT an ApiError: every screen
-    // tests `err instanceof ApiError` to decide what to show, so it fell through to the generic
-    // "Something went wrong" and lost both the status and the offline/server distinction.
-    throw new ApiError(`Malformed response from the server (${res.status})`, res.status);
+    /**
+     * The body gets its own deadline.
+     *
+     * Clearing the header timer and arming nothing left `res.json()` able to hang FOREVER: a connection
+     * that goes away mid-body — the common job-site case, where the radio drops between the headers and
+     * the payload — produces a promise that neither resolves nor rejects, and the screen sits on a
+     * spinner with no timeout, no error, and no retry. Worse than the failure it replaced.
+     *
+     * A full fresh budget rather than the remainder of the original: this client only ever reads JSON,
+     * so a body that needs longer than the whole request budget is pathological, and giving it its own
+     * window keeps a nearly-exhausted header phase from cutting off a payload that is arriving fine.
+     */
+    bodyTimedOut = false;
+    bodyTimer = setTimeout(() => {
+      bodyTimedOut = true;
+      controller.abort();
+    }, timeoutMs);
+
+    if (!res.ok) {
+      // ONLY a 401 (auth failure) clears the session. A 403 is authorization (CSRF/RBAC/permission) and
+      // must surface as an error without signing the user out — see onUnauthorized's doc above.
+      if (res.status === 401) onUnauthorized?.();
+      let message = `Request failed (${res.status})`;
+      let code: string | undefined;
+      try {
+        const parsed = (await res.json()) as {
+          error?: { message?: string; code?: string } | string;
+          code?: string;
+        };
+        const err = (parsed as { error?: unknown }).error;
+        if (typeof err === "string") message = err;
+        else if (err && typeof err === "object") {
+          if (typeof (err as { message?: unknown }).message === "string") {
+            message = (err as { message: string }).message;
+          }
+          if (typeof (err as { code?: unknown }).code === "string") {
+            code = (err as { code: string }).code;
+          }
+        }
+        // Prefer the standard error.code envelope emitted by the server's errorHandler; a top-level code is
+        // a compatibility fallback for the handful of routes that still return one.
+        if (!code && typeof parsed.code === "string") code = parsed.code;
+      } catch {
+        /* keep default message — a body that is absent or not JSON still has a usable status */
+      }
+      // ...but a body that TIMED OUT is not a server error with a readable status; it is a stalled
+      // connection that happened to be carrying an error page. Reporting it as the original 4xx/5xx
+      // would send screens down an error path for a failure the request never actually finished
+      // observing. Same precedence as the success path above.
+      if (bodyTimedOut) throw new ApiError("Request timed out", 408);
+      throw new ApiError(message, res.status, code);
+    }
+
+    if (res.status === 204) return undefined as T;
+    try {
+      return (await res.json()) as T;
+    } catch (e) {
+      // Reading the body can fail for two unrelated reasons, and collapsing them loses the one thing
+      // callers actually branch on.
+      //
+      // A SyntaxError means the body ARRIVED and is not JSON — a proxy's HTML error page, a route that
+      // forgot to serialise, an empty 200. That is a real server response, so it keeps its real status.
+      // Raw, it would escape as a SyntaxError rather than an ApiError, and every screen tests
+      // `err instanceof ApiError` to decide what to show, so it fell through to a generic
+      // "Something went wrong" with no status at all.
+      if (e instanceof SyntaxError) {
+        throw new ApiError(`Malformed response from the server (${res.status})`, res.status);
+      }
+
+      // Anything else is the CONNECTION dropping after the headers arrived but before the body finished.
+      // Nothing is wrong with the server or its response — the network went away mid-read. Reporting that
+      // as ApiError(status = 200) told every screen the request had succeeded and the payload was
+      // malformed, so the offline checks (`status === 0`) missed it and a rep on a site with no signal was
+      // shown a server-fault message for a connectivity problem.
+      // The body DEADLINE, checked before the generic abort handling — it fires by aborting the shared
+      // controller, so `signal.aborted` is true either way and a plain abort check would report every
+      // stalled body as a user cancellation. Callers branch hard on this: 408 drives retry-and-say-so,
+      // status 0 drives the offline copy, and a cancellation is meant to be silent.
+      if (bodyTimedOut) throw new ApiError("Request timed out", 408);
+      if (controller.signal.aborted) throw new ApiError("Request cancelled", 0);
+      throw new ApiError(e instanceof Error ? e.message : "Network request failed", 0);
+    }
+  } finally {
+    clearTimeout(bodyTimer);
+    signal?.removeEventListener("abort", onExternalAbort);
   }
 }

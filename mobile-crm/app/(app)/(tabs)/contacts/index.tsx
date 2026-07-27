@@ -165,6 +165,13 @@ export default function ContactsListScreen() {
           }
           onEndReachedThreshold={0.5}
           onEndReached={() => {
+            // NOT after a page failure. onEndReached fires repeatedly while the user sits at the bottom,
+            // so without this a failed load-more retries on every scroll tick — hammering an endpoint
+            // that is already failing, and fighting the explicit retry the footer offers.
+            //
+            // The deals list has carried this guard from the start; this one did not. Same list, same
+            // hook, one copy hardened — which is the divergence that keeps producing defects here.
+            if (pageError) return;
             if (query.hasNextPage && !query.isFetchingNextPage) void query.fetchNextPage();
           }}
           ListHeaderComponent={
