@@ -106,8 +106,8 @@ import { isRfpVotingEnabled, isStageEntryDateFilterEnabled } from "../../config/
 import { getWtdPeriod } from "../../lib/period.js";
 import {
   buildDealFilterBarConditions,
-  buildInvolvedRepCondition,
-  buildAliasedInvolvedRepSql,
+  buildOwnedRepCondition,
+  buildAliasedOwnedRepSql,
   aliasedStageAwareEffectiveDealValueSql,
   aliasedEffectiveStageAgeDaysSql,
   UNASSIGNED_FILTER_SENTINEL,
@@ -3397,12 +3397,13 @@ export async function getDealsForPipeline(
   } else if (filters?.scope === "team") {
     const teamRepIds = await resolveTeamRepIds(tenantDb, userId, filters.activeOfficeId ?? null);
     if (filters?.assignedRepId) {
-      // Team scope, filtered to one person: bound by team membership (assigned_rep IN teamRepIds)
-      // AND match rep-OR-estimator, so the estimator clause can't surface deals assigned OUTSIDE
-      // the team — the same bounded pattern the deals list and stage drill-down use.
+      // Team scope, filtered to one person: bound by team membership (assigned_rep IN teamRepIds) AND
+      // owned by them. The team bound is now redundant with owner-only matching (owning it already implies
+      // being that person) but is kept so the predicate still reads as "within my team", and so re-widening
+      // the rep match later cannot silently surface deals assigned outside the team.
       commonConditions.push(
         teamRepIds.length > 0
-          ? and(inArray(deals.assignedRepId, teamRepIds), buildInvolvedRepCondition(filters.assignedRepId))!
+          ? and(inArray(deals.assignedRepId, teamRepIds), buildOwnedRepCondition(filters.assignedRepId))!
           : sql`false`
       );
       assignedRepFilterHandled = true;
@@ -3411,7 +3412,7 @@ export async function getDealsForPipeline(
     }
   }
   if (filters?.assignedRepId && !assignedRepFilterHandled) {
-    commonConditions.push(buildInvolvedRepCondition(filters.assignedRepId));
+    commonConditions.push(buildOwnedRepCondition(filters.assignedRepId));
   }
 
   // Office scope: mirror getDeals so the kanban board and the drill-down list
@@ -3683,7 +3684,7 @@ export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePage
   if (input.assignedRepId) {
     // The Unassigned FilterBar option sends the sentinel; map it to IS NULL like the list (getDeals /
     // buildAssignedRepPredicate), not a literal equality that would error on the UUID column (Codex P2).
-    conditions.push(buildAliasedInvolvedRepSql("d", input.assignedRepId));
+    conditions.push(buildAliasedOwnedRepSql("d", input.assignedRepId));
   }
   if (input.regionId) {
     conditions.push(

@@ -185,7 +185,7 @@ describe("getDealsForPipeline team scope", () => {
     expect(result.pipelineColumns[0].deals[0]?.assignedRepName).toBe("Brett Jones");
   });
 
-  it("getDealsForPipeline bounds to the team AND targets the selected person (rep or estimator) when scope=team", async () => {
+  it("getDealsForPipeline bounds to the team AND targets the person's OWNED deals when scope=team", async () => {
     const teamQuery = {
       from: vi.fn().mockReturnThis(),
       where: vi.fn().mockResolvedValue([{ id: "rep-team-1" }, { id: "rep-team-2" }]),
@@ -220,13 +220,14 @@ describe("getDealsForPipeline team scope", () => {
     });
 
     const where = dealQuery.where.mock.calls[0][0];
-    // Estimator-aware + team-bounded: the rep-OR-estimator clause targets rep-team-1, AND'd with
-    // the team-membership IN bound (which includes the other team member rep-team-2 — so the
-    // estimator clause can't surface deals assigned outside the team).
+    // Owner-only + team-bounded: the rep clause targets deals rep-team-1 OWNS, AND'd with the
+    // team-membership IN bound (which still lists rep-team-2, so the predicate keeps reading as
+    // "within my team" even though owner-matching alone now implies membership).
     expect(containsValue(where, "rep-team-1")).toBe(true);
     expect(containsValue(where, "rep-team-2")).toBe(true);
     const text = sqlText(where);
-    expect(text).toContain("estimator_user_id"); // rep filter applied (rep OR estimator), not team-only
+    // The estimator arm is gone: picking a person shows their book, not deals they estimated for others.
+    expect(text).not.toContain("estimator_user_id");
     expect(text).toContain(" in ("); // bounded to the team (assigned_rep_id IN (...))
   });
 
