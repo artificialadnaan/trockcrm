@@ -205,6 +205,27 @@ export default function ContactDetailScreen() {
         ) : null}
 
         <Section title="Deals">
+          {/* A background failure once the linked deals have loaded: never replace what is on screen,
+              just say so. Gated on `data !== undefined` rather than on row count — and this is the case
+              that matters most, because reps see only their OWN deals here, so an empty result is the
+              NORMAL one. Requiring rows meant the most common state reported a failed refresh nowhere:
+              no notice, no retry, just "No deals you can see are linked to this contact" standing there
+              looking authoritative while the refresh behind it had failed.
+
+              TOP placement, beside the heading. It sat below every deal row, so on a contact with enough
+              linked work to fill the screen the warning and its retry were off-screen and the stale rows
+              read as current — the exact silent-failure the notice exists to prevent. Same fix as the
+              deal detail's activity timeline; both files had it, and fixing one and reading the other as
+              correct because it looked familiar is how this app keeps shipping the second copy wrong. */}
+          {dealsState.kind === "loaded" && dealsState.refreshFailed ? (
+            <RetryNotice
+              testID="retry-contact-deals-inline"
+              message="Couldn't refresh deals — tap to retry"
+              onRetry={() => void dealsQuery.refetch()}
+              placement="top"
+            />
+          ) : null}
+
           {dealsState.kind === "loading" ? (
             <ActivityIndicator color={theme.color.brandRed} />
           ) : dealsState.kind === "blocking-error" ? (
@@ -242,20 +263,6 @@ export default function ContactDetailScreen() {
             ))
           )}
 
-          {/* A background failure once the linked deals have loaded: never replace what is on screen,
-              just say so. Gated on `data !== undefined` rather than on row count — and this is the case
-              that matters most, because reps see only their OWN deals here, so an empty result is the
-              NORMAL one. Requiring rows meant the most common state reported a failed refresh nowhere:
-              no notice, no retry, just "No deals you can see are linked to this contact" standing there
-              looking authoritative while the refresh behind it had failed. */}
-          {dealsState.kind === "loaded" && dealsState.refreshFailed ? (
-            <RetryNotice
-              testID="retry-contact-deals-inline"
-              message="Couldn't refresh deals — tap to retry"
-              onRetry={() => void dealsQuery.refetch()}
-              placement="bottom"
-            />
-          ) : null}
         </Section>
       </ScrollView>
     </SafeAreaView>

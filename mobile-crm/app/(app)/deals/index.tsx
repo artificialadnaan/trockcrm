@@ -230,20 +230,30 @@ export default function DealsListScreen() {
             if (query.hasNextPage && !query.isFetchingNextPage) void query.fetchNextPage();
           }}
           ListHeaderComponent={
-            refreshError ? (
-              <RetryNotice
-                testID="deals-refresh-retry"
-                message="Couldn't refresh — showing saved deals. Tap to retry."
-                onRetry={() => void query.refetch()}
-                placement="top"
-              />
-            ) : stagesFailed ? (
-              <RetryNotice
-                testID="deals-stages-retry"
-                message="Couldn't load stage names — showing raw stages. Tap to retry."
-                onRetry={() => void stagesQuery.refetch()}
-                placement="top"
-              />
+            /* BOTH, not either. These are two independent endpoints with independent retries, and the
+               exclusive ternary tied the stage-name recovery to the deals error clearing first: with
+               /deals still down and /deals/stages back up, the only control that could restore real
+               stage names was hidden, leaving the rep on raw slugs with no way to fix it. A retry for
+               a failure the user can actually clear should not be gated on an unrelated one. */
+            refreshError || stagesFailed ? (
+              <>
+                {refreshError ? (
+                  <RetryNotice
+                    testID="deals-refresh-retry"
+                    message="Couldn't refresh — showing saved deals. Tap to retry."
+                    onRetry={() => void query.refetch()}
+                    placement="top"
+                  />
+                ) : null}
+                {stagesFailed ? (
+                  <RetryNotice
+                    testID="deals-stages-retry"
+                    message="Couldn't load stage names — showing raw stages. Tap to retry."
+                    onRetry={() => void stagesQuery.refetch()}
+                    placement="top"
+                  />
+                ) : null}
+              </>
             ) : null
           }
           ListFooterComponent={

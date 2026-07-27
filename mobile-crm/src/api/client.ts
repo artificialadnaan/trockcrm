@@ -98,79 +98,91 @@ export async function apiFetch<T = unknown>(path: string, opts: ApiFetchOptions 
     else signal.addEventListener("abort", onExternalAbort, { once: true });
   }
 
-  let res: Response;
+  // The abort listener is removed in an OUTER finally so it stays live through the BODY read, not
+  // just the headers. A caller that aborts while a slow or large body is still streaming was
+  // previously ignored: the listener had already been detached when fetch() resolved, so the
+  // internal controller never saw the abort and the read ran to completion. That mattered more once
+  // a failed body read stopped being reported as a successful-but-malformed response — the
+  // cancellation path below can only classify an abort it actually received.
   try {
-    res = await fetch(`${API_BASE_URL}/api${path}${buildQuery(query)}`, {
-      method,
-      headers,
-      body: body !== undefined ? JSON.stringify(body) : undefined,
-      signal: controller.signal,
-    });
-  } catch (e) {
-    if (timedOut) throw new ApiError("Request timed out", 408);
-    // Caller-initiated cancellation. Status 0 keeps it in the transport-failure bucket callers already
-    // handle, with a message that does not claim the server was slow.
-    if (controller.signal.aborted) throw new ApiError("Request cancelled", 0);
-    // Wrap transport-level failures (offline, DNS, refused) as ApiError(0) so
-    // callers only ever handle one error type.
-    throw new ApiError(e instanceof Error ? e.message : "Network request failed", 0);
-  } finally {
-    clearTimeout(timer);
-    signal?.removeEventListener("abort", onExternalAbort);
-  }
-
-  if (!res.ok) {
-    // ONLY a 401 (auth failure) clears the session. A 403 is authorization (CSRF/RBAC/permission) and
-    // must surface as an error without signing the user out — see onUnauthorized's doc above.
-    if (res.status === 401) onUnauthorized?.();
-    let message = `Request failed (${res.status})`;
-    let code: string | undefined;
+    let res: Response;
     try {
-      const parsed = (await res.json()) as {
-        error?: { message?: string; code?: string } | string;
-        code?: string;
-      };
-      const err = (parsed as { error?: unknown }).error;
-      if (typeof err === "string") message = err;
-      else if (err && typeof err === "object") {
-        if (typeof (err as { message?: unknown }).message === "string") {
-          message = (err as { message: string }).message;
+      res = await fetch(`${API_BASE_URL}/api${path}${buildQuery(query)}`, {
+        method,
+        headers,
+        body: body !== undefined ? JSON.stringify(body) : undefined,
+        signal: controller.signal,
+      });
+    } catch (e) {
+      if (timedOut) throw new ApiError("Request timed out", 408);
+      // Caller-initiated cancellation. Status 0 keeps it in the transport-failure bucket callers already
+      // handle, with a message that does not claim the server was slow.
+      if (controller.signal.aborted) throw new ApiError("Request cancelled", 0);
+      // Wrap transport-level failures (offline, DNS, refused) as ApiError(0) so
+      // callers only ever handle one error type.
+      throw new ApiError(e instanceof Error ? e.message : "Network request failed", 0);
+    } finally {
+      // Only the TIMEOUT stops here. It measures time-to-response: the server has answered, so a slow
+      // body is a transfer, not an unresponsive server. Leaving it armed would abort large payloads
+      // mid-download and report them as timeouts.
+      clearTimeout(timer);
+    }
+
+    if (!res.ok) {
+      // ONLY a 401 (auth failure) clears the session. A 403 is authorization (CSRF/RBAC/permission) and
+      // must surface as an error without signing the user out — see onUnauthorized's doc above.
+      if (res.status === 401) onUnauthorized?.();
+      let message = `Request failed (${res.status})`;
+      let code: string | undefined;
+      try {
+        const parsed = (await res.json()) as {
+          error?: { message?: string; code?: string } | string;
+          code?: string;
+        };
+        const err = (parsed as { error?: unknown }).error;
+        if (typeof err === "string") message = err;
+        else if (err && typeof err === "object") {
+          if (typeof (err as { message?: unknown }).message === "string") {
+            message = (err as { message: string }).message;
+          }
+          if (typeof (err as { code?: unknown }).code === "string") {
+            code = (err as { code: string }).code;
+          }
         }
-        if (typeof (err as { code?: unknown }).code === "string") {
-          code = (err as { code: string }).code;
-        }
+        // Prefer the standard error.code envelope emitted by the server's errorHandler; a top-level code is
+        // a compatibility fallback for the handful of routes that still return one.
+        if (!code && typeof parsed.code === "string") code = parsed.code;
+      } catch {
+        /* keep default message */
       }
-      // Prefer the standard error.code envelope emitted by the server's errorHandler; a top-level code is
-      // a compatibility fallback for the handful of routes that still return one.
-      if (!code && typeof parsed.code === "string") code = parsed.code;
-    } catch {
-      /* keep default message */
-    }
-    throw new ApiError(message, res.status, code);
-  }
-
-  if (res.status === 204) return undefined as T;
-  try {
-    return (await res.json()) as T;
-  } catch (e) {
-    // Reading the body can fail for two unrelated reasons, and collapsing them loses the one thing
-    // callers actually branch on.
-    //
-    // A SyntaxError means the body ARRIVED and is not JSON — a proxy's HTML error page, a route that
-    // forgot to serialise, an empty 200. That is a real server response, so it keeps its real status.
-    // Raw, it would escape as a SyntaxError rather than an ApiError, and every screen tests
-    // `err instanceof ApiError` to decide what to show, so it fell through to a generic
-    // "Something went wrong" with no status at all.
-    if (e instanceof SyntaxError) {
-      throw new ApiError(`Malformed response from the server (${res.status})`, res.status);
+      throw new ApiError(message, res.status, code);
     }
 
-    // Anything else is the CONNECTION dropping after the headers arrived but before the body finished.
-    // Nothing is wrong with the server or its response — the network went away mid-read. Reporting that
-    // as ApiError(status = 200) told every screen the request had succeeded and the payload was
-    // malformed, so the offline checks (`status === 0`) missed it and a rep on a site with no signal was
-    // shown a server-fault message for a connectivity problem.
-    if (controller.signal.aborted) throw new ApiError("Request cancelled", 0);
-    throw new ApiError(e instanceof Error ? e.message : "Network request failed", 0);
+    if (res.status === 204) return undefined as T;
+    try {
+      return (await res.json()) as T;
+    } catch (e) {
+      // Reading the body can fail for two unrelated reasons, and collapsing them loses the one thing
+      // callers actually branch on.
+      //
+      // A SyntaxError means the body ARRIVED and is not JSON — a proxy's HTML error page, a route that
+      // forgot to serialise, an empty 200. That is a real server response, so it keeps its real status.
+      // Raw, it would escape as a SyntaxError rather than an ApiError, and every screen tests
+      // `err instanceof ApiError` to decide what to show, so it fell through to a generic
+      // "Something went wrong" with no status at all.
+      if (e instanceof SyntaxError) {
+        throw new ApiError(`Malformed response from the server (${res.status})`, res.status);
+      }
+
+      // Anything else is the CONNECTION dropping after the headers arrived but before the body finished.
+      // Nothing is wrong with the server or its response — the network went away mid-read. Reporting that
+      // as ApiError(status = 200) told every screen the request had succeeded and the payload was
+      // malformed, so the offline checks (`status === 0`) missed it and a rep on a site with no signal was
+      // shown a server-fault message for a connectivity problem.
+      if (controller.signal.aborted) throw new ApiError("Request cancelled", 0);
+      throw new ApiError(e instanceof Error ? e.message : "Network request failed", 0);
+    }
+  } finally {
+    signal?.removeEventListener("abort", onExternalAbort);
   }
 }
