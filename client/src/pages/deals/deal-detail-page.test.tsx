@@ -493,6 +493,49 @@ describe("DealDetailPage", () => {
     expect(html).toContain("Dallas Independent SD");
   });
 
+  // The standing "delete the project from the Bid Board" reminder is the only surviving trace of the
+  // ONE manual step "Move back to Opportunity" depends on, so it has to appear for a deal that really
+  // had a project — and must NOT appear for one that never did, since the marker is stamped either way.
+  it("shows the standing Bid Board deletion reminder on a deal detached from a real project", () => {
+    mocks.useDealDetailMock.mockReturnValue({
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      deal: makeDealDetail({
+        bidBoardDetachedAt: "2026-07-20T12:00:00.000Z",
+        bidBoardOwnership: {
+          ...makeDealDetail().bidBoardOwnership,
+          detachedAt: "2026-07-20T12:00:00.000Z",
+          detachedFromLinkedProject: true,
+        },
+      }),
+    });
+
+    const html = renderPage();
+    expect(html).toContain("Disconnected from Bid Board");
+    expect(html).toContain("Delete this project from the Bid Board");
+  });
+
+  it("omits the reminder for a CRM-only deal that was moved back but never had a Bid Board project", () => {
+    mocks.useDealDetailMock.mockReturnValue({
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      deal: makeDealDetail({
+        bidBoardDetachedAt: "2026-07-20T12:00:00.000Z",
+        bidBoardOwnership: {
+          ...makeDealDetail().bidBoardOwnership,
+          detachedAt: "2026-07-20T12:00:00.000Z",
+          detachedFromLinkedProject: false,
+        },
+      }),
+    });
+
+    const html = renderPage();
+    expect(html).not.toContain("Disconnected from Bid Board");
+    expect(html).not.toContain("Delete this project from the Bid Board");
+  });
+
   it("passes officeId query context into the initial deal detail load", () => {
     renderPage("/deals/deal-1?officeId=office-atlanta");
 

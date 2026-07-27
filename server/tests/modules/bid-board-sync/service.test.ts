@@ -88,7 +88,10 @@ describe("Bid Board sync service", () => {
   });
 
   it("matches by stored Procore Bid Board id before project number", async () => {
-    const query = vi.fn().mockResolvedValueOnce({ rows: [{ id: "deal-123" }] });
+    // The matcher probes the ATTACHED partition then the DETACHED one at each tier, so the default
+    // answer is "no rows" and the first call is the attached hit.
+    const query = vi.fn().mockResolvedValue({ rows: [] });
+    query.mockResolvedValueOnce({ rows: [{ id: "deal-123" }] });
     const normalized = normalizeBidBoardRow({
       Name: "Palm Villas",
       "Project ID": "987654",
@@ -99,13 +102,17 @@ describe("Bid Board sync service", () => {
     const ids = await findDealIds({ query }, "office_dallas", normalized);
 
     expect(ids).toEqual(["deal-123"]);
-    expect(query).toHaveBeenCalledTimes(1);
+    // Two calls, not one: the attached hit plus the detached probe at the SAME tier, which is what
+    // keeps an attached/detached collision visible to the multi-match guard.
+    expect(query).toHaveBeenCalledTimes(2);
     expect(query.mock.calls[0][0]).toContain("procore_bid_id = $1::bigint");
+    expect(String(query.mock.calls[1][0]).toLowerCase()).toContain("bid_board_detached_at is not null");
     expect(query.mock.calls[0][1]).toEqual(["987654"]);
   });
 
   it("falls back to project number when the Bid Board id is not numeric", async () => {
-    const query = vi.fn().mockResolvedValueOnce({ rows: [{ id: "deal-by-project-number" }] });
+    const query = vi.fn().mockResolvedValue({ rows: [] });
+    query.mockResolvedValueOnce({ rows: [{ id: "deal-by-project-number" }] });
     const normalized = normalizeBidBoardRow({
       Name: "Palm Villas",
       "Project ID": "not-a-number",
@@ -116,7 +123,7 @@ describe("Bid Board sync service", () => {
     const ids = await findDealIds({ query }, "office_dallas", normalized);
 
     expect(ids).toEqual(["deal-by-project-number"]);
-    expect(query).toHaveBeenCalledTimes(1);
+    expect(query).toHaveBeenCalledTimes(2);
     expect(query.mock.calls[0][0]).toContain("project_number");
     expect(query.mock.calls[0][0]).toContain("deal_number");
     expect(query.mock.calls[0][0]).toContain("bid_board_project_number");
@@ -124,7 +131,8 @@ describe("Bid Board sync service", () => {
   });
 
   it("matches on the canonical project number on BOTH sides (incoming + column) so dash/NBSP variants match legacy stored values", async () => {
-    const query = vi.fn().mockResolvedValueOnce({ rows: [{ id: "deal-canonical" }] });
+    const query = vi.fn().mockResolvedValue({ rows: [] });
+    query.mockResolvedValueOnce({ rows: [{ id: "deal-canonical" }] });
     const enDash = String.fromCharCode(0x2013);
     const normalized = normalizeBidBoardRow({
       Name: "Palm Villas",
@@ -166,7 +174,8 @@ describe("Bid Board sync service", () => {
   });
 
   it("passes the latest ingestion cycle timestamp into the deal update", async () => {
-    const query = vi.fn().mockResolvedValueOnce({ rows: [{ id: "deal-123" }] });
+    const query = vi.fn().mockResolvedValue({ rows: [] });
+    query.mockResolvedValueOnce({ rows: [{ id: "deal-123" }] });
     const normalized = normalizeBidBoardRow({
       Name: "Palm Villas",
       "Project ID": "987654",

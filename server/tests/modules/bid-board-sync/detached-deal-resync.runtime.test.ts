@@ -256,6 +256,36 @@ describe("Bid Board sync cannot re-claim a deal that was moved back to Opportuni
     expect(result.warnings.join(" ")).toContain(DETACHED);
   });
 
+  // AMBIGUITY ACROSS THE PARTITION. Splitting the matcher into attached/detached halves must not hide a
+  // multi-match: with the detached deal filtered out, the attached half alone looks like a clean single
+  // hit and the multi-match guard — whose whole job is refusing an ambiguous write — never fires.
+  it("still refuses an AMBIGUOUS row when the second claimant is the detached deal", async () => {
+    // Give the attached deal a mirror project number equal to the detached deal's project_number, so one
+    // tier-2 lookup legitimately identifies both. (Tier 2 ORs project_number / deal_number /
+    // bid_board_project_number, so this is a shape the real data can take.)
+    await pg.exec(
+      `UPDATE ${SCHEMA}.deals SET bid_board_project_number = 'DFW-2-00002-bb' WHERE id = '${ATTACHED}'`
+    );
+    const attachedBefore = await dealRow(ATTACHED);
+
+    const result = await ingestBidBoardRows({
+      office_slug: "test",
+      rows: [wonRow({ "Project #": "DFW-2-00002-bb" })],
+    });
+
+    // Neither deal is written: an operator has to reconcile which project this row belongs to.
+    const attached = await dealRow(ATTACHED);
+    expect(attached.stage_id).toBe(ST_ESTIMATING);
+    expect(attached.name).toBe("Attached Tower");
+    expect(String(attached.bid_estimate)).toBe(String(attachedBefore.bid_estimate));
+    expect((await dealRow(DETACHED)).stage_id).toBe(ST_OPPORTUNITY);
+
+    expect(result.metrics.multiMatch).toBe(1);
+    expect(result.metrics.stageUpdated).toBe(0);
+    expect(result.metrics.matched).toBe(0);
+    expect(result.metrics.skippedDetached).toBe(0);
+  });
+
   it("still syncs a normal ATTACHED deal in the very same payload (the guard is not a blanket off-switch)", async () => {
     const result = await ingestBidBoardRows({
       office_slug: "test",

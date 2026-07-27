@@ -274,6 +274,12 @@ export interface DealDetail extends Deal {
     reason: string;
     message: string;
     detachedAt?: string | null;
+    /**
+     * True only when the detach severed a REAL Bid Board project. Server-derived from the identity
+     * columns the detach deliberately preserves — the client cannot work this out for itself, because
+     * the detach nulls bidBoardLinkedAt and bidBoardProjectNumber.
+     */
+    detachedFromLinkedProject?: boolean;
   };
   stageHistory: Array<{
     id: string;
@@ -906,6 +912,7 @@ export async function preflightStageCheck(dealId: string, targetStageId: string)
       reason: string;
       message: string;
       detachedAt?: string | null;
+      detachedFromLinkedProject?: boolean;
     } | null;
   }>(`/deals/${dealId}/stage/preflight`, {
     method: "POST",

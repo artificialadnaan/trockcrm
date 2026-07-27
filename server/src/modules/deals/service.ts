@@ -1099,6 +1099,12 @@ export interface DealBidBoardOwnershipState {
   message: string;
   /** ISO timestamp when "Move back to Opportunity" severed this deal from Bid Board sync (else null). */
   detachedAt: string | null;
+  /**
+   * True only when the detach severed a REAL Bid Board project (the preserved procore / SyncHub
+   * identity proves one exists). Gates the standing "delete this project from the Bid Board" reminder,
+   * which must not appear on a CRM-only deal that was moved back but never had a project.
+   */
+  detachedFromLinkedProject: boolean;
 }
 
 /**
@@ -1634,6 +1640,8 @@ function mapDealStageWorkspaceRow(
 export function buildBidBoardOwnershipState(
   deal: Pick<typeof deals.$inferSelect, "isBidBoardOwned" | "workflowRoute"> & {
     bidBoardDetachedAt?: Date | string | null;
+    procoreBidId?: number | string | null;
+    synchubBidBoardId?: string | null;
   }
 ): DealBidBoardOwnershipState {
   // A detached deal is CRM-owned by definition, whatever the stored flag says. Forcing it here (rather
@@ -1642,6 +1650,17 @@ export function buildBidBoardOwnershipState(
   const detachedAt = deal.bidBoardDetachedAt ?? null;
   const isDetached = detachedAt != null;
   const isOwned = isDetached ? false : deal.isBidBoardOwned;
+  // Was there a real Bid Board project behind this detach?
+  //
+  // The action stamps bid_board_detached_at on ANY deal it moves back, including a CRM-only one that
+  // never touched the Bid Board — so the marker alone cannot drive the standing "go delete the project"
+  // reminder, or a deal with no project sends the operator hunting for one, contradicting the dialog
+  // (which correctly omits the warning) and the success toast. It has to be derived from what the detach
+  // deliberately PRESERVES: the procore / SyncHub identity columns are exactly the operator's route back
+  // to the project, so their presence is the evidence a project exists to delete. The mirror columns are
+  // useless here — the detach nulls bid_board_linked_at and bid_board_project_number by design.
+  const detachedFromLinkedProject =
+    isDetached && (deal.procoreBidId != null || deal.synchubBidBoardId != null);
 
   return {
     isOwned,
@@ -1656,12 +1675,15 @@ export function buildBidBoardOwnershipState(
         ? "Bid Board now owns downstream progression after the deal entered estimating."
         : "CRM still owns manual stage progression before estimating handoff.",
     message: isDetached
-      ? "Bid Board exports no longer update this deal. Delete the project from the Bid Board if you have not already."
+      ? detachedFromLinkedProject
+        ? "Bid Board exports no longer update this deal. Delete the project from the Bid Board if you have not already."
+        : "Bid Board exports no longer update this deal."
       : isOwned
         ? "Bid Board is now the source of truth once this deal entered estimating."
         : "CRM remains the source of truth until the deal is handed off into estimating.",
     detachedAt:
       detachedAt instanceof Date ? detachedAt.toISOString() : detachedAt ? String(detachedAt) : null,
+    detachedFromLinkedProject,
   };
 }
 

@@ -78,6 +78,7 @@ const { returnDealToOpportunity, previewReturnToOpportunity } = await import(
   "../../../src/modules/deals/return-to-opportunity-service.js"
 );
 const { changeDealStage } = await import("../../../src/modules/deals/stage-change.js");
+const { buildBidBoardOwnershipState } = await import("../../../src/modules/deals/service.js");
 
 let pg: PGlite;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1000,6 +1001,48 @@ describe("previewReturnToOpportunity", () => {
     expect(preview.allowed).toBe(false);
     expect(preview.blockCode).toBe("COMMISSION_ROLE_NOT_ALLOWED");
     expect(preview.commissionTotal).toBe("18750.00");
+  });
+});
+
+// The standing banner cannot key on bid_board_detached_at alone — the action stamps it on any deal it
+// moves back — and the client cannot derive the answer either, because the detach nulls
+// bid_board_linked_at and bid_board_project_number. It is derived server-side from what the detach
+// deliberately PRESERVES.
+describe("buildBidBoardOwnershipState — was there a project behind the detach?", () => {
+  it("reports detachedFromLinkedProject on a detached deal that kept its Procore identity", () => {
+    const state = buildBidBoardOwnershipState({
+      isBidBoardOwned: false,
+      workflowRoute: "normal",
+      bidBoardDetachedAt: new Date("2026-07-20T12:00:00Z"),
+      procoreBidId: 887766,
+      synchubBidBoardId: null,
+    });
+    expect(state.detachedFromLinkedProject).toBe(true);
+    expect(state.message).toContain("Delete the project from the Bid Board");
+  });
+
+  it("does NOT claim a project for a CRM-only deal that was moved back", () => {
+    const state = buildBidBoardOwnershipState({
+      isBidBoardOwned: false,
+      workflowRoute: "normal",
+      bidBoardDetachedAt: new Date("2026-07-20T12:00:00Z"),
+      procoreBidId: null,
+      synchubBidBoardId: null,
+    });
+    expect(state.detachedFromLinkedProject).toBe(false);
+    expect(state.message).not.toContain("Delete the project from the Bid Board");
+  });
+
+  it("is false on a deal that was never detached, whatever identity it carries", () => {
+    const state = buildBidBoardOwnershipState({
+      isBidBoardOwned: true,
+      workflowRoute: "normal",
+      bidBoardDetachedAt: null,
+      procoreBidId: 887766,
+      synchubBidBoardId: "sh-1",
+    });
+    expect(state.detachedFromLinkedProject).toBe(false);
+    expect(state.isOwned).toBe(true);
   });
 });
 

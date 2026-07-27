@@ -507,18 +507,28 @@ function dealMatchTiers(
 }
 
 /**
- * Resolve an export row to a CRM deal, TIER BY TIER, checking attached and detached deals at the SAME
- * tier before dropping to a weaker one.
+ * Resolve an export row to a CRM deal, TIER BY TIER, evaluating BOTH partitions (attached and detached)
+ * at each tier before dropping to a weaker one.
  *
- * The ordering is the whole point. Running every attached tier first and only then looking for detached
- * deals loses tier PRIORITY: an export row whose exact `procore_bid_id` belongs to a detached deal would
- * fall through tier 1 and could then bind to a DIFFERENT deal on the weaker project-number or
- * name+created-at tiers — overwriting that deal's name, estimate and stage with another project's data.
- * A detached hit at a higher-confidence tier is the answer; it means "this row belongs to a deal that
- * was deliberately disconnected", and the search must stop there rather than keep shopping.
+ * Two separate invariants live here, and both were learned the hard way:
  *
- * Cost: one extra indexed lookup (the partial `deals_bid_board_detached_idx`) per tier that misses,
- * which is bounded at three and only paid by rows that do not match on their strongest identity.
+ *  1. TIER PRIORITY. Running every attached tier first and only then looking for detached deals loses
+ *     tier priority: an export row whose exact `procore_bid_id` belongs to a detached deal would fall
+ *     through tier 1 and could then bind to a DIFFERENT deal on the weaker project-number or
+ *     name+created-at tiers — writing one project's name, estimate and stage onto another project's
+ *     deal. A detached hit at a higher-confidence tier IS the answer; the search stops there.
+ *
+ *  2. AMBIGUITY. The detach predicate partitions what used to be one result set, so ambiguity has to be
+ *     judged across BOTH halves or the partition itself hides it. If an attached and a detached deal
+ *     share an identifier at the same tier, the attached half alone looks like a clean single match —
+ *     and the caller's `matches.length > 1` guard, which exists precisely to refuse an ambiguous write,
+ *     never fires. Both queries always run at a tier that matches anything, and their rows are counted
+ *     together: >1 is returned as `matches` so the caller's existing multi-match guard skips the row and
+ *     an operator reconciles it, exactly as it would have before deals could be detached.
+ *
+ * Cost: two indexed lookups per tier examined instead of one, bounded at three tiers. The detached side
+ * is served by the partial `deals_bid_board_detached_idx` over a near-empty set, and this is a batched
+ * import job, so the trade for not silently writing an ambiguous row is a good one.
  */
 async function resolveDealMatches(
   client: { query: Function },
@@ -527,10 +537,16 @@ async function resolveDealMatches(
 ): Promise<{ matches: DealMatch[]; detached: DealMatch[] }> {
   for (const tier of dealMatchTiers(schemaName, row)) {
     const attached = await client.query(tier.sql(false), tier.params);
-    if (attached.rows.length > 0) return { matches: attached.rows, detached: [] };
-
     const detached = await client.query(tier.sql(true), tier.params);
-    if (detached.rows.length > 0) return { matches: [], detached: detached.rows };
+    const total = attached.rows.length + detached.rows.length;
+
+    if (total === 0) continue;
+    // Ambiguous ACROSS the partition — hand the whole set back as matches so the caller's multi-match
+    // guard refuses the write. A detached deal counts toward ambiguity deliberately: "this identifier
+    // also belongs to a deal someone deliberately disconnected" is a reason to stop, not to proceed.
+    if (total > 1) return { matches: [...attached.rows, ...detached.rows], detached: [] };
+    if (detached.rows.length === 1) return { matches: [], detached: detached.rows };
+    return { matches: attached.rows, detached: [] };
   }
 
   return { matches: [], detached: [] };

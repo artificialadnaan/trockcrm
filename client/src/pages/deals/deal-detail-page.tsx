@@ -1021,8 +1021,15 @@ export function DealDetailPage() {
       <BidDueDateBanner bidDueDate={deal.bidDueDate} />
       {/* Standing reminder, not a toast. The CRM cannot delete the Bid Board project, so the ONE manual
           step this action depends on has to survive a page reload — a single toast at move time gets
-          missed and the Bid Board keeps showing a phantom active project. */}
-      {deal.bidBoardDetachedAt ? (
+          missed and the Bid Board keeps showing a phantom active project.
+
+          Gated on the SERVER's detachedFromLinkedProject, not on the marker alone: the action stamps
+          bid_board_detached_at on any deal it moves back, including a CRM-only one that never had a Bid
+          Board project. Keying on the marker would put a permanent "go delete the project" banner on a
+          deal with no project, contradicting the dialog and the success toast — both of which already
+          follow the same server-side linkage answer. The client cannot derive this itself: the detach
+          nulls bidBoardLinkedAt and bidBoardProjectNumber by design. */}
+      {deal.bidBoardDetachedAt && deal.bidBoardOwnership?.detachedFromLinkedProject ? (
         <div
           className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900"
           role="status"
