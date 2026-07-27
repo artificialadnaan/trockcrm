@@ -214,6 +214,28 @@ export async function listLostReasons(fetcher: Fetcher): Promise<LostReason[]> {
  * The service layer looks more permissive (it only rejects `rep`s who are not the owner), which is
  * exactly why reading the service alone gives the wrong answer.
  */
+/**
+ * Reasons the STAGE-CHANGE route refuses outright, regardless of who is asking.
+ *
+ * These are checked before ownership because they are properties of the DEAL, not the user: no rep,
+ * admin or director can move a change order, and preflight does not apply the lock — so a green
+ * "Ready to move" followed by a 409 is the alternative to checking here.
+ */
+export function stageMoveLock(deal: {
+  isChangeOrder?: boolean | null;
+}): { locked: true; title: string; body: string } | { locked: false } {
+  if (deal.isChangeOrder === true) {
+    return {
+      locked: true,
+      title: "A change order can't change stage",
+      body:
+        "Change orders are Won child deals — moving one off Won would drop its value out of every Won " +
+        "report. Edit it through its parent deal instead.",
+    };
+  }
+  return { locked: false };
+}
+
 export function canMoveStage(
   deal: { assignedRepId?: string | null },
   currentUserId: string | undefined,

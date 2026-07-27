@@ -142,3 +142,26 @@ describe("lost-stage detection", () => {
     },
   );
 });
+
+describe("stageMoveLock", () => {
+  it("locks a change order — nobody may move one, whatever preflight says", () => {
+    const lock = pipeline.stageMoveLock({ isChangeOrder: true });
+    expect(lock.locked).toBe(true);
+  });
+
+  it("does not lock an ordinary deal", () => {
+    expect(pipeline.stageMoveLock({ isChangeOrder: false }).locked).toBe(false);
+    expect(pipeline.stageMoveLock({ isChangeOrder: null }).locked).toBe(false);
+    expect(pipeline.stageMoveLock({}).locked).toBe(false);
+  });
+
+  /**
+   * The lock is about the DEAL, ownership is about the USER, and they are independent: the assigned rep
+   * of a change order is still refused. Gating one on the other would let the owner through to a 409.
+   */
+  it("is independent of ownership", () => {
+    const changeOrder = { isChangeOrder: true, assignedRepId: "u1" };
+    expect(pipeline.canMoveStage(changeOrder, "u1")).toBe(true);
+    expect(pipeline.stageMoveLock(changeOrder).locked).toBe(true);
+  });
+});

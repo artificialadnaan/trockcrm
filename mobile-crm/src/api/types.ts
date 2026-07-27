@@ -135,6 +135,13 @@ export type DealListItem = {
   updatedAt: string | null;
   onHold: boolean | null;
   isActive: boolean | null;
+  /**
+   * A change order is a Won CHILD deal, and the stage-change route rejects one unconditionally with a
+   * 409 CHANGE_ORDER_STAGE_LOCKED (stage-change.ts:161-167) — moving it off Won would silently drop its
+   * value from every Won report. Preflight does NOT apply that lock, so without this field the app can
+   * show a green "Ready to move" and then fail on commit.
+   */
+  isChangeOrder: boolean | null;
   atRisk: AtRiskResult | null;
   /**
    * SERVER verdicts. Do not recompute either of these on device.

@@ -76,6 +76,20 @@ export function isStageValidForWorkflowRoute(
  * `isActivePipeline` defaults to TRUE when absent. The column is NOT NULL with a true default server-
  * side, so a missing value means an older payload shape, not a retired stage — defaulting to false
  * there would empty the menu completely and make the feature look broken.
+ *
+ * NOT FILTERED HERE: the `contract` stage under ENABLE_CONTRACT_STAGE_SELECTION=false. The commit route
+ * rejects it with a 403 CONTRACT_STAGE_SELECTION_DISABLED (stage-change.ts:204-209) and preflight does
+ * not check the flag, so that target can indeed read as "Ready to move" and then fail — a real gap, and
+ * the one review suggestion in this area deliberately not taken.
+ *
+ * The reason is that the flag is a SERVER environment variable exposed through no endpoint at all: this
+ * client has no way to know its value, and neither does the web, which has the identical gap. Filtering
+ * `contract` unconditionally would hide a legitimate target in every deployment to spare a broken one —
+ * the flag defaults to ENABLED (`!== "false"`), so the failing configuration is the exception. A guess
+ * dressed as a filter is worse than the honest 403, whose message already says exactly what happened.
+ *
+ * Closing it properly means the server advertising its capabilities; that is a server change, and it
+ * should be made where the flag lives rather than approximated from here.
  */
 export function eligibleStageTargets<T extends StageTarget>(
   stages: readonly T[],

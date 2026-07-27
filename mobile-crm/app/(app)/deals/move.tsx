@@ -19,6 +19,7 @@ import * as pipelineApi from "../../../src/api/endpoints/pipeline";
 import { useAuth } from "../../../src/auth/AuthContext";
 import { useQueryScope } from "../../../src/auth/useOfficeId";
 import { RetryBlock } from "../../../src/components/RetryBlock";
+import { RetryNotice } from "../../../src/components/RetryNotice";
 import { qk } from "../../../src/query/keys";
 import {
   businessDateInDays,
@@ -113,6 +114,18 @@ export default function MoveStageScreen() {
     queryKey: ["stage-preflight", scope, dealId, targetStageId],
     queryFn: () => pipelineApi.preflightStage(fetcher, dealId, targetStageId as string),
     enabled: Boolean(dealId && targetStageId),
+    /**
+     * ALWAYS STALE. The key names the user, deal and target — none of which change when the DEAL does,
+     * yet the verdict is computed entirely from the deal's current stage and gate state. Under the
+     * app-wide 60s staleTime, preflighting several targets, committing one, and reopening this screen
+     * served the pre-move verdict for the others: a move that is now BACKWARD reads as ready and its
+     * override input never appears, until the server rejects the commit.
+     *
+     * A verdict is a statement about a moment. Caching it past that moment is caching an answer to a
+     * question nobody asked.
+     */
+    staleTime: 0,
+    gcTime: 0,
   });
 
   const lostReasons = useQuery({
@@ -137,6 +150,7 @@ export default function MoveStageScreen() {
 
   // OWNERSHIP, not the preflight verdict. See the module note above.
   const isOwner = deal ? pipelineApi.canMoveStage(deal, session?.user.id) : false;
+  const moveLock = deal ? pipelineApi.stageMoveLock(deal) : ({ locked: false } as const);
 
   const verdict = preflight.data;
   const needsOverride = Boolean(verdict?.requiresOverride);
@@ -176,6 +190,7 @@ export default function MoveStageScreen() {
   const closeDateInvalid = expectedCloseDate.length > 0 && !isUsableCloseDate(expectedCloseDate, today);
 
   const canSubmit =
+    !moveLock.locked &&
     isOwner &&
     Boolean(targetStageId) &&
     preflightAnswered &&
@@ -266,7 +281,16 @@ export default function MoveStageScreen() {
             {deal.name ?? "Untitled deal"}
           </Text>
 
-          {!isOwner ? (
+          {moveLock.locked ? (
+            /* Ahead of ownership, because this is a property of the DEAL: nobody can move it, so telling
+               the rep "only the assigned rep can" would be both wrong and useless. The commit route
+               rejects it with a 409 CHANGE_ORDER_STAGE_LOCKED while preflight happily reports the move
+               as ready — the same shape as the ownership trap this screen exists to prevent. */
+            <View testID="move-locked" style={styles.blockBox}>
+              <Text style={styles.blockTitle}>{moveLock.title}</Text>
+              <Text style={styles.blockBody}>{moveLock.body}</Text>
+            </View>
+          ) : !isOwner ? (
             /* Said up front rather than after a failed commit. Only the assigned rep can move a deal —
                there is no admin or director bypass on this route, which surprises people who have one
                everywhere else. */
@@ -283,11 +307,17 @@ export default function MoveStageScreen() {
           <Text style={styles.label}>Move to</Text>
           {stagesQuery.isLoading ? (
             <ActivityIndicator color={theme.color.brandRed} />
-          ) : stagesQuery.isError ? (
+          ) : stagesQuery.isError && stagesQuery.data === undefined ? (
             /* A failed stages load used to fall through `?? []` and render as a legitimately empty
                menu — indistinguishable from "this pipeline has no other stages", with no error and no
                way back short of remounting the screen. Every move starts by picking one of these, so
-               swallowing the failure takes the whole feature offline silently. */
+               swallowing the failure takes the whole feature offline silently.
+
+               BLOCKING ONLY WHEN NOTHING IS CACHED. `isError` alone also fires when a background
+               refetch of already-loaded stages fails, and that tore a perfectly usable menu off the
+               screen and replaced it with an error — turning a harmless refresh blip into an outage.
+               Same `data === undefined` rule as src/list-state.ts, which exists for exactly this and
+               which I did not apply when writing these two branches. */
             <RetryBlock
               testID="stages-error"
               title="Couldn't load the stages"
@@ -295,6 +325,15 @@ export default function MoveStageScreen() {
               retrying={stagesQuery.isFetching}
             />
           ) : (
+            <>
+            {stagesQuery.isError ? (
+              <RetryNotice
+                testID="stages-refresh-retry"
+                message="Couldn't refresh the stages — showing the saved list. Tap to retry."
+                onRetry={() => void stagesQuery.refetch()}
+                placement="top"
+              />
+            ) : null}
             <View style={styles.stageGrid}>
               {eligibleStageTargets(stages, deal).map((s) => (
                 <Pressable
@@ -304,13 +343,13 @@ export default function MoveStageScreen() {
                     setTargetStageId(s.id);
                     setSubmitError(null);
                   }}
-                  disabled={!isOwner}
+                  disabled={!isOwner || moveLock.locked}
                   accessibilityRole="button"
-                  accessibilityState={{ selected: targetStageId === s.id, disabled: !isOwner }}
+                  accessibilityState={{ selected: targetStageId === s.id, disabled: !isOwner || moveLock.locked }}
                   style={[
                     styles.stageOption,
                     targetStageId === s.id && styles.stageOptionActive,
-                    !isOwner && styles.stageOptionDisabled,
+                    (!isOwner || moveLock.locked) && styles.stageOptionDisabled,
                   ]}
                 >
                   <Text
@@ -321,6 +360,7 @@ export default function MoveStageScreen() {
                 </Pressable>
               ))}
             </View>
+            </>
           )}
 
           {preflight.isFetching ? (
@@ -328,6 +368,20 @@ export default function MoveStageScreen() {
               <ActivityIndicator color={theme.color.brandRed} />
               <Text style={styles.checkingText}>Checking requirements…</Text>
             </View>
+          ) : null}
+
+          {targetStageId && !preflight.isFetching && preflight.isError ? (
+            /* A preflight that FAILED renders nothing otherwise: `verdict` stays undefined, so the
+               verdict box below never appears, while `preflightAnswered` keeps Confirm disabled. The rep
+               is left with a dead button and no explanation — and cannot even retry by re-tapping the
+               target, because the query key does not change when the same stage is selected again. */
+            <RetryBlock
+              testID="preflight-error"
+              title="Couldn't check the requirements"
+              body="Nothing has changed on the deal. Try again to see whether this move is allowed."
+              onRetry={() => void preflight.refetch()}
+              retrying={preflight.isFetching}
+            />
           ) : null}
 
           {verdict ? (
@@ -423,10 +477,11 @@ export default function MoveStageScreen() {
               <Text style={styles.label}>Why was it lost?</Text>
               {lostReasons.isLoading ? (
                 <ActivityIndicator color={theme.color.brandRed} />
-              ) : lostReasons.isError ? (
+              ) : lostReasons.isError && lostReasons.data === undefined ? (
                 /* A Lost move cannot be submitted without a reason id, so a failed lookup rendered as an
                    empty grid left Confirm permanently disabled with nothing on screen explaining why —
-                   the rep sees a button that simply does not work. */
+                   the rep sees a button that simply does not work. Blocking only when nothing is
+                   cached, for the same reason as the stage menu above. */
                 <RetryBlock
                   testID="lost-reasons-error"
                   title="Couldn't load the lost reasons"

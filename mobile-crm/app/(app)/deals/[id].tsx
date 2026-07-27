@@ -13,6 +13,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError } from "../../../src/api/client";
 import * as dealsApi from "../../../src/api/endpoints/deals";
+import * as pipelineApi from "../../../src/api/endpoints/pipeline";
 import { useAuth } from "../../../src/auth/AuthContext";
 import { useQueryScope } from "../../../src/auth/useOfficeId";
 import { displayAmount, showsAtRisk } from "../../../src/components/DealCard";
@@ -210,8 +211,12 @@ export default function DealDetailScreen() {
         ) : null}
 
         {/* Offered only to the assigned rep: the commit route is owner-only with no admin or director
-            bypass, so showing this to anyone else is an invitation to a 403. */}
-        {deal.assignedRepId && deal.assignedRepId === session?.user.id ? (
+            bypass, so showing this to anyone else is an invitation to a 403.
+            AND not at all for a deal the route locks outright — a change order is rejected with a 409
+            no matter who asks, while preflight would still report it as ready. */}
+        {!pipelineApi.stageMoveLock(deal).locked &&
+        deal.assignedRepId &&
+        deal.assignedRepId === session?.user.id ? (
           <Pressable
             testID="open-move-stage"
             onPress={() => router.push({ pathname: "/(app)/deals/move", params: { dealId } })}
