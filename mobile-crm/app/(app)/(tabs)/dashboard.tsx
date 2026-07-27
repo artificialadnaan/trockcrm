@@ -190,10 +190,18 @@ function NavCard({
   );
 }
 
+/**
+ * NO textMuted on this screen.
+ *
+ * #8A95A3 is ~2.8:1 on surfaceMuted and ~3.0:1 on the stat card's white — under the 4.5:1 floor for
+ * normal text, and every string here is 12-13px. It was fixed on the tab bar and the header first and
+ * left behind on the screen with the most supporting text, which is the same half-applied sweep this
+ * app keeps producing. textSecondary is 7.6:1 and still reads as secondary.
+ */
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: theme.color.surfaceMuted },
   body: { padding: theme.space.lg, gap: theme.space.md, paddingBottom: theme.space.xxl },
-  email: { fontFamily: theme.font.regular, fontSize: 13, color: theme.color.textMuted },
+  email: { fontFamily: theme.font.regular, fontSize: 13, color: theme.color.textSecondary },
   statCard: {
     backgroundColor: theme.color.surface,
     borderRadius: theme.radius.lg,
@@ -207,7 +215,7 @@ const styles = StyleSheet.create({
     fontSize: 12,
     letterSpacing: 1,
     textTransform: "uppercase",
-    color: theme.color.textMuted,
+    color: theme.color.textSecondary,
   },
   statValue: { fontFamily: theme.font.bold, fontSize: 34, color: theme.color.inkNavy },
   statHintStale: { color: theme.color.amberText },
@@ -224,13 +232,13 @@ const styles = StyleSheet.create({
     gap: theme.space.sm,
   },
   navLabel: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.textPrimary },
-  note: { fontFamily: theme.font.regular, fontSize: 13, color: theme.color.textMuted },
+  note: { fontFamily: theme.font.regular, fontSize: 13, color: theme.color.textSecondary },
   scopeNote: {
     marginTop: theme.space.sm,
     fontFamily: theme.font.regular,
     fontSize: 12,
     lineHeight: 18,
-    color: theme.color.textMuted,
+    color: theme.color.textSecondary,
   },
   signOut: { marginTop: theme.space.lg, alignItems: "center", paddingVertical: theme.space.md },
   signOutText: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.textSecondary },

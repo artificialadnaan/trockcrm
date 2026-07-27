@@ -45,7 +45,7 @@ export default function DealsListScreen() {
   const router = useRouter();
   const { fetcher } = useAuth();
   const cacheScope = useQueryScope();
-  const { activeOfficeName } = useOffices();
+  const { activeOfficeName, refetch: refetchOffices } = useOffices();
   const [scope, setScope] = useState<DealScope>("mine");
   const [search, setSearch] = useState("");
 
@@ -294,7 +294,13 @@ export default function DealsListScreen() {
           }
           renderItem={renderDeal}
           refreshControl={
-            <RefreshControl refreshing={query.isRefetching} onRefresh={() => void query.refetch()} />
+            <RefreshControl
+              refreshing={query.isRefetching}
+              // The office label too. useOffices retries once and focus-refetching is off, so once both
+              // attempts fail nothing retries it — a rep entering this tab directly was stuck with a blank
+              // office and no way to recover short of restarting. Refreshing a screen refreshes what is on it.
+              onRefresh={() => void Promise.all([query.refetch(), refetchOffices()])}
+            />
           }
         />
       )}
