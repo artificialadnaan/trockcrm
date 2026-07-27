@@ -55,6 +55,23 @@ export type PipelineScope = "mine" | "team" | "all" | "watched" | "on_hold";
  */
 const BOARD_PREVIEW_LIMIT = 15;
 
+/**
+ * ALL-TIME Won and Lost, sent by EVERY pipeline read.
+ *
+ * Without them the server windows both terminal columns to the last 30 days
+ * (resolvePipelineTerminalDateFilters — `since` defaults to now-30d unless the flag is set) and says
+ * nothing about it in the response.
+ *
+ * Shared rather than spelled out per call, because the first version set them on the board only. The
+ * drill-down then applied the 30-day default, so the board could say "Showing 15 of 40 — see all" and
+ * open a list holding a fraction of that, contradicting the very count the rep had just tapped — the
+ * exact silent-truncation the footer exists to expose, reintroduced one screen further in. Both routes
+ * read these through the same readBoardInput, so both must send them.
+ *
+ * snake_case on purpose: the route tests `req.query.won_all_time === "true"` and ignores camelCase.
+ */
+const TERMINAL_ALL_TIME = { won_all_time: "true", lost_all_time: "true" } as const;
+
 export async function getPipeline(
   fetcher: Fetcher,
   params: { scope: PipelineScope; previewLimit?: number },
@@ -66,21 +83,7 @@ export async function getPipeline(
       // office-wide board. Omitting it is merely owner-scoped; misspelling it leaks the whole office.
       scope: params.scope,
       previewLimit: params.previewLimit ?? BOARD_PREVIEW_LIMIT,
-      /**
-       * ALL-TIME Won and Lost, matching the web kanban.
-       *
-       * Without these the server silently windows both terminal columns to the LAST 30 DAYS
-       * (resolvePipelineTerminalDateFilters, service.ts:613-627 — `since` defaults to now-30d unless the
-       * all-time flag is set). Nothing in the response says so, so the board showed a Won count and a
-       * Won total that were a month's worth while labelling them like every other column, and a stage
-       * with older wins read as "No deals". A number presented as a total that is quietly a 30-day
-       * subtotal is worse than no number.
-       *
-       * snake_case on purpose: the route reads `req.query.won_all_time === "true"`
-       * (deals/routes.ts:1003-1008) and ignores any camelCase spelling.
-       */
-      won_all_time: "true",
-      lost_all_time: "true",
+      ...TERMINAL_ALL_TIME,
     },
   });
   return {
@@ -128,6 +131,9 @@ export async function getStagePage(
       scope: params.scope,
       page: params.page && params.page > 0 ? params.page : undefined,
       pageSize: params.pageSize,
+      // readStageInput spreads readBoardInput, so this route honours the same flags — and must be given
+      // them, or the drill-down contradicts the board that linked to it.
+      ...TERMINAL_ALL_TIME,
     },
   });
   return {

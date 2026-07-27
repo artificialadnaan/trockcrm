@@ -242,6 +242,16 @@ describe("getStagePage wire contract", () => {
     expect(res.totalCount).toBe(40);
   });
 
+  it("sends the SAME all-time terminal flags as the board it drills down from", async () => {
+    // The board sent them and this did not, so a Won column could say "Showing 15 of 40 — see all" and
+    // open a list windowed to 30 days — contradicting the count that was just tapped.
+    const { fetcher, calls } = recording({ rows: [] });
+    await pipeline.getStagePage(fetcher, "stage-1", { scope: "mine" });
+    const query = calls[0].opts.query as Record<string, string>;
+    expect(query.won_all_time).toBe("true");
+    expect(query.lost_all_time).toBe("true");
+  });
+
   it("degrades to an empty list rather than undefined", async () => {
     const { fetcher } = recording({});
     const res = await pipeline.getStagePage(fetcher, "stage-1", { scope: "mine" });

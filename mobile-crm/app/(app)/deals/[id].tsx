@@ -99,6 +99,12 @@ export default function DealDetailScreen() {
       // Scoped: a bare ["deals"] prefix-matches EVERY user/office/role variant sitting in the cache, so
       // toggling one watch would refetch lists that this action cannot have changed.
       await queryClient.invalidateQueries({ queryKey: ["deals", scope] });
+      // The board and the stage drill-down are ALSO derived from the watch flag via their Mine/Watched
+      // scopes, and this PR added both. They are separate cache prefixes, stay mounted underneath the
+      // detail, and refetchOnWindowFocus is off — so without these an unwatched deal sits visibly on the
+      // Watched board, and a newly watched one is missing from it, until a manual pull.
+      await queryClient.invalidateQueries({ queryKey: ["pipeline", scope] });
+      await queryClient.invalidateQueries({ queryKey: ["stage-deals", scope] });
     },
   });
 

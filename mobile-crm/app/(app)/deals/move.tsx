@@ -234,6 +234,28 @@ export default function MoveStageScreen() {
       <SafeAreaView style={styles.safe}>
         <View style={styles.center}>
           <Text style={styles.title}>Couldn&apos;t load this deal</Text>
+          {/* Retry BEFORE Go back. This route is reachable by deep link and by restored navigation
+              state, so there may be nothing behind it — "Go back" can leave the app entirely, and it
+              was the only control here. Every sibling error state offers a retry; this one made
+              recovering connectivity useless because the failed request could not be re-run in place.
+              `enabled: false` when the id is missing makes refetch a no-op, so it is only offered when
+              there is actually something to retry. */}
+          {dealId ? (
+            <Pressable
+              testID="move-deal-retry"
+              onPress={() => void dealQuery.refetch()}
+              disabled={dealQuery.isFetching}
+              accessibilityRole="button"
+              accessibilityState={{ disabled: dealQuery.isFetching, busy: dealQuery.isFetching }}
+              style={styles.secondary}
+            >
+              {dealQuery.isFetching ? (
+                <ActivityIndicator color={theme.color.brandRed} />
+              ) : (
+                <Text style={styles.secondaryText}>Try again</Text>
+              )}
+            </Pressable>
+          ) : null}
           <Pressable onPress={() => router.back()} accessibilityRole="button" style={styles.secondary}>
             <Text style={styles.secondaryText}>Go back</Text>
           </Pressable>
