@@ -45,7 +45,7 @@ beforeAll(async () => {
       assigned_rep_id uuid, region_id uuid, on_hold boolean NOT NULL DEFAULT false,
       is_active boolean NOT NULL DEFAULT true, is_test_data boolean NOT NULL DEFAULT false,
       won_closed_date date, lost_at timestamptz, actual_close_date date, stage_entered_at timestamptz,
-      expected_close_date date, created_at timestamptz NOT NULL DEFAULT now(),
+      expected_close_date date, bid_due_date timestamptz, bid_board_stage_slug text, created_at timestamptz NOT NULL DEFAULT now(),
       awarded_amount numeric, bid_estimate numeric, dd_estimate numeric, bid_board_total_sales numeric
     );
 
@@ -217,7 +217,7 @@ describe("getRegionReport — exclusions & edge cases", () => {
         assigned_rep_id uuid, region_id uuid, on_hold boolean NOT NULL DEFAULT false,
         is_active boolean NOT NULL DEFAULT true, is_test_data boolean NOT NULL DEFAULT false,
         won_closed_date date, lost_at timestamptz, actual_close_date date, stage_entered_at timestamptz,
-        expected_close_date date, created_at timestamptz NOT NULL DEFAULT now(),
+        expected_close_date date, bid_due_date timestamptz, bid_board_stage_slug text, created_at timestamptz NOT NULL DEFAULT now(),
         awarded_amount numeric, bid_estimate numeric, dd_estimate numeric, bid_board_total_sales numeric
       );
       INSERT INTO region_config (id, name, display_order, is_active) VALUES ('${ER.west}','West Coast',1,true);

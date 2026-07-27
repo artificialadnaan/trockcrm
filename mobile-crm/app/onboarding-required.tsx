@@ -27,10 +27,49 @@ export default function OnboardingRequiredScreen() {
 
   async function checkAgain() {
     setChecking(true);
+    setLinkError(null);
     try {
       await revalidate();
+    } catch {
+      // revalidate() has no reachable rejection path today, but it is invoked as `void checkAgain()`,
+      // so anything that starts throwing in there becomes an unhandled rejection with no user-visible
+      // symptom on the one screen a blocked user is stuck reading. The gate === "stale" line below
+      // covers the ordinary offline case; this covers the unexpected one.
+      setLinkError("Couldn't check just now. Try again in a moment.");
     } finally {
       setChecking(false);
+    }
+  }
+
+  /**
+   * https only — plus http on loopback in development.
+   *
+   * `cleanupUrl` arrives from the server (cleanupAppUrl()) and is handed straight to the OS, so a
+   * misconfigured or malformed value could open an arbitrary scheme rather than a web page. Nothing
+   * suggests it is attacker-controlled today, but validating the one thing this button is for costs a
+   * line, and "the server sent it" is not a property the OS checks.
+   *
+   * The loopback exception exists because the server's development default is `http://localhost:5175`
+   * (auth/service.ts:60-65). A flat https-only rule nulled that out and removed the button entirely, so
+   * the one flow this screen exists for could not be exercised locally at all — a rule strict enough to
+   * block its own development setup. Gated on __DEV__ and on the host actually being loopback, so a
+   * release build still refuses plain http, and a dev build still refuses http to anywhere else.
+   */
+  function safeCleanupUrl(raw: string | null | undefined): string | null {
+    if (!raw) return null;
+    try {
+      const url = new URL(raw);
+      if (url.protocol === "https:") return raw;
+      // `[::1]` with the brackets: WHATWG URL keeps them in `hostname` for an IPv6 literal, so a plain
+      // "::1" comparison never matches and a dev box on IPv6 loopback loses the button entirely.
+      const isLoopback =
+        url.hostname === "localhost" ||
+        url.hostname === "127.0.0.1" ||
+        url.hostname === "::1" ||
+        url.hostname === "[::1]";
+      return __DEV__ && url.protocol === "http:" && isLoopback ? raw : null;
+    } catch {
+      return null;
     }
   }
 
@@ -59,7 +98,7 @@ export default function OnboardingRequiredScreen() {
   const rawPending = session.user.onboardingPendingCount;
   const pendingKnown = typeof rawPending === "number" && rawPending >= 0;
   const pending = pendingKnown ? rawPending : 0;
-  const cleanupUrl = session.user.cleanupUrl ?? null;
+  const cleanupUrl = safeCleanupUrl(session.user.cleanupUrl);
 
   return (
     <SafeAreaView style={styles.safe}>

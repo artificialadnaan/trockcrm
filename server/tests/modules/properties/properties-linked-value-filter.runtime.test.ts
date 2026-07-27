@@ -66,12 +66,16 @@ beforeAll(async () => {
       bid_board_total_sales numeric(14,2),
       bid_estimate numeric(14,2),
       dd_estimate numeric(14,2),
-      on_hold boolean NOT NULL DEFAULT false, expected_close_date date,
+      on_hold boolean NOT NULL DEFAULT false, expected_close_date date, bid_due_date timestamptz,
       stage_id uuid, bid_board_stage_slug text,
       last_activity_at timestamptz,
       is_active boolean NOT NULL DEFAULT true
     );
-    CREATE TABLE ${T}.pipeline_stage_config (
+    -- In PROD pipeline_stage_config lives ONLY in \`public\` (verified against the live DB) — it is
+    -- shared by every tenant schema, not provisioned per office. Create it there so the shared
+    -- effective-on-hold predicate's \`public.pipeline_stage_config\` subselect resolves exactly as it
+    -- does in prod; the tenant search_path below still finds it for the unqualified joins.
+    CREATE TABLE public.pipeline_stage_config (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
       slug text NOT NULL
     );

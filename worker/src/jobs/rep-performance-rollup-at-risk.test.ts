@@ -21,6 +21,7 @@ function atRiskRow(
     workflow_route: "normal",
     stage_entered_at: "2026-04-23T00:00:00.000Z",
     expected_close_date: null,
+    bid_due_date: null,
     on_hold: false,
     on_hold_started_at: null,
     on_hold_accumulated_seconds: 0,

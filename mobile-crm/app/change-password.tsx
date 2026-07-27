@@ -1,5 +1,6 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import {
+  AccessibilityInfo,
   ActivityIndicator,
   KeyboardAvoidingView,
   Platform,
@@ -58,6 +59,40 @@ export default function ChangePasswordScreen() {
     !mismatch &&
     !sameAsCurrent &&
     !busy;
+
+  /**
+   * The validation hints as data, so they can be both rendered AND announced from one source.
+   *
+   * They are independent rather than an if/else chain: a short password that also matches the current
+   * one earns both lines, and suppressing either would tell the user to fix one thing and then, on the
+   * next keystroke, a second thing they could have fixed at the same time.
+   */
+  const validationHints = [
+    mismatch ? "Passwords don't match." : null,
+    tooShort ? `Use at least ${MIN_PASSWORD_LENGTH} characters.` : null,
+    sameAsCurrent ? "Choose a password different from your current one." : null,
+  ].filter((hint): hint is string => hint !== null);
+
+  const hintText = validationHints.join(" ");
+
+  /**
+   * Announce the hints on iOS.
+   *
+   * `accessibilityLiveRegion` is ANDROID-ONLY. This app ships to iOS — that is the only platform it has
+   * an EAS build profile for — so the live region marked the wrapper and then did nothing: VoiceOver
+   * never announced the hints, and a blind user was left with a submit button that stayed disabled with
+   * no stated reason. `accessible` on the wrapper does not help either; it makes the group focusable,
+   * but a label changing underneath focus is not re-read.
+   *
+   * announceForAccessibility is the iOS-supported equivalent. Keyed on the message TEXT rather than the
+   * individual flags so it fires once per distinct message instead of on every keystroke, and stays
+   * silent when the hints clear — an announcement of "" interrupts whatever VoiceOver is mid-sentence on.
+   */
+  useEffect(() => {
+    if (Platform.OS === "ios" && hintText.length > 0) {
+      AccessibilityInfo.announceForAccessibility(hintText);
+    }
+  }, [hintText]);
 
   /**
    * Is a 401 from this form about the SESSION, or about the password the user just typed?
@@ -207,12 +242,21 @@ export default function ChangePasswordScreen() {
             autoCapitalize="none"
             style={formStyles.input}
           />
-          {mismatch ? <Text style={formStyles.hint}>Passwords don&apos;t match.</Text> : null}
-          {tooShort ? (
-            <Text style={formStyles.hint}>Use at least {MIN_PASSWORD_LENGTH} characters.</Text>
-          ) : null}
-          {sameAsCurrent ? (
-            <Text style={formStyles.hint}>Choose a password different from your current one.</Text>
+          {/* accessibilityLiveRegion covers Android; the useEffect above covers iOS, which ignores it.
+              Both read from validationHints so the announced text and the visible text cannot diverge.
+
+              RENDERED ONLY WHEN THERE ARE HINTS. `accessible` collapses a view into ONE accessibility
+              element, so an always-mounted empty group is an unlabelled focus stop sitting in the middle
+              of the form — VoiceOver and TalkBack users hit it on every pass, including the whole time
+              the password is valid, and it announces nothing at all. */}
+          {validationHints.length > 0 ? (
+            <View accessible accessibilityLiveRegion="polite">
+              {validationHints.map((hint) => (
+                <Text key={hint} style={formStyles.hint}>
+                  {hint}
+                </Text>
+              ))}
+            </View>
           ) : null}
 
           <Pressable

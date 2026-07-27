@@ -37,7 +37,7 @@ beforeAll(async () => {
     CREATE TABLE deals (
       id uuid PRIMARY KEY, sales_source_user_id uuid, deal_number text, name text NOT NULL, stage_id uuid NOT NULL, assigned_rep_id uuid,
       is_test_data boolean NOT NULL DEFAULT false, on_hold boolean NOT NULL DEFAULT false, is_active boolean NOT NULL DEFAULT true,
-      expected_close_date date, stage_entered_at timestamptz,
+      expected_close_date date, bid_due_date timestamptz, bid_board_stage_slug text, stage_entered_at timestamptz,
       dd_estimate numeric, bid_estimate numeric, awarded_amount numeric, bid_board_total_sales numeric
     );
     INSERT INTO users (id, display_name) VALUES ('${REP_A}','Alice'), ('${REP_B}','Bob');

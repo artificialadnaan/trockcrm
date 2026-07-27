@@ -422,4 +422,69 @@ describe("getDealDetail", () => {
 
     expect(detail?.bidDueDate).toEqual(dealBid);
   });
+
+  // The detail response publishes the RESOLVED (lead-owned) bid due date, and since 2026-07-27 that date is
+  // the auto-park horizon in the estimating stage. The hold/value/at-risk verdicts stamped on the SAME
+  // object must therefore be computed from it too — otherwise one payload shows the lead's bid date beside
+  // an On-hold badge and a $0 that were derived from a different (stale snapshot) date. Both directions are
+  // covered so neither "always park" nor "never park" can pass. (Codex P2.)
+  describe("estimating hold verdicts use the resolved bid due date", () => {
+    const ymd = (offsetDays: number) =>
+      new Date(Date.now() + offsetDays * 86_400_000).toISOString().slice(0, 10);
+
+    function estimatingDeal(overrides: Record<string, unknown>) {
+      return {
+        id: "deal-1",
+        dealNumber: "TR-2026-0001",
+        name: "Estimating deal",
+        stageId: "stage-estimating",
+        stageSlug: "estimating",
+        assignedRepId: "rep-1",
+        companyId: "company-1",
+        propertyId: "property-1",
+        sourceLeadId: "lead-1",
+        workflowRoute: "normal",
+        isActive: true,
+        onHold: false,
+        bidEstimate: "125000",
+        // Near close target in BOTH cases: only the bid due date may move the verdict here.
+        expectedCloseDate: ymd(10),
+        ...overrides,
+      };
+    }
+
+    beforeEach(() => {
+      pipelineMocks.getStageById.mockResolvedValue({
+        id: "stage-estimating",
+        slug: "estimating",
+        isTerminal: false,
+      });
+    });
+
+    it("parks the deal when the LEAD's bid date is far out and the deal snapshot is stale-near", async () => {
+      const tenantDb = createFakeTenantDb({
+        leads: [{ id: "lead-1", bidDueDate: ymd(200) }],
+        deals: [estimatingDeal({ bidDueDate: new Date(`${ymd(5)}T00:00:00.000Z`) })],
+      });
+
+      const detail = await getDealDetail(tenantDb as never, "deal-1", "director", "director-1");
+
+      expect(detail?.bidDueDate).toBe(ymd(200));
+      expect(detail?.effectiveOnHold).toBe(true);
+      expect(detail?.effectiveValue).toBe(0);
+    });
+
+    it("keeps the deal active when the LEAD's bid date is near and the deal snapshot is stale-far", async () => {
+      const tenantDb = createFakeTenantDb({
+        leads: [{ id: "lead-1", bidDueDate: ymd(5) }],
+        deals: [estimatingDeal({ bidDueDate: new Date(`${ymd(200)}T00:00:00.000Z`) })],
+      });
+
+      const detail = await getDealDetail(tenantDb as never, "deal-1", "director", "director-1");
+
+      expect(detail?.bidDueDate).toBe(ymd(5));
+      expect(detail?.effectiveOnHold).toBe(false);
+      expect(detail?.effectiveValue).toBe(125000);
+    });
+  });
 });

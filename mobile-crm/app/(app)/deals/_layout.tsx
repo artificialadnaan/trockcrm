@@ -1,7 +1,5 @@
 import React from "react";
-import { Redirect, Stack } from "expo-router";
-import { useAuth } from "../../../src/auth/AuthContext";
-import { canAccessSurface } from "../../../src/auth/surfaces";
+import { SurfaceStack } from "../../../src/auth/SurfaceGuard";
 
 /**
  * Role guard for the whole deals group.
@@ -12,8 +10,5 @@ import { canAccessSurface } from "../../../src/auth/surfaces";
  * /(app)/deals/<id> is covered as well; a guard on the list only would be trivially routed around.
  */
 export default function DealsLayout() {
-  const { session } = useAuth();
-  if (!session) return null;
-  if (!canAccessSurface(session.user.role, "deals")) return <Redirect href="/(app)/dashboard" />;
-  return <Stack screenOptions={{ headerShown: false }} />;
+  return <SurfaceStack surface="deals" />;
 }

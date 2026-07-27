@@ -22,6 +22,7 @@ import {
   UNASSIGNED_FILTER_SENTINEL,
   buildAssignedRepPredicate,
   buildAliasedInvolvedRepSql,
+  buildAliasedOwnedRepSql,
   buildAliasedInvolvedRepInListSql,
   buildRegionPredicate,
   buildProjectTypePredicate,
@@ -37,13 +38,16 @@ describe("assigned-rep predicate", () => {
   it("omits when unset", () => {
     expect(buildAssignedRepPredicate({})).toBeUndefined();
   });
-  it("matches assigned_rep OR estimator_user_id for a concrete rep id", () => {
+  it("matches the OWNER only — the estimator link must not widen a rep filter", () => {
+    // Picking a person in the Rep dropdown asks "show me their deals", and a deal belongs to whoever owns
+    // it. deals.estimator_user_id is populated far beyond the real estimators (it feeds the estimator
+    // report), so an estimator arm here shows a rep dozens of deals out of somebody else's book — and it
+    // cannot reconcile with any surface that groups BY assigned rep.
     const sql = text(buildAssignedRepPredicate({ assignedRepId: "rep-1" }));
     expect(sql).toContain("assigned_rep_id");
-    expect(sql).toContain("estimator_user_id");
-    expect(sql).toContain(" or ");
+    expect(sql).not.toContain("estimator_user_id");
   });
-  it("maps the Unassigned sentinel to assigned_rep IS NULL ONLY (estimator must not widen it)", () => {
+  it("maps the Unassigned sentinel to assigned_rep IS NULL", () => {
     const sql = text(buildAssignedRepPredicate({ assignedRepId: UNASSIGNED_FILTER_SENTINEL }));
     expect(sql).toContain("assigned_rep_id");
     expect(sql).toContain("is null");
@@ -67,6 +71,24 @@ describe("aliased involved-rep SQL (raw, for d-aliased report/drill-down queries
   });
   it("rejects an invalid alias (identifier-injection guard)", () => {
     expect(() => buildAliasedInvolvedRepSql("d; drop table deals", "rep-1")).toThrow();
+  });
+});
+
+describe("aliased OWNED-rep SQL (what a rep FILTER uses)", () => {
+  it("matches alias.assigned_rep_id only — no estimator arm", () => {
+    const sql = text(buildAliasedOwnedRepSql("d", "rep-1"));
+    expect(sql).toContain("d.assigned_rep_id");
+    expect(sql).not.toContain("estimator_user_id");
+    expect(sql).not.toContain(" or ");
+  });
+  it("maps the Unassigned sentinel to alias.assigned_rep_id IS NULL", () => {
+    const sql = text(buildAliasedOwnedRepSql("d", UNASSIGNED_FILTER_SENTINEL));
+    expect(sql).toContain("d.assigned_rep_id");
+    expect(sql).toContain("is null");
+    expect(sql).not.toContain(UNASSIGNED_FILTER_SENTINEL);
+  });
+  it("rejects an invalid alias (identifier-injection guard)", () => {
+    expect(() => buildAliasedOwnedRepSql("d; drop table deals", "rep-1")).toThrow();
   });
 });
 
@@ -186,9 +208,12 @@ describe("value-range predicate (stage-aware effective value == sort == display)
     expect(sql).toContain("between");
     expect(sql).toContain("on_hold");
     expect(sql).toContain("bid_estimate");
-    // The open best-estimate chain has its own per-candidate CASE WHENs, so the
-    // marker of NO stage-aware switch is the absence of stage classification.
-    expect(sql).not.toContain("stage_id"); // no won-vs-open stage CASE
+    // The open best-estimate chain has its own per-candidate CASE WHENs, so the marker of NO stage-aware
+    // switch is the absence of a CALLER-THREADED stage-id list (`stage_id in ($1, $2, ...)`). The shared
+    // hold predicate does reference stage_id — via a pipeline_stage_config SUBSELECT, for the estimating
+    // bid-due horizon (2026-07-27) — and that is a different thing from the won-vs-open value CASE.
+    expect(sql).not.toMatch(/stage_id in \(\$/); // no won-vs-open stage CASE
+    expect(sql).toContain("stage_id in (select id from public.pipeline_stage_config");
   });
   it(">= when only a minimum, <= when only a maximum", () => {
     expect(text(buildValueRangePredicate({ valueMin: 100000 }, openCtx))).toContain(">=");

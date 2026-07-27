@@ -37,7 +37,7 @@ beforeAll(async () => {
       id uuid PRIMARY KEY, deal_number text, name text NOT NULL, stage_id uuid NOT NULL,
       assigned_rep_id uuid, estimator_user_id uuid, sales_source_user_id uuid, workflow_route text DEFAULT 'normal',
       is_active boolean NOT NULL DEFAULT true, is_test_data boolean NOT NULL DEFAULT false,
-      on_hold boolean NOT NULL DEFAULT false, expected_close_date date, on_hold_started_at timestamptz,
+      on_hold boolean NOT NULL DEFAULT false, expected_close_date date, bid_due_date timestamptz, on_hold_started_at timestamptz,
       on_hold_accumulated_seconds bigint, on_hold_accumulated_seconds_at_stage_entry bigint,
       stage_entered_at timestamptz, bid_board_stage_entered_at timestamptz,
       bid_board_stage_slug text, bid_board_stage_status text, region_classification text,

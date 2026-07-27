@@ -1,9 +1,5 @@
 import { sql, type SQL } from "drizzle-orm";
-import {
-  reportableDealSqlPredicate,
-  effectiveOnHoldSqlPredicate,
-  closeTargetFarOutSqlPredicate,
-} from "@trock-crm/shared/types";
+import { reportableDealSqlPredicate, closeTargetFarOutSqlPredicate } from "@trock-crm/shared/types";
 import { TERMINAL_STAGE_SLUGS } from "./pipeline-terminal-stages.js";
 
 type DealValueTable = {
@@ -127,16 +123,19 @@ export function dealBestEstimateWithForecastSql(table: DealValueTable): SQL {
   return dealValueChainSql(table, FORECAST_FIRST_VALUE_CHAIN);
 }
 
-// OPEN-pipeline value-zeroing keys on EFFECTIVE hold = stored on_hold OR a close target past the 90-day
-// horizon, so a far-out OPEN deal contributes $0 to pipeline/forecast just like a parked one. Same
+// OPEN-pipeline value-zeroing keys on EFFECTIVE hold = stored on_hold OR a hold horizon date past the
+// 90-day mark, so a far-out OPEN deal contributes $0 to pipeline/forecast just like a parked one. Same
 // boundary as the On Hold filter (shared CLOSE_TARGET_HOLD_HORIZON_DAYS + the America/Chicago anchor) so
-// the two can't disagree. (The reportable/count predicate is intentionally unchanged — a far-out deal is
+// the two can't disagree. The horizon date is expected_close_date in every stage EXCEPT the genuine
+// 'estimating' stage, where it is bid_due_date (2026-07-27) — the shared predicate branches on stage_id
+// internally, so every caller here inherits it and none of them need new plumbing. (The reportable/count predicate is intentionally unchanged — a far-out deal is
 // $0 but still counted.) The far-future auto-park leg lives ONLY in the ALIASED form
 // (aliasedEffectiveDealValueSql), which runs against OPEN-filtered report populations. The COLUMN form is
 // stored-on_hold ONLY: its sole consumer is the property linked-value SUM, which runs over MIXED (open +
 // won) linked deals with no terminal filter, so applying the horizon here would wrongly zero realized
 // won revenue. (A drizzle table can't be cheaply stage-filtered; the aliased report queries already
-// exclude terminal deals, so they carry the auto-park leg safely.)
+// exclude CRM-terminal deals, and the aliased form additionally exempts a Bid Board-MIRRORED terminal deal,
+// so they carry the auto-park leg safely.)
 export function effectiveDealValueSql(table: DealValueTable, rawValueSql: SQL = dealBestEstimateSql(table)): SQL {
   return storedOnHoldDealValueSql(table, rawValueSql);
 }
@@ -193,14 +192,26 @@ export function aliasedOpenPipelineForecastFirstDealValueSql(alias: string): SQL
   return aliasedDealValueChainSql(alias, FORECAST_FIRST_VALUE_CHAIN);
 }
 
-// Aliased twin of effectiveDealValueSql (OPEN/best-estimate value). Reuses the SHARED
-// effectiveOnHoldSqlPredicate so the value-zero test is byte-identical to the On Hold filter — they
-// cannot drift. NOT for won-value (see aliasedEffectiveWonDealValueSql).
+// Aliased twin of effectiveDealValueSql (OPEN/best-estimate value). Zeroes on the SAME condition the
+// deals "On Hold" pill matches — aliasedEffectiveOnHoldConditionSql — so the value and the pill are
+// byte-identical and cannot drift. NOT for won-value (see aliasedEffectiveWonDealValueSql).
+//
+// It used to compose the bare shared effectiveOnHoldSqlPredicate, which omits the Bid Board MIRROR
+// terminal guard the pill carries: a CRM-open deal whose bid_board_stage_slug is already won/lost had its
+// REALIZED value auto-parked to $0 by a far-out horizon date on the dashboard + report surfaces, while the
+// deals list/board (aliasedStageAwareEffectiveDealValueSql), the On Hold pill, the client TS resolver and
+// the worker digest/rollup all preserved it (Codex P2). This was the last family without the guard.
+// `terminalStageIds` is deliberately left empty: this helper's consumers are already CRM-open-filtered
+// populations, so the only terminal exposure left is the mirror. Prod impact measured $0 / 0 rows (no deal
+// in any tenant schema is Bid Board-terminal while its CRM stage is open), so this only closes the
+// inconsistency — it does not move today's dollars.
+//
+// REQUIRED COLUMNS at `alias`: on_hold, bid_board_stage_slug, stage_id, bid_due_date, expected_close_date.
 export function aliasedEffectiveDealValueSql(
   alias: string,
   rawValueSql: SQL = aliasedDealBestEstimateSql(alias)
 ): SQL {
-  return sql`CASE WHEN ${sql.raw(effectiveOnHoldSqlPredicate(alias))} THEN 0 ELSE COALESCE(${rawValueSql}, 0) END`;
+  return sql`CASE WHEN ${aliasedEffectiveOnHoldConditionSql(alias)} THEN 0 ELSE COALESCE(${rawValueSql}, 0) END`;
 }
 
 // Aliased twin of storedOnHoldDealValueSql — REALIZED-safe (stored on_hold ONLY), for won/awarded value.
@@ -271,7 +282,8 @@ export function aliasedEffectiveLostDealValueSql(alias: string): SQL {
 
 // TERMINAL-AWARE effective-on-hold SQL condition — the SQL twin of the shared TS isDealEffectivelyOnHold.
 // A deal is effectively on hold when the stored `on_hold` flag is set OR — for an OPEN (non-terminal) deal
-// — its close target is more than CLOSE_TARGET_HOLD_HORIZON_DAYS out. A won/lost deal is realized/preserved,
+// — its hold horizon date (the close target, or bid_due_date while it sits in the genuine 'estimating'
+// stage) is more than CLOSE_TARGET_HOLD_HORIZON_DAYS out. A won/lost deal is realized/preserved,
 // so the far-out auto-park leg NEVER applies to it (only its stored flag holds it); `terminalStageIds`
 // (won ∪ lost) gates that leg via `stage_id NOT IN (...)`. Pass `[]` for the legacy open-only predicate
 // (a population with no terminal rows). Reuses the SHARED far-out day-math so SQL and TS can't drift, and

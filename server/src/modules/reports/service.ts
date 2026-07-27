@@ -165,6 +165,8 @@ type StaleDealCandidateRow = {
   stage_slug: string | null;
   stage_entered_at: string | Date | null;
   expected_close_date?: string | Date | null;
+  /** The estimating auto-park horizon (2026-07-27) — see AtRiskDealInput.bidDueDate. */
+  bid_due_date?: string | Date | null;
   workflow_route: string | null;
   on_hold?: boolean | null;
   on_hold_started_at?: string | Date | null;
@@ -184,6 +186,10 @@ function getDealStaleAtRisk(row: StaleDealCandidateRow, now: Date) {
       workflowRoute: normalizeWorkflowRoute(row.workflow_route),
       stageEnteredAt: row.stage_entered_at,
       expectedCloseDate: row.expected_close_date ?? null,
+      // Estimating rows auto-park off the BID due date (2026-07-27). Every one of these queries already
+      // sums ${aliasedEffectiveDealValueSql("d")}, which now zeroes those rows, so the stale list has to
+      // exclude the same rows or the report would list a "stale" deal it prices at $0.
+      bidDueDate: row.bid_due_date ?? null,
       // Honor a postponement (near today-or-future close target) so the Stale Deals report / regional
       // ownership / unified-workflow at-risk match the deal-detail "Postponed" state, not just 90+ day hold.
       applyCloseTargetSuppression: true,
@@ -981,6 +987,7 @@ export async function getStaleDeals(
       COALESCE(d.bid_board_stage_slug, psc.slug) AS stage_slug,
       COALESCE(d.bid_board_stage_entered_at, d.stage_entered_at) AS stage_entered_at,
       d.expected_close_date,
+      d.bid_due_date,
       d.on_hold,
       d.on_hold_started_at,
       d.on_hold_accumulated_seconds,
@@ -1751,6 +1758,7 @@ export async function getRegionalOwnershipOverview(
         COALESCE(d.bid_board_stage_slug, psc.slug) AS stage_slug,
         COALESCE(d.bid_board_stage_entered_at, d.stage_entered_at) AS stage_entered_at,
         d.expected_close_date,
+        d.bid_due_date,
         d.workflow_route,
         d.on_hold,
         d.on_hold_started_at,
@@ -2375,6 +2383,7 @@ export async function getUnifiedWorkflowOverview(
         u.display_name AS rep_name,
         COALESCE(d.bid_board_stage_entered_at, d.stage_entered_at) AS stage_entered_at,
         d.expected_close_date,
+        d.bid_due_date,
         d.on_hold,
         d.on_hold_started_at,
         d.on_hold_accumulated_seconds,
@@ -2402,6 +2411,7 @@ export async function getUnifiedWorkflowOverview(
         COALESCE(d.bid_board_stage_slug, psc.slug) AS stage_slug,
         COALESCE(d.bid_board_stage_entered_at, d.stage_entered_at) AS stage_entered_at,
         d.expected_close_date,
+        d.bid_due_date,
         d.on_hold,
         d.on_hold_started_at,
         d.on_hold_accumulated_seconds,
