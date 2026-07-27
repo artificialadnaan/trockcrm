@@ -37,6 +37,10 @@ import {
   handleScorecardCorrectiveActionEmail,
   SCORECARD_CORRECTIVE_ACTION_EMAIL_JOB,
 } from "./scorecard-corrective-action-email.js";
+import {
+  handleScorecardCorrectiveActionOversightEmail,
+  SCORECARD_CORRECTIVE_ACTION_OVERSIGHT_EMAIL_JOB,
+} from "./scorecard-corrective-action-oversight-email.js";
 import { handleRfpReconfirmDenialEmail, RFP_RECONFIRM_DENIAL_JOB } from "./rfp-reconfirm-denial-email.js";
 import { handleRfpOverrideApprovedEmail, RFP_OVERRIDE_APPROVED_JOB } from "./rfp-override-approved-email.js";
 import { handleRfpVoteInvitation, RFP_VOTE_INVITATION_JOB } from "./rfp-vote-invitation.js";
@@ -138,6 +142,10 @@ export function registerAllJobs() {
   registerJobHandler(RFP_REJECTED_JOB, handleRfpRejectedEmail);
   registerJobHandler(FIELD_SCORECARD_EMAIL_JOB, handleFieldScorecardEmail);
   registerJobHandler(SCORECARD_CORRECTIVE_ACTION_EMAIL_JOB, handleScorecardCorrectiveActionEmail);
+  registerJobHandler(
+    SCORECARD_CORRECTIVE_ACTION_OVERSIGHT_EMAIL_JOB,
+    handleScorecardCorrectiveActionOversightEmail,
+  );
   registerJobHandler(RFP_RECONFIRM_DENIAL_JOB, handleRfpReconfirmDenialEmail);
   registerJobHandler(RFP_OVERRIDE_APPROVED_JOB, handleRfpOverrideApprovedEmail);
   registerJobHandler(RFP_VOTE_INVITATION_JOB, handleRfpVoteInvitation);
