@@ -267,6 +267,9 @@ export default function LeadDetailScreen() {
   const sourceLabel =
     [lead.sourceCategory, lead.sourceDetail].filter(Boolean).join(" · ") || lead.source || "—";
 
+  /** The refusal's itemised list, resolved once — the JSX below branches on it twice and maps it once. */
+  const missingRequirements = refusal?.missing ?? [];
+
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
       <ScrollView contentContainerStyle={styles.body}>
@@ -421,21 +424,24 @@ export default function LeadDetailScreen() {
           {refusal ? (
             <View testID="lead-transition-refusal" style={styles.refusalBox}>
               <Text style={styles.refusalTitle}>Can&apos;t move yet</Text>
-              <Text style={styles.refusalItem}>
-                {(refusal.missing ?? []).length > 0
-                  ? "Set these on the full lead record, then try again:"
-                  : ""}
-              </Text>
-              {(refusal.missing ?? []).length > 0 ? (
-                (refusal.missing ?? []).map((item) => (
-                  /* Both resolutions point at the full record, because THIS screen has no editor and
-                     the transition adapter does not send the server's inlinePatch. Repeating the
-                     server's "inline" hint would promise a remedy that does not exist here — the rep
-                     would look for a field that is not on the screen. */
-                  <Text key={item.key} style={styles.refusalItem}>
-                    • {item.label}
+              {/* One list, one branch. It was read four times and the "" case rendered an empty <Text>,
+                  which is a blank line of padding the rep cannot account for — the two outcomes here
+                  are "here is what is missing" and "we were not told", so they read as two branches. */}
+              {missingRequirements.length > 0 ? (
+                <>
+                  <Text style={styles.refusalItem}>
+                    Set these on the full lead record, then try again:
                   </Text>
-                ))
+                  {/* Both resolutions point at the full record, because THIS screen has no editor and
+                      the transition adapter does not send the server's inlinePatch. Repeating the
+                      server's "inline" hint would promise a remedy that does not exist here — the rep
+                      would look for a field that is not on the screen. */}
+                  {missingRequirements.map((item) => (
+                    <Text key={item.key} style={styles.refusalItem}>
+                      • {item.label}
+                    </Text>
+                  ))}
+                </>
               ) : (
                 /* A refusal with no itemised list still has to say something — this is also the shape
                    reconstructed when the 409 body could not be read. */
