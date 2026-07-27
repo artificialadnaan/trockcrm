@@ -406,7 +406,14 @@ export function isPublicAuthCsrfExempt(input: {
     input.path === "/api/auth/accept-invite" ||
     input.path === "/api/auth/field-password-reset" ||
     input.path === "/api/auth/field-login" ||
-    input.path === "/api/auth/local/login"
+    input.path === "/api/auth/local/login" ||
+    // The native CRM app's login. Every public login endpoint has to be here: the CSRF gate engages on
+    // any unsafe request that arrives WITH a `token` cookie, and a client that is trying to log in by
+    // definition cannot present a CSRF token yet — so without this a stale cookie 403s the request
+    // before the credentials are ever read. The mobile client is Bearer-only and sets no cookie of its
+    // own, but it can still carry one (RN's fetch shares the system cookie store, and anything that
+    // opened a webview against this host leaves one behind).
+    input.path === "/api/auth/mobile-login"
   ) {
     return true;
   }

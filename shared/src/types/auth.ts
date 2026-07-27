@@ -14,10 +14,16 @@ export interface JwtClaims {
   tokenVersion?: number;
   authMethod?: "local" | "dev";
   // Token audience/surface. Tokens minted for the FIELD app (T-Rock Cam / client-field) carry
-  // surface:"field"; CRM/admin tokens leave it unset. CRM auth (authMiddleware) REJECTS any token with
-  // surface:"field" regardless of the user's current role — so a long-lived field token can never be
-  // replayed against CRM routes, even if the user is later promoted. (Field routes accept it normally.)
-  surface?: "field";
+  // surface:"field"; the WEB CRM/admin leaves it unset; the native CRM app (mobile-crm) carries
+  // surface:"mobile". CRM auth (authMiddleware) REJECTS any token with surface:"field" regardless of the
+  // user's current role — so a long-lived field token can never be replayed against CRM routes, even if
+  // the user is later promoted. (Field routes accept it normally.)
+  //
+  // That guard is a FIELD-ONLY DENYLIST (`=== "field"`), not an allowlist, so surface-less web tokens and
+  // surface:"mobile" both pass CRM auth by design — which is exactly why adding "mobile" here needs no
+  // middleware change. Read "mobile" as a provenance/audit LABEL, not a privilege boundary: a mobile
+  // token is precisely as powerful as a web CRM token for the same user.
+  surface?: "field" | "mobile";
 }
 
 export interface AuthenticatedUser {

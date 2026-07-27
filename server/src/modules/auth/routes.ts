@@ -41,6 +41,7 @@ import {
   changeLocalPassword,
   loginWithLocalPassword,
 } from "./local-auth-service.js";
+import { loginMobileUser } from "./mobile-auth-service.js";
 import { fieldUserAuthRouter } from "../field-users/routes.js";
 import { isAuthDemoBootstrapEnabled } from "../../config/feature-flags.js";
 
@@ -287,6 +288,49 @@ router.post("/local/login", authLimiter, async (req, res, next) => {
 
     refreshAuthTokenCookie(req, res, token);
     res.json(withCsrfToken(req, res, { user: await withOnboardingGate({ ...user, activeOfficeId: user.officeId }), returnTo: safeReturnTo(req.body?.returnTo) }));
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * Native CRM app login (mobile-crm). Same credentials and same guards as /local/login — it delegates to
+ * the identical service — but returns the JWT in the BODY, because a native client cannot read the
+ * httpOnly cookie that /local/login sets. Additive: no existing route, middleware or token shape changes.
+ *
+ * Deliberately does NOT call refreshAuthTokenCookie or withCsrfToken. Setting the cookie here would be
+ * actively harmful: the global CSRF gate in app.ts engages only when a `token` cookie is PRESENT, so a
+ * cookie-bearing native client would then have to carry a CSRF token on every write it makes. Staying
+ * Bearer-only keeps this client outside that gate entirely.
+ */
+router.post("/mobile-login", authLimiter, async (req, res, next) => {
+  try {
+    const email = typeof req.body?.email === "string" ? req.body.email : "";
+    const password = typeof req.body?.password === "string" ? req.body.password : "";
+
+    if (!email || !password) {
+      throw new AppError(400, "Email and password are required");
+    }
+
+    const { token, user } = await loginMobileUser({ email, password });
+
+    // Clear every auth-cookie variant — the same set logout clears.
+    //
+    // This is not tidiness, it is what makes the returned token actually the credential in play.
+    // authMiddleware reads `req.cookies?.token || req.headers.authorization`, i.e. the COOKIE WINS. A
+    // native client is Bearer-only but can still carry a cookie (RN's fetch shares the system cookie
+    // store, so any webview opened against this host leaves one behind), and a stale one would silently
+    // out-rank the token we just minted — authenticating every request as whoever that cookie belongs to,
+    // not as the user who just signed in. It would also keep tripping the cookie-triggered CSRF gate on
+    // every write. Clearing at the moment we hand out a Bearer token closes both.
+    for (const clear of logoutCookieClearsForRequest(req)) {
+      res.cookie(clear.name, "", clear.options);
+    }
+
+    // withOnboardingGate supplies isRfpVoter / isRfpReviewer / requiresOnboarding — the same flags the web
+    // client gates its RFP screens on, so the app can hide exactly what the web hides. The server
+    // endpoints still enforce those allowlists as the hard boundary.
+    res.json({ token, user: await withOnboardingGate({ ...user, activeOfficeId: user.officeId }) });
   } catch (err) {
     next(err);
   }

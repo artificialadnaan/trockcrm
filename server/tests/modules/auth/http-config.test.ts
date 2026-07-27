@@ -561,6 +561,7 @@ describe("auth http config", () => {
     expect(isPublicAuthCsrfExempt({ method: "POST", path: "/api/auth/field-password-reset", env })).toBe(true);
     expect(isPublicAuthCsrfExempt({ method: "POST", path: "/api/auth/field-login", env })).toBe(true);
     expect(isPublicAuthCsrfExempt({ method: "POST", path: "/api/auth/local/login", env })).toBe(true);
+    expect(isPublicAuthCsrfExempt({ method: "POST", path: "/api/auth/mobile-login", env })).toBe(true);
     expect(
       isPublicAuthCsrfExempt({
         method: "POST",
