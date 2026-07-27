@@ -840,3 +840,77 @@ describe("corrective-action oversight — review-round regressions", () => {
     expect((await getUpdatedAt(scorecard.id)).getTime()).toBeGreaterThan(future.getTime());
   });
 });
+
+describe("corrective-action oversight — stale job supersession", () => {
+  async function oversightJobRows(): Promise<{ status: string; payload: any }[]> {
+    const res = await tdb.execute(sql`
+      SELECT status, payload FROM public.job_queue
+      WHERE job_type = 'scorecard_corrective_action_oversight_email' ORDER BY id
+    `);
+    return res.rows as any[];
+  }
+
+  it("retires a PENDING oversight job from a prior cycle when a new cycle opens", async () => {
+    // A cycle-A job that runs after cycle B opens reads B's still-open status and B's cleared stamp, so it
+    // sends — under A's idempotency key, which Resend will not dedup against B's. B's own job then sends
+    // too, and oversight gets the same notice twice. Cancelling at the source is what prevents that; the
+    // worker cannot safely tell "superseded" from "the responder self-repair rotated the shared nonce".
+    const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
+    const before = await oversightJobRows();
+    expect(before).toHaveLength(1);
+    expect(before[0].status).toBe("pending");
+    const firstNonce = before[0].payload.cycleNonce;
+
+    // Close the card, then reopen it with a genuinely new flag — a real new cycle.
+    await tdb.execute(sql`UPDATE scorecard_corrective_actions SET status = 'resolved' WHERE scorecard_id = ${scorecard.id}`);
+    await tdb.execute(sql`UPDATE field_scorecards SET status = 'corrective_action_closed' WHERE id = ${scorecard.id}`);
+    await tdb.transaction(async (tx) => {
+      await reconcileScorecardCorrectiveActions(tx as any, {
+        scorecardId: scorecard.id,
+        dealId: DEAL,
+        office: OFFICE,
+        rating: "corrective_action",
+        currentStatus: "corrective_action_closed",
+        deficiencies: ["missed_hold_point"],
+        actionItems: ["Re-inspect slab 2", "Verify hold points", "NEW: re-torque anchors"],
+      } as any);
+    });
+
+    const after = await oversightJobRows();
+    expect(after).toHaveLength(2);
+    // The prior-cycle job is retired, not left to fire alongside the new one.
+    expect(after[0].status).toBe("dead");
+    expect(after[0].payload.cycleNonce).toBe(firstNonce);
+    // The new cycle's job is live and carries a different nonce.
+    expect(after[1].status).toBe("pending");
+    expect(after[1].payload.cycleNonce).not.toBe(firstNonce);
+  });
+
+  it("does not retire an oversight job for a DIFFERENT scorecard", async () => {
+    const { scorecard: a } = await createFieldScorecard(tdb, belowBandSubmission());
+    const { scorecard: b } = await createFieldScorecard(
+      tdb,
+      belowBandSubmission({ clientSubmissionId: csid(720) }),
+    );
+    expect((await oversightJobRows()).filter((j) => j.status === "pending")).toHaveLength(2);
+
+    await tdb.execute(sql`UPDATE scorecard_corrective_actions SET status = 'resolved' WHERE scorecard_id = ${a.id}`);
+    await tdb.execute(sql`UPDATE field_scorecards SET status = 'corrective_action_closed' WHERE id = ${a.id}`);
+    await tdb.transaction(async (tx) => {
+      await reconcileScorecardCorrectiveActions(tx as any, {
+        scorecardId: a.id,
+        dealId: DEAL,
+        office: OFFICE,
+        rating: "corrective_action",
+        currentStatus: "corrective_action_closed",
+        deficiencies: ["missed_hold_point"],
+        actionItems: ["Re-inspect slab 2", "Verify hold points", "NEW: another"],
+      } as any);
+    });
+
+    const rows = await oversightJobRows();
+    const bJobs = rows.filter((j) => j.payload.scorecardId === b.id);
+    expect(bJobs).toHaveLength(1);
+    expect(bJobs[0].status).toBe("pending");
+  });
+});

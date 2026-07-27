@@ -676,6 +676,28 @@ export async function reconcileScorecardCorrectiveActions(
     // Gated on transitioningIntoOpen ALONE, matching the stamp clearing above. The other two triggers of
     // this block operate on a card that was already open, which is not news for oversight.
     if (transitioningIntoOpen) {
+      // RETIRE any oversight job still queued from a PRIOR cycle before enqueueing this one.
+      //
+      // Without this, a job minted for cycle A can start after the reopen that created cycle B: it reads B's
+      // still-open status and B's freshly-cleared stamp, so it sends — under A's idempotency key, which
+      // Resend will not dedup against B's. A's nonce-scoped stamp then correctly writes nothing, B's own job
+      // sends too, and oversight gets the same notice twice.
+      //
+      // Cancelling at the source is better than a pre-send nonce check in the worker, because the worker
+      // cannot distinguish "my cycle was superseded" from "the responder job's self-repair rotated the
+      // shared nonce without starting a new cycle" — and returning early on the latter would strand the
+      // notice entirely. The reopen knows exactly which jobs are stale, so it says so.
+      //
+      // Only `pending` rows are retired: a claimed/processing job is already past this point, and the
+      // nonce-scoped stamp is what covers that much narrower in-flight window.
+      await tx.execute(sql`
+        UPDATE public.job_queue
+           SET status = 'dead',
+               last_error = 'superseded by a newer corrective-action cycle'
+         WHERE job_type = ${SCORECARD_CORRECTIVE_ACTION_OVERSIGHT_EMAIL_JOB}
+           AND status = 'pending'
+           AND payload->>'scorecardId' = ${input.scorecardId}
+      `);
       await tx.insert(jobQueue).values({
         jobType: SCORECARD_CORRECTIVE_ACTION_OVERSIGHT_EMAIL_JOB,
         payload: {
