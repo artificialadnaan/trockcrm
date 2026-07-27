@@ -174,6 +174,11 @@ export default function DealsListScreen() {
         <FlatList
           data={deals}
           keyExtractor={(d) => d.id}
+          // The search field sits directly above this list, so after a search the keyboard is still up.
+          // RN's default here is "never", which spends the first tap dismissing it — so opening a result,
+          // or the one-tap Call this screen advertises, silently needs two taps. Same fix the deal detail
+          // needed for its Save button.
+          keyboardShouldPersistTaps="handled"
           // `flexGrow` so the empty state centres in the viewport while the list still scrolls — which is
           // what keeps pull-to-refresh reachable with zero rows.
           contentContainerStyle={[styles.list, deals.length === 0 && styles.listEmpty]}
