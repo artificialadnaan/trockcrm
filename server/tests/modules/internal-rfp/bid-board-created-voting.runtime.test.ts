@@ -49,7 +49,8 @@ async function seed() {
       rfp_override_reviewed_at timestamptz, rfp_bidboard_attempt_at timestamptz, rfp_last_attempt_error text, bid_board_linked_at timestamptz, assigned_rep_id uuid, rfp_approval_requested_by uuid,
       rfp_approval_request_id integer, rfp_approval_requested_at timestamptz, rfp_approval_request_event_id uuid, workflow_route text NOT NULL DEFAULT 'normal', stage_entered_at timestamptz,
       on_hold boolean NOT NULL DEFAULT false, on_hold_started_at timestamptz, on_hold_accumulated_seconds bigint DEFAULT 0,
-      on_hold_accumulated_seconds_at_stage_entry bigint DEFAULT 0, is_active boolean NOT NULL DEFAULT true, updated_at timestamptz
+      on_hold_accumulated_seconds_at_stage_entry bigint DEFAULT 0, is_active boolean NOT NULL DEFAULT true,
+      bid_board_detached_at timestamptz, bid_board_detached_by uuid, bid_board_detach_reason text, updated_at timestamptz
     );
     CREATE TABLE office_test.deal_stage_history (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), deal_id uuid, from_stage_id uuid, to_stage_id uuid, changed_by uuid,
@@ -96,6 +97,72 @@ describe("POST /bid-board-created (voting path)", () => {
     expect(rows[0].is_bid_board_owned).toBe(true);
     expect(String(rows[0].procore_bid_id)).toBe("88123");
     expect(rows[0].stage_id).toBe(EST);
+  });
+
+  // Re-attachment after "Move back to Opportunity" (migration 0200). Detaching is deliberately sticky —
+  // it is the ONLY thing stopping the Bid Board export from dragging the deal forward again — so the
+  // marker must clear at exactly one moment: when a genuinely NEW Bid Board project is created for the
+  // deal after it was re-submitted. That is this callback.
+  it("clears the Bid Board detach marker when a NEW project is created for a re-submitted deal", async () => {
+    await seed();
+    // Simulate the post-move-back state: detached, then re-triggered (a fresh round reopened the RFP).
+    await holder.pg.query(
+      `UPDATE office_test.deals
+          SET bid_board_detached_at = now() - interval '2 days',
+              bid_board_detached_by = $2,
+              bid_board_detach_reason = 'Scope was not ready'
+        WHERE id = $1`,
+      [DEAL, REP],
+    );
+    const app = await buildApp();
+    const raw = JSON.stringify({
+      status: "created",
+      sourceDealId: DEAL,
+      bidboardProjectId: "88999",
+      procoreCompanyId: "42",
+      createdAt: new Date().toISOString(),
+    });
+    const res = await request(app).post("/bid-board-created").set("content-type", "application/json").set("x-rfp-request-signature", sign(raw)).send(raw);
+    expect(res.status).toBe(200);
+
+    const rows = (await holder.pg.query(
+      `SELECT bid_board_detached_at, bid_board_detached_by, bid_board_detach_reason, is_bid_board_owned, procore_bid_id
+         FROM office_test.deals WHERE id=$1`, [DEAL])).rows as any[];
+    expect(rows[0].bid_board_detached_at).toBeNull();
+    expect(rows[0].bid_board_detached_by).toBeNull();
+    expect(rows[0].bid_board_detach_reason).toBeNull();
+    expect(rows[0].is_bid_board_owned).toBe(true);
+    expect(String(rows[0].procore_bid_id)).toBe("88999");
+  });
+
+  it("does NOT re-attach a detached deal whose RFP cycle was cleared (a stale 'created' cannot resurrect it)", async () => {
+    await seed();
+    // Exactly what returnDealToOpportunity leaves behind: detached AND rfp_approval_status NULL. A late
+    // 'created' from the PRIOR round must not re-approve + re-own it — the existing resurrection guard
+    // (AND rfp_approval_status IS NOT NULL) is what makes the detach survive.
+    await holder.pg.query(
+      `UPDATE office_test.deals
+          SET bid_board_detached_at = now(), rfp_approval_status = NULL, rfp_approval_requested_at = NULL
+        WHERE id = $1`,
+      [DEAL],
+    );
+    const app = await buildApp();
+    const raw = JSON.stringify({
+      status: "created",
+      sourceDealId: DEAL,
+      bidboardProjectId: "88777",
+      procoreCompanyId: "42",
+      createdAt: new Date().toISOString(),
+    });
+    await request(app).post("/bid-board-created").set("content-type", "application/json").set("x-rfp-request-signature", sign(raw)).send(raw);
+
+    const rows = (await holder.pg.query(
+      `SELECT bid_board_detached_at, is_bid_board_owned, rfp_approval_status, procore_bid_id
+         FROM office_test.deals WHERE id=$1`, [DEAL])).rows as any[];
+    expect(rows[0].bid_board_detached_at).not.toBeNull();
+    expect(rows[0].is_bid_board_owned).toBe(false);
+    expect(rows[0].rfp_approval_status).toBeNull();
+    expect(rows[0].procore_bid_id).toBeNull();
   });
 
   it("surfaces a visible failed marker on a voting deal (no rfp_approval_request_id) when the 'failed' callback lands", async () => {

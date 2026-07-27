@@ -28,6 +28,7 @@ export * from "./workflow-gates.js";
 export * from "./workflow.js";
 export * from "./rfp.js";
 export * from "./rfp-pending.js";
+export * from "./return-to-opportunity.js";
 export * from "./field-scorecard.js";
 export * from "./field-responder.js";
 export * from "./estimator-pipeline-report.js";

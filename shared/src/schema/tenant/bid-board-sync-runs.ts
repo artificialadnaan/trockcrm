@@ -24,6 +24,11 @@ export const bidBoardSyncRuns = pgTable(
     appliedBackwardCount: integer("applied_backward_count").default(0).notNull(),
     skippedTerminalCount: integer("skipped_terminal_count").default(0).notNull(),
     skippedNoStageChangeCount: integer("skipped_no_stage_change_count").default(0).notNull(),
+    // Rows whose CRM deal exists but has been DETACHED from Bid Board ("Move back to Opportunity",
+    // migration 0200). Counted separately from no_match_count on purpose: folding them into noMatch
+    // would flip EVERY subsequent run to 'completed_with_unmatched' and append the same project number
+    // to unmatched_project_numbers forever, burying the real "a deal silently failed to sync" signal.
+    skippedDetachedCount: integer("skipped_detached_count").default(0).notNull(),
     estimateUpdatedCount: integer("estimate_updated_count").default(0).notNull(),
     estimateUpdatedHigherCount: integer("estimate_updated_higher_count").default(0).notNull(),
     estimateUpdatedLowerCount: integer("estimate_updated_lower_count").default(0).notNull(),

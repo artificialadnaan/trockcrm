@@ -165,6 +165,16 @@ export const deals = pgTable(
     projectNumber: text("project_number"),
     bidBoardLinkedAt: timestamp("bid_board_linked_at", { withTimezone: true }),
     bidBoardLastUpdatedAt: timestamp("bid_board_last_updated_at", { withTimezone: true }),
+    // Bid Board DETACH marker (migration 0200) — set by "Move back to Opportunity". While non-null the
+    // deal is invisible to every Bid Board ingress (the export matcher's base WHERE + all four of its
+    // write sites + the SyncHub /opportunities webhook), so the next export cannot drag it forward
+    // again. The procore/synchub identity columns above are deliberately PRESERVED: nulling them would
+    // make the webhook miss and INSERT a bid-board-owned twin of the same project. Cleared only when a
+    // NEW Bid Board project is genuinely created for the deal (the internal-RFP bid-board-created
+    // callback), which is the one moment re-attachment is correct.
+    bidBoardDetachedAt: timestamp("bid_board_detached_at", { withTimezone: true }),
+    bidBoardDetachedBy: uuid("bid_board_detached_by"),
+    bidBoardDetachReason: text("bid_board_detach_reason"),
     // Assigned PM is not present in the Bid Board export; role polling can populate this after portfolio handoff.
     bidBoardAssignedPm: text("bid_board_assigned_pm"),
     intendedProjectNumber: text("intended_project_number"),

@@ -37,6 +37,8 @@ type ClientOptions = {
   targetStageSlug?: string;
   targetStageWorkflowFamily?: "standard_deal" | "service_deal";
   currentDealOverrides?: Record<string, unknown>;
+  /** Non-null once "Move back to Opportunity" detached the resolved deal from Bid Board sync. */
+  detachedAt?: string | null;
 };
 
 function createClient(options: ClientOptions = {}) {
@@ -83,6 +85,9 @@ function createClient(options: ClientOptions = {}) {
               }]
             : []),
         };
+      }
+      if (sql.includes("SELECT bid_board_detached_at FROM office_dallas.deals")) {
+        return { rows: [{ bid_board_detached_at: options.detachedAt ?? null }] };
       }
       if (sql.includes("LOWER(TRIM(name)) = LOWER(TRIM($2))")) {
         return { rows: options.existingDealIdByName ? [{ id: options.existingDealIdByName }] : [] };
@@ -1051,5 +1056,68 @@ describe("syncHubRoutes", () => {
         entry.sql.includes("WHERE slug = $1")
     );
     expect(targetStageLookup?.params?.slice(0, 2)).toEqual(["opportunity", "standard_deal"]);
+  });
+
+  // The second Bid Board ingress. A deal moved back to Opportunity keeps its procore/synchub identity
+  // BECAUSE of this route: if the detach nulled those columns, both identity lookups below would miss
+  // and the route would fall through to INSERT INTO office_dallas.deals — creating a bid-board-owned
+  // TWIN of the same project competing for its project number. So the deal must still be FOUND here and
+  // then deliberately skipped.
+  it("skips a DETACHED deal instead of mirroring it — and does not create a duplicate deal", async () => {
+    const { client, queries } = createClient({
+      existingDealIdByProcoreBid: "deal-detached",
+      detachedAt: "2026-07-20T12:00:00.000Z",
+    });
+    dbMocks.connect.mockResolvedValue(client);
+
+    const app = createApp();
+    const response = await request(app)
+      .post("/api/integrations/synchub/opportunities")
+      .set("x-synchub-secret", "test-secret")
+      .send({
+        office_slug: "dallas",
+        bid_board_id: "bb-detached",
+        procore_bid_id: 107,
+        name: "Palm Villas",
+        stage_slug: "won",
+        stage_status: "won",
+      });
+
+    // 200, not an error: SyncHub must record the push as delivered and stop retrying it forever.
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({ status: "skipped_detached", deal_id: "deal-detached" });
+
+    // Nothing was mirrored…
+    expect(queries.some((entry) => entry.sql.includes("UPDATE office_dallas.deals"))).toBe(false);
+    expect(queries.some((entry) => entry.sql.includes("INSERT INTO office_dallas.deal_stage_history"))).toBe(false);
+    // …and, crucially, no duplicate deal was inserted.
+    expect(queries.some((entry) => entry.sql.includes("INSERT INTO office_dallas.deals"))).toBe(false);
+    expect(queries.some((entry) => entry.sql === "ROLLBACK")).toBe(true);
+    expect(queries.some((entry) => entry.sql === "COMMIT")).toBe(false);
+  });
+
+  it("still mirrors an ATTACHED deal (the detach guard is not a blanket off-switch)", async () => {
+    const { client, queries } = createClient({
+      existingDealIdByProcoreBid: "deal-attached",
+      detachedAt: null,
+    });
+    dbMocks.connect.mockResolvedValue(client);
+
+    const app = createApp();
+    const response = await request(app)
+      .post("/api/integrations/synchub/opportunities")
+      .set("x-synchub-secret", "test-secret")
+      .send({
+        office_slug: "dallas",
+        bid_board_id: "bb-attached",
+        procore_bid_id: 108,
+        name: "Palm Villas",
+        stage_slug: "bid_sent",
+        stage_status: "under_review",
+      });
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ status: "updated", deal_id: "deal-attached" });
+    expect(queries.some((entry) => entry.sql.includes("UPDATE office_dallas.deals"))).toBe(true);
   });
 });

@@ -404,6 +404,27 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
 
     const existingDealId = existingDealIdBySyncHubBidBoardId ?? existingDealIdByProcoreBid;
 
+    // Second Bid Board ingress, and the one that makes the "keep the identity columns" decision
+    // load-bearing: this route resolves a deal by synchub_bid_board_id then procore_bid_id and, on a
+    // MISS, falls through to INSERT INTO deals below. So a deal that was moved back to Opportunity must
+    // still be FOUND here — it just must not be mirrored. Detaching by nulling the identity columns
+    // would instead make this lookup miss and create a bid-board-owned TWIN of the same project.
+    // Answer 200 (not an error) so SyncHub records the push as delivered and stops retrying it.
+    if (existingDealId) {
+      const detachedResult = await client.query(
+        `SELECT bid_board_detached_at FROM ${schemaName}.deals WHERE id = $1`,
+        [existingDealId]
+      );
+      if (detachedResult.rows[0]?.bid_board_detached_at != null) {
+        await client.query("ROLLBACK");
+        console.warn(
+          `[SyncHub] Skipped Bid Board push for deal ${existingDealId}: moved back to Opportunity and detached from Bid Board sync. Delete this project from the Bid Board.`
+        );
+        res.json({ status: "skipped_detached", deal_id: existingDealId });
+        return;
+      }
+    }
+
     if (existingDealId) {
       // Mirror (update) path writes deal_stage_history explicitly below, so suppress the
       // backstop trigger (migration 0143) for this branch to avoid double-recording.

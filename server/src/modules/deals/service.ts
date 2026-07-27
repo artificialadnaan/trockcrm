@@ -1097,6 +1097,8 @@ export interface DealBidBoardOwnershipState {
   mirroredInCrm: readonly string[];
   reason: string;
   message: string;
+  /** ISO timestamp when "Move back to Opportunity" severed this deal from Bid Board sync (else null). */
+  detachedAt: string | null;
 }
 
 /**
@@ -1630,9 +1632,16 @@ function mapDealStageWorkspaceRow(
 }
 
 export function buildBidBoardOwnershipState(
-  deal: Pick<typeof deals.$inferSelect, "isBidBoardOwned" | "workflowRoute">
+  deal: Pick<typeof deals.$inferSelect, "isBidBoardOwned" | "workflowRoute"> & {
+    bidBoardDetachedAt?: Date | string | null;
+  }
 ): DealBidBoardOwnershipState {
-  const isOwned = deal.isBidBoardOwned;
+  // A detached deal is CRM-owned by definition, whatever the stored flag says. Forcing it here (rather
+  // than trusting the detach to have nulled is_bid_board_owned) means a stale/reintroduced flag can
+  // never make the UI claim Bid Board owns a deal the sync is no longer allowed to touch.
+  const detachedAt = deal.bidBoardDetachedAt ?? null;
+  const isDetached = detachedAt != null;
+  const isOwned = isDetached ? false : deal.isBidBoardOwned;
 
   return {
     isOwned,
@@ -1641,12 +1650,18 @@ export function buildBidBoardOwnershipState(
     downstreamStagesReadOnly: isOwned,
     canEditInCrm: BID_BOARD_CRM_EDITABLE_FIELDS,
     mirroredInCrm: BID_BOARD_MIRRORED_FIELDS,
-    reason: isOwned
-      ? "Bid Board now owns downstream progression after the deal entered estimating."
-      : "CRM still owns manual stage progression before estimating handoff.",
-    message: isOwned
-      ? "Bid Board is now the source of truth once this deal entered estimating."
-      : "CRM remains the source of truth until the deal is handed off into estimating.",
+    reason: isDetached
+      ? "This deal was moved back to Opportunity and is disconnected from Bid Board sync."
+      : isOwned
+        ? "Bid Board now owns downstream progression after the deal entered estimating."
+        : "CRM still owns manual stage progression before estimating handoff.",
+    message: isDetached
+      ? "Bid Board exports no longer update this deal. Delete the project from the Bid Board if you have not already."
+      : isOwned
+        ? "Bid Board is now the source of truth once this deal entered estimating."
+        : "CRM remains the source of truth until the deal is handed off into estimating.",
+    detachedAt:
+      detachedAt instanceof Date ? detachedAt.toISOString() : detachedAt ? String(detachedAt) : null,
   };
 }
 

@@ -1085,6 +1085,16 @@ internalRfpRoutes.post(
                   rfp_override_error = NULL,
                   -- clear the per-attempt marker (finding F4/F5): the create succeeded, so no attempt is in flight.
                   rfp_bidboard_attempt_at = NULL,
+                  -- RE-ATTACH (migration 0200). A deal that was moved back to Opportunity is detached from
+                  -- Bid Board sync so the export can't drag it forward again; this callback is the ONE moment
+                  -- re-attachment is correct, because a genuinely NEW Bid Board project now exists for it.
+                  -- Deliberately NOT a bid_board_detached_at IS NULL guard in the WHERE: that would strand a
+                  -- re-submitted deal permanently outside sync. A STALE 'created' from the old round can't
+                  -- re-attach anyway — the move-back nulls rfp_approval_status, and the resurrection guard at
+                  -- the bottom of this WHERE requires a non-null status.
+                  bid_board_detached_at = NULL,
+                  bid_board_detached_by = NULL,
+                  bid_board_detach_reason = NULL,
                   updated_at = NOW()
             WHERE id = $3
               -- a re-confirmed denial is terminal; never let a (delayed) success callback override it
@@ -1117,7 +1127,8 @@ internalRfpRoutes.post(
                 rfp_approval_status IS DISTINCT FROM 'approved' OR
                 bid_board_linked_at IS NULL OR
                 rfp_override_state IS NOT NULL OR
-                rfp_override_error IS NOT NULL
+                rfp_override_error IS NOT NULL OR
+                bid_board_detached_at IS NOT NULL
               )
               -- A request-less (voting) 'created' must NOT resurrect a deal that was Returned to Opportunity.
               -- cancelPendingRfp clears rfp_approval_status to NULL (+ every RFP field), and a delayed 'created'

@@ -225,6 +225,7 @@ export async function changeDealStage(
     bidBoardMirrorSourceEnteredAt: currentDeal[0].bidBoardMirrorSourceEnteredAt,
     isReadOnlyMirror: currentDeal[0].isReadOnlyMirror,
     readOnlySyncedAt: currentDeal[0].readOnlySyncedAt,
+    bidBoardDetachedAt: currentDeal[0].bidBoardDetachedAt,
   });
   const estimatingBoundary = await getEstimatingBoundaryStage(currentDeal[0].workflowRoute);
   if (inferredOwnership.isBidBoardOwned && !estimatingBoundary) {
@@ -349,6 +350,16 @@ export async function changeDealStage(
     dealUpdates.isBidBoardOwned = true;
     dealUpdates.bidBoardStageSlug = targetStage.slug;
     dealUpdates.readOnlySyncedAt = new Date();
+    // Advancing INTO the estimating boundary is the CRM's explicit "hand this deal to Bid Board"
+    // moment, so it also RE-ATTACHES a deal that a previous "Move back to Opportunity" detached
+    // (migration 0200). Without this the deal would sit in the incoherent state of "CRM says Bid Board
+    // owns it" while every sync ingress still skips it — the export would nag "delete this from the Bid
+    // Board" forever on a project the team had deliberately handed back. Only a deliberate human
+    // forward move reaches here: the Bid Board's own writeback and the bid-board-created callback both
+    // write stage SQL directly and never call changeDealStage.
+    dealUpdates.bidBoardDetachedAt = null;
+    dealUpdates.bidBoardDetachedBy = null;
+    dealUpdates.bidBoardDetachReason = null;
   }
 
   // Always clear ALL terminal fields before setting new ones.

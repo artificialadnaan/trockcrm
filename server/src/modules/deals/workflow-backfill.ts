@@ -71,6 +71,14 @@ export interface PlanDealWorkflowBackfillInput {
   stageEnteredAt?: Date | string | null;
   isReadOnlyMirror?: boolean | null;
   readOnlySyncedAt?: Date | string | null;
+  /**
+   * Set once "Move back to Opportunity" severed the deal from Bid Board sync (migration 0200). The
+   * detach nulls every other input below, so ownership would already infer as "crm" without this — but
+   * that makes the invariant EMERGENT across six columns. Reading the marker directly keeps it local,
+   * so a future path that repopulates one mirror field can't silently flip a detached deal back to
+   * bid-board-owned.
+   */
+  bidBoardDetachedAt?: Date | string | null;
   stageHistory?: LegacyDealStageHistoryEntry[];
 }
 
@@ -152,6 +160,9 @@ function resolvePipelineTypeSnapshot(input: PlanDealWorkflowBackfillInput): Work
 }
 
 function hasBidBoardSync(input: PlanDealWorkflowBackfillInput) {
+  // Detached wins over every other signal: the deal is deliberately out of Bid Board sync.
+  if (input.bidBoardDetachedAt) return false;
+
   const mirroredStageSlug =
     normalizeMirroredStageSlug(input.bidBoardStageSlug) ?? normalizeMirroredStageSlug(input.stageSlug);
 

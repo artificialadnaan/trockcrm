@@ -22,6 +22,7 @@ import {
   ExternalLink,
   Users,
   Send,
+  Undo2,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Button, buttonVariants } from "@/components/ui/button";
@@ -78,6 +79,7 @@ import { DealEstimatingSubstage } from "./deal-estimating-substage";
 import { LeadForm } from "@/components/leads/lead-form";
 import { LeadTimelineTab } from "@/components/leads/lead-timeline-tab";
 import { StageChangeDialog } from "@/components/deals/stage-change-dialog";
+import { ReturnToOpportunityDialog } from "@/components/deals/return-to-opportunity-dialog";
 import { TaskCreateDialog } from "@/components/tasks/task-create-dialog";
 import {
   useDealDetail,
@@ -396,6 +398,7 @@ export function DealDetailPage() {
   const [rfpReadinessRefreshKey, setRfpReadinessRefreshKey] = useState(0);
   const [watchPending, setWatchPending] = useState(false);
   const [holdTogglePending, setHoldTogglePending] = useState(false);
+  const [returnToOpportunityOpen, setReturnToOpportunityOpen] = useState(false);
   const [archiveOpen, setArchiveOpen] = useState(false);
   const [archiveReason, setArchiveReason] = useState("");
   const [archiving, setArchiving] = useState(false);
@@ -967,6 +970,26 @@ export function DealDetailPage() {
               Edit Deal
             </DropdownMenuItem>
           )}
+          {/* "Move back to Opportunity" sits between Edit and Archive: amber, one step below Archive's red.
+              Deliberately NOT on the PipelineProgress strip — that is the ordinary stage-click path, and
+              this is not an ordinary stage change (it severs Bid Board sync and can void commission).
+              Only the coarse role check lives here; the authoritative eligibility (Won/commission tier,
+              change-order children, already-Opportunity) comes from the dialog's server preview, which
+              renders the exact block reason rather than silently hiding the option. */}
+          {!isOpportunityStage && isDirectorOrAdmin ? (
+            <DropdownMenuItem
+              onClick={() => setReturnToOpportunityOpen(true)}
+              className="text-amber-600"
+            >
+              <Undo2 className="h-4 w-4 mr-2" />
+              Move back to Opportunity
+            </DropdownMenuItem>
+          ) : !isOpportunityStage && viewerOwnsDeal ? (
+            <DropdownMenuItem disabled title="Only a director or an admin can move a deal back to Opportunity">
+              <Undo2 className="h-4 w-4 mr-2" />
+              Move back to Opportunity
+            </DropdownMenuItem>
+          ) : null}
           {canArchiveDeal({ stageSlug: deal.stageSlug ?? currentStage?.slug ?? null, assignedRepId: deal.assignedRepId }, user) ? (
             <DropdownMenuItem onClick={() => setArchiveOpen(true)} className="text-red-600">
               <Trash2 className="h-4 w-4 mr-2" />
@@ -996,6 +1019,32 @@ export function DealDetailPage() {
   const tabContent = (
     <div className="space-y-4">
       <BidDueDateBanner bidDueDate={deal.bidDueDate} />
+      {/* Standing reminder, not a toast. The CRM cannot delete the Bid Board project, so the ONE manual
+          step this action depends on has to survive a page reload — a single toast at move time gets
+          missed and the Bid Board keeps showing a phantom active project. */}
+      {deal.bidBoardDetachedAt ? (
+        <div
+          className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900"
+          role="status"
+        >
+          <span className="font-black uppercase tracking-[0.06em]">Disconnected from Bid Board</span>
+          <span className="ml-2">
+            on {new Date(deal.bidBoardDetachedAt).toLocaleDateString()} — Bid Board exports no longer
+            update this deal. Delete this project from the Bid Board if you have not already.
+          </span>
+          {buildBidBoardProjectUrl(deal) ? (
+            <a
+              className="ml-2 inline-flex items-center gap-1 font-semibold underline"
+              href={buildBidBoardProjectUrl(deal) as string}
+              target="_blank"
+              rel="noreferrer"
+            >
+              Open in Bid Board
+              <ExternalLink className="h-3.5 w-3.5" />
+            </a>
+          ) : null}
+        </div>
+      ) : null}
       {!viewerOwnsDeal ? (
         <div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-medium text-slate-600">
           Assigned to {deal.assignedRepName ?? deal.assignedRepId ?? "another rep"}. You can collaborate with notes, activity, files, photos, and emails, but only the assigned rep can edit.
@@ -1157,6 +1206,28 @@ export function DealDetailPage() {
           onSuccess={handleStageChangeSuccess}
         />
       )}
+
+      {/* Move back to Opportunity */}
+      <ReturnToOpportunityDialog
+        dealId={deal.id}
+        dealName={deal.name}
+        open={returnToOpportunityOpen}
+        onOpenChange={setReturnToOpportunityOpen}
+        onSuccess={async (result) => {
+          toast.success(
+            result.commissionRowsVoided > 0
+              ? `Moved back to Opportunity — ${result.commissionRowsVoided} commission row(s) voided. Remember to delete it from Bid Board.`
+              : "Moved back to Opportunity — remember to delete it from Bid Board."
+          );
+          // Keep the move's success separate from a later refetch failure: the write already committed,
+          // so a failed reload is a "refresh the page" hint, never a "the move failed" error.
+          try {
+            await refetch();
+          } catch {
+            toast.info("Moved back to Opportunity. Refresh the page to see the updated deal.");
+          }
+        }}
+      />
 
       {/* Archive Deal Dialog */}
       <Dialog open={archiveOpen} onOpenChange={(open) => { if (!archiving) setArchiveOpen(open); }}>
