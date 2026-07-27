@@ -23,12 +23,14 @@ import {
 const U = (s: string) => `00000000-0000-0000-0000-${s.padStart(12, "0")}`;
 const REP_A = U("a01"); // owns D1; assigned rep of D3 (which REP_B estimated)
 const REP_B = U("b01"); // owns D2; estimator-only on D3
-const REP_C = U("c01"); // owns nothing, estimated nothing — must surface NO deals
+const REP_C = U("c01"); // owns NOTHING but IS the estimator on D5 — the pure estimator-only person
+const REP_D = U("d0d"); // touches nothing at all — the genuinely uninvolved control
 const D = {
   ownedByA: U("d01"),
   ownedByB: U("d02"),
   ownedByA_estByB: U("d03"), // assigned A, estimator B -> the estimator-only-for-B case
   unassigned: U("d04"),
+  ownedByA_estByC: U("d05"), // assigned A, estimator C -> C owns nothing yet estimated this
 };
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -50,6 +52,7 @@ beforeAll(async () => {
       ('${D.ownedByA}', '${REP_A}', NULL),
       ('${D.ownedByB}', '${REP_B}', NULL),
       ('${D.ownedByA_estByB}', '${REP_A}', '${REP_B}'),
+      ('${D.ownedByA_estByC}', '${REP_A}', '${REP_C}'),
       ('${D.unassigned}', NULL, NULL);
   `);
   tdb = drizzle(pg);
@@ -66,15 +69,15 @@ describe("buildAliasedInvolvedRepSql — real execution", () => {
   it("filtering by REP_A is unchanged for an owned-only rep (no estimator widening of A's own set)", async () => {
     // A owns D1 and D3; A estimated nothing. So A's set is exactly A's owned deals.
     const rows = await ids(buildAliasedInvolvedRepSql("d", REP_A));
-    expect(rows).toEqual([D.ownedByA, D.ownedByA_estByB].sort());
+    expect(rows).toEqual([D.ownedByA, D.ownedByA_estByB, D.ownedByA_estByC].sort());
   });
   it("the Unassigned sentinel matches assigned_rep IS NULL ONLY (estimator does not widen it)", async () => {
     const rows = await ids(buildAliasedInvolvedRepSql("d", UNASSIGNED_FILTER_SENTINEL));
     expect(rows).toEqual([D.unassigned]);
   });
-  it("a person who neither owns nor estimated anything surfaces NO deals", async () => {
+  it("an estimator-only person surfaces the deal they estimated but do not own", async () => {
     const rows = await ids(buildAliasedInvolvedRepSql("d", REP_C));
-    expect(rows).toEqual([]);
+    expect(rows).toEqual([D.ownedByA_estByC]);
   });
 });
 
@@ -89,30 +92,40 @@ describe("buildAliasedOwnedRepSql — real execution", () => {
   it("still returns the owner of a deal someone else estimated", async () => {
     // D.ownedByA_estByB is owned by A and estimated by B: it belongs to A's book, and only A's.
     const rows = await ids(buildAliasedOwnedRepSql("d", REP_A));
-    expect(rows).toEqual([D.ownedByA, D.ownedByA_estByB].sort());
+    expect(rows).toEqual([D.ownedByA, D.ownedByA_estByB, D.ownedByA_estByC].sort());
   });
   it("the Unassigned sentinel matches assigned_rep IS NULL", async () => {
     const rows = await ids(buildAliasedOwnedRepSql("d", UNASSIGNED_FILTER_SENTINEL));
     expect(rows).toEqual([D.unassigned]);
   });
-  it("a person who owns nothing surfaces NO deals even if they estimated some", async () => {
+  it("a person who owns nothing surfaces NO deals even though they DID estimate one", async () => {
+    // REP_C is the estimator on D.ownedByA_estByC and owns nothing. The involved variant returns that deal
+    // (asserted above); the owner variant must return none — this is the whole point of the split.
+    expect(await ids(buildAliasedInvolvedRepSql("d", REP_C))).toEqual([D.ownedByA_estByC]);
     const rows = await ids(buildAliasedOwnedRepSql("d", REP_C));
     expect(rows).toEqual([]);
   });
-  it("every deal lands on exactly ONE rep, so per-rep totals cannot double-count", async () => {
-    // The reconciliation property the estimator-OR arm broke: summing per-rep sets must equal the whole set,
-    // never more. With an estimator arm, D.ownedByA_estByB appears for BOTH A and B.
+  it("the per-rep sets PARTITION the fixture — no overlap and no gaps", async () => {
+    // The reconciliation property the estimator-OR arm broke. Two halves, both needed:
+    //   no OVERLAP -> per-rep totals cannot double-count against an office total (with an estimator arm,
+    //     D.ownedByA_estByB counts for BOTH A and B, so the rep rows sum to more than the office);
+    //   no GAPS    -> every deal is attributed to exactly one bucket, so the rep rows do not sum to LESS
+    //     either. The Unassigned bucket is part of that partition, which is why it is included here.
     const a = await ids(buildAliasedOwnedRepSql("d", REP_A));
     const b = await ids(buildAliasedOwnedRepSql("d", REP_B));
     const c = await ids(buildAliasedOwnedRepSql("d", REP_C));
-    expect([...a, ...b, ...c].length).toBe(new Set([...a, ...b, ...c]).size);
+    const none = await ids(buildAliasedOwnedRepSql("d", UNASSIGNED_FILTER_SENTINEL));
+    const all = [...a, ...b, ...c, ...none];
+    expect(all.length).toBe(new Set(all).size); // disjoint
+    expect(all.sort()).toEqual(Object.values(D).sort()); // exhaustive — every fixture deal, exactly once
   });
 });
 
 describe("buildAliasedInvolvedRepInListSql — real execution (all cast styles)", () => {
   it("a team list [A,B] surfaces every deal either owns or estimated", async () => {
     const rows = await ids(buildAliasedInvolvedRepInListSql("d", [REP_A, REP_B])!);
-    expect(rows).toEqual([D.ownedByA, D.ownedByB, D.ownedByA_estByB].sort());
+    // D.ownedByA_estByC is A's too (A owns it) — the list arm is an OR over both columns for every id.
+    expect(rows).toEqual([D.ownedByA, D.ownedByB, D.ownedByA_estByB, D.ownedByA_estByC].sort());
   });
   it("a single-person list [B] surfaces B's owned AND estimated deals (estimator-only appears)", async () => {
     const rows = await ids(buildAliasedInvolvedRepInListSql("d", [REP_B])!);
@@ -130,7 +143,13 @@ describe("buildAliasedInvolvedRepInListSql — real execution (all cast styles)"
     expect(buildAliasedInvolvedRepInListSql("d", [])).toBeUndefined();
   });
   it("a list of only uninvolved people surfaces NO deals", async () => {
-    const rows = await ids(buildAliasedInvolvedRepInListSql("d", [REP_C])!);
+    // REP_D, not REP_C: C is the estimator on D.ownedByA_estByC, so C is INVOLVED and this list arm would
+    // correctly return that deal. REP_D touches nothing, which is what "uninvolved" has to mean here.
+    const rows = await ids(buildAliasedInvolvedRepInListSql("d", [REP_D])!);
     expect(rows).toEqual([]);
+  });
+  it("an estimator-only person IS surfaced by the involved list arm (but owns none of it)", async () => {
+    expect(await ids(buildAliasedInvolvedRepInListSql("d", [REP_C])!)).toEqual([D.ownedByA_estByC]);
+    expect(await ids(buildAliasedOwnedRepSql("d", REP_C))).toEqual([]);
   });
 });
