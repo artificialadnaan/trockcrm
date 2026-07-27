@@ -70,6 +70,34 @@ export default function ContactDetailScreen() {
   }
 
   const contact = contactQuery.data;
+
+  /**
+   * A soft-deleted or merged contact must NOT render as a live one.
+   *
+   * getContactById filters by id alone, so it happily returns a removed contact — reachable from a
+   * cached screen, a deep link, or a stale linked-deals row. Rendering it would present that person's
+   * notes and working call/text/email actions as current, which is worse than a 404: a rep would ring a
+   * number the CRM has deliberately retired.
+   *
+   * `=== false` rather than `!contact.isActive`, matching getContactDeals: an absent flag means unknown,
+   * not deleted, and hiding a real contact on a missing field is its own failure.
+   */
+  if (contact.isActive === false) {
+    return (
+      <SafeAreaView style={styles.safe}>
+        <View style={styles.center}>
+          <Text style={styles.errorTitle}>This contact has been removed</Text>
+          <Text style={styles.emptyBody}>
+            It was deleted or merged into another record, so its details are no longer current.
+          </Text>
+          <Pressable onPress={() => router.back()} accessibilityRole="button" style={styles.backBtn}>
+            <Text style={styles.backBtnText}>Go back</Text>
+          </Pressable>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
   const company = contactsApi.contactCompanyName(contact);
   const phone = contactsApi.contactPhone(contact);
   const location = formatLocation(contact.city, contact.state);

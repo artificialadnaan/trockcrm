@@ -278,6 +278,13 @@ export type ContactListRow = ContactBase & {
 
 /** A row from GET /contacts/:id. Note the ABSENCE of owner fields — the endpoint does not select them. */
 export type ContactDetail = ContactBase & {
+  /**
+   * Soft-delete flag. The DIRECTORY filters to active contacts, but getContactById
+   * (contacts/service.ts:571-572) selects by id alone with no isActive predicate — so a contact
+   * soft-deleted or merged after this screen was cached, or reached by deep link, still comes back.
+   * The screen has to check it; the server will not.
+   */
+  isActive: boolean | null;
   linkedCompanyName: string | null;
   isPrimary: boolean;
   linkedDealsCount: number;
