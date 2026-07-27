@@ -291,12 +291,14 @@ export default function DealDetailScreen() {
         <Section title="Activity">
           {activitiesQuery.isLoading ? (
             <ActivityIndicator color={theme.color.brandRed} />
-          ) : activitiesQuery.error && activities.length === 0 ? (
+          ) : activitiesQuery.error && activitiesQuery.data === undefined ? (
             // A failed timeline request is NOT an empty timeline. Claiming "nothing logged" on a 5xx
             // presents a failure as authoritative CRM data, and a rep would believe it.
             //
-            // Gated on `activities.length === 0`: once entries are loaded, a failed refetch or a failed
-            // load-more must not delete the history already on screen. That case shows below instead.
+            // Gated on `data === undefined`, not on row count. A deal with genuinely NO activity has
+            // loaded successfully, so a later failed refetch must stay inline like any other background
+            // failure — keying on length treated "loaded, and empty" as "never loaded" and replaced the
+            // real empty state with a retry prompt. Same distinction as the lists.
             <Pressable
               testID="retry-activities"
               onPress={() => void activitiesQuery.refetch()}
