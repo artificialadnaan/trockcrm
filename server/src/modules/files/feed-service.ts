@@ -14,6 +14,31 @@ type TenantDb = NodePgDatabase<typeof schema>;
  * offer a dropdown with exactly one real option.
  */
 export const PHOTO_FEED_SOURCES = ["companycam", "trock"] as const;
+
+/**
+ * A photo's PHASE, normalized across the two columns that carry it.
+ *
+ * `files.photo_category` is the typed column, but the CRM web capture flow still writes the phase the
+ * user picked into `files.subcategory` — `photo-capture-page.tsx` says so in as many words ("The 6 phase
+ * categories (shared source of truth). Stored on the `subcategory`"), and the deal photo timeline
+ * already reads both (`photo-timeline-filters.ts`). Comparing only `photo_category` would mean a photo
+ * captured through that flow is missing from its own phase AND wrongly counted as Uncategorized — the
+ * same value meaning two different things on two surfaces, which is the class of bug this feed work
+ * exists to remove.
+ *
+ * Production census (office_dallas, 2026-07-27) finds ZERO phase-valued subcategories today — only
+ * 'CompanyCam' (48,986) and NULL (12,433) — so this changes no current row. The WRITE PATH is live
+ * though, so the first user to pick a phase on the capture page would have hit it.
+ *
+ * 'CompanyCam' is excluded because on that row it is a SOURCE flag, not a phase (see PHOTO_FEED_SOURCES).
+ * That is a deliberate divergence from the deal timeline, whose Uncategorized arm requires
+ * `subcategory IS NULL` and therefore excludes every CompanyCam photo. On this surface CompanyCam is
+ * ~80% of the library, so importing that rule would make "Uncategorized" almost empty and wrong.
+ */
+const photoPhaseSql = sql`COALESCE(
+  ${files.photoCategory}::text,
+  CASE WHEN LOWER(${files.subcategory}) = 'companycam' THEN NULL ELSE LOWER(${files.subcategory}) END
+)`;
 export type PhotoFeedSource = (typeof PHOTO_FEED_SOURCES)[number];
 
 export interface PhotoFeedFilters {
@@ -71,13 +96,14 @@ function buildFeedPhotoConditions(filters: PhotoFeedFilters): SQL[] {
 
   if (filters.photoCategory) {
     // "uncategorized" is a first-class option, not a missing value: ~90% of production photos carry no
-    // photo_category, so without it the phase dropdown could only ever reach 10% of the library.
-    // Compare the COLUMN cast to text (not the value cast to the enum) so an unknown/stale value from a
-    // bookmarked URL filters to nothing instead of aborting the query with a 22P02 enum error -> 500.
+    // phase at all, so without it the dropdown could only ever reach 10% of the library.
+    // Compares the normalized COLUMN expression cast to text (not the value cast to the enum), so an
+    // unknown/stale value from a bookmarked URL filters to nothing instead of aborting the query with a
+    // 22P02 enum error -> 500.
     conditions.push(
       filters.photoCategory === "uncategorized"
-        ? isNull(files.photoCategory)
-        : sql`${files.photoCategory}::text = ${filters.photoCategory}`,
+        ? sql`${photoPhaseSql} IS NULL`
+        : sql`${photoPhaseSql} = ${filters.photoCategory.toLowerCase()}`,
     );
   }
 
@@ -223,7 +249,23 @@ export function encodeProjectCursor(cursor: ProjectPhotoCursor): string {
   return Buffer.from(`${cursor.sortValue}\u0000${cursor.dealId}`, "utf8").toString("base64url");
 }
 
-export function decodeProjectCursor(raw: unknown): ProjectPhotoCursor | undefined {
+/**
+ * Whether `value` is a Postgres timestamptz literal that Postgres will actually accept.
+ *
+ * `Date.parse` is not sufficient: it NORMALIZES out-of-range calendar dates (`2026-02-30` becomes
+ * March 2) and reports success, while Postgres rejects the original string outright. Anything the
+ * regex or the round-trip refuses is treated as a malformed cursor and the list restarts.
+ */
+function isPostgresTimestampText(value: string): boolean {
+  const match = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(\.\d+)?([+-]\d{2}(:?\d{2})?|Z)?$/.exec(value);
+  if (!match) return false;
+  const [, year, month, day] = match;
+  // Reject calendar overflow the way Postgres does, rather than the way Date.parse does.
+  const probe = new Date(`${year}-${month}-${day}T00:00:00Z`);
+  return !Number.isNaN(probe.getTime()) && probe.toISOString().slice(0, 10) === `${year}-${month}-${day}`;
+}
+
+export function decodeProjectCursor(raw: unknown, sort: ProjectPhotoSort): ProjectPhotoCursor | undefined {
   if (typeof raw !== "string" || raw.length === 0 || raw.length > 512) return undefined;
   let decoded: string;
   try {
@@ -240,6 +282,14 @@ export function decodeProjectCursor(raw: unknown): ProjectPhotoCursor | undefine
   // which is the harmless outcome.
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(dealId)) return undefined;
   if (sortValue.length === 0 || sortValue.length > 64) return undefined;
+  // The sortValue half is cast too — to bigint for the count sorts, timestamptz for recency — so it needs
+  // the SAME treatment as the uuid half. Validating only the uuid left `base64url("abc\0<valid-uuid>")`
+  // reaching Postgres as a bad cast: a 500 where the documented behaviour is "restart the list".
+  const sortValueValid = sort === "recent"
+    ? isPostgresTimestampText(sortValue)
+    // bigint, and bounded so a 40-digit count cannot overflow the cast either.
+    : /^\d{1,18}$/.test(sortValue);
+  if (!sortValueValid) return undefined;
   return { sortValue, dealId };
 }
 
@@ -344,7 +394,7 @@ export async function getProjectPhotoStats(
     : PROJECT_STATS_DEFAULT_LIMIT;
   // A malformed/stale cursor decodes to undefined and simply restarts the list — never a 400, never a
   // bad uuid cast reaching Postgres.
-  const cursor = decodeProjectCursor(options.cursor);
+  const cursor = decodeProjectCursor(options.cursor, sort);
 
   // Ownership and search narrow the SAME query the sort and paging run on. Filtering them in the
   // browser instead would repeat the sort-after-truncation mistake in a second place: under
@@ -532,8 +582,10 @@ export async function getPhotoFeedFacets(tenantDb: TenantDb): Promise<{
     .leftJoin(users, eq(users.id, files.uploadedBy))
     .where(scope);
 
+  // Same normalized expression as the predicate, so an option can never appear in the dropdown that the
+  // filter then cannot match (or vice versa).
   const categoryRows = await tenantDb
-    .selectDistinct({ value: sql<string | null>`${files.photoCategory}::text` })
+    .selectDistinct({ value: sql<string | null>`${photoPhaseSql}` })
     .from(files)
     .where(scope);
 

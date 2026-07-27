@@ -406,3 +406,136 @@ describe("PhotoFeedPage — date filters", () => {
     expect(to.getTime() - from.getTime()).toBeGreaterThan(20 * 60 * 60 * 1000);
   });
 });
+
+describe("PhotoFeedPage — Photos tab replacement failures", () => {
+  // Same rule the Projects tab applies. A page-1 request is a REPLACEMENT: if it fails, the previous
+  // query's photos render beneath the newly selected controls as though they matched.
+  it("clears stale photos and says so when a filter change fails", async () => {
+    let failNext = false;
+    mocks.api.mockImplementation(async (path: string) => {
+      if (path.startsWith("/files/photos/project-stats")) {
+        projectStatsCalls.push(path);
+        return { projects: [], pagination: { limit: 100, total: 0, nextCursor: null } };
+      }
+      if (path.startsWith("/files/photos/feed/facets")) {
+        return { uploaders: [{ id: "u1", name: "Alice" }], photoCategories: ["construction"], projects: [] };
+      }
+      if (path.startsWith("/files/photos/feed/count")) return { count: 0 };
+      if (path.startsWith("/files/photos/feed")) {
+        if (failNext) throw new Error("boom");
+        return {
+          photos: [
+            {
+              id: "p1",
+              displayName: "Roof shot",
+              dealId: "d1",
+              dealName: "Alpha",
+              dealNumber: "TR-1",
+              takenAt: "2026-07-01T00:00:00.000Z",
+              createdAt: "2026-07-01T00:00:00.000Z",
+              uploaderName: "Alice",
+              mimeType: "image/jpeg",
+            },
+          ],
+          pagination: { page: 1, limit: 40, total: 1, totalPages: 1 },
+        };
+      }
+      return {};
+    });
+
+    await renderPage();
+    const tab = (label: string) =>
+      Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.trim().startsWith(label));
+    await act(async () => { tab("Photos")!.click(); });
+    await act(async () => { await Promise.resolve(); });
+    expect(container.textContent).toContain("1 photo");
+
+    failNext = true;
+    await changeSelect(selectByLabel("Uploaded By"), "u1");
+    await act(async () => { await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+
+    // Not "No photos yet" — the query never ran, so that would be a different and wrong claim.
+    expect(container.textContent).toContain("Couldn't load photos");
+    expect(container.textContent).not.toContain("No photos yet");
+  });
+});
+
+describe("PhotoFeedPage — Clear Filters is tab-specific", () => {
+  // `projectFilterId` is set by a control only the Photos tab renders, and it is not sent in
+  // projectStatsQuery. Counting it on the Projects tab put a Clear Filters action there with every
+  // VISIBLE control at its default — and clicking it silently cleared an off-screen selection.
+  it("does not offer Clear Filters on Projects for a Photos-tab-only selection", async () => {
+    await renderPage();
+    const tab = (label: string) =>
+      Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.trim().startsWith(label));
+    const clearButton = () =>
+      Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.includes("Clear Filters"));
+
+    await act(async () => { tab("Photos")!.click(); });
+    await act(async () => { await Promise.resolve(); });
+    await changeSelect(selectByLabel("Project"), "d1");
+    // On the Photos tab the control IS visible, so the action belongs there.
+    expect(clearButton()).toBeDefined();
+
+    await act(async () => { tab("Projects")!.click(); });
+    await act(async () => { await Promise.resolve(); });
+    expect(clearButton()).toBeUndefined();
+
+    // A genuinely shared filter still surfaces it on Projects.
+    await changeSelect(selectByLabel("Uploaded By"), "u1");
+    expect(clearButton()).toBeDefined();
+  });
+});
+
+describe("PhotoFeedPage — facets follow the library", () => {
+  // Loading newly-polled photos can introduce a project, uploader or phase; the grid would show them
+  // while the matching filter option stayed missing until a full page reload.
+  it("refetches facets when newly polled photos are loaded", async () => {
+    const facetCalls = () =>
+      mocks.api.mock.calls.filter((call) => String(call[0]).startsWith("/files/photos/feed/facets")).length;
+
+    mocks.api.mockImplementation(async (path: string) => {
+      if (path.startsWith("/files/photos/project-stats")) {
+        projectStatsCalls.push(path);
+        return { projects: [], pagination: { limit: 100, total: 0, nextCursor: null } };
+      }
+      if (path.startsWith("/files/photos/feed/facets")) return { uploaders: [], photoCategories: [], projects: [] };
+      if (path.startsWith("/files/photos/feed/count")) return { count: 4 };
+      if (path.startsWith("/files/photos/feed")) {
+        return { photos: [], pagination: { page: 1, limit: 40, total: 0, totalPages: 0 } };
+      }
+      return {};
+    });
+
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      await renderPage();
+      expect(facetCalls()).toBe(1);
+
+      // The banner renders only on the Photos tab.
+      const tab = (label: string) =>
+        Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.trim().startsWith(label));
+      await act(async () => { tab("Photos")!.click(); });
+      await act(async () => { await Promise.resolve(); });
+
+      // ...and only once the 30s poll reports new photos.
+      await act(async () => { await vi.advanceTimersByTimeAsync(31_000); });
+      await act(async () => { await Promise.resolve(); });
+      expect(container.textContent).toContain("4 new photos");
+
+      const loadNew = Array.from(container.querySelectorAll("button")).find(
+        (b) => b.textContent?.trim() === "Load",
+      );
+      expect(loadNew).toBeDefined();
+      await act(async () => { loadNew!.click(); });
+      await act(async () => { await Promise.resolve(); });
+
+      // The library changed, so the filter options must be re-derived — otherwise the grid shows a
+      // project or uploader that has no option in its own dropdown.
+      expect(facetCalls()).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

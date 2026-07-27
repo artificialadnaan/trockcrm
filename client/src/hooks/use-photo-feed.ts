@@ -44,6 +44,9 @@ export function usePhotoFeed(filters: FeedFilters = {}) {
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [newCount, setNewCount] = useState(0);
+  // Distinct from `loading`: lets the page say the FILTERS failed rather than render an empty grid that
+  // reads as "no photos match".
+  const [error, setError] = useState(false);
   const lastFetchedAt = useRef<string>(new Date().toISOString());
   // Monotonic request id: a filter/refreshToken change (or page change) can leave an older request in
   // flight that resolves AFTER the newer one and would otherwise clobber the fresh feed. Only the latest
@@ -77,6 +80,7 @@ export function usePhotoFeed(filters: FeedFilters = {}) {
         }>(`/files/photos/feed?${params}`);
 
         if (seq !== requestSeq.current) return; // a newer request superseded this one — ignore stale data
+        setError(false);
         setPhotos(data.photos);
         setPage(data.pagination.page);
         setTotalPages(data.pagination.totalPages);
@@ -86,6 +90,17 @@ export function usePhotoFeed(filters: FeedFilters = {}) {
       } catch (err) {
         if (seq !== requestSeq.current) return;
         console.error("Failed to fetch photo feed:", err);
+        setError(true);
+        if (pageNum === 1) {
+          // A page-1 request is a REPLACEMENT: a filter just changed. Leaving the previous query's
+          // photos and totals on screen renders them beneath the newly selected controls as though they
+          // matched — one query's rows labelled with another query's filters. Same rule the Projects tab
+          // applies to its own replacement failures.
+          setPhotos([]);
+          setTotal(0);
+          setTotalPages(0);
+          setPage(1);
+        }
       } finally {
         if (seq === requestSeq.current) setLoading(false);
       }
@@ -125,5 +140,5 @@ export function usePhotoFeed(filters: FeedFilters = {}) {
   const loadNewPhotos = () => fetchFeed(1);
   const goToPage = (p: number) => fetchFeed(p);
 
-  return { photos, page, totalPages, total, loading, newCount, loadNewPhotos, goToPage };
+  return { photos, page, totalPages, total, loading, error, newCount, loadNewPhotos, goToPage };
 }

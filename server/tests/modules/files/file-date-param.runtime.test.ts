@@ -30,3 +30,25 @@ describe("parseFileDateParam", () => {
     expect(parseFileDateParam(12345 as any)).toBeUndefined();
   });
 });
+
+/**
+ * `Date.parse` is necessary but not sufficient. It NORMALIZES calendar overflow and reports success,
+ * while Postgres rejects the original string when the value is cast to timestamptz — so these used to
+ * pass validation and then 500 at the cast, which is exactly what this helper exists to prevent.
+ */
+describe("parseFileDateParam — full timestamps with calendar overflow", () => {
+  it("rejects an overflowing day in a full ISO timestamp (Date.parse silently rolls it over)", () => {
+    // Date.parse accepts this and yields March 2nd; Postgres raises 'date/time field value out of range'.
+    expect(Date.isNaN?.(0) ?? Number.isNaN(Date.parse("2026-02-30T00:00:00Z"))).toBe(false);
+    expect(parseFileDateParam("2026-02-30T00:00:00Z")).toBeUndefined();
+    expect(parseFileDateParam("2026-04-31T12:00:00.000Z")).toBeUndefined();
+    expect(parseFileDateParam("2026-13-01T00:00:00Z")).toBeUndefined();
+  });
+
+  it("still accepts the ISO timestamps the feed client actually sends", () => {
+    expect(parseFileDateParam("2026-07-27T00:00:00.000Z")).toBe("2026-07-27T00:00:00.000Z");
+    expect(parseFileDateParam("2026-02-28T23:59:59.999Z")).toBe("2026-02-28T23:59:59.999Z");
+    // Leap day in a real leap year.
+    expect(parseFileDateParam("2028-02-29T00:00:00Z")).toBe("2028-02-29T00:00:00Z");
+  });
+});

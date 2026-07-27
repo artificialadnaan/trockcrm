@@ -1089,6 +1089,9 @@ export function PhotoFeedPage() {
   const [categoryFilter, setCategoryFilter] = useState("");
   const [sourceFilter, setSourceFilter] = useState("");
   const [facets, setFacets] = useState<FeedFacets>({ uploaders: [], photoCategories: [], projects: [] });
+  // Bumped whenever the photo LIBRARY changes (not the selection) — an unassigned-photo assignment, or
+  // the user loading newly-polled photos. Drives the facets refetch.
+  const [libraryVersion, setLibraryVersion] = useState(0);
 
   // ── Photos tab state ──
   const [projectFilterId, setProjectFilterId] = useState("");
@@ -1112,7 +1115,7 @@ export function PhotoFeedPage() {
     return f;
   }, [dateFrom, dateTo, projectFilterId, uploaderFilter, categoryFilter, sourceFilter, feedRefreshToken]);
 
-  const { photos, page, totalPages, total, loading, newCount, loadNewPhotos, goToPage } =
+  const { photos, page, totalPages, total, loading, error: photosError, newCount, loadNewPhotos, goToPage } =
     usePhotoFeed(feedFilters);
 
   const dateGroups = useMemo(() => groupPhotosByDate(photos), [photos]);
@@ -1213,7 +1216,15 @@ export function PhotoFeedPage() {
   const handleUnassignedDataChanged = useCallback(() => {
     void fetchProjectStats();
     setFeedRefreshToken((t) => t + 1);
+    setLibraryVersion((v) => v + 1);
   }, [fetchProjectStats]);
+
+  // Pulling in newly-uploaded photos can introduce a project, uploader or phase that has no filter
+  // option yet. Same invalidation as an assignment — the library changed, so the facets did too.
+  const handleLoadNewPhotos = useCallback(() => {
+    loadNewPhotos();
+    setLibraryVersion((v) => v + 1);
+  }, [loadNewPhotos]);
 
   useEffect(() => {
     void fetchProjectStats();
@@ -1226,9 +1237,10 @@ export function PhotoFeedPage() {
 
   // Filter options come from the whole library and never change with the SELECTION, so they're fetched
   // once rather than alongside every sort/filter change — but they DO change when the library itself
-  // does. Assigning rescued photos onto a deal that previously had none makes that deal (and possibly a
-  // new uploader or phase) newly eligible for the facets, whose scope requires a non-null dealId. Keyed
-  // on the same refresh token as the feed so the dropdowns cannot go stale until a full page reload.
+  // does, and there are two ways that happens here: assigning rescued photos onto a deal that previously
+  // had none (which makes that deal newly eligible — the facet scope requires a non-null dealId), and
+  // the 30-second poll surfacing photos the user then Loads. Both bump `libraryVersion`, so the
+  // dropdowns cannot show a grid full of photos whose project or uploader has no filter option.
   useEffect(() => {
     let cancelled = false;
     void api<FeedFacets>("/files/photos/feed/facets")
@@ -1239,15 +1251,18 @@ export function PhotoFeedPage() {
     return () => {
       cancelled = true;
     };
-  }, [feedRefreshToken]);
+  }, [libraryVersion]);
 
   // No client-side narrowing left: sort, filters, ownership, search and paging are ALL resolved by the
   // server, so the rows on screen and the count above them always describe the same set.
   const filteredProjects = projectStats;
 
-  const hasActiveFilters = Boolean(
-    dateFrom || dateTo || uploaderFilter || categoryFilter || sourceFilter || projectFilterId,
-  );
+  // Shared across both tabs. `projectFilterId` is NOT here: the Project selector is only rendered on the
+  // Photos tab and is not sent in projectStatsQuery, so counting it would put a "Clear Filters" action on
+  // the Projects tab with every visible control at its default — and clicking it would silently clear an
+  // off-screen selection the user cannot see.
+  const hasSharedFilters = Boolean(dateFrom || dateTo || uploaderFilter || categoryFilter || sourceFilter);
+  const hasPhotosTabFilters = hasSharedFilters || Boolean(projectFilterId);
 
   function clearFilters() {
     setDateFrom("");
@@ -1255,6 +1270,7 @@ export function PhotoFeedPage() {
     setUploaderFilter("");
     setCategoryFilter("");
     setSourceFilter("");
+    // Only reachable from the Photos tab, where the control that sets it is on screen.
     setProjectFilterId("");
   }
 
@@ -1314,7 +1330,7 @@ export function PhotoFeedPage() {
           <Button
             variant="outline"
             size="sm"
-            onClick={loadNewPhotos}
+            onClick={handleLoadNewPhotos}
             className="border-white/40 text-white hover:bg-white/20 hover:text-white h-7 text-xs"
           >
             Load
@@ -1395,7 +1411,7 @@ export function PhotoFeedPage() {
                 dateTo={dateTo}
                 onDateToChange={setDateTo}
               />
-              {hasActiveFilters && (
+              {hasSharedFilters && (
                 <Button
                   variant="ghost"
                   size="sm"
@@ -1508,7 +1524,7 @@ export function PhotoFeedPage() {
                 dateTo={dateTo}
                 onDateToChange={setDateTo}
               />
-              {hasActiveFilters && (
+              {hasPhotosTabFilters && (
                 <Button
                   variant="ghost"
                   size="sm"
@@ -1524,6 +1540,16 @@ export function PhotoFeedPage() {
             {loading ? (
               <div className="flex items-center justify-center py-20">
                 <Loader2 className="h-8 w-8 animate-spin text-gray-400" />
+              </div>
+            ) : photosError && photos.length === 0 ? (
+              /* The request failed, so "No photos yet" would be a different and wrong claim — the query
+                 never ran. Mirrors the Projects tab's failed-replacement surface. */
+              <div className="flex flex-col items-center justify-center py-20 text-center">
+                <h2 className="text-lg font-semibold text-gray-700 mb-1">Couldn't load photos</h2>
+                <p className="text-sm text-gray-500 mb-4">These filters couldn't be applied just now.</p>
+                <Button variant="outline" size="sm" onClick={() => goToPage(1)}>
+                  Try again
+                </Button>
               </div>
             ) : photos.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-20 text-center">

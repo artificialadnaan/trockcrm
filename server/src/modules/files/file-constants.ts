@@ -169,6 +169,16 @@ export function parseFileDateParam(value: unknown): string | undefined {
   // dropped here instead of surfacing as a 500 at the SQL cast.
   if (!v.includes("T")) return undefined;
   if (Number.isNaN(Date.parse(v))) return undefined;
+  // Date.parse is necessary but NOT sufficient: it NORMALIZES calendar overflow ("2026-02-30T00:00:00Z"
+  // silently becomes March 2) and reports success, while Postgres rejects the original string when this
+  // value is cast to timestamptz — a 500 where the documented policy is to drop an invalid date filter.
+  // Same round-trip check the date-only branch above already applies.
+  const datePart = /^(\d{4})-(\d{2})-(\d{2})T/.exec(v);
+  if (!datePart) return undefined;
+  const probe = new Date(`${datePart[1]}-${datePart[2]}-${datePart[3]}T00:00:00Z`);
+  if (Number.isNaN(probe.getTime()) || probe.toISOString().slice(0, 10) !== `${datePart[1]}-${datePart[2]}-${datePart[3]}`) {
+    return undefined;
+  }
   return v;
 }
 

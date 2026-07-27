@@ -153,7 +153,19 @@ describe("getProjectPhotoStats sorting", () => {
   });
 
   it("restarts the list for a malformed or stale cursor instead of erroring", async () => {
-    for (const bad of ["not-base64!!", "", Buffer.from("12\u0000not-a-uuid").toString("base64url")]) {
+    const validUuid = "00000000-0000-4000-8000-000000000005";
+    for (const bad of [
+      "not-base64!!",
+      "",
+      // Bad uuid half.
+      Buffer.from("12\u0000not-a-uuid").toString("base64url"),
+      // Bad SORT-VALUE half with a perfectly good uuid. This is cast to bigint (count sorts) or
+      // timestamptz (recency), so validating only the uuid left it reaching Postgres as a bad cast — a
+      // 500 where the documented behaviour is "restart the list".
+      Buffer.from(`not-a-number\u0000${validUuid}`).toString("base64url"),
+      Buffer.from(`2026-02-30 00:00:00+00\u0000${validUuid}`).toString("base64url"),
+      Buffer.from(`99999999999999999999999\u0000${validUuid}`).toString("base64url"),
+    ]) {
       const { projects } = await getProjectPhotoStats(tdb as never, { sort: "most_photos", limit: 3, cursor: bad });
       expect(projects.length).toBe(3);
       expect(projects[0].dealName).toBe("Project 8");
@@ -346,5 +358,68 @@ describe("getProjectPhotoStats keyset paging under concurrent writes", () => {
     // would have slid by one, repeating a delivered project and dropping an undelivered one.
     const after = await getProjectPhotoStats(tdb as never, { sort: "recent", limit: 3, cursor });
     expect(after.projects.map((p) => p.dealId)).toEqual(before.projects.map((p) => p.dealId));
+  });
+});
+
+/**
+ * PHASE lives in two columns. `files.photo_category` is the typed one, but the CRM web capture flow
+ * writes the phase the user picked into `files.subcategory` — its own source comments say so, and the
+ * deal photo timeline already reads both. Comparing only `photo_category` would drop those photos from
+ * their own phase AND miscount them as Uncategorized: the same value meaning two different things on
+ * two surfaces, which is the class of bug this feed work exists to remove.
+ *
+ * Production holds zero phase-valued subcategories today, so this seeds the case the WRITE PATH can
+ * already produce. Self-cleaning; last in the file.
+ */
+describe("getProjectPhotoStats phase normalization across photo_category and subcategory", () => {
+  const PHASE_KEY_PREFIX = "phase/";
+  const PHASE_DEAL = "00000000-0000-4000-8000-000000088888";
+
+  beforeAll(async () => {
+    await pg.exec(`
+      INSERT INTO deals (id, name, deal_number, assigned_rep_id, property_city, property_state, source_lead_id)
+      VALUES ('${PHASE_DEAL}', 'Project Phase', 'TR-PHASE', '${REP}', 'Austin', 'TX', NULL);
+    `);
+    // Phase carried on SUBCATEGORY, the way the CRM web capture page writes it.
+    const rows = [0, 1, 2].map(
+      (i) =>
+        `('${PHASE_DEAL}', 'photo', 'preconstruction', NULL, '${PHASE_KEY_PREFIX}${i}.jpg', 'phase-${i}.jpg', 'orig.jpg', 'phase-${i}', 'image/jpeg', '.jpg', 10, 'trockcrm', 'Photos', '${USER_A}', '2026-05-0${i + 1}T00:00:00Z', true, 1)`,
+    );
+    await pg.exec(`
+      INSERT INTO files (deal_id, category, subcategory, photo_category, r2_key, system_filename, original_filename, display_name, mime_type, file_extension, file_size_bytes, r2_bucket, folder_path, uploaded_by, taken_at, is_active, version)
+      VALUES ${rows.join(",")};
+    `);
+  });
+
+  afterAll(async () => {
+    await pg.exec(`DELETE FROM files WHERE r2_key LIKE '${PHASE_KEY_PREFIX}%';`);
+    await pg.exec(`DELETE FROM deals WHERE id = '${PHASE_DEAL}';`);
+  });
+
+  it("finds a subcategory-carried phase when filtering by that phase", async () => {
+    const { projects } = await getProjectPhotoStats(tdb as never, { photoCategory: "preconstruction" });
+    expect(projects.map((p) => p.dealName)).toContain("Project Phase");
+    expect(projects.find((p) => p.dealName === "Project Phase")!.photoCount).toBe(3);
+  });
+
+  it("does NOT count a subcategory-carried phase as Uncategorized", async () => {
+    const { projects } = await getProjectPhotoStats(tdb as never, { photoCategory: "uncategorized" });
+    expect(projects.map((p) => p.dealName)).not.toContain("Project Phase");
+  });
+
+  it("still treats the CompanyCam subcategory as a SOURCE flag, not a phase", async () => {
+    // CompanyCam photos carry no phase, so they belong to Uncategorized — the fixture's CompanyCam rows
+    // have a null photo_category.
+    const { projects } = await getProjectPhotoStats(tdb as never, { photoCategory: "uncategorized" });
+    expect(projects.length).toBeGreaterThan(0);
+    const { projects: asPhase } = await getProjectPhotoStats(tdb as never, { photoCategory: "companycam" });
+    expect(asPhase.length).toBe(0);
+  });
+
+  it("offers the subcategory-carried phase in the facet dropdown", async () => {
+    const facets = await getPhotoFeedFacets(tdb as never);
+    expect(facets.photoCategories).toContain("preconstruction");
+    // ...and never offers the source flag as though it were a phase.
+    expect(facets.photoCategories).not.toContain("companycam");
   });
 });
