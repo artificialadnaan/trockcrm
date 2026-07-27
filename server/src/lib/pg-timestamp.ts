@@ -51,11 +51,22 @@ export const PG_MAX_TZ_OFFSET_MINUTES = 15 * 60 + 59;
  */
 export function isPostgresTzOffset(offset: string | undefined | null): boolean {
   if (!offset || offset === "Z" || offset === "z") return true;
-  const match = /^([+-])(\d{2}):?(\d{2})?$/.exec(offset);
+  const match = /^([+-])(\d{2})(?::?(\d{2}))?$/.exec(offset);
   if (!match) return false;
-  const [, , hours, minutes] = match;
-  const total = Number(hours) * 60 + Number(minutes ?? "0");
-  return Number.isFinite(total) && total <= PG_MAX_TZ_OFFSET_MINUTES;
+  const hours = Number(match[2]);
+  const minutes = match[3] === undefined ? 0 : Number(match[3]);
+
+  // The COMPONENTS are bounded independently, not merely their total. `+14:99` sums to 939 minutes —
+  // comfortably inside the 959 cap — yet Postgres rejects it, because a minute field above 59 is not a
+  // time at all. A total-only check calls that valid.
+  //
+  // No caller can currently reach it: the cursor regex bounds its minute field to `[0-5]\d`, and
+  // `parseFileDateParam` runs `Date.parse` first, which returns NaN for `+14:99`. It is fixed anyway
+  // because this module's whole justification is being the ONE owner of these bounds — a future caller
+  // with a looser regex would otherwise inherit exactly the wrong answer, which is the failure this
+  // module was extracted to prevent.
+  if (minutes > 59) return false;
+  return hours * 60 + minutes <= PG_MAX_TZ_OFFSET_MINUTES;
 }
 
 /**

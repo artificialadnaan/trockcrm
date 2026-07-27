@@ -29,9 +29,25 @@ const USER_B = "00000000-0000-4000-8000-0000000000a2";
 const REP = "00000000-0000-4000-8000-0000000000a3";
 const OTHER_REP = "00000000-0000-4000-8000-0000000000a4";
 
-// One project with a LARGE gallery, so the aggregate/strip path is exercised at a realistic size rather
-// than the 3-photo toy case (production's biggest project holds 2,911 photos).
-const BIG_PROJECT_PHOTOS = 1200;
+/**
+ * Project 8's gallery — the one project sized to exceed the bounds these tests probe.
+ *
+ * 50 is not a round guess. It is the smallest value that clears EVERY threshold in play, so the next
+ * person can neither shrink it without breaking an assertion nor inflate it without a reason:
+ *   - > PROJECT_RECENT_UPLOADER_COUNT (10) — the uploader window, the largest PRODUCT bound here;
+ *   - > PROJECT_RECENT_PHOTO_COUNT (5)     — the thumbnail strip;
+ *   - > project 2's 40 photos              — so project 8 really is the most-photographed under
+ *                                            `most_photos`, which the sort-before-limit test depends on.
+ * Divisible by 2 and by 5, because the seeder alternates uploaders (`i % 2`) and tags every fifth photo
+ * (`i % 5`), and the parity assertions compare against exactly N/2 and N/5.
+ *
+ * It was 1,200. Nothing asserted anything AT that magnitude — every claim is of the form "the bound
+ * still holds above it" — but seeding 1,200 rows into PGlite kept the vitest worker CPU-bound long
+ * enough to time out its reporter RPC on CI, which fails the whole gate with every test passing. That
+ * is a tax on every unrelated PR too, since the gate runs the full server suite. 50 proves the same
+ * properties; see the header note for the measured before/after.
+ */
+const BIG_PROJECT_PHOTOS = 50;
 
 let tdb: ReturnType<typeof drizzle>;
 let pg: PGlite;
@@ -232,11 +248,11 @@ describe("getProjectPhotoStats page payload", () => {
     const big = projects[0];
 
     // Strip is capped regardless of how many photos the project holds — the per-photo work is bounded
-    // by the page, not by the gallery size. 1200 photos still yield exactly 5 thumbnails.
+    // by the page, not by the gallery size — a gallery well past the cap still yields exactly 5.
     expect(big.recentPhotos.length).toBe(5);
     expect(big.recentPhotoIds.length).toBe(5);
     expect(big.recentPhotos[0].r2Key).toContain("p/8/");
-    // Uploaders are drawn from the project's 10 most recent photos (not all 1200), so which names
+    // Uploaders are drawn from the project's 10 most recent photos (not the whole gallery), so which names
     // appear depends on who took those — assert the bound, not a fixed roster.
     expect(big.recentUploaders.length).toBeGreaterThan(0);
     expect(big.recentUploaders.every((name) => ["Alice Uploader", "Bob Uploader"].includes(name))).toBe(true);
@@ -261,7 +277,7 @@ describe("filter parity between the Projects aggregate and the Photos list", () 
     const feed = await getPhotoFeed(tdb as never, "admin", REP, { ...filters, dealId: dealId(8), limit: 1 });
 
     // Project 8 alternates uploaders, so exactly half its photos belong to Alice. If the filter reached
-    // the photo list but not the aggregate, the project row would still claim all 1200.
+    // the photo list but not the aggregate, the project row would still claim the project's FULL count.
     expect(projects[0].photoCount).toBe(BIG_PROJECT_PHOTOS / 2);
     expect(feed.pagination.total).toBe(BIG_PROJECT_PHOTOS / 2);
   });
