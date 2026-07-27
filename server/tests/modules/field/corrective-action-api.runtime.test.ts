@@ -20,6 +20,8 @@ import {
 } from "@trock-crm/shared/schema";
 import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
 
+const TEST_OFFICE = { id: "00000000-0000-0000-0000-0000000000f1", slug: "test" };
+
 const DEAL = "11111111-1111-1111-1111-111111111111";
 const USER = "33333333-3333-3333-3333-333333333333";
 const STAGE_ACTIVE = "cccccccc-0000-0000-0000-000000000001";
@@ -198,6 +200,7 @@ describe("getCorrectiveActionItems", () => {
       comment: "corrective action documented",
       photoFileIds: [FILE_B],
       respondedBy: { userId: USER, name: "Sam", email: null },
+      office: TEST_OFFICE,
     });
 
     // WITH a resolver: the response photo carries a resolvable url (same shape the evidence read uses).
@@ -227,6 +230,7 @@ describe("submitCorrectiveActionResponse", () => {
       comment: "Slab re-inspected",
       photoFileIds: [FILE_A, FILE_B],
       respondedBy: { userId: USER, name: "Sam Field", email: null },
+      office: TEST_OFFICE,
     });
 
     const items = await getCorrectiveActionItems(tdb, scorecard.id);
@@ -253,6 +257,7 @@ describe("submitCorrectiveActionResponse", () => {
           idx === items.length - 1
             ? { userId: null, name: "Ext PM", email: "pm@x.com" }
             : { userId: USER, name: "Sam", email: null },
+        office: TEST_OFFICE,
       });
     }
     expect(await getScorecardStatus(scorecard.id)).toBe("corrective_action_closed");
@@ -268,6 +273,7 @@ describe("submitCorrectiveActionResponse", () => {
         comment: "x",
         photoFileIds: ["bbbbbbbb-0000-0000-0000-0000000000ff"],
         respondedBy: { userId: USER, name: "Sam", email: null },
+        office: TEST_OFFICE,
       }),
     ).rejects.toBeInstanceOf(AppError);
   });
@@ -280,6 +286,7 @@ describe("submitCorrectiveActionResponse", () => {
         itemId: "00000000-0000-0000-0000-0000000000ee",
         comment: "x",
         respondedBy: { userId: USER, name: "Sam", email: null },
+        office: TEST_OFFICE,
       }),
     ).rejects.toBeInstanceOf(AppError);
   });
@@ -303,6 +310,7 @@ describe("submitCorrectiveActionResponse", () => {
         comment: "trying to hijack evidence",
         photoFileIds: [FILE_A],
         respondedBy: { userId: USER, name: "Sam", email: null },
+        office: TEST_OFFICE,
       }),
     ).rejects.toBeInstanceOf(AppError);
 
@@ -344,6 +352,7 @@ describe("submitCorrectiveActionResponse", () => {
         comment: "borrowing a sibling scorecard's photo",
         photoFileIds: [FILE_B],
         respondedBy: { userId: USER, name: "Sam", email: null },
+        office: TEST_OFFICE,
       }),
     ).rejects.toBeInstanceOf(AppError);
 
@@ -377,6 +386,7 @@ describe("submitCorrectiveActionResponse", () => {
         comment: "attaching an arbitrary deal file",
         photoFileIds: [FILE_A],
         respondedBy: { userId: USER, name: "Sam", email: null },
+        office: TEST_OFFICE,
       }),
     ).rejects.toBeInstanceOf(AppError);
     expect(await getScorecardStatus(scorecard.id)).toBe("corrective_action_open");
@@ -394,6 +404,7 @@ describe("submitCorrectiveActionResponse", () => {
       comment: "resolved by the first responder",
       photoFileIds: [FILE_A],
       respondedBy: { userId: USER, name: "Sam", email: null },
+      office: TEST_OFFICE,
     });
 
     // A SECOND (stale) submit for the SAME now-resolved item — e.g. a concurrent responder or a replayed
@@ -408,6 +419,7 @@ describe("submitCorrectiveActionResponse", () => {
         comment: "stale submit from a losing responder",
         photoFileIds: [FILE_B],
         respondedBy: { userId: null, name: "Ext PM", email: "pm@x.com" },
+        office: TEST_OFFICE,
       });
     } catch (err) {
       thrown = err;
@@ -440,6 +452,7 @@ describe("submitCorrectiveActionResponse", () => {
       itemId: first.id,
       comment: "resolved by the first responder",
       respondedBy: { userId: USER, name: "Sam", email: null },
+      office: TEST_OFFICE,
     });
 
     // A replayed comment-only submit by the SAME responder (the winner) is an idempotent success — nothing to
@@ -450,6 +463,7 @@ describe("submitCorrectiveActionResponse", () => {
         itemId: first.id,
         comment: "replay with no photos",
         respondedBy: { userId: USER, name: "Sam", email: null },
+        office: TEST_OFFICE,
       }),
     ).resolves.toBeUndefined();
 
@@ -475,6 +489,7 @@ describe("submitCorrectiveActionResponse", () => {
       itemId: first.id,
       comment: "resolved by the super",
       respondedBy: { userId: USER, name: "Sam", email: null },
+      office: TEST_OFFICE,
     });
 
     // The loser (a DIFFERENT, token PM) submits comment-only after the winner resolved → 409.
@@ -485,6 +500,7 @@ describe("submitCorrectiveActionResponse", () => {
         itemId: first.id,
         comment: "PM's comment that lost the race",
         respondedBy: { userId: null, name: "Ext PM", email: "pm@x.com" },
+        office: TEST_OFFICE,
       });
     } catch (err) {
       thrown = err;
@@ -516,6 +532,7 @@ describe("submitCorrectiveActionResponse", () => {
       comment: "resolved with two response photos",
       photoFileIds: [FILE_A, FILE_B],
       respondedBy: { userId: USER, name: "Sam", email: null },
+      office: TEST_OFFICE,
     });
 
     // The SAME responder retries the SAME submission (order of fileIds differs — sets, not sequences).
@@ -526,6 +543,7 @@ describe("submitCorrectiveActionResponse", () => {
         comment: "resolved with two response photos",
         photoFileIds: [FILE_B, FILE_A],
         respondedBy: { userId: USER, name: "Sam", email: null },
+        office: TEST_OFFICE,
       }),
     ).resolves.toBeUndefined();
 
@@ -554,6 +572,7 @@ describe("submitCorrectiveActionResponse", () => {
       comment: "resolved by the external PM",
       photoFileIds: [FILE_A],
       respondedBy: { userId: null, name: "Ext PM", email: "pm@x.com" },
+      office: TEST_OFFICE,
     });
 
     await expect(
@@ -563,6 +582,7 @@ describe("submitCorrectiveActionResponse", () => {
         comment: "resolved by the external PM",
         photoFileIds: [FILE_A],
         respondedBy: { userId: null, name: "Ext PM", email: "pm@x.com" },
+        office: TEST_OFFICE,
       }),
     ).resolves.toBeUndefined();
 
@@ -586,6 +606,7 @@ describe("submitCorrectiveActionResponse", () => {
       comment: "resolved with FILE_A",
       photoFileIds: [FILE_A],
       respondedBy: { userId: USER, name: "Sam", email: null },
+      office: TEST_OFFICE,
     });
 
     // Same responder, but a DIFFERENT fresh file (FILE_B) that did NOT attach → competing/stale submit → 409.
@@ -597,6 +618,7 @@ describe("submitCorrectiveActionResponse", () => {
         comment: "trying to add another photo after resolution",
         photoFileIds: [FILE_B],
         respondedBy: { userId: USER, name: "Sam", email: null },
+        office: TEST_OFFICE,
       });
     } catch (err) {
       thrown = err;
@@ -625,6 +647,7 @@ describe("submitCorrectiveActionResponse", () => {
       comment: "resolved by the session responder",
       photoFileIds: [FILE_A],
       respondedBy: { userId: USER, name: "Sam", email: null },
+      office: TEST_OFFICE,
     });
 
     // A token responder re-supplies the SAME already-linked FILE_A → different responder → 409, not a replay.
@@ -636,6 +659,7 @@ describe("submitCorrectiveActionResponse", () => {
         comment: "external PM submitting the same file",
         photoFileIds: [FILE_A],
         respondedBy: { userId: null, name: "Ext PM", email: "pm@x.com" },
+        office: TEST_OFFICE,
       });
     } catch (err) {
       thrown = err;
@@ -669,6 +693,7 @@ describe("submitCorrectiveActionResponse", () => {
       comment: "resolved with a response photo",
       photoFileIds: [FILE_B],
       respondedBy: { userId: USER, name: "Sam", email: null },
+      office: TEST_OFFICE,
     });
 
     // Now (mis)supply the SAME already-linked FILE_B for the still-open item 2. It is still ledgered, so it
@@ -681,6 +706,7 @@ describe("submitCorrectiveActionResponse", () => {
         comment: "reusing an already-linked file id",
         photoFileIds: [FILE_B],
         respondedBy: { userId: USER, name: "Sam", email: null },
+        office: TEST_OFFICE,
       });
     } catch (err) {
       thrown = err;
@@ -712,6 +738,7 @@ describe("submitCorrectiveActionResponse", () => {
       comment: "item 1 done",
       photoFileIds: [FILE_A],
       respondedBy: { userId: USER, name: "Sam", email: null },
+      office: TEST_OFFICE,
     });
     await submitCorrectiveActionResponse(tdb, {
       scorecardId: scorecard.id,
@@ -719,6 +746,7 @@ describe("submitCorrectiveActionResponse", () => {
       comment: "item 2 done with a different fresh file",
       photoFileIds: [FILE_B],
       respondedBy: { userId: USER, name: "Sam", email: null },
+      office: TEST_OFFICE,
     });
 
     const after = await getCorrectiveActionItems(tdb, scorecard.id);
@@ -745,6 +773,7 @@ describe("submitCorrectiveActionResponse", () => {
       comment: "corrective action documented",
       photoFileIds: [FILE_B],
       respondedBy: { userId: USER, name: "Sam", email: null },
+      office: TEST_OFFICE,
     });
 
     // The response photo is attached to the item (corrective_action_id set, section_key null).

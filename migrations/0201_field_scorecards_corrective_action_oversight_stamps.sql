@@ -6,10 +6,14 @@
 -- state machine: it suppresses duplicate responder sends and gates the server reconcile's re-enqueue
 -- decision. Letting an oversight-send failure write to it would corrupt responder delivery.
 --
--- Both are cleared wherever a genuinely new cycle starts — i.e. every site that resets
--- corrective_action_email_sent_at to NULL (the reconcile enqueue and the shared restart helper behind
--- restartCorrectiveActionNotificationCycleForDeal / ...ForResponder) — so a reopen re-notifies oversight
--- while a queue retry never double-sends.
+-- Cleared where a genuinely new BUSINESS cycle starts: reconcileScorecardCorrectiveActions'
+-- transitioningIntoOpen branch (a fresh submit, or an edit reopening a closed/submitted card). A reopen
+-- therefore re-notifies oversight, while a queue retry never double-sends.
+--
+-- Deliberately NOT cleared by restartCorrectiveActionNotificationCycleForDeal / ...ForResponder. Those
+-- restart the RESPONDER cycle after a super/PM reassignment, and only ever touch cards already at
+-- 'corrective_action_open' — the corrective action never left open, so nothing new happened for oversight.
+-- Clearing there would re-send the "opened" notice on every team-tab reassignment.
 --
 -- NOTE on the cycle nonce: the oversight handler dedups on THESE stamps alone and never compares its
 -- payload nonce against corrective_action_cycle_nonce. The responder worker has a self-repair path that

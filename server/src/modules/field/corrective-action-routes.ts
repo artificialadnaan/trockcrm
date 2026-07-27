@@ -458,6 +458,7 @@ export function registerCorrectiveActionRoutes(fieldRoutes: Router): void {
             comment,
             photoFileIds,
             respondedBy: responder,
+            office,
           });
           return getCorrectiveActionItems(db, id, { resolvePhotoUrl: correctiveActionPhotoUrlResolver(db) });
         });

@@ -23,6 +23,11 @@ type TenantDb = NodePgDatabase<typeof schema>;
 // worker package) and kept identical to the copy in scorecards-service.ts so the create + edit reconcile
 // paths enqueue the same job type.
 const SCORECARD_CORRECTIVE_ACTION_EMAIL_JOB = "scorecard_corrective_action_email";
+// The OVERSIGHT notification (FIELD_SCORECARD_EMAIL_RECIPIENTS watchers) — a SEPARATE job from the responder
+// one above, because the responder email carries a per-recipient token that authorizes answering and must
+// never reach an oversight inbox. MUST match the worker's
+// registerJobHandler(SCORECARD_CORRECTIVE_ACTION_OVERSIGHT_EMAIL_JOB, ...).
+const SCORECARD_CORRECTIVE_ACTION_OVERSIGHT_EMAIL_JOB = "scorecard_corrective_action_oversight_email";
 // Give the synchronous PDF render + R2 upload a head start over the worker's poll (mirrors the
 // field_scorecard_email delay). run_after is a short while in the future so the email doesn't race the poll.
 const SCORECARD_EMAIL_RUN_AFTER_SECONDS = 120;
@@ -68,13 +73,14 @@ export async function resolveCorrectiveActionItem(
  * concurrent/stale submit whose item is no longer `open` never leaves orphan photos (the caller checks the
  * status under the same lock before inserting). See resolveCorrectiveActionItem for the concurrency rationale.
  *
- * Returns true when it flipped an open item to resolved, false when the item was already resolved / unknown
- * (the idempotent no-op) — the caller uses this to decide whether the write is the winning one.
+ * Returns `{ resolved, closed }`: `resolved` is true when it flipped an open item (false on the idempotent
+ * no-op — an already-resolved or unknown id), and `closed` is true only on the winning write that answered
+ * the LAST open item. The caller uses `closed` to fire the oversight "completed" notification exactly once.
  */
 export async function resolveCorrectiveActionItemTx(
   tx: TenantDb,
   input: ResolveCorrectiveActionInput,
-): Promise<boolean> {
+): Promise<{ resolved: boolean; closed: boolean }> {
   // Serialize resolves for the SAME scorecard. Office transactions run at READ COMMITTED, so two
   // responders closing out the final two open items in separate transactions could each run their
   // `stillOpen` SELECT before seeing the other's uncommitted resolve → neither observes zero open
@@ -110,7 +116,7 @@ export async function resolveCorrectiveActionItemTx(
     )
     .returning({ id: scorecardCorrectiveActions.id });
 
-  if (updated.length === 0) return false; // already resolved or not found — no-op.
+  if (updated.length === 0) return { resolved: false, closed: false }; // already resolved / unknown — no-op.
 
   const stillOpen = await tx
     .select({ id: scorecardCorrectiveActions.id })
@@ -141,7 +147,56 @@ export async function resolveCorrectiveActionItemTx(
     )
     .where(eq(fieldScorecards.id, input.scorecardId));
 
-  return true;
+  return { resolved: true, closed: closing };
+}
+
+/**
+ * Enqueue the OVERSIGHT "completed" notification for a scorecard that just auto-closed. Called from the
+ * responder funnel inside the SAME transaction as the closing resolve, so the job cannot exist for a close
+ * that rolled back.
+ *
+ * Carries the scorecard's CURRENT corrective_action_cycle_nonce so the Resend idempotency key is distinct
+ * per cycle. The worker never compares that nonce against the stored value — see the handler's dedup note —
+ * so a nonce rotated by the responder job's self-repair path cannot strand this notice.
+ *
+ * Only the winning close reaches here (resolveCorrectiveActionItemTx returns closed: true exactly once), and
+ * the worker's own closed-stamp is the second line of defence against a duplicate send.
+ */
+export async function enqueueCorrectiveActionOversightClosed(
+  tx: TenantDb,
+  input: { office: { id: string; slug: string }; scorecardId: string },
+): Promise<void> {
+  const [card] = await tx
+    .select({
+      dealId: fieldScorecards.dealId,
+      cycleNonce: fieldScorecards.correctiveActionCycleNonce,
+    })
+    .from(fieldScorecards)
+    .where(eq(fieldScorecards.id, input.scorecardId))
+    .limit(1);
+  // The row is guaranteed present here (the caller just resolved an item on it under a FOR UPDATE lock),
+  // but bail rather than enqueue a job with a null dealId whose email would have no CRM link.
+  if (!card) return;
+
+  await tx.insert(jobQueue).values({
+    jobType: SCORECARD_CORRECTIVE_ACTION_OVERSIGHT_EMAIL_JOB,
+    payload: {
+      tenantSchema: `office_${input.office.slug}`,
+      scorecardId: input.scorecardId,
+      dealId: card.dealId,
+      officeId: input.office.id,
+      phase: "closed",
+      // Null on a legacy card that predates the cycle-nonce column; the worker falls back to a "none"
+      // dimension, which is still phase- and scorecard-scoped.
+      cycleNonce: card.cycleNonce ?? undefined,
+    },
+    officeId: input.office.id,
+    status: "pending",
+    // The completed notice attaches the refreshed PDF, which the route re-renders post-commit. Reuse the
+    // same head start the other scorecard emails take so the attachment is normally ready.
+    runAfter: new Date(Date.now() + SCORECARD_EMAIL_RUN_AFTER_SECONDS * 1000),
+    maxAttempts: 6,
+  });
 }
 
 /** The shape of an existing scorecard_corrective_actions row as read by the reconcile SELECT. */
@@ -531,7 +586,15 @@ export async function reconcileScorecardCorrectiveActions(
     // Reset the sent stamp AND stamp the active cycle nonce together (fresh cycle → the worker must send).
     await tx
       .update(fieldScorecards)
-      .set({ correctiveActionEmailSentAt: null, correctiveActionCycleNonce: cycleNonce })
+      .set({
+        correctiveActionEmailSentAt: null,
+        correctiveActionCycleNonce: cycleNonce,
+        // A fresh cycle must re-notify OVERSIGHT too, not just the responders. Clearing here but not at the
+        // restart helper (or vice versa) leaves a reopen re-notifying responders while oversight stays
+        // silent. See migration 0201.
+        correctiveActionOversightOpenedAt: null,
+        correctiveActionOversightClosedAt: null,
+      })
       .where(eq(fieldScorecards.id, input.scorecardId));
     // Starting a NEW notification cycle (a reopen, OR an already-open card that gained new work after its
     // original email sent), prior-cycle web tokens must not survive it. The worker's per-recipient reuse-skip
@@ -559,6 +622,25 @@ export async function reconcileScorecardCorrectiveActions(
         // → a duplicate email). See the worker handler's idempotency-key derivation. This is the SAME nonce
         // persisted on the scorecard above (corrective_action_cycle_nonce), so the worker's delivery stamp
         // can require it to still be the ACTIVE cycle at stamp time.
+        cycleNonce,
+      },
+      officeId: input.office.id,
+      status: "pending",
+      runAfter: new Date(Date.now() + SCORECARD_EMAIL_RUN_AFTER_SECONDS * 1000),
+      maxAttempts: 6,
+    });
+
+    // Tell OVERSIGHT the corrective action opened — a separate job carrying the SAME cycleNonce, so both
+    // notifications agree on which cycle they belong to. Never a CC on the job above: that one embeds a
+    // per-recipient token authorizing a response, which must not reach an oversight inbox.
+    await tx.insert(jobQueue).values({
+      jobType: SCORECARD_CORRECTIVE_ACTION_OVERSIGHT_EMAIL_JOB,
+      payload: {
+        tenantSchema: `office_${input.office.slug}`,
+        scorecardId: input.scorecardId,
+        dealId: input.dealId,
+        officeId: input.office.id,
+        phase: "opened",
         cycleNonce,
       },
       officeId: input.office.id,
@@ -673,6 +755,13 @@ async function restartCorrectiveActionCyclesForCards(
         correctiveActionEmailSentAt: null,
         correctiveActionCycleNonce: cycleNonceByScorecardId.get(scorecardId)!,
         updatedAt: now,
+        // The OVERSIGHT stamps are deliberately NOT cleared here. This helper only ever touches scorecards
+        // already at status 'corrective_action_open' (see the id query above): the corrective action never
+        // left open, so from oversight's point of view nothing new happened — a responder was reassigned.
+        // Oversight was correctly told once when it opened and will be told once when it completes.
+        // Clearing them would re-send the "opened" notice on every team-tab reassignment, which is exactly
+        // the inbox noise this feature is meant to avoid. A genuine REOPEN goes through
+        // reconcileScorecardCorrectiveActions' transitioningIntoOpen branch, which does clear them.
       })
       .where(eq(fieldScorecards.id, scorecardId));
   }

@@ -3,7 +3,12 @@ import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
 import { sql } from "drizzle-orm";
 import { createFieldScorecard } from "../../../src/modules/field/scorecards-service.js";
-import { resolveCorrectiveActionItem } from "../../../src/modules/field/corrective-actions-service.js";
+import {
+  reconcileScorecardCorrectiveActions,
+  resolveCorrectiveActionItem,
+  restartCorrectiveActionNotificationCycleForDeal,
+} from "../../../src/modules/field/corrective-actions-service.js";
+import { submitCorrectiveActionResponse } from "../../../src/modules/field/corrective-action-api.js";
 import {
   fieldScorecards,
   fieldScorecardItems,
@@ -18,6 +23,7 @@ import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
 const DEAL = "11111111-1111-1111-1111-111111111111";
 const USER = "33333333-3333-3333-3333-333333333333";
 const STAGE_ACTIVE = "cccccccc-0000-0000-0000-000000000001";
+const OFFICE = { id: "00000000-0000-0000-0000-0000000000f1", slug: "test" };
 
 const csid = (n: number) => `55555555-5555-5555-5555-${String(n).padStart(12, "0")}`;
 
@@ -535,5 +541,166 @@ describe("resolve advances the scorecard content generation", () => {
     });
 
     expect((await getUpdatedAt(scorecard.id)).getTime()).toBe(afterFirst.getTime());
+  });
+});
+
+describe("corrective-action oversight email enqueue", () => {
+  async function oversightJobs(): Promise<{ payload: any; max_attempts: number; office_id: string | null }[]> {
+    const res = await tdb.execute(sql`
+      SELECT payload, max_attempts, office_id
+      FROM public.job_queue
+      WHERE job_type = 'scorecard_corrective_action_oversight_email'
+      ORDER BY id
+    `);
+    return res.rows as any[];
+  }
+
+  async function responderJobNonce(scorecardId: string): Promise<string> {
+    const res = await tdb.execute(sql`
+      SELECT payload FROM public.job_queue
+      WHERE job_type = 'scorecard_corrective_action_email'
+        AND payload->>'scorecardId' = ${scorecardId}
+      ORDER BY id DESC LIMIT 1
+    `);
+    return (res.rows[0] as any).payload.cycleNonce;
+  }
+
+  it("enqueues an 'opened' oversight job alongside the responder job when a cycle starts", async () => {
+    const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
+
+    const jobs = await oversightJobs();
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0].payload.phase).toBe("opened");
+    expect(jobs[0].payload.scorecardId).toBe(scorecard.id);
+    expect(jobs[0].payload.dealId).toBe(DEAL);
+    expect(jobs[0].payload.tenantSchema).toBe("office_test");
+    expect(jobs[0].max_attempts).toBe(6);
+    // Same cycle as the responder job — both notifications must agree on which cycle they describe.
+    expect(jobs[0].payload.cycleNonce).toBe(await responderJobNonce(scorecard.id));
+  });
+
+  it("enqueues a 'closed' oversight job when the LAST item is answered", async () => {
+    const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
+    const items = await getCorrectiveActions(scorecard.id);
+    await tdb.execute(sql`DELETE FROM public.job_queue`);
+
+    for (const item of items) {
+      await tdb.transaction(async (tx) => {
+        await submitCorrectiveActionResponse(tx as any, {
+          scorecardId: scorecard.id,
+          itemId: item.id,
+          comment: "fixed",
+          respondedBy: { userId: USER, name: "Sam", email: null },
+          office: OFFICE,
+        });
+      });
+    }
+
+    expect((await getScorecardRow(scorecard.id)).status).toBe("corrective_action_closed");
+    const jobs = await oversightJobs();
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0].payload.phase).toBe("closed");
+    expect(jobs[0].payload.scorecardId).toBe(scorecard.id);
+    expect(jobs[0].payload.dealId).toBe(DEAL);
+  });
+
+  it("does NOT enqueue a 'closed' job while items remain open", async () => {
+    const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
+    const items = await getCorrectiveActions(scorecard.id);
+    expect(items.length).toBeGreaterThan(1);
+    await tdb.execute(sql`DELETE FROM public.job_queue`);
+
+    await tdb.transaction(async (tx) => {
+      await submitCorrectiveActionResponse(tx as any, {
+        scorecardId: scorecard.id,
+        itemId: items[0].id,
+        comment: "fixed",
+        respondedBy: { userId: USER, name: "Sam", email: null },
+        office: OFFICE,
+      });
+    });
+
+    expect(await oversightJobs()).toHaveLength(0);
+  });
+
+  it("does NOT enqueue a second 'closed' job on an idempotent replay of the closing response", async () => {
+    const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission({ actionItems: ["Only item"], criticalDeficiencies: [] }));
+    const items = await getCorrectiveActions(scorecard.id);
+    expect(items).toHaveLength(1);
+    await tdb.execute(sql`DELETE FROM public.job_queue`);
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await tdb.transaction(async (tx) => {
+        await submitCorrectiveActionResponse(tx as any, {
+          scorecardId: scorecard.id,
+          itemId: items[0].id,
+          comment: "fixed",
+          respondedBy: { userId: USER, name: "Sam", email: null },
+          office: OFFICE,
+        });
+      });
+    }
+
+    expect(await oversightJobs()).toHaveLength(1);
+  });
+
+  it("clears BOTH oversight stamps when a card REOPENS, so oversight is re-notified", async () => {
+    const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
+    await tdb.execute(sql`
+      UPDATE field_scorecards
+         SET corrective_action_oversight_opened_at = NOW(),
+             corrective_action_oversight_closed_at = NOW(),
+             status = 'corrective_action_closed'
+       WHERE id = ${scorecard.id}
+    `);
+    await tdb.execute(sql`UPDATE scorecard_corrective_actions SET status = 'resolved' WHERE scorecard_id = ${scorecard.id}`);
+    await tdb.execute(sql`DELETE FROM public.job_queue`);
+
+    // An edit adding a NEW flag walks the closed card back into corrective_action_open — a genuinely new
+    // cycle. (Re-submitting the SAME already-resolved flags correctly does NOT reopen it.)
+    await tdb.transaction(async (tx) => {
+      await reconcileScorecardCorrectiveActions(tx as any, {
+        scorecardId: scorecard.id,
+        dealId: DEAL,
+        office: OFFICE,
+        rating: "corrective_action",
+        currentStatus: "corrective_action_closed",
+        deficiencies: ["missed_hold_point"],
+        actionItems: ["Re-inspect slab 2", "Verify hold points", "NEW: re-torque anchors"],
+      } as any);
+    });
+
+    const row = await tdb.execute(sql`
+      SELECT corrective_action_oversight_opened_at, corrective_action_oversight_closed_at
+      FROM field_scorecards WHERE id = ${scorecard.id}
+    `);
+    expect(row.rows[0]).toMatchObject({
+      corrective_action_oversight_opened_at: null,
+      corrective_action_oversight_closed_at: null,
+    });
+    const jobs = await oversightJobs();
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0].payload.phase).toBe("opened");
+  });
+
+  it("does NOT re-notify oversight when a responder reassignment restarts the RESPONDER cycle", async () => {
+    // The card never left corrective_action_open — a super/PM was swapped. Oversight was already told it
+    // opened and will be told when it completes; re-sending here is exactly the inbox noise to avoid.
+    const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
+    const stampedAt = new Date("2026-07-27T12:00:00.000Z");
+    await tdb.execute(sql`
+      UPDATE field_scorecards SET corrective_action_oversight_opened_at = ${stampedAt} WHERE id = ${scorecard.id}
+    `);
+    await tdb.execute(sql`DELETE FROM public.job_queue`);
+
+    await tdb.transaction(async (tx) => {
+      await restartCorrectiveActionNotificationCycleForDeal(tx as any, { dealId: DEAL, office: OFFICE } as any);
+    });
+
+    expect(await oversightJobs()).toHaveLength(0);
+    const row = await tdb.execute(sql`
+      SELECT corrective_action_oversight_opened_at FROM field_scorecards WHERE id = ${scorecard.id}
+    `);
+    expect(new Date((row.rows[0] as any).corrective_action_oversight_opened_at).getTime()).toBe(stampedAt.getTime());
   });
 });

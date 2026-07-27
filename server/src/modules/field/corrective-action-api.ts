@@ -8,7 +8,10 @@ import {
   scorecardCorrectiveActions,
 } from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
-import { resolveCorrectiveActionItemTx } from "./corrective-actions-service.js";
+import {
+  enqueueCorrectiveActionOversightClosed,
+  resolveCorrectiveActionItemTx,
+} from "./corrective-actions-service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -135,6 +138,8 @@ export interface SubmitCorrectiveActionResponseInput {
   /** Already-uploaded file ids to attach as response evidence (must belong to the scorecard's deal). */
   photoFileIds?: string[];
   respondedBy: { userId: string | null; name: string | null; email: string | null };
+  /** Office context for the oversight "completed" job enqueued when this response closes the scorecard. */
+  office: { id: string; slug: string };
 }
 
 /**
@@ -366,11 +371,21 @@ export async function submitCorrectiveActionResponse(
   }
 
   // Resolve within the SAME (caller-supplied) transaction so a resolve failure rolls back the photo inserts.
-  await resolveCorrectiveActionItemTx(db, {
+  const { closed } = await resolveCorrectiveActionItemTx(db, {
     scorecardId: input.scorecardId,
     itemId: input.itemId,
     responseComment: comment,
     respondedBy: input.respondedBy,
     photoFileIds,
   });
+
+  // This response answered the LAST open item — tell oversight the corrective action is complete. Enqueued
+  // in the SAME transaction as the close, so the job cannot exist for a close that rolled back, and only on
+  // the winning write (an idempotent replay returns closed: false).
+  if (closed) {
+    await enqueueCorrectiveActionOversightClosed(db, {
+      office: input.office,
+      scorecardId: input.scorecardId,
+    });
+  }
 }
