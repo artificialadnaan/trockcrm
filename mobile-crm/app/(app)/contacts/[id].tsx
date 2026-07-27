@@ -7,6 +7,9 @@ import { ApiError } from "../../../src/api/client";
 import * as contactsApi from "../../../src/api/endpoints/contacts";
 import { useAuth } from "../../../src/auth/AuthContext";
 import { useQueryScope } from "../../../src/auth/useOfficeId";
+import { RetryNotice } from "../../../src/components/RetryNotice";
+import { Row } from "../../../src/components/Row";
+import { resolveListState } from "../../../src/list-state";
 import { mailtoUrl, smsUrl, telUrl } from "../../../src/contact-links";
 import { openLink } from "../../../src/lib/open-link";
 import { formatLocation } from "../../../src/format";
@@ -101,6 +104,15 @@ export default function ContactDetailScreen() {
   const company = contactsApi.contactCompanyName(contact);
   const phone = contactsApi.contactPhone(contact);
   const location = formatLocation(contact.city, contact.state);
+  // Same state machine as everywhere else. `isFetchNextPageError: false` — this endpoint returns the
+  // whole association set in one response, so there is no next page that can fail.
+  const dealsState = resolveListState({
+    isLoading: dealsQuery.isLoading,
+    data: dealsQuery.data,
+    error: dealsQuery.error,
+    isFetchNextPageError: false,
+  });
+
   // Data is on screen but the last refresh failed — say so without taking the screen away.
   const refreshFailed = Boolean(contactQuery.error);
   // Reps see only the deals they own here — the server scopes this endpoint by assigned rep, unlike the
@@ -193,9 +205,9 @@ export default function ContactDetailScreen() {
         ) : null}
 
         <Section title="Deals">
-          {dealsQuery.isLoading ? (
+          {dealsState.kind === "loading" ? (
             <ActivityIndicator color={theme.color.brandRed} />
-          ) : dealsQuery.error && dealsQuery.data === undefined ? (
+          ) : dealsState.kind === "blocking-error" ? (
             // A FAILED request is not an empty result. Rendering "no deals are linked" on a 5xx presents
             // a network failure as a fact about the contact, and a rep would act on it — calling someone
             // believing they have no live work when they may have several.
@@ -236,15 +248,13 @@ export default function ContactDetailScreen() {
               NORMAL one. Requiring rows meant the most common state reported a failed refresh nowhere:
               no notice, no retry, just "No deals you can see are linked to this contact" standing there
               looking authoritative while the refresh behind it had failed. */}
-          {dealsQuery.data !== undefined && dealsQuery.error ? (
-            <Pressable
+          {dealsState.kind === "loaded" && dealsState.refreshFailed ? (
+            <RetryNotice
               testID="retry-contact-deals-inline"
-              onPress={() => void dealsQuery.refetch()}
-              accessibilityRole="button"
-              style={styles.retry}
-            >
-              <Text style={styles.retryText}>Couldn&apos;t refresh deals — tap to retry</Text>
-            </Pressable>
+              message="Couldn't refresh deals — tap to retry"
+              onRetry={() => void dealsQuery.refetch()}
+              placement="bottom"
+            />
           ) : null}
         </Section>
       </ScrollView>
@@ -288,14 +298,6 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   );
 }
 
-function Row({ label, value }: { label: string; value: string }) {
-  return (
-    <View style={styles.row}>
-      <Text style={styles.rowLabel}>{label}</Text>
-      <Text style={styles.rowValue}>{value}</Text>
-    </View>
-  );
-}
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: theme.color.surfaceMuted },
@@ -330,9 +332,6 @@ const styles = StyleSheet.create({
     padding: theme.space.lg,
     gap: theme.space.sm,
   },
-  row: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: theme.space.md },
-  rowLabel: { fontFamily: theme.font.regular, fontSize: 14, color: theme.color.textSecondary },
-  rowValue: { flexShrink: 1, textAlign: "right", fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.textPrimary },
   notes: { fontFamily: theme.font.regular, fontSize: 14, color: theme.color.textSecondary },
   emptyBody: { fontFamily: theme.font.regular, fontSize: 14, color: theme.color.textMuted },
   linkError: { fontFamily: theme.font.regular, fontSize: 13, color: theme.color.brandRedDeep },

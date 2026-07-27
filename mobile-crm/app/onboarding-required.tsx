@@ -27,10 +27,32 @@ export default function OnboardingRequiredScreen() {
 
   async function checkAgain() {
     setChecking(true);
+    setLinkError(null);
     try {
       await revalidate();
+    } catch {
+      // revalidate() has no reachable rejection path today, but it is invoked as `void checkAgain()`,
+      // so anything that starts throwing in there becomes an unhandled rejection with no user-visible
+      // symptom on the one screen a blocked user is stuck reading. The gate === "stale" line below
+      // covers the ordinary offline case; this covers the unexpected one.
+      setLinkError("Couldn't check just now. Try again in a moment.");
     } finally {
       setChecking(false);
+    }
+  }
+
+  /**
+   * Only https. `cleanupUrl` arrives from the server (cleanupAppUrl()) and is handed straight to the
+   * OS — so a misconfigured or malformed value could open an arbitrary scheme rather than a web page.
+   * Nothing suggests it is attacker-controlled today, but validating the one thing this button is for
+   * costs a line, and "the server sent it" is not a property the OS checks.
+   */
+  function safeCleanupUrl(raw: string | null | undefined): string | null {
+    if (!raw) return null;
+    try {
+      return new URL(raw).protocol === "https:" ? raw : null;
+    } catch {
+      return null;
     }
   }
 
@@ -59,7 +81,7 @@ export default function OnboardingRequiredScreen() {
   const rawPending = session.user.onboardingPendingCount;
   const pendingKnown = typeof rawPending === "number" && rawPending >= 0;
   const pending = pendingKnown ? rawPending : 0;
-  const cleanupUrl = session.user.cleanupUrl ?? null;
+  const cleanupUrl = safeCleanupUrl(session.user.cleanupUrl);
 
   return (
     <SafeAreaView style={styles.safe}>

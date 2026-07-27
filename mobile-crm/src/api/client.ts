@@ -89,9 +89,13 @@ export async function apiFetch<T = unknown>(path: string, opts: ApiFetchOptions 
     timedOut = true;
     controller.abort();
   }, timeoutMs);
+  // The listener is RETAINED so it can be removed when the request settles. `{ once: true }` only
+  // detaches after the event fires — a request that completes normally leaves it attached forever, so a
+  // caller reusing one long-lived signal across many requests accumulates a listener per request.
+  const onExternalAbort = () => controller.abort();
   if (signal) {
     if (signal.aborted) controller.abort();
-    else signal.addEventListener("abort", () => controller.abort(), { once: true });
+    else signal.addEventListener("abort", onExternalAbort, { once: true });
   }
 
   let res: Response;
@@ -112,6 +116,7 @@ export async function apiFetch<T = unknown>(path: string, opts: ApiFetchOptions 
     throw new ApiError(e instanceof Error ? e.message : "Network request failed", 0);
   } finally {
     clearTimeout(timer);
+    signal?.removeEventListener("abort", onExternalAbort);
   }
 
   if (!res.ok) {
@@ -145,5 +150,13 @@ export async function apiFetch<T = unknown>(path: string, opts: ApiFetchOptions 
   }
 
   if (res.status === 204) return undefined as T;
-  return (await res.json()) as T;
+  try {
+    return (await res.json()) as T;
+  } catch {
+    // A 2xx with an empty or non-JSON body — a proxy's HTML error page, a truncated response, a route
+    // that forgot to serialise. Raw, this throws a SyntaxError, which is NOT an ApiError: every screen
+    // tests `err instanceof ApiError` to decide what to show, so it fell through to the generic
+    // "Something went wrong" and lost both the status and the offline/server distinction.
+    throw new ApiError(`Malformed response from the server (${res.status})`, res.status);
+  }
 }

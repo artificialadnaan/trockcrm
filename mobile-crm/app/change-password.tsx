@@ -207,13 +207,17 @@ export default function ChangePasswordScreen() {
             autoCapitalize="none"
             style={formStyles.input}
           />
-          {mismatch ? <Text style={formStyles.hint}>Passwords don&apos;t match.</Text> : null}
-          {tooShort ? (
-            <Text style={formStyles.hint}>Use at least {MIN_PASSWORD_LENGTH} characters.</Text>
-          ) : null}
-          {sameAsCurrent ? (
-            <Text style={formStyles.hint}>Choose a password different from your current one.</Text>
-          ) : null}
+          {/* A live region: these hints appear and disappear as the user types, and without this a
+              screen reader never announces them — the button just stays disabled for no stated reason. */}
+          <View accessible accessibilityLiveRegion="polite">
+            {mismatch ? <Text style={formStyles.hint}>Passwords don&apos;t match.</Text> : null}
+            {tooShort ? (
+              <Text style={formStyles.hint}>Use at least {MIN_PASSWORD_LENGTH} characters.</Text>
+            ) : null}
+            {sameAsCurrent ? (
+              <Text style={formStyles.hint}>Choose a password different from your current one.</Text>
+            ) : null}
+          </View>
 
           <Pressable
             testID="change-password-submit"

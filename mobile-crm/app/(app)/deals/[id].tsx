@@ -17,7 +17,9 @@ import { useAuth } from "../../../src/auth/AuthContext";
 import { useQueryScope } from "../../../src/auth/useOfficeId";
 import { displayAmount, showsAtRisk } from "../../../src/components/DealCard";
 import { Badge } from "../../../src/components/Badge";
+import { RetryNotice } from "../../../src/components/RetryNotice";
 import { Row } from "../../../src/components/Row";
+import { resolveListState } from "../../../src/list-state";
 import { mailtoUrl, telUrl } from "../../../src/contact-links";
 import { buildStageIndex, stageLabelFor } from "../../../src/stage-label";
 import { openLink } from "../../../src/lib/open-link";
@@ -64,6 +66,15 @@ export default function DealDetailScreen() {
     queryKey: qk.stages(scope),
     queryFn: () => dealsApi.listStages(fetcher),
     staleTime: 30 * 60_000,
+  });
+
+  // The SAME state machine the lists use — see resolveListState for the four ways this branching has
+  // been got wrong. It was hand-rolled here, which is exactly the duplication that module exists to end.
+  const activityState = resolveListState({
+    isLoading: activitiesQuery.isLoading,
+    data: activitiesQuery.data,
+    error: activitiesQuery.error,
+    isFetchNextPageError: activitiesQuery.isFetchNextPageError,
   });
 
   const activities = useMemo(
@@ -151,9 +162,12 @@ export default function DealDetailScreen() {
   const location = formatLocation(deal.propertyCity, deal.propertyState);
   // Data is on screen but the last refresh failed — say so without taking the screen away.
   const refreshFailed = Boolean(dealQuery.error);
-  // Both columns, coalesced the way every other contact surface does. Projecting only `phone` hid the
-  // call action entirely for a contact reachable only on a mobile number.
-  const contactPhone = deal.primaryContactPhone ?? deal.primaryContactMobile;
+  // MOBILE FIRST, matching contactPhone() on the contact surfaces. This read `phone ?? mobile`, so the
+  // same person could be called on a different number depending on which screen you started from — and
+  // the deal detail would pick the landline while the contact screen picked the mobile. The reason the
+  // contacts helper prefers mobile is the reason it should win here too: it is the one that reaches
+  // someone standing on a roof.
+  const contactPhone = deal.primaryContactMobile ?? deal.primaryContactPhone;
   // Shared with the list, so the two can never disagree about which stage a deal is in.
   const stageLabel = stageLabelFor(deal, buildStageIndex(stagesQuery.data)) ?? "—";
 
@@ -289,9 +303,9 @@ export default function DealDetailScreen() {
         </Section>
 
         <Section title="Activity">
-          {activitiesQuery.isLoading ? (
+          {activityState.kind === "loading" ? (
             <ActivityIndicator color={theme.color.brandRed} />
-          ) : activitiesQuery.error && activitiesQuery.data === undefined ? (
+          ) : activityState.kind === "blocking-error" ? (
             // A failed timeline request is NOT an empty timeline. Claiming "nothing logged" on a 5xx
             // presents a failure as authoritative CRM data, and a rep would believe it.
             //
@@ -349,23 +363,20 @@ export default function DealDetailScreen() {
               failed refresh nowhere at all: no notice, no retry, just the unchanged "Nothing logged
               yet". Silently wrong in exactly the state the empty message claims to be authoritative
               about. */}
-          {activitiesQuery.data !== undefined && activitiesQuery.error ? (
-            <Pressable
+          {activityState.kind === "loaded" && activityState.pageFailed ? (
+            <RetryNotice
+              testID="retry-activities-page"
+              message="Couldn't load older activity — tap to retry"
+              onRetry={() => void activitiesQuery.fetchNextPage()}
+              placement="bottom"
+            />
+          ) : activityState.kind === "loaded" && activityState.refreshFailed ? (
+            <RetryNotice
               testID="retry-activities-inline"
-              onPress={() =>
-                void (activitiesQuery.isFetchNextPageError
-                  ? activitiesQuery.fetchNextPage()
-                  : activitiesQuery.refetch())
-              }
-              accessibilityRole="button"
-              style={styles.retry}
-            >
-              <Text style={styles.retryText}>
-                {activitiesQuery.isFetchNextPageError
-                  ? "Couldn't load older activity — tap to retry"
-                  : "Couldn't refresh activity — tap to retry"}
-              </Text>
-            </Pressable>
+              message="Couldn't refresh activity — tap to retry"
+              onRetry={() => void activitiesQuery.refetch()}
+              placement="bottom"
+            />
           ) : null}
         </Section>
       </ScrollView>
