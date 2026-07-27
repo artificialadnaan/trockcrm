@@ -19,6 +19,7 @@ import { useAuth } from "../../../src/auth/AuthContext";
 import { useQueryScope } from "../../../src/auth/useOfficeId";
 import { DealCard } from "../../../src/components/DealCard";
 import { RetryNotice } from "../../../src/components/RetryNotice";
+import { resolveListState } from "../../../src/list-state";
 import { stageLabelFor } from "../../../src/stage-label";
 import { qk } from "../../../src/query/keys";
 import { theme } from "../../../src/theme/theme";
@@ -94,13 +95,17 @@ export default function DealsListScreen() {
   // loaded successfully — so a later failed refresh must stay inline, exactly as it does for a
   // non-empty list. Keying on row count treated "loaded, and empty" as "never loaded", and replaced a
   // refreshable empty state with the blocking initial-load error.
-  const everLoaded = query.data !== undefined;
-  // Split by WHICH fetch failed, because that decides where the notice has to go. A failed refresh must
-  // appear at the top next to the gesture — after a pull the user is still at the top, so a footer
-  // message sits below a full page, off-screen, and the refresh looks like it worked while stale data
-  // stays up. A failed load-more belongs in the footer, which is where the user already is.
-  const pageError = query.error && everLoaded && query.isFetchNextPageError ? query.error : null;
-  const refreshError = query.error && everLoaded && !query.isFetchNextPageError ? query.error : null;
+  // One tested decision, shared with the contacts list — see resolveListState for the four ways this
+  // has been got wrong, and why none of them are about how many rows there are.
+  const listState = resolveListState({
+    isLoading: query.isLoading,
+    data: query.data,
+    error: query.error,
+    rowCount: deals.length,
+    isFetchNextPageError: query.isFetchNextPageError,
+  });
+  const refreshError = listState.kind === "loaded" && listState.refreshFailed;
+  const pageError = listState.kind === "loaded" && listState.pageFailed;
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
@@ -140,11 +145,11 @@ export default function DealsListScreen() {
         <Text style={styles.searchHint}>Type at least {MIN_SEARCH_LENGTH} characters to search.</Text>
       ) : null}
 
-      {query.isLoading ? (
+      {listState.kind === "loading" ? (
         <View style={styles.center}>
           <ActivityIndicator color={theme.color.brandRed} />
         </View>
-      ) : query.error && !everLoaded ? (
+      ) : listState.kind === "blocking-error" ? (
         // A retry BUTTON, not "pull to retry" — this branch replaces the FlatList, so there is no
         // RefreshControl mounted to pull on. The earlier copy advertised a gesture that did not exist.
         <View style={styles.center}>
