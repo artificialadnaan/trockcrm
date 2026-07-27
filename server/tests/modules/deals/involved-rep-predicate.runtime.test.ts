@@ -5,6 +5,7 @@ import { sql, type SQL } from "drizzle-orm";
 import {
   UNASSIGNED_FILTER_SENTINEL,
   buildAliasedInvolvedRepSql,
+  buildAliasedOwnedRepSql,
   buildAliasedInvolvedRepInListSql,
 } from "../../../src/modules/deals/deal-filter-predicates.js";
 
@@ -74,6 +75,37 @@ describe("buildAliasedInvolvedRepSql — real execution", () => {
   it("a person who neither owns nor estimated anything surfaces NO deals", async () => {
     const rows = await ids(buildAliasedInvolvedRepSql("d", REP_C));
     expect(rows).toEqual([]);
+  });
+});
+
+// The rep FILTER uses the OWNED variant. This is the production symptom that motivated it: filtering the Won
+// drill-down to one rep returned 60 deals/$10.2M while the director dashboard showed 42/$6.8M for the same
+// person — an 18-deal gap that was entirely deals he had ESTIMATED for other reps. Owner-only closes it.
+describe("buildAliasedOwnedRepSql — real execution", () => {
+  it("filtering by REP_B surfaces ONLY deals B owns — the estimator-only deal is excluded", async () => {
+    const rows = await ids(buildAliasedOwnedRepSql("d", REP_B));
+    expect(rows).toEqual([D.ownedByB]);
+  });
+  it("still returns the owner of a deal someone else estimated", async () => {
+    // D.ownedByA_estByB is owned by A and estimated by B: it belongs to A's book, and only A's.
+    const rows = await ids(buildAliasedOwnedRepSql("d", REP_A));
+    expect(rows).toEqual([D.ownedByA, D.ownedByA_estByB].sort());
+  });
+  it("the Unassigned sentinel matches assigned_rep IS NULL", async () => {
+    const rows = await ids(buildAliasedOwnedRepSql("d", UNASSIGNED_FILTER_SENTINEL));
+    expect(rows).toEqual([D.unassigned]);
+  });
+  it("a person who owns nothing surfaces NO deals even if they estimated some", async () => {
+    const rows = await ids(buildAliasedOwnedRepSql("d", REP_C));
+    expect(rows).toEqual([]);
+  });
+  it("every deal lands on exactly ONE rep, so per-rep totals cannot double-count", async () => {
+    // The reconciliation property the estimator-OR arm broke: summing per-rep sets must equal the whole set,
+    // never more. With an estimator arm, D.ownedByA_estByB appears for BOTH A and B.
+    const a = await ids(buildAliasedOwnedRepSql("d", REP_A));
+    const b = await ids(buildAliasedOwnedRepSql("d", REP_B));
+    const c = await ids(buildAliasedOwnedRepSql("d", REP_C));
+    expect([...a, ...b, ...c].length).toBe(new Set([...a, ...b, ...c]).size);
   });
 });
 
