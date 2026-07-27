@@ -30,5 +30,6 @@ export * from "./rfp.js";
 export * from "./rfp-pending.js";
 export * from "./field-scorecard.js";
 export * from "./field-scorecard-signature.js";
+export * from "./corrective-action-status.js";
 export * from "./field-responder.js";
 export * from "./estimator-pipeline-report.js";
