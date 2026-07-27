@@ -82,7 +82,6 @@ export default function ContactsListScreen() {
     isLoading: query.isLoading,
     data: query.data,
     error: query.error,
-    rowCount: contacts.length,
     isFetchNextPageError: query.isFetchNextPageError,
   });
   const refreshError = listState.kind === "loaded" && listState.refreshFailed;
