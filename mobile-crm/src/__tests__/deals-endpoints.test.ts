@@ -171,6 +171,7 @@ describe("displayAmount — the canonical value priority", () => {
   const empty = {
     effectiveValue: null,
     effectiveOnHold: null,
+    onHold: null,
     awardedAmount: null,
     bidEstimate: null,
     ddEstimate: null,
@@ -277,6 +278,7 @@ describe("displayAmount — the server's effective value wins", () => {
   const empty = {
     effectiveValue: null,
     effectiveOnHold: null,
+    onHold: null,
     awardedAmount: null,
     bidEstimate: null,
     ddEstimate: null,
@@ -317,5 +319,36 @@ describe("displayAmount — the server's effective value wins", () => {
         awardedAmount: "250000.00",
       }),
     ).toBe("$250,000");
+  });
+});
+
+describe("the compatibility fallback honours a stored hold", () => {
+  const legacy = {
+    // A payload predating effectiveValue/effectiveOnHold — the explicitly supported mixed-version case.
+    effectiveValue: null,
+    effectiveOnHold: null,
+    onHold: true,
+    awardedAmount: "250000.00",
+    bidEstimate: null,
+    ddEstimate: null,
+    bidBoardTotalSales: null,
+    stageSlug: null,
+    workflowRoute: null,
+  };
+
+  it("zeroes on the stored onHold flag, not only the effective one", () => {
+    // The badge already falls back to `onHold` and says "On hold". Checking only effectiveOnHold here
+    // printed the full amount right beside that badge — contradictory money and hold status on the same
+    // card, which is precisely what a mixed-version deployment would have produced.
+    expect(displayAmount(legacy)).toBe("—");
+  });
+
+  it("still shows the value when nothing says it is held", () => {
+    expect(displayAmount({ ...legacy, onHold: false })).toBe("$250,000");
+  });
+
+  it("prefers the server's effectiveValue over the stored flag when both are present", () => {
+    // effectiveValue already has the canonical rule applied, including its own hold handling.
+    expect(displayAmount({ ...legacy, onHold: false, effectiveValue: 180000 })).toBe("$180,000");
   });
 });

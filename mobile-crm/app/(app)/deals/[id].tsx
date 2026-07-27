@@ -55,6 +55,26 @@ export default function DealDetailScreen() {
     enabled: dealId.length > 0,
   });
 
+  // The stage NAMES. The detail row rendered the raw slug, so common stages read as
+  // "estimate_sent_to_client" or "service_estimating" — internal identifiers shown to a rep, while the
+  // list beside it already displayed the proper names. Same 30-minute staleTime as the list: stage
+  // config is effectively static per office.
+  const stagesQuery = useQuery({
+    queryKey: qk.stages(scope),
+    queryFn: () => dealsApi.listStages(fetcher),
+    staleTime: 30 * 60_000,
+  });
+
+  const stageNames = useMemo(() => {
+    const bySlug = new Map<string, string>();
+    const byId = new Map<string, string>();
+    for (const stage of stagesQuery.data ?? []) {
+      bySlug.set(stage.slug, stage.name);
+      byId.set(stage.id, stage.name);
+    }
+    return { bySlug, byId };
+  }, [stagesQuery.data]);
+
   const activities = useMemo(
     () => (activitiesQuery.data?.pages ?? []).flatMap((p) => p.activities),
     [activitiesQuery.data],
@@ -143,6 +163,12 @@ export default function DealDetailScreen() {
   // Both columns, coalesced the way every other contact surface does. Projecting only `phone` hid the
   // call action entirely for a contact reachable only on a mobile number.
   const contactPhone = deal.primaryContactPhone ?? deal.primaryContactMobile;
+  const stageSlugForDisplay = deal.displayStageSlug ?? deal.stageSlug ?? null;
+  const stageLabel =
+    (stageSlugForDisplay ? stageNames.bySlug.get(stageSlugForDisplay) : undefined) ??
+    (deal.stageId ? stageNames.byId.get(deal.stageId) : undefined) ??
+    stageSlugForDisplay ??
+    "—";
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
@@ -198,8 +224,10 @@ export default function DealDetailScreen() {
 
         <Section title="Details">
           {/* displayStageSlug is bid-board-aware: an owned deal can advance or close in Bid Board
-              while its CRM stageSlug still reads an earlier stage. The web detail switches the same way. */}
-          <Row label="Stage" value={deal.displayStageSlug ?? deal.stageSlug ?? "—"} />
+              while its CRM stageSlug still reads an earlier stage. The web detail switches the same way.
+              Falls back to the raw slug rather than a dash — a Bid Board stage has no CRM pipeline row
+              to name it, and the slug is still more use to a rep than nothing. */}
+          <Row label="Stage" value={stageLabel} />
           <Row label="Days in stage" value={stageDays === null ? "—" : String(stageDays)} />
           <Row label="Close date" value={formatDate(deal.expectedCloseDate)} />
           {location ? <Row label="Location" value={location} /> : null}

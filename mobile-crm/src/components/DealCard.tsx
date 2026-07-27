@@ -13,6 +13,7 @@ type ValueFields = Pick<
   DealListItem,
   | "effectiveValue"
   | "effectiveOnHold"
+  | "onHold"
   | "awardedAmount"
   | "bidEstimate"
   | "ddEstimate"
@@ -61,7 +62,11 @@ export function resolveDealValue(deal: ValueFields): number {
   if (typeof deal.effectiveValue === "number" && Number.isFinite(deal.effectiveValue)) {
     return deal.effectiveValue;
   }
-  if (deal.effectiveOnHold === true) return 0;
+  // Both hold signals, not just the effective one. On a payload predating these fields the badge falls
+  // back to `onHold` and says "On hold" — so checking only `effectiveOnHold` here printed the full
+  // amount directly beside that badge. Contradictory money and hold status is exactly what a
+  // mixed-version deployment produces if the fallback is narrower than the badge.
+  if (deal.effectiveOnHold === true || deal.onHold === true) return 0;
 
   const isEstimating = isGenuineEstimatingStage(deal.stageSlug, deal.workflowRoute);
   const candidates = isEstimating

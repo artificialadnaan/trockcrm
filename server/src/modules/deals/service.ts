@@ -182,6 +182,11 @@ export function attachAtRiskResult<T extends {
     ? actualStageSlug
     : deal.bidBoardStageSlug ?? actualStageSlug;
 
+  // The resolved CRM stage, for the value/hold rules. They take the CRM slug and the Bid Board slug
+  // SEPARATELY and combine them internally (terminal-ness honours both), so this supplies the former
+  // and leaves bidBoardStageSlug untouched rather than pre-merging the two.
+  const valueSource = { ...deal, stageSlug: actualStageSlug };
+
   return {
     ...deal,
     // The DISPLAY stage: a Bid Board-owned deal can advance (or close) in Bid Board while its CRM
@@ -195,8 +200,15 @@ export function attachAtRiskResult<T extends {
     // and resolves "today" against the America/Chicago calendar day. Re-deriving that on a device would
     // be a second implementation of a rule that has moved repeatedly, and the failure mode is wrong
     // money next to an On Hold badge rather than an error. Clients read these; they do not recompute.
-    effectiveOnHold: isDealValueEffectivelyOnHold(deal as never),
-    effectiveValue: getEffectiveDealValue(deal as never),
+    //
+    // Computed from `valueSource`, NOT the raw `deal`. /deals/pipeline selects card rows with no
+    // stageSlug and supplies the authoritative one as fallbackStageSlug, stamping it on only AFTER this
+    // helper returns — so passing `deal` left both functions with a null stage. That made estimating
+    // cards take the bid-first order, and made terminal cards with far-future close dates look held and
+    // worth zero, because the won/lost exemption never fired. Both would then disagree with the
+    // stage-aware pipeline totals computed from the same rows.
+    effectiveOnHold: isDealValueEffectivelyOnHold(valueSource as never),
+    effectiveValue: getEffectiveDealValue(valueSource as never),
     atRisk: getDealAtRiskResult(
       {
         stageSlug,
