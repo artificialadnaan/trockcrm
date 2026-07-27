@@ -9,11 +9,17 @@ import {
   type ScorecardPdfArtifactState,
 } from "../../../src/modules/field/scorecard-pdf-artifact.js";
 
+const GENERATION = new Date("2026-07-27T12:00:00.000Z");
+
 function artifact(overrides: Partial<ScorecardPdfArtifactState> = {}): ScorecardPdfArtifactState {
   return {
-    pdfR2Key: `office_dallas/deals/DFW-1/documents/scorecards/card.${"a".repeat(64)}.v2.pdf`,
+    // Track the CURRENT renderer revision rather than hardcoding one — a version bump must not require
+    // rewriting every unrelated assertion in this file.
+    pdfR2Key: `office_dallas/deals/DFW-1/documents/scorecards/card.${"a".repeat(64)}.v${CURRENT_SCORECARD_PDF_RENDER_VERSION}.pdf`,
     pdfRenderVersion: CURRENT_SCORECARD_PDF_RENDER_VERSION,
     linkedPhotoCount: 0,
+    pdfContentGeneration: GENERATION,
+    currentGeneration: GENERATION,
     ...overrides,
   };
 }
@@ -33,7 +39,9 @@ describe("needsScorecardPdfRegeneration", () => {
     ).toBe(true);
   });
 
-  it("regenerates a legacy artifact even without photos because v2 also upgraded signatures and layout", () => {
+  // Every renderer revision has changed a photo-less card too: v2 added signature images/deficiency
+  // descriptions, v3 added the corrective-action record. A legacy artifact is stale regardless of photos.
+  it("regenerates a legacy artifact even without photos", () => {
     expect(
       needsScorecardPdfRegeneration(
         artifact({ pdfRenderVersion: CURRENT_SCORECARD_PDF_RENDER_VERSION - 1, linkedPhotoCount: 0 }),
@@ -133,5 +141,64 @@ describe("coalesceScorecardPdfFinalization", () => {
     await expect(
       coalesceScorecardPdfFinalization("office:failed:v2", async () => "retry.pdf"),
     ).resolves.toBe("retry.pdf");
+  });
+});
+
+describe("needsScorecardPdfRegeneration — content generation", () => {
+  it("is current when the rendered generation matches the live one", () => {
+    expect(needsScorecardPdfRegeneration(artifact())).toBe(false);
+  });
+
+  it("regenerates when the scorecard changed after the artifact was rendered", () => {
+    // The reported bug: a corrective-action response advances updated_at, but the key/version pair alone
+    // could not see it, so the download kept presigning the submit-time object.
+    expect(
+      needsScorecardPdfRegeneration(
+        artifact({ currentGeneration: new Date("2026-07-27T12:05:00.000Z") }),
+      ),
+    ).toBe(true);
+  });
+
+  it("regenerates when the artifact predates the generation column", () => {
+    expect(needsScorecardPdfRegeneration(artifact({ pdfContentGeneration: null }))).toBe(true);
+  });
+
+  it("compares at millisecond precision so Postgres microseconds cannot force a false regeneration", () => {
+    // node-postgres materializes timestamps as millisecond Dates while Postgres retains microseconds.
+    // Comparing raw values would report every artifact stale forever and re-render on every download.
+    expect(
+      needsScorecardPdfRegeneration(
+        artifact({
+          pdfContentGeneration: new Date("2026-07-27T12:00:00.000Z"),
+          currentGeneration: "2026-07-27T12:00:00.000Z",
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("still regenerates a legacy render version even when the generation matches", () => {
+    expect(
+      needsScorecardPdfRegeneration(
+        artifact({ pdfRenderVersion: CURRENT_SCORECARD_PDF_RENDER_VERSION - 1 }),
+      ),
+    ).toBe(true);
+  });
+
+  it("keeps a FUTURE render version regardless of generation drift", () => {
+    // A newer instance's artifact is authoritative; an older instance must not fight it into a re-render loop.
+    expect(
+      needsScorecardPdfRegeneration(
+        artifact({
+          pdfRenderVersion: CURRENT_SCORECARD_PDF_RENDER_VERSION + 1,
+          currentGeneration: new Date("2026-07-27T13:00:00.000Z"),
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("treats an unreadable live generation as current rather than looping", () => {
+    // A card whose row could not be read must not spin the download in an endless regenerate loop; the
+    // caller's own 404/availability handling owns that case.
+    expect(needsScorecardPdfRegeneration(artifact({ currentGeneration: null }))).toBe(false);
   });
 });

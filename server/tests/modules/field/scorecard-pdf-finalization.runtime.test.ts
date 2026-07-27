@@ -31,6 +31,7 @@ import {
   finalizeFieldScorecardArtifacts,
   renderAndStoreFieldScorecardArtifacts,
 } from "../../../src/modules/field/scorecards-service.js";
+import { CURRENT_SCORECARD_PDF_RENDER_VERSION } from "../../../src/modules/field/scorecard-pdf-artifact.js";
 import { fieldScorecards, fieldScorecardItems, fieldScorecardPhotos } from "@trock-crm/shared/schema";
 import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
 
@@ -133,7 +134,7 @@ describe("finalizeFieldScorecardArtifacts", () => {
 
     const key = await finalizeFieldScorecardArtifacts({ id: "office-1", slug: "dallas" }, USER, CARD);
 
-    expect(key).toMatch(new RegExp(`${CARD}\\.[a-f0-9]{64}\\.v2\\.pdf$`));
+    expect(key).toMatch(new RegExp(`${CARD}\\.[a-f0-9]{64}\\.v${CURRENT_SCORECARD_PDF_RENDER_VERSION}\\.pdf$`));
     expect(r2Mocks.getObjectBuffer).toHaveBeenCalledWith("thumbs/photo.jpg", { maxBytes: 750_000 });
     expect(r2Mocks.putObject).toHaveBeenCalledOnce();
     const [uploadedKey, pdf, contentType] = r2Mocks.putObject.mock.calls[0];
@@ -145,7 +146,7 @@ describe("finalizeFieldScorecardArtifacts", () => {
     const row = await db.execute(sql`
       SELECT pdf_r2_key, pdf_render_version FROM field_scorecards WHERE id = ${CARD}::uuid
     `);
-    expect(row.rows[0]).toMatchObject({ pdf_r2_key: key, pdf_render_version: 2 });
+    expect(row.rows[0]).toMatchObject({ pdf_r2_key: key, pdf_render_version: CURRENT_SCORECARD_PDF_RENDER_VERSION });
   });
 
   it("does not upload or advance the version when evidence storage fails transiently", async () => {
@@ -239,12 +240,12 @@ describe("finalizeFieldScorecardArtifacts", () => {
       renderAndStoreFieldScorecardArtifacts({ id: "office-1", slug: "dallas" }, USER, CONCURRENT_CARD),
     ]);
 
-    expect(first).toMatch(new RegExp(`${CONCURRENT_CARD}\\.[a-f0-9]{64}\\.v2\\.pdf$`));
-    expect(second).toMatch(new RegExp(`${CONCURRENT_CARD}\\.[a-f0-9]{64}\\.v2\\.pdf$`));
+    expect(first).toMatch(new RegExp(`${CONCURRENT_CARD}\\.[a-f0-9]{64}\\.v${CURRENT_SCORECARD_PDF_RENDER_VERSION}\\.pdf$`));
+    expect(second).toMatch(new RegExp(`${CONCURRENT_CARD}\\.[a-f0-9]{64}\\.v${CURRENT_SCORECARD_PDF_RENDER_VERSION}\\.pdf$`));
     const row = await db.execute(sql`
       SELECT pdf_r2_key, pdf_render_version FROM field_scorecards WHERE id = ${CONCURRENT_CARD}::uuid
     `);
-    expect(row.rows[0]).toMatchObject({ pdf_render_version: 2 });
+    expect(row.rows[0]).toMatchObject({ pdf_render_version: CURRENT_SCORECARD_PDF_RENDER_VERSION });
     expect([first, second]).toContain(row.rows[0]?.pdf_r2_key);
   });
 
@@ -301,7 +302,7 @@ describe("finalizeFieldScorecardArtifacts", () => {
     const row = await db.execute(sql`
       SELECT pdf_r2_key, pdf_render_version FROM field_scorecards WHERE id = ${INTERLEAVED_CARD}::uuid
     `);
-    expect(row.rows[0]).toMatchObject({ pdf_r2_key: currentKey, pdf_render_version: 2 });
+    expect(row.rows[0]).toMatchObject({ pdf_r2_key: currentKey, pdf_render_version: CURRENT_SCORECARD_PDF_RENDER_VERSION });
     expect(objects.get(currentKey!)).toBe(puts[1].pdf);
     expect(objects.get(puts[0].key)).toBe(puts[0].pdf);
   });
@@ -329,13 +330,13 @@ describe("finalizeFieldScorecardArtifacts", () => {
 
     // The render published successfully (no spurious SCORECARD_EVIDENCE_CHANGED), and only the ORIGINAL
     // evidence file was pulled from R2 — the response file was never fetched for the PDF.
-    expect(key).toMatch(new RegExp(`${RESPONSE_PHOTO_CARD}\\.[a-f0-9]{64}\\.v2\\.pdf$`));
+    expect(key).toMatch(new RegExp(`${RESPONSE_PHOTO_CARD}\\.[a-f0-9]{64}\\.v${CURRENT_SCORECARD_PDF_RENDER_VERSION}\\.pdf$`));
     expect(r2Mocks.getObjectBuffer).toHaveBeenCalledWith("thumbs/photo.jpg", { maxBytes: 750_000 });
     expect(r2Mocks.getObjectBuffer).not.toHaveBeenCalledWith("thumbs/response.jpg", { maxBytes: 750_000 });
 
     const row = await db.execute(sql`
       SELECT pdf_r2_key, pdf_render_version FROM field_scorecards WHERE id = ${RESPONSE_PHOTO_CARD}::uuid
     `);
-    expect(row.rows[0]).toMatchObject({ pdf_r2_key: key, pdf_render_version: 2 });
+    expect(row.rows[0]).toMatchObject({ pdf_r2_key: key, pdf_render_version: CURRENT_SCORECARD_PDF_RENDER_VERSION });
   });
 });

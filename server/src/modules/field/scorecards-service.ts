@@ -1290,6 +1290,8 @@ export async function getFieldScorecardPdfArtifactState(
       dealId: fieldScorecards.dealId,
       pdfR2Key: fieldScorecards.pdfR2Key,
       pdfRenderVersion: fieldScorecards.pdfRenderVersion,
+      pdfContentGeneration: fieldScorecards.pdfContentGeneration,
+      currentGeneration: fieldScorecards.updatedAt,
       linkedPhotoCount: sql<number>`COUNT(${files.id})::int`,
     })
     .from(fieldScorecards)
@@ -1308,6 +1310,8 @@ export async function getFieldScorecardPdfArtifactState(
       fieldScorecards.dealId,
       fieldScorecards.pdfR2Key,
       fieldScorecards.pdfRenderVersion,
+      fieldScorecards.pdfContentGeneration,
+      fieldScorecards.updatedAt,
     )
     .limit(1);
   if (!card) throw new AppError(404, "Scorecard not found");
@@ -1316,6 +1320,8 @@ export async function getFieldScorecardPdfArtifactState(
     pdfR2Key: card.pdfR2Key,
     pdfRenderVersion: card.pdfRenderVersion,
     linkedPhotoCount: Number(card.linkedPhotoCount),
+    pdfContentGeneration: card.pdfContentGeneration,
+    currentGeneration: card.currentGeneration,
   };
   return { ...state, needsRegeneration: needsScorecardPdfRegeneration(state) };
 }
