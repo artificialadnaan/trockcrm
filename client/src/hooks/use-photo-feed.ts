@@ -20,10 +20,16 @@ export interface FeedPhoto {
   uploaderName: string | null;
 }
 
+/** Where a photo came from. Mirrors PHOTO_FEED_SOURCES in server/src/modules/files/feed-service.ts. */
+export type FeedSource = "companycam" | "trock";
+
 export interface FeedFilters {
   dealId?: string;
   uploadedBy?: string;
   subcategory?: string;
+  /** Phase (files.photo_category). The literal "uncategorized" selects photos with no phase set. */
+  photoCategory?: string;
+  source?: FeedSource;
   dateFrom?: string;
   dateTo?: string;
   // Not a server filter — bump this to force a refetch (e.g. after assigning rescued photos to a deal so the
@@ -55,6 +61,8 @@ export function usePhotoFeed(filters: FeedFilters = {}) {
         if (filters.dealId) params.set("dealId", filters.dealId);
         if (filters.uploadedBy) params.set("uploadedBy", filters.uploadedBy);
         if (filters.subcategory) params.set("subcategory", filters.subcategory);
+        if (filters.photoCategory) params.set("photoCategory", filters.photoCategory);
+        if (filters.source) params.set("source", filters.source);
         if (filters.dateFrom) params.set("dateFrom", filters.dateFrom);
         if (filters.dateTo) params.set("dateTo", filters.dateTo);
 
@@ -87,6 +95,8 @@ export function usePhotoFeed(filters: FeedFilters = {}) {
       filters.dealId,
       filters.uploadedBy,
       filters.subcategory,
+      filters.photoCategory,
+      filters.source,
       filters.dateFrom,
       filters.dateTo,
       filters.refreshToken,

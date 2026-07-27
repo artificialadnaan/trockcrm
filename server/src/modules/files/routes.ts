@@ -32,7 +32,20 @@ import {
 import { getDealById } from "../deals/service.js";
 import { assertDealScopingWriteAllowed } from "../deals/scoping-service.js";
 import { getLeadById } from "../leads/service.js";
-import { getPhotoFeed, getNewPhotoCount, getProjectPhotoStats, getUnassignedCompanyCamProjects, getUnassignedCompanyCamPhotos, assignUnassignedCompanyCamProjectToDeal } from "./feed-service.js";
+import {
+  getPhotoFeed,
+  getNewPhotoCount,
+  getPhotoFeedFacets,
+  getProjectPhotoStats,
+  getUnassignedCompanyCamProjects,
+  getUnassignedCompanyCamPhotos,
+  assignUnassignedCompanyCamProjectToDeal,
+  PHOTO_FEED_SOURCES,
+  PROJECT_PHOTO_SORTS,
+  type PhotoFeedFilters,
+  type PhotoFeedSource,
+  type ProjectPhotoSort,
+} from "./feed-service.js";
 import { getPhotoAuditEvents, logPhotoEvent } from "./audit-log-service.js";
 import { emitUploadedFileEvent, recordUploadedFileSideEffects } from "./upload-workflow.js";
 import { parseFileDateParam } from "./file-constants.js";
@@ -610,12 +623,63 @@ router.get("/deal/:dealId/photos", async (req, res, next) => {
   }
 });
 
-// GET /api/files/photos/project-stats — photo counts and metadata grouped by project
+function optionalQueryString(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+/**
+ * One parser for BOTH photo-feed tabs, so the Projects tab and the Photos tab can never interpret the
+ * same query string differently (a filter honoured on one tab and dropped on the other is exactly how
+ * the two surfaces end up reporting different totals for the same selection).
+ * Unknown enum values are dropped rather than rejected: these arrive from bookmarked/shared URLs, and a
+ * stale `?source=…` should degrade to "unfiltered", not 400 the page.
+ */
+function parseFeedFilterQuery(query: express.Request["query"]): PhotoFeedFilters {
+  const source = optionalQueryString(query.source);
+  return {
+    dealId: optionalQueryString(query.dealId),
+    uploadedBy: optionalQueryString(query.uploadedBy),
+    subcategory: optionalQueryString(query.subcategory),
+    photoCategory: optionalQueryString(query.photoCategory),
+    source: PHOTO_FEED_SOURCES.includes(source as PhotoFeedSource) ? (source as PhotoFeedSource) : undefined,
+    dateFrom: optionalQueryString(query.dateFrom),
+    dateTo: optionalQueryString(query.dateTo),
+    page: query.page ? parseInt(query.page as string, 10) : undefined,
+    limit: query.limit ? parseInt(query.limit as string, 10) : undefined,
+  };
+}
+
+// GET /api/files/photos/project-stats — photo counts and metadata grouped by project, sorted and paged
+// SERVER-SIDE. The sort must not move to the client: it would only ever reorder the rows the server
+// already chose, so "most photos" would silently mean "most-photographed of the most recent page".
 router.get("/photos/project-stats", async (req, res, next) => {
   try {
-    const result = await getProjectPhotoStats(req.tenantDb!);
+    const sort = optionalQueryString(req.query.sort);
+    const result = await getProjectPhotoStats(req.tenantDb!, {
+      ...parseFeedFilterQuery(req.query),
+      sort: PROJECT_PHOTO_SORTS.includes(sort as ProjectPhotoSort) ? (sort as ProjectPhotoSort) : undefined,
+      // "My Projects" resolves to the CALLER, never to a client-supplied id — otherwise the pill would
+      // double as an arbitrary rep filter that no other surface offers.
+      assignedRepId: req.query.mine === "1" ? req.user!.id : undefined,
+      search: optionalQueryString(req.query.q),
+    });
     await req.commitTransaction!();
     res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/files/photos/feed/facets — options for the feed's filter dropdowns. Separate from the row
+// endpoints (rather than embedded in every response) because the options are filter-independent, so the
+// client fetches them once per mount instead of on every sort/filter change.
+router.get("/photos/feed/facets", async (req, res, next) => {
+  try {
+    const facets = await getPhotoFeedFacets(req.tenantDb!);
+    await req.commitTransaction!();
+    res.json(facets);
   } catch (err) {
     next(err);
   }
@@ -673,17 +737,7 @@ router.post("/photos/unassigned-companycam/:companycamProjectId/assign", async (
 // GET /api/files/photos/feed — paginated cross-deal photo feed
 router.get("/photos/feed", async (req, res, next) => {
   try {
-    const filters = {
-      dealId: req.query.dealId as string | undefined,
-      uploadedBy: req.query.uploadedBy as string | undefined,
-      subcategory: req.query.subcategory as string | undefined,
-      dateFrom: req.query.dateFrom as string | undefined,
-      dateTo: req.query.dateTo as string | undefined,
-      page: req.query.page ? parseInt(req.query.page as string, 10) : undefined,
-      limit: req.query.limit ? parseInt(req.query.limit as string, 10) : undefined,
-    };
-
-    const result = await getPhotoFeed(req.tenantDb!, req.user!.role, req.user!.id, filters);
+    const result = await getPhotoFeed(req.tenantDb!, req.user!.role, req.user!.id, parseFeedFilterQuery(req.query));
     await req.commitTransaction!();
     res.json(result);
   } catch (err) {

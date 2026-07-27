@@ -14,17 +14,25 @@ vi.mock("@/lib/api", () => ({ api: apiMock }));
 let root: Root | null = null;
 let container: HTMLDivElement | null = null;
 
-// The locked public payload exposes only { id, imageUrl } per photo and { name, propertyAddress }
-// per deal — no uploader, category, caption, timestamps, file metadata, or internal ids.
+// The locked public payload exposes only { id, imageUrl, fullImageUrl } per photo and
+// { name, propertyAddress } per deal — no uploader, category, caption, timestamps, file metadata, or
+// internal ids. imageUrl is the grid thumbnail; fullImageUrl is the lightbox original.
 const basePhoto = {
   id: "photo-1",
-  imageUrl: "https://example.test/photo.jpg",
+  imageUrl: "https://example.test/photo.jpg?variant=thumb",
+  fullImageUrl: "https://example.test/photo.jpg",
 };
 
 const baseDeal = {
   name: "Portfolio Roof",
   propertyAddress: "123 Main St",
 };
+
+// jsdom has no layout, so the viewer stays in its unwindowed fallback grid and every loaded photo is
+// rendered — which is what makes these exposure assertions meaningful (nothing is hidden by windowing).
+function pagedResponse(photos: unknown[], total = photos.length) {
+  return { deal: baseDeal, photos, pagination: { page: 1, limit: 60, total, totalPages: 1 } };
+}
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -60,10 +68,10 @@ describe("PublicPhotoViewerPage", () => {
   });
 
   it("renders a read-only, leak-free grid (image + property name/address only)", async () => {
-    apiMock.mockResolvedValue({ deal: baseDeal, photos: [basePhoto] });
+    apiMock.mockResolvedValue(pagedResponse([basePhoto]));
 
     const node = renderPage();
-    await vi.waitFor(() => expect(apiMock).toHaveBeenCalledWith("/public/photo-viewer/raw-token"));
+    await vi.waitFor(() => expect(apiMock).toHaveBeenCalledWith("/public/photo-viewer/raw-token?page=1"));
     await vi.waitFor(() => expect(node.textContent).toContain("Portfolio Roof"));
     expect(node.textContent).toContain("123 Main St");
     expect(node.querySelector('img[alt^="Shared photo"]')).not.toBeNull();
@@ -81,7 +89,7 @@ describe("PublicPhotoViewerPage", () => {
   });
 
   it("renders an empty shared-photo state", async () => {
-    apiMock.mockResolvedValue({ deal: baseDeal, photos: [] });
+    apiMock.mockResolvedValue(pagedResponse([]));
 
     const node = renderPage();
 
@@ -89,14 +97,13 @@ describe("PublicPhotoViewerPage", () => {
   });
 
   it("renders every shared photo in a flat grid without date grouping", async () => {
-    apiMock.mockResolvedValue({
-      deal: baseDeal,
-      photos: [
+    apiMock.mockResolvedValue(
+      pagedResponse([
         basePhoto,
-        { id: "photo-2", imageUrl: "https://example.test/photo-2.jpg" },
-        { id: "photo-3", imageUrl: "https://example.test/photo-3.jpg" },
-      ],
-    });
+        { id: "photo-2", imageUrl: "https://example.test/photo-2.jpg", fullImageUrl: "https://example.test/f2.jpg" },
+        { id: "photo-3", imageUrl: "https://example.test/photo-3.jpg", fullImageUrl: "https://example.test/f3.jpg" },
+      ]),
+    );
 
     const node = renderPage();
     await vi.waitFor(() => expect(node.querySelectorAll('img[alt^="Shared photo"]').length).toBe(3));
@@ -105,7 +112,7 @@ describe("PublicPhotoViewerPage", () => {
   });
 
   it("does not render non-image shared records as images", async () => {
-    apiMock.mockResolvedValue({ deal: baseDeal, photos: [{ id: "photo-pdf", imageUrl: null }] });
+    apiMock.mockResolvedValue(pagedResponse([{ id: "photo-pdf", imageUrl: null, fullImageUrl: null }]));
 
     const node = renderPage();
     await vi.waitFor(() => expect(node.querySelectorAll("button").length).toBeGreaterThan(0));
@@ -118,7 +125,7 @@ describe("PublicPhotoViewerPage", () => {
     const openMock = vi.spyOn(window, "open").mockImplementation(() => null);
     apiMock.mockImplementation(async (path: string) => {
       if (path.includes("/download")) return { url: "https://example.test/download.jpg" };
-      return { deal: baseDeal, photos: [basePhoto] };
+      return pagedResponse([basePhoto]);
     });
 
     const node = renderPage();

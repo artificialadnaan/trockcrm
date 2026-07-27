@@ -83,9 +83,21 @@ function sanitizeFilename(name: string): string {
   return name.replace(/[^\x20-\x7e]/g, "_").replace(/[\r\n"\\]/g, "_").slice(0, 200) || "photo";
 }
 
+// Parses a query int if one is present. Range is NOT enforced here — getPublicPhotoViewer clamps
+// page/limit itself, so this stays a pure parse and there is only one place that owns the bounds.
+function optionalQueryInt(value: unknown): number | undefined {
+  if (typeof value !== "string" || value.trim() === "") return undefined;
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
 publicPhotoViewerRoutes.get("/:token", async (req, res, next) => {
   try {
-    const result = await getPublicPhotoViewer(req.params.token, { assetBaseUrl: apiPublicPhotoBaseUrl(req) });
+    const result = await getPublicPhotoViewer(req.params.token, {
+      assetBaseUrl: apiPublicPhotoBaseUrl(req),
+      page: optionalQueryInt(req.query.page),
+      limit: optionalQueryInt(req.query.limit),
+    });
     res.json(result);
   } catch (err) {
     if (err instanceof AppError && err.statusCode === 404) {
@@ -113,10 +125,14 @@ publicPhotoViewerRoutes.get("/:token/photos/:photoId/download", async (req, res,
 });
 
 // Streams a single photo through the API: hides the presigned R2 key (which embeds the deal number)
-// and strips EXIF/GPS from JPEGs. ?download=1 forces an attachment download.
+// and strips EXIF/GPS from JPEGs. ?download=1 forces an attachment download. ?variant=thumb serves the
+// grid-sized JPEG instead of the full-resolution original.
 publicPhotoViewerRoutes.get("/:token/photos/:photoId/image", async (req, res, next) => {
   try {
-    const asset = await getPublicPhotoAsset(req.params.token, req.params.photoId);
+    const wantsThumb = req.query.variant === "thumb";
+    const asset = await getPublicPhotoAsset(req.params.token, req.params.photoId, {
+      variant: wantsThumb ? "thumb" : "full",
+    });
     // The public viewer page is served from a DIFFERENT origin than this API proxy (the frontend host /
     // trockcam.com vs the API host), so the global helmet `Cross-Origin-Resource-Policy: same-origin` makes
     // the browser block the cross-origin <img> (net::ERR_BLOCKED_BY_RESPONSE.NotSameOrigin). Relax CORP to
@@ -131,7 +147,13 @@ publicPhotoViewerRoutes.get("/:token/photos/:photoId/image", async (req, res, ne
     const disposition = req.query.download === "1" ? "attachment" : "inline";
     res.setHeader("Content-Type", asset.contentType);
     res.setHeader("Content-Disposition", `${disposition}; filename="${sanitizeFilename(asset.filename)}"`);
-    res.setHeader("Cache-Control", "private, max-age=300");
+    // Grid thumbnails get a longer TTL than the full-res original: a recipient scrolling a 3000-photo
+    // gallery revisits the same tiles constantly, and each miss is a fresh R2 fetch (plus a sharp
+    // render whenever the photo predates thumbnail_r2_key). Deliberately still `private` and NOT
+    // `immutable` — a share link can be revoked, and `immutable` tells the browser never to revalidate,
+    // so the cache window is also the window in which a revoked link keeps rendering. One hour covers a
+    // browsing session without meaningfully widening that.
+    res.setHeader("Cache-Control", wantsThumb ? "private, max-age=3600" : "private, max-age=300");
     res.setHeader("X-Content-Type-Options", "nosniff");
     if (asset.kind === "jpeg-buffer") {
       // Already a freshly re-encoded, metadata-free JPEG (sharp transcode) — send as-is. No
