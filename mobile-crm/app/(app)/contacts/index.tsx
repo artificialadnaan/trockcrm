@@ -71,8 +71,12 @@ export default function ContactsListScreen() {
    * refresh, would replace a list the user is reading — and on a phone that is their whole screen.
    * The full-screen error belongs to the case where nothing loaded at all; everything else goes inline.
    */
-  const hasRows = contacts.length > 0;
-  const backgroundError = query.error && hasRows ? query.error : null;
+  // `query.data`, NOT `contacts.length`. A search that legitimately matched ZERO contacts has loaded
+  // successfully, so a later failed refresh must stay inline exactly as it does for a non-empty list.
+  // Keying on row count treated "loaded, and empty" as "never loaded" and replaced a refreshable empty
+  // state with the blocking initial-load error — the same conflation fixed on the deals list.
+  const everLoaded = query.data !== undefined;
+  const backgroundError = query.error && everLoaded ? query.error : null;
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
@@ -101,7 +105,7 @@ export default function ContactsListScreen() {
         <View style={styles.center}>
           <ActivityIndicator color={theme.color.brandRed} />
         </View>
-      ) : query.error && !hasRows ? (
+      ) : query.error && !everLoaded ? (
         // A retry BUTTON: this branch replaces the FlatList, so there is no RefreshControl left to pull.
         <View style={styles.center}>
           <Text style={styles.emptyTitle}>{offline ? "You're offline" : "Couldn't load contacts"}</Text>
