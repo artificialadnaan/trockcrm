@@ -225,3 +225,112 @@ export type ActivityListResponse = {
   activities: Activity[];
   pagination?: { page: number; limit: number; total: number; totalPages: number };
 };
+
+/* ────────────────────────────────────────────────────────────────────────────────────────────────
+ * Contacts and companies
+ *
+ * The server exposes THREE different shapes for a single contact, and they are not interchangeable:
+ *   GET /contacts        list rows   — carry ownerUserName, isPrimary, linkedDealsCount, lastTouchAt
+ *   GET /contacts/:id    detail row  — DOES NOT carry any owner field at all
+ *   POST/PATCH responses raw row     — carry ownerId, but none of the computed/joined fields
+ * Modelling them as one type would make `owner` look available on a screen where it is always
+ * undefined. They are kept separate deliberately.
+ * ──────────────────────────────────────────────────────────────────────────────────────────────── */
+
+/** Required on create. snake_case tokens; see CONTACT_CATEGORY_LABELS for display. */
+export type ContactCategory =
+  | "client"
+  | "subcontractor"
+  | "architect"
+  | "property_manager"
+  | "regional_manager"
+  | "vendor"
+  | "consultant"
+  | "influencer"
+  | "other";
+
+type ContactBase = {
+  id: string;
+  firstName: string;
+  lastName: string;
+  email: string | null;
+  phone: string | null;
+  mobile: string | null;
+  jobTitle: string | null;
+  category: ContactCategory | string;
+  role: string | null;
+  city: string | null;
+  state: string | null;
+  companyId: string | null;
+  /** Free text, often null or stale on imported contacts — prefer linkedCompanyName. */
+  companyName: string | null;
+  isActive: boolean | null;
+};
+
+/** A row from GET /contacts. */
+export type ContactListRow = ContactBase & {
+  linkedCompanyName: string | null;
+  ownerUserName: string | null;
+  isPrimary: boolean;
+  linkedDealsCount: number;
+  lastTouchAt: string | null;
+};
+
+/** A row from GET /contacts/:id. Note the ABSENCE of owner fields — the endpoint does not select them. */
+export type ContactDetail = ContactBase & {
+  /**
+   * Soft-delete flag. The DIRECTORY filters to active contacts, but getContactById
+   * (contacts/service.ts:571-572) selects by id alone with no isActive predicate — so a contact
+   * soft-deleted or merged after this screen was cached, or reached by deep link, still comes back.
+   * The screen has to check it; the server will not.
+   */
+  isActive: boolean | null;
+  linkedCompanyName: string | null;
+  isPrimary: boolean;
+  linkedDealsCount: number;
+  lastTouchAt: string | null;
+  address: string | null;
+  zip: string | null;
+  notes: string | null;
+  lastContactedAt: string | null;
+};
+
+export type ContactListResponse = {
+  contacts: ContactListRow[];
+  pagination?: { page: number; limit: number; total: number; totalPages: number };
+};
+
+/**
+ * The deal carried by a contact association is the RAW tenant.deals row (passed through
+ * redactDealResponse), NOT a list row: contacts/association-service.ts:26-34 selects `deals` whole with
+ * no joins and no derived fields. So there is no `stageSlug`, no server `atRisk` verdict, and none of the
+ * joined company/property columns a DealListItem promises. Typing it as DealListItem invited code to read
+ * fields that are always undefined — and undefined renders as a blank, not as an error.
+ */
+export type AssociatedDeal = {
+  id: string;
+  name: string | null;
+  /**
+   * Soft-delete flag. An explicit `false` means deleted and must not be shown or opened.
+   *
+   * OPTIONAL, matching what getContactDeals actually accepts: it filters on `isActive !== false`, so an
+   * older row that predates the column — or a redaction that drops it — stays VISIBLE. Requiring it here
+   * told callers the field is always present, which is the assumption that filter exists to avoid.
+   */
+  isActive?: boolean | null;
+  stageId: string | null;
+  onHold: boolean | null;
+  workflowRoute: string | null;
+  expectedCloseDate: string | null;
+  awardedAmount: string | null;
+  bidEstimate: string | null;
+  ddEstimate: string | null;
+  bidBoardTotalSales: string | null;
+};
+
+/** GET /contacts/:id/deals returns associations, each wrapping the deal — not a bare deal list. */
+export type ContactDealAssociation = {
+  id: string;
+  role?: string | null;
+  deal: AssociatedDeal | null;
+};

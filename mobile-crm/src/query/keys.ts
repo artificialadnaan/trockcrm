@@ -33,4 +33,6 @@ export const qk = {
   stages: (scope: QueryScope) => ["stages", scope] as const,
   dealActivities: (scope: QueryScope, dealId: string) =>
     ["deal-activities", scope, dealId] as const,
+  contactDeals: (scope: QueryScope, contactId: string) =>
+    ["contact-deals", scope, contactId] as const,
 } as const;
