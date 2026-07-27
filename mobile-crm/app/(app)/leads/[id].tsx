@@ -88,37 +88,44 @@ export default function LeadDetailScreen() {
     },
     onError: async (err) => {
       setRefusal(null);
+      if (!(err instanceof ApiError)) {
+        setTransitionError("Couldn't move the lead.");
+        return;
+      }
+
       /**
-       * status 0 AND 408 are both indeterminate: the connection dropped, or our own 30s timeout fired
-       * while the server may already have committed. Retrying blind then resubmits the same target,
-       * and a same-stage update rewrites stage_entered_at — so the lead is refreshed before another
-       * attempt is possible, and the message says what is actually known.
+       * ONE rule, not a branch per status code.
+       *
+       * Every failure here falls into one of two kinds, and the distinction that matters is not which
+       * code arrived but whether the screen's copy of the lead can still be trusted:
+       *
+       *   0 / 408 — INDETERMINATE. The connection dropped, or our own 30s timeout fired while the
+       *             server may already have committed. Retrying blind resubmits the same target, and a
+       *             same-stage update rewrites stage_entered_at, resetting the stage age every SLA reads.
+       *   403     — the lead was REASSIGNED after this screen loaded. The cached assignedRepId still
+       *             makes isOwner true, so the control stays live and every retry repeats the 403.
+       *   409     — the lead went terminal, or the move skips a canonical stage. Same shape: the cached
+       *             lead looks workable and is not.
+       *
+       * All four leave a stale screen offering an action that cannot succeed, so all four refresh. This
+       * arrived as three separate reports because it was written as three separate branches and I added
+       * them one at a time; as a single predicate the next status in this family is covered already.
        */
-      if (err instanceof ApiError && (err.status === 0 || err.status === 408)) {
-        setTransitionError(
-          "The move may or may not have gone through — refreshing. Check the stage before trying again.",
-        );
+      const staleAfterFailure =
+        err.status === 0 || err.status === 403 || err.status === 408 || err.status === 409;
+
+      setTransitionError(
+        err.status === 0 || err.status === 408
+          ? "The move may or may not have gone through — refreshing. Check the stage before trying again."
+          : err.message,
+      );
+
+      if (staleAfterFailure) {
         await Promise.all([
           queryClient.invalidateQueries({ queryKey: qk.lead(scope, leadId) }),
           queryClient.invalidateQueries({ queryKey: ["leads", scope] }),
         ]);
-        return;
       }
-      /**
-       * A 409 that is NOT a requirements refusal is a stale-screen conflict — most often the lead was
-       * converted or disqualified by someone else after this screen loaded. The message alone left the
-       * cached lead looking open and the move control live, so every retry repeated the same conflict.
-       * Refreshing turns it into a screen that now shows the truth.
-       */
-      if (err instanceof ApiError && err.status === 409) {
-        setTransitionError(err.message);
-        await Promise.all([
-          queryClient.invalidateQueries({ queryKey: qk.lead(scope, leadId) }),
-          queryClient.invalidateQueries({ queryKey: ["leads", scope] }),
-        ]);
-        return;
-      }
-      setTransitionError(err instanceof ApiError ? err.message : "Couldn't move the lead.");
     },
   });
 
