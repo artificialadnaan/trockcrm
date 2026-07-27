@@ -50,7 +50,7 @@ export default function LeadDetailScreen() {
   const transition = useMutation({
     mutationFn: (targetStageId: string) =>
       leadsApi.transitionLeadStage(fetcher, leadId, { targetStageId }),
-    onSuccess: (result) => {
+    onSuccess: async (result) => {
       // A REFUSAL arrives here as a successful promise carrying ok:false — the endpoint answers 409 with
       // the reason. Treating that as a win would move the UI on from a transition that never happened.
       if (!result.ok) {
@@ -58,20 +58,42 @@ export default function LeadDetailScreen() {
         return;
       }
       setRefusal(null);
-      void Promise.all([
+      /**
+       * AWAITED, unlike the deals move screen — because this screen STAYS.
+       *
+       * There the handler navigates away immediately, so firing invalidations without waiting is right:
+       * nothing is left on screen to act on. Here the rep is still looking at the lead, and
+       * `isPending` goes false the moment this handler returns. Discarding the promise re-enabled every
+       * stage button while `lead.stageId` was still the OLD one, so a second tap on a slow refetch
+       * resubmits the SAME target — and the server accepts a same-stage update and unconditionally
+       * rewrites stage_entered_at, silently resetting the stage age every SLA and at-risk calculation
+       * is measured from. The same "make it concurrent" instinct is correct in one screen and
+       * corrupting in the other; what differs is whether anything is still on screen to press.
+       */
+      await Promise.all([
         queryClient.invalidateQueries({ queryKey: qk.lead(scope, leadId) }),
         queryClient.invalidateQueries({ queryKey: ["leads", scope] }),
       ]);
     },
-    onError: (err) => {
+    onError: async (err) => {
       setRefusal(null);
-      setTransitionError(
-        err instanceof ApiError && err.status === 0
-          ? "Lost connection before the server answered — check the stage before trying again."
-          : err instanceof ApiError
-            ? err.message
-            : "Couldn't move the lead.",
-      );
+      /**
+       * status 0 AND 408 are both indeterminate: the connection dropped, or our own 30s timeout fired
+       * while the server may already have committed. Retrying blind then resubmits the same target,
+       * and a same-stage update rewrites stage_entered_at — so the lead is refreshed before another
+       * attempt is possible, and the message says what is actually known.
+       */
+      if (err instanceof ApiError && (err.status === 0 || err.status === 408)) {
+        setTransitionError(
+          "The move may or may not have gone through — refreshing. Check the stage before trying again.",
+        );
+        await Promise.all([
+          queryClient.invalidateQueries({ queryKey: qk.lead(scope, leadId) }),
+          queryClient.invalidateQueries({ queryKey: ["leads", scope] }),
+        ]);
+        return;
+      }
+      setTransitionError(err instanceof ApiError ? err.message : "Couldn't move the lead.");
     },
   });
 
@@ -147,6 +169,10 @@ export default function LeadDetailScreen() {
    * displays and the server filters on: the date a lead ENDED if it ended, otherwise when it entered its
    * stage, otherwise when it was created.
    */
+  // The ONE legal target. See nextLeadStage: a forward skip is a hard 409, so a grid of every other
+  // stage was mostly guaranteed failures sitting beside the single move that works.
+  const nextStage = leadsApi.nextLeadStage(stagesQuery.data ?? [], lead.stageId);
+
   const detailDate =
     lead.displayDate ?? lead.convertedAt ?? lead.disqualifiedAt ?? lead.stageEnteredAt ?? lead.createdAt;
 
@@ -236,26 +262,30 @@ export default function LeadDetailScreen() {
           ) : stages.length === 0 ? (
             <Text style={styles.help}>No lead stages are configured for this office.</Text>
           ) : (
-            <View style={styles.stageGrid}>
-              {stages
-                .filter((s) => s.id !== lead.stageId)
-                .map((s) => (
-                  <Pressable
-                    key={s.id}
-                    testID={`lead-target-${s.slug}`}
-                    onPress={() => {
-                      setTransitionError(null);
-                      transition.mutate(s.id);
-                    }}
-                    disabled={transition.isPending}
-                    accessibilityRole="button"
-                    accessibilityState={{ disabled: transition.isPending }}
-                    style={[styles.stageOption, transition.isPending && styles.stageOptionDisabled]}
-                  >
-                    <Text style={styles.stageOptionText}>{s.name}</Text>
-                  </Pressable>
-                ))}
-            </View>
+            !nextStage ? (
+              /* Already at the end of the canonical pipeline — the remaining moves are conversion and
+                 disqualification, which are different endpoints, not stage transitions. */
+              <Text style={styles.help}>
+                This lead is at the last stage. Converting or disqualifying it happens on the web.
+              </Text>
+            ) : (
+              <View style={styles.stageGrid}>
+                <Pressable
+                  testID={`lead-target-${nextStage.slug}`}
+                  onPress={() => {
+                    setTransitionError(null);
+                    transition.mutate(nextStage.id);
+                  }}
+                  disabled={transition.isPending}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Move this lead to ${nextStage.name}`}
+                  accessibilityState={{ disabled: transition.isPending, busy: transition.isPending }}
+                  style={[styles.stageOption, transition.isPending && styles.stageOptionDisabled]}
+                >
+                  <Text style={styles.stageOptionText}>Move to {nextStage.name}</Text>
+                </Pressable>
+              </View>
+            )
           )}
 
           {transition.isPending ? <ActivityIndicator color={theme.color.brandRed} /> : null}

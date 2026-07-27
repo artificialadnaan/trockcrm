@@ -163,8 +163,21 @@ export async function transitionLeadStage(
       const body = err.body as LeadTransitionRefusal | undefined;
       if (body && body.ok === false) return body;
 
-      // Only when the body was absent or unparseable — the shape still has to be a refusal, because a
-      // 409 is a refusal whether or not we could read why.
+      /**
+       * NOT every 409 is a missing-requirements refusal, and treating them alike tells the rep to go
+       * and complete information that is not the problem.
+       *
+       * The transition path also 409s for LEAD_STAGE_PROGRESSION_GAP (skipping a canonical stage) and
+       * for a lead that was converted or disqualified after this screen loaded. Both are conflicts
+       * about the MOVE, not about the record being incomplete — the second in particular means the
+       * screen is stale and should say so, not send the rep hunting for a missing field.
+       *
+       * Only the requirements envelope is normalised; everything else keeps its own message.
+       */
+      if (err.code && err.code !== "MISSING_REQUIREMENTS") throw err;
+
+      // Body absent or unparseable, and no code to tell us otherwise. A 409 is still a refusal — it must
+      // never read as a success — so fall back to the requirements shape with nothing itemised.
       return {
         ok: false,
         reason: "missing_requirements",
@@ -202,6 +215,35 @@ export async function convertLead(
 /** POST/DELETE /leads/:id/watch — the watch toggle behind the "Watched" scope. */
 export async function watchLead(fetcher: Fetcher, leadId: string, watching: boolean): Promise<void> {
   await fetcher(`/leads/${leadId}/watch`, { method: watching ? "POST" : "DELETE" });
+}
+
+/**
+ * The ONE stage a lead may move into next.
+ *
+ * `assertCanonicalLeadProgression` (leads/service.ts:524-529) rejects any forward move of more than one
+ * canonical stage with a 409 LEAD_STAGE_PROGRESSION_GAP, so a picker of "every stage except the current
+ * one" offers mostly actions that cannot succeed — from New Lead, Sales Validation is a guaranteed
+ * failure sitting next to the one legal target. The web solves it the same way, with
+ * isImmediateNextStageMove (client/src/pages/leads/lead-list-page.tsx:71-73).
+ *
+ * Backward moves are omitted too. That rule does not reject them, but the canonical lead flow is
+ * forward-only and the web offers no backward control; adding one on mobile would be inventing a
+ * workflow rather than mirroring it.
+ *
+ * Ordered by displayOrder over ACTIVE stages only — a retired stage sitting mid-pipeline would
+ * otherwise become the "next" one and every move would fail against the write guard.
+ */
+export function nextLeadStage<T extends { id: string; displayOrder: number; isActivePipeline?: boolean }>(
+  stages: readonly T[],
+  currentStageId: string | null | undefined,
+): T | null {
+  if (!currentStageId) return null;
+  const ordered = [...stages]
+    .filter((stage) => stage.isActivePipeline !== false)
+    .sort((a, b) => a.displayOrder - b.displayOrder);
+  const index = ordered.findIndex((stage) => stage.id === currentStageId);
+  if (index < 0) return null;
+  return ordered[index + 1] ?? null;
 }
 
 /**

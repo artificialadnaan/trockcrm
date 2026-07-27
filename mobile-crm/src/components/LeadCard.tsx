@@ -32,7 +32,17 @@ export const LeadCard = React.memo(function LeadCard({
       testID={`lead-card-${lead.id}`}
       onPress={() => onPress(lead)}
       accessibilityRole="button"
-      accessibilityLabel={lead.name ?? "Untitled lead"}
+      /* Name AND stage AND lifecycle. An explicit label REPLACES the text assembled from the children,
+         so a name-only label made a converted lead sound exactly like a workable open one — and
+         terminal status is what decides whether the record can be changed at all, which is the first
+         thing a rep needs to know before opening it. */
+      accessibilityLabel={[
+        lead.name ?? "Untitled lead",
+        stageName,
+        converted ? "Converted" : disqualified ? "Disqualified" : null,
+      ]
+        .filter(Boolean)
+        .join(", ")}
       style={styles.card}
     >
       <View style={styles.head}>

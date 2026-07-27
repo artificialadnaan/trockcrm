@@ -209,3 +209,76 @@ describe("isLeadOpen", () => {
     expect(leads.isLeadOpen({ status: "open", isActive: false })).toBe(false);
   });
 });
+
+describe("nextLeadStage", () => {
+  const stages = [
+    { id: "s1", slug: "new_lead", displayOrder: 1, isActivePipeline: true },
+    { id: "s2", slug: "qualified", displayOrder: 2, isActivePipeline: true },
+    { id: "s3", slug: "validation", displayOrder: 3, isActivePipeline: true },
+  ];
+
+  /**
+   * A forward move of more than one canonical stage is a hard 409 (LEAD_STAGE_PROGRESSION_GAP), so a
+   * picker of "every stage but the current one" offered mostly guaranteed failures beside the single
+   * legal target. The web narrows the same way.
+   */
+  it("offers exactly the following stage", () => {
+    expect(leads.nextLeadStage(stages, "s1")?.id).toBe("s2");
+    expect(leads.nextLeadStage(stages, "s2")?.id).toBe("s3");
+  });
+
+  it("offers nothing at the end of the pipeline", () => {
+    expect(leads.nextLeadStage(stages, "s3")).toBeNull();
+  });
+
+  it("orders by displayOrder, not array order", () => {
+    const shuffled = [stages[2], stages[0], stages[1]];
+    expect(leads.nextLeadStage(shuffled, "s1")?.id).toBe("s2");
+  });
+
+  it("skips a retired stage rather than making it the next target", () => {
+    // A retired stage mid-pipeline would otherwise be offered and rejected by the write guard.
+    const withRetired = [
+      stages[0],
+      { id: "gone", slug: "legacy", displayOrder: 2, isActivePipeline: false },
+      { ...stages[1], displayOrder: 3 },
+    ];
+    expect(leads.nextLeadStage(withRetired, "s1")?.id).toBe("s2");
+  });
+
+  it("returns null for an unknown or missing current stage", () => {
+    expect(leads.nextLeadStage(stages, "nope")).toBeNull();
+    expect(leads.nextLeadStage(stages, null)).toBeNull();
+  });
+});
+
+describe("409s that are not missing-requirements", () => {
+  /**
+   * The transition path also 409s for a progression gap and for a lead that went terminal after the
+   * screen loaded. Normalising those into a requirements refusal told the rep to complete information
+   * that was not the problem, and left a stale screen looking workable.
+   */
+  it("re-throws a progression-gap conflict instead of calling it missing requirements", async () => {
+    const fetcher = throwing(
+      new ApiError("Lead stage progression must move one canonical stage at a time", 409, "LEAD_STAGE_PROGRESSION_GAP"),
+    );
+    await expect(leads.transitionLeadStage(fetcher, "l1", { targetStageId: "s3" })).rejects.toBeInstanceOf(
+      ApiError,
+    );
+  });
+
+  it("still normalizes a coded missing-requirements conflict", async () => {
+    const fetcher = throwing(new ApiError("Missing requirements", 409, "MISSING_REQUIREMENTS"));
+    const res = await leads.transitionLeadStage(fetcher, "l1", { targetStageId: "s2" });
+    expect(res.ok).toBe(false);
+  });
+
+  it("prefers the SERVER's body over the code, when it sent one", async () => {
+    // A refusal body wins even under an unfamiliar code — it is the server's own answer.
+    const body = { ok: false, reason: "missing_requirements", missing: [{ key: "a", label: "A", resolution: "inline" }] };
+    const fetcher = throwing(new ApiError("Conflict", 409, "SOMETHING_ELSE", body));
+    const res = await leads.transitionLeadStage(fetcher, "l1", { targetStageId: "s2" });
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.missing).toHaveLength(1);
+  });
+});
