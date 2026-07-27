@@ -95,6 +95,116 @@ describe("isDealEffectivelyOnHold", () => {
     expect(isDealEffectivelyOnHold({ onHold: null, expectedCloseDate: "not-a-date", now: NOW })).toBe(false);
   });
 
+  it("in ESTIMATING the horizon is the BID due date, not the close target", () => {
+    // The whole point of the 2026-07-27 rule: estimating work has to stay near-term, and its bid deadline
+    // is usually much sooner than the project close target.
+    //
+    // near close / FAR bid -> now HELD (this is the direction that removes dollars from reported pipeline)
+    expect(
+      isDealEffectivelyOnHold({
+        onHold: false,
+        expectedCloseDate: plusDays(TODAY, 30),
+        bidDueDate: plusDays(TODAY, 200),
+        isEstimating: true,
+        now: NOW,
+      })
+    ).toBe(true);
+    // FAR close / near bid -> now RELEASED (the direction Adnaan asked for: a live bid is not parked)
+    expect(
+      isDealEffectivelyOnHold({
+        onHold: false,
+        expectedCloseDate: plusDays(TODAY, 200),
+        bidDueDate: plusDays(TODAY, 30),
+        isEstimating: true,
+        now: NOW,
+      })
+    ).toBe(false);
+    // Same two rows OUTSIDE estimating keep today's close-target rule byte-for-byte.
+    expect(
+      isDealEffectivelyOnHold({
+        onHold: false,
+        expectedCloseDate: plusDays(TODAY, 30),
+        bidDueDate: plusDays(TODAY, 200),
+        now: NOW,
+      })
+    ).toBe(false);
+    expect(
+      isDealEffectivelyOnHold({
+        onHold: false,
+        expectedCloseDate: plusDays(TODAY, 200),
+        bidDueDate: plusDays(TODAY, 30),
+        now: NOW,
+      })
+    ).toBe(true);
+  });
+
+  it("falls back to the close target when an estimating deal has no bid due date", () => {
+    // The NULL policy. bid_due_date is null on ~91% of deals; "no bid due date => never park" would
+    // release far-out estimating deals ($4.39M of them on prod) back into reported pipeline. The fallback
+    // reproduces today's behaviour exactly for a null-bid row.
+    for (const bidDueDate of [null, undefined, "not-a-date"]) {
+      expect(
+        isDealEffectivelyOnHold({
+          onHold: false,
+          expectedCloseDate: plusDays(TODAY, 200),
+          bidDueDate,
+          isEstimating: true,
+          now: NOW,
+        })
+      ).toBe(true);
+      expect(
+        isDealEffectivelyOnHold({
+          onHold: false,
+          expectedCloseDate: plusDays(TODAY, 30),
+          bidDueDate,
+          isEstimating: true,
+          now: NOW,
+        })
+      ).toBe(false);
+    }
+  });
+
+  it("applies the strict 90-day boundary to the bid due date too, resolved as a UTC calendar day", () => {
+    // Mirrors the SQL's `(bid_due_date AT TIME ZONE 'UTC')::date > CT_today + INTERVAL '90 days'`:
+    // strictly greater-than, and the timestamp's UTC day (bid_due_date is stored at UTC midnight).
+    const boundary = plusDays(TODAY, 90);
+    const pastBoundary = plusDays(TODAY, 91);
+    expect(
+      isDealEffectivelyOnHold({
+        onHold: false,
+        expectedCloseDate: null,
+        bidDueDate: `${boundary}T00:00:00.000Z`,
+        isEstimating: true,
+        now: NOW,
+      })
+    ).toBe(false);
+    expect(
+      isDealEffectivelyOnHold({
+        onHold: false,
+        expectedCloseDate: null,
+        bidDueDate: new Date(`${pastBoundary}T00:00:00.000Z`),
+        isEstimating: true,
+        now: NOW,
+      })
+    ).toBe(true);
+  });
+
+  it("a TERMINAL deal is never auto-parked by a far-out BID due date either", () => {
+    // A Bid Board-owned deal can be won/lost in its mirror while its CRM stage still reads estimating.
+    // Its value is realized, so the estimating horizon must sit INSIDE the terminal exemption, not beside
+    // it — otherwise a BB-won estimating deal would lose its realized revenue.
+    expect(
+      isDealEffectivelyOnHold({
+        onHold: false,
+        expectedCloseDate: plusDays(TODAY, 30),
+        bidDueDate: plusDays(TODAY, 200),
+        isEstimating: true,
+        isTerminal: true,
+        now: NOW,
+      })
+    ).toBe(false);
+  });
+
   it("a TERMINAL (won/lost) deal is NOT auto-parked by a far-out target, but its stored flag still holds", () => {
     // early-won or stale-lost deal with a far-future forecast date -> NOT held (value realized/preserved).
     expect(isDealEffectivelyOnHold({ onHold: false, expectedCloseDate: plusDays(TODAY, 200), now: NOW, isTerminal: true })).toBe(false);

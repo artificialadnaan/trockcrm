@@ -370,3 +370,83 @@ describe("close-target at-risk suppression", () => {
     expect(result.reason).toBe("threshold_reached");
   });
 });
+
+describe("estimating-stage at-risk uses the BID due date as the hold horizon (2026-07-27)", () => {
+  // CT-today = 2026-06-01, so the 90-day horizon lands on 2026-08-30.
+  const NOW = new Date("2026-06-01T12:00:00.000Z");
+  // Well past the estimating SLA threshold, so the row would nag if it were not effectively held.
+  const staleEstimatingDeal = {
+    stageSlug: "estimating" as const,
+    workflowRoute: "normal" as const,
+    stageEnteredAt: "2026-01-01T12:00:00.000Z",
+    applyCloseTargetSuppression: false,
+  };
+
+  it("quiets a stale estimating deal whose bid is not due for another quarter", () => {
+    const result = getDealAtRiskResult(
+      { ...staleEstimatingDeal, expectedCloseDate: null, bidDueDate: "2027-01-01T00:00:00.000Z" },
+      "rep",
+      NOW
+    );
+
+    // Effectively held -> not at risk. The board prices this deal at $0; a "stale deal" alert on a deal
+    // the app itself says is parked is the contradiction this rule has to avoid.
+    expect(result.isAtRisk).toBe(false);
+    expect(result.reason).toBe("on_hold");
+  });
+
+  it("still nags a stale estimating deal whose bid is due soon, even with a far-out close target", () => {
+    const result = getDealAtRiskResult(
+      {
+        ...staleEstimatingDeal,
+        expectedCloseDate: "2026-12-01",
+        bidDueDate: "2026-06-15T00:00:00.000Z",
+      },
+      "rep",
+      NOW
+    );
+
+    // Before this rule the far-out close target auto-held it and silenced the nag; a live bid must not be.
+    expect(result.isAtRisk).toBe(true);
+    expect(result.reason).toBe("threshold_reached");
+  });
+
+  it("ignores bidDueDate outside the estimating stage", () => {
+    const result = getDealAtRiskResult(
+      {
+        stageSlug: "estimate_sent_to_client",
+        workflowRoute: "normal" as const,
+        stageEnteredAt: "2026-01-01T12:00:00.000Z",
+        applyCloseTargetSuppression: false,
+        expectedCloseDate: "2026-06-15",
+        bidDueDate: "2027-01-01T00:00:00.000Z",
+      },
+      "rep",
+      NOW
+    );
+
+    expect(result.isAtRisk).toBe(true);
+    expect(result.reason).toBe("threshold_reached");
+  });
+
+  it("does NOT let the bid due date drive the shorter close-target SLA suppression", () => {
+    // The "Move Close Date" postponement is a separate, deliberately unchanged rule: it stays keyed on
+    // expected_close_date in every stage. A near-future BID date must not silence a stage-age nag on its
+    // own — only a near-future CLOSE target does.
+    const result = getDealAtRiskResult(
+      {
+        stageSlug: "estimating",
+        workflowRoute: "normal" as const,
+        stageEnteredAt: "2026-01-01T12:00:00.000Z",
+        applyCloseTargetSuppression: true,
+        expectedCloseDate: null,
+        bidDueDate: "2026-06-20T00:00:00.000Z",
+      },
+      "rep",
+      NOW
+    );
+
+    expect(result.isAtRisk).toBe(true);
+    expect(result.reason).toBe("threshold_reached");
+  });
+});

@@ -25,6 +25,10 @@ export interface PipelineRecordCardData {
   // (90+ day) OPEN card shows $0 AND the On Hold badge, matching the kanban cards. Present at runtime when
   // a full Deal is passed structurally as this narrow type.
   expectedCloseDate?: string | null;
+  // The BID due date replaces the close target as the auto-park horizon while a card sits in the
+  // estimating stage (2026-07-27), so an estimating card with a far-out bid reads $0 + On Hold here
+  // exactly as it does on the deals board and in every server rollup.
+  bidDueDate?: string | null;
   bidBoardStageSlug?: string | null;
   stageEnteredAt: string;
   updatedAt: string;

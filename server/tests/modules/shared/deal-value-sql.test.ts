@@ -73,13 +73,17 @@ describe("deal-value-sql", () => {
     expect(normalize(aliasedEffectiveDealValueSql("d"))).toContain("d.dd_estimate");
   });
 
-  it("ALIASED open value zeros on EFFECTIVE hold: stored on_hold OR a close target past the 90-day horizon", () => {
+  it("ALIASED open value zeros on EFFECTIVE hold: stored on_hold OR a hold horizon past the 90-day mark", () => {
     // The far-future auto-park leg lives ONLY in the aliased form, which runs against OPEN-filtered report
     // populations; it reuses the shared filter predicate verbatim, so the two can never drift.
     const aliased = normalize(aliasedEffectiveDealValueSql("d")).toLowerCase();
     expect(aliased).toContain("coalesce(d.on_hold, false) = true");
-    expect(aliased).toContain("d.expected_close_date is not null");
-    expect(aliased).toContain("d.expected_close_date > (now() at time zone 'america/chicago')::date + interval '90 days'");
+    expect(aliased).toContain("d.expected_close_date");
+    expect(aliased).toContain("> (now() at time zone 'america/chicago')::date + interval '90 days'");
+    // The estimating branch rides in through the shared predicate — the value helpers need NO plumbing of
+    // their own, which is exactly why every report/company/property caller inherits it (2026-07-27).
+    expect(aliased).toContain("(d.bid_due_date at time zone 'utc')::date");
+    expect(aliased).toContain("d.stage_id in (select id from public.pipeline_stage_config");
   });
 
   it("COLUMN-form value is stored-on_hold ONLY (its consumer, property linked-value, sums MIXED open+won deals)", () => {
@@ -88,6 +92,7 @@ describe("deal-value-sql", () => {
     const column = normalize(effectiveDealValueSql(table)).toLowerCase();
     expect(column).toContain("coalesce(d.on_hold, false)");
     expect(column).not.toContain("expected_close_date");
+    expect(column).not.toContain("bid_due_date");
     expect(column).not.toContain("interval '90 days'");
   });
 
@@ -102,6 +107,7 @@ describe("deal-value-sql", () => {
     ]) {
       expect(realized).toContain("coalesce(d.on_hold, false)"); // stored-hold zeroing kept
       expect(realized).not.toContain("expected_close_date"); // but NO auto-park horizon
+      expect(realized).not.toContain("bid_due_date"); // ...on EITHER horizon date (2026-07-27)
       expect(realized).not.toContain("interval '90 days'");
     }
   });

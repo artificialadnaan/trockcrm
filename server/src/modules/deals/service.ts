@@ -169,6 +169,13 @@ export function attachAtRiskResult<T extends {
   onHoldAccumulatedSeconds?: number | bigint | null;
   onHoldAccumulatedSecondsAtStageEntry?: number | bigint | null;
   expectedCloseDate?: string | Date | null;
+  /**
+   * The BID due date — the auto-park horizon while a deal sits in estimating (2026-07-27). REQUIRED (not
+   * optional like the fields above) on purpose: forgetting it does not error at runtime, it silently
+   * reverts that row to the close-target rule, so the card would show full value while every SQL rollup
+   * shows $0. Making it mandatory turns "a row source forgot to select bid_due_date" into a compile error.
+   */
+  bidDueDate: string | Date | null;
 }>(
   deal: T,
   viewerRole: string | null | undefined,
@@ -227,6 +234,14 @@ export function attachAtRiskResult<T extends {
         // the deal-detail view shows as "Postponed". Defaults ON so the list/board/drill-down callers (which
         // omit options) match detail; a caller can still opt OUT with { applyCloseTargetSuppression: false }.
         expectedCloseDate: deal.expectedCloseDate ?? null,
+        // Estimating deals auto-park off the BID due date instead of the close target (2026-07-27), so an
+        // estimating deal the board reads as $0 is also quiet in at-risk. NOTE the deliberate asymmetry
+        // with `effectiveOnHold` above: at-risk classifies the stage from the DISPLAY (Bid Board-aware)
+        // slug because that is the stage its SLA policy is about, while the value/hold rule and the SQL
+        // both classify from the CRM stage_id. Prod has zero deals where those two disagree about
+        // estimating (the Bid Board sync mirrors the stage), but if one ever appears, the $ and the nag
+        // are answering two different questions and both answers are the intended one.
+        bidDueDate: deal.bidDueDate ?? null,
         applyCloseTargetSuppression: options?.applyCloseTargetSuppression !== false,
       },
       normalizeAtRiskViewerRole(viewerRole),
@@ -930,6 +945,7 @@ type DealStageWorkspaceRow = {
   updated_at: string;
   stage_entered_at: string;
   expected_close_date: string | null;
+  bid_due_date: string | null;
   is_bid_board_owned: boolean;
   is_change_order: boolean;
   bid_board_stage_slug: string | null;
@@ -1609,6 +1625,11 @@ function mapDealStageWorkspaceRow(
     // Hydrate the close target so attachAtRiskResult marks a far-out (90+ day) row effectively on hold —
     // matching the header/status logic and the $0 card value (Codex P2).
     expectedCloseDate: row.expected_close_date,
+    // The estimating auto-park horizon (2026-07-27). Hydrated for the SAME reason as the close target
+    // above: without it this row silently falls back to the close-target rule while the stage-page header
+    // total (which runs the shared SQL predicate) already reads the bid due date, so the header and the
+    // sum of its own cards would disagree.
+    bidDueDate: row.bid_due_date,
     isBidBoardOwned: row.is_bid_board_owned,
     isChangeOrder: row.is_change_order,
     bidBoardStageSlug: row.bid_board_stage_slug,
@@ -2342,9 +2363,22 @@ export async function getDealDetail(
   // Deal DETAIL re-derives at-risk here (overriding getDealById's), so it must opt into the
   // close-target suppression too — otherwise the detail page that hosts "Move Close Date" would still
   // read threshold_reached after a future date is set.
-  const attached = attachAtRiskResult(dealWithMetadata, atRiskViewerRole, currentStage?.slug ?? null, {
-    applyCloseTargetSuppression: true,
-  });
+  //
+  // Fed the RESOLVED bid due date, not the raw `deals.bid_due_date` snapshot (Codex P2). Since 2026-07-27
+  // that date is the auto-park horizon in the estimating stage, so it now drives `effectiveOnHold`,
+  // `effectiveValue` and `atRisk` — and this response deliberately publishes `resolvedBidDueDate` as the
+  // deal's bid due date below. Passing the snapshot here would ship ONE object whose banner shows the
+  // lead-owned date while its own $0/On-hold verdict was computed from a different one. The lead is the
+  // system of record for a converted deal's bid date (see the resolver above), so the authoritative date
+  // has to drive the money too. The remaining gap — SQL surfaces still read the denormalized column, so a
+  // lead-only edit with no write-through can make the board disagree with detail — is the documented
+  // follow-up in the PR body (prod drift today: 0 of 25 lead-backed estimating deals).
+  const attached = attachAtRiskResult(
+    { ...dealWithMetadata, bidDueDate: resolvedBidDueDate },
+    atRiskViewerRole,
+    currentStage?.slug ?? null,
+    { applyCloseTargetSuppression: true }
+  );
 
   return {
     ...dealWithMetadata,
@@ -3815,6 +3849,7 @@ export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePage
       d.updated_at,
       d.stage_entered_at,
       d.expected_close_date,
+      d.bid_due_date,
       d.is_bid_board_owned,
       d.is_change_order,
       d.bid_board_stage_slug,

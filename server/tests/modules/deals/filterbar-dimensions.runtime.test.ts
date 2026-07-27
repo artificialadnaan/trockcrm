@@ -37,6 +37,10 @@ async function matched(input: DealFilterBarInput, ctx: DealFilterContext = {}): 
 beforeAll(async () => {
   db = new PGlite();
   await db.exec(`
+    -- pipeline_stage_config lives ONLY in \`public\` in prod, and the shared effective-on-hold predicate
+    -- subselects it to detect the estimating stage (whose auto-park horizon is bid_due_date, not the close
+    -- target). PGlite's default schema IS public, so a bare CREATE TABLE reproduces prod's placement.
+    CREATE TABLE pipeline_stage_config (id text PRIMARY KEY, slug text NOT NULL);
     CREATE TABLE deals (
       id text PRIMARY KEY,
       stage_id text NOT NULL DEFAULT 'open',
@@ -47,7 +51,7 @@ beforeAll(async () => {
       project_type_id text,
       workflow_route text NOT NULL DEFAULT 'normal',
       is_active boolean NOT NULL DEFAULT true,
-      on_hold boolean NOT NULL DEFAULT false, expected_close_date date,
+      on_hold boolean NOT NULL DEFAULT false, expected_close_date date, bid_due_date timestamptz,
       won_closed_date date,
       lost_at timestamptz,
       stage_entered_at timestamptz,

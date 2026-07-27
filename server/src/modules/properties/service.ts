@@ -1,4 +1,4 @@
-import { and, asc, count, desc, eq, ilike, inArray, isNotNull, sql, type SQL } from "drizzle-orm";
+import { and, asc, count, desc, eq, getTableColumns, ilike, inArray, isNotNull, sql, type SQL } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
   companies,
@@ -715,8 +715,18 @@ export async function getPropertyDetail(tenantDb: TenantDb, propertyId: string) 
     .where(eq(leads.propertyId, propertyId))
     .orderBy(desc(leads.updatedAt), desc(leads.createdAt));
   const relatedDeals = await tenantDb
-    .select()
+    .select({
+      ...getTableColumns(deals),
+      // Stamp the CRM stage slug on every linked deal. The property detail page re-derives each deal's
+      // effective value CLIENT-side (getEffectiveDealValue over this array) and the shared resolvers are
+      // stage-aware — the estimating stage auto-parks off the bid due date (2026-07-27) and prices
+      // DD-over-bid. Without a slug those rows silently fall back to the default rules, so the property's
+      // "Active Pipeline Value" would price an estimating deal at full value while the deals board, the
+      // company rollup, and every report show it at $0.
+      stageSlug: pipelineStageConfig.slug,
+    })
     .from(deals)
+    .leftJoin(pipelineStageConfig, eq(pipelineStageConfig.id, deals.stageId))
     .where(eq(deals.propertyId, propertyId))
     .orderBy(desc(deals.updatedAt), desc(deals.createdAt));
   const linkedValueRows = await tenantDb

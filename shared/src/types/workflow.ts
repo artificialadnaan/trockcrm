@@ -320,6 +320,28 @@ export const LOST_DEAL_STAGE_SLUGS = [
 // (Adnaan, 2026-06-18). Single source of truth shared by the SQL + shared-TS + client-TS resolvers.
 export const ESTIMATING_STAGE_SLUG = "estimating" as const;
 
+// EVERY pipeline_stage_config slug that canonicalizes to the genuine normal-route 'estimating' stage —
+// the canonical slug plus its legacy aliases (today just "estimate_in_progress", which is still a live
+// psc row). DERIVED from LEGACY_DEAL_STAGE_TO_CANONICAL_STAGE, never hand-listed: a hand-list silently
+// goes stale on a stage rename, and the failure mode is a whole stage quietly dropping OUT of the
+// estimating rules while every test still passes. Guarded by a workflow.test.ts assertion that this set
+// is exactly { s : isGenuineEstimatingDealStageSlug(s, "normal") }.
+//
+// Exists because the SQL twin of the estimating rules ([[deal-reporting]] holdHorizonDateSql) classifies
+// rows by pipeline_stage_config.slug and therefore cannot call the route-aware TS predicate. Mirrors the
+// route-derivation the server already does for the DD-over-bid value chain
+// (isGenuineEstimatingDealStageSlug(stage.slug, dealRouteForStageFamily(stage.workflowFamily))): both
+// slugs below live in the standard_deal family, so deriving the route from the STAGE gives "normal" and
+// service_estimating is correctly excluded.
+export const GENUINE_ESTIMATING_DEAL_STAGE_SLUGS = [
+  ...new Set<string>([
+    ESTIMATING_STAGE_SLUG,
+    ...Object.entries(LEGACY_DEAL_STAGE_TO_CANONICAL_STAGE.normal)
+      .filter(([, canonicalSlug]) => canonicalSlug === ESTIMATING_STAGE_SLUG)
+      .map(([legacySlug]) => legacySlug),
+  ]),
+] as readonly string[];
+
 const GENUINE_WON_DEAL_STAGE_SLUG_SET = new Set<string>(WON_DEAL_STAGE_SLUGS);
 const GENUINE_LOST_DEAL_STAGE_SLUG_SET = new Set<string>(LOST_DEAL_STAGE_SLUGS);
 const TRANSITIONAL_WON_MAPPED_DEAL_STAGE_SLUG_SET = new Set<string>(

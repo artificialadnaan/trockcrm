@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  CANONICAL_DEAL_STAGE_SLUGS,
+  GENUINE_ESTIMATING_DEAL_STAGE_SLUGS,
   GENUINE_LOST_DEAL_STAGE_ALIAS_SLUGS,
+  LEGACY_DEAL_STAGE_TO_CANONICAL_STAGE,
   GENUINE_WON_DEAL_STAGE_ALIAS_SLUGS,
   LOST_DEAL_STAGE_SLUGS,
   TRANSITIONAL_WON_MAPPED_DEAL_STAGE_SLUGS,
@@ -106,5 +109,29 @@ describe("workflow stage canonicalization", () => {
     expect(isGenuineLostDealStageSlug("estimating")).toBe(false);
     expect(isGenuineLostDealStageSlug(null)).toBe(false);
     expect(isGenuineLostDealStageSlug(undefined)).toBe(false);
+  });
+  it("derives the genuine-estimating slug set from the canonicalizer, so a rename cannot drop a stage", () => {
+    // GENUINE_ESTIMATING_DEAL_STAGE_SLUGS is the ONLY way SQL can classify the estimating stage (it
+    // matches pipeline_stage_config.slug and cannot call the route-aware predicate). Pin it to the
+    // canonicalizer over EVERY known deal slug: if a rename or a new alias makes the two disagree, the SQL
+    // rule silently stops applying to a whole stage while every value/at-risk test still passes.
+    const everyKnownDealSlug = [
+      ...new Set<string>([
+        ...CANONICAL_DEAL_STAGE_SLUGS,
+        ...Object.keys(LEGACY_DEAL_STAGE_TO_CANONICAL_STAGE.normal),
+        ...Object.keys(LEGACY_DEAL_STAGE_TO_CANONICAL_STAGE.service),
+      ]),
+    ];
+    const derivedFromCanonicalizer = everyKnownDealSlug
+      .filter((slug) => isGenuineEstimatingDealStageSlug(slug, "normal"))
+      .sort();
+
+    expect([...GENUINE_ESTIMATING_DEAL_STAGE_SLUGS].sort()).toEqual(derivedFromCanonicalizer);
+    expect(GENUINE_ESTIMATING_DEAL_STAGE_SLUGS).toContain("estimating");
+    expect(GENUINE_ESTIMATING_DEAL_STAGE_SLUGS).toContain("estimate_in_progress");
+    // service_estimating is a SERVICE-route stage and is deliberately out of scope for both the
+    // DD-over-bid value chain and the bid-due-date hold horizon.
+    expect(GENUINE_ESTIMATING_DEAL_STAGE_SLUGS).not.toContain("service_estimating");
+    expect(GENUINE_ESTIMATING_DEAL_STAGE_SLUGS).not.toContain("estimate_sent_to_client");
   });
 });
