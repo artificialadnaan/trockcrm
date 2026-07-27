@@ -1,5 +1,4 @@
 import {
-  closeTargetFarOutSqlPredicate,
   getDealAtRiskResult,
   isReportableDeal,
   reportableDealSqlPredicate,
@@ -8,16 +7,17 @@ import {
   WON_DEAL_STAGE_SLUGS,
 } from "@trock-crm/shared/types";
 import { pool } from "../db.js";
+import {
+  workerCurrentDealValueSql,
+  workerEffectiveCurrentDealValueSql,
+} from "./deal-value-sql.js";
 
 export const STALE_ACCOUNT_THRESHOLD_DAYS = 30;
 const REPORTABLE_DEAL_SQL = reportableDealSqlPredicate("d");
-const currentDealValueSql = `COALESCE(
-  CASE WHEN d.bid_board_total_sales > 0 THEN d.bid_board_total_sales END,
-  CASE WHEN d.bid_estimate > 0 THEN d.bid_estimate END,
-  CASE WHEN d.dd_estimate > 0 THEN d.dd_estimate END,
-  CASE WHEN d.awarded_amount > 0 THEN d.awarded_amount END,
-  0
-)`;
+// The RAW and auto-parked value expressions come from the shared worker leaf module (deal-value-sql.ts),
+// which weekly-digest also uses and the cross-surface reconciliation test executes directly — so the two
+// jobs and the test can no longer hold three hand-copied versions of the same rule.
+const currentDealValueSql = workerCurrentDealValueSql("d");
 const awardedFirstDealValueSql = `COALESCE(
   CASE WHEN d.awarded_amount > 0 THEN d.awarded_amount END,
   CASE WHEN d.bid_board_total_sales > 0 THEN d.bid_board_total_sales END,
@@ -30,13 +30,11 @@ const lostStageSqlList = LOST_DEAL_STAGE_SLUGS.map((slug) => `'${slug}'`).join("
 const terminalStageSqlList = [...WON_DEAL_STAGE_SLUGS, ...LOST_DEAL_STAGE_SLUGS]
   .map((slug) => `'${slug}'`)
   .join(", ");
-// A Bid Board-owned deal can be terminal in bid_board_stage_slug while its CRM stage_id still joins to a
-// non-terminal stage — its realized value is preserved, never auto-parked (mirrors the server exemption).
-const bidBoardTerminalSql = `COALESCE(d.bid_board_stage_slug, '') IN (${terminalStageSqlList})`;
 // CURRENT-period pipeline_value: zero a far-out (90+ day) auto-held OPEN deal to $0 (deals-list parity),
-// EXCEPT a Bid Board-mirrored terminal deal. on_hold is already excluded via REPORTABLE_DEAL_SQL, so only the
-// far-out leg is added (Codex P2). closed_value/awardedFirst stays raw — it sums realized won deals.
-const effectiveCurrentDealValueSql = `CASE WHEN NOT (${bidBoardTerminalSql}) AND (${closeTargetFarOutSqlPredicate("d")}) THEN 0 ELSE ${currentDealValueSql} END`;
+// EXCEPT a Bid Board-mirrored terminal deal, whose realized value is preserved. on_hold is already excluded
+// via REPORTABLE_DEAL_SQL, so only the far-out leg is added (Codex P2). closed_value/awardedFirst stays raw —
+// it sums realized won deals.
+const effectiveCurrentDealValueSql = workerEffectiveCurrentDealValueSql("d");
 // HISTORICAL snapshots (last_month/quarter/year) reflect what was open AS OF that period, so they must NOT
 // re-zero by today's 90-day horizon (a deal won early with a stale far-future target, or the window moving
 // past 90 days, would otherwise mutate a closed historical period). $1 is the period_kind bind (Codex P2).

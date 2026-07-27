@@ -41,7 +41,7 @@ beforeAll(async () => {
       id uuid PRIMARY KEY, sales_source_user_id uuid, name text, deal_number text, project_number text, assigned_rep_id uuid, company_id uuid,
       region_id uuid, project_type_id uuid, stage_id uuid NOT NULL,
       is_active boolean NOT NULL DEFAULT true, is_test_data boolean NOT NULL DEFAULT false,
-      on_hold boolean NOT NULL DEFAULT false, won_closed_date date, expected_close_date date, bid_due_date timestamptz,
+      on_hold boolean NOT NULL DEFAULT false, won_closed_date date, expected_close_date date, bid_due_date timestamptz, bid_board_stage_slug text,
       stage_entered_at timestamptz, project_type text, win_probability int,
       awarded_amount numeric, bid_board_total_sales numeric, bid_estimate numeric, dd_estimate numeric
     );
@@ -188,7 +188,7 @@ describe("region Won CARD ↔ DRAWER reconcile — soft-deleted (is_active=false
         on_hold boolean NOT NULL DEFAULT false, is_active boolean NOT NULL DEFAULT true,
         is_test_data boolean NOT NULL DEFAULT false, win_probability int,
         won_closed_date date, lost_at timestamptz, actual_close_date date, stage_entered_at timestamptz,
-        expected_close_date date, bid_due_date timestamptz, created_at timestamptz NOT NULL DEFAULT now(),
+        expected_close_date date, bid_due_date timestamptz, bid_board_stage_slug text, created_at timestamptz NOT NULL DEFAULT now(),
         awarded_amount numeric, bid_estimate numeric, dd_estimate numeric, bid_board_total_sales numeric
       );
       INSERT INTO users (id, display_name) VALUES ('${RP}','Rep One');

@@ -38,11 +38,17 @@ export function reportableDealSqlPredicate(identifierPath?: string): string {
 }
 
 /**
- * "Effectively on hold" = the stored `on_hold` flag OR a close target far enough out (more than
- * CLOSE_TARGET_HOLD_HORIZON_DAYS CT-days) that the deal is treated as parked. This is what the deals
- * "On Hold" filter pill matches; the horizon constant is shared with the at-risk module so the SQL day
- * boundary and the TS day-math can never drift. Pure string builder (no drizzle dep), consumed via
- * `sql.raw` like reportableDealSqlPredicate.
+ * "Effectively on hold" = the stored `on_hold` flag OR a hold horizon date far enough out (more than
+ * CLOSE_TARGET_HOLD_HORIZON_DAYS CT-days) that the deal is treated as parked. The canonical two-leg
+ * definition, and the shape the emitted-SQL tests pin; the horizon constant is shared with the at-risk
+ * module so the SQL day boundary and the TS day-math can never drift. Pure string builder (no drizzle dep),
+ * consumed via `sql.raw` like reportableDealSqlPredicate.
+ *
+ * NOTE this bare form carries NO terminal exemption, so it is only correct for a population that has no
+ * terminal rows OR no `bid_board_stage_slug` column to test. Every server SQL consumer instead composes
+ * `aliasedEffectiveOnHoldConditionSql`, which gates the far-out leg behind the CRM stage-id terminal set AND
+ * the Bid Board mirror — a realized deal must never be auto-parked by a stale horizon date. Reach for that
+ * one unless you know your population is open-only.
  */
 export function effectiveOnHoldSqlPredicate(identifierPath?: string): string {
   if (identifierPath && !SQL_IDENTIFIER_PATH.test(identifierPath)) {

@@ -30,7 +30,7 @@ beforeAll(async () => {
     CREATE TABLE deals (
       id uuid PRIMARY KEY, sales_source_user_id uuid, deal_number text, name text NOT NULL, stage_id uuid NOT NULL, assigned_rep_id uuid,
       is_test_data boolean NOT NULL DEFAULT false, on_hold boolean NOT NULL DEFAULT false, is_active boolean NOT NULL DEFAULT true,
-      won_closed_date date, expected_close_date date, bid_due_date timestamptz, stage_entered_at timestamptz,
+      won_closed_date date, expected_close_date date, bid_due_date timestamptz, bid_board_stage_slug text, stage_entered_at timestamptz,
       dd_estimate numeric, bid_estimate numeric, awarded_amount numeric, bid_board_total_sales numeric
     );
     CREATE TABLE deal_stage_history (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), deal_id uuid NOT NULL, to_stage_id uuid NOT NULL, created_at timestamptz NOT NULL);

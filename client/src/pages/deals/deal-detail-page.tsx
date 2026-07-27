@@ -279,11 +279,12 @@ function getDealDetailSlaResult(
       onHoldAccumulatedSecondsAtStageEntry: deal.onHoldAccumulatedSecondsAtStageEntry,
       // A today-or-future close target postpones the at-risk verdict (mirrors the server path).
       expectedCloseDate: deal.expectedCloseDate,
-      // In the estimating stage the 90-day auto-park horizon is the BID due date (2026-07-27), so this
-      // fallback path reaches the same verdict the server stamps on `deal.atRisk` above. NOTE this is the
-      // deal-detail RESOLVED bid due date (getDealDetail resolves lead-first for a lead-backed deal) while
-      // the SQL surfaces read deals.bid_due_date directly — prod currently has zero drift between the two
-      // on estimating deals, but a lead edit that is not written through would show up here first.
+      // In the estimating stage the 90-day auto-park horizon is the BID due date (2026-07-27). This is the
+      // deal-detail RESOLVED bid due date (getDealDetail resolves it lead-first for a lead-backed deal),
+      // which is the SAME value getDealDetail feeds into the server-stamped `deal.atRisk` taken above — so
+      // this fallback and the server verdict can never disagree about the horizon. The SQL surfaces still
+      // read deals.bid_due_date directly; prod has zero drift between the two on estimating deals today, and
+      // closing it needs a lead→deal write-through (its own PR, see the known limitation in #966).
       bidDueDate: deal.bidDueDate,
     },
     normalizeUserRole(userRole),

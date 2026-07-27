@@ -2363,9 +2363,22 @@ export async function getDealDetail(
   // Deal DETAIL re-derives at-risk here (overriding getDealById's), so it must opt into the
   // close-target suppression too — otherwise the detail page that hosts "Move Close Date" would still
   // read threshold_reached after a future date is set.
-  const attached = attachAtRiskResult(dealWithMetadata, atRiskViewerRole, currentStage?.slug ?? null, {
-    applyCloseTargetSuppression: true,
-  });
+  //
+  // Fed the RESOLVED bid due date, not the raw `deals.bid_due_date` snapshot (Codex P2). Since 2026-07-27
+  // that date is the auto-park horizon in the estimating stage, so it now drives `effectiveOnHold`,
+  // `effectiveValue` and `atRisk` — and this response deliberately publishes `resolvedBidDueDate` as the
+  // deal's bid due date below. Passing the snapshot here would ship ONE object whose banner shows the
+  // lead-owned date while its own $0/On-hold verdict was computed from a different one. The lead is the
+  // system of record for a converted deal's bid date (see the resolver above), so the authoritative date
+  // has to drive the money too. The remaining gap — SQL surfaces still read the denormalized column, so a
+  // lead-only edit with no write-through can make the board disagree with detail — is the documented
+  // follow-up in the PR body (prod drift today: 0 of 25 lead-backed estimating deals).
+  const attached = attachAtRiskResult(
+    { ...dealWithMetadata, bidDueDate: resolvedBidDueDate },
+    atRiskViewerRole,
+    currentStage?.slug ?? null,
+    { applyCloseTargetSuppression: true }
+  );
 
   return {
     ...dealWithMetadata,

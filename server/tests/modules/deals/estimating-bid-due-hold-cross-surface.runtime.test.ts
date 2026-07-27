@@ -2,11 +2,7 @@ import { PGlite } from "@electric-sql/pglite";
 import { PgDialect } from "drizzle-orm/pg-core";
 import { sql, type SQL } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import {
-  closeTargetFarOutSqlPredicate,
-  getEffectiveDealValue,
-  isDealValueEffectivelyOnHold,
-} from "@trock-crm/shared/types";
+import { getEffectiveDealValue, isDealValueEffectivelyOnHold } from "@trock-crm/shared/types";
 import {
   aliasedDealBestEstimateWithForecastSql,
   aliasedEffectiveDealValueSql,
@@ -19,6 +15,10 @@ import {
 import { aliasedStageAwareEffectiveDealValueSql } from "../../../src/modules/deals/deal-filter-predicates.js";
 import { buildDealOnHoldCondition } from "../../../src/modules/shared/mine-visibility.js";
 import { dealValueSqlForBasis } from "../../../src/modules/reports/foundations.js";
+// The worker jobs are outside Drizzle and build raw SQL strings; this is the leaf module (no db/pool
+// import) that weekly-digest and rep-performance-rollup both compose, so the reconciliation below runs the
+// real production expression rather than a copy of it.
+import { workerEffectiveCurrentDealValueSql } from "../../../../worker/src/jobs/deal-value-sql.js";
 
 /**
  * CROSS-SURFACE reconciliation for the estimating bid-due-date hold rule (Adnaan, 2026-07-27).
@@ -196,13 +196,11 @@ describe("estimating bid-due hold — every OPEN-value surface returns the same 
 
   it("the worker's raw-SQL digest/rollup value expression agrees with all of them", async () => {
     // weekly-digest + rep-performance-rollup build their value CASE as a raw STRING (they are outside
-    // Drizzle), so they can only inherit the rule through closeTargetFarOutSqlPredicate. Reproduce that
-    // composition verbatim rather than importing it — the worker consts are module-private.
-    const rawValue = `COALESCE(CASE WHEN d.bid_board_total_sales > 0 THEN d.bid_board_total_sales END, 0)`;
-    const bidBoardTerminal = `COALESCE(d.bid_board_stage_slug, '') IN ('won','lost')`;
-    const workerValue = `CASE WHEN NOT (${bidBoardTerminal}) AND (${closeTargetFarOutSqlPredicate(
-      "d"
-    )}) THEN 0 ELSE ${rawValue} END`;
+    // Drizzle), so they can only inherit the rule through closeTargetFarOutSqlPredicate. This executes the
+    // PRODUCTION builder both jobs use — not a hand-copied paste of it (CodeRabbit): a reproduction would
+    // keep passing while the real worker SQL drifted, which is the exact failure this file exists to catch.
+    // worker/src/jobs/deal-value-sql.ts is a leaf module (no pool/db import), so importing it here is safe.
+    const workerValue = workerEffectiveCurrentDealValueSql("d");
     const { rows } = await db.query<{ id: string; v: string }>(
       `SELECT d.id, (${workerValue})::text AS v FROM deals d ORDER BY d.id`
     );
@@ -277,6 +275,26 @@ describe("estimating bid-due hold — the deliberate NON-changes", () => {
       )
     );
     expect(Number(terminalAware.get(BB_WON_ESTIMATING_ID))).toBe(BB_WON_ESTIMATING_VALUE);
+  });
+
+  it("the OPEN dashboard/report value family preserves a Bid Board-terminal deal too", async () => {
+    // These surfaces filter their population CRM-open (psc.slug NOT IN terminal), which leaves exactly one
+    // terminal exposure: a deal already won/lost in the Bid Board MIRROR whose CRM stage is still open. The
+    // deals board, the On Hold pill, the client resolver and the worker digest all exempted that row from
+    // the far-out auto-park; aliasedEffectiveDealValueSql was the last family that did not, so a
+    // Director-Scorecard-style query zeroed its realized value off a far-out horizon date (Codex P2). Both
+    // date columns are far out on this row, so it fails under the old rule AND the new estimating one.
+    for (const [name, expression] of [
+      ["dashboard + reports open value", aliasedEffectiveDealValueSql("d")],
+      ["reports foundations 'open' basis", dealValueSqlForBasis("d", "open")],
+      [
+        "deals board estimating branch",
+        aliasedStageAwareEffectiveDealValueSql("d", ["won"], ["estimating"], ["lost"]),
+      ],
+    ] as Array<[string, SQL]>) {
+      const values = await evaluate(expression);
+      expect(Number(values.get(BB_WON_ESTIMATING_ID)), name).toBe(BB_WON_ESTIMATING_VALUE);
+    }
   });
 
   it("the COLUMN-form value helper still zeroes on stored on_hold ONLY", () => {

@@ -243,7 +243,11 @@ export function buildAliasedDealWatchedCondition(
 // the shared predicate measures from `bid_due_date` instead (2026-07-27). TERMINAL-AWARE: a won/lost deal is realized/preserved, never auto-parked by a stale forecast date
 // (only its stored flag holds it), so the caller passes `terminalStageIds` (won ∪ lost) to exempt those
 // rows — matching the value-zeroing helpers and the TS isDealEffectivelyOnHold twin, so the pill, the $
-// math, and the card $0 can never disagree. Pass `[]` (default) for the open-only predicate. Unlike Watched
+// math, and the card $0 can never disagree. TWO independent terminal signals gate that leg and only ONE of
+// them is caller-supplied: `terminalStageIds` covers the CRM `stage_id`, while a terminal
+// `bid_board_stage_slug` is ALWAYS excluded inside aliasedEffectiveOnHoldConditionSql. So `[]` (the default)
+// does not mean "no terminal exemption" — it means "this population has no CRM-terminal rows to exempt", and
+// a Bid Board-mirrored terminal deal stays exempt either way. Unlike Watched
 // there is NO optional table, so NO capability gate is needed
 // (`on_hold`/`expected_close_date`/`bid_due_date`/`stage_id` are base deal columns). `identifierPath` qualifies the columns to the query's deals relation ("deals") or
 // its alias ("d"); the shared builder regex-validates it.
