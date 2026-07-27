@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from "react";
 import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
+import { useGoBack } from "../../../src/lib/go-back";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError } from "../../../src/api/client";
@@ -17,6 +18,9 @@ export default function LeadDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const leadId = typeof id === "string" ? id : "";
   const router = useRouter();
+  // Back needs a destination: this screen is reachable by deep link and by restored navigation state,
+  // where goBack() is a no-op and the control would render, be tappable, and do nothing.
+  const goBack = useGoBack("/(app)/leads");
   const { fetcher } = useAuth();
   const scope = useQueryScope();
   const queryClient = useQueryClient();
@@ -101,7 +105,7 @@ export default function LeadDetailScreen() {
               <Text style={styles.retryText}>Try again</Text>
             </Pressable>
           ) : null}
-          <Pressable onPress={() => router.back()} accessibilityRole="button" style={styles.retryBtn}>
+          <Pressable onPress={() => goBack()} accessibilityRole="button" style={styles.retryBtn}>
             <Text style={styles.retryText}>Go back</Text>
           </Pressable>
         </View>
@@ -116,7 +120,7 @@ export default function LeadDetailScreen() {
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
       <ScrollView contentContainerStyle={styles.body}>
-        <Pressable onPress={() => router.back()} accessibilityRole="button" hitSlop={8}>
+        <Pressable onPress={() => goBack()} accessibilityRole="button" hitSlop={8}>
           <Text style={styles.back}>‹ Leads</Text>
         </Pressable>
 
