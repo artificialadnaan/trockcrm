@@ -202,8 +202,13 @@ export default function ContactDetailScreen() {
             ))
           )}
 
-          {/* A background failure with rows already on screen: never replace them, just say so. */}
-          {associations.length > 0 && dealsQuery.error ? (
+          {/* A background failure once the linked deals have loaded: never replace what is on screen,
+              just say so. Gated on `data !== undefined` rather than on row count — and this is the case
+              that matters most, because reps see only their OWN deals here, so an empty result is the
+              NORMAL one. Requiring rows meant the most common state reported a failed refresh nowhere:
+              no notice, no retry, just "No deals you can see are linked to this contact" standing there
+              looking authoritative while the refresh behind it had failed. */}
+          {dealsQuery.data !== undefined && dealsQuery.error ? (
             <Pressable
               testID="retry-contact-deals-inline"
               onPress={() => void dealsQuery.refetch()}
