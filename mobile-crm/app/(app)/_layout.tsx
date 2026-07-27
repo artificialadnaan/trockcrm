@@ -1,9 +1,7 @@
 import React from "react";
 import { ActivityIndicator, View } from "react-native";
-import { Redirect, Tabs } from "expo-router";
-import { Ionicons } from "@expo/vector-icons";
+import { Redirect, Stack } from "expo-router";
 import { useAuth } from "../../src/auth/AuthContext";
-import { canAccessSurface } from "../../src/auth/surfaces";
 import { formStyles } from "../../src/theme/formStyles";
 import { theme } from "../../src/theme/theme";
 
@@ -45,51 +43,21 @@ export default function AppLayout() {
   if (session.user.requiresOnboarding) return <Redirect href="/onboarding-required" />;
 
   /**
-   * TABS, not a Stack. The app shipped as a single Stack with a landing screen that linked onward, so
-   * every surface was two taps deep and there was no way to tell where you were. A tab bar is what turns
-   * a set of screens into an app — and it is the thing a rep uses one-handed on a roof.
+   * A STACK that CONTAINS the tab bar, not a bare tab navigator.
    *
-   * Tabs are filtered by the SAME policy that guards the route groups, so a role never sees a tab that
-   * would bounce it back to the dashboard. Enforcement stays in the group layouts; this is the courtesy
-   * half, exactly as the web sidebar is arranged.
+   * The tab bar is one screen inside this stack ((tabs)); detail screens are siblings pushed OVER it.
+   * That ordering is the whole point: when a rep opens a linked deal from a contact, the deal is pushed
+   * onto the CURRENT stack, so Back returns to the contact they came from.
+   *
+   * With the tab navigator at the root instead, pushing a deal switched to the Deals tab and Back went
+   * to the deals list — losing the context the rep was actually working in. That was a regression this
+   * PR introduced by adding tabs, and it is structural: no amount of care at the call site fixes it,
+   * because the destination's tab ownership decides where Back goes.
    */
   return (
-    <Tabs
-      screenOptions={{
-        headerShown: false,
-        tabBarActiveTintColor: theme.color.brandRed,
-        tabBarInactiveTintColor: theme.color.textMuted,
-        tabBarStyle: {
-          backgroundColor: theme.color.surface,
-          borderTopColor: theme.color.borderSubtle,
-        },
-        tabBarLabelStyle: { fontFamily: theme.font.semibold, fontSize: 11 },
-      }}
-    >
-      <Tabs.Screen
-        name="dashboard"
-        options={{
-          title: "Home",
-          tabBarIcon: ({ color, size }) => <Ionicons name="home-outline" color={color} size={size} />,
-        }}
-      />
-      <Tabs.Screen
-        name="deals"
-        options={{
-          title: "Deals",
-          href: canAccessSurface(session.user.role, "deals") ? undefined : null,
-          tabBarIcon: ({ color, size }) => <Ionicons name="briefcase-outline" color={color} size={size} />,
-        }}
-      />
-      <Tabs.Screen
-        name="contacts"
-        options={{
-          title: "Contacts",
-          href: canAccessSurface(session.user.role, "contacts") ? undefined : null,
-          tabBarIcon: ({ color, size }) => <Ionicons name="people-outline" color={color} size={size} />,
-        }}
-      />
-    </Tabs>
+    <Stack screenOptions={{ headerShown: false }}>
+      <Stack.Screen name="(tabs)" />
+    </Stack>
   );
 }
 

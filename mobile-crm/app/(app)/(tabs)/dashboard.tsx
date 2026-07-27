@@ -4,14 +4,14 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { useQuery } from "@tanstack/react-query";
-import * as dealsApi from "../../src/api/endpoints/deals";
-import { useAuth } from "../../src/auth/AuthContext";
-import { useOffices } from "../../src/auth/useOffices";
-import { useQueryScope } from "../../src/auth/useOfficeId";
-import { canAccessSurface } from "../../src/auth/surfaces";
-import { ScreenHeader } from "../../src/components/ScreenHeader";
-import { qk } from "../../src/query/keys";
-import { theme } from "../../src/theme/theme";
+import * as dealsApi from "../../../src/api/endpoints/deals";
+import { useAuth } from "../../../src/auth/AuthContext";
+import { useOffices } from "../../../src/auth/useOffices";
+import { useQueryScope } from "../../../src/auth/useOfficeId";
+import { canAccessSurface } from "../../../src/auth/surfaces";
+import { ScreenHeader } from "../../../src/components/ScreenHeader";
+import { qk } from "../../../src/query/keys";
+import { theme } from "../../../src/theme/theme";
 
 /**
  * Home.
@@ -34,14 +34,15 @@ export default function DashboardScreen() {
     // limit 1: this is a COUNT, and the totals ride in the pagination envelope. Pulling a full page to
     // count it would be paying for fifty rows nobody renders.
     queryFn: () => dealsApi.listDeals(fetcher, { scope: "mine", limit: 1 }),
-    enabled: Boolean(session),
+    // Not for a role that cannot reach deals at all — construction sees no deals tab, so firing and
+    // caching this request only to discard it is pure waste on a metered connection.
+    enabled: Boolean(session) && canAccessSurface(session?.user.role, "deals"),
   });
 
   if (!session) return null;
   const { user } = session;
 
   const total = mine.data?.pagination.total;
-  const atRiskHint = mine.data?.deals.filter((d) => d.atRisk?.isAtRisk).length ?? 0;
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
@@ -67,16 +68,20 @@ export default function DashboardScreen() {
             accessibilityLabel="Open my deals"
             style={styles.statCard}
           >
-            <Text style={styles.statLabel}>Assigned to you</Text>
+            {/* "Your deals", not "Assigned to you": the server's `mine` scope is broader than assignment —
+                it also covers deals you created, are subscribed to, or have activity on. Labelling it
+                as assignment would make the number disagree with the rep's own idea of their book. */}
+            <Text style={styles.statLabel}>Your deals</Text>
             <Text style={styles.statValue}>{total === undefined ? "—" : total}</Text>
+            {/* No at-risk count here. It was derived from this query's rows — a limit:1 page — so it
+                could only ever be 0 or 1 regardless of the real number. A wrong count is worse than
+                none, and counting properly would mean pulling the whole set just to measure it. */}
             <Text style={styles.statHint}>
               {total === undefined
                 ? "Pull to refresh"
                 : total === 0
-                  ? "Nothing assigned yet"
-                  : atRiskHint > 0
-                    ? `${atRiskHint} flagged at risk on this page`
-                    : "Tap to open your pipeline"}
+                  ? "Nothing assigned to you yet"
+                  : "Tap to open your pipeline"}
             </Text>
           </Pressable>
         ) : null}

@@ -12,19 +12,19 @@ import {
 import { useRouter } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
-import { ApiError } from "../../../src/api/client";
-import * as dealsApi from "../../../src/api/endpoints/deals";
-import type { DealListItem, DealScope } from "../../../src/api/types";
-import { useAuth } from "../../../src/auth/AuthContext";
-import { useQueryScope } from "../../../src/auth/useOfficeId";
-import { useOffices } from "../../../src/auth/useOffices";
-import { ScreenHeader } from "../../../src/components/ScreenHeader";
-import { DealCard } from "../../../src/components/DealCard";
-import { RetryNotice } from "../../../src/components/RetryNotice";
-import { resolveListState } from "../../../src/list-state";
-import { buildStageIndex, stageLabelFor } from "../../../src/stage-label";
-import { qk } from "../../../src/query/keys";
-import { theme } from "../../../src/theme/theme";
+import { ApiError } from "../../../../src/api/client";
+import * as dealsApi from "../../../../src/api/endpoints/deals";
+import type { DealListItem, DealScope } from "../../../../src/api/types";
+import { useAuth } from "../../../../src/auth/AuthContext";
+import { useQueryScope } from "../../../../src/auth/useOfficeId";
+import { useOffices } from "../../../../src/auth/useOffices";
+import { ScreenHeader } from "../../../../src/components/ScreenHeader";
+import { DealCard } from "../../../../src/components/DealCard";
+import { RetryNotice } from "../../../../src/components/RetryNotice";
+import { resolveListState } from "../../../../src/list-state";
+import { buildStageIndex, stageLabelFor } from "../../../../src/stage-label";
+import { qk } from "../../../../src/query/keys";
+import { theme } from "../../../../src/theme/theme";
 
 const SCOPES: Array<{ key: DealScope; label: string }> = [
   { key: "mine", label: "Mine" },

@@ -12,19 +12,19 @@ import {
 import { useRouter } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useInfiniteQuery } from "@tanstack/react-query";
-import { ApiError } from "../../../src/api/client";
-import * as contactsApi from "../../../src/api/endpoints/contacts";
-import type { ContactListRow } from "../../../src/api/types";
-import { useAuth } from "../../../src/auth/AuthContext";
-import { useQueryScope } from "../../../src/auth/useOfficeId";
-import { useOffices } from "../../../src/auth/useOffices";
-import { ScreenHeader } from "../../../src/components/ScreenHeader";
-import { RetryNotice } from "../../../src/components/RetryNotice";
-import { telUrl } from "../../../src/contact-links";
-import { resolveListState } from "../../../src/list-state";
-import { openLink } from "../../../src/lib/open-link";
-import { qk } from "../../../src/query/keys";
-import { theme } from "../../../src/theme/theme";
+import { ApiError } from "../../../../src/api/client";
+import * as contactsApi from "../../../../src/api/endpoints/contacts";
+import type { ContactListRow } from "../../../../src/api/types";
+import { useAuth } from "../../../../src/auth/AuthContext";
+import { useQueryScope } from "../../../../src/auth/useOfficeId";
+import { useOffices } from "../../../../src/auth/useOffices";
+import { ScreenHeader } from "../../../../src/components/ScreenHeader";
+import { RetryNotice } from "../../../../src/components/RetryNotice";
+import { telUrl } from "../../../../src/contact-links";
+import { resolveListState } from "../../../../src/list-state";
+import { openLink } from "../../../../src/lib/open-link";
+import { qk } from "../../../../src/query/keys";
+import { theme } from "../../../../src/theme/theme";
 
 const PAGE_SIZE = 50;
 

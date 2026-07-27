@@ -30,7 +30,9 @@ export function BrandLogo({
 }) {
   const onDarkSurface = tint === "light";
   return (
-    <View style={styles.row}>
+    // ONE accessibility element. Left as two, a screen reader announces the mark and then the word
+    // "CRM" as separate stops — noise on every screen, since this sits in the header of all of them.
+    <View style={styles.row} accessible accessibilityRole="image" accessibilityLabel="T-Rock CRM">
       <ExpoImage
         source={onDarkSurface ? require("../../assets/mark.png") : require("../../assets/mark-onlight.png")}
         style={{ width: size, height: size }}
@@ -38,7 +40,8 @@ export function BrandLogo({
         // A bundled asset, but still keyed: recycling a mark across a tint change would show the wrong
         // variant for a frame.
         recyclingKey={onDarkSurface ? "mark-dark" : "mark-light"}
-        accessibilityLabel="T-Rock"
+        accessibilityElementsHidden
+        importantForAccessibility="no-hide-descendants"
       />
       {showWordmark ? (
         <Text

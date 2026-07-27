@@ -27,7 +27,11 @@ export function ScreenHeader({
     <View style={styles.wrap}>
       <View style={styles.brandRow}>
         <BrandLogo size={22} />
-        {context ? <Text style={styles.context}>{context}</Text> : null}
+        {context ? (
+          <Text style={styles.context} numberOfLines={1}>
+            {context}
+          </Text>
+        ) : null}
       </View>
       <View style={styles.titleRow}>
         <Text style={styles.title}>{title}</Text>
@@ -47,7 +51,14 @@ const styles = StyleSheet.create({
     borderBottomColor: theme.color.borderSubtle,
   },
   brandRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
-  context: { fontFamily: theme.font.semibold, fontSize: 12, color: theme.color.textMuted },
+  context: {
+    flexShrink: 1,
+    marginLeft: theme.space.md,
+    textAlign: "right",
+    fontFamily: theme.font.semibold,
+    fontSize: 12,
+    color: theme.color.textMuted,
+  },
   titleRow: {
     flexDirection: "row",
     alignItems: "baseline",
