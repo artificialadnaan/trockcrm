@@ -343,8 +343,13 @@ export default function DealDetailScreen() {
             </Pressable>
           ) : null}
 
-          {/* A background failure with rows already on screen: never replace them, just say so. */}
-          {activities.length > 0 && activitiesQuery.error ? (
+          {/* A background failure once the timeline has loaded: never replace what is on screen, just
+              say so. Gated on `data !== undefined` rather than on row count — the blocking branch above
+              already keys on that, and requiring rows here meant a deal with NO activity reported its
+              failed refresh nowhere at all: no notice, no retry, just the unchanged "Nothing logged
+              yet". Silently wrong in exactly the state the empty message claims to be authoritative
+              about. */}
+          {activitiesQuery.data !== undefined && activitiesQuery.error ? (
             <Pressable
               testID="retry-activities-inline"
               onPress={() =>
