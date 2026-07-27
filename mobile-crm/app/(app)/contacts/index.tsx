@@ -17,7 +17,9 @@ import * as contactsApi from "../../../src/api/endpoints/contacts";
 import type { ContactListRow } from "../../../src/api/types";
 import { useAuth } from "../../../src/auth/AuthContext";
 import { useQueryScope } from "../../../src/auth/useOfficeId";
+import { RetryNotice } from "../../../src/components/RetryNotice";
 import { telUrl } from "../../../src/contact-links";
+import { resolveListState } from "../../../src/list-state";
 import { openLink } from "../../../src/lib/open-link";
 import { qk } from "../../../src/query/keys";
 import { theme } from "../../../src/theme/theme";
@@ -75,8 +77,16 @@ export default function ContactsListScreen() {
   // successfully, so a later failed refresh must stay inline exactly as it does for a non-empty list.
   // Keying on row count treated "loaded, and empty" as "never loaded" and replaced a refreshable empty
   // state with the blocking initial-load error — the same conflation fixed on the deals list.
-  const everLoaded = query.data !== undefined;
-  const backgroundError = query.error && everLoaded ? query.error : null;
+  // Same tested decision the deals list uses — see resolveListState.
+  const listState = resolveListState({
+    isLoading: query.isLoading,
+    data: query.data,
+    error: query.error,
+    rowCount: contacts.length,
+    isFetchNextPageError: query.isFetchNextPageError,
+  });
+  const refreshError = listState.kind === "loaded" && listState.refreshFailed;
+  const pageError = listState.kind === "loaded" && listState.pageFailed;
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
@@ -101,11 +111,11 @@ export default function ContactsListScreen() {
         <Text style={styles.searchHint}>Type at least {MIN_SEARCH_LENGTH} characters to search.</Text>
       ) : null}
 
-      {query.isLoading ? (
+      {listState.kind === "loading" ? (
         <View style={styles.center}>
           <ActivityIndicator color={theme.color.brandRed} />
         </View>
-      ) : query.error && !everLoaded ? (
+      ) : listState.kind === "blocking-error" ? (
         // A retry BUTTON: this branch replaces the FlatList, so there is no RefreshControl left to pull.
         <View style={styles.center}>
           <Text style={styles.emptyTitle}>{offline ? "You're offline" : "Couldn't load contacts"}</Text>
@@ -149,26 +159,27 @@ export default function ContactsListScreen() {
           onEndReached={() => {
             if (query.hasNextPage && !query.isFetchingNextPage) void query.fetchNextPage();
           }}
+          ListHeaderComponent={
+            refreshError ? (
+              <RetryNotice
+                testID="contacts-refresh-retry"
+                message="Couldn't refresh — showing saved contacts. Tap to retry."
+                onRetry={() => void query.refetch()}
+                placement="top"
+              />
+            ) : null
+          }
           ListFooterComponent={
             query.isFetchingNextPage ? (
               <ActivityIndicator color={theme.color.brandRed} style={styles.footer} />
-            ) : backgroundError ? (
-              // Retry the operation that actually failed: another page, or the refresh. Calling refetch()
-              // for a failed page would silently reload page 1 and leave the gap the user hit.
-              <Pressable
+            ) : pageError ? (
+              // fetchNextPage, not refetch: reloading page 1 would silently leave the gap the user hit.
+              <RetryNotice
                 testID="contacts-page-retry"
-                onPress={() =>
-                  void (query.isFetchNextPageError ? query.fetchNextPage() : query.refetch())
-                }
-                accessibilityRole="button"
-                style={styles.footerRetry}
-              >
-                <Text style={styles.retryText}>
-                  {query.isFetchNextPageError
-                    ? "Couldn't load more — tap to retry"
-                    : "Couldn't refresh — tap to retry"}
-                </Text>
-              </Pressable>
+                message="Couldn't load more — tap to retry"
+                onRetry={() => void query.fetchNextPage()}
+                placement="bottom"
+              />
             ) : null
           }
           refreshControl={
@@ -249,7 +260,6 @@ const styles = StyleSheet.create({
     color: theme.color.textMuted,
   },
   footer: { paddingVertical: theme.space.lg },
-  footerRetry: { paddingVertical: theme.space.lg, alignItems: "center" },
   retryBtn: {
     marginTop: theme.space.sm,
     borderWidth: 1,

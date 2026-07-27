@@ -11,8 +11,12 @@ function recording(result: unknown = {}) {
 }
 
 /**
- * The contacts/companies routes use FOUR different envelope conventions, and a wrong guess renders an
- * empty screen rather than throwing. These pin each one against the server's actual res.json(...).
+ * The contacts routes use THREE different envelope conventions, and a wrong guess renders an empty
+ * screen rather than throwing. These pin each one against the server's actual res.json(...).
+ *
+ * It said FOUR while the companies read path was here; that path was removed as unreachable, and a
+ * count that no longer matches the file would have future changes validated against a convention that
+ * does not exist.
  */
 describe("response envelopes", () => {
   it("GET /contacts returns the service result directly, not wrapped again", async () => {

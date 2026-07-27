@@ -303,8 +303,14 @@ export type ContactListResponse = {
 export type AssociatedDeal = {
   id: string;
   name: string | null;
-  /** Soft-delete flag. A false here means the deal is deleted and must not be shown or opened. */
-  isActive: boolean | null;
+  /**
+   * Soft-delete flag. An explicit `false` means deleted and must not be shown or opened.
+   *
+   * OPTIONAL, matching what getContactDeals actually accepts: it filters on `isActive !== false`, so an
+   * older row that predates the column — or a redaction that drops it — stays VISIBLE. Requiring it here
+   * told callers the field is always present, which is the assumption that filter exists to avoid.
+   */
+  isActive?: boolean | null;
   stageId: string | null;
   onHold: boolean | null;
   workflowRoute: string | null;
