@@ -187,6 +187,22 @@ export function attachAtRiskResult<T extends {
   // and leaves bidBoardStageSlug untouched rather than pre-merging the two.
   const valueSource = { ...deal, stageSlug: actualStageSlug };
 
+  /**
+   * ONE timestamp for both verdicts.
+   *
+   * Both helpers take `now` with a `new Date()` default (shared/src/types/deal-hold.ts:145,167), so
+   * calling them bare gives each its own clock reading. The far-future auto-park resolves "today"
+   * against the America/Chicago CALENDAR DAY, so two readings that straddle CT midnight can land on
+   * different days — and a deal whose close target sits on the 90-day boundary is then held by one
+   * verdict and not the other.
+   *
+   * The result is not a wrong number, it is two numbers that contradict each other: `effectiveOnHold:
+   * true` beside the full amount, or `false` beside zero. That is the exact "money next to an On Hold
+   * badge" failure these server-side verdicts exist to prevent, reintroduced one layer down. The window
+   * is narrow; the cost of closing it is one variable.
+   */
+  const verdictNow = new Date();
+
   return {
     ...deal,
     // The DISPLAY stage: a Bid Board-owned deal can advance (or close) in Bid Board while its CRM
@@ -207,8 +223,8 @@ export function attachAtRiskResult<T extends {
     // cards take the bid-first order, and made terminal cards with far-future close dates look held and
     // worth zero, because the won/lost exemption never fired. Both would then disagree with the
     // stage-aware pipeline totals computed from the same rows.
-    effectiveOnHold: isDealValueEffectivelyOnHold(valueSource as never),
-    effectiveValue: getEffectiveDealValue(valueSource as never),
+    effectiveOnHold: isDealValueEffectivelyOnHold(valueSource as never, verdictNow),
+    effectiveValue: getEffectiveDealValue(valueSource as never, verdictNow),
     atRisk: getDealAtRiskResult(
       {
         stageSlug,

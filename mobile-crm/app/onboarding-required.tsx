@@ -42,15 +42,27 @@ export default function OnboardingRequiredScreen() {
   }
 
   /**
-   * Only https. `cleanupUrl` arrives from the server (cleanupAppUrl()) and is handed straight to the
-   * OS — so a misconfigured or malformed value could open an arbitrary scheme rather than a web page.
-   * Nothing suggests it is attacker-controlled today, but validating the one thing this button is for
-   * costs a line, and "the server sent it" is not a property the OS checks.
+   * https only — plus http on loopback in development.
+   *
+   * `cleanupUrl` arrives from the server (cleanupAppUrl()) and is handed straight to the OS, so a
+   * misconfigured or malformed value could open an arbitrary scheme rather than a web page. Nothing
+   * suggests it is attacker-controlled today, but validating the one thing this button is for costs a
+   * line, and "the server sent it" is not a property the OS checks.
+   *
+   * The loopback exception exists because the server's development default is `http://localhost:5175`
+   * (auth/service.ts:60-65). A flat https-only rule nulled that out and removed the button entirely, so
+   * the one flow this screen exists for could not be exercised locally at all — a rule strict enough to
+   * block its own development setup. Gated on __DEV__ and on the host actually being loopback, so a
+   * release build still refuses plain http, and a dev build still refuses http to anywhere else.
    */
   function safeCleanupUrl(raw: string | null | undefined): string | null {
     if (!raw) return null;
     try {
-      return new URL(raw).protocol === "https:" ? raw : null;
+      const url = new URL(raw);
+      if (url.protocol === "https:") return raw;
+      const isLoopback =
+        url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "::1";
+      return __DEV__ && url.protocol === "http:" && isLoopback ? raw : null;
     } catch {
       return null;
     }

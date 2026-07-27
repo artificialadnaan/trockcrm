@@ -152,11 +152,25 @@ export async function apiFetch<T = unknown>(path: string, opts: ApiFetchOptions 
   if (res.status === 204) return undefined as T;
   try {
     return (await res.json()) as T;
-  } catch {
-    // A 2xx with an empty or non-JSON body — a proxy's HTML error page, a truncated response, a route
-    // that forgot to serialise. Raw, this throws a SyntaxError, which is NOT an ApiError: every screen
-    // tests `err instanceof ApiError` to decide what to show, so it fell through to the generic
-    // "Something went wrong" and lost both the status and the offline/server distinction.
-    throw new ApiError(`Malformed response from the server (${res.status})`, res.status);
+  } catch (e) {
+    // Reading the body can fail for two unrelated reasons, and collapsing them loses the one thing
+    // callers actually branch on.
+    //
+    // A SyntaxError means the body ARRIVED and is not JSON — a proxy's HTML error page, a route that
+    // forgot to serialise, an empty 200. That is a real server response, so it keeps its real status.
+    // Raw, it would escape as a SyntaxError rather than an ApiError, and every screen tests
+    // `err instanceof ApiError` to decide what to show, so it fell through to a generic
+    // "Something went wrong" with no status at all.
+    if (e instanceof SyntaxError) {
+      throw new ApiError(`Malformed response from the server (${res.status})`, res.status);
+    }
+
+    // Anything else is the CONNECTION dropping after the headers arrived but before the body finished.
+    // Nothing is wrong with the server or its response — the network went away mid-read. Reporting that
+    // as ApiError(status = 200) told every screen the request had succeeded and the payload was
+    // malformed, so the offline checks (`status === 0`) missed it and a rep on a site with no signal was
+    // shown a server-fault message for a connectivity problem.
+    if (controller.signal.aborted) throw new ApiError("Request cancelled", 0);
+    throw new ApiError(e instanceof Error ? e.message : "Network request failed", 0);
   }
 }

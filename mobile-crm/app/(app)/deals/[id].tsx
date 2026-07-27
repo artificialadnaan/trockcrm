@@ -303,6 +303,21 @@ export default function DealDetailScreen() {
         </Section>
 
         <Section title="Activity">
+          {/* A failed background REFRESH belongs at the top of the section, beside the heading — not
+              under the timeline. The two failures are read in different places: a refresh fails while
+              the user is looking at the newest entries at the top, so a notice below fifty rows is
+              off-screen and the stale data reads as freshly loaded. A failed LOAD-MORE is the opposite
+              — the user is at the bottom, which is where that one stays. Same reasoning RetryNotice's
+              `placement` encodes; both were bottom, so only one of them was right. */}
+          {activityState.kind === "loaded" && activityState.refreshFailed ? (
+            <RetryNotice
+              testID="retry-activities-inline"
+              message="Couldn't refresh activity — tap to retry"
+              onRetry={() => void activitiesQuery.refetch()}
+              placement="top"
+            />
+          ) : null}
+
           {activityState.kind === "loading" ? (
             <ActivityIndicator color={theme.color.brandRed} />
           ) : activityState.kind === "blocking-error" ? (
@@ -357,24 +372,16 @@ export default function DealDetailScreen() {
             </Pressable>
           ) : null}
 
-          {/* A background failure once the timeline has loaded: never replace what is on screen, just
-              say so. Gated on `data !== undefined` rather than on row count — the blocking branch above
-              already keys on that, and requiring rows here meant a deal with NO activity reported its
-              failed refresh nowhere at all: no notice, no retry, just the unchanged "Nothing logged
-              yet". Silently wrong in exactly the state the empty message claims to be authoritative
-              about. */}
+          {/* A failed load-more, at the bottom where the user asked for it. Gated on `data !== undefined`
+              rather than on row count — the blocking branch above already keys on that, and requiring
+              rows here meant a deal with NO activity reported its failed refresh nowhere at all: no
+              notice, no retry, just the unchanged "Nothing logged yet". Silently wrong in exactly the
+              state the empty message claims to be authoritative about. */}
           {activityState.kind === "loaded" && activityState.pageFailed ? (
             <RetryNotice
               testID="retry-activities-page"
               message="Couldn't load older activity — tap to retry"
               onRetry={() => void activitiesQuery.fetchNextPage()}
-              placement="bottom"
-            />
-          ) : activityState.kind === "loaded" && activityState.refreshFailed ? (
-            <RetryNotice
-              testID="retry-activities-inline"
-              message="Couldn't refresh activity — tap to retry"
-              onRetry={() => void activitiesQuery.refetch()}
               placement="bottom"
             />
           ) : null}
