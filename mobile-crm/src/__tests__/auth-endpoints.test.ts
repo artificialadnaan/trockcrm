@@ -43,4 +43,24 @@ describe("auth endpoints", () => {
     expect(calls[0].path).toBe("/auth/accessible-offices");
     expect(calls[0].opts.token).toBe("jwt-abc");
   });
+
+  /**
+   * The question "where can I go?" must not be answered from "where am I now?".
+   *
+   * With the active office attached, the server anchors the list on THAT office plus explicit grants,
+   * and a rep sitting in a granted secondary office loses their own home office from the result — the
+   * switcher then hides itself and strands them. Explicit null, not merely absent: the shared fetcher
+   * injects the active office by default, so only an explicit override suppresses it.
+   */
+  it("asks for the office list from the HOME office, not the active one", () => {
+    const { fetcher, calls } = recordingFetcher([]);
+    void accessibleOffices(fetcher, "jwt-abc");
+    expect(calls[0].opts.officeId).toBeNull();
+  });
+
+  it("scopes /auth/me to the home office for the same reason", () => {
+    const { fetcher, calls } = recordingFetcher({ id: "u1" });
+    void me(fetcher, "jwt-abc");
+    expect(calls[0].opts.officeId).toBeNull();
+  });
 });

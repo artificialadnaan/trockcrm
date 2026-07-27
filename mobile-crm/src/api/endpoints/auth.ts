@@ -51,8 +51,23 @@ export async function me(fetcher: Fetcher, token: string): Promise<CrmUser> {
  * /auth/me instead, which answers the grant question AND returns that office's effective role in one
  * request — and, unlike this endpoint, is exempt from the forced-password-change gate. This stays for
  * the office switcher, which needs the list itself rather than a yes/no on one office.
+ *
+ * `officeId: null` is LOAD-BEARING, and the reason is self-referential: this is the one request whose
+ * answer must not be scoped by where the user currently is. The route derives its argument from
+ * `activeOfficeId ?? officeId` (auth/routes.ts:313), and for a non-admin the result is that office UNION
+ * their user_office_access grants (auth/service.ts:817-829). A home office normally has no grant row —
+ * the SQL's `o.id = $1 OR o.id IN (...)` only makes sense if it doesn't — so sending the active office
+ * while a rep sits in a granted SECONDARY office drops their own home office from the list. The switcher
+ * then sees one office, hides itself, and strands them there with no way back.
+ *
+ * Omitting the header makes the middleware fall back to the home office (middleware/auth.ts:70), which
+ * is the only anchor that yields the user's true reachable set. The web has the same escape hatch for
+ * the same class of problem (`suppressOfficeHeader`, client/src/lib/api.ts:37-44).
  */
 export async function accessibleOffices(fetcher: Fetcher, token: string): Promise<AccessibleOffice[]> {
-  const res = await fetcher<{ offices: AccessibleOffice[] }>("/auth/accessible-offices", { token });
+  const res = await fetcher<{ offices: AccessibleOffice[] }>("/auth/accessible-offices", {
+    token,
+    officeId: null,
+  });
   return res.offices ?? [];
 }
