@@ -1087,13 +1087,30 @@ describe("syncHubRoutes", () => {
     expect(response.status).toBe(200);
     expect(response.body).toEqual({ status: "skipped_detached", deal_id: "deal-detached" });
 
-    // Nothing was mirrored…
-    expect(queries.some((entry) => entry.sql.includes("UPDATE office_dallas.deals"))).toBe(false);
+    // Nothing was MIRRORED: no stage history, and the only UPDATE is the identity backfill below.
     expect(queries.some((entry) => entry.sql.includes("INSERT INTO office_dallas.deal_stage_history"))).toBe(false);
     // …and, crucially, no duplicate deal was inserted.
     expect(queries.some((entry) => entry.sql.includes("INSERT INTO office_dallas.deals"))).toBe(false);
-    expect(queries.some((entry) => entry.sql === "ROLLBACK")).toBe(true);
-    expect(queries.some((entry) => entry.sql === "COMMIT")).toBe(false);
+
+    // The ONE write it does make: record the stable SyncHub identity so the skip stays idempotent.
+    // This deal was found through the OPTIONAL procore_bid_id fallback with a NULL synchub_bid_board_id
+    // (prod's state for every deal today); without recording it, the next push for the same project —
+    // which may legally omit procore_bid_id — would miss both lookups and INSERT a twin.
+    const dealUpdates = queries.filter((entry) => entry.sql.includes("UPDATE office_dallas.deals"));
+    expect(dealUpdates).toHaveLength(1);
+    expect(dealUpdates[0].sql).toContain("synchub_bid_board_id = $2");
+    expect(dealUpdates[0].sql).toContain("synchub_bid_board_id IS NULL");
+    // Identity ONLY — not a mirror write.
+    expect(dealUpdates[0].sql).not.toContain("stage_id");
+    expect(dealUpdates[0].sql).not.toContain("is_bid_board_owned");
+    expect(dealUpdates[0].sql).not.toContain("bid_board_stage_slug");
+    expect(dealUpdates[0].sql).not.toContain("awarded_amount");
+    // …and the detach marker is untouched, so the deal stays out of sync.
+    expect(dealUpdates[0].sql).not.toContain("bid_board_detached_at");
+
+    // Committed, not rolled back — the identity backfill has to survive.
+    expect(queries.some((entry) => entry.sql === "COMMIT")).toBe(true);
+    expect(queries.some((entry) => entry.sql === "ROLLBACK")).toBe(false);
   });
 
   it("still mirrors an ATTACHED deal (the detach guard is not a blanket off-switch)", async () => {

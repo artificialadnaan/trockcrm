@@ -1095,6 +1095,7 @@ internalRfpRoutes.post(
                   bid_board_detached_at = NULL,
                   bid_board_detached_by = NULL,
                   bid_board_detach_reason = NULL,
+                  bid_board_detached_was_linked = NULL,
                   updated_at = NOW()
             WHERE id = $3
               -- a re-confirmed denial is terminal; never let a (delayed) success callback override it

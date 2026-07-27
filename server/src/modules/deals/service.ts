@@ -1640,6 +1640,7 @@ function mapDealStageWorkspaceRow(
 export function buildBidBoardOwnershipState(
   deal: Pick<typeof deals.$inferSelect, "isBidBoardOwned" | "workflowRoute"> & {
     bidBoardDetachedAt?: Date | string | null;
+    bidBoardDetachedWasLinked?: boolean | null;
     procoreBidId?: number | string | null;
     synchubBidBoardId?: string | null;
   }
@@ -1655,12 +1656,19 @@ export function buildBidBoardOwnershipState(
   // The action stamps bid_board_detached_at on ANY deal it moves back, including a CRM-only one that
   // never touched the Bid Board — so the marker alone cannot drive the standing "go delete the project"
   // reminder, or a deal with no project sends the operator hunting for one, contradicting the dialog
-  // (which correctly omits the warning) and the success toast. It has to be derived from what the detach
-  // deliberately PRESERVES: the procore / SyncHub identity columns are exactly the operator's route back
-  // to the project, so their presence is the evidence a project exists to delete. The mirror columns are
-  // useless here — the detach nulls bid_board_linked_at and bid_board_project_number by design.
+  // (which correctly omits the warning) and the success toast.
+  //
+  // Read from the PERSISTED answer the detach recorded, never recomputed. Half of what makes a deal
+  // "linked" (is_bid_board_owned, bid_board_project_number, bid_board_linked_at, read_only_synced_at)
+  // is cleared by the detach itself, and the preserved procore/synchub identity is not a stand-in:
+  // 315 of Dallas's 1,294 active deals are Bid Board linked while carrying neither, so deriving it
+  // afterwards would silently drop the reminder on the majority of real cases. The identity fallback
+  // below only covers a row detached before the column existed (none in practice — the column ships
+  // with the feature), and errs toward showing the reminder rather than hiding it.
   const detachedFromLinkedProject =
-    isDetached && (deal.procoreBidId != null || deal.synchubBidBoardId != null);
+    isDetached &&
+    (deal.bidBoardDetachedWasLinked ??
+      (deal.procoreBidId != null || deal.synchubBidBoardId != null));
 
   return {
     isOwned,

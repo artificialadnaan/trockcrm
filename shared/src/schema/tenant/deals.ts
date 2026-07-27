@@ -175,6 +175,13 @@ export const deals = pgTable(
     bidBoardDetachedAt: timestamp("bid_board_detached_at", { withTimezone: true }),
     bidBoardDetachedBy: uuid("bid_board_detached_by"),
     bidBoardDetachReason: text("bid_board_detach_reason"),
+    // Did the detach sever a REAL Bid Board project? PERSISTED at detach time rather than derived
+    // afterwards: the answer counts is_bid_board_owned / bid_board_project_number /
+    // bid_board_linked_at / read_only_synced_at, and the detach CLEARS all four, so nothing on the row
+    // afterwards can reconstruct it. The preserved procore/synchub identity is not a substitute — most
+    // Bid Board linked deals in prod carry neither. Drives the standing "delete this project from the
+    // Bid Board" reminder, which must not appear on a CRM-only deal and must not vanish on a real one.
+    bidBoardDetachedWasLinked: boolean("bid_board_detached_was_linked"),
     // Assigned PM is not present in the Bid Board export; role polling can populate this after portfolio handoff.
     bidBoardAssignedPm: text("bid_board_assigned_pm"),
     intendedProjectNumber: text("intended_project_number"),

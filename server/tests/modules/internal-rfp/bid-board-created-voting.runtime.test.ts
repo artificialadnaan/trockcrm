@@ -50,7 +50,8 @@ async function seed() {
       rfp_approval_request_id integer, rfp_approval_requested_at timestamptz, rfp_approval_request_event_id uuid, workflow_route text NOT NULL DEFAULT 'normal', stage_entered_at timestamptz,
       on_hold boolean NOT NULL DEFAULT false, on_hold_started_at timestamptz, on_hold_accumulated_seconds bigint DEFAULT 0,
       on_hold_accumulated_seconds_at_stage_entry bigint DEFAULT 0, is_active boolean NOT NULL DEFAULT true,
-      bid_board_detached_at timestamptz, bid_board_detached_by uuid, bid_board_detach_reason text, updated_at timestamptz
+      bid_board_detached_at timestamptz, bid_board_detached_by uuid, bid_board_detach_reason text,
+      bid_board_detached_was_linked boolean, updated_at timestamptz
     );
     CREATE TABLE office_test.deal_stage_history (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), deal_id uuid, from_stage_id uuid, to_stage_id uuid, changed_by uuid,
@@ -110,7 +111,8 @@ describe("POST /bid-board-created (voting path)", () => {
       `UPDATE office_test.deals
           SET bid_board_detached_at = now() - interval '2 days',
               bid_board_detached_by = $2,
-              bid_board_detach_reason = 'Scope was not ready'
+              bid_board_detach_reason = 'Scope was not ready',
+              bid_board_detached_was_linked = true
         WHERE id = $1`,
       [DEAL, REP],
     );
@@ -126,11 +128,15 @@ describe("POST /bid-board-created (voting path)", () => {
     expect(res.status).toBe(200);
 
     const rows = (await holder.pg.query(
-      `SELECT bid_board_detached_at, bid_board_detached_by, bid_board_detach_reason, is_bid_board_owned, procore_bid_id
+      `SELECT bid_board_detached_at, bid_board_detached_by, bid_board_detach_reason,
+              bid_board_detached_was_linked, is_bid_board_owned, procore_bid_id
          FROM office_test.deals WHERE id=$1`, [DEAL])).rows as any[];
     expect(rows[0].bid_board_detached_at).toBeNull();
     expect(rows[0].bid_board_detached_by).toBeNull();
     expect(rows[0].bid_board_detach_reason).toBeNull();
+    // The persisted linkage answer is part of the detach marker set, so re-attachment clears it too —
+    // otherwise a re-linked deal would keep claiming it had been severed from a project.
+    expect(rows[0].bid_board_detached_was_linked).toBeNull();
     expect(rows[0].is_bid_board_owned).toBe(true);
     expect(String(rows[0].procore_bid_id)).toBe("88999");
   });

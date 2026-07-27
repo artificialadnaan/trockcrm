@@ -427,7 +427,24 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
         [existingDealId]
       );
       if (detachedResult.rows[0]?.bid_board_detached_at != null) {
-        await client.query("ROLLBACK");
+        // BACKFILL THE STABLE IDENTITY BEFORE SKIPPING — this is not a mirror write, it is what keeps
+        // the skip idempotent. A legacy deal reached here through the OPTIONAL procore_bid_id fallback
+        // while its synchub_bid_board_id is still NULL (that is every deal in prod today: 0 of 1,294
+        // active Dallas deals carry one). Rolling back without recording the stable id means the NEXT
+        // push for the same project — which may legitimately omit procore_bid_id — misses BOTH lookups,
+        // falls through to the INSERT branch, and creates exactly the bid-board-owned twin this guard
+        // exists to prevent. Scoped to the identity column alone: no stage, no mirror, no financial
+        // field, and `IS NULL` so an established identity is never overwritten (a conflicting one has
+        // already 409'd above). Safe under the advisory lock on this bid_board_id, so no concurrent
+        // webhook can claim it between the lookup and here.
+        await client.query(
+          `UPDATE ${schemaName}.deals
+              SET synchub_bid_board_id = $2
+            WHERE id = $1
+              AND synchub_bid_board_id IS NULL`,
+          [existingDealId, syncHubBidBoardId]
+        );
+        await client.query("COMMIT");
         console.warn(
           `[SyncHub] Skipped Bid Board push for deal ${existingDealId}: moved back to Opportunity and detached from Bid Board sync. Delete this project from the Bid Board.`
         );

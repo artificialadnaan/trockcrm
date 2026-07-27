@@ -448,10 +448,20 @@ describe("returnDealToOpportunity — Won deals void commission", () => {
       spy.mockRestore();
     }
 
-    const lockedRead = sql.find(
+    const lockedRead = sql.findIndex(
       (text) => /deal_signed_commissions/i.test(text) && /for update/i.test(text)
     );
-    expect(lockedRead, "the commit path must read the commission rows FOR UPDATE").toBeDefined();
+    expect(lockedRead, "the commit path must read the commission rows FOR UPDATE").toBeGreaterThan(-1);
+
+    // The deal-scoped advisory lock closes the one writer row locks cannot: the settings recompute's
+    // sales-source mint, which decides from an unlocked read and then INSERTs. Its ORDER is the
+    // load-bearing part — it must come before EVERY row lock, because the recompute holds these locks
+    // across a whole rep's deals. A waiter that already held row locks could close a dependency cycle
+    // and deadlock; a waiter holding nothing simply queues.
+    const advisoryLock = sql.findIndex((text) => /pg_advisory_xact_lock/i.test(text));
+    expect(advisoryLock, "the commit path must take the deal commission advisory lock").toBeGreaterThan(-1);
+    const firstRowLock = sql.findIndex((text) => /for update/i.test(text));
+    expect(advisoryLock).toBeLessThan(firstRowLock);
   });
 
   it("aborts the ENTIRE move when a commission row appears after the acknowledgement, destroying nothing", async () => {
@@ -840,6 +850,9 @@ describe("re-attaching a detached deal", () => {
     expect(row.bid_board_detached_at).toBeNull();
     expect(row.bid_board_detached_by).toBeNull();
     expect(row.bid_board_detach_reason).toBeNull();
+    // The persisted linkage answer is part of the marker set: leaving it behind would make a re-linked
+    // deal keep claiming it had been severed from a Bid Board project.
+    expect(row.bid_board_detached_was_linked).toBeNull();
     expect(row.is_bid_board_owned).toBe(true);
 
     // The re-attach is as auditable as the detach. The move-back writes an audit_log row naming
@@ -1009,12 +1022,16 @@ describe("previewReturnToOpportunity", () => {
 // bid_board_linked_at and bid_board_project_number. It is derived server-side from what the detach
 // deliberately PRESERVES.
 describe("buildBidBoardOwnershipState — was there a project behind the detach?", () => {
-  it("reports detachedFromLinkedProject on a detached deal that kept its Procore identity", () => {
+  it("reports detachedFromLinkedProject from the PERSISTED answer, with no identity columns at all", () => {
+    // The majority shape in prod: 315 of Dallas's 1,294 active deals are Bid Board linked while
+    // carrying neither a procore nor a SyncHub id. Deriving the answer after the fact would drop the
+    // reminder on every one of them, which is why the detach records it.
     const state = buildBidBoardOwnershipState({
       isBidBoardOwned: false,
       workflowRoute: "normal",
       bidBoardDetachedAt: new Date("2026-07-20T12:00:00Z"),
-      procoreBidId: 887766,
+      bidBoardDetachedWasLinked: true,
+      procoreBidId: null,
       synchubBidBoardId: null,
     });
     expect(state.detachedFromLinkedProject).toBe(true);
@@ -1026,11 +1043,26 @@ describe("buildBidBoardOwnershipState — was there a project behind the detach?
       isBidBoardOwned: false,
       workflowRoute: "normal",
       bidBoardDetachedAt: new Date("2026-07-20T12:00:00Z"),
+      bidBoardDetachedWasLinked: false,
       procoreBidId: null,
       synchubBidBoardId: null,
     });
     expect(state.detachedFromLinkedProject).toBe(false);
     expect(state.message).not.toContain("Delete the project from the Bid Board");
+  });
+
+  it("falls back to the preserved identity only when the persisted answer is absent", () => {
+    // A row detached before the column existed. None in practice (the column ships with the feature),
+    // and the fallback errs toward SHOWING the reminder rather than hiding a real project.
+    const state = buildBidBoardOwnershipState({
+      isBidBoardOwned: false,
+      workflowRoute: "normal",
+      bidBoardDetachedAt: new Date("2026-07-20T12:00:00Z"),
+      bidBoardDetachedWasLinked: null,
+      procoreBidId: 887766,
+      synchubBidBoardId: null,
+    });
+    expect(state.detachedFromLinkedProject).toBe(true);
   });
 
   it("is false on a deal that was never detached, whatever identity it carries", () => {
@@ -1058,6 +1090,7 @@ describe("migration 0200 — tenant column-add shape", () => {
     expect(migration).toContain("ADD COLUMN IF NOT EXISTS bid_board_detached_at timestamptz");
     expect(migration).toContain("ADD COLUMN IF NOT EXISTS bid_board_detached_by uuid");
     expect(migration).toContain("ADD COLUMN IF NOT EXISTS bid_board_detach_reason text");
+    expect(migration).toContain("ADD COLUMN IF NOT EXISTS bid_board_detached_was_linked boolean");
     expect(migration).toContain("ADD COLUMN IF NOT EXISTS skipped_detached_count INTEGER NOT NULL DEFAULT 0");
   });
 
@@ -1071,6 +1104,7 @@ describe("migration 0200 — tenant column-add shape", () => {
     expect(block).toContain("bid_board_detached_at timestamptz");
     expect(block).toContain("bid_board_detached_by uuid");
     expect(block).toContain("bid_board_detach_reason text");
+    expect(block).toContain("bid_board_detached_was_linked boolean");
     expect(block).toContain("ALTER TABLE office_dallas.bid_board_sync_runs");
     expect(block).toContain("skipped_detached_count INTEGER NOT NULL DEFAULT 0");
   });

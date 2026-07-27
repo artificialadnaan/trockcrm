@@ -67,6 +67,7 @@ beforeAll(async () => {
       bid_board_customer_contact_raw text, bid_board_project_number text, project_number text,
       bid_board_linked_at timestamptz, bid_board_last_updated_at timestamptz, bid_board_assigned_pm text,
       bid_board_detached_at timestamptz, bid_board_detached_by uuid, bid_board_detach_reason text,
+      bid_board_detached_was_linked boolean,
       intended_project_number text, bid_board_mirror_source_entered_at timestamptz,
       bid_board_mirror_source_exited_at timestamptz, pipeline_type_snapshot text,
       region_classification varchar(50), is_read_only_mirror boolean, is_read_only_sync_dirty boolean,

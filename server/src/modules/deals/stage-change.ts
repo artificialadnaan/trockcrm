@@ -360,6 +360,7 @@ export async function changeDealStage(
     dealUpdates.bidBoardDetachedAt = null;
     dealUpdates.bidBoardDetachedBy = null;
     dealUpdates.bidBoardDetachReason = null;
+    dealUpdates.bidBoardDetachedWasLinked = null;
   }
 
   // Non-null only when THIS move actually cleared a LIVE detach marker. Read off the pre-update row

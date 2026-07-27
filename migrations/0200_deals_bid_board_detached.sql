@@ -19,6 +19,14 @@
 --   bid_board_detached_by     -- the admin/director who did it (public.users id; no cross-schema FK,
 --                                matching every other user-id column on this table)
 --   bid_board_detach_reason   -- the required free-text reason, mirrored onto deal_history
+--   bid_board_detached_was_linked -- did the detach sever a REAL Bid Board project? PERSISTED, not
+--                                derived: the dialog's "you must delete this project from the Bid Board
+--                                yourself" answer counts is_bid_board_owned / bid_board_project_number /
+--                                bid_board_linked_at / read_only_synced_at, and the detach CLEARS all
+--                                four. 315 of Dallas's 1,294 active deals are Bid Board linked with no
+--                                procore/synchub identity at all, so reconstructing the answer after the
+--                                fact from the preserved identity columns would drop the standing
+--                                "delete the project" reminder on exactly those deals.
 --
 -- Plus bid_board_sync_runs.skipped_detached_count: a detached row must be counted as a DELIBERATE skip,
 -- not as noMatch. Without its own counter every subsequent sync run would report
@@ -42,7 +50,8 @@ BEGIN
         'ALTER TABLE %I.deals
            ADD COLUMN IF NOT EXISTS bid_board_detached_at timestamptz,
            ADD COLUMN IF NOT EXISTS bid_board_detached_by uuid,
-           ADD COLUMN IF NOT EXISTS bid_board_detach_reason text',
+           ADD COLUMN IF NOT EXISTS bid_board_detach_reason text,
+           ADD COLUMN IF NOT EXISTS bid_board_detached_was_linked boolean',
         schema_name
       );
 
@@ -73,7 +82,8 @@ END $tenant$;
 ALTER TABLE office_dallas.deals
   ADD COLUMN IF NOT EXISTS bid_board_detached_at timestamptz,
   ADD COLUMN IF NOT EXISTS bid_board_detached_by uuid,
-  ADD COLUMN IF NOT EXISTS bid_board_detach_reason text;
+  ADD COLUMN IF NOT EXISTS bid_board_detach_reason text,
+  ADD COLUMN IF NOT EXISTS bid_board_detached_was_linked boolean;
 
 CREATE INDEX IF NOT EXISTS deals_bid_board_detached_idx
   ON office_dallas.deals (bid_board_detached_at)

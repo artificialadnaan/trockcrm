@@ -16,6 +16,7 @@ import {
 } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
 import { logActivity, type AuditContext } from "../audit/audit-logger.js";
+import { lockDealCommissions } from "../commissions/deal-commission-lock.js";
 import { removeCommissionForDeal } from "../commissions/service.js";
 import { getStageById, getStageBySlug } from "../pipeline/service.js";
 import { effectiveContractSignedDate } from "../shared/won-close-date.js";
@@ -92,11 +93,23 @@ export interface ReturnToOpportunityResult {
  * un-editable — the operator could not fix the scope that made it "not ready to progress", which is
  * the entire point of the action.
  */
-function buildBidBoardDetachUpdate(userId: string, reason: string, now: Date) {
+function buildBidBoardDetachUpdate(
+  userId: string,
+  reason: string,
+  now: Date,
+  wasBidBoardLinked: boolean
+) {
   return {
     bidBoardDetachedAt: now,
     bidBoardDetachedBy: userId,
     bidBoardDetachReason: reason,
+    // PERSIST the linkage answer — it cannot be recovered afterwards. The four columns immediately
+    // below (is_bid_board_owned, bid_board_project_number, bid_board_linked_at, read_only_synced_at)
+    // are half of what makes a deal "linked", and this update clears every one of them; the preserved
+    // procore/synchub identity is not a stand-in, because most Bid Board linked deals in prod carry
+    // neither. Without this the standing "delete the project from the Bid Board" reminder would
+    // disappear on reload for exactly the deals that most need it.
+    bidBoardDetachedWasLinked: wasBidBoardLinked,
     isBidBoardOwned: false,
     bidBoardStageSlug: null,
     bidBoardStageFamily: null,
@@ -383,6 +396,13 @@ export async function returnDealToOpportunity(
     );
   }
 
+  // FIRST statement of the transaction, before ANY row lock — see deal-commission-lock.ts for why the
+  // order is load-bearing. This closes the one commission writer the row locks below cannot reach: the
+  // settings-driven recompute's sales-source mint, which decides from an unlocked read of the deal and
+  // then INSERTs, so without this it can add a row AFTER the delete and leave booked commission on a
+  // deal the operator was told had been voided.
+  await lockDealCommissions(tenantDb, input.dealId);
+
   // FOR UPDATE here and again inside changeDealStage; the second lock is a no-op re-acquire on the
   // same transaction and keeps changeDealStage usable standalone.
   const deal = await loadDealOrThrow(tenantDb, input.dealId, true);
@@ -463,7 +483,7 @@ export async function returnDealToOpportunity(
   const contractSignedDateCleared = signedDate;
 
   const detachUpdate = {
-    ...buildBidBoardDetachUpdate(input.userId, reason, now),
+    ...buildBidBoardDetachUpdate(input.userId, reason, now, wasBidBoardLinked),
     ...buildRfpCycleReset(),
     ...(eligibility.voidsCommission
       ? { contractSignedDate: null, contractSignedAt: null }

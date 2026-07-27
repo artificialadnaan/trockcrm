@@ -8,6 +8,7 @@ import {
   listActiveFieldOffices,
   runInOfficeTransaction,
 } from "../field/cross-office.js";
+import { lockDealCommissions } from "./deal-commission-lock.js";
 import {
   effectiveSignedDateOf,
   mintSalesSourceCommissionForDeal,
@@ -36,6 +37,13 @@ export async function recalculateRepCommissionsInOffice(
 
   let recomputed = 0;
   for (const { dealId } of dealRows) {
+    // Serialize this deal's commission mutations against "Move back to Opportunity", which voids the
+    // deal's commission after showing the operator an exact amount. Taken BEFORE the deal is read, so
+    // the eligibility decision below cannot be made from a snapshot that a concurrent move-back is
+    // about to invalidate — and before any row lock, which is what keeps the two paths deadlock-free
+    // (see deal-commission-lock.ts).
+    await lockDealCommissions(officeDb, dealId);
+
     const [deal] = await officeDb
       .select({
         contractSignedAt: deals.contractSignedAt,
@@ -89,6 +97,12 @@ export async function recalculateRepCommissionsInOffice(
         )
       );
     for (const { id: dealId } of sourcedDeals) {
+      // THE path that made deal-commission-lock.ts necessary: this mint reads the deal (signed date
+      // included) without locking or writing it, then INSERTs a row for a rep that had none — so it is
+      // the one commission writer neither the deal-row FOR UPDATE nor the deal_signed_commissions row
+      // locks can serialize. Lock before the mint reads anything.
+      await lockDealCommissions(officeDb, dealId);
+
       const result = await mintSalesSourceCommissionForDeal(officeDb, {
         dealId,
         salesSourceUserId: repUserId,
