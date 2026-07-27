@@ -188,10 +188,19 @@ describe("getDealDetail — canonical verdicts reach the response", () => {
   });
 
   it("keeps effectiveOnHold and effectiveValue consistent with each other", async () => {
-    for (const overrides of [{}, { onHold: true }, { expectedCloseDate: isoDay(200) }]) {
+    // EXPECTED values per case, not a conditional. `if (effectiveOnHold) expect(value).toBe(0)` passes
+    // vacuously the moment a regression makes effectiveOnHold false — the assertion simply stops
+    // running, and the test stays green while reporting nothing.
+    const cases = [
+      { overrides: {}, onHold: false, value: 250000 },
+      { overrides: { onHold: true }, onHold: true, value: 0 },
+      { overrides: { expectedCloseDate: isoDay(200) }, onHold: true, value: 0 },
+    ];
+    for (const { overrides, onHold, value } of cases) {
       const tenantDb = createFakeTenantDb({ deals: [dealRow(overrides)] });
       const detail = await getDealDetail(tenantDb as never, "deal-1", "director", "director-1");
-      if (detail?.effectiveOnHold) expect(detail?.effectiveValue).toBe(0);
+      expect(detail?.effectiveOnHold).toBe(onHold);
+      expect(detail?.effectiveValue).toBe(value);
     }
   });
 
@@ -217,7 +226,8 @@ describe("getDealDetail — canonical verdicts reach the response", () => {
       "@trock-crm/shared/types"
     );
 
-    // 23:59:30 CT (05:59:30Z next day) and 30s later — a boundary a real request can straddle.
+    // March 2026 is CDT (UTC-5), so CT midnight is 05:00:00Z: 04:59:30Z is 23:59:30 the previous CT
+    // evening, and 05:00:30Z is 30 seconds into the next CT day — a boundary a real request straddles.
     const beforeMidnightCt = new Date("2026-03-11T04:59:30.000Z");
     const afterMidnightCt = new Date("2026-03-11T05:00:30.000Z");
 

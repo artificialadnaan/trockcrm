@@ -353,8 +353,13 @@ export default function DealDetailScreen() {
             ))
           )}
 
-          {/* Older history is reachable rather than silently truncated at the server's 50-row page. */}
-          {activities.length > 0 && activitiesQuery.hasNextPage ? (
+          {/* Older history is reachable rather than silently truncated at the server's 50-row page.
+              HIDDEN once a page fetch has failed: hasNextPage stays true after a failure, so this sat
+              directly above the RetryNotice offering the same action in different words — two controls,
+              one of them not acknowledging that anything went wrong. The notice is the retry while a
+              failure is outstanding; this returns as soon as one succeeds. */}
+          {activities.length > 0 && activitiesQuery.hasNextPage &&
+          !(activityState.kind === "loaded" && activityState.pageFailed) ? (
             <Pressable
               testID="load-more-activities"
               onPress={() => {

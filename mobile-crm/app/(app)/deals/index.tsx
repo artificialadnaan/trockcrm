@@ -82,15 +82,20 @@ export default function DealsListScreen() {
   // Stable identity so memoised rows are not invalidated on every keystroke in the search field. With an
   // inline arrow every card re-rendered on each render of this screen, which on a paginated list is the
   // whole viewport per character typed.
+  // Hoisted out of renderDeal so it is one stable function for the life of the screen. Inline, every
+  // card received a BRAND-NEW onPress on each render, which defeats DealCard's React.memo entirely —
+  // the memo compares props, and a fresh closure never equals the last one. On a paginated list that is
+  // the whole viewport re-rendering per keystroke in the search field, which is exactly when it hurts.
+  const handleDealPress = useCallback(
+    (deal: DealListItem) => router.push(`/(app)/deals/${deal.id}`),
+    [router],
+  );
+
   const renderDeal = useCallback(
     ({ item }: { item: DealListItem }) => (
-      <DealCard
-        deal={item}
-        stageName={stageLabelFor(item, stageIndex)}
-        onPress={(deal) => router.push(`/(app)/deals/${deal.id}`)}
-      />
+      <DealCard deal={item} stageName={stageLabelFor(item, stageIndex)} onPress={handleDealPress} />
     ),
-    [stageIndex, router],
+    [stageIndex, handleDealPress],
   );
   const total = query.data?.pages[0]?.pagination.total;
 

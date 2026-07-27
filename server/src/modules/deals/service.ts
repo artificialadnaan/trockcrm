@@ -246,7 +246,11 @@ export function attachAtRiskResult<T extends {
         applyCloseTargetSuppression: options?.applyCloseTargetSuppression !== false,
       },
       normalizeAtRiskViewerRole(viewerRole),
-      new Date()
+      // verdictNow, not a THIRD clock reading. At-risk applies the same close-target suppression against
+      // the same America/Chicago calendar day as the two verdicts above, so a separate reading reopens
+      // the midnight split one field over: a deal whose target sits on the boundary could come back
+      // effectively-held and simultaneously at-risk for a stage age that hold is supposed to pause.
+      verdictNow
     ),
   };
 }

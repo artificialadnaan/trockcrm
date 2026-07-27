@@ -85,6 +85,9 @@ export async function apiFetch<T = unknown>(path: string, opts: ApiFetchOptions 
   // alone cannot say which fired — and reporting a deliberate unmount cancellation as "Request timed out"
   // sends screens down an error path for something that is not an error. Track the cause explicitly.
   let timedOut = false;
+  // Armed only once the headers are in — see the body deadline below.
+  let bodyTimedOut = false;
+  let bodyTimer: ReturnType<typeof setTimeout> | undefined;
   const timer = setTimeout(() => {
     timedOut = true;
     controller.abort();
@@ -122,11 +125,29 @@ export async function apiFetch<T = unknown>(path: string, opts: ApiFetchOptions 
       // callers only ever handle one error type.
       throw new ApiError(e instanceof Error ? e.message : "Network request failed", 0);
     } finally {
-      // Only the TIMEOUT stops here. It measures time-to-response: the server has answered, so a slow
-      // body is a transfer, not an unresponsive server. Leaving it armed would abort large payloads
-      // mid-download and report them as timeouts.
+      // The HEADER timer stops here and a fresh BODY timer is armed below. Two deadlines rather than
+      // one, because they measure different things: this one is time-to-response, and the server has
+      // now answered.
       clearTimeout(timer);
     }
+
+    /**
+     * The body gets its own deadline.
+     *
+     * Clearing the header timer and arming nothing left `res.json()` able to hang FOREVER: a connection
+     * that goes away mid-body — the common job-site case, where the radio drops between the headers and
+     * the payload — produces a promise that neither resolves nor rejects, and the screen sits on a
+     * spinner with no timeout, no error, and no retry. Worse than the failure it replaced.
+     *
+     * A full fresh budget rather than the remainder of the original: this client only ever reads JSON,
+     * so a body that needs longer than the whole request budget is pathological, and giving it its own
+     * window keeps a nearly-exhausted header phase from cutting off a payload that is arriving fine.
+     */
+    bodyTimedOut = false;
+    bodyTimer = setTimeout(() => {
+      bodyTimedOut = true;
+      controller.abort();
+    }, timeoutMs);
 
     if (!res.ok) {
       // ONLY a 401 (auth failure) clears the session. A 403 is authorization (CSRF/RBAC/permission) and
@@ -183,6 +204,7 @@ export async function apiFetch<T = unknown>(path: string, opts: ApiFetchOptions 
       throw new ApiError(e instanceof Error ? e.message : "Network request failed", 0);
     }
   } finally {
+    clearTimeout(bodyTimer);
     signal?.removeEventListener("abort", onExternalAbort);
   }
 }
