@@ -179,6 +179,41 @@ describe("POST /api/deals/:id/return-to-opportunity — input handling", () => {
     });
   });
 
+  // The dialog branches on the STATUS: a 403 is "you may not", a 409 is "the state moved under you,
+  // re-read the amount and try again". That contract only holds if AppError's statusCode and code
+  // survive errorHandler untouched, so pin both shapes here rather than assuming it.
+  it.each([
+    {
+      label: "the acknowledged commission total no longer matches",
+      statusCode: 409,
+      code: "MOVE_BACK_COMMISSION_ACK_REQUIRED",
+    },
+    {
+      label: "a commission row appeared after the acknowledgement",
+      statusCode: 409,
+      code: "MOVE_BACK_COMMISSION_CHANGED",
+    },
+    {
+      label: "a director tried the commission-voiding variant",
+      statusCode: 403,
+      code: "MOVE_BACK_COMMISSION_ROLE_NOT_ALLOWED",
+    },
+  ])("propagates the service's $statusCode/$code when $label", async ({ statusCode, code }) => {
+    const { AppError } = await import("../../../src/middleware/error-handler.js");
+    serviceMocks.returnDealToOpportunity.mockRejectedValueOnce(
+      new AppError(statusCode, "nope", code)
+    );
+
+    const response = await request(createApp("admin"))
+      .post("/api/deals/deal-1/return-to-opportunity")
+      .send({ reason: "x", acknowledgedCommissionTotal: "1.00" });
+
+    expect(response.status).toBe(statusCode);
+    expect(response.body.error.code).toBe(code);
+    // A failed move must not leave the copilot refresh enqueued as if it had happened.
+    expect(insertedJobs).toHaveLength(0);
+  });
+
   it("enqueues the copilot refresh, like the ordinary stage change does", async () => {
     await request(createApp("admin"))
       .post("/api/deals/deal-1/return-to-opportunity")

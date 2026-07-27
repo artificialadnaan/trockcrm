@@ -304,5 +304,13 @@ export const deals = pgTable(
     index("deals_property_active_idx")
       .on(table.propertyId)
       .where(sql`${table.isActive} = TRUE`),
+    // Partial index over the DETACHED deals only — the small side. Source-of-truth mirror of migration
+    // 0200. It backs the Bid Board sync's classification lookup (the "was this deliberately detached,
+    // or is there genuinely no CRM deal?" re-query that runs only after a match miss); the hot matcher
+    // path uses it as an anti-join filter on rows it already located, so it neither needs nor would use
+    // an index on the NULL side.
+    index("deals_bid_board_detached_idx")
+      .on(table.bidBoardDetachedAt)
+      .where(sql`${table.bidBoardDetachedAt} IS NOT NULL`),
   ]
 );

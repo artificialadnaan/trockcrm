@@ -129,6 +129,41 @@ describe("ReturnToOpportunityDialog", () => {
     expect(link.href).toContain("/companies/99000/tools/bid-board/project/887766/details");
   });
 
+  it("omits the Bid Board block entirely for a deal that was never linked", async () => {
+    mocks.getReturnToOpportunityPreview.mockResolvedValue({
+      ...wonPreview,
+      isBidBoardLinked: false,
+      procoreCompanyId: null,
+      procoreBidId: null,
+    });
+    await renderDialog();
+
+    // A CRM-only deal has no Bid Board project to delete; telling the operator to go delete one sends
+    // them hunting for something that does not exist.
+    expect(container.textContent).not.toContain("You must delete this project from Bid Board yourself");
+    expect(container.querySelector('a[href*="bid-board"]')).toBeNull();
+    // The commission warning is independent of the Bid Board block and must still be there.
+    expect(container.querySelector('[data-testid="return-to-opportunity-commission-warning"]')).toBeTruthy();
+  });
+
+  it("hands the caller the server's wasBidBoardLinked so the success toast can match the dialog", async () => {
+    mocks.returnDealToOpportunity.mockResolvedValue({
+      commissionRowsVoided: 0,
+      commissionTotalVoided: "0",
+      contractSignedDateCleared: null,
+      wasBidBoardLinked: false,
+    });
+    await renderDialog();
+    await act(async () => setTextarea("Never linked"));
+    await act(async () => {
+      buttonByText("Move back to Opportunity")!.click();
+    });
+
+    expect(mocks.onSuccess).toHaveBeenCalledWith(
+      expect.objectContaining({ wasBidBoardLinked: false })
+    );
+  });
+
   it("keeps submit disabled until a reason is typed", async () => {
     await renderDialog();
     expect(buttonByText("Move back to Opportunity")!.disabled).toBe(true);

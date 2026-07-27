@@ -15,14 +15,7 @@ import {
   returnDealToOpportunity,
   type ReturnToOpportunityPreview,
 } from "@/hooks/use-deals";
-
-export function buildProcoreBidBoardProjectUrl(
-  procoreCompanyId: string | null,
-  procoreBidId: string | null
-) {
-  if (!procoreCompanyId || !procoreBidId) return null;
-  return `https://us02.procore.com/webclients/host/companies/${procoreCompanyId}/tools/bid-board/project/${procoreBidId}/details`;
-}
+import { buildProcoreBidBoardProjectUrl } from "@/lib/procore";
 
 function formatUsd(value: string | number | null | undefined) {
   const amount = typeof value === "number" ? value : Number(String(value ?? "0").replace(/[$,\s]/g, ""));
@@ -35,7 +28,19 @@ interface ReturnToOpportunityDialogProps {
   dealName: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onSuccess: (result: { commissionRowsVoided: number; commissionTotalVoided: string }) => void;
+  /**
+   * The server's own account of what the move did. `wasBidBoardLinked` is passed through rather than
+   * re-derived on the page: the success toast repeats the "remember to delete it from Bid Board"
+   * instruction, and that instruction must appear on exactly the deals whose dialog showed the Bid
+   * Board block — otherwise a deal that never touched the Bid Board sends the operator hunting for a
+   * project that does not exist.
+   */
+  onSuccess: (result: {
+    commissionRowsVoided: number;
+    commissionTotalVoided: string;
+    contractSignedDateCleared: string | null;
+    wasBidBoardLinked: boolean;
+  }) => void;
 }
 
 /**

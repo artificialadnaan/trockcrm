@@ -138,8 +138,51 @@ function buildRfpCycleReset() {
   } as const;
 }
 
-/** Booked commission on a deal: row count + summed amount as a decimal string. */
-async function loadCommissionState(tenantDb: TenantDb, dealId: string) {
+/**
+ * Sum a locked set of commission rows into the SAME string shape `sum(amount)::text` produces for a
+ * numeric(14,2) column ("26250.00", or "0" for an empty set), so the locked and unlocked reads are
+ * interchangeable everywhere the total is displayed, acknowledged or audited. Summed in integer CENTS:
+ * a long book of rows added as floats can drift a cent, and this number is compared for equality
+ * against what the operator confirmed.
+ */
+function sumCommissionAmounts(rows: Array<{ amount: string | null }>): string {
+  if (rows.length === 0) return "0";
+  const cents = rows.reduce((acc, row) => acc + Math.round(Number(row.amount ?? 0) * 100), 0);
+  return (cents / 100).toFixed(2);
+}
+
+/**
+ * Booked commission on a deal: row count + summed amount as a decimal string.
+ *
+ * `forUpdate` is the difference between the read-only PREVIEW and the COMMIT path, and it is a money
+ * guarantee rather than an optimization. The parent deal's FOR UPDATE does NOT serialize commission
+ * writers: recalculateCommissionForDeal (the settings-driven cross-office recompute, which is
+ * fire-and-forget and can be in flight for many seconds after a rate edit) reads and UPDATEs
+ * deal_signed_commissions in place without ever locking or writing the deals row. Without a lock here,
+ * that recompute can commit between this aggregate read and removeCommissionForDeal below — so the
+ * operator confirms $X and the transaction destroys $Y, recording $X in the audit trail. Locking the
+ * rows we counted, and holding the lock through the DELETE in the same transaction, makes the confirmed
+ * set and the voided set provably identical (see the row-count assertion at the delete site for the one
+ * residual case row locks cannot cover: a brand-new INSERT).
+ */
+async function loadCommissionState(
+  tenantDb: TenantDb,
+  dealId: string,
+  opts: { forUpdate?: boolean } = {}
+) {
+  if (opts.forUpdate) {
+    // ORDER BY id so two concurrent move-backs on the same deal take the row locks in the same order
+    // and queue instead of deadlocking.
+    const rows = await tenantDb
+      .select({ id: dealSignedCommissions.id, amount: dealSignedCommissions.amount })
+      .from(dealSignedCommissions)
+      .where(eq(dealSignedCommissions.dealId, dealId))
+      .orderBy(dealSignedCommissions.id)
+      .for("update");
+
+    return { rowCount: rows.length, total: sumCommissionAmounts(rows) };
+  }
+
   const [row] = await tenantDb
     .select({
       rowCount: sql<number>`count(*)::int`,
@@ -152,6 +195,50 @@ async function loadCommissionState(tenantDb: TenantDb, dealId: string) {
     rowCount: Number(row?.rowCount ?? 0),
     total: String(row?.total ?? "0"),
   };
+}
+
+/**
+ * Does this deal still carry a Bid Board footprint the operator has to go delete BY HAND?
+ *
+ * ONE predicate, called by the preview (which renders "you must delete this project from Bid Board
+ * yourself") and by the commit path (which records `wasBidBoardLinked` in the audit_log header and the
+ * deal_history reason). Two copies drifted before: the preview counted procore_bid_id, the audit flag
+ * did not, so a legacy deal whose only footprint is the deliberately PRESERVED procore identity was
+ * told to go delete the project while the audit trail recorded that nothing was disconnected.
+ *
+ * The identity columns count precisely BECAUSE the detach preserves them — they are what the operator
+ * follows to the Bid Board project, so they are also what makes the disconnection worth recording. An
+ * already-detached deal returns false from both callers: the action is still allowed (it re-runs the
+ * reset), but it is not severing a live link.
+ */
+function isDealBidBoardLinked(deal: typeof deals.$inferSelect): boolean {
+  if (deal.bidBoardDetachedAt != null) return false;
+  return (
+    deal.isBidBoardOwned ||
+    deal.procoreBidId != null ||
+    deal.synchubBidBoardId != null ||
+    deal.bidBoardProjectNumber != null ||
+    deal.bidBoardLinkedAt != null ||
+    deal.readOnlySyncedAt != null
+  );
+}
+
+/**
+ * The "(disconnected from Bid Board; voided N row(s) totalling $X)" tail on the deal_history reason.
+ * Each clause appears only when it actually happened, so the timeline never claims a disconnection or a
+ * void that did not occur.
+ */
+function buildHistoryQualifier(
+  wasBidBoardLinked: boolean,
+  commissionRowsVoided: number,
+  commissionTotal: string
+): string {
+  const parts: string[] = [];
+  if (wasBidBoardLinked) parts.push("disconnected from Bid Board");
+  if (commissionRowsVoided > 0) {
+    parts.push(`voided ${commissionRowsVoided} commission row(s) totalling ${commissionTotal}`);
+  }
+  return parts.length > 0 ? ` (${parts.join("; ")})` : "";
 }
 
 /** Active change-order CHILD deals hanging off this deal (they stay Won and keep their own commission). */
@@ -179,10 +266,13 @@ async function loadDealOrThrow(tenantDb: TenantDb, dealId: string, forUpdate: bo
 async function buildEligibility(
   tenantDb: TenantDb,
   deal: typeof deals.$inferSelect,
-  userRole: UserRole
+  userRole: UserRole,
+  opts: { lockCommissions?: boolean } = {}
 ) {
   const currentStage = await getStageById(deal.stageId);
-  const commission = await loadCommissionState(tenantDb, deal.id);
+  const commission = await loadCommissionState(tenantDb, deal.id, {
+    forUpdate: opts.lockCommissions,
+  });
   const activeChangeOrderCount = await countActiveChangeOrders(tenantDb, deal.id);
   const signedDate = effectiveContractSignedDate(deal.contractSignedDate, deal.contractSignedAt);
 
@@ -225,14 +315,7 @@ export async function previewReturnToOpportunity(
     dealName: deal.name,
     currentStageSlug: currentStage?.slug ?? null,
     currentStageName: currentStage?.name ?? null,
-    // "Linked" for dialog purposes means the deal still has a Bid Board footprint the operator has to
-    // go delete by hand — an already-detached deal keeps its procore ids, so key on the marker too.
-    isBidBoardLinked:
-      deal.bidBoardDetachedAt == null &&
-      (deal.isBidBoardOwned ||
-        deal.procoreBidId != null ||
-        deal.bidBoardProjectNumber != null ||
-        deal.bidBoardLinkedAt != null),
+    isBidBoardLinked: isDealBidBoardLinked(deal),
     bidBoardDetachedAt: deal.bidBoardDetachedAt ? deal.bidBoardDetachedAt.toISOString() : null,
     procoreCompanyId: deal.procoreCompanyId ?? null,
     procoreBidId: deal.procoreBidId != null ? String(deal.procoreBidId) : null,
@@ -272,10 +355,16 @@ export async function returnDealToOpportunity(
   // FOR UPDATE here and again inside changeDealStage; the second lock is a no-op re-acquire on the
   // same transaction and keeps changeDealStage usable standalone.
   const deal = await loadDealOrThrow(tenantDb, input.dealId, true);
+  // lockCommissions: the deal's commission rows are locked FOR UPDATE as part of this same read, and
+  // the lock is held until this transaction ends — through the acknowledgement check and through the
+  // DELETE. The deal-row lock above does NOT cover them (the settings-driven recompute rewrites
+  // deal_signed_commissions without touching deals), and this is the read whose total the operator's
+  // acknowledgement is compared against.
   const { eligibility, currentStage, commission, signedDate } = await buildEligibility(
     tenantDb,
     deal,
-    input.userRole
+    input.userRole,
+    { lockCommissions: true }
   );
 
   if (!eligibility.allowed) {
@@ -295,7 +384,8 @@ export async function returnDealToOpportunity(
 
   // Explicit money confirmation: the caller must echo the exact total the dialog displayed. A mismatch
   // means the number the operator agreed to is no longer the number we would destroy, so refuse and let
-  // them re-read it. Only enforced when there is actually money to void.
+  // them re-read it. Only enforced when there is actually money to void. Validated against the LOCKED
+  // read above, so between this check and the DELETE the amounts cannot move under us.
   if (commission.rowCount > 0) {
     const acknowledged = commissionAckKey(input.acknowledgedCommissionTotal);
     const live = commissionAckKey(commission.total);
@@ -323,11 +413,9 @@ export async function returnDealToOpportunity(
   }
 
   const now = new Date();
-  const wasBidBoardLinked =
-    deal.isBidBoardOwned ||
-    deal.bidBoardLinkedAt != null ||
-    deal.bidBoardProjectNumber != null ||
-    deal.readOnlySyncedAt != null;
+  // Same predicate the preview used to tell the operator "go delete this from the Bid Board", so the
+  // audit trail can never disagree with the instruction the operator was given.
+  const wasBidBoardLinked = isDealBidBoardLinked(deal);
 
   // Clearing the contract-signed date alongside the commission void is NOT optional. The Contracts
   // Signed YTD/MTD query (buildRepContractsSignedSql, dashboard/service.ts) has NO stage predicate at
@@ -372,9 +460,24 @@ export async function returnDealToOpportunity(
   // re-minting if the deal is later re-signed. removeCommissionForDeal writes one audit_log delete row
   // per commission (amount + rep + deal), which IS the void trail; we add a deal-level roll-up below so
   // "what was voided" is answerable from one row rather than N.
-  let commissionRowsVoided = 0;
-  if (commission.rowCount > 0) {
-    commissionRowsVoided = await removeCommissionForDeal(tenantDb, input.dealId, input.userId);
+  //
+  // Runs UNCONDITIONALLY — including when the locked read found no rows — because it is also the
+  // SERIALIZATION POINT for the one drift a row lock cannot cover. Rows we read are locked, so no
+  // concurrent transaction can change or remove them; what row locks cannot stop is a brand-new INSERT
+  // (mintSalesSourceCommissionForDeal / calculateCommissionForDeal insert without locking the deal
+  // row). A deal-scoped DELETE sweeps such a row up, and the count comparison below turns "we destroyed
+  // an amount the operator never confirmed" into a 409 that rolls this whole transaction back —
+  // including the detach and the stage move — so nothing is destroyed and nothing is half-applied.
+  const commissionRowsVoided = await removeCommissionForDeal(tenantDb, input.dealId, input.userId);
+  if (commissionRowsVoided !== commission.rowCount) {
+    throw new AppError(
+      409,
+      `This deal's commission changed while the move was being confirmed ` +
+        `(${commission.rowCount} row(s) totalling ${commission.total} were confirmed, ` +
+        `${commissionRowsVoided} found at commit). Nothing was changed — re-open the confirmation ` +
+        "dialog and confirm the current amount.",
+      "MOVE_BACK_COMMISSION_CHANGED"
+    );
   }
 
   // Now the ordinary stage change: it owns deal_stage_history (with is_backward_move + the override
@@ -444,10 +547,15 @@ export async function returnDealToOpportunity(
     newValue: opportunityStage.name ?? opportunityStage.slug,
     changedBy: input.userId,
     source: RETURN_TO_OPPORTUNITY_SOURCE,
-    reason:
-      commissionRowsVoided > 0
-        ? `Moved back to Opportunity — ${reason} (disconnected from Bid Board; voided ${commissionRowsVoided} commission row(s) totalling ${commission.total})`
-        : `Moved back to Opportunity — ${reason}${wasBidBoardLinked ? " (disconnected from Bid Board)" : ""}`,
+    // Both halves of the parenthetical are conditional on what actually happened. A legacy deal can
+    // carry commission without ever having been Bid Board linked, so the disconnection phrase is gated
+    // on wasBidBoardLinked in EVERY branch — a timeline row that claims a disconnection that did not
+    // happen is exactly the kind of drift this row exists to prevent.
+    reason: `Moved back to Opportunity — ${reason}${buildHistoryQualifier(
+      wasBidBoardLinked,
+      commissionRowsVoided,
+      commission.total
+    )}`,
     changedAt: now,
   });
 

@@ -185,12 +185,23 @@ afterAll(async () => {
 beforeEach(() => {
   vi.mocked(validateStageGate).mockReset();
   // Shape mirrors the real gate's verdict for an admin/director backward move into Opportunity.
-  vi.mocked(validateStageGate).mockImplementation(async (_db, _dealId, targetStageId) => ({
+  //
+  // currentStage is read from the SEEDED ROW, never pinned to a constant: changeDealStage takes the
+  // deal's current stage from the gate verdict, not from the row, and derives isReopen from
+  // currentStage.isTerminal. Pinning it to Estimating would make isReopen false on exactly the
+  // Won-deal cases that ARE a reopen in production, so the dealApprovals auto-invalidation (and the
+  // Won-family branches keyed on the current stage) would never run under test.
+  vi.mocked(validateStageGate).mockImplementation(async (_db, dealId, targetStageId) => {
+    const { rows } = await pg.query<{ stage_id: string }>(
+      `SELECT stage_id FROM public.deals WHERE id = '${dealId}'`
+    );
+    const currentStage = STAGES[rows[0]?.stage_id ?? ESTIMATING_STAGE] ?? STAGES[ESTIMATING_STAGE];
+    return {
     allowed: true,
     isBackwardMove: true,
     isTerminal: false,
     targetStage: STAGES[targetStageId as string],
-    currentStage: STAGES[ESTIMATING_STAGE],
+    currentStage,
     missingRequirements: {
       fields: [],
       documents: [],
@@ -201,7 +212,8 @@ beforeEach(() => {
     requiresOverride: true,
     overrideType: "backward_move",
     blockReason: null,
-  }) as never);
+    } as never;
+  });
 });
 
 describe("returnDealToOpportunity — the detach", () => {
@@ -401,6 +413,105 @@ describe("returnDealToOpportunity — Won deals void commission", () => {
     expect((await dealRow(D)).bid_board_detached_at).toBeNull();
   });
 
+  // The acknowledgement is only worth anything if the rows it was computed from cannot move between
+  // the check and the DELETE. The parent deal's FOR UPDATE does NOT give that: the settings-driven
+  // recompute (recalculateCommissionForDeal, fanned out fire-and-forget after any rate edit) rewrites
+  // deal_signed_commissions without ever locking or writing the deals row, and the sales-source mint
+  // INSERTs a brand-new row the same way. These two cases cover both halves.
+  it("takes the commission rows' row locks in the SAME transaction that validates the acknowledgement", async () => {
+    const D = U("d104");
+    await seedBidBoardDeal(D, { stageId: WON_STAGE, contractSignedDate: "2026-03-01" });
+    await seedCommission(D, REP, "18750.00");
+
+    const sql: string[] = [];
+    const originalQuery = pg.query.bind(pg);
+    const spy = vi.spyOn(pg, "query").mockImplementation((async (text: unknown, ...rest: unknown[]) => {
+      if (typeof text === "string") sql.push(text);
+      return originalQuery(text as never, ...(rest as never[]));
+    }) as never);
+    try {
+      await returnDealToOpportunity(tdb, {
+        dealId: D,
+        userId: ADMIN,
+        userRole: "admin",
+        reason: "Award rescinded",
+        acknowledgedCommissionTotal: "18750.00",
+        auditContext,
+      });
+    } finally {
+      spy.mockRestore();
+    }
+
+    const lockedRead = sql.find(
+      (text) => /deal_signed_commissions/i.test(text) && /for update/i.test(text)
+    );
+    expect(lockedRead, "the commit path must read the commission rows FOR UPDATE").toBeDefined();
+  });
+
+  it("aborts the ENTIRE move when a commission row appears after the acknowledgement, destroying nothing", async () => {
+    const D = U("d105");
+    await seedBidBoardDeal(D, { stageId: WON_STAGE, contractSignedDate: "2026-03-01" });
+    await seedCommission(D, REP, "18750.00");
+
+    // Stands in for the one writer row locks cannot stop: mintSalesSourceCommissionForDeal and
+    // calculateCommissionForDeal INSERT a row for a rep that had none, without touching the deals row,
+    // so a row that did not exist when the operator confirmed can appear mid-transaction. The trigger
+    // fires on the detach UPDATE — after the acknowledgement was validated, before the DELETE — which
+    // is exactly that window.
+    await pg.exec(`
+      CREATE OR REPLACE FUNCTION insert_late_commission() RETURNS trigger AS $fn$
+      BEGIN
+        INSERT INTO public.deal_signed_commissions
+          (deal_id, rep_user_id, attribution_role, source_value_kind, source_value_amount,
+           applied_rate, amount, contract_signed_date_at_signing, created_by)
+        VALUES (NEW.id, '${DIRECTOR}', 'estimator', 'awarded_amount', 250000, 0.030000, 7500.00,
+                '2026-03-01', '${ADMIN}');
+        RETURN NEW;
+      END;
+      $fn$ LANGUAGE plpgsql;
+      CREATE TRIGGER late_commission BEFORE UPDATE ON public.deals
+        FOR EACH ROW
+        WHEN (NEW.bid_board_detached_at IS NOT NULL AND OLD.bid_board_detached_at IS NULL)
+        EXECUTE FUNCTION insert_late_commission();
+    `);
+
+    // BEGIN/ROLLBACK on the connection itself rather than tdb.transaction(), mirroring what the route
+    // actually gets: middleware/tenant.ts issues BEGIN on the pooled client and binds Drizzle to that
+    // same client, so the service's writes and the failure's rollback are the request transaction. (It
+    // also avoids PGlite's transaction() mutex, which would deadlock the gate stub's own query.)
+    await pg.exec("BEGIN");
+    try {
+      await expect(
+        returnDealToOpportunity(tdb, {
+          dealId: D,
+          userId: ADMIN,
+          userRole: "admin",
+          reason: "Award rescinded",
+          acknowledgedCommissionTotal: "18750.00",
+          auditContext,
+        })
+      ).rejects.toMatchObject({ statusCode: 409, code: "MOVE_BACK_COMMISSION_CHANGED" });
+    } finally {
+      await pg.exec("ROLLBACK");
+      await pg.exec(
+        `DROP TRIGGER late_commission ON public.deals; DROP FUNCTION insert_late_commission();`
+      );
+    }
+
+    // Nothing was destroyed and nothing was half-applied: the deal is still Won, still attached, and
+    // the money the operator confirmed is still there. Without the count assertion the move would have
+    // committed, deleting BOTH rows while reporting one row / $18,750.00 voided.
+    const row = await dealRow(D);
+    expect(row.stage_id).toBe(WON_STAGE);
+    expect(row.bid_board_detached_at).toBeNull();
+    expect(row.contract_signed_date).not.toBeNull();
+    const { rows } = await pg.query<{ amount: string }>(
+      `SELECT amount FROM public.deal_signed_commissions WHERE deal_id = '${D}'`
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].amount).toBe("18750.00");
+  });
+
   it("refuses when no acknowledgement is supplied at all", async () => {
     const D = U("d103");
     await seedBidBoardDeal(D, { stageId: WON_STAGE, contractSignedDate: "2026-03-01" });
@@ -511,6 +622,25 @@ describe("returnDealToOpportunity — permissions and state blocks", () => {
     ).rejects.toMatchObject({ statusCode: 409, code: "MOVE_BACK_ALREADY_OPPORTUNITY" });
 
     expect((await dealRow(D)).rfp_approval_status).toBe("approved");
+  });
+
+  it("409s an ARCHIVED deal — restore it first, rather than reviving it through a stage move", async () => {
+    const D = U("d208");
+    await seedBidBoardDeal(D, { isActive: false });
+
+    await expect(
+      returnDealToOpportunity(tdb, {
+        dealId: D,
+        userId: ADMIN,
+        userRole: "admin",
+        reason: "archived attempt",
+        auditContext,
+      })
+    ).rejects.toMatchObject({ statusCode: 409, code: "MOVE_BACK_DEAL_INACTIVE" });
+
+    const row = await dealRow(D);
+    expect(row.bid_board_detached_at).toBeNull();
+    expect(row.stage_id).toBe(ESTIMATING_STAGE);
   });
 
   it("400s an empty reason", async () => {
@@ -653,6 +783,84 @@ describe("previewReturnToOpportunity", () => {
     expect(preview.procoreCompanyId).toBe("99000");
     expect(preview.procoreBidId).toBe("887766");
     expect(preview.effectiveContractSignedDate).toBe("2026-03-01");
+  });
+
+  // The preview's "you must delete this project from Bid Board yourself" block and the commit path's
+  // wasBidBoardLinked audit flag are ONE predicate. They drifted once (the preview counted
+  // procore_bid_id, the audit flag did not), which told the operator to go delete a project while
+  // recording that nothing had been disconnected.
+  it("agrees with the commit path on a legacy deal whose only footprint is the preserved Procore id", async () => {
+    const D = U("d303");
+    await seedBidBoardDeal(D);
+    // A legacy import: the CRM never owned it through Bid Board sync, but it carries the Procore
+    // identity — which the detach deliberately PRESERVES, and which is how the operator finds the
+    // project to delete.
+    await pg.exec(
+      `UPDATE public.deals SET is_bid_board_owned = false, bid_board_linked_at = NULL,
+         bid_board_project_number = NULL, read_only_synced_at = NULL, is_read_only_mirror = false,
+         synchub_bid_board_id = NULL
+       WHERE id = '${D}'`
+    );
+
+    const preview = await previewReturnToOpportunity(tdb, { dealId: D, userRole: "admin" });
+    expect(preview.isBidBoardLinked).toBe(true);
+
+    const result = await returnDealToOpportunity(tdb, {
+      dealId: D,
+      userId: ADMIN,
+      userRole: "admin",
+      reason: "Legacy import, not ready",
+      auditContext,
+    });
+    expect(result.wasBidBoardLinked).toBe(preview.isBidBoardLinked);
+
+    const { rows: audits } = await pg.query<{ full_row: Record<string, unknown> }>(
+      `SELECT full_row FROM public.audit_log
+        WHERE record_id = '${D}' AND table_name = 'deals'
+          AND full_row ->> 'source' = 'return_to_opportunity'`
+    );
+    expect(audits[0].full_row.wasBidBoardLinked).toBe(true);
+
+    const { rows: history } = await pg.query<{ reason: string }>(
+      `SELECT reason FROM public.deal_history WHERE deal_id = '${D}'`
+    );
+    expect(history[0].reason).toContain("disconnected from Bid Board");
+  });
+
+  it("says a deal with NO Bid Board footprint at all was never linked, in the dialog and the audit", async () => {
+    const D = U("d304");
+    await seedBidBoardDeal(D, { contractSignedDate: "2026-03-01" });
+    // Carries commission, so the move takes the commission-voiding branch of the history text — the
+    // branch that used to hardcode "(disconnected from Bid Board; …)" regardless of linkage.
+    await seedCommission(D, REP, "18750.00");
+    await pg.exec(
+      `UPDATE public.deals SET is_bid_board_owned = false, bid_board_linked_at = NULL,
+         bid_board_project_number = NULL, read_only_synced_at = NULL, is_read_only_mirror = false,
+         synchub_bid_board_id = NULL, procore_bid_id = NULL, procore_company_id = NULL
+       WHERE id = '${D}'`
+    );
+
+    const preview = await previewReturnToOpportunity(tdb, { dealId: D, userRole: "admin" });
+    expect(preview.isBidBoardLinked).toBe(false);
+
+    const result = await returnDealToOpportunity(tdb, {
+      dealId: D,
+      userId: ADMIN,
+      userRole: "admin",
+      reason: "CRM-only deal",
+      acknowledgedCommissionTotal: "18750.00",
+      auditContext,
+    });
+    expect(result.wasBidBoardLinked).toBe(false);
+    expect(result.commissionRowsVoided).toBe(1);
+
+    // The timeline must not claim a disconnection that did not happen — including on the
+    // commission-voiding branch, where the phrase used to be hardcoded.
+    const { rows: history } = await pg.query<{ reason: string }>(
+      `SELECT reason FROM public.deal_history WHERE deal_id = '${D}'`
+    );
+    expect(history[0].reason).not.toContain("disconnected from Bid Board");
+    expect(history[0].reason).toContain("voided 1 commission row(s) totalling 18750.00");
   });
 
   it("reports the block reason for a director rather than pretending the action is available", async () => {

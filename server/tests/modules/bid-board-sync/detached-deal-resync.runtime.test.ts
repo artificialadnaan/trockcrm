@@ -58,8 +58,11 @@ async function seedDeals() {
       ('${ATTACHED}', 'Attached Tower', '${ST_ESTIMATING}', now() - interval '5 days', 'normal',
        'DFW-1-00001-aa', 'DFW-1-00001-aa', 'DFW-1-00001-aa', 111111, '2026-01-01T00:00:00Z', 100000,
        true, 'estimating', true, NULL),
+      -- deal_number is deliberately DIFFERENT from project_number on the detached deal: tier 2 is one
+      -- OR-ed predicate over project_number / deal_number / bid_board_project_number, so with the two
+      -- equal the "deal_number" case would silently re-run the project_number case and prove nothing.
       ('${DETACHED}', 'Detached Tower', '${ST_OPPORTUNITY}', now() - interval '5 days', 'normal',
-       'DFW-2-00002-bb', 'DFW-2-00002-bb', NULL, 222222, '2026-02-02T00:00:00Z', 100000,
+       'DFW-2-90002-zz', 'DFW-2-00002-bb', NULL, 222222, '2026-02-02T00:00:00Z', 100000,
        false, NULL, true, '2026-07-20T12:00:00Z');
   `);
 }
@@ -184,7 +187,7 @@ describe("Bid Board sync cannot re-claim a deal that was moved back to Opportuni
     },
     {
       label: "tier 2 — deal_number",
-      row: wonRow({ "Project #": "DFW-2-00002-bb" }),
+      row: wonRow({ "Project #": "DFW-2-90002-zz" }),
     },
     {
       label: "tier 3 — name + bid_board_created_at (reachable because the detach nulls bid_board_project_number)",

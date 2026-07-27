@@ -410,9 +410,20 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
     // still be FOUND here — it just must not be mirrored. Detaching by nulling the identity columns
     // would instead make this lookup miss and create a bid-board-owned TWIN of the same project.
     // Answer 200 (not an error) so SyncHub records the push as delivered and stops retrying it.
+    //
+    // FOR UPDATE is load-bearing, not defensive. The two identity lookups above take no row lock (the
+    // synchub_bid_board_id tier is guarded only by an advisory lock, which serializes concurrent
+    // WEBHOOKS and nothing else), so without it a "Move back to Opportunity" transaction could commit
+    // in the gap between this check and buildMirrorDealUpdateQuery — and that unconditional mirror
+    // UPDATE would then re-own the deal, drag its stage and financial mirrors forward, and leave the
+    // detach marker and the voided commission behind. Locking the deal row here means the two
+    // transactions serialize on it whichever order they arrive in: if the move-back went first we read
+    // its committed marker and skip, and if we go first the move-back waits and then detaches on top of
+    // a coherent mirror. It costs nothing — this branch takes the same row lock a few statements later
+    // when it updates the deal.
     if (existingDealId) {
       const detachedResult = await client.query(
-        `SELECT bid_board_detached_at FROM ${schemaName}.deals WHERE id = $1`,
+        `SELECT bid_board_detached_at FROM ${schemaName}.deals WHERE id = $1 FOR UPDATE`,
         [existingDealId]
       );
       if (detachedResult.rows[0]?.bid_board_detached_at != null) {

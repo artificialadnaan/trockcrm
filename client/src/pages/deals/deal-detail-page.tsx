@@ -96,6 +96,7 @@ import { useSalesReps, type SalesRepOption } from "@/hooks/use-sales-reps";
 import { useAuth } from "@/lib/auth";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import { buildProcoreBidBoardProjectUrl } from "@/lib/procore";
 import { isDealScopeReadOnlyAfterRfp } from "@/lib/deal-scope-lock";
 import { isRfpDetailPollActive } from "@/lib/rfp-detail-poll";
 import { formatCurrency, bestEstimateCaptionLabel, formatDealDisplayNumber, resolveBestEstimate, resolveDealValueKind, LOST_BID_VALUE_LABEL } from "@/lib/deal-utils";
@@ -162,8 +163,7 @@ function formatBidBoardEstimate(value: string | number | null | undefined) {
 }
 
 export function buildBidBoardProjectUrl(deal: Pick<DealDetail, "procoreCompanyId" | "procoreBidId">) {
-  if (!deal.procoreCompanyId || !deal.procoreBidId) return null;
-  return `https://us02.procore.com/webclients/host/companies/${deal.procoreCompanyId}/tools/bid-board/project/${deal.procoreBidId}/details`;
+  return buildProcoreBidBoardProjectUrl(deal.procoreCompanyId, deal.procoreBidId);
 }
 
 type Tab = "overview" | "lead" | "scoping" | "files" | "photos" | "scorecards" | "email" | "activity" | "timeline" | "history" | "team" | "billing" | "estimates" | "punch_list" | "closeout";
@@ -1029,8 +1029,8 @@ export function DealDetailPage() {
         >
           <span className="font-black uppercase tracking-[0.06em]">Disconnected from Bid Board</span>
           <span className="ml-2">
-            on {new Date(deal.bidBoardDetachedAt).toLocaleDateString()} — Bid Board exports no longer
-            update this deal. Delete this project from the Bid Board if you have not already.
+            on {formatDate(deal.bidBoardDetachedAt)} — Bid Board exports no longer update this deal.
+            Delete this project from the Bid Board if you have not already.
           </span>
           {buildBidBoardProjectUrl(deal) ? (
             <a
@@ -1214,10 +1214,16 @@ export function DealDetailPage() {
         open={returnToOpportunityOpen}
         onOpenChange={setReturnToOpportunityOpen}
         onSuccess={async (result) => {
+          // The Bid Board reminder is the dialog's own conditional block repeated as a toast, so it
+          // follows the SERVER's wasBidBoardLinked — never assumed. A deal with no Bid Board footprint
+          // gets no instruction to go delete a project that was never there.
+          const bidBoardReminder = result.wasBidBoardLinked
+            ? " Remember to delete it from Bid Board."
+            : "";
           toast.success(
             result.commissionRowsVoided > 0
-              ? `Moved back to Opportunity — ${result.commissionRowsVoided} commission row(s) voided. Remember to delete it from Bid Board.`
-              : "Moved back to Opportunity — remember to delete it from Bid Board."
+              ? `Moved back to Opportunity — ${result.commissionRowsVoided} commission row(s) voided.${bidBoardReminder}`
+              : `Moved back to Opportunity.${bidBoardReminder}`
           );
           // Keep the move's success separate from a later refetch failure: the write already committed,
           // so a failed reload is a "refresh the page" hint, never a "the move failed" error.

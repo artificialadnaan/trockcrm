@@ -43,7 +43,10 @@ beforeAll(async () => {
       bid_board_stage_family text, bid_board_stage_status text, bid_board_last_updated_at timestamptz,
       bid_estimate numeric, awarded_amount numeric, won_closed_date date, contract_signed_date date, contract_signed_at timestamptz,
       procore_bid_id bigint, is_active boolean NOT NULL DEFAULT true,
-      bid_board_detached_at timestamptz,
+      -- The full detach trio, not just the marker: this hand-rolled DDL is a standing invitation to
+      -- drift from the real table, and a partial copy is how the next suite that starts reading
+      -- bid_board_detached_by finds a column that exists in prod but not here.
+      bid_board_detached_at timestamptz, bid_board_detached_by uuid, bid_board_detach_reason text,
       is_change_order boolean NOT NULL DEFAULT false, parent_deal_id uuid
     );
     INSERT INTO public.pipeline_stage_config (id, slug, name, display_order, is_terminal) VALUES ('${ST}','won','Won', 90, true);
