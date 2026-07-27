@@ -9,6 +9,8 @@ import {
   scorecardLeadershipRatingLabel,
   scorecardRatingLabel,
   scorecardV2RatingLabel,
+  signatureDataUrlBase64Body,
+  typedSignatureFallback as sharedTypedSignatureFallback,
   type ScorecardKind,
   type ScorecardRating,
   type ScorecardFormVersion,
@@ -534,13 +536,17 @@ function drawSignature(doc: PDFKit.PDFDocument, label: string, signature: string
   doc.y = y + 52;
 }
 
-/** A handwritten-signature data URL (png/jpeg) → decoded image bytes to draw; null for anything else. */
+/**
+ * A handwritten-signature data URL (png/jpeg) → decoded image bytes to draw; null for anything else.
+ *
+ * The CLASSIFICATION lives in shared/types/field-scorecard-signature so the web deal tab applies exactly
+ * the same rule; only the Buffer decode is server-side.
+ */
 export function signatureDataUrlToBuffer(signature: string | null): Buffer | null {
-  if (!signature) return null;
-  const match = /^data:image\/(?:png|jpeg|jpg);base64,([A-Za-z0-9+/=\s]+)$/i.exec(signature);
-  if (!match) return null;
+  const body = signatureDataUrlBase64Body(signature);
+  if (body == null) return null;
   try {
-    return Buffer.from(match[1], "base64");
+    return Buffer.from(body, "base64");
   } catch {
     return null;
   }
@@ -550,9 +556,12 @@ export function signatureDataUrlToBuffer(signature: string | null): Buffer | nul
  * The legacy typed-signature text to render when there's no drawable image: a plain typed name renders
  * verbatim, but a data URL (drawn as an image, or an unsupported/undecodable one) must NOT be dumped as
  * raw text — it falls back to "—" instead.
+ *
+ * Delegates to the shared predicate so this renderer and the web deal tab can never disagree about what
+ * counts as a signature.
  */
 export function typedSignatureFallback(signature: string | null): string | null {
-  return signature && !signature.startsWith("data:") ? signature : null;
+  return sharedTypedSignatureFallback(signature);
 }
 
 function heading(doc: PDFKit.PDFDocument, label: string): void {

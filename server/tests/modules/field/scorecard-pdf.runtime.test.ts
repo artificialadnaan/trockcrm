@@ -9,6 +9,10 @@ import {
   type EvidenceGroup,
   type ScorecardPdfPhoto,
 } from "../../../src/modules/field/scorecard-pdf.js";
+import {
+  isRenderableSignatureDataUrl,
+  typedSignatureFallback as sharedTypedSignatureFallback,
+} from "@trock-crm/shared/types";
 
 // Compact data URL used to exercise the handwritten-signature parsing helpers below. Evidence rendering
 // uses the tracked 32x32 PNG because PDFKit rejects this minimal 1x1 fixture while decoding an image tile.
@@ -223,5 +227,32 @@ describe("scorecard signature rendering helpers", () => {
     expect(typedSignatureFallback("Pat Q. Manager")).toBe("Pat Q. Manager");
     expect(typedSignatureFallback(TINY_PNG_DATA_URL)).toBeNull();
     expect(typedSignatureFallback(null)).toBeNull();
+  });
+
+  it("classifies identically to the shared predicate the web deal tab uses", () => {
+    // Both surfaces now route through shared/types/field-scorecard-signature. This locks them together:
+    // if they ever disagree, one shows a signature the other renders as an em dash.
+    for (const value of [
+      TINY_PNG_DATA_URL,
+      "Pat Q. Manager",
+      "data:image/gif;base64,AAAA",
+      "data:image/svg+xml;base64,PHN2Zz4=",
+      "data:text/html;base64,PHNjcmlwdD4=",
+      "DATA:IMAGE/PNG;BASE64,iVBORw0KGgo=",
+      "",
+      null,
+    ]) {
+      expect(signatureDataUrlToBuffer(value) !== null).toBe(isRenderableSignatureDataUrl(value));
+      expect(typedSignatureFallback(value)).toBe(sharedTypedSignatureFallback(value));
+    }
+  });
+
+  it("never renders an unsupported data URL as either an image or verbatim text", () => {
+    // The reported bug was a raw `data:image/png;base64,...` printed as text. Neither an unsupported image
+    // type nor an uppercase data URL may fall through to the verbatim-text branch.
+    for (const value of ["data:image/svg+xml;base64,PHN2Zz4=", "DATA:TEXT/HTML;BASE64,PHNjcmlwdD4="]) {
+      expect(signatureDataUrlToBuffer(value)).toBeNull();
+      expect(typedSignatureFallback(value)).toBeNull();
+    }
   });
 });
