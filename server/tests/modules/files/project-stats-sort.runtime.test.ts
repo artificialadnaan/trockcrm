@@ -427,11 +427,24 @@ describe("getProjectPhotoStats keyset paging under concurrent writes", () => {
 describe("getProjectPhotoStats phase normalization across photo_category and subcategory", () => {
   const PHASE_KEY_PREFIX = "phase/";
   const PHASE_DEAL = "00000000-0000-4000-8000-000000088888";
+  const FOLDER_DEAL = "00000000-0000-4000-8000-000000088777";
 
   beforeAll(async () => {
     await pg.exec(`
       INSERT INTO deals (id, name, deal_number, assigned_rep_id, property_city, property_state, source_lead_id)
       VALUES ('${PHASE_DEAL}', 'Project Phase', 'TR-PHASE', '${REP}', 'Austin', 'TX', NULL);
+    `);
+    // A deal whose photos carry the phase in BOTH shapes: the folder picker's display name and the
+    // capture page's canonical token.
+    await pg.exec(`
+      INSERT INTO deals (id, name, deal_number, assigned_rep_id, property_city, property_state, source_lead_id)
+      VALUES ('${FOLDER_DEAL}', 'Project Folder', 'TR-FOLDER', '${REP}', 'Plano', 'TX', NULL);
+    `);
+    await pg.exec(`
+      INSERT INTO files (deal_id, category, subcategory, photo_category, r2_key, system_filename, original_filename, display_name, mime_type, file_extension, file_size_bytes, r2_bucket, folder_path, uploaded_by, taken_at, is_active, version)
+      VALUES
+        ('${FOLDER_DEAL}', 'photo', 'Site Visits', NULL, '${PHASE_KEY_PREFIX}folder.jpg', 'folder.jpg', 'orig.jpg', 'folder', 'image/jpeg', '.jpg', 10, 'trockcrm', 'Photos/Site Visits', '${USER_A}', '2026-05-05T00:00:00Z', true, 1),
+        ('${FOLDER_DEAL}', 'photo', 'site_visit', NULL, '${PHASE_KEY_PREFIX}typed.jpg', 'typed.jpg', 'orig.jpg', 'typed', 'image/jpeg', '.jpg', 10, 'trockcrm', 'Photos', '${USER_A}', '2026-05-06T00:00:00Z', true, 1);
     `);
     // Phase carried on SUBCATEGORY, the way the CRM web capture page writes it.
     const rows = [0, 1, 2].map(
@@ -446,13 +459,36 @@ describe("getProjectPhotoStats phase normalization across photo_category and sub
 
   afterAll(async () => {
     await pg.exec(`DELETE FROM files WHERE r2_key LIKE '${PHASE_KEY_PREFIX}%';`);
-    await pg.exec(`DELETE FROM deals WHERE id = '${PHASE_DEAL}';`);
+    await pg.exec(`DELETE FROM deals WHERE id IN ('${PHASE_DEAL}', '${FOLDER_DEAL}');`);
   });
 
   it("finds a subcategory-carried phase when filtering by that phase", async () => {
     const { projects } = await getProjectPhotoStats(tdb as never, { photoCategory: "preconstruction" });
     expect(projects.map((p) => p.dealName)).toContain("Project Phase");
     expect(projects.find((p) => p.dealName === "Project Phase")!.photoCount).toBe(3);
+  });
+
+  /**
+   * The FOLDER writer, which stores a THIRD shape. `deal-file-tab.tsx` sets `subcategory` to the folder's
+   * display NAME (`sub.name`), and the Photos folder's subfolders are "Site Visits", "Progress",
+   * "Final Walkthrough", "Damage". Lowercasing alone yields `site visits`, a different value from the
+   * typed `site_visit` — so the facet would list one phase twice and picking either would exclude the
+   * other's photos.
+   */
+  it("canonicalizes a folder-label subcategory onto the same phase as the typed token", async () => {
+    const { projects } = await getProjectPhotoStats(tdb as never, { photoCategory: "site_visit" });
+    const row = projects.find((p) => p.dealName === "Project Folder");
+    expect(row).toBeDefined();
+    // The folder-label photo AND the typed-token photo both answer to `site_visit`.
+    expect(row!.photoCount).toBe(2);
+  });
+
+  it("offers that phase ONCE, under its canonical token, not twice", async () => {
+    const facets = await getPhotoFeedFacets(tdb as never);
+    const siteVisitish = facets.photoCategories.filter((value) =>
+      value.replace(/[^a-z]/g, "").startsWith("sitevisit"),
+    );
+    expect(siteVisitish).toEqual(["site_visit"]);
   });
 
   it("does NOT count a subcategory-carried phase as Uncategorized", async () => {

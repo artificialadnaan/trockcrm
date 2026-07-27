@@ -1,8 +1,10 @@
 import { eq, and, desc, gte, inArray, isNull, sql, type SQL } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { files, deals, users, dealCompanycamProjects } from "@trock-crm/shared/schema";
+import { PHOTO_CATEGORIES, PHOTO_CATEGORY_LABELS } from "@trock-crm/shared/types";
 import type * as schema from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
+import { isPostgresCalendarDate, isPostgresTzOffset } from "../../lib/pg-timestamp.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -35,10 +37,59 @@ export const PHOTO_FEED_SOURCES = ["companycam", "trock"] as const;
  * `subcategory IS NULL` and therefore excludes every CompanyCam photo. On this surface CompanyCam is
  * ~80% of the library, so importing that rule would make "Uncategorized" almost empty and wrong.
  */
-const photoPhaseSql = sql`COALESCE(
-  ${files.photoCategory}::text,
-  CASE WHEN LOWER(${files.subcategory}) = 'companycam' THEN NULL ELSE LOWER(${files.subcategory}) END
-)`;
+/**
+ * `subcategory` -> canonical phase token, DERIVED from the constants rather than hand-typed, so a
+ * renamed folder or a new phase cannot silently create a second representation again.
+ *
+ * Three writers put three different shapes in that column:
+ *   - `photo-capture-page.tsx` writes a canonical token (`site_visit`);
+ *   - the deal Files-tab folder picker writes the FOLDER'S DISPLAY NAME (`deal-file-tab.tsx` uses
+ *     `sub.name`), and the Photos folder's subfolders are "Site Visits", "Progress",
+ *     "Final Walkthrough", "Damage" (`DEAL_FOLDER_TEMPLATE`);
+ *   - CompanyCam sync writes the source flag.
+ *
+ * Lowercasing alone therefore yields `site visits` alongside `site_visit` — the facet lists one phase
+ * twice and picking either excludes the other's photos, which is precisely the divergence this shared
+ * expression exists to prevent.
+ *
+ * Built by matching each folder name against the human labels in `PHOTO_CATEGORY_LABELS`, allowing the
+ * plural the folder tree uses ("Site Visits" -> label "Site Visit" -> token `site_visit`). A folder with
+ * no canonical equivalent — "Final Walkthrough" has none; `final_completion` is a different thing — is
+ * deliberately left unmapped rather than guessed at, so it stays its own self-consistent value on both
+ * the facet and the filter instead of being quietly folded into a phase it is not.
+ */
+const SUBCATEGORY_PHASE_ALIASES: ReadonlyMap<string, string> = (() => {
+  const aliases = new Map<string, string>();
+  for (const [token, label] of Object.entries(PHOTO_CATEGORY_LABELS)) {
+    aliases.set(label.toLowerCase(), token);
+    aliases.set(`${label.toLowerCase()}s`, token); // the folder tree pluralizes ("Site Visits")
+  }
+  // Canonical tokens map to themselves; set last so a token always wins over a colliding label.
+  for (const token of PHOTO_CATEGORIES) aliases.set(token.toLowerCase(), token);
+  return aliases;
+})();
+
+/**
+ * The normalized phase, as SQL. Used by BOTH the row predicate and the facet — that identity is the
+ * whole point, so the alias mapping lives here rather than at either call site.
+ *
+ * 'CompanyCam' is excluded because on that row it is a SOURCE flag, not a phase (see
+ * PHOTO_FEED_SOURCES). Deliberate divergence from the deal timeline, whose Uncategorized arm requires
+ * `subcategory IS NULL` and therefore excludes every CompanyCam photo: here CompanyCam is ~80% of the
+ * library, so importing that rule would make "Uncategorized" almost empty and wrong.
+ */
+const photoPhaseSql = (() => {
+  const whens = Array.from(SUBCATEGORY_PHASE_ALIASES.entries())
+    .filter(([alias, token]) => alias !== token) // identity rows need no CASE arm
+    .map(([alias, token]) => sql`WHEN ${alias} THEN ${token}`);
+  const aliasCase = whens.length > 0
+    ? sql`CASE LOWER(${files.subcategory}) ${sql.join(whens, sql` `)} ELSE LOWER(${files.subcategory}) END`
+    : sql`LOWER(${files.subcategory})`;
+  return sql`COALESCE(
+    ${files.photoCategory}::text,
+    CASE WHEN LOWER(${files.subcategory}) = 'companycam' THEN NULL ELSE ${aliasCase} END
+  )`;
+})();
 export type PhotoFeedSource = (typeof PHOTO_FEED_SOURCES)[number];
 
 export interface PhotoFeedFilters {
@@ -281,37 +332,17 @@ export function encodeProjectCursor(cursor: ProjectPhotoCursor): string {
  * regex or the round-trip refuses is treated as a malformed cursor and the list restarts.
  */
 function isPostgresTimestampText(value: string): boolean {
-  // Every field is RANGE-BOUNDED in the pattern itself. An unbounded `\d{2}` for the hour would accept
-  // "99:00:00", which looks well-formed, passes a calendar-only check, and is then rejected by Postgres
-  // at the ::timestamptz cast — a 500 from the one function whose contract is "restart the list".
-  const match =
-    /^(\d{4})-(\d{2})-(\d{2})[ T]([01]\d|2[0-3]):([0-5]\d):([0-5]\d)(\.\d{1,6})?([+-](?:0\d|1[0-5])(?::?[0-5]\d)?|Z)?$/.exec(
-      value,
-    );
+  // Shape and the time-of-day fields are bounded in the pattern itself — an unbounded `\d{2}` for the
+  // hour accepts "99:00:00", which looks well-formed and is then rejected at the cast. The YEAR and the
+  // TIMEZONE OFFSET are checked by lib/pg-timestamp.ts, shared with `parseFileDateParam`: these two
+  // validators used to answer the same question differently, and each carried a hole the other did not
+  // (year zero here, offsets past ±15:59 there).
+  const match = /^(\d{4})-(\d{2})-(\d{2})[ T]([01]\d|2[0-3]):([0-5]\d):([0-5]\d)(\.\d{1,6})?(Z|[+-]\d{2}(?::?\d{2})?)?$/.exec(
+    value,
+  );
   if (!match) return false;
   const [, year, month, day] = match;
-  // Postgres uses the proleptic Gregorian calendar, which has NO year zero (1 BC is followed by 1 AD),
-  // so it rejects all 366 dates in `0000` at the ::timestamptz cast. JavaScript's Date DOES have a year
-  // 0, accepts it, and round-trips it faithfully — so the calendar check below passes it straight
-  // through. The last way a hand-edited cursor could reach Postgres as a bad cast and 500 the one
-  // endpoint whose documented contract is "restart the list".
-  //
-  // Bounded exhaustively against a real ::timestamptz cast rather than reasoned about, so this is known
-  // to close the whole class rather than one symptom:
-  //   - all 10,000 x 100 x 100 y-m-d combinations the regex can express: the validator accepts
-  //     3,652,425 of them, Postgres rejects exactly 366 — every one in year 0000, none in any other year;
-  //   - all 86,400 times of day x every timezone form the regex allows, applied to BOTH range boundaries
-  //     (0001-01-01 00:00:00 and 9999-12-31 23:59:59) with 1-6 fractional digits: 101,943 accepted,
-  //     0 rejected — so no timezone shift pushes a boundary value outside what Postgres can represent.
-  //
-  // The sweep also found the reverse: Postgres ACCEPTS `24:00:00` and `23:59:60`, which this regex
-  // refuses. Left deliberately over-strict — it errs toward restarting the list (harmless) rather than
-  // 500ing, and Postgres never EMITS either form, so a legitimately issued cursor cannot contain one.
-  if (year === "0000") return false;
-  // Calendar overflow too (2026-02-30), which no regex can express — rejected the way Postgres does
-  // rather than the way Date.parse does (it silently rolls over and reports success).
-  const probe = new Date(`${year}-${month}-${day}T00:00:00Z`);
-  return !Number.isNaN(probe.getTime()) && probe.toISOString().slice(0, 10) === `${year}-${month}-${day}`;
+  return isPostgresCalendarDate(year, month, day) && isPostgresTzOffset(match[8]);
 }
 
 export function decodeProjectCursor(raw: unknown, sort: ProjectPhotoSort): ProjectPhotoCursor | undefined {

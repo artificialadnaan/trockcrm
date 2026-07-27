@@ -1248,7 +1248,12 @@ export function PhotoFeedPage() {
   const handleLoadNewPhotos = useCallback(() => {
     loadNewPhotos();
     setLibraryVersion((v) => v + 1);
-  }, [loadNewPhotos]);
+    // ...and the PROJECT rows too. New uploads move both of that tab's ordering keys — `count(*)` and
+    // `max(taken_at)` — so leaving it alone means switching to Projects shows stale counts in a stale
+    // order, and a project whose first photo just arrived is missing entirely until some other control
+    // changes. Exactly what the assignment handler already refreshes, for the same reason.
+    void fetchProjectStats();
+  }, [loadNewPhotos, fetchProjectStats]);
 
   useEffect(() => {
     void fetchProjectStats();
