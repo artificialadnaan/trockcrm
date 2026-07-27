@@ -30,3 +30,57 @@ jobs:
 
       - name: Run production build and test-inclusive typecheck gate
         run: npm run check:premerge
+
+  # mobile-crm is a self-contained app OUTSIDE the npm workspace graph (see mobile-crm/metro.config.js for
+  # why it must stay that way). Two consequences make this job load-bearing rather than optional:
+  #   - the root `npm ci` above never installs mobile-crm/node_modules, and
+  #   - `npm run check:premerge` iterates only the five workspaces.
+  # Without this job, nothing in mobile-crm/ is compiled or run by CI at all, and a green gate would say
+  # nothing about it. Its own lockfile is the cache key for the same reason.
+  #
+  # T-Rock Cam (mobile/) has the identical shape and is still ungated; adding that is a separate change,
+  # deliberately not bundled into this PR.
+  mobile-crm:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        # Pinned to a SHA rather than a mutable @v4 tag, and credentials are not persisted: this job runs
+        # `npm ci`, which executes dependency lifecycle scripts, and it performs no git operations after
+        # checkout — so leaving the token in local git config would expose it for no benefit.
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: mobile-crm/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: mobile-crm
+
+      - name: Typecheck
+        run: npm run typecheck
+        working-directory: mobile-crm
+
+      # Includes the tree-wide AST guard that forbids React Native's core <Image>, whose absence is what
+      # let the Fabric use-after-free crash reach production in the other app (#956).
+      - name: Test
+        run: npm test
+        working-directory: mobile-crm
+
+      # Typecheck and Jest both pass happily on an app that cannot actually produce a bundle — a Metro
+      # resolution error, a bad Babel config, a missing asset or a native-module mismatch surfaces only
+      # here. Without this step a broken app gets a green gate and the failure is not discovered until
+      # someone burns an EAS build on it.
+      - name: Bundle (expo export)
+        run: npm run build:export
+        working-directory: mobile-crm
+        env:
+          # Any syntactically valid host works: this step proves the bundle BUILDS, and reaches no network.
+          # The real host is supplied as an EAS build env var and is never committed.
+          EXPO_PUBLIC_API_BASE_URL: https://api.ci.invalid

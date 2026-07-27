@@ -72,6 +72,7 @@ import { listDealChangeOrders, softDeleteChangeOrderChildren, sumDealChangeOrder
 import { loadRfpVoteDetail, type RfpVoteView } from "./rfp-vote-detail.js";
 import { isServiceRfp } from "./rfp-vote-service.js";
 import { computeRfpVoteState } from "@trock-crm/shared/lib/rfpVoteState";
+import { getEffectiveDealValue, isDealValueEffectivelyOnHold } from "@trock-crm/shared/types";
 import { isCompleteBillingAddress } from "../../lib/billing-address.js";
 import { recordDescriptionHistoryChange } from "./deal-description-history.js";
 import { buildArchivedDescription } from "./archive-description.js";
@@ -116,7 +117,20 @@ import {
 type TenantDb = NodePgDatabase<typeof schema>;
 type DealRow = typeof deals.$inferSelect;
 type PipelineStageRow = typeof pipelineStageConfig.$inferSelect;
-type DealWithAtRisk<T> = T & { atRisk: AtRiskResult };
+/**
+ * What attachAtRiskResult returns. The three verdict fields are declared here, not just produced at
+ * runtime: a caller that copies only `.atRisk` (as deal DETAIL did) then silently drops them, and
+ * without them in the type the compiler cannot say so.
+ */
+type DealWithAtRisk<T> = T & {
+  atRisk: AtRiskResult;
+  /** Canonical effective-hold verdict — stored flag OR a far-future close target, terminal-exempt. */
+  effectiveOnHold: boolean;
+  /** The canonical value with that hold rule applied: an effectively-held deal is worth 0. */
+  effectiveValue: number;
+  /** The stage to display — bid-board-aware for owned deals. */
+  displayStageSlug: string | null;
+};
 const contractSignedDateForReporting = sql`COALESCE(contract_signed_at::date, contract_signed_date)`;
 const DEFAULT_PIPELINE_CARDS_PER_STAGE_LIMIT = 100;
 const MAX_PIPELINE_CARDS_PER_STAGE_LIMIT = 1000;
@@ -168,8 +182,33 @@ export function attachAtRiskResult<T extends {
     ? actualStageSlug
     : deal.bidBoardStageSlug ?? actualStageSlug;
 
+  // The resolved CRM stage, for the value/hold rules. They take the CRM slug and the Bid Board slug
+  // SEPARATELY and combine them internally (terminal-ness honours both), so this supplies the former
+  // and leaves bidBoardStageSlug untouched rather than pre-merging the two.
+  const valueSource = { ...deal, stageSlug: actualStageSlug };
+
   return {
     ...deal,
+    // The DISPLAY stage: a Bid Board-owned deal can advance (or close) in Bid Board while its CRM
+    // stageSlug still reads "opportunity". The web detail already switches to bidBoardStageSlug; this
+    // exposes the same resolved value so non-web clients cannot drift from it.
+    displayStageSlug: stageSlug,
+    // The canonical hold + value verdicts, computed here so every client shows the same money.
+    //
+    // getEffectiveDealValue zeroes an effectively-held deal, and "effectively held" is not just the
+    // stored on_hold flag — it ORs in a close target more than 90 CT-days out, exempts terminal deals,
+    // and resolves "today" against the America/Chicago calendar day. Re-deriving that on a device would
+    // be a second implementation of a rule that has moved repeatedly, and the failure mode is wrong
+    // money next to an On Hold badge rather than an error. Clients read these; they do not recompute.
+    //
+    // Computed from `valueSource`, NOT the raw `deal`. /deals/pipeline selects card rows with no
+    // stageSlug and supplies the authoritative one as fallbackStageSlug, stamping it on only AFTER this
+    // helper returns — so passing `deal` left both functions with a null stage. That made estimating
+    // cards take the bid-first order, and made terminal cards with far-future close dates look held and
+    // worth zero, because the won/lost exemption never fired. Both would then disagree with the
+    // stage-aware pipeline totals computed from the same rows.
+    effectiveOnHold: isDealValueEffectivelyOnHold(valueSource as never),
+    effectiveValue: getEffectiveDealValue(valueSource as never),
     atRisk: getDealAtRiskResult(
       {
         stageSlug,
@@ -2184,6 +2223,11 @@ export async function getDealDetail(
       // client_email/client_phone). Not otherwise projected by the detail select.
       primaryContactEmail: contacts.email,
       primaryContactPhone: contacts.phone,
+      // Additive: the contacts table has a separate `mobile` column and every other contact surface
+      // coalesces the two (contact-list-page.tsx uses `phone ?? mobile`). Projecting only `phone` left a
+      // mobile-only contact with no reachable number on any consumer of this detail read. Added rather
+      // than COALESCEd into primaryContactPhone so existing consumers see no change in what they read.
+      primaryContactMobile: contacts.mobile,
       primaryContactOwnerUserId: contacts.ownerId,
       primaryContactOwnerUserName: sql<string | null>`(SELECT display_name FROM public.users WHERE id = ${contacts.ownerId})`,
       billingContactName: sql<string | null>`NULLIF(TRIM(CONCAT_WS(' ', ${billingContact.firstName}, ${billingContact.lastName})), '')`,
@@ -2295,17 +2339,26 @@ export async function getDealDetail(
   // guard fires (loadRfpVoteDetail returns a non-null zero-state that would otherwise render the panel on every RFP).
   const isVoteRound = rfpVotesView.length > 0 || isRequestlessVoteRound;
 
+  // Deal DETAIL re-derives at-risk here (overriding getDealById's), so it must opt into the
+  // close-target suppression too — otherwise the detail page that hosts "Move Close Date" would still
+  // read threshold_reached after a future date is set.
+  const attached = attachAtRiskResult(dealWithMetadata, atRiskViewerRole, currentStage?.slug ?? null, {
+    applyCloseTargetSuppression: true,
+  });
+
   return {
     ...dealWithMetadata,
     // Authoritative bid due date (lead-owned for converted deals; deal column for manual deals),
     // overriding the raw snapshot spread above so the banner never shows a stale/cleared value.
     bidDueDate: resolvedBidDueDate,
-    // Deal DETAIL re-derives at-risk here (overriding getDealById's), so it must opt into the
-    // close-target suppression too — otherwise the detail page that hosts "Move Close Date" would
-    // still read threshold_reached after a future date is set.
-    atRisk: attachAtRiskResult(dealWithMetadata, atRiskViewerRole, currentStage?.slug ?? null, {
-      applyCloseTargetSuppression: true,
-    }).atRisk,
+    atRisk: attached.atRisk,
+    // Named individually rather than spreading `attached`, which also carries the raw deal columns and
+    // would clobber the overrides above (bidDueDate in particular). Taking only `.atRisk` here was the
+    // bug: the LIST path got the effective verdicts while detail silently received undefined, so a
+    // stored on-hold deal showed its full raw value beside its own "On hold" badge.
+    effectiveOnHold: attached.effectiveOnHold,
+    effectiveValue: attached.effectiveValue,
+    displayStageSlug: attached.displayStageSlug,
     postConversionEnrichment: evaluatePostConversionEnrichment(dealWithMetadata as any, currentStage ?? { isTerminal: true }),
     bidBoardOwnership: buildBidBoardOwnershipState(dealWithMetadata),
     stageHistory,
