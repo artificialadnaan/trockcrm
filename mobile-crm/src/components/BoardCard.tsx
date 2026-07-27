@@ -14,6 +14,18 @@ import { theme } from "../theme/theme";
  * from a SERVER verdict (effectiveOnHold, atRisk, effectiveValue) precisely so there is one answer;
  * duplicating the component is how the two copies drift apart in the first place.
  */
+/**
+ * A soft-deleted (archived) deal is `is_active = false`, which is this app's canonical delete marker.
+ *
+ * The Lost column deliberately RETAINS these for reporting, so they appear on an all-time board — but
+ * `getDealById` hides them by default (service.ts:2103), so tapping one opens a 404. Rendering them as
+ * ordinary openable cards promises a screen that does not exist; they stay visible, because the column
+ * counted them, and say what they are instead.
+ */
+function isArchived(deal: { isActive?: boolean | null }): boolean {
+  return deal.isActive === false;
+}
+
 export function BoardCard({
   deal,
   canMove,
@@ -26,13 +38,19 @@ export function BoardCard({
   onPress: () => void;
   testIDPrefix?: string;
 }) {
+  const archived = isArchived(deal);
+
   return (
     <Pressable
       testID={`${testIDPrefix}-${deal.id}`}
-      onPress={onPress}
+      onPress={archived ? undefined : onPress}
+      disabled={archived}
       accessibilityRole="button"
-      accessibilityLabel={deal.name ?? "Untitled deal"}
-      style={styles.card}
+      accessibilityLabel={[deal.name ?? "Untitled deal", archived ? "Archived, can't be opened" : null]
+        .filter(Boolean)
+        .join(", ")}
+      accessibilityState={{ disabled: archived }}
+      style={[styles.card, archived && styles.cardArchived]}
     >
       <View style={styles.cardHead}>
         <Text style={styles.cardName} numberOfLines={1}>
@@ -49,7 +67,8 @@ export function BoardCard({
         {(deal.effectiveOnHold ?? deal.onHold) ? <Badge label="On hold" tone="amber" /> : null}
         {showsAtRisk(deal) ? <Badge label="At risk" tone="red" /> : null}
         {/* Marking the ones you CAN move is more useful than offering an action that 403s. */}
-        {canMove ? <Text style={styles.yours}>Yours</Text> : null}
+        {canMove && !archived ? <Text style={styles.yours}>Yours</Text> : null}
+        {archived ? <Text style={styles.archived}>Archived</Text> : null}
       </View>
     </Pressable>
   );
@@ -76,4 +95,6 @@ const styles = StyleSheet.create({
     marginTop: theme.space.xs,
   },
   yours: { fontFamily: theme.font.semibold, fontSize: 12, color: theme.color.green },
+  cardArchived: { opacity: 0.6 },
+  archived: { fontFamily: theme.font.semibold, fontSize: 12, color: theme.color.textSecondary },
 });

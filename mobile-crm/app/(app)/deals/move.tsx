@@ -239,11 +239,26 @@ export default function MoveStageScreen() {
             : "Lost connection before the server answered — the move may or may not have gone through. " +
               "Check the deal's stage before trying again.",
         );
+        /**
+         * CLEAR THE SELECTION, not just the caches.
+         *
+         * The preflight key is (scope, dealId, targetStageId) — none of which change when the DEAL
+         * does. staleTime: 0 does not help while the observer stays mounted with the same key, so
+         * refreshing the deal left the verdict beside it computed for a stage the deal may no longer
+         * be in: Confirm re-enabled on the pre-move direction and requirements. Dropping the target
+         * unmounts that query, so re-selecting asks the question again against the refreshed deal.
+         */
+        setTargetStageId(null);
+        setOverrideReason("");
+        setLostReasonId(null);
+        setLostNotes("");
+        setExpectedCloseDate("");
         void Promise.all([
           queryClient.invalidateQueries({ queryKey: qk.deal(scope, dealId) }),
           queryClient.invalidateQueries({ queryKey: ["deals", scope] }),
           queryClient.invalidateQueries({ queryKey: ["pipeline", scope] }),
           queryClient.invalidateQueries({ queryKey: ["stage-deals", scope] }),
+          queryClient.invalidateQueries({ queryKey: ["stage-preflight", scope, dealId] }),
         ]);
         return;
       }

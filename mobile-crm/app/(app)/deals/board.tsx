@@ -179,11 +179,14 @@ export default function PipelineBoardScreen() {
               ListHeaderComponent={
                 <View style={styles.columnSummary}>
                   <Text style={styles.columnValue}>{formatColumnValue(selected.totalValue)}</Text>
+                  {/* TWO server facts, not a third derived from them. `activeCount` counts only the
+                      STORED on_hold flag (deals/service.ts:2000-2002), while a card is badged "On hold"
+                      when it is EFFECTIVELY held — which also covers a close target more than 90 days
+                      out. Subtracting therefore under-counted: a column could read "10 active" with no
+                      hold figure at all while one of those ten visibly carried the badge. The two
+                      counts the server actually computed say enough. */}
                   <Text style={styles.columnMeta}>
-                    {selected.activeCount} active
-                    {selected.totalCount > selected.activeCount
-                      ? ` · ${selected.totalCount - selected.activeCount} on hold`
-                      : ""}
+                    {selected.activeCount} active of {selected.totalCount}
                   </Text>
                 </View>
               }
