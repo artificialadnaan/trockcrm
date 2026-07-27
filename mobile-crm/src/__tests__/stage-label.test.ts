@@ -8,6 +8,7 @@ const stage = (id: string, slug: string, name: string): PipelineStage => ({
   displayOrder: 0,
   isTerminal: false,
   isActivePipeline: true,
+  workflowFamily: "standard_deal",
   color: null,
 });
 

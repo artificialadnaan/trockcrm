@@ -153,6 +153,16 @@ export default function DealsListScreen() {
         right={total !== undefined ? <Text style={styles.count}>{total} total</Text> : undefined}
       />
 
+      <Pressable
+        testID="open-board"
+        onPress={() => router.push("/(app)/deals/board")}
+        accessibilityRole="button"
+        accessibilityLabel="Open the pipeline board"
+        style={styles.boardLink}
+      >
+        <Text style={styles.boardLinkText}>View pipeline board ›</Text>
+      </Pressable>
+
       <View style={styles.scopeRow}>
         {SCOPES.map((s) => (
           <Pressable
@@ -319,6 +329,17 @@ const styles = StyleSheet.create({
   },
   title: { fontFamily: theme.font.bold, fontSize: 26, color: theme.color.inkNavy },
   count: { fontFamily: theme.font.regular, fontSize: 13, color: theme.color.textMuted },
+  boardLink: {
+    marginHorizontal: theme.space.lg,
+    marginTop: theme.space.sm,
+    alignItems: "center",
+    paddingVertical: theme.space.sm,
+    borderRadius: theme.radius.md,
+    borderWidth: 1,
+    borderColor: theme.color.border,
+    backgroundColor: theme.color.surface,
+  },
+  boardLinkText: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.brandRed },
   scopeRow: { flexDirection: "row", gap: theme.space.sm, paddingHorizontal: theme.space.lg, paddingTop: theme.space.md },
   scopePill: {
     borderRadius: theme.radius.pill,
