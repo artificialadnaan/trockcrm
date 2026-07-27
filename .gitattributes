@@ -1,0 +1,12 @@
+# Lockfiles are generated, not authored. Marking them collapses them in GitHub's diff view and lets
+# review tooling skip them.
+#
+# Not cosmetic here: mobile-crm/package-lock.json is 12,028 of this PR's ~15,900 added lines — 76% of
+# the diff — and the automated reviewer failed twice with "Unknown error" on it while succeeding on the
+# sibling PRs, which are a tenth the size. A diff nobody and nothing can read is a review that does not
+# happen, on the PR that carries the whole auth spine.
+#
+# They remain committed and are still diffable on demand; `npm ci` requires them, and the CI cache keys
+# off mobile-crm/package-lock.json directly.
+package-lock.json linguist-generated=true
+**/package-lock.json linguist-generated=true
