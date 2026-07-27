@@ -326,40 +326,69 @@ describe("persist queue", () => {
 });
 
 describe("failed-erasure retry semantics", () => {
+  const KEY = "trock.crm.session.v1";
+
+  function storeWith(raw: string | null) {
+    jest.resetModules();
+    const deleteItemAsync = jest.fn().mockResolvedValue(undefined);
+    jest.doMock("expo-secure-store", () => ({
+      getItemAsync: jest.fn().mockResolvedValue(raw),
+      setItemAsync: jest.fn().mockResolvedValue(undefined),
+      deleteItemAsync,
+    }));
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const mod = require("../auth/session") as typeof import("../auth/session");
+    return { mod, deleteItemAsync };
+  }
+
+  const record = (token: string) =>
+    JSON.stringify({
+      token,
+      user: { id: "u1", email: "r@x.com", role: "rep", officeId: "o1" },
+      activeOfficeId: null,
+    });
+
+  afterEach(() => jest.resetModules());
+
   /**
-   * The retry for a credential erasure that failed must be generation-guarded, NOT unconditional.
+   * The retry must be decided by "is that credential STILL on disk?", not by a generation comparison.
    *
-   * createPersistQueue.clear() runs unconditionally by design — right for a user-initiated sign-out,
-   * wrong for this retry. Guarding on "is anyone signed in right now?" before enqueuing is not enough:
-   * a sign-in landing between that check and the queued operation would watch an unconditional clear
-   * delete the NEW account's session. These pin the property the retry depends on.
+   * A generation guard is a proxy, and it is wrong in the case that matters: if a replacement sign-in
+   * advances the generation and then ITS save also fails, nothing overwrote the old record — yet a
+   * generation-guarded retry is skipped, and skipped operations resolve, so the warning clears while the
+   * signed-out account's token is still sitting there for the next launch to restore.
    */
-  it("skips the retry once a newer sign-in has taken the generation", async () => {
-    let generation = 1;
-    const queue = createPersistQueue(() => generation);
-    const erase = jest.fn().mockResolvedValue(undefined);
-
-    generation = 2; // someone signed in after the failed sign-out
-    await queue.save(1, erase);
-
-    // Being skipped is CORRECT: that sign-in's save already overwrote the record this wanted to remove,
-    // so running it would erase the new account instead.
-    expect(erase).not.toHaveBeenCalled();
+  it("still sees the stale token when a replacement sign-in failed to save", async () => {
+    const { mod } = storeWith(record("stale-token"));
+    await expect(mod.peekStoredToken()).resolves.toBe("stale-token");
   });
 
-  it("still runs the retry while that identity is the current one", async () => {
-    let generation = 1;
-    const queue = createPersistQueue(() => generation);
-    const erase = jest.fn().mockResolvedValue(undefined);
-    await queue.save(1, erase);
-    expect(erase).toHaveBeenCalledTimes(1);
+  it("reports a REPLACED record as no longer ours", async () => {
+    const { mod } = storeWith(record("someone-elses-token"));
+    const stored = await mod.peekStoredToken();
+    expect(stored).not.toBe("stale-token");
   });
 
-  it("does not resolve the flag when the retry itself fails again", async () => {
-    let generation = 1;
-    const queue = createPersistQueue(() => generation);
-    await expect(
-      queue.save(1, () => Promise.reject(new Error("keychain still locked"))),
-    ).rejects.toThrow("keychain still locked");
+  it.each([
+    ["nothing stored", null],
+    ["a tombstone", "{}"],
+    ["unparseable data", "{ not json"],
+  ])("treats %s as nothing left to erase", async (_case, raw) => {
+    const { mod } = storeWith(raw);
+    await expect(mod.peekStoredToken()).resolves.toBeNull();
+  });
+
+  it("counts an EXPIRED record as still present", async () => {
+    // loadSession returns null for an expired token, so it cannot answer this question — the record is
+    // still on disk and still has to be erased.
+    const expired = `header.${Buffer.from(JSON.stringify({ exp: 1 })).toString("base64url")}.sig`;
+    const { mod } = storeWith(record(expired));
+    await expect(mod.peekStoredToken()).resolves.toBe(expired);
+  });
+
+  it("never writes — it is a read used to decide a write", async () => {
+    const { mod, deleteItemAsync } = storeWith(record("stale-token"));
+    await mod.peekStoredToken();
+    expect(deleteItemAsync).not.toHaveBeenCalled();
   });
 });

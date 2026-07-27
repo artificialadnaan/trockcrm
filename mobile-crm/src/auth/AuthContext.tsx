@@ -7,7 +7,14 @@ import { chooseActiveOffice, isOfficeConfirmed, type OfficeProbe } from "./offic
 import { createSerialRunner } from "../lib/serial";
 import { createPersistQueue } from "./persist-queue";
 import { hasAnyCrmSurface } from "./surfaces";
-import { clearSession, isAllowedRole, loadSession, saveSession, type Session } from "./session";
+import {
+  clearSession,
+  isAllowedRole,
+  loadSession,
+  peekStoredToken,
+  saveSession,
+  type Session,
+} from "./session";
 import type { CrmUser } from "../api/types";
 
 /**
@@ -85,13 +92,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [session, setSession] = useState<Session | null | undefined>(undefined);
   const [gate, setGate] = useState<GateState>("checking");
   /**
-   * A sign-out whose credential erasure failed, tagged with the generation it belonged to.
+   * A sign-out whose credential erasure failed, tagged with the TOKEN it failed to erase.
    *
-   * The generation matters: the retry below is valid ONLY for that identity. Once a newer sign-in has
-   * saved, it has overwritten the very record the retry wants to remove, so retrying would delete the
-   * NEW account's session instead of the old one's.
+   * The token, not the generation. A generation guard answers "has anything happened since?", which is a
+   * proxy for the real question — "is that credential still on disk?" — and the proxy is wrong in the
+   * case that matters: if a replacement sign-in advances the generation and then ITS save also fails,
+   * nothing overwrote the old record, yet a generation-guarded retry is skipped. Skipped operations
+   * resolve, so the warning would clear while the signed-out account's token sat there.
    */
-  const [failedClear, setFailedClear] = useState<{ generation: number } | null>(null);
+  const [failedClear, setFailedClear] = useState<{ token: string } | null>(null);
   const signOutIncomplete = failedClear !== null;
 
   /**
@@ -128,7 +137,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }
 
   const signOut = useCallback(async () => {
-    const generation = ++authGenerationRef.current;
+    authGenerationRef.current += 1;
+    const staleToken = sessionRef.current?.token ?? null;
     sessionRef.current = null;
     setSession(null);
     // Nothing left to verify. Without this the gate keeps the previous session's value, so a stale one
@@ -151,7 +161,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       // on a dead authenticated screen does not make the keychain any more writable. But the failure is
       // not discarded — it is flagged so the login screen can say the device was not fully cleared, and
       // retried below, which is the part that can actually still succeed.
-      setFailedClear({ generation });
+      if (staleToken) setFailedClear({ token: staleToken });
     }
   }, [queryClient]);
 
@@ -165,20 +175,30 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
    */
   useEffect(() => {
     if (!failedClear) return;
-    const { generation } = failedClear;
+    const { token } = failedClear;
 
     let cancelled = false;
     const attempt = () => {
       if (cancelled) return;
-      // save(), NOT clear(). clear() runs unconditionally by design — correct for a user-initiated
-      // sign-out, wrong here. Checking `sessionRef.current` first is not enough: a sign-in landing
-      // between that check and the queued operation would see an unconditional clear delete the NEW
-      // account's session. The generation guard closes that window, and a superseding sign-in has
-      // already overwritten the record this retry wanted to remove, so being skipped is the right
-      // outcome rather than a missed erasure.
-      void persistRef.current!
-        .save(generation, clearSession)
+      /**
+       * The check and the erase run as ONE queued operation, so nothing can interleave between them.
+       *
+       * Deciding outside the queue — "is anyone signed in right now?", or a generation comparison — is
+       * either racy (a sign-in landing between the check and the queued write) or wrong (a skipped
+       * operation resolves, clearing the warning while the credential remains). Reading the stored
+       * token inside the queue answers the ONLY question that matters, at the only moment it stays true.
+       */
+      void persistRef
+        .current!.clear(async () => {
+          const stored = await peekStoredToken();
+          // Something else owns the record now, or there is nothing left — either way ours is gone.
+          if (stored !== token) return;
+          // Proven to still be the stale credential, so erasing it cannot touch anyone else's.
+          await clearSession();
+        })
         .then(() => {
+          // Resolved means the credential is gone: erased, or already replaced. Only a rejection —
+          // clearSession failing again — leaves it on disk, and that keeps the warning up.
           if (!cancelled) setFailedClear(null);
         })
         .catch(() => undefined);

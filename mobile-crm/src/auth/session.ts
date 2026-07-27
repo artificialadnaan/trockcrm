@@ -132,6 +132,25 @@ export async function loadSession(): Promise<LoadedSession> {
 }
 
 /**
+ * The RAW token currently in the store, with no validation and no writes.
+ *
+ * Exists for one job: deciding whether a credential whose erasure failed is still the thing on disk. An
+ * expired or otherwise unusable record still has to count as present — `loadSession` returns null for
+ * those, so it cannot answer this question. Returns null when nothing is stored or the record is not
+ * even parseable, both of which mean there is no token of ours left to erase.
+ */
+export async function peekStoredToken(): Promise<string | null> {
+  const raw = await SecureStore.getItemAsync(KEY);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as { token?: unknown };
+    return typeof parsed.token === "string" && parsed.token.length > 0 ? parsed.token : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Written over the session when deletion fails. `loadSession` structurally rejects it (no token, no
  * user), so it is as good as deleted — and, unlike a delete, it only needs the keychain to accept a
  * WRITE, which can succeed when a delete does not.
