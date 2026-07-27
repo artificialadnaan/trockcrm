@@ -93,7 +93,22 @@ export default function LeadsListScreen() {
     return index;
   }, [stagesQuery.data]);
 
-  const leads = query.data ?? [];
+  /**
+   * ARCHIVE TOMBSTONES are filtered out of the Closed tab.
+   *
+   * `isActive=false` is not the same axis as `status`. Archiving a lead sets isActive false and LEAVES
+   * status "open" (leads/service.ts:2196-2208), so a plain inactive filter returns those tombstones
+   * alongside the genuinely converted and disqualified ones — and opening one produced the flatly
+   * contradictory "This lead is open. Its stage can no longer be changed."
+   *
+   * The route takes a single `status`, so it cannot express "converted OR disqualified" server-side.
+   * Filtered here instead, on the row's own status: the set is capped at 100 either way, and these are
+   * records the rep should never have been shown.
+   */
+  const leads = useMemo(() => {
+    const rows = query.data ?? [];
+    return lifecycle === "false" ? rows.filter((lead) => (lead.status ?? "open") !== "open") : rows;
+  }, [query.data, lifecycle]);
 
   const handleLeadPress = useCallback(
     (lead: LeadListItem) => router.push(`/(app)/leads/${lead.id}`),

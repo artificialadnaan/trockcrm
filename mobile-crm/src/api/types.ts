@@ -102,6 +102,12 @@ export type PipelineStage = {
   displayOrder: number;
   isTerminal: boolean;
   isActivePipeline: boolean;
+  /**
+   * Which workflow this stage belongs to. `GET /deals/stages` returns BOTH deal families in one
+   * unfiltered list, so without this a service-only stage is indistinguishable from a standard one and
+   * gets offered to every deal. See eligibleStageTargets in src/stage-targets.ts.
+   */
+  workflowFamily: "standard_deal" | "service_deal" | "lead" | null;
   color: string | null;
 };
 
@@ -129,6 +135,13 @@ export type DealListItem = {
   updatedAt: string | null;
   onHold: boolean | null;
   isActive: boolean | null;
+  /**
+   * A change order is a Won CHILD deal, and the stage-change route rejects one unconditionally with a
+   * 409 CHANGE_ORDER_STAGE_LOCKED (stage-change.ts:161-167) — moving it off Won would silently drop its
+   * value from every Won report. Preflight does NOT apply that lock, so without this field the app can
+   * show a green "Ready to move" and then fail on commit.
+   */
+  isChangeOrder: boolean | null;
   atRisk: AtRiskResult | null;
   /**
    * SERVER verdicts. Do not recompute either of these on device.
@@ -141,6 +154,13 @@ export type DealListItem = {
    */
   effectiveOnHold: boolean | null;
   effectiveValue: number | null;
+  /**
+   * OPTIONAL because it is not on every shape: pipeline board cards and the deal detail carry it, the
+   * plain /deals list row does not. It decides whether a stage move is offered at all, so a type that
+   * claimed it was always present would invite gating on `undefined === userId` — permanently false,
+   * silently hiding the action from the one person allowed to take it.
+   */
+  assignedRepId?: string | null;
   /**
    * The stage to DISPLAY. A Bid Board-owned deal can advance, or close, in Bid Board while its CRM
    * `stageSlug` still reads an earlier stage; the web detail already switches to bidBoardStageSlug.
@@ -158,6 +178,12 @@ export type DealListResponse = {
     totalPages: number;
   };
 };
+
+/**
+ * Present on pipeline BOARD cards and the deal detail, absent from the plain list. Ownership decides
+ * whether a stage move is even offered — the commit route is strictly owner-only.
+ */
+export type DealOwnership = { assignedRepId: string | null };
 
 export type DealDetail = DealListItem & {
   assignedRepId: string | null;

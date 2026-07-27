@@ -14,6 +14,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError } from "../../../src/api/client";
 import * as dealsApi from "../../../src/api/endpoints/deals";
+import * as pipelineApi from "../../../src/api/endpoints/pipeline";
 import { useAuth } from "../../../src/auth/AuthContext";
 import { useQueryScope } from "../../../src/auth/useOfficeId";
 import { displayAmount, showsAtRisk } from "../../../src/components/DealCard";
@@ -35,7 +36,8 @@ export default function DealDetailScreen() {
   // Back needs a destination: this screen is reachable by deep link and by restored
   // navigation state, where goBack() is a no-op and the control would do nothing.
   const goBack = useGoBack("/(app)/deals");
-  const { fetcher } = useAuth();
+  // `session` is this branch's addition — the change-order lock and the ownership gate both need it.
+  const { fetcher, session } = useAuth();
   const scope = useQueryScope();
   const queryClient = useQueryClient();
   const [note, setNote] = useState("");
@@ -106,13 +108,25 @@ export default function DealDetailScreen() {
     mutationFn: (next: boolean) =>
       next ? dealsApi.watchDeal(fetcher, dealId) : dealsApi.unwatchDeal(fetcher, dealId),
     onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: qk.deal(scope, dealId) });
-      // The Watched list is derived from this flag, so it must be invalidated too — otherwise an
-      // already-mounted list keeps showing an unwatched deal (or hiding a newly watched one).
+      // CONCURRENT. invalidateQueries resolves only once the active queries have refetched, and
+      // watch.isPending stays true for the whole handler — so awaiting four in series left the star
+      // disabled for four sequential round trips after the toggle had already succeeded. The move screen
+      // was made concurrent one commit ago and this was left serial in the same breath, having just
+      // gained two more entries.
       //
-      // Scoped: a bare ["deals"] prefix-matches EVERY user/office/role variant sitting in the cache, so
-      // toggling one watch would refetch lists that this action cannot have changed.
-      await queryClient.invalidateQueries({ queryKey: ["deals", scope] });
+      // All four are derived from the watch flag: the deal itself, the Watched list, and — via their
+      // Mine/Watched scopes — the board and the stage drill-down. Those two are separate cache prefixes
+      // that stay mounted underneath this screen, and refetchOnWindowFocus is off, so without them an
+      // unwatched deal sits visibly on the Watched board until a manual pull.
+      //
+      // SCOPED, not a bare ["deals"]: that prefix-matches every user/office/role variant in the cache,
+      // so one toggle would refetch lists this action cannot have changed.
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: qk.deal(scope, dealId) }),
+        queryClient.invalidateQueries({ queryKey: ["deals", scope] }),
+        queryClient.invalidateQueries({ queryKey: ["pipeline", scope] }),
+        queryClient.invalidateQueries({ queryKey: ["stage-deals", scope] }),
+      ]);
     },
   });
 
@@ -225,6 +239,24 @@ export default function DealDetailScreen() {
                 ? watch.error.message
                 : "Couldn't update your watch setting."}
           </Text>
+        ) : null}
+
+        {/* Offered only to the assigned rep: the commit route is owner-only with no admin or director
+            bypass, so showing this to anyone else is an invitation to a 403.
+            AND not at all for a deal the route locks outright — a change order is rejected with a 409
+            no matter who asks, while preflight would still report it as ready. */}
+        {!pipelineApi.stageMoveLock(deal).locked &&
+        deal.assignedRepId &&
+        deal.assignedRepId === session?.user.id ? (
+          <Pressable
+            testID="open-move-stage"
+            onPress={() => router.push({ pathname: "/(app)/deals/move", params: { dealId } })}
+            accessibilityRole="button"
+            accessibilityLabel="Move this deal to another stage"
+            style={styles.moveBtn}
+          >
+            <Text style={styles.moveText}>Move stage</Text>
+          </Pressable>
         ) : null}
 
         <Section title="Details">
@@ -449,6 +481,15 @@ const styles = StyleSheet.create({
   badgeText: { fontFamily: theme.font.semibold, fontSize: 12 },
   badgeTextAmber: { color: "#92400E" },
   badgeTextRed: { color: theme.color.brandRedDeep },
+  moveBtn: {
+    marginTop: theme.space.sm,
+    borderWidth: 1,
+    borderColor: theme.color.brandRed,
+    borderRadius: theme.radius.md,
+    paddingVertical: theme.space.md,
+    alignItems: "center",
+  },
+  moveText: { fontFamily: theme.font.bold, fontSize: 15, color: theme.color.brandRed },
   watchBtn: {
     alignSelf: "flex-start",
     borderWidth: 1,

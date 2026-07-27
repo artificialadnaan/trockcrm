@@ -141,12 +141,47 @@ describe("stage transition", () => {
    * the endpoint produces would surface as a generic error and the caller would render nothing.
    */
   it("turns a 409 refusal into a VALUE, not an exception", async () => {
-    const fetcher = throwing(new ApiError("Missing requirements", 409, "MISSING_REQUIREMENTS"));
+    // The refusal RESULT itself, which is what the route sends when preflight refuses.
+    const fetcher = throwing(
+      new ApiError("Missing requirements", 409, "MISSING_REQUIREMENTS", {
+        ok: false,
+        reason: "missing_requirements",
+        targetStageId: "s2",
+        missing: [],
+      }),
+    );
     const res = await leads.transitionLeadStage(fetcher, "l1", { targetStageId: "s2" });
     expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.targetStageId).toBe("s2");
+  });
+
+  /**
+   * The OTHER refusal shape. When preflight passed and updateLead then rejected the move, the route
+   * answers with a nested envelope under a different code — reachable, and previously re-thrown, so the
+   * detail screen showed a bare message and dropped the itemised remediation.
+   */
+  it("normalizes the nested LEAD_STAGE_REQUIREMENTS_UNMET envelope too", async () => {
+    const fetcher = throwing(
+      new ApiError("Requirements unmet", 409, "LEAD_STAGE_REQUIREMENTS_UNMET", {
+        error: {
+          code: "LEAD_STAGE_REQUIREMENTS_UNMET",
+          missingRequirements: {
+            effectiveChecklist: {
+              fields: [
+                { key: "estimatedValue", label: "Estimated value", satisfied: false },
+                { key: "name", label: "Name", satisfied: true },
+              ],
+            },
+          },
+        },
+      }),
+    );
+    const res = await leads.transitionLeadStage(fetcher, "l1", { targetStageId: "s2" });
+    expect(res.ok).toBe(false);
+    // Only the UNSATISFIED entries — a satisfied field is not something to go and fix.
     if (!res.ok) {
-      expect(res.code).toBe("MISSING_REQUIREMENTS");
-      expect(res.targetStageId).toBe("s2");
+      expect(res.missing).toHaveLength(1);
+      expect(res.missing?.[0]).toMatchObject({ label: "Estimated value" });
     }
   });
 
@@ -176,11 +211,17 @@ describe("stage transition", () => {
     }
   });
 
-  it("still yields a refusal when the 409 body could not be read", async () => {
-    // A 409 is a refusal whether or not we could parse why — it must never read as a success.
-    const fetcher = throwing(new ApiError("Conflict", 409, undefined, undefined));
-    const res = await leads.transitionLeadStage(fetcher, "l1", { targetStageId: "s2" });
-    expect(res.ok).toBe(false);
+  /**
+   * An UNCODED 409 is a stale-screen conflict, not a requirements refusal — updateLead rejects a
+   * converted, disqualified or archived lead with plain messages and no code. Fabricating a
+   * missing-requirements result for those routed them through onSuccess, skipped the refresh onError
+   * performs, and told the rep to complete fields that do not exist.
+   */
+  it("re-throws a 409 whose payload does not identify a requirements refusal", async () => {
+    const fetcher = throwing(new ApiError("Hidden lead records are read-only", 409, undefined, undefined));
+    await expect(leads.transitionLeadStage(fetcher, "l1", { targetStageId: "s2" })).rejects.toBeInstanceOf(
+      ApiError,
+    );
   });
 
   it("still throws on a real failure — a 500 is not a refusal", async () => {
@@ -279,10 +320,12 @@ describe("409s that are not missing-requirements", () => {
     );
   });
 
-  it("still normalizes a coded missing-requirements conflict", async () => {
+  it("re-throws a bare MISSING_REQUIREMENTS code with no payload to itemise", async () => {
+    // The code alone cannot be acted on; re-throwing routes it through onError, which refreshes.
     const fetcher = throwing(new ApiError("Missing requirements", 409, "MISSING_REQUIREMENTS"));
-    const res = await leads.transitionLeadStage(fetcher, "l1", { targetStageId: "s2" });
-    expect(res.ok).toBe(false);
+    await expect(leads.transitionLeadStage(fetcher, "l1", { targetStageId: "s2" })).rejects.toBeInstanceOf(
+      ApiError,
+    );
   });
 
   it("prefers the SERVER's body over the code, when it sent one", async () => {

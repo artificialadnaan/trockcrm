@@ -28,6 +28,16 @@ export default function LeadDetailScreen() {
   /** The last refusal, kept so the rep can see WHAT the lead still needs rather than just that it failed. */
   const [refusal, setRefusal] = useState<leadsApi.LeadTransitionRefusal | null>(null);
   const [transitionError, setTransitionError] = useState<string | null>(null);
+  /**
+   * Set when a move's outcome is UNKNOWN and cleared only by a refetch that actually succeeds.
+   *
+   * `invalidateQueries` resolves even when its refetch fails, so awaiting it is not confirmation of
+   * anything. Without this the control came back the moment the mutation settled, still showing the old
+   * stage — and a retry submits a same-stage transition, which the server accepts and which restamps
+   * stage_entered_at, corrupting the stage age every SLA and at-risk figure is measured from. The move
+   * stays disabled until the screen can prove what stage the lead is actually in.
+   */
+  const [unconfirmed, setUnconfirmed] = useState(false);
 
   const leadQuery = useQuery({
     queryKey: qk.lead(scope, leadId),
@@ -51,6 +61,7 @@ export default function LeadDetailScreen() {
     mutationFn: (targetStageId: string) =>
       leadsApi.transitionLeadStage(fetcher, leadId, { targetStageId }),
     onSuccess: async (result) => {
+      setUnconfirmed(false);
       // A REFUSAL arrives here as a successful promise carrying ok:false — the endpoint answers 409 with
       // the reason. Treating that as a win would move the UI on from a transition that never happened.
       if (!result.ok) {
@@ -80,7 +91,18 @@ export default function LeadDetailScreen() {
        * Awaiting was necessary and not sufficient; the response already contains the new lead, so the
        * cache is written from it rather than hoping a network round-trip succeeds.
        */
-      queryClient.setQueryData(qk.lead(scope, leadId), result.lead);
+      /**
+       * MERGED into the decorated entry, not substituted for it.
+       *
+       * The transition returns updateLead's RAW row — no companyName, assignedRepName, property,
+       * projectType or converted-deal metadata, all of which are added by the detail decorator. Writing
+       * it wholesale blanked those fields the instant a stage moved, and if the invalidation below then
+       * failed, the screen deliberately keeps that incomplete copy as its "saved" state. Merging takes
+       * the authoritative stage fields from the response and leaves the decoration alone.
+       */
+      queryClient.setQueryData(qk.lead(scope, leadId), (previous: typeof lead | undefined) =>
+        previous ? { ...previous, ...result.lead } : result.lead,
+      );
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: qk.lead(scope, leadId) }),
         queryClient.invalidateQueries({ queryKey: ["leads", scope] }),
@@ -114,17 +136,21 @@ export default function LeadDetailScreen() {
       const staleAfterFailure =
         err.status === 0 || err.status === 403 || err.status === 408 || err.status === 409;
 
+      const indeterminate = err.status === 0 || err.status === 408;
       setTransitionError(
-        err.status === 0 || err.status === 408
+        indeterminate
           ? "The move may or may not have gone through — refreshing. Check the stage before trying again."
           : err.message,
       );
 
+      if (indeterminate) setUnconfirmed(true);
+
       if (staleAfterFailure) {
-        await Promise.all([
-          queryClient.invalidateQueries({ queryKey: qk.lead(scope, leadId) }),
-          queryClient.invalidateQueries({ queryKey: ["leads", scope] }),
-        ]);
+        void queryClient.invalidateQueries({ queryKey: ["leads", scope] });
+        // refetch(), not invalidateQueries(): this one has to REPORT whether it worked, and
+        // invalidateQueries resolves either way. Only a success clears the block.
+        const refreshed = await leadQuery.refetch();
+        if (refreshed.isSuccess) setUnconfirmed(false);
       }
     },
   });
@@ -311,11 +337,21 @@ export default function LeadDetailScreen() {
                     setTransitionError(null);
                     transition.mutate(nextStage.id);
                   }}
-                  disabled={transition.isPending}
+                  disabled={transition.isPending || unconfirmed}
                   accessibilityRole="button"
-                  accessibilityLabel={`Move this lead to ${nextStage.name}`}
-                  accessibilityState={{ disabled: transition.isPending, busy: transition.isPending }}
-                  style={[styles.stageOption, transition.isPending && styles.stageOptionDisabled]}
+                  accessibilityLabel={
+                    unconfirmed
+                      ? "Move unavailable until the lead's current stage is confirmed"
+                      : `Move this lead to ${nextStage.name}`
+                  }
+                  accessibilityState={{
+                    disabled: transition.isPending || unconfirmed,
+                    busy: transition.isPending,
+                  }}
+                  style={[
+                    styles.stageOption,
+                    (transition.isPending || unconfirmed) && styles.stageOptionDisabled,
+                  ]}
                 >
                   <Text style={styles.stageOptionText}>Move to {nextStage.name}</Text>
                 </Pressable>
@@ -324,6 +360,33 @@ export default function LeadDetailScreen() {
           )}
 
           {transition.isPending ? <ActivityIndicator color={theme.color.brandRed} /> : null}
+
+          {/* An escape from the disabled state. Blocking the move until the stage is confirmed is right;
+              leaving the rep with a permanently dead button and no way to re-check is the very defect
+              that blocking was meant to avoid — it just moves it one step along. */}
+          {unconfirmed ? (
+            <Pressable
+              testID="lead-confirm-refresh"
+              onPress={async () => {
+                const refreshed = await leadQuery.refetch();
+                if (refreshed.isSuccess) {
+                  setUnconfirmed(false);
+                  setTransitionError(null);
+                }
+              }}
+              disabled={leadQuery.isFetching}
+              accessibilityRole="button"
+              accessibilityLabel="Refresh to confirm this lead's current stage"
+              accessibilityState={{ disabled: leadQuery.isFetching, busy: leadQuery.isFetching }}
+              style={styles.retryBtn}
+            >
+              {leadQuery.isFetching ? (
+                <ActivityIndicator color={theme.color.brandRed} />
+              ) : (
+                <Text style={styles.retryText}>Refresh to confirm the stage</Text>
+              )}
+            </Pressable>
+          ) : null}
 
           {/* The REFUSAL payload, which is the useful half of this endpoint: the server names each thing
               the lead still needs and says whether it can be fixed here or only on the full record. */}

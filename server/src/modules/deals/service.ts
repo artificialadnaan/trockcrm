@@ -152,6 +152,11 @@ function nonTerminalMirroredStageCondition() {
   return sql`COALESCE(${deals.bidBoardStageSlug}, '') NOT IN (${sqlStringList(TERMINAL_STAGE_SLUGS)})`;
 }
 
+/** The same predicate against an aliased `deals` (the stage page selects `from deals d`). */
+function aliasedNonTerminalMirroredStageCondition(alias: string) {
+  return sql`COALESCE(${sql.raw(alias)}.bid_board_stage_slug, '') NOT IN (${sqlStringList(TERMINAL_STAGE_SLUGS)})`;
+}
+
 function normalizeAtRiskViewerRole(role: string | null | undefined): UserRole | null {
   return USER_ROLES.includes(role as UserRole) ? (role as UserRole) : null;
 }
@@ -922,6 +927,11 @@ export interface DealBoardInput {
 
 export interface DealStagePageInput extends DealBoardInput {
   stageId: string;
+  /**
+   * Reproduce the BOARD's population — drops open rows whose Bid Board mirror has already closed.
+   * Off by default so the web workspace, which also uses this endpoint, is unchanged.
+   */
+  boardPopulation?: boolean;
   page: number;
   pageSize: number;
   sort?: StagePageSort;
@@ -968,6 +978,7 @@ type DealStageWorkspaceRow = {
   bid_due_date: string | null;
   is_bid_board_owned: boolean;
   is_change_order: boolean;
+  is_active: boolean | null;
   bid_board_stage_slug: string | null;
   bid_board_stage_entered_at: string | null;
   on_hold: boolean;
@@ -1652,6 +1663,16 @@ function mapDealStageWorkspaceRow(
     bidDueDate: row.bid_due_date,
     isBidBoardOwned: row.is_bid_board_owned,
     isChangeOrder: row.is_change_order,
+    /**
+     * The lifecycle flag, carried so a client can tell an ARCHIVED row from a live one.
+     *
+     * `is_active = false` is this codebase's soft-delete marker, and the Lost column deliberately keeps
+     * those rows in its reporting population — but getDealById hides them by default, so a client that
+     * cannot see this flag renders an archived card as openable and the tap lands on a 404. The board
+     * already receives it through the list shape; the stage drill-down did not, which made the client's
+     * archived guard silently inert on exactly the surface the all-time board links into.
+     */
+    isActive: row.is_active,
     bidBoardStageSlug: row.bid_board_stage_slug,
     bidBoardStageEnteredAt: row.bid_board_stage_entered_at,
     onHold: row.on_hold,
@@ -3718,6 +3739,20 @@ export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePage
     scope,
     sql`d.stage_id IN (${sqlList(stageIds)})`,
     excludeTestDataCondition("d"),
+    /**
+     * OPT-IN board-equivalent population.
+     *
+     * getDealsForPipeline drops open-stage deals whose Bid Board mirror has already reached a terminal
+     * stage (nonTerminalMirroredStageCondition, :3450), and this endpoint never did — so a drill-down
+     * opened from "Showing X of Y — see all" could list deals the board had not counted, under an open
+     * stage they have in fact moved past.
+     *
+     * Behind a flag rather than applied unconditionally: this endpoint also backs the WEB deals
+     * workspace, which has not asked for the board's population, and silently removing rows from a
+     * surface this change set does not touch is not a fix, it is a second surprise. Callers that link
+     * FROM the board opt in; everyone else is byte-identical to before.
+     */
+    ...(input.boardPopulation ? [aliasedNonTerminalMirroredStageCondition("d")] : []),
   ];
 
   if (isWonTerminalStage) {
@@ -3872,6 +3907,7 @@ export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePage
       d.bid_due_date,
       d.is_bid_board_owned,
       d.is_change_order,
+      d.is_active,
       d.bid_board_stage_slug,
       d.bid_board_stage_entered_at,
       d.on_hold,

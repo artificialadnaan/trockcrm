@@ -161,41 +161,51 @@ export async function transitionLeadStage(
   } catch (err) {
     if (err instanceof ApiError && err.status === 409) {
       /**
-       * THE SERVER'S OWN REFUSAL, not a reconstruction of it.
+       * THE SERVER'S OWN REFUSAL, in either of the two shapes it sends.
        *
-       * The 409 body IS the result — `{ ok:false, reason, code, targetStageId, resolution, missing }` —
-       * and `missing` is the whole point: an itemised list of what the lead still needs, each entry
-       * saying whether it can be fixed inline or only on the full record. The first version of this
-       * rebuilt a refusal with `missing: []`, which meant the detail screen's entire itemised-refusal
-       * view could never receive data and always fell through to its generic "open it on the web"
-       * message. A UI that cannot be reached is worse than one that was never built.
+       *   1. the transition RESULT itself — `{ ok:false, …, missing }` — when preflight refuses; and
+       *   2. a nested error envelope `{ error: { code: LEAD_STAGE_REQUIREMENTS_UNMET,
+       *      missingRequirements, currentStage, targetStage } }`, which is what comes back when the
+       *      initial preflight passed and updateLead then rejected the move.
+       *
+       * The second is reachable and was being re-thrown, so the detail screen showed a bare message and
+       * discarded the itemised remediation — the same "refusal view that can never receive data" this
+       * adapter was rewritten to fix, just via the other branch. The web normalises both
+       * (client/src/hooks/use-leads.ts:642-673).
        */
-      const body = err.body as LeadTransitionRefusal | undefined;
+      const body = err.body as
+        | (LeadTransitionRefusal & { error?: { code?: string; missingRequirements?: unknown } })
+        | undefined;
+
       if (body && body.ok === false) return body;
 
-      /**
-       * NOT every 409 is a missing-requirements refusal, and treating them alike tells the rep to go
-       * and complete information that is not the problem.
-       *
-       * The transition path also 409s for LEAD_STAGE_PROGRESSION_GAP (skipping a canonical stage) and
-       * for a lead that was converted or disqualified after this screen loaded. Both are conflicts
-       * about the MOVE, not about the record being incomplete — the second in particular means the
-       * screen is stale and should say so, not send the rep hunting for a missing field.
-       *
-       * Only the requirements envelope is normalised; everything else keeps its own message.
-       */
-      if (err.code && err.code !== "MISSING_REQUIREMENTS") throw err;
+      const nested = body?.error;
+      if (nested?.code === "LEAD_STAGE_REQUIREMENTS_UNMET") {
+        const missing = (nested.missingRequirements as
+          | { effectiveChecklist?: { fields?: Array<{ key: string; label: string; satisfied?: boolean }> } }
+          | undefined)?.effectiveChecklist?.fields;
+        return {
+          ok: false,
+          reason: "missing_requirements",
+          code: nested.code,
+          targetStageId: input.targetStageId,
+          resolution: "detail",
+          missing: (missing ?? [])
+            .filter((field) => field.satisfied === false)
+            .map((field) => ({ key: field.key, label: field.label, resolution: "detail" as const })),
+        };
+      }
 
-      // Body absent or unparseable, and no code to tell us otherwise. A 409 is still a refusal — it must
-      // never read as a success — so fall back to the requirements shape with nothing itemised.
-      return {
-        ok: false,
-        reason: "missing_requirements",
-        code: err.code ?? null,
-        targetStageId: input.targetStageId,
-        resolution: "detail",
-        missing: [],
-      };
+      /**
+       * EVERYTHING ELSE RE-THROWS, coded or not.
+       *
+       * updateLead rejects a stale submission with UNCODED 409s — "Converted leads only allow
+       * questionnaire answer updates", "Hidden lead records are read-only". The previous fallback
+       * fabricated a missing-requirements result for those, which routed them through onSuccess,
+       * skipped the refresh onError performs, and told the rep to complete fields that do not exist
+       * while leaving the stale control live. A 409 is only normalised when its payload positively
+       * identifies a requirements refusal.
+       */
     }
     throw err;
   }

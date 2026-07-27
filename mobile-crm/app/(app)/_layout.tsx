@@ -6,8 +6,11 @@ import { formStyles } from "../../src/theme/formStyles";
 import { theme } from "../../src/theme/theme";
 
 /**
- * Authenticated shell. The tab bar arrives with the feature screens in later PRs; this PR ships the
- * auth spine and one landing screen, so a Stack is enough and avoids a tab bar with a single tab.
+ * The authenticated shell: auth gates, then the tab bar.
+ *
+ * Gates run in a deliberate order — restoring, signed-out, forced password change, onboarding — and each
+ * one owns exactly one redirect. The tab bar renders only once every gate has passed, so no tab can be
+ * reached by a session that should have been sent elsewhere.
  */
 export default function AppLayout() {
   const { session, gate } = useAuth();
@@ -39,7 +42,23 @@ export default function AppLayout() {
   // gate that only guards the front door is not a gate.
   if (session.user.requiresOnboarding) return <Redirect href="/onboarding-required" />;
 
-  return <Stack screenOptions={{ headerShown: false }} />;
+  /**
+   * A STACK that CONTAINS the tab bar, not a bare tab navigator.
+   *
+   * The tab bar is one screen inside this stack ((tabs)); detail screens are siblings pushed OVER it.
+   * That ordering is the whole point: when a rep opens a linked deal from a contact, the deal is pushed
+   * onto the CURRENT stack, so Back returns to the contact they came from.
+   *
+   * With the tab navigator at the root instead, pushing a deal switched to the Deals tab and Back went
+   * to the deals list — losing the context the rep was actually working in. That was a regression this
+   * PR introduced by adding tabs, and it is structural: no amount of care at the call site fixes it,
+   * because the destination's tab ownership decides where Back goes.
+   */
+  return (
+    <Stack screenOptions={{ headerShown: false }}>
+      <Stack.Screen name="(tabs)" />
+    </Stack>
+  );
 }
 
 function Restoring() {
