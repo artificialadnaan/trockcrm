@@ -181,9 +181,13 @@ export default function PipelineBoardScreen() {
                 // The board is a PREVIEW — the server caps cards per column and there is no
                 // "load more" here, so saying so is the difference between "that's all of them" and a
                 // silent truncation the rep plans around.
-                selected.deals.length > 0 && selected.activeCount > selected.deals.length ? (
+                // totalCount, NOT activeCount. The preview includes held cards while activeCount
+                // excludes them, so a column of 20 (15 active + 5 held) returning a 15-card preview
+                // compared 15 > 15 and hid this — presenting a truncated column as complete, which is
+                // exactly the silent-truncation the note exists to prevent.
+                selected.deals.length > 0 && selected.totalCount > selected.deals.length ? (
                   <Text style={styles.previewNote}>
-                    Showing {selected.deals.length} of {selected.activeCount}. Open the list for all.
+                    Showing {selected.deals.length} of {selected.totalCount}. Open the list for all.
                   </Text>
                 ) : null
               }

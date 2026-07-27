@@ -35,10 +35,24 @@ import { theme } from "../../../src/theme/theme";
  */
 
 /**
- * Slugs that mean LOST, where the server additionally requires a reason and non-blank notes.
- * Mirrors the terminal lost set; kept narrow so the drift surface is one line.
+ * Slugs that mean LOST, where the server additionally requires a reason id and non-blank notes.
+ *
+ * Mirrors LOST_DEAL_STAGE_SLUGS in shared/src/types/workflow.ts:313-315, which is the union of the
+ * CANONICAL slug and its four legacy aliases. This app cannot import shared (it is deliberately not an
+ * npm workspace), so it is a mirror — and the first version of it had all four ALIASES and omitted the
+ * canonical "lost", which is the slug a current pipeline config actually uses. The effect was the worst
+ * kind: the screen would not ask for a reason or notes, and the server would reject the move with a
+ * message about fields the rep was never shown.
  */
-const LOST_SLUGS = new Set(["closed_lost", "deal_canceled", "production_lost", "service_lost"]);
+const LOST_SLUGS = new Set([
+  // canonical (workflow.ts:149)
+  "lost",
+  // legacy aliases (workflow.ts:297-302)
+  "deal_canceled",
+  "production_lost",
+  "service_lost",
+  "closed_lost",
+]);
 
 export default function MoveStageScreen() {
   const { dealId: rawId } = useLocalSearchParams<{ dealId: string }>();

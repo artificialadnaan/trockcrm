@@ -113,3 +113,32 @@ describe("canMoveStage", () => {
     expect(pipeline.canMoveStage({}, undefined)).toBe(false);
   });
 });
+
+describe("lost-stage detection", () => {
+  /**
+   * The server requires a reason id AND non-blank notes for a Lost move. If the screen does not
+   * recognise the target as Lost it collects neither, and the rep gets a rejection naming fields they
+   * were never shown.
+   *
+   * shared/src/types/workflow.ts:313-315 defines the set as the CANONICAL slug plus four legacy
+   * aliases. The first mirror here had the four aliases and omitted the canonical one — which is the
+   * slug a current pipeline config actually uses, so it failed on the common case and worked on the
+   * legacy ones.
+   */
+  const LOST = ["lost", "deal_canceled", "production_lost", "service_lost", "closed_lost"];
+
+  it.each(LOST)("treats %s as a Lost move", (slug) => {
+    expect(LOST.includes(slug)).toBe(true);
+  });
+
+  it("includes the CANONICAL slug, not just the legacy aliases", () => {
+    expect(LOST).toContain("lost");
+  });
+
+  it.each(["won", "closed_won", "estimating", "opportunity", "contract"])(
+    "does not treat %s as Lost",
+    (slug) => {
+      expect(LOST.includes(slug)).toBe(false);
+    },
+  );
+});
