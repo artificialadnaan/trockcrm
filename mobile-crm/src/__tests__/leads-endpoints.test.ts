@@ -161,28 +161,55 @@ describe("stage transition", () => {
    * detail screen showed a bare message and dropped the itemised remediation.
    */
   it("normalizes the nested LEAD_STAGE_REQUIREMENTS_UNMET envelope too", async () => {
+    /**
+     * THE SHAPE THE TRANSITION ACTUALLY SENDS — three flat string arrays.
+     *
+     * This fixture previously carried `missingRequirements.effectiveChecklist.fields`, which belongs to
+     * the PREFLIGHT gate (stage-gate.ts:307-317), not to this error. The test passed because it was
+     * written from the same wrong assumption as the code it was checking: both read a field the server
+     * never sends here, and agreeing with each other is not the same as agreeing with the server. Pinned
+     * against stage-transition-service.ts:34-38 and routes.ts:541-549 instead.
+     */
     const fetcher = throwing(
       new ApiError("Requirements unmet", 409, "LEAD_STAGE_REQUIREMENTS_UNMET", {
         error: {
           code: "LEAD_STAGE_REQUIREMENTS_UNMET",
           missingRequirements: {
-            effectiveChecklist: {
-              fields: [
-                { key: "estimatedValue", label: "Estimated value", satisfied: false },
-                { key: "name", label: "Name", satisfied: true },
-              ],
-            },
+            prerequisiteFields: ["source", "projectTypeId"],
+            qualificationFields: ["qualification_budget"],
+            projectTypeQuestionIds: ["q-roof-age"],
           },
         },
       }),
     );
     const res = await leads.transitionLeadStage(fetcher, "l1", { targetStageId: "s2" });
     expect(res.ok).toBe(false);
-    // Only the UNSATISFIED entries — a satisfied field is not something to go and fix.
     if (!res.ok) {
-      expect(res.missing).toHaveLength(1);
-      expect(res.missing?.[0]).toMatchObject({ label: "Estimated value" });
+      // All three arrays, flattened in order — the web normalizer's contract (use-leads.ts:657-661).
+      expect(res.missing?.map((item) => item.key)).toEqual([
+        "source",
+        "projectTypeId",
+        "qualification_budget",
+        "q-roof-age",
+      ]);
+      expect(res.missing?.[0]).toMatchObject({ key: "source", label: "source", resolution: "detail" });
     }
+  });
+
+  it("survives a nested refusal that names only one of the three arrays", async () => {
+    // The qualified_lead gate returns prerequisiteFields with the other two empty; the sales-validation
+    // gate returns the other two with prerequisiteFields empty. Neither shape may drop to `missing: []`.
+    const fetcher = throwing(
+      new ApiError("Requirements unmet", 409, "LEAD_STAGE_REQUIREMENTS_UNMET", {
+        error: {
+          code: "LEAD_STAGE_REQUIREMENTS_UNMET",
+          missingRequirements: { prerequisiteFields: ["source"] },
+        },
+      }),
+    );
+    const res = await leads.transitionLeadStage(fetcher, "l1", { targetStageId: "s2" });
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.missing?.map((item) => item.key)).toEqual(["source"]);
   });
 
   /**
@@ -260,6 +287,145 @@ describe("isLeadOpen", () => {
 
   it("closes an inactive lead whatever its status says", () => {
     expect(leads.isLeadOpen({ status: "open", isActive: false })).toBe(false);
+  });
+});
+
+describe("isLeadArchived", () => {
+  /**
+   * The third lifecycle state, and the one with no field of its own.
+   *
+   * Archiving clears is_active and LEAVES status at "open" (leads/service.ts:2202-2210), so these rows
+   * are "not open" by isLeadOpen and "open" by their own status — which is how the detail screen came to
+   * say "This lead is open. Its stage can no longer be changed."
+   */
+  it("recognises the archive tombstone: inactive but still status open", () => {
+    expect(leads.isLeadArchived({ status: "open", isActive: false })).toBe(true);
+  });
+
+  it("is NOT archived for converted or disqualified leads, which are inactive on purpose", () => {
+    expect(leads.isLeadArchived({ status: "converted", isActive: false })).toBe(false);
+    expect(leads.isLeadArchived({ status: "disqualified", isActive: false })).toBe(false);
+  });
+
+  it("is NOT archived for a live open lead", () => {
+    expect(leads.isLeadArchived({ status: "open", isActive: true })).toBe(false);
+    expect(leads.isLeadArchived({})).toBe(false);
+  });
+});
+
+describe("mergeLeadDetail", () => {
+  /**
+   * A raw write response folded into a decorated cache entry.
+   *
+   * `projectType` is the trap: a legacy TEXT column on the row AND a `{ id, name }` object on a
+   * decorated read. A plain `{ ...previous, ...raw }` therefore replaced the object with a string, so
+   * "Project type" blanked on every stage move — and stayed blank if the follow-up refetch failed,
+   * because the screen deliberately keeps the merged copy as its saved state.
+   */
+  const decorated = {
+    id: "l1",
+    name: "Palm Villas roof",
+    stageId: "s1",
+    status: "open",
+    projectType: { id: "pt1", name: "Re-roof" },
+    property: { id: "p1", name: "Palm Villas", address: null, city: "Dallas", state: "TX" },
+    companyName: "Palm Villas HOA",
+    assignedRepName: "Dana",
+    stageName: "New lead",
+  } as unknown as Parameters<typeof leads.mergeLeadDetail>[0];
+
+  const rawRow = {
+    id: "l1",
+    name: "Palm Villas roof",
+    stageId: "s2",
+    status: "open",
+    updatedAt: "2026-07-27T00:00:00.000Z",
+    // The COLUMN, not the decorated object.
+    projectType: "re_roof",
+  } as unknown as Parameters<typeof leads.mergeLeadDetail>[1];
+
+  it("takes the moved stage from the response", () => {
+    expect(leads.mergeLeadDetail(decorated, rawRow)).toMatchObject({
+      stageId: "s2",
+      updatedAt: "2026-07-27T00:00:00.000Z",
+    });
+  });
+
+  it("keeps the decorated projectType OBJECT rather than the raw column that shares its name", () => {
+    const merged = leads.mergeLeadDetail(decorated, rawRow);
+    expect(merged.projectType).toEqual({ id: "pt1", name: "Re-roof" });
+  });
+
+  it("keeps every other decorated field the raw row simply does not carry", () => {
+    expect(leads.mergeLeadDetail(decorated, rawRow)).toMatchObject({
+      companyName: "Palm Villas HOA",
+      assignedRepName: "Dana",
+      stageName: "New lead",
+      property: { id: "p1", city: "Dallas" },
+    });
+  });
+
+  it("never surfaces the raw column as a decorated field when there is no cache entry", () => {
+    // With nothing to merge into there is no object to keep — but handing the screen a STRING under a
+    // field it reads as `projectType?.name` would be worse than absent, so the raw value is dropped.
+    expect(leads.mergeLeadDetail(undefined, rawRow).projectType).toBeUndefined();
+  });
+});
+
+describe("listClosedLeads", () => {
+  /**
+   * Two requests, because "closed" is not "inactive".
+   *
+   * Archive tombstones are inactive with an "open" status, and the server sorts by updatedAt and caps at
+   * 100 BEFORE the client sees anything — so a client-side status filter could not recover the converted
+   * and disqualified leads a page full of tombstones had already pushed out.
+   */
+  function multiRecording(results: unknown[]) {
+    const calls: Array<{ path: string; opts: Record<string, unknown> }> = [];
+    let index = 0;
+    const fetcher = (async (path: string, opts: Record<string, unknown> = {}) => {
+      calls.push({ path, opts });
+      return results[index++] ?? {};
+    }) as unknown as Fetcher;
+    return { fetcher, calls };
+  }
+
+  it("asks for the two terminal statuses separately — the route's status filter is a single equality", async () => {
+    const { fetcher, calls } = multiRecording([{ leads: [] }, { leads: [] }]);
+    await leads.listClosedLeads(fetcher, { scope: "mine" });
+
+    const statuses = calls.map((call) => (call.opts.query as Record<string, unknown>).status);
+    expect(statuses).toEqual(["converted", "disqualified"]);
+    // Each capped independently, so neither status can crowd the other out.
+    for (const call of calls) {
+      expect((call.opts.query as Record<string, unknown>).limit).toBe(100);
+      expect((call.opts.query as Record<string, unknown>).scope).toBe("mine");
+    }
+  });
+
+  it("does not filter on isActive, which is the axis that let tombstones in", async () => {
+    const { fetcher, calls } = multiRecording([{ leads: [] }, { leads: [] }]);
+    await leads.listClosedLeads(fetcher);
+    for (const call of calls) {
+      expect((call.opts.query as Record<string, unknown>).isActive).toBe("all");
+    }
+  });
+
+  it("merges both statuses onto the one updatedAt axis the server sorts by", async () => {
+    const { fetcher } = multiRecording([
+      { leads: [{ id: "c1", updatedAt: "2026-07-01T00:00:00.000Z" }] },
+      { leads: [{ id: "d1", updatedAt: "2026-07-20T00:00:00.000Z" }] },
+    ]);
+    const rows = await leads.listClosedLeads(fetcher);
+    // Newest first ACROSS the two responses — concatenating them would have shown every converted lead
+    // before every disqualified one regardless of date.
+    expect(rows.map((row) => row.id)).toEqual(["d1", "c1"]);
+  });
+
+  it("returns no archive tombstones, because it never asks for status open", async () => {
+    const { fetcher, calls } = multiRecording([{ leads: [] }, { leads: [] }]);
+    await leads.listClosedLeads(fetcher);
+    expect(calls.some((call) => (call.opts.query as Record<string, unknown>).status === "open")).toBe(false);
   });
 });
 

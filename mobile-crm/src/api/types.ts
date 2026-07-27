@@ -452,4 +452,40 @@ export type LeadTransitionRefusal = {
   missing?: Array<{ key: string; label: string; resolution: "detail" | "inline" }>;
 };
 
-export type LeadTransitionResult = { ok: true; lead: LeadDetail } | LeadTransitionRefusal;
+/**
+ * The fields the SERVER'S DECORATOR adds — not columns on the leads table.
+ *
+ * decorateLeads (leads/service.ts:682-708) builds each of these from a joined lookup, and one of them
+ * collides with a real column of the SAME NAME and a DIFFERENT TYPE: `project_type` is a legacy TEXT
+ * column, while the decorated `projectType` is a `{ id, name }` object. A raw row and a decorated read
+ * therefore disagree about what `lead.projectType` even is, and nothing in the type system notices,
+ * because only the decorated shape was ever modelled here.
+ *
+ * Listed once, as data, so the raw-row type and the runtime merge cannot drift apart.
+ */
+export const DECORATED_LEAD_FIELDS = [
+  "stageName",
+  "assignedRepName",
+  "companyName",
+  "primaryContactName",
+  "primaryContactTitle",
+  "property",
+  "projectType",
+  "convertedDealId",
+  "convertedDealNumber",
+  // Computed in the LIST query's SELECT, so it is absent from any raw row as well.
+  "displayDate",
+] as const;
+
+export type DecoratedLeadField = (typeof DECORATED_LEAD_FIELDS)[number];
+
+/**
+ * What a WRITE returns: updateLead's raw row — every lead COLUMN, none of the decoration.
+ *
+ * Typing this as LeadDetail was a lie the compiler then defended: it asserted `projectType` was an
+ * object about a value that is a string, so spreading a transition response over a cached detail
+ * downgraded the field with no error at any layer. See mergeLeadDetail.
+ */
+export type LeadRawRow = Omit<LeadDetail, DecoratedLeadField>;
+
+export type LeadTransitionResult = { ok: true; lead: LeadRawRow } | LeadTransitionRefusal;

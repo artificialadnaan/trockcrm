@@ -149,7 +149,7 @@ export default function DashboardScreen() {
         ) : null}
 
         <Text style={styles.scopeNote}>
-          This release covers deals, contacts and notes. Leads, tasks, email and reports are still to
+          This release covers deals, leads, contacts and notes. Tasks, email and reports are still to
           come — if something is missing it is not built yet rather than broken.
         </Text>
 

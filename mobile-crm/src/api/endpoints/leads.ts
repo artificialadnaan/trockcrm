@@ -1,6 +1,14 @@
-import type { LeadDetail, LeadListItem, LeadStage, LeadTransitionRefusal, LeadTransitionResult } from "../types";
+import type {
+  LeadDetail,
+  LeadListItem,
+  LeadRawRow,
+  LeadStage,
+  LeadTransitionRefusal,
+  LeadTransitionResult,
+} from "../types";
+import { DECORATED_LEAD_FIELDS } from "../types";
 
-export type { LeadTransitionRefusal, LeadTransitionResult } from "../types";
+export type { LeadRawRow, LeadTransitionRefusal, LeadTransitionResult } from "../types";
 import { ApiError } from "../client";
 import type { Fetcher } from "./auth";
 
@@ -181,18 +189,48 @@ export async function transitionLeadStage(
 
       const nested = body?.error;
       if (nested?.code === "LEAD_STAGE_REQUIREMENTS_UNMET") {
-        const missing = (nested.missingRequirements as
-          | { effectiveChecklist?: { fields?: Array<{ key: string; label: string; satisfied?: boolean }> } }
-          | undefined)?.effectiveChecklist?.fields;
+        /**
+         * THREE FLAT ARRAYS — not the preflight's checklist.
+         *
+         * These are two different functions returning two different shapes under one field name.
+         * The PREFLIGHT gate returns `missingRequirements.effectiveChecklist.fields`, each entry a
+         * `{ key, label, satisfied }` object (leads/stage-gate.ts:307-317). The TRANSITION error
+         * returns `missingRequirements.{prerequisiteFields, qualificationFields, projectTypeQuestionIds}`,
+         * three arrays of bare strings (stage-transition-service.ts:34-38, routes.ts:541-549).
+         *
+         * Reading the preflight's shape here resolved to undefined on every real refusal, so the
+         * itemised list this whole branch exists to surface was silently dropped — the adapter caught
+         * the 409 and then discarded exactly the payload that made catching it worthwhile. The web
+         * flattens the same three arrays (client/src/hooks/use-leads.ts:657-661).
+         */
+        const requirements = nested.missingRequirements as
+          | {
+              prerequisiteFields?: string[];
+              qualificationFields?: string[];
+              projectTypeQuestionIds?: string[];
+            }
+          | undefined;
+        const requirementKeys = [
+          ...(requirements?.prerequisiteFields ?? []),
+          ...(requirements?.qualificationFields ?? []),
+          ...(requirements?.projectTypeQuestionIds ?? []),
+        ];
         return {
           ok: false,
           reason: "missing_requirements",
           code: nested.code,
           targetStageId: input.targetStageId,
           resolution: "detail",
-          missing: (missing ?? [])
-            .filter((field) => field.satisfied === false)
-            .map((field) => ({ key: field.key, label: field.label, resolution: "detail" as const })),
+          /**
+           * The key IS the label, exactly as the web does it.
+           *
+           * The server's readable labels come from questionnaireFieldLabel, which lives on the server
+           * and is not exported to any client. Mirroring it here would be the fourth hand-copied table
+           * in this app and would go stale the first time a question is added; humanising the key
+           * instead would mangle `projectTypeQuestionIds`, which are ids rather than field paths.
+           * The refusal box already directs the rep to the full record, where the fields are named.
+           */
+          missing: requirementKeys.map((key) => ({ key, label: key, resolution: "detail" as const })),
         };
       }
 
@@ -275,4 +313,61 @@ export function nextLeadStage<T extends { id: string; displayOrder: number; isAc
  */
 export function isLeadOpen(lead: { status?: string | null; isActive?: boolean | null }): boolean {
   return lead.isActive !== false && (lead.status ?? "open") === "open";
+}
+
+/**
+ * Is this lead an ARCHIVE TOMBSTONE — hidden, but never converted or disqualified?
+ *
+ * Archiving sets `is_active = false` and deliberately LEAVES `status` at "open" (leads/service.ts:2202-
+ * 2210), so these rows are simultaneously "not open" by isLeadOpen and "open" by their own status
+ * field. Interpolating that status into a message produced the flatly self-contradictory "This lead is
+ * open. Its stage can no longer be changed." The two axes need naming separately or the copy cannot be
+ * written correctly.
+ */
+export function isLeadArchived(lead: { status?: string | null; isActive?: boolean | null }): boolean {
+  return lead.isActive === false && (lead.status ?? "open") === "open";
+}
+
+/**
+ * Fold a WRITE response into the cached DETAIL entry.
+ *
+ * The transition returns updateLead's raw row, which carries every column and none of the decoration —
+ * and one of its columns shares a name with a decorated field while holding a different type. Spreading
+ * it wholesale replaced the `{ id, name }` projectType object with the legacy TEXT column, so "Project
+ * type" went blank the instant a stage moved, and stayed blank if the follow-up refetch failed. The
+ * type system could not catch it: the response was modelled as a decorated LeadDetail.
+ *
+ * So the decorated fields are dropped from the response before merging — columns from the server,
+ * decoration from the cache — rather than the merge being ordered to hope no key collides.
+ */
+export function mergeLeadDetail(previous: LeadDetail | undefined, updated: LeadRawRow): LeadDetail {
+  const columns = { ...(updated as Record<string, unknown>) };
+  for (const field of DECORATED_LEAD_FIELDS) delete columns[field];
+  return { ...(previous ?? {}), ...columns } as LeadDetail;
+}
+
+/**
+ * Every CLOSED lead, as TWO requests rather than one inactive filter.
+ *
+ * `isActive: "false"` looks like the closed set and is not: archive tombstones are inactive with an
+ * "open" status, so they come back mixed in with the genuinely converted and disqualified. Filtering
+ * them out AFTER the response cannot fix it, because the server orders by updatedAt and applies its
+ * 100-row cap FIRST (leads/service.ts:1492-1512) — a busy week of archiving fills the whole page, and
+ * the tab renders empty while the records it exists to show sit just past the cut.
+ *
+ * The route's `status` filter is a single equality (service.ts:1469), so "converted OR disqualified"
+ * is not expressible in one call. Two calls, each capped independently, then merged on the same
+ * updatedAt axis the server sorts by. Tombstones are excluded by construction rather than by cleanup.
+ */
+export async function listClosedLeads(
+  fetcher: Fetcher,
+  params: Omit<ListLeadsParams, "status" | "isActive"> = {},
+): Promise<LeadListItem[]> {
+  const [converted, disqualified] = await Promise.all([
+    listLeads(fetcher, { ...params, status: "converted", isActive: "all" }),
+    listLeads(fetcher, { ...params, status: "disqualified", isActive: "all" }),
+  ]);
+  return [...converted, ...disqualified]
+    .sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""))
+    .slice(0, LEADS_PAGE_LIMIT);
 }

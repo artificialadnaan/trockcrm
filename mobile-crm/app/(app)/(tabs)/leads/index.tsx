@@ -12,16 +12,16 @@ import {
 import { useRouter } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useQuery } from "@tanstack/react-query";
-import { ApiError } from "../../../src/api/client";
-import * as leadsApi from "../../../src/api/endpoints/leads";
-import type { LeadListItem } from "../../../src/api/types";
-import { useAuth } from "../../../src/auth/AuthContext";
-import { useQueryScope } from "../../../src/auth/useOfficeId";
-import { LeadCard } from "../../../src/components/LeadCard";
-import { RetryNotice } from "../../../src/components/RetryNotice";
-import { resolveListState } from "../../../src/list-state";
-import { qk } from "../../../src/query/keys";
-import { theme } from "../../../src/theme/theme";
+import { ApiError } from "../../../../src/api/client";
+import * as leadsApi from "../../../../src/api/endpoints/leads";
+import type { LeadListItem } from "../../../../src/api/types";
+import { useAuth } from "../../../../src/auth/AuthContext";
+import { useQueryScope } from "../../../../src/auth/useOfficeId";
+import { LeadCard } from "../../../../src/components/LeadCard";
+import { RetryNotice } from "../../../../src/components/RetryNotice";
+import { resolveListState } from "../../../../src/list-state";
+import { qk } from "../../../../src/query/keys";
+import { theme } from "../../../../src/theme/theme";
 
 /**
  * NO "Watched" here, unlike the deals list.
@@ -74,10 +74,20 @@ export default function LeadsListScreen() {
    * GET /leads takes no page or offset at all — one opt-in `limit`, clamped server-side. The reflex here
    * is to copy the deals list, which pages; that would send a `page` the route never reads and
    * re-request the same first rows forever while looking like it was loading more.
+   *
+   * CLOSED goes through listClosedLeads, which asks for the two terminal statuses separately. An
+   * `isActive: "false"` filter is not the closed set: archive tombstones are inactive with an "open"
+   * status, and because the server sorts by updatedAt and caps at 100 BEFORE the client sees anything,
+   * removing them afterwards left a tab that could render empty while the converted and disqualified
+   * leads it exists to show sat just past the cut. Filtering after a truncation cannot recover what the
+   * truncation dropped.
    */
   const query = useQuery({
     queryKey: qk.leads(cacheScope, params),
-    queryFn: () => leadsApi.listLeads(fetcher, params),
+    queryFn: () =>
+      lifecycle === "false"
+        ? leadsApi.listClosedLeads(fetcher, { scope, search: submittedSearch || undefined })
+        : leadsApi.listLeads(fetcher, params),
   });
 
   const stagesQuery = useQuery({
@@ -93,22 +103,9 @@ export default function LeadsListScreen() {
     return index;
   }, [stagesQuery.data]);
 
-  /**
-   * ARCHIVE TOMBSTONES are filtered out of the Closed tab.
-   *
-   * `isActive=false` is not the same axis as `status`. Archiving a lead sets isActive false and LEAVES
-   * status "open" (leads/service.ts:2196-2208), so a plain inactive filter returns those tombstones
-   * alongside the genuinely converted and disqualified ones — and opening one produced the flatly
-   * contradictory "This lead is open. Its stage can no longer be changed."
-   *
-   * The route takes a single `status`, so it cannot express "converted OR disqualified" server-side.
-   * Filtered here instead, on the row's own status: the set is capped at 100 either way, and these are
-   * records the rep should never have been shown.
-   */
-  const leads = useMemo(() => {
-    const rows = query.data ?? [];
-    return lifecycle === "false" ? rows.filter((lead) => (lead.status ?? "open") !== "open") : rows;
-  }, [query.data, lifecycle]);
+  // Tombstones are excluded by the QUERY now (see listClosedLeads), not trimmed off the response, so
+  // there is nothing left to filter here.
+  const leads = query.data ?? [];
 
   const handleLeadPress = useCallback(
     (lead: LeadListItem) => router.push(`/(app)/leads/${lead.id}`),

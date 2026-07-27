@@ -32,14 +32,22 @@ export const LeadCard = React.memo(function LeadCard({
       testID={`lead-card-${lead.id}`}
       onPress={() => onPress(lead)}
       accessibilityRole="button"
-      /* Name AND stage AND lifecycle. An explicit label REPLACES the text assembled from the children,
-         so a name-only label made a converted lead sound exactly like a workable open one — and
-         terminal status is what decides whether the record can be changed at all, which is the first
-         thing a rep needs to know before opening it. */
+      /* EVERYTHING the card shows, in the order it shows it.
+         An explicit label REPLACES the text assembled from the children, so whatever is left out of
+         this array is not merely unannounced — it becomes unreachable. The first version listed the
+         name, stage and lifecycle only, which made every sighted-only detail invisible: two leads for
+         the same company at the same stage were indistinguishable by ear, and the rep had to open each
+         one to tell them apart. Built from the SAME values the JSX renders, so a line that is hidden
+         because it is empty is absent here too. */
       accessibilityLabel={[
         lead.name ?? "Untitled lead",
         stageName,
         converted ? "Converted" : disqualified ? "Disqualified" : null,
+        lead.companyName,
+        projectTypeName,
+        location,
+        lead.assignedRepName,
+        lead.displayDate ? formatDate(lead.displayDate) : null,
       ]
         .filter(Boolean)
         .join(", ")}
@@ -89,7 +97,11 @@ const styles = StyleSheet.create({
   name: { flex: 1, fontFamily: theme.font.bold, fontSize: 15, color: theme.color.inkNavy },
   stage: { fontFamily: theme.font.semibold, fontSize: 12, color: theme.color.textSecondary },
   company: { fontFamily: theme.font.semibold, fontSize: 13, color: theme.color.textSecondary },
-  meta: { fontFamily: theme.font.regular, fontSize: 13, color: theme.color.textMuted },
+  /* textSecondary, NOT textMuted — the same call the tab bar already documents. On the white card,
+     #8A95A3 is about 3.0:1 and this line is 13pt, under the 4.5:1 floor for normal text; #4B5563 is
+     7.6:1 and still reads as secondary against the 15pt name above it. This is the whole content of
+     the card besides the name: project type, location and the assigned rep. */
+  meta: { fontFamily: theme.font.regular, fontSize: 13, color: theme.color.textSecondary },
   badges: {
     flexDirection: "row",
     alignItems: "center",
@@ -97,5 +109,5 @@ const styles = StyleSheet.create({
     gap: theme.space.sm,
     marginTop: theme.space.xs,
   },
-  date: { fontFamily: theme.font.regular, fontSize: 12, color: theme.color.textMuted },
+  date: { fontFamily: theme.font.regular, fontSize: 12, color: theme.color.textSecondary },
 });

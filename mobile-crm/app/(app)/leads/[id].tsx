@@ -92,16 +92,18 @@ export default function LeadDetailScreen() {
        * cache is written from it rather than hoping a network round-trip succeeds.
        */
       /**
-       * MERGED into the decorated entry, not substituted for it.
+       * MERGED into the decorated entry, not substituted for it — and via mergeLeadDetail, because a
+       * plain spread is not a merge when a raw COLUMN and a decorated FIELD share a name.
        *
-       * The transition returns updateLead's RAW row — no companyName, assignedRepName, property,
-       * projectType or converted-deal metadata, all of which are added by the detail decorator. Writing
-       * it wholesale blanked those fields the instant a stage moved, and if the invalidation below then
-       * failed, the screen deliberately keeps that incomplete copy as its "saved" state. Merging takes
-       * the authoritative stage fields from the response and leaves the decoration alone.
+       * The transition returns updateLead's RAW row: no companyName, assignedRepName, property or
+       * converted-deal metadata, all of which the detail decorator adds. `projectType` is worse than
+       * missing — the row carries the legacy TEXT column under that exact name, so spreading it last
+       * replaced the `{ id, name }` object with a string and blanked "Project type" on every stage
+       * move. The helper drops the decorated fields from the response first: columns from the server,
+       * decoration from the cache.
        */
       queryClient.setQueryData(qk.lead(scope, leadId), (previous: typeof lead | undefined) =>
-        previous ? { ...previous, ...result.lead } : result.lead,
+        leadsApi.mergeLeadDetail(previous, result.lead),
       );
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: qk.lead(scope, leadId) }),
@@ -143,9 +145,20 @@ export default function LeadDetailScreen() {
           : err.message,
       );
 
-      if (indeterminate) setUnconfirmed(true);
-
+      /**
+       * BLOCKED for the whole family, not just the indeterminate half.
+       *
+       * The block was set only for 0/408, on the reasoning that 403 and 409 tell you the move did not
+       * happen — true, and beside the point. What re-enables the button is the REFETCH below, and that
+       * can fail too. When it does, the screen falls back to the cached owner and status, which are
+       * precisely the values the server just contradicted: the control comes back live, reading from
+       * the stale copy, and every tap repeats a request already known to be refused.
+       *
+       * The block belongs to the same predicate that triggers the refresh, and is cleared by the same
+       * event — a refetch that actually succeeded — for every status in the family.
+       */
       if (staleAfterFailure) {
+        setUnconfirmed(true);
         void queryClient.invalidateQueries({ queryKey: ["leads", scope] });
         // refetch(), not invalidateQueries(): this one has to REPORT whether it worked, and
         // invalidateQueries resolves either way. Only a success clears the block.
@@ -194,6 +207,16 @@ export default function LeadDetailScreen() {
   }
 
   const open = leadsApi.isLeadOpen(lead);
+  /**
+   * ARCHIVED is a third state, not a value of `status`.
+   *
+   * getLeadById selects by id with no is_active predicate (leads/service.ts:1379), so an archived lead
+   * is fully reachable by deep link or restored navigation state — and archiving leaves `status` at
+   * "open" while clearing is_active. Interpolating the status field then produced "This lead is open.
+   * Its stage can no longer be changed", which contradicts itself in one sentence and tells the rep
+   * nothing about why. The list no longer shows these rows; the detail still has to explain them.
+   */
+  const archived = leadsApi.isLeadArchived(lead);
   const location = formatLocation(lead.property?.city, lead.property?.state);
   const refreshFailed = Boolean(leadQuery.error);
 
@@ -256,6 +279,9 @@ export default function LeadDetailScreen() {
           {stageName ? <Text style={styles.stage}>{stageName}</Text> : null}
           {lead.status === "converted" ? <Badge label="Converted" tone="green" /> : null}
           {lead.status === "disqualified" ? <Badge label="Disqualified" tone="amber" /> : null}
+          {/* Badged as well as explained below: the header is where the other two lifecycle states are
+              announced, and an archived lead that looks identical to an open one reads as a bug. */}
+          {archived ? <Badge label="Archived" tone="amber" /> : null}
         </View>
 
         {refreshFailed ? (
@@ -296,10 +322,12 @@ export default function LeadDetailScreen() {
               which is false, since the server refuses them too. The more fundamental reason goes first
               because it is the one that does not depend on who is asking. */}
           {!open ? (
-            /* Converted and disqualified leads keep a name, a stage and a rep, so nothing about the row
-               says it cannot be worked. */
+            /* Converted, disqualified and archived leads all keep a name, a stage and a rep, so nothing
+               about the row itself says it cannot be worked. */
             <Text testID="lead-terminal" style={styles.help}>
-              This lead is {lead.status}. Its stage can no longer be changed.
+              {archived
+                ? "This lead was archived. Its stage can no longer be changed."
+                : `This lead is ${lead.status}. Its stage can no longer be changed.`}
             </Text>
           ) : !isOwner ? (
             /* Said up front rather than after a 403. The route is strictly owner-only with no admin or

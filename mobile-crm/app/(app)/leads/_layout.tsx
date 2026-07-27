@@ -1,21 +1,18 @@
 import React from "react";
-import { Redirect, Stack } from "expo-router";
-import { useAuth } from "../../../src/auth/AuthContext";
-import { canAccessSurface } from "../../../src/auth/surfaces";
+import { SurfaceStack } from "../../../src/auth/SurfaceGuard";
 
 /**
- * Role guard for the whole leads group.
+ * Role guard for the lead DETAIL routes, which live above the tab bar so Back keeps the context a rep
+ * arrived from — the same split the deals surface uses ((tabs)/deals holds the list, (app)/deals the
+ * detail).
  *
- * Same shape as the deals and contacts guards, and for the same reason: the web sidebar scopes Leads to
- * admin/director/rep (client/src/components/layout/sidebar.tsx:66) while the SERVER's requireCrmUser
- * admits `construction` too, so these requests succeed and the boundary is client-side on both surfaces.
+ * Guarding here as well as on the tab group is not redundant: these routes are reachable by deep link
+ * and from other surfaces, so the tab-group guard never runs for them. A guard that only covers the
+ * route you happened to arrive by is not a guard.
  *
- * Guarding the GROUP rather than each screen covers a deep link straight to /(app)/leads/<id>; a guard
- * on the list alone would be trivially routed around.
+ * Uses the shared SurfaceStack rather than repeating its four lines, which is what this file did until
+ * it became the third copy of the same guard.
  */
-export default function LeadsLayout() {
-  const { session } = useAuth();
-  if (!session) return null;
-  if (!canAccessSurface(session.user.role, "leads")) return <Redirect href="/(app)/dashboard" />;
-  return <Stack screenOptions={{ headerShown: false }} />;
+export default function LeadsDetailLayout() {
+  return <SurfaceStack surface="leads" />;
 }
