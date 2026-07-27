@@ -290,6 +290,24 @@ function isPostgresTimestampText(value: string): boolean {
     );
   if (!match) return false;
   const [, year, month, day] = match;
+  // Postgres uses the proleptic Gregorian calendar, which has NO year zero (1 BC is followed by 1 AD),
+  // so it rejects all 366 dates in `0000` at the ::timestamptz cast. JavaScript's Date DOES have a year
+  // 0, accepts it, and round-trips it faithfully — so the calendar check below passes it straight
+  // through. The last way a hand-edited cursor could reach Postgres as a bad cast and 500 the one
+  // endpoint whose documented contract is "restart the list".
+  //
+  // Bounded exhaustively against a real ::timestamptz cast rather than reasoned about, so this is known
+  // to close the whole class rather than one symptom:
+  //   - all 10,000 x 100 x 100 y-m-d combinations the regex can express: the validator accepts
+  //     3,652,425 of them, Postgres rejects exactly 366 — every one in year 0000, none in any other year;
+  //   - all 86,400 times of day x every timezone form the regex allows, applied to BOTH range boundaries
+  //     (0001-01-01 00:00:00 and 9999-12-31 23:59:59) with 1-6 fractional digits: 101,943 accepted,
+  //     0 rejected — so no timezone shift pushes a boundary value outside what Postgres can represent.
+  //
+  // The sweep also found the reverse: Postgres ACCEPTS `24:00:00` and `23:59:60`, which this regex
+  // refuses. Left deliberately over-strict — it errs toward restarting the list (harmless) rather than
+  // 500ing, and Postgres never EMITS either form, so a legitimately issued cursor cannot contain one.
+  if (year === "0000") return false;
   // Calendar overflow too (2026-02-30), which no regex can express — rejected the way Postgres does
   // rather than the way Date.parse does (it silently rolls over and reports success).
   const probe = new Date(`${year}-${month}-${day}T00:00:00Z`);

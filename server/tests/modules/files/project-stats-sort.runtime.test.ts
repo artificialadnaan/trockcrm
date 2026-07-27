@@ -7,6 +7,8 @@ import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
 import {
   getPhotoFeed,
   getPhotoFeedFacets,
+  encodeProjectCursor,
+  decodeProjectCursor,
   getProjectPhotoStats,
 } from "../../../src/modules/files/feed-service.js";
 
@@ -167,6 +169,9 @@ describe("getProjectPhotoStats sorting", () => {
       "2026-07-01 12:00:99+00",
       "2026-07-01 12:00:00+99",
       "2026-02-30 12:00:00+00",
+      // Year zero: JavaScript accepts AND round-trips it, so the calendar check alone waves it through;
+      // Postgres has no year 0 in its AD/BC calendar and rejects it at the cast.
+      "0000-01-01 00:00:00+00",
       "not-a-timestamp",
     ]) {
       const cursor = Buffer.from(`${bad}\u0000${validUuid}`).toString("base64url");
@@ -174,6 +179,18 @@ describe("getProjectPhotoStats sorting", () => {
       // Restarted from the top of the recency ordering rather than throwing.
       expect(projects.map((p) => p.dealName)).toEqual(["Project 3", "Project 5", "Project 7"]);
     }
+  });
+
+  // Direct on the codec as well as end-to-end, because this is the layer whose contract is "a malformed
+  // cursor decodes to undefined" — the endpoint behaviour above is the consequence, not the rule.
+  it("decodes year-zero to undefined — Postgres has no year 0, JavaScript does", () => {
+    const dealId = "00000000-0000-4000-8000-000000000005";
+    const yearZero = encodeProjectCursor({ sortValue: "0000-01-01 00:00:00+00", dealId });
+    expect(decodeProjectCursor(yearZero, "recent")).toBeUndefined();
+
+    // The neighbouring year is fine, so this rejects year zero specifically rather than "old dates".
+    const yearOne = encodeProjectCursor({ sortValue: "0001-01-01 00:00:00+00", dealId });
+    expect(decodeProjectCursor(yearOne, "recent")).toMatchObject({ dealId });
   });
 
   it("accepts a well-formed recency cursor and resumes after it", async () => {
