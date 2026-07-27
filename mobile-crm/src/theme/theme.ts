@@ -31,6 +31,11 @@ export const theme = {
     amberSurface: "#FEF3C7",
     amberText: "#92400E",
     redSurface: "#FEE2E2",
+    // The green badge pair, added when the "Converted" tone arrived. It lived as two hex literals in
+    // Badge.tsx under a comment claiming they came from the palette — which is the duplication this
+    // block exists to prevent, one file away from where it is described.
+    greenSurface: "#DCFCE7",
+    greenText: "#166534",
     amber: "#F59E0B",
     blue: "#3B82F6",
     green: "#22C55E",

@@ -28,9 +28,8 @@ const styles = StyleSheet.create({
   amberText: { color: theme.color.amberText },
   red: { backgroundColor: theme.color.redSurface },
   redText: { color: theme.color.brandRedDeep },
-  // Tinted from the palette's green rather than a new literal, so it sits with the other two.
-  green: { backgroundColor: "#DCFCE7" },
-  greenText: { color: "#166534" },
+  green: { backgroundColor: theme.color.greenSurface },
+  greenText: { color: theme.color.greenText },
 });
 
 const TONE_STYLES: Record<BadgeTone, { pill: object; text: object }> = {
