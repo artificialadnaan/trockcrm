@@ -18,7 +18,9 @@ import * as dealsApi from "../../../src/api/endpoints/deals";
 import * as pipelineApi from "../../../src/api/endpoints/pipeline";
 import { useAuth } from "../../../src/auth/AuthContext";
 import { useQueryScope } from "../../../src/auth/useOfficeId";
+import { RetryBlock } from "../../../src/components/RetryBlock";
 import { qk } from "../../../src/query/keys";
+import { eligibleStageTargets } from "../../../src/stage-targets";
 import { theme } from "../../../src/theme/theme";
 
 /**
@@ -35,20 +37,32 @@ import { theme } from "../../../src/theme/theme";
  */
 
 /**
- * Slugs that mean LOST, where the server additionally requires a reason id and non-blank notes.
+ * Slugs the STAGE-CHANGE ROUTE treats as a Lost outcome — the only ones for which it requires a reason
+ * id and non-blank notes, and the only ones for which it stores them.
  *
- * Mirrors LOST_DEAL_STAGE_SLUGS in shared/src/types/workflow.ts:313-315, which is the union of the
- * CANONICAL slug and its four legacy aliases. This app cannot import shared (it is deliberately not an
- * npm workspace), so it is a mirror — and the first version of it had all four ALIASES and omitted the
- * canonical "lost", which is the slug a current pipeline config actually uses. The effect was the worst
- * kind: the screen would not ask for a reason or notes, and the server would reject the move with a
- * message about fields the rep was never shown.
+ * Mirrors `isLostOutcomeStage` in server/src/modules/deals/stage-change.ts:74-80, resolved through
+ * `toCanonicalTerminalOutcomeSlug` (same file, :44-70). This app cannot import shared (it is deliberately
+ * not an npm workspace), so it is a mirror — and getting the mirror right has taken three attempts, each
+ * failing differently:
+ *
+ *   1. All four legacy aliases, omitting the canonical "lost" — so the screen stayed silent on the slug
+ *      current pipelines actually use, and the server rejected the move naming fields the rep never saw.
+ *   2. Anchored to LOST_DEAL_STAGE_SLUGS (shared/src/types/workflow.ts:313-315). That constant is the
+ *      REPORTING classification set — "does this deal count as lost" — and it is deliberately wider,
+ *      because historical HubSpot-imported rows carry `deal_canceled` and must still tally as losses.
+ *      The stage-change ROUTE does not accept that slug as a Lost outcome, so prompting on it collected
+ *      a reason and notes the server then dropped on the floor.
+ *
+ * The two sets differ on exactly one slug, and only one of them is a request contract. Anchor here.
+ *
+ * `deal_canceled` is therefore absent ON PURPOSE. It is seeded by no migration and belongs to no live
+ * pipeline; it exists so old rows read correctly. Note the web dialog does prompt on it — it derives the
+ * flag from the canonical mapping — and has its details discarded just the same. That is a pre-existing
+ * server-side gap, not a mobile one, and closing it would make the route start rejecting moves that
+ * succeed today, so it is not something to fix from here.
  */
 const LOST_SLUGS = new Set([
-  // canonical (workflow.ts:149)
   "lost",
-  // legacy aliases (workflow.ts:297-302)
-  "deal_canceled",
   "production_lost",
   "service_lost",
   "closed_lost",
@@ -108,9 +122,24 @@ export default function MoveStageScreen() {
   const needsOverride = Boolean(verdict?.requiresOverride);
   const blocked = Boolean(verdict && !verdict.allowed);
 
+  /**
+   * The gate must have ANSWERED, not merely stopped asking.
+   *
+   * `blocked` is derived from `verdict`, so when preflight fails — offline, 500, timeout — `verdict` is
+   * undefined and `blocked` is false. Read as "not blocked", that enabled Confirm the moment the spinner
+   * stopped, offering a two-step confirmation whose first step never happened. The commit route does
+   * revalidate, so nothing invalid gets written; the cost is that a rep is walked past the explanation
+   * this screen exists to give and handed the raw 400 instead.
+   *
+   * Absence of an answer is not a permissive answer. Same shape as the never-loaded-vs-empty rule in
+   * src/list-state.ts, which is where this app keeps getting caught: `undefined` is not `false`.
+   */
+  const preflightAnswered = verdict !== undefined;
+
   const canSubmit =
     isOwner &&
     Boolean(targetStageId) &&
+    preflightAnswered &&
     !blocked &&
     (!needsOverride || overrideReason.trim().length > 0) &&
     (!isLostMove || (Boolean(lostReasonId) && lostNotes.trim().length > 0)) &&
@@ -192,10 +221,22 @@ export default function MoveStageScreen() {
           ) : null}
 
           <Text style={styles.label}>Move to</Text>
-          <View style={styles.stageGrid}>
-            {stages
-              .filter((s) => s.id !== deal.stageId)
-              .map((s) => (
+          {stagesQuery.isLoading ? (
+            <ActivityIndicator color={theme.color.brandRed} />
+          ) : stagesQuery.isError ? (
+            /* A failed stages load used to fall through `?? []` and render as a legitimately empty
+               menu — indistinguishable from "this pipeline has no other stages", with no error and no
+               way back short of remounting the screen. Every move starts by picking one of these, so
+               swallowing the failure takes the whole feature offline silently. */
+            <RetryBlock
+              testID="stages-error"
+              title="Couldn't load the stages"
+              onRetry={() => void stagesQuery.refetch()}
+              retrying={stagesQuery.isFetching}
+            />
+          ) : (
+            <View style={styles.stageGrid}>
+              {eligibleStageTargets(stages, deal).map((s) => (
                 <Pressable
                   key={s.id}
                   testID={`move-target-${s.slug}`}
@@ -219,7 +260,8 @@ export default function MoveStageScreen() {
                   </Text>
                 </Pressable>
               ))}
-          </View>
+            </View>
+          )}
 
           {preflight.isFetching ? (
             <View style={styles.checkingRow}>
@@ -269,6 +311,16 @@ export default function MoveStageScreen() {
               <Text style={styles.label}>Why was it lost?</Text>
               {lostReasons.isLoading ? (
                 <ActivityIndicator color={theme.color.brandRed} />
+              ) : lostReasons.isError ? (
+                /* A Lost move cannot be submitted without a reason id, so a failed lookup rendered as an
+                   empty grid left Confirm permanently disabled with nothing on screen explaining why —
+                   the rep sees a button that simply does not work. */
+                <RetryBlock
+                  testID="lost-reasons-error"
+                  title="Couldn't load the lost reasons"
+                  onRetry={() => void lostReasons.refetch()}
+                  retrying={lostReasons.isFetching}
+                />
               ) : (
                 <View style={styles.stageGrid}>
                   {(lostReasons.data ?? []).map((r) => (

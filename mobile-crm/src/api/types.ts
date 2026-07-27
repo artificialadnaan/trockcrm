@@ -102,6 +102,12 @@ export type PipelineStage = {
   displayOrder: number;
   isTerminal: boolean;
   isActivePipeline: boolean;
+  /**
+   * Which workflow this stage belongs to. `GET /deals/stages` returns BOTH deal families in one
+   * unfiltered list, so without this a service-only stage is indistinguishable from a standard one and
+   * gets offered to every deal. See eligibleStageTargets in src/stage-targets.ts.
+   */
+  workflowFamily: "standard_deal" | "service_deal" | "lead" | null;
   color: string | null;
 };
 

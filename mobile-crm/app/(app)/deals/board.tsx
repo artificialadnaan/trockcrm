@@ -17,9 +17,8 @@ import * as pipelineApi from "../../../src/api/endpoints/pipeline";
 import type { DealListItem } from "../../../src/api/types";
 import { useAuth } from "../../../src/auth/AuthContext";
 import { useQueryScope } from "../../../src/auth/useOfficeId";
-import { Badge } from "../../../src/components/Badge";
+import { BoardCard } from "../../../src/components/BoardCard";
 import { RetryNotice } from "../../../src/components/RetryNotice";
-import { displayAmount, showsAtRisk } from "../../../src/components/DealCard";
 import { resolveListState } from "../../../src/list-state";
 import { theme } from "../../../src/theme/theme";
 
@@ -185,10 +184,29 @@ export default function PipelineBoardScreen() {
                 // excludes them, so a column of 20 (15 active + 5 held) returning a 15-card preview
                 // compared 15 > 15 and hid this — presenting a truncated column as complete, which is
                 // exactly the silent-truncation the note exists to prevent.
+                //
+                // PRESSABLE, and it goes somewhere. This was plain Text naming a list that had no
+                // route, so the cards it was counting stayed unreachable — a truncation notice that
+                // points nowhere just tells the rep what they are missing.
                 selected.deals.length > 0 && selected.totalCount > selected.deals.length ? (
-                  <Text style={styles.previewNote}>
-                    Showing {selected.deals.length} of {selected.totalCount}. Open the list for all.
-                  </Text>
+                  <Pressable
+                    testID="board-open-stage-list"
+                    onPress={() =>
+                      router.push({
+                        pathname: "/(app)/deals/stage/[stageId]",
+                        // Scope travels with it — a stage list under a different filter than the board
+                        // the rep just tapped would contradict the count they tapped on.
+                        params: { stageId: selected.stage.id, name: selected.stage.name, scope },
+                      })
+                    }
+                    accessibilityRole="button"
+                    accessibilityLabel={`Show all ${selected.totalCount} deals in ${selected.stage.name}`}
+                    style={styles.previewNoteBtn}
+                  >
+                    <Text style={styles.previewNote}>
+                      Showing {selected.deals.length} of {selected.totalCount} — see all
+                    </Text>
+                  </Pressable>
                 ) : null
               }
               renderItem={({ item }) => (
@@ -214,45 +232,6 @@ function formatColumnValue(total: number): string {
     currency: "USD",
     maximumFractionDigits: 0,
   });
-}
-
-function BoardCard({
-  deal,
-  canMove,
-  onPress,
-}: {
-  deal: DealListItem;
-  canMove: boolean;
-  onPress: () => void;
-}) {
-  return (
-    <Pressable
-      testID={`board-card-${deal.id}`}
-      onPress={onPress}
-      accessibilityRole="button"
-      accessibilityLabel={deal.name ?? "Untitled deal"}
-      style={styles.card}
-    >
-      <View style={styles.cardHead}>
-        <Text style={styles.cardName} numberOfLines={1}>
-          {deal.name ?? "Untitled deal"}
-        </Text>
-        <Text style={styles.cardAmount}>{displayAmount(deal)}</Text>
-      </View>
-      {deal.companyName ? (
-        <Text style={styles.cardCompany} numberOfLines={1}>
-          {deal.companyName}
-        </Text>
-      ) : null}
-      <View style={styles.cardBadges}>
-        {(deal.effectiveOnHold ?? deal.onHold) ? <Badge label="On hold" tone="amber" /> : null}
-        {showsAtRisk(deal) ? <Badge label="At risk" tone="red" /> : null}
-        {/* Only the assigned rep may move a stage — the commit route has no admin or director bypass.
-            Marking the ones you CAN move is more useful than offering an action that 403s. */}
-        {canMove ? <Text style={styles.yours}>Yours</Text> : null}
-      </View>
-    </Pressable>
-  );
 }
 
 const styles = StyleSheet.create({
@@ -297,26 +276,7 @@ const styles = StyleSheet.create({
   columnMeta: { fontFamily: theme.font.regular, fontSize: 13, color: theme.color.textMuted },
   list: { padding: theme.space.lg, paddingTop: theme.space.sm, gap: theme.space.md },
   listEmpty: { flexGrow: 1 },
-  card: {
-    backgroundColor: theme.color.surface,
-    borderRadius: theme.radius.lg,
-    borderWidth: 1,
-    borderColor: theme.color.border,
-    padding: theme.space.lg,
-    gap: theme.space.xs,
-  },
-  cardHead: { flexDirection: "row", justifyContent: "space-between", gap: theme.space.sm },
-  cardName: { flex: 1, fontFamily: theme.font.bold, fontSize: 15, color: theme.color.inkNavy },
-  cardAmount: { fontFamily: theme.font.bold, fontSize: 14, color: theme.color.textPrimary },
-  cardCompany: { fontFamily: theme.font.semibold, fontSize: 13, color: theme.color.textSecondary },
-  cardBadges: {
-    flexDirection: "row",
-    alignItems: "center",
-    flexWrap: "wrap",
-    gap: theme.space.sm,
-    marginTop: theme.space.xs,
-  },
-  yours: { fontFamily: theme.font.semibold, fontSize: 12, color: theme.color.green },
+  previewNoteBtn: { paddingVertical: theme.space.sm, minHeight: 44, justifyContent: "center" },
   previewNote: {
     paddingTop: theme.space.md,
     textAlign: "center",
