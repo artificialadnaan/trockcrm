@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   commissionAckKey,
   evaluateReturnToOpportunityEligibility,
+  isReturnToOpportunityNoOp,
   type ReturnToOpportunityDealState,
 } from "./return-to-opportunity.js";
 
@@ -15,6 +16,7 @@ function deal(overrides: Partial<ReturnToOpportunityDealState> = {}): ReturnToOp
     commissionRowCount: 0,
     commissionTotal: "0",
     effectiveContractSignedDate: null,
+    isBidBoardLinked: false,
     ...overrides,
   };
 }
@@ -89,9 +91,60 @@ describe("evaluateReturnToOpportunityEligibility — voidsCommission is broader 
 });
 
 describe("evaluateReturnToOpportunityEligibility — state blocks", () => {
-  it("blocks a deal already at Opportunity", () => {
+  it("blocks a CLEAN deal already at Opportunity", () => {
     const result = evaluateReturnToOpportunityEligibility(deal({ stageSlug: "opportunity" }), "admin");
     expect(result.blockCode).toBe("ALREADY_OPPORTUNITY");
+  });
+
+  // The Bid Board APPLIES backward moves, so a mirror can park a deal it still owns on Opportunity —
+  // and a previously-Won one keeps its signed date and commission. Blocking on the stage alone left
+  // those deals unfixable while every export cycle reclaimed them.
+  it("ALLOWS an Opportunity deal that is still Bid Board linked", () => {
+    const result = evaluateReturnToOpportunityEligibility(
+      deal({ stageSlug: "opportunity", isBidBoardLinked: true }),
+      "admin"
+    );
+    expect(result.allowed).toBe(true);
+    expect(result.blockCode).toBeNull();
+  });
+
+  it("ALLOWS an Opportunity deal that still carries booked commission", () => {
+    const result = evaluateReturnToOpportunityEligibility(
+      deal({ stageSlug: "opportunity", commissionRowCount: 1, commissionTotal: "18750.00" }),
+      "admin"
+    );
+    expect(result.allowed).toBe(true);
+    expect(result.voidsCommission).toBe(true);
+  });
+
+  it("ALLOWS an Opportunity deal that still carries a signed contract", () => {
+    const result = evaluateReturnToOpportunityEligibility(
+      deal({ stageSlug: "opportunity", effectiveContractSignedDate: "2026-03-01" }),
+      "admin"
+    );
+    expect(result.allowed).toBe(true);
+  });
+
+  it("keeps the no-op block narrow: linked/money is what unblocks, not the stage", () => {
+    // A clean Opportunity deal is still a no-op — this is what protects a live, not-yet-linked RFP
+    // submission from having its cycle silently reset.
+    expect(
+      isReturnToOpportunityNoOp({
+        stageSlug: "opportunity",
+        isBidBoardLinked: false,
+        commissionRowCount: 0,
+        effectiveContractSignedDate: null,
+      })
+    ).toBe(true);
+    // …and nothing outside Opportunity is ever a no-op.
+    expect(
+      isReturnToOpportunityNoOp({
+        stageSlug: "estimating",
+        isBidBoardLinked: false,
+        commissionRowCount: 0,
+        effectiveContractSignedDate: null,
+      })
+    ).toBe(false);
   });
 
   it("blocks the legacy Due Diligence alias, which canonicalizes to Opportunity", () => {

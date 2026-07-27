@@ -346,36 +346,35 @@ export async function changeDealStage(
     dealUpdates.readOnlySyncedAt = null;
   }
 
-  if (isEstimatingBoundaryStageSlug(targetStage.slug, currentDeal[0].workflowRoute)) {
+  // BID BOARD HANDOFF on entering the estimating boundary — SKIPPED ENTIRELY while the deal is detached.
+  //
+  // THE INVARIANT: a deal re-attaches to Bid Board sync only when a specific Bid Board project
+  // demonstrably exists for it, evidenced by an identity recorded at the moment of attachment. Advancing
+  // a stage is not evidence — changeDealStage neither creates nor links a project — so this path cannot
+  // satisfy the invariant and therefore must not re-attach. (It used to; that was wrong.) The one path
+  // that can is the internal-RFP `bid-board-created` callback, which is handed the new project's id and
+  // writes it in the same statement that clears the marker. That callback also performs its own stage
+  // transition, so a detached deal's legitimate route back into estimating goes through it, not here.
+  //
+  // Re-attaching here produced two concrete failures. If the operator had followed the dialog and deleted
+  // the old project, the deal became Bid-Board-owned and read-only with no counterpart to sync against.
+  // If they had not, the preserved identity let the very next export reclaim the OLD project and silently
+  // undo the move-back.
+  //
+  // Skipping the whole block — not just the marker clear — matters just as much: is_bid_board_owned,
+  // bid_board_stage_slug and read_only_synced_at are three of the ten conditions POST /:id/trigger-rfp's
+  // atomic reservation requires to be empty. Setting them on a detached deal would leave it unable to be
+  // re-submitted, which is precisely the "re-trigger silently impossible" dead end this feature exists to
+  // remove. A detached deal simply advances as a CRM-owned deal and waits for a real project.
+  const isDetachedFromBidBoard = currentDeal[0].bidBoardDetachedAt != null;
+  if (
+    isEstimatingBoundaryStageSlug(targetStage.slug, currentDeal[0].workflowRoute) &&
+    !isDetachedFromBidBoard
+  ) {
     dealUpdates.isBidBoardOwned = true;
     dealUpdates.bidBoardStageSlug = targetStage.slug;
     dealUpdates.readOnlySyncedAt = new Date();
-    // Advancing INTO the estimating boundary is the CRM's explicit "hand this deal to Bid Board"
-    // moment, so it also RE-ATTACHES a deal that a previous "Move back to Opportunity" detached
-    // (migration 0200). Without this the deal would sit in the incoherent state of "CRM says Bid Board
-    // owns it" while every sync ingress still skips it — the export would nag "delete this from the Bid
-    // Board" forever on a project the team had deliberately handed back. Only a deliberate human
-    // forward move reaches here: the Bid Board's own writeback and the bid-board-created callback both
-    // write stage SQL directly and never call changeDealStage.
-    dealUpdates.bidBoardDetachedAt = null;
-    dealUpdates.bidBoardDetachedBy = null;
-    dealUpdates.bidBoardDetachReason = null;
-    dealUpdates.bidBoardDetachedWasLinked = null;
   }
-
-  // Non-null only when THIS move actually cleared a LIVE detach marker. Read off the pre-update row
-  // because the UPDATE below nulls the column, and keyed on `=== null` (not truthiness) so it can only
-  // be set by the re-attach branch above — an unrelated stage move leaves the property `undefined`.
-  //
-  // Why it is audited at all: "Move back to Opportunity" writes an audit_log row naming
-  // bidBoardDetachedAt null→<ts>, so without this the trail reads "this deal was severed from Bid Board
-  // sync" with no record of it ever coming back — and re-attachment is exactly the event an auditor
-  // asking "why is the Bid Board updating this deal again?" needs to find. deal_stage_history records
-  // the forward move, but a stage row does not say the sync linkage was restored.
-  const clearedDetachMarkerAt =
-    dealUpdates.bidBoardDetachedAt === null && currentDeal[0].bidBoardDetachedAt != null
-      ? new Date(currentDeal[0].bidBoardDetachedAt).toISOString()
-      : null;
 
   // Always clear ALL terminal fields before setting new ones.
   // This prevents stale data when moving between terminal stages
@@ -476,11 +475,6 @@ export async function changeDealStage(
         // Record the inline forecast-date change too, mirroring the normal deal-update audit path, so a
         // close-date set/change made during a stage advance isn't invisible in the trail.
         ...(expectedCloseDateAuditChange ? { expectedCloseDate: expectedCloseDateAuditChange } : {}),
-        // The counterpart to the detach's own audit row: re-attaching to Bid Board sync is as auditable
-        // as severing it, and the two must be findable in the same place.
-        ...(clearedDetachMarkerAt
-          ? { bidBoardDetachedAt: { from: clearedDetachMarkerAt, to: null } }
-          : {}),
       },
       metadata: {
         overrideReason: overrideReason ?? null,

@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
 import {
@@ -551,5 +551,64 @@ describe("recalculateRepCommissionsInOffice", () => {
     const count2 = await recalculateRepCommissionsInOffice(tdb, SRC_E, ADMIN, ["sales_source"]);
     expect(count2).toBe(1);
     expect(await srcRow()).toEqual({ amount: "600.00", applied_rate: "0.006000" });
+  });
+
+  // DEADLOCK SAFETY. Each recompute holds one advisory lock per deal until COMMIT, and two recomputes
+  // for DIFFERENT reps routinely share deals (co-booked owner/estimator, or owner/sales-source). Taking
+  // those locks in traversal order lets one hold X and wait for Y while the other holds Y and waits for
+  // X; Postgres aborts one, and because the caller is fire-and-forget and only collects officeFailures,
+  // the settings save still reports success while that office's payouts stay at the old rate. A
+  // deterministic global order makes the cycle unconstructible — so assert the ORDER, not just that
+  // locks are taken.
+  it("acquires every deal's commission lock up front, in sorted id order", async () => {
+    // ADVERSARIAL ORDER. The two scans are concatenated row-scan-then-sourced-scan, so a
+    // traversal-order implementation locks in that order. HI carries a commission row (row-scan) and
+    // sorts AFTER LO, which is sourced-ONLY (sourced-scan) — so the unsorted sequence ends [… HI, LO]
+    // and is provably not sorted, while the fix yields LO before HI.
+    const HI = U("0bbb");
+    const LO = U("0aaa");
+    for (const id of [HI, LO]) {
+      await pg.exec(
+        `INSERT INTO public.deals
+           (id, deal_number, name, stage_id, assigned_rep_id, awarded_amount, is_change_order, on_hold,
+            office_code, contract_signed_date, sales_source_user_id, workflow_route, is_active)
+         VALUES ('${id}', 'D-${id.slice(-4)}', 'Lock ${id.slice(-4)}', '${STAGE}', '${REP}', 100000,
+                 false, false, 'dfw', '2026-03-01', '${REP}', 'service', true)`,
+      );
+    }
+    // Only HI is discoverable through the commission-row scan.
+    await pg.exec(
+      `INSERT INTO public.deal_signed_commissions
+         (deal_id, rep_user_id, attribution_role, source_value_kind, source_value_amount, applied_rate,
+          amount, contract_signed_date_at_signing, created_by)
+       VALUES ('${HI}', '${REP}', 'owner', 'awarded_amount', 100000, 0.030000, 3000.00, '2026-03-01', '${ADMIN}')`,
+    );
+
+    const locked: string[] = [];
+    const originalQuery = pg.query.bind(pg);
+    const spy = vi.spyOn(pg, "query").mockImplementation((async (text: unknown, ...rest: unknown[]) => {
+      if (typeof text === "string" && /pg_advisory_xact_lock/i.test(text)) {
+        const params = (rest[0] as unknown[] | undefined) ?? [];
+        locked.push(String(params[0] ?? ""));
+      }
+      return originalQuery(text as never, ...(rest as never[]));
+    }) as never);
+    try {
+      await recalculateRepCommissionsInOffice(tdb, REP, ADMIN);
+    } finally {
+      spy.mockRestore();
+    }
+
+    // Both scans contributed, and the sourced-only deal LO is locked BEFORE the row-scan deal HI —
+    // the inversion that proves the order comes from a sort, not from traversal.
+    expect(locked.some((key) => key.includes(HI))).toBe(true);
+    expect(locked.some((key) => key.includes(LO))).toBe(true);
+    expect(locked.findIndex((key) => key.includes(LO))).toBeLessThan(
+      locked.findIndex((key) => key.includes(HI))
+    );
+    // Globally sorted, and each deal locked exactly once even when it appears in BOTH scans — a
+    // second, separately ordered pass would reintroduce the cycle.
+    expect(locked).toEqual([...locked].sort());
+    expect(new Set(locked).size).toBe(locked.length);
   });
 });

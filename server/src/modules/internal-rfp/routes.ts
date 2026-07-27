@@ -92,6 +92,12 @@ async function findDeal(sourceDealId: string) {
               d.rfp_override_reviewed_at,
               d.rfp_bidboard_attempt_at,
               d.bid_board_linked_at,
+              d.synchub_bid_board_id,
+              -- Loaded for the AUDIT before-state: this callback is a re-attachment, and a trail that
+              -- records the detach but never its reversal is exactly the gap the feature is justified on.
+              d.bid_board_detached_at,
+              d.bid_board_detached_by,
+              d.bid_board_detach_reason,
               d.assigned_rep_id,
               d.rfp_approval_requested_by,
               d.rfp_approval_request_id,
@@ -1096,6 +1102,16 @@ internalRfpRoutes.post(
                   bid_board_detached_by = NULL,
                   bid_board_detach_reason = NULL,
                   bid_board_detached_was_linked = NULL,
+                  -- RETIRE THE OLD PROJECT'S STABLE IDENTITY. procore_bid_id above is being repointed at
+                  -- the NEW Bid Board project, but synchub_bid_board_id would still name the OLD one, and
+                  -- /opportunities 409s when the id it finds by procore_bid_id disagrees with the incoming
+                  -- bid_board_id ("conflicts with the existing Procore Bid mapping") — permanently, since
+                  -- nothing else ever rewrites it. That became reachable the moment the skipped_detached
+                  -- path started recording the id while a deal was detached. Clearing it is safe here
+                  -- precisely BECAUSE procore_bid_id is set in the same statement: the deal stays findable
+                  -- through the documented Procore fallback, which is the path that legitimately backfills
+                  -- a NULL stable id, so the new project's first push adopts the deal instead of failing.
+                  synchub_bid_board_id = NULL,
                   updated_at = NOW()
             WHERE id = $3
               -- a re-confirmed denial is terminal; never let a (delayed) success callback override it
@@ -1162,6 +1178,21 @@ internalRfpRoutes.post(
               isBidBoardOwned: { from: found.deal.is_bid_board_owned ?? null, to: true },
               rfpApprovalStatus: { from: found.deal.rfp_approval_status ?? null, to: "approved" },
               bidBoardLinkedAt: { from: found.deal.bid_board_linked_at ?? null, to: linkedDeal.bid_board_linked_at ?? "now" },
+              // The REVERSAL half of the detach trail. Emitted only when this callback actually cleared a
+              // live marker, so an ordinary first-time linkage records nothing extra — and so the audit
+              // for a re-submitted deal reads detach -> re-attach rather than a detach that never ended.
+              // The stage-change path logs its own reversal; both must agree or the trail is path-dependent.
+              ...(found.deal.bid_board_detached_at
+                ? {
+                    bidBoardDetachedAt: { from: found.deal.bid_board_detached_at, to: null },
+                    bidBoardDetachedBy: { from: found.deal.bid_board_detached_by ?? null, to: null },
+                    bidBoardDetachReason: { from: found.deal.bid_board_detach_reason ?? null, to: null },
+                  }
+                : {}),
+              // Retiring the old project's stable identity is part of the same re-attachment.
+              ...(found.deal.synchub_bid_board_id
+                ? { synchubBidBoardId: { from: found.deal.synchub_bid_board_id, to: null } }
+                : {}),
             },
             metadata: { rfpApprovalRequestId: payload.rfpApprovalRequestId, bidboardProjectId },
           });

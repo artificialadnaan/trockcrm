@@ -670,9 +670,19 @@ describe("returnDealToOpportunity — permissions and state blocks", () => {
     expect((await dealRow(D)).bid_board_detached_at).toBeNull();
   });
 
-  it("409s a deal that is already at Opportunity, so a live RFP cycle is never cleared by accident", async () => {
+  it("409s a CLEAN Opportunity deal, so a live RFP cycle is never cleared by accident", async () => {
     const D = U("d206");
     await seedBidBoardDeal(D, { stageId: OPP_STAGE });
+    // Clean = nothing linked to sever and no money to void. This is the case the block exists for: such
+    // a deal may have an RFP submission in flight (requested, not yet linked), and running the reset
+    // would silently cancel it.
+    await pg.exec(
+      `UPDATE public.deals SET is_bid_board_owned = false, bid_board_linked_at = NULL,
+         bid_board_project_number = NULL, read_only_synced_at = NULL, is_read_only_mirror = false,
+         procore_bid_id = NULL, synchub_bid_board_id = NULL, bid_board_created_at = NULL,
+         contract_signed_date = NULL, contract_signed_at = NULL
+       WHERE id = '${D}'`
+    );
 
     await expect(
       returnDealToOpportunity(tdb, {
@@ -685,6 +695,65 @@ describe("returnDealToOpportunity — permissions and state blocks", () => {
     ).rejects.toMatchObject({ statusCode: 409, code: "MOVE_BACK_ALREADY_OPPORTUNITY" });
 
     expect((await dealRow(D)).rfp_approval_status).toBe("approved");
+  });
+
+  // The Bid Board is authoritative over stage and APPLIES backward moves, so a mirror can park a deal
+  // that it still OWNS on Opportunity. Blocking on the stage alone left an admin unable to sever a sync
+  // that kept reclaiming the deal on every export.
+  it("ALLOWS a still-LINKED Opportunity deal to be detached — the sync keeps reclaiming it otherwise", async () => {
+    const D = U("d210");
+    await seedBidBoardDeal(D, { stageId: OPP_STAGE });
+
+    const preview = await previewReturnToOpportunity(tdb, { dealId: D, userRole: "admin" });
+    expect(preview.allowed).toBe(true);
+    expect(preview.blockCode).toBeNull();
+
+    await returnDealToOpportunity(tdb, {
+      dealId: D,
+      userId: ADMIN,
+      userRole: "admin",
+      reason: "Mirror parked it here while still owning it",
+      auditContext,
+    });
+
+    const row = await dealRow(D);
+    expect(row.bid_board_detached_at).not.toBeNull();
+    expect(row.is_bid_board_owned).toBe(false);
+    expect(row.bid_board_project_number).toBeNull();
+    expect(row.rfp_approval_status).toBeNull();
+  });
+
+  // The same stage can also retain MONEY: a Won deal walked backward by the mirror keeps its signed date
+  // and commission rows, and only this action can void them.
+  it("ALLOWS an Opportunity deal that still carries booked commission", async () => {
+    const D = U("d211");
+    await seedBidBoardDeal(D, { stageId: OPP_STAGE, contractSignedDate: "2026-03-01" });
+    await seedCommission(D, REP, "18750.00");
+    // Strip every Bid Board signal so ONLY the retained money can unblock it.
+    await pg.exec(
+      `UPDATE public.deals SET is_bid_board_owned = false, bid_board_linked_at = NULL,
+         bid_board_project_number = NULL, read_only_synced_at = NULL, is_read_only_mirror = false,
+         procore_bid_id = NULL, synchub_bid_board_id = NULL, bid_board_created_at = NULL
+       WHERE id = '${D}'`
+    );
+
+    const preview = await previewReturnToOpportunity(tdb, { dealId: D, userRole: "admin" });
+    expect(preview.allowed).toBe(true);
+    expect(preview.voidsCommission).toBe(true);
+
+    const result = await returnDealToOpportunity(tdb, {
+      dealId: D,
+      userId: ADMIN,
+      userRole: "admin",
+      reason: "Void the commission the mirror left behind",
+      acknowledgedCommissionTotal: "18750.00",
+      acknowledgedCommissionRowCount: 1,
+      auditContext,
+    });
+    expect(result.commissionRowsVoided).toBe(1);
+
+    const { rows } = await pg.query(`SELECT id FROM public.deal_signed_commissions WHERE deal_id = '${D}'`);
+    expect(rows).toHaveLength(0);
   });
 
   it("409s a parent carrying a LEGACY deal_change_orders row, not just child-deal COs", async () => {
@@ -805,7 +874,7 @@ describe("returnDealToOpportunity — the deal can actually be used again afterw
 });
 
 describe("re-attaching a detached deal", () => {
-  it("a deliberate forward move back into estimating clears the detach marker and restores sync", async () => {
+  it("a forward move into estimating does NOT re-attach — no Bid Board project exists yet", async () => {
     const D = U("d501");
     await seedBidBoardDeal(D);
 
@@ -818,9 +887,12 @@ describe("re-attaching a detached deal", () => {
     });
     expect((await dealRow(D)).bid_board_detached_at).not.toBeNull();
 
-    // Now hand it back to Bid Board the normal way. Leaving the marker set would produce the incoherent
-    // "CRM says Bid Board owns it, but every sync ingress skips it" state, and the export would nag to
-    // delete a project the team just re-handed off.
+    // Walk it forward to estimating by hand. THE INVARIANT: a deal re-attaches only when a Bid Board
+    // project demonstrably exists for it, and changeDealStage neither creates nor links one — so this
+    // path must leave the detach alone. Re-attaching here used to produce two real failures: an
+    // operator who had followed the dialog and deleted the old project got a Bid-Board-owned, read-only
+    // deal with no counterpart; one who had not got the old project reclaimed on the next export,
+    // silently undoing the move-back.
     vi.mocked(validateStageGate).mockImplementation(async () => ({
       allowed: true,
       isBackwardMove: false,
@@ -846,31 +918,75 @@ describe("re-attaching a detached deal", () => {
     });
 
     const row = await dealRow(D);
+    // The stage advances...
     expect(row.stage_id).toBe(ESTIMATING_STAGE);
-    expect(row.bid_board_detached_at).toBeNull();
-    expect(row.bid_board_detached_by).toBeNull();
-    expect(row.bid_board_detach_reason).toBeNull();
-    // The persisted linkage answer is part of the marker set: leaving it behind would make a re-linked
-    // deal keep claiming it had been severed from a Bid Board project.
-    expect(row.bid_board_detached_was_linked).toBeNull();
-    expect(row.is_bid_board_owned).toBe(true);
+    // ...but the deal stays detached and CRM-owned.
+    expect(row.bid_board_detached_at).not.toBeNull();
+    expect(row.bid_board_detach_reason).toBe("Not ready");
+    expect(row.is_bid_board_owned).toBe(false);
 
-    // The re-attach is as auditable as the detach. The move-back writes an audit_log row naming
-    // bidBoardDetachedAt null→<ts>; without a matching row here the trail says the deal was severed
-    // from Bid Board sync and never says it came back, which is the question an auditor actually has
-    // when they find the Bid Board updating a deal someone deliberately disconnected.
-    const { rows: audits } = await pg.query<{ changes: Record<string, { from: unknown; to: unknown }> }>(
-      `SELECT changes FROM public.audit_log
-        WHERE record_id = '${D}' AND table_name = 'deals'
-          AND changes ? 'bidBoardDetachedAt'
-        ORDER BY created_at`
+    // The whole handoff block is skipped, not just the marker clear: is_bid_board_owned,
+    // bid_board_stage_slug and read_only_synced_at are three of the ten conditions the trigger-RFP
+    // atomic reservation requires to be EMPTY. Setting them here would leave the deal unable to be
+    // re-submitted — the "re-trigger silently impossible" dead end this feature exists to remove — so
+    // the deal must still satisfy the reservation after being walked forward.
+    expect(row.bid_board_stage_slug).toBeNull();
+    expect(row.read_only_synced_at).toBeNull();
+    const { rows: reservable } = await pg.query<{ ok: boolean }>(
+      `SELECT (
+          rfp_approval_status IS NULL
+          AND is_bid_board_owned = false
+          AND (bid_board_stage_slug IS NULL OR bid_board_stage_slug = '')
+          AND is_read_only_mirror = false
+          AND read_only_synced_at IS NULL
+          AND bid_board_stage_entered_at IS NULL
+          AND bid_board_mirror_source_entered_at IS NULL
+        ) AS ok
+       FROM public.deals WHERE id = '${D}'`
     );
-    const reattach = audits.find((a) => a.changes.bidBoardDetachedAt.to === null);
-    expect(reattach, "the re-attach must leave its own audit row").toBeDefined();
-    expect(reattach!.changes.bidBoardDetachedAt.from).toEqual(expect.any(String));
+    expect(reservable[0].ok, "a forward-moved detached deal must still be re-submittable").toBe(true);
   });
 
-  it("does not fabricate a re-attach audit entry on an ordinary forward move", async () => {
+  it("still hands an ATTACHED deal to Bid Board on the same forward move", async () => {
+    // The skip is scoped to detached deals; the ordinary handoff is untouched.
+    const D = U("d503");
+    await seedBidBoardDeal(D, { stageId: OPP_STAGE });
+    await pg.exec(
+      `UPDATE public.deals SET is_bid_board_owned = false, bid_board_stage_slug = NULL,
+         read_only_synced_at = NULL, bid_board_detached_at = NULL WHERE id = '${D}'`
+    );
+
+    vi.mocked(validateStageGate).mockImplementation(async () => ({
+      allowed: true,
+      isBackwardMove: false,
+      isTerminal: false,
+      targetStage: STAGES[ESTIMATING_STAGE],
+      currentStage: STAGES[OPP_STAGE],
+      missingRequirements: {
+        fields: [], documents: [], approvals: [],
+        effectiveChecklist: { fields: [], attachments: [], approvals: [] },
+      },
+      effectiveChecklist: { fields: [], attachments: [], approvals: [] },
+      requiresOverride: false,
+      overrideType: null,
+      blockReason: null,
+    }) as never);
+
+    await changeDealStage(tdb, {
+      dealId: D,
+      targetStageId: ESTIMATING_STAGE,
+      userId: ADMIN,
+      userRole: "admin",
+      auditContext,
+    });
+
+    const row = await dealRow(D);
+    expect(row.is_bid_board_owned).toBe(true);
+    expect(row.bid_board_stage_slug).toBe("estimating");
+    expect(row.read_only_synced_at).not.toBeNull();
+  });
+
+  it("never logs a detach reversal from a stage move — the callback owns re-attachment", async () => {
     const D = U("d502");
     await seedBidBoardDeal(D, { stageId: OPP_STAGE });
 

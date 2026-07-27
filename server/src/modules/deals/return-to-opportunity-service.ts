@@ -330,6 +330,9 @@ async function buildEligibility(
       commissionRowCount: commission.rowCount,
       commissionTotal: commission.total,
       effectiveContractSignedDate: signedDate,
+      // Same predicate as the dialog copy and the audit flag — and now also what decides whether an
+      // Opportunity-stage deal is a genuine no-op or a linked deal the sync keeps reclaiming.
+      isBidBoardLinked: isDealBidBoardLinked(deal),
     },
     userRole
   );

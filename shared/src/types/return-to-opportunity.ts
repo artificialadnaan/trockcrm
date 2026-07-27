@@ -36,6 +36,12 @@ export interface ReturnToOpportunityDealState {
   commissionTotal: string;
   /** contract_signed_date / contract_signed_at, collapsed to a single effective date by the caller. */
   effectiveContractSignedDate: string | null;
+  /**
+   * Does the deal still have a live Bid Board footprint (ownership flag, project number, linked-at, or a
+   * preserved procore/synchub identity) — i.e. is there something for this action to actually sever?
+   * Server passes the same `isDealBidBoardLinked` answer that drives the dialog copy and the audit flag.
+   */
+  isBidBoardLinked: boolean;
 }
 
 export interface ReturnToOpportunityEligibility {
@@ -59,6 +65,33 @@ export const RETURN_TO_OPPORTUNITY_COMMISSION_ROLES = ["admin"] as const;
 
 function isAllowedRole(role: string | null | undefined, allowed: readonly string[]): boolean {
   return role != null && allowed.includes(role);
+}
+
+/**
+ * Is "Move back to Opportunity" genuinely a no-op for this deal?
+ *
+ * True only for a deal that is ALREADY at Opportunity, has no live Bid Board footprint to sever, and
+ * carries no booked money to void. Anything else at Opportunity still has real work to do — the Bid
+ * Board can move a linked (and even a signed, commission-carrying) deal backward onto this stage while
+ * keeping ownership, and that deal needs the detach exactly as much as an estimating one does.
+ *
+ * Exported so the deal-detail menu item hides the action on the SAME condition the service blocks it,
+ * rather than on the stage alone. `commissionRowCount` is server-only knowledge; a caller that cannot
+ * see it passes 0 and errs toward OFFERING the action, whose server preview then renders the real
+ * verdict — the safe direction, and the one this module exists to keep consistent.
+ */
+export function isReturnToOpportunityNoOp(deal: {
+  stageSlug: string | null | undefined;
+  isBidBoardLinked: boolean;
+  commissionRowCount: number;
+  effectiveContractSignedDate: string | null;
+}): boolean {
+  return (
+    isOpportunityStageSlug(deal.stageSlug) &&
+    !deal.isBidBoardLinked &&
+    deal.commissionRowCount === 0 &&
+    deal.effectiveContractSignedDate == null
+  );
 }
 
 /**
@@ -126,12 +159,24 @@ export function evaluateReturnToOpportunityEligibility(
     };
   }
 
-  if (isOpportunityStageSlug(deal.stageSlug)) {
+  // ALREADY AT OPPORTUNITY — a no-op ONLY when there is genuinely nothing to sever and no money to void.
+  //
+  // The Bid Board is authoritative over stage and APPLIES backward moves, so a mirror can park a deal at
+  // `opportunity` while is_bid_board_owned stays true — and, if it was previously Won, while its signed
+  // date and booked commission rows stay behind. Blocking that state unconditionally (with the detail
+  // page also hiding the item at Opportunity) left an admin unable to sever sync, reset the RFP cycle, or
+  // void retained commission, while every export cycle reclaimed the deal. The stage alone was never the
+  // right test: what makes this action a no-op is a CLEAN, CRM-owned, money-free deal.
+  //
+  // The original reason for the block still holds inside the narrowed condition: a genuinely clean
+  // Opportunity deal may have a LIVE RFP cycle in flight (requested but not yet linked — so not linked,
+  // no money), and running the reset on it would silently cancel that submission.
+  if (isReturnToOpportunityNoOp(deal)) {
     return {
       ...base,
       allowed: false,
       blockCode: "ALREADY_OPPORTUNITY",
-      blockReason: "This deal is already in Opportunity.",
+      blockReason: "This deal is already in Opportunity, with nothing linked to Bid Board to disconnect.",
     };
   }
 

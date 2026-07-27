@@ -111,6 +111,7 @@ import {
   getDealAtRiskResult,
   getCanonicalEstimatingBoundaryStageSlug,
   getOwnerInitialColor,
+  isReturnToOpportunityNoOp,
   pendingRfpSubStateForStatus,
   resolveEffectiveStageEnteredAt,
   toCanonicalDealStageSlug,
@@ -505,6 +506,19 @@ export function DealDetailPage() {
 
   const currentStageSlug = currentStage?.slug ?? "";
   const isOpportunityStage = canonicalCurrentStageSlug === "opportunity";
+  // Client-side mirror of the server's isDealBidBoardLinked: is there still a Bid Board footprint to
+  // sever? Detached wins over everything (the identity columns are deliberately preserved through a
+  // detach, so they must not read as "still linked"). Used only to decide whether the move-back menu
+  // item is a no-op; the dialog's server preview remains authoritative.
+  const isDealStillBidBoardLinked =
+    !deal?.bidBoardDetachedAt &&
+    Boolean(
+      deal?.bidBoardOwnership?.isOwned ||
+        deal?.isBidBoardOwned ||
+        deal?.procoreBidId ||
+        deal?.bidBoardProjectNumber ||
+        deal?.bidBoardLinkedAt
+    );
   const opportunityStage = dealStages.find(
     (stage) =>
       stage.slug === "opportunity" &&
@@ -975,8 +989,20 @@ export function DealDetailPage() {
               this is not an ordinary stage change (it severs Bid Board sync and can void commission).
               Only the coarse role check lives here; the authoritative eligibility (Won/commission tier,
               change-order children, already-Opportunity) comes from the dialog's server preview, which
-              renders the exact block reason rather than silently hiding the option. */}
-          {!isOpportunityStage && isDirectorOrAdmin ? (
+              renders the exact block reason rather than silently hiding the option.
+
+              Hidden on the SHARED no-op predicate, not on the stage: the Bid Board applies backward moves,
+              so it can park a still-owned — and even a signed, commission-carrying — deal on Opportunity,
+              and hiding the action there left an admin unable to sever a sync that kept reclaiming it.
+              `isReturnToOpportunityNoOp` is the same function the service blocks on, so the menu and the
+              route cannot disagree. Commission rows are server-only knowledge; passing 0 errs toward
+              OFFERING the action and letting the preview render the real verdict. */}
+          {!isReturnToOpportunityNoOp({
+            stageSlug: canonicalCurrentStageSlug,
+            isBidBoardLinked: isDealStillBidBoardLinked,
+            commissionRowCount: 0,
+            effectiveContractSignedDate: deal.contractSignedDate ?? deal.contractSignedAt ?? null,
+          }) && isDirectorOrAdmin ? (
             <DropdownMenuItem
               onClick={() => setReturnToOpportunityOpen(true)}
               className="text-amber-600"
@@ -984,7 +1010,12 @@ export function DealDetailPage() {
               <Undo2 className="h-4 w-4 mr-2" />
               Move back to Opportunity
             </DropdownMenuItem>
-          ) : !isOpportunityStage && viewerOwnsDeal ? (
+          ) : !isReturnToOpportunityNoOp({
+              stageSlug: canonicalCurrentStageSlug,
+              isBidBoardLinked: isDealStillBidBoardLinked,
+              commissionRowCount: 0,
+              effectiveContractSignedDate: deal.contractSignedDate ?? deal.contractSignedAt ?? null,
+            }) && viewerOwnsDeal ? (
             <DropdownMenuItem disabled title="Only a director or an admin can move a deal back to Opportunity">
               <Undo2 className="h-4 w-4 mr-2" />
               Move back to Opportunity

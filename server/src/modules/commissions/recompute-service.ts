@@ -35,15 +35,47 @@ export async function recalculateRepCommissionsInOffice(
     .from(dealSignedCommissions)
     .where(eq(dealSignedCommissions.repUserId, repUserId));
 
-  let recomputed = 0;
-  for (const { dealId } of dealRows) {
+  // Resolved UP FRONT, before any lock is taken, because its deal ids have to join the same globally
+  // ordered lock set as the row-scan's (see below). A second, separately ordered traversal would
+  // reintroduce exactly the cycle the ordering exists to prevent.
+  const sourcedDeals =
+    !roles || roles.includes("sales_source")
+      ? await officeDb
+          .select({ id: deals.id })
+          .from(deals)
+          .where(
+            and(
+              eq(deals.salesSourceUserId, repUserId),
+              eq(deals.workflowRoute, "service"),
+              eq(deals.isActive, true)
+            )
+          )
+      : [];
+
+  // GLOBAL LOCK ORDER. Every deal this transaction will touch is locked here, in sorted id order,
+  // before any work begins.
+  //
+  // Two recomputes for DIFFERENT reps routinely share deals (a co-booked owner and estimator, or an
+  // owner and a sales source). Each holds its advisory locks until COMMIT, so acquiring them in
+  // traversal order lets one lock deal X and wait for Y while the other holds Y and waits for X —
+  // Postgres breaks the tie by aborting one. That abort is close to invisible: the caller is
+  // fire-and-forget and only collects `officeFailures`, so the settings save still reports success
+  // while that office's payouts silently stay at the old rate. A deterministic global order makes the
+  // cycle unconstructible, and keeps the whole recompute in one transaction.
+  const orderedDealIds = [
+    ...new Set([...dealRows.map((row) => row.dealId), ...sourcedDeals.map((deal) => deal.id)]),
+  ].sort();
+  for (const dealId of orderedDealIds) {
     // Serialize this deal's commission mutations against "Move back to Opportunity", which voids the
-    // deal's commission after showing the operator an exact amount. Taken BEFORE the deal is read, so
-    // the eligibility decision below cannot be made from a snapshot that a concurrent move-back is
-    // about to invalidate — and before any row lock, which is what keeps the two paths deadlock-free
+    // deal's commission after showing the operator an exact amount. Taken BEFORE any deal is read, so
+    // no eligibility decision below can be made from a snapshot a concurrent move-back is about to
+    // invalidate — and before any row lock, which is what keeps the two paths deadlock-free
     // (see deal-commission-lock.ts).
     await lockDealCommissions(officeDb, dealId);
+  }
 
+  let recomputed = 0;
+  for (const { dealId } of dealRows) {
     const [deal] = await officeDb
       .select({
         contractSignedAt: deals.contractSignedAt,
@@ -85,31 +117,17 @@ export async function recalculateRepCommissionsInOffice(
   // Deliberately sales_source-specific: owner rows are discoverable via assigned_rep_id but keep the
   // backfill-only convention, whereas the sourced-deal link is a first-class column and a solo↔mixed
   // switch is the designed 0↔positive flow.
-  if (!roles || roles.includes("sales_source")) {
-    const sourcedDeals = await officeDb
-      .select({ id: deals.id })
-      .from(deals)
-      .where(
-        and(
-          eq(deals.salesSourceUserId, repUserId),
-          eq(deals.workflowRoute, "service"),
-          eq(deals.isActive, true)
-        )
-      );
-    for (const { id: dealId } of sourcedDeals) {
-      // THE path that made deal-commission-lock.ts necessary: this mint reads the deal (signed date
-      // included) without locking or writing it, then INSERTs a row for a rep that had none — so it is
-      // the one commission writer neither the deal-row FOR UPDATE nor the deal_signed_commissions row
-      // locks can serialize. Lock before the mint reads anything.
-      await lockDealCommissions(officeDb, dealId);
-
-      const result = await mintSalesSourceCommissionForDeal(officeDb, {
-        dealId,
-        salesSourceUserId: repUserId,
-        triggeredByUserId,
-      });
-      if (result.status === "created") recomputed += 1;
-    }
+  for (const { id: dealId } of sourcedDeals) {
+    // THE path that made deal-commission-lock.ts necessary: this mint reads the deal (signed date
+    // included) without locking or writing it, then INSERTs a row for a rep that had none — so it is
+    // the one commission writer neither the deal-row FOR UPDATE nor the deal_signed_commissions row
+    // locks can serialize. Its lock was already taken above, in the global order.
+    const result = await mintSalesSourceCommissionForDeal(officeDb, {
+      dealId,
+      salesSourceUserId: repUserId,
+      triggeredByUserId,
+    });
+    if (result.status === "created") recomputed += 1;
   }
 
   return recomputed;

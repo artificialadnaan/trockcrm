@@ -19,7 +19,8 @@ vi.mock("../../../src/db.js", () => ({
   releasePooledClient: () => {},
   isBrokenConnectionError: () => false,
 }));
-vi.mock("../../../src/modules/audit/pg-activity-logger.js", () => ({ logActivityWithPgClient: vi.fn(async () => {}) }));
+const auditMocks = vi.hoisted(() => ({ logActivityWithPgClient: vi.fn(async () => {}) }));
+vi.mock("../../../src/modules/audit/pg-activity-logger.js", () => ({ logActivityWithPgClient: auditMocks.logActivityWithPgClient }));
 vi.mock("../../../src/modules/audit/audit-logger.js", () => ({ buildAuditActorFromSystem: () => ({}) }));
 vi.mock("../../../src/modules/audit/system-processes.js", () => ({ INTERNAL_RFP_RECEIVER: "internal_rfp_receiver" }));
 
@@ -51,7 +52,7 @@ async function seed() {
       on_hold boolean NOT NULL DEFAULT false, on_hold_started_at timestamptz, on_hold_accumulated_seconds bigint DEFAULT 0,
       on_hold_accumulated_seconds_at_stage_entry bigint DEFAULT 0, is_active boolean NOT NULL DEFAULT true,
       bid_board_detached_at timestamptz, bid_board_detached_by uuid, bid_board_detach_reason text,
-      bid_board_detached_was_linked boolean, updated_at timestamptz
+      bid_board_detached_was_linked boolean, synchub_bid_board_id text, updated_at timestamptz
     );
     CREATE TABLE office_test.deal_stage_history (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), deal_id uuid, from_stage_id uuid, to_stage_id uuid, changed_by uuid,
@@ -112,10 +113,14 @@ describe("POST /bid-board-created (voting path)", () => {
           SET bid_board_detached_at = now() - interval '2 days',
               bid_board_detached_by = $2,
               bid_board_detach_reason = 'Scope was not ready',
-              bid_board_detached_was_linked = true
+              bid_board_detached_was_linked = true,
+              -- Recorded by the /opportunities skipped_detached path while the deal was detached; it
+              -- names the OLD project, which this callback is about to replace.
+              synchub_bid_board_id = 'bb-old-project'
         WHERE id = $1`,
       [DEAL, REP],
     );
+    auditMocks.logActivityWithPgClient.mockClear();
     const app = await buildApp();
     const raw = JSON.stringify({
       status: "created",
@@ -129,7 +134,7 @@ describe("POST /bid-board-created (voting path)", () => {
 
     const rows = (await holder.pg.query(
       `SELECT bid_board_detached_at, bid_board_detached_by, bid_board_detach_reason,
-              bid_board_detached_was_linked, is_bid_board_owned, procore_bid_id
+              bid_board_detached_was_linked, synchub_bid_board_id, is_bid_board_owned, procore_bid_id
          FROM office_test.deals WHERE id=$1`, [DEAL])).rows as any[];
     expect(rows[0].bid_board_detached_at).toBeNull();
     expect(rows[0].bid_board_detached_by).toBeNull();
@@ -138,6 +143,22 @@ describe("POST /bid-board-created (voting path)", () => {
     // otherwise a re-linked deal would keep claiming it had been severed from a project.
     expect(rows[0].bid_board_detached_was_linked).toBeNull();
     expect(rows[0].is_bid_board_owned).toBe(true);
+    // The OLD project's stable identity is RETIRED. procore_bid_id now points at the new project, so
+    // leaving the old bid_board_id behind makes /opportunities 409 forever on the mismatch
+    // ("conflicts with the existing Procore Bid mapping") — the new project could never sync. Cleared,
+    // the new project's first push finds the deal through the Procore fallback and backfills its own id.
+    expect(rows[0].synchub_bid_board_id).toBeNull();
+
+    // The re-attachment is AUDITED. The detach wrote an audit row; without its reversal here the trail
+    // shows a deal severed from Bid Board sync that never came back — on the normal re-submission path.
+    // The LINKAGE audit specifically — this callback also writes a separate stage-change audit row.
+    const auditCall = auditMocks.logActivityWithPgClient.mock.calls
+      .map((call) => call[0] as { fieldChanges?: Record<string, { from: unknown; to: unknown }> })
+      .find((call) => call?.fieldChanges?.procoreBidId != null);
+    expect(auditCall?.fieldChanges?.bidBoardDetachedAt?.to).toBeNull();
+    expect(auditCall?.fieldChanges?.bidBoardDetachedAt?.from).not.toBeNull();
+    expect(auditCall?.fieldChanges?.bidBoardDetachReason?.from).toBe("Scope was not ready");
+    expect(auditCall?.fieldChanges?.synchubBidBoardId).toEqual({ from: "bb-old-project", to: null });
     expect(String(rows[0].procore_bid_id)).toBe("88999");
   });
 
