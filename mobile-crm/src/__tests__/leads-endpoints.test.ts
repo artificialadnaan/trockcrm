@@ -290,6 +290,50 @@ describe("isLeadOpen", () => {
   });
 });
 
+/**
+ * The two adapters that had no contract test, in a file whose whole premise is that each envelope is
+ * pinned against its route because the leads surface's shapes do not follow each other.
+ *
+ * `watchLead` is the sharper of the two: its entire behaviour is a `watching ? "POST" : "DELETE"`
+ * ternary, so inverting it is a one-character edit that changes watch into unwatch with nothing to
+ * catch it and no error at either end — the request succeeds, it just does the opposite thing.
+ */
+describe("preflight and watch", () => {
+  it("POSTs the target stage to the preflight route and returns the GATE result, not a transition result", async () => {
+    // Different function, different shape: preflight answers `allowed` / `missingRequirements`, and has
+    // no `ok` at all. Typing it as the transition result made every `ok` check silently falsy.
+    const { fetcher, calls } = recording({
+      allowed: false,
+      blockReason: "Lead stage change not allowed until required intake is complete",
+      missingRequirements: {
+        fields: ["source"],
+        effectiveChecklist: { fields: [{ key: "source", label: "Source", satisfied: false }] },
+      },
+    });
+
+    const res = await leads.preflightLeadStage(fetcher, "l1", "s2");
+
+    expect(calls[0].path).toBe("/leads/l1/stage/preflight");
+    expect(calls[0].opts.method).toBe("POST");
+    expect(calls[0].opts.body).toEqual({ targetStageId: "s2" });
+    expect(res.allowed).toBe(false);
+    // The PREFLIGHT is the shape that really does carry effectiveChecklist — the transition error does
+    // not, and reading this one there is what dropped every itemised refusal.
+    expect(res.missingRequirements?.effectiveChecklist?.fields?.[0]).toMatchObject({ key: "source" });
+  });
+
+  it("POSTs to watch and DELETEs to unwatch — the same path, opposite verbs", async () => {
+    const { fetcher, calls } = recording({});
+    await leads.watchLead(fetcher, "l1", true);
+    await leads.watchLead(fetcher, "l1", false);
+
+    expect(calls.map((call) => [call.path, call.opts.method])).toEqual([
+      ["/leads/l1/watch", "POST"],
+      ["/leads/l1/watch", "DELETE"],
+    ]);
+  });
+});
+
 describe("isLeadArchived", () => {
   /**
    * The third lifecycle state, and the one with no field of its own.
