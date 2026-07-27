@@ -37,6 +37,12 @@ const EVIDENCE_SUBTITLE_HEIGHT = 44;
 // worker applies a hard byte-size backstop on top of this. Exported so the artifact job pre-caps photos
 // BEFORE downloading their bytes (never fetching/transcoding tiles the renderer would only discard).
 export const MAX_EVIDENCE_PHOTOS = 60;
+// Cap the corrective-action RESPONSE photos embedded across the whole report. Separate from
+// MAX_EVIDENCE_PHOTOS so a heavily-documented fix cannot crowd out the original evidence (or push the
+// attachment past the provider ceiling). Overflow is reported as a count, never dropped silently.
+export const MAX_CORRECTIVE_ACTION_PHOTOS = 24;
+// Bound one response comment so a long dictation cannot run away; the full text lives in the CRM.
+const CORRECTIVE_ACTION_COMMENT_MAX_HEIGHT = 72;
 // Bound each critical-deficiency description on the summary page so one long (up to 4000-char) note can't
 // blow the layout across pages; the same note also appears (bounded) as the evidence-group subtitle.
 const DEFICIENCY_NOTE_MAX_HEIGHT = 54;
@@ -77,6 +83,8 @@ export interface ScorecardPdfInput {
   /** Evidence photos already dropped upstream (capped before download) — added to the render-side cap's
    *  omitted count so the "available in the CRM" note reflects the true total. */
   omittedEvidenceCount?: number;
+  /** The scorecard's corrective-action items (below-band cards only). Empty/absent renders no section. */
+  correctiveActions?: ScorecardPdfCorrectiveAction[];
 }
 
 export interface ScorecardPdfPhoto {
@@ -84,6 +92,31 @@ export interface ScorecardPdfPhoto {
   deficiencyKey: string | null;
   caption: string | null;
   image: Buffer | null;
+}
+
+/** One photo documenting a corrective-action response. Not section-keyed — it belongs to an ITEM. */
+export interface ScorecardPdfCorrectiveActionPhoto {
+  caption: string | null;
+  image: Buffer | null;
+}
+
+/**
+ * One corrective-action item on a below-band scorecard: the flagged action item / critical deficiency, and
+ * (once answered) who fixed it, when, what they said and what they photographed.
+ */
+export interface ScorecardPdfCorrectiveAction {
+  /** 'action_item' | 'critical_deficiency' */
+  itemType: string;
+  /** Action-item index as a string, or the critical-deficiency key. */
+  itemRef: string;
+  itemLabel: string;
+  /** 'open' | 'resolved' */
+  status: string;
+  responderName: string | null;
+  /** ISO timestamp, or null while open. */
+  respondedAt: string | null;
+  responseComment: string | null;
+  photos: ScorecardPdfCorrectiveActionPhoto[];
 }
 
 export interface ScorecardPdfSection {
@@ -124,6 +157,12 @@ export interface ScorecardPdfData {
   /** Leadership Project Summary evidence photos (sectionKey `project_summary`). Empty for project cards. */
   summaryPhotos: ScorecardPdfPhoto[];
   omittedEvidenceCount: number;
+  /** Corrective-action items in render order (numeric item_ref), response photos already capped. */
+  correctiveActions: ScorecardPdfCorrectiveAction[];
+  /** e.g. "1 of 2 resolved" / "All items resolved"; null when there are no corrective actions. */
+  correctiveActionSummary: string | null;
+  /** Response photos dropped by MAX_CORRECTIVE_ACTION_PHOTOS. */
+  omittedCorrectiveActionPhotoCount: number;
 }
 
 /**
@@ -176,6 +215,37 @@ export function buildScorecardPdfData(input: ScorecardPdfInput): ScorecardPdfDat
           .filter((deficiency): deficiency is ScorecardPdfDeficiency => deficiency !== null);
       })();
   const actionItems = kind === "leadership" ? [] : input.actionItems.map((s) => s.trim()).filter((s) => s.length > 0);
+
+  // Numeric-aware ordering. item_ref is an action-item INDEX for action items — where "10" must follow "2",
+  // not precede it (the lpad guard from the corrective-action work) — and an opaque key for critical
+  // deficiencies (lexical). Action items sort ahead of deficiencies so this matches the deal-thread order.
+  const orderedCorrectiveActions = [...(input.correctiveActions ?? [])].sort((left, right) => {
+    if (left.itemType !== right.itemType) return left.itemType === "action_item" ? -1 : 1;
+    const leftNum = Number(left.itemRef);
+    const rightNum = Number(right.itemRef);
+    if (Number.isFinite(leftNum) && Number.isFinite(rightNum)) return leftNum - rightNum;
+    return left.itemRef.localeCompare(right.itemRef);
+  });
+
+  // Apply the response-photo cap ACROSS the whole report, in the order items render, so the kept set is
+  // deterministic rather than dependent on which item happened to be read first.
+  let correctiveActionPhotoBudget = MAX_CORRECTIVE_ACTION_PHOTOS;
+  let omittedCorrectiveActionPhotoCount = 0;
+  const cappedCorrectiveActions = orderedCorrectiveActions.map((item) => {
+    const kept = item.photos.slice(0, Math.max(0, correctiveActionPhotoBudget));
+    omittedCorrectiveActionPhotoCount += item.photos.length - kept.length;
+    correctiveActionPhotoBudget -= kept.length;
+    return { ...item, photos: kept };
+  });
+
+  const resolvedCount = cappedCorrectiveActions.filter((item) => item.status === "resolved").length;
+  const correctiveActionSummary =
+    cappedCorrectiveActions.length === 0
+      ? null
+      : resolvedCount === cappedCorrectiveActions.length
+        ? "All items resolved"
+        : `${resolvedCount} of ${cappedCorrectiveActions.length} resolved`;
+
   return {
     dealName: input.dealName,
     projectNumber: input.projectNumber,
@@ -206,6 +276,9 @@ export function buildScorecardPdfData(input: ScorecardPdfInput): ScorecardPdfDat
       ? photos.filter((photo) => photo.sectionKey === FIELD_SCORECARD_LEADERSHIP_SUMMARY_SECTION_KEY)
       : [],
     omittedEvidenceCount: Math.max(0, input.omittedEvidenceCount ?? 0),
+    correctiveActions: cappedCorrectiveActions,
+    correctiveActionSummary,
+    omittedCorrectiveActionPhotoCount,
   };
 }
 
@@ -365,6 +438,37 @@ export async function renderFieldScorecardPdf(data: ScorecardPdfData): Promise<B
     heading(doc, "Signatures");
     drawSignature(doc, "Superintendent", data.superintendentSignature);
     drawSignature(doc, "Project manager", data.pmSignature);
+  }
+
+  // ── Corrective actions ──
+  // Placed after the signed card body and before the original-evidence pages, so each item renders
+  // self-contained: its status, response and photos stay adjacent instead of being split across the report.
+  // Applies to BOTH kinds — a leadership card can trip the corrective-action band too.
+  if (data.correctiveActions.length > 0) {
+    doc.addPage();
+    heading(doc, "Corrective Actions");
+    if (data.correctiveActionSummary) {
+      doc.font("Helvetica").fontSize(10).fillColor(BRAND_MUTED).text(
+        data.correctiveActionSummary,
+        PAGE.margin,
+        doc.y,
+        { width: CONTENT_WIDTH },
+      );
+      doc.moveDown(0.6);
+    }
+    for (const item of data.correctiveActions) {
+      drawCorrectiveAction(doc, item);
+    }
+    if (data.omittedCorrectiveActionPhotoCount > 0) {
+      doc.moveDown(0.4);
+      const count = data.omittedCorrectiveActionPhotoCount;
+      doc.font("Helvetica-Oblique").fontSize(9).fillColor(BRAND_MUTED).text(
+        `${count} additional response photo${count === 1 ? "" : "s"} available in the CRM.`,
+        PAGE.margin,
+        doc.y,
+        { width: CONTENT_WIDTH },
+      );
+    }
   }
 
   const evidenceGroups: EvidenceGroup[] = isLeadership
@@ -562,6 +666,94 @@ export function signatureDataUrlToBuffer(signature: string | null): Buffer | nul
  */
 export function typedSignatureFallback(signature: string | null): string | null {
   return sharedTypedSignatureFallback(signature);
+}
+
+/**
+ * One corrective-action item: the flagged label, an Open/Resolved status, and — once answered — who fixed
+ * it, when, what they said and what they photographed. An open item deliberately shows only the label and
+ * status: there is nothing yet to document.
+ */
+function drawCorrectiveAction(doc: PDFKit.PDFDocument, item: ScorecardPdfCorrectiveAction): void {
+  const resolved = item.status === "resolved";
+  // Keep the label with at least its status line rather than orphaning it at a page foot.
+  if (doc.y + 64 > PAGE.height - PAGE.margin) doc.addPage();
+
+  doc.font("Helvetica-Bold").fontSize(11).fillColor(BRAND_BLACK).text(item.itemLabel, PAGE.margin, doc.y, {
+    width: CONTENT_WIDTH,
+  });
+  doc.font("Helvetica-Bold").fontSize(9).fillColor(resolved ? "#16A34A" : BRAND_RED).text(
+    resolved ? "RESOLVED" : "OPEN",
+    PAGE.margin,
+    doc.y + 2,
+    { width: CONTENT_WIDTH },
+  );
+
+  if (resolved) {
+    const who = item.responderName?.trim();
+    const when = item.respondedAt ? formatDate(item.respondedAt) : null;
+    const attribution = [who, when].filter(Boolean).join("  ·  ");
+    if (attribution) {
+      doc.font("Helvetica").fontSize(9).fillColor(BRAND_MUTED).text(attribution, PAGE.margin, doc.y + 2, {
+        width: CONTENT_WIDTH,
+      });
+    }
+    const comment = item.responseComment?.trim();
+    if (comment) {
+      doc.font("Helvetica").fontSize(10).fillColor(BRAND_BLACK).text(comment, PAGE.margin, doc.y + 4, {
+        width: CONTENT_WIDTH,
+        height: CORRECTIVE_ACTION_COMMENT_MAX_HEIGHT,
+        ellipsis: true,
+      });
+    }
+    drawCorrectiveActionPhotos(doc, item.photos);
+  }
+
+  doc.moveDown(0.8);
+  hairline(doc);
+}
+
+/**
+ * Response photos in a 2-up grid, reusing the evidence tile geometry and the same "Image unavailable"
+ * placeholder so a permanently-bad object degrades identically to original evidence.
+ */
+function drawCorrectiveActionPhotos(
+  doc: PDFKit.PDFDocument,
+  photos: ScorecardPdfCorrectiveActionPhoto[],
+): void {
+  if (photos.length === 0) return;
+  doc.moveDown(0.4);
+  const captionHeight = 20;
+  for (let index = 0; index < photos.length; index += 2) {
+    const row = photos.slice(index, index + 2);
+    if (doc.y + EVIDENCE_IMAGE_HEIGHT + captionHeight + 8 > PAGE.height - PAGE.margin) doc.addPage();
+    const rowTop = doc.y;
+    row.forEach((photo, column) => {
+      const x = PAGE.margin + column * (EVIDENCE_IMAGE_WIDTH + 16);
+      if (photo.image) {
+        try {
+          doc.image(photo.image, x, rowTop, {
+            fit: [EVIDENCE_IMAGE_WIDTH, EVIDENCE_IMAGE_HEIGHT],
+            align: "center",
+            valign: "center",
+          });
+          doc.rect(x, rowTop, EVIDENCE_IMAGE_WIDTH, EVIDENCE_IMAGE_HEIGHT).lineWidth(1).strokeColor(BRAND_BORDER).stroke();
+        } catch {
+          drawImageUnavailable(doc, x, rowTop);
+        }
+      } else {
+        drawImageUnavailable(doc, x, rowTop);
+      }
+      if (photo.caption?.trim()) {
+        doc.font("Helvetica").fontSize(8).fillColor(BRAND_MUTED).text(
+          photo.caption.trim(),
+          x,
+          rowTop + EVIDENCE_IMAGE_HEIGHT + 4,
+          { width: EVIDENCE_IMAGE_WIDTH, height: captionHeight, ellipsis: true },
+        );
+      }
+    });
+    doc.y = rowTop + EVIDENCE_IMAGE_HEIGHT + captionHeight + 6;
+  }
 }
 
 function heading(doc: PDFKit.PDFDocument, label: string): void {

@@ -7,6 +7,8 @@ import {
   signatureDataUrlToBuffer,
   typedSignatureFallback,
   type EvidenceGroup,
+  type ScorecardPdfCorrectiveAction,
+  MAX_CORRECTIVE_ACTION_PHOTOS,
   type ScorecardPdfPhoto,
 } from "../../../src/modules/field/scorecard-pdf.js";
 import {
@@ -164,7 +166,9 @@ describe("field scorecard PDF evidence", () => {
     // Substantial (multi-page evidence) but not runaway.
     expect(pdf.length).toBeGreaterThan(5_000);
     expect(pdf.length).toBeLessThan(5_000_000);
-  });
+    // Renders in well under a second in isolation but has been observed near 5s under full-suite parallel
+    // load, where it timed out against vitest's default. Give the slowest render in the file real headroom.
+  }, 30_000);
 });
 
 describe("buildScorecardPdfData omittedEvidenceCount", () => {
@@ -254,5 +258,134 @@ describe("scorecard signature rendering helpers", () => {
       expect(signatureDataUrlToBuffer(value)).toBeNull();
       expect(typedSignatureFallback(value)).toBeNull();
     }
+  });
+});
+
+describe("corrective-action section", () => {
+  const base = {
+    dealName: "Arboretum at Lewisville",
+    projectNumber: "DFW-4-19426-ak",
+    weekOf: "2026-07-27",
+    superintendentName: "Adnaan Iqbal",
+    pmName: "Addy",
+    submittedByName: "Adnaan Iqbal",
+    submittedAt: "2026-07-27T12:00:00.000Z",
+    totalScore: 23,
+    formVersion: 2 as const,
+    rating: "corrective_action" as const,
+    items: [],
+    criticalDeficiencyKeys: [],
+    actionItems: [],
+  };
+
+  function ca(over: Partial<ScorecardPdfCorrectiveAction> & Pick<ScorecardPdfCorrectiveAction, "itemRef">): ScorecardPdfCorrectiveAction {
+    return {
+      itemType: "action_item",
+      itemLabel: `Item ${over.itemRef}`,
+      status: "open",
+      responderName: null,
+      respondedAt: null,
+      responseComment: null,
+      photos: [],
+      ...over,
+    };
+  }
+
+  it("orders items NUMERICALLY by item_ref, action items before deficiencies", () => {
+    // Lexical ordering puts "10" before "2". This must match the deal-thread order.
+    const data = buildScorecardPdfData({
+      ...base,
+      correctiveActions: [
+        ca({ itemRef: "10" }),
+        ca({ itemRef: "2" }),
+        ca({ itemRef: "missed_hold_point", itemType: "critical_deficiency" }),
+        ca({ itemRef: "1" }),
+      ],
+    });
+
+    expect(data.correctiveActions.map((c) => c.itemRef)).toEqual(["1", "2", "10", "missed_hold_point"]);
+  });
+
+  it("summarises partial and complete progress", () => {
+    const partial = buildScorecardPdfData({
+      ...base,
+      correctiveActions: [ca({ itemRef: "1", status: "resolved" }), ca({ itemRef: "2" })],
+    });
+    expect(partial.correctiveActionSummary).toBe("1 of 2 resolved");
+
+    const complete = buildScorecardPdfData({
+      ...base,
+      correctiveActions: [ca({ itemRef: "1", status: "resolved" })],
+    });
+    expect(complete.correctiveActionSummary).toBe("All items resolved");
+
+    expect(buildScorecardPdfData({ ...base }).correctiveActionSummary).toBeNull();
+  });
+
+  it("caps response photos across the whole report and reports the omitted count", () => {
+    const photos = (n: number) =>
+      Array.from({ length: n }, (_, i) => ({ caption: `Photo ${i}`, image: null }));
+    const data = buildScorecardPdfData({
+      ...base,
+      correctiveActions: [
+        ca({ itemRef: "1", status: "resolved", photos: photos(MAX_CORRECTIVE_ACTION_PHOTOS) }),
+        ca({ itemRef: "2", status: "resolved", photos: photos(5) }),
+      ],
+    });
+
+    // The budget is spent by the first item in render order; the second keeps none.
+    expect(data.correctiveActions[0].photos).toHaveLength(MAX_CORRECTIVE_ACTION_PHOTOS);
+    expect(data.correctiveActions[1].photos).toHaveLength(0);
+    expect(data.omittedCorrectiveActionPhotoCount).toBe(5);
+  });
+
+  it("renders a PDF carrying the corrective-action record", async () => {
+    const data = buildScorecardPdfData({
+      ...base,
+      correctiveActions: [
+        ca({
+          itemRef: "missed_hold_point",
+          itemType: "critical_deficiency",
+          itemLabel: "Missed hold point",
+          status: "resolved",
+          responderName: "Addy",
+          respondedAt: "2026-07-27T13:00:00.000Z",
+          responseComment: "Re-inspected and signed off by the PM.",
+          photos: [{ caption: "After", image: EVIDENCE_PNG }],
+        }),
+        ca({ itemRef: "1", itemLabel: "Still outstanding" }),
+      ],
+    });
+
+    const pdf = await renderFieldScorecardPdf(data);
+    expect(pdf.byteLength).toBeGreaterThan(1000);
+  });
+
+  it("renders byte-identically when the card has no corrective actions", async () => {
+    // The section must be entirely absent for the vast majority of cards that never go below band.
+    const [withoutField, withEmpty] = await Promise.all([
+      renderFieldScorecardPdf(buildScorecardPdfData({ ...base })),
+      renderFieldScorecardPdf(buildScorecardPdfData({ ...base, correctiveActions: [] })),
+    ]);
+    expect(withEmpty.byteLength).toBe(withoutField.byteLength);
+  });
+
+  it("survives a long comment and an undecodable response photo", async () => {
+    const data = buildScorecardPdfData({
+      ...base,
+      correctiveActions: [
+        ca({
+          itemRef: "1",
+          status: "resolved",
+          responderName: "Addy",
+          respondedAt: "2026-07-27T13:00:00.000Z",
+          responseComment: "Re-poured and cured. ".repeat(400),
+          photos: [{ caption: "Corrupt", image: Buffer.from("not an image") }],
+        }),
+      ],
+    });
+
+    const pdf = await renderFieldScorecardPdf(data);
+    expect(pdf.byteLength).toBeGreaterThan(1000);
   });
 });
