@@ -142,6 +142,13 @@ export type DealListItem = {
   effectiveOnHold: boolean | null;
   effectiveValue: number | null;
   /**
+   * OPTIONAL because it is not on every shape: pipeline board cards and the deal detail carry it, the
+   * plain /deals list row does not. It decides whether a stage move is offered at all, so a type that
+   * claimed it was always present would invite gating on `undefined === userId` — permanently false,
+   * silently hiding the action from the one person allowed to take it.
+   */
+  assignedRepId?: string | null;
+  /**
    * The stage to DISPLAY. A Bid Board-owned deal can advance, or close, in Bid Board while its CRM
    * `stageSlug` still reads an earlier stage; the web detail already switches to bidBoardStageSlug.
    */
@@ -158,6 +165,12 @@ export type DealListResponse = {
     totalPages: number;
   };
 };
+
+/**
+ * Present on pipeline BOARD cards and the deal detail, absent from the plain list. Ownership decides
+ * whether a stage move is even offered — the commit route is strictly owner-only.
+ */
+export type DealOwnership = { assignedRepId: string | null };
 
 export type DealDetail = DealListItem & {
   assignedRepId: string | null;

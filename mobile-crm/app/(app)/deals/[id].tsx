@@ -29,7 +29,7 @@ export default function DealDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const dealId = typeof id === "string" ? id : "";
   const router = useRouter();
-  const { fetcher } = useAuth();
+  const { fetcher, session } = useAuth();
   const scope = useQueryScope();
   const queryClient = useQueryClient();
   const [note, setNote] = useState("");
@@ -207,6 +207,20 @@ export default function DealDetailScreen() {
                 ? watch.error.message
                 : "Couldn't update your watch setting."}
           </Text>
+        ) : null}
+
+        {/* Offered only to the assigned rep: the commit route is owner-only with no admin or director
+            bypass, so showing this to anyone else is an invitation to a 403. */}
+        {deal.assignedRepId && deal.assignedRepId === session?.user.id ? (
+          <Pressable
+            testID="open-move-stage"
+            onPress={() => router.push({ pathname: "/(app)/deals/move", params: { dealId } })}
+            accessibilityRole="button"
+            accessibilityLabel="Move this deal to another stage"
+            style={styles.moveBtn}
+          >
+            <Text style={styles.moveText}>Move stage</Text>
+          </Pressable>
         ) : null}
 
         <Section title="Details">
@@ -422,6 +436,15 @@ const styles = StyleSheet.create({
   badgeText: { fontFamily: theme.font.semibold, fontSize: 12 },
   badgeTextAmber: { color: "#92400E" },
   badgeTextRed: { color: theme.color.brandRedDeep },
+  moveBtn: {
+    marginTop: theme.space.sm,
+    borderWidth: 1,
+    borderColor: theme.color.brandRed,
+    borderRadius: theme.radius.md,
+    paddingVertical: theme.space.md,
+    alignItems: "center",
+  },
+  moveText: { fontFamily: theme.font.bold, fontSize: 15, color: theme.color.brandRed },
   watchBtn: {
     alignSelf: "flex-start",
     borderWidth: 1,
