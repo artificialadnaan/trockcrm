@@ -74,10 +74,22 @@ export type DealScope = "mine" | "all" | "watched";
  * postponement suppression applied). Never recompute it on device — the rules have moved repeatedly and a
  * second implementation would disagree with the web app.
  */
+/**
+ * The server's at-risk verdict. `status` and `severity` are typed as OPEN unions — the known values,
+ * plus `(string & {})` so an unrecognised one still assigns.
+ *
+ * Deliberately not a closed union: this app cannot import the server's enum (see the header note), so a
+ * closed list would be a hand-copy that silently starts lying the moment a value is added server-side.
+ * Open unions give autocomplete and catch typos in comparisons — which is what actually goes wrong here
+ * — without pretending to know the full set.
+ */
+export type AtRiskStatus = "at_risk" | "ok" | "postponed" | "suppressed" | (string & {});
+export type AtRiskSeverity = "none" | "low" | "medium" | "high" | (string & {});
+
 export type AtRiskResult = {
   isAtRisk: boolean;
-  status: string;
-  severity: string;
+  status: AtRiskStatus;
+  severity: AtRiskSeverity;
   reason?: string | null;
   effectiveStageAgeDays: number | null;
   thresholdDays: number | null;

@@ -1,4 +1,5 @@
 import { useAuth } from "./AuthContext";
+import type { QueryScope } from "../query/keys";
 
 /**
  * The office id every request is actually scoped by.
@@ -23,7 +24,7 @@ export function useOfficeId(): string | null {
  * account's keys would collide with the first's and TanStack would serve cached rows without a request.
  * That silently leaks owner-scoped "mine" lists and viewer-filtered detail between accounts.
  */
-export function useQueryScope(): string {
+export function useQueryScope(): QueryScope {
   const { session } = useAuth();
   const officeId = useOfficeId();
   // ROLE participates. At-risk is computed server-side against the VIEWER's role, and the thresholds
@@ -32,5 +33,5 @@ export function useQueryScope(): string {
   // role_override) keeps the same user and office ids, so without the role in the key every mounted
   // deals and detail query would keep serving the previous role's cached at-risk verdicts until a
   // manual refresh or a remount.
-  return `${session?.user.id ?? "anon"}:${officeId ?? "none"}:${session?.user.role ?? "none"}`;
+  return `${session?.user.id ?? "anon"}:${officeId ?? "none"}:${session?.user.role ?? "none"}` as QueryScope;
 }

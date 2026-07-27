@@ -6,7 +6,10 @@
  * phone rather than failing loudly — the kind of bug you ship.
  */
 export function formatMoney(value: string | number | null | undefined): string {
-  if (value === null || value === undefined || value === "") return "—";
+  if (value === null || value === undefined) return "—";
+  // TRIMMED before the emptiness test. Number("   ") is 0, not NaN, so a whitespace-only value slipped
+  // past both guards and rendered "$0" — a confident wrong number where the em dash means "no value".
+  if (typeof value === "string" && value.trim() === "") return "—";
   const n = typeof value === "number" ? value : Number(value);
   if (!Number.isFinite(n)) return "—";
   return n.toLocaleString("en-US", {
@@ -23,9 +26,19 @@ export function formatMoney(value: string | number | null | undefined): string {
 export function formatDate(value: string | null | undefined): string {
   if (!value) return "—";
   const dateOnly = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
-  const d = dateOnly
-    ? new Date(Number(dateOnly[1]), Number(dateOnly[2]) - 1, Number(dateOnly[3]))
-    : new Date(value);
+  if (dateOnly) {
+    const year = Number(dateOnly[1]);
+    const month = Number(dateOnly[2]);
+    const day = Number(dateOnly[3]);
+    const d = new Date(year, month - 1, day);
+    // The regex only proves the SHAPE is digits. "2026-02-31" passes it, and the Date constructor
+    // silently rolls that over to 3 March — a plausible wrong date is worse than a dash, because
+    // nothing about it looks wrong. Reject anything the constructor moved. Mirrors the same guard in
+    // shared/src/types/deal-hold-risk.ts calendarDay.
+    if (d.getFullYear() !== year || d.getMonth() !== month - 1 || d.getDate() !== day) return "—";
+    return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+  }
+  const d = new Date(value);
   if (Number.isNaN(d.getTime())) return "—";
   return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 }

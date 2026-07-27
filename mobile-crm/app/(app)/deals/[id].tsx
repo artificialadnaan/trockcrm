@@ -83,7 +83,10 @@ export default function DealDetailScreen() {
       await queryClient.invalidateQueries({ queryKey: qk.deal(scope, dealId) });
       // The Watched list is derived from this flag, so it must be invalidated too — otherwise an
       // already-mounted list keeps showing an unwatched deal (or hiding a newly watched one).
-      await queryClient.invalidateQueries({ queryKey: ["deals"] });
+      //
+      // Scoped: a bare ["deals"] prefix-matches EVERY user/office/role variant sitting in the cache, so
+      // toggling one watch would refetch lists that this action cannot have changed.
+      await queryClient.invalidateQueries({ queryKey: ["deals", scope] });
     },
   });
 
@@ -106,15 +109,21 @@ export default function DealDetailScreen() {
     return (
       <SafeAreaView style={styles.safe}>
         <View style={styles.center}>
-          <Text style={styles.errorTitle}>{offline ? "You're offline" : "Couldn't load this deal"}</Text>
-          <Pressable
-            testID="deal-retry"
-            onPress={() => void dealQuery.refetch()}
-            accessibilityRole="button"
-            style={styles.backBtn}
-          >
-            <Text style={styles.backBtnText}>Try again</Text>
-          </Pressable>
+          <Text style={styles.errorTitle}>
+            {!dealId ? "Deal not found" : offline ? "You're offline" : "Couldn't load this deal"}
+          </Text>
+          {/* With no usable id there is no query to retry — the button would sit there doing nothing,
+              which is worse than not offering it. `enabled: false` means refetch() is a no-op. */}
+          {dealId ? (
+            <Pressable
+              testID="deal-retry"
+              onPress={() => void dealQuery.refetch()}
+              accessibilityRole="button"
+              style={styles.backBtn}
+            >
+              <Text style={styles.backBtnText}>Try again</Text>
+            </Pressable>
+          ) : null}
           <Pressable onPress={() => router.back()} accessibilityRole="button" style={styles.backBtn}>
             <Text style={styles.backBtnText}>Go back</Text>
           </Pressable>

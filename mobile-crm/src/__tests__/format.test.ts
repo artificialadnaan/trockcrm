@@ -155,3 +155,37 @@ describe("openLink failure reporting", () => {
     await expect(openLink("tel:1", jest.fn())).resolves.toBeUndefined();
   });
 });
+
+describe("format fallbacks that looked handled but were not", () => {
+  it("treats a whitespace-only amount as no value, not as $0", () => {
+    // Number("   ") is 0, not NaN, so it slipped past both the emptiness and the finiteness guard and
+    // rendered "$0" — a confident wrong number where the em dash means "we don't have one".
+    expect(formatMoney("   ")).toBe("—");
+  });
+
+  it.each([null, undefined, "", "  ", "abc"])("renders %p as an em dash", (value) => {
+    expect(formatMoney(value as string | null)).toBe("—");
+  });
+
+  it("still formats a legitimate zero as $0", () => {
+    // "no value" and "a value of zero" are different, and only the first gets the dash.
+    expect(formatMoney("0")).toBe("$0");
+    expect(formatMoney(0)).toBe("$0");
+  });
+
+  it.each([
+    ["2026-02-31", "31 February"],
+    ["2026-13-01", "month 13"],
+    ["2026-00-10", "month 0"],
+  ])("refuses %s rather than rolling it over (%s)", (value) => {
+    // The regex only proves the SHAPE is digits. new Date(2026, 1, 31) silently becomes 3 March — a
+    // plausible wrong date, which is worse than a dash because nothing about it looks wrong.
+    expect(formatDate(value)).toBe("—");
+  });
+
+  it("formats a real date-only value without timezone drift", () => {
+    // The whole reason for splitting the parts: new Date("2026-07-04") is UTC midnight, which renders
+    // as 3 July for anyone west of Greenwich.
+    expect(formatDate("2026-07-04")).toBe("Jul 4, 2026");
+  });
+});
