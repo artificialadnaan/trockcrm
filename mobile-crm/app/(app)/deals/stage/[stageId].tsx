@@ -40,7 +40,7 @@ export default function StageDealsScreen() {
   const list = useInfiniteQuery({
     queryKey: ["stage-deals", cacheScope, stageId, scope],
     queryFn: ({ pageParam }) =>
-      pipelineApi.getStagePage(fetcher, stageId, { scope, page: pageParam, limit: PAGE_SIZE }),
+      pipelineApi.getStagePage(fetcher, stageId, { scope, page: pageParam, pageSize: PAGE_SIZE }),
     initialPageParam: 1,
     getNextPageParam: (lastPage, pages) => {
       // Trust the server's totalPages when it sends one. Without pagination metadata, infer from a
@@ -53,7 +53,9 @@ export default function StageDealsScreen() {
   });
 
   const deals = list.data?.pages.flatMap((p) => p.deals) ?? [];
-  const total = list.data?.pages[0]?.pagination?.total;
+  // summary.totalCount includes held cards, matching the board footer that linked here; pagination.total
+  // is the same number for an unfiltered stage but is the paging count, so prefer the summary.
+  const total = list.data?.pages[0]?.totalCount ?? list.data?.pages[0]?.pagination?.total;
 
   const state = resolveListState({
     isLoading: list.isLoading,

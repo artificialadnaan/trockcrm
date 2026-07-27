@@ -74,24 +74,52 @@ export async function getPipeline(
   };
 }
 
-/** One stage's full, paginated card list — the drill-down the board preview links to. */
+export type StagePagePagination = { page: number; pageSize: number; total: number; totalPages: number };
+
+/**
+ * One stage's full, paginated card list — the drill-down the board preview links to.
+ *
+ * THREE separate names had to be right here and two were guesses, so they are spelled out against the
+ * source rather than inferred from the sibling endpoints:
+ *
+ *   • rows, NOT deals      — listDealStagePage returns `{ stage, scope, summary, pagination, rows }`
+ *                            (service.ts:3797-3817). `deals` read as an always-empty array, so the
+ *                            drill-down rendered "Nothing here" beside a non-zero header total.
+ *   • pageSize, NOT limit  — both the query param (routes.ts readStageInput:627) and the pagination
+ *                            field. Sending `limit` was silently ignored and every page came back at
+ *                            the server default of 25.
+ *   • summary.totalCount   — the full count including held cards; `summary.count` is active-only.
+ *
+ * "The service result IS the body" was right about the envelope and no protection at all against the
+ * field names inside it — which is the failure this app keeps repeating.
+ *
+ * The rows carry the server verdicts (they end in attachAtRiskResult, service.ts:1592) so cards render
+ * from the same authority as the board. They do NOT carry companyName: the workspace SELECT does not
+ * join companies. BoardCard renders that line conditionally, so it is simply absent here rather than
+ * broken — worth knowing before someone reads its absence as a bug.
+ */
 export async function getStagePage(
   fetcher: Fetcher,
   stageId: string,
-  params: { scope: PipelineScope; page?: number; limit?: number } ,
-): Promise<{ deals: DealListItem[]; pagination?: { page: number; limit: number; total: number; totalPages: number } }> {
-  // NO envelope on this one — the service result IS the body (routes.ts:1052).
+  params: { scope: PipelineScope; page?: number; pageSize?: number },
+): Promise<{ deals: DealListItem[]; pagination?: StagePagePagination; totalCount?: number }> {
+  // NO envelope on this one — the service result IS the body (routes.ts:1046-1050).
   const res = await fetcher<{
-    deals?: DealListItem[];
-    pagination?: { page: number; limit: number; total: number; totalPages: number };
+    rows?: DealListItem[];
+    pagination?: StagePagePagination;
+    summary?: { count?: number; activeCount?: number; totalCount?: number };
   }>(`/deals/stages/${stageId}`, {
     query: {
       scope: params.scope,
       page: params.page && params.page > 0 ? params.page : undefined,
-      limit: params.limit,
+      pageSize: params.pageSize,
     },
   });
-  return { deals: res.deals ?? [], pagination: res.pagination };
+  return {
+    deals: res.rows ?? [],
+    pagination: res.pagination,
+    totalCount: res.summary?.totalCount,
+  };
 }
 
 /** One requirement the gate checks. */
@@ -144,6 +172,14 @@ export type StageMoveInput = {
   lostReasonId?: string;
   lostNotes?: string;
   lostCompetitor?: string;
+  /**
+   * A close target set in the SAME request as the move (YYYY-MM-DD).
+   *
+   * The gate considers it a pending value and revalidates against it (routes.ts:3525-3543), so an advance
+   * blocked only by a missing expectedCloseDate completes in one action instead of requiring a separate
+   * edit — which this app has no screen for.
+   */
+  expectedCloseDate?: string;
 };
 
 export async function moveStage(

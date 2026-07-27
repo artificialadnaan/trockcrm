@@ -20,6 +20,13 @@ import { useAuth } from "../../../src/auth/AuthContext";
 import { useQueryScope } from "../../../src/auth/useOfficeId";
 import { RetryBlock } from "../../../src/components/RetryBlock";
 import { qk } from "../../../src/query/keys";
+import {
+  businessDateInDays,
+  businessTodayDateStr,
+  isExpectedCloseDateSoleGateBlocker,
+  isGateResolvedByInlineCloseDate,
+  isUsableCloseDate,
+} from "../../../src/inline-close-date";
 import { eligibleStageTargets } from "../../../src/stage-targets";
 import { theme } from "../../../src/theme/theme";
 
@@ -68,6 +75,13 @@ const LOST_SLUGS = new Set([
   "closed_lost",
 ]);
 
+/** Common forecast horizons. Deliberately short of 90 days — past that the deal auto-parks as held. */
+const QUICK_CLOSE_DATES = [
+  { label: "2 weeks", days: 14 },
+  { label: "30 days", days: 30 },
+  { label: "60 days", days: 60 },
+];
+
 export default function MoveStageScreen() {
   const { dealId: rawId } = useLocalSearchParams<{ dealId: string }>();
   const dealId = typeof rawId === "string" ? rawId : "";
@@ -80,6 +94,7 @@ export default function MoveStageScreen() {
   const [overrideReason, setOverrideReason] = useState("");
   const [lostReasonId, setLostReasonId] = useState<string | null>(null);
   const [lostNotes, setLostNotes] = useState("");
+  const [expectedCloseDate, setExpectedCloseDate] = useState("");
   const [submitError, setSubmitError] = useState<string | null>(null);
 
   const dealQuery = useQuery({
@@ -101,7 +116,12 @@ export default function MoveStageScreen() {
   });
 
   const lostReasons = useQuery({
-    queryKey: ["lost-reasons"],
+    // SCOPED BY OFFICE. Lost reasons are tenant rows and offices are separate Postgres schemas, so the
+    // ids are only meaningful inside the office that issued them. Cached under a bare key with a
+    // one-hour staleTime, a multi-office rep who switched offices kept being offered the PREVIOUS
+    // office's reasons — submitting one then either 400s or, if the ids happen to collide, silently
+    // records the wrong reason. The fetcher already sends the new office header; only the key lagged.
+    queryKey: ["lost-reasons", scope],
     queryFn: () => pipelineApi.listLostReasons(fetcher),
     staleTime: 60 * 60_000,
     // Only fetched once a Lost target is actually selected — it is a different router mount and most
@@ -136,12 +156,36 @@ export default function MoveStageScreen() {
    */
   const preflightAnswered = verdict !== undefined;
 
+  /**
+   * The inline close-date gate — the one blocker this screen can clear itself.
+   *
+   * Without it, a stage advance whose ONLY missing requirement is expectedCloseDate was a dead end on
+   * mobile: the field was listed, Confirm stayed disabled, and there is no deal-edit path in this app to
+   * go and set it. The server accepts the date in the same POST and revalidates against it, which is how
+   * the web resolves the same gate in one action.
+   */
+  const closeDateGate = {
+    missingRequirements: verdict?.missingRequirements,
+    isBackwardMove: verdict?.isBackwardMove,
+    currentStageSlug: verdict?.currentStage?.slug,
+    bidBoardLocked: verdict?.bidBoardLocked,
+  };
+  const today = businessTodayDateStr();
+  const needsCloseDate = isExpectedCloseDateSoleGateBlocker(closeDateGate);
+  const closeDateResolvesGate = isGateResolvedByInlineCloseDate(closeDateGate, expectedCloseDate, today);
+  const closeDateInvalid = expectedCloseDate.length > 0 && !isUsableCloseDate(expectedCloseDate, today);
+
   const canSubmit =
     isOwner &&
     Boolean(targetStageId) &&
     preflightAnswered &&
-    !blocked &&
-    (!needsOverride || overrideReason.trim().length > 0) &&
+    // A blocked verdict still passes when the inline date is the sole blocker AND a usable value is in
+    // hand — the POST revalidates with it, so the stale verdict must not veto its own remedy.
+    (!blocked || closeDateResolvesGate) &&
+    (!needsCloseDate || closeDateResolvesGate) &&
+    // Preflight computed requiresOverride BEFORE this date existed; when the date alone clears the gate
+    // the server no longer wants an override, so demanding one here would block a move it would accept.
+    (!needsOverride || closeDateResolvesGate || overrideReason.trim().length > 0) &&
     (!isLostMove || (Boolean(lostReasonId) && lostNotes.trim().length > 0)) &&
     !preflight.isFetching;
 
@@ -152,21 +196,37 @@ export default function MoveStageScreen() {
         overrideReason: needsOverride ? overrideReason.trim() : undefined,
         lostReasonId: isLostMove ? (lostReasonId as string) : undefined,
         lostNotes: isLostMove ? lostNotes.trim() : undefined,
+        expectedCloseDate: needsCloseDate && closeDateResolvesGate ? expectedCloseDate : undefined,
       }),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: qk.deal(scope, dealId) });
       await queryClient.invalidateQueries({ queryKey: ["deals", scope] });
       await queryClient.invalidateQueries({ queryKey: ["pipeline", scope] });
+      // The stage drill-down too. It is a SIBLING route that stays mounted underneath this screen when
+      // the move was started from it, so returning goes to a cached list still showing the deal in the
+      // stage it just left — and the destination stage's cached list missing it. Neither key above
+      // matches ["stage-deals", ...], so without this the rep is looking at a board that disagrees with
+      // the move they just made.
+      await queryClient.invalidateQueries({ queryKey: ["stage-deals", scope] });
       router.back();
     },
-    onError: (err) => {
-      setSubmitError(
-        err instanceof ApiError && err.status === 0
-          ? "Couldn't reach the server. Nothing was changed."
-          : err instanceof ApiError
-            ? err.message
-            : "Couldn't move the deal.",
-      );
+    onError: async (err) => {
+      // A dropped connection on a POST is INDETERMINATE, not a rollback. The request may have reached
+      // the server and committed with only the response lost, so "Nothing was changed" is a claim this
+      // client is not in a position to make — and a rep who believes it will move the deal a second
+      // time. Say what is actually known, and refresh so the screen behind shows whichever way it went.
+      if (err instanceof ApiError && err.status === 0) {
+        setSubmitError(
+          "Lost connection before the server answered — the move may or may not have gone through. " +
+            "Check the deal's stage before trying again.",
+        );
+        await queryClient.invalidateQueries({ queryKey: qk.deal(scope, dealId) });
+        await queryClient.invalidateQueries({ queryKey: ["deals", scope] });
+        await queryClient.invalidateQueries({ queryKey: ["pipeline", scope] });
+        await queryClient.invalidateQueries({ queryKey: ["stage-deals", scope] });
+        return;
+      }
+      setSubmitError(err instanceof ApiError ? err.message : "Couldn't move the deal.");
     },
   });
 
@@ -288,7 +348,59 @@ export default function MoveStageScreen() {
             </View>
           ) : null}
 
-          {isOwner && needsOverride ? (
+          {isOwner && needsCloseDate ? (
+            <>
+              <Text style={styles.label}>Expected close date</Text>
+              <Text style={styles.help}>
+                This is the only thing holding the move up. Set it here and the deal advances in one step.
+              </Text>
+              {/* Quick picks first: on a phone, on a ladder, three taps of a chip beats typing ten
+                  digits, and these cover the common forecasts. The field stays for an exact date. */}
+              <View style={styles.stageGrid}>
+                {QUICK_CLOSE_DATES.map((pick) => {
+                  const value = businessDateInDays(pick.days);
+                  return (
+                    <Pressable
+                      key={pick.label}
+                      testID={`close-date-${pick.days}`}
+                      onPress={() => setExpectedCloseDate(value)}
+                      accessibilityRole="button"
+                      accessibilityLabel={`${pick.label}, ${value}`}
+                      accessibilityState={{ selected: expectedCloseDate === value }}
+                      style={[styles.stageOption, expectedCloseDate === value && styles.stageOptionActive]}
+                    >
+                      <Text
+                        style={[
+                          styles.stageOptionText,
+                          expectedCloseDate === value && styles.stageOptionTextActive,
+                        ]}
+                      >
+                        {pick.label}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+              <TextInput
+                testID="expected-close-date"
+                value={expectedCloseDate}
+                onChangeText={setExpectedCloseDate}
+                placeholder="YYYY-MM-DD"
+                placeholderTextColor={theme.color.textMuted}
+                autoCapitalize="none"
+                autoCorrect={false}
+                keyboardType={Platform.OS === "ios" ? "numbers-and-punctuation" : "default"}
+                style={styles.input}
+              />
+              {closeDateInvalid ? (
+                <Text testID="close-date-invalid" style={styles.error}>
+                  Use a real date of today or later, written as YYYY-MM-DD.
+                </Text>
+              ) : null}
+            </>
+          ) : null}
+
+          {isOwner && needsOverride && !closeDateResolvesGate ? (
             <>
               <Text style={styles.label}>Reason for the override</Text>
               <Text style={styles.help}>
