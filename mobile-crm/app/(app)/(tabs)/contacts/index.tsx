@@ -12,17 +12,19 @@ import {
 import { useRouter } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useInfiniteQuery } from "@tanstack/react-query";
-import { ApiError } from "../../../src/api/client";
-import * as contactsApi from "../../../src/api/endpoints/contacts";
-import type { ContactListRow } from "../../../src/api/types";
-import { useAuth } from "../../../src/auth/AuthContext";
-import { useQueryScope } from "../../../src/auth/useOfficeId";
-import { RetryNotice } from "../../../src/components/RetryNotice";
-import { telUrl } from "../../../src/contact-links";
-import { resolveListState } from "../../../src/list-state";
-import { openLink } from "../../../src/lib/open-link";
-import { qk } from "../../../src/query/keys";
-import { theme } from "../../../src/theme/theme";
+import { ApiError } from "../../../../src/api/client";
+import * as contactsApi from "../../../../src/api/endpoints/contacts";
+import type { ContactListRow } from "../../../../src/api/types";
+import { useAuth } from "../../../../src/auth/AuthContext";
+import { useQueryScope } from "../../../../src/auth/useOfficeId";
+import { useOffices } from "../../../../src/auth/useOffices";
+import { ScreenHeader } from "../../../../src/components/ScreenHeader";
+import { RetryNotice } from "../../../../src/components/RetryNotice";
+import { telUrl } from "../../../../src/contact-links";
+import { resolveListState } from "../../../../src/list-state";
+import { openLink } from "../../../../src/lib/open-link";
+import { qk } from "../../../../src/query/keys";
+import { theme } from "../../../../src/theme/theme";
 
 const PAGE_SIZE = 50;
 
@@ -36,6 +38,7 @@ export default function ContactsListScreen() {
   const router = useRouter();
   const { fetcher } = useAuth();
   const cacheScope = useQueryScope();
+  const { activeOfficeName, refetch: refetchOffices } = useOffices();
   const [search, setSearch] = useState("");
   const [submitted, setSubmitted] = useState("");
 
@@ -89,10 +92,11 @@ export default function ContactsListScreen() {
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
-      <View style={styles.header}>
-        <Text style={styles.title}>Contacts</Text>
-        {total !== undefined ? <Text style={styles.count}>{total} total</Text> : null}
-      </View>
+      <ScreenHeader
+        title="Contacts"
+        context={activeOfficeName ?? undefined}
+        right={total !== undefined ? <Text style={styles.count}>{total} total</Text> : undefined}
+      />
 
       <TextInput
         testID="contacts-search"
@@ -194,7 +198,13 @@ export default function ContactsListScreen() {
             ) : null
           }
           refreshControl={
-            <RefreshControl refreshing={query.isRefetching} onRefresh={() => void query.refetch()} />
+            <RefreshControl
+              refreshing={query.isRefetching}
+              // The office label too. useOffices retries once and focus-refetching is off, so once both
+              // attempts fail nothing retries it — a rep entering this tab directly was stuck with a blank
+              // office and no way to recover short of restarting. Refreshing a screen refreshes what is on it.
+              onRefresh={() => void Promise.all([query.refetch(), refetchOffices()])}
+            />
           }
           renderItem={({ item }) => (
             <ContactRow contact={item} onOpen={() => router.push(`/(app)/contacts/${item.id}`)} />

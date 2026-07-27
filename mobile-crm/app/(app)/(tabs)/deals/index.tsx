@@ -12,17 +12,19 @@ import {
 import { useRouter } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
-import { ApiError } from "../../../src/api/client";
-import * as dealsApi from "../../../src/api/endpoints/deals";
-import type { DealListItem, DealScope } from "../../../src/api/types";
-import { useAuth } from "../../../src/auth/AuthContext";
-import { useQueryScope } from "../../../src/auth/useOfficeId";
-import { DealCard } from "../../../src/components/DealCard";
-import { RetryNotice } from "../../../src/components/RetryNotice";
-import { resolveListState } from "../../../src/list-state";
-import { buildStageIndex, stageLabelFor } from "../../../src/stage-label";
-import { qk } from "../../../src/query/keys";
-import { theme } from "../../../src/theme/theme";
+import { ApiError } from "../../../../src/api/client";
+import * as dealsApi from "../../../../src/api/endpoints/deals";
+import type { DealListItem, DealScope } from "../../../../src/api/types";
+import { useAuth } from "../../../../src/auth/AuthContext";
+import { useQueryScope } from "../../../../src/auth/useOfficeId";
+import { useOffices } from "../../../../src/auth/useOffices";
+import { ScreenHeader } from "../../../../src/components/ScreenHeader";
+import { DealCard } from "../../../../src/components/DealCard";
+import { RetryNotice } from "../../../../src/components/RetryNotice";
+import { resolveListState } from "../../../../src/list-state";
+import { buildStageIndex, stageLabelFor } from "../../../../src/stage-label";
+import { qk } from "../../../../src/query/keys";
+import { theme } from "../../../../src/theme/theme";
 
 const SCOPES: Array<{ key: DealScope; label: string }> = [
   { key: "mine", label: "Mine" },
@@ -43,6 +45,7 @@ export default function DealsListScreen() {
   const router = useRouter();
   const { fetcher } = useAuth();
   const cacheScope = useQueryScope();
+  const { activeOfficeName, refetch: refetchOffices } = useOffices();
   const [scope, setScope] = useState<DealScope>("mine");
   const [search, setSearch] = useState("");
 
@@ -144,10 +147,11 @@ export default function DealsListScreen() {
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
-      <View style={styles.header}>
-        <Text style={styles.title}>Deals</Text>
-        {total !== undefined ? <Text style={styles.count}>{total} total</Text> : null}
-      </View>
+      <ScreenHeader
+        title="Deals"
+        context={activeOfficeName ?? undefined}
+        right={total !== undefined ? <Text style={styles.count}>{total} total</Text> : undefined}
+      />
 
       <View style={styles.scopeRow}>
         {SCOPES.map((s) => (
@@ -290,7 +294,13 @@ export default function DealsListScreen() {
           }
           renderItem={renderDeal}
           refreshControl={
-            <RefreshControl refreshing={query.isRefetching} onRefresh={() => void query.refetch()} />
+            <RefreshControl
+              refreshing={query.isRefetching}
+              // The office label too. useOffices retries once and focus-refetching is off, so once both
+              // attempts fail nothing retries it — a rep entering this tab directly was stuck with a blank
+              // office and no way to recover short of restarting. Refreshing a screen refreshes what is on it.
+              onRefresh={() => void Promise.all([query.refetch(), refetchOffices()])}
+            />
           }
         />
       )}
