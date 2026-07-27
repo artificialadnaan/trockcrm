@@ -18,6 +18,7 @@ import type { DealScope } from "../../../src/api/types";
 import { useAuth } from "../../../src/auth/AuthContext";
 import { useQueryScope } from "../../../src/auth/useOfficeId";
 import { DealCard } from "../../../src/components/DealCard";
+import { stageLabelFor } from "../../../src/stage-label";
 import { qk } from "../../../src/query/keys";
 import { theme } from "../../../src/theme/theme";
 
@@ -71,36 +72,6 @@ export default function DealsListScreen() {
     staleTime: 30 * 60_000,
   });
 
-  const stageNameById = useMemo(() => {
-    const map = new Map<string, string>();
-    for (const stage of stagesQuery.data ?? []) map.set(stage.id, stage.name);
-    return map;
-  }, [stagesQuery.data]);
-
-  // Also by SLUG, because the display stage is a slug rather than an id.
-  const stageNameBySlug = useMemo(() => {
-    const map = new Map<string, string>();
-    for (const stage of stagesQuery.data ?? []) map.set(stage.slug, stage.name);
-    return map;
-  }, [stagesQuery.data]);
-
-  /**
-   * The stage label for a card.
-   *
-   * Prefers the server's `displayStageSlug`, which is bid-board-aware: an owned deal can advance — or
-   * close — in Bid Board while its CRM `stageId` still points at an earlier stage, so keying the label
-   * off the id alone let the list call a closed deal "Opportunity" while the detail screen and the
-   * server verdict both said otherwise. Falls back to the id when the slug is absent or is a Bid Board
-   * stage with no CRM pipeline row to name it.
-   */
-  function stageLabelFor(deal: { displayStageSlug: string | null; stageId: string | null }) {
-    if (deal.displayStageSlug) {
-      const bySlug = stageNameBySlug.get(deal.displayStageSlug);
-      if (bySlug) return bySlug;
-    }
-    return deal.stageId ? stageNameById.get(deal.stageId) : undefined;
-  }
-
   const deals = useMemo(() => (query.data?.pages ?? []).flatMap((p) => p.deals), [query.data]);
   const total = query.data?.pages[0]?.pagination.total;
 
@@ -118,8 +89,12 @@ export default function DealsListScreen() {
    * refresh, would replace a list the rep is reading — and on a phone that is their whole screen. The
    * full-screen error belongs to the case where nothing loaded at all; everything else goes inline.
    */
-  const hasRows = deals.length > 0;
-  const backgroundError = query.error && hasRows ? query.error : null;
+  // `query.data`, NOT `deals.length`. A scope or search that legitimately returned ZERO deals has
+  // loaded successfully — so a later failed refresh must stay inline, exactly as it does for a
+  // non-empty list. Keying on row count treated "loaded, and empty" as "never loaded", and replaced a
+  // refreshable empty state with the blocking initial-load error.
+  const everLoaded = query.data !== undefined;
+  const backgroundError = query.error && everLoaded ? query.error : null;
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
@@ -163,7 +138,7 @@ export default function DealsListScreen() {
         <View style={styles.center}>
           <ActivityIndicator color={theme.color.brandRed} />
         </View>
-      ) : query.error && !hasRows ? (
+      ) : query.error && !everLoaded ? (
         // A retry BUTTON, not "pull to retry" — this branch replaces the FlatList, so there is no
         // RefreshControl mounted to pull on. The earlier copy advertised a gesture that did not exist.
         <View style={styles.center}>
@@ -239,7 +214,7 @@ export default function DealsListScreen() {
           renderItem={({ item }) => (
             <DealCard
               deal={item}
-              stageName={stageLabelFor(item)}
+              stageName={stageLabelFor(item, stagesQuery.data)}
               onPress={(deal) => router.push(`/(app)/deals/${deal.id}`)}
             />
           )}
