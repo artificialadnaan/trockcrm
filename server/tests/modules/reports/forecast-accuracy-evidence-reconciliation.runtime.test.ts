@@ -49,7 +49,7 @@ beforeAll(async () => {
       id uuid PRIMARY KEY, sales_source_user_id uuid, deal_number text, name text, stage_id uuid NOT NULL, assigned_rep_id uuid,
       is_active boolean NOT NULL DEFAULT true, is_test_data boolean NOT NULL DEFAULT false, on_hold boolean NOT NULL DEFAULT false,
       won_closed_date date, lost_at timestamptz, contract_signed_at timestamptz, contract_signed_date date, actual_close_date date,
-      expected_close_date date, updated_at timestamptz, stage_entered_at timestamptz,
+      expected_close_date date, bid_due_date timestamptz, updated_at timestamptz, stage_entered_at timestamptz,
       company_id uuid, region_id uuid, project_type_id uuid, project_type text, office_code text,
       forecast_revenue numeric, bid_board_total_sales numeric, bid_estimate numeric, dd_estimate numeric, awarded_amount numeric,
       win_probability integer

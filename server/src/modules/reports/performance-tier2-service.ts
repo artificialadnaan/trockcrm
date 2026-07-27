@@ -284,6 +284,8 @@ interface AtRiskDealCandidateRow extends AtRiskDealRow {
   stage_entered_at: string | Date | null;
   bid_board_stage_entered_at: string | Date | null;
   expected_close_date: string | Date | null;
+  /** The estimating auto-park horizon (2026-07-27) — see AtRiskDealInput.bidDueDate. */
+  bid_due_date: string | Date | null;
   on_hold: boolean | null;
   on_hold_started_at: string | Date | null;
   on_hold_accumulated_seconds: string | number | bigint | null;
@@ -392,6 +394,9 @@ function buildDirectorScorecardAtRiskRows(
           workflowRoute: row.workflow_route ?? "normal",
           stageEnteredAt: row.bid_board_stage_entered_at ?? row.stage_entered_at,
           expectedCloseDate: row.expected_close_date,
+          // Estimating rows auto-park off the BID due date (2026-07-27), so the scorecard's at-risk list and
+          // its pipeline KPI (which runs the shared SQL predicate) park the same deals.
+          bidDueDate: row.bid_due_date,
           // Honor a postponement (near today-or-future close target) so the Director Scorecard at-risk rows
           // match the deal-detail "Postponed" state, not just the 90+ day auto-hold.
           applyCloseTargetSuppression: true,
@@ -590,6 +595,7 @@ export async function getDirectorScorecard(db: TenantDb, filters: PerformanceRep
           d.stage_entered_at,
           d.bid_board_stage_entered_at,
           d.expected_close_date,
+          d.bid_due_date,
           d.on_hold,
           d.on_hold_started_at,
           d.on_hold_accumulated_seconds,

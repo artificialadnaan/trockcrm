@@ -58,7 +58,7 @@ beforeAll(async () => {
       stage_id text NOT NULL,
       bid_board_stage_slug text,
       on_hold boolean NOT NULL DEFAULT false,
-      expected_close_date date,
+      expected_close_date date, bid_due_date timestamptz,
       bid_estimate numeric,
       forecast_revenue numeric,
       bid_board_total_sales numeric,

@@ -68,7 +68,7 @@ beforeAll(async () => {
       on_hold boolean NOT NULL DEFAULT false, contract_signed_at timestamptz, contract_signed_date date,
       won_closed_date date, actual_close_date date, project_number text,
       awarded_amount numeric, bid_board_total_sales numeric, bid_estimate numeric, dd_estimate numeric,
-      change_order_total numeric, expected_close_date date, stage_entered_at timestamptz DEFAULT now());
+      change_order_total numeric, expected_close_date date, bid_due_date timestamptz, stage_entered_at timestamptz DEFAULT now());
     CREATE TABLE leads (id uuid PRIMARY KEY, name text, assigned_rep_id uuid, stage_id uuid NOT NULL,
       company_id uuid, status text NOT NULL DEFAULT 'open', is_active boolean NOT NULL DEFAULT true,
       stage_entered_at timestamptz DEFAULT now());

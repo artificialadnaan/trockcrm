@@ -186,9 +186,12 @@ describe("value-range predicate (stage-aware effective value == sort == display)
     expect(sql).toContain("between");
     expect(sql).toContain("on_hold");
     expect(sql).toContain("bid_estimate");
-    // The open best-estimate chain has its own per-candidate CASE WHENs, so the
-    // marker of NO stage-aware switch is the absence of stage classification.
-    expect(sql).not.toContain("stage_id"); // no won-vs-open stage CASE
+    // The open best-estimate chain has its own per-candidate CASE WHENs, so the marker of NO stage-aware
+    // switch is the absence of a CALLER-THREADED stage-id list (`stage_id in ($1, $2, ...)`). The shared
+    // hold predicate does reference stage_id — via a pipeline_stage_config SUBSELECT, for the estimating
+    // bid-due horizon (2026-07-27) — and that is a different thing from the won-vs-open value CASE.
+    expect(sql).not.toMatch(/stage_id in \(\$/); // no won-vs-open stage CASE
+    expect(sql).toContain("stage_id in (select id from public.pipeline_stage_config");
   });
   it(">= when only a minimum, <= when only a maximum", () => {
     expect(text(buildValueRangePredicate({ valueMin: 100000 }, openCtx))).toContain(">=");

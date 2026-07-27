@@ -8,12 +8,14 @@
  * is today-or-future, the stage-age at-risk verdict is suppressed ("don't nag until the target
  * passes"); once it passes (or is null/past), normal stage-age at-risk applies again.
  *
- * Derived hold horizon: `CLOSE_TARGET_HOLD_HORIZON_DAYS` (bottom of file) is the threshold at which a
- * close target is far enough out that the deal reads as "effectively on hold" — the basis for the deals
- * On Hold filter pill, value-zeroing, and at-risk exclusion. This is DISTINCT from the shorter pending
- * close-target suppression above, which callers opt into for detail-style SLA messaging. On-hold also
- * remains the explicit, stored `deals.on_hold` toggle ([[deal-reporting]]); the derived horizon is an
- * OR-leg on top of it, never a replacement.
+ * Derived hold horizon: `CLOSE_TARGET_HOLD_HORIZON_DAYS` (bottom of file) is the threshold at which the
+ * deal's hold horizon date is far enough out that it reads as "effectively on hold" — the basis for the
+ * deals On Hold filter pill, value-zeroing, and at-risk exclusion. That horizon date is the close target
+ * in every stage EXCEPT the genuine 'estimating' stage, where it is the deal's BID due date (2026-07-27;
+ * see resolveHoldHorizonDay). This is DISTINCT from the shorter pending close-target suppression above,
+ * which callers opt into for detail-style SLA messaging and which stays keyed on `expected_close_date` in
+ * every stage. On-hold also remains the explicit, stored `deals.on_hold` toggle ([[deal-reporting]]); the
+ * derived horizon is an OR-leg on top of it, never a replacement.
  *
  * Day boundary: the predicate takes an injected `now: Date` and resolves "today" to the
  * America/Chicago calendar day — the SAME anchor the forecast SQL uses ((now() AT TIME ZONE
@@ -106,6 +108,19 @@ export interface EffectiveOnHoldInput {
   onHold?: boolean | null;
   /** The deal's close target = its `expected_close_date`. */
   expectedCloseDate?: string | Date | null;
+  /**
+   * The deal's BID due date (`deals.bid_due_date`). Read ONLY when `isEstimating` is true; ignored in
+   * every other stage. A Date is resolved to its UTC calendar day, matching the SQL twin's
+   * `(bid_due_date AT TIME ZONE 'UTC')::date` — the column is a timestamptz stored at UTC midnight.
+   */
+  bidDueDate?: string | Date | null;
+  /**
+   * True only for the genuine normal-route 'estimating' stage (route-aware: includes the legacy
+   * estimate_in_progress alias, EXCLUDES service_estimating). In that stage the auto-park horizon is
+   * measured from the BID due date instead of the close target — see resolveHoldHorizonDay. Callers that
+   * cannot classify the stage leave it unset and keep today's close-target rule.
+   */
+  isEstimating?: boolean;
   /** The reference instant; "today" is its America/Chicago calendar day. */
   now: Date;
   /**
@@ -120,17 +135,59 @@ export interface EffectiveOnHoldInput {
 }
 
 /**
- * "Effectively on hold" = the stored `on_hold` flag OR (for an OPEN deal) a close target more than
- * CLOSE_TARGET_HOLD_HORIZON_DAYS CT-days out (auto-park). The TS twin of [[deal-reporting]]
- * `effectiveOnHoldSqlPredicate`: STRICTLY greater-than the horizon, mirroring the SQL's
+ * The date the far-out auto-park horizon is measured against — the TS twin of [[deal-reporting]]
+ * `holdHorizonDateSql`, and the ONLY place the two rules are chosen between.
+ *
+ * Everywhere except the genuine 'estimating' stage that is `expected_close_date`. In estimating it is the
+ * BID due date (Adnaan, 2026-07-27): estimating work has to stay relevant and quick, and the bid deadline
+ * is almost always nearer than the project close target, so a deal whose bid is not due for another
+ * quarter parks even though its close date looks near-term.
+ *
+ * A NULL/unparseable bid due date falls back to `expected_close_date` rather than never auto-parking:
+ * `bid_due_date` is NULL on 91% of deals, and "no bid due date ⇒ never park" would let one missing field
+ * release $4.39M of far-out estimating pipeline back into reported dollars on prod — the stale-forecast
+ * inflation auto-on-hold exists to prevent. The fallback is strictly conservative: for a null-bid row it
+ * reproduces today's behaviour exactly.
+ *
+ * Coalesces on the PARSED calendar day, not on the raw value, so it matches the SQL `COALESCE` over a real
+ * date column even when a caller hands us an unparseable bid string.
+ */
+function resolveHoldHorizonDay(
+  { expectedCloseDate, bidDueDate, isEstimating }: Pick<
+    EffectiveOnHoldInput,
+    "expectedCloseDate" | "bidDueDate" | "isEstimating"
+  >
+): string | null {
+  if (isEstimating === true) {
+    const bidDay = calendarDay(bidDueDate);
+    if (bidDay != null) return bidDay;
+  }
+  return calendarDay(expectedCloseDate);
+}
+
+/**
+ * "Effectively on hold" = the stored `on_hold` flag OR (for an OPEN deal) a hold horizon date more than
+ * CLOSE_TARGET_HOLD_HORIZON_DAYS CT-days out (auto-park). The horizon date is the close target in every
+ * stage but 'estimating', where it is the bid due date (resolveHoldHorizonDay). The TS twin of
+ * [[deal-reporting]] `effectiveOnHoldSqlPredicate`: STRICTLY greater-than the horizon, mirroring the SQL's
  * `> ... + INTERVAL '90 days'`, so a deal exactly 90 days out is NOT yet held in either world. Drives
  * client value-zeroing (getEffectiveDealValue), the On Hold badge, and at-risk exclusion.
  */
-export function isDealEffectivelyOnHold({ onHold, expectedCloseDate, now, isTerminal }: EffectiveOnHoldInput): boolean {
+export function isDealEffectivelyOnHold({
+  onHold,
+  expectedCloseDate,
+  bidDueDate,
+  isEstimating,
+  now,
+  isTerminal,
+}: EffectiveOnHoldInput): boolean {
   if (onHold === true) return true;
   // A terminal (won/lost) deal is realized/preserved — never auto-parked by a stale forecast date (only
   // its stored flag holds it).
   if (isTerminal === true) return false;
-  const days = daysUntilCloseTarget(expectedCloseDate, now);
+  const days = daysUntilCloseTarget(
+    resolveHoldHorizonDay({ expectedCloseDate, bidDueDate, isEstimating }),
+    now
+  );
   return days != null && days > CLOSE_TARGET_HOLD_HORIZON_DAYS;
 }

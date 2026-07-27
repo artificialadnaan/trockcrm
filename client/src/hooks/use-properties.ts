@@ -108,6 +108,11 @@ export interface PropertyDeal {
   lostCompetitor: string | null;
   lostAt: string | null;
   expectedCloseDate: string | null;
+  // The estimating auto-park horizon (2026-07-27) and the CRM stage slug that selects it. Both are read by
+  // the property page's client-side getEffectiveDealValue sum; without them an estimating deal would price
+  // at full value on the property card while the deals board, company rollup and every report show $0.
+  bidDueDate: string | null;
+  stageSlug: string | null;
   actualCloseDate: string | null;
   lastActivityAt: string | null;
   stageEnteredAt: string;

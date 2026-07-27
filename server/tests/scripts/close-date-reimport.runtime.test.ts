@@ -62,8 +62,8 @@ beforeAll(async () => {
   await pg.exec(`
     CREATE SCHEMA office_dallas;
     CREATE SCHEMA office_atlanta;
-    CREATE TABLE office_dallas.deals (id uuid PRIMARY KEY, sales_source_user_id uuid, deal_number text, expected_close_date date, updated_at timestamptz DEFAULT now());
-    CREATE TABLE office_atlanta.deals (id uuid PRIMARY KEY, deal_number text, expected_close_date date, updated_at timestamptz DEFAULT now());
+    CREATE TABLE office_dallas.deals (id uuid PRIMARY KEY, sales_source_user_id uuid, deal_number text, expected_close_date date, bid_due_date timestamptz, updated_at timestamptz DEFAULT now());
+    CREATE TABLE office_atlanta.deals (id uuid PRIMARY KEY, deal_number text, expected_close_date date, bid_due_date timestamptz, updated_at timestamptz DEFAULT now());
   `);
 });
 
@@ -184,7 +184,7 @@ describe("re-import fault isolation (real DB errors + races + commit failure)", 
     await fpg.exec(`
       CREATE SCHEMA office_dallas;
       CREATE TABLE office_dallas.deals (
-        id uuid PRIMARY KEY, expected_close_date date, updated_at timestamptz DEFAULT now(),
+        id uuid PRIMARY KEY, expected_close_date date, bid_due_date timestamptz, updated_at timestamptz DEFAULT now(),
         CONSTRAINT no_sentinel CHECK (expected_close_date <> DATE '2099-12-31')
       );
     `);
@@ -352,7 +352,7 @@ describe("re-import is side-effect-safe under the guarded deal triggers (incl. a
       CREATE TABLE office_dallas.deals (
         id uuid PRIMARY KEY, stage_id uuid NOT NULL, assigned_rep_id uuid, created_by_user_id uuid,
         project_number text, rfp_approval_status text, is_read_only_mirror boolean NOT NULL DEFAULT false,
-        expected_close_date date, stage_entered_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz DEFAULT now()
+        expected_close_date date, bid_due_date timestamptz, stage_entered_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz DEFAULT now()
       );
       CREATE TABLE office_dallas.deal_stage_history (
         id uuid PRIMARY KEY DEFAULT gen_random_uuid(), deal_id uuid, from_stage_id uuid, to_stage_id uuid,

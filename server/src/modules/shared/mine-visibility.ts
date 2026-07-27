@@ -238,13 +238,14 @@ export function buildAliasedDealWatchedCondition(
 }
 
 // The "On Hold" scope predicate = effectively on hold: the stored `on_hold` flag OR — for an OPEN
-// (non-terminal) deal — a close target far enough out (CLOSE_TARGET_HOLD_HORIZON_DAYS+ CT-days) to read as
-// parked. TERMINAL-AWARE: a won/lost deal is realized/preserved, never auto-parked by a stale forecast date
+// (non-terminal) deal — a hold horizon date far enough out (CLOSE_TARGET_HOLD_HORIZON_DAYS+ CT-days) to
+// read as parked. That horizon is the close target everywhere except the genuine 'estimating' stage, where
+// the shared predicate measures from `bid_due_date` instead (2026-07-27). TERMINAL-AWARE: a won/lost deal is realized/preserved, never auto-parked by a stale forecast date
 // (only its stored flag holds it), so the caller passes `terminalStageIds` (won ∪ lost) to exempt those
 // rows — matching the value-zeroing helpers and the TS isDealEffectivelyOnHold twin, so the pill, the $
 // math, and the card $0 can never disagree. Pass `[]` (default) for the open-only predicate. Unlike Watched
-// there is NO optional table, so NO capability gate is needed (`on_hold`/`expected_close_date`/`stage_id`
-// are base deal columns). `identifierPath` qualifies the columns to the query's deals relation ("deals") or
+// there is NO optional table, so NO capability gate is needed
+// (`on_hold`/`expected_close_date`/`bid_due_date`/`stage_id` are base deal columns). `identifierPath` qualifies the columns to the query's deals relation ("deals") or
 // its alias ("d"); the shared builder regex-validates it.
 export function buildDealOnHoldCondition(identifierPath = "deals", terminalStageIds: string[] = []) {
   return aliasedEffectiveOnHoldConditionSql(identifierPath, terminalStageIds);

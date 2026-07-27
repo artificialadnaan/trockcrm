@@ -127,10 +127,12 @@ export function dealBestEstimateWithForecastSql(table: DealValueTable): SQL {
   return dealValueChainSql(table, FORECAST_FIRST_VALUE_CHAIN);
 }
 
-// OPEN-pipeline value-zeroing keys on EFFECTIVE hold = stored on_hold OR a close target past the 90-day
-// horizon, so a far-out OPEN deal contributes $0 to pipeline/forecast just like a parked one. Same
+// OPEN-pipeline value-zeroing keys on EFFECTIVE hold = stored on_hold OR a hold horizon date past the
+// 90-day mark, so a far-out OPEN deal contributes $0 to pipeline/forecast just like a parked one. Same
 // boundary as the On Hold filter (shared CLOSE_TARGET_HOLD_HORIZON_DAYS + the America/Chicago anchor) so
-// the two can't disagree. (The reportable/count predicate is intentionally unchanged — a far-out deal is
+// the two can't disagree. The horizon date is expected_close_date in every stage EXCEPT the genuine
+// 'estimating' stage, where it is bid_due_date (2026-07-27) — the shared predicate branches on stage_id
+// internally, so every caller here inherits it and none of them need new plumbing. (The reportable/count predicate is intentionally unchanged — a far-out deal is
 // $0 but still counted.) The far-future auto-park leg lives ONLY in the ALIASED form
 // (aliasedEffectiveDealValueSql), which runs against OPEN-filtered report populations. The COLUMN form is
 // stored-on_hold ONLY: its sole consumer is the property linked-value SUM, which runs over MIXED (open +
@@ -271,7 +273,8 @@ export function aliasedEffectiveLostDealValueSql(alias: string): SQL {
 
 // TERMINAL-AWARE effective-on-hold SQL condition — the SQL twin of the shared TS isDealEffectivelyOnHold.
 // A deal is effectively on hold when the stored `on_hold` flag is set OR — for an OPEN (non-terminal) deal
-// — its close target is more than CLOSE_TARGET_HOLD_HORIZON_DAYS out. A won/lost deal is realized/preserved,
+// — its hold horizon date (the close target, or bid_due_date while it sits in the genuine 'estimating'
+// stage) is more than CLOSE_TARGET_HOLD_HORIZON_DAYS out. A won/lost deal is realized/preserved,
 // so the far-out auto-park leg NEVER applies to it (only its stored flag holds it); `terminalStageIds`
 // (won ∪ lost) gates that leg via `stage_id NOT IN (...)`. Pass `[]` for the legacy open-only predicate
 // (a population with no terminal rows). Reuses the SHARED far-out day-math so SQL and TS can't drift, and

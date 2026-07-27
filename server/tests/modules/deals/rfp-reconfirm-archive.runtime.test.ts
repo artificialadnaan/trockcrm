@@ -40,6 +40,10 @@ let pg: PGlite;
 beforeAll(async () => {
   pg = new PGlite();
   await pg.exec(`
+    -- pipeline_stage_config lives ONLY in \`public\` in prod, and the shared effective-on-hold predicate
+    -- subselects it to detect the estimating stage (whose auto-park horizon is bid_due_date, not the close
+    -- target). PGlite's default schema IS public, so a bare CREATE TABLE reproduces prod's placement.
+    CREATE TABLE pipeline_stage_config (id uuid PRIMARY KEY, slug text NOT NULL);
     -- Full deals table: same shape as in archive-deal.runtime.test.ts so the Drizzle
     -- .returning() (which selects every column in the schema) doesn't hit a missing-column error.
     CREATE TABLE deals (

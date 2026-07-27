@@ -388,4 +388,35 @@ describe("DecoratedKanbanCard", () => {
 
     expect(html).not.toContain('data-on-hold="true"');
   });
+
+  it("auto-parks an ESTIMATING card off its BID due date, not its close target (2026-07-27)", () => {
+    // The estimating column is the whole point of the rule: work sitting there has to stay near-term, and
+    // its bid deadline is usually much sooner than the project close target. The card must show $0 + the
+    // badge, or it contradicts the column total the server computed from the same rows.
+    const html = renderDeal(
+      makeDeal({ onHold: false, expectedCloseDate: "2026-08-01", bidDueDate: "2099-12-31T00:00:00.000Z" }),
+      "estimating"
+    );
+
+    expect(html).toContain('data-on-hold="true"');
+    expect(html).toContain("On Hold");
+  });
+
+  it("RELEASES an estimating card whose bid is due soon, despite a far-out close target", () => {
+    const html = renderDeal(
+      makeDeal({ onHold: false, expectedCloseDate: "2099-12-31", bidDueDate: "2026-08-01T00:00:00.000Z" }),
+      "estimating"
+    );
+
+    expect(html).not.toContain('data-on-hold="true"');
+  });
+
+  it("ignores bidDueDate on a card in any other column", () => {
+    const html = renderDeal(
+      makeDeal({ onHold: false, expectedCloseDate: "2026-08-01", bidDueDate: "2099-12-31T00:00:00.000Z" }),
+      "estimate_sent_to_client"
+    );
+
+    expect(html).not.toContain('data-on-hold="true"');
+  });
 });
