@@ -137,28 +137,29 @@ export async function getStagePage(
       /**
        * The board's POPULATION, not just its date window.
        *
-       * getDealsForPipeline drops open-stage deals whose Bid Board mirror has already reached a
+       * getDealsForPipeline drops OPEN-stage deals whose Bid Board mirror has already reached a
        * terminal stage; this endpoint did not, so "Showing X of Y — see all" could open a list holding
        * deals the board never counted, filed under an open stage they have moved past. Added to the
        * server as an opt-in flag rather than applied unconditionally, because the web workspace uses
        * the same endpoint and did not ask for the board's rules.
+       *
+       * OPEN stages only, on the server side: the board applies that predicate in one of its three
+       * branches, and a Won or Lost deal synchronized from the Bid Board carries a terminal mirror slug
+       * because it IS settled. Applied to a terminal drill-down it removed exactly the rows that belong
+       * there, so a Bid-Board-sourced Won column opened empty.
+       *
+       * The soft-delete half of the board's population was never divergent — buildDealWorkspaceScope
+       * scopes open and Won stage pages to `is_active = true` and deliberately leaves Lost alone, which
+       * is the board's own branching. An earlier note here claimed otherwise; it was reading this
+       * endpoint's per-stage branches, where the rule does not appear, rather than the shared scope
+       * term that supplies it.
+       *
+       * What remains different is only the on-hold axis, and only by intent: no value of `status` can
+       * express "active, held included", because "active" also drops effectively-held cards that the
+       * board's totalCount includes. So the drill-down shows ITS OWN total in the header rather than
+       * echoing the board's, and the screen is self-consistent either way.
        */
       boardPopulation: "true",
-      /**
-       * KNOWN DIVERGENCE, deliberately not papered over: this route's POPULATION is not identical to
-       * the board's. getDealsForPipeline restricts open and Won columns to active rows and drops open
-       * CRM rows whose Bid Board mirror has already closed; listDealStagePage applies neither unless a
-       * `status` is sent, so a drill-down can include soft-deleted rows the board never counted.
-       *
-       * No value of `status` fixes it. "active" ALSO excludes effectively-held cards, which the board's
-       * totalCount includes — so it would trade "shows too many" for "shows too few", and the count the
-       * rep tapped would still not match. The Bid Board mirror rule is not expressible from a client at
-       * all. Picking one would be choosing which contradiction to ship.
-       *
-       * The real fix is server-side: either the stage endpoint mirrors the board predicate, or it gains
-       * a lifecycle value meaning "active, held included". Until then the drill-down shows ITS OWN
-       * total in its header rather than echoing the board's, so the screen is at least self-consistent.
-       */
     },
   });
   return {

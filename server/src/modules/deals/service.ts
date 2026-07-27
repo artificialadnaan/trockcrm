@@ -3764,6 +3764,14 @@ export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePage
     ...(input.boardPopulation && !isTerminalStagePage
       ? [aliasedNonTerminalMirroredStageCondition("d")]
       : []),
+    /**
+     * The soft-delete half of the board's population needs NOTHING here — buildDealWorkspaceScope
+     * (:1586-1597) already branches exactly as the board does: `is_active = true` for open stages
+     * (unless an explicit status owns the axis) and for Won (unless status=inactive, the administrator
+     * diagnostic view), and deliberately not for Lost, whose column retains soft-deleted deals for
+     * reporting. Adding it again here would be a second, redundant copy of a rule that is already
+     * correct — recorded because comparing the per-branch code alone makes it look missing.
+     */
   ];
 
   if (isWonTerminalStage) {

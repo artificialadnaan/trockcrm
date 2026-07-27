@@ -376,6 +376,36 @@ describe("listDealStagePage", () => {
     expect(rowSql).not.toContain(MIRRORED_TERMINAL_PREDICATE);
   });
 
+  /**
+   * The soft-delete half of the board's population, which the SCOPE already owns.
+   *
+   * Pinned because the per-branch code makes it look absent: listDealStagePage's own Won/Lost/open
+   * branches never mention is_active, and buildDealWorkspaceScope supplies it as the first element of
+   * the same conditions array. Anyone comparing this endpoint's branches against the board's will
+   * "find" a missing guard and add a redundant second copy — this states where the rule actually is.
+   */
+  const ACTIVE_PREDICATE = "d.is_active = true";
+
+  it("scopes an OPEN stage page to live rows, with or without the flag", async () => {
+    for (const extra of [{ boardPopulation: true }, {}]) {
+      const { countSql, rowSql } = await runStagePage(ESTIMATING_STAGE, extra);
+      expect(countSql).toContain(ACTIVE_PREDICATE);
+      expect(rowSql).toContain(ACTIVE_PREDICATE);
+    }
+  });
+
+  it("scopes a Won drill-down to live rows — a soft-deleted Won deal is a deleted deal", async () => {
+    const { countSql, rowSql } = await runStagePage(WON_STAGE, { boardPopulation: true });
+    expect(countSql).toContain(ACTIVE_PREDICATE);
+    expect(rowSql).toContain(ACTIVE_PREDICATE);
+  });
+
+  it("does NOT scope a Lost drill-down that way — that column retains archived deals on purpose", async () => {
+    const { countSql, rowSql } = await runStagePage(LOST_STAGE, { boardPopulation: true });
+    expect(countSql).not.toContain(ACTIVE_PREDICATE);
+    expect(rowSql).not.toContain(ACTIVE_PREDICATE);
+  });
+
   it("uses positive awarded-first fallback for won terminal stage totals and value sorting", async () => {
     dbState.responses = [
       [{ id: "stage-won", slug: "service_complete", name: "Service Complete", displayOrder: 8, isTerminal: true }],
