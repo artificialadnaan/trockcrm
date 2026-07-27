@@ -48,6 +48,27 @@ export default function DashboardScreen() {
   const countFailed = Boolean(mine.error) && !mine.isFetching;
   const countOffline = mine.error instanceof ApiError && mine.error.status === 0;
 
+  /**
+   * The card's supporting line, built ONCE and used for both the visible text and the spoken label.
+   *
+   * An explicit accessibilityLabel REPLACES the text a screen reader would otherwise assemble from the
+   * card's children, so "Open my deals" was hiding the label, the number, and the stale/offline warning
+   * from exactly the users who cannot glance at them. The count is the dashboard's whole point, and the
+   * warning is the difference between a current figure and a stale one — neither is decoration.
+   */
+  const countHint = countFailed
+    ? countOffline
+      ? "You're offline — this may be out of date. Pull to retry."
+      : "Couldn't refresh — this may be out of date. Pull to retry."
+    : total === undefined
+      ? "Pull to refresh"
+      : total === 0
+        ? "Nothing assigned to you yet"
+        : "Tap to open your pipeline";
+
+  const countLabel =
+    total === undefined ? "Your deals, count unavailable" : `Your deals, ${total}`;
+
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
       <ScreenHeader
@@ -75,7 +96,7 @@ export default function DashboardScreen() {
             testID="home-my-deals"
             onPress={() => router.push("/(app)/deals")}
             accessibilityRole="button"
-            accessibilityLabel="Open my deals"
+            accessibilityLabel={`${countLabel}. ${countHint}`}
             style={styles.statCard}
           >
             {/* "Your deals", not "Assigned to you": the server's `mine` scope is broader than assignment —
@@ -90,17 +111,7 @@ export default function DashboardScreen() {
                 failed" with the same "Pull to refresh", and a failure AFTER a success is worse still:
                 TanStack keeps the previous data, so the old number stayed on screen, the spinner just
                 stopped, and nothing said the figure was stale. A rep plans their day off this count. */}
-            <Text style={[styles.statHint, countFailed && styles.statHintStale]}>
-              {countFailed
-                ? countOffline
-                  ? "You're offline — this may be out of date. Pull to retry."
-                  : "Couldn't refresh — this may be out of date. Pull to retry."
-                : total === undefined
-                  ? "Pull to refresh"
-                  : total === 0
-                    ? "Nothing assigned to you yet"
-                    : "Tap to open your pipeline"}
-            </Text>
+            <Text style={[styles.statHint, countFailed && styles.statHintStale]}>{countHint}</Text>
           </Pressable>
         ) : null}
 

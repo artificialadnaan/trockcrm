@@ -57,7 +57,10 @@ const styles = StyleSheet.create({
     textAlign: "right",
     fontFamily: theme.font.semibold,
     fontSize: 12,
-    color: theme.color.textMuted,
+    // textSecondary, NOT textMuted — #8A95A3 is ~3:1 on white, under the 4.5:1 floor, and at 12px this
+    // is the ONLY thing on screen saying which office's numbers these are. Outdoors on a phone that is
+    // the first text to disappear. Same fix as the tab labels; this was the copy I missed.
+    color: theme.color.textSecondary,
   },
   titleRow: {
     flexDirection: "row",
