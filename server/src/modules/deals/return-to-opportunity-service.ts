@@ -1,7 +1,6 @@
 import { and, eq, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
-  dealApprovals,
   dealChangeOrders,
   dealHistory,
   dealSignedCommissions,
@@ -17,6 +16,7 @@ import {
 } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
 import { logActivity, type AuditContext } from "../audit/audit-logger.js";
+import { retireDealApprovals } from "./approval-retirement.js";
 import { lockDealCommissions } from "../commissions/deal-commission-lock.js";
 import { removeCommissionForDeal } from "../commissions/service.js";
 import { getStageById, getStageBySlug } from "../pipeline/service.js";
@@ -75,6 +75,12 @@ export interface ReturnToOpportunityResult {
   commissionTotalVoided: string;
   contractSignedDateCleared: string | null;
   wasBidBoardLinked: boolean;
+  /**
+   * A SyncHub RFP submission may still exist for the cycle this retired — because the CRM had already
+   * recorded a response for it, or because a delivery job was mid-flight when the move ran. The CRM
+   * cannot withdraw it, so the operator is told, exactly as they are for the Bid Board project.
+   */
+  rfpSubmissionMayExist: boolean;
   _eventsToEmit: Array<{ name: string; payload: unknown }>;
 }
 
@@ -219,7 +225,10 @@ function buildRfpCycleReset() {
  * also refuses to write RFP state back onto a deal that is no longer in the round the job was built for
  * (worker/src/jobs/rfp-request-delivery.ts). Neither half suffices alone.
  */
-async function cancelQueuedRfpJobs(tenantDb: TenantDb, dealId: string): Promise<number> {
+async function cancelQueuedRfpJobs(
+  tenantDb: TenantDb,
+  dealId: string
+): Promise<{ cancelled: number; deliveryInFlight: boolean }> {
   // Serialize with the delivery worker's send-authorization, which takes this same lock across its
   // pre-send recheck (worker/src/jobs/rfp-request-delivery.ts). Without it the worker can observe
   // `pending_outbox` a microsecond before this transaction commits and POST anyway, creating an orphan
@@ -242,7 +251,37 @@ async function cancelQueuedRfpJobs(tenantDb: TenantDb, dealId: string): Promise<
        AND status IN ('pending', 'dead')
        AND payload->>'dealId' = ${dealId}
   `);
-  return (result as unknown as { rowCount?: number }).rowCount ?? 0;
+
+  // A delivery job a worker is RUNNING RIGHT NOW cannot be cancelled — the cancel above deliberately
+  // only touches 'pending'/'dead'. It can, however, be OBSERVED, and that is the one thing this
+  // transaction was previously unable to do.
+  //
+  // 'processing' is stamped by the queue's claim transaction (worker/src/queue.ts) and COMMITTED before
+  // the handler runs, so unlike the handler's own advisory lock — which is transaction-scoped and gone
+  // by the time it POSTs — the marker survives across the send. Reading it under the same
+  // deal_rfp_delivery lock is therefore a reservation the two sides can detect each other through: if a
+  // row is here, a worker holds this deal's delivery and may already have put a request on the wire.
+  //
+  // It CANNOT tell us whether the POST actually happened: if this transaction won the lock race the
+  // worker's pre-send recheck will read the cleared cycle and decline, and if it lost, the worker sent.
+  // Both look identical from here. So this is deliberately reported as "a submission MAY exist", not as
+  // a fact — an over-warning the operator can resolve by looking, which is strictly better than the
+  // silence it replaces. Preventing the submission outright is not achievable on this side at all: an
+  // outbound POST is not retractable, and any reservation that made this transaction wait or refuse
+  // would only move the orphan later, not remove it. That needs a SyncHub-side handshake.
+  const inFlight = await tenantDb.execute(sql`
+    SELECT 1
+      FROM public.job_queue
+     WHERE job_type = 'rfp_request_delivery'
+       AND status = 'processing'
+       AND payload->>'dealId' = ${dealId}
+     LIMIT 1
+  `);
+
+  return {
+    cancelled: (result as unknown as { rowCount?: number }).rowCount ?? 0,
+    deliveryInFlight: ((inFlight as unknown as { rows?: unknown[] }).rows ?? []).length > 0,
+  };
 }
 
 /**
@@ -338,12 +377,19 @@ function isDealBidBoardLinked(deal: typeof deals.$inferSelect): boolean {
 function buildHistoryQualifier(
   wasBidBoardLinked: boolean,
   commissionRowsVoided: number,
-  commissionTotal: string
+  commissionTotal: string,
+  rfpSubmissionMayExist: boolean
 ): string {
   const parts: string[] = [];
   if (wasBidBoardLinked) parts.push("disconnected from Bid Board");
   if (commissionRowsVoided > 0) {
     parts.push(`voided ${commissionRowsVoided} commission row(s) totalling ${commissionTotal}`);
+  }
+  // Same reason the Bid Board clause is here: the CRM cannot undo this externally-visible side effect,
+  // so the timeline has to say it happened. Worded as "may" because the CRM genuinely cannot tell
+  // whether an in-flight POST landed.
+  if (rfpSubmissionMayExist) {
+    parts.push("an RFP submission may still exist in SyncHub — cancel it there");
   }
   return parts.length > 0 ? ` (${parts.join("; ")})` : "";
 }
@@ -606,7 +652,21 @@ export async function returnDealToOpportunity(
   // payload and write the cycle straight back. Cancelled in THIS transaction so it commits atomically
   // with the reset — a job cancelled but a reset that rolled back, or vice versa, is the incoherent
   // outcome. See cancelQueuedRfpJobs for why the worker carries the other half of this guard.
-  const cancelledRfpJobs = await cancelQueuedRfpJobs(tenantDb, input.dealId);
+  const { deliveryInFlight } = await cancelQueuedRfpJobs(tenantDb, input.dealId);
+
+  // Did this move-back retire a cycle SyncHub already has a copy of? The CRM cannot withdraw a
+  // submission, so — exactly as with the Bid Board project this action also cannot delete — the honest
+  // thing is to name it and let the operator go cancel it there.
+  //
+  // 'pending_outbox' on its own means the payload never left the CRM: it was still queued, and the
+  // cancel above just neutralized the job. Every other status is written only AFTER an outbound POST
+  // ('pending'/'approving'/'approved'/'declined'/'conflict' record a SyncHub response; 'send_failed'
+  // records an attempt whose outcome is unknown, which is not the same as "nothing was sent"). Add the
+  // in-flight probe and this covers both the narrow race Codex flagged and the far more common case of
+  // moving back a deal whose RFP went out days ago — which was equally silent before.
+  const rfpStatusCleared = deal.rfpApprovalStatus ?? null;
+  const rfpSubmissionMayExist =
+    deliveryInFlight || (rfpStatusCleared != null && rfpStatusCleared !== "pending_outbox");
 
   // Void booked commission through the SAME audited helper the contract-date clear uses
   // (setDealContractSignedDate's date→null branch). deal_signed_commissions has no soft-delete column
@@ -654,16 +714,20 @@ export async function returnDealToOpportunity(
   // re-approves work this action explicitly tore down.
   //
   // Overlapping with changeDealStage on case 1 is deliberate and free: it runs first for a real reopen,
-  // so this UPDATE matches zero rows. Idempotent by construction, and far cheaper than a split rule
+  // so this call finds zero rows. Idempotent by construction, and far cheaper than a split rule
   // applied by two owners under different predicates with a gap between them.
-  await tenantDb
-    .update(dealApprovals)
-    .set({
-      status: "rejected",
-      resolvedAt: now,
-      notes: "Auto-invalidated on move back to Opportunity",
-    })
-    .where(and(eq(dealApprovals.dealId, input.dealId), eq(dealApprovals.status, "approved")));
+  //
+  // WHY DELETE and not "mark rejected": marking in place leaves the row occupying the
+  // (deal_id, target_stage_id, required_role) unique key, which the bare-INSERT request route cannot
+  // get past, and leaves any still-`pending` row resolvable to `approved` for the cycle just retired.
+  // retireDealApprovals carries the full argument and the audit itemization; both owners of this rule —
+  // here and changeDealStage's reopen branch — go through it so neither can drift from the other.
+  const approvalsRetired = await retireDealApprovals(
+    tenantDb,
+    input.dealId,
+    input.userId,
+    "move back to Opportunity"
+  );
 
   // Now the ordinary stage change: it owns deal_stage_history (with is_backward_move + the override
   // reason), the terminal-field clear (won_closed_date / actual_close_date / lost_*), the approval
@@ -734,7 +798,17 @@ export async function returnDealToOpportunity(
         reason,
         commissionRowsVoided,
         commissionTotalVoided: commissionRowsVoided > 0 ? commission.total : "0",
+        // Header count for the approvals torn down; the itemization is the per-approval audit_log
+        // `delete` rows retireDealApprovals writes. Same header/itemization split as the commissions
+        // above, so "what did this destroy?" stays one query on the deal.
+        approvalsRetired,
         wasBidBoardLinked,
+        // The RFP cycle this retired, and whether SyncHub may still be holding a submission for it.
+        // Recorded verbatim so an operator chasing an orphan can tell "it was still queued here" from
+        // "SyncHub had already answered" without re-deriving it.
+        rfpStatusCleared,
+        rfpDeliveryInFlight: deliveryInFlight,
+        rfpSubmissionMayExist,
         fromStageSlug: currentStage?.slug ?? null,
       },
       ipAddress: input.auditContext.ipAddress ?? null,
@@ -758,7 +832,8 @@ export async function returnDealToOpportunity(
     reason: `Moved back to Opportunity — ${reason}${buildHistoryQualifier(
       wasBidBoardLinked,
       commissionRowsVoided,
-      commission.total
+      commission.total,
+      rfpSubmissionMayExist
     )}`,
     changedAt: now,
   });
@@ -770,6 +845,7 @@ export async function returnDealToOpportunity(
     commissionTotalVoided: commissionRowsVoided > 0 ? commission.total : "0",
     contractSignedDateCleared: eligibility.voidsCommission ? contractSignedDateCleared : null,
     wasBidBoardLinked,
+    rfpSubmissionMayExist,
     _eventsToEmit: stageChange._eventsToEmit,
   };
 }

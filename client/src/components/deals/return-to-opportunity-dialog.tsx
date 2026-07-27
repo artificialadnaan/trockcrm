@@ -40,6 +40,7 @@ interface ReturnToOpportunityDialogProps {
     commissionTotalVoided: string;
     contractSignedDateCleared: string | null;
     wasBidBoardLinked: boolean;
+    rfpSubmissionMayExist: boolean;
   }) => void;
 }
 

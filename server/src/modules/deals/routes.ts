@@ -1255,6 +1255,30 @@ router.post("/:id/trigger-rfp", async (req, res, next) => {
       ? toCanonicalDealStageSlug(stageSlug, deal.workflowRoute)
       : null;
     if (canonicalStageSlug !== "opportunity") {
+      // A DETACHED deal past Opportunity is the one case where this rejection is genuinely confusing, so
+      // it gets told what to do rather than left to infer it.
+      //
+      // After a move back to Opportunity the deal is CRM-owned with no Bid Board project, and this route
+      // is the ONLY path that can create a replacement one (the callback it drives writes the new
+      // project's id in the same statement that clears the detach marker). Every Bid Board ingress skips
+      // detached rows, and changeDealStage deliberately no longer re-attaches on the estimating boundary.
+      // So if someone advances such a deal by hand, "trigger RFP" is unavailable until it comes back —
+      // recoverable (this feature is itself the way back), but not guessable from a bare stage error.
+      //
+      // Deliberately NOT blocking the forward stage move instead: a detached deal in estimating is
+      // CRM-owned and works fine, it simply has no Bid Board project. Blocking would remove a transition
+      // that is legitimate today and would strand deals that belong in estimating without one, to
+      // prevent a recoverable annoyance. The cheaper, non-destructive half of the fix is to make the
+      // failure legible — same 400, same RFP_WRONG_STAGE code (nothing keys on it), better sentence.
+      if (deal.bidBoardDetachedAt) {
+        throw new AppError(
+          400,
+          "RFP review can only be triggered from Opportunity stage. This deal was moved back to " +
+            "Opportunity and disconnected from Bid Board sync, so it has no Bid Board project — move it " +
+            "back to Opportunity again, then trigger RFP review to create a replacement project.",
+          "RFP_WRONG_STAGE"
+        );
+      }
       throw new AppError(400, "RFP review can only be triggered from Opportunity stage.", "RFP_WRONG_STAGE");
     }
 
@@ -3777,6 +3801,7 @@ router.post(
           commissionTotalVoided: result.commissionTotalVoided,
           contractSignedDateCleared: result.contractSignedDateCleared,
           wasBidBoardLinked: result.wasBidBoardLinked,
+          rfpSubmissionMayExist: result.rfpSubmissionMayExist,
         })
       );
     } catch (err) {

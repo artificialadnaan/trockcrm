@@ -171,6 +171,16 @@ beforeAll(async () => {
   await pg.exec(
     `ALTER TABLE public.deal_signed_commissions ADD CONSTRAINT deal_signed_commissions_dedup UNIQUE (deal_id, rep_user_id);`
   );
+  // tenantSchemaSql emits columns but NOT unique constraints, so this one has to be restated by hand —
+  // and it is the whole reason the approval retirement has to DELETE. shared/src/schema/tenant/
+  // deal-approvals.ts declares unique().on(dealId, targetStageId, requiredRole) with `status` NOT in the
+  // key, so a row left behind as `rejected` keeps occupying it and the bare-INSERT request route can
+  // never re-request that approval. Without this line the re-request test would pass against a schema
+  // that cannot produce the production failure.
+  await pg.exec(
+    `ALTER TABLE public.deal_approvals
+       ADD CONSTRAINT deal_approvals_deal_stage_role_unique UNIQUE (deal_id, target_stage_id, required_role);`
+  );
   tdb = drizzle(pg);
 
   for (const [id, role] of [[ADMIN, "admin"], [DIRECTOR, "director"], [REP, "rep"]] as const) {
@@ -772,17 +782,17 @@ describe("returnDealToOpportunity — permissions and state blocks", () => {
     expect(row.rfp_approval_status).toBeNull();
   });
 
-  // APPROVAL INVALIDATION across all three paths. The rule belongs to this action, so it must hold
+  // APPROVAL RETIREMENT across all three paths. The rule belongs to this action, so it must hold
   // regardless of which stage the deal came from — delegating it to changeDealStage's reopen
   // classification left the most common path uncovered.
   //
   // CASE 3, the likely-common one: a NON-TERMINAL source. The stage genuinely changes (so the
   // already-at-Opportunity branch does not apply) but changeDealStage's
   // `isReopen = currentStage.isTerminal && !targetStage.isTerminal` is FALSE because estimating is not
-  // terminal — so before the fix NOTHING invalidated. That is an authorization bypass: validateStageGate
+  // terminal — so before the fix NOTHING was retired. That is an authorization bypass: validateStageGate
   // matches approvals on (deal_id, target_stage_id, status='approved'), so the surviving row silently
   // satisfies the gate when the deal is later re-advanced to that same stage.
-  it("invalidates approvals when moving back from a NON-TERMINAL stage (neither path covered this)", async () => {
+  it("retires approvals when moving back from a NON-TERMINAL stage (neither path covered this)", async () => {
     const D = U("d213");
     await seedBidBoardDeal(D); // estimating — not terminal
     await pg.exec(
@@ -794,17 +804,14 @@ describe("returnDealToOpportunity — permissions and state blocks", () => {
       dealId: D, userId: ADMIN, userRole: "admin", reason: "Mid-pipeline move back", auditContext,
     });
 
-    const { rows } = await pg.query<{ status: string; notes: string | null }>(
-      `SELECT status, notes FROM public.deal_approvals WHERE deal_id = '${D}'`
-    );
-    expect(rows[0].status).toBe("rejected");
-    expect(rows[0].notes).toContain("move back to Opportunity");
+    const { rows } = await pg.query(`SELECT id FROM public.deal_approvals WHERE deal_id = '${D}'`);
+    expect(rows).toHaveLength(0);
   });
 
   // CASE 1: a TERMINAL source, where changeDealStage's own reopen cleanup also fires. The two overlap
-  // harmlessly — whichever runs first moves the rows out of 'approved' and the other matches none — but
-  // the outcome is pinned here so the seam between the two owners is covered rather than assumed.
-  it("invalidates approvals when moving back from a TERMINAL stage", async () => {
+  // harmlessly — whichever runs first removes the rows and the other finds none — but the outcome is
+  // pinned here so the seam between the two owners is covered rather than assumed.
+  it("retires approvals when moving back from a TERMINAL stage", async () => {
     const D = U("d214");
     await seedBidBoardDeal(D, { stageId: WON_STAGE, contractSignedDate: "2026-03-01" });
     await pg.exec(
@@ -817,15 +824,13 @@ describe("returnDealToOpportunity — permissions and state blocks", () => {
       acknowledgedCommissionTotal: "0", acknowledgedCommissionRowCount: 0, auditContext,
     });
 
-    const { rows } = await pg.query<{ status: string }>(
-      `SELECT status FROM public.deal_approvals WHERE deal_id = '${D}'`
-    );
-    expect(rows[0].status).toBe("rejected");
+    const { rows } = await pg.query(`SELECT id FROM public.deal_approvals WHERE deal_id = '${D}'`);
+    expect(rows).toHaveLength(0);
   });
 
   // CASE 2: changeDealStage returns through a same-stage no-op BEFORE its reopen cleanup, so the
-  // already-at-Opportunity case would otherwise skip approval invalidation entirely.
-  it("invalidates approvals even when Opportunity is ALREADY the current stage", async () => {
+  // already-at-Opportunity case would otherwise skip approval retirement entirely.
+  it("retires approvals even when Opportunity is ALREADY the current stage", async () => {
     const D = U("d212");
     await seedBidBoardDeal(D, { stageId: OPP_STAGE });
     await pg.exec(
@@ -837,11 +842,115 @@ describe("returnDealToOpportunity — permissions and state blocks", () => {
       dealId: D, userId: ADMIN, userRole: "admin", reason: "Mirror parked it here still owned", auditContext,
     });
 
-    const { rows } = await pg.query<{ status: string; notes: string | null }>(
-      `SELECT status, notes FROM public.deal_approvals WHERE deal_id = '${D}'`
+    const { rows } = await pg.query(`SELECT id FROM public.deal_approvals WHERE deal_id = '${D}'`);
+    expect(rows).toHaveLength(0);
+  });
+
+  // REQUIREMENT (a): the retirement must leave the deal ABLE to request that approval again.
+  //
+  // `deal_approvals` is UNIQUE on (deal_id, target_stage_id, required_role) with `status` NOT in the
+  // key, and POST /api/deals/:id/approvals is a bare INSERT with no onConflict. Marking the old row
+  // `rejected` therefore left it occupying the key: the re-request raises 23505 and the route 500s.
+  // This INSERT is that route's statement verbatim, and it is the assertion — a deal that was moved
+  // back and then re-advanced is exactly the population that has to re-request.
+  it("leaves the same (deal, stage, role) approval REQUESTABLE again after the move back", async () => {
+    const D = U("d215");
+    await seedBidBoardDeal(D);
+    await pg.exec(
+      `INSERT INTO public.deal_approvals (deal_id, target_stage_id, required_role, status, requested_by)
+       VALUES ('${D}', '${ESTIMATING_STAGE}', 'director', 'approved', '${ADMIN}')`
     );
-    expect(rows[0].status).toBe("rejected");
-    expect(rows[0].notes).toContain("move back to Opportunity");
+
+    await returnDealToOpportunity(tdb, {
+      dealId: D, userId: ADMIN, userRole: "admin", reason: "Re-scope before re-advancing", auditContext,
+    });
+
+    // The re-request, on the SAME unique key — the request route's statement verbatim. Retaining a
+    // rejected row makes this raise 23505, which is the 500 the operator actually sees.
+    await expect(
+      pg.exec(
+        `INSERT INTO public.deal_approvals (deal_id, target_stage_id, required_role, status, requested_by)
+         VALUES ('${D}', '${ESTIMATING_STAGE}', 'director', 'pending', '${REP}')`
+      )
+    ).resolves.not.toThrow();
+
+    const { rows } = await pg.query<{ status: string }>(
+      `SELECT status FROM public.deal_approvals WHERE deal_id = '${D}'`
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].status).toBe("pending");
+  });
+
+  // REQUIREMENT (b): nothing left behind may later BECOME an approval for the retired cycle.
+  //
+  // A status='approved' predicate does not match a row that is still `pending`, so before the fix the
+  // pending row survived the move back, the resolution route could resolve it to `approved` afterwards,
+  // and validateStageGate — which matches (deal_id, target_stage_id, status='approved') and has no
+  // notion of cycle — then accepted it. The retirement has to remove the pending row too.
+  it("retires PENDING approvals as well, so they cannot later be resolved into a live approval", async () => {
+    const D = U("d216");
+    await seedBidBoardDeal(D);
+    await pg.exec(
+      `INSERT INTO public.deal_approvals (deal_id, target_stage_id, required_role, status, requested_by)
+       VALUES ('${D}', '${WON_STAGE}', 'director', 'pending', '${REP}')`
+    );
+
+    await returnDealToOpportunity(tdb, {
+      dealId: D, userId: ADMIN, userRole: "admin", reason: "Cycle abandoned", auditContext,
+    });
+
+    // Nothing for PATCH …/approvals/:approvalId to find, so nothing can be resolved to 'approved'…
+    const { rows } = await pg.query(`SELECT id FROM public.deal_approvals WHERE deal_id = '${D}'`);
+    expect(rows).toHaveLength(0);
+
+    // …and therefore nothing validateStageGate's (deal_id, target_stage_id, 'approved') lookup can find.
+    const { rows: approvedForStage } = await pg.query(
+      `SELECT id FROM public.deal_approvals
+        WHERE deal_id = '${D}' AND target_stage_id = '${WON_STAGE}' AND status = 'approved'`
+    );
+    expect(approvedForStage).toHaveLength(0);
+  });
+
+  // The rows are DELETED, so audit_log is where the forensic record has to live — the same
+  // header/itemization split the voided commissions use. Without this the retirement would be a silent
+  // destruction on a feature whose whole justification is auditability.
+  it("itemizes each retired approval into audit_log and counts them on the deal header row", async () => {
+    const D = U("d217");
+    await seedBidBoardDeal(D);
+    await pg.exec(
+      `INSERT INTO public.deal_approvals (deal_id, target_stage_id, required_role, status, requested_by)
+       VALUES ('${D}', '${WON_STAGE}', 'director', 'approved', '${ADMIN}'),
+              ('${D}', '${ESTIMATING_STAGE}', 'admin', 'pending', '${REP}')`
+    );
+
+    await returnDealToOpportunity(tdb, {
+      dealId: D, userId: ADMIN, userRole: "admin", reason: "Torn down", auditContext,
+    });
+
+    const { rows: itemized } = await pg.query<{
+      changes: Record<string, { from: unknown; to: unknown }>;
+      changed_by: string;
+    }>(
+      `SELECT changes, changed_by FROM public.audit_log
+        WHERE table_name = 'deal_approvals' AND action = 'delete'
+          AND changes -> 'dealId' ->> 'from' = '${D}'`
+    );
+    expect(itemized).toHaveLength(2);
+    expect(itemized.every((row) => row.changed_by === ADMIN)).toBe(true);
+    expect(itemized.map((row) => String(row.changes.status.from)).sort()).toEqual([
+      "approved",
+      "pending",
+    ]);
+    expect(itemized.every((row) => row.changes.retiredBecause.to === "move back to Opportunity")).toBe(
+      true
+    );
+
+    const { rows: header } = await pg.query<{ full_row: Record<string, unknown> }>(
+      `SELECT full_row FROM public.audit_log
+        WHERE record_id = '${D}' AND table_name = 'deals'
+          AND full_row ->> 'source' = 'return_to_opportunity'`
+    );
+    expect(header[0].full_row.approvalsRetired).toBe(2);
   });
 
   // The same stage can also retain MONEY: a Won deal walked backward by the mirror keeps its signed date
@@ -1082,6 +1191,83 @@ describe("returnDealToOpportunity — queued RFP work is cancelled with the cycl
 
     expect((await jobRows(OTHER))[0].status).toBe("pending");
     expect((await jobRows(D))[0].status).toBe("processing");
+  });
+
+  // AN ORPHAN SYNCHUB SUBMISSION CANNOT BE PREVENTED FROM HERE — an outbound POST is not retractable,
+  // and the worker's pre-send lock is transaction-scoped, so it is released before it sends. What CAN
+  // be done is DETECT it: the queue's claim transaction commits `status = 'processing'` before the
+  // handler runs, so that marker survives the commit and is visible to this transaction under the same
+  // deal_rfp_delivery lock. A claimed delivery therefore means "a worker holds this send and may
+  // already have put it on the wire" — reported as MAY, because if this transaction won the lock race
+  // the worker's recheck declines instead, and the two are indistinguishable from here.
+  it("reports a possible SyncHub submission when a delivery job was CLAIMED at move time", async () => {
+    const D = U("d605");
+    await seedBidBoardDeal(D);
+    await pg.exec(`UPDATE public.deals SET rfp_approval_status = 'pending_outbox' WHERE id = '${D}'`);
+    await queueRfpJob(D, "rfp_request_delivery", "processing");
+
+    const result = await returnDealToOpportunity(tdb, {
+      dealId: D, userId: ADMIN, userRole: "admin", reason: "Moved while a send was claimed", auditContext,
+    });
+
+    expect(result.rfpSubmissionMayExist).toBe(true);
+
+    // The operator-facing half: the History tab says it, the same way it says "disconnected from Bid
+    // Board" for the other side effect this action cannot undo.
+    const { rows: history } = await pg.query<{ reason: string }>(
+      `SELECT reason FROM public.deal_history WHERE deal_id = '${D}' AND source = 'return_to_opportunity'`
+    );
+    expect(history[0].reason).toContain("RFP submission may still exist in SyncHub");
+
+    const { rows: audits } = await pg.query<{ full_row: Record<string, unknown> }>(
+      `SELECT full_row FROM public.audit_log
+        WHERE record_id = '${D}' AND table_name = 'deals'
+          AND full_row ->> 'source' = 'return_to_opportunity'`
+    );
+    expect(audits[0].full_row.rfpDeliveryInFlight).toBe(true);
+    expect(audits[0].full_row.rfpStatusCleared).toBe("pending_outbox");
+  });
+
+  // The much larger, entirely non-racy case that was equally silent: the RFP went to SyncHub days ago
+  // (any status past pending_outbox is written only after an outbound POST) and the deal is moved back
+  // now. A submission definitely exists and nobody was told.
+  it("reports a possible SyncHub submission when the cycle had already been DELIVERED", async () => {
+    const D = U("d606");
+    await seedBidBoardDeal(D);
+    await pg.exec(`UPDATE public.deals SET rfp_approval_status = 'pending' WHERE id = '${D}'`);
+
+    const result = await returnDealToOpportunity(tdb, {
+      dealId: D, userId: ADMIN, userRole: "admin", reason: "Submitted last week, now recalled", auditContext,
+    });
+
+    expect(result.rfpSubmissionMayExist).toBe(true);
+    const { rows: audits } = await pg.query<{ full_row: Record<string, unknown> }>(
+      `SELECT full_row FROM public.audit_log
+        WHERE record_id = '${D}' AND table_name = 'deals'
+          AND full_row ->> 'source' = 'return_to_opportunity'`
+    );
+    expect(audits[0].full_row.rfpStatusCleared).toBe("pending");
+    expect(audits[0].full_row.rfpDeliveryInFlight).toBe(false);
+  });
+
+  // …and the negative, which is what keeps this from being a warning nobody can act on. A cycle still
+  // sitting in pending_outbox with only an UNCLAIMED job never left the CRM: the cancel above defused
+  // it, SyncHub never saw anything, and the operator must NOT be sent looking for a submission.
+  it("does NOT warn when the cycle was still queued and no worker had claimed it", async () => {
+    const D = U("d607");
+    await seedBidBoardDeal(D);
+    await pg.exec(`UPDATE public.deals SET rfp_approval_status = 'pending_outbox' WHERE id = '${D}'`);
+    await queueRfpJob(D, "rfp_request_delivery", "pending");
+
+    const result = await returnDealToOpportunity(tdb, {
+      dealId: D, userId: ADMIN, userRole: "admin", reason: "Never left the outbox", auditContext,
+    });
+
+    expect(result.rfpSubmissionMayExist).toBe(false);
+    const { rows: history } = await pg.query<{ reason: string }>(
+      `SELECT reason FROM public.deal_history WHERE deal_id = '${D}' AND source = 'return_to_opportunity'`
+    );
+    expect(history[0].reason).not.toContain("SyncHub");
   });
 });
 

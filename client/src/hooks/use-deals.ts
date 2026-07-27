@@ -974,6 +974,7 @@ export async function returnDealToOpportunity(
     commissionTotalVoided: string;
     contractSignedDateCleared: string | null;
     wasBidBoardLinked: boolean;
+    rfpSubmissionMayExist: boolean;
   }>(`/deals/${dealId}/return-to-opportunity`, { method: "POST", json: input });
 }
 

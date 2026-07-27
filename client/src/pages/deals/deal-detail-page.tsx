@@ -1251,10 +1251,17 @@ export function DealDetailPage() {
           const bidBoardReminder = result.wasBidBoardLinked
             ? " Remember to delete it from Bid Board."
             : "";
+          // Same shape, same reason, for the OTHER external side effect this action cannot undo: if the
+          // RFP had already gone to SyncHub (or a delivery was mid-flight), the submission outlives the
+          // cycle we just cleared and only the operator can cancel it there. Server-decided, like the
+          // Bid Board clause — the page never guesses.
+          const rfpReminder = result.rfpSubmissionMayExist
+            ? " An RFP submission may still exist in SyncHub — cancel it there."
+            : "";
           toast.success(
             result.commissionRowsVoided > 0
-              ? `Moved back to Opportunity — ${result.commissionRowsVoided} commission row(s) voided.${bidBoardReminder}`
-              : `Moved back to Opportunity.${bidBoardReminder}`
+              ? `Moved back to Opportunity — ${result.commissionRowsVoided} commission row(s) voided.${bidBoardReminder}${rfpReminder}`
+              : `Moved back to Opportunity.${bidBoardReminder}${rfpReminder}`
           );
           // Keep the move's success separate from a later refetch failure: the write already committed,
           // so a failed reload is a "refresh the page" hint, never a "the move failed" error.

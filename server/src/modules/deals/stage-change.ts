@@ -3,7 +3,6 @@ import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
   deals,
   dealStageHistory,
-  dealApprovals,
   jobQueue,
   tasks,
 } from "@trock-crm/shared/schema";
@@ -19,6 +18,7 @@ import {
   isContractStageSelectionEnabled,
 } from "../../config/feature-flags.js";
 import { validateStageGate, isStageRequiredFieldSatisfied } from "./stage-gate.js";
+import { retireDealApprovals } from "./approval-retirement.js";
 import type { UserRole } from "@trock-crm/shared/types";
 import { createStageTimers } from "./timer-service.js";
 import { activateDealScopingIntake, evaluateDealScopingReadiness } from "./scoping-service.js";
@@ -435,11 +435,17 @@ export async function changeDealStage(
     dealUpdates.lostAt = new Date();
   }
 
-  // Reopen handling: invalidate old approvals so they can't be reused
+  // Reopen handling: retire the closed cycle's approvals so they can't be reused.
+  //
+  // This used to mark approved rows `rejected` in place, which left the deal UNABLE to request that
+  // approval again (the retained row still occupies the (deal_id, target_stage_id, required_role)
+  // unique key that the bare-INSERT request route has no onConflict for) and left any still-`pending`
+  // row resolvable to `approved` for the very cycle just closed. Both owners of this rule — here and
+  // "Move back to Opportunity" — now go through retireDealApprovals, which states the requirement and
+  // itemizes each retired approval into audit_log. Fixing only the move-back would have left the
+  // terminal-reopen path with the identical defect.
   if (isReopen) {
-    await tenantDb.update(dealApprovals)
-      .set({ status: "rejected", resolvedAt: new Date(), notes: "Auto-invalidated on deal reopen" })
-      .where(and(eq(dealApprovals.dealId, dealId), eq(dealApprovals.status, "approved")));
+    await retireDealApprovals(tenantDb, dealId, userId, "deal reopen");
   }
 
   // Tell the deal_stage_history backstop trigger (migration 0143) to stand down for this
