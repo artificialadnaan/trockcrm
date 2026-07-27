@@ -1,6 +1,9 @@
 import React from "react";
+import { ActivityIndicator, View } from "react-native";
 import { Redirect, Stack } from "expo-router";
 import { useAuth } from "../../src/auth/AuthContext";
+import { formStyles } from "../../src/theme/formStyles";
+import { theme } from "../../src/theme/theme";
 
 /**
  * Authenticated shell. The tab bar arrives with the feature screens in later PRs; this PR ships the
@@ -9,7 +12,10 @@ import { useAuth } from "../../src/auth/AuthContext";
 export default function AppLayout() {
   const { session, gate } = useAuth();
 
-  if (session === undefined) return null;
+  // A SPINNER, not a blank screen. Two things land here: the SecureStore restore on cold start, and
+  // the gate check below with its 3s grace. Rendering nothing for up to that long reads as a crash or a
+  // frozen app — on a job site the reasonable response is to force-quit, which restarts the wait.
+  if (session === undefined) return <Restoring />;
   if (!session) return <Redirect href="/login" />;
   if (session.user.mustChangePassword) return <Redirect href="/change-password" />;
 
@@ -26,7 +32,7 @@ export default function AppLayout() {
    * instead of locking a rep out of the CRM from a site with no signal. That is the honest trade: this
    * gate is an operational cleanup nag, not a security boundary, and the server treats it as one too.
    */
-  if (gate === "checking") return null;
+  if (gate === "checking") return <Restoring />;
 
   // Enforced HERE, not only on the index route: index is just the launch redirect, and a deep link or a
   // restored navigation state can mount a screen inside this group without ever passing through it. A
@@ -34,4 +40,12 @@ export default function AppLayout() {
   if (session.user.requiresOnboarding) return <Redirect href="/onboarding-required" />;
 
   return <Stack screenOptions={{ headerShown: false }} />;
+}
+
+function Restoring() {
+  return (
+    <View style={[formStyles.safe, formStyles.centre]}>
+      <ActivityIndicator color={theme.color.brandRed} />
+    </View>
+  );
 }
