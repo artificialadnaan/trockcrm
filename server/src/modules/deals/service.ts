@@ -1105,6 +1105,13 @@ export interface DealBidBoardOwnershipState {
    * which must not appear on a CRM-only deal that was moved back but never had a project.
    */
   detachedFromLinkedProject: boolean;
+  /**
+   * Does the deal STILL have a live Bid Board footprint to sever? The server's own answer, so the
+   * "Move back to Opportunity" menu item can be hidden on exactly the deals the service would refuse.
+   * Re-deriving this client-side drifted once already (it omitted synchub_bid_board_id and
+   * read_only_synced_at, hiding the action on deals a webhook could still reclaim).
+   */
+  isBidBoardLinked: boolean;
 }
 
 /**
@@ -1643,6 +1650,9 @@ export function buildBidBoardOwnershipState(
     bidBoardDetachedWasLinked?: boolean | null;
     procoreBidId?: number | string | null;
     synchubBidBoardId?: string | null;
+    bidBoardProjectNumber?: string | null;
+    bidBoardLinkedAt?: Date | string | null;
+    readOnlySyncedAt?: Date | string | null;
   }
 ): DealBidBoardOwnershipState {
   // A detached deal is CRM-owned by definition, whatever the stored flag says. Forcing it here (rather
@@ -1669,6 +1679,19 @@ export function buildBidBoardOwnershipState(
     isDetached &&
     (deal.bidBoardDetachedWasLinked ??
       (deal.procoreBidId != null || deal.synchubBidBoardId != null));
+  // The SAME footprint test the return-to-opportunity service uses (isDealBidBoardLinked): detached
+  // wins over everything, then any live ownership/mirror/identity signal counts. Published so the UI
+  // consumes one server answer instead of maintaining a second, drift-prone copy.
+  const isBidBoardLinked =
+    !isDetached &&
+    Boolean(
+      deal.isBidBoardOwned ||
+        deal.procoreBidId != null ||
+        deal.synchubBidBoardId != null ||
+        deal.bidBoardProjectNumber != null ||
+        deal.bidBoardLinkedAt != null ||
+        deal.readOnlySyncedAt != null
+    );
 
   return {
     isOwned,
@@ -1692,6 +1715,7 @@ export function buildBidBoardOwnershipState(
     detachedAt:
       detachedAt instanceof Date ? detachedAt.toISOString() : detachedAt ? String(detachedAt) : null,
     detachedFromLinkedProject,
+    isBidBoardLinked,
   };
 }
 

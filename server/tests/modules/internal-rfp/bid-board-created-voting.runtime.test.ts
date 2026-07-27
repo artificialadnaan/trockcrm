@@ -101,6 +101,37 @@ describe("POST /bid-board-created (voting path)", () => {
     expect(rows[0].stage_id).toBe(EST);
   });
 
+  // The identity retirement is scoped to ACTUAL re-attachments. This same statement also runs for
+  // ordinary first-time and repair linkages, where the WHERE is satisfied by a status or
+  // bid_board_linked_at change alone — clearing the stable id there would destroy a LIVE idempotency
+  // key, and the next /opportunities push that legitimately omits the optional procore_bid_id would
+  // miss the deal and INSERT the twin this design exists to prevent.
+  it("does NOT clear a live synchub identity on an ordinary (non-detached) linkage", async () => {
+    await seed();
+    await holder.pg.query(
+      `UPDATE office_test.deals SET synchub_bid_board_id = 'bb-live', bid_board_detached_at = NULL
+        WHERE id = $1`,
+      [DEAL],
+    );
+    const app = await buildApp();
+    const raw = JSON.stringify({
+      status: "created",
+      sourceDealId: DEAL,
+      bidboardProjectId: "77111",
+      procoreCompanyId: "42",
+      createdAt: new Date().toISOString(),
+    });
+    const res = await request(app).post("/bid-board-created").set("content-type", "application/json").set("x-rfp-request-signature", sign(raw)).send(raw);
+    expect(res.status).toBe(200);
+
+    const rows = (await holder.pg.query(
+      `SELECT synchub_bid_board_id, is_bid_board_owned FROM office_test.deals WHERE id=$1`, [DEAL])).rows as any[];
+    // The linkage still applied…
+    expect(rows[0].is_bid_board_owned).toBe(true);
+    // …but the live idempotency key survived.
+    expect(rows[0].synchub_bid_board_id).toBe("bb-live");
+  });
+
   // Re-attachment after "Move back to Opportunity" (migration 0200). Detaching is deliberately sticky —
   // it is the ONLY thing stopping the Bid Board export from dragging the deal forward again — so the
   // marker must clear at exactly one moment: when a genuinely NEW Bid Board project is created for the

@@ -82,7 +82,14 @@ async function updateDealPending(
             rfp_override_state = NULL,
             rfp_override_error = NULL,
             updated_at = NOW()
-      WHERE id = $3`,
+      WHERE id = $3
+        -- ROUND GUARD. This job carries a payload snapshot and writes back BY DEAL ID, so without it a
+        -- delivery that was already in flight repopulates an RFP cycle that has since been cleared —
+        -- "Move back to Opportunity" nulls the whole cycle, and a non-null status is precisely what
+        -- re-arms the bid-board-created resurrection guard, letting a later callback re-attach a deal
+        -- the operator deliberately disconnected. Only a deal still AWAITING this delivery may be
+        -- advanced by it; pending is included so an idempotent replay can still refresh the request id.
+        AND rfp_approval_status IN ('pending_outbox', 'pending')`,
     [body.requestId ?? body.id ?? null, body.token ?? null, dealId]
   );
 }
@@ -100,7 +107,10 @@ async function updateDealConflict(
             rfp_conflict_with = $2::jsonb,
             rfp_last_attempt_error = NULL,
             updated_at = NOW()
-      WHERE id = $3`,
+      WHERE id = $3
+        -- Same round guard as the success path: a conflict verdict for a cycle that no longer exists
+        -- must not resurrect it as 'conflict'.
+        AND rfp_approval_status IN ('pending_outbox', 'pending')`,
     [body.error ?? "conflict", JSON.stringify(body.conflict ?? body), dealId]
   );
 }
@@ -133,6 +143,24 @@ export async function handleRfpRequestDelivery(
   }
 
   const schemaName = await resolveOfficeSchema(db, officeId);
+
+  // Re-read before POSTing. The write-back guards below stop a stale delivery from corrupting the deal,
+  // but only skipping the request stops it from creating an ORPHAN RFP submission in SyncHub for a deal
+  // whose cycle was cancelled — one the operator would then have to chase down externally. The server
+  // cancels still-queued jobs inside the move-back transaction; this covers the job it could not reach
+  // because the worker had already claimed it.
+  const current = await db.query(
+    `SELECT rfp_approval_status FROM ${quoteIdent(schemaName)}.deals WHERE id = $1`,
+    [payload.dealId]
+  );
+  const currentStatus = current.rows[0]?.rfp_approval_status ?? null;
+  if (current.rows.length > 0 && currentStatus !== "pending_outbox" && currentStatus !== "pending") {
+    console.info(
+      `[Worker:rfp_request_delivery] Skipping delivery for deal ${payload.dealId}: RFP cycle is no longer awaiting delivery (status=${currentStatus ?? "cleared"})`
+    );
+    return;
+  }
+
   const rawBody = JSON.stringify(payload.body);
   let response: Response;
   try {

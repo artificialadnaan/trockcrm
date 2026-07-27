@@ -181,6 +181,14 @@ export const deals = pgTable(
     // afterwards can reconstruct it. The preserved procore/synchub identity is not a substitute — most
     // Bid Board linked deals in prod carry neither. Drives the standing "delete this project from the
     // Bid Board" reminder, which must not appear on a CRM-only deal and must not vanish on a real one.
+    //
+    // SEMANTIC (the field name implies neither, so it is stated here): "was there a real Bid Board
+    // project at the moment this deal was DISCONNECTED" — a property of the RETIRED project, not of the
+    // deal's live state and not "was ever linked at any point in its history". A repeat detach
+    // therefore preserves the stored answer rather than recomputing it, and only a genuine
+    // re-attachment (the internal-RFP bid-board-created callback) resets it to NULL so the next detach
+    // computes fresh. Those two readings cannot diverge today — a detached deal cannot become linked
+    // again without passing through that callback — which is why preserving is safe.
     bidBoardDetachedWasLinked: boolean("bid_board_detached_was_linked"),
     // Assigned PM is not present in the Bid Board export; role polling can populate this after portfolio handoff.
     bidBoardAssignedPm: text("bid_board_assigned_pm"),

@@ -506,19 +506,12 @@ export function DealDetailPage() {
 
   const currentStageSlug = currentStage?.slug ?? "";
   const isOpportunityStage = canonicalCurrentStageSlug === "opportunity";
-  // Client-side mirror of the server's isDealBidBoardLinked: is there still a Bid Board footprint to
-  // sever? Detached wins over everything (the identity columns are deliberately preserved through a
-  // detach, so they must not read as "still linked"). Used only to decide whether the move-back menu
-  // item is a no-op; the dialog's server preview remains authoritative.
-  const isDealStillBidBoardLinked =
-    !deal?.bidBoardDetachedAt &&
-    Boolean(
-      deal?.bidBoardOwnership?.isOwned ||
-        deal?.isBidBoardOwned ||
-        deal?.procoreBidId ||
-        deal?.bidBoardProjectNumber ||
-        deal?.bidBoardLinkedAt
-    );
+  // The SERVER's linkage answer, not a client re-derivation. The first version of this guard rebuilt
+  // the predicate here and promptly drifted — it omitted synchub_bid_board_id and read_only_synced_at,
+  // so a SyncHub-created deal that had been walked backward could reach a stable-id-only state where
+  // the next webhook could still reclaim it while the UI hid the only action that would stop that.
+  // buildBidBoardOwnershipState now publishes isBidBoardLinked from the same test the service uses.
+  const isDealStillBidBoardLinked = Boolean(deal?.bidBoardOwnership?.isBidBoardLinked);
   const opportunityStage = dealStages.find(
     (stage) =>
       stage.slug === "opportunity" &&

@@ -1102,16 +1102,25 @@ internalRfpRoutes.post(
                   bid_board_detached_by = NULL,
                   bid_board_detach_reason = NULL,
                   bid_board_detached_was_linked = NULL,
-                  -- RETIRE THE OLD PROJECT'S STABLE IDENTITY. procore_bid_id above is being repointed at
-                  -- the NEW Bid Board project, but synchub_bid_board_id would still name the OLD one, and
-                  -- /opportunities 409s when the id it finds by procore_bid_id disagrees with the incoming
-                  -- bid_board_id ("conflicts with the existing Procore Bid mapping") — permanently, since
-                  -- nothing else ever rewrites it. That became reachable the moment the skipped_detached
-                  -- path started recording the id while a deal was detached. Clearing it is safe here
-                  -- precisely BECAUSE procore_bid_id is set in the same statement: the deal stays findable
-                  -- through the documented Procore fallback, which is the path that legitimately backfills
-                  -- a NULL stable id, so the new project's first push adopts the deal instead of failing.
-                  synchub_bid_board_id = NULL,
+                  -- RETIRE THE OLD PROJECT'S STABLE IDENTITY — but ONLY on a genuine RE-ATTACHMENT.
+                  --
+                  -- When this callback re-links a deal that was moved back to Opportunity, procore_bid_id
+                  -- above is repointed at the NEW project while synchub_bid_board_id would still name the
+                  -- OLD one, and /opportunities then 409s forever on the mismatch it finds through the
+                  -- Procore fallback ("conflicts with the existing Procore Bid mapping"). Clearing it is
+                  -- safe THERE precisely because procore_bid_id is set in the same statement, so the deal
+                  -- stays findable through the fallback that legitimately backfills a NULL stable id.
+                  --
+                  -- The CASE is what keeps that scoped. This statement also runs for ordinary first-time
+                  -- and repair linkages, where the WHERE is satisfied by a status or bid_board_linked_at
+                  -- change alone; clearing the id there would destroy a LIVE idempotency key, and the next
+                  -- push that legitimately omits the optional procore_bid_id would miss the deal and INSERT
+                  -- the twin this whole design exists to prevent. The detach marker is the only evidence
+                  -- that the stored id belongs to a retired project rather than the current one.
+                  synchub_bid_board_id = CASE
+                    WHEN bid_board_detached_at IS NOT NULL THEN NULL
+                    ELSE synchub_bid_board_id
+                  END,
                   updated_at = NOW()
             WHERE id = $3
               -- a re-confirmed denial is terminal; never let a (delayed) success callback override it
@@ -1189,8 +1198,10 @@ internalRfpRoutes.post(
                     bidBoardDetachReason: { from: found.deal.bid_board_detach_reason ?? null, to: null },
                   }
                 : {}),
-              // Retiring the old project's stable identity is part of the same re-attachment.
-              ...(found.deal.synchub_bid_board_id
+              // Retiring the old project's stable identity is part of the same re-attachment — so it is
+              // recorded on exactly the rows where the CASE above actually cleared it, never on an
+              // ordinary linkage that kept its live id.
+              ...(found.deal.bid_board_detached_at && found.deal.synchub_bid_board_id
                 ? { synchubBidBoardId: { from: found.deal.synchub_bid_board_id, to: null } }
                 : {}),
             },

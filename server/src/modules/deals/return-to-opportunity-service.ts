@@ -97,7 +97,11 @@ function buildBidBoardDetachUpdate(
   userId: string,
   reason: string,
   now: Date,
-  wasBidBoardLinked: boolean
+  wasBidBoardLinked: boolean,
+  /** True when the deal already carried a detach marker — i.e. this is a REPEAT detach. */
+  alreadyDetached: boolean,
+  /** The answer an EARLIER detach of this same deal stored; authoritative on a repeat. */
+  previouslyDetachedFromLinkedProject: boolean
 ) {
   return {
     bidBoardDetachedAt: now,
@@ -109,7 +113,26 @@ function buildBidBoardDetachUpdate(
     // procore/synchub identity is not a stand-in, because most Bid Board linked deals in prod carry
     // neither. Without this the standing "delete the project from the Bid Board" reminder would
     // disappear on reload for exactly the deals that most need it.
-    bidBoardDetachedWasLinked: wasBidBoardLinked,
+    //
+    // SEMANTIC: "was there a real Bid Board project when this deal was disconnected?" — a property of
+    // the retired project, not of the deal's live state. So a FIRST detach computes it, and a REPEAT
+    // detach (detach -> advance the stage by hand -> move back again) PRESERVES the stored answer.
+    //
+    // Without that, a repeat detach silently downgrades a true to false: isDealBidBoardLinked() answers
+    // false whenever the marker is already set, purely because it is set — so the standing "delete the
+    // project from the Bid Board" reminder would vanish for exactly the deals whose project is still
+    // sitting there. (Reachable because the round-5 narrowing of isReturnToOpportunityNoOp deliberately
+    // re-allows the action on an already-detached deal that has since gained money.)
+    //
+    // "Preserve" and "sticky-once-true" coincide here, and provably so: a deal cannot become linked
+    // again while it stays detached — every ingress skips detached deals, the forward stage move no
+    // longer re-attaches, and the only path that does (the bid-board-created callback) resets this
+    // column to NULL, so the next detach computes fresh. The webhook's identity backfill cannot bridge
+    // the gap either: it can only find a deal that already carries an identity, which is itself enough
+    // to have made the first answer true. Written as preserve-the-stored-answer because that is the
+    // intent; if a future path ever does re-link a still-detached deal, this is the line to revisit.
+    bidBoardDetachedWasLinked:
+      alreadyDetached ? previouslyDetachedFromLinkedProject : wasBidBoardLinked,
     isBidBoardOwned: false,
     bidBoardStageSlug: null,
     bidBoardStageFamily: null,
@@ -163,6 +186,41 @@ function buildRfpCycleReset() {
     rfpOverrideReviewedBy: null,
     rfpBidboardAttemptAt: null,
   } as const;
+}
+
+/**
+ * Neutralize RFP work still QUEUED for this deal, in the same transaction that clears the cycle.
+ *
+ * `cancelPendingRfp` — the sibling escape hatch this action copies its RFP field list from — refuses to
+ * cancel an in-flight `pending_outbox`/`pending` request outright, in its own words because that "would
+ * race the delivery worker / approval callbacks". This action cannot refuse (a Won deal has to be
+ * movable), so it defuses the race instead: `handleRfpRequestDelivery` POSTs its payload without
+ * re-reading the deal and then writes `rfp_approval_status = 'pending'` back BY DEAL ID, repopulating
+ * the cycle we just cleared — and a non-null status is exactly what re-arms the `bid-board-created`
+ * resurrection guard, letting a later callback re-attach the deal.
+ *
+ * `rfp_bidboard_create` is cancelled for the same reason one step further along: it would create a Bid
+ * Board project for a deal the operator has just disconnected, handing them a second one to delete.
+ *
+ * Marked `completed`, NOT `dead`: the dead-letter sweep claims dead `rfp_request_delivery` rows and
+ * stamps the deal `send_failed` — repopulating the very field we are clearing. The payload marker keeps
+ * a cancelled job distinguishable from a genuinely delivered one.
+ *
+ * Only `pending` rows are reachable here; a job the worker has already CLAIMED is beyond this
+ * transaction, which is why the worker also refuses to write RFP state back onto a deal that is no
+ * longer awaiting delivery (worker/src/jobs/rfp-request-delivery.ts). Neither half suffices alone.
+ */
+async function cancelQueuedRfpJobs(tenantDb: TenantDb, dealId: string): Promise<number> {
+  const result = await tenantDb.execute(sql`
+    UPDATE public.job_queue
+       SET status = 'completed',
+           completed_at = NOW(),
+           payload = jsonb_set(payload, '{cancelledBy}', '"return_to_opportunity"'::jsonb, true)
+     WHERE job_type IN ('rfp_request_delivery', 'rfp_bidboard_create')
+       AND status = 'pending'
+       AND payload->>'dealId' = ${dealId}
+  `);
+  return (result as unknown as { rowCount?: number }).rowCount ?? 0;
 }
 
 /**
@@ -486,7 +544,14 @@ export async function returnDealToOpportunity(
   const contractSignedDateCleared = signedDate;
 
   const detachUpdate = {
-    ...buildBidBoardDetachUpdate(input.userId, reason, now, wasBidBoardLinked),
+    ...buildBidBoardDetachUpdate(
+      input.userId,
+      reason,
+      now,
+      wasBidBoardLinked,
+      deal.bidBoardDetachedAt != null,
+      deal.bidBoardDetachedWasLinked === true
+    ),
     ...buildRfpCycleReset(),
     ...(eligibility.voidsCommission
       ? { contractSignedDate: null, contractSignedAt: null }
@@ -514,6 +579,12 @@ export async function returnDealToOpportunity(
       "MOVE_BACK_STALE"
     );
   }
+
+  // Clearing the RFP columns is not enough on its own: a queued delivery job would post the stale
+  // payload and write the cycle straight back. Cancelled in THIS transaction so it commits atomically
+  // with the reset — a job cancelled but a reset that rolled back, or vice versa, is the incoherent
+  // outcome. See cancelQueuedRfpJobs for why the worker carries the other half of this guard.
+  const cancelledRfpJobs = await cancelQueuedRfpJobs(tenantDb, input.dealId);
 
   // Void booked commission through the SAME audited helper the contract-date clear uses
   // (setDealContractSignedDate's date→null branch). deal_signed_commissions has no soft-delete column
@@ -577,7 +648,13 @@ export async function returnDealToOpportunity(
           from: currentStage?.name ?? currentStage?.slug ?? deal.stageId,
           to: opportunityStage.name ?? opportunityStage.slug,
         },
-        bidBoardDetachedAt: { from: null, to: now.toISOString() },
+        // Read the PRIOR value; a hardcoded null asserted "this deal had never been detached" on every
+        // repeat move-back, contradicting the adjacent isBidBoardOwned field which reads live state. On
+        // a feature justified by auditability, a false `from` is worse than an absent one.
+        bidBoardDetachedAt: {
+          from: deal.bidBoardDetachedAt ? deal.bidBoardDetachedAt.toISOString() : null,
+          to: now.toISOString(),
+        },
         isBidBoardOwned: { from: deal.isBidBoardOwned, to: false },
         ...(commissionRowsVoided > 0
           ? { commissionVoidedTotal: { from: commission.total, to: "0" } }

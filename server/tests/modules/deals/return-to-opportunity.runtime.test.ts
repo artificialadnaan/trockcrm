@@ -816,6 +816,134 @@ describe("returnDealToOpportunity — permissions and state blocks", () => {
   });
 });
 
+// Clearing the RFP columns is not enough on its own. handleRfpRequestDelivery POSTs its payload without
+// re-reading the deal and writes rfp_approval_status back BY DEAL ID, so a queued delivery repopulates
+// the cycle we just cleared — and a non-null status is exactly what re-arms the bid-board-created
+// resurrection guard. cancelPendingRfp (whose field list this action copies) sidesteps the same race by
+// REFUSING in-flight requests; this action cannot refuse, so it cancels the work instead.
+// A REPEAT move-back (detach -> advance the stage by hand -> move back again) is reachable because the
+// round-5 narrowing of isReturnToOpportunityNoOp deliberately re-allows the action on an already-detached
+// deal that has since gained money. isDealBidBoardLinked() answers false whenever the marker is set —
+// purely because it is set — so a naive recompute would downgrade the persisted answer.
+describe("returnDealToOpportunity — a repeat detach preserves what the first one recorded", () => {
+  it("keeps bid_board_detached_was_linked true, so the standing reminder survives", async () => {
+    const D = U("d701");
+    await seedBidBoardDeal(D);
+
+    await returnDealToOpportunity(tdb, {
+      dealId: D, userId: ADMIN, userRole: "admin", reason: "First detach", auditContext,
+    });
+    expect((await dealRow(D)).bid_board_detached_was_linked).toBe(true);
+
+    // Walk it forward by hand (stays detached — the handoff block is skipped), then move it back again.
+    await pg.exec(`UPDATE public.deals SET stage_id = '${ESTIMATING_STAGE}' WHERE id = '${D}'`);
+    await returnDealToOpportunity(tdb, {
+      dealId: D, userId: ADMIN, userRole: "admin", reason: "Second detach", auditContext,
+    });
+
+    const row = await dealRow(D);
+    // The flag describes the RETIRED PROJECT, not the deal's live state, so it must not be recomputed.
+    expect(row.bid_board_detached_was_linked).toBe(true);
+    expect(row.bid_board_detach_reason).toBe("Second detach");
+  });
+
+  it("records the PRIOR detach timestamp in the audit instead of asserting null", async () => {
+    const D = U("d702");
+    await seedBidBoardDeal(D);
+    await returnDealToOpportunity(tdb, {
+      dealId: D, userId: ADMIN, userRole: "admin", reason: "First detach", auditContext,
+    });
+    const firstDetachedAt = (await dealRow(D)).bid_board_detached_at;
+
+    await pg.exec(`UPDATE public.deals SET stage_id = '${ESTIMATING_STAGE}' WHERE id = '${D}'`);
+    await returnDealToOpportunity(tdb, {
+      dealId: D, userId: ADMIN, userRole: "admin", reason: "Second detach", auditContext,
+    });
+
+    const { rows: audits } = await pg.query<{ changes: Record<string, { from: unknown; to: unknown }> }>(
+      `SELECT changes FROM public.audit_log
+        WHERE record_id = '${D}' AND table_name = 'deals'
+          AND full_row ->> 'source' = 'return_to_opportunity'
+        ORDER BY created_at`
+    );
+    expect(audits).toHaveLength(2);
+    // A hardcoded null claimed "this deal had never been detached" on every repeat — false, and
+    // inconsistent with the adjacent isBidBoardOwned field which reads live state.
+    expect(audits[0].changes.bidBoardDetachedAt.from).toBeNull();
+    expect(audits[1].changes.bidBoardDetachedAt.from).not.toBeNull();
+    // Within a second of the first detach (the stored timestamptz round-trips at lower precision than
+    // the ISO string the audit records) — the point is that it is the REAL prior value, not null.
+    const recordedFrom = new Date(String(audits[1].changes.bidBoardDetachedAt.from)).getTime();
+    expect(Math.abs(recordedFrom - new Date(String(firstDetachedAt)).getTime())).toBeLessThan(1000);
+  });
+});
+
+describe("returnDealToOpportunity — queued RFP work is cancelled with the cycle", () => {
+  async function queueRfpJob(dealId: string, jobType: string, status = "pending") {
+    await pg.exec(
+      `INSERT INTO public.job_queue (job_type, payload, status, run_after)
+       VALUES ('${jobType}', '{"dealId":"${dealId}"}'::jsonb, '${status}', now())`
+    );
+  }
+  async function jobRows(dealId: string) {
+    const { rows } = await pg.query<{ job_type: string; status: string; payload: Record<string, unknown> }>(
+      `SELECT job_type, status, payload FROM public.job_queue
+        WHERE payload->>'dealId' = '${dealId}'
+          AND job_type IN ('rfp_request_delivery', 'rfp_bidboard_create')
+        ORDER BY job_type`
+    );
+    return rows;
+  }
+
+  it("cancels the queued delivery and bid-board-create jobs so neither can resurrect the cycle", async () => {
+    const D = U("d601");
+    await seedBidBoardDeal(D);
+    await pg.exec(`UPDATE public.deals SET rfp_approval_status = 'pending_outbox' WHERE id = '${D}'`);
+    await queueRfpJob(D, "rfp_request_delivery");
+    await queueRfpJob(D, "rfp_bidboard_create");
+
+    await returnDealToOpportunity(tdb, {
+      dealId: D,
+      userId: ADMIN,
+      userRole: "admin",
+      reason: "Cancel the in-flight submission",
+      auditContext,
+    });
+
+    const jobs = await jobRows(D);
+    expect(jobs).toHaveLength(2);
+    for (const job of jobs) {
+      // 'completed', never 'dead': the dead-letter sweep claims dead rfp_request_delivery rows and
+      // stamps the deal send_failed — repopulating the very field this action clears.
+      expect(job.status).toBe("completed");
+      expect(job.payload.cancelledBy).toBe("return_to_opportunity");
+    }
+    expect((await dealRow(D)).rfp_approval_status).toBeNull();
+  });
+
+  it("leaves another deal's queued jobs and this deal's already-claimed job alone", async () => {
+    const D = U("d602");
+    const OTHER = U("d603");
+    await seedBidBoardDeal(D);
+    await seedBidBoardDeal(OTHER);
+    await queueRfpJob(OTHER, "rfp_request_delivery");
+    // Already claimed by a worker — beyond this transaction's reach, which is why the worker carries
+    // the other half of the guard.
+    await queueRfpJob(D, "rfp_request_delivery", "processing");
+
+    await returnDealToOpportunity(tdb, {
+      dealId: D,
+      userId: ADMIN,
+      userRole: "admin",
+      reason: "Only cancel what is still queued",
+      auditContext,
+    });
+
+    expect((await jobRows(OTHER))[0].status).toBe("pending");
+    expect((await jobRows(D))[0].status).toBe("processing");
+  });
+});
+
 describe("returnDealToOpportunity — the deal can actually be used again afterwards", () => {
   it("satisfies every condition of the trigger-RFP atomic reservation", async () => {
     const D = U("d401");
@@ -1179,6 +1307,46 @@ describe("buildBidBoardOwnershipState — was there a project behind the detach?
       synchubBidBoardId: null,
     });
     expect(state.detachedFromLinkedProject).toBe(true);
+  });
+
+  // The menu guard consumes THIS flag rather than re-deriving linkage client-side. The first client
+  // copy drifted immediately — it omitted synchub_bid_board_id and read_only_synced_at, so a
+  // SyncHub-created deal walked backward into a stable-id-only state had the action hidden even though
+  // the next webhook could still reclaim it.
+  it.each([
+    ["synchubBidBoardId only", { synchubBidBoardId: "bb-1" }],
+    ["readOnlySyncedAt only", { readOnlySyncedAt: new Date("2026-05-01T00:00:00Z") }],
+    ["bidBoardProjectNumber only", { bidBoardProjectNumber: "DFW-4-11826-ab" }],
+    ["procoreBidId only", { procoreBidId: 887766 }],
+  ])("publishes isBidBoardLinked for a deal whose only footprint is %s", (_label, footprint) => {
+    const state = buildBidBoardOwnershipState({
+      isBidBoardOwned: false,
+      workflowRoute: "normal",
+      bidBoardDetachedAt: null,
+      ...footprint,
+    });
+    expect(state.isBidBoardLinked).toBe(true);
+  });
+
+  it("reports a detached deal as NOT linked, whatever identity it kept", () => {
+    const state = buildBidBoardOwnershipState({
+      isBidBoardOwned: false,
+      workflowRoute: "normal",
+      bidBoardDetachedAt: new Date("2026-07-20T12:00:00Z"),
+      bidBoardDetachedWasLinked: true,
+      procoreBidId: 887766,
+      synchubBidBoardId: "bb-1",
+    });
+    expect(state.isBidBoardLinked).toBe(false);
+  });
+
+  it("reports a CRM-only deal as not linked", () => {
+    const state = buildBidBoardOwnershipState({
+      isBidBoardOwned: false,
+      workflowRoute: "normal",
+      bidBoardDetachedAt: null,
+    });
+    expect(state.isBidBoardLinked).toBe(false);
   });
 
   it("is false on a deal that was never detached, whatever identity it carries", () => {

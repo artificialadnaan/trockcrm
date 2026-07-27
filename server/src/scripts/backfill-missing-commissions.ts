@@ -33,15 +33,18 @@
 import pg from "pg";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-postgres";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import * as schema from "@trock-crm/shared/schema";
 import { LOST_DEAL_STAGE_SLUGS } from "@trock-crm/shared/types";
 import {
   calculateCommissionForDeal,
+  effectiveSignedDateOf,
   type CalculateCommissionResult,
   type CalculateCommissionStatus,
 } from "../modules/commissions/service.js";
+import { lockDealCommissions } from "../modules/commissions/deal-commission-lock.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 type QueryFn = (sql: string, params?: unknown[]) => Promise<{ rows: Record<string, unknown>[] }>;
@@ -131,6 +134,34 @@ export async function findBackfillCandidates(query: QueryFn): Promise<BackfillCa
   }));
 }
 
+/**
+ * Take this deal's commission lock, then re-validate the CACHED candidate against the live row.
+ *
+ * The candidate list is a snapshot: its `signedDate` was read by the scan, possibly minutes earlier.
+ * "Move back to Opportunity" voids a deal's commission and clears its signed date under this same
+ * advisory lock, so without participating in the protocol the backfill can re-INSERT owner and additive
+ * rows straight after that delete — leaving a payout on an Opportunity deal that the operator was told
+ * had been voided. Locking FIRST (before any row lock, per deal-commission-lock.ts) and re-reading
+ * afterwards means we either run before the void, or see the cleared date and skip.
+ *
+ * Returns the LIVE signed date to calculate from, or null when the deal is no longer a candidate.
+ */
+async function lockAndRevalidateSignedDate(
+  tx: TenantDb,
+  candidate: BackfillCandidate
+): Promise<string | null> {
+  await lockDealCommissions(tx, candidate.dealId);
+  const [live] = await tx
+    .select({
+      contractSignedAt: schema.deals.contractSignedAt,
+      contractSignedDate: schema.deals.contractSignedDate,
+    })
+    .from(schema.deals)
+    .where(eq(schema.deals.id, candidate.dealId))
+    .limit(1);
+  return live ? effectiveSignedDateOf(live) : null;
+}
+
 /** Run (dry-run rolls back; execute commits) calculateCommissionForDeal for one candidate. */
 async function runOne(
   tenantDb: TenantDb,
@@ -148,14 +179,30 @@ async function runOne(
     // assigned rep, which is a real user — so the throwaway INSERT doesn't trip the created_by FK.
     triggeredByUserId: actorUserId ?? candidate.repId,
   };
+  // Reused by both branches so the dry-run stays a faithful rehearsal of the write, lock included.
+  const calcUnderLock = async (tx: TenantDb): Promise<CalculateCommissionResult> => {
+    const liveSignedDate = await lockAndRevalidateSignedDate(tx, candidate);
+    if (!liveSignedDate) {
+      // The deal stopped being signed between the scan and now — almost certainly a commission void
+      // (the contract-date clear, or "Move back to Opportunity"). Re-minting here would resurrect the
+      // payout that action just destroyed. Reported as skipped_no_value rather than a new status so the
+      // tally stays total; the warning is what tells the operator it was a live change, not bad data.
+      console.warn(
+        `[backfill] Skipping deal ${candidate.dealNumber ?? candidate.dealId}: contract-signed date was cleared after the scan (commission likely voided) — not re-minting.`
+      );
+      return { status: "skipped_no_value" };
+    }
+    return calculateCommissionForDeal(tx, { ...input, contractSignedDate: liveSignedDate });
+  };
+
   if (execute) {
-    return tenantDb.transaction((tx) => calculateCommissionForDeal(tx, input));
+    return tenantDb.transaction(calcUnderLock);
   }
   // Faithful dry-run: run the real calc, capture the would-be result, then roll back.
   let captured: CalculateCommissionResult = { status: "skipped_no_rep" };
   try {
     await tenantDb.transaction(async (tx) => {
-      captured = await calculateCommissionForDeal(tx, input);
+      captured = await calcUnderLock(tx);
       throw DRY_RUN_ROLLBACK;
     });
   } catch (err) {

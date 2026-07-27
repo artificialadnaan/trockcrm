@@ -280,6 +280,11 @@ export interface DealDetail extends Deal {
      * the detach nulls bidBoardLinkedAt and bidBoardProjectNumber.
      */
     detachedFromLinkedProject?: boolean;
+    /**
+     * Does the deal still have a live Bid Board footprint to sever? Server-derived from the same
+     * predicate the return-to-opportunity service uses, so the menu item and the route agree.
+     */
+    isBidBoardLinked?: boolean;
   };
   stageHistory: Array<{
     id: string;
@@ -913,6 +918,7 @@ export async function preflightStageCheck(dealId: string, targetStageId: string)
       message: string;
       detachedAt?: string | null;
       detachedFromLinkedProject?: boolean;
+      isBidBoardLinked?: boolean;
     } | null;
   }>(`/deals/${dealId}/stage/preflight`, {
     method: "POST",
