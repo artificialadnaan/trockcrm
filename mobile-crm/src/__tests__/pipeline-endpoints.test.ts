@@ -50,9 +50,20 @@ describe("GET /deals/pipeline", () => {
     // megabytes on cellular for a board that shows a handful of cards at a time.
     const { fetcher, calls } = recording({ pipelineColumns: [], terminalStages: [] });
     await pipeline.getPipeline(fetcher, { scope: "mine" });
-    const limit = (calls[0].opts.query as Record<string, number>).previewLimit;
-    expect(limit).toBeLessThanOrEqual(25);
-    expect(limit).toBeGreaterThan(0);
+    // The EXACT value, not a range. A bound of "<= 25 and > 0" passes for 1 as happily as for 15, so it
+    // would not notice the cap being changed to something that guts the board or bloats the payload.
+    expect((calls[0].opts.query as Record<string, number>).previewLimit).toBe(15);
+  });
+
+  it("asks for ALL-TIME Won and Lost, in the spelling the route reads", async () => {
+    // Without these the server windows both terminal columns to the last 30 days and says nothing about
+    // it, so the board reports a month's Won total as if it were the whole thing. snake_case because the
+    // route tests `req.query.won_all_time === "true"` and ignores camelCase.
+    const { fetcher, calls } = recording({ pipelineColumns: [], terminalStages: [] });
+    await pipeline.getPipeline(fetcher, { scope: "mine" });
+    const query = calls[0].opts.query as Record<string, string>;
+    expect(query.won_all_time).toBe("true");
+    expect(query.lost_all_time).toBe("true");
   });
 
   it("degrades to empty arrays rather than undefined", async () => {
@@ -116,31 +127,46 @@ describe("canMoveStage", () => {
 
 describe("lost-stage detection", () => {
   /**
-   * The server requires a reason id AND non-blank notes for a Lost move. If the screen does not
-   * recognise the target as Lost it collects neither, and the rep gets a rejection naming fields they
-   * were never shown.
+   * Exercised against the PRODUCTION set (pipeline.isLostOutcomeStageSlug), not a copy.
    *
-   * shared/src/types/workflow.ts:313-315 defines the set as the CANONICAL slug plus four legacy
-   * aliases. The first mirror here had the four aliases and omitted the canonical one — which is the
-   * slug a current pipeline config actually uses, so it failed on the common case and worked on the
-   * legacy ones.
+   * The previous version of this block declared its own `LOST` array and then asserted things like
+   * `expect(LOST.includes(slug)).toBe(true)` — a literal compared with itself. It could not fail, and it
+   * proved it: it went on listing `deal_canceled` as a Lost slug for two commits after the shipping set
+   * had dropped it, which is the exact drift a mirror test exists to catch.
+   *
+   * The server requires a reason id AND non-blank notes for these. A screen that does not recognise the
+   * target as Lost collects neither, and the rep gets a rejection naming fields they were never shown.
    */
-  const LOST = ["lost", "deal_canceled", "production_lost", "service_lost", "closed_lost"];
-
-  it.each(LOST)("treats %s as a Lost move", (slug) => {
-    expect(LOST.includes(slug)).toBe(true);
-  });
+  it.each(["lost", "production_lost", "service_lost", "closed_lost"])(
+    "treats %s as a Lost move",
+    (slug) => {
+      expect(pipeline.isLostOutcomeStageSlug(slug)).toBe(true);
+    },
+  );
 
   it("includes the CANONICAL slug, not just the legacy aliases", () => {
-    expect(LOST).toContain("lost");
+    // The first mirror had all four aliases and omitted this one — the slug current pipelines actually
+    // use — so it failed on the common case and worked on the legacy ones.
+    expect(pipeline.isLostOutcomeStageSlug("lost")).toBe(true);
+  });
+
+  it("excludes deal_canceled, which the stage-change route does NOT accept as a Lost outcome", () => {
+    // It IS lost for REPORTING (shared LOST_DEAL_STAGE_SLUGS) and is not a Lost outcome for this
+    // REQUEST. Prompting on it collected a reason and notes the server then discarded.
+    expect(pipeline.isLostOutcomeStageSlug("deal_canceled")).toBe(false);
   });
 
   it.each(["won", "closed_won", "estimating", "opportunity", "contract"])(
     "does not treat %s as Lost",
     (slug) => {
-      expect(LOST.includes(slug)).toBe(false);
+      expect(pipeline.isLostOutcomeStageSlug(slug)).toBe(false);
     },
   );
+
+  it("is safe on a missing slug rather than throwing inside a render", () => {
+    expect(pipeline.isLostOutcomeStageSlug(null)).toBe(false);
+    expect(pipeline.isLostOutcomeStageSlug(undefined)).toBe(false);
+  });
 });
 
 describe("stageMoveLock", () => {
@@ -163,5 +189,63 @@ describe("stageMoveLock", () => {
     const changeOrder = { isChangeOrder: true, assignedRepId: "u1" };
     expect(pipeline.canMoveStage(changeOrder, "u1")).toBe(true);
     expect(pipeline.stageMoveLock(changeOrder).locked).toBe(true);
+  });
+});
+
+describe("getStagePage wire contract", () => {
+  /**
+   * Every name here was wrong on the first attempt, and the drill-down rendered "Nothing here" beside a
+   * non-zero header total. Pinned against the server rather than against the sibling endpoints, which
+   * spell all three differently.
+   *
+   * NOTE ON `pageSize`: a review suggested this parameter should be `limit`. It should not — the route's
+   * readStageInput reads `req.query.pageSize` (deals/routes.ts:627) and never looks at `limit`, so
+   * sending `limit` is silently ignored and every page comes back at the server default of 25. Verified
+   * against the handler before writing this, because that is exactly the mistake being pinned.
+   */
+  it("reads rows, NOT deals — the field that made the drill-down look empty", async () => {
+    const { fetcher } = recording({
+      rows: [{ id: "d1", name: "Palm Villas" }],
+      pagination: { page: 1, pageSize: 25, total: 40, totalPages: 2 },
+      summary: { count: 30, activeCount: 30, totalCount: 40 },
+    });
+    const res = await pipeline.getStagePage(fetcher, "stage-1", { scope: "mine" });
+    expect(res.deals).toHaveLength(1);
+    expect(res.deals[0]).toMatchObject({ name: "Palm Villas" });
+  });
+
+  it("sends pageSize, the only paging name the route reads", async () => {
+    const { fetcher, calls } = recording({ rows: [] });
+    await pipeline.getStagePage(fetcher, "stage-1", { scope: "all", page: 3, pageSize: 50 });
+    const query = calls[0].opts.query as Record<string, unknown>;
+    expect(query.pageSize).toBe(50);
+    expect(query.page).toBe(3);
+    expect(query.scope).toBe("all");
+    expect(query.limit).toBeUndefined();
+  });
+
+  it("drops a non-positive page rather than sending page=0", async () => {
+    // apiFetch's query builder strips undefined but KEEPS 0, and page=0 is not a valid page.
+    const { fetcher, calls } = recording({ rows: [] });
+    await pipeline.getStagePage(fetcher, "stage-1", { scope: "mine", page: 0 });
+    expect((calls[0].opts.query as Record<string, unknown>).page).toBeUndefined();
+  });
+
+  it("takes the total from summary.totalCount, which counts held cards too", async () => {
+    // summary.count is ACTIVE-only; using it would under-report the very truncation this screen exists
+    // to expose.
+    const { fetcher } = recording({
+      rows: [],
+      summary: { count: 30, activeCount: 30, totalCount: 40 },
+    });
+    const res = await pipeline.getStagePage(fetcher, "stage-1", { scope: "mine" });
+    expect(res.totalCount).toBe(40);
+  });
+
+  it("degrades to an empty list rather than undefined", async () => {
+    const { fetcher } = recording({});
+    const res = await pipeline.getStagePage(fetcher, "stage-1", { scope: "mine" });
+    expect(res.deals).toEqual([]);
+    expect(res.totalCount).toBeUndefined();
   });
 });

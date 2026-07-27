@@ -67,6 +67,21 @@ export default function PipelineBoardScreen() {
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
+      {/* An explicit way out. The deals Stack sets headerShown: false, so the ONLY way back off this
+          screen was the iOS edge-swipe — which switch-control and other assistive-technology users
+          cannot perform, leaving them stuck on the board. The detail and stage-list screens already
+          carry one; this was the screen that didn't. */}
+      <Pressable
+        testID="board-back"
+        onPress={() => router.back()}
+        accessibilityRole="button"
+        accessibilityLabel="Back to deals"
+        hitSlop={8}
+        style={styles.backRow}
+      >
+        <Text style={styles.back}>‹ Deals</Text>
+      </Pressable>
+
       <View style={styles.scopeRow}>
         {SCOPES.map((s) => (
           <Pressable
@@ -236,6 +251,8 @@ function formatColumnValue(total: number): string {
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: theme.color.surfaceMuted },
+  backRow: { paddingHorizontal: theme.space.lg, paddingTop: theme.space.sm, minHeight: 44, justifyContent: "center" },
+  back: { fontFamily: theme.font.semibold, fontSize: 15, color: theme.color.brandRed },
   scopeRow: {
     flexDirection: "row",
     gap: theme.space.sm,

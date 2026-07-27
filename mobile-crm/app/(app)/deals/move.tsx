@@ -44,38 +44,6 @@ import { theme } from "../../../src/theme/theme";
  * failure at the last step.
  */
 
-/**
- * Slugs the STAGE-CHANGE ROUTE treats as a Lost outcome — the only ones for which it requires a reason
- * id and non-blank notes, and the only ones for which it stores them.
- *
- * Mirrors `isLostOutcomeStage` in server/src/modules/deals/stage-change.ts:74-80, resolved through
- * `toCanonicalTerminalOutcomeSlug` (same file, :44-70). This app cannot import shared (it is deliberately
- * not an npm workspace), so it is a mirror — and getting the mirror right has taken three attempts, each
- * failing differently:
- *
- *   1. All four legacy aliases, omitting the canonical "lost" — so the screen stayed silent on the slug
- *      current pipelines actually use, and the server rejected the move naming fields the rep never saw.
- *   2. Anchored to LOST_DEAL_STAGE_SLUGS (shared/src/types/workflow.ts:313-315). That constant is the
- *      REPORTING classification set — "does this deal count as lost" — and it is deliberately wider,
- *      because historical HubSpot-imported rows carry `deal_canceled` and must still tally as losses.
- *      The stage-change ROUTE does not accept that slug as a Lost outcome, so prompting on it collected
- *      a reason and notes the server then dropped on the floor.
- *
- * The two sets differ on exactly one slug, and only one of them is a request contract. Anchor here.
- *
- * `deal_canceled` is therefore absent ON PURPOSE. It is seeded by no migration and belongs to no live
- * pipeline; it exists so old rows read correctly. Note the web dialog does prompt on it — it derives the
- * flag from the canonical mapping — and has its details discarded just the same. That is a pre-existing
- * server-side gap, not a mobile one, and closing it would make the route start rejecting moves that
- * succeed today, so it is not something to fix from here.
- */
-const LOST_SLUGS = new Set([
-  "lost",
-  "production_lost",
-  "service_lost",
-  "closed_lost",
-]);
-
 /** Common forecast horizons. Deliberately short of 90 days — past that the deal auto-parks as held. */
 const QUICK_CLOSE_DATES = [
   { label: "2 weeks", days: 14 },
@@ -140,13 +108,13 @@ export default function MoveStageScreen() {
     // Only fetched once a Lost target is actually selected — it is a different router mount and most
     // moves never need it.
     enabled: Boolean(targetStage(stagesQuery.data, targetStageId)?.slug &&
-      LOST_SLUGS.has(targetStage(stagesQuery.data, targetStageId)!.slug)),
+      pipelineApi.isLostOutcomeStageSlug(targetStage(stagesQuery.data, targetStageId)!.slug)),
   });
 
   const deal = dealQuery.data;
   const stages = stagesQuery.data ?? [];
   const target = targetStage(stages, targetStageId);
-  const isLostMove = Boolean(target && LOST_SLUGS.has(target.slug));
+  const isLostMove = Boolean(target && pipelineApi.isLostOutcomeStageSlug(target.slug));
 
   // OWNERSHIP, not the preflight verdict. See the module note above.
   const isOwner = deal ? pipelineApi.canMoveStage(deal, session?.user.id) : false;
@@ -213,19 +181,23 @@ export default function MoveStageScreen() {
         lostNotes: isLostMove ? lostNotes.trim() : undefined,
         expectedCloseDate: needsCloseDate && closeDateResolvesGate ? expectedCloseDate : undefined,
       }),
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: qk.deal(scope, dealId) });
-      await queryClient.invalidateQueries({ queryKey: ["deals", scope] });
-      await queryClient.invalidateQueries({ queryKey: ["pipeline", scope] });
-      // The stage drill-down too. It is a SIBLING route that stays mounted underneath this screen when
-      // the move was started from it, so returning goes to a cached list still showing the deal in the
-      // stage it just left — and the destination stage's cached list missing it. Neither key above
-      // matches ["stage-deals", ...], so without this the rep is looking at a board that disagrees with
-      // the move they just made.
-      await queryClient.invalidateQueries({ queryKey: ["stage-deals", scope] });
+    onSuccess: () => {
+      // CONCURRENT, and not awaited before navigating. These four are independent caches; awaiting them
+      // in series held the rep on the move screen for four sequential round trips after the move had
+      // already succeeded, which reads as the button not having worked. Invalidation marks the caches
+      // stale immediately — the refetches can land while the previous screen is already showing.
+      void Promise.all([
+        queryClient.invalidateQueries({ queryKey: qk.deal(scope, dealId) }),
+        queryClient.invalidateQueries({ queryKey: ["deals", scope] }),
+        queryClient.invalidateQueries({ queryKey: ["pipeline", scope] }),
+        queryClient.invalidateQueries({ queryKey: ["stage-deals", scope] }),
+      ]);
+      // ["stage-deals"] is in that list because the drill-down is a SIBLING route that stays mounted
+      // underneath this screen when the move was started from it — without it, returning shows a cached
+      // list with the deal still in the stage it just left.
       router.back();
     },
-    onError: async (err) => {
+    onError: (err) => {
       // A dropped connection on a POST is INDETERMINATE, not a rollback. The request may have reached
       // the server and committed with only the response lost, so "Nothing was changed" is a claim this
       // client is not in a position to make — and a rep who believes it will move the deal a second
@@ -235,10 +207,12 @@ export default function MoveStageScreen() {
           "Lost connection before the server answered — the move may or may not have gone through. " +
             "Check the deal's stage before trying again.",
         );
-        await queryClient.invalidateQueries({ queryKey: qk.deal(scope, dealId) });
-        await queryClient.invalidateQueries({ queryKey: ["deals", scope] });
-        await queryClient.invalidateQueries({ queryKey: ["pipeline", scope] });
-        await queryClient.invalidateQueries({ queryKey: ["stage-deals", scope] });
+        void Promise.all([
+          queryClient.invalidateQueries({ queryKey: qk.deal(scope, dealId) }),
+          queryClient.invalidateQueries({ queryKey: ["deals", scope] }),
+          queryClient.invalidateQueries({ queryKey: ["pipeline", scope] }),
+          queryClient.invalidateQueries({ queryKey: ["stage-deals", scope] }),
+        ]);
         return;
       }
       setSubmitError(err instanceof ApiError ? err.message : "Couldn't move the deal.");
@@ -334,6 +308,14 @@ export default function MoveStageScreen() {
                 placement="top"
               />
             ) : null}
+            {eligibleStageTargets(stages, deal).length === 0 ? (
+              /* Loaded fine, and there is genuinely nowhere to go — every other stage is retired, or
+                 belongs to the other workflow family. An empty grid said nothing at all, leaving the rep
+                 to conclude the screen was broken. */
+              <Text testID="no-stage-targets" style={styles.help}>
+                There are no other stages this deal can move to.
+              </Text>
+            ) : (
             <View style={styles.stageGrid}>
               {eligibleStageTargets(stages, deal).map((s) => (
                 <Pressable
@@ -360,6 +342,7 @@ export default function MoveStageScreen() {
                 </Pressable>
               ))}
             </View>
+            )}
             </>
           )}
 
@@ -488,6 +471,14 @@ export default function MoveStageScreen() {
                   onRetry={() => void lostReasons.refetch()}
                   retrying={lostReasons.isFetching}
                 />
+              ) : (lostReasons.data ?? []).length === 0 ? (
+                /* The lookup succeeded and the office has no reasons configured. The server still
+                   requires a reason id, so this move cannot be completed from here at all — saying so is
+                   the only honest option; an empty grid just leaves Confirm dead with no explanation. */
+                <Text testID="no-lost-reasons" style={styles.help}>
+                  No lost reasons are set up for this office, so a Lost move can&apos;t be completed here.
+                  Ask an admin to add them.
+                </Text>
               ) : (
                 <View style={styles.stageGrid}>
                   {(lostReasons.data ?? []).map((r) => (
@@ -565,11 +556,42 @@ function targetStage(
   return (stages ?? []).find((s) => s.id === id) ?? null;
 }
 
+/**
+ * Rep-facing names for the gate's field keys.
+ *
+ * missingRequirements.fields carries COLUMN names — a rep was being told to supply
+ * "expectedCloseDate" and "awardedAmount", which are not words that appear anywhere else in the product.
+ * Documents and approvals already arrive as prose, so only fields are mapped; anything unrecognised
+ * falls back to a humanised spelling rather than being hidden, because an unlabelled requirement is
+ * still a requirement the rep has to satisfy.
+ */
+const FIELD_LABELS: Record<string, string> = {
+  expectedCloseDate: "Expected close date",
+  awardedAmount: "Awarded amount",
+  bidEstimate: "Bid estimate",
+  ddEstimate: "DD estimate",
+  contractSignedDate: "Contract signed date",
+  primaryContactId: "Primary contact",
+  companyId: "Company",
+  propertyId: "Property",
+  projectTypeId: "Project type",
+  assignedRepId: "Assigned rep",
+  lostReasonId: "Lost reason",
+  lostNotes: "Lost notes",
+};
+
+function fieldLabel(key: string): string {
+  if (FIELD_LABELS[key]) return FIELD_LABELS[key];
+  // camelCase / snake_case → "Sentence case", so an unmapped key still reads as English.
+  const spaced = key.replace(/_/g, " ").replace(/([a-z0-9])([A-Z])/g, "$1 $2").trim();
+  return spaced.charAt(0).toUpperCase() + spaced.slice(1).toLowerCase();
+}
+
 /** What the gate is still waiting on, if anything. */
 function MissingList({ verdict }: { verdict: pipelineApi.StagePreflight }) {
   const missing = verdict.missingRequirements;
   const items = [
-    ...(missing?.fields ?? []).map((f) => ({ kind: "Field", label: f })),
+    ...(missing?.fields ?? []).map((f) => ({ kind: "Field", label: fieldLabel(f) })),
     ...(missing?.documents ?? []).map((f) => ({ kind: "Document", label: f })),
     ...(missing?.approvals ?? []).map((f) => ({ kind: "Approval", label: f })),
   ];

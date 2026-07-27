@@ -66,6 +66,21 @@ export async function getPipeline(
       // office-wide board. Omitting it is merely owner-scoped; misspelling it leaks the whole office.
       scope: params.scope,
       previewLimit: params.previewLimit ?? BOARD_PREVIEW_LIMIT,
+      /**
+       * ALL-TIME Won and Lost, matching the web kanban.
+       *
+       * Without these the server silently windows both terminal columns to the LAST 30 DAYS
+       * (resolvePipelineTerminalDateFilters, service.ts:613-627 — `since` defaults to now-30d unless the
+       * all-time flag is set). Nothing in the response says so, so the board showed a Won count and a
+       * Won total that were a month's worth while labelling them like every other column, and a stage
+       * with older wins read as "No deals". A number presented as a total that is quietly a 30-day
+       * subtotal is worse than no number.
+       *
+       * snake_case on purpose: the route reads `req.query.won_all_time === "true"`
+       * (deals/routes.ts:1003-1008) and ignores any camelCase spelling.
+       */
+      won_all_time: "true",
+      lost_all_time: "true",
     },
   });
   return {
@@ -214,6 +229,44 @@ export async function listLostReasons(fetcher: Fetcher): Promise<LostReason[]> {
  * The service layer looks more permissive (it only rejects `rep`s who are not the owner), which is
  * exactly why reading the service alone gives the wrong answer.
  */
+/**
+ * Slugs the STAGE-CHANGE ROUTE treats as a Lost outcome — the only ones for which it requires a reason
+ * id and non-blank notes, and the only ones for which it stores them.
+ *
+ * Mirrors `isLostOutcomeStage` (server/src/modules/deals/stage-change.ts:74-80) resolved through
+ * `toCanonicalTerminalOutcomeSlug` (:44-70). Deliberately NARROWER than LOST_DEAL_STAGE_SLUGS in
+ * shared/src/types/workflow.ts, which is the REPORTING classification set and includes the legacy
+ * `deal_canceled` so historical HubSpot rows still tally as losses. Only one of those two is a request
+ * contract; this is it.
+ *
+ * EXPORTED so the move screen and its tests read the same set. They previously each carried their own
+ * copy, which made the tests tautological — they asserted a local literal against itself and would have
+ * stayed green through any drift in the one that ships.
+ *
+ * Getting this mirror right took three attempts, each failing differently, which is why it now lives in
+ * exactly one place:
+ *   1. All four legacy aliases, omitting the canonical "lost" — so the screen stayed silent on the slug
+ *      current pipelines actually use, and the server rejected the move naming fields the rep never saw.
+ *   2. Anchored to the reporting set above, so it prompted on `deal_canceled` and collected a reason and
+ *      notes the stage-change route then discarded.
+ *   3. Correct, but duplicated between the screen and its tests — see the export note.
+ *
+ * `deal_canceled` is absent ON PURPOSE. It is seeded by no migration and belongs to no live pipeline; it
+ * exists so historical rows read correctly. The web dialog does prompt on it and loses the details just
+ * the same — a pre-existing server-side gap, and closing it would make the route start rejecting moves
+ * that succeed today, so it is not something to fix from a mobile client.
+ */
+export const LOST_OUTCOME_STAGE_SLUGS: ReadonlySet<string> = new Set([
+  "lost",
+  "production_lost",
+  "service_lost",
+  "closed_lost",
+]);
+
+export function isLostOutcomeStageSlug(slug: string | null | undefined): boolean {
+  return typeof slug === "string" && LOST_OUTCOME_STAGE_SLUGS.has(slug);
+}
+
 /**
  * Reasons the STAGE-CHANGE route refuses outright, regardless of who is asking.
  *
