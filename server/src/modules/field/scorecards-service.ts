@@ -1,4 +1,4 @@
-import { and, desc, eq, getTableColumns, inArray, isNull, lte, notInArray, sql } from "drizzle-orm";
+import { and, desc, eq, getTableColumns, inArray, isNotNull, isNull, lte, notInArray, sql } from "drizzle-orm";
 import { createHash, randomUUID } from "node:crypto";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
@@ -10,6 +10,7 @@ import {
   fieldScorecardPhotos,
   files,
   jobQueue,
+  scorecardCorrectiveActions,
 } from "@trock-crm/shared/schema";
 import { generateDownloadUrl, headObjectStrict, putObject } from "../../lib/r2-client.js";
 import { buildScorecardPdfData, renderFieldScorecardPdf, MAX_EVIDENCE_PHOTOS } from "./scorecard-pdf.js";
@@ -1088,15 +1089,58 @@ export async function renderAndStoreFieldScorecardArtifacts(
       // Deterministic order (link time, then PK tie-breaker) so the downstream MAX_EVIDENCE_PHOTOS cap
       // always keeps/drops the SAME photos across renders, not an arbitrary Postgres physical-row order.
       .orderBy(fieldScorecardPhotos.createdAt, fieldScorecardPhotos.id);
+    // The corrective-action record rendered by PDF v3 — one row per flagged item on a below-band card.
+    const correctiveActionRows = await db
+      .select({
+        id: scorecardCorrectiveActions.id,
+        itemType: scorecardCorrectiveActions.itemType,
+        itemRef: scorecardCorrectiveActions.itemRef,
+        itemLabel: scorecardCorrectiveActions.itemLabel,
+        status: scorecardCorrectiveActions.status,
+        responderName: scorecardCorrectiveActions.responderName,
+        respondedAt: scorecardCorrectiveActions.respondedAt,
+        responseComment: scorecardCorrectiveActions.responseComment,
+      })
+      .from(scorecardCorrectiveActions)
+      .where(eq(scorecardCorrectiveActions.scorecardId, scorecardId));
+
+    // Response photos, keyed by item. These are DELIBERATELY excluded from the evidence query above
+    // (corrective_action_id IS NULL) — original evidence and the corrective-action record are separate
+    // sets, and the publish-time recheck fingerprint applies the same exclusion. Widening either one alone
+    // produces a spurious SCORECARD_EVIDENCE_CHANGED on every regeneration.
+    const correctiveActionPhotoRows = correctiveActionRows.length === 0 ? [] : await db
+      .select({
+        correctiveActionId: fieldScorecardPhotos.correctiveActionId,
+        fileId: files.id,
+        caption: files.description,
+        r2Key: files.r2Key,
+        thumbnailR2Key: files.thumbnailR2Key,
+        mimeType: files.mimeType,
+        isActive: files.isActive,
+        deletedAt: files.deletedAt,
+      })
+      .from(fieldScorecardPhotos)
+      .innerJoin(files, eq(files.id, fieldScorecardPhotos.fileId))
+      .where(
+        and(
+          eq(fieldScorecardPhotos.scorecardId, scorecardId),
+          isNotNull(fieldScorecardPhotos.correctiveActionId),
+          eq(files.isActive, true),
+          isNull(files.deletedAt),
+        ),
+      )
+      // Deterministic order so the MAX_CORRECTIVE_ACTION_PHOTOS cap keeps the SAME photos across renders.
+      .orderBy(fieldScorecardPhotos.createdAt, fieldScorecardPhotos.id);
+
     const [deal] = await db
       .select({ name: deals.name, dealNumber: deals.dealNumber })
       .from(deals)
       .where(eq(deals.id, card.dealId))
       .limit(1);
-    return { card, itemRows, photoRows, deal: deal ?? null };
+    return { card, itemRows, photoRows, correctiveActionRows, correctiveActionPhotoRows, deal: deal ?? null };
   });
   if (!loaded) return null;
-  const { card, itemRows, photoRows, deal } = loaded;
+  const { card, itemRows, photoRows, correctiveActionRows, correctiveActionPhotoRows, deal } = loaded;
   const evidenceFingerprint = scorecardEvidenceFingerprint(photoRows);
   const activePhotoRows = photoRows.filter((photo) => photo.isActive && photo.deletedAt == null);
 
@@ -1125,7 +1169,24 @@ export async function renderAndStoreFieldScorecardArtifacts(
     const batch = photosToLoad.slice(index, index + PDF_EVIDENCE_DOWNLOAD_CONCURRENCY);
     photos.push(...await Promise.all(batch.map(loadPhoto)));
   }
-  const retryableFailure = photos.find((photo) => photo.resolution.failure?.retryable);
+  // Corrective-action RESPONSE photos resolve through the SAME pipeline, so a transient storage failure
+  // stays retryable and a permanently-bad object renders a placeholder rather than making the whole report
+  // unexportable. Capped in buildScorecardPdfData; the row set here is already bounded by the item count.
+  const loadResponsePhoto = async (photo: typeof correctiveActionPhotoRows[number]) => ({
+    correctiveActionId: photo.correctiveActionId as string,
+    caption: photo.caption ?? null,
+    resolution: await resolveScorecardEvidenceImage(photo),
+  });
+  const correctiveActionPhotos: Awaited<ReturnType<typeof loadResponsePhoto>>[] = [];
+  for (let index = 0; index < correctiveActionPhotoRows.length; index += PDF_EVIDENCE_DOWNLOAD_CONCURRENCY) {
+    const batch = correctiveActionPhotoRows.slice(index, index + PDF_EVIDENCE_DOWNLOAD_CONCURRENCY);
+    correctiveActionPhotos.push(...await Promise.all(batch.map(loadResponsePhoto)));
+  }
+
+  // Evaluate BOTH photo sets against the retryable/permanent policy — a response photo that is only
+  // temporarily unavailable must block the version stamp exactly like an evidence photo would.
+  const allResolvedPhotos = [...photos, ...correctiveActionPhotos];
+  const retryableFailure = allResolvedPhotos.find((photo) => photo.resolution.failure?.retryable);
   if (retryableFailure) {
     throw new AppError(
       503,
@@ -1133,7 +1194,7 @@ export async function renderAndStoreFieldScorecardArtifacts(
       "SCORECARD_EVIDENCE_UNAVAILABLE",
     );
   }
-  const permanentFailures = photos
+  const permanentFailures = allResolvedPhotos
     .map((photo) => photo.resolution.failure?.reason)
     .filter((reason): reason is NonNullable<typeof reason> => reason != null);
   if (permanentFailures.length > 0) {
@@ -1170,6 +1231,18 @@ export async function renderAndStoreFieldScorecardArtifacts(
       image: photo.resolution.image,
     })),
     omittedEvidenceCount,
+    correctiveActions: correctiveActionRows.map((row) => ({
+      itemType: row.itemType,
+      itemRef: row.itemRef,
+      itemLabel: row.itemLabel,
+      status: row.status,
+      responderName: row.responderName ?? null,
+      respondedAt: toIso(row.respondedAt),
+      responseComment: row.responseComment ?? null,
+      photos: correctiveActionPhotos
+        .filter((photo) => photo.correctiveActionId === row.id)
+        .map((photo) => ({ caption: photo.caption, image: photo.resolution.image })),
+    })),
   });
   const bucket = process.env.R2_BUCKET_NAME || "trock-crm-files";
 
@@ -1245,6 +1318,10 @@ export async function renderAndStoreFieldScorecardArtifacts(
         pdfR2Bucket: bucket,
         pdfGeneratedAt: new Date(),
         pdfRenderVersion: CURRENT_SCORECARD_PDF_RENDER_VERSION,
+        // Stamp the generation this render READ (migration 0200). The guarded WHERE below already proves
+        // updated_at has not moved since, so this is exactly the content the stored bytes represent.
+        // needsScorecardPdfRegeneration compares it against the live updated_at on the next download.
+        pdfContentGeneration: card.updatedAt as Date,
       })
       // Monotonic revision write: an older server finishing late during a rolling deploy must never point
       // the row back at its older version-specific object. <= permits repairing a missing v2 object.

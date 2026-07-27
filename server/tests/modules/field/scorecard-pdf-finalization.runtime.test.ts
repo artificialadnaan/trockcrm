@@ -32,14 +32,15 @@ import {
   renderAndStoreFieldScorecardArtifacts,
 } from "../../../src/modules/field/scorecards-service.js";
 import { CURRENT_SCORECARD_PDF_RENDER_VERSION } from "../../../src/modules/field/scorecard-pdf-artifact.js";
-import { fieldScorecards, fieldScorecardItems, fieldScorecardPhotos } from "@trock-crm/shared/schema";
+import { fieldScorecards, fieldScorecardItems, fieldScorecardPhotos, scorecardCorrectiveActions } from "@trock-crm/shared/schema";
 import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
 
 const DEAL = "11111111-1111-1111-1111-111111111111";
 const USER = "33333333-3333-3333-3333-333333333333";
 const FILE = "aaaaaaaa-0000-0000-0000-000000000001";
-// A distinct file used only as a corrective-action RESPONSE photo — it must NOT participate in the PDF
-// evidence fingerprint (corrective_action_id IS NULL excludes it on both the initial read and the recheck).
+// A distinct file used only as a corrective-action RESPONSE photo. It must NOT participate in the PDF
+// evidence fingerprint (corrective_action_id IS NULL excludes it on both the initial read and the recheck),
+// but since PDF v3 it IS embedded in the document — in the corrective-action section, not the evidence pages.
 const RESPONSE_FILE = "aaaaaaaa-0000-0000-0000-000000000002";
 const RESPONSE_PHOTO_CARD = "55555555-5555-5555-5555-000000000008";
 const RESPONSE_CORRECTIVE_ACTION = "77777777-7777-7777-7777-000000000001";
@@ -50,6 +51,8 @@ const CAPTION_CHANGED_CARD = "55555555-5555-5555-5555-000000000004";
 const INTERLEAVED_CARD = "55555555-5555-5555-5555-000000000005";
 const CONTENT_CHANGED_CARD = "55555555-5555-5555-5555-000000000006";
 const CONCURRENT_CARD = "55555555-5555-5555-5555-000000000007";
+const CONTENT_GENERATION_CARD = "55555555-5555-5555-5555-000000000009";
+const GENERATION_UNPUBLISHED_CARD = "55555555-5555-5555-5555-000000000010";
 const EVIDENCE_PNG = readFileSync(new URL("../../../../client-field/public/favicon-32x32.png", import.meta.url));
 
 let pg: PGlite;
@@ -70,7 +73,7 @@ beforeAll(async () => {
       created_at timestamptz DEFAULT NOW()
     );
   `);
-  await pg.exec(tenantSchemaSql("public", [fieldScorecards, fieldScorecardItems, fieldScorecardPhotos]));
+  await pg.exec(tenantSchemaSql("public", [fieldScorecards, fieldScorecardItems, fieldScorecardPhotos, scorecardCorrectiveActions]));
   await pg.exec(`
     INSERT INTO deals VALUES ('${DEAL}', 'Maple Street Tower', 'DFW-10432');
     INSERT INTO files VALUES (
@@ -97,6 +100,7 @@ beforeEach(async () => {
     contentLength: EVIDENCE_PNG.byteLength,
   });
   await db.execute(sql`DELETE FROM field_scorecard_photos`);
+  await db.execute(sql`DELETE FROM scorecard_corrective_actions`);
   await db.execute(sql`DELETE FROM field_scorecard_items`);
   await db.execute(sql`DELETE FROM field_scorecards`);
   await db.execute(sql`UPDATE files SET is_active = true, deleted_at = NULL, description = 'Framing detail'`);
@@ -307,13 +311,29 @@ describe("finalizeFieldScorecardArtifacts", () => {
     expect(objects.get(puts[0].key)).toBe(puts[0].pdf);
   });
 
-  it("regenerates the PDF for a scorecard that has a corrective-action RESPONSE photo (recheck excludes it)", async () => {
-    // A below-band scorecard accrued a corrective-action RESPONSE photo (corrective_action_id set). The PDF
-    // embeds ONLY original evidence, so both the initial evidence read AND the publication recheck must
-    // exclude the response photo. Before the fix, the recheck selected ALL field_scorecard_photos, so its
-    // fingerprint included the response photo while the initial fingerprint did not → SCORECARD_EVIDENCE_CHANGED
-    // on every regeneration. This proves the finalizer now succeeds with a response photo present.
+  it("embeds a corrective-action RESPONSE photo while keeping it out of the evidence fingerprint", async () => {
+    // A below-band scorecard accrued a corrective-action RESPONSE photo (corrective_action_id set).
+    //
+    // TWO separate invariants meet here:
+    //   1. FINGERPRINT symmetry — the response photo must be excluded from BOTH the initial evidence read
+    //      and the publication recheck. When only the recheck selected ALL field_scorecard_photos, its
+    //      fingerprint included the response photo while the initial one did not → a spurious
+    //      SCORECARD_EVIDENCE_CHANGED on every regeneration.
+    //   2. RENDERING — since PDF v3 the response photo IS fetched and embedded, in the corrective-action
+    //      section rather than the original-evidence pages. Excluding it from the fingerprint must not be
+    //      confused with excluding it from the document.
     await seedScorecard(RESPONSE_PHOTO_CARD);
+    await db.insert(scorecardCorrectiveActions).values({
+      id: RESPONSE_CORRECTIVE_ACTION,
+      scorecardId: RESPONSE_PHOTO_CARD,
+      itemType: "action_item",
+      itemRef: "0",
+      itemLabel: "Re-inspect framing",
+      status: "resolved",
+      responderName: "Pat Manager",
+      responseComment: "Re-inspected and corrected.",
+      respondedAt: new Date(),
+    });
     await db.insert(fieldScorecardPhotos).values({
       scorecardId: RESPONSE_PHOTO_CARD,
       sectionKey: null,
@@ -328,15 +348,49 @@ describe("finalizeFieldScorecardArtifacts", () => {
       RESPONSE_PHOTO_CARD,
     );
 
-    // The render published successfully (no spurious SCORECARD_EVIDENCE_CHANGED), and only the ORIGINAL
-    // evidence file was pulled from R2 — the response file was never fetched for the PDF.
+    // Published successfully — no spurious SCORECARD_EVIDENCE_CHANGED (invariant 1) — and BOTH the original
+    // evidence and the response photo were pulled from R2 for the document (invariant 2).
     expect(key).toMatch(new RegExp(`${RESPONSE_PHOTO_CARD}\\.[a-f0-9]{64}\\.v${CURRENT_SCORECARD_PDF_RENDER_VERSION}\\.pdf$`));
     expect(r2Mocks.getObjectBuffer).toHaveBeenCalledWith("thumbs/photo.jpg", { maxBytes: 750_000 });
-    expect(r2Mocks.getObjectBuffer).not.toHaveBeenCalledWith("thumbs/response.jpg", { maxBytes: 750_000 });
+    expect(r2Mocks.getObjectBuffer).toHaveBeenCalledWith("thumbs/response.jpg", { maxBytes: 750_000 });
 
     const row = await db.execute(sql`
       SELECT pdf_r2_key, pdf_render_version FROM field_scorecards WHERE id = ${RESPONSE_PHOTO_CARD}::uuid
     `);
     expect(row.rows[0]).toMatchObject({ pdf_r2_key: key, pdf_render_version: CURRENT_SCORECARD_PDF_RENDER_VERSION });
+  });
+
+  it("stamps pdf_content_generation with the updated_at the render read", async () => {
+    // The staleness check compares this against the live updated_at, so a render that does not stamp it
+    // leaves the artifact permanently "stale" and re-renders on every single download.
+    await seedScorecard(CONTENT_GENERATION_CARD);
+
+    const key = await finalizeFieldScorecardArtifacts(
+      { id: "office-1", slug: "dallas" },
+      USER,
+      CONTENT_GENERATION_CARD,
+    );
+    expect(key).toBeTruthy();
+
+    const row = await db.execute(sql`
+      SELECT pdf_content_generation, updated_at FROM field_scorecards WHERE id = ${CONTENT_GENERATION_CARD}::uuid
+    `);
+    const { pdf_content_generation: stamped, updated_at: current } = row.rows[0] as Record<string, Date>;
+    expect(stamped).not.toBeNull();
+    expect(new Date(stamped).getTime()).toBe(new Date(current).getTime());
+  });
+
+  it("leaves pdf_content_generation untouched when the render never publishes", async () => {
+    await seedScorecard(GENERATION_UNPUBLISHED_CARD);
+    r2Mocks.getObjectBuffer.mockRejectedValue(new Error("R2 timeout"));
+
+    await expect(
+      finalizeFieldScorecardArtifacts({ id: "office-1", slug: "dallas" }, USER, GENERATION_UNPUBLISHED_CARD),
+    ).rejects.toMatchObject({ statusCode: 503 });
+
+    const row = await db.execute(sql`
+      SELECT pdf_content_generation FROM field_scorecards WHERE id = ${GENERATION_UNPUBLISHED_CARD}::uuid
+    `);
+    expect(row.rows[0]).toMatchObject({ pdf_content_generation: null });
   });
 });

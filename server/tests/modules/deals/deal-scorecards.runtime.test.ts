@@ -22,6 +22,7 @@ import {
 } from "@trock-crm/shared/schema";
 import { sql } from "drizzle-orm";
 import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
+import { CURRENT_SCORECARD_PDF_RENDER_VERSION } from "../../../src/modules/field/scorecard-pdf-artifact.js";
 
 const DEAL = "11111111-1111-1111-1111-111111111111";
 const OTHER_DEAL = "22222222-2222-2222-2222-222222222222";
@@ -32,7 +33,8 @@ const SC_LEADERSHIP = "55555555-5555-5555-5555-000000000004"; // DEAL, kind='lea
 const FILE1 = "aaaaaaaa-0000-0000-0000-000000000001";
 const FILE2 = "aaaaaaaa-0000-0000-0000-000000000002"; // leadership Project Summary photo
 const USER = "33333333-3333-3333-3333-333333333333";
-const CURRENT_PDF_KEY = `office_x/deals/DFW-10432/documents/scorecards/sc1.${"a".repeat(64)}.v2.pdf`;
+// Track the CURRENT renderer revision: a version bump must not require rewriting unrelated assertions.
+const CURRENT_PDF_KEY = `office_x/deals/DFW-10432/documents/scorecards/sc1.${"a".repeat(64)}.v${CURRENT_SCORECARD_PDF_RENDER_VERSION}.pdf`;
 
 let pg: PGlite;
 let tdb: any;
@@ -59,7 +61,11 @@ beforeAll(async () => {
       id: SC_NEWER, clientSubmissionId: "66666666-6666-6666-6666-000000000001", dealId: DEAL, weekOf: "2026-06-30", projectNumber: "DFW-10432",
       totalScore: 82, rating: "needs_improvement", criticalDeficiencies: ["failed_inspection"], actionItems: ["Re-pour slab"],
       submittedBy: USER, submittedByName: "Sam Super", pdfR2Key: CURRENT_PDF_KEY,
-      pdfRenderVersion: 2,
+      pdfRenderVersion: CURRENT_SCORECARD_PDF_RENDER_VERSION,
+      // A CURRENT artifact was rendered from the row's own generation; updatedAt is pinned to match so the
+      // staleness check sees an up-to-date artifact rather than one predating migration 0200.
+      pdfContentGeneration: new Date("2026-06-30T18:00:00Z"),
+      updatedAt: new Date("2026-06-30T18:00:00Z"),
       submittedAt: new Date("2026-06-30T18:00:00Z"),
     },
     {
@@ -266,7 +272,7 @@ describe("corrective-action thread on the detail (spec §9)", () => {
 describe("deal scorecard PDF artifact download", () => {
   it("reports a current artifact and presigns its stored key separately", async () => {
     const state = await getDealScorecardPdfArtifactState(tdb, DEAL, SC_NEWER);
-    expect(state).toMatchObject({ pdfRenderVersion: 2, linkedPhotoCount: 1, needsRegeneration: false });
+    expect(state).toMatchObject({ pdfRenderVersion: CURRENT_SCORECARD_PDF_RENDER_VERSION, linkedPhotoCount: 1, needsRegeneration: false });
     const { url } = await presignDealScorecardPdf(SC_NEWER, state.pdfR2Key!);
     expect(url).toContain(CURRENT_PDF_KEY);
   });
