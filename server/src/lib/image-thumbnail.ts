@@ -65,24 +65,11 @@ export function deriveThumbnailKey(r2Key: string): string {
   return `${dir ? `${dir}/` : ""}thumbs/${stem}.jpg`;
 }
 
-/**
- * Resize an image buffer into a small JPEG thumbnail. Throws if sharp can't decode the input.
- *
- * `limitInputPixels` is load-bearing, not defensive style: the public share proxy now calls this to
- * render grid thumbnails on demand for photos with no stored `thumbnail_r2_key`, so this runs on an
- * UNAUTHENTICATED path. Without the cap it would inherit sharp's ~268 MP default — 5x looser than the
- * 50 MP bound the sibling public transcoder (image-transcode.ts) pins for exactly this reason — and a
- * small, highly-compressed 200 MP TIFF inside the byte cap would decode to a raster the full-res path
- * would have refused. 50 MP still covers any real camera photo (a 48 MP phone shot is 8000x6000).
- */
+/** Resize an image buffer into a small JPEG thumbnail. Throws if sharp can't decode the input. */
 export async function generateThumbnailBuffer(source: Buffer): Promise<Buffer> {
-  return sharp(source, { failOn: "none", limitInputPixels: EVIDENCE_DECODE_PIXEL_LIMIT })
+  return sharp(source, { failOn: "none" })
     .rotate() // honor EXIF orientation so the thumbnail isn't sideways
     .resize({ width: THUMBNAIL_MAX_EDGE, height: THUMBNAIL_MAX_EDGE, fit: "inside", withoutEnlargement: true })
-    // JPEG has no alpha, so transparency would otherwise composite to BLACK. Flatten to white to match
-    // transcodeToStrippedJpeg — without this the same transparent PNG renders as a black tile in the
-    // share grid and a white one in the lightbox, because those two variants take different encoders.
-    .flatten({ background: { r: 255, g: 255, b: 255 } })
     .jpeg({ quality: THUMBNAIL_QUALITY, mozjpeg: true })
     .toBuffer();
 }

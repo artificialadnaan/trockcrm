@@ -2028,12 +2028,7 @@ export async function getDealPhotoTimeline(
     .from(files)
     .leftJoin(users, eq(users.id, files.uploadedBy))
     .where(conditions)
-    // `files.id` is a tiebreaker, not decoration. Bulk imports (CompanyCam, a day's field upload) land
-    // with identical taken_at/created_at values, and OFFSET paging over a non-deterministic order lets
-    // Postgres arrange tied rows differently per page — so a photo can appear twice, or never. It went
-    // unnoticed while the deepest caller read one 200-row page; the public share viewer now pages
-    // through galleries of up to 3000.
-    .orderBy(desc(sql`COALESCE(${files.takenAt}, ${files.createdAt})`), desc(files.id))
+    .orderBy(desc(sql`COALESCE(${files.takenAt}, ${files.createdAt})`))
     .limit(limit)
     .offset(offset);
 
@@ -2050,34 +2045,6 @@ export async function getDealPhotoTimeline(
     photos,
     pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
   };
-}
-
-/**
- * Which of `photoIds` the deal's photo timeline WOULD return — the membership check behind "these
- * photos may be shared / bulk-downloaded", without materialising the photos themselves.
- *
- * Shares buildDealPhotoTimelineConditions with getDealPhotoTimeline, so a sharable selection can never
- * drift from what the field UI and public viewer actually list (deal + converted-lead lineage, photo
- * category, active, latest version, not deleted). ONLY the projection differs: one uuid column instead
- * of 49, and no resolvePhotoDisplayUrls pass.
- *
- * That projection is the point. Validation happens once per mint over the WHOLE selection, so at the
- * 3000-photo share cap the timeline-based check would fetch 3000 wide rows and mint ~6000 presigned
- * URLs solely to discard them — the one place in the share path whose cost scales with the cap rather
- * than with a page size.
- */
-export async function getDealPhotoIdsInScope(
-  tenantDb: TenantDb,
-  dealId: string,
-  photoIds: string[],
-): Promise<string[]> {
-  if (photoIds.length === 0) return [];
-  const conditions = await buildDealPhotoTimelineConditions(tenantDb, dealId, {
-    photoIds,
-    includeDeleted: false,
-  });
-  const rows = await tenantDb.select({ id: files.id }).from(files).where(conditions);
-  return rows.map((row) => row.id);
 }
 
 /**

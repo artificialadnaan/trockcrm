@@ -108,7 +108,8 @@ describe("getProjectPhotoStats sorting", () => {
     // Project 8 holds the most photos but the OLDEST ones. A client-side sort over a recency-ordered
     // page would have ranked Project 3 (newest, 2 photos) first and never seen Project 8 at all.
     expect(pagination.total).toBe(9);
-    expect(pagination.totalPages).toBe(3);
+    // Keyset, not page numbers: a full page hands back a position to resume from.
+    expect(pagination.nextCursor).toBeTypeOf("string");
   });
 
   it("orders by fewest photos across all projects", async () => {
@@ -127,22 +128,36 @@ describe("getProjectPhotoStats sorting", () => {
     expect(projects.map((p) => p.dealName)).toEqual(["Project 3"]);
   });
 
-  it("pages deterministically when projects TIE on the sort key", async () => {
+  it("walks the whole set by cursor when projects TIE on the sort key", async () => {
     // Projects 4 and 9 both hold 12 photos, so `ORDER BY count(*) DESC` alone leaves their relative
-    // order up to Postgres — and it may resolve it differently per OFFSET, which shows up as one
-    // project appearing on two pages while another never appears at all. The deal_id tiebreaker is what
-    // makes the union of the pages equal the whole set.
+    // order up to Postgres. The deal_id tiebreak is what gives the cursor a unique boundary to resume
+    // from — without it the keyset predicate cannot express "strictly after this row".
     const tied = await getProjectPhotoStats(tdb as never, { sort: "most_photos", limit: 100 });
-    const counts = tied.projects.map((project) => project.photoCount);
-    expect(counts.filter((count) => count === 12).length).toBe(2);
+    expect(tied.projects.map((p) => p.photoCount).filter((count) => count === 12).length).toBe(2);
+    expect(tied.pagination.nextCursor).toBeNull(); // short page == the end
 
     const seen: string[] = [];
-    for (let page = 1; page <= 4; page++) {
-      const { projects } = await getProjectPhotoStats(tdb as never, { sort: "most_photos", limit: 3, page });
+    let cursor: string | undefined;
+    for (let guard = 0; guard < 10; guard++) {
+      const { projects, pagination } = await getProjectPhotoStats(tdb as never, {
+        sort: "most_photos",
+        limit: 3,
+        cursor,
+      });
       seen.push(...projects.map((p) => p.dealId));
+      if (!pagination.nextCursor) break;
+      cursor = pagination.nextCursor;
     }
     expect(seen.length).toBe(9);
     expect(new Set(seen).size).toBe(9);
+  });
+
+  it("restarts the list for a malformed or stale cursor instead of erroring", async () => {
+    for (const bad of ["not-base64!!", "", Buffer.from("12\u0000not-a-uuid").toString("base64url")]) {
+      const { projects } = await getProjectPhotoStats(tdb as never, { sort: "most_photos", limit: 3, cursor: bad });
+      expect(projects.length).toBe(3);
+      expect(projects[0].dealName).toBe("Project 8");
+    }
   });
 });
 
@@ -270,5 +285,66 @@ describe("getPhotoFeedFacets", () => {
     expect(facets.photoCategories).toEqual(["construction"]);
     // The project picker comes from the full library so a selection can't vanish from its own dropdown.
     expect(facets.projects.length).toBe(9);
+  });
+});
+
+/**
+ * The reason this is keyset and not OFFSET, stated as the property that actually distinguishes them.
+ *
+ * Under OFFSET, "page 2" means "skip the first N rows" — so anything inserted BEFORE the boundary
+ * shifts the window and the next page repeats a row while another is never delivered. Under a cursor,
+ * "next" means "strictly after this exact (sortValue, dealId)", which does not depend on how many rows
+ * precede it. These aggregate ordering keys (`count(*)`, `max(taken_at)`) change on every upload, so
+ * that difference is the normal case here, not an edge one.
+ *
+ * Honest scope of the guarantee: a project whose OWN sort value moves across the cursor can still be
+ * missed (it is no longer "after" the boundary) or repeated. Keyset removes the shifting-window class,
+ * not every consequence of a mutable ordering — the residual is why the client still de-dupes on
+ * `dealId`. What it does remove is the case where an unrelated write silently drops a row.
+ *
+ * Last in the file and self-cleaning: the only test here that mutates the shared fixture.
+ */
+describe("getProjectPhotoStats keyset paging under concurrent writes", () => {
+  const DRIFT_KEY_PREFIX = "drift/";
+  const NEW_DEAL = "00000000-0000-4000-8000-000000099999";
+
+  afterAll(async () => {
+    await pg.exec(`DELETE FROM files WHERE r2_key LIKE '${DRIFT_KEY_PREFIX}%';`);
+    await pg.exec(`DELETE FROM deals WHERE id = '${NEW_DEAL}';`);
+  });
+
+  it("returns the same rows after a cursor no matter what is inserted BEFORE it", async () => {
+    const firstPage = await getProjectPhotoStats(tdb as never, { sort: "recent", limit: 3 });
+    const cursor = firstPage.pagination.nextCursor!;
+    expect(cursor).toBeTypeOf("string");
+
+    const before = await getProjectPhotoStats(tdb as never, { sort: "recent", limit: 3, cursor });
+    expect(before.projects.length).toBe(3);
+
+    // A deal that had no photos gets its first ones, newer than everything else — so it enters the
+    // ordering AHEAD of the cursor. This is the write that makes an OFFSET window slide.
+    await pg.exec(`
+      INSERT INTO deals (id, name, deal_number, assigned_rep_id, property_city, property_state, source_lead_id)
+      VALUES ('${NEW_DEAL}', 'Project New', 'TR-NEW', '${REP}', 'Dallas', 'TX', NULL);
+    `);
+    const rows: string[] = [];
+    for (let i = 0; i < 25; i++) {
+      rows.push(
+        `('${NEW_DEAL}', 'photo', NULL, NULL, '${DRIFT_KEY_PREFIX}${i}.jpg', 'drift-${i}.jpg', 'orig.jpg', 'drift-${i}', 'image/jpeg', '.jpg', 10, 'trockcrm', 'Photos', '${USER_A}', '2026-07-01T0${i % 10}:00:00Z', true, 1)`,
+      );
+    }
+    await pg.exec(`
+      INSERT INTO files (deal_id, category, subcategory, photo_category, r2_key, system_filename, original_filename, display_name, mime_type, file_extension, file_size_bytes, r2_bucket, folder_path, uploaded_by, taken_at, is_active, version)
+      VALUES ${rows.join(",")};
+    `);
+
+    // The new project genuinely sorts first now...
+    const restarted = await getProjectPhotoStats(tdb as never, { sort: "recent", limit: 1 });
+    expect(restarted.projects[0].dealName).toBe("Project New");
+
+    // ...and the page after the ORIGINAL cursor is byte-for-byte unchanged. With OFFSET this window
+    // would have slid by one, repeating a delivered project and dropping an undelivered one.
+    const after = await getProjectPhotoStats(tdb as never, { sort: "recent", limit: 3, cursor });
+    expect(after.projects.map((p) => p.dealId)).toEqual(before.projects.map((p) => p.dealId));
   });
 });

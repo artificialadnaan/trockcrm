@@ -381,33 +381,9 @@ fieldRoutes.delete("/projects/:dealId/star", requireFieldContractor, async (req,
 // The recipient-facing lifetime is purely this token expiry (the asset endpoint streams via our server
 // and never hands out a presigned R2 URL), so it isn't bound by the 7-day presigned-URL cap.
 const SHARE_LINK_TTL_MS = 90 * 24 * 60 * 60 * 1000;
+const MAX_SHARE_PHOTOS = 200;
 
-// A share link is a DB row plus a uuid[] column, and the viewer that consumes it now pages, so its cost
-// is bounded by the page size rather than by the selection size. 3000 covers the whole photo library of
-// every project in production (largest gallery measured 2026-07-27: 2,911 photos; 33 projects over 200,
-// 19 over 500, none over 3000) with headroom, while still refusing an unbounded request — a share is
-// never allowed to become "send the server an arbitrarily long id list".
-const MAX_SHARE_PHOTOS = 3000;
-
-// DELIBERATELY NOT RAISED WITH THE SHARE CAP. These two routes used to share one constant, so raising it
-// for /share would have silently handed 3000 ids to the bulk-download path too. That path presigns and
-// audits every photo inside ONE transaction-bound client and then makes the browser start that many
-// downloads at once; 200 is what it is sized for. Keeping the caps separate is the point, not an
-// oversight — `share-photo-caps.test.ts` asserts they are independent.
-const MAX_DOWNLOAD_PHOTOS = 200;
-
-// NOT capped here: the photo-report routes (/reports/preview, /reports/generate). They take their ids
-// from a different body shape, have never had a length check, and this change set does not touch what
-// they render — so a cap on them is a separate decision, not a consequence of raising the share cap.
-// An earlier revision of this PR added MAX_REPORT_PHOTOS = 500. It was removed for two measured
-// reasons. (1) It could not do the job: generateFieldPhotoReport rebuilds each section from its own
-// photoIds and the renderer draws every OCCURRENCE, so a union-of-ids budget is not a bound on the work
-// (Codex, PR #970). (2) 500 sits below real usage — production office_dallas holds a 660-photo project
-// (Granada Place) that people actively generate photo reports from, so "select all" there would have
-// started 400-ing. The underlying hazard (unbounded sequential full-res R2 GETs buffered into one PDF;
-// the largest rendered report in production is ~950 MB) is real and PRE-EXISTING, and deserves its own
-// change with the owner picking the bound — most likely a byte budget rather than a photo count.
-function parseSharePhotoIds(raw: unknown, maxPhotos: number, limitMessage: string): string[] {
+function parseSharePhotoIds(raw: unknown): string[] {
   if (!Array.isArray(raw) || raw.length === 0) {
     throw new AppError(400, "photoIds must be a non-empty array of photo ids.");
   }
@@ -415,8 +391,8 @@ function parseSharePhotoIds(raw: unknown, maxPhotos: number, limitMessage: strin
   // canonical lowercase, so we normalize here to keep the stored subset and every downstream
   // comparison (membership validation, foundIds set) consistent regardless of client casing.
   const ids = Array.from(new Set(raw.map((value) => String(value).toLowerCase())));
-  if (ids.length > maxPhotos) {
-    throw new AppError(400, limitMessage);
+  if (ids.length > MAX_SHARE_PHOTOS) {
+    throw new AppError(400, `A share link can include at most ${MAX_SHARE_PHOTOS} photos.`);
   }
   ids.forEach((id) => assertValidUuid(id, "photoId"));
   return ids;
@@ -426,11 +402,7 @@ fieldRoutes.post("/projects/:dealId/share", requireFieldContractor, async (req, 
   try {
     const dealId = String(req.params.dealId);
     assertValidUuid(dealId, "dealId");
-    const photoIds = parseSharePhotoIds(
-      req.body?.photoIds,
-      MAX_SHARE_PHOTOS,
-      `A share link can include at most ${MAX_SHARE_PHOTOS} photos.`,
-    );
+    const photoIds = parseSharePhotoIds(req.body?.photoIds);
 
     // Resolve the deal's office (cross-office, read-only), then:
     //   1. gate the deal to a FIELD-VISIBLE project (active-pipeline or Won-family, never Lost/
@@ -473,11 +445,7 @@ fieldRoutes.post("/projects/:dealId/photos/download-urls", requireFieldContracto
   try {
     const dealId = String(req.params.dealId);
     assertValidUuid(dealId, "dealId");
-    const photoIds = parseSharePhotoIds(
-      req.body?.photoIds,
-      MAX_DOWNLOAD_PHOTOS,
-      `A bulk download can include at most ${MAX_DOWNLOAD_PHOTOS} photos.`,
-    );
+    const photoIds = parseSharePhotoIds(req.body?.photoIds);
 
     const { value: downloads } = await withResolvedOffice(
       "deal",

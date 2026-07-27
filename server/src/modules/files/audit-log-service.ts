@@ -77,40 +77,6 @@ export async function logPhotoEvent(
   }
 }
 
-/**
- * Same contract as logPhotoEvent (best-effort, never throws) for a BATCH of photos, written as ONE
- * multi-row INSERT.
- *
- * Callers hold a single transaction-bound pg client, so a per-photo loop is necessarily sequential —
- * N round-trips inside one open transaction, holding it (and its locks) for the whole run. That is
- * survivable at a handful of photos and is exactly what makes a bulk path's cap load-bearing. Batching
- * makes the audit write O(1) statements so the cost of raising a cap is no longer paid here.
- */
-export async function logPhotoEvents(
-  tenantDb: Pick<TenantDb, "insert">,
-  events: LogPhotoEventParams[]
-): Promise<void> {
-  if (events.length === 0) return;
-  try {
-    await tenantDb.insert(schema.photoAuditLog).values(
-      events.map((params) => ({
-        photoId: params.photoId,
-        eventType: params.eventType,
-        userId: params.userId,
-        ipAddress: params.ipAddress ?? null,
-        userAgent: params.userAgent ?? null,
-        metadata: params.metadata ?? {},
-      }))
-    );
-  } catch (err) {
-    console.error(
-      "[photo-audit] Failed to write photo audit events",
-      { count: events.length, eventType: events[0]?.eventType, userId: events[0]?.userId },
-      err
-    );
-  }
-}
-
 export function parseCsvQueryParam(value: unknown): string[] {
   const values = Array.isArray(value) ? value : value === undefined ? [] : [value];
   return values

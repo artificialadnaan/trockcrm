@@ -21,9 +21,8 @@ import {
 } from "../lib/field-projects";
 
 const GROUP_SEQUENCE: PhotoGrouping[] = ["date", "category", "uploader", "none"];
-// The download-urls endpoint caps each request at 200 ids (MAX_DOWNLOAD_PHOTOS on the server — its OWN
-// cap, no longer shared with /share, which now allows far more). Chunk bulk downloads so a "Select all"
-// on a large project succeeds instead of 400-ing. Must stay <= the server's download cap.
+// The download-urls endpoint caps each request at 200 ids (shared with /share). Chunk bulk downloads so a
+// "Select all" on a large project succeeds instead of 400-ing.
 const DOWNLOAD_BATCH_SIZE = 200;
 
 // Photos are grouped by date across the whole project, so we load EVERY page (not just the first 200) —
@@ -85,7 +84,7 @@ export function ProjectDetailPage() {
 
   // Fetch presigned high-res download URLs for the given photos and save them to the computer. Used by the
   // per-photo quick-download button (one id) and the bulk "Download (N)" action. The endpoint caps each
-  // request at MAX_DOWNLOAD_PHOTOS ids, so a "Select all" on a 200+ photo project is chunked here.
+  // request at 200 ids (shared with /share), so a "Select all" on a 200+ photo project is chunked here.
   async function downloadPhotos(ids: string[]) {
     const unique = Array.from(new Set(ids));
     if (unique.length === 0 || !id) return;

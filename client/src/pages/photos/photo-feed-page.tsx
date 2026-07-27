@@ -21,6 +21,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { photoCategoryLabel } from "@trock-crm/shared/types";
 import { formatDealDisplayNumber } from "@/lib/deal-utils";
 import { api } from "@/lib/api";
+import { endOfCalendarDayIso, startOfCalendarDayIso } from "@/lib/calendar-day-range";
 import { usePhotoFeed, type FeedFilters, type FeedPhoto, type FeedSource } from "@/hooks/use-photo-feed";
 import { PhotoLightbox } from "@/components/photos/photo-lightbox";
 import { getFileMediaKind, type FileMediaKind } from "@/lib/file-media";
@@ -1067,11 +1068,16 @@ export function PhotoFeedPage() {
   // ── Projects tab state ──
   const [projectStats, setProjectStats] = useState<ProjectStat[]>([]);
   const [projectTotal, setProjectTotal] = useState(0);
-  const [projectPage, setProjectPage] = useState(1);
+  // Keyset position for the next page, or null when the server has nothing further. This IS the end
+  // signal — there is no count-based "are we done yet?" heuristic, because the ordering keys (photo
+  // count, latest photo time) move with every upload and a count cannot tell drift from the end.
+  const [projectNextCursor, setProjectNextCursor] = useState<string | null>(null);
   const [projectsLoading, setProjectsLoading] = useState(true);
   const [projectSearch, setProjectSearch] = useState("");
   const [projectFilter, setProjectFilter] = useState<"all" | "my">("all");
   const [projectSort, setProjectSort] = useState<ProjectSort>("recent");
+  // A failed request must not leave rows from a DIFFERENT query on screen pretending to be this one.
+  const [projectError, setProjectError] = useState(false);
   // The search box now drives a server query, so debounce it — otherwise every keystroke is a
   // cross-deal photo aggregate.
   const [debouncedSearch, setDebouncedSearch] = useState("");
@@ -1094,12 +1100,11 @@ export function PhotoFeedPage() {
   // Build filters for photo feed
   const feedFilters = useMemo<FeedFilters>(() => {
     const f: FeedFilters = { refreshToken: feedRefreshToken };
-    if (dateFrom) f.dateFrom = new Date(dateFrom).toISOString();
-    if (dateTo) {
-      const end = new Date(dateTo);
-      end.setHours(23, 59, 59, 999);
-      f.dateTo = end.toISOString();
-    }
+    // Local calendar-day bounds. `new Date("YYYY-MM-DD")` parses as UTC midnight while `setHours` mutates
+    // in LOCAL time, so the old pairing collapsed a same-day selection to a few hours ending the previous
+    // local evening — see lib/calendar-day-range.ts.
+    if (dateFrom) f.dateFrom = startOfCalendarDayIso(dateFrom);
+    if (dateTo) f.dateTo = endOfCalendarDayIso(dateTo);
     if (projectFilterId) f.dealId = projectFilterId;
     if (uploaderFilter) f.uploadedBy = uploaderFilter;
     if (categoryFilter) f.photoCategory = categoryFilter;
@@ -1127,48 +1132,75 @@ export function PhotoFeedPage() {
     if (uploaderFilter) params.set("uploadedBy", uploaderFilter);
     if (categoryFilter) params.set("photoCategory", categoryFilter);
     if (sourceFilter) params.set("source", sourceFilter);
-    if (dateFrom) params.set("dateFrom", new Date(dateFrom).toISOString());
-    if (dateTo) {
-      const end = new Date(dateTo);
-      end.setHours(23, 59, 59, 999);
-      params.set("dateTo", end.toISOString());
-    }
+    // SAME helper as the Photos tab above — the two tabs share one filter state, so they must also
+    // share one interpretation of what a picked day means.
+    const from = dateFrom ? startOfCalendarDayIso(dateFrom) : undefined;
+    const to = dateTo ? endOfCalendarDayIso(dateTo) : undefined;
+    if (from) params.set("dateFrom", from);
+    if (to) params.set("dateTo", to);
     return params;
   }, [projectSort, projectFilter, debouncedSearch, uploaderFilter, categoryFilter, sourceFilter, dateFrom, dateTo]);
 
   // Monotonic request id — a sort/filter change can leave an older request in flight that would
   // otherwise resolve last and clobber the fresh list (same guard as usePhotoFeed).
   const projectRequestSeq = useRef(0);
+  // Deal ids already rendered. Keyset paging cannot SKIP a project, but a project whose own sort value
+  // changes enough to move back across the cursor can be delivered twice — a duplicate React key would
+  // crash the list, so dedupe on append.
+  const projectSeenIdsRef = useRef<Set<string>>(new Set());
 
   const fetchProjectStats = useCallback(
-    async (pageNum = 1) => {
+    async (cursor?: string) => {
       const seq = ++projectRequestSeq.current;
+      const isFirstPage = !cursor;
       setProjectsLoading(true);
       try {
         const params = new URLSearchParams(projectStatsQuery);
-        params.set("page", String(pageNum));
+        if (cursor) params.set("cursor", cursor);
         const data = await api<{
           projects: ProjectStat[];
-          pagination: { page: number; total: number };
+          pagination: { limit: number; total: number | null; nextCursor: string | null };
         }>(`/files/photos/project-stats?${params}`);
         if (seq !== projectRequestSeq.current) return;
-        // Append when paging forward, replace on a fresh query — so "Load more" grows the list instead
-        // of swapping it out. Deduped because OFFSET paging over a live aggregate can repeat a row: one
-        // photo uploaded between the page-1 and page-2 requests shifts a project across the boundary,
-        // and a duplicate React key crashes the render.
-        setProjectStats((prev) => {
-          if (pageNum === 1) return data.projects;
-          const seen = new Set(prev.map((project) => project.dealId));
-          return [...prev, ...data.projects.filter((project) => !seen.has(project.dealId))];
+
+        // Dedupe on append. Keyset paging cannot skip a project, but one whose sort value moves back
+        // across the cursor can arrive twice, and a duplicate React key would crash the list.
+        const seen = isFirstPage ? new Set<string>() : projectSeenIdsRef.current;
+        if (isFirstPage) seen.clear();
+        const fresh = data.projects.filter((project) => {
+          if (seen.has(project.dealId)) return false;
+          seen.add(project.dealId);
+          return true;
         });
-        setProjectPage(data.pagination.page);
-        // `count(*) OVER ()` only rides on returned rows, so an out-of-range page reports total 0.
-        // Taking that at face value would flip the header to "0 projects" and hide "Load more" while a
-        // full list is still on screen.
-        if (data.projects.length > 0 || pageNum === 1) setProjectTotal(data.pagination.total);
+        projectSeenIdsRef.current = seen;
+
+        setProjectStats((prev) => (isFirstPage ? fresh : [...prev, ...fresh]));
+        // The ONLY end signal. No `loaded < total` arithmetic: that count can never close its gap once
+        // the ordering drifts, which is what kept "Load more" visible forever fetching pages that do not
+        // exist — and the client-side attempts to detect the end instead each introduced a new bug.
+        setProjectNextCursor(data.pagination.nextCursor);
+        setProjectError(false);
+        // `total` is computed only on the first page (the keyset predicate is in HAVING, so past a
+        // cursor the window would count what remains and the header would count down as the user pages).
+        if (data.pagination.total !== null) setProjectTotal(data.pagination.total);
       } catch (err) {
         if (seq !== projectRequestSeq.current) return;
         console.error("Failed to fetch project stats:", err);
+        setProjectError(true);
+        if (isFirstPage) {
+          // A first-page request is a REPLACEMENT: the sort, search, ownership pill or filters just
+          // changed. Leaving the previous query's rows and total on screen would label one query's
+          // results with another query's controls, and the retained cursor belongs to the OLD ordering —
+          // so the next "Load more" would append a page of the NEW query into the OLD list. Drop the
+          // stale result and the stale position together.
+          setProjectStats([]);
+          setProjectTotal(0);
+          setProjectNextCursor(null);
+          projectSeenIdsRef.current.clear();
+        }
+        // A later-page failure keeps its rows: nothing on screen is stale, the user simply did not get
+        // MORE. `projectNextCursor` is untouched, so the retry resumes from the same position.
+        // Deliberately NOT terminal — a transient error must never be mistaken for the end of the list.
       } finally {
         if (seq === projectRequestSeq.current) setProjectsLoading(false);
       }
@@ -1179,12 +1211,12 @@ export function PhotoFeedPage() {
   // After photos are assigned out of the Unassigned tab, refresh the Projects stats + the Photos feed so
   // their counts/lists aren't stale when the user switches tabs (Codex).
   const handleUnassignedDataChanged = useCallback(() => {
-    void fetchProjectStats(1);
+    void fetchProjectStats();
     setFeedRefreshToken((t) => t + 1);
   }, [fetchProjectStats]);
 
   useEffect(() => {
-    void fetchProjectStats(1);
+    void fetchProjectStats();
   }, [fetchProjectStats]);
 
   useEffect(() => {
@@ -1192,8 +1224,11 @@ export function PhotoFeedPage() {
     return () => clearTimeout(timer);
   }, [projectSearch]);
 
-  // Filter options come from the whole library and never change with the selection, so they're fetched
-  // once per mount rather than alongside every sort/filter change.
+  // Filter options come from the whole library and never change with the SELECTION, so they're fetched
+  // once rather than alongside every sort/filter change — but they DO change when the library itself
+  // does. Assigning rescued photos onto a deal that previously had none makes that deal (and possibly a
+  // new uploader or phase) newly eligible for the facets, whose scope requires a non-null dealId. Keyed
+  // on the same refresh token as the feed so the dropdowns cannot go stale until a full page reload.
   useEffect(() => {
     let cancelled = false;
     void api<FeedFacets>("/files/photos/feed/facets")
@@ -1204,7 +1239,7 @@ export function PhotoFeedPage() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [feedRefreshToken]);
 
   // No client-side narrowing left: sort, filters, ownership, search and paging are ALL resolved by the
   // server, so the rows on screen and the count above them always describe the same set.
@@ -1377,6 +1412,17 @@ export function PhotoFeedPage() {
               <div className="flex items-center justify-center py-20">
                 <Loader2 className="h-8 w-8 animate-spin text-gray-400" />
               </div>
+            ) : projectError && projectStats.length === 0 ? (
+              /* The replacement query failed, so there is nothing trustworthy to show under these
+                 controls. An empty-state would claim "no projects match", which is a different and
+                 wrong statement. */
+              <div className="flex flex-col items-center justify-center py-20 text-center">
+                <h2 className="text-lg font-semibold text-gray-700 mb-1">Couldn't load projects</h2>
+                <p className="text-sm text-gray-500 mb-4">These filters couldn't be applied just now.</p>
+                <Button variant="outline" size="sm" onClick={() => void fetchProjectStats()}>
+                  Try again
+                </Button>
+              </div>
             ) : filteredProjects.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-20 text-center">
                 <div className="rounded-full bg-gray-100 p-6 mb-4">
@@ -1406,15 +1452,20 @@ export function PhotoFeedPage() {
                     />
                   ))}
                 </div>
-                {projectStats.length < projectTotal && (
-                  <div className="flex justify-center pt-4">
+                {/* Driven by the SERVER's cursor, not by `loaded < total`. The count kept this visible
+                    forever once the ordering drifted, and every click fetched a page that does not
+                    exist. A failed page keeps the control (as a retry) because a transient error is not
+                    the end of the list. */}
+                {(projectNextCursor !== null || projectError) && (
+                  <div className="flex flex-col items-center gap-2 pt-4">
+                    {projectError && <p className="text-xs text-gray-500">Couldn't load more projects.</p>}
                     <Button
                       variant="outline"
                       size="sm"
                       disabled={projectsLoading}
-                      onClick={() => void fetchProjectStats(projectPage + 1)}
+                      onClick={() => void fetchProjectStats(projectNextCursor ?? undefined)}
                     >
-                      {projectsLoading ? "Loading..." : "Load more projects"}
+                      {projectsLoading ? "Loading..." : projectError ? "Try again" : "Load more projects"}
                     </Button>
                   </div>
                 )}

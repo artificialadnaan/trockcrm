@@ -174,7 +174,7 @@ describe("public photo token routes", () => {
     expect(response.body.toString("latin1")).not.toContain("Exif");
     expect(response.body.toString("latin1")).not.toContain("GPSLatitude");
     expect(response.body.includes(Buffer.from([0x12, 0x34, 0x56]))).toBe(true); // image data preserved
-    expect(mocks.getPublicPhotoAsset).toHaveBeenCalledWith("raw-token", "photo-1", { variant: "full" });
+    expect(mocks.getPublicPhotoAsset).toHaveBeenCalledWith("raw-token", "photo-1");
   });
 
   it("sends a transcoded jpeg-buffer asset as-is (non-JPEG original re-encoded), with image/jpeg + CORP", async () => {

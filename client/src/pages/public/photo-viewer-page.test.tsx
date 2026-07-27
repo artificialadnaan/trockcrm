@@ -3,7 +3,7 @@
  */
 import React from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { MemoryRouter, Route, Routes, useNavigate } from "react-router-dom";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PublicPhotoViewerPage } from "./photo-viewer-page";
 
@@ -14,25 +14,17 @@ vi.mock("@/lib/api", () => ({ api: apiMock }));
 let root: Root | null = null;
 let container: HTMLDivElement | null = null;
 
-// The locked public payload exposes only { id, imageUrl, fullImageUrl } per photo and
-// { name, propertyAddress } per deal — no uploader, category, caption, timestamps, file metadata, or
-// internal ids. imageUrl is the grid thumbnail; fullImageUrl is the lightbox original.
+// The locked public payload exposes only { id, imageUrl } per photo and { name, propertyAddress }
+// per deal — no uploader, category, caption, timestamps, file metadata, or internal ids.
 const basePhoto = {
   id: "photo-1",
-  imageUrl: "https://example.test/photo.jpg?variant=thumb",
-  fullImageUrl: "https://example.test/photo.jpg",
+  imageUrl: "https://example.test/photo.jpg",
 };
 
 const baseDeal = {
   name: "Portfolio Roof",
   propertyAddress: "123 Main St",
 };
-
-// jsdom has no layout, so the viewer stays in its unwindowed fallback grid and every loaded photo is
-// rendered — which is what makes these exposure assertions meaningful (nothing is hidden by windowing).
-function pagedResponse(photos: unknown[], total = photos.length) {
-  return { deal: baseDeal, photos, pagination: { page: 1, limit: 60, total, totalPages: 1 } };
-}
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -43,25 +35,6 @@ afterEach(() => {
   document.body.innerHTML = "";
   apiMock.mockReset();
 });
-
-/** Client-side navigation between two `/p/:token` routes — the only way the component is reused. */
-function TokenSwitcher({ to }: { to: string }) {
-  const navigate = useNavigate();
-  return (
-    <button type="button" data-testid="switch-token" onClick={() => navigate(to)}>
-      switch
-    </button>
-  );
-}
-
-/** A promise whose settlement the test controls, so two token requests can be interleaved. */
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((res) => {
-    resolve = res;
-  });
-  return { promise, resolve };
-}
 
 function renderPage() {
   container = document.createElement("div");
@@ -87,10 +60,10 @@ describe("PublicPhotoViewerPage", () => {
   });
 
   it("renders a read-only, leak-free grid (image + property name/address only)", async () => {
-    apiMock.mockResolvedValue(pagedResponse([basePhoto]));
+    apiMock.mockResolvedValue({ deal: baseDeal, photos: [basePhoto] });
 
     const node = renderPage();
-    await vi.waitFor(() => expect(apiMock).toHaveBeenCalledWith("/public/photo-viewer/raw-token?page=1"));
+    await vi.waitFor(() => expect(apiMock).toHaveBeenCalledWith("/public/photo-viewer/raw-token"));
     await vi.waitFor(() => expect(node.textContent).toContain("Portfolio Roof"));
     expect(node.textContent).toContain("123 Main St");
     expect(node.querySelector('img[alt^="Shared photo"]')).not.toBeNull();
@@ -108,7 +81,7 @@ describe("PublicPhotoViewerPage", () => {
   });
 
   it("renders an empty shared-photo state", async () => {
-    apiMock.mockResolvedValue(pagedResponse([]));
+    apiMock.mockResolvedValue({ deal: baseDeal, photos: [] });
 
     const node = renderPage();
 
@@ -116,13 +89,14 @@ describe("PublicPhotoViewerPage", () => {
   });
 
   it("renders every shared photo in a flat grid without date grouping", async () => {
-    apiMock.mockResolvedValue(
-      pagedResponse([
+    apiMock.mockResolvedValue({
+      deal: baseDeal,
+      photos: [
         basePhoto,
-        { id: "photo-2", imageUrl: "https://example.test/photo-2.jpg", fullImageUrl: "https://example.test/f2.jpg" },
-        { id: "photo-3", imageUrl: "https://example.test/photo-3.jpg", fullImageUrl: "https://example.test/f3.jpg" },
-      ]),
-    );
+        { id: "photo-2", imageUrl: "https://example.test/photo-2.jpg" },
+        { id: "photo-3", imageUrl: "https://example.test/photo-3.jpg" },
+      ],
+    });
 
     const node = renderPage();
     await vi.waitFor(() => expect(node.querySelectorAll('img[alt^="Shared photo"]').length).toBe(3));
@@ -131,7 +105,7 @@ describe("PublicPhotoViewerPage", () => {
   });
 
   it("does not render non-image shared records as images", async () => {
-    apiMock.mockResolvedValue(pagedResponse([{ id: "photo-pdf", imageUrl: null, fullImageUrl: null }]));
+    apiMock.mockResolvedValue({ deal: baseDeal, photos: [{ id: "photo-pdf", imageUrl: null }] });
 
     const node = renderPage();
     await vi.waitFor(() => expect(node.querySelectorAll("button").length).toBeGreaterThan(0));
@@ -144,7 +118,7 @@ describe("PublicPhotoViewerPage", () => {
     const openMock = vi.spyOn(window, "open").mockImplementation(() => null);
     apiMock.mockImplementation(async (path: string) => {
       if (path.includes("/download")) return { url: "https://example.test/download.jpg" };
-      return pagedResponse([basePhoto]);
+      return { deal: baseDeal, photos: [basePhoto] };
     });
 
     const node = renderPage();
@@ -165,218 +139,5 @@ describe("PublicPhotoViewerPage", () => {
 
     await vi.waitFor(() => expect(apiMock).toHaveBeenCalledWith("/public/photo-viewer/raw-token/photos/photo-1/download"));
     expect(openMock).toHaveBeenCalledWith("https://example.test/download.jpg", "_blank", "noopener,noreferrer");
-  });
-
-  // `/p/:token` is declared WITHOUT a key, so React Router reuses this component across a token change
-  // and an in-flight request for the previous link can resolve after the new one has already painted.
-  // Committing it would put the previous share's deal name and photos under the current link. Revert
-  // the `requestTokenRef` guard in loadPage and this test fails: "Second Share" is replaced by
-  // "First Share" and the first token's photo appears in the grid.
-  it("drops a response from a superseded token instead of committing it under the current link", async () => {
-    const first = deferred<unknown>();
-    const second = deferred<unknown>();
-    apiMock.mockImplementation((path: string) => {
-      if (path.includes("token-a")) return first.promise;
-      if (path.includes("token-b")) return second.promise;
-      throw new Error(`unexpected request: ${path}`);
-    });
-
-    container = document.createElement("div");
-    document.body.appendChild(container);
-    root = createRoot(container);
-    root.render(
-      <MemoryRouter initialEntries={["/p/token-a"]}>
-        <TokenSwitcher to="/p/token-b" />
-        <Routes>
-          <Route path="/p/:token" element={<PublicPhotoViewerPage />} />
-        </Routes>
-      </MemoryRouter>
-    );
-    const node = container;
-
-    await vi.waitFor(() => expect(apiMock).toHaveBeenCalledWith("/public/photo-viewer/token-a?page=1"));
-
-    // Navigate to the second share while the first request is still pending.
-    node.querySelector<HTMLButtonElement>('[data-testid="switch-token"]')?.click();
-    await vi.waitFor(() => expect(apiMock).toHaveBeenCalledWith("/public/photo-viewer/token-b?page=1"));
-
-    second.resolve({
-      deal: { name: "Second Share", propertyAddress: null },
-      photos: [{ id: "photo-b", imageUrl: "https://example.test/b.jpg", fullImageUrl: "https://example.test/b-full.jpg" }],
-      pagination: { page: 1, limit: 60, total: 1, totalPages: 1 },
-    });
-    await vi.waitFor(() => expect(node.textContent).toContain("Second Share"));
-
-    // The loser lands late.
-    first.resolve({
-      deal: { name: "First Share", propertyAddress: "999 Old Rd" },
-      photos: [{ id: "photo-a", imageUrl: "https://example.test/a.jpg", fullImageUrl: "https://example.test/a-full.jpg" }],
-      pagination: { page: 1, limit: 60, total: 900, totalPages: 15 },
-    });
-    await first.promise;
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
-    expect(node.textContent).toContain("Second Share");
-    expect(node.textContent).not.toContain("First Share");
-    expect(node.textContent).not.toContain("999 Old Rd");
-    expect(node.querySelector('img[src="https://example.test/a.jpg"]')).toBeNull();
-    // And the stale total must not leak into the current link's header or its paging cursor.
-    expect(node.textContent).not.toContain("900 photos");
-  });
-
-  // `photos.length < total` and "the server has more pages" are not the same statement, and once they
-  // disagree the gap never closes: OFFSET paging over a live deal means a photo uploaded mid-scroll
-  // repeats (and is deduped away) while a deleted one is skipped outright, so the gallery ends short of
-  // `total`. Revert the `endReached` guard and the client keeps asking for pages that do not exist.
-  it("stops paging when the server reports its last page, even if the loaded count is short of total", async () => {
-    // Two photos delivered, header total of five, and ONE page — the post-deletion shape.
-    apiMock.mockResolvedValue({
-      deal: baseDeal,
-      photos: [basePhoto, { id: "photo-2", imageUrl: "https://example.test/2.jpg", fullImageUrl: null }],
-      pagination: { page: 1, limit: 60, total: 5, totalPages: 1 },
-    });
-
-    const node = renderPage();
-    await vi.waitFor(() => expect(node.querySelectorAll('img[alt^="Shared photo"]').length).toBe(2));
-
-    // No paging affordance: there is no page 2 to fetch, so offering one would be a button that
-    // silently does nothing.
-    expect(node.textContent).not.toContain("Load more photos");
-    expect(node.textContent).not.toContain("Loading more photos");
-    expect(apiMock).toHaveBeenCalledTimes(1);
-  });
-
-  // The second, independent stop. `totalPages` is derived from a `total` that grows while photos are
-  // being uploaded, so it can stay ahead of a cursor that is already re-reading rows it has seen — the
-  // server keeps claiming another page and every one of them is duplicates. A page that contributes no
-  // new ids is the end whatever the arithmetic says. Here totalPages is 3, so the totalPages stop alone
-  // would NOT catch this.
-  it("stops when a page contributes only ids it already has, even if the server claims more pages", async () => {
-    const photoA = basePhoto;
-    const photoB = { id: "photo-2", imageUrl: "https://example.test/2.jpg", fullImageUrl: null };
-    let calls = 0;
-    apiMock.mockImplementation(async () => {
-      calls += 1;
-      if (calls > 4) throw new Error("runaway paging");
-      return {
-        deal: baseDeal,
-        // Page 2 re-serves page 1 — the shape an OFFSET cursor produces when rows are inserted ahead
-        // of it. Every id is already known.
-        photos: [photoA, photoB],
-        pagination: { page: calls, limit: 2, total: 6, totalPages: 3 },
-      };
-    });
-
-    // Queried as an element, not via textContent: "Loading more photos…" contains "more photos" too, so
-    // a text assertion would pass on the transient in-flight state and prove nothing.
-    const loadMoreButton = () =>
-      Array.from(node.querySelectorAll<HTMLButtonElement>("button")).find((button) =>
-        button.textContent?.includes("Load more photos"),
-      );
-
-    const node = renderPage();
-    await vi.waitFor(() => expect(node.querySelectorAll('img[alt^="Shared photo"]').length).toBe(2));
-    // Page 1 said totalPages 3, so the control is offered.
-    await vi.waitFor(() => expect(loadMoreButton()).not.toBeUndefined());
-
-    loadMoreButton()?.click();
-
-    // Page 2 arrives as pure duplicates. Wait for the request to SETTLE before judging the control.
-    await vi.waitFor(() => expect(calls).toBe(2));
-    await vi.waitFor(() => expect(node.textContent).not.toContain("Loading more photos"));
-
-    // totalPages is 3 and only 2 of 6 photos are loaded, so every count-based signal still says "more".
-    // Only the contributed-nothing stop can end the gallery here.
-    expect(loadMoreButton()).toBeUndefined();
-    expect(node.querySelectorAll('img[alt^="Shared photo"]').length).toBe(2);
-    for (let tick = 0; tick < 5; tick += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    }
-    expect(calls).toBe(2);
-  });
-
-  // The two paging fixes point in opposite directions and must compose: a page that FAILS is retryable,
-  // a page that legitimately ends the gallery is not. If a transient failure could reach the terminal
-  // "no more pages" state, the retry bug would have been traded for a silent truncation — the exact
-  // failure this change set exists to remove.
-  it("keeps a failed page retryable — a transient error is not a terminal end-of-gallery", async () => {
-    let calls = 0;
-    apiMock.mockImplementation(async () => {
-      calls += 1;
-      if (calls === 2) throw new Error("network blip");
-      return {
-        deal: baseDeal,
-        photos: [{ id: `photo-p${calls}`, imageUrl: `https://example.test/${calls}.jpg`, fullImageUrl: null }],
-        pagination: { page: calls === 1 ? 1 : 2, limit: 1, total: 3, totalPages: 3 },
-      };
-    });
-
-    const node = renderPage();
-    await vi.waitFor(() => expect(node.textContent).toContain("Load more photos"));
-
-    Array.from(node.querySelectorAll<HTMLButtonElement>("button"))
-      .find((button) => button.textContent?.includes("Load more photos"))
-      ?.click();
-
-    // The failure surfaces as a retry, NOT as the end of the gallery.
-    await vi.waitFor(() => expect(node.textContent).toContain("Try again"));
-    expect(node.textContent).toContain("Couldn't load the rest of these photos");
-
-    Array.from(node.querySelectorAll<HTMLButtonElement>("button"))
-      .find((button) => button.textContent?.includes("Try again"))
-      ?.click();
-
-    // Retry re-requests the SAME page (nextPageRef never advanced) and the gallery grows.
-    await vi.waitFor(() => expect(node.querySelectorAll('img[alt^="Shared photo"]').length).toBe(2));
-    expect(calls).toBe(3);
-  });
-
-  // The virtualized branch, which jsdom otherwise never reaches (no ResizeObserver, no layout). Stubbing
-  // both is what makes the scroll-driven prefetch — and therefore the runaway-request loop — reachable
-  // in a test at all.
-  it("does not loop requesting pages past the end when windowed", async () => {
-    const observed: Array<() => void> = [];
-    class StubResizeObserver {
-      constructor(private callback: () => void) {}
-      observe() {
-        observed.push(this.callback);
-      }
-      unobserve() {}
-      disconnect() {}
-    }
-    vi.stubGlobal("ResizeObserver", StubResizeObserver);
-    const widthDescriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "clientWidth");
-    Object.defineProperty(HTMLElement.prototype, "clientWidth", { configurable: true, value: 1024 });
-
-    try {
-      let calls = 0;
-      apiMock.mockImplementation(async () => {
-        calls += 1;
-        // Circuit breaker: without the fix this loop is unbounded and would hang the runner. Failing
-        // the 6th request lets the buggy build terminate and still be measured.
-        if (calls > 5) throw new Error("runaway paging");
-        return {
-          deal: baseDeal,
-          photos: calls === 1 ? [basePhoto] : [],
-          pagination: { page: calls, limit: 60, total: 4, totalPages: 1 },
-        };
-      });
-
-      const node = renderPage();
-      await vi.waitFor(() => expect(node.querySelectorAll('img[alt^="Shared photo"]').length).toBe(1));
-      // The virtualized layout is the one under test — prove we are in it, not the fallback grid.
-      await vi.waitFor(() => expect(node.querySelector("div.relative.w-full")).not.toBeNull());
-
-      // Let every prefetch the effect would schedule actually run.
-      for (let tick = 0; tick < 10; tick += 1) {
-        await new Promise((resolve) => setTimeout(resolve, 0));
-      }
-
-      expect(calls).toBe(1);
-    } finally {
-      vi.unstubAllGlobals();
-      if (widthDescriptor) Object.defineProperty(HTMLElement.prototype, "clientWidth", widthDescriptor);
-      else delete (HTMLElement.prototype as unknown as Record<string, unknown>).clientWidth;
-    }
   });
 });

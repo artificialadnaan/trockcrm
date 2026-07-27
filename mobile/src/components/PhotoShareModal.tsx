@@ -11,14 +11,13 @@ import { Banner } from "./Banner";
 import { PhotoPickerGrid } from "./PhotoPickerGrid";
 
 // Mirror the server cap (server/src/modules/field/routes.ts MAX_SHARE_PHOTOS) so a large gallery can't
-// post more ids than the endpoint accepts and get a 400 — we cap the selection client-side and tell the
-// user. This is the SHARE cap only; bulk download has its own, lower one on the server.
-const MAX_SHARE_PHOTOS = 3000;
+// post 201+ ids and get a 400 — we cap the selection client-side and tell the user.
+const MAX_SHARE_PHOTOS = 200;
 
 /**
  * Photo-share flow (mirrors the ReportBuilder select grid): multi-select a project's photos →
  * "Share link" → POST /field/projects/:id/share → open the iOS share sheet with the returned URL.
- * Photos-only: the endpoint mints a public, 90-day, read-only link and never mutates the deal.
+ * Photos-only: the endpoint mints a public, 7-day, read-only link and never mutates the deal.
  */
 export function PhotoShareModal({
   visible,
@@ -187,9 +186,8 @@ export function PhotoShareModal({
                   <Text style={styles.link}>{allSelected ? "Clear all" : "Select all"}</Text>
                 </Pressable>
               </View>
-              {/* 90 days is SHARE_LINK_TTL_MS on the server; this copy said 7 and had always been wrong. */}
               <Text style={styles.hint}>
-                Anyone with the link can view the selected photos for 90 days — no login needed.
+                Anyone with the link can view the selected photos for 7 days — no login needed.
                 {photos.length > MAX_SHARE_PHOTOS ? ` Up to ${MAX_SHARE_PHOTOS} per link.` : ""}
               </Text>
             </View>

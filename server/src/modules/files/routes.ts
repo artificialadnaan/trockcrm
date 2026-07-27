@@ -688,6 +688,8 @@ export function parseFeedFilterQuery(query: express.Request["query"]): PhotoFeed
 // GET /api/files/photos/project-stats — photo counts and metadata grouped by project, sorted and paged
 // SERVER-SIDE. The sort must not move to the client: it would only ever reorder the rows the server
 // already chose, so "most photos" would silently mean "most-photographed of the most recent page".
+// Paged by KEYSET CURSOR, not page number: the ordering keys (photo count, latest photo time) change
+// with every upload, and OFFSET over a moving set duplicates and skips rows.
 router.get("/photos/project-stats", async (req, res, next) => {
   try {
     const sort = optionalQueryString(req.query.sort);
@@ -698,6 +700,9 @@ router.get("/photos/project-stats", async (req, res, next) => {
       // double as an arbitrary rep filter that no other surface offers.
       assignedRepId: req.query.mine === "1" ? req.user!.id : undefined,
       search: optionalQueryString(req.query.q),
+      // Keyset position, opaque to the client. Validated in decodeProjectCursor, which drops anything
+      // malformed so a stale bookmark restarts the list instead of 400-ing or reaching a bad uuid cast.
+      cursor: optionalQueryString(req.query.cursor),
     });
     await req.commitTransaction!();
     res.json(result);

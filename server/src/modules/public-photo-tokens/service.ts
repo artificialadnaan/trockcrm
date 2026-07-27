@@ -5,11 +5,10 @@ import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import * as schema from "@trock-crm/shared/schema";
 import { db, pool, releasePooledClient, isBrokenConnectionError } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
-import { getDealPhotoIdsInScope, getDealPhotoTimeline } from "../files/service.js";
+import { getDealPhotoTimeline } from "../files/service.js";
 import { logPhotoEvent } from "../files/audit-log-service.js";
 import { latestActiveVersionCondition, type DealPhotoTimelineFilters } from "../files/photo-timeline-filters.js";
 import { getObjectBuffer, getObjectStream, ObjectTooLargeError } from "../../lib/r2-client.js";
-import { generateThumbnailBuffer } from "../../lib/image-thumbnail.js";
 import { isStrippableJpeg } from "./image-metadata.js";
 import { isTranscodableToJpeg, transcodeToStrippedJpeg } from "./image-transcode.js";
 
@@ -114,32 +113,9 @@ function normalizePhotoIds(value: unknown): string[] | null {
 }
 
 // Limits a per-photo lookup (`files.id`) to a subset token's photo_ids — so a requested photo id
-// outside the token's scope 404s even if guessed. Whole-deal tokens (NULL photo_ids) match everything
-// in the deal, so the EXISTS is satisfied by the `t.photo_ids IS NULL` arm.
-//
-// Compares against the token row's STORED photo_ids instead of re-sending the id list. The previous
-// shape marshalled ONE BIND PARAMETER PER ID into `ARRAY[$1::uuid, $2::uuid, …]` and injected it here —
-// and this predicate runs on EVERY per-photo asset/download request. At the 200 cap that was 200
-// requests x 200 params; at the 3000 cap it would be 3000 requests each re-sending a 3000-element uuid
-// array (~9M parameters to view one gallery, and within one order of magnitude of Postgres's
-// 65535-parameters-per-statement ceiling). One uuid now goes over the wire and Postgres compares the
-// array in place.
-//
-// The token's revoked/expired guard is repeated here on purpose: the caller validated the token in a
-// separate statement, so re-checking closes the window where a link revoked in between still serves
-// bytes from an in-flight gallery.
-function tokenPhotoScopeSql(tokenId: string) {
-  return sql` AND EXISTS (
-    SELECT 1 FROM public.public_photo_tokens t
-    WHERE t.id = ${tokenId}::uuid
-      AND t.revoked_at IS NULL
-      AND (t.expires_at IS NULL OR t.expires_at > now())
-      -- cardinality guard: normalizePhotoIds maps an EMPTY array to "whole deal" on the JS side, but
-      -- IS NULL is FALSE for an empty array, so without this an empty-array row would LIST a deal's
-      -- photos in the viewer and then 404 every single tile. Not reachable via generatePublicToken
-      -- today; cheap to make unreachable by construction.
-      AND (t.photo_ids IS NULL OR cardinality(t.photo_ids) = 0 OR files.id = ANY(t.photo_ids))
-  )`;
+// outside the token's scope 404s even if guessed. No-op for whole-deal tokens (null photo_ids).
+function tokenPhotoScopeSql(photoIds: string[] | null) {
+  return photoIds === null ? sql`` : sql` AND id = ANY(${photoIdsArrayParam(photoIds)})`;
 }
 
 // A token's deal may be a converted lead, whose photos live under files.lead_id = deals.source_lead_id.
@@ -194,24 +170,24 @@ export async function generatePublicToken(input: {
   };
 }
 
-// Validates that every requested photo id is one the deal's photo timeline would show — by running the
-// ids through the SAME buildDealPhotoTimelineConditions scope the field UI and public viewer use. That
-// scope covers deal+lead lineage (converted-lead photos via sourceLeadId), photo category, active +
-// latest-version (superseded versions excluded), and not-deleted. Reusing it means a sharable selection
-// exactly matches what the field app shows — no divergent membership rule. Throws 400 if any id isn't
-// returned (foreign deal, superseded version, non-photo, deleted). No-op for an empty list.
+// Validates that every requested photo id is one the deal's photo timeline would show — by running
+// the ids through the SAME getDealPhotoTimeline scope the field UI and public viewer use. That scope
+// covers deal+lead lineage (converted-lead photos via sourceLeadId), photo category, active +
+// latest-version (superseded versions excluded), and not-deleted. Reusing it means a sharable
+// selection exactly matches what the field app shows — no divergent membership rule. Throws 400 if any
+// id isn't returned (foreign deal, superseded version, non-photo, deleted). No-op for an empty list.
 // Callers must pass canonical (lowercase) uuids so ids match Postgres's lowercase form.
-//
-// Reads ids only (getDealPhotoIdsInScope) rather than the full timeline: the predicate is identical, but
-// this is the ONE step whose cost scales with the share cap rather than a page size, and the full
-// timeline would fetch 3000 x 49-column rows plus ~6000 presigned URLs just to read `.id` off them.
 export async function assertPhotosBelongToDeal(
   tenantDb: TenantDb,
   dealId: string,
   photoIds: string[]
 ): Promise<void> {
   if (photoIds.length === 0) return;
-  const foundIds = new Set(await getDealPhotoIdsInScope(tenantDb, dealId, photoIds));
+  const timeline = await getDealPhotoTimeline(tenantDb, dealId, 1, photoIds.length, {
+    photoIds,
+    includeDeleted: false,
+  });
+  const foundIds = new Set(timeline.photos.map((photo) => photo.id));
   const missing = photoIds.filter((id) => !foundIds.has(id));
   if (missing.length > 0) {
     throw new AppError(400, "One or more selected photos are not part of this project.");
@@ -367,15 +343,10 @@ export async function withPublicPhotoTenant<T>(
 // Per-photo GPS + geocoded address were already omitted; the deal number is hidden by
 // the image proxy. `id` is the random photo UUID needed to address the proxied image
 // (it's already embedded in imageUrl) — not a business identifier.
-//
-// `imageUrl` (grid) and `fullImageUrl` (lightbox) are the same proxy endpoint with a different
-// `variant`, so the split adds no exposure: identical gates, identical stripping, same hidden object
-// key. It exists so the grid stops paying full resolution for a 200px tile — see resolvePublicThumbnail.
-function publicPhotoShape(photo: any, imageUrl: string | null, fullImageUrl: string | null) {
+function publicPhotoShape(photo: any, imageUrl: string | null) {
   return {
     id: photo.id,
     imageUrl,
-    fullImageUrl,
   };
 }
 
@@ -385,19 +356,10 @@ function publicPhotoShape(photo: any, imageUrl: string | null, fullImageUrl: str
  * which would leak the deal number this public surface deliberately omits. The proxy hides the key
  * and strips EXIF on the way out.
  */
-function publicPhotoAssetUrl(
-  assetBaseUrl: string,
-  rawToken: string,
-  photoId: string,
-  options: { download?: boolean; variant?: "thumb" } = {},
-): string {
+function publicPhotoAssetUrl(assetBaseUrl: string, rawToken: string, photoId: string, download = false): string {
   const base = assetBaseUrl.replace(/\/+$/, "");
   const url = `${base}/${encodeURIComponent(rawToken)}/photos/${encodeURIComponent(photoId)}/image`;
-  const params = new URLSearchParams();
-  if (options.download) params.set("download", "1");
-  if (options.variant) params.set("variant", options.variant);
-  const query = params.toString();
-  return query ? `${url}?${query}` : url;
+  return download ? `${url}?download=1` : url;
 }
 
 // Whether an R2-backed photo can be served through the public proxy. JPEGs stream (size-independent);
@@ -419,12 +381,7 @@ function isPublicProxyServable(
   return false;
 }
 
-function publicPhotoImageUrl(
-  photo: any,
-  assetBaseUrl: string | undefined,
-  rawToken: string,
-  variant?: "thumb",
-): string | null {
+function publicPhotoImageUrl(photo: any, assetBaseUrl: string | undefined, rawToken: string): string | null {
   if (!isPublicPhotoImagePreviewable(photo)) return null;
   // R2-backed photos are served through the API proxy (object key hidden, metadata stripped). JPEGs are
   // EXIF-stripped on the fly; PNG/WebP/GIF/AVIF/TIFF originals are re-encoded server-side to a
@@ -433,49 +390,17 @@ function publicPhotoImageUrl(
   // request. External (CompanyCam CDN) URLs don't carry the deal number and are served directly.
   if (photo.r2Key) {
     if (!isPublicProxyServable(photo.mimeType, photo.fileExtension, photo.fileSizeBytes)) return null;
-    return assetBaseUrl ? publicPhotoAssetUrl(assetBaseUrl, rawToken, photo.id, { variant }) : null;
+    return assetBaseUrl ? publicPhotoAssetUrl(assetBaseUrl, rawToken, photo.id) : null;
   }
-  // External-only (CompanyCam) imports already publish two sizes; use the CDN's own thumbnail for the
-  // grid so this branch gets the same "small bytes in the grid" treatment as the proxied one.
-  return variant === "thumb"
-    ? photo.externalThumbnailUrl ?? photo.externalUrl ?? null
-    : photo.externalUrl ?? photo.externalThumbnailUrl ?? null;
+  return photo.externalThumbnailUrl ?? photo.externalUrl ?? null;
 }
-
-/**
- * How many photos one public-viewer page returns. The viewer USED TO take `getDealPhotoTimeline(…, 1,
- * 500)` with no pagination at all in its response, which meant a link scoped to more than 500 photos
- * rendered exactly 500 of them — no error, no truncation notice, no way for the recipient to know. That
- * was already misleading production whole-deal links (19 projects hold more than 500 photos, the largest
- * 2,911), and raising the share cap to 3000 would have made it the norm. Paging is therefore a
- * PREREQUISITE of the cap raise, not a nicety.
- *
- * 60 fills a 5-column grid twelve rows deep — about two screens — so the first paint is fast and the
- * rest streams in as the recipient scrolls. The max is what bounds the per-request cost now that the
- * selection itself no longer does: at most 200 timeline rows and ~400 presigns per request, regardless
- * of whether the token covers 200 photos or 3000.
- */
-const PUBLIC_VIEWER_DEFAULT_PER_PAGE = 60;
-const PUBLIC_VIEWER_MAX_PER_PAGE = 200;
 
 export async function getPublicPhotoViewer(
   rawToken: string,
-  options: { assetBaseUrl?: string; filters?: DealPhotoTimelineFilters; page?: number; limit?: number } = {}
+  options: { assetBaseUrl?: string; filters?: DealPhotoTimelineFilters } = {}
 ) {
   const filters = options.filters ?? {};
-  // Clamp before use: `?page=abc` / `?limit=-1` would otherwise reach SQL as a NaN/negative OFFSET.
-  const page = Number.isFinite(options.page) && (options.page as number) >= 1 ? Math.floor(options.page as number) : 1;
-  const limit = Number.isFinite(options.limit) && (options.limit as number) >= 1
-    ? Math.min(Math.floor(options.limit as number), PUBLIC_VIEWER_MAX_PER_PAGE)
-    : PUBLIC_VIEWER_DEFAULT_PER_PAGE;
-  // ONE access per visit, not one per page. `access_count` is surfaced to the sender as "N accesses"
-  // in the share panel, and before this change a viewer load was exactly one request. Now that the
-  // gallery pages, counting every page would have made a single recipient scrolling a 3000-photo share
-  // read as ~50 separate visits — the metric would grow with the SIZE of the share rather than with
-  // interest in it. Page 1 is the visit; pages 2+ validate read-only, for the same reason the per-photo
-  // asset endpoint already uses resolvePublicPhotoToken. Both helpers 404 identically on a revoked or
-  // expired link, so this does not widen what a stale link can reach.
-  const token = page === 1 ? await verifyAndConsumeToken(rawToken) : await resolvePublicPhotoToken(rawToken);
+  const token = await verifyAndConsumeToken(rawToken);
   return withPublicPhotoTenant(token.tenantId, async (tenantDb) => {
     const dealResult = await tenantDb.execute(sql`
       SELECT
@@ -489,36 +414,14 @@ export async function getPublicPhotoViewer(
     const deal = ((dealResult as any).rows ?? dealResult)[0];
     if (!deal) throw new AppError(404, "Photo link not found");
 
-    // Still routed through getDealPhotoTimeline rather than a hand-written narrow query. The narrow
-    // query is tempting (49 columns and 2 presigns per row are discarded by publicPhotoShape), but
-    // paging already bounds that waste to the page size, whereas re-implementing the scope is exactly
-    // where `latestActiveVersionCondition` or `deleted_at IS NULL` gets dropped — and on THIS surface a
-    // dropped predicate means a revoked or superseded photo reappearing on a public link.
-    //
-    // KNOWN LIMITATION — OFFSET paging over a set that can change underneath it. If a photo on an
-    // already-loaded page is deleted before the next page is fetched, every later row shifts left while
-    // the next request still skips the original offset, so one still-active photo is stepped over and
-    // never delivered. The recipient sees a gallery one photo short with nothing indicating it.
-    //
-    // Not fixed here, deliberately. A stable cursor is the right answer, but getDealPhotoTimeline is
-    // shared with the field project timeline and the photo-report selector, so changing its paging
-    // contract reaches two surfaces this change set does not touch — and this PR inherited the OFFSET
-    // model rather than introducing it. What this PR DID introduce, and has fixed, is the unbounded
-    // request loop that the same drift used to cause on the client (see photo-viewer-page.tsx): the
-    // gallery now stops when the SERVER says it is done, so drift costs at most a missing tile instead
-    // of an endless retry against an unauthenticated endpoint.
-    const timeline = await getDealPhotoTimeline(tenantDb, token.dealId, page, limit, {
+    const timeline = await getDealPhotoTimeline(tenantDb, token.dealId, 1, 500, {
       ...filters,
       includeDeleted: false,
       // Subset token (non-null photo_ids) -> the viewer lists ONLY those photos; whole-deal token -> all.
       photoIds: token.photoIds ?? undefined,
     });
     const photos = timeline.photos.map((photo) =>
-      publicPhotoShape(
-        photo,
-        publicPhotoImageUrl(photo, options.assetBaseUrl, rawToken, "thumb"),
-        publicPhotoImageUrl(photo, options.assetBaseUrl, rawToken),
-      )
+      publicPhotoShape(photo, publicPhotoImageUrl(photo, options.assetBaseUrl, rawToken))
     );
 
     return {
@@ -529,9 +432,6 @@ export async function getPublicPhotoViewer(
         propertyAddress: deal.property_address ?? null,
       },
       photos,
-      // `total` is the share's real size. The recipient-facing page uses it to keep loading, and it is
-      // what makes an under-delivered gallery detectable instead of silent.
-      pagination: timeline.pagination,
     };
   });
 }
@@ -557,7 +457,7 @@ export async function getPublicPhotoDownload(rawToken: string, photoId: string, 
       WHERE id = ${photoId}::uuid
         AND ${dealPhotoOwnershipSql(token.dealId)}
         AND category = 'photo'
-        AND deleted_at IS NULL${tokenPhotoScopeSql(token.tokenId)}${latestActivePhotoSql()}
+        AND deleted_at IS NULL${tokenPhotoScopeSql(token.photoIds)}${latestActivePhotoSql()}
       LIMIT 1
     `);
     const photo = ((photoResult as any).rows ?? photoResult)[0];
@@ -576,10 +476,10 @@ export async function getPublicPhotoDownload(rawToken: string, photoId: string, 
         throw new AppError(404, "Photo not found");
       }
       if (isStrippableJpeg(photo.mime_type, photo.file_extension)) {
-        result = { url: publicPhotoAssetUrl(context.assetBaseUrl, rawToken, String(photo.id), { download: true }), filename };
+        result = { url: publicPhotoAssetUrl(context.assetBaseUrl, rawToken, String(photo.id), true), filename };
       } else {
         // Transcodable non-JPEG within the size cap -> served as a transcoded JPEG, so the download is photo.jpg.
-        result = { url: publicPhotoAssetUrl(context.assetBaseUrl, rawToken, String(photo.id), { download: true }), filename: "photo.jpg" };
+        result = { url: publicPhotoAssetUrl(context.assetBaseUrl, rawToken, String(photo.id), true), filename: "photo.jpg" };
       }
     } else if (photo.external_url) {
       result = { url: photo.external_url, filename };
@@ -609,134 +509,6 @@ export type PublicPhotoAsset =
   | { kind: "jpeg-buffer"; buffer: Buffer; contentType: string; filename: string };
 
 /**
- * Admission control for ON-DEMAND grid thumbnails (see resolvePublicThumbnail). Each render buffers an
- * original into memory and decodes it in sharp, so an unbounded burst is both a memory and a CPU hazard
- * on this PUBLIC, unauthenticated endpoint — 40 MB (MAX_TRANSCODE_BYTES) x N live buffers is how you OOM
- * the API from a shared link.
- *
- * QUEUE, don't shed. A plain burst cap (the lib/pdf-thumbnail.ts pattern) is right there because a
- * skipped PDF render costs only a type badge. Here shedding is self-defeating: a 60-tile page fires
- * dozens of concurrent requests, so a bare cap of 4 would hand a thumbnail to 4 tiles and stream
- * full-resolution originals to the rest — on exactly the legacy galleries (81% of production photos have
- * no stored thumbnail) this feature exists to speed up, and the "shed" path is INVISIBLE, so the
- * regression would never surface. Waiting a few hundred ms for a ~40 KB render beats downloading 0.58 MB
- * immediately. The FIFO grant mirrors withHeicDecodePermit in lib/image-thumbnail.ts.
- *
- * The waiter list is bounded because the queue is itself a resource: past that depth we DO fall back to
- * the full-res path, so a pathological burst degrades to "correct but heavier" instead of parking
- * unbounded requests.
- */
-const MAX_CONCURRENT_PUBLIC_THUMBNAILS = 4;
-const MAX_QUEUED_PUBLIC_THUMBNAILS = 48;
-let activePublicThumbnails = 0;
-const publicThumbnailWaiters: Array<() => void> = [];
-
-/** Resolves true once a permit is held, or false when the queue is too deep to wait. */
-async function acquirePublicThumbnailPermit(): Promise<boolean> {
-  if (activePublicThumbnails < MAX_CONCURRENT_PUBLIC_THUMBNAILS) {
-    activePublicThumbnails += 1;
-    return true;
-  }
-  if (publicThumbnailWaiters.length >= MAX_QUEUED_PUBLIC_THUMBNAILS) return false;
-  // The releaser hands the permit over already incremented, so no second increment here.
-  await new Promise<void>((resolve) => publicThumbnailWaiters.push(resolve));
-  return true;
-}
-
-function releasePublicThumbnailPermit(): void {
-  const next = publicThumbnailWaiters.shift();
-  // Transfer the permit directly to the next waiter rather than decrementing and letting it re-check:
-  // the count stays occupied across the handoff, so a request arriving in that window cannot slip ahead
-  // and push concurrency above the cap.
-  if (next) next();
-  else activePublicThumbnails -= 1;
-}
-
-/**
- * Grid-sized JPEG for a photo, or null to fall back to the full-res path.
- *
- * WHY THIS EXISTS: the proxy only ever resolved `r2_key`, so the recipient's GRID was being served
- * full-resolution ORIGINALS — averaging 0.58 MB each in production. At the old 200 cap that was ~116 MB
- * per gallery; at 3000 it is ~1.7 GB streamed through one Node process for a single share. Thumbnails
- * are ~40 KB, a ~14x reduction, and this is the single largest cost in the whole feature.
- *
- * Two sources, in order:
- *   1. `thumbnail_r2_key` — the sharp thumbnail generated at confirmUpload (#808). Free, but only 19%
- *      of production photos have one: the column postdates most of the library and the backfill it
- *      anticipates has never run (migrations/0169). Serving only this would leave every legacy project
- *      — i.e. exactly the big ones this feature is for — on full-res originals.
- *   2. rendered on demand from the original, burst-capped. Deliberately NOT persisted back to R2: that
- *      would be a write driven by an unauthenticated request, and a one-off backfill script is the
- *      right way to make this permanent (this repo runs those as inert dry-run/--commit scripts).
- *
- * Exposure-safe either way: both paths are sharp re-encodes, which drop EXIF/GPS by construction, so a
- * thumbnail never needs (or gets) the pipeStrippedJpeg pass the raw-original stream requires.
- */
-async function resolvePublicThumbnail(photo: {
-  r2_key?: string | null;
-  thumbnail_r2_key?: string | null;
-  mime_type?: string | null;
-  file_extension?: string | null;
-}): Promise<PublicPhotoAsset | null> {
-  if (photo.thumbnail_r2_key) {
-    try {
-      /**
-       * STREAMED, not buffered.
-       *
-       * Buffering here looked free — a stored thumbnail is ~40 KB — but it sat on the one path with no
-       * admission control at all, on a router mounted WITHOUT apiLimiter. Concurrency is set by whoever
-       * holds the link, so N simultaneous tile requests meant N simultaneous buffers, each allowed up to
-       * several megabytes. The permit below exists to stop exactly that amplification on the
-       * render path, and this path walked around it.
-       *
-       * Putting it under the same permit would be worse than leaving it: a denied permit returns null,
-       * and the caller then falls back to the FULL-RES original — answering "too much memory in flight"
-       * by sending a 0.58 MB file instead of a 40 KB one. Streaming removes the amplification outright
-       * rather than rationing it, and needs no permit because nothing accumulates.
-       *
-       * The route pipes `jpeg-stream` through pipeStrippedJpeg, which is a no-op pass here — these are
-       * sharp's own re-encodes and already metadata-free — but running it costs nothing on a ~40 KB
-       * object and keeps ONE rule for every streamed byte on this endpoint rather than a variant-shaped
-       * exception that a later change could get wrong.
-       */
-      const object = await getObjectStream(photo.thumbnail_r2_key);
-      return {
-        kind: "jpeg-stream",
-        stream: object.stream,
-        contentType: "image/jpeg",
-        filename: "photo.jpg",
-      };
-    } catch (err) {
-      // A thumbnail_r2_key can outlive its object (thumbnail generation is best-effort and the R2
-      // write is not transactional with the row). Falling through to render one on demand — and
-      // ultimately to the full-res original — keeps a stale key from 500-ing a customer's tile.
-      console.warn(`[public-photo-token] stored thumbnail unavailable for ${photo.thumbnail_r2_key}:`, err);
-    }
-  }
-  if (!photo.r2_key) return null;
-  if (!(await acquirePublicThumbnailPermit())) return null;
-
-  try {
-    const { buffer } = await getObjectBuffer(photo.r2_key, { maxBytes: MAX_TRANSCODE_BYTES });
-    return {
-      kind: "jpeg-buffer",
-      buffer: await generateThumbnailBuffer(buffer),
-      contentType: "image/jpeg",
-      filename: "photo.jpg",
-    };
-  } catch (err) {
-    // Best-effort by design: an oversized original, a decode failure, or an R2 hiccup falls back to the
-    // full-res path (which applies its own size/format gates) rather than punching a hole in the grid.
-    if (!(err instanceof ObjectTooLargeError)) {
-      console.warn(`[public-photo-token] on-demand thumbnail failed for ${photo.r2_key}:`, err);
-    }
-    return null;
-  } finally {
-    releasePublicThumbnailPermit();
-  }
-}
-
-/**
  * Resolves a single photo for the public viewer proxy. R2-backed JPEGs return a raw byte stream the
  * route strips + streams (key never exposed, EXIF removed); R2-backed NON-JPEG rasters
  * (PNG/WebP/GIF/AVIF/TIFF) are re-encoded server-side to a metadata-free JPEG buffer — the raw
@@ -744,25 +516,17 @@ async function resolvePublicThumbnail(photo: {
  * decode (HEIC/HEIF — no libheif in sharp's prebuilt) are 404'd, never served raw. Token validated
  * read-only (no access_count increment); the photo row is read in the tenant transaction, which is
  * released before the R2 fetch so a pooled connection is never held across network I/O.
- *
- * `variant: "thumb"` serves the grid-sized JPEG (see resolvePublicThumbnail); the lightbox keeps
- * requesting the default full-res variant. The token/ownership/latest-version gates are identical for
- * both — the variant only chooses which bytes to send, never which photos are reachable.
  */
-export async function getPublicPhotoAsset(
-  rawToken: string,
-  photoId: string,
-  options: { variant?: "full" | "thumb" } = {},
-): Promise<PublicPhotoAsset> {
+export async function getPublicPhotoAsset(rawToken: string, photoId: string): Promise<PublicPhotoAsset> {
   const token = await resolvePublicPhotoToken(rawToken);
   const photo = await withPublicPhotoTenant(token.tenantId, async (tenantDb) => {
     const photoResult = await tenantDb.execute(sql`
-      SELECT id, r2_key, thumbnail_r2_key, mime_type, file_extension, external_url
+      SELECT id, r2_key, mime_type, file_extension, external_url
       FROM files
       WHERE id = ${photoId}::uuid
         AND ${dealPhotoOwnershipSql(token.dealId)}
         AND category = 'photo'
-        AND deleted_at IS NULL${tokenPhotoScopeSql(token.tokenId)}${latestActivePhotoSql()}
+        AND deleted_at IS NULL${tokenPhotoScopeSql(token.photoIds)}${latestActivePhotoSql()}
       LIMIT 1
     `);
     return ((photoResult as any).rows ?? photoResult)[0];
@@ -770,12 +534,6 @@ export async function getPublicPhotoAsset(
 
   if (!photo) throw new AppError(404, "Photo not found");
   if (photo.r2_key) {
-    // Gate the thumbnail on the SAME servability rule as the full-res path, before any bytes are
-    // fetched: a HEIC original must stay a placeholder, not become a thumbnail the viewer can't reach.
-    if (options.variant === "thumb" && isPublicProxyServable(photo.mime_type, photo.file_extension, null)) {
-      const thumbnail = await resolvePublicThumbnail(photo);
-      if (thumbnail) return thumbnail;
-    }
     if (isStrippableJpeg(photo.mime_type, photo.file_extension)) {
       const object = await getObjectStream(photo.r2_key);
       return {

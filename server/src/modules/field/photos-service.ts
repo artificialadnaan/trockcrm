@@ -14,7 +14,7 @@ import {
   requestUploadUrl,
 } from "../files/service.js";
 import { recordUploadedFileSideEffects, type UploadAuditContext } from "../files/upload-workflow.js";
-import { logPhotoEvents } from "../files/audit-log-service.js";
+import { logPhotoEvent } from "../files/audit-log-service.js";
 import { assertPhotosBelongToDeal } from "../public-photo-tokens/service.js";
 import { assertAccessibleFieldCaptureTarget, assertActiveFieldProject, type FieldPhoto } from "./projects-service.js";
 import { authorizeScorecardEditEvidenceUpload } from "./scorecard-evidence-upload.js";
@@ -810,22 +810,19 @@ export async function buildFieldPhotoDownloadUrls(
     }),
   );
 
-  // Audit each download, matching the authenticated /files/:id/download path so field saves still appear
-  // in a photo's history. ONE multi-row INSERT, not a per-photo loop: tenantDb is a single
-  // transaction-bound client, so the loop was N sequential round-trips holding the transaction open for
-  // the whole batch — the part of this route that made its photo cap load-bearing. logPhotoEvents
+  // Audit each download, matching the authenticated /files/:id/download path so field saves still appear in
+  // a photo's history. Sequential — req.tenantDb is a single transaction-bound client. logPhotoEvent
   // swallows its own write errors (same as the /files path), so this never fails the download.
-  await logPhotoEvents(
-    tenantDb,
-    timeline.photos.map((photo) => ({
+  for (const photo of timeline.photos) {
+    await logPhotoEvent(tenantDb, {
       photoId: photo.id,
-      eventType: "downloaded" as const,
+      eventType: "downloaded",
       userId: input.userId,
       ipAddress: input.auditContext?.ipAddress ?? null,
       userAgent: input.auditContext?.userAgent ?? null,
       metadata: { purpose: "field_download" },
-    })),
-  );
+    });
+  }
 
   return downloads;
 }

@@ -191,6 +191,58 @@ export async function getPhotoFeed(
 export const PROJECT_PHOTO_SORTS = ["recent", "most_photos", "least_photos"] as const;
 export type ProjectPhotoSort = (typeof PROJECT_PHOTO_SORTS)[number];
 
+/**
+ * KEYSET (cursor) paging for the Projects tab, replacing OFFSET.
+ *
+ * OFFSET is only correct over a set that does not move. This aggregate moves constantly: every photo
+ * upload changes a project's `count(*)` and its `max(taken_at)`, which are the exact values the list is
+ * ordered by. A project that gains photos between two requests jumps ahead of the cursor, so page 2
+ * re-delivers a project page 1 already showed and the project that was pushed past the boundary is never
+ * delivered at all. No amount of client-side de-duplication fixes that, because the client cannot tell
+ * "this page repeated rows because the window drifted" from "this page repeated rows because the list
+ * ended" — that information does not exist on the client. Guarding it there produced, in sequence, a
+ * never-retry bug, an infinite-retry bug, and a silent-truncation bug.
+ *
+ * A cursor carries the position IN THE ORDERING rather than a row count, so a reorder cannot skip a row:
+ * the next page is defined as "everything ordered after this exact (sortValue, dealId)", which stays
+ * meaningful however the set changes. `dealId` is the tiebreak that makes the key unique — without it,
+ * the dozens of projects sharing a photo count would have no stable boundary.
+ *
+ * A project can still be RE-DELIVERED if its own sort value changes enough to move it back across the
+ * cursor (a project that loses photos under `most_photos`). That is a duplicate, not a gap: the client
+ * de-dupes on `dealId` for its React keys anyway, and no project is ever silently dropped.
+ */
+export interface ProjectPhotoCursor {
+  /** The ordering value of the last row delivered — a timestamp or a photo count, as text. */
+  sortValue: string;
+  dealId: string;
+}
+
+/** Opaque to the client: it is a position, not a page number, and must not be arithmetic'd on. */
+export function encodeProjectCursor(cursor: ProjectPhotoCursor): string {
+  return Buffer.from(`${cursor.sortValue}\u0000${cursor.dealId}`, "utf8").toString("base64url");
+}
+
+export function decodeProjectCursor(raw: unknown): ProjectPhotoCursor | undefined {
+  if (typeof raw !== "string" || raw.length === 0 || raw.length > 512) return undefined;
+  let decoded: string;
+  try {
+    decoded = Buffer.from(raw, "base64url").toString("utf8");
+  } catch {
+    return undefined;
+  }
+  const separator = decoded.indexOf("\u0000");
+  if (separator <= 0) return undefined;
+  const sortValue = decoded.slice(0, separator);
+  const dealId = decoded.slice(separator + 1);
+  // The dealId half lands in a uuid comparison, so a malformed cursor must be DROPPED here rather than
+  // reaching Postgres as a bad cast (22P02 -> 500). A stale or hand-edited cursor restarts the list,
+  // which is the harmless outcome.
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(dealId)) return undefined;
+  if (sortValue.length === 0 || sortValue.length > 64) return undefined;
+  return { sortValue, dealId };
+}
+
 const PROJECT_STATS_DEFAULT_LIMIT = 50;
 const PROJECT_STATS_MAX_LIMIT = 100;
 const PROJECT_RECENT_PHOTO_COUNT = 5;
@@ -198,6 +250,8 @@ const PROJECT_RECENT_UPLOADER_COUNT = 10;
 
 export interface ProjectPhotoStatsOptions extends PhotoFeedFilters {
   sort?: ProjectPhotoSort;
+  /** Keyset position from the previous page's `nextCursor`. Absent = first page. */
+  cursor?: string;
   /** Restrict to deals owned by this rep — the "My Projects" pill. */
   assignedRepId?: string;
   /** Free-text match over deal name / number / property city — the search box. */
@@ -269,18 +323,28 @@ export async function getProjectPhotoStats(
   options: ProjectPhotoStatsOptions = {},
 ): Promise<{
   projects: ProjectPhotoStat[];
-  pagination: { page: number; limit: number; total: number; totalPages: number };
+  pagination: {
+    limit: number;
+    /**
+     * Total matching projects. Computed ONLY on the first page: the keyset predicate lives in HAVING, so
+     * the `count(*) OVER ()` window would otherwise count what REMAINS after the cursor and the header
+     * would count down as the user paged. `null` on cursor pages means "unchanged" — the client keeps
+     * the figure it already has.
+     */
+    total: number | null;
+    /** Position to resume from, or `null` when the server has nothing further. The ONLY end signal. */
+    nextCursor: string | null;
+  };
 }> {
   const sort: ProjectPhotoSort = PROJECT_PHOTO_SORTS.includes(options.sort as ProjectPhotoSort)
     ? (options.sort as ProjectPhotoSort)
     : "recent";
-  // Guard against `?page=abc` / `?limit=-1`, which would otherwise produce a NaN/negative OFFSET or a
-  // divide-by-zero totalPages (same clamp as getUnassignedCompanyCamPhotos).
-  const page = Number.isFinite(options.page) && (options.page as number) >= 1 ? Math.floor(options.page as number) : 1;
   const limit = Number.isFinite(options.limit) && (options.limit as number) >= 1
     ? Math.min(Math.floor(options.limit as number), PROJECT_STATS_MAX_LIMIT)
     : PROJECT_STATS_DEFAULT_LIMIT;
-  const offset = (page - 1) * limit;
+  // A malformed/stale cursor decodes to undefined and simply restarts the list — never a 400, never a
+  // bad uuid cast reaching Postgres.
+  const cursor = decodeProjectCursor(options.cursor);
 
   // Ownership and search narrow the SAME query the sort and paging run on. Filtering them in the
   // browser instead would repeat the sort-after-truncation mistake in a second place: under
@@ -311,6 +375,21 @@ export async function getProjectPhotoStats(
       ? sql`count(*) ASC`
       : sql`${lastPhotoAtSql} DESC NULLS LAST`;
 
+  // The keyset predicate: "strictly after this position in THIS ordering". Written per sort because the
+  // comparison direction has to match the ORDER BY — a `<` where the ordering ascends silently returns
+  // the rows already delivered. `deal_id` breaks the tie, and its `>` is the same in all three because
+  // the tiebreak is always ascending.
+  //
+  // `files.created_at` is NOT NULL, so `max(COALESCE(taken_at, created_at))` is never NULL for a group
+  // that exists — the NULLS LAST above is defensive, and the cursor never has to encode a null.
+  const havingCursor: SQL | undefined = cursor
+    ? sort === "most_photos"
+      ? sql`(count(*) < ${cursor.sortValue}::bigint OR (count(*) = ${cursor.sortValue}::bigint AND ${files.dealId} > ${cursor.dealId}::uuid))`
+      : sort === "least_photos"
+        ? sql`(count(*) > ${cursor.sortValue}::bigint OR (count(*) = ${cursor.sortValue}::bigint AND ${files.dealId} > ${cursor.dealId}::uuid))`
+        : sql`(${lastPhotoAtSql} < ${cursor.sortValue}::timestamptz OR (${lastPhotoAtSql} = ${cursor.sortValue}::timestamptz AND ${files.dealId} > ${cursor.dealId}::uuid))`
+    : undefined;
+
   const rows = await tenantDb
     .select({
       dealId: files.dealId,
@@ -322,21 +401,31 @@ export async function getProjectPhotoStats(
       photoCount: sql<number>`count(*)::int`,
       lastPhotoAt: sql<string>`${lastPhotoAtSql}::text`,
       // Window over the GROUPED result (window functions run after GROUP BY, before LIMIT), so this is
-      // the number of matching projects — no second COUNT(DISTINCT deal_id) round-trip for pagination.
+      // the number of matching projects — no second COUNT(DISTINCT deal_id) round-trip. Only meaningful
+      // on the first page; past a cursor it counts what REMAINS (the keyset predicate is in HAVING).
       totalProjects: sql<number>`(count(*) OVER ())::int`,
     })
     .from(files)
     .innerJoin(deals, eq(deals.id, files.dealId))
     .where(where)
     .groupBy(files.dealId, deals.name, deals.dealNumber, deals.assignedRepId, deals.propertyCity, deals.propertyState)
+    .having(havingCursor)
     // Tiebreaker is load-bearing, not cosmetic: on `most_photos` dozens of projects share a count, and
-    // without a deterministic second key Postgres may return a different arrangement per page, so paging
-    // could repeat or skip projects.
+    // without a deterministic second key the cursor has no unique boundary to resume from.
     .orderBy(orderBy, files.dealId)
-    .limit(limit)
-    .offset(offset);
+    .limit(limit);
 
-  const total = Number(rows[0]?.totalProjects ?? 0);
+  const total = cursor ? null : Number(rows[0]?.totalProjects ?? 0);
+  // A full page MAY have more after it; a short page cannot. At worst this costs one extra request at an
+  // exact multiple of the page size, which then returns nothing and ends the walk — bounded, and never
+  // the reverse error of stopping while rows remain.
+  const lastRow = rows.length === limit ? rows[rows.length - 1] : undefined;
+  const nextCursor = lastRow?.dealId
+    ? encodeProjectCursor({
+        sortValue: sort === "recent" ? String(lastRow.lastPhotoAt) : String(lastRow.photoCount),
+        dealId: lastRow.dealId,
+      })
+    : null;
   const dealIds = rows.map((row) => row.dealId).filter((id): id is string => Boolean(id));
 
   // Recent-photo strip + uploader avatars, for the RETURNED PAGE ONLY. Same `where` as the aggregate, so
@@ -409,7 +498,7 @@ export async function getProjectPhotoStats(
         recentPhotos: strip.recentPhotos,
       };
     }),
-    pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
+    pagination: { limit, total, nextCursor },
   };
 }
 

@@ -7,7 +7,6 @@ const tenantQueryMock = vi.hoisted(() => vi.fn());
 const releaseMock = vi.hoisted(() => vi.fn());
 const connectMock = vi.hoisted(() => vi.fn(() => ({ query: tenantQueryMock, release: releaseMock })));
 const getDealPhotoTimelineMock = vi.hoisted(() => vi.fn());
-const getDealPhotoIdsInScopeMock = vi.hoisted(() => vi.fn());
 const buildFileDownloadUrlFromRecordMock = vi.hoisted(() => vi.fn());
 const getFileDownloadUrlMock = vi.hoisted(() => vi.fn());
 const logPhotoEventMock = vi.hoisted(() => vi.fn());
@@ -36,7 +35,6 @@ vi.mock("drizzle-orm/node-postgres", () => ({
 vi.mock("../../../src/modules/files/service.js", () => ({
   buildFileDownloadUrlFromRecord: buildFileDownloadUrlFromRecordMock,
   getDealPhotoTimeline: getDealPhotoTimelineMock,
-  getDealPhotoIdsInScope: getDealPhotoIdsInScopeMock,
   getFileDownloadUrl: getFileDownloadUrlMock,
 }));
 
@@ -60,7 +58,6 @@ describe("public photo token service", () => {
     releaseMock.mockReset();
     connectMock.mockClear();
     getDealPhotoTimelineMock.mockReset();
-    getDealPhotoIdsInScopeMock.mockReset();
     buildFileDownloadUrlFromRecordMock.mockReset();
     getFileDownloadUrlMock.mockReset();
     logPhotoEventMock.mockReset();
@@ -224,7 +221,6 @@ describe("public photo token service", () => {
         externalUrl: null,
         r2Key: "office_dallas/deals/TR-1/photos/roof-damage.jpg",
       }],
-      pagination: { page: 1, limit: 60, total: 1, totalPages: 1 },
     });
     buildFileDownloadUrlFromRecordMock.mockResolvedValue({ url: "https://r2.test/photo.jpg" });
 
@@ -240,12 +236,9 @@ describe("public photo token service", () => {
     // Per-photo payload is locked to the image only: { id, imageUrl }. R2-backed photos are
     // served through the token proxy — never a presigned key URL (which embeds the deal
     // number) — so the imageUrl must contain neither the deal number nor an R2 host.
-    // Same proxy endpoint for both, differing only by variant: the grid takes the thumbnail, the
-    // lightbox the full-resolution original. Neither may expose a presigned key.
     expect(result.photos[0]).toEqual({
       id: "photo-1",
-      imageUrl: `${ASSET_BASE}/raw-token/photos/photo-1/image?variant=thumb`,
-      fullImageUrl: `${ASSET_BASE}/raw-token/photos/photo-1/image`,
+      imageUrl: `${ASSET_BASE}/raw-token/photos/photo-1/image`,
     });
     expect(result.photos[0].imageUrl).not.toContain("TR-1");
     expect(result.photos[0].imageUrl).not.toContain("r2.test");
@@ -300,14 +293,13 @@ describe("public photo token service", () => {
         externalUrl: null,
         r2Key: "office_dallas/deals/TR-1/photos/bid-package.pdf",
       }],
-      pagination: { page: 1, limit: 60, total: 1, totalPages: 1 },
     });
 
     const result = await getPublicPhotoViewer("raw-token");
 
     // Non-image record: imageUrl is null (un-strippable, not proxied) and the locked shape
     // still exposes only { id, imageUrl } — the mimeType is not leaked.
-    expect(result.photos[0]).toEqual({ id: "photo-pdf", imageUrl: null, fullImageUrl: null });
+    expect(result.photos[0]).toEqual({ id: "photo-pdf", imageUrl: null });
     expect(result.photos[0]).not.toHaveProperty("mimeType");
     expect(getFileDownloadUrlMock).not.toHaveBeenCalled();
   });
@@ -346,11 +338,10 @@ describe("public photo token service", () => {
         externalUrl: "https://img.companycam.com/full.jpg?token=external",
         r2Key: "office_dallas/deals/TR-1/photos/companycam_123.jpg",
       }],
-      pagination: { page: 1, limit: 60, total: 1, totalPages: 1 },
     });
     const result = await getPublicPhotoViewer("raw-token", { assetBaseUrl: ASSET_BASE });
 
-    expect(result.photos[0]).toEqual({ id: "photo-1", imageUrl: `${ASSET_BASE}/raw-token/photos/photo-1/image?variant=thumb`, fullImageUrl: `${ASSET_BASE}/raw-token/photos/photo-1/image` });
+    expect(result.photos[0]).toEqual({ id: "photo-1", imageUrl: `${ASSET_BASE}/raw-token/photos/photo-1/image` });
     expect(result.photos[0].imageUrl).not.toContain("r2.test");
     expect(buildFileDownloadUrlFromRecordMock).not.toHaveBeenCalled();
     expect(getFileDownloadUrlMock).not.toHaveBeenCalled();
@@ -390,7 +381,6 @@ describe("public photo token service", () => {
         externalUrl: null,
         r2Key: "office_dallas/deals/TR-1/photos/companycam_renamed.heic",
       }],
-      pagination: { page: 1, limit: 60, total: 1, totalPages: 1 },
     });
     const result = await getPublicPhotoViewer("raw-token", { assetBaseUrl: ASSET_BASE });
 
@@ -434,15 +424,13 @@ describe("public photo token service", () => {
         externalUrl: null,
         r2Key: "office_dallas/deals/TR-1/photos/screenshot.png",
       }],
-      pagination: { page: 1, limit: 60, total: 1, totalPages: 1 },
     });
     const result = await getPublicPhotoViewer("raw-token", { assetBaseUrl: ASSET_BASE });
 
     // PNG is transcoded by the proxy (not dropped) — the viewer hands the browser the proxy URL.
     expect(result.photos[0]).toMatchObject({
       id: "photo-png",
-      imageUrl: `${ASSET_BASE}/raw-token/photos/photo-png/image?variant=thumb`,
-      fullImageUrl: `${ASSET_BASE}/raw-token/photos/photo-png/image`,
+      imageUrl: `${ASSET_BASE}/raw-token/photos/photo-png/image`,
     });
     // The proxy URL still hides the deal number.
     expect(result.photos[0].imageUrl).not.toContain("TR-1");
@@ -466,7 +454,6 @@ describe("public photo token service", () => {
         address: null, addressSource: null, geocodedAt: null, procoreSyncStatus: null,
         externalThumbnailUrl: null, externalUrl: null, r2Key: "office_dallas/deals/TR-1/photos/huge.png",
       }],
-      pagination: { page: 1, limit: 60, total: 1, totalPages: 1 },
     });
     const result = await getPublicPhotoViewer("raw-token", { assetBaseUrl: ASSET_BASE });
 
@@ -509,7 +496,6 @@ describe("public photo token service", () => {
         externalUrl: null,
         r2Key: "office_dallas/deals/TR-1/photos/actual.pdf",
       }],
-      pagination: { page: 1, limit: 60, total: 1, totalPages: 1 },
     });
 
     const result = await getPublicPhotoViewer("raw-token");
@@ -552,7 +538,6 @@ describe("public photo token service", () => {
         externalUrl: null,
         r2Key: null,
       }],
-      pagination: { page: 1, limit: 60, total: 1, totalPages: 1 },
     });
 
     const result = await getPublicPhotoViewer("raw-token");
@@ -830,7 +815,7 @@ describe("public photo token service", () => {
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [{ id: "deal-1", name: "Public Deal", property_address: "100 Main St" }] })
       .mockResolvedValueOnce({ rows: [] });
-    getDealPhotoTimelineMock.mockResolvedValue({ photos: [], pagination: { page: 1, limit: 60, total: 0, totalPages: 0 } });
+    getDealPhotoTimelineMock.mockResolvedValue({ photos: [] });
 
     await getPublicPhotoViewer("raw-token", { assetBaseUrl: ASSET_BASE });
 
@@ -838,7 +823,7 @@ describe("public photo token service", () => {
       expect.anything(),
       "deal-1",
       1,
-      60,
+      500,
       expect.objectContaining({ photoIds: [PHOTO_A], includeDeleted: false }),
     );
   });
@@ -855,13 +840,8 @@ describe("public photo token service", () => {
 
     await expect(getPublicPhotoAsset("raw-token", PHOTO_C)).rejects.toMatchObject({ statusCode: 404 });
     const filesSql = tenantQueryMock.mock.calls.map((call) => JSON.stringify(call[0])).join(" ");
-    // The subset is enforced against the token row's STORED photo_ids, not by re-sending the id list.
-    // At the 3000-photo share cap the old shape re-marshalled a 3000-element uuid array on EVERY one of
-    // the ~3000 image requests a gallery makes; this asserts we send the token id instead.
-    expect(filesSql).toContain("public_photo_tokens");
-    expect(filesSql).toContain("photo_ids");
-    expect(filesSql).toContain("token-1");
-    expect(filesSql).not.toContain(PHOTO_A);
+    expect(filesSql).toContain("ANY");
+    expect(filesSql).toContain(PHOTO_A); // the subset is bound into the query
   });
 
   it("does NOT add a subset filter to the asset query for a whole-deal token", async () => {
@@ -876,9 +856,7 @@ describe("public photo token service", () => {
 
     await getPublicPhotoAsset("raw-token", "photo-1");
     const filesSql = tenantQueryMock.mock.calls.map((call) => JSON.stringify(call[0])).join(" ");
-    // A whole-deal token stores NULL photo_ids, so the scope predicate is satisfied by the IS NULL arm
-    // and every photo in the deal stays reachable — the guard is still present, just not restrictive.
-    expect(filesSql).toContain("t.photo_ids IS NULL");
+    expect(filesSql).not.toContain("ANY");
   });
 
   it("scopes per-photo asset lookups to deal + source-lead lineage (converted-lead photos resolve)", async () => {
@@ -902,26 +880,28 @@ describe("public photo token service", () => {
     expect(filesSql).toContain("parent_file_id");
   });
 
-  it("assertPhotosBelongToDeal accepts only ids the deal's photo scope returns (shared predicate)", async () => {
+  it("assertPhotosBelongToDeal accepts only ids the deal's photo timeline returns (shared scope)", async () => {
     const { assertPhotosBelongToDeal } = await import("../../../src/modules/public-photo-tokens/service.js");
 
-    // Validates through getDealPhotoIdsInScope, which runs the SAME buildDealPhotoTimelineConditions
-    // predicate as the field UI / public viewer (deal+lead lineage, category, active + latest-version,
-    // not-deleted) but selects ids only — no 49-column rows, no discarded presigns. This is the one
-    // step whose cost scales with the share cap. All ids returned -> ok.
-    getDealPhotoIdsInScopeMock.mockResolvedValueOnce([PHOTO_A, PHOTO_B]);
+    // Validates through getDealPhotoTimeline — the SAME scope as the field UI / public viewer
+    // (deal+lead lineage, category, active + latest-version, not-deleted). All ids returned -> ok.
+    getDealPhotoTimelineMock.mockResolvedValueOnce({ photos: [{ id: PHOTO_A }, { id: PHOTO_B }], pagination: {} });
     await expect(assertPhotosBelongToDeal({} as any, "deal-1", [PHOTO_A, PHOTO_B])).resolves.toBeUndefined();
-    expect(getDealPhotoIdsInScopeMock).toHaveBeenCalledWith(expect.anything(), "deal-1", [PHOTO_A, PHOTO_B]);
-    // The fat timeline read is gone from the mint path entirely.
-    expect(getDealPhotoTimelineMock).not.toHaveBeenCalled();
+    expect(getDealPhotoTimelineMock).toHaveBeenCalledWith(
+      expect.anything(),
+      "deal-1",
+      1,
+      2,
+      expect.objectContaining({ photoIds: [PHOTO_A, PHOTO_B], includeDeleted: false }),
+    );
 
-    // An id the scope hides (superseded version, wrong deal/lead lineage, non-photo) -> 400.
-    getDealPhotoIdsInScopeMock.mockResolvedValueOnce([PHOTO_A]);
+    // An id the timeline hides (superseded version, wrong deal/lead lineage, non-photo) -> 400.
+    getDealPhotoTimelineMock.mockResolvedValueOnce({ photos: [{ id: PHOTO_A }], pagination: {} });
     await expect(assertPhotosBelongToDeal({} as any, "deal-1", [PHOTO_A, PHOTO_B])).rejects.toMatchObject({ statusCode: 400 });
 
-    // No id list -> no query at all.
-    getDealPhotoIdsInScopeMock.mockClear();
+    // No id list -> no timeline query at all.
+    getDealPhotoTimelineMock.mockClear();
     await expect(assertPhotosBelongToDeal({} as any, "deal-1", [])).resolves.toBeUndefined();
-    expect(getDealPhotoIdsInScopeMock).not.toHaveBeenCalled();
+    expect(getDealPhotoTimelineMock).not.toHaveBeenCalled();
   });
 });

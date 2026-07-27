@@ -22,7 +22,7 @@ const filesMocks = vi.hoisted(() => ({
   requestUploadUrl: vi.fn(),
 }));
 
-const auditMocks = vi.hoisted(() => ({ logPhotoEvent: vi.fn(), logPhotoEvents: vi.fn() }));
+const auditMocks = vi.hoisted(() => ({ logPhotoEvent: vi.fn() }));
 
 vi.mock("../../../src/modules/field/projects-service.js", () => projectMocks);
 vi.mock("../../../src/modules/public-photo-tokens/service.js", () => tokenMocks);
@@ -63,13 +63,7 @@ describe("buildFieldPhotoDownloadUrls", () => {
     expect(tokenMocks.assertPhotosBelongToDeal).toHaveBeenCalledWith(db, "deal-1", ["p1"]);
     expect(result).toEqual([{ id: "p1", url: "https://r2/a.jpg?dl=1", filename: "Front.jpg" }]);
     // Each download is audited (so field saves appear in photo history).
-    // ONE batched multi-row INSERT, not a per-photo loop: the loop held a single transaction-bound
-    // client open for N sequential round-trips, which is what made this route's cap load-bearing.
-    expect(auditMocks.logPhotoEvents).toHaveBeenCalledWith(
-      db,
-      expect.arrayContaining([expect.objectContaining({ photoId: "p1", eventType: "downloaded" })]),
-    );
-    expect(auditMocks.logPhotoEvent).not.toHaveBeenCalled();
+    expect(auditMocks.logPhotoEvent).toHaveBeenCalledWith(db, expect.objectContaining({ photoId: "p1", eventType: "downloaded" }));
   });
 
   it("rejects when a requested id is not part of the deal (no URLs minted)", async () => {
