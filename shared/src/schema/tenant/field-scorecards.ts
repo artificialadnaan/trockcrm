@@ -83,6 +83,18 @@ export const fieldScorecards = pgTable(
     // current cycle's matching-nonce job stamps. Nullable: legacy cards + legacy in-flight jobs (no payload
     // nonce) fall back to the pre-guard stamp behavior.
     correctiveActionCycleNonce: uuid("corrective_action_cycle_nonce"),
+    /**
+     * Per-cycle idempotency stamps for the OVERSIGHT notification (migration 0201) — the
+     * FIELD_SCORECARD_EMAIL_RECIPIENTS watchers, told once when a corrective action opens and once when it
+     * completes. Separate from correctiveActionEmailSentAt on purpose: that stamp drives the RESPONDER
+     * state machine, and an oversight-send failure must not be able to corrupt responder delivery.
+     *
+     * These stamps — NOT the cycle nonce — are the oversight handler's dedup. The responder worker rotates
+     * corrective_action_cycle_nonce on its self-repair path, so gating oversight on a nonce match would
+     * strand a pending "opened" notice. Cleared wherever a fresh cycle starts, so a reopen re-notifies.
+     */
+    correctiveActionOversightOpenedAt: timestamp("corrective_action_oversight_opened_at", { withTimezone: true }),
+    correctiveActionOversightClosedAt: timestamp("corrective_action_oversight_closed_at", { withTimezone: true }),
     isActive: boolean("is_active").default(true).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
