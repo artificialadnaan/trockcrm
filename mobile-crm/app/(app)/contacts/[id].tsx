@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
+import { useGoBack } from "../../../src/lib/go-back";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useQuery } from "@tanstack/react-query";
 import { ApiError } from "../../../src/api/client";
@@ -20,6 +21,9 @@ export default function ContactDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const contactId = typeof id === "string" ? id : "";
   const router = useRouter();
+  // Back needs a destination: this screen is reachable by deep link and by restored
+  // navigation state, where goBack() is a no-op and the control would do nothing.
+  const goBack = useGoBack("/(app)/contacts");
   const { fetcher } = useAuth();
   const cacheScope = useQueryScope();
   // Surfaced under the action row — see openLink on why a silent failure is not acceptable here.
@@ -64,7 +68,7 @@ export default function ContactDetailScreen() {
           >
             <Text style={styles.backBtnText}>Try again</Text>
           </Pressable>
-          <Pressable onPress={() => router.back()} accessibilityRole="button" style={styles.backBtn}>
+          <Pressable onPress={() => goBack()} accessibilityRole="button" style={styles.backBtn}>
             <Text style={styles.backBtnText}>Go back</Text>
           </Pressable>
         </View>
@@ -93,7 +97,7 @@ export default function ContactDetailScreen() {
           <Text style={styles.emptyBody}>
             It was deleted or merged into another record, so its details are no longer current.
           </Text>
-          <Pressable onPress={() => router.back()} accessibilityRole="button" style={styles.backBtn}>
+          <Pressable onPress={() => goBack()} accessibilityRole="button" style={styles.backBtn}>
             <Text style={styles.backBtnText}>Go back</Text>
           </Pressable>
         </View>
@@ -125,7 +129,7 @@ export default function ContactDetailScreen() {
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
       <ScrollView contentContainerStyle={styles.body}>
-        <Pressable onPress={() => router.back()} accessibilityRole="button" accessibilityLabel="Back">
+        <Pressable onPress={() => goBack()} accessibilityRole="button" accessibilityLabel="Back">
           <Text style={styles.back}>‹ Contacts</Text>
         </Pressable>
 

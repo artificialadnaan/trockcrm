@@ -183,7 +183,9 @@ const styles = StyleSheet.create({
     paddingVertical: 3,
   },
   stagePillText: { fontFamily: theme.font.semibold, fontSize: 12, color: theme.color.textSecondary },
-  closeDate: { fontFamily: theme.font.regular, fontSize: 12, color: theme.color.textMuted },
+  // textSecondary, not textMuted: #8A95A3 on white is ~3:1, under the 4.5:1 floor for normal
+  // text, and at 12px on a phone outdoors it is the first thing to become unreadable.
+  closeDate: { fontFamily: theme.font.regular, fontSize: 12, color: theme.color.textSecondary },
 });
 
 /**

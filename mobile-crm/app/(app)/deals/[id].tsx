@@ -9,6 +9,7 @@ import {
   View,
 } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
+import { useGoBack } from "../../../src/lib/go-back";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError } from "../../../src/api/client";
@@ -31,6 +32,9 @@ export default function DealDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const dealId = typeof id === "string" ? id : "";
   const router = useRouter();
+  // Back needs a destination: this screen is reachable by deep link and by restored
+  // navigation state, where goBack() is a no-op and the control would do nothing.
+  const goBack = useGoBack("/(app)/deals");
   const { fetcher } = useAuth();
   const scope = useQueryScope();
   const queryClient = useQueryClient();
@@ -146,7 +150,7 @@ export default function DealDetailScreen() {
               <Text style={styles.backBtnText}>Try again</Text>
             </Pressable>
           ) : null}
-          <Pressable onPress={() => router.back()} accessibilityRole="button" style={styles.backBtn}>
+          <Pressable onPress={() => goBack()} accessibilityRole="button" style={styles.backBtn}>
             <Text style={styles.backBtnText}>Go back</Text>
           </Pressable>
         </View>
@@ -176,7 +180,7 @@ export default function DealDetailScreen() {
       {/* Without "handled", the first tap on Save only dismisses the keyboard and never reaches the
           button — so the rep's opening tap on the app's primary action silently does nothing. */}
       <ScrollView contentContainerStyle={styles.body} keyboardShouldPersistTaps="handled">
-        <Pressable onPress={() => router.back()} accessibilityRole="button" accessibilityLabel="Back">
+        <Pressable onPress={() => goBack()} accessibilityRole="button" accessibilityLabel="Back">
           <Text style={styles.back}>‹ Deals</Text>
         </Pressable>
 
@@ -526,7 +530,9 @@ const styles = StyleSheet.create({
   retryText: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.brandRed },
   emptyActivity: { fontFamily: theme.font.regular, fontSize: 14, color: theme.color.textMuted },
   activity: { gap: 2, paddingVertical: theme.space.sm },
-  activityMeta: { fontFamily: theme.font.regular, fontSize: 12, color: theme.color.textMuted },
+  // textSecondary, not textMuted: #8A95A3 on white is ~3:1, under the 4.5:1 floor for normal
+  // text, and at 12px on a phone outdoors it is the first thing to become unreadable.
+  activityMeta: { fontFamily: theme.font.regular, fontSize: 12, color: theme.color.textSecondary },
   activitySubject: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.textPrimary },
   activityNotes: { fontFamily: theme.font.regular, fontSize: 14, color: theme.color.textSecondary },
   errorTitle: { fontFamily: theme.font.bold, fontSize: 17, color: theme.color.inkNavy },
