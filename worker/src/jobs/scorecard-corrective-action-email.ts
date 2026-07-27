@@ -28,15 +28,15 @@ const SCORECARD_RATING_SET = new Set<string>(FIELD_SCORECARD_RATINGS);
 // the Won/Lost slug text[] arrays (passed as query params so the fragment carries no interpolated values).
 // DRIFT RISK: if the server changes activeProjectWhere's shape (e.g. adds a clause), this copy must be updated in
 // lockstep — it is only kept honest by shared slug constants + the finding-C tests, not by a compile-time link.
-const BROWSABLE_PROJECT_SQL = `
+export const BROWSABLE_PROJECT_SQL = `
     d.is_active = true
     AND (
       COALESCE(psc.is_terminal, false) = false
       OR COALESCE(psc.slug, d.bid_board_stage_slug, '') = ANY($1::text[])
     )
     AND COALESCE(psc.slug, d.bid_board_stage_slug, '') <> ALL($2::text[])`;
-const WON_BROWSABLE_SLUGS = [...WON_DEAL_STAGE_SLUGS];
-const LOST_EXCLUDED_SLUGS = [...LOST_DEAL_STAGE_SLUGS];
+export const WON_BROWSABLE_SLUGS = [...WON_DEAL_STAGE_SLUGS];
+export const LOST_EXCLUDED_SLUGS = [...LOST_DEAL_STAGE_SLUGS];
 
 export const SCORECARD_CORRECTIVE_ACTION_EMAIL_JOB = "scorecard_corrective_action_email";
 

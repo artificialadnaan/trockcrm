@@ -66,6 +66,9 @@ interface ScorecardOverrides {
   updatedAt?: Date;
   /** false => the guarded stamp UPDATE matches no row (superseded mid-send). */
   stampMatches?: boolean;
+  storedNonce?: string | null;
+  /** [] => the browsable/active gate filtered the row out entirely. */
+  scorecardRows?: unknown[];
 }
 
 /** Query mock routing on SQL text — no DB. Captures the stamp UPDATE for assertion. */
@@ -79,6 +82,7 @@ function makeQuery(
     // responder branch must be tested before the scorecard-snapshot branch or it is swallowed by it.
     if (sql.includes("WITH candidates AS")) return { rows: responders };
     if (sql.includes("FROM office_dallas.field_scorecards sc")) {
+      if (over.scorecardRows) return { rows: over.scorecardRows };
       return {
         rows: [
           {
@@ -96,6 +100,7 @@ function makeQuery(
             pdf_content_generation:
               over.pdfContentGeneration === undefined ? GENERATION : over.pdfContentGeneration,
             updated_at: over.updatedAt ?? GENERATION,
+            corrective_action_cycle_nonce: over.storedNonce === undefined ? CYCLE : over.storedNonce,
             corrective_action_oversight_opened_at: over.openedAt ?? null,
             corrective_action_oversight_closed_at: over.closedAt ?? null,
           },
@@ -533,21 +538,6 @@ describe("handleScorecardCorrectiveActionOversightEmail", () => {
     expect(stampUpdates[0].params).toEqual([SCORECARD, CYCLE]);
   });
 
-  it("omits the nonce clause when the job carries no cycle nonce (legacy in-flight job)", async () => {
-    const { query, stampUpdates } = makeQuery();
-    const sendEmail = makeSend();
-
-    await handleScorecardCorrectiveActionOversightEmail(payload({ cycleNonce: undefined }), null, {
-      query: query as never,
-      sendEmail: sendEmail as never,
-      env,
-      logger: makeLogger(),
-    });
-
-    expect(stampUpdates[0].sql).not.toContain("corrective_action_cycle_nonce");
-    expect(stampUpdates[0].params).toEqual([SCORECARD]);
-  });
-
   it("logs rather than throwing when the stamp is superseded mid-send", async () => {
     // The email did go out and accurately described the older cycle; the current cycle's own job still has a
     // null stamp and will notify. Throwing here would retry a send that already happened.
@@ -595,5 +585,86 @@ describe("handleScorecardCorrectiveActionOversightEmail", () => {
       string[], string, string, { attachments?: unknown[] },
     ];
     expect(options.attachments).toBeUndefined();
+  });
+
+  it("gates on the ACTIVE, BROWSABLE scorecard, not the id alone", async () => {
+    // This job runs ~120s after enqueue. A soft-delete or a move to Lost does not change the corrective-action
+    // status, so an id-only lookup would still send a notice whose CRM link 404s.
+    const { query } = makeQuery();
+    const sendEmail = makeSend();
+
+    await handleScorecardCorrectiveActionOversightEmail(payload(), null, {
+      query: query as never,
+      sendEmail: sendEmail as never,
+      env,
+      logger: makeLogger(),
+    });
+
+    const snapshotSql = query.mock.calls
+      .map((call) => call[0] as string)
+      .find((text) => text.includes("FROM office_dallas.field_scorecards sc"))!;
+    expect(snapshotSql).toContain("sc.is_active = true");
+    expect(snapshotSql).toContain("JOIN office_dallas.deals d");
+    expect(snapshotSql).toContain("pipeline_stage_config psc");
+    // The renumber must be a SINGLE pass: $1 stays the scorecard, the slug arrays land on $2/$3. A cascading
+    // replace would collapse both arrays onto $3 and silently drop every terminal-stage card.
+    expect(snapshotSql).toContain("$2::text[]");
+    expect(snapshotSql).toContain("$3::text[]");
+    expect(snapshotSql).not.toContain("$4::text[]");
+  });
+
+  it("sends nothing and stamps nothing for a hidden scorecard", async () => {
+    const { query, stampUpdates } = makeQuery({ scorecardRows: [] });
+    const sendEmail = makeSend();
+
+    await handleScorecardCorrectiveActionOversightEmail(payload(), null, {
+      query: query as never,
+      sendEmail: sendEmail as never,
+      env,
+      logger: makeLogger(),
+    });
+
+    expect(sendEmail).not.toHaveBeenCalled();
+    expect(stampUpdates).toHaveLength(0);
+  });
+
+  it("a nonce-less job asserts the cycle is STILL nonce-less before stamping", async () => {
+    // Otherwise a reopen that mints a nonce and clears the stamps would be stamped by this stale job on id
+    // alone, and the new cycle's job would then skip its notice.
+    const { query, stampUpdates } = makeQuery({ storedNonce: null });
+    const sendEmail = makeSend();
+
+    await handleScorecardCorrectiveActionOversightEmail(payload({ cycleNonce: undefined }), null, {
+      query: query as never,
+      sendEmail: sendEmail as never,
+      env,
+      logger: makeLogger(),
+    });
+
+    expect(stampUpdates[0].sql).toContain("corrective_action_cycle_nonce IS NULL");
+    expect(stampUpdates[0].params).toEqual([SCORECARD]);
+  });
+
+  it("names who was asked to respond in the opened notice", async () => {
+    const { query } = makeQuery({}, [
+      { email: "sam@trock.com", name: "Sam Super", role: "superintendent" } as never,
+    ]);
+    const sendEmail = makeSend();
+
+    await handleScorecardCorrectiveActionOversightEmail(payload(), null, {
+      query: query as never,
+      sendEmail: sendEmail as never,
+      env,
+      logger: makeLogger(),
+    });
+
+    const [, , html, options] = sendEmail.mock.calls[0] as unknown as [
+      string[], string, string, { text: string },
+    ];
+    expect(html).toContain("Sam Super");
+    expect(html).toContain("Superintendent");
+    expect(options.text).toContain("Sam Super");
+    // Names only — never a token or a responder link.
+    expect(html).not.toMatch(/token=/i);
   });
 });

@@ -3,6 +3,7 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { describe, expect, it } from "vitest";
 import type { CorrectiveActionItemView, FieldScorecardDetail } from "@trock-crm/shared/types";
+import { isRenderableSignatureDataUrl, typedSignatureFallback } from "@trock-crm/shared/types";
 import {
   buildCorrectiveActionLookup,
   correctiveActionStatusBadge,
@@ -265,3 +266,29 @@ describe("ScorecardDetailView signatures", () => {
 function stripTags(html: string): string {
   return html.replace(/<[^>]*>/g, " ");
 }
+
+describe("ScorecardDetailView signature decode failure", () => {
+  // The shared predicate validates the media type and the base64 ALPHABET but cannot prove the payload
+  // decodes to a real image. The PDF catches that at draw time; the web must too, or the two surfaces
+  // disagree on exactly the input the shared module exists to keep them agreeing on.
+  const UNDECODABLE = "data:image/png;base64,====";
+
+  it("classifies an undecodable-but-well-formed payload as renderable (so the runtime fallback matters)", () => {
+    expect(isRenderableSignatureDataUrl(UNDECODABLE)).toBe(true);
+    expect(typedSignatureFallback(UNDECODABLE)).toBeNull();
+  });
+
+  it("renders it as an image with an error fallback rather than raw text", async () => {
+    const html = await renderDetail({
+      ...BASE_DETAIL,
+      formVersion: 2,
+      superintendentSignature: UNDECODABLE,
+      pmSignature: null,
+    });
+
+    // It starts as an <img> (we cannot know it is bad until the browser tries), but the payload must never
+    // reach the DOM as a text node, and the element must carry an error handler to fall back.
+    expect(html).toContain('alt="Superintendent signature"');
+    expect(stripTags(html)).not.toContain("data:image/png;base64");
+  });
+});

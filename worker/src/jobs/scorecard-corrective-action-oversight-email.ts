@@ -7,7 +7,12 @@ import { getObjectBuffer } from "../lib/r2-client.js";
 import { escapeHtml, normalizeText, isSafeTenantSchema } from "../lib/email-format.js";
 import { resolveFrontendUrl, TROCK_LOGO_EMAIL_URL } from "./project-number-email.js";
 import { resolveFieldScorecardRecipients } from "@trock-crm/shared/lib/fieldScorecardEmails";
-import { recipientResolutionSql } from "./scorecard-corrective-action-email.js";
+import {
+  BROWSABLE_PROJECT_SQL,
+  LOST_EXCLUDED_SLUGS,
+  WON_BROWSABLE_SLUGS,
+  recipientResolutionSql,
+} from "./scorecard-corrective-action-email.js";
 
 /**
  * OVERSIGHT notification for the corrective-action lifecycle.
@@ -96,6 +101,7 @@ interface ScorecardRow {
   /** The scorecard updated_at the stored PDF was rendered from (migration 0200); null pre-migration. */
   pdf_content_generation: Date | string | null;
   updated_at: Date | string | null;
+  corrective_action_cycle_nonce: string | null;
   corrective_action_oversight_opened_at: Date | null;
   corrective_action_oversight_closed_at: Date | null;
 }
@@ -149,21 +155,39 @@ export async function handleScorecardCorrectiveActionOversightEmail(
   const column = stampColumn(phase);
   // tenantSchema is regex-validated above, so interpolating it as the schema qualifier is safe (identifiers
   // cannot be $-parametrized). `column` comes from the literal switch, never from the payload.
+  // Gate on the ACTIVE + BROWSABLE record, exactly as the responder job does. This job runs ~120s after
+  // enqueue, and in that window the scorecard can be soft-deleted or its deal archived / moved to Lost —
+  // none of which changes the corrective-action lifecycle status, so a status-only guard would still send an
+  // oversight notice whose CRM link 404s. A miss here is indistinguishable from a nonexistent id and returns
+  // WITHOUT sending or stamping, so a restore can still notify.
+  //
+  // BROWSABLE_PROJECT_SQL authors its placeholders as $1/$2; here they occupy $2/$3 after $1 = scorecardId.
+  // Renumber in a SINGLE atomic pass — a chained replace would CASCADE $1→$2→$3 and collapse both slug
+  // arrays onto $3. (The responder job documents this trap at length; same fragment, same hazard.)
   const scorecardResult = await query(
     `SELECT sc.deal_id, sc.project_number, sc.week_of, sc.total_score, sc.average_score, sc.rating,
             sc.form_version, sc.status, sc.pdf_r2_key, sc.pdf_render_version,
             sc.pdf_content_generation, sc.updated_at,
             sc.corrective_action_oversight_opened_at, sc.corrective_action_oversight_closed_at,
+            sc.corrective_action_cycle_nonce,
             d.name AS deal_name
        FROM ${tenantSchema}.field_scorecards sc
-       LEFT JOIN ${tenantSchema}.deals d ON d.id = sc.deal_id
+       JOIN ${tenantSchema}.deals d ON d.id = sc.deal_id
+       LEFT JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
       WHERE sc.id = $1::uuid
+        AND sc.is_active = true
+        AND ${BROWSABLE_PROJECT_SQL.replace(/\$(\d+)/g, (_m, n) => "$" + (Number(n) + 1))}
       LIMIT 1`,
-    [scorecardId],
+    [scorecardId, WON_BROWSABLE_SLUGS, LOST_EXCLUDED_SLUGS],
   );
   const scorecard = scorecardResult.rows[0] as ScorecardRow | undefined;
   if (!scorecard) {
-    logger.warn("[CorrectiveActionOversightEmail] Scorecard not found - skipping", { scorecardId });
+    // Genuinely nonexistent OR hidden (soft-deleted card / archived-or-Lost deal) — indistinguishable here,
+    // matching the responder's 404. No send, no stamp, so a restore can still notify.
+    logger.warn(
+      "[CorrectiveActionOversightEmail] Scorecard not found or no longer browsable - skipping (no send, no stamp)",
+      { scorecardId },
+    );
     return;
   }
 
@@ -203,11 +227,24 @@ export async function handleScorecardCorrectiveActionOversightEmail(
     scorecard.deal_id,
     scorecardId,
   ]);
+  const responderRows = responderResult.rows as Array<{
+    email: string | null;
+    name: string | null;
+    role: string | null;
+  }>;
   const responderEmails = new Set(
-    (responderResult.rows as Array<{ email: string | null }>)
+    responderRows
       .map((row) => normalizeText(row.email)?.toLowerCase())
       .filter((email): email is string => !!email),
   );
+  // The opened notice names WHO was asked to respond — that context is the point of the notice, and
+  // recipientResolutionSql already returns role and name. Names only: never their tokens or links.
+  const responders = responderRows
+    .map((row) => ({
+      name: normalizeText(row.name) ?? normalizeText(row.email),
+      role: normalizeText(row.role),
+    }))
+    .filter((r): r is { name: string; role: string | null } => !!r.name);
   const recipients = dedupe(
     configured.filter((email) => !responderEmails.has(email.trim().toLowerCase())),
   );
@@ -256,6 +293,7 @@ export async function handleScorecardCorrectiveActionOversightEmail(
     weekOf: formatWeekOf(scorecard.week_of),
     scoreText: formatScore(scorecard),
     items,
+    responders,
     link: `${resolveFrontendUrl(env)}/deals/${scorecard.deal_id ?? ""}?tab=scorecards`,
   });
 
@@ -293,9 +331,12 @@ export async function handleScorecardCorrectiveActionOversightEmail(
   //
   // Same clause shape the responder job uses (migration 0197): a NULL stored nonce (legacy row) or a job
   // carrying no payload nonce omits the comparison, preserving pre-guard behaviour.
+  // A job that carries NO payload nonce came from a card whose stored nonce was null (pre-0197). It must
+  // still assert the cycle has not moved: without a clause, a reopen that mints a nonce and clears the
+  // stamps would be stamped by this stale job on id alone, and the new cycle's job would then skip.
   const nonceClause = cycleNonceValue
     ? " AND (corrective_action_cycle_nonce IS NULL OR corrective_action_cycle_nonce = $2::uuid)"
-    : "";
+    : " AND corrective_action_cycle_nonce IS NULL";
   const stamped = await query(
     `UPDATE ${tenantSchema}.field_scorecards
         SET ${column} = NOW()
@@ -450,6 +491,8 @@ export function buildOversightEmail(input: {
   weekOf: string | null;
   scoreText: string;
   items: ItemRow[];
+  /** Who was asked to respond (opened notice only). Names and roles — never tokens or responder links. */
+  responders?: Array<{ name: string; role: string | null }>;
   link: string;
 }) {
   const opened = input.phase === "opened";
@@ -459,12 +502,24 @@ export function buildOversightEmail(input: {
     ? `Corrective action opened: ${project} (${input.scoreText})`
     : `Corrective action completed: ${project}`;
 
+  const roleLabel = (role: string | null) =>
+    role === "superintendent" ? "Superintendent" : role === "project_manager" ? "Project manager" : null;
+  const responderList = (input.responders ?? [])
+    .map((r) => {
+      const label = roleLabel(r.role);
+      return label ? `${r.name} (${label})` : r.name;
+    })
+    .join(", ");
+  const askedText = responderList
+    ? `${responderList} ${(input.responders ?? []).length === 1 ? "has" : "have"} been asked to document a fix for each flagged item.`
+    : "The assigned superintendent and project manager have been asked to document a fix for each flagged item.";
+
   const intro = opened
-    ? `A field scorecard for <strong>${escapeHtml(input.dealName)}</strong>${input.projectNumber ? ` (${escapeHtml(input.projectNumber)})` : ""}${input.weekOf ? `, week of ${escapeHtml(input.weekOf)}` : ""} came in below standard (${escapeHtml(input.scoreText)}) and a corrective action has been opened. The assigned superintendent and project manager have been asked to document a fix for each flagged item.`
+    ? `A field scorecard for <strong>${escapeHtml(input.dealName)}</strong>${input.projectNumber ? ` (${escapeHtml(input.projectNumber)})` : ""}${input.weekOf ? `, week of ${escapeHtml(input.weekOf)}` : ""} came in below standard (${escapeHtml(input.scoreText)}) and a corrective action has been opened. ${escapeHtml(askedText)}`
     : `The corrective action for <strong>${escapeHtml(input.dealName)}</strong>${input.projectNumber ? ` (${escapeHtml(input.projectNumber)})` : ""}${input.weekOf ? `, week of ${escapeHtml(input.weekOf)}` : ""} is complete. Every flagged item has been documented. The updated scorecard is attached where available.`;
 
   const textIntro = opened
-    ? `A field scorecard for ${input.dealName}${input.projectNumber ? ` (${input.projectNumber})` : ""}${input.weekOf ? `, week of ${input.weekOf}` : ""} came in below standard (${input.scoreText}) and a corrective action has been opened.`
+    ? `A field scorecard for ${input.dealName}${input.projectNumber ? ` (${input.projectNumber})` : ""}${input.weekOf ? `, week of ${input.weekOf}` : ""} came in below standard (${input.scoreText}) and a corrective action has been opened. ${askedText}`
     : `The corrective action for ${input.dealName}${input.projectNumber ? ` (${input.projectNumber})` : ""}${input.weekOf ? `, week of ${input.weekOf}` : ""} is complete.`;
 
   const htmlItems = input.items.length
