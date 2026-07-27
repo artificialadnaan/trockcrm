@@ -54,6 +54,16 @@ describe("typedSignatureFallback", () => {
     expect(typedSignatureFallback("data:text/html;base64,PHNjcmlwdD4=")).toBeNull();
   });
 
+  it("trims, so a whitespace-padded data url never prints as raw text", () => {
+    // Divergence found in review: the mobile copy of this rule trims and the shared one did not, so a
+    // padded value failed BOTH checks and the raw base64 printed as a text node — the original bug.
+    expect(typedSignatureFallback(`  ${PNG}  `)).toBeNull();
+    expect(isRenderableSignatureDataUrl(`  ${PNG}  `)).toBe(true);
+    expect(typedSignatureFallback("  Adnaan Iqbal  ")).toBe("Adnaan Iqbal");
+    expect(typedSignatureFallback("   ")).toBeNull();
+    expect(isRenderableSignatureDataUrl("   ")).toBe(false);
+  });
+
   it("treats an uppercase data url as a data url, not as a typed name", () => {
     // The renderable regex is case-insensitive; a case-SENSITIVE check here would disagree with it and
     // print an unrenderable uppercase payload verbatim — the exact bug this module exists to prevent.

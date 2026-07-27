@@ -209,8 +209,15 @@ export async function handleScorecardCorrectiveActionOversightEmail(
   const itemsResult = await query(
     `SELECT ca.item_type, ca.item_ref, ca.item_label, ca.status, ca.responder_name, ca.responded_at,
             ca.response_comment,
-            (SELECT COUNT(*) FROM ${tenantSchema}.field_scorecard_photos p
-              WHERE p.corrective_action_id = ca.id) AS photo_count
+            -- Count only photos that are ACTUALLY renderable. Both other surfaces for this data apply the
+            -- same filter (the PDF loader and the CRM item read), so counting soft-deleted rows here would
+            -- have the email say "3 photos" while the attached PDF and the CRM both show 2.
+            (SELECT COUNT(*)
+               FROM ${tenantSchema}.field_scorecard_photos p
+               JOIN ${tenantSchema}.files f ON f.id = p.file_id
+              WHERE p.corrective_action_id = ca.id
+                AND f.is_active = TRUE
+                AND f.deleted_at IS NULL) AS photo_count
        FROM ${tenantSchema}.scorecard_corrective_actions ca
       WHERE ca.scorecard_id = $1::uuid
       -- Numeric-aware ordering: item_ref is an action-item INDEX, where "10" must follow "2". Matches the

@@ -487,4 +487,25 @@ describe("handleScorecardCorrectiveActionOversightEmail", () => {
 
     expect(getPdf).not.toHaveBeenCalled();
   });
+
+  it("counts only renderable response photos, excluding soft-deleted ones", async () => {
+    // Three-way consistency: the PDF loader and the CRM item read both filter on files.is_active /
+    // deleted_at. Counting soft-deleted rows here would make the email say "3 photos" while the attached
+    // PDF and the CRM both show 2.
+    const { query } = makeQuery();
+    const sendEmail = makeSend();
+
+    await handleScorecardCorrectiveActionOversightEmail(payload(), null, {
+      query: query as never,
+      sendEmail: sendEmail as never,
+      env,
+      logger: makeLogger(),
+    });
+
+    const itemsSql = query.mock.calls
+      .map((call) => call[0] as string)
+      .find((text) => text.includes("scorecard_corrective_actions ca"))!;
+    expect(itemsSql).toContain("f.is_active = TRUE");
+    expect(itemsSql).toContain("f.deleted_at IS NULL");
+  });
 });

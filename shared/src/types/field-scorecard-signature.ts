@@ -19,13 +19,14 @@ const RENDERABLE_SIGNATURE_DATA_URL = /^data:image\/(?:png|jpeg|jpg);base64,([A-
  * malformed base64 body) is false, so callers never pass an arbitrary data URI into an image sink.
  */
 export function isRenderableSignatureDataUrl(value: string | null | undefined): boolean {
-  return !!value && RENDERABLE_SIGNATURE_DATA_URL.test(value);
+  return !!signatureDataUrlBase64Body(value);
 }
 
 /** The decoded base64 body of a renderable signature data URL, or null. Server-side image decode path. */
 export function signatureDataUrlBase64Body(value: string | null | undefined): string | null {
-  if (!value) return null;
-  const match = RENDERABLE_SIGNATURE_DATA_URL.exec(value);
+  const trimmed = value?.trim();
+  if (!trimmed) return null;
+  const match = RENDERABLE_SIGNATURE_DATA_URL.exec(trimmed);
   return match ? match[1] : null;
 }
 
@@ -37,8 +38,13 @@ export function signatureDataUrlBase64Body(value: string | null | undefined): st
  * The `data:` test is case-INSENSITIVE on purpose. The renderable-image regex above is case-insensitive,
  * so a case-sensitive test here would disagree with it: `DATA:TEXT/HTML;base64,…` is not renderable, and a
  * `startsWith("data:")` check would miss it and print the raw payload as if it were a typed name.
+ *
+ * Trimmed for the same reason, and to match the mobile copy of this rule: a value with leading whitespace
+ * would otherwise fail BOTH the renderable check and this one, and the raw base64 would print as a text
+ * node — precisely the defect this module exists to prevent.
  */
 export function typedSignatureFallback(value: string | null | undefined): string | null {
-  if (!value) return null;
-  return /^data:/i.test(value) ? null : value;
+  const trimmed = value?.trim();
+  if (!trimmed) return null;
+  return /^data:/i.test(trimmed) ? null : trimmed;
 }
