@@ -77,7 +77,11 @@ Blocked on account access, not code:
 
 1. **App icon and splash.** `app.config.ts` intentionally declares neither, so Expo's defaults apply.
    Reusing `mobile/assets` would put T-Rock Cam's mark on the CRM app.
-2. **App Store Connect record** for `com.trockgc.trockcrm` — yields the `ascAppId` for `eas.json`.
+2. **App Store Connect record** for `com.trockgc.trockcrm` — yields the `ascAppId`, which is the ONE
+   field `eas.json` deliberately omits. `appleTeamId` is committed (it is the same team as T-Rock Cam);
+   `ascAppId` identifies a specific App Store listing, and guessing or copying T-Rock Cam's would aim a
+   submission at the wrong app. Add it under `submit.production.ios` once the record exists, or pass it
+   to `eas submit` directly.
 3. **`eas init`** under owner `adnaan.iqbal` — yields the `EAS_PROJECT_ID`. There is no committed
    default, so builds must supply it via the environment until the project exists.
 4. **`EXPO_TOKEN`** repo secret, for the build workflow.
