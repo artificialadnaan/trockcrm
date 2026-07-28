@@ -1393,6 +1393,7 @@ router.post("/:id/trigger-rfp", async (req, res, next) => {
       deal: reservedDeal,
       officeId,
       eventId,
+      userId: req.user!.id,
     });
 
     const eventsToEmit: Array<{ name: string; payload: Record<string, unknown> }> = [];
@@ -1687,7 +1688,10 @@ router.post("/:id/rfp-retry", async (req, res, next) => {
     // A dead job has exhausted all auto-retries, so a manual retry can land
     // well past the attachments' presigned-URL TTL. Re-mint the URLs here (the
     // retry is effectively a re-enqueue) so the job doesn't carry dead links.
-    const freshAttachments = await loadRfpAttachmentsForDeal(req.tenantDb!, deal.id);
+    const freshAttachments = await loadRfpAttachmentsForDeal(req.tenantDb!, deal.id, {
+      userId: req.user!.id,
+      officeId: req.user!.activeOfficeId ?? req.user!.officeId,
+    });
     const payload: RfpRequestDeliveryPayload = {
       ...deadJob.payload,
       syncHubUrl: resolveSyncHubRfpRequestUrl(),

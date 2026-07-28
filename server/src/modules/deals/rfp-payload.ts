@@ -65,6 +65,8 @@ export interface NormalizedRfpRequestBody {
     workflowRoute: string | null;
   };
   attachments: RfpAttachment[];
+  /** How many attachments were dropped to keep the body parseable by SyncHub (0 when none). */
+  attachmentsOmitted: number;
 }
 
 export interface RfpAttachment {
@@ -83,6 +85,8 @@ export interface RfpAttachmentSourceFile {
   fileExtension: string | null;
   mimeType: string;
   r2Key: string;
+  /** `files.category`. "photo" rows collapse into a single share link — see buildRfpAttachments. */
+  category?: string | null;
 }
 
 /**
@@ -104,6 +108,40 @@ export async function buildRfpAttachmentsFromFiles(
       };
     })
   );
+}
+
+/**
+ * Builds the attachment list SyncHub receives, collapsing the deal's PHOTOS into one public
+ * share link instead of one presigned R2 URL per photo.
+ *
+ * Photos are what make a deal file-heavy, and at ~800 bytes per presigned URL a few hundred of
+ * them alone exceeded SyncHub's 100kb parser limit — the 413 on TRK-2607-H3X6. One `/p/<token>`
+ * link is ~60 bytes and, because that viewer streams through our own server rather than handing
+ * out presigned URLs, it also outlives the 7-day SigV4 maximum the per-file attachments are
+ * capped at.
+ *
+ * The link is placed FIRST so the body-size cap — which drops from the tail — can never discard it.
+ * If no link can be minted (the public viewer base URL is unconfigured), we fall back to the
+ * per-photo attachments rather than silently shipping an RFP with no photos at all.
+ */
+export async function buildRfpAttachments(
+  files: RfpAttachmentSourceFile[],
+  deps: {
+    resolveUrl: (input: { r2Key: string; filename: string }) => Promise<string>;
+    mintPhotoShareUrl: (photoCount: number) => Promise<string | null>;
+  }
+): Promise<RfpAttachment[]> {
+  const photos = files.filter((file) => file.category === "photo");
+  const shareUrl = photos.length > 0 ? await deps.mintPhotoShareUrl(photos.length) : null;
+
+  const individually = shareUrl ? files.filter((file) => file.category !== "photo") : files;
+  const attachments = await buildRfpAttachmentsFromFiles(individually, deps.resolveUrl);
+
+  if (!shareUrl) return attachments;
+  return [
+    { name: `Project Photos (${photos.length})`, url: shareUrl, contentType: "text/html" },
+    ...attachments,
+  ];
 }
 
 export interface RfpRequestDeliveryPayload {
@@ -172,13 +210,64 @@ export function resolveSyncHubOverrideApproveUrl(
   return `${resolveSyncHubBaseUrl(env)}/api/rfp-requests/${encodeURIComponent(String(requestId))}/override-approve`;
 }
 
+/**
+ * SyncHub parses BOTH RFP endpoints it exposes to us — POST /api/rfp-requests and
+ * POST /api/bid-board/create-from-rfp — with `express.json()` and NO `limit` option, so they
+ * cap at the body-parser default. Measured against production: a 102,395-byte body is accepted
+ * and a 104,443-byte body is rejected, i.e. the wall is exactly 100kb.
+ *
+ * Over that, SyncHub rejects at the PARSER — before the signature check — and its production
+ * error middleware masks the message, so the CRM surfaces the useless
+ * "RFP delivery failed with 413: Internal server error" (TRK-2607-H3X6).
+ */
+export const SYNCHUB_JSON_BODY_LIMIT_BYTES = 100 * 1024;
+
+/**
+ * What we actually target. Kept below the hard limit so a body that fits here can't be pushed
+ * over the wall by anything outside our measurement (proxy framing, a SyncHub-side re-encode).
+ */
+export const RFP_BODY_BYTE_BUDGET = 90 * 1024;
+
+const DESCRIPTION_TRUNCATED_SUFFIX = " […] (truncated for delivery — open the deal in the CRM for the full description)";
+
+function serializedBytes(body: unknown): number {
+  return Buffer.byteLength(JSON.stringify(body));
+}
+
+/**
+ * Shrinks the body until SyncHub will parse it. The deal fields are a ~730-byte floor, so the
+ * only unbounded inputs are the description and the attachment list — we give up the pathological
+ * description first (it has a CRM fallback), then drop attachments from the TAIL, which callers
+ * order newest-first so the most relevant documents survive.
+ */
+function fitWithinBudget(body: NormalizedRfpRequestBody, budget: number): void {
+  const original = body.deal.description;
+  if (original && serializedBytes(body) > budget) {
+    // Geometric shrink: guaranteed progress, terminates in O(log n), and exactness doesn't
+    // matter here — only that the result is parseable.
+    let keep = original.length;
+    while (keep > 0 && serializedBytes(body) > budget) {
+      keep = Math.floor(keep / 2);
+      body.deal.description =
+        keep > 0 ? original.slice(0, keep) + DESCRIPTION_TRUNCATED_SUFFIX : DESCRIPTION_TRUNCATED_SUFFIX.trim();
+    }
+  }
+
+  while (body.attachments.length > 0 && serializedBytes(body) > budget) {
+    body.attachments.pop();
+    body.attachmentsOmitted += 1;
+  }
+}
+
 export function buildNormalizedRfpRequestBody(input: {
   deal: RfpPayloadSourceDeal;
   sourceEventId: string;
   attachments?: RfpAttachment[];
+  /** Override the byte budget (tests). Defaults to RFP_BODY_BYTE_BUDGET. */
+  maxBodyBytes?: number;
 }): NormalizedRfpRequestBody {
   const { deal, sourceEventId } = input;
-  return {
+  const body: NormalizedRfpRequestBody = {
     sourceSystem: "trock_crm",
     sourceDealId: deal.id,
     sourceEventId,
@@ -212,8 +301,12 @@ export function buildNormalizedRfpRequestBody(input: {
       dueDate: cleanIso(deal.bidDueDate) ?? cleanIso(deal.bidBoardDueDate),
       workflowRoute: deal.workflowRoute ?? null,
     },
-    attachments: input.attachments ?? [],
+    attachments: [...(input.attachments ?? [])],
+    attachmentsOmitted: 0,
   };
+
+  fitWithinBudget(body, input.maxBodyBytes ?? RFP_BODY_BYTE_BUDGET);
+  return body;
 }
 
 export function buildRfpRequestDeliveryPayload(input: {

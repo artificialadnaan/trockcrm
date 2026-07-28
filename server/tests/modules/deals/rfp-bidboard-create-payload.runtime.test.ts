@@ -58,7 +58,10 @@ async function setup() {
     );
     CREATE TABLE files (
       id uuid PRIMARY KEY, deal_id uuid, lead_id uuid, is_active boolean NOT NULL DEFAULT true,
-      parent_file_id uuid, display_name text, file_extension text, mime_type text, r2_key text, category text
+      parent_file_id uuid, display_name text, file_extension text, mime_type text, r2_key text, category text,
+      -- Attachments are ordered newest-first so the RFP body-size cap, which drops from the tail,
+      -- keeps the most recent documents (TRK-2607-H3X6).
+      created_at timestamptz NOT NULL DEFAULT now()
     );
   `);
   await db.query(

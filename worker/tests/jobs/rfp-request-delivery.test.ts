@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { handleRfpRequestDelivery, runRfpRequestDeadLetterSweep } from "./rfp-request-delivery.js";
+import { handleRfpRequestDelivery, runRfpRequestDeadLetterSweep } from "../../src/jobs/rfp-request-delivery.js";
 
 function makeDb() {
   const query = vi.fn(async (sql: string, params?: unknown[]) => {
@@ -94,6 +94,29 @@ describe("handleRfpRequestDelivery", () => {
       fetchImpl: fetchImpl as any,
       secret: "secret",
     })).rejects.toThrow(`RFP delivery failed with ${status}`);
+  });
+
+  // TRK-2607-H3X6. A 413 means the body exceeded SyncHub's parser limit — retrying re-sends the
+  // SAME bytes, so all 8 attempts are guaranteed to fail. The old behaviour burned ~2.7h of backoff
+  // and then surfaced SyncHub's production-masked "Internal server error", which told the rep
+  // nothing. Fail fast, and say what actually went wrong.
+  it("dead-letters immediately on SyncHub 413 rather than retrying a body that can never shrink", async () => {
+    const db = makeDb();
+    const fetchImpl = vi.fn(
+      async () => new Response(JSON.stringify({ message: "Internal server error" }), { status: 413 })
+    );
+
+    const result = await handleRfpRequestDelivery(makePayload(), "office-1", {
+      db,
+      fetchImpl: fetchImpl as any,
+      secret: "secret",
+    });
+
+    expect(result).toMatchObject({ status: "dead" });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    // The operator-facing message must explain the 413 instead of parroting SyncHub's mask.
+    expect((result as { error: string }).error).toMatch(/too large/i);
+    expect((result as { error: string }).error).toContain("413");
   });
 
   it("throws on network errors so job_queue retries", async () => {
