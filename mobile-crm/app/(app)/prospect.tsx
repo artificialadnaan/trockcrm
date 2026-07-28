@@ -437,16 +437,31 @@ export default function ProspectScreen() {
        * record the address would have matched. The address is new information, so it earns a new
        * lookup; anything it finds is offered instead of created.
        */
-      const rematched = await prospecting
-        .matchProperties(fetcher, {
-          lat: fix?.lat ?? null,
-          lng: fix?.lng ?? null,
-          address: at.address,
-          city: at.city,
-          state: at.state,
-          zip: at.zip,
-        })
-        .catch(() => [] as prospecting.PropertyMatch[]);
+      const rematched = await prospecting.matchProperties(fetcher, {
+        /**
+         * NO COORDINATES, deliberately.
+         *
+         * Sending them returned the same proximity rows the rep had just rejected with "None of
+         * these" — and since any candidate blocks creation, every further Add replayed that rejection
+         * forever, so a genuinely new building within 200 m of an existing one could never be added.
+         * The question this lookup asks is narrower than the first one: does anything share this
+         * ADDRESS? Proximity has already had its turn and been answered.
+         */
+        lat: null,
+        lng: null,
+        address: at.address,
+        city: at.city,
+        state: at.state,
+        zip: at.zip,
+      });
+      /**
+       * NOT caught. A dropped response is not "no matches".
+       *
+       * Swallowing the failure turned a timeout into a confirmed empty result and went straight to an
+       * endpoint that creates unconditionally — so on a weak signal, at exactly the address that would
+       * have matched an uncoordinated legacy row, this minted the duplicate it was added to prevent.
+       * The same rule the activity save and the contact write already follow.
+       */
       if (rematched.length > 0) return { created: null, rematched, at, under };
 
       const created = await prospecting.createProperty(fetcher, {
@@ -508,7 +523,7 @@ export default function ProspectScreen() {
     onError: (err) => {
       setCreatePropertyError(
         err instanceof ApiError && (err.status === 0 || err.status === 408)
-          ? "No signal — this building may or may not have been added. Check before adding it again."
+          ? "No signal — couldn't check that address, so nothing was added. Try again."
           : err instanceof ApiError
             ? err.message
             : "Couldn't add this building.",
