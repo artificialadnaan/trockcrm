@@ -8,6 +8,8 @@ import {
   resolveHubSpotStage,
   shouldRefreshBidEstimate,
   STAGE_MAPPING,
+  assertWritableStageTargets,
+  type StageTargetRow,
 } from "../../../scripts/refresh-from-hubspot";
 
 afterEach(() => {
@@ -142,7 +144,7 @@ describe("HubSpot refresh field policies", () => {
         companyName: null,
       },
       hubSpotStages: new Map([["closedwon", "Closed Won"]]),
-      stageByKey: new Map([["standard_deal:sent_to_production", "stage-new"]]),
+      stageByKey: new Map([["standard_deal:sent_to_production", { id: "stage-new", isActivePipeline: false, isTerminal: true }]]),
       companies: [],
     });
 
@@ -183,7 +185,7 @@ describe("HubSpot refresh field policies", () => {
         companyName: "Birchstone Residential",
       },
       hubSpotStages: new Map([["qualifiedtobuy", "Estimating"]]),
-      stageByKey: new Map([["standard_deal:estimate_in_progress", "stage-old"]]),
+      stageByKey: new Map([["standard_deal:estimating", { id: "stage-old", isActivePipeline: true, isTerminal: false }]]),
       companies: [{ id: "company-1", name: "birchstone   residential" }],
     });
 
@@ -215,7 +217,7 @@ describe("HubSpot refresh field policies", () => {
         companyName: "Birchstone Residential",
       },
       hubSpotStages: new Map([["qualifiedtobuy", "Estimating"]]),
-      stageByKey: new Map([["standard_deal:estimate_in_progress", "stage-old"]]),
+      stageByKey: new Map([["standard_deal:estimating", { id: "stage-old", isActivePipeline: true, isTerminal: false }]]),
       companies: [{ id: "company-1", name: "birchstone   residential" }],
       refreshCompanyId: true,
     });
@@ -448,5 +450,68 @@ describe("HubSpot refresh field policies", () => {
 
     expect(auditRowsWritten).toBe(5);
     expect(skippedUpdates).toBe(2);
+  });
+});
+
+describe("stage-mapping writability preflight", () => {
+  // The real prod shape as of 2026-07-28: the Won/Lost mappings deliberately target legacy TERMINAL
+  // aliases that are is_active_pipeline=false but hold hundreds of live deals.
+  const PROD_STAGES = new Map<string, StageTargetRow>([
+    ["standard_deal:opportunity", { id: "s1", isActivePipeline: true, isTerminal: false }],
+    ["standard_deal:estimating", { id: "s2", isActivePipeline: true, isTerminal: false }],
+    ["standard_deal:estimate_under_review", { id: "s3", isActivePipeline: true, isTerminal: false }],
+    ["standard_deal:estimate_sent_to_client", { id: "s4", isActivePipeline: true, isTerminal: false }],
+    ["standard_deal:sent_to_production", { id: "s5", isActivePipeline: false, isTerminal: true }],
+    ["standard_deal:production_lost", { id: "s6", isActivePipeline: false, isTerminal: true }],
+    ["service_deal:service_estimating", { id: "s7", isActivePipeline: true, isTerminal: false }],
+    ["service_deal:service_sent_to_production", { id: "s8", isActivePipeline: false, isTerminal: true }],
+    ["service_deal:service_lost", { id: "s9", isActivePipeline: false, isTerminal: true }],
+    // The retired OPEN alias the mapping used to point at.
+    ["standard_deal:estimate_in_progress", { id: "s10", isActivePipeline: false, isTerminal: false }],
+  ]);
+
+  it("accepts the shipped mapping against the real stage table", () => {
+    expect(() => assertWritableStageTargets(STAGE_MAPPING, PROD_STAGES)).not.toThrow();
+  });
+
+  it("no mapping targets a retired OPEN stage — the regression that parked 7 deals", () => {
+    // `estimate_in_progress` is is_active_pipeline=false: deals land there, the kanban still shows them
+    // (the column merges aliases) but the stage drill-down cannot reach them.
+    const targets = STAGE_MAPPING.filter((e) => e.action === "update").map((e) => e.crmStageSlug);
+    expect(targets).not.toContain("estimate_in_progress");
+    expect(targets).toContain("estimating");
+  });
+
+  it("REJECTS a retired open alias, naming it", () => {
+    expect(() =>
+      assertWritableStageTargets(
+        [{ hubSpotStage: "Estimating", action: "update", crmStageSlug: "estimate_in_progress", workflowFamily: "standard_deal" }],
+        PROD_STAGES
+      )
+    ).toThrow(/estimate_in_progress.*retired/s);
+  });
+
+  it("KEEPS terminal legacy aliases writable — rejecting them would break every closed-deal refresh", () => {
+    expect(() =>
+      assertWritableStageTargets(
+        [{ hubSpotStage: "Closed Won", action: "update", crmStageSlug: "sent_to_production", workflowFamily: "standard_deal" }],
+        PROD_STAGES
+      )
+    ).not.toThrow();
+  });
+
+  it("rejects a target that does not exist at all", () => {
+    expect(() =>
+      assertWritableStageTargets(
+        [{ hubSpotStage: "Ghost", action: "update", crmStageSlug: "no_such_stage", workflowFamily: "standard_deal" }],
+        PROD_STAGES
+      )
+    ).toThrow(/no such stage/);
+  });
+
+  it("ignores skip entries", () => {
+    expect(() =>
+      assertWritableStageTargets([{ hubSpotStage: "On Hold", action: "skip", reason: "on_hold" }] as any, PROD_STAGES)
+    ).not.toThrow();
   });
 });

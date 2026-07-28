@@ -25,7 +25,11 @@ export type StageMappingEntry =
 export const STAGE_MAPPING: StageMappingEntry[] = [
   { hubSpotStage: "Pipe Line", action: "update", crmStageSlug: "opportunity", workflowFamily: "standard_deal" },
   { hubSpotStage: "RFP", action: "update", crmStageSlug: "opportunity", workflowFamily: "standard_deal" },
-  { hubSpotStage: "Estimating", action: "update", crmStageSlug: "estimate_in_progress", workflowFamily: "standard_deal" },
+  // `estimating`, NOT the retired `estimate_in_progress` alias. Both canonicalize to the same board
+  // column, but the alias is is_active_pipeline=false: a run on 2026-07-28 parked 7 HubSpot deals on it,
+  // where the kanban still SHOWED them (the column merges aliases) while the stage drill-down could not
+  // reach them — the $11.0M header vs $6.5M drill incident. See assertWritableStageTargets below.
+  { hubSpotStage: "Estimating", action: "update", crmStageSlug: "estimating", workflowFamily: "standard_deal" },
   { hubSpotStage: "Internal Review", action: "update", crmStageSlug: "estimate_under_review", workflowFamily: "standard_deal" },
   { hubSpotStage: "Proposal Sent", action: "update", crmStageSlug: "estimate_sent_to_client", workflowFamily: "standard_deal" },
   { hubSpotStage: "Follow-Up", action: "update", crmStageSlug: "estimate_sent_to_client", workflowFamily: "standard_deal" },
@@ -299,7 +303,7 @@ export function buildDealUpdatePlan(input: {
   crmDeal: CrmDealForRefresh;
   hubSpotDeal: HubSpotDealForRefresh;
   hubSpotStages: Map<string, string>;
-  stageByKey: Map<string, string>;
+  stageByKey: Map<string, StageTargetRow>;
   companies: CrmCompanyForRefresh[];
   refreshCompanyId?: boolean;
 }): DealUpdatePlan {
@@ -311,7 +315,7 @@ export function buildDealUpdatePlan(input: {
   const stageResolution = resolveHubSpotStage(hsDeal.dealstage, input.hubSpotStages);
   if (stageResolution.action === "update") {
     const stageKey = `${stageResolution.workflowFamily}:${stageResolution.targetSlug}`;
-    const targetStageId = input.stageByKey.get(stageKey);
+    const targetStageId = input.stageByKey.get(stageKey)?.id;
     if (!targetStageId) {
       warnings.push(`missing_crm_stage:${stageKey}`);
     } else if (crmDeal.stageId !== targetStageId) {
@@ -470,12 +474,66 @@ async function fetchCrmDeals(client: Client, limit: number | null): Promise<CrmD
   return result.rows;
 }
 
-async function fetchStageByKey(client: Client): Promise<Map<string, string>> {
+export interface StageTargetRow {
+  id: string;
+  isActivePipeline: boolean;
+  isTerminal: boolean;
+}
+
+async function fetchStageByKey(client: Client): Promise<Map<string, StageTargetRow>> {
   const result = await client.query(`
-    SELECT id, slug, workflow_family
+    SELECT id, slug, workflow_family, is_active_pipeline, is_terminal
     FROM public.pipeline_stage_config
   `);
-  return new Map(result.rows.map((row) => [`${row.workflow_family}:${row.slug}`, row.id]));
+  return new Map(
+    result.rows.map((row) => [
+      `${row.workflow_family}:${row.slug}`,
+      { id: row.id, isActivePipeline: row.is_active_pipeline === true, isTerminal: row.is_terminal === true },
+    ])
+  );
+}
+
+/**
+ * Fail CLOSED on the stage targets before touching a single deal.
+ *
+ * This script UPDATEs `deals.stage_id` directly, so it never passes through the API's
+ * `assertActiveDealStageWriteTarget`. Existence alone is not enough: `estimate_in_progress` exists, is
+ * is_active_pipeline=false, and parking deals there hides them from their own stage drill-down.
+ *
+ * A target is writable when it is a LIVE pipeline stage (is_active_pipeline) OR a TERMINAL one. The
+ * terminal exemption is deliberate and load-bearing: the Won/Lost mappings intentionally target legacy
+ * aliases (`sent_to_production`, `production_lost`, `service_*`) that are is_active_pipeline=false but
+ * hold 266/216/4/2 live deals and are merged into the canonical Won/Lost columns. Requiring
+ * is_active_pipeline alone would reject those five and break every closed-deal refresh.
+ *
+ * What this REJECTS is the actual bug class: a retired OPEN alias — neither live nor terminal.
+ */
+export function assertWritableStageTargets(
+  mapping: readonly StageMappingEntry[],
+  stageByKey: ReadonlyMap<string, StageTargetRow>
+): void {
+  const problems: string[] = [];
+  for (const entry of mapping) {
+    if (entry.action !== "update") continue;
+    const key = `${entry.workflowFamily}:${entry.crmStageSlug}`;
+    const stage = stageByKey.get(key);
+    if (!stage) {
+      problems.push(`${entry.hubSpotStage} -> ${key} (no such stage)`);
+      continue;
+    }
+    if (!stage.isActivePipeline && !stage.isTerminal) {
+      problems.push(
+        `${entry.hubSpotStage} -> ${key} (retired: is_active_pipeline=false and is_terminal=false)`
+      );
+    }
+  }
+  if (problems.length > 0) {
+    throw new Error(
+      `Refusing to run: HubSpot stage mapping targets ${problems.length} unwritable CRM stage(s). ` +
+        `Deals parked there are shown on the board but unreachable from the stage drill-down.\n  - ` +
+        problems.join("\n  - ")
+    );
+  }
 }
 
 async function fetchCompanies(client: Client): Promise<CrmCompanyForRefresh[]> {
@@ -794,12 +852,7 @@ async function runRefresh() {
       fetchCompanies(db),
       fetchHubSpotStageLabels(hubSpot),
     ]);
-    for (const entry of STAGE_MAPPING) {
-      if (entry.action === "update") {
-        const key = `${entry.workflowFamily}:${entry.crmStageSlug}`;
-        if (!stageByKey.has(key)) throw new Error(`Missing CRM stage target for ${key}`);
-      }
-    }
+    assertWritableStageTargets(STAGE_MAPPING, stageByKey);
 
     const deals = await fetchCrmDeals(db, options.limit);
     report.totalHubSpotLinkedCrmDeals = deals.length;
