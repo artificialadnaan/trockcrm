@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { getTableName } from "drizzle-orm";
 
 type InsertValues = Record<string, unknown>;
 
@@ -342,5 +343,89 @@ describe("activities service", () => {
     expect(flattened).toContain("contact-1");
     expect(flattened).toContain("rep-1");
     expect(flattened).toContain("email");
+  });
+});
+
+describe("createActivity — the last-touch fan-out", () => {
+  /**
+   * `properties.last_activity_at` and `companies.last_activity_at` each carry their own index and are
+   * read for staleness filtering and "least recently touched" sorting, but only the DEAL was ever
+   * refreshed. Survivable while activities came from deal-centric surfaces; field prospecting makes a
+   * property or a company the usual target, so every captured visit left the thing it was about looking
+   * untouched — and the buildings reps are actively working sorted as the coldest on the board.
+   */
+  function harness() {
+    const insertMock = createInsertMock();
+    const updates: string[] = [];
+    const updateWhere = vi.fn(async () => []);
+    const updateSet = vi.fn(() => ({ where: updateWhere }));
+    const update = vi.fn((table: unknown) => {
+      // getTableName is drizzle's PUBLIC accessor. Reading `_.name` off the table object worked on
+      // nothing and silently produced "[object Object]", which would have made every assertion below a
+      // test of string formatting rather than of behaviour.
+      updates.push(getTableName(table as Parameters<typeof getTableName>[0]));
+      return { set: updateSet };
+    });
+    return { insertMock, update, updates, updateSet };
+  }
+
+  it("touches the PROPERTY a site visit was about", async () => {
+    const { insertMock, update, updates } = harness();
+    await createActivity({ insert: insertMock.insert, update } as any, {
+      type: "note",
+      responsibleUserId: "rep-1",
+      performedByUserId: "rep-1",
+      body: "Met the super",
+      propertyId: "property-1",
+      sourceEntityType: "property",
+      sourceEntityId: "property-1",
+    });
+    expect(updates).toContain("properties");
+  });
+
+  it("touches the COMPANY on the fallback path", async () => {
+    const { insertMock, update, updates } = harness();
+    await createActivity({ insert: insertMock.insert, update } as any, {
+      type: "note",
+      responsibleUserId: "rep-1",
+      performedByUserId: "rep-1",
+      body: "Spoke to the PM",
+      companyId: "company-1",
+      sourceEntityType: "company",
+      sourceEntityId: "company-1",
+    });
+    expect(updates).toContain("companies");
+  });
+
+  it("touches nothing it was not given", async () => {
+    // A contact-only log must not invent a property or company write.
+    const { insertMock, update, updates } = harness();
+    await createActivity({ insert: insertMock.insert, update } as any, {
+      type: "note",
+      responsibleUserId: "rep-1",
+      performedByUserId: "rep-1",
+      body: "Called Dana",
+      contactId: "contact-1",
+      sourceEntityType: "contact",
+      sourceEntityId: "contact-1",
+    });
+    expect(updates).not.toContain("properties");
+    expect(updates).not.toContain("companies");
+  });
+
+  it("uses GREATEST so a back-dated log cannot drag a recent touch backwards", async () => {
+    const { insertMock, update, updateSet } = harness();
+    await createActivity({ insert: insertMock.insert, update } as any, {
+      type: "note",
+      responsibleUserId: "rep-1",
+      performedByUserId: "rep-1",
+      body: "Logged late",
+      propertyId: "property-1",
+      sourceEntityType: "property",
+      sourceEntityId: "property-1",
+      occurredAt: "2020-01-01T00:00:00.000Z",
+    });
+    const written = JSON.stringify(flattenQueryChunks(updateSet.mock.calls[0]?.[0]));
+    expect(written.toLowerCase()).toContain("greatest");
   });
 });

@@ -1,6 +1,6 @@
 import { and, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
-import { activities, contacts, deals, leads, users } from "@trock-crm/shared/schema";
+import { activities, companies, contacts, deals, leads, properties, users } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
 
@@ -235,13 +235,43 @@ export async function createActivity(
 
   const activity = result[0];
 
-  // Update deal.lastActivityAt if deal is associated
-  if (linkedEntities.dealId) {
-    await tenantDb
-      .update(deals)
-      .set({ lastActivityAt: new Date() })
-      .where(eq(deals.id, linkedEntities.dealId));
-  }
+  /**
+   * Refresh the last-touch on EVERY entity this activity names, not just the deal.
+   *
+   * `properties.last_activity_at` and `companies.last_activity_at` both exist and both carry their own
+   * index — they are read for staleness filtering and for sorting "least recently touched" — but only
+   * the deal was ever refreshed. That was survivable while activities were created from deal-centric
+   * surfaces; field prospecting makes a PROPERTY or a COMPANY the usual target, so every captured visit
+   * left the thing it was about looking untouched, and the buildings reps are actually working would
+   * sort as the coldest on the board.
+   *
+   * GREATEST, not a bare assignment: an activity can be logged with a back-dated `occurredAt`, and a
+   * blind write would drag a recent touch backwards. Same rule the lead link uses.
+   */
+  const touchedAt = activity?.occurredAt ?? new Date();
+  const touches = [
+    linkedEntities.dealId
+      ? tenantDb
+          .update(deals)
+          .set({ lastActivityAt: sql`GREATEST(${deals.lastActivityAt}, ${touchedAt})` })
+          .where(eq(deals.id, linkedEntities.dealId))
+      : null,
+    linkedEntities.propertyId
+      ? tenantDb
+          .update(properties)
+          .set({ lastActivityAt: sql`GREATEST(${properties.lastActivityAt}, ${touchedAt})` })
+          .where(eq(properties.id, linkedEntities.propertyId))
+      : null,
+    linkedEntities.companyId
+      ? tenantDb
+          .update(companies)
+          .set({ lastActivityAt: sql`GREATEST(${companies.lastActivityAt}, ${touchedAt})` })
+          .where(eq(companies.id, linkedEntities.companyId))
+      : null,
+  ].filter(Boolean);
+  // Sequential, not Promise.all: these share one tenant transaction, and concurrent statements on a
+  // single connection is how the pool gets corrupted rather than parallelised.
+  for (const touch of touches) await touch;
 
   return activity;
 }

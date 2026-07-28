@@ -328,12 +328,79 @@ export default function ProspectScreen() {
    * it findable by the next capture rather than a duplicate waiting to happen.
    */
   const [createPropertyError, setCreatePropertyError] = useState<string | null>(null);
+  /**
+   * Create the company a net-new prospect belongs to.
+   *
+   * Same dedup discipline as the contact path: `POST /companies` answers 200 with suggestions rather
+   * than 201 when it suspects a duplicate, so a 2xx is not a success and the prompt is the useful
+   * outcome — a rep at a door should be shown the existing company, not given a second one.
+   */
+  const [duplicateCompanies, setDuplicateCompanies] = useState<prospecting.DedupSuggestion[] | null>(
+    null,
+  );
+  const [createCompanyError, setCreateCompanyError] = useState<string | null>(null);
+
+  /**
+   * The address, typed, for when the geocode could not supply one.
+   *
+   * reverseGeocode returns null by DESIGN on a missing token, a timeout or a non-2xx — the degradation
+   * the endpoint documents. That is precisely when a rep is standing at a building the CRM has never
+   * seen, so leaving the create control gated on the geocode removed the only way to capture it.
+   */
+  const [manualAddress, setManualAddress] = useState("");
+  const [manualCity, setManualCity] = useState("");
+  const [manualState, setManualState] = useState("");
+  const [manualZip, setManualZip] = useState("");
+
+  /** Whatever address we actually have: the geocode first, the rep's typing second. */
+  const effectiveAddress = useMemo(() => {
+    if (address?.address && address.city && address.state && address.zip) return address;
+    const typed = {
+      address: manualAddress.trim(),
+      city: manualCity.trim(),
+      state: manualState.trim().toUpperCase(),
+      zip: manualZip.trim(),
+    };
+    if (!typed.address || !typed.city || !typed.state || !typed.zip) return null;
+    // Coordinates come from the FIX, not the typing — the rep is standing here either way, and storing
+    // them is what makes this building findable by the next capture.
+    return { ...typed, lat: address?.lat ?? null, lng: address?.lng ?? null };
+  }, [address, manualAddress, manualCity, manualState, manualZip]);
+  const createCompanyNamed = useMutation({
+    mutationFn: async (name: string) => prospecting.createCompany(fetcher, { name }),
+    onSuccess: async (result) => {
+      if (!result.created) {
+        setDuplicateCompanies(result.duplicates ?? []);
+        setCreateCompanyError(
+          result.duplicates?.length ? null : "Couldn't add that company — try a different name.",
+        );
+        return;
+      }
+      setDuplicateCompanies(null);
+      setCreateCompanyError(null);
+      setCompany(result.created);
+      setCompanyResults(null);
+      setCompanyQuery("");
+      companyQueryRef.current = "";
+      await queryClient.invalidateQueries({ queryKey: ["companies"] });
+    },
+    onError: (err) => {
+      setCreateCompanyError(
+        err instanceof ApiError && (err.status === 0 || err.status === 408)
+          ? "No signal — that company may or may not have been added. Check before adding it again."
+          : err instanceof ApiError
+            ? err.message
+            : "Couldn't add that company.",
+      );
+    },
+  });
+
   const createPropertyHere = useMutation({
     mutationFn: async () => {
       // Read ONCE, before the await. Both are state and can change under a slow request, and what
       // onSuccess writes into the target has to describe what was actually created.
       const under = company;
-      const at = address;
+      const at = effectiveAddress;
       if (!under || !at?.address || !at.city || !at.state || !at.zip) {
         throw new Error("A company and a full address are needed to add a building.");
       }
@@ -987,10 +1054,73 @@ export default function ProspectScreen() {
                       </Text>
                     ) : null}
                     {companyResults?.length === 0 && companyQuery.trim().length >= 2 ? (
-                      <Text testID="prospect-no-companies" style={styles.help}>
-                        No companies match “{companyQuery.trim()}”. Try the person instead, or add the
-                        property on the web and log against it.
-                      </Text>
+                      <>
+                        <Text testID="prospect-no-companies" style={styles.help}>
+                          No companies match “{companyQuery.trim()}”.
+                        </Text>
+                        {/* CREATE IT. Without this a completely net-new prospect — no property, no
+                            company — could not be logged at all: the building control below needs a
+                            company, and with neither the target stays empty and Save never enables.
+                            That is the case field prospecting exists for. */}
+                        <Pressable
+                          testID="prospect-create-company"
+                          onPress={() => createCompanyNamed.mutate(companyQuery.trim())}
+                          disabled={locked || createCompanyNamed.isPending}
+                          accessibilityRole="button"
+                          accessibilityLabel={`Add ${companyQuery.trim()} as a new company`}
+                          accessibilityState={{
+                            disabled: locked || createCompanyNamed.isPending,
+                            busy: createCompanyNamed.isPending,
+                          }}
+                          style={[
+                            styles.secondaryBtn,
+                            (locked || createCompanyNamed.isPending) && styles.primaryBtnDisabled,
+                          ]}
+                        >
+                          {createCompanyNamed.isPending ? (
+                            <ActivityIndicator color={theme.color.textPrimary} />
+                          ) : (
+                            <Text style={styles.secondaryText}>Add “{companyQuery.trim()}”</Text>
+                          )}
+                        </Pressable>
+                        {duplicateCompanies?.length ? (
+                          /* The dedup prompt, answered the same way the contact one is: pick the
+                             existing company rather than quietly making a second. */
+                          <View testID="prospect-duplicate-companies" style={styles.dupBox}>
+                            <Text style={styles.warn}>
+                              {duplicateCompanies.length === 1
+                                ? "A company with a similar name already exists. Is this it?"
+                                : `${duplicateCompanies.length} similar companies already exist. Which one?`}
+                            </Text>
+                            {duplicateCompanies.map((s) => (
+                              <Pressable
+                                key={s.id}
+                                testID={`prospect-duplicate-company-${s.id}`}
+                                onPress={() => {
+                                  setCompany({ id: s.id, name: s.name ?? "Existing company" });
+                                  setDuplicateCompanies(null);
+                                  setCompanyResults(null);
+                                  setCompanyQuery("");
+                                  companyQueryRef.current = "";
+                                }}
+                                accessibilityRole="button"
+                                accessibilityLabel={`Use ${s.name ?? "this company"}`}
+                                style={styles.matchRow}
+                              >
+                                <Text style={styles.matchName} numberOfLines={1}>
+                                  {s.name ?? "Existing company"}
+                                </Text>
+                                <Text style={styles.linkText}>Use</Text>
+                              </Pressable>
+                            ))}
+                          </View>
+                        ) : null}
+                        {createCompanyError ? (
+                          <Text testID="prospect-create-company-error" style={styles.warn}>
+                            {createCompanyError}
+                          </Text>
+                        ) : null}
+                      </>
                     ) : null}
 
                     {/* THE PERSON FALLBACK. Both this screen and the blocked-state copy promised a
@@ -1096,17 +1226,75 @@ export default function ProspectScreen() {
                   </>
                 )}
 
-                  {/* ADD THE BUILDING. Offered once a company is chosen and the geocode gave a full
-                      address — the two things the server requires. This is what stops a genuinely new
-                      building from being unloggable. */}
-                  {company && address?.address && address.city && address.state && address.zip ? (
+                  {/* ADD THE BUILDING. Offered once a company is chosen and a full address is known —
+                      the two things the server requires.
+
+                      The address can be TYPED, because reverse geocoding degrades to null by design
+                      (missing token, timeout, non-2xx). Gating solely on the geocode meant the one
+                      control that captures a new building disappeared for good in exactly the
+                      conditions a rep hits outdoors, and nothing else on this screen could take an
+                      address. */}
+                  {company && !effectiveAddress ? (
+                    <View style={styles.dupBox}>
+                      <Text style={styles.warn}>
+                        Couldn&apos;t work out the address here. Type it to add the building, or just log
+                        this against {company.name}.
+                      </Text>
+                      <TextInput
+                        testID="prospect-manual-address"
+                        editable={!locked}
+                        value={manualAddress}
+                        onChangeText={setManualAddress}
+                        placeholder="Street address"
+                        placeholderTextColor={theme.color.textMuted}
+                        autoCapitalize="words"
+                        style={styles.input}
+                      />
+                      <View style={styles.nameRow}>
+                        <TextInput
+                          testID="prospect-manual-city"
+                          editable={!locked}
+                          value={manualCity}
+                          onChangeText={setManualCity}
+                          placeholder="City"
+                          placeholderTextColor={theme.color.textMuted}
+                          autoCapitalize="words"
+                          style={[styles.input, styles.half]}
+                        />
+                        <TextInput
+                          testID="prospect-manual-state"
+                          editable={!locked}
+                          value={manualState}
+                          onChangeText={setManualState}
+                          placeholder="State"
+                          placeholderTextColor={theme.color.textMuted}
+                          autoCapitalize="characters"
+                          maxLength={2}
+                          style={[styles.input, styles.half]}
+                        />
+                      </View>
+                      <TextInput
+                        testID="prospect-manual-zip"
+                        editable={!locked}
+                        value={manualZip}
+                        onChangeText={setManualZip}
+                        placeholder="ZIP"
+                        placeholderTextColor={theme.color.textMuted}
+                        keyboardType="number-pad"
+                        maxLength={10}
+                        style={styles.input}
+                      />
+                    </View>
+                  ) : null}
+
+                  {company && effectiveAddress ? (
                     <>
                       <Pressable
                         testID="prospect-create-property"
                         onPress={() => createPropertyHere.mutate()}
                         disabled={locked || createPropertyHere.isPending}
                         accessibilityRole="button"
-                        accessibilityLabel={`Add ${address.address} under ${company.name}`}
+                        accessibilityLabel={`Add ${effectiveAddress.address} under ${company.name}`}
                         accessibilityState={{
                           disabled: locked || createPropertyHere.isPending,
                           busy: createPropertyHere.isPending,
@@ -1120,7 +1308,7 @@ export default function ProspectScreen() {
                           <ActivityIndicator color={theme.color.textPrimary} />
                         ) : (
                           <Text style={styles.secondaryText}>
-                            Add “{address.address}” to {company.name}
+                            Add “{effectiveAddress.address}” to {company.name}
                           </Text>
                         )}
                       </Pressable>
