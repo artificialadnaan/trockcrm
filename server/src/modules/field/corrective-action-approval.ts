@@ -10,6 +10,7 @@ import {
 } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
 import { recordCorrectiveActionEvent } from "./corrective-action-events.js";
+import { restartCorrectiveActionCyclesForCards } from "./corrective-actions-service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -290,4 +291,53 @@ export async function itemsBelongToScorecard(
       ),
     );
   return rows.length === itemIds.length;
+}
+
+/**
+ * Reject an item AND restart the responders' notification cycle, in one transaction.
+ *
+ * These belong together and must not be two calls a route can get half-right. The responders' tokens were
+ * DELETED when they submitted, so a rejection on its own leaves them holding no valid link: they receive a
+ * notice, click it, get a 403, and the card stalls with work nobody can do.
+ *
+ * The restart machinery is REUSED rather than reimplemented. It mints a fresh cycle nonce, clears the send
+ * stamp, deletes stale tokens and enqueues the responder job — and it carries the supersession and delivery
+ * guarantees thirteen review rounds put into it. A second token path would have to re-earn all of that, and
+ * would be the second place a cycle can be started wrongly.
+ */
+export async function rejectAndRestart(
+  tx: TenantDb,
+  input: {
+    office: { id: string; slug: string };
+    scorecardId: string;
+    itemId: string;
+    comment: string;
+    actor: ApprovalActor;
+  },
+): Promise<ApprovalOutcome> {
+  const outcome = await rejectCorrectiveActionItem(tx, {
+    scorecardId: input.scorecardId,
+    itemId: input.itemId,
+    comment: input.comment,
+    actor: input.actor,
+  });
+
+  // Only on a REAL transition back to the responders. A no-op rejection (already rejected, or resubmitted
+  // since the approver loaded the page), or one on a card that was already open, must not churn the cycle —
+  // that would revoke a link the responder may be using right now and re-notify them about no change.
+  if (!outcome.reopened) return outcome;
+
+  const [card] = await tx
+    .select({ dealId: fieldScorecards.dealId })
+    .from(fieldScorecards)
+    .where(eq(fieldScorecards.id, input.scorecardId))
+    .limit(1);
+  if (!card) return outcome;
+
+  await restartCorrectiveActionCyclesForCards(
+    tx,
+    [{ id: input.scorecardId, dealId: card.dealId }],
+    input.office,
+  );
+  return outcome;
 }

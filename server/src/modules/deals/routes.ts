@@ -122,8 +122,8 @@ import {
   assertScorecardBelongsToDeal,
   parseApproveItemIds,
   parseRejectionComment,
-  rejectCorrectiveActionItem,
 } from "../field/corrective-action-approval-routes.js";
+import { rejectAndRestart } from "../field/corrective-action-approval.js";
 import {
   getDealScorecardDetail,
   getDealScorecardPdfArtifactState,
@@ -2630,7 +2630,11 @@ router.post("/:id/scorecards/:scorecardId/corrective-actions/:itemId/reject", as
     const comment = parseRejectionComment(req.body);
     await assertScorecardBelongsToDeal(req.tenantDb!, req.params.id, req.params.scorecardId);
 
-    const outcome = await rejectCorrectiveActionItem(req.tenantDb!, {
+    if (!req.officeSlug) throw new AppError(500, "Office context not available");
+    // rejectAndRestart, not rejectCorrectiveActionItem: the responders' tokens were deleted when they
+    // submitted, so a rejection without a fresh cycle hands them a notice they cannot act on.
+    const outcome = await rejectAndRestart(req.tenantDb!, {
+      office: { id: req.user!.activeOfficeId, slug: req.officeSlug },
       scorecardId: req.params.scorecardId,
       itemId: req.params.itemId,
       comment,

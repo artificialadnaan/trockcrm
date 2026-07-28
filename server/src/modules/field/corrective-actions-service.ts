@@ -913,7 +913,7 @@ export async function restartCorrectiveActionNotificationCycleForResponder(
  * responder-scoped entry points above so the two can never drift on the nonce/token/enqueue trio, which the
  * worker's delivery stamp depends on being applied together.
  */
-async function restartCorrectiveActionCyclesForCards(
+export async function restartCorrectiveActionCyclesForCards(
   tx: TenantDb,
   openScorecards: Array<{ id: string; dealId: string }>,
   office: { id: string; slug: string },
