@@ -117,6 +117,14 @@ import { inferDealBidBoardOwnership } from "./workflow-backfill.js";
 import { getPendingRfpDeals, cancelPendingRfp } from "./pending-rfp-service.js";
 import { confirmUpload, getFileById, getFileDownloadUrl, getPendingUploadMetadata } from "../files/service.js";
 import {
+  approveCorrectiveActionItems,
+  assertCorrectiveActionApprover,
+  assertScorecardBelongsToDeal,
+  parseApproveItemIds,
+  parseRejectionComment,
+  rejectCorrectiveActionItem,
+} from "../field/corrective-action-approval-routes.js";
+import {
   getDealScorecardDetail,
   getDealScorecardPdfArtifactState,
   listDealScorecards,
@@ -2583,6 +2591,53 @@ router.get("/:id/scorecards/:scorecardId", async (req, res, next) => {
     });
     await req.commitTransaction!();
     res.json({ scorecard });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/deals/:id/scorecards/:scorecardId/corrective-actions/approve — approve specific items, or
+// every item awaiting approval when `itemIds` is omitted (approve-all).
+//
+// Authorization is TWO gates, both required: assertDealRouteAccess proves the caller can see this deal, and
+// the QC_APPROVER_EMAILS allowlist proves they may exercise the approval verb. The allowlist is global, so
+// the deal check is what keeps an approver from acting on records they cannot otherwise read.
+router.post("/:id/scorecards/:scorecardId/corrective-actions/approve", async (req, res, next) => {
+  try {
+    await assertDealRouteAccess(req, req.params.id);
+    const actor = assertCorrectiveActionApprover(req);
+    const itemIds = parseApproveItemIds(req.body);
+    await assertScorecardBelongsToDeal(req.tenantDb!, req.params.id, req.params.scorecardId);
+
+    const outcome = await approveCorrectiveActionItems(req.tenantDb!, {
+      scorecardId: req.params.scorecardId,
+      itemIds,
+      actor,
+    });
+    await req.commitTransaction!();
+    res.json({ outcome });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/deals/:id/scorecards/:scorecardId/corrective-actions/:itemId/reject — send ONE item back with a
+// required reason. Only that item reopens; approved siblings keep their verdict.
+router.post("/:id/scorecards/:scorecardId/corrective-actions/:itemId/reject", async (req, res, next) => {
+  try {
+    await assertDealRouteAccess(req, req.params.id);
+    const actor = assertCorrectiveActionApprover(req);
+    const comment = parseRejectionComment(req.body);
+    await assertScorecardBelongsToDeal(req.tenantDb!, req.params.id, req.params.scorecardId);
+
+    const outcome = await rejectCorrectiveActionItem(req.tenantDb!, {
+      scorecardId: req.params.scorecardId,
+      itemId: req.params.itemId,
+      comment,
+      actor,
+    });
+    await req.commitTransaction!();
+    res.json({ outcome });
   } catch (err) {
     next(err);
   }
