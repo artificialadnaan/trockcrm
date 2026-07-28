@@ -42,6 +42,12 @@ const FILE = "aaaaaaaa-0000-0000-0000-000000000001";
 // evidence fingerprint (corrective_action_id IS NULL excludes it on both the initial read and the recheck),
 // but since PDF v3 it IS embedded in the document — in the corrective-action section, not the evidence pages.
 const RESPONSE_FILE = "aaaaaaaa-0000-0000-0000-000000000002";
+// Two more response files, used to prove the pre-cap photo slice and the renderer agree on item order.
+const REORDER_FILE_A = "aaaaaaaa-0000-0000-0000-000000000003";
+const REORDER_FILE_B = "aaaaaaaa-0000-0000-0000-000000000004";
+const REORDER_CARD = "55555555-5555-5555-5555-000000000010";
+const REORDER_ITEM_A = "77777777-7777-7777-7777-000000000002";
+const REORDER_ITEM_B = "77777777-7777-7777-7777-000000000003";
 const RESPONSE_PHOTO_CARD = "55555555-5555-5555-5555-000000000008";
 const RESPONSE_CORRECTIVE_ACTION = "77777777-7777-7777-7777-000000000001";
 const CARD = "55555555-5555-5555-5555-000000000001";
@@ -81,6 +87,12 @@ beforeAll(async () => {
     );
     INSERT INTO files VALUES (
       '${RESPONSE_FILE}', 'Corrective action photo', 'original/response.jpg', 'thumbs/response.jpg', 'image/jpeg', true, NULL, NOW()
+    );
+    INSERT INTO files VALUES (
+      '${REORDER_FILE_A}', 'Item A evidence', 'original/a.jpg', 'thumbs/a.jpg', 'image/jpeg', true, NULL, NOW()
+    );
+    INSERT INTO files VALUES (
+      '${REORDER_FILE_B}', 'Item B evidence', 'original/b.jpg', 'thumbs/b.jpg', 'image/jpeg', true, NULL, NOW()
     );
   `);
   db = drizzle(pg);
@@ -392,5 +404,66 @@ describe("finalizeFieldScorecardArtifacts", () => {
       SELECT pdf_content_generation FROM field_scorecards WHERE id = ${GENERATION_UNPUBLISHED_CARD}::uuid
     `);
     expect(row.rows[0]).toMatchObject({ pdf_content_generation: null });
+  });
+
+  it("REGRESSION: the pre-cap photo slice ranks items the same way the renderer does", async () => {
+    // The loader slices response photos to a global cap BEFORE the renderer sees them, so the two MUST rank
+    // items identically. When the loader ranked by item_ref while the renderer ranked by the live
+    // action-item list, a reorder made them disagree: the cap kept photos for one item and the renderer drew
+    // a different one, so an item silently lost its response evidence.
+    //
+    // Fetch ORDER is the observable proxy for the ranking — the loader resolves photos in rank order.
+    await db.insert(fieldScorecards).values({
+      id: REORDER_CARD,
+      clientSubmissionId: "66666666-5555-5555-5555-000000000010",
+      dealId: DEAL,
+      weekOf: "2026-07-06",
+      totalScore: 40,
+      formVersion: 2,
+      averageScore: "4.0",
+      rating: "corrective_action",
+      submittedBy: USER,
+      submittedByName: "Sam Super",
+      // The editor REORDERED the list: "Item B" is now first, though its row still carries the higher ref.
+      actionItems: ["Item B", "Item A"],
+    });
+    await db.insert(scorecardCorrectiveActions).values([
+      {
+        id: REORDER_ITEM_A,
+        scorecardId: REORDER_CARD,
+        itemType: "action_item",
+        itemRef: "0",
+        itemLabel: "Item A",
+        status: "resolved",
+        responderName: "Pat Manager",
+        responseComment: "A done.",
+        respondedAt: new Date(),
+      },
+      {
+        id: REORDER_ITEM_B,
+        scorecardId: REORDER_CARD,
+        itemType: "action_item",
+        itemRef: "1",
+        itemLabel: "Item B",
+        status: "resolved",
+        responderName: "Pat Manager",
+        responseComment: "B done.",
+        respondedAt: new Date(),
+      },
+    ]);
+    await db.insert(fieldScorecardPhotos).values([
+      { scorecardId: REORDER_CARD, sectionKey: null, deficiencyKey: null, fileId: REORDER_FILE_A, correctiveActionId: REORDER_ITEM_A },
+      { scorecardId: REORDER_CARD, sectionKey: null, deficiencyKey: null, fileId: REORDER_FILE_B, correctiveActionId: REORDER_ITEM_B },
+    ]);
+
+    r2Mocks.getObjectBuffer.mockClear();
+    await finalizeFieldScorecardArtifacts({ id: "office-1", slug: "dallas" }, USER, REORDER_CARD);
+
+    const responseFetchOrder = r2Mocks.getObjectBuffer.mock.calls
+      .map((call) => call[0] as string)
+      .filter((key) => key === "thumbs/a.jpg" || key === "thumbs/b.jpg");
+    // Item B renders first now, so its evidence is ranked first — matching buildScorecardPdfData. Ranking by
+    // item_ref would put "thumbs/a.jpg" first.
+    expect(responseFetchOrder).toEqual(["thumbs/b.jpg", "thumbs/a.jpg"]);
   });
 });

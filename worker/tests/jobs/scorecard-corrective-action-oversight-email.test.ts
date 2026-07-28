@@ -42,6 +42,7 @@ const ITEMS = [
     item_label: "Re-inspect slab 2",
     status: "resolved",
     responder_name: "Sam Super",
+    responder_email: "pat@trockgc.com",
     // Deliberately an evening-CT instant whose UTC CALENDAR DATE is the following day: 8:30 PM CDT on Jul 27
     // is Jul 28 in UTC. Any renderer that slices the ISO string dates this response to the wrong day.
     responded_at: new Date("2026-07-28T01:30:00.000Z"),
@@ -54,6 +55,7 @@ const ITEMS = [
     item_label: "Missed hold point",
     status: "open",
     responder_name: null,
+    responder_email: null,
     responded_at: null,
     response_comment: null,
     photo_count: 0,
@@ -86,6 +88,10 @@ interface ScorecardOverrides {
   revalidateRows?: unknown[];
   /** [] => the browsable/active gate filtered the row out entirely. */
   scorecardRows?: unknown[];
+  /** The card's CURRENT action-item list — what the corrective-action rows are ordered against. */
+  actionItems?: string[];
+  /** Override the corrective-action rows (e.g. two action items, to assert ordering). */
+  items?: unknown[];
   /**
    * Does the scorecard ROW still exist when the browsable gate misses? This is the difference between a
    * deleted card (nothing to notify, complete the job) and a merely-hidden project (restorable, so retry).
@@ -155,6 +161,7 @@ function makeQuery(
             rating: "corrective_action",
             form_version: 2,
             status: over.status ?? "corrective_action_open",
+            action_items: over.actionItems ?? ["Re-inspect slab 2"],
             pdf_r2_key: over.pdfR2Key === undefined ? `sc.${"a".repeat(64)}.v3.pdf` : over.pdfR2Key,
             pdf_render_version: over.pdfRenderVersion ?? 3,
             pdf_content_generation:
@@ -169,7 +176,7 @@ function makeQuery(
         ],
       };
     }
-    if (sql.includes("scorecard_corrective_actions ca")) return { rows: ITEMS };
+    if (sql.includes("scorecard_corrective_actions ca")) return { rows: over.items ?? ITEMS };
     if (sql.includes("UPDATE office_dallas.field_scorecards")) {
       stampUpdates.push({ sql, params });
       // rowCount 0 models a guarded UPDATE that matched nothing (stamp already set, or the cycle moved on).
@@ -1129,5 +1136,53 @@ describe("handleScorecardCorrectiveActionOversightEmail", () => {
     // reporting the response on a day the responder had already finished.
     expect(html).toMatch(/Jul 27, 2026, 8:30\s?PM CDT/);
     expect(html).not.toContain("2026-07-28");
+  });
+
+  it("REGRESSION: orders items by the CURRENT action-item list, not the preserved item_ref", async () => {
+    // Reconciliation preserves an action item's original item_ref across edits, so after a reorder the ref
+    // order is the OLD order. This email sits beside the PDF it attaches and the deal thread it links to;
+    // listing the same record in a contradictory sequence makes the reader distrust all three.
+    const twoActionItems = [
+      { ...ITEMS[0], item_ref: "0", item_label: "Item A" },
+      { ...ITEMS[0], item_ref: "1", item_label: "Item B" },
+    ];
+    const { query } = makeQuery({
+      items: twoActionItems,
+      // The editor swapped them; the rows keep their original refs.
+      actionItems: ["Item B", "Item A"],
+    });
+    const sendEmail = makeSend();
+
+    await handleScorecardCorrectiveActionOversightEmail(payload(), null, {
+      query: query as never,
+      sendEmail: sendEmail as never,
+      env,
+      logger: makeLogger(),
+    });
+
+    const [, , html] = sendEmail.mock.calls[0] as unknown as [string[], string, string];
+    // Ordering by item_ref would list Item A first, contradicting the card.
+    expect(html.indexOf("Item B")).toBeLessThan(html.indexOf("Item A"));
+  });
+
+  it("names the responder by EMAIL when they have no display name", async () => {
+    // A session responder with no first/last name stores a null responder_name but a non-null email. Without
+    // the fallback the notice reports when a fix landed but not who filed it.
+    const { query } = makeQuery({ status: "corrective_action_closed" });
+    const sendEmail = makeSend();
+    ITEMS[0].responder_name = null;
+    try {
+      await handleScorecardCorrectiveActionOversightEmail(payload({ phase: "closed" }), null, {
+        query: query as never,
+        sendEmail: sendEmail as never,
+        getPdf: (async () => Buffer.from("%PDF-1.4")) as never,
+        env,
+        logger: makeLogger(),
+      });
+      const [, , html] = sendEmail.mock.calls[0] as unknown as [string[], string, string];
+      expect(html).toContain("pat@trockgc.com");
+    } finally {
+      ITEMS[0].responder_name = "Sam Super";
+    }
   });
 });

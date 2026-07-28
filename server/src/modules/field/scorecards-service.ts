@@ -30,6 +30,7 @@ import {
   type ScorecardPdfArtifactState,
 } from "./scorecard-pdf-artifact.js";
 import { prioritizeAndCapEvidencePhotos, resolveScorecardEvidenceImage } from "./scorecard-evidence-image.js";
+import { orderCorrectiveActions } from "@trock-crm/shared/lib/correctiveActionOrder";
 import {
   FIELD_SCORECARD_LEADERSHIP_SECTION_KEYS,
   FIELD_SCORECARD_LEADERSHIP_SUMMARY_SECTION_KEY,
@@ -1105,6 +1106,10 @@ export async function renderAndStoreFieldScorecardArtifacts(
         itemLabel: scorecardCorrectiveActions.itemLabel,
         status: scorecardCorrectiveActions.status,
         responderName: scorecardCorrectiveActions.responderName,
+        // The record must say WHO. A session responder with no first/last name stores a null
+        // responder_name but a non-null email, so a name-only select renders the fix as anonymous.
+        // The CRM detail already falls back this way; the exports must match it.
+        responderEmail: scorecardCorrectiveActions.responderEmail,
         respondedAt: scorecardCorrectiveActions.respondedAt,
         responseComment: scorecardCorrectiveActions.responseComment,
       })
@@ -1189,6 +1194,7 @@ export async function renderAndStoreFieldScorecardArtifacts(
   const responsePhotoRowsInRenderOrder = sortResponsePhotosForRender(
     correctiveActionPhotoRows,
     correctiveActionRows,
+    card.actionItems ?? [],
   );
   const responsePhotosToLoad = responsePhotoRowsInRenderOrder.slice(0, MAX_CORRECTIVE_ACTION_PHOTOS);
   const omittedCorrectiveActionPhotoCount =
@@ -1259,7 +1265,7 @@ export async function renderAndStoreFieldScorecardArtifacts(
       itemRef: row.itemRef,
       itemLabel: row.itemLabel,
       status: row.status,
-      responderName: row.responderName ?? null,
+      responderName: row.responderName ?? row.responderEmail ?? null,
       respondedAt: toIso(row.respondedAt),
       responseComment: row.responseComment ?? null,
       photos: correctiveActionPhotos
@@ -1969,18 +1975,15 @@ function toIso(value: unknown): string {
  */
 function sortResponsePhotosForRender<T extends { correctiveActionId: string | null }>(
   photoRows: T[],
-  itemRows: Array<{ id: string; itemType: string; itemRef: string }>,
+  itemRows: Array<{ id: string; itemType: string; itemRef: string; itemLabel: string }>,
+  actionItems: readonly string[],
 ): T[] {
+  // MUST use the same ranking the renderer uses. This function decides which photos survive the global cap;
+  // the renderer decides which item draws them. Rank by item_ref here while the renderer ranks by the live
+  // action-item list and the two disagree the moment an editor reorders the list — the cap then keeps photos
+  // for one item and the renderer draws a different one, so an item silently loses its evidence.
   const rankById = new Map<string, number>();
-  [...itemRows]
-    .sort((left, right) => {
-      if (left.itemType !== right.itemType) return left.itemType === "action_item" ? -1 : 1;
-      const leftNum = Number(left.itemRef);
-      const rightNum = Number(right.itemRef);
-      if (Number.isFinite(leftNum) && Number.isFinite(rightNum)) return leftNum - rightNum;
-      return left.itemRef.localeCompare(right.itemRef);
-    })
-    .forEach((item, index) => rankById.set(item.id, index));
+  orderCorrectiveActions(itemRows, actionItems).forEach((item, index) => rankById.set(item.id, index));
 
   // The incoming rows already arrive ordered by (created_at, id); Array.prototype.sort is stable, so that
   // ordering is preserved within each item.

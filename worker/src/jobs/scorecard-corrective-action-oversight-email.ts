@@ -7,6 +7,7 @@ import { getObjectBuffer } from "../lib/r2-client.js";
 import { escapeHtml, normalizeText, isSafeTenantSchema } from "../lib/email-format.js";
 import { resolveFrontendUrl, TROCK_LOGO_EMAIL_URL } from "./project-number-email.js";
 import { resolveFieldScorecardRecipients } from "@trock-crm/shared/lib/fieldScorecardEmails";
+import { orderCorrectiveActions } from "@trock-crm/shared/lib/correctiveActionOrder";
 import {
   BROWSABLE_PROJECT_SQL,
   LOST_EXCLUDED_SLUGS,
@@ -108,6 +109,8 @@ interface ScorecardRow {
   rating: string | null;
   form_version: number | null;
   status: string | null;
+  /** The CURRENT action-item list — what the corrective-action rows must be ordered against. */
+  action_items: string[] | null;
   pdf_r2_key: string | null;
   pdf_render_version: number | null;
   /** The scorecard updated_at the stored PDF was rendered from (migration 0200); null pre-migration. */
@@ -125,6 +128,7 @@ interface ItemRow {
   item_label: string;
   status: string;
   responder_name: string | null;
+  responder_email: string | null;
   responded_at: Date | null;
   response_comment: string | null;
   photo_count: number | string;
@@ -180,7 +184,7 @@ export async function handleScorecardCorrectiveActionOversightEmail(
   // arrays onto $3. (The responder job documents this trap at length; same fragment, same hazard.)
   const scorecardResult = await query(
     `SELECT sc.deal_id, sc.project_number, sc.week_of, sc.total_score, sc.average_score, sc.rating,
-            sc.form_version, sc.status, sc.pdf_r2_key, sc.pdf_render_version,
+            sc.form_version, sc.status, sc.action_items, sc.pdf_r2_key, sc.pdf_render_version,
             sc.pdf_content_generation, sc.updated_at,
             sc.corrective_action_oversight_opened_at, sc.corrective_action_oversight_closed_at,
             sc.corrective_action_cycle_nonce, sc.corrective_action_oversight_cycle,
@@ -300,7 +304,10 @@ export async function handleScorecardCorrectiveActionOversightEmail(
   }
 
   const itemsResult = await query(
-    `SELECT ca.item_type, ca.item_ref, ca.item_label, ca.status, ca.responder_name, ca.responded_at,
+    `SELECT ca.item_type, ca.item_ref, ca.item_label, ca.status, ca.responder_name,
+            -- A session responder with no first/last name stores a null responder_name but a non-null
+            -- email. Without this the notice reports WHEN a fix landed but not WHO filed it.
+            ca.responder_email, ca.responded_at,
             ca.response_comment,
             -- Count only photos that are ACTUALLY renderable. Both other surfaces for this data apply the
             -- same filter (the PDF loader and the CRM item read), so counting soft-deleted rows here would
@@ -312,14 +319,21 @@ export async function handleScorecardCorrectiveActionOversightEmail(
                 AND f.is_active = TRUE
                 AND f.deleted_at IS NULL) AS photo_count
        FROM ${tenantSchema}.scorecard_corrective_actions ca
-      WHERE ca.scorecard_id = $1::uuid
-      -- Numeric-aware ordering: item_ref is an action-item INDEX, where "10" must follow "2". Matches the
-      -- deal thread and the PDF.
-      ORDER BY CASE WHEN ca.item_type = 'action_item' THEN 0 ELSE 1 END,
-               CASE WHEN ca.item_ref ~ '^[0-9]+$' THEN LPAD(ca.item_ref, 12, '0') ELSE ca.item_ref END`,
+      WHERE ca.scorecard_id = $1::uuid`,
     [scorecardId],
   );
-  const items = itemsResult.rows as ItemRow[];
+  // Ordered against the CURRENT action-item list, NOT item_ref. Reconciliation preserves an action item's
+  // original ref across edits, so ref order is the OLD order after a reorder — and this email sits beside the
+  // PDF it attaches and the deal thread it links to. All three rank through orderCorrectiveActions.
+  const items = orderCorrectiveActions(
+    (itemsResult.rows as ItemRow[]).map((row) => ({
+      ...row,
+      itemType: row.item_type,
+      itemRef: row.item_ref,
+      itemLabel: row.item_label,
+    })),
+    scorecard.action_items ?? [],
+  );
 
   // The completed notice carries the refreshed PDF — which is only meaningful from v3, the revision that
   // first embedded the corrective-action record. Best-effort: a missing or oversized object degrades to a
@@ -762,7 +776,7 @@ export function buildOversightEmail(input: {
     ? `<ul style="margin:12px 0 0 0;padding-left:20px;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:20px;color:#111111;">${input.items
         .map((item) => {
           const resolved = item.status === "resolved";
-          const who = normalizeText(item.responder_name);
+          const who = normalizeText(item.responder_name) ?? normalizeText(item.responder_email);
           const when = formatRespondedAt(item.responded_at);
           const comment = normalizeText(item.response_comment);
           const photos = Number(item.photo_count ?? 0);
@@ -779,7 +793,7 @@ export function buildOversightEmail(input: {
         .map((item) => {
           const resolved = item.status === "resolved";
           if (!resolved) return `• ${item.item_label} — Open`;
-          const who = normalizeText(item.responder_name);
+          const who = normalizeText(item.responder_name) ?? normalizeText(item.responder_email);
           const when = formatRespondedAt(item.responded_at);
           const comment = normalizeText(item.response_comment);
           const photos = Number(item.photo_count ?? 0);
