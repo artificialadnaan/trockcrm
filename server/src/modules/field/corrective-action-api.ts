@@ -415,13 +415,28 @@ export async function submitCorrectiveActionResponse(
   }
 
   // Resolve within the SAME (caller-supplied) transaction so a resolve failure rolls back the photo inserts.
-  const { awaitingApproval } = await resolveCorrectiveActionItemTx(db, {
+  const { awaitingApproval, submissionEventId } = await resolveCorrectiveActionItemTx(db, {
     scorecardId: input.scorecardId,
     itemId: input.itemId,
     responseComment: comment,
     respondedBy: input.respondedBy,
     photoFileIds,
   });
+
+  // Attribute the photos THIS call inserted to the event THIS call created. Scoped by fileId and by a null
+  // event id so a resubmission cannot re-stamp an earlier attempt's evidence onto the new one.
+  if (photoFileIds.length > 0 && submissionEventId) {
+    await db
+      .update(fieldScorecardPhotos)
+      .set({ correctiveActionEventId: submissionEventId })
+      .where(
+        and(
+          eq(fieldScorecardPhotos.correctiveActionId, input.itemId),
+          inArray(fieldScorecardPhotos.fileId, photoFileIds),
+          isNull(fieldScorecardPhotos.correctiveActionEventId),
+        ),
+      );
+  }
 
   // This response answered the LAST outstanding item, so the card now sits with the APPROVER rather than
   // being complete. Notify them in the SAME transaction as the state change, so the job cannot exist for a

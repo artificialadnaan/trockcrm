@@ -383,11 +383,27 @@ router.get("/qc-scorecards", requireAnyRole, async (req, res, next) => {
       throw new AppError(400, "'kind' must be 'project' or 'leadership'.");
     }
     const kind = rawKind as ScorecardKind | undefined;
+    // Three buckets since the approval gate: a card can now sit BETWEEN open and closed, waiting on the
+    // approver. The client's filter, this validator and the service predicate have to move together — the
+    // dashboard sent `awaiting_approval`, the service implemented it, and this validator still 400'd it, so
+    // selecting the new filter cleared the report instead of narrowing it.
     const rawCaStatus = readQueryString(req.query.correctiveActionStatus);
-    if (rawCaStatus && rawCaStatus !== "open" && rawCaStatus !== "closed") {
-      throw new AppError(400, "'correctiveActionStatus' must be 'open' or 'closed'.");
+    if (
+      rawCaStatus &&
+      rawCaStatus !== "open" &&
+      rawCaStatus !== "awaiting_approval" &&
+      rawCaStatus !== "closed"
+    ) {
+      throw new AppError(
+        400,
+        "'correctiveActionStatus' must be 'open', 'awaiting_approval' or 'closed'.",
+      );
     }
-    const correctiveActionStatus = rawCaStatus as "open" | "closed" | undefined;
+    const correctiveActionStatus = rawCaStatus as
+      | "open"
+      | "awaiting_approval"
+      | "closed"
+      | undefined;
 
     const data = await getQcScorecardsReport(req.tenantDb!, {
       from,

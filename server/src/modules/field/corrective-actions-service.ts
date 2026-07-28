@@ -100,7 +100,7 @@ export async function resolveCorrectiveActionItem(
  * concurrent/stale submit whose item is no longer `open` never leaves orphan photos (the caller checks the
  * status under the same lock before inserting). See resolveCorrectiveActionItem for the concurrency rationale.
  *
- * Returns `{ resolved, awaitingApproval }`: `resolved` is true when it accepted a response (false on the
+ * Returns `{ resolved, awaitingApproval, submissionEventId }`: `resolved` is true when it accepted a response (false on the
  * idempotent no-op — an already-answered or unknown id), and `awaitingApproval` is true only on the winning
  * write that answered the LAST outstanding item. The caller uses it to notify the approver exactly once.
  *
@@ -109,7 +109,7 @@ export async function resolveCorrectiveActionItem(
 export async function resolveCorrectiveActionItemTx(
   tx: TenantDb,
   input: ResolveCorrectiveActionInput,
-): Promise<{ resolved: boolean; awaitingApproval: boolean }> {
+): Promise<{ resolved: boolean; awaitingApproval: boolean; submissionEventId?: string }> {
   // Serialize resolves for the SAME scorecard. Office transactions run at READ COMMITTED, so two
   // responders closing out the final two open items in separate transactions could each run their
   // `stillOpen` SELECT before seeing the other's uncommitted resolve → neither observes zero open
@@ -152,7 +152,10 @@ export async function resolveCorrectiveActionItemTx(
 
   // Record the attempt on the append-only thread BEFORE recomputing state, so the history exists even if a
   // later statement in this transaction fails and rolls the whole thing back together.
-  await recordCorrectiveActionEvent(tx, {
+  // Returned to the caller so the photos it just inserted can be attributed to THIS attempt. Without that
+  // link every event's photo set is empty, and the PDF falls back to hanging every unattributed photo off
+  // the first submission — so a reject/resubmit shows attempt two's evidence under attempt one.
+  const submissionEventId = await recordCorrectiveActionEvent(tx, {
     correctiveActionId: input.itemId,
     scorecardId: input.scorecardId,
     eventType: "submitted",
@@ -195,7 +198,7 @@ export async function resolveCorrectiveActionItemTx(
     )
     .where(eq(fieldScorecards.id, input.scorecardId));
 
-  return { resolved: true, awaitingApproval };
+  return { resolved: true, awaitingApproval, submissionEventId };
 }
 
 /**

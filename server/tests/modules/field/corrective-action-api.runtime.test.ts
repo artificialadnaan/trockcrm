@@ -867,4 +867,58 @@ describe("submitCorrectiveActionResponse", () => {
     const [refreshed] = await getCorrectiveActionItems(tdb, scorecard.id);
     expect(refreshed.events.map((e) => e.comment)).toEqual(labels);
   });
+
+  it("REGRESSION: attributes each attempt's photos to ITS submission event", async () => {
+    // Photos are inserted before the event exists, so the event id was never written back and every event's
+    // photo set came back empty. The PDF then falls back to hanging every unattributed photo off the FIRST
+    // submission — so after a reject/resubmit, attempt two's evidence appears under attempt one, which is
+    // exactly the per-attempt record the events table was added to provide.
+    const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
+    const [item] = await getCorrectiveActionItems(tdb, scorecard.id);
+
+    const attemptOnePhoto = "cccccccc-0000-0000-0000-000000000001";
+    const attemptTwoPhoto = "cccccccc-0000-0000-0000-000000000002";
+    await tdb.execute(sql`
+      INSERT INTO files (id, deal_id, client_upload_id, uploaded_by, description, is_active) VALUES
+        (${attemptOnePhoto}, ${DEAL}, 'up-c1', ${USER}, 'attempt one', true),
+        (${attemptTwoPhoto}, ${DEAL}, 'up-c2', ${USER}, 'attempt two', true)
+    `);
+    await seedUploadLedger(scorecard.id, [attemptOnePhoto, attemptTwoPhoto]);
+
+    await submitCorrectiveActionResponse(tdb, {
+      scorecardId: scorecard.id,
+      itemId: item.id,
+      comment: "First try.",
+      respondedBy: { userId: USER, name: "Pat Manager", email: "pat@trockgc.com" },
+      photoFileIds: [attemptOnePhoto],
+      office: TEST_OFFICE,
+    });
+
+    // The approver sends it back, and the responder answers again with NEW evidence.
+    await tdb.execute(sql`
+      UPDATE scorecard_corrective_actions SET status = 'rejected' WHERE id = ${item.id}
+    `);
+    await tdb.insert(scorecardCorrectiveActionEvents).values({
+      correctiveActionId: item.id,
+      scorecardId: scorecard.id,
+      eventType: "rejected",
+      actorName: "James Helms",
+      comment: "Not enough detail.",
+    });
+    await submitCorrectiveActionResponse(tdb, {
+      scorecardId: scorecard.id,
+      itemId: item.id,
+      comment: "Second try.",
+      respondedBy: { userId: USER, name: "Pat Manager", email: "pat@trockgc.com" },
+      photoFileIds: [attemptTwoPhoto],
+      office: TEST_OFFICE,
+    });
+
+    const [refreshed] = await getCorrectiveActionItems(tdb, scorecard.id);
+    const submissions = refreshed.events.filter((e) => e.eventType === "submitted");
+    expect(submissions).toHaveLength(2);
+    // Each attempt carries ITS OWN photo, not the aggregate and not the other attempt's.
+    expect(submissions[0].photos.map((p) => p.caption)).toEqual(["attempt one"]);
+    expect(submissions[1].photos.map((p) => p.caption)).toEqual(["attempt two"]);
+  });
 });
