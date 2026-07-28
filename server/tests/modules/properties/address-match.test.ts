@@ -436,3 +436,38 @@ describe("matchProperties — row processing and ranking", () => {
     expect(out.map((m) => m.id)).toEqual(["close", "far"]);
   });
 });
+
+describe("localityContradicts — state spelling is not a contradiction", () => {
+  /**
+   * A contradiction here is not a missed signal: it switches off BOTH address and distance matching for
+   * the row, so the one outcome this file trades everything to avoid — a duplicate property — was
+   * produced by two spellings of the same state.
+   */
+  it("treats 'Texas' and 'TX' as one state", () => {
+    expect(
+      localityContradicts({ city: "Dallas", state: "TX", zip: null }, { city: "Dallas", state: "Texas", zip: null }),
+    ).toBe(false);
+  });
+
+  it("works in the other direction too", () => {
+    expect(
+      localityContradicts({ city: null, state: "Texas", zip: null }, { city: null, state: "tx", zip: null }),
+    ).toBe(false);
+  });
+
+  it("still contradicts two genuinely different states", () => {
+    // The loose alternative — "different lengths, so don't compare" — would have lost this.
+    expect(
+      localityContradicts({ city: null, state: "Texas", zip: null }, { city: null, state: "CA", zip: null }),
+    ).toBe(true);
+    expect(
+      localityContradicts({ city: null, state: "TX", zip: null }, { city: null, state: "California", zip: null }),
+    ).toBe(true);
+  });
+
+  it("leaves an unknown state string compared as written", () => {
+    expect(
+      localityContradicts({ city: null, state: "Ontario", zip: null }, { city: null, state: "Ontario", zip: null }),
+    ).toBe(false);
+  });
+});

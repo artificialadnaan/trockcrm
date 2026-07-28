@@ -356,6 +356,75 @@ export function addressKeysMatch(a: string | null | undefined, b: string | null 
 }
 
 /**
+ * Full state names to their codes, because a legacy row and a geocode rarely agree on the form.
+ *
+ * "Texas" against Mapbox's "TX" compared as raw strings looks like a CONTRADICTION — and a
+ * contradiction here is not a missed signal, it switches off both address and distance matching for
+ * that row. So the one thing this file trades everything to avoid, a duplicate property, was produced
+ * by two spellings of the same state. Codes are canonicalised in both directions before comparing.
+ */
+const STATE_CODES: Record<string, string> = {
+  "alabama": "al",
+  "alaska": "ak",
+  "arizona": "az",
+  "arkansas": "ar",
+  "california": "ca",
+  "colorado": "co",
+  "connecticut": "ct",
+  "delaware": "de",
+  "district of columbia": "dc",
+  "florida": "fl",
+  "georgia": "ga",
+  "hawaii": "hi",
+  "idaho": "id",
+  "illinois": "il",
+  "indiana": "in",
+  "iowa": "ia",
+  "kansas": "ks",
+  "kentucky": "ky",
+  "louisiana": "la",
+  "maine": "me",
+  "maryland": "md",
+  "massachusetts": "ma",
+  "michigan": "mi",
+  "minnesota": "mn",
+  "mississippi": "ms",
+  "missouri": "mo",
+  "montana": "mt",
+  "nebraska": "ne",
+  "nevada": "nv",
+  "new hampshire": "nh",
+  "new jersey": "nj",
+  "new mexico": "nm",
+  "new york": "ny",
+  "north carolina": "nc",
+  "north dakota": "nd",
+  "ohio": "oh",
+  "oklahoma": "ok",
+  "oregon": "or",
+  "pennsylvania": "pa",
+  "puerto rico": "pr",
+  "rhode island": "ri",
+  "south carolina": "sc",
+  "south dakota": "sd",
+  "tennessee": "tn",
+  "texas": "tx",
+  "utah": "ut",
+  "vermont": "vt",
+  "virginia": "va",
+  "washington": "wa",
+  "west virginia": "wv",
+  "wisconsin": "wi",
+  "wyoming": "wy",
+};
+
+/** A state in canonical two-letter form, whichever way it was written. */
+function canonicalState(value: string): string {
+  const v = value.trim().toLowerCase();
+  return STATE_CODES[v] ?? v;
+}
+
+/**
  * Does the locality CONTRADICT the address match?
  *
  * "100 Main St" exists in every city in the country, and an office spanning more than one of them would
@@ -389,8 +458,10 @@ export function localityContradicts(
   const qCity = norm(query.city);
   const rCity = norm(row.city);
   if (qCity && rCity && qCity !== rCity) return true;
-  const qState = norm(query.state);
-  const rState = norm(row.state);
+  // Canonicalised, so "Texas" and "TX" are one state rather than a contradiction that would disable
+  // matching for the row entirely.
+  const qState = canonicalState(norm(query.state));
+  const rState = canonicalState(norm(row.state));
   if (qState && rState && qState !== rState) return true;
   // ZIP catches what city and state cannot: two "100 Main St" in the SAME city, in different postal
   // areas — a large city has several, and city+state agree on both.
