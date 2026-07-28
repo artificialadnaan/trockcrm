@@ -63,6 +63,28 @@ function nextGeneration() {
  * Without it two approvers finishing the last two items could each read "one still outstanding" and neither
  * would close the card, leaving it stuck awaiting an approval that already happened.
  */
+/**
+ * Refuse the approval verbs on a card whose corrective action is FINISHED.
+ *
+ * Deliberately narrow: it rejects `corrective_action_closed` only. A card sitting at
+ * `corrective_action_open` is a legitimate target — a sibling item may still be unanswered while another
+ * awaits the approver, and rejecting that second item is real work the responders must hear about. Gating on
+ * "must be awaiting approval" would break exactly that case.
+ *
+ * The closed case is the one that matters: migration 0202 makes an already-closed card's items `approved`,
+ * so they no longer match the item-level `submitted` guard, but leaving the item status as the ONLY defence
+ * means one stray request could reopen a corrective action closed months ago and email its responders.
+ */
+function assertCardNotFinished(cardStatus: string): void {
+  if (cardStatus === CORRECTIVE_ACTION_CARD_CLOSED) {
+    throw new AppError(
+      409,
+      "This corrective action is already approved and closed.",
+      "CORRECTIVE_ACTION_ALREADY_CLOSED",
+    );
+  }
+}
+
 async function lockAndReadItems(tx: TenantDb, scorecardId: string) {
   await tx
     .select({ id: fieldScorecards.id })
@@ -230,6 +252,7 @@ export async function rejectCorrectiveActionItem(
   const target = items.find((item) => item.id === input.itemId);
   if (!target) throw new AppError(404, "Corrective-action item not found on this scorecard.");
   const currentStatus = await readCardStatus(tx, input.scorecardId);
+  assertCardNotFinished(currentStatus);
 
   const updated = await tx
     .update(scorecardCorrectiveActions)

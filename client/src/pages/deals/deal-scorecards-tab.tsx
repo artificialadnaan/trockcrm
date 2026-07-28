@@ -420,6 +420,42 @@ export function LeadershipDetailView({ detail }: { detail: FieldScorecardDetail 
   );
 }
 
+/**
+ * Bulk approve, with the same busy + error treatment as the per-item controls.
+ *
+ * Discarding the rejected promise left a transient network failure or an authorization change completely
+ * invisible: nothing was approved, the UI did not move, and the only signal was the absence of a change —
+ * which reads as a slow request, not a failure.
+ */
+function ApproveAllButton({ onApproveAll }: { onApproveAll: () => Promise<void> }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  return (
+    <div className="flex items-center justify-end gap-2">
+      {error && <span className="text-xs text-red-700">{error}</span>}
+      <button
+        type="button"
+        disabled={busy}
+        onClick={async () => {
+          setBusy(true);
+          setError(null);
+          try {
+            await onApproveAll();
+          } catch (err) {
+            setError(isApiError(err) ? err.message : "Could not approve. Please try again.");
+          } finally {
+            setBusy(false);
+          }
+        }}
+        className="rounded-md bg-green-700 px-3 py-1 text-xs font-medium text-white disabled:opacity-50"
+      >
+        {busy ? "Approving…" : "Approve all"}
+      </button>
+    </div>
+  );
+}
+
 export function ScorecardDetailView({
   detail,
   dealId,
@@ -487,15 +523,7 @@ export function ScorecardDetailView({
       </div>
 
       {approveAll && shouldShowApproveAll(correctiveActions ?? [], canApprove) && (
-        <div className="flex justify-end">
-          <button
-            type="button"
-            onClick={() => void approveAll()}
-            className="rounded-md bg-green-700 px-3 py-1 text-xs font-medium text-white"
-          >
-            Approve all
-          </button>
-        </div>
+        <ApproveAllButton onApproveAll={approveAll} />
       )}
 
       {hasCorrectiveActions && totalCount > 0 && (

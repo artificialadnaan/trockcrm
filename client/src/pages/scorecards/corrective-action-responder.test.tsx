@@ -140,9 +140,9 @@ describe("CorrectiveActionResponderPage", () => {
     expect(text).toContain("couldn’t load the corrective actions");
   });
 
-  it("shows the completion state when every item is resolved", async () => {
+  it("shows the APPROVED completion state only when every item is approved", async () => {
     mocks.useCorrectiveActions.mockReturnValue({
-      items: [{ ...openItem, status: "resolved", responseComment: "done", responderName: "Ext PM" }],
+      items: [{ ...openItem, status: "approved", responseComment: "done", responderName: "Ext PM" }],
       loading: false,
       error: null,
       errorStatus: null,
@@ -150,7 +150,7 @@ describe("CorrectiveActionResponderPage", () => {
     });
     await renderAt("/scorecards/sc-1/corrective-action?token=tok");
     const text = container.textContent ?? "";
-    expect(text).toContain("All corrective actions complete");
+    expect(text).toContain("All corrective actions approved");
     // A resolved item renders read-only (no submit button, shows the response).
     expect(text).not.toContain("Submit response");
     expect(text).toContain("done");
@@ -489,5 +489,49 @@ describe("CorrectiveActionResponderPage", () => {
     mocks.discardCorrectiveActionPhoto.mockClear();
     await act(() => root.unmount());
     expect(mocks.discardCorrectiveActionPhoto).not.toHaveBeenCalled();
+  });
+
+  it("says AWAITING APPROVAL, not complete, once responses are submitted", async () => {
+    // Nothing left for the responder is not the same as approved. The card sits at
+    // corrective_action_submitted and an approver can still send it back — calling that "resolved" would be
+    // a promise this page cannot keep.
+    mocks.useCorrectiveActions.mockReturnValue({
+      items: [{ ...openItem, status: "submitted", responseComment: "done", responderName: "Ext PM" }],
+      loading: false,
+      error: null,
+      errorStatus: null,
+      refetch: vi.fn(),
+    });
+    await renderAt("/scorecards/sc-1/corrective-action?token=tok");
+    const text = container.textContent ?? "";
+    expect(text).toContain("Submitted — awaiting approval");
+    expect(text).not.toContain("All corrective actions approved");
+  });
+
+  it("shows the approver's reason on a returned item, where the rework happens", async () => {
+    // Preserving rejection history in the API achieves nothing if the responder has to go back to their
+    // email to read what was asked for.
+    mocks.useCorrectiveActions.mockReturnValue({
+      items: [
+        {
+          ...openItem,
+          status: "rejected",
+          events: [
+            { id: "e1", eventType: "submitted", actorName: "Ext PM", actorEmail: null, comment: "Done.", createdAt: null, photos: [] },
+            { id: "e2", eventType: "rejected", actorName: "James Helms", actorEmail: null, comment: "Torque values were not documented.", createdAt: null, photos: [] },
+          ],
+        },
+      ],
+      loading: false,
+      error: null,
+      errorStatus: null,
+      refetch: vi.fn(),
+    });
+    await renderAt("/scorecards/sc-1/corrective-action?token=tok");
+    const text = container.textContent ?? "";
+    expect(text).toContain("Sent back by James Helms");
+    expect(text).toContain("Torque values were not documented.");
+    // ...and the form is still there, because it is theirs to fix.
+    expect(text).toContain("Submit response");
   });
 });

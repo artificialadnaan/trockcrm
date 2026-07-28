@@ -346,4 +346,38 @@ describe("the event thread", () => {
       priorGeneration.getTime(),
     );
   });
+
+  it("REGRESSION: refuses to re-litigate a card whose corrective action is already CLOSED", async () => {
+    // Migration 0202 makes an already-closed card's items `approved`, so they no longer match the item-level
+    // `submitted` guard. But leaving that as the ONLY defence means one stray request could reject an item on
+    // a card closed months ago — reopening it and emailing responders about finished work.
+    const ids = await seedAwaitingApproval(1, "corrective_action_closed");
+    await tdb.execute(sql`UPDATE scorecard_corrective_actions SET status = 'approved' WHERE id = ${ids[0]}`);
+
+    await expect(
+      rejectCorrectiveActionItem(tdb, {
+        scorecardId: CARD,
+        itemId: ids[0],
+        comment: "Actually, no.",
+        actor: APPROVER,
+      }),
+    ).rejects.toMatchObject({ statusCode: 409 });
+  });
+
+  it("STILL allows rejecting a second item while a sibling is open", async () => {
+    // The guard is deliberately narrow. A card at corrective_action_open is a legitimate target: a sibling
+    // may be unanswered while another awaits the approver, and returning that second item is real work the
+    // responders must hear about. A "must be awaiting approval" gate would break exactly this.
+    const ids = await seedAwaitingApproval(2, "corrective_action_open");
+    await tdb.execute(sql`UPDATE scorecard_corrective_actions SET status = 'open' WHERE id = ${ids[1]}`);
+
+    const outcome = await rejectCorrectiveActionItem(tdb, {
+      scorecardId: CARD,
+      itemId: ids[0],
+      comment: "Needs the torque log.",
+      actor: APPROVER,
+    });
+
+    expect(outcome.changedItemIds).toEqual([ids[0]]);
+  });
 });

@@ -345,14 +345,17 @@ export default function ProjectDetailScreen() {
               // load error). correctiveAffordance encodes all four (open/closed × can/can't) cases.
               const affordance = correctiveAffordance(s.status, s.canRespondToCorrectiveAction === true);
               // Derive the SPOKEN corrective wording from the same affordance value that drives the VISIBLE
-              // affordance below (open_* → "required", closed_* → "resolved", none → silent) so screen-reader
-              // semantics stay aligned with what's rendered rather than re-deriving from raw s.status.
+              // affordance below (open_* → "required", awaiting → "awaiting approval", closed_* →
+              // "approved", none → silent) so screen-reader semantics stay aligned with what's rendered
+              // rather than re-deriving from raw s.status.
               const correctiveA11y =
                 affordance === "open_tappable" || affordance === "open_status"
                   ? ", corrective action required"
-                  : affordance === "closed_tappable" || affordance === "closed_status"
-                    ? ", corrective action resolved"
-                    : "";
+                  : affordance === "awaiting_status"
+                    ? ", corrective action awaiting approval"
+                    : affordance === "closed_tappable" || affordance === "closed_status"
+                      ? ", corrective action approved"
+                      : "";
               return (
                 // The corrective controls are SIBLINGS of the row Pressable (not nested inside it): a nested
                 // Pressable's press still bubbles to the parent row's onPress on RN, so tapping "Corrective
@@ -399,21 +402,28 @@ export default function ProjectDetailScreen() {
                       <Ionicons name="alert-circle" size={16} color={theme.color.brandRed} />
                       <Text style={styles.correctivePromptText}>Corrective action required</Text>
                     </View>
+                  ) : affordance === "awaiting_status" ? (
+                    // Visible but NOT tappable: the responder has answered and an approver is reviewing, so
+                    // there is nothing for them to do — but hiding it entirely made the workflow look ended.
+                    <View accessibilityRole="text" accessibilityLabel="Corrective action awaiting approval" style={styles.correctiveStatus}>
+                      <Ionicons name="time-outline" size={16} color="#B45309" />
+                      <Text style={styles.correctivePromptText}>Awaiting approval</Text>
+                    </View>
                   ) : affordance === "closed_tappable" ? (
                     <Pressable
                       accessibilityRole="button"
-                      accessibilityLabel="Review the resolved corrective action"
+                      accessibilityLabel="Review the approved corrective action"
                       onPress={() => router.push({ pathname: "/(app)/scorecards/corrective-action/[id]", params: { id: s.id } })}
                       style={({ pressed }) => [styles.correctiveResolved, pressed && { opacity: 0.75 }]}
                     >
                       <Ionicons name="checkmark-circle" size={14} color="#166534" />
-                      <Text style={styles.correctiveResolvedText}>Resolved</Text>
+                      <Text style={styles.correctiveResolvedText}>Approved</Text>
                       <Text style={styles.correctiveResolvedChevron}>›</Text>
                     </Pressable>
                   ) : affordance === "closed_status" ? (
-                    <View accessibilityRole="text" accessibilityLabel="Corrective action resolved" style={styles.correctiveResolved}>
+                    <View accessibilityRole="text" accessibilityLabel="Corrective action approved" style={styles.correctiveResolved}>
                       <Ionicons name="checkmark-circle" size={14} color="#166534" />
-                      <Text style={styles.correctiveResolvedText}>Resolved</Text>
+                      <Text style={styles.correctiveResolvedText}>Approved</Text>
                     </View>
                   ) : null}
                 </View>

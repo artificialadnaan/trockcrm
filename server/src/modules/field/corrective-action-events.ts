@@ -1,4 +1,5 @@
 import { asc, eq, inArray } from "drizzle-orm";
+import { AppError } from "../../middleware/error-handler.js";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
 import { scorecardCorrectiveActionEvents } from "@trock-crm/shared/schema";
@@ -56,7 +57,10 @@ export async function recordCorrectiveActionEvent(
   // Mirrors the CHECK in migration 0202. Validated here too so the failure is a clear 400 at the API edge
   // rather than a constraint violation surfacing as a 500.
   if (input.eventType === "rejected" && !comment) {
-    throw new Error("A rejection must carry a comment: telling the responder what to fix IS the rejection.");
+    throw new AppError(
+      400,
+      "A rejection must carry a comment: telling the responder what to fix IS the rejection.",
+    );
   }
 
   const [row] = await tx

@@ -37,10 +37,26 @@ BEGIN
       CONTINUE;
     END IF;
 
-    -- 1. resolved -> submitted. Idempotent: a rerun matches no rows.
+    -- 1. resolved -> submitted or approved, depending on what the card's outcome ALREADY was.
+    --
+    -- A blanket rename to 'submitted' is wrong for history. Under the old model an answered item closed the
+    -- card immediately, so every item on a card that is already corrective_action_closed was, in effect,
+    -- accepted -- nobody is going to review it now. Renaming those to 'submitted' would put every
+    -- historically closed card back into the approver's queue: the item-derived card status recomputes to
+    -- corrective_action_submitted the next time anything touches the card, resurrecting finished work.
+    --
+    -- So: items on an already-CLOSED card become 'approved'; items on a card still in flight become
+    -- 'submitted', which is genuinely where they are. Idempotent -- a rerun matches no rows.
     EXECUTE format(
-      'UPDATE %I.scorecard_corrective_actions SET status = ''submitted'' WHERE status = ''resolved''',
-      schema_name
+      'UPDATE %I.scorecard_corrective_actions ca
+          SET status = CASE
+                         WHEN sc.status = ''corrective_action_closed'' THEN ''approved''
+                         ELSE ''submitted''
+                       END
+         FROM %I.field_scorecards sc
+        WHERE sc.id = ca.scorecard_id
+          AND ca.status = ''resolved''',
+      schema_name, schema_name
     );
 
     -- 2. The outstanding-set index. Drop the narrower one only after the wider one exists.
@@ -148,7 +164,14 @@ END $tenant$;
 
 -- New tenants: cloned by the office provisioner (office_dallas -> new schema).
 -- TENANT_SCHEMA_START
-UPDATE office_dallas.scorecard_corrective_actions SET status = 'submitted' WHERE status = 'resolved';
+UPDATE office_dallas.scorecard_corrective_actions ca
+   SET status = CASE
+                  WHEN sc.status = 'corrective_action_closed' THEN 'approved'
+                  ELSE 'submitted'
+                END
+  FROM office_dallas.field_scorecards sc
+ WHERE sc.id = ca.scorecard_id
+   AND ca.status = 'resolved';
 CREATE INDEX IF NOT EXISTS scorecard_corrective_actions_outstanding_idx
   ON office_dallas.scorecard_corrective_actions (scorecard_id)
   WHERE status IN ('open', 'rejected');

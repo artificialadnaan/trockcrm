@@ -809,7 +809,9 @@ function drawCorrectiveAction(doc: PDFKit.PDFDocument, item: ScorecardPdfCorrect
           ellipsis: true,
         });
       }
-      drawCorrectiveActionPhotos(doc, event.photos);
+      // Same continuation heading as the legacy path: a photo row spilling to a new page must stay
+      // attributable to its item, and a thread has MORE rows to spill than a single response did.
+      drawCorrectiveActionPhotos(doc, event.photos, item.itemLabel);
     }
   } else if (showsFallbackResponse) {
     // No thread, but the item was answered — a response that predates the event table on a card the 0202

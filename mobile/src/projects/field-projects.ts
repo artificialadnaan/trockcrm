@@ -49,6 +49,10 @@ export type CorrectiveAffordance =
   | "open_status"
   | "closed_tappable"
   | "closed_status"
+  // Between open and closed since the approval gate: the responder has answered and an approver is
+  // reviewing. Never TAPPABLE — there is nothing for the responder to do until it comes back — but it must
+  // still show, or the project screen looks as though the workflow simply ended.
+  | "awaiting_status"
   | "none";
 
 export function correctiveAffordance(
@@ -56,6 +60,7 @@ export function correctiveAffordance(
   canRespond: boolean,
 ): CorrectiveAffordance {
   if (status === "corrective_action_open") return canRespond ? "open_tappable" : "open_status";
+  if (status === "corrective_action_submitted") return "awaiting_status";
   if (status === "corrective_action_closed") return canRespond ? "closed_tappable" : "closed_status";
   return "none";
 }

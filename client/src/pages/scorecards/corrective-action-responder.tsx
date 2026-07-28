@@ -75,7 +75,11 @@ export default function CorrectiveActionResponderPage() {
     () => items.filter((i) => isCorrectiveActionOutstanding(i.status)).length,
     [items],
   );
-  const allResolved = items.length > 0 && openCount === 0;
+  // NOTHING LEFT FOR THE RESPONDER is not the same as APPROVED. When the last outstanding item is submitted
+  // the card sits at corrective_action_submitted, and an approver can still send it back — telling the
+  // responder it is "resolved" would be a promise this page cannot keep.
+  const nothingOutstanding = items.length > 0 && openCount === 0;
+  const allApproved = nothingOutstanding && items.every((i) => i.status === "approved");
 
   // A missing token is as unusable as an expired one — the server would 401 anyway; short-circuit with the
   // same clear message so the recipient knows to use the link from their email.
@@ -117,12 +121,25 @@ export default function CorrectiveActionResponderPage() {
       </header>
 
       <div className="mx-auto max-w-2xl space-y-4 px-4 py-6 sm:px-6">
-        {allResolved && (
+        {allApproved && (
           <div className="flex items-center gap-3 rounded-lg border border-emerald-200 bg-emerald-50 p-4 text-emerald-800">
             <CheckCircle2 className="h-6 w-6 shrink-0" />
             <div>
-              <p className="font-semibold">All corrective actions complete</p>
-              <p className="text-sm">Thank you — this scorecard has been marked resolved.</p>
+              <p className="font-semibold">All corrective actions approved</p>
+              <p className="text-sm">Thank you — this scorecard is complete.</p>
+            </div>
+          </div>
+        )}
+
+        {nothingOutstanding && !allApproved && (
+          <div className="flex items-center gap-3 rounded-lg border border-amber-200 bg-amber-50 p-4 text-amber-900">
+            <CheckCircle2 className="h-6 w-6 shrink-0" />
+            <div>
+              <p className="font-semibold">Submitted — awaiting approval</p>
+              <p className="text-sm">
+                Your responses have been sent for review. If anything needs more work you will get another
+                email with the reason.
+              </p>
             </div>
           </div>
         )}
@@ -211,6 +228,12 @@ function ItemCard({
   // Settled = submitted (with the approver) or approved. Only an OUTSTANDING item keeps an active form;
   // otherwise a responder could post repeatedly over work already sitting in the approver's queue.
   const isResolved = !isCorrectiveActionOutstanding(item.status);
+  // The approver's most recent reason, read from the thread the API already returns. Only shown while the
+  // item is theirs to fix — once resubmitted, the thread below carries the full history.
+  const latestRejection =
+    item.status === "rejected"
+      ? [...(item.events ?? [])].reverse().find((e) => e.eventType === "rejected") ?? null
+      : null;
 
   const onPickFiles = useCallback(
     async (files: FileList | null) => {
@@ -390,14 +413,35 @@ function ItemCard({
         </div>
         <span
           className={`shrink-0 rounded-full border px-2.5 py-0.5 text-xs font-semibold ${
-            isResolved
+            item.status === "approved"
               ? "border-emerald-200 bg-emerald-50 text-emerald-700"
-              : "border-amber-200 bg-amber-50 text-amber-700"
+              : item.status === "submitted"
+                ? "border-slate-200 bg-slate-50 text-slate-700"
+                : item.status === "rejected"
+                  ? "border-red-200 bg-red-50 text-red-700"
+                  : "border-amber-200 bg-amber-50 text-amber-700"
           }`}
         >
-          {isResolved ? "Resolved" : "Open"}
+          {item.status === "approved"
+            ? "Approved"
+            : item.status === "submitted"
+              ? "Awaiting approval"
+              : item.status === "rejected"
+                ? "Changes requested"
+                : "Open"}
         </span>
       </div>
+
+      {/* WHY it came back, on the form where the rework happens. Preserving the rejection history in the API
+          achieves nothing if the responder has to go back to their email to read it. */}
+      {latestRejection && (
+        <div className="mt-3 rounded-md border border-red-200 bg-red-50 p-3">
+          <p className="text-[11px] font-bold uppercase tracking-wide text-red-700">
+            {latestRejection.actorName ? `Sent back by ${latestRejection.actorName}` : "Sent back"}
+          </p>
+          <p className="mt-1 whitespace-pre-wrap text-sm text-red-900">{latestRejection.comment}</p>
+        </div>
+      )}
 
       {isResolved ? (
         <div className="mt-3 border-l-2 border-slate-200 pl-3">
