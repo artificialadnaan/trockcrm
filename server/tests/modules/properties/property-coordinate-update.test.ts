@@ -38,3 +38,21 @@ describe("buildPropertyUpdatePatch — coordinates", () => {
     expect(buildPropertyUpdatePatch({ lat: null, lng: null }).lat).toBeNull();
   });
 });
+
+describe("buildPropertyUpdatePatch — coordinate types and zero", () => {
+  it("keeps a legitimate 0,0 rather than treating it as absent", () => {
+    // The exact edge the null-island guard could swallow: 0 is falsy, and a truthiness check here
+    // would silently discard a real (if unlikely) equatorial coordinate.
+    const patch = buildPropertyUpdatePatch({ lat: 0, lng: 0 });
+    expect(patch.lat).toBe("0");
+    expect(patch.lng).toBe("0");
+  });
+
+  it("rejects types that Number() would happily coerce", () => {
+    // Number(true) is 1 and Number([5]) is 5, so a malformed body could store a plausible-looking
+    // coordinate nobody typed. Only a number or a numeric string is a coordinate.
+    expect(buildPropertyUpdatePatch({ lat: true as unknown as number, lng: 1 }).lat).toBeNull();
+    expect(buildPropertyUpdatePatch({ lat: [5] as unknown as number, lng: 1 }).lat).toBeNull();
+    expect(buildPropertyUpdatePatch({ lat: {} as unknown as number, lng: 1 }).lat).toBeNull();
+  });
+});

@@ -211,3 +211,16 @@ describe("linkActivityToLead — company-anchored consistency", () => {
     ).resolves.toMatchObject({ leadId: "l1" });
   });
 });
+
+describe("linkActivityToLead — missing lead", () => {
+  it("404s when the anchored lead row does not exist", async () => {
+    const { db, updates } = stubDb(
+      { id: "a1", leadId: null, propertyId: "p1", responsibleUserId: "u1" },
+      { lead: null },
+    );
+    await expect(
+      linkActivityToLead(db, { activityId: "a1", leadId: "gone", viewer: OWNER }),
+    ).rejects.toMatchObject({ statusCode: 404 });
+    expect(updates).toEqual([]);
+  });
+});

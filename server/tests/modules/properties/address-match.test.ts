@@ -253,3 +253,30 @@ describe("route-number addresses", () => {
     expect(compareAddressKeys("100 Main St", "100 Main Street")).toBe("exact");
   });
 });
+
+describe("diacritics and single-letter street names", () => {
+  /**
+   * The punctuation strip turns anything outside [a-z0-9] into a space, so an accented letter was
+   * DELETED rather than folded: "Cañon" became "ca on", two tokens matching nothing — least of all a
+   * legacy row spelling it "Canon".
+   */
+  it("folds accents instead of splitting the word", () => {
+    expect(compareAddressKeys("100 Cañon Rd", "100 Canon Road")).toBe("exact");
+    expect(compareAddressKeys("5 Peña Blvd", "5 Pena Boulevard")).toBe("exact");
+  });
+
+  /**
+   * "100 E St" is E Street — a real street in more than one US city — not "100 East St". Expanding the
+   * lone letter merges two distinct addresses, and a false match is the one failure this file refuses
+   * to trade for a missed one.
+   */
+  it("does not expand a single-letter street NAME into a directional", () => {
+    expect(compareAddressKeys("100 E St", "100 East St")).toBeNull();
+    expect(compareAddressKeys("100 E St", "100 E Street")).toBe("exact");
+  });
+
+  it("still expands a directional that precedes a real street name", () => {
+    // The unambiguous case: something follows the directional, so it cannot be the name itself.
+    expect(compareAddressKeys("100 N Main St", "100 North Main Street")).toBe("exact");
+  });
+});

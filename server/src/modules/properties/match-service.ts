@@ -119,6 +119,11 @@ export function normalizeAddressKey(value: string | null | undefined): string {
   if (typeof value !== "string") return "";
   const cleaned = value
     .toLowerCase()
+    // FOLD accents rather than deleting the letter. The punctuation strip below turns any character
+    // outside [a-z0-9] into a space, so "Cañon" became "ca on" — two tokens that match nothing, least
+    // of all a legacy row spelling it "Canon". Decompose, drop the combining marks, keep the letter.
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
     // "#200" is a UNIT, and stripping the hash to whitespace destroyed that: "1420 Bishop St #200"
     // became "1420 bishop street 200", which splitUnit cannot recognise — so a legacy row storing the
     // tenancy was rejected against a building-level geocode and a duplicate created. The suite case was
@@ -149,10 +154,20 @@ export function normalizeAddressKey(value: string | null | undefined): string {
     if ((DIRECTIONALS[last] || /^\d+$/.test(last)) && STREET_TYPES[prev]) typeIndex -= 1;
   }
 
+  /**
+   * A lone letter between the house number and the street type IS the street name.
+   *
+   * "100 E St" is E Street — a real street in more than one US city — not "100 East St". Expanding it
+   * merges two distinct addresses, and a false match is the failure this file refuses to trade for a
+   * missed one. A directional with a name after it ("100 N Main St") is unambiguous and still expands.
+   */
+  const nameIsSingleLetter = baseEnd === 3 && tokens[1]!.length === 1;
+
   return tokens
     .map((token, index) => {
       if (index >= baseEnd) return UNIT_MARKER_CANONICAL[token] ?? token;
       if (index === typeIndex) return STREET_TYPES[token] ?? DIRECTIONALS[token] ?? token;
+      if (index === 1 && nameIsSingleLetter) return token;
       return DIRECTIONALS[token] ?? NON_FINAL_ALIASES[token] ?? token;
     })
     .join(" ");

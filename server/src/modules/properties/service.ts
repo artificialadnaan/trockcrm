@@ -641,6 +641,10 @@ function validateOptionalCoordinate(value: unknown, limit: number): string | nul
   // A blank or whitespace string is ABSENT, not zero. Number("") is 0, which would store the property
   // at the equator — a coordinate that is present, plausible to the database, and matches nothing.
   if (typeof value === "string" && value.trim() === "") return null;
+  // TYPE first, then value. Number() happily accepts a boolean or a single-element array — Number(true)
+  // is 1 and Number([5]) is 5 — so a malformed body could store a plausible-looking coordinate that
+  // nobody typed. Only a number or a numeric string is a coordinate.
+  if (typeof value !== "number" && typeof value !== "string") return null;
   const numeric = typeof value === "number" ? value : Number(value);
   if (!Number.isFinite(numeric) || Math.abs(numeric) > limit) return null;
   return String(numeric);
