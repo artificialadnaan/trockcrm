@@ -185,6 +185,18 @@ export interface EffectiveOnHoldInput {
  * Coalesces on the PARSED calendar day, not on the raw value, so it matches the SQL `COALESCE` over a real
  * date column even when a caller hands us an unparseable bid string.
  */
+/**
+ * The resolved horizon day ("YYYY-MM-DD") a suppression verdict was measured against, or null when there
+ * is none. Exported so UI copy can NAME the date the engine actually used instead of assuming it was the
+ * close target — in the estimating stage it is the bid due date, and printing "Postponed until <close
+ * date>" there can display a date months in the PAST that had no part in the verdict.
+ */
+export function resolveAtRiskSuppressionDay(
+  input: Pick<EffectiveOnHoldInput, "expectedCloseDate" | "bidDueDate" | "isEstimating">
+): string | null {
+  return resolveHoldHorizonDay(input);
+}
+
 function resolveHoldHorizonDay(
   { expectedCloseDate, bidDueDate, isEstimating }: Pick<
     EffectiveOnHoldInput,

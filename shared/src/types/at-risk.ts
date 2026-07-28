@@ -39,8 +39,11 @@ export interface AtRiskInput {
   /** Current hold flag. Active hold clears risk; historical hold time is reflected only in effective age. */
   onHold?: boolean | null;
   /**
-   * Set when a future close target (expected_close_date within the auto-hold window) should quiet the
-   * stage-age at-risk verdict. Computed by callers that have `now` — see {@link getDealAtRiskResult}.
+   * Set when a today-or-future hold horizon date within the auto-hold window should quiet the stage-age
+   * at-risk verdict. That date is `expected_close_date` in every stage EXCEPT the genuine 'estimating'
+   * stage, where it is the deal's BID due date falling back to the close target (2026-07-28) — so the
+   * flag no longer implies the close target drove it. Computed by callers that have `now` — see
+   * {@link getDealAtRiskResult}. Use `resolveAtRiskSuppressionDay` to NAME the date in UI copy.
    */
   closeTargetSuppressesRisk?: boolean;
   viewerRole: UserRole | null | undefined;

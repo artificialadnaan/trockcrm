@@ -27,6 +27,13 @@ interface MoveCloseDateDialogProps {
   officeId?: string | null;
   /** Called after a successful save so the caller can refetch the deal + activity feed. */
   onSaved: () => void | Promise<void>;
+  /**
+   * True when this deal sits in the genuine estimating stage, where the at-risk SLA suppression is
+   * measured from the BID due date rather than the close target (2026-07-28). The dialog must not promise
+   * a pause it cannot deliver there — moving the close date is still a real forecast edit, just not an
+   * SLA postponement.
+   */
+  slaFollowsBidDueDate?: boolean;
 }
 
 /** Render a "YYYY-MM-DD" as a readable local date with no timezone drift (no Date(string) parse). */
@@ -42,7 +49,7 @@ function formatHuman(ymd: string): string {
  * reason is logged as a note on the deal's activity feed. The date write is load-bearing (it drives the
  * SLA), so it runs first; the note is a best-effort audit trail layered on top.
  */
-export function MoveCloseDateDialog({ open, onOpenChange, dealId, currentDate, officeId, onSaved }: MoveCloseDateDialogProps) {
+export function MoveCloseDateDialog({ open, onOpenChange, dealId, currentDate, officeId, onSaved, slaFollowsBidDueDate = false }: MoveCloseDateDialogProps) {
   const [date, setDate] = useState(currentDate ?? "");
   const [reason, setReason] = useState("");
   const [saving, setSaving] = useState(false);
@@ -153,8 +160,9 @@ export function MoveCloseDateDialog({ open, onOpenChange, dealId, currentDate, o
         <DialogHeader>
           <DialogTitle>Move close date</DialogTitle>
           <DialogDescription>
-            Pick a new close target and add a short note on why. The SLA pauses until that date, and your
-            note is logged to the activity feed.
+            {slaFollowsBidDueDate
+              ? "Pick a new close target and add a short note on why. Your note is logged to the activity feed. In the estimating stage the SLA follows the BID due date, so moving this date updates the forecast but does not pause the SLA."
+              : "Pick a new close target and add a short note on why. The SLA pauses until that date, and your note is logged to the activity feed."}
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-4 py-1">
@@ -169,7 +177,9 @@ export function MoveCloseDateDialog({ open, onOpenChange, dealId, currentDate, o
             />
             {isPastDate ? (
               <p className="text-xs text-amber-600">
-                Pick today or a future date — a past date won't postpone the SLA.
+                {slaFollowsBidDueDate
+                  ? "Pick today or a future date."
+                  : "Pick today or a future date — a past date won't postpone the SLA."}
               </p>
             ) : null}
           </div>

@@ -113,6 +113,8 @@ import {
   toCanonicalDealStageSlug,
   type AtRiskResult,
   type UserRole,
+  isGenuineEstimatingDealStageSlug,
+  resolveAtRiskSuppressionDay,
 } from "@trock-crm/shared/types";
 
 function bidBoardSyncTimeAgo(date: string | null | undefined) {
@@ -308,10 +310,24 @@ function getSlaStatusValue(atRisk: AtRiskResult | null) {
   return atRisk.isAtRisk ? "Overdue" : "Current";
 }
 
-function getSlaCaptionContext(atRisk: AtRiskResult | null, expectedCloseDate?: string | null) {
+/**
+ * Name the date the SUPPRESSION was actually measured against, not the close target by assumption. In the
+ * genuine estimating stage the horizon is the deal's BID due date (2026-07-28), so printing the close
+ * target there could show a date months in the PAST that played no part in the verdict.
+ */
+function getSlaCaptionContext(
+  atRisk: AtRiskResult | null,
+  deal?: { expectedCloseDate?: string | null; bidDueDate?: string | null; stageSlug?: string | null; workflowRoute?: string | null } | null
+) {
   if (!atRisk) return "SLA unavailable";
-  if (atRisk.reason === "close_target_pending" && expectedCloseDate) {
-    return `Postponed until ${formatDateOnly(expectedCloseDate)}`;
+  if (atRisk.reason === "close_target_pending" && deal) {
+    const workflowRoute = deal.workflowRoute === "normal" || deal.workflowRoute === "service" ? deal.workflowRoute : null;
+    const suppressedUntil = resolveAtRiskSuppressionDay({
+      expectedCloseDate: deal.expectedCloseDate,
+      bidDueDate: deal.bidDueDate,
+      isEstimating: isGenuineEstimatingDealStageSlug(deal.stageSlug ?? null, workflowRoute),
+    });
+    if (suppressedUntil) return `Postponed until ${formatDateOnly(suppressedUntil)}`;
   }
   return atRisk.thresholdDays == null ? "No SLA threshold" : `SLA ${atRisk.thresholdDays} days`;
 }
@@ -756,7 +772,7 @@ export function DealDetailPage() {
   const stageAgeDays = slaResult?.effectiveStageAgeDays ?? null;
   const slaCaptionLabel = getSlaCaptionLabel(slaResult);
   const slaStatusValue = getSlaStatusValue(slaResult);
-  const slaCaptionContext = getSlaCaptionContext(slaResult, deal.expectedCloseDate);
+  const slaCaptionContext = getSlaCaptionContext(slaResult, deal);
   const isSlaBreached = slaResult?.isAtRisk === true;
   // Detail header value uses the deal's stage (server now provides stageSlug; fall back to the loaded
   // currentStage) so an estimating deal shows the DD-over-bid value, matching the board/list (Codex P2).
@@ -1085,6 +1101,12 @@ export function DealDetailPage() {
           emptyLabel="deal"
           showRecordings
           closeTargetDate={deal.expectedCloseDate}
+          // In the genuine estimating stage the at-risk SLA is measured from the BID due date, so the
+          // dialog must stop promising that moving the close target pauses it (2026-07-28).
+          slaFollowsBidDueDate={isGenuineEstimatingDealStageSlug(
+            deal.stageSlug ?? null,
+            deal.workflowRoute === "normal" || deal.workflowRoute === "service" ? deal.workflowRoute : null
+          )}
           onDealChanged={refetch}
           // Owner-only: the PATCH that writes expected_close_date is gated to the assigned rep on the
           // server (assertDealOwnerRouteAccess, no allowAdmin), so a non-owner admin would 403.
