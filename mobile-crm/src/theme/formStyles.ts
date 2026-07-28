@@ -9,7 +9,7 @@ import { theme } from "./theme";
  * specific bits stay in the screens; only what must MATCH lives here.
  */
 export const formStyles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: theme.color.surface },
+  safe: { flex: 1, backgroundColor: theme.color.canvas },
   flex: { flex: 1 },
   centre: { flex: 1, alignItems: "center", justifyContent: "center" },
   body: { padding: theme.space.xl, flexGrow: 1, justifyContent: "center" },

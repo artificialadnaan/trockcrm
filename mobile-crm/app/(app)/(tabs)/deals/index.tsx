@@ -319,7 +319,7 @@ export default function DealsListScreen() {
 }
 
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: theme.color.surfaceMuted },
+  safe: { flex: 1, backgroundColor: theme.color.canvas },
   header: {
     paddingHorizontal: theme.space.lg,
     paddingTop: theme.space.sm,

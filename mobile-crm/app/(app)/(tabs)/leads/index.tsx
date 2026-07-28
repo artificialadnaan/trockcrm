@@ -261,7 +261,7 @@ export default function LeadsListScreen() {
 }
 
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: theme.color.surfaceMuted },
+  safe: { flex: 1, backgroundColor: theme.color.canvas },
   header: {
     flexDirection: "row",
     alignItems: "baseline",

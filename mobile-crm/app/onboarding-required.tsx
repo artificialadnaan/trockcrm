@@ -171,7 +171,7 @@ export default function OnboardingRequiredScreen() {
 }
 
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: theme.color.surfaceMuted },
+  safe: { flex: 1, backgroundColor: theme.color.canvas },
   center: { flex: 1, alignItems: "center", justifyContent: "center" },
   body: { flex: 1, justifyContent: "center", padding: theme.space.xl, gap: theme.space.md },
   kicker: {

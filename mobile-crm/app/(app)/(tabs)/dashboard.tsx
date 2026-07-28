@@ -207,7 +207,7 @@ function NavCard({
  * app keeps producing. textSecondary is 7.6:1 and still reads as secondary.
  */
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: theme.color.surfaceMuted },
+  safe: { flex: 1, backgroundColor: theme.color.canvas },
   body: { padding: theme.space.lg, gap: theme.space.md, paddingBottom: theme.space.xxl },
   email: { fontFamily: theme.font.regular, fontSize: 13, color: theme.color.textSecondary },
   statCard: {
