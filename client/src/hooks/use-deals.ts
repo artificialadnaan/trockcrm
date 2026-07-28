@@ -1095,6 +1095,13 @@ export function useDealStagePage(input: StagePageQuery & { stageId: string; scop
       // must query the same family or the page's header and list disagree with the board that opened it.
       // Opt-in because mobile-crm shares this endpoint with UNMERGED raw columns (Codex P2 on #983).
       canonicalStageFamily: "true",
+      // Canonical membership alone is only HALF of "what the board counted": the board also drops open
+      // rows whose Bid Board mirror has already closed (nonTerminalMirroredStageCondition), and the stage
+      // endpoint applies that predicate only under boardPopulation. Sending the family without it would
+      // broaden the population past the very column that opened the page. Measured inert on prod today —
+      // 0 active deals are Bid Board-terminal while their CRM stage is open — so this aligns the predicate
+      // without moving a number (Codex P2 on #983).
+      boardPopulation: "true",
     });
 
     setLoading(true);

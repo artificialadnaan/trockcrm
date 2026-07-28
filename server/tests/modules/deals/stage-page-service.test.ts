@@ -1338,6 +1338,26 @@ describe("listDealStagePage canonical stage family", () => {
     return extractSqlText(execute.mock.calls[0]![0]);
   }
 
+  it("pairs canonical membership with the board population, matching the column that opened it", async () => {
+    // Canonical membership alone is half of "what the board counted" — the board also drops open rows
+    // whose Bid Board mirror already closed. Sending the family WITHOUT boardPopulation would broaden the
+    // page past the column that opened it (Codex P2).
+    dbState.responses = [ESTIMATING_FAMILY_STAGES];
+    const execute = vi.fn()
+      .mockResolvedValueOnce({ rows: [{ total_count: "16", active_count: "13", total_value: "0" }] })
+      .mockResolvedValueOnce({ rows: [] });
+    const tenantDb = { select: createOfficeScopeSelectMock(), execute } as any;
+    const { listDealStagePage } = await import("../../../src/modules/deals/service.js");
+    await listDealStagePage(tenantDb, {
+      role: "admin", userId: "admin-1", activeOfficeId: "office-1", scope: "all",
+      stageId: "stage-estimating", canonicalStageFamily: true, boardPopulation: true,
+      page: 1, pageSize: 25, sort: "newest",
+    } as any);
+    const sqlText = extractSqlText(execute.mock.calls[0]![0]);
+    expect(sqlText).toContain("stage-eip");
+    expect(sqlText).toContain("bid_board_stage_slug");
+  });
+
   it("stays scoped to the clicked stage when the caller does NOT opt in (raw mobile board)", async () => {
     // mobile-crm renders UNMERGED raw columns and opens this endpoint with the raw stage id; expanding by
     // default would make its "see all 13" return 16. Shipped builds cannot start sending a flag, so narrow
