@@ -9,6 +9,7 @@ import {
   fieldScorecardItems,
   fieldScorecardPhotos,
   scorecardCorrectiveActions,
+  scorecardCorrectiveActionEvents,
   scorecardCorrectiveActionTokens,
   dealTeamMembers,
   contacts,
@@ -113,6 +114,7 @@ beforeAll(async () => {
       fieldScorecardItems,
       fieldScorecardPhotos,
       scorecardCorrectiveActions,
+  scorecardCorrectiveActionEvents,
       scorecardCorrectiveActionTokens,
       dealTeamMembers,
       contacts,
@@ -469,7 +471,7 @@ describe("POST /scorecards/:id/corrective-actions/:itemId", () => {
       .send({ comment: "fixed two" });
     expect(second.status).toBe(200);
     status = await tdb.execute(sql`SELECT status FROM field_scorecards WHERE id = ${scorecardId}`);
-    expect(status.rows[0].status).toBe("corrective_action_closed");
+    expect(status.rows[0].status).toBe("corrective_action_submitted");
 
     // The session responder is stamped by user id.
     const item = await tdb.execute(

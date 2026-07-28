@@ -74,17 +74,26 @@ export async function recordCorrectiveActionEvent(
   return row.id;
 }
 
-/** The columns both readers select — one list so the two cannot drift. */
-const EVENT_COLUMNS = {
-  id: scorecardCorrectiveActionEvents.id,
-  correctiveActionId: scorecardCorrectiveActionEvents.correctiveActionId,
-  eventType: scorecardCorrectiveActionEvents.eventType,
-  actorUserId: scorecardCorrectiveActionEvents.actorUserId,
-  actorName: scorecardCorrectiveActionEvents.actorName,
-  actorEmail: scorecardCorrectiveActionEvents.actorEmail,
-  comment: scorecardCorrectiveActionEvents.comment,
-  createdAt: scorecardCorrectiveActionEvents.createdAt,
-} as const;
+/**
+ * The columns both readers select — one list so the two cannot drift.
+ *
+ * A FUNCTION, not a module-level const: a top-level object literal dereferences the Drizzle table at IMPORT
+ * time, which throws for any consumer that partially mocks `@trock-crm/shared/schema`. This module is
+ * reachable from the corrective-action service and therefore from the auth and deal import graphs, so that
+ * would break unrelated suites — the same trap the generation-token helper already hit.
+ */
+function eventColumns() {
+  return {
+    id: scorecardCorrectiveActionEvents.id,
+    correctiveActionId: scorecardCorrectiveActionEvents.correctiveActionId,
+    eventType: scorecardCorrectiveActionEvents.eventType,
+    actorUserId: scorecardCorrectiveActionEvents.actorUserId,
+    actorName: scorecardCorrectiveActionEvents.actorName,
+    actorEmail: scorecardCorrectiveActionEvents.actorEmail,
+    comment: scorecardCorrectiveActionEvents.comment,
+    createdAt: scorecardCorrectiveActionEvents.createdAt,
+  } as const;
+}
 
 function groupByItem(
   rows: Array<{ createdAt: Date | string | null } & Omit<CorrectiveActionEventRow, "createdAt">>,
@@ -112,7 +121,7 @@ export async function getCorrectiveActionEventsByItem(
   scorecardId: string,
 ): Promise<Map<string, CorrectiveActionEventRow[]>> {
   const rows = await db
-    .select(EVENT_COLUMNS)
+    .select(eventColumns())
     .from(scorecardCorrectiveActionEvents)
     .where(eq(scorecardCorrectiveActionEvents.scorecardId, scorecardId))
     // Ordered by the monotonic sequence, NOT created_at: events written in one transaction share a
@@ -129,7 +138,7 @@ export async function getCorrectiveActionEventsForItems(
 ): Promise<Map<string, CorrectiveActionEventRow[]>> {
   if (itemIds.length === 0) return new Map();
   const rows = await db
-    .select(EVENT_COLUMNS)
+    .select(eventColumns())
     .from(scorecardCorrectiveActionEvents)
     .where(inArray(scorecardCorrectiveActionEvents.correctiveActionId, itemIds))
     .orderBy(asc(scorecardCorrectiveActionEvents.seq));

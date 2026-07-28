@@ -18,6 +18,7 @@ import {
   fieldScorecardPhotos,
   fieldScorecards,
   scorecardCorrectiveActions,
+  scorecardCorrectiveActionEvents,
   scorecardCorrectiveActionTokens,
 } from "@trock-crm/shared/schema";
 import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
@@ -167,6 +168,7 @@ beforeAll(async () => {
       fieldScorecardPhotos,
       fieldScorecardEditUploads,
       scorecardCorrectiveActions,
+  scorecardCorrectiveActionEvents,
       scorecardCorrectiveActionTokens,
       dealTeamMembers,
       contacts,
@@ -316,11 +318,11 @@ describe("updateFieldScorecard corrective-action reconcile", () => {
     );
     expect(updated.rating).toBe("corrective_action");
     // No open items remain (the resolved one is history) → auto-close.
-    expect(updated.status).toBe("corrective_action_closed");
-    expect(await getStatus(scorecard.id)).toBe("corrective_action_closed");
+    expect(updated.status).toBe("corrective_action_submitted");
+    expect(await getStatus(scorecard.id)).toBe("corrective_action_submitted");
     const after = await getItems(scorecard.id);
     expect(after).toHaveLength(1);
-    expect(after[0].status).toBe("resolved");
+    expect(after[0].status).toBe("submitted");
     expect(after[0].item_label).toBe("Resolve me");
   });
 
@@ -347,7 +349,7 @@ describe("updateFieldScorecard corrective-action reconcile", () => {
     const after = await getItems(scorecard.id);
     expect(after).toHaveLength(2);
     const resolvedAfter = after.find((i) => i.item_label === "Resolved one")!;
-    expect(resolvedAfter.status).toBe("resolved");
+    expect(resolvedAfter.status).toBe("submitted");
     expect(resolvedAfter.id).toBe(resolved.id); // same row, not reseeded
     expect(after.find((i) => i.item_label === "Still open")!.status).toBe("open");
     expect(await getStatus(scorecard.id)).toBe("corrective_action_open");
@@ -371,7 +373,7 @@ describe("updateFieldScorecard corrective-action reconcile", () => {
       responseComment: "corrected",
       respondedBy: { userId: OWNER, name: "Sam", email: null },
     });
-    expect(await getStatus(scorecard.id)).toBe("corrective_action_closed");
+    expect(await getStatus(scorecard.id)).toBe("corrective_action_submitted");
 
     // Edit REMOVES the deficiency (still below band via a different flag so the card doesn't leave the band).
     const at1 = await currentUpdatedAt(scorecard.id);
@@ -421,7 +423,7 @@ describe("updateFieldScorecard corrective-action reconcile", () => {
       responseComment: "corrected",
       respondedBy: { userId: OWNER, name: "Sam", email: null },
     });
-    expect(await getStatus(scorecard.id)).toBe("corrective_action_closed");
+    expect(await getStatus(scorecard.id)).toBe("corrective_action_submitted");
 
     // An unrelated edit that KEEPS the deficiency flagged.
     const at = await currentUpdatedAt(scorecard.id);
@@ -436,9 +438,9 @@ describe("updateFieldScorecard corrective-action reconcile", () => {
     const after = await getItems(scorecard.id);
     expect(after).toHaveLength(1);
     expect(after[0].id).toBe(def.id); // same resolved row, not reseeded
-    expect(after[0].status).toBe("resolved");
+    expect(after[0].status).toBe("submitted");
     // Still closed — a resolved-but-still-flagged deficiency must not reopen the card.
-    expect(await getStatus(scorecard.id)).toBe("corrective_action_closed");
+    expect(await getStatus(scorecard.id)).toBe("corrective_action_submitted");
   });
 
   it("resolve last flag → remove ALL flags → re-add it reopens with a fresh open row (finding 4)", async () => {
@@ -457,7 +459,7 @@ describe("updateFieldScorecard corrective-action reconcile", () => {
       responseComment: "re-inspected",
       respondedBy: { userId: OWNER, name: "Sam", email: null },
     });
-    expect(await getStatus(scorecard.id)).toBe("corrective_action_closed");
+    expect(await getStatus(scorecard.id)).toBe("corrective_action_submitted");
 
     // Edit removes EVERY flag (still below band by score, but no flags → not-inBand) → the resolved row is purged.
     const at1 = await currentUpdatedAt(scorecard.id);
@@ -498,7 +500,7 @@ describe("updateFieldScorecard corrective-action reconcile", () => {
       responseComment: "corrected",
       respondedBy: { userId: OWNER, name: "Sam", email: null },
     });
-    expect(await getStatus(scorecard.id)).toBe("corrective_action_closed");
+    expect(await getStatus(scorecard.id)).toBe("corrective_action_submitted");
 
     // Lift ABOVE band (score 9) but KEEP the deficiency flagged → not-inBand, still-flagged resolved row preserved.
     const at1 = await currentUpdatedAt(scorecard.id);
@@ -510,7 +512,7 @@ describe("updateFieldScorecard corrective-action reconcile", () => {
     const mid = await getItems(scorecard.id);
     expect(mid).toHaveLength(1);
     expect(mid[0].id).toBe(def.id); // the still-flagged resolved row survived
-    expect(mid[0].status).toBe("resolved");
+    expect(mid[0].status).toBe("submitted");
 
     // Dropping BACK in-band with the same (still-flagged) deficiency must NOT reopen it — the resolved row stays.
     const at2 = await currentUpdatedAt(scorecard.id);
@@ -521,9 +523,9 @@ describe("updateFieldScorecard corrective-action reconcile", () => {
     const after = await getItems(scorecard.id);
     expect(after).toHaveLength(1);
     expect(after[0].id).toBe(def.id);
-    expect(after[0].status).toBe("resolved"); // still resolved, not reopened
+    expect(after[0].status).toBe("submitted"); // still resolved, not reopened
     // No open rows → the card auto-closes rather than reopening.
-    expect(await getStatus(scorecard.id)).toBe("corrective_action_closed");
+    expect(await getStatus(scorecard.id)).toBe("corrective_action_submitted");
   });
 
   it("re-adding a REMOVED-then-resolved action item reopens with a fresh open row (finding 2)", async () => {
@@ -542,7 +544,7 @@ describe("updateFieldScorecard corrective-action reconcile", () => {
       responseComment: "re-inspected",
       respondedBy: { userId: OWNER, name: "Sam", email: null },
     });
-    expect(await getStatus(scorecard.id)).toBe("corrective_action_closed");
+    expect(await getStatus(scorecard.id)).toBe("corrective_action_submitted");
 
     // Edit REMOVES the action item (keeping the card below band via a deficiency so it stays in the band).
     const at1 = await currentUpdatedAt(scorecard.id);
@@ -590,7 +592,7 @@ describe("updateFieldScorecard corrective-action reconcile", () => {
       responseComment: "fixed",
       respondedBy: { userId: OWNER, name: "Sam", email: null },
     });
-    expect(await getStatus(scorecard.id)).toBe("corrective_action_closed");
+    expect(await getStatus(scorecard.id)).toBe("corrective_action_submitted");
     // Simulate the worker having stamped the notification as sent.
     await tdb.execute(sql`UPDATE field_scorecards SET corrective_action_email_sent_at = now() WHERE id = ${scorecard.id}`);
     expect(await getEmailSentAt(scorecard.id)).not.toBeNull();
@@ -610,7 +612,7 @@ describe("updateFieldScorecard corrective-action reconcile", () => {
     expect(await correctiveJobCount()).toBe(jobsBefore + 1);
     // The originally-resolved flag stays resolved history; the new flag is open.
     const after = await getItems(scorecard.id);
-    expect(after.find((i) => i.item_label === "Only flag")!.status).toBe("resolved");
+    expect(after.find((i) => i.item_label === "Only flag")!.status).toBe("submitted");
     expect(after.find((i) => i.item_label === "Brand new flag")!.status).toBe("open");
   });
 
@@ -812,9 +814,9 @@ describe("updateFieldScorecard corrective-action reconcile", () => {
     const after = await getItems(scorecard.id);
     expect(after).toHaveLength(1);
     expect(after[0].id).toBe(both[0].id); // the RESOLVED row survived
-    expect(after[0].status).toBe("resolved");
+    expect(after[0].status).toBe("submitted");
     // The lone surviving item is resolved history → the card auto-closes.
-    expect(await getStatus(scorecard.id)).toBe("corrective_action_closed");
+    expect(await getStatus(scorecard.id)).toBe("corrective_action_submitted");
   });
 
   it("trimming TWO RESOLVED duplicates to one deletes the surplus resolved row; re-adding reopens (finding 1-surplus)", async () => {
@@ -838,7 +840,7 @@ describe("updateFieldScorecard corrective-action reconcile", () => {
         respondedBy: { userId: OWNER, name: "Sam", email: null },
       });
     }
-    expect(await getStatus(scorecard.id)).toBe("corrective_action_closed");
+    expect(await getStatus(scorecard.id)).toBe("corrective_action_submitted");
 
     // Edit reduces the label to a SINGLE occurrence. flaggedCount(1) < existingCount(2), surplus == 1, but both
     // rows are resolved → the surplus resolved row must be deleted, leaving exactly ONE resolved row.
@@ -849,9 +851,9 @@ describe("updateFieldScorecard corrective-action reconcile", () => {
     );
     const mid = await getItems(scorecard.id);
     expect(mid).toHaveLength(1); // the surplus resolved row was deleted (not both, not neither)
-    expect(mid[0].status).toBe("resolved");
+    expect(mid[0].status).toBe("submitted");
     // Still closed (the one surviving row is resolved history, no open items).
-    expect(await getStatus(scorecard.id)).toBe("corrective_action_closed");
+    expect(await getStatus(scorecard.id)).toBe("corrective_action_submitted");
 
     // A LATER edit RE-ADDS the duplicate (back to TWO). existingCount is now 1 (not 2), so a FRESH open row is
     // inserted for the recurring flag → the card reopens.
@@ -867,7 +869,7 @@ describe("updateFieldScorecard corrective-action reconcile", () => {
     expect(after).toHaveLength(2);
     // Exactly one open (the freshly-inserted recurring flag) + one resolved (the preserved history).
     expect(after.filter((i) => i.status === "open")).toHaveLength(1);
-    expect(after.filter((i) => i.status === "resolved")).toHaveLength(1);
+    expect(after.filter((i) => i.status === "submitted")).toHaveLength(1);
     expect(await getStatus(scorecard.id)).toBe("corrective_action_open");
   });
 
@@ -894,7 +896,7 @@ describe("updateFieldScorecard corrective-action reconcile", () => {
       responseComment: "fixed",
       respondedBy: { userId: OWNER, name: "Sam", email: null },
     });
-    expect(await getStatus(scorecard.id)).toBe("corrective_action_closed");
+    expect(await getStatus(scorecard.id)).toBe("corrective_action_submitted");
     const tokensBefore = await tdb.execute(
       sql`SELECT COUNT(*)::int AS c FROM scorecard_corrective_action_tokens WHERE scorecard_id = ${scorecard.id}`,
     );
@@ -964,7 +966,7 @@ describe("updateFieldScorecard corrective-action reconcile", () => {
       responseComment: "fixed",
       respondedBy: { userId: OWNER, name: "Sam", email: null },
     });
-    expect(await getStatus(scorecard.id)).toBe("corrective_action_closed");
+    expect(await getStatus(scorecard.id)).toBe("corrective_action_submitted");
     // A leftover responder token from the resolved cycle.
     await tdb.insert(scorecardCorrectiveActionTokens).values({
       scorecardId: scorecard.id,
@@ -1006,7 +1008,7 @@ describe("updateFieldScorecard corrective-action reconcile", () => {
       responseComment: "corrected",
       respondedBy: { userId: OWNER, name: "Sam", email: null },
     });
-    expect(await getStatus(scorecard.id)).toBe("corrective_action_closed");
+    expect(await getStatus(scorecard.id)).toBe("corrective_action_submitted");
 
     // Keep the low score (5) but remove every flag → not-inBand → revert to submitted.
     const at = await currentUpdatedAt(scorecard.id);

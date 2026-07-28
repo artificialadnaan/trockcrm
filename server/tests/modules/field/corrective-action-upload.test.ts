@@ -10,6 +10,7 @@ import {
   fieldScorecardPhotos,
   fieldScorecardEditUploads,
   scorecardCorrectiveActions,
+  scorecardCorrectiveActionEvents,
   scorecardCorrectiveActionTokens,
   scorecardCorrectiveActionUploads,
   dealTeamMembers,
@@ -131,6 +132,7 @@ beforeAll(async () => {
       // such binding row (the lookup no-ops), but the table must exist for the query to run.
       fieldScorecardEditUploads,
       scorecardCorrectiveActions,
+  scorecardCorrectiveActionEvents,
       scorecardCorrectiveActionTokens,
       scorecardCorrectiveActionUploads,
       dealTeamMembers,
@@ -287,7 +289,7 @@ describe("token-scoped corrective-action photo upload", () => {
       .send({ comment: "fixed with photo", photoFileIds: [fileId] });
     expect(resp.status).toBe(200);
     const resolved = resp.body.items.find((i: any) => i.id === itemId);
-    expect(resolved.status).toBe("resolved");
+    expect(resolved.status).toBe("submitted");
     expect(resolved.photos.map((p: any) => p.fileId)).toContain(fileId);
   });
 

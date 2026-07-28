@@ -19,6 +19,7 @@ import {
   fieldScorecardItems,
   fieldScorecardPhotos,
   scorecardCorrectiveActions,
+  scorecardCorrectiveActionEvents,
 } from "@trock-crm/shared/schema";
 import { sql } from "drizzle-orm";
 import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
@@ -51,7 +52,7 @@ beforeAll(async () => {
     SET search_path TO public;
   `);
   await pg.exec(
-    tenantSchemaSql("public", [fieldScorecards, fieldScorecardItems, fieldScorecardPhotos, scorecardCorrectiveActions]),
+    tenantSchemaSql("public", [fieldScorecards, fieldScorecardItems, fieldScorecardPhotos, scorecardCorrectiveActions, scorecardCorrectiveActionEvents]),
   );
   await pg.exec(`INSERT INTO files (id, description) VALUES ('${FILE1}', 'Slab crack'), ('${FILE2}', 'Crew briefing');`);
   tdb = drizzle(pg);

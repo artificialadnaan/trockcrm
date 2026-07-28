@@ -13,6 +13,7 @@ import {
   fieldScorecardItems,
   fieldScorecardPhotos,
   scorecardCorrectiveActions,
+  scorecardCorrectiveActionEvents,
   scorecardCorrectiveActionTokens,
   scorecardCorrectiveActionUploads,
   dealTeamMembers,
@@ -98,6 +99,7 @@ beforeAll(async () => {
       fieldScorecardItems,
       fieldScorecardPhotos,
       scorecardCorrectiveActions,
+  scorecardCorrectiveActionEvents,
       scorecardCorrectiveActionTokens,
       scorecardCorrectiveActionUploads,
       dealTeamMembers,
@@ -235,7 +237,7 @@ describe("submitCorrectiveActionResponse", () => {
 
     const items = await getCorrectiveActionItems(tdb, scorecard.id);
     const resolved = items.find((i) => i.id === first.id)!;
-    expect(resolved.status).toBe("resolved");
+    expect(resolved.status).toBe("submitted");
     expect(resolved.responseComment).toBe("Slab re-inspected");
     expect(resolved.respondedByUserId).toBe(USER);
     expect(resolved.photos.map((p) => p.fileId).sort()).toEqual([FILE_A, FILE_B].sort());
@@ -260,7 +262,7 @@ describe("submitCorrectiveActionResponse", () => {
         office: TEST_OFFICE,
       });
     }
-    expect(await getScorecardStatus(scorecard.id)).toBe("corrective_action_closed");
+    expect(await getScorecardStatus(scorecard.id)).toBe("corrective_action_submitted");
   });
 
   it("rejects a photo file id that does not belong to the deal (400)", async () => {
@@ -431,7 +433,7 @@ describe("submitCorrectiveActionResponse", () => {
     // The item keeps the WINNER's comment/responder (the stale resolve did not overwrite it).
     const items = await getCorrectiveActionItems(tdb, scorecard.id);
     const resolved = items.find((i) => i.id === first.id)!;
-    expect(resolved.status).toBe("resolved");
+    expect(resolved.status).toBe("submitted");
     expect(resolved.responseComment).toBe("resolved by the first responder");
     expect(resolved.respondedByUserId).toBe(USER);
 
@@ -470,7 +472,7 @@ describe("submitCorrectiveActionResponse", () => {
     // The winner's response is preserved.
     const items = await getCorrectiveActionItems(tdb, scorecard.id);
     const resolved = items.find((i) => i.id === first.id)!;
-    expect(resolved.status).toBe("resolved");
+    expect(resolved.status).toBe("submitted");
     expect(resolved.responseComment).toBe("resolved by the first responder");
     expect(resolved.respondedByUserId).toBe(USER);
   });
@@ -512,7 +514,7 @@ describe("submitCorrectiveActionResponse", () => {
     // The winner's response is untouched (the loser's comment never overwrote it).
     const items = await getCorrectiveActionItems(tdb, scorecard.id);
     const resolved = items.find((i) => i.id === first.id)!;
-    expect(resolved.status).toBe("resolved");
+    expect(resolved.status).toBe("submitted");
     expect(resolved.responseComment).toBe("resolved by the super");
     expect(resolved.respondedByUserId).toBe(USER);
   });
@@ -550,7 +552,7 @@ describe("submitCorrectiveActionResponse", () => {
     // The item keeps the ORIGINAL response (comment/responder unchanged) and its EXACT two photos — no dup rows.
     const items = await getCorrectiveActionItems(tdb, scorecard.id);
     const resolved = items.find((i) => i.id === first.id)!;
-    expect(resolved.status).toBe("resolved");
+    expect(resolved.status).toBe("submitted");
     expect(resolved.responseComment).toBe("resolved with two response photos");
     expect(resolved.respondedByUserId).toBe(USER);
     expect(resolved.photos.map((p) => p.fileId).sort()).toEqual([FILE_A, FILE_B].sort());
@@ -779,7 +781,7 @@ describe("submitCorrectiveActionResponse", () => {
     // The response photo is attached to the item (corrective_action_id set, section_key null).
     const items = await getCorrectiveActionItems(tdb, scorecard.id);
     const resolved = items.find((i) => i.id === first.id)!;
-    expect(resolved.status).toBe("resolved");
+    expect(resolved.status).toBe("submitted");
     expect(resolved.photos.map((p) => p.fileId)).toEqual([FILE_B]);
 
     const responseRow = await tdb.execute(

@@ -8,8 +8,9 @@ import {
   scorecardCorrectiveActions,
 } from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
+import { isCorrectiveActionOutstanding } from "@trock-crm/shared/types";
 import {
-  enqueueCorrectiveActionOversightClosed,
+  enqueueCorrectiveActionApprovalRequested,
   resolveCorrectiveActionItemTx,
 } from "./corrective-actions-service.js";
 
@@ -240,7 +241,10 @@ export async function submitCorrectiveActionResponse(
   //     set): a genuine competing/stale submission carrying fresh uploads that did NOT attach. Signal a CONFLICT
   //     (409, code CORRECTIVE_ACTION_ALREADY_RESOLVED) so the caller discards those now-orphaned uploads (web
   //     clears its pending-discard set / calls the discard endpoint; mobile deletes its local draft).
-  if (item.status !== "open") {
+  // OUTSTANDING, not just `open`: an item the approver REJECTED is the responder's to answer again, so a
+  // fresh response on it is a legitimate first attempt of the next round — not a replay of a settled one.
+  // Checking `!== "open"` here would 409 every rework submission and make rejection a dead end.
+  if (!isCorrectiveActionOutstanding(item.status)) {
     // Same responder? A session caller (userId non-null) matches on responded_by_user_id; a token caller
     // (userId null) matches on responder_email (the token recipient's email).
     const sameResponder =
@@ -270,7 +274,7 @@ export async function submitCorrectiveActionResponse(
     // signal the conflict so the caller discards its orphaned uploads / surfaces the lost race.
     throw new AppError(
       409,
-      "This corrective action was already resolved; discard the uploaded photos.",
+      "This corrective action has already been answered; discard the uploaded photos.",
       "CORRECTIVE_ACTION_ALREADY_RESOLVED",
     );
   }
@@ -371,7 +375,7 @@ export async function submitCorrectiveActionResponse(
   }
 
   // Resolve within the SAME (caller-supplied) transaction so a resolve failure rolls back the photo inserts.
-  const { closed } = await resolveCorrectiveActionItemTx(db, {
+  const { awaitingApproval } = await resolveCorrectiveActionItemTx(db, {
     scorecardId: input.scorecardId,
     itemId: input.itemId,
     responseComment: comment,
@@ -379,11 +383,14 @@ export async function submitCorrectiveActionResponse(
     photoFileIds,
   });
 
-  // This response answered the LAST open item — tell oversight the corrective action is complete. Enqueued
-  // in the SAME transaction as the close, so the job cannot exist for a close that rolled back, and only on
-  // the winning write (an idempotent replay returns closed: false).
-  if (closed) {
-    await enqueueCorrectiveActionOversightClosed(db, {
+  // This response answered the LAST outstanding item, so the card now sits with the APPROVER rather than
+  // being complete. Notify them in the SAME transaction as the state change, so the job cannot exist for a
+  // transition that rolled back, and only on the winning write (an idempotent replay returns false).
+  //
+  // The oversight "completed" notice is NOT fired here any more — completion now means APPROVED, and only
+  // approveCorrectiveActionItems can reach that state.
+  if (awaitingApproval) {
+    await enqueueCorrectiveActionApprovalRequested(db, {
       office: input.office,
       scorecardId: input.scorecardId,
     });

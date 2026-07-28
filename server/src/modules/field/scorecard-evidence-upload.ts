@@ -16,6 +16,8 @@ export const EDITABLE_SCORECARD_STATUSES = new Set([
   "submitted",
   "corrective_action_open",
   "corrective_action_closed",
+  // Awaiting approval is another corrective-action stage; evidence stays editable there.
+  "corrective_action_submitted",
 ]);
 
 export type ScorecardEvidenceUploadTarget = {

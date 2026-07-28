@@ -60,6 +60,9 @@ import {
   type ScorecardSectionKey,
   type ScorecardFormVersion,
   type ScorecardV2SectionKey,
+  CORRECTIVE_ACTION_CARD_AWAITING_APPROVAL,
+  CORRECTIVE_ACTION_CARD_CLOSED,
+  CORRECTIVE_ACTION_CARD_OPEN,
 } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
 import { activeProjectWhere, assertActiveFieldProject, type FieldAccessContext } from "./projects-service.js";
@@ -498,10 +501,14 @@ export async function updateFieldScorecard(
   // or re-open a closed card — reconcileScorecardCorrectiveActions (below) walks the status + tracked items
   // to match the freshly recomputed rating. The pre-edit status drives the enqueue-on-transition decision.
   const preEditStatus = card.status;
+  // `corrective_action_submitted` — awaiting approval — belongs here too. It is simply another stage of the
+  // corrective-action lifecycle, and omitting it would make a card uneditable for as long as it sits in the
+  // approver's queue, which can be indefinite (there is no escalation or timeout on that state).
   if (
     (preEditStatus !== "submitted" &&
-      preEditStatus !== "corrective_action_open" &&
-      preEditStatus !== "corrective_action_closed") ||
+      preEditStatus !== CORRECTIVE_ACTION_CARD_OPEN &&
+      preEditStatus !== CORRECTIVE_ACTION_CARD_AWAITING_APPROVAL &&
+      preEditStatus !== CORRECTIVE_ACTION_CARD_CLOSED) ||
     card.formVersion !== 2
   ) {
     throw new AppError(422, "Only submitted current-form scorecards can be edited.", "SCORECARD_EDIT_UNSUPPORTED");
