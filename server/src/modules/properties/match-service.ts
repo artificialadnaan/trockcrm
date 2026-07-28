@@ -368,13 +368,21 @@ export async function matchProperties(
   const lngHigh = lng + lngDelta;
   const lngBand =
     lngLow < -180 || lngHigh > 180
-      ? sql`(p.lng::float8 >= ${((lngLow + 180 + 360) % 360) - 180} OR p.lng::float8 <= ${((lngHigh + 180 + 360) % 360) - 180})`
-      : sql`p.lng::float8 BETWEEN ${lngLow} AND ${lngHigh}`;
+      ? sql`(p.lng >= ${((lngLow + 180 + 360) % 360) - 180}::numeric OR p.lng <= ${((lngHigh + 180 + 360) % 360) - 180}::numeric)`
+      : sql`p.lng BETWEEN ${lngLow}::numeric AND ${lngHigh}::numeric`;
 
+  /**
+   * The box compares NUMERIC to NUMERIC on purpose.
+   *
+   * Casting the column (`p.lat::float8`) makes the comparison an expression over `lat` rather than a
+   * reference to it, and Postgres cannot then use the (lat, lng) index from migration 0201 — the query
+   * would be indexed on paper and sequential in practice. The bound is cast instead of the column. The
+   * haversine below keeps its float8 cast, because it only runs on rows the box already admitted.
+   */
   const withinBox = hasPoint
     ? sql`(
         p.lat IS NOT NULL AND p.lng IS NOT NULL
-        AND p.lat::float8 BETWEEN ${lat - latDelta} AND ${lat + latDelta}
+        AND p.lat BETWEEN ${lat - latDelta}::numeric AND ${lat + latDelta}::numeric
         AND ${lngBand}
       )`
     : sql`false`;
