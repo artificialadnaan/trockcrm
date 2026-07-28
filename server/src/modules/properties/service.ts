@@ -730,7 +730,17 @@ export async function updateProperty(tenantDb: TenantDb, propertyId: string, inp
     })
     .from(properties)
     .where(eq(properties.id, propertyId))
-    .limit(1);
+    .limit(1)
+    /**
+     * FOR UPDATE, because the address comparison and the write are separate statements.
+     *
+     * Without the lock two concurrent edits interleave: one reads the OLD address and concludes its
+     * resubmitted address is unchanged, the other commits a new address with its geocode, and the first
+     * then writes the old address back while leaving the second's coordinates in place — a property
+     * whose coordinates point at an address it no longer has, which then matches captures at the former
+     * location. Taking the lock makes the read-compare-write atomic.
+     */
+    .for("update");
 
   const addressChanged = ADDRESS_FIELDS.some(
     (field) =>

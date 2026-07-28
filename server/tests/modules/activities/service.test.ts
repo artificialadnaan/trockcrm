@@ -346,13 +346,13 @@ describe("activities service", () => {
   });
 });
 
-describe("createActivity — the last-touch fan-out", () => {
+describe("createActivity — who maintains the last touch", () => {
   /**
-   * `properties.last_activity_at` and `companies.last_activity_at` each carry their own index and are
-   * read for staleness filtering and "least recently touched" sorting, but only the DEAL was ever
-   * refreshed. Survivable while activities came from deal-centric surfaces; field prospecting makes a
-   * property or a company the usual target, so every captured visit left the thing it was about looking
-   * untouched — and the buildings reps are actively working sorted as the coldest on the board.
+   * properties.last_activity_at and companies.last_activity_at are maintained by the
+   * redesign_last_activity_refresh TRIGGER (migration 0090), which recomputes each as max(occurred_at)
+   * over the activities table on insert, update and delete. An earlier version of this service wrote
+   * them here too — redundant, and weaker than the trigger, since GREATEST only ratchets upward.
+   * Deals have no such trigger, so the service owns that one.
    */
   function harness() {
     const insertMock = createInsertMock();
@@ -360,16 +360,27 @@ describe("createActivity — the last-touch fan-out", () => {
     const updateWhere = vi.fn(async () => []);
     const updateSet = vi.fn(() => ({ where: updateWhere }));
     const update = vi.fn((table: unknown) => {
-      // getTableName is drizzle's PUBLIC accessor. Reading `_.name` off the table object worked on
-      // nothing and silently produced "[object Object]", which would have made every assertion below a
-      // test of string formatting rather than of behaviour.
       updates.push(getTableName(table as Parameters<typeof getTableName>[0]));
       return { set: updateSet };
     });
-    return { insertMock, update, updates, updateSet };
+    return { insertMock, update, updates };
   }
 
-  it("touches the PROPERTY a site visit was about", async () => {
+  it("refreshes the DEAL, which no trigger covers", async () => {
+    const { insertMock, update, updates } = harness();
+    await createActivity({ insert: insertMock.insert, update } as any, {
+      type: "note",
+      responsibleUserId: "rep-1",
+      performedByUserId: "rep-1",
+      body: "Call",
+      dealId: "deal-1",
+      sourceEntityType: "deal",
+      sourceEntityId: "deal-1",
+    });
+    expect(updates).toContain("deals");
+  });
+
+  it("does NOT duplicate the trigger's property/company writes", async () => {
     const { insertMock, update, updates } = harness();
     await createActivity({ insert: insertMock.insert, update } as any, {
       type: "note",
@@ -377,55 +388,11 @@ describe("createActivity — the last-touch fan-out", () => {
       performedByUserId: "rep-1",
       body: "Met the super",
       propertyId: "property-1",
+      companyId: "company-1",
       sourceEntityType: "property",
       sourceEntityId: "property-1",
-    });
-    expect(updates).toContain("properties");
-  });
-
-  it("touches the COMPANY on the fallback path", async () => {
-    const { insertMock, update, updates } = harness();
-    await createActivity({ insert: insertMock.insert, update } as any, {
-      type: "note",
-      responsibleUserId: "rep-1",
-      performedByUserId: "rep-1",
-      body: "Spoke to the PM",
-      companyId: "company-1",
-      sourceEntityType: "company",
-      sourceEntityId: "company-1",
-    });
-    expect(updates).toContain("companies");
-  });
-
-  it("touches nothing it was not given", async () => {
-    // A contact-only log must not invent a property or company write.
-    const { insertMock, update, updates } = harness();
-    await createActivity({ insert: insertMock.insert, update } as any, {
-      type: "note",
-      responsibleUserId: "rep-1",
-      performedByUserId: "rep-1",
-      body: "Called Dana",
-      contactId: "contact-1",
-      sourceEntityType: "contact",
-      sourceEntityId: "contact-1",
     });
     expect(updates).not.toContain("properties");
     expect(updates).not.toContain("companies");
-  });
-
-  it("uses GREATEST so a back-dated log cannot drag a recent touch backwards", async () => {
-    const { insertMock, update, updateSet } = harness();
-    await createActivity({ insert: insertMock.insert, update } as any, {
-      type: "note",
-      responsibleUserId: "rep-1",
-      performedByUserId: "rep-1",
-      body: "Logged late",
-      propertyId: "property-1",
-      sourceEntityType: "property",
-      sourceEntityId: "property-1",
-      occurredAt: "2020-01-01T00:00:00.000Z",
-    });
-    const written = JSON.stringify(flattenQueryChunks(updateSet.mock.calls[0]?.[0]));
-    expect(written.toLowerCase()).toContain("greatest");
   });
 });

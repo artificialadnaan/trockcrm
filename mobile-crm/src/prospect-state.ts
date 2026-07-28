@@ -104,7 +104,12 @@ export function isPositionTooCoarse(accuracyMeters: number | null, thresholdMete
  * `localityContradicts` has already ruled out a disagreeing one.
  */
 export function isCorroborated(match: PropertyMatch): boolean {
-  return match.distanceMeters != null || Boolean(match.city || match.state || match.zip);
+  if (match.distanceMeters != null) return true;
+  // ZIP alone discriminates; so does a city WITH its state. A state on its own does not — "TX" against
+  // a Dallas query agrees with every "100 Main St" in Texas, and since this verdict can VETO creating a
+  // building, one such row would block the rep from adding the real one however often they rejected it.
+  if (match.zip) return true;
+  return Boolean(match.city && match.state);
 }
 
 export function describeMatch(match: PropertyMatch): string {

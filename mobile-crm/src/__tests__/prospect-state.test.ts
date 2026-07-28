@@ -345,9 +345,19 @@ describe("isCorroborated — ONE rule for the label and the veto", () => {
     expect(isCorroborated(match({ distanceMeters: 12, city: null, state: null, zip: null }))).toBe(true);
   });
 
-  it("counts any locality field, since a disagreeing one is already excluded", () => {
-    expect(isCorroborated(match({ distanceMeters: null, city: "Dallas", state: null, zip: null }))).toBe(true);
+  it("counts a ZIP, or a city WITH its state", () => {
     expect(isCorroborated(match({ distanceMeters: null, city: null, state: null, zip: "75201" }))).toBe(true);
+    expect(isCorroborated(match({ distanceMeters: null, city: "Dallas", state: "TX", zip: null }))).toBe(true);
+  });
+
+  it("does NOT count a state on its own", () => {
+    // "TX" agrees with every "100 Main St" in Texas. Because this verdict can veto creating a building,
+    // one such row would block the rep from adding the real one however often they rejected it.
+    expect(isCorroborated(match({ distanceMeters: null, city: null, state: "TX", zip: null }))).toBe(false);
+  });
+
+  it("does not count a bare city either", () => {
+    expect(isCorroborated(match({ distanceMeters: null, city: "Springfield", state: null, zip: null }))).toBe(false);
   });
 
   it("is false for a row with neither — the phantom that must not veto", () => {

@@ -415,6 +415,13 @@ export default function ProspectScreen() {
       setDuplicateCompanies(null);
       setCreateCompanyError(null);
       setCompany(result.created);
+      /* ONE target — the search and duplicate-pick paths already do this and the create path did not.
+         The UI would then present the company while save still sent the stale contact id, linking the
+         visit to a person the rep can no longer see. */
+      setContact(null);
+      setContactQuery("");
+      contactQueryRef.current = "";
+      setContactResults(null);
       setCompanyResults(null);
       setCompanyQuery("");
       companyQueryRef.current = "";
@@ -1223,6 +1230,11 @@ export default function ProspectScreen() {
                               <Pressable
                                 key={s.id}
                                 testID={`prospect-duplicate-company-${s.id}`}
+                                /* A target control like any other: left enabled during the forced
+                                   create, tapping one selected it and cleared the query while that
+                                   POST still committed — so the callback discarded a mismatched result
+                                   and an unwanted company was created anyway. */
+                                disabled={targetsLocked}
                                 onPress={() => {
                                   setCompany({ id: s.id, name: s.name ?? "Existing company" });
                                   setDuplicateCompanies(null);
