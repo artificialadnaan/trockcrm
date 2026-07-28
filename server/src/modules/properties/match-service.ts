@@ -194,9 +194,14 @@ const UNIT_MARKERS = new Set(["ste", "suite", "unit", "apt", "apartment", "rm", 
  * duplicate.
  */
 const UNIT_MARKER_CANONICAL: Record<string, string> = {
+  // One FAMILY, folded: a generic "#", "unit" and "ste"/"suite" all name the same commercial slot, and
+  // this is a commercial-roofing CRM where suites dominate.
   ste: "unit", suite: "unit", unit: "unit",
-  apt: "unit", apartment: "unit",
-  rm: "unit", room: "unit",
+  // Apartments and rooms keep their OWN tokens. Folding them in made "100 Main St Ste 200" and
+  // "100 Main St Apt 200" identical — a false match between two spaces in a mixed-use building, which
+  // is the failure this file trades everything else to avoid. Missing that pair costs a duplicate.
+  apt: "apartment", apartment: "apartment",
+  rm: "room", room: "room",
 };
 
 /**
@@ -566,8 +571,24 @@ export async function matchProperties(
    */
   // exact address, then same-building, then proximity. An exact hit must never sit below whatever
   // happens to be physically nearest — it is the signal that survives an uncoordinated legacy row.
-  const rank = (m: PropertyMatch) =>
-    m.addressMatch === "exact" ? 0 : m.addressMatch === "base" ? 1 : 2;
+  /**
+   * Corroboration outranks strength.
+   *
+   * An exact address match whose locality cannot be checked — the query names a city, the legacy row
+   * has none — has NO second signal agreeing with it, and "100 Main St" exists in every city. Ranking
+   * it purely on address strength let an uncorroborated hit sit above a nearby property that both the
+   * address AND the coordinates agreed on, and with a capped list it could push that real one out.
+   *
+   * Still a candidate, deliberately: those uncoordinated legacy rows are what address matching exists
+   * to recover. It simply stops being the FIRST answer offered.
+   */
+  const corroborated = (m: PropertyMatch) =>
+    m.distanceMeters != null && m.distanceMeters <= PROPERTY_MATCH_RADIUS_METERS;
+  const rank = (m: PropertyMatch) => {
+    if (m.addressMatch === "exact") return corroborated(m) ? 0 : 1;
+    if (m.addressMatch === "base") return corroborated(m) ? 2 : 3;
+    return 4;
+  };
   matches.sort((a, b) => {
     if (rank(a) !== rank(b)) return rank(a) - rank(b);
     return (a.distanceMeters ?? Number.MAX_SAFE_INTEGER) - (b.distanceMeters ?? Number.MAX_SAFE_INTEGER);

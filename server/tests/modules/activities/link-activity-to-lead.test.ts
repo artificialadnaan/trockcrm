@@ -234,30 +234,45 @@ describe("linkActivityToLead — the lead's last touch", () => {
     const occurred = new Date("2026-07-28T08:00:00Z");
     const { db, updates } = stubDb({ id: "a1", leadId: null, responsibleUserId: "u1", occurredAt: occurred });
     await linkActivityToLead(db, { activityId: "a1", leadId: "l1", viewer: OWNER });
-    expect(updates).toContainEqual({ lastActivityAt: occurred });
+    // The VALUE is now a GREATEST(...) expression rather than a raw date, so the assertion is that the
+    // column is written at all — the monotonicity itself is Postgres's job, not the stub's.
+    expect(updates.some((u) => "lastActivityAt" in u)).toBe(true);
   });
 
-  it("still returns the link when the timestamp refresh throws", async () => {
-    // Best-effort by design: the link is the authoritative change and must not fail because a
-    // denormalised value could not be updated.
+  it("FAILS the link when the timestamp write fails — it cannot be best-effort", async () => {
+    /**
+     * The opposite of what this test asserted a commit ago, and the earlier version was wrong.
+     *
+     * Both writes run inside the request's transaction. A failed UPDATE aborts it at the Postgres
+     * level, and catching the JavaScript error does not undo that — every later statement, including
+     * the COMMIT, fails with "current transaction is aborted". Swallowing the error produced a link
+     * that appeared to succeed and could never commit.
+     */
     const existing = { id: "a1", leadId: null, responsibleUserId: "u1" };
     let call = 0;
     const db = {
       select: () => ({ from: () => ({ where: () => ({ limit: async () => [existing] }) }) }),
       update: () => ({
         set: (patch: Record<string, unknown>) => ({
-          where: () => ({
-            returning: async () => {
-              call += 1;
-              if (call > 1) throw new Error("timestamp write failed");
-              return [{ ...existing, ...patch }];
-            },
-          }),
+          // The activity UPDATE ends in .returning(); the leads one is awaited straight off .where().
+          // The stub has to satisfy BOTH, so where() is a thenable that also carries returning().
+          where: () => {
+            call += 1;
+            const failing = call > 1;
+            return {
+              returning: async () => {
+                if (failing) throw new Error("timestamp write failed");
+                return [{ ...existing, ...patch }];
+              },
+              then: (resolve: (v: unknown) => unknown, reject: (e: unknown) => unknown) =>
+                failing ? reject(new Error("timestamp write failed")) : resolve([{ ...existing, ...patch }]),
+            };
+          },
         }),
       }),
     } as unknown as Parameters<typeof linkActivityToLead>[0];
     await expect(
       linkActivityToLead(db, { activityId: "a1", leadId: "l1", viewer: OWNER }),
-    ).resolves.toMatchObject({ leadId: "l1" });
+    ).rejects.toThrow();
   });
 });

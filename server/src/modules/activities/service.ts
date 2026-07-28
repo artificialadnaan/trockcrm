@@ -312,7 +312,7 @@ export async function linkActivityToLead(
    * thing both records agree on, so it is what is compared — and only when the activity actually has
    * one, since a company- or contact-anchored capture legitimately has no property.
    */
-  if (existing.propertyId || existing.companyId || existing.contactId) {
+  if (existing.propertyId || existing.companyId || existing.contactId || existing.dealId) {
     const [lead] = await tenantDb
       .select({ propertyId: leads.propertyId, companyId: leads.companyId })
       .from(leads)
@@ -348,6 +348,27 @@ export async function linkActivityToLead(
      * no company either, so both guards above skipped and any accessible lead could claim it. The
      * contact's own company is the only anchor such a row has.
      */
+    /**
+     * A DEAL-anchored activity is checked through the deal's company.
+     *
+     * An activity created with only `dealId` had none of the other anchors, so it skipped every lookup
+     * and could be linked to any lead the caller could see — the widest hole of the four, because a
+     * deal is the anchor most likely to belong to a different company than the lead being promoted.
+     */
+    if (existing.dealId && lead.companyId) {
+      const [deal] = await tenantDb
+        .select({ companyId: deals.companyId })
+        .from(deals)
+        .where(eq(deals.id, existing.dealId))
+        .limit(1);
+      if (deal?.companyId && deal.companyId !== lead.companyId) {
+        throw new AppError(
+          409,
+          "That lead is for a different company than this deal",
+          "ACTIVITY_LEAD_COMPANY_MISMATCH"
+        );
+      }
+    }
     if (!existing.companyId && existing.contactId && lead.companyId) {
       const [contact] = await tenantDb
         .select({ companyId: contacts.companyId })
@@ -387,14 +408,28 @@ export async function linkActivityToLead(
      * untouched, which is the opposite of what happened. Best-effort: the link is the authoritative
      * change and must not fail because a denormalised timestamp could not be refreshed.
      */
-    try {
-      await tenantDb
-        .update(leads)
-        .set({ lastActivityAt: updated.occurredAt ?? new Date() })
-        .where(eq(leads.id, input.leadId));
-    } catch {
-      // ignore — see above
-    }
+    /**
+     * NOT wrapped in try/catch, and that is the fix rather than an omission.
+     *
+     * This runs inside the request's transaction. If the UPDATE raises — a statement timeout, a
+     * trigger, a constraint — Postgres marks the whole transaction aborted, and catching the
+     * JavaScript exception does not undo that: every later statement fails with "current transaction
+     * is aborted", including the COMMIT. "Best-effort" is not a thing you can do to a statement inside
+     * a transaction by ignoring its error.
+     *
+     * So it participates properly. Both writes land together or neither does, which is also the
+     * honest contract: a link whose lead never registered the visit is half-applied state.
+     *
+     * GREATEST keeps the column monotonic. A visit linked after the lead has already seen newer
+     * activity must not drag last-touch backwards — every surface that sorts by it would then show the
+     * lead as going cold because someone filed an older note.
+     */
+    await tenantDb
+      .update(leads)
+      .set({
+        lastActivityAt: sql`GREATEST(${leads.lastActivityAt}, ${updated.occurredAt ?? new Date()})`,
+      })
+      .where(eq(leads.id, input.leadId));
     return updated;
   }
 
