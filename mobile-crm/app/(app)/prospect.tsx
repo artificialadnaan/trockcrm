@@ -826,7 +826,18 @@ export default function ProspectScreen() {
   const locked = save.isPending || saved;
   /** Save is unavailable while the building is still being written, too — see the button below. */
   const saveBlocked =
-    !ready || save.isPending || createPropertyHere.isPending || createCompanyNamed.isPending;
+    !ready ||
+    save.isPending ||
+    createPropertyHere.isPending ||
+    createCompanyNamed.isPending ||
+    /**
+     * ...and while a property LOOKUP is in flight.
+     *
+     * With a company fallback chosen, `ready` is already true — so saving during the lookup filed the
+     * visit against that company, and then runMatch's success cleared the fallback and showed
+     * candidates instead. The screen ended up presenting a target the committed activity never had.
+     */
+    runMatch.isPending;
 
   /**
    * The TARGET is frozen while anything is being written against it.
@@ -1964,7 +1975,11 @@ export default function ProspectScreen() {
               )}
             </Pressable>
             {/* A disabled button with no explanation is the same defect as a dead one. */}
-            {createPropertyHere.isPending || createCompanyNamed.isPending ? (
+            {runMatch.isPending ? (
+              <Text testID="prospect-blocked" style={styles.help}>
+                Checking what&apos;s here…
+              </Text>
+            ) : createPropertyHere.isPending || createCompanyNamed.isPending ? (
               /* Both writes disable Save, so both need a reason — a button that goes dead without
                  explanation is the defect this line exists to prevent. */
               <Text testID="prospect-blocked" style={styles.help}>
