@@ -36,6 +36,7 @@ import {
 import { DealStageBadge } from "@/components/deals/deal-stage-badge";
 import { LeadStageBadge } from "@/components/leads/lead-stage-badge";
 import { PropertyImageAvatar, PropertyPhotoButton } from "@/components/properties/property-image";
+import { EntityActivityTab } from "@/components/activities/entity-activity-tab";
 import {
   formatPropertyLabel,
   usePropertyDetail,
@@ -539,7 +540,16 @@ function PropertyTabContent({
     return <RelatedLeadsList leads={leads} />;
   }
 
-  const placeholders: Record<Exclude<PropertyTab, "overview" | "deals" | "leads">, { title: string; body: string }> = {
+  if (tab === "activity") {
+    // The SAME tab companies, leads and deals use — property was simply missing from its union. A
+    // property-specific copy would have been a third renderer to keep in step.
+    return <EntityActivityTab entityType="property" entityId={property.id} emptyLabel="property" />;
+  }
+
+  const placeholders: Record<
+    Exclude<PropertyTab, "overview" | "deals" | "leads" | "activity">,
+    { title: string; body: string }
+  > = {
     photos: {
       title: "Photo gallery coming soon",
       body: companyCamUrl
@@ -551,10 +561,6 @@ function PropertyTabContent({
       body: property.companyName
         ? `Contacts will roll up from ${property.companyName} once property-contact linking ships.`
         : "No owner company is linked for contact rollup.",
-    },
-    activity: {
-      title: "Property activity feed coming soon",
-      body: "Activity will aggregate notes, stage movement, photos, files, and linked deal updates.",
     },
     files: {
       title: "Property files coming soon",

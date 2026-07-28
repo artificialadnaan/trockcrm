@@ -6,7 +6,16 @@ import { Button } from "@/components/ui/button";
 import { MoveCloseDateDialog } from "@/components/deals/move-close-date-dialog";
 import { createActivity, useActivities, type Activity, type ActivitySourceEntityType } from "@/hooks/use-activities";
 
-type SupportedActivityEntity = Extract<ActivitySourceEntityType, "company" | "lead" | "deal">;
+/**
+ * `property` joins the list because field prospecting logs a site visit against the BUILDING, and its
+ * tab was a "coming soon" placeholder — so every capture a rep made landed in a table no office screen
+ * read. The server already answered `GET /activities?propertyId=` and the hook already took the filter;
+ * only this union and the map below excluded it.
+ */
+type SupportedActivityEntity = Extract<
+  ActivitySourceEntityType,
+  "company" | "lead" | "deal" | "property"
+>;
 
 interface EntityActivityTabProps {
   entityType: SupportedActivityEntity;
@@ -28,10 +37,27 @@ interface EntityActivityTabProps {
   officeId?: string | null;
 }
 
-const activityFilterKey: Record<SupportedActivityEntity, "companyId" | "leadId" | "dealId"> = {
+/**
+ * The marker the field app writes into `nextStep` when a rep flags a prospect worth a lead.
+ *
+ * Matched as a PREFIX because the app keeps the rep's own next step alongside it — one column holds
+ * both ("Create lead — Call Dana Monday"), so an exact comparison would miss every flag that carried a
+ * note, which is most of them.
+ */
+const LEAD_FLAG_PREFIX = "Create lead";
+
+export function isLeadFlagged(activity: Pick<Activity, "nextStep">): boolean {
+  return Boolean(activity.nextStep?.startsWith(LEAD_FLAG_PREFIX));
+}
+
+const activityFilterKey: Record<
+  SupportedActivityEntity,
+  "companyId" | "leadId" | "dealId" | "propertyId"
+> = {
   company: "companyId",
   lead: "leadId",
   deal: "dealId",
+  property: "propertyId",
 };
 
 const activityLabels: Record<string, string> = {
@@ -115,7 +141,11 @@ export function EntityActivityTab({
 
   return (
     <div className="space-y-4">
-      {showRecordings ? <RecordingList entityType={entityType} entityId={entityId} /> : null}
+      {/* Recordings attach to a person or a deal, never to a BUILDING — RecordingList's own union says
+          so. Narrowed here rather than widened there: a property has no call to record. */}
+      {showRecordings && entityType !== "property" ? (
+        <RecordingList entityType={entityType} entityId={entityId} />
+      ) : null}
       <ActivityLogForm
         onSubmit={handleLogActivity}
         showProposalSent={entityType === "deal"}
@@ -180,10 +210,33 @@ export function EntityActivityTab({
                         {activity.durationMinutes} min
                       </span>
                     ) : null}
+                    {/* The FLAG a rep sets in the field on a prospect worth a lead. It was written to
+                        nextStep and rendered by nothing, anywhere — so the marker existed and no office
+                        surface showed it, which made the whole "flag it and the office picks it up"
+                        handoff invisible. */}
+                    {isLeadFlagged(activity) ? (
+                      <span
+                        data-testid="activity-lead-flag"
+                        className="rounded bg-amber-100 px-1.5 py-0.5 text-xs font-medium text-amber-900"
+                      >
+                        Worth a lead
+                      </span>
+                    ) : null}
                   </div>
                   {activity.body ? (
                     <p className="mt-0.5 line-clamp-2 text-sm text-muted-foreground">
                       {activity.body}
+                    </p>
+                  ) : null}
+                  {/* The rep's own next step, flagged or not — it is what they wrote down for whoever
+                      picks this up, and it was not shown at all. */}
+                  {activity.nextStep ? (
+                    <p className="mt-1 text-xs text-muted-foreground" data-testid="activity-next-step">
+                      <span className="font-medium">Next: </span>
+                      {activity.nextStep}
+                      {activity.nextStepDueAt
+                        ? ` (due ${formatActivityDate(activity.nextStepDueAt)})`
+                        : ""}
                     </p>
                   ) : null}
                   <p className="mt-1 text-xs text-muted-foreground">

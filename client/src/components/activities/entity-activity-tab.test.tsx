@@ -268,4 +268,77 @@ describe("EntityActivityTab", () => {
     expect(mounted.container.textContent).not.toContain("Company B note");
     expect(mocks.useActivitiesMock).toHaveBeenCalledWith({ companyId: "company-a" });
   });
+
+  it("scopes a PROPERTY tab to propertyId — the filter the placeholder never used", async () => {
+    // Field prospecting logs a site visit against the BUILDING, and this tab was a "coming soon"
+    // placeholder, so every capture landed in a table no office screen read. The server and the hook
+    // already supported the filter; only this union excluded it.
+    mocks.useActivitiesMock.mockReturnValueOnce({
+      activities: [],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    mounted = mount(
+      <EntityActivityTab entityType="property" entityId="property-1" emptyLabel="property" />
+    );
+
+    expect(mocks.useActivitiesMock).toHaveBeenCalledWith({ propertyId: "property-1" });
+  });
+
+  it("shows the WORTH A LEAD flag a rep set in the field", async () => {
+    // The marker was written to nextStep and rendered by nothing, anywhere — so the whole "flag it and
+    // the office picks it up" handoff was invisible on every surface.
+    mocks.useActivitiesMock.mockReturnValueOnce({
+      activities: [
+        {
+          id: "activity-1",
+          type: "site_visit",
+          occurredAt: "2026-07-28T15:00:00.000Z",
+          body: "Met the super",
+          outcome: null,
+          durationMinutes: null,
+          nextStep: "Create lead — Call Dana Monday",
+          nextStepDueAt: null,
+        },
+      ],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    mounted = mount(
+      <EntityActivityTab entityType="property" entityId="property-1" emptyLabel="property" />
+    );
+
+    expect(mounted.container.querySelector('[data-testid="activity-lead-flag"]')).not.toBeNull();
+    // And the rep's own words survive alongside the marker.
+    expect(mounted.container.textContent).toContain("Call Dana Monday");
+  });
+
+  it("shows an ordinary next step WITHOUT calling it a lead", async () => {
+    mocks.useActivitiesMock.mockReturnValueOnce({
+      activities: [
+        {
+          id: "activity-2",
+          type: "call",
+          occurredAt: "2026-07-28T15:00:00.000Z",
+          body: null,
+          outcome: null,
+          durationMinutes: null,
+          nextStep: "Call Dana Monday",
+          nextStepDueAt: null,
+        },
+      ],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    mounted = mount(<EntityActivityTab entityType="deal" entityId="deal-1" emptyLabel="deal" />);
+
+    expect(mounted.container.querySelector('[data-testid="activity-next-step"]')).not.toBeNull();
+    expect(mounted.container.querySelector('[data-testid="activity-lead-flag"]')).toBeNull();
+  });
 });
