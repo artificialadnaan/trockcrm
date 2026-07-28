@@ -117,13 +117,8 @@ const NON_FINAL_ALIASES: Record<string, string> = { st: "saint" };
  */
 export function normalizeAddressKey(value: string | null | undefined): string {
   if (typeof value !== "string") return "";
-  const cleaned = value
+  const cleaned = foldDiacritics(value)
     .toLowerCase()
-    // FOLD accents rather than deleting the letter. The punctuation strip below turns any character
-    // outside [a-z0-9] into a space, so "Cañon" became "ca on" — two tokens that match nothing, least
-    // of all a legacy row spelling it "Canon". Decompose, drop the combining marks, keep the letter.
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
     // "#200" is a UNIT, and stripping the hash to whitespace destroyed that: "1420 Bishop St #200"
     // became "1420 bishop street 200", which splitUnit cannot recognise — so a legacy row storing the
     // tenancy was rejected against a building-level geocode and a duplicate created. The suite case was
@@ -182,6 +177,18 @@ export function normalizeAddressKey(value: string | null | undefined): string {
       return DIRECTIONALS[token] ?? NON_FINAL_ALIASES[token] ?? token;
     })
     .join(" ");
+}
+
+/**
+ * FOLD accents rather than delete the letter, in one place.
+ *
+ * The punctuation strip turns any character outside [a-z0-9] into a space, so "Cañon" became "ca on" —
+ * two tokens matching nothing, least of all a legacy row spelling it "Canon". Decompose, drop the
+ * combining marks, keep the letter. Every TypeScript-side key goes through here so the raw candidate
+ * key, the expanded address key and the locality comparison cannot drift apart — they already did once.
+ */
+export function foldDiacritics(value: string): string {
+  return value.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 }
 
 /**
@@ -503,7 +510,16 @@ export async function matchProperties(
     : sql`false`;
   // A street line with no usable lead token still has a full form worth comparing — cheaper than
   // giving up and creating a duplicate. The punctuation-collapsed key is what the DB side can produce.
-  const punctuationKey = (input.address ?? "")
+  /**
+   * The RAW query key folds accents too, or the two sides disagree again.
+   *
+   * The stored column is now folded in SQL, so "100 Peña Blvd" is indexed as "100 pena blvd" — but this
+   * key was still built by stripping punctuation from the raw text, giving "100 pe a blvd". Neither
+   * whole-address predicate then matched, leaving an uncoordinated legacy row reachable only through
+   * the broad "100 %" lead-token scan, where the candidate cap can drop it on a street with many
+   * properties sharing that house number. Same fold as normalizeAddressKey, same reason.
+   */
+  const punctuationKey = foldDiacritics(input.address ?? "")
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, " ")
     .trim();

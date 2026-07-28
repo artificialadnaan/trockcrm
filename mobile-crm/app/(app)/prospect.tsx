@@ -50,8 +50,17 @@ import { theme } from "../../src/theme/theme";
  */
 function todayIsoDate(): string {
   const now = new Date();
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+  /**
+   * LOCAL NOON, sent as a full timestamp.
+   *
+   * Two separate day-shifts had to be closed. toISOString() picks the UTC calendar day, so a rep in
+   * Texas flagging at 7pm sent tomorrow. Fixing that alone still left a bare "YYYY-MM-DD", which the
+   * server turns into midnight UTC — displaying as the PREVIOUS day in every negative-UTC office, so
+   * July 28 queued as July 27. Anchoring at local noon puts the instant far enough from both midnights
+   * that no offset in use can move it across a date boundary.
+   */
+  const noon = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 12, 0, 0, 0);
+  return noon.toISOString();
 }
 
 const ACTIVITY_TYPES: Array<{ key: prospecting.FieldActivityType; label: string }> = [
@@ -306,6 +315,76 @@ export default function ProspectScreen() {
     },
   });
 
+  /**
+   * ADD THE BUILDING the CRM has never seen.
+   *
+   * Without this the core prospecting case had no path at all: location resolves, /properties/match
+   * returns nothing, and the rep is told to attach the visit to a company — so the address and
+   * coordinates the capture just worked out are discarded, and the building stays unknown for the next
+   * rep too. `createProperty` existed and nothing called it.
+   *
+   * Needs a company, because properties belong to one — so this appears only once the rep has chosen
+   * one from the fallback search. The new property is written WITH its coordinates, which is what makes
+   * it findable by the next capture rather than a duplicate waiting to happen.
+   */
+  const [createPropertyError, setCreatePropertyError] = useState<string | null>(null);
+  const createPropertyHere = useMutation({
+    mutationFn: async () => {
+      // Read ONCE, before the await. Both are state and can change under a slow request, and what
+      // onSuccess writes into the target has to describe what was actually created.
+      const under = company;
+      const at = address;
+      if (!under || !at?.address || !at.city || !at.state || !at.zip) {
+        throw new Error("A company and a full address are needed to add a building.");
+      }
+      const created = await prospecting.createProperty(fetcher, {
+        companyId: under.id,
+        // The street line is the honest default name; it can be renamed on the web.
+        name: at.address,
+        address: at.address,
+        city: at.city,
+        state: at.state,
+        zip: at.zip,
+        // Written WITH coordinates — that is what makes it findable by the next capture instead of
+        // becoming the duplicate this feature exists to prevent.
+        lat: at.lat ?? undefined,
+        lng: at.lng ?? undefined,
+      });
+      return { created, at, under };
+    },
+    onSuccess: async ({ created, at, under }) => {
+      /**
+       * POST /properties has NO dedup branch — it creates unconditionally, which is exactly why
+       * /properties/match runs first and why this control appears only after it came back empty.
+       */
+      setCreatePropertyError(null);
+      setProperty({
+        id: created.id,
+        name: created.name,
+        address: at.address,
+        city: at.city,
+        state: at.state,
+        zip: at.zip,
+        companyId: created.companyId,
+        companyName: under.name,
+        // Zero: the rep is standing on it, and it was stored with these coordinates.
+        distanceMeters: 0,
+        reason: "address",
+        addressMatch: "exact",
+      });
+      await queryClient.invalidateQueries({ queryKey: ["properties"] });
+    },
+    onError: (err) => {
+      setCreatePropertyError(
+        err instanceof ApiError && (err.status === 0 || err.status === 408)
+          ? "No signal — this building may or may not have been added. Check before adding it again."
+          : err instanceof ApiError
+            ? err.message
+            : "Couldn't add this building.",
+      );
+    },
+  });
+
   const save = useMutation({
     mutationFn: async () => {
       let contactId: string | undefined;
@@ -344,89 +423,85 @@ export default function ProspectScreen() {
        * from the WHO fields produced an unsaveable activity AFTER committing them: a new contact
        * stranded in the directory and a visit that could not be logged at all. The WHO block is hidden
        * in this mode for the same reason, so the two can never name different people.
+       *
+       * This sets the id and falls through to the SINGLE write below. An earlier version returned early
+       * with its own copy of the logActivity call, which meant two payloads to keep in step — and the
+       * next field added to one of them would have been silently missing from the other.
        */
       if (contact) {
-        const activity = await prospecting.logActivity(fetcher, {
-          ...target,
-          type: type!,
-          body: body.trim() || undefined,
-          outcome: outcome.trim() || undefined,
-          nextStep: leadFlagNextStep({ flagged: flagForLead, nextStep }),
-          nextStepDueAt: flagForLead ? todayIsoDate() : undefined,
+        contactId = contact.id;
+      } else {
+        const { plan, dropRetained } = planContact({
+          first,
+          last,
+          key: contactKey,
+          resolvedContactId: resolvedContactId.current,
+          waived: contactWaived.current,
+          retained: createdContactId.current,
         });
-        return { activity, duplicates: null, contactFailed: false, contactIndeterminate: false };
-      }
+        if (dropRetained) createdContactId.current = undefined;
+        if (plan.action === "reuse") contactId = plan.contactId;
 
-      const { plan, dropRetained } = planContact({
-        first,
-        last,
-        key: contactKey,
-        resolvedContactId: resolvedContactId.current,
-        waived: contactWaived.current,
-        retained: createdContactId.current,
-      });
-      if (dropRetained) createdContactId.current = undefined;
-      if (plan.action === "reuse") contactId = plan.contactId;
-
-      if (plan.action === "create") {
-        /**
-         * The PERSON is optional; the VISIT is not.
-         *
-         * A throw here aborted the whole mutation, so a contacts outage or a validation refusal took
-         * the site visit down with it — the opposite of what the docblock promised, and the wrong
-         * trade: the rep is standing outside and the log is the thing that must survive.
-         */
-        try {
-          const created = await prospecting.createContact(fetcher, {
-            firstName: first,
-            lastName: last,
+        if (plan.action === "create") {
+          /**
+           * The PERSON is optional; the VISIT is not.
+           *
+           * A throw here aborted the whole mutation, so a contacts outage or a validation refusal took
+           * the site visit down with it — the opposite of what the docblock promised, and the wrong
+           * trade: the rep is standing outside and the log is the thing that must survive.
+           */
+          try {
+            const created = await prospecting.createContact(fetcher, {
+              firstName: first,
+              lastName: last,
+              /**
+               * NEUTRAL, because the screen never asks.
+               *
+               * Reps meet vendors, architects, subcontractors and regional managers too, and stamping
+               * every one of them "property_manager" quietly corrupted the directory and every filter
+               * built on it. "other" is the honest answer to a question not asked; the real category is
+               * set on the web, where the choice exists.
+               */
+              category: "other",
+              jobTitle: contactTitle.trim() || undefined,
+              mobile: contactPhone.trim() || undefined,
+              // The FALLBACK company counts too. Without it a person met at a building the CRM has never
+              // seen was created with no company at all — the one case where the link matters most.
+              companyId: property?.companyId ?? company?.id,
+            });
+            contactId = created.created?.id;
+            if (contactId) createdContactId.current = { id: contactId, key: contactKey };
+            duplicates = created.duplicates ?? null;
             /**
-             * NEUTRAL, because the screen never asks.
+             * STOP. Do not write the activity yet.
              *
-             * Reps meet vendors, architects, subcontractors and regional managers too, and stamping
-             * every one of them "property_manager" quietly corrupted the directory and every filter
-             * built on it. "other" is the honest answer to a question not asked; the real category is
-             * set on the web, where the choice exists.
+             * A dedup reply carries no new id but it DOES carry the ids of the people it matched, so the
+             * person is knowable — and logging here attached the visit to nobody while the screen said
+             * "Logged". That is unrecoverable: /activities has no update path in this app, so a rep who
+             * meets a property manager the CRM already knows loses them silently, which is precisely the
+             * case the prompt exists to catch. Hand the choice back instead.
              */
-            category: "other",
-            jobTitle: contactTitle.trim() || undefined,
-            mobile: contactPhone.trim() || undefined,
-            // The FALLBACK company counts too. Without it a person met at a building the CRM has never
-            // seen was created with no company at all — the one case where the link matters most.
-            companyId: property?.companyId ?? company?.id,
-          });
-          contactId = created.created?.id;
-          if (contactId) createdContactId.current = { id: contactId, key: contactKey };
-          duplicates = created.duplicates ?? null;
-          /**
-           * STOP. Do not write the activity yet.
-           *
-           * A dedup reply carries no new id but it DOES carry the ids of the people it matched, so the
-           * person is knowable — and logging here attached the visit to nobody while the screen said
-           * "Logged". That is unrecoverable: /activities has no update path in this app, so a rep who
-           * meets a property manager the CRM already knows loses them silently, which is precisely the
-           * case the prompt exists to catch. Hand the choice back instead.
-           */
-          if (haltsForDuplicates({ createdId: contactId, duplicates })) {
-            return {
-              activity: null,
-              duplicates,
-              contactFailed: false,
-              contactIndeterminate: false,
-            } as const;
+            if (haltsForDuplicates({ createdId: contactId, duplicates })) {
+              return {
+                activity: null,
+                duplicates,
+                contactFailed: false,
+                contactIndeterminate: false,
+              } as const;
+            }
+          } catch (err) {
+            /**
+             * A DROPPED RESPONSE IS NOT A FAILED WRITE — the same rule the activity save already follows.
+             *
+             * On status 0/408 the contact may well have been committed. Reporting a definite failure sent
+             * the rep off to create that person a second time, so a weak signal produced an orphaned
+             * contact plus a duplicate. The VISIT still goes through either way; only the wording of what
+             * happened to the person changes.
+             */
+            contactFailed = true;
+            contactIndeterminate =
+              err instanceof ApiError && (err.status === 0 || err.status === 408);
           }
-        } catch (err) {
-          /**
-           * A DROPPED RESPONSE IS NOT A FAILED WRITE — the same rule the activity save already follows.
-           *
-           * On status 0/408 the contact may well have been committed. Reporting a definite failure sent
-           * the rep off to create that person a second time, so a weak signal produced an orphaned
-           * contact plus a duplicate. The VISIT still goes through either way; only the wording of what
-           * happened to the person changes.
-           */
-          contactFailed = true;
-          contactIndeterminate =
-            err instanceof ApiError && (err.status === 0 || err.status === 408);
         }
       }
 
@@ -1000,6 +1075,43 @@ export default function ProspectScreen() {
                     )}
                   </>
                 )}
+
+                  {/* ADD THE BUILDING. Offered once a company is chosen and the geocode gave a full
+                      address — the two things the server requires. This is what stops a genuinely new
+                      building from being unloggable. */}
+                  {company && address?.address && address.city && address.state && address.zip ? (
+                    <>
+                      <Pressable
+                        testID="prospect-create-property"
+                        onPress={() => createPropertyHere.mutate()}
+                        disabled={locked || createPropertyHere.isPending}
+                        accessibilityRole="button"
+                        accessibilityLabel={`Add ${address.address} under ${company.name}`}
+                        accessibilityState={{
+                          disabled: locked || createPropertyHere.isPending,
+                          busy: createPropertyHere.isPending,
+                        }}
+                        style={[
+                          styles.secondaryBtn,
+                          (locked || createPropertyHere.isPending) && styles.primaryBtnDisabled,
+                        ]}
+                      >
+                        {createPropertyHere.isPending ? (
+                          <ActivityIndicator color={theme.color.textPrimary} />
+                        ) : (
+                          <Text style={styles.secondaryText}>
+                            Add “{address.address}” to {company.name}
+                          </Text>
+                        )}
+                      </Pressable>
+                      {createPropertyError ? (
+                        <Text testID="prospect-create-property-error" style={styles.warn}>
+                          {createPropertyError}
+                        </Text>
+                      ) : null}
+                    </>
+                  ) : null}
+
               </View>
             ) : null}
           </View>

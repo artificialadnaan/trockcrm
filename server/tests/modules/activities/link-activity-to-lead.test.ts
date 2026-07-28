@@ -48,7 +48,21 @@ function stubDb(
   const db = {
     select: () => ({
       from: () => ({
-        where: () => ({ limit: async () => reads[readIndex++] ?? [] }),
+        where: () => ({
+          /**
+           * Awaitable AND `.for("update")`-able, consuming the sequence exactly once either way.
+           *
+           * The lead read takes a row lock; the activity read does not. Returning a promise with a
+           * `for` method attached models both without a second stub — and resolving `for` from the
+           * already-taken rows is what stops it consuming a second entry and shifting every later read.
+           */
+          limit: () => {
+            const rows = reads[readIndex++] ?? [];
+            return Object.assign(Promise.resolve(rows), {
+              for: () => Promise.resolve(rows),
+            });
+          },
+        }),
       }),
     }),
     update: () => ({

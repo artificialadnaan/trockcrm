@@ -270,10 +270,18 @@ export async function createProperty(
   input: {
     companyId: string;
     name: string;
-    address?: string;
-    city?: string;
-    state?: string;
-    zip?: string;
+    /**
+     * REQUIRED, all four, because the server requires them.
+     *
+     * `createProperty` calls validatePropertyAddressFields unconditionally and 400s without any one of
+     * these. Declaring them optional here meant a caller could satisfy the type with just companyId and
+     * name, compile clean, and discover the refusal at runtime — after the rep had finished the
+     * capture. The reverse geocode supplies all four, so requiring them costs nothing.
+     */
+    address: string;
+    city: string;
+    state: string;
+    zip: string;
     lat?: number;
     lng?: number;
   },

@@ -342,7 +342,17 @@ export async function linkActivityToLead(
     })
     .from(leads)
     .where(eq(leads.id, input.leadId))
-    .limit(1);
+    .limit(1)
+    /**
+     * FOR UPDATE, because an unlocked read makes the guard advisory.
+     *
+     * Archival locks and updates the lead row. Without taking that lock here, this transaction can read
+     * the still-active version, link the activity, and then block on the archival commit before
+     * refreshing lastActivityAt — succeeding in precisely the tombstone state the check exists to
+     * reject, and touching the archived row on the way out. Taking the lock makes the two serialise:
+     * either this sees the row live and archival waits, or it sees it archived and refuses.
+     */
+    .for("update");
   if (!lead) throw new AppError(404, "Lead not found");
   if (lead.isActive === false && lead.status === "open") {
     throw new AppError(409, "That lead has been archived", "ACTIVITY_LEAD_ARCHIVED");
