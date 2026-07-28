@@ -234,3 +234,37 @@ export async function logActivity(
 export function hasActivityTarget(target: ActivityTarget): boolean {
   return Boolean(target.propertyId || target.companyId || target.contactId || target.dealId || target.leadId);
 }
+
+export type LeadRef = { id: string; name: string | null; leadNumber?: string | null };
+
+/**
+ * POST /leads → 201 `{ lead }`. Requires exactly companyId + propertyId + name.
+ *
+ * Those three are what a capture already produces, which is why promotion needs no new creation path:
+ * the endpoint that owns every rule about what a lead IS stays the only thing that makes one.
+ *
+ * A 400 here is a REQUIREMENTS refusal, not a bug — createLead can reject with a coded
+ * missingRequirements payload, and the screen shows it rather than a generic failure.
+ */
+export async function createLeadFromCapture(
+  fetcher: Fetcher,
+  input: { companyId: string; propertyId: string; name: string },
+): Promise<LeadRef> {
+  const res = await fetcher<{ lead: LeadRef }>("/leads", { method: "POST", body: input });
+  return res.lead;
+}
+
+/**
+ * POST /activities/:id/link-lead → `{ activity }`.
+ *
+ * The second half of promotion, and deliberately separate: see the server note. Not atomic with the
+ * lead creation, so a failure here leaves a real lead that simply is not linked — which is why the
+ * screen reports the lead as CREATED even when this step fails, rather than implying nothing happened.
+ */
+export async function linkActivityToLead(
+  fetcher: Fetcher,
+  activityId: string,
+  leadId: string,
+): Promise<void> {
+  await fetcher(`/activities/${activityId}/link-lead`, { method: "POST", body: { leadId } });
+}

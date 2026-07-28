@@ -151,3 +151,34 @@ describe("hasActivityTarget", () => {
     expect(prospecting.hasActivityTarget({ propertyId: "" })).toBe(false);
   });
 });
+
+describe("promotion to a lead", () => {
+  it("sends exactly the three fields POST /leads requires", async () => {
+    // companyId + propertyId + name is the whole contract, and it is precisely what a capture already
+    // produces — which is why promotion needs no new creation path.
+    const { fetcher, calls } = recording({ lead: { id: "l1", name: "Palm Villas" } });
+    await prospecting.createLeadFromCapture(fetcher, {
+      companyId: "c1",
+      propertyId: "p1",
+      name: "Palm Villas",
+    });
+    expect(calls[0].path).toBe("/leads");
+    expect(calls[0].opts.method).toBe("POST");
+    expect(calls[0].opts.body).toEqual({ companyId: "c1", propertyId: "p1", name: "Palm Villas" });
+  });
+
+  it("unwraps { lead }", async () => {
+    const { fetcher } = recording({ lead: { id: "l1", name: "Palm Villas", leadNumber: "L-204" } });
+    await expect(
+      prospecting.createLeadFromCapture(fetcher, { companyId: "c1", propertyId: "p1", name: "X" }),
+    ).resolves.toMatchObject({ id: "l1", leadNumber: "L-204" });
+  });
+
+  it("links the activity to the new lead by id", async () => {
+    const { fetcher, calls } = recording({ activity: { id: "a1", leadId: "l1" } });
+    await prospecting.linkActivityToLead(fetcher, "a1", "l1");
+    expect(calls[0].path).toBe("/activities/a1/link-lead");
+    expect(calls[0].opts.method).toBe("POST");
+    expect(calls[0].opts.body).toEqual({ leadId: "l1" });
+  });
+});

@@ -65,7 +65,8 @@ export default function ProspectScreen() {
   const [contactPhone, setContactPhone] = useState("");
   const [contactTitle, setContactTitle] = useState("");
 
-  const [saved, setSaved] = useState(false);
+  const [savedActivityId, setSavedActivityId] = useState<string | null>(null);
+  const saved = savedActivityId !== null;
   const [saveError, setSaveError] = useState<string | null>(null);
 
   const target = useMemo(
@@ -166,8 +167,8 @@ export default function ProspectScreen() {
         nextStep: nextStep.trim() || undefined,
       });
     },
-    onSuccess: async () => {
-      setSaved(true);
+    onSuccess: async (activity) => {
+      setSavedActivityId(activity.id);
       setSaveError(null);
       // The property's activity feed and any list showing last-touch are now stale.
       await Promise.all([
@@ -176,13 +177,65 @@ export default function ProspectScreen() {
       ]);
     },
     onError: (err) => {
-      setSaved(false);
+      setSavedActivityId(null);
       setSaveError(
         err instanceof ApiError && err.status === 0
           ? "No signal — this didn't save. Try again once you're back in range."
           : err instanceof ApiError
             ? err.message
             : "Couldn't save this log.",
+      );
+    },
+  });
+
+  const [promoted, setPromoted] = useState<prospecting.LeadRef | null>(null);
+  const [promoteError, setPromoteError] = useState<string | null>(null);
+
+  /**
+   * Promote the capture to a lead.
+   *
+   * TWO CALLS, and deliberately so: POST /leads owns every rule about what a lead is (office code, rep
+   * assignment, due-diligence dispatch, its own requirements contract), and reproducing that for a
+   * "promote" endpoint would be a second definition of a lead. So the lead is created there and the
+   * activity is linked afterwards.
+   *
+   * They are not atomic, which shapes the error handling below: if the LINK fails the lead still
+   * exists, so the screen reports it as created and says only the back-reference is missing. Telling a
+   * rep "promotion failed" when a lead was in fact created is how the same lead gets made twice.
+   */
+  const promote = useMutation({
+    mutationFn: async () => {
+      if (!property) throw new Error("A property is required to make a lead.");
+      const lead = await prospecting.createLeadFromCapture(fetcher, {
+        companyId: property.companyId,
+        propertyId: property.id,
+        // The property's name is the honest default — a rep naming the lead is a second decision at the
+        // moment they are trying to leave, and it can be edited on the web where there is a keyboard.
+        name: property.name,
+      });
+      if (savedActivityId) {
+        try {
+          await prospecting.linkActivityToLead(fetcher, savedActivityId, lead.id);
+        } catch {
+          // Swallowed ON PURPOSE. The lead is the artifact that matters and it exists; a missing
+          // back-reference is a traceability gap, not a failed promotion, and surfacing it as failure
+          // invites a duplicate lead.
+        }
+      }
+      return lead;
+    },
+    onSuccess: async (lead) => {
+      setPromoted(lead);
+      setPromoteError(null);
+      await queryClient.invalidateQueries({ queryKey: ["leads"] });
+    },
+    onError: (err) => {
+      setPromoteError(
+        err instanceof ApiError && err.status === 0
+          ? "No signal — the log is saved, but the lead wasn't created."
+          : err instanceof ApiError
+            ? err.message
+            : "Couldn't create the lead.",
       );
     },
   });
@@ -420,10 +473,44 @@ export default function ProspectScreen() {
         {saved ? (
           <View testID="prospect-saved" style={styles.savedBox}>
             <Text style={styles.savedText}>Logged.</Text>
+
+            {/* PROMOTION lives here, after the log is safe. Offering it before saving would make a rep
+                choose between recording the visit and acting on it, and the visit is the thing that
+                must not be lost. Only offered with a property, because a lead requires one. */}
+            {promoted ? (
+              <Text testID="prospect-promoted" style={styles.help}>
+                Lead created{promoted.leadNumber ? ` — ${promoted.leadNumber}` : ""}. Finish it on the
+                web when you&apos;re back.
+              </Text>
+            ) : property ? (
+              <Pressable
+                testID="prospect-promote"
+                onPress={() => promote.mutate()}
+                disabled={promote.isPending}
+                accessibilityRole="button"
+                accessibilityLabel={`Make a lead for ${property.name}`}
+                accessibilityState={{ disabled: promote.isPending, busy: promote.isPending }}
+                style={[styles.secondaryBtn, promote.isPending && styles.primaryBtnDisabled]}
+              >
+                {promote.isPending ? (
+                  <ActivityIndicator color={theme.color.textPrimary} />
+                ) : (
+                  <Text style={styles.secondaryText}>Make this a lead</Text>
+                )}
+              </Pressable>
+            ) : null}
+
+            {promoteError ? (
+              <Text testID="prospect-promote-error" style={styles.error}>
+                {promoteError}
+              </Text>
+            ) : null}
             <Pressable
               testID="prospect-log-another"
               onPress={() => {
-                setSaved(false);
+                setSavedActivityId(null);
+                setPromoted(null);
+                setPromoteError(null);
                 setBody("");
                 setOutcome("");
                 setNextStep("");
