@@ -4,18 +4,19 @@
  * reports, and worker stale-deal alerts (server TS) — every surface that computes at-risk via [[at-risk]]
  * `getDealAtRiskResult`.
  *
- * The "close target" is the deal's `expected_close_date` (reused, not a new column). While that date
- * is today-or-future, the stage-age at-risk verdict is suppressed ("don't nag until the target
- * passes"); once it passes (or is null/past), normal stage-age at-risk applies again.
+ * The "hold horizon date" is the deal's `expected_close_date` in every stage EXCEPT the genuine
+ * 'estimating' stage, where it is the deal's BID due date falling back to the close target (2026-07-27
+ * for auto-park, extended to at-risk suppression 2026-07-28; see resolveHoldHorizonDay). While that date
+ * is today-or-future, the stage-age at-risk verdict is suppressed ("don't nag until the date passes");
+ * once it passes (or is null/past), normal stage-age at-risk applies again.
  *
- * Derived hold horizon: `CLOSE_TARGET_HOLD_HORIZON_DAYS` (bottom of file) is the threshold at which the
- * deal's hold horizon date is far enough out that it reads as "effectively on hold" — the basis for the
- * deals On Hold filter pill, value-zeroing, and at-risk exclusion. That horizon date is the close target
- * in every stage EXCEPT the genuine 'estimating' stage, where it is the deal's BID due date (2026-07-27;
- * see resolveHoldHorizonDay). This is DISTINCT from the shorter pending close-target suppression above,
- * which callers opt into for detail-style SLA messaging and which stays keyed on `expected_close_date` in
- * every stage. On-hold also remains the explicit, stored `deals.on_hold` toggle ([[deal-reporting]]); the
- * derived horizon is an OR-leg on top of it, never a replacement.
+ * Derived hold horizon: `CLOSE_TARGET_HOLD_HORIZON_DAYS` (bottom of file) is the threshold at which that
+ * SAME horizon date is far enough out that the deal reads as "effectively on hold" — the basis for the
+ * deals On Hold filter pill, value-zeroing, and at-risk exclusion. So the two legs differ only in their
+ * threshold (today-or-future quiets; 90+ days out parks), never in which date they read — a deal cannot
+ * be parked off its bid date while being nagged off its close date. On-hold also remains the explicit,
+ * stored `deals.on_hold` toggle ([[deal-reporting]]); the derived horizon is an OR-leg on top of it,
+ * never a replacement.
  *
  * Day boundary: the predicate takes an injected `now: Date` and resolves "today" to the
  * America/Chicago calendar day — the SAME anchor the forecast SQL uses ((now() AT TIME ZONE
@@ -25,6 +26,19 @@
 export interface CloseTargetInput {
   /** The deal's close target = its `expected_close_date` (a calendar DATE; string "YYYY-MM-DD" or Date). */
   expectedCloseDate?: string | Date | null;
+  /**
+   * The deal's BID due date (`deals.bid_due_date`). Read ONLY when `isEstimating` is true; ignored in
+   * every other stage. A Date is resolved to its UTC calendar day, matching the SQL twin's
+   * `(bid_due_date AT TIME ZONE 'UTC')::date` — the column is a timestamptz stored at UTC midnight.
+   */
+  bidDueDate?: string | Date | null;
+  /**
+   * True only for the genuine normal-route 'estimating' stage (route-aware: includes the legacy
+   * estimate_in_progress alias, EXCLUDES service_estimating). In that stage the suppression horizon is
+   * measured from the BID due date instead of the close target — see resolveHoldHorizonDay. Callers that
+   * cannot classify the stage leave it unset and keep the close-target rule.
+   */
+  isEstimating?: boolean;
   /** The reference instant; "today" is its America/Chicago calendar day. */
   now: Date;
 }
@@ -86,12 +100,31 @@ export function daysUntilCloseTarget(
 }
 
 /**
- * At-risk suppression: a today-or-future close target quiets the stage-age at-risk nag until it
- * passes. Returns false for a null, unparseable, or already-past target (normal at-risk applies).
+ * At-risk suppression: a today-or-future hold horizon date quiets the stage-age at-risk nag until it
+ * passes. Returns false for a null, unparseable, or already-past date (normal at-risk applies).
+ *
+ * The date measured is `resolveHoldHorizonDay` — the close target in every stage EXCEPT the genuine
+ * 'estimating' stage, where it is the BID due date (Adnaan, 2026-07-28). SUPERSEDES the #966 decision to
+ * scope the bid date to the auto-park leg only: keeping suppression on `expected_close_date` there let a
+ * comfortable project close date quiet a bid that was already weeks overdue — on prod, 6 estimating deals
+ * (one 46 days in stage with its bid due a month earlier, close date four months out) were silently
+ * suppressed. Sharing ONE horizon resolver with isDealEffectivelyOnHold also means the date that parks a
+ * deal and the date that quiets it can never drift apart.
+ *
+ * A null/unparseable bid due date falls back to the close target, exactly as the auto-park does, so a
+ * null-bid row reproduces the previous behaviour byte-for-byte.
  */
-export function isAtRiskSuppressedByCloseTarget({ expectedCloseDate, now }: CloseTargetInput): boolean {
-  const days = daysUntilCloseTarget(expectedCloseDate, now);
-  return days != null && days >= 0;
+export function isAtRiskSuppressedByCloseTarget({
+  expectedCloseDate,
+  bidDueDate,
+  isEstimating,
+  now,
+}: CloseTargetInput): boolean {
+  // resolveHoldHorizonDay is a hoisted function declaration defined below, next to the auto-park rule it
+  // is shared with — the two legs are deliberately read together.
+  const horizonDay = resolveHoldHorizonDay({ expectedCloseDate, bidDueDate, isEstimating });
+  if (horizonDay == null) return false;
+  return calendarDayDiff(chicagoCalendarDay(now), horizonDay) >= 0;
 }
 
 /**
@@ -152,6 +185,18 @@ export interface EffectiveOnHoldInput {
  * Coalesces on the PARSED calendar day, not on the raw value, so it matches the SQL `COALESCE` over a real
  * date column even when a caller hands us an unparseable bid string.
  */
+/**
+ * The resolved horizon day ("YYYY-MM-DD") a suppression verdict was measured against, or null when there
+ * is none. Exported so UI copy can NAME the date the engine actually used instead of assuming it was the
+ * close target — in the estimating stage it is the bid due date, and printing "Postponed until <close
+ * date>" there can display a date months in the PAST that had no part in the verdict.
+ */
+export function resolveAtRiskSuppressionDay(
+  input: Pick<EffectiveOnHoldInput, "expectedCloseDate" | "bidDueDate" | "isEstimating">
+): string | null {
+  return resolveHoldHorizonDay(input);
+}
+
 function resolveHoldHorizonDay(
   { expectedCloseDate, bidDueDate, isEstimating }: Pick<
     EffectiveOnHoldInput,

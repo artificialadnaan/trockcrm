@@ -58,7 +58,7 @@ function saveButton(c: HTMLElement): HTMLButtonElement {
 let roots: Root[] = [];
 let containers: HTMLElement[] = [];
 
-function render(currentDate: string | null = null, officeId?: string | null) {
+function render(currentDate: string | null = null, officeId?: string | null, slaFollowsBidDueDate?: boolean) {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
@@ -70,6 +70,7 @@ function render(currentDate: string | null = null, officeId?: string | null) {
         dealId="deal-1"
         currentDate={currentDate}
         officeId={officeId}
+        slaFollowsBidDueDate={slaFollowsBidDueDate}
         onSaved={mocks.onSaved}
       />
     );
@@ -92,6 +93,57 @@ afterEach(() => {
   containers = [];
 });
 
+describe("MoveCloseDateDialog — estimating SLA follows the bid due date", () => {
+  it("stops promising an SLA pause and relabels the removal as a forecast edit", () => {
+    // Codex P2: fixing only the description left "Remove postponement" claiming an SLA effect it no
+    // longer has — in estimating the bid due date governs suppression, so this clears a forecast date.
+    const c = render(FUTURE, null, true);
+    expect(c.textContent).toContain("SLA follows the BID due date");
+    expect(c.textContent).not.toContain("The SLA pauses until that date");
+    expect(c.textContent).toContain("Remove close date");
+    expect(c.textContent).not.toContain("Remove postponement");
+  });
+
+  it("claims NOTHING about the SLA when the caller cannot classify the stage", () => {
+    // The Monday Showcase evidence drawer carries no stage or bid date on its records, so it passes
+    // nothing. Guessing "the SLA pauses" there would be wrong for an estimating row (Codex P2).
+    const c = render(FUTURE, null, undefined);
+    expect(c.textContent).not.toContain("The SLA pauses until that date");
+    expect(c.textContent).not.toContain("SLA follows the BID due date");
+    expect(c.textContent).toContain("Remove close date");
+  });
+
+  it("lets a STALE PAST close target be cleared when the SLA follows the bid date", () => {
+    // Forecast-only in that mode, so hiding the action left the rep unable to clear it at all (Codex P2).
+    const c = render("2020-01-01", null, true);
+    expect(c.textContent).toContain("Remove close date");
+  });
+
+  it("still hides the removal for a past target when the close date IS the postponement", () => {
+    const c = render("2020-01-01", null, false);
+    expect(c.textContent).not.toContain("Remove postponement");
+  });
+
+  it("keeps the postponement wording and the SLA promise everywhere else", () => {
+    const c = render(FUTURE, null, false);
+    expect(c.textContent).toContain("The SLA pauses until that date");
+    expect(c.textContent).toContain("Remove postponement");
+    expect(c.textContent).not.toContain("SLA follows the BID due date");
+  });
+
+  it("does not claim an SLA effect in the note it logs when clearing a forecast date", async () => {
+    const c = render(FUTURE, null, true);
+    const removeBtn = [...c.querySelectorAll("button")].find((b) =>
+      (b.textContent ?? "").includes("Remove close date")
+    ) as HTMLButtonElement;
+    await act(async () => {
+      removeBtn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(mocks.updateDeal).toHaveBeenCalledWith("deal-1", { expectedCloseDate: null }, { officeId: null });
+    expect(mocks.createActivity.mock.calls[0]![0].body).toContain("continues to follow the bid due date");
+  });
+});
+
 describe("MoveCloseDateDialog", () => {
   it("keeps Save disabled until BOTH a date and a reason are provided", () => {
     const c = render();
@@ -108,7 +160,7 @@ describe("MoveCloseDateDialog", () => {
   });
 
   it("blocks a PAST close date (a past target would not postpone the SLA)", () => {
-    const c = render();
+    const c = render(null, null, false);
     setValue(c.querySelector("#move-close-date") as HTMLInputElement, "2020-01-01");
     setValue(c.querySelector("#move-close-reason") as HTMLTextAreaElement, "stale date");
     expect(saveButton(c).disabled).toBe(true);
@@ -177,21 +229,21 @@ describe("MoveCloseDateDialog", () => {
   });
 
   it("seeds the picker from the deal's current close date", () => {
-    const c = render(FUTURE);
+    const c = render(FUTURE, null, false);
     expect((c.querySelector("#move-close-date") as HTMLInputElement).value).toBe(FUTURE);
   });
 
   it("offers Remove postponement ONLY when the deal has an active (future) close target", () => {
     const removeBtn = (c: HTMLElement) =>
       Array.from(c.querySelectorAll("button")).find((b) => b.textContent?.includes("Remove postponement"));
-    expect(removeBtn(render(null))).toBeUndefined(); // nothing postponed
-    expect(removeBtn(render("2020-01-01"))).toBeUndefined(); // a past date isn't postponing the SLA
-    expect(removeBtn(render(TODAY))).toBeDefined(); // today is the >= boundary -> still an active postponement
-    expect(removeBtn(render(FUTURE))).toBeDefined(); // active postponement -> offer the undo
+    expect(removeBtn(render(null, null, false))).toBeUndefined(); // nothing postponed
+    expect(removeBtn(render("2020-01-01", null, false))).toBeUndefined(); // a past date isn't postponing the SLA
+    expect(removeBtn(render(TODAY, null, false))).toBeDefined(); // today is the >= boundary -> still an active postponement
+    expect(removeBtn(render(FUTURE, null, false))).toBeDefined(); // active postponement -> offer the undo
   });
 
   it("Remove postponement clears the close date, logs a note, refreshes + closes", async () => {
-    const c = render(FUTURE);
+    const c = render(FUTURE, undefined, false);
     const removeBtn = Array.from(c.querySelectorAll("button")).find((b) =>
       b.textContent?.includes("Remove postponement")
     )!;

@@ -39,7 +39,7 @@ interface StaleDealCandidateRow {
   workflow_route: string | null;
   stage_entered_at: string | Date | null;
   expected_close_date: string | Date | null;
-  /** The estimating auto-park horizon (2026-07-27) — see AtRiskDealInput.bidDueDate. */
+  /** The estimating hold horizon (2026-07-27 auto-park; 2026-07-28 at-risk SLA suppression too) — see AtRiskDealInput.bidDueDate. */
   bid_due_date: string | Date | null;
   on_hold: boolean | null;
   on_hold_started_at: string | Date | null;
@@ -78,7 +78,8 @@ function toStaleDealRows(rows: StaleDealCandidateRow[], now: Date): StaleDealRow
         // stale nag, so a deal a rep explicitly moved to next week does NOT alert or spawn a stale_deal task.
         // The 90+ day auto-held case is still excluded (via the same effective-hold leg).
         expectedCloseDate: row.expected_close_date,
-        // Estimating deals auto-park off the BID due date, not the project close target (2026-07-27), so
+        // Estimating deals read the BID due date, not the project close target, as their hold horizon (2026-07-27
+        // auto-park; since 2026-07-28 the at-risk SLA suppression too), so
         // this job never nags about a deal every in-app surface already reads as parked and worth $0.
         bidDueDate: row.bid_due_date,
         applyCloseTargetSuppression: true,

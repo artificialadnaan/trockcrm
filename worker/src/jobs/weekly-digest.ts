@@ -33,7 +33,7 @@ interface DigestAtRiskDealRow {
   workflow_route: string | null;
   stage_entered_at: string | Date | null;
   expected_close_date: string | Date | null;
-  /** The estimating auto-park horizon (2026-07-27) — see AtRiskDealInput.bidDueDate. */
+  /** The estimating hold horizon (2026-07-27 auto-park; 2026-07-28 at-risk SLA suppression too) — see AtRiskDealInput.bidDueDate. */
   bid_due_date: string | Date | null;
   on_hold: boolean | null;
   on_hold_started_at: string | Date | null;
@@ -64,7 +64,8 @@ function countDigestAtRiskDeals(rows: DigestAtRiskDealRow[], now: Date): number 
         // close target) quiets the stale nag too, so the weekly digest stale count mirrors the deals
         // list/dashboard/detail — plus the 90+ day auto-held exclusion.
         expectedCloseDate: row.expected_close_date,
-        // Estimating deals auto-park off the BID due date, not the project close target (2026-07-27), so
+        // Estimating deals read the BID due date, not the project close target, as their hold horizon (2026-07-27
+        // auto-park; since 2026-07-28 the at-risk SLA suppression too), so
         // this job never nags about a deal every in-app surface already reads as parked and worth $0.
         bidDueDate: row.bid_due_date,
         applyCloseTargetSuppression: true,

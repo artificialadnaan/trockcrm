@@ -78,7 +78,7 @@ export type DashboardAtRiskSummaryRow = {
   workflowRoute?: WorkflowRoute | null;
   stageEnteredAt?: string | Date | null;
   expectedCloseDate?: string | Date | null;
-  /** The estimating auto-park horizon (2026-07-27) — see AtRiskDealInput.bidDueDate. */
+  /** The estimating hold horizon (2026-07-27 auto-park; 2026-07-28 at-risk SLA suppression too) — see AtRiskDealInput.bidDueDate. */
   bidDueDate?: string | Date | null;
   onHold?: boolean | null;
   onHoldStartedAt?: string | Date | null;

@@ -69,6 +69,111 @@ describe("isAtRiskSuppressedByCloseTarget", () => {
     expect(isAtRiskSuppressedByCloseTarget({ expectedCloseDate: null, now: NOW })).toBe(false);
     expect(isAtRiskSuppressedByCloseTarget({ expectedCloseDate: "not-a-date", now: NOW })).toBe(false);
   });
+
+  // The estimating branch (2026-07-28). SUPERSEDES the #966 scoping note that the bid due date
+  // "deliberately does NOT feed the shorter close-target SLA suppression": in the genuine estimating
+  // stage the suppression is now measured from the SAME horizon date the auto-park uses, so a bid that
+  // is already due stops being quieted by a comfortable project close date.
+  it("measures suppression from the BID due date in the estimating stage", () => {
+    // Bid already due, close target still comfortably ahead -> NOT suppressed (was suppressed pre-change).
+    expect(
+      isAtRiskSuppressedByCloseTarget({
+        expectedCloseDate: plusDays(TODAY, 120),
+        bidDueDate: plusDays(TODAY, -30),
+        isEstimating: true,
+        now: NOW,
+      })
+    ).toBe(false);
+
+    // Bid not due yet, close target already past -> suppressed (was NOT suppressed pre-change).
+    expect(
+      isAtRiskSuppressedByCloseTarget({
+        expectedCloseDate: plusDays(TODAY, -30),
+        bidDueDate: plusDays(TODAY, 10),
+        isEstimating: true,
+        now: NOW,
+      })
+    ).toBe(true);
+  });
+
+  it("suppresses on the bid due date itself (today-or-future, same >= boundary)", () => {
+    expect(
+      isAtRiskSuppressedByCloseTarget({
+        expectedCloseDate: plusDays(TODAY, -30),
+        bidDueDate: TODAY,
+        isEstimating: true,
+        now: NOW,
+      })
+    ).toBe(true);
+    expect(
+      isAtRiskSuppressedByCloseTarget({
+        expectedCloseDate: plusDays(TODAY, 120),
+        bidDueDate: plusDays(TODAY, -1),
+        isEstimating: true,
+        now: NOW,
+      })
+    ).toBe(false);
+  });
+
+  it("falls back to the close target when the bid due date is null or unparseable", () => {
+    // Same conservative fallback the auto-park uses: a null bid date reproduces today's behaviour exactly.
+    expect(
+      isAtRiskSuppressedByCloseTarget({
+        expectedCloseDate: plusDays(TODAY, 10),
+        bidDueDate: null,
+        isEstimating: true,
+        now: NOW,
+      })
+    ).toBe(true);
+    expect(
+      isAtRiskSuppressedByCloseTarget({
+        expectedCloseDate: plusDays(TODAY, -10),
+        bidDueDate: "not-a-date",
+        isEstimating: true,
+        now: NOW,
+      })
+    ).toBe(false);
+  });
+
+  it("IGNORES the bid due date outside the estimating stage", () => {
+    // Every other stage stays on the project close date, whatever the bid date says.
+    expect(
+      isAtRiskSuppressedByCloseTarget({
+        expectedCloseDate: plusDays(TODAY, 10),
+        bidDueDate: plusDays(TODAY, -30),
+        now: NOW,
+      })
+    ).toBe(true);
+    expect(
+      isAtRiskSuppressedByCloseTarget({
+        expectedCloseDate: plusDays(TODAY, -10),
+        bidDueDate: plusDays(TODAY, 30),
+        isEstimating: false,
+        now: NOW,
+      })
+    ).toBe(false);
+  });
+
+  it("reads a Date bid due date on its UTC calendar day (matches the SQL AT TIME ZONE 'UTC')", () => {
+    // bid_due_date is a timestamptz stamped at UTC midnight; a bare local read would shift the day west
+    // of UTC and flip the verdict.
+    expect(
+      isAtRiskSuppressedByCloseTarget({
+        expectedCloseDate: plusDays(TODAY, 120),
+        bidDueDate: new Date(`${plusDays(TODAY, -1)}T00:00:00.000Z`),
+        isEstimating: true,
+        now: NOW,
+      })
+    ).toBe(false);
+    expect(
+      isAtRiskSuppressedByCloseTarget({
+        expectedCloseDate: plusDays(TODAY, -120),
+        bidDueDate: new Date(`${TODAY}T00:00:00.000Z`),
+        isEstimating: true,
+        now: NOW,
+      })
+    ).toBe(true);
+  });
 });
 
 describe("isDealEffectivelyOnHold", () => {

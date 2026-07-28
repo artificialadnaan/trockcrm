@@ -429,10 +429,12 @@ describe("estimating-stage at-risk uses the BID due date as the hold horizon (20
     expect(result.reason).toBe("threshold_reached");
   });
 
-  it("does NOT let the bid due date drive the shorter close-target SLA suppression", () => {
-    // The "Move Close Date" postponement is a separate, deliberately unchanged rule: it stays keyed on
-    // expected_close_date in every stage. A near-future BID date must not silence a stage-age nag on its
-    // own — only a near-future CLOSE target does.
+  it("DOES drive the shorter SLA suppression from the bid due date in estimating", () => {
+    // SUPERSEDES the #966 rule "the bid due date does NOT feed the shorter close-target SLA suppression"
+    // (Adnaan, 2026-07-28). Keeping suppression on expected_close_date in estimating meant a comfortable
+    // project close date silenced a bid that was already overdue; the two legs now read ONE horizon date.
+    // Here the bid is not due for another 19 days, so the stage-age nag is quieted even though the deal
+    // has no close target at all — the inverse of the case this test used to lock.
     const result = getDealAtRiskResult(
       {
         stageSlug: "estimating",
@@ -446,7 +448,49 @@ describe("estimating-stage at-risk uses the BID due date as the hold horizon (20
       NOW
     );
 
+    expect(result.isAtRisk).toBe(false);
+    expect(result.reason).toBe("close_target_pending");
+  });
+
+  it("surfaces an overdue bid that a far-out close target used to hide (prod case)", () => {
+    // Modelled on "Warehouse and Factory" (office_dallas, 2026-07-28): 46 days in the estimating stage,
+    // bid due a month earlier, close date four months out. The close target was BOTH inside the 90-day
+    // horizon (so no auto-park) AND in the future (so the SLA nag was suppressed) — the deal went silent
+    // on every surface. Six prod deals sat in exactly this shape.
+    const result = getDealAtRiskResult(
+      {
+        stageSlug: "estimating",
+        workflowRoute: "normal" as const,
+        stageEnteredAt: "2026-04-16T12:00:00.000Z",
+        applyCloseTargetSuppression: true,
+        expectedCloseDate: "2026-08-15",
+        bidDueDate: "2026-05-01T00:00:00.000Z",
+      },
+      "rep",
+      NOW
+    );
+
     expect(result.isAtRisk).toBe(true);
     expect(result.reason).toBe("threshold_reached");
+  });
+
+  it("leaves every other stage on the close target when the bid is overdue", () => {
+    // The stage gate is the whole scope of this rule: outside estimating an overdue bid must not
+    // un-suppress a deal whose close target is still pending.
+    const result = getDealAtRiskResult(
+      {
+        stageSlug: "estimate_sent_to_client",
+        workflowRoute: "normal" as const,
+        stageEnteredAt: "2026-04-16T12:00:00.000Z",
+        applyCloseTargetSuppression: true,
+        expectedCloseDate: "2026-08-15",
+        bidDueDate: "2026-05-01T00:00:00.000Z",
+      },
+      "rep",
+      NOW
+    );
+
+    expect(result.isAtRisk).toBe(false);
+    expect(result.reason).toBe("close_target_pending");
   });
 });

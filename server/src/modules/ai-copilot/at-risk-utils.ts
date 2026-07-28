@@ -5,7 +5,7 @@ export type AiAtRiskDealRow = {
   workflow_route?: string | null;
   stage_entered_at?: string | Date | null;
   expected_close_date?: string | Date | null;
-  /** The estimating auto-park horizon (2026-07-27) — see AtRiskDealInput.bidDueDate. */
+  /** The estimating hold horizon (2026-07-27 auto-park; 2026-07-28 at-risk SLA suppression too) — see AtRiskDealInput.bidDueDate. */
   bid_due_date?: string | Date | null;
   on_hold?: boolean | null;
   on_hold_started_at?: string | Date | null;

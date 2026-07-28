@@ -15,6 +15,9 @@ interface EntityActivityTabProps {
   showRecordings?: boolean;
   /** Deal-only: the current expected_close_date ("YYYY-MM-DD"), used to seed the Move Close Date picker. */
   closeTargetDate?: string | null;
+  /** Deal-only: the deal sits in the genuine estimating stage, where the SLA follows the BID due date, so
+   *  the Move Close Date dialog must not promise an SLA pause it cannot deliver (2026-07-28). */
+  slaFollowsBidDueDate?: boolean;
   /** Deal-only: called after the close date moves so the host can refetch the deal (the SLA badge). */
   onDealChanged?: () => void | Promise<void>;
   /** Deal-only: whether the viewer may edit the deal (assigned rep or admin). Gates the Move Close Date
@@ -75,6 +78,7 @@ export function EntityActivityTab({
   emptyLabel,
   showRecordings = false,
   closeTargetDate = null,
+  slaFollowsBidDueDate,
   onDealChanged,
   canMoveCloseDate = false,
   officeId = null,
@@ -129,6 +133,7 @@ export function EntityActivityTab({
           onOpenChange={setMoveCloseDateOpen}
           dealId={entityId}
           currentDate={closeTargetDate}
+          slaFollowsBidDueDate={slaFollowsBidDueDate}
           officeId={officeId}
           onSaved={async () => {
             await refetch();
