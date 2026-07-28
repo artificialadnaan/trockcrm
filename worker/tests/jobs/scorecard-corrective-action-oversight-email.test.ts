@@ -74,6 +74,8 @@ interface ScorecardOverrides {
   revalidateOversightCycle?: string | null;
   revalidatePhaseStamp?: Date | null;
   revalidateStatus?: string;
+  /** Generation the POST-FETCH artifact recheck sees, modelling an edit during the R2 read. */
+  postFetchGeneration?: Date | null;
   /** [] => the browsable/active gate filtered the row out entirely. */
   scorecardRows?: unknown[];
 }
@@ -89,6 +91,20 @@ function makeQuery(
     // responder branch must be tested before the scorecard-snapshot branch or it is swallowed by it.
     if (sql.includes("WITH candidates AS")) return { rows: responders };
     // The final pre-delivery revalidation — a narrow SELECT, distinct from the snapshot join above.
+    // The POST-FETCH artifact recheck — narrower than both the snapshot and the delivery revalidation.
+    if (sql.includes("SELECT pdf_content_generation")) {
+      return {
+        rows: [
+          {
+            pdf_content_generation:
+              over.postFetchGeneration === undefined
+                ? (over.pdfContentGeneration === undefined ? GENERATION : over.pdfContentGeneration)
+                : over.postFetchGeneration,
+            updated_at: over.updatedAt ?? GENERATION,
+          },
+        ],
+      };
+    }
     if (sql.includes("SELECT corrective_action_oversight_cycle")) {
       return {
         rows: [
@@ -875,5 +891,34 @@ describe("handleScorecardCorrectiveActionOversightEmail", () => {
 
     const [, , html] = sendEmail.mock.calls[0] as unknown as [string[], string, string];
     expect(html).toContain("tab=scorecards&amp;officeId=00000000-0000-0000-0000-0000000000f1");
+  });
+
+  it("drops the attachment when the card changed WHILE the PDF was being fetched", async () => {
+    // The R2 read is the slowest step. An edit landing during it — even one that leaves the lifecycle
+    // CLOSED, like a note or signature change — advances updated_at while the old key stays in place, so
+    // marker, status and phase stamp all still match. Only re-reading the generation catches it.
+    const { query } = makeQuery({
+      status: "corrective_action_closed",
+      postFetchGeneration: new Date("2026-07-27T13:00:00.000Z"),
+      updatedAt: new Date("2026-07-27T14:00:00.000Z"),
+    });
+    const sendEmail = makeSend();
+    const getPdf = vi.fn(async () => Buffer.from("%PDF-1.4 stale-by-now"));
+
+    await handleScorecardCorrectiveActionOversightEmail(payload({ phase: "closed" }), null, {
+      query: query as never,
+      sendEmail: sendEmail as never,
+      getPdf: getPdf as never,
+      env,
+      logger: makeLogger(),
+    });
+
+    // It still sends — the notice matters more than the attachment — but WITHOUT stale bytes.
+    expect(getPdf).toHaveBeenCalled();
+    expect(sendEmail).toHaveBeenCalledOnce();
+    const [, , , options] = sendEmail.mock.calls[0] as unknown as [
+      string[], string, string, { attachments?: unknown[] },
+    ];
+    expect(options.attachments).toBeUndefined();
   });
 });

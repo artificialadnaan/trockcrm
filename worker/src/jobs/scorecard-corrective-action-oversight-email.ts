@@ -318,7 +318,7 @@ export async function handleScorecardCorrectiveActionOversightEmail(
   // no-attachment send rather than blocking the notification.
   let attachments: SendSystemEmailAttachment[] | undefined;
   if (phase === "closed") {
-    attachments = await loadPdfAttachment(scorecard, scorecardId, deps, logger);
+    attachments = await loadPdfAttachment(scorecard, scorecardId, tenantSchema, query, deps, logger);
   }
 
   const email = buildOversightEmail({
@@ -458,6 +458,8 @@ export async function handleScorecardCorrectiveActionOversightEmail(
 async function loadPdfAttachment(
   scorecard: ScorecardRow,
   scorecardId: string,
+  tenantSchema: string,
+  query: typeof pool.query,
   deps: HandlerDeps,
   logger: Pick<Console, "log" | "warn" | "error">,
 ): Promise<SendSystemEmailAttachment[] | undefined> {
@@ -511,6 +513,26 @@ async function loadPdfAttachment(
         scorecardId,
         bytes: buffer.byteLength,
       });
+      return undefined;
+    }
+    // POST-FETCH REVALIDATION. Every check above described the row BEFORE the R2 read, which is the
+    // slowest step here. An edit landing during it — even one that leaves the lifecycle CLOSED, like a note
+    // or signature change — advances updated_at while the old key stays in place until the best-effort
+    // rerender succeeds. Marker, status and phase stamp would all still match, so only re-reading the
+    // generation catches it. Drop the attachment rather than send a "Completed" notice with stale bytes.
+    const fresh = await query(
+      `SELECT pdf_content_generation, updated_at
+         FROM ${tenantSchema}.field_scorecards WHERE id = $1::uuid LIMIT 1`,
+      [scorecardId],
+    );
+    const freshRow = fresh.rows[0] as
+      | { pdf_content_generation: Date | string | null; updated_at: Date | string | null }
+      | undefined;
+    if (!freshRow || !isStoredPdfCurrent(freshRow as ScorecardRow)) {
+      logger.warn(
+        "[CorrectiveActionOversightEmail] Scorecard changed while the PDF was being fetched - sending without attachment (the CRM link regenerates)",
+        { scorecardId },
+      );
       return undefined;
     }
     return [{ filename: `field-scorecard-${scorecardId}.pdf`, content: buffer }];

@@ -28,6 +28,10 @@ const SCORECARD_MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 // without downgrading pdf_render_version. Never email either stale shape; the no-attachment CRM-link
 // fallback is safer and the download route will regenerate the current artifact on demand.
 const MIN_SCORECARD_PDF_RENDER_VERSION_WITH_EVIDENCE = 2;
+// Renderer v3 is the first revision that embeds the corrective-action record. A below-band scorecard
+// attached at v2 shows no corrective actions at all, so the post-fetch revalidation requires v3 — matching
+// the server, which already treats every pre-v3 artifact as stale.
+const MIN_SCORECARD_PDF_RENDER_VERSION_WITH_CORRECTIVE_ACTIONS = 3;
 
 function isCurrentScorecardPdfArtifactKey(r2Key: string, renderVersion: number): boolean {
   if (!Number.isInteger(renderVersion) || renderVersion < MIN_SCORECARD_PDF_RENDER_VERSION_WITH_EVIDENCE) {
@@ -37,6 +41,45 @@ function isCurrentScorecardPdfArtifactKey(r2Key: string, renderVersion: number):
   // digest as well as the revision rejects both pre-v2 PDFs and the old same-key v2 publisher, whose
   // object could be overwritten by an interleaved stale render.
   return new RegExp(`\\.[a-f0-9]{64}\\.v${renderVersion}\\.pdf$`).test(r2Key);
+}
+
+/**
+ * Whether the stored artifact still describes the scorecard's CURRENT content, re-read AFTER the R2 fetch.
+ *
+ * Two conditions, both required:
+ *   - the render VERSION must carry the corrective-action record. The server treats every pre-v3 artifact as
+ *     stale for exactly that reason, and a worker that accepted v2 would attach a below-band scorecard with
+ *     its corrective-action section missing — reachable on a rolling deploy or a legacy pending job.
+ *   - the rendered GENERATION must still match updated_at, when both are known. A null rendered generation is
+ *     a pre-0200 artifact with nothing to compare, and blocking on that would drop the attachment for every
+ *     legacy card.
+ */
+async function isStoredArtifactStillCurrent(
+  query: typeof pool.query,
+  tenantSchema: string,
+  scorecardId: string,
+): Promise<boolean> {
+  const res = await query(
+    `SELECT status, pdf_render_version, pdf_content_generation, updated_at
+       FROM ${tenantSchema}.field_scorecards WHERE id = $1::uuid LIMIT 1`,
+    [scorecardId],
+  );
+  const row = res.rows[0];
+  if (!row) return false;
+  // Require the corrective-action-bearing renderer ONLY for a card that actually has corrective actions.
+  // Demanding v3 unconditionally would refuse to attach a perfectly good v2 artifact for the ordinary
+  // above-band scorecard during a rolling deploy — a regression far wider than the case being guarded.
+  const inCorrectiveAction = typeof row.status === "string" && row.status.startsWith("corrective_action");
+  if (
+    inCorrectiveAction &&
+    Number(row.pdf_render_version ?? 0) < MIN_SCORECARD_PDF_RENDER_VERSION_WITH_CORRECTIVE_ACTIONS
+  ) {
+    return false;
+  }
+  const rendered = row.pdf_content_generation;
+  const current = row.updated_at;
+  if (rendered == null || current == null) return true;
+  return new Date(rendered).getTime() === new Date(current).getTime();
 }
 
 export interface FieldScorecardEmailPayload {
@@ -201,8 +244,19 @@ export async function handleFieldScorecardEmail(
     } catch (err) {
       logger.warn("[FieldScorecardEmail] PDF fetch failed - sending without attachment", { scorecardId, pdfR2Key, err });
     }
+    // POST-FETCH REVALIDATION. Everything above described the row as it was BEFORE the R2 read, and that
+    // read is the slowest step in this handler. A corrective-action response committing during it advances
+    // updated_at while deliberately leaving the old key in place until the best-effort rerender lands — so
+    // the bytes now in hand can be stale even though every pre-fetch check passed. Re-read the generation
+    // and drop the attachment if the artifact is no longer current; the CRM link always regenerates.
+    const stillCurrent = buffer ? await isStoredArtifactStillCurrent(query, tenantSchema, scorecardId) : true;
     if (!buffer) {
       logger.warn("[FieldScorecardEmail] PDF not available in R2 - sending without attachment", { scorecardId, pdfR2Key });
+    } else if (!stillCurrent) {
+      logger.warn(
+        "[FieldScorecardEmail] Scorecard changed while the PDF was being fetched - sending without attachment (the CRM link regenerates)",
+        { scorecardId, pdfR2Key },
+      );
     } else if (buffer.byteLength > SCORECARD_MAX_ATTACHMENT_BYTES) {
       // Oversized PDF: it EXISTS (downloadable in the CRM); deliver the notification with a CRM link rather
       // than attaching (or dead-lettering).
