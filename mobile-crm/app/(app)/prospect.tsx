@@ -342,6 +342,15 @@ export default function ProspectScreen() {
   const [createCompanyError, setCreateCompanyError] = useState<string | null>(null);
   /** Shown beside the match list when a typed address turned up existing records. */
   const [rematchNotice, setRematchNotice] = useState<string | null>(null);
+  /**
+   * Did we get as far as the CREATE?
+   *
+   * One error handler covers two very different failures. Before the create, a dropped response means
+   * the lookup never answered and nothing was written. After it, the property may well exist — and
+   * saying "nothing was added" there sends the rep to make a second one, which is the duplicate this
+   * whole path exists to avoid. A ref, because onError cannot see the mutation's locals.
+   */
+  const propertyCreateAttempted = useRef(false);
 
   /**
    * The address, typed, for when the geocode could not supply one.
@@ -440,6 +449,7 @@ export default function ProspectScreen() {
 
   const createPropertyHere = useMutation({
     mutationFn: async () => {
+      propertyCreateAttempted.current = false;
       // Read ONCE, before the await. Both are state and can change under a slow request, and what
       // onSuccess writes into the target has to describe what was actually created.
       const under = company;
@@ -493,6 +503,7 @@ export default function ProspectScreen() {
       const corroborated = rematched.filter(isCorroborated);
       if (corroborated.length > 0) return { created: null, rematched: corroborated, at, under };
 
+      propertyCreateAttempted.current = true;
       const created = await prospecting.createProperty(fetcher, {
         companyId: under.id,
         // The street line is the honest default name; it can be renamed on the web.
@@ -550,9 +561,14 @@ export default function ProspectScreen() {
       await queryClient.invalidateQueries({ queryKey: ["properties"] });
     },
     onError: (err) => {
+      const dropped = err instanceof ApiError && (err.status === 0 || err.status === 408);
       setCreatePropertyError(
-        err instanceof ApiError && (err.status === 0 || err.status === 408)
-          ? "No signal — couldn't check that address, so nothing was added. Try again."
+        dropped
+          ? propertyCreateAttempted.current
+            ? // The write had already started. It may have committed — the same rule the activity and
+              // company writes follow, and the reason neither of them claims failure here.
+              "No signal — this building may or may not have been added. Check before adding it again."
+            : "No signal — couldn't check that address, so nothing was added. Try again."
           : err instanceof ApiError
             ? err.message
             : "Couldn't add this building.",
