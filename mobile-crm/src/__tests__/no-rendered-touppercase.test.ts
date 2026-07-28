@@ -77,16 +77,36 @@ function sourceFiles(dir: string): string[] {
  *
  * So walk outward and let the nearest JSX context decide:
  *   - a child-position expression (`<Text>{...}</Text>`) is rendered;
- *   - an `on*` attribute is a handler — its return value is never spoken;
- *   - any other attribute (`accessibilityLabel`, `title`) IS spoken.
+ *   - an attribute counts only if it is TEXT-BEARING (`accessibilityLabel`, `title`, `placeholder`);
+ *     `testID`, `key`, `style` and handlers are not perceived by anyone and are exempt.
  * The map case resolves against the inner `<Text>` it returns, which is the correct answer.
  */
+/**
+ * Attributes whose value a person actually reads or hears.
+ *
+ * An ALLOWLIST, not "everything except on*". Exempting only handlers still classified `testID`, `key`,
+ * `style` and every custom data prop as spoken, so an ordinary
+ * `<View testID={id.toUpperCase()} />` would have failed a tree-wide test for something no user ever
+ * perceives. Naming the spoken props keeps the guard about accessibility rather than about strings.
+ */
+const TEXT_BEARING_PROPS = new Set([
+  "accessibilityLabel",
+  "accessibilityHint",
+  "accessibilityValue",
+  "aria-label",
+  "alt",
+  "label",
+  "title",
+  "placeholder",
+  "value",
+  "defaultValue",
+]);
+
 function isRenderedText(node: ts.Node): boolean {
   for (let cur = node.parent; cur; cur = cur.parent) {
     if (ts.isJsxAttribute(cur)) {
       const name = ts.isIdentifier(cur.name) ? cur.name.text : cur.name.getText();
-      // Handlers are named onPress/onChangeText/... — their result is not displayed.
-      return !/^on[A-Z]/.test(name);
+      return TEXT_BEARING_PROPS.has(name);
     }
     if (ts.isJsxExpression(cur)) {
       const parent = cur.parent;
@@ -200,6 +220,13 @@ describe("no toUpperCase() on rendered text", () => {
       expect(
         check("const A = () => <View>{xs.map((i) => <Text>{i.name.toUpperCase()}</Text>)}</View>;"),
       ).toBe(1);
+    });
+
+    it("allows uppercase in props nobody perceives", () => {
+      // testID, key and friends are not spoken and not drawn. Flagging them would make a tree-wide
+      // accessibility invariant block changes that have nothing to do with accessibility.
+      expect(check("const A = () => <View testID={id.toUpperCase()} />;")).toBe(0);
+      expect(check("const A = () => <View key={code.toUpperCase()} />;")).toBe(0);
     });
 
     it("is not fooled by the identifier appearing in a comment", () => {
