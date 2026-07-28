@@ -69,6 +69,8 @@ export default function ProspectScreen() {
   const [companySearchFailed, setCompanySearchFailed] = useState(false);
   /** Set when the lead was created but the back-reference could not be written. */
   const [linkFailed, setLinkFailed] = useState(false);
+  /** The person could not be saved, but the visit was. Reported, never silent. */
+  const [contactFailed, setContactFailed] = useState(false);
 
   const [type, setType] = useState<prospecting.FieldActivityType | null>("site_visit");
   const [body, setBody] = useState("");
@@ -206,6 +208,8 @@ export default function ProspectScreen() {
   const save = useMutation({
     mutationFn: async () => {
       let contactId: string | undefined;
+      let duplicates: prospecting.DedupSuggestion[] | null = null;
+      let contactFailed = false;
       const first = contactFirst.trim();
       const last = contactLast.trim();
       /**
@@ -217,7 +221,15 @@ export default function ProspectScreen() {
        * undefined and the activity still attaches to the property.
        */
       if (first && last) {
-        const created = await prospecting.createContact(fetcher, {
+        /**
+         * The PERSON is optional; the VISIT is not.
+         *
+         * A throw here aborted the whole mutation, so a contacts outage or a validation refusal took
+         * the site visit down with it — the opposite of what the docblock promised, and the wrong
+         * trade: the rep is standing outside and the log is the thing that must survive.
+         */
+        try {
+          const created = await prospecting.createContact(fetcher, {
           firstName: first,
           lastName: last,
           category: "property_manager",
@@ -227,16 +239,15 @@ export default function ProspectScreen() {
           // seen was created with no company at all — the one case where the link matters most.
           companyId: property?.companyId ?? company?.id,
         });
-        contactId = created.created?.id;
-        // SURFACED, not swallowed. The union exists so a duplicate cannot be mistaken for success, and
-        // then discarding the suggestions here threw away the one useful thing about that answer — the
-        // rep would never learn the person is already in the CRM.
-        setDuplicateContacts(created.duplicates ?? null);
-      } else {
-        setDuplicateContacts(null);
+          contactId = created.created?.id;
+          duplicates = created.duplicates ?? null;
+        } catch {
+          // Recorded and reported after the activity lands; the visit continues regardless.
+          contactFailed = true;
+        }
       }
 
-      return prospecting.logActivity(fetcher, {
+      const activity = await prospecting.logActivity(fetcher, {
         ...target,
         contactId,
         type: type!,
@@ -244,10 +255,15 @@ export default function ProspectScreen() {
         outcome: outcome.trim() || undefined,
         nextStep: nextStep.trim() || undefined,
       });
+      // State moves to the callbacks — mutationFn can run twice under React's concurrent rendering,
+      // and a setState there is a side effect in a function that is not allowed to have one.
+      return { activity, duplicates, contactFailed };
     },
-    onSuccess: async (activity) => {
+    onSuccess: async ({ activity, duplicates, contactFailed }) => {
       setSavedActivityId(activity.id);
       setSaveError(null);
+      setDuplicateContacts(duplicates);
+      setContactFailed(contactFailed);
       // The property's activity feed and any list showing last-touch are now stale.
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["properties"] }),
@@ -268,7 +284,7 @@ export default function ProspectScreen() {
        * outcome is unknown is the honest version, and it puts the check before the retry.
        */
       setSaveError(
-        err instanceof ApiError && err.status === 0
+        err instanceof ApiError && (err.status === 0 || err.status === 408)
           ? "No signal — this may or may not have saved. Check the property's activity before logging it again."
           : err instanceof ApiError
             ? err.message
@@ -279,6 +295,8 @@ export default function ProspectScreen() {
 
   const [promoted, setPromoted] = useState<prospecting.LeadRef | null>(null);
   const [promoteError, setPromoteError] = useState<string | null>(null);
+  /** What the lead-creation gate still wants — the NORMAL outcome of promoting from the field. */
+  const [leadMissing, setLeadMissing] = useState<prospecting.LeadRequirement[] | null>(null);
 
   /**
    * Promote the capture to a lead.
@@ -295,13 +313,16 @@ export default function ProspectScreen() {
   const promote = useMutation({
     mutationFn: async () => {
       if (!property) throw new Error("A property is required to make a lead.");
-      const lead = await prospecting.createLeadFromCapture(fetcher, {
+      const result = await prospecting.createLeadFromCapture(fetcher, {
         companyId: property.companyId,
         propertyId: property.id,
         // The property's name is the honest default — a rep naming the lead is a second decision at the
         // moment they are trying to leave, and it can be edited on the web where there is a keyboard.
         name: property.name,
       });
+      // The gate refused, and that is not a failure — see createLeadFromCapture.
+      if (!result.lead) return { missing: result.missing };
+      const lead = result.lead;
       if (savedActivityId) {
         try {
           await prospecting.linkActivityToLead(fetcher, savedActivityId, lead.id);
@@ -313,17 +334,29 @@ export default function ProspectScreen() {
           setLinkFailed(true);
         }
       }
-      return lead;
+      return { lead };
     },
-    onSuccess: async (lead) => {
-      setPromoted(lead);
+    onSuccess: async ({ lead, missing }: { lead?: prospecting.LeadRef; missing?: prospecting.LeadRequirement[] }) => {
       setPromoteError(null);
+      if (!lead) {
+        setLeadMissing(missing ?? []);
+        return;
+      }
+      setLeadMissing(null);
+      setPromoted(lead);
       await queryClient.invalidateQueries({ queryKey: ["leads"] });
     },
     onError: (err) => {
+      /**
+       * 0 AND 408 are both INDETERMINATE.
+       *
+       * 408 is our own 30s deadline firing, not the server declining — the write may have committed.
+       * Reporting "the lead wasn't created" is how the same lead gets made twice, which is exactly what
+       * the equivalent rule on the activity save exists to prevent. The deadline was missed there.
+       */
       setPromoteError(
-        err instanceof ApiError && err.status === 0
-          ? "No signal — the log is saved, but the lead wasn't created."
+        err instanceof ApiError && (err.status === 0 || err.status === 408)
+          ? "No signal — the lead may or may not have been created. Check on the web before trying again."
           : err instanceof ApiError
             ? err.message
             : "Couldn't create the lead.",
@@ -370,7 +403,7 @@ export default function ProspectScreen() {
                 promote THAT one — creating a lead for a building they never logged, with the activity
                 still pointing at the first. The target the log committed to is not editable after the
                 fact; logging another visit here starts a fresh capture. */}
-            {saved ? null : (
+            {saved || save.isPending ? null : (
               <Pressable
                 testID="prospect-change-property"
                 onPress={() => {
@@ -722,6 +755,12 @@ export default function ProspectScreen() {
               </Pressable>
             ) : null}
 
+            {contactFailed ? (
+              <Text testID="prospect-contact-failed" style={styles.warn}>
+                The visit was logged, but that person couldn&apos;t be saved — add them on the web.
+              </Text>
+            ) : null}
+
             {duplicateContacts?.length ? (
               /* The dedup answer, shown rather than swallowed. The person is already in the CRM, the
                  visit is logged against the property regardless, and the rep can link them properly on
@@ -732,6 +771,24 @@ export default function ProspectScreen() {
                   : `${duplicateContacts.length} similar people are already in the CRM, so nobody was added.`}{" "}
                 The visit was logged.
               </Text>
+            ) : null}
+
+            {leadMissing ? (
+              /* The gate's own list, labelled by the server. "Couldn't create the lead" would be both
+                 useless and misleading — nothing is broken, the lead simply needs facts a rep at a door
+                 does not have. Naming them is the difference between a dead end and a next step. */
+              <View testID="prospect-lead-missing">
+                <Text style={styles.help}>
+                  {leadMissing.length > 0
+                    ? "This needs a few more details before it can be a lead — finish it on the web:"
+                    : "This needs more details before it can be a lead. Finish it on the web."}
+                </Text>
+                {leadMissing.map((field) => (
+                  <Text key={field.key} style={styles.help}>
+                    • {field.label}
+                  </Text>
+                ))}
+              </View>
             ) : null}
 
             {promoteError ? (
@@ -745,7 +802,9 @@ export default function ProspectScreen() {
                 setSavedActivityId(null);
                 setPromoted(null);
                 setPromoteError(null);
+                setLeadMissing(null);
                 setLinkFailed(false);
+                setContactFailed(false);
                 setDuplicateContacts(null);
                 setBody("");
                 setOutcome("");

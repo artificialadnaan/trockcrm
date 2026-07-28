@@ -1,3 +1,4 @@
+import { ApiError } from "../client";
 import type { Fetcher } from "./auth";
 
 /**
@@ -267,6 +268,13 @@ export function hasActivityTarget(target: ActivityTarget): boolean {
 
 export type LeadRef = { id: string; name: string | null; leadNumber?: string | null };
 
+/** What the lead-creation gate still wants, already labelled by the server. */
+export type LeadRequirement = { key: string; label: string };
+
+export type CreateLeadResult =
+  | { lead: LeadRef; missing?: undefined }
+  | { lead?: undefined; missing: LeadRequirement[] };
+
 /**
  * POST /leads → 201 `{ lead }`. Requires exactly companyId + propertyId + name.
  *
@@ -279,9 +287,35 @@ export type LeadRef = { id: string; name: string | null; leadNumber?: string | n
 export async function createLeadFromCapture(
   fetcher: Fetcher,
   input: { companyId: string; propertyId: string; name: string },
-): Promise<LeadRef> {
-  const res = await fetcher<{ lead: LeadRef }>("/leads", { method: "POST", body: input });
-  return res.lead;
+): Promise<CreateLeadResult> {
+  try {
+    const res = await fetcher<{ lead: LeadRef }>("/leads", { method: "POST", body: input });
+    return { lead: res.lead };
+  } catch (err) {
+    /**
+     * THE CREATION GATE, which is not optional and is not three fields.
+     *
+     * The route's own check is `companyId && propertyId && name`, and reading only that is how this
+     * shipped believing promotion was nearly free. `createLead` then calls assertLeadCreateRequirements
+     * UNCONDITIONALLY, which additionally demands primaryContactId, primaryContactRole, budgetStatus,
+     * projectTypeId and bidDueDate, plus six fields on the property itself. A capture has none of them
+     * — a rep at a door does not know the bid due date — so this 400 is the NORMAL outcome, not an
+     * error case.
+     *
+     * The server labels each missing field. Returning them as a VALUE lets the screen say exactly what
+     * the lead still needs instead of "couldn't create the lead", which would be both useless and
+     * misleading: nothing is broken.
+     */
+    if (err instanceof ApiError && err.status === 400) {
+      const body = err.body as
+        | { error?: { code?: string; missingRequirements?: { fields?: LeadRequirement[] } } }
+        | undefined;
+      if (body?.error?.code === "LEAD_CREATE_REQUIREMENTS_UNMET") {
+        return { missing: body.error.missingRequirements?.fields ?? [] };
+      }
+    }
+    throw err;
+  }
 }
 
 /**

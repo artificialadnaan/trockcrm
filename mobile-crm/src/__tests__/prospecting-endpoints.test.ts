@@ -1,4 +1,5 @@
 import * as prospecting from "../api/endpoints/prospecting";
+import { ApiError } from "../api/client";
 import type { Fetcher } from "../api/endpoints/auth";
 
 function recording(result: unknown = {}) {
@@ -167,11 +168,16 @@ describe("promotion to a lead", () => {
     expect(calls[0].opts.body).toEqual({ companyId: "c1", propertyId: "p1", name: "Palm Villas" });
   });
 
-  it("unwraps { lead }", async () => {
+  it("unwraps { lead } into the success arm of the result", async () => {
+    // The contract changed when the creation gate turned out to be real: a refusal is a VALUE, so the
+    // success case is `{ lead }` rather than a bare LeadRef.
     const { fetcher } = recording({ lead: { id: "l1", name: "Palm Villas", leadNumber: "L-204" } });
-    await expect(
-      prospecting.createLeadFromCapture(fetcher, { companyId: "c1", propertyId: "p1", name: "X" }),
-    ).resolves.toMatchObject({ id: "l1", leadNumber: "L-204" });
+    const res = await prospecting.createLeadFromCapture(fetcher, {
+      companyId: "c1",
+      propertyId: "p1",
+      name: "X",
+    });
+    expect(res.lead).toMatchObject({ id: "l1", leadNumber: "L-204" });
   });
 
   it("links the activity to the new lead by id", async () => {
@@ -248,5 +254,62 @@ describe("match query forwards every disproving signal", () => {
       zip: "75201",
     });
     expect(calls[0].opts.query).toMatchObject({ city: "Dallas", state: "TX", zip: "75201" });
+  });
+});
+
+describe("the lead-creation gate", () => {
+  /**
+   * The finding that mattered most: promotion never worked.
+   *
+   * POST /leads validates `companyId && propertyId && name` in the ROUTE, and reading only that is how
+   * this shipped believing promotion was nearly free. createLead then calls
+   * assertLeadCreateRequirements unconditionally, which also demands primaryContactId,
+   * primaryContactRole, budgetStatus, projectTypeId and bidDueDate plus six property fields. A capture
+   * has none of them, so the 400 is the NORMAL outcome and must be a value, not an exception.
+   */
+  it("returns the gate's labelled fields instead of throwing", async () => {
+    const fetcher = (async () => {
+      throw new ApiError("Complete required lead creation fields before creating a lead.", 400, "LEAD_CREATE_REQUIREMENTS_UNMET", {
+        error: {
+          code: "LEAD_CREATE_REQUIREMENTS_UNMET",
+          missingRequirements: {
+            fields: [
+              { key: "bidDueDate", label: "Bid Due Date" },
+              { key: "primaryContactId", label: "Primary contact" },
+            ],
+          },
+        },
+      });
+    }) as unknown as Fetcher;
+
+    const res = await prospecting.createLeadFromCapture(fetcher, {
+      companyId: "c1",
+      propertyId: "p1",
+      name: "Palm Villas",
+    });
+    expect(res.lead).toBeUndefined();
+    expect(res.missing?.map((f) => f.label)).toEqual(["Bid Due Date", "Primary contact"]);
+  });
+
+  it("still throws on a 400 that is NOT the requirements gate", async () => {
+    // Only a positively identified gate refusal is normalised; anything else is a real failure and
+    // must not be dressed up as "needs more details".
+    const fetcher = (async () => {
+      throw new ApiError("Company not found", 400, undefined, undefined);
+    }) as unknown as Fetcher;
+    await expect(
+      prospecting.createLeadFromCapture(fetcher, { companyId: "c1", propertyId: "p1", name: "X" }),
+    ).rejects.toBeInstanceOf(ApiError);
+  });
+
+  it("returns the lead on a genuine success", async () => {
+    const { fetcher } = recording({ lead: { id: "l1", name: "Palm Villas", leadNumber: "L-204" } });
+    const res = await prospecting.createLeadFromCapture(fetcher, {
+      companyId: "c1",
+      propertyId: "p1",
+      name: "Palm Villas",
+    });
+    expect(res.lead).toMatchObject({ id: "l1", leadNumber: "L-204" });
+    expect(res.missing).toBeUndefined();
   });
 });
