@@ -352,6 +352,16 @@ export default function ProspectScreen() {
   const [manualState, setManualState] = useState("");
   const [manualZip, setManualZip] = useState("");
 
+  /**
+   * Did the GEOCODE give us a usable address? Distinct from `effectiveAddress`, and the distinction
+   * matters: keying the input block on `!effectiveAddress` unmounted it the instant the fourth field
+   * was filled, so the last keystroke of the ZIP dropped the keyboard and removed every control that
+   * could fix a typo. The fields stay mounted for as long as the geocode has not supplied an address.
+   */
+  const geocodeComplete = Boolean(
+    address?.address && address.city && address.state && address.zip,
+  );
+
   /** Whatever address we actually have: the geocode first, the rep's typing second. */
   const effectiveAddress = useMemo(() => {
     if (address?.address && address.city && address.state && address.zip) return address;
@@ -989,6 +999,11 @@ export default function ProspectScreen() {
                         // they stayed tappable through the debounce and the next round trip — long
                         // enough to attach the visit to a company the screen was no longer describing.
                         setCompanyResults(null);
+                        // The dedup ANSWER goes with them. Typing "Palm", tapping Add, then retyping
+                        // "Ocean Ridge" left the Palm suggestions on screen and tappable under a prompt
+                        // about a name the draft no longer contained.
+                        setDuplicateCompanies(null);
+                        setCreateCompanyError(null);
                         /* DEBOUNCED. One request per keystroke sent ten for "palm villas" — on a
                            truck's connection that is ten round trips racing each other to answer a
                            query the rep has already moved past. 250ms matches the web's own
@@ -1234,7 +1249,7 @@ export default function ProspectScreen() {
                       control that captures a new building disappeared for good in exactly the
                       conditions a rep hits outdoors, and nothing else on this screen could take an
                       address. */}
-                  {company && !effectiveAddress ? (
+                  {company && !geocodeComplete ? (
                     <View style={styles.dupBox}>
                       <Text style={styles.warn}>
                         Couldn&apos;t work out the address here. Type it to add the building, or just log

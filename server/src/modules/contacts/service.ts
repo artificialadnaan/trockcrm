@@ -385,8 +385,11 @@ export async function checkForDuplicates(
     matchReason:
       normalizeName(match.firstName, match.lastName) === normalizedInput
         ? "Exact name match"
-        : (match.linkedCompanyName ?? match.companyName)?.toLowerCase() ===
-            input.companyName?.toLowerCase()
+        : // TRIMMED on both sides, matching the SQL predicate above. Comparing untrimmed input meant
+          // "Acme " could satisfy the query and then be labelled "Same name", describing a weaker
+          // match than the one that actually fired.
+          (match.linkedCompanyName ?? match.companyName)?.trim().toLowerCase() ===
+            input.companyName?.trim().toLowerCase()
           ? "Same last name + company"
           : "Same name",
   }));
