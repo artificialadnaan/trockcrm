@@ -108,6 +108,17 @@ export interface CreatePropertyInput {
   buildYear?: number | null;
   unitCount?: number | null;
   notes?: string | null;
+  /**
+   * Optional coordinates, normally from a Mapbox geocode.
+   *
+   * The columns have existed since the table was created and NOTHING on the write path has ever set
+   * them, so every property created through the API carries null lat/lng forever. That is not a
+   * cosmetic gap: it means "which property am I standing at?" cannot be answered by distance for any
+   * of them, so field capture would create a fresh duplicate at a building it had itself created the
+   * week before. Accepting them here is what lets the data heal as it is used.
+   */
+  lat?: number | null;
+  lng?: number | null;
 }
 
 export interface UpdatePropertyInput {
@@ -585,6 +596,20 @@ export async function listProperties(
   };
 }
 
+/**
+ * A coordinate, or null — never a number the database will accept and no query will ever match.
+ *
+ * Returns a STRING because these are `numeric` columns. Rejecting silently (rather than throwing) is
+ * deliberate: a property with a bad coordinate is still a property worth creating, and a rep standing
+ * in front of the building should not lose the record because the device reported a junk fix.
+ */
+function validateOptionalCoordinate(value: unknown, limit: number): string | null {
+  if (value == null) return null;
+  const numeric = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(numeric) || Math.abs(numeric) > limit) return null;
+  return String(numeric);
+}
+
 export async function createProperty(tenantDb: TenantDb, input: CreatePropertyInput) {
   const address = validatePropertyAddressFields(input);
   const buildYear = validateOptionalPropertyBuildYear(input.buildYear);
@@ -612,6 +637,11 @@ export async function createProperty(tenantDb: TenantDb, input: CreatePropertyIn
       buildYear,
       unitCount,
       notes: input.notes ?? null,
+      // numeric(10,7) columns — Drizzle takes them as strings. Validated first so a NaN or an
+      // out-of-range value is stored as null rather than poisoning every later distance calculation
+      // with a coordinate that silently matches nothing.
+      lat: validateOptionalCoordinate(input.lat, 90),
+      lng: validateOptionalCoordinate(input.lng, 180),
       isActive: true,
     })
     .returning();

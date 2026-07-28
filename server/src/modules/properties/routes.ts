@@ -5,6 +5,7 @@ import { requestAuditContext, writeSoftDeleteAuditLog } from "../../lib/soft-del
 import { redactDealList, shouldIncludeHubspotId } from "../deals/redact.js";
 import { createProperty, deleteProperty, getPropertyDetail, listProperties, updateProperty } from "./service.js";
 import { parseMoneyBound } from "./query-params.js";
+import { matchProperties } from "./match-service.js";
 import { randomUUID } from "node:crypto";
 import {
   PROPERTY_IMAGE_MAX_BYTES,
@@ -44,9 +45,36 @@ router.get("/", async (req, res, next) => {
   }
 });
 
+/**
+ * GET /api/properties/match?lat=&lng=&address= — the property a rep is standing at.
+ *
+ * Deliberately a READ that returns candidates rather than a create-or-get. The field capture shows what
+ * matched and why, and only offers "add a new property" when this comes back empty — because the
+ * alternative, creating on a near-miss, is how ~94 duplicate property groups happen faster.
+ *
+ * Returns [] rather than erroring when there is nothing to match on; see matchProperties.
+ */
+router.get("/match", async (req, res, next) => {
+  try {
+    const rawLat = Number(req.query.lat);
+    const rawLng = Number(req.query.lng);
+    const matches = await matchProperties(req.tenantDb!, {
+      // Number("") is 0 and Number(undefined) is NaN — a missing coordinate must not read as a point
+      // at the equator, which would match nothing and quietly degrade to address-only.
+      lat: Number.isFinite(rawLat) && req.query.lat !== "" ? rawLat : null,
+      lng: Number.isFinite(rawLng) && req.query.lng !== "" ? rawLng : null,
+      address: typeof req.query.address === "string" ? req.query.address : null,
+    });
+    res.json({ matches });
+  } catch (err) {
+    next(err);
+  }
+});
+
 router.post("/", async (req, res, next) => {
   try {
-    const { companyId, name, address, city, state, zip, buildYear, unitCount, notes } = req.body;
+    const { companyId, name, address, city, state, zip, buildYear, unitCount, notes, lat, lng } =
+      req.body;
     if (!companyId) {
       throw new AppError(400, "companyId is required");
     }
@@ -63,6 +91,10 @@ router.post("/", async (req, res, next) => {
       buildYear,
       unitCount,
       notes,
+      // Optional and additive — every existing caller omits them and is unchanged. Field capture sends
+      // the Mapbox geocode so the property is findable by distance next time someone stands there.
+      lat,
+      lng,
     });
     await req.commitTransaction!();
     res.status(201).json({ property });
