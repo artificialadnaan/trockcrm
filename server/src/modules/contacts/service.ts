@@ -276,6 +276,13 @@ function levenshteinDistance(a: string, b: string): number {
   return prev[n];
 }
 
+/** True only when BOTH sides name a company and they agree. undefined === undefined is not a match. */
+function bothNameSameCompany(a: string | null | undefined, b: string | null | undefined): boolean {
+  const left = a?.trim().toLowerCase() ?? "";
+  const right = b?.trim().toLowerCase() ?? "";
+  return left.length > 0 && left === right;
+}
+
 /**
  * Check for duplicate contacts before creation.
  *
@@ -385,11 +392,12 @@ export async function checkForDuplicates(
     matchReason:
       normalizeName(match.firstName, match.lastName) === normalizedInput
         ? "Exact name match"
-        : // TRIMMED on both sides, matching the SQL predicate above. Comparing untrimmed input meant
-          // "Acme " could satisfy the query and then be labelled "Same name", describing a weaker
-          // match than the one that actually fired.
-          (match.linkedCompanyName ?? match.companyName)?.trim().toLowerCase() ===
-            input.companyName?.trim().toLowerCase()
+        : // TRIMMED on both sides, matching the SQL predicate above, and BOTH must be non-empty.
+          // Untrimmed input meant "Acme " could satisfy the query and then be labelled "Same name";
+          // and with optional chaining, a contact with no company against an input with no company
+          // compared undefined to undefined and claimed "Same last name + company" for two records
+          // sharing nothing but a surname.
+          bothNameSameCompany(match.linkedCompanyName ?? match.companyName, input.companyName)
           ? "Same last name + company"
           : "Same name",
   }));

@@ -92,6 +92,21 @@ export function isPositionTooCoarse(accuracyMeters: number | null, thresholdMete
  * are different claims with different confidence, and a rep confirming a building deserves the one that
  * is actually being made — an unexplained suggestion is how the wrong property gets confirmed.
  */
+/**
+ * Is there any SECOND signal agreeing this is the right building?
+ *
+ * One rule, one place. It decides two things that must never disagree: what the row is LABELLED, and
+ * whether it may veto creating a new building. Spelled out at both sites — as it briefly was — a change
+ * to one silently contradicts the other, producing a row labelled "no city on file" that still blocks
+ * Add, or a "Same address" that does not.
+ *
+ * A distance reading is corroboration on its own; so is any locality field, because
+ * `localityContradicts` has already ruled out a disagreeing one.
+ */
+export function isCorroborated(match: PropertyMatch): boolean {
+  return match.distanceMeters != null || Boolean(match.city || match.state || match.zip);
+}
+
 export function describeMatch(match: PropertyMatch): string {
   const distance =
     match.distanceMeters != null
@@ -112,11 +127,10 @@ export function describeMatch(match: PropertyMatch): string {
    * kind of confident wrong answer a rep in a hurry confirms — filing the visit against a building in
    * another town.
    */
-  const corroborated =
-    match.distanceMeters != null || Boolean(match.city || match.state || match.zip);
-
   if (match.addressMatch === "exact") {
-    if (!corroborated) return "Same street line — no city on file, check this is the right one";
+    if (!isCorroborated(match)) {
+      return "Same street line — no city on file, check this is the right one";
+    }
     return distance ? `Same address · ${distance}` : "Same address";
   }
   // "base" means the stored record names a suite and the geocode didn't (or the reverse) — a strong

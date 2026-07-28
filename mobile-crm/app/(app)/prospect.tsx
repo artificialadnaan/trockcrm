@@ -20,6 +20,7 @@ import { COARSE_ACCURACY_METERS, useCurrentLocation } from "../../src/lib/use-cu
 import {
   canSubmit,
   haltsForDuplicates,
+  isCorroborated,
   leadFlagNextStep,
   personDetailsWillBeDiscarded,
   planContact,
@@ -386,13 +387,24 @@ export default function ProspectScreen() {
     return { ...typed, lat: fix?.lat ?? address?.lat ?? null, lng: fix?.lng ?? address?.lng ?? null };
   }, [address, fix, manualAddress, manualCity, manualState, manualZip]);
   const createCompanyNamed = useMutation({
-    mutationFn: async (input: { name: string; force?: boolean }) =>
-      prospecting.createCompany(fetcher, {
+    mutationFn: async (input: { name: string; force?: boolean }) => {
+      const created = await prospecting.createCompany(fetcher, {
         name: input.name,
         // Only after the rep has seen the suggestions and rejected them.
         skipDedupCheck: input.force || undefined,
-      }),
-    onSuccess: async (result) => {
+      });
+      return { result: created, name: input.name };
+    },
+    onSuccess: async ({ result, name }) => {
+      /**
+       * The answer belongs to the name that was SUBMITTED.
+       *
+       * The search field stays editable during the POST, so a rep can send "Palm", retype "Ocean", and
+       * have this callback select the new Palm record — or show Palm's duplicates — under an Ocean
+       * draft. Same late-response discipline the searches already use; the write needed it more,
+       * because its result is a target the visit then carries.
+       */
+      if (name.trim() !== companyQueryRef.current.trim()) return;
       if (!result.created) {
         setDuplicateCompanies(result.duplicates ?? []);
         setCreateCompanyError(
@@ -471,9 +483,7 @@ export default function ProspectScreen() {
        * standing at, permanently and with no way around it. Those rows are still shown (labelled "no
        * city on file"); they simply do not decide.
        */
-      const corroborated = rematched.filter(
-        (m) => m.distanceMeters != null || Boolean(m.city || m.state || m.zip),
-      );
+      const corroborated = rematched.filter(isCorroborated);
       if (corroborated.length > 0) return { created: null, rematched: corroborated, at, under };
 
       const created = await prospecting.createProperty(fetcher, {
@@ -741,7 +751,8 @@ export default function ProspectScreen() {
    */
   const locked = save.isPending || saved;
   /** Save is unavailable while the building is still being written, too — see the button below. */
-  const saveBlocked = !ready || save.isPending || createPropertyHere.isPending;
+  const saveBlocked =
+    !ready || save.isPending || createPropertyHere.isPending || createCompanyNamed.isPending;
 
   /** Person details the save will discard, because a contact needs BOTH names to be created. */
   const personPartial = personDetailsWillBeDiscarded({
@@ -1208,6 +1219,14 @@ export default function ProspectScreen() {
                                   setCompanyResults(null);
                                   setCompanyQuery("");
                                   companyQueryRef.current = "";
+                                  /* ONE target — the same rule the search rows follow. Without it the
+                                     memo sources the activity to the company while save still sends
+                                     the retained contact id, producing a visit linked to a person it
+                                     is not about. */
+                                  setContact(null);
+                                  setContactQuery("");
+                                  contactQueryRef.current = "";
+                                  setContactResults(null);
                                 }}
                                 accessibilityRole="button"
                                 accessibilityLabel={`Use ${s.name ?? "this company"}`}
@@ -1783,9 +1802,11 @@ export default function ProspectScreen() {
               )}
             </Pressable>
             {/* A disabled button with no explanation is the same defect as a dead one. */}
-            {createPropertyHere.isPending ? (
+            {createPropertyHere.isPending || createCompanyNamed.isPending ? (
+              /* Both writes disable Save, so both need a reason — a button that goes dead without
+                 explanation is the defect this line exists to prevent. */
               <Text testID="prospect-blocked" style={styles.help}>
-                Adding the building…
+                {createPropertyHere.isPending ? "Adding the building…" : "Adding the company…"}
               </Text>
             ) : blockedReason ? (
               <Text testID="prospect-blocked" style={styles.help}>

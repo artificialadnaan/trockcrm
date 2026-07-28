@@ -2,6 +2,7 @@ import {
   canSubmit,
   describeMatch,
   haltsForDuplicates,
+  isCorroborated,
   leadFlagNextStep,
   isPositionTooCoarse,
   personDetailsWillBeDiscarded,
@@ -334,5 +335,22 @@ describe("describeMatch — uncorroborated address hits", () => {
         match({ addressMatch: "exact", distanceMeters: 12, city: null, state: null, zip: null }),
       ),
     ).toBe("Same address · 12 m away");
+  });
+});
+
+describe("isCorroborated — ONE rule for the label and the veto", () => {
+  // These two consumers must never disagree: a row labelled "no city on file" that still blocks Add,
+  // or a "Same address" that does not, is the contradiction this function exists to make impossible.
+  it("counts a distance reading on its own", () => {
+    expect(isCorroborated(match({ distanceMeters: 12, city: null, state: null, zip: null }))).toBe(true);
+  });
+
+  it("counts any locality field, since a disagreeing one is already excluded", () => {
+    expect(isCorroborated(match({ distanceMeters: null, city: "Dallas", state: null, zip: null }))).toBe(true);
+    expect(isCorroborated(match({ distanceMeters: null, city: null, state: null, zip: "75201" }))).toBe(true);
+  });
+
+  it("is false for a row with neither — the phantom that must not veto", () => {
+    expect(isCorroborated(match({ distanceMeters: null, city: null, state: null, zip: null }))).toBe(false);
   });
 });
