@@ -341,4 +341,85 @@ describe("EntityActivityTab", () => {
     expect(mounted.container.querySelector('[data-testid="activity-next-step"]')).not.toBeNull();
     expect(mounted.container.querySelector('[data-testid="activity-lead-flag"]')).toBeNull();
   });
+
+  it("does NOT badge an ordinary next step that merely starts with the marker", async () => {
+    // nextStep is free text. A bare prefix test called "Create leadership deck" a prospect flag on
+    // every activity tab in the app.
+    mocks.useActivitiesMock.mockReturnValueOnce({
+      activities: [
+        {
+          id: "activity-3",
+          type: "note",
+          occurredAt: "2026-07-28T15:00:00.000Z",
+          body: null,
+          outcome: null,
+          durationMinutes: null,
+          nextStep: "Create leadership deck",
+          nextStepDueAt: null,
+        },
+      ],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    mounted = mount(<EntityActivityTab entityType="deal" entityId="deal-1" emptyLabel="deal" />);
+
+    expect(mounted.container.querySelector('[data-testid="activity-lead-flag"]')).toBeNull();
+    expect(mounted.container.querySelector('[data-testid="activity-next-step"]')).not.toBeNull();
+  });
+
+  it("renders a date-only due value without shifting it a day", async () => {
+    // The form's type="date" input sends YYYY-MM-DD, stored as midnight UTC. The activity timestamp
+    // formatter applied the browser's zone, so every user west of UTC saw the previous calendar day.
+    mocks.useActivitiesMock.mockReturnValueOnce({
+      activities: [
+        {
+          id: "activity-4",
+          type: "note",
+          occurredAt: "2026-07-28T15:00:00.000Z",
+          body: null,
+          outcome: null,
+          durationMinutes: null,
+          nextStep: "Create lead — follow up",
+          nextStepDueAt: "2026-07-28T00:00:00.000Z",
+        },
+      ],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    mounted = mount(
+      <EntityActivityTab entityType="property" entityId="property-1" emptyLabel="property" />
+    );
+
+    expect(mounted.container.textContent).toContain("Jul 28, 2026");
+    expect(mounted.container.textContent).not.toContain("Jul 27");
+  });
+
+  it("hides the log form for a read-only record", async () => {
+    // A soft-deleted property still resolves on its detail route, and POST /activities does not check
+    // the target is active — so a writable form here wrote visits onto a deleted building.
+    mocks.useActivitiesMock.mockReturnValueOnce({
+      activities: [],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    mounted = mount(
+      <EntityActivityTab
+        entityType="property"
+        entityId="property-1"
+        emptyLabel="property"
+        readOnly
+      />
+    );
+
+    const addNote = Array.from(mounted.container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("Add Note")
+    );
+    expect(addNote).toBeUndefined();
+  });
 });

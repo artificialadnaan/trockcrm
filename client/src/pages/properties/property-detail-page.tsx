@@ -543,7 +543,16 @@ function PropertyTabContent({
   if (tab === "activity") {
     // The SAME tab companies, leads and deals use — property was simply missing from its union. A
     // property-specific copy would have been a third renderer to keep in step.
-    return <EntityActivityTab entityType="property" entityId={property.id} emptyLabel="property" />;
+    return (
+      <EntityActivityTab
+        entityType="property"
+        entityId={property.id}
+        emptyLabel="property"
+        // A soft-deleted property is read-only everywhere else on this page, and POST /activities does
+        // not check the target is active — so without this a deleted building accepted new visits.
+        readOnly={!property.isActive}
+      />
+    );
   }
 
   const placeholders: Record<

@@ -32,6 +32,15 @@ interface EntityActivityTabProps {
   /** Deal-only: whether the viewer may edit the deal (assigned rep or admin). Gates the Move Close Date
    *  action so a view-only collaborator doesn't hit a 403 after filling the dialog. Default false. */
   canMoveCloseDate?: boolean;
+  /**
+   * Hide the log FORM and show the feed only.
+   *
+   * A soft-deleted record still resolves on its detail route, and the surrounding page treats it as
+   * read-only — but this tab mounted a writable form regardless, and POST /activities does not check
+   * whether the target is active. So opening Activity on a deleted property let notes, calls and site
+   * visits be written against it, where nothing lists them.
+   */
+  readOnly?: boolean;
   /** Deal-only: the office the deal was read from (cross-office detail). Threaded into the Move Close
    *  Date PATCH so a cross-office move/clear targets the deal's tenant, not the viewer's active office. */
   officeId?: string | null;
@@ -46,8 +55,38 @@ interface EntityActivityTabProps {
  */
 const LEAD_FLAG_PREFIX = "Create lead";
 
+/**
+ * A due DATE, rendered without a timezone shift.
+ *
+ * ActivityLogForm's `type="date"` input sends "YYYY-MM-DD", which the server stores as midnight UTC.
+ * Running that through the activity timestamp formatter applies the browser's zone, so every user west
+ * of UTC saw the PREVIOUS calendar day — a 28 July due date reading as 27 July, plus a 7:00 PM that
+ * means nothing. Read the calendar parts back in UTC and show only the date.
+ */
+function formatDueDate(value: string): string {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return parsed.toLocaleDateString("en-US", {
+    timeZone: "UTC",
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+}
+
 export function isLeadFlagged(activity: Pick<Activity, "nextStep">): boolean {
-  return Boolean(activity.nextStep?.startsWith(LEAD_FLAG_PREFIX));
+  const next = activity.nextStep?.trim();
+  if (!next) return false;
+  if (next === LEAD_FLAG_PREFIX) return true;
+  /**
+   * A BOUNDARY after the marker, because nextStep is free text.
+   *
+   * A bare prefix test badged "Create leadership deck" as a prospect flag on every activity tab in the
+   * app. The field app writes either the marker alone or the marker, a space-padded em dash, and the
+   * rep's own note — so anything else that merely starts with those characters is a different
+   * sentence.
+   */
+  return next.startsWith(`${LEAD_FLAG_PREFIX} — `);
 }
 
 const activityFilterKey: Record<
@@ -102,6 +141,7 @@ export function EntityActivityTab({
   entityType,
   entityId,
   emptyLabel,
+  readOnly = false,
   showRecordings = false,
   closeTargetDate = null,
   slaFollowsBidDueDate,
@@ -146,6 +186,7 @@ export function EntityActivityTab({
       {showRecordings && entityType !== "property" ? (
         <RecordingList entityType={entityType} entityId={entityId} />
       ) : null}
+      {readOnly ? null : (
       <ActivityLogForm
         onSubmit={handleLogActivity}
         showProposalSent={entityType === "deal"}
@@ -157,6 +198,7 @@ export function EntityActivityTab({
           ) : undefined
         }
       />
+      )}
       {entityType === "deal" && canMoveCloseDate ? (
         <MoveCloseDateDialog
           open={moveCloseDateOpen}
@@ -234,9 +276,7 @@ export function EntityActivityTab({
                     <p className="mt-1 text-xs text-muted-foreground" data-testid="activity-next-step">
                       <span className="font-medium">Next: </span>
                       {activity.nextStep}
-                      {activity.nextStepDueAt
-                        ? ` (due ${formatActivityDate(activity.nextStepDueAt)})`
-                        : ""}
+                      {activity.nextStepDueAt ? ` (due ${formatDueDate(activity.nextStepDueAt)})` : ""}
                     </p>
                   ) : null}
                   <p className="mt-1 text-xs text-muted-foreground">
