@@ -20,6 +20,7 @@ import { COARSE_ACCURACY_METERS, useCurrentLocation } from "../../src/lib/use-cu
 import {
   canSubmit,
   haltsForDuplicates,
+  leadFlagNextStep,
   personDetailsWillBeDiscarded,
   planContact,
   describeMatch,
@@ -40,6 +41,11 @@ import { theme } from "../../src/theme/theme";
  * visit, nobody in" and leaves; a rep who met the property manager fills in the person too. The form
  * never demands the long version, because a capture tool that insists gets used once.
  */
+/** Today, as the server's date-only format. The flag is due now — that is the point of flagging it. */
+function todayIsoDate(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
 const ACTIVITY_TYPES: Array<{ key: prospecting.FieldActivityType; label: string }> = [
   { key: "site_visit", label: "Site visit" },
   { key: "call", label: "Call" },
@@ -86,8 +92,6 @@ export default function ProspectScreen() {
   /** The rep said none of the suggestions is the building — the fallback has to appear. */
   const [rejectedMatches, setRejectedMatches] = useState(false);
   const [companySearchFailed, setCompanySearchFailed] = useState(false);
-  /** Set when the lead was created but the back-reference could not be written. */
-  const [linkFailed, setLinkFailed] = useState(false);
   /** The person could not be saved, but the visit was. Reported, never silent. */
   const [contactFailed, setContactFailed] = useState(false);
   /** The person's write may or may not have landed — a dropped response, not a refusal. */
@@ -325,6 +329,26 @@ export default function ProspectScreen() {
         contactTitle.trim().toLowerCase(),
         property?.companyId ?? company?.id ?? "",
       ].join("|");
+      /**
+       * When the TARGET is a person, that person IS the activity's contact — full stop.
+       *
+       * The service rejects a contactId that disagrees with sourceEntityId, so creating a second person
+       * from the WHO fields produced an unsaveable activity AFTER committing them: a new contact
+       * stranded in the directory and a visit that could not be logged at all. The WHO block is hidden
+       * in this mode for the same reason, so the two can never name different people.
+       */
+      if (contact) {
+        const activity = await prospecting.logActivity(fetcher, {
+          ...target,
+          type: type!,
+          body: body.trim() || undefined,
+          outcome: outcome.trim() || undefined,
+          nextStep: leadFlagNextStep({ flagged: flagForLead, nextStep }),
+          nextStepDueAt: flagForLead ? todayIsoDate() : undefined,
+        });
+        return { activity, duplicates: null, contactFailed: false, contactIndeterminate: false };
+      }
+
       const { plan, dropRetained } = planContact({
         first,
         last,
@@ -348,7 +372,15 @@ export default function ProspectScreen() {
           const created = await prospecting.createContact(fetcher, {
             firstName: first,
             lastName: last,
-            category: "property_manager",
+            /**
+             * NEUTRAL, because the screen never asks.
+             *
+             * Reps meet vendors, architects, subcontractors and regional managers too, and stamping
+             * every one of them "property_manager" quietly corrupted the directory and every filter
+             * built on it. "other" is the honest answer to a question not asked; the real category is
+             * set on the web, where the choice exists.
+             */
+            category: "other",
             jobTitle: contactTitle.trim() || undefined,
             mobile: contactPhone.trim() || undefined,
             // The FALLBACK company counts too. Without it a person met at a building the CRM has never
@@ -396,7 +428,13 @@ export default function ProspectScreen() {
         type: type!,
         body: body.trim() || undefined,
         outcome: outcome.trim() || undefined,
-        nextStep: nextStep.trim() || undefined,
+        /**
+         * The flag and the rep's own next step share one column, so the flag WINS and carries their
+         * text with it rather than discarding either. Sending only "Create lead" would throw away what
+         * they typed; sending only their text would lose the flag the office reads.
+         */
+        nextStep: leadFlagNextStep({ flagged: flagForLead, nextStep }),
+        nextStepDueAt: flagForLead ? todayIsoDate() : undefined,
       });
       // State moves to the callbacks — mutationFn can run twice under React's concurrent rendering,
       // and a setState there is a side effect in a function that is not allowed to have one.
@@ -461,76 +499,23 @@ export default function ProspectScreen() {
     title: contactTitle,
   });
 
-  const [promoted, setPromoted] = useState<prospecting.LeadRef | null>(null);
-  const [promoteError, setPromoteError] = useState<string | null>(null);
-  /** What the lead-creation gate still wants — the NORMAL outcome of promoting from the field. */
-  const [leadMissing, setLeadMissing] = useState<prospecting.LeadRequirement[] | null>(null);
-
   /**
-   * Promote the capture to a lead.
+   * FLAGGED FOR A LEAD, rather than promoted into one.
    *
-   * TWO CALLS, and deliberately so: POST /leads owns every rule about what a lead is (office code, rep
-   * assignment, due-diligence dispatch, its own requirements contract), and reproducing that for a
-   * "promote" endpoint would be a second definition of a lead. So the lead is created there and the
-   * activity is linked afterwards.
+   * Creating the lead here is not possible honestly. `createLead` is reached only through POST /leads,
+   * which calls assertLeadCreateRequirements unconditionally, and three of the fields it demands cannot
+   * be known at a door: `bidDueDate` (a cold stop has no bid), `property.buildYear` and
+   * `property.unitCount`. A form on the phone would therefore be a form for INVENTING them — fabricated
+   * values in exactly the fields due-diligence and bid workflows read. Relaxing the gate is the same
+   * trade wearing a different hat: leads in the pipeline that meet none of the rules every other lead
+   * meets.
    *
-   * They are not atomic, which shapes the error handling below: if the LINK fails the lead still
-   * exists, so the screen reports it as created and says only the back-reference is missing. Telling a
-   * rep "promotion failed" when a lead was in fact created is how the same lead gets made twice.
+   * So the rep marks the prospect and the office builds the lead, where those facts are knowable. This
+   * writes `nextStep`/`nextStepDueAt` on the activity itself — both already in the payload, so no
+   * migration and no second endpoint — and it is set AT CREATION because /activities has no update
+   * route.
    */
-  const promote = useMutation({
-    mutationFn: async () => {
-      if (!property) throw new Error("A property is required to make a lead.");
-      const result = await prospecting.createLeadFromCapture(fetcher, {
-        companyId: property.companyId,
-        propertyId: property.id,
-        // The property's name is the honest default — a rep naming the lead is a second decision at the
-        // moment they are trying to leave, and it can be edited on the web where there is a keyboard.
-        name: property.name,
-      });
-      // The gate refused, and that is not a failure — see createLeadFromCapture.
-      if (!result.lead) return { missing: result.missing };
-      const lead = result.lead;
-      if (savedActivityId) {
-        try {
-          await prospecting.linkActivityToLead(fetcher, savedActivityId, lead.id);
-        } catch {
-          // The lead EXISTS, so this is not a failed promotion and must not read as one — reporting
-          // failure here is how the same lead gets created twice. But swallowing it silently was the
-          // other error: the visit then never appears on the lead's timeline and nobody knows why.
-          // Recorded, and surfaced as the smaller thing it is.
-          setLinkFailed(true);
-        }
-      }
-      return { lead };
-    },
-    onSuccess: async ({ lead, missing }: { lead?: prospecting.LeadRef; missing?: prospecting.LeadRequirement[] }) => {
-      setPromoteError(null);
-      if (!lead) {
-        setLeadMissing(missing ?? []);
-        return;
-      }
-      setLeadMissing(null);
-      setPromoted(lead);
-      await queryClient.invalidateQueries({ queryKey: ["leads"] });
-    },
-    onError: (err) => {
-      /**
-       * 0 AND 408 are both INDETERMINATE.
-       *
-       * 408 is our own 30s deadline firing, not the server declining — the write may have committed.
-       * Reporting "the lead wasn't created" is how the same lead gets made twice, which is exactly what
-       * the equivalent rule on the activity save exists to prevent. The deadline was missed there.
-       */
-      setPromoteError(
-        err instanceof ApiError && (err.status === 0 || err.status === 408)
-          ? "No signal — the lead may or may not have been created. Check on the web before trying again."
-          : err instanceof ApiError
-            ? err.message
-            : "Couldn't create the lead.",
-      );
-    },
-  });
+  const [flagForLead, setFlagForLead] = useState(false);
 
   /**
    * Re-check permission when the app comes back to the foreground.
@@ -605,6 +590,13 @@ export default function ProspectScreen() {
                   // computed target silently fall back to it: Save stayed enabled and would attach the
                   // visit to an entity the screen was no longer showing.
                   setCompany(null);
+                  // The CONTACT target goes with it, for the same reason and by the same mechanism:
+                  // Change hides the fallback UI, so a contact left selected became an invisible
+                  // target that kept Save enabled and filed the visit against someone off screen.
+                  setContact(null);
+                  setContactQuery("");
+                  contactQueryRef.current = "";
+                  setContactResults(null);
                   setCompanyResults(null);
                   setCompanyQuery("");
                   companyQueryRef.current = "";
@@ -802,6 +794,7 @@ export default function ProspectScreen() {
                   <>
                     <TextInput
                       testID="prospect-company-search"
+                      editable={!locked}
                       value={companyQuery}
                       onChangeText={(next) => {
                         setCompanyQuery(next);
@@ -840,6 +833,10 @@ export default function ProspectScreen() {
                           setCompanyResults(null);
                           setCompanyQuery("");
                         }}
+                        /* These rows ignored `locked`, so after a contact-backed save a leftover
+                           company result was still tappable — the screen would then show a company the
+                           committed activity never carried, and "Log another" kept it. */
+                        disabled={locked}
                         accessibilityRole="button"
                         accessibilityLabel={`Attach this visit to ${c.name}`}
                         style={styles.matchRow}
@@ -873,7 +870,7 @@ export default function ProspectScreen() {
                             {`${contact.firstName} ${contact.lastName}`.trim()}
                           </Text>
                           <Text style={styles.matchMeta} numberOfLines={1}>
-                            {contact.companyName || "Contact"}
+                            {prospecting.contactCompanyLabel(contact) || "Contact"}
                           </Text>
                         </View>
                         {locked ? null : (
@@ -922,6 +919,7 @@ export default function ProspectScreen() {
                           <Pressable
                             key={c.id}
                             testID={`prospect-contact-${c.id}`}
+                            disabled={locked}
                             onPress={() => {
                               setContact(c);
                               setContactResults(null);
@@ -938,7 +936,7 @@ export default function ProspectScreen() {
                               </Text>
                               {/* The employer, so two people with the same name are distinguishable. */}
                               <Text style={styles.matchMeta} numberOfLines={1}>
-                                {c.companyName || "No company on file"}
+                                {prospecting.contactCompanyLabel(c) || "No company on file"}
                               </Text>
                             </View>
                           </Pressable>
@@ -1016,7 +1014,37 @@ export default function ProspectScreen() {
           style={styles.input}
         />
 
-        {/* ---- 3. WHO. Entirely optional; fills in a real contact only when named. ---- */}
+        {/* WORTH A LEAD. A toggle rather than a button after "Logged", because /activities has no
+            update route — nextStep can only be written when the activity is created. */}
+        <Pressable
+          testID="prospect-flag-lead"
+          onPress={() => setFlagForLead((on) => !on)}
+          disabled={locked}
+          accessibilityRole="switch"
+          accessibilityState={{ checked: flagForLead, disabled: locked }}
+          accessibilityLabel="Flag this visit for a lead"
+          style={[styles.flagRow, flagForLead && styles.flagRowOn, locked && styles.chipLocked]}
+        >
+          <Text style={[styles.flagText, flagForLead && styles.flagTextOn]}>
+            {flagForLead ? "✓  Flagged for a lead" : "Worth a lead?"}
+          </Text>
+        </Pressable>
+        {flagForLead ? (
+          <Text style={styles.help}>
+            The office will build the lead from this visit — they have the build year and bid dates.
+          </Text>
+        ) : null}
+
+        {/* ---- 3. WHO. Entirely optional; fills in a real contact only when named. ----
+            Hidden when an existing person is the TARGET: the activity carries one contact id, and the
+            service refuses one that disagrees with sourceEntityId, so offering to name a second person
+            here could only build a visit that cannot be saved. */}
+        {contact ? (
+          <Text testID="prospect-who-is-target" style={styles.help}>
+            This visit is filed against {`${contact.firstName} ${contact.lastName}`.trim()}.
+          </Text>
+        ) : (
+          <>
         <Text style={styles.stepLabel}>WHO YOU MET (OPTIONAL)</Text>
         <View style={styles.nameRow}>
           <TextInput
@@ -1057,7 +1085,10 @@ export default function ProspectScreen() {
           keyboardType="phone-pad"
           style={styles.input}
         />
-        {personPartial ? (
+        </>
+        )}
+
+        {personPartial && !contact ? (
           /* The server requires BOTH names and 400s otherwise. Said here rather than after a failed
              save, because the save also creates the activity and a rep should not lose the visit. */
           /* ANY populated person field, not just a half-typed name. Keyed on the names alone, a rep who
@@ -1143,33 +1174,10 @@ export default function ProspectScreen() {
           <View testID="prospect-saved" style={styles.savedBox}>
             <Text style={styles.savedText}>Logged.</Text>
 
-            {/* PROMOTION lives here, after the log is safe. Offering it before saving would make a rep
-                choose between recording the visit and acting on it, and the visit is the thing that
-                must not be lost. Only offered with a property, because a lead requires one. */}
-            {promoted ? (
-              <Text testID="prospect-promoted" style={styles.help}>
-                Lead created{promoted.leadNumber ? ` — ${promoted.leadNumber}` : ""}. Finish it on the
-                web when you&apos;re back.
-                {linkFailed
-                  ? " This visit couldn't be attached to it — the lead is fine, the link is missing."
-                  : ""}
+            {flagForLead ? (
+              <Text testID="prospect-flagged" style={styles.help}>
+                Flagged for a lead. The office will build it from this visit.
               </Text>
-            ) : property ? (
-              <Pressable
-                testID="prospect-promote"
-                onPress={() => promote.mutate()}
-                disabled={promote.isPending}
-                accessibilityRole="button"
-                accessibilityLabel={`Make a lead for ${property.name}`}
-                accessibilityState={{ disabled: promote.isPending, busy: promote.isPending }}
-                style={[styles.secondaryBtn, promote.isPending && styles.primaryBtnDisabled]}
-              >
-                {promote.isPending ? (
-                  <ActivityIndicator color={theme.color.textPrimary} />
-                ) : (
-                  <Text style={styles.secondaryText}>Make this a lead</Text>
-                )}
-              </Pressable>
             ) : null}
 
             {contactFailed ? (
@@ -1189,37 +1197,11 @@ export default function ProspectScreen() {
               </Text>
             ) : null}
 
-            {leadMissing ? (
-              /* The gate's own list, labelled by the server. "Couldn't create the lead" would be both
-                 useless and misleading — nothing is broken, the lead simply needs facts a rep at a door
-                 does not have. Naming them is the difference between a dead end and a next step. */
-              <View testID="prospect-lead-missing">
-                <Text style={styles.help}>
-                  {leadMissing.length > 0
-                    ? "This needs a few more details before it can be a lead — finish it on the web:"
-                    : "This needs more details before it can be a lead. Finish it on the web."}
-                </Text>
-                {leadMissing.map((field) => (
-                  <Text key={field.key} style={styles.help}>
-                    • {field.label}
-                  </Text>
-                ))}
-              </View>
-            ) : null}
-
-            {promoteError ? (
-              <Text testID="prospect-promote-error" style={styles.error}>
-                {promoteError}
-              </Text>
-            ) : null}
             <Pressable
               testID="prospect-log-another"
               onPress={() => {
                 setSavedActivityId(null);
-                setPromoted(null);
-                setPromoteError(null);
-                setLeadMissing(null);
-                setLinkFailed(false);
+                setFlagForLead(false);
                 setContactFailed(false);
                 createdContactId.current = undefined;
                 resolvedContactId.current = null;
@@ -1342,6 +1324,18 @@ const styles = StyleSheet.create({
     backgroundColor: theme.color.surfaceMuted,
   },
   chipLocked: { opacity: 0.5 },
+  flagRow: {
+    minHeight: 48,
+    justifyContent: "center",
+    paddingHorizontal: theme.space.md,
+    borderRadius: theme.radius.md,
+    borderWidth: 1,
+    borderColor: theme.color.borderControl,
+    backgroundColor: theme.color.surface,
+  },
+  flagRowOn: { borderColor: theme.color.brandRed, backgroundColor: theme.color.surfaceRaised },
+  flagText: { ...theme.type.label, color: theme.color.textSecondary },
+  flagTextOn: { color: theme.color.textPrimary },
   matchRow: {
     flexDirection: "row",
     alignItems: "center",

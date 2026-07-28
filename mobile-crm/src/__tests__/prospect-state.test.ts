@@ -2,6 +2,7 @@ import {
   canSubmit,
   describeMatch,
   haltsForDuplicates,
+  leadFlagNextStep,
   isPositionTooCoarse,
   personDetailsWillBeDiscarded,
   planContact,
@@ -279,5 +280,31 @@ describe("a CONTACT is a valid target", () => {
     expect(
       submitBlockedReason({ target: {}, type: "call", body: "x", outcome: "" }),
     ).toMatch(/property/i);
+  });
+});
+
+describe("leadFlagNextStep — flagging a prospect for the office", () => {
+  it("sends the marker alone when the rep typed no next step", () => {
+    expect(leadFlagNextStep({ flagged: true, nextStep: "" })).toBe("Create lead");
+  });
+
+  it("KEEPS the rep's own next step alongside the marker", () => {
+    // One column holds both. Dropping either half loses something real: their text, or the flag the
+    // office queue matches on.
+    expect(leadFlagNextStep({ flagged: true, nextStep: "Call Dana Monday" })).toBe(
+      "Create lead — Call Dana Monday",
+    );
+  });
+
+  it("leaves an unflagged next step exactly as typed", () => {
+    expect(leadFlagNextStep({ flagged: false, nextStep: "Call Dana Monday" })).toBe("Call Dana Monday");
+  });
+
+  it("sends nothing when there is neither a flag nor a next step", () => {
+    expect(leadFlagNextStep({ flagged: false, nextStep: "   " })).toBeUndefined();
+  });
+
+  it("starts with the marker, so the office can match on a prefix", () => {
+    expect(leadFlagNextStep({ flagged: true, nextStep: "x" })!.startsWith("Create lead")).toBe(true);
   });
 });

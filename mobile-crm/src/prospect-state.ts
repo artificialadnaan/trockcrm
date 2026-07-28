@@ -185,3 +185,21 @@ export function personDetailsWillBeDiscarded(input: {
   );
   return any && !(input.first.trim() && input.last.trim());
 }
+
+/** The canonical marker the office's queue matches on. Two spellings would mean two queues. */
+export const LEAD_FLAG = "Create lead";
+
+/**
+ * What goes in the activity's `nextStep` when a rep marks a prospect worth a lead.
+ *
+ * The flag and the rep's own next step share ONE column, so the flag wins and carries their text with
+ * it. Sending only the marker would discard what they typed; sending only their text would lose the
+ * flag the office reads. Creating the lead on the phone is not an option — `POST /leads` demands a bid
+ * due date, a build year and a unit count, none of which are knowable at a door, so a form here would
+ * be a form for inventing them.
+ */
+export function leadFlagNextStep(input: { flagged: boolean; nextStep: string }): string | undefined {
+  const typed = input.nextStep.trim();
+  if (!input.flagged) return typed || undefined;
+  return typed ? `${LEAD_FLAG} — ${typed}` : LEAD_FLAG;
+}
