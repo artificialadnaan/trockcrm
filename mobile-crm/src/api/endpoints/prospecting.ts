@@ -109,7 +109,40 @@ export async function searchCompanies(
   return res.companies ?? [];
 }
 
-export type DedupSuggestion = { id: string; name?: string; firstName?: string; lastName?: string };
+/**
+ * Search existing contacts for the fallback target.
+ *
+ * Reuses `GET /contacts?search=`, the same list the Contacts tab reads, rather than adding a search
+ * route: this needs the identical matching, and a second endpoint would be a second definition of what
+ * "finding a person" means.
+ */
+export async function searchContacts(fetcher: Fetcher, query: string): Promise<ContactRef[]> {
+  const q = query.trim();
+  if (q.length < 2) return [];
+  const res = await fetcher<{ contacts: ContactRef[] }>("/contacts", {
+    query: { search: q, limit: 10 },
+  });
+  return res.contacts ?? [];
+}
+
+/**
+ * A person the server thinks the rep may have just re-entered.
+ *
+ * `companyName` and `email` are carried because the picker has to be CHOOSABLE: two people with the
+ * same name render as two identical rows without them, and picking the wrong one attaches the visit to
+ * the wrong person permanently. The server already returns both — dropping them here was what made the
+ * prompt unanswerable. `isActive` is carried so a soft-deleted record is never offered.
+ */
+export type DedupSuggestion = {
+  id: string;
+  name?: string;
+  firstName?: string;
+  lastName?: string;
+  companyName?: string | null;
+  email?: string | null;
+  isActive?: boolean;
+  matchReason?: string;
+};
 
 /**
  * THE TRAP ON BOTH CREATE ENDPOINTS, and the reason this is a discriminated union.
@@ -151,7 +184,20 @@ export async function createCompany(
   return readCreateResult<CompanyRef>(body, "company");
 }
 
-export type ContactRef = { id: string; firstName: string; lastName: string };
+/**
+ * A person — created by a capture, or found by the fallback search.
+ *
+ * The company fields are optional because the two producers differ: `POST /contacts` echoes the record
+ * it just wrote, while the search list carries the employer, which is what makes one Dana Reyes
+ * distinguishable from another in a picker.
+ */
+export type ContactRef = {
+  id: string;
+  firstName: string;
+  lastName: string;
+  companyName?: string | null;
+  companyId?: string | null;
+};
 
 /**
  * POST /contacts → 201 `{ contact }`, or 200 `{ contact: null, dedupWarning, suggestions }`.

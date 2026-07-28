@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import * as Location from "expo-location";
 
 /**
@@ -50,30 +50,56 @@ export const LOCATION_FIX_TIMEOUT_MS = 12_000;
 
 export function useCurrentLocation() {
   const [state, setState] = useState<LocationState>({ status: "idle" });
+  /**
+   * Which attempt is current.
+   *
+   * Stamped at the START of locate(), not before the fix: every step here is async, so a rep who taps
+   * "Try again" during the permission prompt has two attempts in flight through all of them.
+   */
+  const locateGeneration = useRef(0);
 
   const locate = useCallback(async () => {
+    const generation = ++locateGeneration.current;
+    const superseded = () => generation !== locateGeneration.current;
     setState({ status: "locating" });
     try {
       // Services BEFORE permission: with location off device-wide, requesting permission can resolve
       // "granted" and then never produce a fix — a granted permission and a permanent spinner.
       const enabled = await Location.hasServicesEnabledAsync();
+      if (superseded()) return;
       if (!enabled) {
         setState({ status: "unavailable", reason: "Location services are off for this phone." });
         return;
       }
 
       const { status } = await Location.requestForegroundPermissionsAsync();
+      if (superseded()) return;
       if (status !== Location.PermissionStatus.GRANTED) {
         setState({ status: "denied" });
         return;
       }
 
+      /**
+       * The deadline abandons the WAIT; it cannot cancel the native request.
+       *
+       * expo-location's getCurrentPositionAsync takes no signal, so the OS keeps looking and may
+       * resolve minutes later — by which time the rep has retried, or moved, or attached the visit to
+       * a company. A generation stamp makes that harmless: a result from a superseded attempt is
+       * discarded rather than applied, so a late fix can never overwrite a newer one or reanimate a
+       * screen the rep has already moved past. Overlapping native work is the cost of an API with no
+       * cancellation; corrupting state with it is not.
+       */
+      let timer: ReturnType<typeof setTimeout> | undefined;
       const position = await Promise.race([
         Location.getCurrentPositionAsync({ accuracy: ACCURACY }),
-        new Promise<never>((_resolve, reject) =>
-          setTimeout(() => reject(new Error("LOCATION_TIMEOUT")), LOCATION_FIX_TIMEOUT_MS),
-        ),
-      ]);
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => reject(new Error("LOCATION_TIMEOUT")), LOCATION_FIX_TIMEOUT_MS);
+        }),
+      ]).finally(() => {
+        // Without this the timer holds a pending rejection for its full duration after a fast fix.
+        if (timer) clearTimeout(timer);
+      });
+      if (superseded()) return;
       const { latitude, longitude, accuracy } = position.coords;
       // A fix can come back as NaN on a cold start. Validated here rather than passed to the matcher,
       // where a NaN silently degrades a "which building?" query into an address-only one with no
@@ -90,6 +116,9 @@ export function useCurrentLocation() {
       });
     } catch (err) {
       const timedOut = err instanceof Error && err.message === "LOCATION_TIMEOUT";
+      // A superseded attempt reports nothing — including its timeout. Otherwise the FIRST attempt's
+      // deadline lands on top of a retry that is still running and tells the rep it failed.
+      if (superseded()) return;
       setState({
         status: "unavailable",
         reason: timedOut

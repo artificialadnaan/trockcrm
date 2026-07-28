@@ -64,6 +64,20 @@ export default function ProspectScreen() {
    * the CRM has never seen could not be recorded at all — the exact case prospecting exists for.
    */
   const [company, setCompany] = useState<prospecting.CompanyRef | null>(null);
+  /**
+   * An EXISTING person as the target.
+   *
+   * The screen and the blocked-state copy both offered "a company or contact", but only a company
+   * search existed — and the WHO fields create a person during the SAVE, so they cannot satisfy a gate
+   * that runs before it. A visit about someone known, at a building the CRM has never seen, could not
+   * be recorded at all.
+   */
+  const [contact, setContact] = useState<prospecting.ContactRef | null>(null);
+  const [contactQuery, setContactQuery] = useState("");
+  const contactQueryRef = useRef("");
+  const contactSearchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [contactResults, setContactResults] = useState<prospecting.ContactRef[] | null>(null);
+  const [contactSearchFailed, setContactSearchFailed] = useState(false);
   const [companyQuery, setCompanyQuery] = useState("");
   const companyQueryRef = useRef("");
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -76,6 +90,8 @@ export default function ProspectScreen() {
   const [linkFailed, setLinkFailed] = useState(false);
   /** The person could not be saved, but the visit was. Reported, never silent. */
   const [contactFailed, setContactFailed] = useState(false);
+  /** The person's write may or may not have landed — a dropped response, not a refusal. */
+  const [contactIndeterminate, setContactIndeterminate] = useState(false);
   /**
    * A contact that was already COMMITTED, kept across retries.
    *
@@ -105,6 +121,12 @@ export default function ProspectScreen() {
    */
   const editPerson = (setter: (next: string) => void) => (next: string) => {
     setDuplicateContacts(null);
+    // The DECISIONS go too, not just the visible prompt. A failed activity write unlocks the draft, so
+    // a rep who then corrects the name would otherwise retry with the previously picked person still
+    // pinned — or with the waiver still set, silently skipping the person they just typed.
+    resolvedContactId.current = null;
+    contactWaived.current = false;
+    setResolvedContactName(null);
     setter(next);
   };
 
@@ -140,8 +162,17 @@ export default function ProspectScreen() {
           }
         : company
           ? { companyId: company.id, sourceEntityType: "company" as const, sourceEntityId: company.id }
-          : {},
-    [property, company],
+          : contact
+            ? {
+                contactId: contact.id,
+                // The person's employer rides along when known, so the visit still rolls up to a
+                // company — but the SOURCE stays the contact, because that is what it was about.
+                companyId: contact.companyId ?? undefined,
+                sourceEntityType: "contact" as const,
+                sourceEntityId: contact.id,
+              }
+            : {},
+    [property, company, contact],
   );
   const blockedReason = submitBlockedReason({ target, type, body, outcome });
   const ready = canSubmit({ target, type, body, outcome });
@@ -248,11 +279,27 @@ export default function ProspectScreen() {
     },
   });
 
+  /** The contact fallback's search. Mirrors findCompanies, including its late-response discipline. */
+  const findContacts = useMutation({
+    mutationFn: async (q: string) => ({ q, results: await prospecting.searchContacts(fetcher, q) }),
+    onSuccess: ({ q, results }) => {
+      if (q.trim() !== contactQueryRef.current.trim()) return;
+      setContactResults(results);
+      setContactSearchFailed(false);
+    },
+    onError: (_err, q) => {
+      if (q.trim() !== contactQueryRef.current.trim()) return;
+      setContactResults(null);
+      setContactSearchFailed(true);
+    },
+  });
+
   const save = useMutation({
     mutationFn: async () => {
       let contactId: string | undefined;
       let duplicates: prospecting.DedupSuggestion[] | null = null;
       let contactFailed = false;
+      let contactIndeterminate = false;
       const first = contactFirst.trim();
       const last = contactLast.trim();
       /**
@@ -321,11 +368,25 @@ export default function ProspectScreen() {
            * case the prompt exists to catch. Hand the choice back instead.
            */
           if (haltsForDuplicates({ createdId: contactId, duplicates })) {
-            return { activity: null, duplicates, contactFailed: false } as const;
+            return {
+              activity: null,
+              duplicates,
+              contactFailed: false,
+              contactIndeterminate: false,
+            } as const;
           }
-        } catch {
-          // Recorded and reported after the activity lands; the visit continues regardless.
+        } catch (err) {
+          /**
+           * A DROPPED RESPONSE IS NOT A FAILED WRITE — the same rule the activity save already follows.
+           *
+           * On status 0/408 the contact may well have been committed. Reporting a definite failure sent
+           * the rep off to create that person a second time, so a weak signal produced an orphaned
+           * contact plus a duplicate. The VISIT still goes through either way; only the wording of what
+           * happened to the person changes.
+           */
           contactFailed = true;
+          contactIndeterminate =
+            err instanceof ApiError && (err.status === 0 || err.status === 408);
         }
       }
 
@@ -339,11 +400,12 @@ export default function ProspectScreen() {
       });
       // State moves to the callbacks — mutationFn can run twice under React's concurrent rendering,
       // and a setState there is a side effect in a function that is not allowed to have one.
-      return { activity, duplicates, contactFailed };
+      return { activity, duplicates, contactFailed, contactIndeterminate };
     },
-    onSuccess: async ({ activity, duplicates, contactFailed }) => {
+    onSuccess: async ({ activity, duplicates, contactFailed, contactIndeterminate }) => {
       setDuplicateContacts(duplicates);
       setContactFailed(contactFailed);
+      setContactIndeterminate(contactIndeterminate);
       // Halted on a duplicate: nothing was written, so the draft stays live and editable and the picker
       // below asks who this is. Reporting "Logged" here is the defect.
       if (!activity) {
@@ -480,6 +542,7 @@ export default function ProspectScreen() {
   // nobody will read and resolves into a component that no longer exists.
   useEffect(() => () => {
     if (searchTimer.current) clearTimeout(searchTimer.current);
+    if (contactSearchTimer.current) clearTimeout(contactSearchTimer.current);
   }, []);
 
   useEffect(() => {
@@ -654,9 +717,15 @@ export default function ProspectScreen() {
                     key={m.id}
                     testID={`prospect-match-${m.id}`}
                     onPress={() => setProperty(m)}
+                    /* The THIRD target control, frozen with the property and company ones. A rep who
+                       rejected the matches, logged against a company, then tapped a match still on
+                       screen changed the displayed target after the write — and enabled promotion for a
+                       property that was never part of the saved capture. */
+                    disabled={locked}
                     accessibilityRole="button"
+                    accessibilityState={{ disabled: locked }}
                     accessibilityLabel={`${m.name}, ${describeMatch(m)}`}
-                    style={styles.matchRow}
+                    style={[styles.matchRow, locked && styles.chipLocked]}
                   >
                     <View style={styles.matchBody}>
                       <Text style={styles.matchName} numberOfLines={1}>
@@ -677,6 +746,7 @@ export default function ProspectScreen() {
                 <Pressable
                   testID="prospect-reject-matches"
                   onPress={() => setRejectedMatches(true)}
+                  disabled={locked}
                   accessibilityRole="button"
                   style={styles.linkBtn}
                 >
@@ -737,6 +807,10 @@ export default function ProspectScreen() {
                         setCompanyQuery(next);
                         companyQueryRef.current = next;
                         setCompanySearchFailed(false);
+                        // Results for the PREVIOUS query are wrong the moment the text changes, and
+                        // they stayed tappable through the debounce and the next round trip — long
+                        // enough to attach the visit to a company the screen was no longer describing.
+                        setCompanyResults(null);
                         /* DEBOUNCED. One request per keystroke sent ten for "palm villas" — on a
                            truck's connection that is ten round trips racing each other to answer a
                            query the rep has already moved past. 250ms matches the web's own
@@ -782,10 +856,105 @@ export default function ProspectScreen() {
                     ) : null}
                     {companyResults?.length === 0 && companyQuery.trim().length >= 2 ? (
                       <Text testID="prospect-no-companies" style={styles.help}>
-                        No companies match “{companyQuery.trim()}”. Add the property and company on the
-                        web, then log against them.
+                        No companies match “{companyQuery.trim()}”. Try the person instead, or add the
+                        property on the web and log against it.
                       </Text>
                     ) : null}
+
+                    {/* THE PERSON FALLBACK. Both this screen and the blocked-state copy promised a
+                        contact was a valid target; without this they were describing a control that did
+                        not exist. A visit about someone known, at a building the CRM has never seen, is
+                        exactly the prospecting case. */}
+                    <Text style={styles.stepLabel}>OR A PERSON</Text>
+                    {contact ? (
+                      <View style={styles.matchRow}>
+                        <View style={styles.matchBody}>
+                          <Text style={styles.matchName} numberOfLines={1}>
+                            {`${contact.firstName} ${contact.lastName}`.trim()}
+                          </Text>
+                          <Text style={styles.matchMeta} numberOfLines={1}>
+                            {contact.companyName || "Contact"}
+                          </Text>
+                        </View>
+                        {locked ? null : (
+                          <Pressable
+                            testID="prospect-clear-contact"
+                            onPress={() => setContact(null)}
+                            accessibilityRole="button"
+                            accessibilityLabel="Choose a different person"
+                            style={styles.linkBtn}
+                          >
+                            <Text style={styles.linkText}>Change</Text>
+                          </Pressable>
+                        )}
+                      </View>
+                    ) : (
+                      <>
+                        <TextInput
+                          testID="prospect-contact-search"
+                          editable={!locked}
+                          value={contactQuery}
+                          onChangeText={(next) => {
+                            setContactQuery(next);
+                            contactQueryRef.current = next;
+                            setContactSearchFailed(false);
+                            // Stale rows are wrong the moment the text changes, and they stay tappable
+                            // through the debounce otherwise.
+                            setContactResults(null);
+                            if (contactSearchTimer.current) clearTimeout(contactSearchTimer.current);
+                            if (next.trim().length >= 2) {
+                              contactSearchTimer.current = setTimeout(
+                                () => findContacts.mutate(next),
+                                250,
+                              );
+                            }
+                          }}
+                          placeholder="Search people"
+                          placeholderTextColor={theme.color.textMuted}
+                          autoCapitalize="words"
+                          autoCorrect={false}
+                          style={styles.input}
+                        />
+                        {findContacts.isPending ? (
+                          <ActivityIndicator color={theme.color.brandRed} />
+                        ) : null}
+                        {contactResults?.map((c) => (
+                          <Pressable
+                            key={c.id}
+                            testID={`prospect-contact-${c.id}`}
+                            onPress={() => {
+                              setContact(c);
+                              setContactResults(null);
+                              setContactQuery("");
+                              contactQueryRef.current = "";
+                            }}
+                            accessibilityRole="button"
+                            accessibilityLabel={`Attach this visit to ${c.firstName} ${c.lastName}`}
+                            style={styles.matchRow}
+                          >
+                            <View style={styles.matchBody}>
+                              <Text style={styles.matchName} numberOfLines={1}>
+                                {`${c.firstName} ${c.lastName}`.trim()}
+                              </Text>
+                              {/* The employer, so two people with the same name are distinguishable. */}
+                              <Text style={styles.matchMeta} numberOfLines={1}>
+                                {c.companyName || "No company on file"}
+                              </Text>
+                            </View>
+                          </Pressable>
+                        ))}
+                        {contactSearchFailed ? (
+                          <Text testID="prospect-contact-search-failed" style={styles.warn}>
+                            Couldn&apos;t search people — check your signal and try again.
+                          </Text>
+                        ) : null}
+                        {contactResults?.length === 0 && contactQuery.trim().length >= 2 ? (
+                          <Text testID="prospect-no-contacts" style={styles.help}>
+                            No people match “{contactQuery.trim()}”.
+                          </Text>
+                        ) : null}
+                      </>
+                    )}
                   </>
                 )}
               </View>
@@ -918,7 +1087,7 @@ export default function ProspectScreen() {
                 ? "Someone with this name is already in the CRM. Is this them?"
                 : `${duplicateContacts.length} people with this name are already in the CRM. Which one did you meet?`}
             </Text>
-            {duplicateContacts.map((s) => {
+            {duplicateContacts.filter((s) => s.isActive !== false).map((s) => {
               const name = s.name ?? [s.firstName, s.lastName].filter(Boolean).join(" ");
               return (
                 <Pressable
@@ -935,9 +1104,17 @@ export default function ProspectScreen() {
                   accessibilityLabel={`Log this visit with ${name || "this contact"}`}
                   style={styles.matchRow}
                 >
-                  <Text style={styles.matchName} numberOfLines={1}>
-                    {name || "Existing contact"}
-                  </Text>
+                  <View style={styles.matchBody}>
+                    <Text style={styles.matchName} numberOfLines={1}>
+                      {name || "Existing contact"}
+                    </Text>
+                    {/* WHO they are, not just that they exist. Two people with the same name rendered as
+                        two identical rows, so the rep picked blind and could pin the visit to the wrong
+                        person for good. The server already returns both of these. */}
+                    <Text style={styles.matchMeta} numberOfLines={1}>
+                      {[s.companyName, s.email].filter(Boolean).join(" · ") || "No other details"}
+                    </Text>
+                  </View>
                   <Text style={styles.linkText}>Use</Text>
                 </Pressable>
               );
@@ -997,7 +1174,9 @@ export default function ProspectScreen() {
 
             {contactFailed ? (
               <Text testID="prospect-contact-failed" style={styles.warn}>
-                The visit was logged, but that person couldn&apos;t be saved — add them on the web.
+                {contactIndeterminate
+                  ? "The visit was logged. That person may or may not have been saved — check before adding them again."
+                  : "The visit was logged, but that person couldn't be saved — add them on the web."}
               </Text>
             ) : null}
 
@@ -1046,7 +1225,15 @@ export default function ProspectScreen() {
                 resolvedContactId.current = null;
                 contactWaived.current = false;
                 setResolvedContactName(null);
+                setContactIndeterminate(false);
                 setDuplicateContacts(null);
+                // The person TARGET is a separate thing from the person being described; a fresh log at
+                // the same spot keeps the building, not who the last visit was with.
+                setContact(null);
+                setContactQuery("");
+                contactQueryRef.current = "";
+                setContactResults(null);
+                setContactSearchFailed(false);
                 setBody("");
                 setOutcome("");
                 setNextStep("");

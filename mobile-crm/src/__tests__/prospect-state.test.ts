@@ -259,3 +259,25 @@ describe("personDetailsWillBeDiscarded", () => {
     expect(d({ first: "  ", last: "  " })).toBe(false);
   });
 });
+
+describe("a CONTACT is a valid target", () => {
+  // The screen promised "a company or contact" long before one could be chosen. These pin the gate
+  // side of that promise, so the target can never silently narrow back to property-or-company.
+  it("lets a visit submit against a contact alone", () => {
+    expect(
+      canSubmit({ target: { contactId: "ct1" }, type: "site_visit", body: "Met Dana", outcome: "" }),
+    ).toBe(true);
+  });
+
+  it("does not ask for a property when a contact is the target", () => {
+    expect(
+      submitBlockedReason({ target: { contactId: "ct1" }, type: "call", body: "x", outcome: "" }),
+    ).toBeNull();
+  });
+
+  it("still blocks with no target at all", () => {
+    expect(
+      submitBlockedReason({ target: {}, type: "call", body: "x", outcome: "" }),
+    ).toMatch(/property/i);
+  });
+});

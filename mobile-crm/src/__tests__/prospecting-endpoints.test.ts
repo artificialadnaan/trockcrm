@@ -223,6 +223,30 @@ describe("company search", () => {
   });
 });
 
+describe("contact search", () => {
+  it("does not query below two characters", async () => {
+    const { fetcher, calls } = recording({ contacts: [] });
+    await expect(prospecting.searchContacts(fetcher, "a")).resolves.toEqual([]);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("reads GET /contacts?search= rather than inventing a second search route", async () => {
+    // Deliberately the SAME list the Contacts tab reads: a dedicated route would be a second
+    // definition of what "finding a person" means, and the two would drift.
+    const { fetcher, calls } = recording({
+      contacts: [{ id: "ct1", firstName: "Dana", lastName: "Reyes", companyName: "Palm Villas HOA" }],
+    });
+    await expect(prospecting.searchContacts(fetcher, "dana")).resolves.toHaveLength(1);
+    expect(calls[0].path).toBe("/contacts");
+    expect((calls[0].opts.query as Record<string, unknown>).search).toBe("dana");
+  });
+
+  it("survives a response with no contacts array", async () => {
+    const { fetcher } = recording({});
+    await expect(prospecting.searchContacts(fetcher, "dana")).resolves.toEqual([]);
+  });
+});
+
 describe("activity source entity", () => {
   it("states the source explicitly so a contact cannot steal it from the property", async () => {
     // inferSourceEntity ranks contact ABOVE property, so attaching a newly created person re-anchored
