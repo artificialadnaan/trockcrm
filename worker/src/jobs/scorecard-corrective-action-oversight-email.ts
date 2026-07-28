@@ -7,6 +7,7 @@ import { getObjectBuffer } from "../lib/r2-client.js";
 import { escapeHtml, normalizeText, isSafeTenantSchema } from "../lib/email-format.js";
 import { resolveFrontendUrl, TROCK_LOGO_EMAIL_URL } from "./project-number-email.js";
 import { resolveFieldScorecardRecipients } from "@trock-crm/shared/lib/fieldScorecardEmails";
+import { resolveCorrectiveActionApprovers } from "@trock-crm/shared/lib/correctiveActionApprovers";
 import { orderCorrectiveActions } from "@trock-crm/shared/lib/correctiveActionOrder";
 import {
   BROWSABLE_PROJECT_SQL,
@@ -91,7 +92,9 @@ function isCurrentScorecardPdfArtifactKey(r2Key: string, renderVersion: number):
   return new RegExp(`\\.[a-f0-9]{64}\\.v${renderVersion}\\.pdf$`).test(r2Key);
 }
 
-export type CorrectiveActionOversightPhase = "opened" | "closed";
+export type CorrectiveActionOversightPhase = "opened" | "closed" | "awaiting_approval";
+
+const VALID_PHASES: readonly CorrectiveActionOversightPhase[] = ["opened", "closed", "awaiting_approval"];
 
 export interface ScorecardCorrectiveActionOversightEmailPayload {
   tenantSchema?: string;
@@ -124,9 +127,11 @@ interface HandlerDeps {
 
 /** The phase's own stamp column. A literal switch — the phase never reaches SQL as interpolated text. */
 function stampColumn(phase: CorrectiveActionOversightPhase): string {
-  return phase === "opened"
-    ? "corrective_action_oversight_opened_at"
-    : "corrective_action_oversight_closed_at";
+  if (phase === "opened") return "corrective_action_oversight_opened_at";
+  // Its OWN column: reusing either oversight stamp would make an approval request suppress the opened or the
+  // completion notice for the same cycle.
+  if (phase === "awaiting_approval") return "corrective_action_approval_requested_at";
+  return "corrective_action_oversight_closed_at";
 }
 
 interface ScorecardRow {
@@ -152,6 +157,7 @@ interface ScorecardRow {
   corrective_action_oversight_cycle: string | null;
   corrective_action_oversight_opened_at: Date | null;
   corrective_action_oversight_closed_at: Date | null;
+  corrective_action_approval_requested_at: Date | null;
 }
 
 interface ItemRow {
@@ -192,7 +198,7 @@ export async function handleScorecardCorrectiveActionOversightEmail(
   const tenantSchema = payload.tenantSchema;
   const scorecardId = normalizeText(payload.scorecardId);
   const phase = payload.phase;
-  if (!isSafeTenantSchema(tenantSchema) || !scorecardId || (phase !== "opened" && phase !== "closed")) {
+  if (!isSafeTenantSchema(tenantSchema) || !scorecardId || !phase || !VALID_PHASES.includes(phase)) {
     logger.warn("[CorrectiveActionOversightEmail] Invalid job payload - skipping", {
       tenantSchema,
       scorecardId,
@@ -220,6 +226,7 @@ export async function handleScorecardCorrectiveActionOversightEmail(
             sc.pdf_r2_key, sc.pdf_render_version,
             sc.pdf_content_generation, sc.updated_at,
             sc.corrective_action_oversight_opened_at, sc.corrective_action_oversight_closed_at,
+            sc.corrective_action_approval_requested_at,
             sc.corrective_action_cycle_nonce, sc.corrective_action_oversight_cycle,
             d.name AS deal_name
        FROM ${tenantSchema}.field_scorecards sc
@@ -240,7 +247,9 @@ export async function handleScorecardCorrectiveActionOversightEmail(
   const alreadySent =
     phase === "opened"
       ? scorecard.corrective_action_oversight_opened_at
-      : scorecard.corrective_action_oversight_closed_at;
+      : phase === "awaiting_approval"
+        ? scorecard.corrective_action_approval_requested_at
+        : scorecard.corrective_action_oversight_closed_at;
   if (alreadySent) {
     logger.log("[CorrectiveActionOversightEmail] Already notified for this cycle - skipping", {
       scorecardId,
@@ -275,7 +284,12 @@ export async function handleScorecardCorrectiveActionOversightEmail(
     return;
   }
 
-  const expectedStatus = phase === "opened" ? "corrective_action_open" : "corrective_action_closed";
+  const expectedStatus =
+    phase === "opened"
+      ? "corrective_action_open"
+      : phase === "awaiting_approval"
+        ? "corrective_action_submitted"
+        : "corrective_action_closed";
   if (scorecard.status !== expectedStatus) {
     logger.log(
       "[CorrectiveActionOversightEmail] Scorecard is no longer in the state this notice describes - skipping (no send, no stamp)",
@@ -286,7 +300,14 @@ export async function handleScorecardCorrectiveActionOversightEmail(
 
   // Oversight recipients MINUS the cycle's responders: a superintendent who is also on the env list should
   // get "please fix this", not additionally "someone needs to fix this" for the same card.
-  const configured = resolveFieldScorecardRecipients(env);
+  // WHO to tell depends on the question. opened/closed INFORM the watchers
+  // (FIELD_SCORECARD_EMAIL_RECIPIENTS); awaiting_approval ASKS the people who can act
+  // (QC_APPROVER_EMAILS) — the same config the API authorizes the verb against, so the set notified and the
+  // set able to act are one definition and cannot drift into asking someone who will only get a 403.
+  const configured =
+    phase === "awaiting_approval"
+      ? resolveCorrectiveActionApprovers(env)
+      : resolveFieldScorecardRecipients(env);
   const responderResult = await query(recipientResolutionSql(tenantSchema), [
     scorecard.deal_id,
     scorecardId,
@@ -777,11 +798,21 @@ export function buildOversightEmail(input: {
   link: string;
 }) {
   const opened = input.phase === "opened";
-  const title = opened ? "Corrective Action Opened" : "Corrective Action Completed";
+  const awaiting = input.phase === "awaiting_approval";
+  const title = opened
+    ? "Corrective Action Opened"
+    : awaiting
+      ? "Awaiting Your Approval"
+      // Says APPROVED, not "completed". Under the approval gate the card only reaches this state on the
+      // approver's acceptance, and "documented" is a weaker claim than "accepted" — the distinction is the
+      // entire point of the gate.
+      : "Corrective Action Approved";
   const project = input.projectNumber ? `${input.projectNumber} — ${input.dealName}` : input.dealName;
   const subject = opened
     ? `Corrective action opened: ${project} (${input.scoreText})`
-    : `Corrective action completed: ${project}`;
+    : awaiting
+      ? `Corrective action awaiting your approval: ${project}`
+      : `Corrective action approved: ${project}`;
 
   const roleLabel = (role: string | null) =>
     role === "superintendent" ? "Superintendent" : role === "project_manager" ? "Project manager" : null;
@@ -803,13 +834,20 @@ export function buildOversightEmail(input: {
     ? `${responderList} ${(input.responders ?? []).length === 1 ? "is" : "are"} assigned to document a fix for each flagged item.`
     : "No assigned superintendent or project manager could be reached by email for this project, so nobody has been asked to document a fix yet — assign a responder with a valid email on the deal's Team tab.";
 
+  const where = `${input.projectNumber ? ` (${input.projectNumber})` : ""}${input.weekOf ? `, week of ${input.weekOf}` : ""}`;
+  const whereHtml = `${input.projectNumber ? ` (${escapeHtml(input.projectNumber)})` : ""}${input.weekOf ? `, week of ${escapeHtml(input.weekOf)}` : ""}`;
+
   const intro = opened
-    ? `A field scorecard for <strong>${escapeHtml(input.dealName)}</strong>${input.projectNumber ? ` (${escapeHtml(input.projectNumber)})` : ""}${input.weekOf ? `, week of ${escapeHtml(input.weekOf)}` : ""} came in below standard (${escapeHtml(input.scoreText)}) and a corrective action has been opened. ${escapeHtml(askedText)}`
-    : `The corrective action for <strong>${escapeHtml(input.dealName)}</strong>${input.projectNumber ? ` (${escapeHtml(input.projectNumber)})` : ""}${input.weekOf ? `, week of ${escapeHtml(input.weekOf)}` : ""} is complete. Every flagged item has been documented. The updated scorecard is attached where available.`;
+    ? `A field scorecard for <strong>${escapeHtml(input.dealName)}</strong>${whereHtml} came in below standard (${escapeHtml(input.scoreText)}) and a corrective action has been opened. ${escapeHtml(askedText)}`
+    : awaiting
+      ? `The corrective action for <strong>${escapeHtml(input.dealName)}</strong>${whereHtml} has been documented and is <strong>waiting for your review</strong>. Approve each item, or send one back with a comment saying what still has to be fixed.`
+      : `The corrective action for <strong>${escapeHtml(input.dealName)}</strong>${whereHtml} has been <strong>approved</strong>. Every flagged item was documented and accepted. The updated scorecard is attached where available.`;
 
   const textIntro = opened
-    ? `A field scorecard for ${input.dealName}${input.projectNumber ? ` (${input.projectNumber})` : ""}${input.weekOf ? `, week of ${input.weekOf}` : ""} came in below standard (${input.scoreText}) and a corrective action has been opened. ${askedText}`
-    : `The corrective action for ${input.dealName}${input.projectNumber ? ` (${input.projectNumber})` : ""}${input.weekOf ? `, week of ${input.weekOf}` : ""} is complete.`;
+    ? `A field scorecard for ${input.dealName}${where} came in below standard (${input.scoreText}) and a corrective action has been opened. ${askedText}`
+    : awaiting
+      ? `The corrective action for ${input.dealName}${where} has been documented and is waiting for your review. Approve each item, or send one back with a comment saying what still has to be fixed.`
+      : `The corrective action for ${input.dealName}${where} has been approved. Every flagged item was documented and accepted.`;
 
   const htmlItems = input.items.length
     ? `<ul style="margin:12px 0 0 0;padding-left:20px;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:20px;color:#111111;">${input.items

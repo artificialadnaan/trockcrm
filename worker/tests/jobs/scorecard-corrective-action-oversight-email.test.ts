@@ -90,6 +90,8 @@ interface ScorecardOverrides {
   scorecardRows?: unknown[];
   /** The card's CURRENT action-item list — what the corrective-action rows are ordered against. */
   actionItems?: string[];
+  /** Non-null => the approver has already been told about this cycle. */
+  approvalRequestedAt?: Date | null;
   /** Override the corrective-action rows (e.g. two action items, to assert ordering). */
   items?: unknown[];
   /**
@@ -172,6 +174,7 @@ function makeQuery(
               over.storedOversightCycle === undefined ? OVERSIGHT_CYCLE : over.storedOversightCycle,
             corrective_action_oversight_opened_at: over.openedAt ?? null,
             corrective_action_oversight_closed_at: over.closedAt ?? null,
+            corrective_action_approval_requested_at: over.approvalRequestedAt ?? null,
           },
         ],
       };
@@ -231,8 +234,8 @@ describe("handleScorecardCorrectiveActionOversightEmail", () => {
       string,
       { attachments?: Array<{ filename: string }> },
     ];
-    expect(subject).toContain("Corrective action completed");
-    expect(html).toContain("Corrective Action Completed");
+    expect(subject).toContain("Corrective action approved");
+    expect(html).toContain("Corrective Action Approved");
     expect(options.attachments).toHaveLength(1);
     expect(options.attachments![0].filename).toBe(`field-scorecard-${SCORECARD}.pdf`);
   });
@@ -1256,5 +1259,153 @@ describe("handleScorecardCorrectiveActionOversightEmail", () => {
     expect(html).not.toContain(longLabel);
     expect(options.text).not.toContain(longLabel);
     expect(html.length).toBeLessThan(longLabel.length);
+  });
+
+  const approverEnv = { ...env, QC_APPROVER_EMAILS: "james@trockgc.com" } as unknown as NodeJS.ProcessEnv;
+
+  it("REGRESSION: an awaiting_approval job actually SENDS — it used to be dropped by the payload guard", async () => {
+    // enqueueCorrectiveActionApprovalRequested has always enqueued this phase; the worker's union rejected
+    // it, so the job completed successfully having notified nobody. A silently-dropped notification is worse
+    // than a dead-letter, because nothing surfaces it — the queue reports success.
+    const { query } = makeQuery({ status: "corrective_action_submitted" });
+    const sendEmail = makeSend();
+
+    await handleScorecardCorrectiveActionOversightEmail(payload({ phase: "awaiting_approval" }), null, {
+      query: query as never,
+      sendEmail: sendEmail as never,
+      env: approverEnv,
+      logger: makeLogger(),
+    });
+
+    expect(sendEmail).toHaveBeenCalledTimes(1);
+    const [to, subject] = sendEmail.mock.calls[0] as unknown as [string[], string];
+    expect(to).toEqual(["james@trockgc.com"]);
+    expect(subject).toMatch(/awaiting your approval/i);
+  });
+
+  it("addresses the APPROVER list, never the oversight watcher list", async () => {
+    // Different question, different config. FIELD_SCORECARD_EMAIL_RECIPIENTS is who WATCHES;
+    // QC_APPROVER_EMAILS is who can ACT. Asking a watcher to approve sends them to a 403.
+    const { query } = makeQuery({ status: "corrective_action_submitted" });
+    const sendEmail = makeSend();
+
+    await handleScorecardCorrectiveActionOversightEmail(payload({ phase: "awaiting_approval" }), null, {
+      query: query as never,
+      sendEmail: sendEmail as never,
+      env: approverEnv,
+      logger: makeLogger(),
+    });
+
+    const [to] = sendEmail.mock.calls[0] as unknown as [string[]];
+    expect(to).not.toContain("ops@trockgc.com");
+  });
+
+  it("does NOT subtract responders from the approver list", async () => {
+    // The subtraction exists so a super does not get "someone must fix this" on top of "please fix this".
+    // An approver who also happens to be a super on this card still has to be asked to approve it.
+    const { query } = makeQuery({ status: "corrective_action_submitted" }, [
+      { email: "james@trockgc.com", name: "James Helms", role: "superintendent" } as never,
+    ]);
+    const sendEmail = makeSend();
+
+    await handleScorecardCorrectiveActionOversightEmail(payload({ phase: "awaiting_approval" }), null, {
+      query: query as never,
+      sendEmail: sendEmail as never,
+      env: approverEnv,
+      logger: makeLogger(),
+    });
+
+    const [to] = sendEmail.mock.calls[0] as unknown as [string[]];
+    expect(to).toEqual(["james@trockgc.com"]);
+  });
+
+  it("stamps its OWN column, so it cannot suppress the opened or completed notice", async () => {
+    const { query, stampUpdates } = makeQuery({ status: "corrective_action_submitted" });
+    const sendEmail = makeSend();
+
+    await handleScorecardCorrectiveActionOversightEmail(payload({ phase: "awaiting_approval" }), null, {
+      query: query as never,
+      sendEmail: sendEmail as never,
+      env: approverEnv,
+      logger: makeLogger(),
+    });
+
+    expect(stampUpdates).toHaveLength(1);
+    expect(stampUpdates[0].sql).toContain("corrective_action_approval_requested_at");
+    expect(stampUpdates[0].sql).not.toContain("oversight_opened_at");
+    expect(stampUpdates[0].sql).not.toContain("oversight_closed_at");
+  });
+
+  it("skips a card that has LEFT the approver queue before the job ran", async () => {
+    // Same send-time state guard the other phases apply: an approver who acted within the ~120s delay must
+    // not then receive "awaiting your approval" for something already approved.
+    const { query, stampUpdates } = makeQuery({ status: "corrective_action_closed" });
+    const sendEmail = makeSend();
+
+    await handleScorecardCorrectiveActionOversightEmail(payload({ phase: "awaiting_approval" }), null, {
+      query: query as never,
+      sendEmail: sendEmail as never,
+      env: approverEnv,
+      logger: makeLogger(),
+    });
+
+    expect(sendEmail).not.toHaveBeenCalled();
+    expect(stampUpdates).toHaveLength(0);
+  });
+
+  it("does not re-ask an approver already told about this cycle", async () => {
+    const { query, stampUpdates } = makeQuery({
+      status: "corrective_action_submitted",
+      approvalRequestedAt: new Date("2026-07-28T12:00:00.000Z"),
+    });
+    const sendEmail = makeSend();
+
+    await handleScorecardCorrectiveActionOversightEmail(payload({ phase: "awaiting_approval" }), null, {
+      query: query as never,
+      sendEmail: sendEmail as never,
+      env: approverEnv,
+      logger: makeLogger(),
+    });
+
+    expect(sendEmail).not.toHaveBeenCalled();
+    expect(stampUpdates).toHaveLength(0);
+  });
+
+  it("logs and returns when QC_APPROVER_EMAILS is unset — nobody can approve, so nobody is asked", async () => {
+    // Matches the API, which 403s everyone when the list is empty. Not an error: a dead-letter here would be
+    // noise about a misconfiguration the API already reports the moment anyone tries to act.
+    const { query, stampUpdates } = makeQuery({ status: "corrective_action_submitted" });
+    const sendEmail = makeSend();
+
+    await handleScorecardCorrectiveActionOversightEmail(payload({ phase: "awaiting_approval" }), null, {
+      query: query as never,
+      sendEmail: sendEmail as never,
+      env: { ...env, QC_APPROVER_EMAILS: "" } as unknown as NodeJS.ProcessEnv,
+      logger: makeLogger(),
+    });
+
+    expect(sendEmail).not.toHaveBeenCalled();
+    expect(stampUpdates).toHaveLength(0);
+  });
+
+  it("says APPROVED, not merely documented, on the completion notice", async () => {
+    // Under the gate the card reaches this state only on the approver's acceptance. "Complete. Every flagged
+    // item has been documented" describes the PRE-gate behaviour and tells oversight the wrong thing about
+    // what actually happened — documented is not accepted.
+    const { query } = makeQuery({ status: "corrective_action_closed" });
+    const sendEmail = makeSend();
+
+    await handleScorecardCorrectiveActionOversightEmail(payload({ phase: "closed" }), null, {
+      query: query as never,
+      sendEmail: sendEmail as never,
+      getPdf: (async () => Buffer.from("%PDF-1.4")) as never,
+      env,
+      logger: makeLogger(),
+    });
+
+    const [, subject, html] = sendEmail.mock.calls[0] as unknown as [string[], string, string];
+    expect(subject).toMatch(/approved/i);
+    expect(html).toMatch(/has been <strong>approved<\/strong>/i);
+    expect(html).not.toMatch(/Every flagged item has been documented\./i);
   });
 });
