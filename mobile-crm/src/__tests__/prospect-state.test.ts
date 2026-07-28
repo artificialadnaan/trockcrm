@@ -376,3 +376,29 @@ describe("isCorroborated — a bounding-box corner is not proximity", () => {
     expect(isCorroborated(match({ distanceMeters: 200, city: null, state: null, zip: null }))).toBe(true);
   });
 });
+
+describe("selectable vs advisory matches", () => {
+  // The rule match-service.ts states and this enforces: when unsure, MISS. An address hit with no
+  // locality and no coordinates is unsure — "100 Main St" is in every town — so it may be SHOWN but
+  // must not be a one-tap target, because the tap attaches this visit and everything after it.
+  const isSelectable = (m: PropertyMatch) => m.addressMatch === null || isCorroborated(m);
+
+  it("keeps an uncorroborated address hit OUT of the tappable list", () => {
+    expect(
+      isSelectable(match({ addressMatch: "exact", distanceMeters: null, city: null, state: null, zip: null })),
+    ).toBe(false);
+  });
+
+  it("keeps a corroborated address hit selectable", () => {
+    expect(
+      isSelectable(match({ addressMatch: "exact", distanceMeters: null, city: "Dallas", state: "TX", zip: "75201" })),
+    ).toBe(true);
+  });
+
+  it("keeps a proximity-only hit selectable — distance IS the corroboration", () => {
+    // These reached the list by being within the radius, so they are not the unsure case.
+    expect(
+      isSelectable(match({ addressMatch: null, distanceMeters: 40, city: null, state: null, zip: null })),
+    ).toBe(true);
+  });
+});

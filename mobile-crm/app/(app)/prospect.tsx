@@ -850,6 +850,28 @@ export default function ProspectScreen() {
   const targetsLocked = locked || createPropertyHere.isPending || createCompanyNamed.isPending;
 
   /** Person details the save will discard, because a contact needs BOTH names to be created. */
+  /**
+   * ADVISORY vs SELECTABLE, and the file's own rule decides it.
+   *
+   * match-service.ts states the asymmetry this whole feature is built on: a missed match costs a
+   * visible, mergeable duplicate; a FALSE match silently folds two buildings and corrupts every deal,
+   * activity and contact on both — so when unsure, MISS. An address hit with no locality and no
+   * coordinates is exactly "unsure": "100 Main St" exists in every town, and one tap would attach this
+   * visit and everything after it to a building somewhere else.
+   *
+   * So those rows stop being one-tap targets and become a NOTE. They are still shown, because the rep
+   * needs to know a record like this exists before adding another — the signal is the useful part, the
+   * tap target was the dangerous part.
+   */
+  const selectableMatches = useMemo(
+    () => (matches ?? []).filter((m) => m.addressMatch === null || isCorroborated(m)),
+    [matches],
+  );
+  const advisoryMatches = useMemo(
+    () => (matches ?? []).filter((m) => m.addressMatch !== null && !isCorroborated(m)),
+    [matches],
+  );
+
   const personPartial = personDetailsWillBeDiscarded({
     first: contactFirst,
     last: contactLast,
@@ -1096,8 +1118,12 @@ export default function ProspectScreen() {
 
             {matches?.length ? (
               <View style={styles.matchList}>
-                <Text style={styles.help}>Is this the property?</Text>
-                {matches.map((m) => (
+                {/* Only when something is actually confirmable — otherwise the question sits above an
+                    empty list and the advisory block below answers a question nobody asked. */}
+                {selectableMatches.length ? (
+                  <Text style={styles.help}>Is this the property?</Text>
+                ) : null}
+                {selectableMatches.map((m) => (
                   <Pressable
                     key={m.id}
                     testID={`prospect-match-${m.id}`}
@@ -1146,6 +1172,24 @@ export default function ProspectScreen() {
                 {/* The escape hatch. With candidates on screen the company fallback was hidden, so a
                     rep whose building is simply not among them had no way forward — the suggestions
                     became a set of wrong answers with no "none of these". */}
+                {advisoryMatches.length ? (
+                  <View testID="prospect-advisory-matches" style={styles.dupBox}>
+                    <Text style={styles.warn}>
+                      {advisoryMatches.length === 1
+                        ? "One record shares this street line but has no city on file, so it can't be confirmed from here:"
+                        : `${advisoryMatches.length} records share this street line but have no city on file, so they can't be confirmed from here:`}
+                    </Text>
+                    {advisoryMatches.map((m) => (
+                      <Text key={m.id} style={styles.matchMeta} numberOfLines={2}>
+                        • {[m.name, m.address, m.companyName].filter(Boolean).join(" · ")}
+                      </Text>
+                    ))}
+                    <Text style={styles.help}>
+                      If one of these is this building, link it on the web rather than adding another.
+                    </Text>
+                  </View>
+                ) : null}
+
                 <Pressable
                   testID="prospect-reject-matches"
                   onPress={() => setRejectedMatches(true)}
