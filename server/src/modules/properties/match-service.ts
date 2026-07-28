@@ -583,6 +583,11 @@ export async function matchProperties(
       ? sql`(
           ${normalizedDbAddress} LIKE ${`${rawQueryKey} %`}
           OR ${normalizedDbAddress} LIKE ${`${addressKey} %`}
+          -- The COLLAPSED form too, mirroring the equality predicate above. A query written out in
+          -- full ("100 Main Street") against a stored abbreviation ("100 Main St Ste 200") matched
+          -- neither prefix, so a row compareAddressKeys would call a base match was ordered through
+          -- the broad token set and could still fall past the cap.
+          OR ${normalizedDbAddress} LIKE ${`${collapseSuffixes(rawQueryKey)} %`}
         )`
       : sql`false`;
 

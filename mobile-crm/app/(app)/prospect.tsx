@@ -339,6 +339,8 @@ export default function ProspectScreen() {
     null,
   );
   const [createCompanyError, setCreateCompanyError] = useState<string | null>(null);
+  /** Shown beside the match list when a typed address turned up existing records. */
+  const [rematchNotice, setRematchNotice] = useState<string | null>(null);
 
   /**
    * The address, typed, for when the geocode could not supply one.
@@ -426,6 +428,27 @@ export default function ProspectScreen() {
       if (!under || !at?.address || !at.city || !at.state || !at.zip) {
         throw new Error("A company and a full address are needed to add a building.");
       }
+      /**
+       * RE-MATCH on the typed address before creating anything.
+       *
+       * When the geocode failed, the first lookup ran on coordinates alone — and a legacy property
+       * with null coordinates (most of the table) cannot be found that way. The rep then types that
+       * property's exact address and this posted it straight to /properties, minting a duplicate of the
+       * record the address would have matched. The address is new information, so it earns a new
+       * lookup; anything it finds is offered instead of created.
+       */
+      const rematched = await prospecting
+        .matchProperties(fetcher, {
+          lat: fix?.lat ?? null,
+          lng: fix?.lng ?? null,
+          address: at.address,
+          city: at.city,
+          state: at.state,
+          zip: at.zip,
+        })
+        .catch(() => [] as prospecting.PropertyMatch[]);
+      if (rematched.length > 0) return { created: null, rematched, at, under };
+
       const created = await prospecting.createProperty(fetcher, {
         companyId: under.id,
         // The street line is the honest default name; it can be renamed on the web.
@@ -439,9 +462,28 @@ export default function ProspectScreen() {
         lat: at.lat ?? undefined,
         lng: at.lng ?? undefined,
       });
-      return { created, at, under };
+      return { created, at, under, rematched: null };
     },
-    onSuccess: async ({ created, at, under }) => {
+    onSuccess: async ({ created, at, under, rematched }) => {
+      // The typed address found existing records. Offer them rather than creating a second copy — the
+      // duplicate this whole feature exists to prevent.
+      if (rematched?.length) {
+        /**
+         * The notice goes in `rematchNotice`, NOT createPropertyError.
+         *
+         * That error renders inside the fallback block, which is itself gated on
+         * `matches?.length === 0` — so setting matches here unmounts the very element that would have
+         * explained why. Same hidden-state shape as the other defects on this screen: the state was
+         * set, the container was gone.
+         */
+        setMatches(rematched);
+        setRematchNotice(
+          "Those already exist at that address — pick one instead of adding another record.",
+        );
+        setCreatePropertyError(null);
+        return;
+      }
+      if (!created) return;
       /**
        * POST /properties has NO dedup branch — it creates unconditionally, which is exactly why
        * /properties/match runs first and why this control appears only after it came back empty.
@@ -874,6 +916,12 @@ export default function ProspectScreen() {
               </Text>
             ) : null}
 
+            {rematchNotice ? (
+              <Text testID="prospect-rematch-notice" style={styles.warn}>
+                {rematchNotice}
+              </Text>
+            ) : null}
+
             {matchError ? (
               <>
                 <Text style={styles.warn}>{matchError}</Text>
@@ -923,15 +971,19 @@ export default function ProspectScreen() {
                     disabled={locked}
                     accessibilityRole="button"
                     accessibilityState={{ disabled: locked }}
-                    accessibilityLabel={`${m.name}, ${describeMatch(m)}`}
+                    accessibilityLabel={`${m.name}${m.companyName ? `, ${m.companyName}` : ""}, ${describeMatch(m)}`}
                     style={[styles.matchRow, locked && styles.chipLocked]}
                   >
                     <View style={styles.matchBody}>
                       <Text style={styles.matchName} numberOfLines={1}>
                         {m.name}
                       </Text>
+                      {/* The COMPANY too. The duplicate groups this feature exists to handle are
+                          same-name, same-address records under different owners, so without it the
+                          two rows a rep must choose between are indistinguishable. */}
                       <Text style={styles.matchMeta} numberOfLines={1}>
-                        {[m.address, m.city].filter(Boolean).join(", ") || "No address on file"}
+                        {[m.address, m.city, m.companyName].filter(Boolean).join(", ") ||
+                          "No address on file"}
                       </Text>
                     </View>
                     {/* WHY it is being offered. "Same address" and "40 m away" are different claims, and
@@ -1134,9 +1186,23 @@ export default function ProspectScreen() {
                                 accessibilityLabel={`Use ${s.name ?? "this company"}`}
                                 style={styles.matchRow}
                               >
-                                <Text style={styles.matchName} numberOfLines={1}>
-                                  {s.name ?? "Existing company"}
-                                </Text>
+                                <View style={styles.matchBody}>
+                                  <Text style={styles.matchName} numberOfLines={1}>
+                                    {s.name ?? "Existing company"}
+                                  </Text>
+                                  {/* These rows exist BECAUSE the names agree, so the name alone can
+                                      never distinguish them. The server already returns the locality
+                                      and a deal count. */}
+                                  <Text style={styles.matchMeta} numberOfLines={1}>
+                                    {[
+                                      [s.city, s.state].filter(Boolean).join(", "),
+                                      s.dealCount ? `${s.dealCount} deal${s.dealCount === 1 ? "" : "s"}` : null,
+                                      s.matchReason,
+                                    ]
+                                      .filter(Boolean)
+                                      .join(" · ") || "No other details"}
+                                  </Text>
+                                </View>
                                 <Text style={styles.linkText}>Use</Text>
                               </Pressable>
                             ))}
@@ -1209,6 +1275,7 @@ export default function ProspectScreen() {
                             setContactQuery(next);
                             contactQueryRef.current = next;
                             setContactSearchFailed(false);
+                setRematchNotice(null);
                             // Stale rows are wrong the moment the text changes, and they stay tappable
                             // through the debounce otherwise.
                             setContactResults(null);

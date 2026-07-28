@@ -150,6 +150,17 @@ export type DedupSuggestion = {
   email?: string | null;
   isActive?: boolean;
   matchReason?: string;
+  /**
+   * COMPANY suggestions carry these instead of an employer.
+   *
+   * They are duplicates precisely because their names agree, so the name alone cannot tell two of them
+   * apart — and the server already returns the locality and a deal count, which do. Dropping them left
+   * the rep choosing between identical rows in a decision the activity then carries.
+   */
+  address?: string | null;
+  city?: string | null;
+  state?: string | null;
+  dealCount?: number;
 };
 
 /**
