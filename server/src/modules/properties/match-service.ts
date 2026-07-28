@@ -261,7 +261,11 @@ export function localityContradicts(
   query: { city?: string | null; state?: string | null; zip?: string | null },
   row: { city?: string | null; state?: string | null; zip?: string | null }
 ): boolean {
-  const norm = (v: string | null | undefined) => (typeof v === "string" ? v.trim().toLowerCase() : "");
+  // Punctuation-insensitive: Mapbox returns "St. Louis" where a legacy row stores "St Louis", and a
+  // raw comparison calls that a CONTRADICTION — actively disproving a correct match and sending the
+  // capture off to create a duplicate. Disproof has to be certain to be useful.
+  const norm = (v: string | null | undefined) =>
+    typeof v === "string" ? v.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim() : "";
   const qCity = norm(query.city);
   const rCity = norm(row.city);
   if (qCity && rCity && qCity !== rCity) return true;
@@ -284,6 +288,21 @@ export interface PropertyMatchInput {
   city?: string | null;
   state?: string | null;
   zip?: string | null;
+}
+
+/**
+ * The query address with street types ABBREVIATED rather than expanded — the shape a legacy row is
+ * likely to hold. Used only to widen the candidate fetch, never to decide a match.
+ */
+function collapseSuffixes(key: string): string {
+  const reverse: Record<string, string> = {};
+  for (const [abbr, full] of Object.entries(STREET_TYPES)) {
+    if (!(full in reverse)) reverse[full] = abbr;
+  }
+  return key
+    .split(" ")
+    .map((token) => reverse[token] ?? token)
+    .join(" ");
 }
 
 function isFiniteCoordinate(value: unknown, limit: number): value is number {
@@ -389,9 +408,26 @@ export async function matchProperties(
    * the NORMALISED key too keeps it in front of the cap. Still not a mirror: this only promotes
    * candidates, and addressKeysMatch remains the sole decision.
    */
+  /**
+   * Three forms, because each misses a pair the others catch.
+   *
+   * The stored side is only punctuation-collapsed — no suffix expansion happens in SQL, by design. So
+   * a query of "100 Main Street" against a stored "100 Main St" matches NEITHER the punctuation key
+   * nor the normalised key: one side is expanded and the other is not. Comparing the query's
+   * UNEXPANDED punctuation form against the stored text covers that direction, and comparing the
+   * expanded key covers the reverse (stored "100 Main Street", query "100 Main St").
+   *
+   * Still not a mirror: all three only PROMOTE a row past the candidate cap. addressKeysMatch remains
+   * the single decision about whether it is the same building.
+   */
+  const rawQueryKey = punctuationKey;
   const sameWholeAddress =
-    punctuationKey || addressKey
-      ? sql`(${normalizedDbAddress} = ${punctuationKey} OR ${normalizedDbAddress} = ${addressKey})`
+    rawQueryKey || addressKey
+      ? sql`(
+          ${normalizedDbAddress} = ${rawQueryKey}
+          OR ${normalizedDbAddress} = ${addressKey}
+          OR ${normalizedDbAddress} = ${collapseSuffixes(rawQueryKey)}
+        )`
       : sql`false`;
 
   const rows = await tenantDb.execute(sql`

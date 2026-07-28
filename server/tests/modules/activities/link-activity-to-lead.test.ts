@@ -10,12 +10,26 @@ import { AppError } from "../../../src/middleware/error-handler.js";
  * a different lead. Both are cases a field app WILL hit — a dropped response on a truck's connection is
  * the normal case, not the edge one.
  */
-function stubDb(existing: Record<string, unknown> | undefined) {
+/**
+ * `rows` is consumed in order, so a test can describe a SEQUENCE of reads — which is what the
+ * lost-race path needs: the first read sees an unlinked activity, the conditional update returns
+ * nothing, and the re-read shows who won.
+ */
+function stubDb(
+  existing: Record<string, unknown> | undefined,
+  options: { lead?: Record<string, unknown> | null; updateReturns?: unknown[]; afterRace?: Record<string, unknown> } = {},
+) {
   const updates: Array<Record<string, unknown>> = [];
+  const reads: unknown[][] = [
+    existing ? [existing] : [],
+    ...(options.lead !== undefined ? [options.lead ? [options.lead] : []] : []),
+    ...(options.afterRace ? [[options.afterRace]] : []),
+  ];
+  let readIndex = 0;
   const db = {
     select: () => ({
       from: () => ({
-        where: () => ({ limit: async () => (existing ? [existing] : []) }),
+        where: () => ({ limit: async () => reads[readIndex++] ?? [] }),
       }),
     }),
     update: () => ({
@@ -23,7 +37,8 @@ function stubDb(existing: Record<string, unknown> | undefined) {
         updates.push(patch);
         return {
           where: () => ({
-            returning: async () => [{ ...existing, ...patch }],
+            returning: async () =>
+              options.updateReturns ?? [{ ...existing, ...patch }],
           }),
         };
       },
@@ -74,5 +89,57 @@ describe("linkActivityToLead", () => {
     const db = { select } as unknown as Parameters<typeof linkActivityToLead>[0];
     await expect(linkActivityToLead(db, input)).rejects.toBeInstanceOf(AppError);
     expect(select).not.toHaveBeenCalled();
+  });
+});
+
+describe("linkActivityToLead — concurrency and consistency", () => {
+  it("loses a race safely: a concurrent link to the SAME lead is still a success", async () => {
+    // Two promotions both read leadId as null; the conditional UPDATE matches zero rows for the loser.
+    // Re-reading is what lets it answer with the same rules rather than reporting a false conflict.
+    const { db } = stubDb(
+      { id: "a1", leadId: null, propertyId: null },
+      { updateReturns: [], afterRace: { id: "a1", leadId: "l1" } },
+    );
+    await expect(linkActivityToLead(db, { activityId: "a1", leadId: "l1" })).resolves.toMatchObject({
+      leadId: "l1",
+    });
+  });
+
+  it("loses a race to a DIFFERENT lead and reports the conflict", async () => {
+    const { db } = stubDb(
+      { id: "a1", leadId: null, propertyId: null },
+      { updateReturns: [], afterRace: { id: "a1", leadId: "l2" } },
+    );
+    await expect(linkActivityToLead(db, { activityId: "a1", leadId: "l1" })).rejects.toMatchObject({
+      statusCode: 409,
+      code: "ACTIVITY_LEAD_CONFLICT",
+    });
+  });
+
+  it("refuses a lead for a different property than the visit", async () => {
+    // Nothing else checked it: a caller with access to any lead could attach a visit at one building
+    // to a lead at another, and the visit would then read as that lead's origin.
+    const { db } = stubDb({ id: "a1", leadId: null, propertyId: "p1" }, { lead: { propertyId: "p2" } });
+    await expect(linkActivityToLead(db, { activityId: "a1", leadId: "l1" })).rejects.toMatchObject({
+      statusCode: 409,
+      code: "ACTIVITY_LEAD_PROPERTY_MISMATCH",
+    });
+  });
+
+  it("allows a lead for the SAME property", async () => {
+    const { db, updates } = stubDb({ id: "a1", leadId: null, propertyId: "p1" }, { lead: { propertyId: "p1" } });
+    await expect(linkActivityToLead(db, { activityId: "a1", leadId: "l1" })).resolves.toMatchObject({
+      leadId: "l1",
+    });
+    expect(updates).toEqual([{ leadId: "l1" }]);
+  });
+
+  it("skips the property check for a company-anchored capture", async () => {
+    // A visit logged against a company legitimately has no property; requiring one would block exactly
+    // the fallback path added for buildings the CRM has never seen.
+    const { db } = stubDb({ id: "a1", leadId: null, propertyId: null });
+    await expect(linkActivityToLead(db, { activityId: "a1", leadId: "l1" })).resolves.toMatchObject({
+      leadId: "l1",
+    });
   });
 });

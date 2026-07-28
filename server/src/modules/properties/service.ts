@@ -291,11 +291,20 @@ export function buildPropertyUpdatePatch(input: UpdatePropertyInput): Partial<ty
   }
   // Same validation as create: a blank or out-of-range value degrades to null rather than storing a
   // coordinate the database accepts and no query will ever match.
-  if (Object.prototype.hasOwnProperty.call(input, "lat")) {
-    patch.lat = validateOptionalCoordinate(input.lat, 90);
-  }
-  if (Object.prototype.hasOwnProperty.call(input, "lng")) {
-    patch.lng = validateOptionalCoordinate(input.lng, 180);
+  /**
+   * A PAIR, always. Half a coordinate is not a position: writing lat alone leaves lng describing the
+   * OLD address, which places the property somewhere neither address describes and matches nothing
+   * near either. Mentioning one is treated as intent to set both.
+   */
+  if (
+    Object.prototype.hasOwnProperty.call(input, "lat") ||
+    Object.prototype.hasOwnProperty.call(input, "lng")
+  ) {
+    const lat = validateOptionalCoordinate(input.lat, 90);
+    const lng = validateOptionalCoordinate(input.lng, 180);
+    // Either half unusable and the pair is meaningless — store neither.
+    patch.lat = lat != null && lng != null ? lat : null;
+    patch.lng = lat != null && lng != null ? lng : null;
   }
 
   return patch;
@@ -691,7 +700,31 @@ export async function updateProperty(tenantDb: TenantDb, propertyId: string, inp
    * result to hand, and a null coordinate degrades honestly to address matching, which is the signal
    * most of this table relies on anyway. The next field visit repopulates it.
    */
-  const addressChanged = ADDRESS_FIELDS.some((field) => field in patch);
+  /**
+   * Only a REAL change invalidates the geocode.
+   *
+   * The web's property-repair flow submits all four address fields on every save, so "field present in
+   * the patch" meant every repair — including one that changed only the build year, or changed
+   * nothing — wiped a perfectly good coordinate pair. Compared against the stored row instead, so a
+   * no-op resubmit is a no-op.
+   */
+  const [current] = await tenantDb
+    .select({
+      address: properties.address,
+      city: properties.city,
+      state: properties.state,
+      zip: properties.zip,
+    })
+    .from(properties)
+    .where(eq(properties.id, propertyId))
+    .limit(1);
+
+  const addressChanged = ADDRESS_FIELDS.some(
+    (field) =>
+      field in patch &&
+      (patch as Record<string, unknown>)[field] !==
+        ((current ?? {}) as Record<string, unknown>)[field],
+  );
   // An EXPLICIT coordinate in the same request wins over the reset — that request is "here is the new
   // address AND its geocode", which is exactly how a corrected property gets its position back. Only a
   // bare address edit, with no replacement offered, clears the pair.

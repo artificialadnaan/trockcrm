@@ -1,6 +1,6 @@
-import { and, desc, eq, inArray, or, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
-import { activities, deals, users } from "@trock-crm/shared/schema";
+import { activities, deals, leads, users } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
 
@@ -286,11 +286,53 @@ export async function linkActivityToLead(
     throw new AppError(409, "This activity is already linked to a different lead", "ACTIVITY_LEAD_CONFLICT");
   }
 
+  /**
+   * The lead must describe the SAME building as the visit.
+   *
+   * Nothing else checks it: a caller with access to any lead could attach a site visit at one property
+   * to a lead at another, and the visit would then appear as that lead's origin. The property is the
+   * thing both records agree on, so it is what is compared — and only when the activity actually has
+   * one, since a company- or contact-anchored capture legitimately has no property.
+   */
+  if (existing.propertyId) {
+    const [lead] = await tenantDb
+      .select({ propertyId: leads.propertyId })
+      .from(leads)
+      .where(eq(leads.id, input.leadId))
+      .limit(1);
+    if (!lead) throw new AppError(404, "Lead not found");
+    if (lead.propertyId && lead.propertyId !== existing.propertyId) {
+      throw new AppError(
+        409,
+        "That lead is for a different property than this visit",
+        "ACTIVITY_LEAD_PROPERTY_MISMATCH"
+      );
+    }
+  }
+
+  /**
+   * CONDITIONAL update — the read above cannot hold a claim on the row.
+   *
+   * Two concurrent promotions both read leadId as null and both write, and the second silently wins:
+   * the 409 above never fires because neither request saw the other's value. Requiring leadId to still
+   * be null in the UPDATE makes the database the arbiter, and a zero-row result means someone else got
+   * there first.
+   */
   const [updated] = await tenantDb
     .update(activities)
     .set({ leadId: input.leadId })
-    .where(eq(activities.id, input.activityId))
+    .where(and(eq(activities.id, input.activityId), isNull(activities.leadId)))
     .returning();
 
-  return updated ?? existing;
+  if (updated) return updated;
+
+  // Lost the race. Re-read to answer with the same rules as above: the winner may have been this very
+  // lead (a concurrent retry, which is a success) or a different one (a genuine conflict).
+  const [after] = await tenantDb
+    .select()
+    .from(activities)
+    .where(eq(activities.id, input.activityId))
+    .limit(1);
+  if (after?.leadId === input.leadId) return after;
+  throw new AppError(409, "This activity is already linked to a different lead", "ACTIVITY_LEAD_CONFLICT");
 }
