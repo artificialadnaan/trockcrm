@@ -17,6 +17,7 @@ import {
   resolveScorecardCorrectiveActionRecipients,
 } from "./corrective-action-recipients.js";
 import { getCorrectiveActionItems, submitCorrectiveActionResponse } from "./corrective-action-api.js";
+import { finalizeFieldScorecardArtifacts } from "./scorecards-service.js";
 import { activeProjectWhere } from "./projects-service.js";
 import { getFileDownloadUrl } from "../files/service.js";
 import {
@@ -450,17 +451,37 @@ export function registerCorrectiveActionRoutes(fieldRoutes: Router): void {
 
         const { office, responder } = await authorizeCorrectiveAction(req, id);
         // runInOfficeTransaction sets app.current_user_id — a token responder has no user id, so "".
-        const items = await runInOfficeTransaction(office, responder.userId ?? "", async (db) => {
-          await submitCorrectiveActionResponse(db, {
+        const result = await runInOfficeTransaction(office, responder.userId ?? "", async (db) => {
+          const submitted = await submitCorrectiveActionResponse(db, {
             scorecardId: id,
             itemId,
             comment,
             photoFileIds,
             respondedBy: responder,
+            office,
           });
-          return getCorrectiveActionItems(db, id, { resolvePhotoUrl: correctiveActionPhotoUrlResolver(db) });
+          const items = await getCorrectiveActionItems(db, id, {
+            resolvePhotoUrl: correctiveActionPhotoUrlResolver(db),
+          });
+          return { items, resolved: submitted.resolved };
         });
-        res.json({ items });
+
+        // Refresh the stored PDF so a download taken right after a response already carries the
+        // corrective-action record. POST-COMMIT and best-effort by design: R2 I/O must never hold the
+        // transaction open, and a failure here is harmless because needsScorecardPdfRegeneration now sees
+        // the advanced generation and re-renders on demand. This only shortens the window in which a
+        // downloader pays for the render.
+        // ONLY on a winning write. An idempotent replay — the same responder re-sending a comment-only
+        // response, or the exact same photo set — changed nothing, so re-rendering would re-download up to
+        // MAX_EVIDENCE_PHOTOS images and republish an artifact whose generation never moved. A retrying
+        // mobile client can send several of these.
+        if (result.resolved) {
+          void finalizeFieldScorecardArtifacts(office, responder.userId ?? "", id).catch((err) => {
+            console.error("[CorrectiveAction] Post-response PDF refresh failed", { scorecardId: id, err });
+          });
+        }
+
+        res.json({ items: result.items });
       } catch (err) {
         next(err);
       }

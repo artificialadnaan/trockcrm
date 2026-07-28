@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { ClipboardCheck, Download, ChevronDown, ChevronRight, AlertTriangle, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -14,6 +14,8 @@ import {
   type FieldScorecardDetail,
   type CorrectiveActionItemView,
   type ScorecardRating,
+  isRenderableSignatureDataUrl,
+  typedSignatureFallback,
 } from "@trock-crm/shared/types";
 import { isApiError } from "@/lib/api";
 import { useDealScorecards, fetchDealScorecardDetail, downloadDealScorecardPdf } from "@/hooks/use-deal-scorecards";
@@ -469,8 +471,8 @@ export function ScorecardDetailView({ detail }: { detail: FieldScorecardDetail }
         <div>
           <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">Signatures</h4>
           <div className="space-y-1 text-sm text-gray-900">
-            <p>Superintendent: {detail.superintendentSignature || "—"}</p>
-            <p>Project manager: {detail.pmSignature || "—"}</p>
+            <SignatureBlock label="Superintendent" value={detail.superintendentSignature} />
+            <SignatureBlock label="Project manager" value={detail.pmSignature} />
           </div>
         </div>
       )}
@@ -499,6 +501,50 @@ export function ScorecardDetailView({ detail }: { detail: FieldScorecardDetail }
             )}
           </div>
         </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * One signature line. Mirrors the PDF's drawSignature exactly — both route through the shared
+ * classification predicate, so a signature this renders as an image is one the PDF also draws.
+ *
+ * Three cases: a handwritten data-URL capture draws as an image; a legacy typed name renders as text; and
+ * anything else — including a data URL of a type we will not render — falls back to an em dash. That last
+ * case is the bug this replaced: the raw `data:image/png;base64,…` payload was printed as a text node.
+ */
+function SignatureBlock({ label, value }: { label: string; value: string | null | undefined }) {
+  // The shared predicate validates the media type and the base64 ALPHABET, but it cannot prove the payload
+  // decodes to a real image — `data:image/png;base64,====` passes it. The PDF catches that at draw time and
+  // prints "Signature unavailable"; without this the web would render a broken <img> instead, so the two
+  // surfaces would disagree on exactly the input the shared module exists to keep them agreeing on.
+  const [imageFailed, setImageFailed] = useState(false);
+  const typed = typedSignatureFallback(value);
+  const showImage = isRenderableSignatureDataUrl(value) && !imageFailed;
+
+  // A new value deserves a fresh attempt — otherwise switching scorecards inside the same mounted row would
+  // keep showing the fallback from a previous card's bad signature.
+  const lastValueRef = useRef(value);
+  if (lastValueRef.current !== value) {
+    lastValueRef.current = value;
+    if (imageFailed) setImageFailed(false);
+  }
+
+  return (
+    <div className="flex items-center gap-2">
+      <span className="shrink-0 text-gray-500">{label}:</span>
+      {showImage ? (
+        <img
+          src={value as string}
+          alt={`${label} signature`}
+          className="h-12 max-w-[220px] object-contain"
+          onError={() => setImageFailed(true)}
+        />
+      ) : (
+        <span className={typed ? "text-gray-900" : "text-gray-400"}>
+          {typed ?? (imageFailed ? "Signature unavailable" : "—")}
+        </span>
       )}
     </div>
   );

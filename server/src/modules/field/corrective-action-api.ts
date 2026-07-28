@@ -8,7 +8,10 @@ import {
   scorecardCorrectiveActions,
 } from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
-import { resolveCorrectiveActionItemTx } from "./corrective-actions-service.js";
+import {
+  enqueueCorrectiveActionOversightClosed,
+  resolveCorrectiveActionItemTx,
+} from "./corrective-actions-service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -135,6 +138,8 @@ export interface SubmitCorrectiveActionResponseInput {
   /** Already-uploaded file ids to attach as response evidence (must belong to the scorecard's deal). */
   photoFileIds?: string[];
   respondedBy: { userId: string | null; name: string | null; email: string | null };
+  /** Office context for the oversight "completed" job enqueued when this response closes the scorecard. */
+  office: { id: string; slug: string };
 }
 
 /**
@@ -176,7 +181,7 @@ export interface SubmitCorrectiveActionResponseInput {
 export async function submitCorrectiveActionResponse(
   db: TenantDb,
   input: SubmitCorrectiveActionResponseInput,
-): Promise<void> {
+): Promise<{ resolved: boolean }> {
   const comment = input.comment?.trim();
   if (!comment) throw new AppError(400, "A response comment is required.");
 
@@ -246,7 +251,7 @@ export async function submitCorrectiveActionResponse(
     if (photoFileIds.length === 0) {
       // A comment-only submission on a resolved item: an idempotent no-op ONLY for the winner (same responder);
       // a DIFFERENT responder is a race loser and must get the conflict, not a phantom success.
-      if (sameResponder) return;
+      if (sameResponder) return { resolved: false };
     } else if (sameResponder) {
       // The response-photo file_ids ALREADY linked to THIS item (corrective_action_id = item.id).
       const linked = await db
@@ -258,7 +263,7 @@ export async function submitCorrectiveActionResponse(
       const sameFileSet =
         linkedIds.size === suppliedIds.size && [...suppliedIds].every((id) => linkedIds.has(id));
       // Exact replay of the recorded response → idempotent success (do not re-insert, do not 409).
-      if (sameFileSet) return;
+      if (sameFileSet) return { resolved: false };
     }
 
     // A genuine competing submission (different responder, or same responder with a different photo set) —
@@ -366,11 +371,23 @@ export async function submitCorrectiveActionResponse(
   }
 
   // Resolve within the SAME (caller-supplied) transaction so a resolve failure rolls back the photo inserts.
-  await resolveCorrectiveActionItemTx(db, {
+  const { closed } = await resolveCorrectiveActionItemTx(db, {
     scorecardId: input.scorecardId,
     itemId: input.itemId,
     responseComment: comment,
     respondedBy: input.respondedBy,
     photoFileIds,
   });
+
+  // This response answered the LAST open item — tell oversight the corrective action is complete. Enqueued
+  // in the SAME transaction as the close, so the job cannot exist for a close that rolled back, and only on
+  // the winning write (an idempotent replay returns closed: false).
+  if (closed) {
+    await enqueueCorrectiveActionOversightClosed(db, {
+      office: input.office,
+      scorecardId: input.scorecardId,
+    });
+  }
+
+  return { resolved: true };
 }

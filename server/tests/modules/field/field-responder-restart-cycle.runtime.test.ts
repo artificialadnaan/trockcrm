@@ -210,4 +210,33 @@ describe("roster PATCH re-notifies the cards a picked responder answers for", ()
     expect(updated.isActive).toBe(false);
     expect(await correctiveJobs()).toEqual([]);
   });
+
+  it("REGRESSION: advances updated_at MONOTONICALLY, never back to an earlier captured timestamp", async () => {
+    // updated_at is now the PDF's content generation, and the currency check is an equality against it — so
+    // it must only ever increase. The restart used to write a `new Date()` captured before its loop. If the
+    // transaction selected the open cards and then blocked behind a concurrent corrective-action response,
+    // that response advances the generation and this write could restore the EARLIER value — which is
+    // exactly the generation stamped on the PRE-response artifact. The stale PDF then classifies as current
+    // forever: the original "download shows the scorecard before the corrective action" bug, latched on.
+    const before = await tdb.execute(sql`
+      SELECT updated_at FROM field_scorecards WHERE id = ${OPEN_CARD}::uuid
+    `);
+    const priorGeneration = new Date((before.rows[0] as { updated_at: string }).updated_at);
+
+    // Model the concurrent response: push the row's generation FORWARD of anything this call could have
+    // captured beforehand.
+    const future = new Date(Date.now() + 60_000);
+    await tdb.execute(sql`
+      UPDATE field_scorecards SET updated_at = ${future.toISOString()} WHERE id = ${OPEN_CARD}::uuid
+    `);
+
+    await updateFieldResponder(tdb, RESPONDER, { email: "moved@trockgc.com" }, OFFICE);
+
+    const after = await tdb.execute(sql`
+      SELECT updated_at FROM field_scorecards WHERE id = ${OPEN_CARD}::uuid
+    `);
+    const newGeneration = new Date((after.rows[0] as { updated_at: string }).updated_at);
+    expect(newGeneration.getTime()).toBeGreaterThan(future.getTime());
+    expect(newGeneration.getTime()).toBeGreaterThan(priorGeneration.getTime());
+  });
 });

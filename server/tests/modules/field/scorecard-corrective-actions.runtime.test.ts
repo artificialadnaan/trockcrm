@@ -3,7 +3,12 @@ import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
 import { sql } from "drizzle-orm";
 import { createFieldScorecard } from "../../../src/modules/field/scorecards-service.js";
-import { resolveCorrectiveActionItem } from "../../../src/modules/field/corrective-actions-service.js";
+import {
+  reconcileScorecardCorrectiveActions,
+  resolveCorrectiveActionItem,
+  restartCorrectiveActionNotificationCycleForDeal,
+} from "../../../src/modules/field/corrective-actions-service.js";
+import { submitCorrectiveActionResponse } from "../../../src/modules/field/corrective-action-api.js";
 import {
   fieldScorecards,
   fieldScorecardItems,
@@ -18,6 +23,7 @@ import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
 const DEAL = "11111111-1111-1111-1111-111111111111";
 const USER = "33333333-3333-3333-3333-333333333333";
 const STAGE_ACTIVE = "cccccccc-0000-0000-0000-000000000001";
+const OFFICE = { id: "00000000-0000-0000-0000-0000000000f1", slug: "test" };
 
 const csid = (n: number) => `55555555-5555-5555-5555-${String(n).padStart(12, "0")}`;
 
@@ -462,5 +468,449 @@ describe("corrective_action_id FK ON DELETE CASCADE (finding 3)", () => {
     // The underlying gallery file is untouched (the FK is on corrective_action_id, not file_id).
     const remaining = await tdb.execute(sql`SELECT id FROM files WHERE id = ${fileId}`);
     expect(remaining.rows).toHaveLength(1);
+  });
+});
+
+describe("resolve advances the scorecard content generation", () => {
+  async function getUpdatedAt(id: string): Promise<Date> {
+    const res = await tdb.execute(sql`SELECT updated_at FROM field_scorecards WHERE id = ${id}`);
+    return new Date((res.rows[0] as { updated_at: string | Date }).updated_at);
+  }
+
+  it("advances updated_at when a NON-final item is resolved", async () => {
+    // The reported bug: resolving item 1 of N left updated_at untouched, so the download path still
+    // considered the submit-time PDF current and served a scorecard with no corrective action on it.
+    const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
+    const items = await getCorrectiveActions(scorecard.id);
+    expect(items.length).toBeGreaterThan(1);
+    const before = await getUpdatedAt(scorecard.id);
+
+    await resolveCorrectiveActionItem(tdb, {
+      scorecardId: scorecard.id,
+      itemId: items[0].id,
+      responseComment: "fixed",
+      respondedBy: { userId: USER, name: "Sam", email: null },
+    });
+
+    expect((await getUpdatedAt(scorecard.id)).getTime()).toBeGreaterThan(before.getTime());
+    // Still open — only one of several items answered.
+    expect((await getScorecardRow(scorecard.id)).status).toBe("corrective_action_open");
+  });
+
+  it("advances updated_at on the final item alongside the auto-close", async () => {
+    const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
+    const items = await getCorrectiveActions(scorecard.id);
+    for (const item of items.slice(0, -1)) {
+      await resolveCorrectiveActionItem(tdb, {
+        scorecardId: scorecard.id,
+        itemId: item.id,
+        responseComment: "fixed",
+        respondedBy: { userId: USER, name: "Sam", email: null },
+      });
+    }
+    const before = await getUpdatedAt(scorecard.id);
+
+    await resolveCorrectiveActionItem(tdb, {
+      scorecardId: scorecard.id,
+      itemId: items[items.length - 1].id,
+      responseComment: "fixed",
+      respondedBy: { userId: USER, name: "Sam", email: null },
+    });
+
+    expect((await getUpdatedAt(scorecard.id)).getTime()).toBeGreaterThan(before.getTime());
+    expect((await getScorecardRow(scorecard.id)).status).toBe("corrective_action_closed");
+  });
+
+  it("does NOT advance updated_at on an idempotent re-resolve", async () => {
+    // A no-op must not invalidate the artifact — otherwise a duplicate submit re-renders the PDF for free.
+    const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
+    const items = await getCorrectiveActions(scorecard.id);
+    await resolveCorrectiveActionItem(tdb, {
+      scorecardId: scorecard.id,
+      itemId: items[0].id,
+      responseComment: "fixed",
+      respondedBy: { userId: USER, name: "Sam", email: null },
+    });
+    const afterFirst = await getUpdatedAt(scorecard.id);
+
+    await resolveCorrectiveActionItem(tdb, {
+      scorecardId: scorecard.id,
+      itemId: items[0].id,
+      responseComment: "again",
+      respondedBy: { userId: USER, name: "Sam", email: null },
+    });
+
+    expect((await getUpdatedAt(scorecard.id)).getTime()).toBe(afterFirst.getTime());
+  });
+});
+
+describe("corrective-action oversight email enqueue", () => {
+  async function oversightJobs(): Promise<{ payload: any; max_attempts: number; office_id: string | null }[]> {
+    const res = await tdb.execute(sql`
+      SELECT payload, max_attempts, office_id
+      FROM public.job_queue
+      WHERE job_type = 'scorecard_corrective_action_oversight_email'
+      ORDER BY id
+    `);
+    return res.rows as any[];
+  }
+
+  async function responderJobNonce(scorecardId: string): Promise<string> {
+    const res = await tdb.execute(sql`
+      SELECT payload FROM public.job_queue
+      WHERE job_type = 'scorecard_corrective_action_email'
+        AND payload->>'scorecardId' = ${scorecardId}
+      ORDER BY id DESC LIMIT 1
+    `);
+    return (res.rows[0] as any).payload.cycleNonce;
+  }
+
+  it("enqueues an 'opened' oversight job alongside the responder job when a cycle starts", async () => {
+    const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
+
+    const jobs = await oversightJobs();
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0].payload.phase).toBe("opened");
+    expect(jobs[0].payload.scorecardId).toBe(scorecard.id);
+    expect(jobs[0].payload.dealId).toBe(DEAL);
+    expect(jobs[0].payload.tenantSchema).toBe("office_test");
+    expect(jobs[0].max_attempts).toBe(6);
+    // Same cycle as the responder job — both notifications must agree on which cycle they describe.
+    expect(jobs[0].payload.cycleNonce).toBe(await responderJobNonce(scorecard.id));
+  });
+
+  it("enqueues a 'closed' oversight job when the LAST item is answered", async () => {
+    const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
+    const items = await getCorrectiveActions(scorecard.id);
+    await tdb.execute(sql`DELETE FROM public.job_queue`);
+
+    for (const item of items) {
+      await tdb.transaction(async (tx) => {
+        await submitCorrectiveActionResponse(tx as any, {
+          scorecardId: scorecard.id,
+          itemId: item.id,
+          comment: "fixed",
+          respondedBy: { userId: USER, name: "Sam", email: null },
+          office: OFFICE,
+        });
+      });
+    }
+
+    expect((await getScorecardRow(scorecard.id)).status).toBe("corrective_action_closed");
+    const jobs = await oversightJobs();
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0].payload.phase).toBe("closed");
+    expect(jobs[0].payload.scorecardId).toBe(scorecard.id);
+    expect(jobs[0].payload.dealId).toBe(DEAL);
+  });
+
+  it("does NOT enqueue a 'closed' job while items remain open", async () => {
+    const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
+    const items = await getCorrectiveActions(scorecard.id);
+    expect(items.length).toBeGreaterThan(1);
+    await tdb.execute(sql`DELETE FROM public.job_queue`);
+
+    await tdb.transaction(async (tx) => {
+      await submitCorrectiveActionResponse(tx as any, {
+        scorecardId: scorecard.id,
+        itemId: items[0].id,
+        comment: "fixed",
+        respondedBy: { userId: USER, name: "Sam", email: null },
+        office: OFFICE,
+      });
+    });
+
+    expect(await oversightJobs()).toHaveLength(0);
+  });
+
+  it("does NOT enqueue a second 'closed' job on an idempotent replay of the closing response", async () => {
+    const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission({ actionItems: ["Only item"], criticalDeficiencies: [] }));
+    const items = await getCorrectiveActions(scorecard.id);
+    expect(items).toHaveLength(1);
+    await tdb.execute(sql`DELETE FROM public.job_queue`);
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await tdb.transaction(async (tx) => {
+        await submitCorrectiveActionResponse(tx as any, {
+          scorecardId: scorecard.id,
+          itemId: items[0].id,
+          comment: "fixed",
+          respondedBy: { userId: USER, name: "Sam", email: null },
+          office: OFFICE,
+        });
+      });
+    }
+
+    expect(await oversightJobs()).toHaveLength(1);
+  });
+
+  it("clears BOTH oversight stamps when a card REOPENS, so oversight is re-notified", async () => {
+    const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
+    await tdb.execute(sql`
+      UPDATE field_scorecards
+         SET corrective_action_oversight_opened_at = NOW(),
+             corrective_action_oversight_closed_at = NOW(),
+             status = 'corrective_action_closed'
+       WHERE id = ${scorecard.id}
+    `);
+    await tdb.execute(sql`UPDATE scorecard_corrective_actions SET status = 'resolved' WHERE scorecard_id = ${scorecard.id}`);
+    await tdb.execute(sql`DELETE FROM public.job_queue`);
+
+    // An edit adding a NEW flag walks the closed card back into corrective_action_open — a genuinely new
+    // cycle. (Re-submitting the SAME already-resolved flags correctly does NOT reopen it.)
+    await tdb.transaction(async (tx) => {
+      await reconcileScorecardCorrectiveActions(tx as any, {
+        scorecardId: scorecard.id,
+        dealId: DEAL,
+        office: OFFICE,
+        rating: "corrective_action",
+        currentStatus: "corrective_action_closed",
+        deficiencies: ["missed_hold_point"],
+        actionItems: ["Re-inspect slab 2", "Verify hold points", "NEW: re-torque anchors"],
+      } as any);
+    });
+
+    const row = await tdb.execute(sql`
+      SELECT corrective_action_oversight_opened_at, corrective_action_oversight_closed_at
+      FROM field_scorecards WHERE id = ${scorecard.id}
+    `);
+    expect(row.rows[0]).toMatchObject({
+      corrective_action_oversight_opened_at: null,
+      corrective_action_oversight_closed_at: null,
+    });
+    const jobs = await oversightJobs();
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0].payload.phase).toBe("opened");
+  });
+
+  it("does NOT re-notify oversight when a responder reassignment restarts the RESPONDER cycle", async () => {
+    // The card never left corrective_action_open — a super/PM was swapped. Oversight was already told it
+    // opened and will be told when it completes; re-sending here is exactly the inbox noise to avoid.
+    const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
+    const stampedAt = new Date("2026-07-27T12:00:00.000Z");
+    await tdb.execute(sql`
+      UPDATE field_scorecards SET corrective_action_oversight_opened_at = ${stampedAt} WHERE id = ${scorecard.id}
+    `);
+    await tdb.execute(sql`DELETE FROM public.job_queue`);
+
+    await tdb.transaction(async (tx) => {
+      await restartCorrectiveActionNotificationCycleForDeal(tx as any, { dealId: DEAL, office: OFFICE } as any);
+    });
+
+    expect(await oversightJobs()).toHaveLength(0);
+    const row = await tdb.execute(sql`
+      SELECT corrective_action_oversight_opened_at FROM field_scorecards WHERE id = ${scorecard.id}
+    `);
+    expect(new Date((row.rows[0] as any).corrective_action_oversight_opened_at).getTime()).toBe(stampedAt.getTime());
+  });
+});
+
+describe("corrective-action oversight — review-round regressions", () => {
+  async function oversightJobs(): Promise<{ payload: any }[]> {
+    const res = await tdb.execute(sql`
+      SELECT payload FROM public.job_queue
+      WHERE job_type = 'scorecard_corrective_action_oversight_email' ORDER BY id
+    `);
+    return res.rows as any[];
+  }
+  async function stamps(id: string) {
+    const res = await tdb.execute(sql`
+      SELECT corrective_action_oversight_opened_at AS opened, corrective_action_oversight_closed_at AS closed
+      FROM field_scorecards WHERE id = ${id}
+    `);
+    return res.rows[0] as { opened: string | null; closed: string | null };
+  }
+  async function getUpdatedAt(id: string): Promise<Date> {
+    const res = await tdb.execute(sql`SELECT updated_at FROM field_scorecards WHERE id = ${id}`);
+    return new Date((res.rows[0] as any).updated_at);
+  }
+
+  it("does NOT re-notify oversight when an edit ADDS a flag to an already-open card", async () => {
+    // The responder cycle legitimately restarts (they must learn of the new flag), but the corrective
+    // action never left open, so oversight already knows. Re-sending "opened" here is inbox noise.
+    const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
+    const stampedAt = new Date("2026-07-27T12:00:00.000Z");
+    await tdb.execute(sql`
+      UPDATE field_scorecards
+         SET corrective_action_oversight_opened_at = ${stampedAt}, corrective_action_email_sent_at = NOW()
+       WHERE id = ${scorecard.id}
+    `);
+    await tdb.execute(sql`DELETE FROM public.job_queue`);
+
+    await tdb.transaction(async (tx) => {
+      await reconcileScorecardCorrectiveActions(tx as any, {
+        scorecardId: scorecard.id,
+        dealId: DEAL,
+        office: OFFICE,
+        rating: "corrective_action",
+        currentStatus: "corrective_action_open",
+        deficiencies: ["missed_hold_point"],
+        actionItems: ["Re-inspect slab 2", "Verify hold points", "NEW: re-torque anchors"],
+      } as any);
+    });
+
+    // The RESPONDER cycle restarted...
+    const responder = await tdb.execute(sql`
+      SELECT 1 FROM public.job_queue WHERE job_type = 'scorecard_corrective_action_email'
+    `);
+    expect(responder.rows.length).toBe(1);
+    // ...but oversight was neither re-enqueued nor un-stamped.
+    expect(await oversightJobs()).toHaveLength(0);
+    expect(new Date((await stamps(scorecard.id)).opened!).getTime()).toBe(stampedAt.getTime());
+  });
+
+  it("does NOT re-notify oversight when the picked responder changes on an already-open card", async () => {
+    const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
+    const stampedAt = new Date("2026-07-27T12:00:00.000Z");
+    await tdb.execute(sql`
+      UPDATE field_scorecards SET corrective_action_oversight_opened_at = ${stampedAt} WHERE id = ${scorecard.id}
+    `);
+    await tdb.execute(sql`DELETE FROM public.job_queue`);
+
+    await tdb.transaction(async (tx) => {
+      await reconcileScorecardCorrectiveActions(tx as any, {
+        scorecardId: scorecard.id,
+        dealId: DEAL,
+        office: OFFICE,
+        rating: "corrective_action",
+        currentStatus: "corrective_action_open",
+        deficiencies: ["missed_hold_point"],
+        actionItems: ["Re-inspect slab 2", "Verify hold points"],
+        responderPickChanged: true,
+      } as any);
+    });
+
+    expect(await oversightJobs()).toHaveLength(0);
+    expect(new Date((await stamps(scorecard.id)).opened!).getTime()).toBe(stampedAt.getTime());
+  });
+
+  it("enqueues a 'closed' oversight job when an EDIT closes the card, not only a responder", async () => {
+    // Removing the last still-open flag closes the card through reconcile. Without an enqueue here the
+    // watchers who were told it opened would never learn it completed, and nothing would enqueue later.
+    const { scorecard } = await createFieldScorecard(
+      tdb,
+      belowBandSubmission({ actionItems: ["Keep this", "Drop this"], criticalDeficiencies: [] }),
+    );
+    const items = await getCorrectiveActions(scorecard.id);
+    const keep = items.find((i) => i.item_label === "Keep this")!;
+    await resolveCorrectiveActionItem(tdb, {
+      scorecardId: scorecard.id,
+      itemId: keep.id,
+      responseComment: "fixed",
+      respondedBy: { userId: USER, name: "Sam", email: null },
+    });
+    expect((await getScorecardRow(scorecard.id)).status).toBe("corrective_action_open");
+    await tdb.execute(sql`DELETE FROM public.job_queue`);
+
+    await tdb.transaction(async (tx) => {
+      await reconcileScorecardCorrectiveActions(tx as any, {
+        scorecardId: scorecard.id,
+        dealId: DEAL,
+        office: OFFICE,
+        rating: "corrective_action",
+        currentStatus: "corrective_action_open",
+        deficiencies: [],
+        actionItems: ["Keep this"],
+      } as any);
+    });
+
+    expect((await getScorecardRow(scorecard.id)).status).toBe("corrective_action_closed");
+    const jobs = await oversightJobs();
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0].payload.phase).toBe("closed");
+  });
+
+  it("advances updated_at STRICTLY, even past a future-dated generation", async () => {
+    // updated_at is the PDF staleness token and the finalize single-flight key. A bare new Date() can land
+    // in the same millisecond as the write before it, letting a render that read the OLD state stamp its
+    // stale bytes as current — permanently, since the staleness check then sees rendered == current.
+    const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
+    const items = await getCorrectiveActions(scorecard.id);
+    const future = new Date(Date.now() + 60_000);
+    await tdb.execute(sql`UPDATE field_scorecards SET updated_at = ${future} WHERE id = ${scorecard.id}`);
+
+    await resolveCorrectiveActionItem(tdb, {
+      scorecardId: scorecard.id,
+      itemId: items[0].id,
+      responseComment: "fixed",
+      respondedBy: { userId: USER, name: "Sam", email: null },
+    });
+
+    // A bare NOW() would move the generation BACKWARDS here, re-colliding with an already-rendered token.
+    expect((await getUpdatedAt(scorecard.id)).getTime()).toBeGreaterThan(future.getTime());
+  });
+});
+
+describe("corrective-action oversight — stale job supersession", () => {
+  async function oversightJobRows(): Promise<{ status: string; payload: any }[]> {
+    const res = await tdb.execute(sql`
+      SELECT status, payload FROM public.job_queue
+      WHERE job_type = 'scorecard_corrective_action_oversight_email' ORDER BY id
+    `);
+    return res.rows as any[];
+  }
+
+  it("retires a PENDING oversight job from a prior cycle when a new cycle opens", async () => {
+    // A cycle-A job that runs after cycle B opens reads B's still-open status and B's cleared stamp, so it
+    // sends — under A's idempotency key, which Resend will not dedup against B's. B's own job then sends
+    // too, and oversight gets the same notice twice. Cancelling at the source is what prevents that; the
+    // worker cannot safely tell "superseded" from "the responder self-repair rotated the shared nonce".
+    const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
+    const before = await oversightJobRows();
+    expect(before).toHaveLength(1);
+    expect(before[0].status).toBe("pending");
+    const firstNonce = before[0].payload.cycleNonce;
+
+    // Close the card, then reopen it with a genuinely new flag — a real new cycle.
+    await tdb.execute(sql`UPDATE scorecard_corrective_actions SET status = 'resolved' WHERE scorecard_id = ${scorecard.id}`);
+    await tdb.execute(sql`UPDATE field_scorecards SET status = 'corrective_action_closed' WHERE id = ${scorecard.id}`);
+    await tdb.transaction(async (tx) => {
+      await reconcileScorecardCorrectiveActions(tx as any, {
+        scorecardId: scorecard.id,
+        dealId: DEAL,
+        office: OFFICE,
+        rating: "corrective_action",
+        currentStatus: "corrective_action_closed",
+        deficiencies: ["missed_hold_point"],
+        actionItems: ["Re-inspect slab 2", "Verify hold points", "NEW: re-torque anchors"],
+      } as any);
+    });
+
+    const after = await oversightJobRows();
+    expect(after).toHaveLength(2);
+    // The prior-cycle job is retired, not left to fire alongside the new one.
+    expect(after[0].status).toBe("dead");
+    expect(after[0].payload.cycleNonce).toBe(firstNonce);
+    // The new cycle's job is live and carries a different nonce.
+    expect(after[1].status).toBe("pending");
+    expect(after[1].payload.cycleNonce).not.toBe(firstNonce);
+  });
+
+  it("does not retire an oversight job for a DIFFERENT scorecard", async () => {
+    const { scorecard: a } = await createFieldScorecard(tdb, belowBandSubmission());
+    const { scorecard: b } = await createFieldScorecard(
+      tdb,
+      belowBandSubmission({ clientSubmissionId: csid(720) }),
+    );
+    expect((await oversightJobRows()).filter((j) => j.status === "pending")).toHaveLength(2);
+
+    await tdb.execute(sql`UPDATE scorecard_corrective_actions SET status = 'resolved' WHERE scorecard_id = ${a.id}`);
+    await tdb.execute(sql`UPDATE field_scorecards SET status = 'corrective_action_closed' WHERE id = ${a.id}`);
+    await tdb.transaction(async (tx) => {
+      await reconcileScorecardCorrectiveActions(tx as any, {
+        scorecardId: a.id,
+        dealId: DEAL,
+        office: OFFICE,
+        rating: "corrective_action",
+        currentStatus: "corrective_action_closed",
+        deficiencies: ["missed_hold_point"],
+        actionItems: ["Re-inspect slab 2", "Verify hold points", "NEW: another"],
+      } as any);
+    });
+
+    const rows = await oversightJobRows();
+    const bJobs = rows.filter((j) => j.payload.scorecardId === b.id);
+    expect(bJobs).toHaveLength(1);
+    expect(bJobs[0].status).toBe("pending");
   });
 });

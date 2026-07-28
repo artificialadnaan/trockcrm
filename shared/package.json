@@ -21,6 +21,10 @@
       "types": "./dist/lib/bidBoardStatusMap.d.ts",
       "default": "./dist/lib/bidBoardStatusMap.js"
     },
+    "./lib/correctiveActionOrder": {
+      "types": "./dist/lib/correctiveActionOrder.d.ts",
+      "default": "./dist/lib/correctiveActionOrder.js"
+    },
     "./lib/fieldScorecardEmails": {
       "types": "./dist/lib/fieldScorecardEmails.d.ts",
       "default": "./dist/lib/fieldScorecardEmails.js"

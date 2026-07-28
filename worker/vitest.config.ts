@@ -13,6 +13,7 @@ export default defineConfig({
       // lib/* aliases must come before the broad @trock-crm/shared alias to avoid the prefix being
       // replaced with schema/index.ts (which would produce a non-existent path). Mirrors the server
       // vitest.config.ts pattern; add one entry per lib file that worker tests import.
+      "@trock-crm/shared/lib/correctiveActionOrder": path.resolve(__dirname, "../shared/src/lib/correctiveActionOrder.ts"),
       "@trock-crm/shared/lib/rfpReviewerEmails": path.resolve(__dirname, "../shared/src/lib/rfpReviewerEmails.ts"),
       "@trock-crm/shared/lib/rfpVoterEmails": path.resolve(__dirname, "../shared/src/lib/rfpVoterEmails.ts"),
       "@trock-crm/shared/lib/fieldScorecardEmails": path.resolve(__dirname, "../shared/src/lib/fieldScorecardEmails.ts"),

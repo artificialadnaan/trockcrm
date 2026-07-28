@@ -20,7 +20,9 @@ const DEAL = "11111111-1111-1111-1111-111111111111";
 const USER = "33333333-3333-3333-3333-333333333333";
 const STAGE_ACTIVE = "cccccccc-0000-0000-0000-000000000001";
 const STAGE_LOST = "cccccccc-0000-0000-0000-000000000002";
-const OFFICE = { id: "office-1", slug: "test" };
+// A real UUID: job_queue.office_id is `uuid` in prod, and closing a corrective action now enqueues the
+// oversight notification, so a placeholder string id would fail the insert here but never in production.
+const OFFICE = { id: "00000000-0000-0000-0000-0000000000f1", slug: "test" };
 // A field-responder roster row the scorecard picker can point at (never on deal_team_members).
 const ROSTER_SUPER = "44444444-4444-4444-4444-444444444401";
 
@@ -96,6 +98,14 @@ beforeAll(async () => {
       description text, is_active boolean DEFAULT true, deleted_at timestamptz, created_at timestamptz DEFAULT now()
     );
     CREATE TABLE public.users (id uuid PRIMARY KEY, display_name text, email text, avatar_url text, is_active boolean DEFAULT true);
+    -- Closing a corrective action enqueues the oversight notification in the SAME transaction as the close,
+    -- so this route now writes to job_queue.
+    CREATE TABLE public.job_queue (
+      id bigserial PRIMARY KEY, job_type varchar(100) NOT NULL, payload jsonb NOT NULL, office_id uuid,
+      status text NOT NULL DEFAULT 'pending', attempts int NOT NULL DEFAULT 0, max_attempts int NOT NULL DEFAULT 3,
+      last_error text, started_processing_at timestamptz, run_after timestamptz NOT NULL DEFAULT now(),
+      created_at timestamptz NOT NULL DEFAULT now(), completed_at timestamptz
+    );
   `);
   await pg.exec(
     tenantSchemaSql("public", [

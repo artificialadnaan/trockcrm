@@ -1,4 +1,4 @@
-import { and, desc, eq, getTableColumns, inArray, isNull, lte, notInArray, sql } from "drizzle-orm";
+import { and, desc, eq, getTableColumns, inArray, isNotNull, isNull, lte, notInArray, sql } from "drizzle-orm";
 import { createHash, randomUUID } from "node:crypto";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
@@ -10,18 +10,27 @@ import {
   fieldScorecardPhotos,
   files,
   jobQueue,
+  scorecardCorrectiveActions,
 } from "@trock-crm/shared/schema";
 import { generateDownloadUrl, headObjectStrict, putObject } from "../../lib/r2-client.js";
-import { buildScorecardPdfData, renderFieldScorecardPdf, MAX_EVIDENCE_PHOTOS } from "./scorecard-pdf.js";
+import {
+  buildScorecardPdfData,
+  renderFieldScorecardPdf,
+  MAX_CORRECTIVE_ACTION_PHOTOS,
+  MAX_EVIDENCE_PHOTOS,
+} from "./scorecard-pdf.js";
 import {
   CURRENT_SCORECARD_PDF_RENDER_VERSION,
+  classifyScorecardArtifactRecheck,
   coalesceScorecardPdfFinalization,
   isScorecardPdfObjectMetadataValid,
   needsScorecardPdfRegeneration,
   scorecardEvidenceFingerprint,
+  type ScorecardArtifactRecheck,
   type ScorecardPdfArtifactState,
 } from "./scorecard-pdf-artifact.js";
 import { prioritizeAndCapEvidencePhotos, resolveScorecardEvidenceImage } from "./scorecard-evidence-image.js";
+import { orderCorrectiveActions } from "@trock-crm/shared/lib/correctiveActionOrder";
 import {
   FIELD_SCORECARD_LEADERSHIP_SECTION_KEYS,
   FIELD_SCORECARD_LEADERSHIP_SUMMARY_SECTION_KEY,
@@ -1088,15 +1097,62 @@ export async function renderAndStoreFieldScorecardArtifacts(
       // Deterministic order (link time, then PK tie-breaker) so the downstream MAX_EVIDENCE_PHOTOS cap
       // always keeps/drops the SAME photos across renders, not an arbitrary Postgres physical-row order.
       .orderBy(fieldScorecardPhotos.createdAt, fieldScorecardPhotos.id);
+    // The corrective-action record rendered by PDF v3 — one row per flagged item on a below-band card.
+    const correctiveActionRows = await db
+      .select({
+        id: scorecardCorrectiveActions.id,
+        itemType: scorecardCorrectiveActions.itemType,
+        itemRef: scorecardCorrectiveActions.itemRef,
+        itemLabel: scorecardCorrectiveActions.itemLabel,
+        status: scorecardCorrectiveActions.status,
+        responderName: scorecardCorrectiveActions.responderName,
+        // The record must say WHO. A session responder with no first/last name stores a null
+        // responder_name but a non-null email, so a name-only select renders the fix as anonymous.
+        // The CRM detail already falls back this way; the exports must match it.
+        responderEmail: scorecardCorrectiveActions.responderEmail,
+        respondedAt: scorecardCorrectiveActions.respondedAt,
+        responseComment: scorecardCorrectiveActions.responseComment,
+      })
+      .from(scorecardCorrectiveActions)
+      .where(eq(scorecardCorrectiveActions.scorecardId, scorecardId));
+
+    // Response photos, keyed by item. These are DELIBERATELY excluded from the evidence query above
+    // (corrective_action_id IS NULL) — original evidence and the corrective-action record are separate
+    // sets, and the publish-time recheck fingerprint applies the same exclusion. Widening either one alone
+    // produces a spurious SCORECARD_EVIDENCE_CHANGED on every regeneration.
+    const correctiveActionPhotoRows = correctiveActionRows.length === 0 ? [] : await db
+      .select({
+        correctiveActionId: fieldScorecardPhotos.correctiveActionId,
+        fileId: files.id,
+        caption: files.description,
+        r2Key: files.r2Key,
+        thumbnailR2Key: files.thumbnailR2Key,
+        mimeType: files.mimeType,
+        isActive: files.isActive,
+        deletedAt: files.deletedAt,
+      })
+      .from(fieldScorecardPhotos)
+      .innerJoin(files, eq(files.id, fieldScorecardPhotos.fileId))
+      .where(
+        and(
+          eq(fieldScorecardPhotos.scorecardId, scorecardId),
+          isNotNull(fieldScorecardPhotos.correctiveActionId),
+          eq(files.isActive, true),
+          isNull(files.deletedAt),
+        ),
+      )
+      // Deterministic order so the MAX_CORRECTIVE_ACTION_PHOTOS cap keeps the SAME photos across renders.
+      .orderBy(fieldScorecardPhotos.createdAt, fieldScorecardPhotos.id);
+
     const [deal] = await db
       .select({ name: deals.name, dealNumber: deals.dealNumber })
       .from(deals)
       .where(eq(deals.id, card.dealId))
       .limit(1);
-    return { card, itemRows, photoRows, deal: deal ?? null };
+    return { card, itemRows, photoRows, correctiveActionRows, correctiveActionPhotoRows, deal: deal ?? null };
   });
   if (!loaded) return null;
-  const { card, itemRows, photoRows, deal } = loaded;
+  const { card, itemRows, photoRows, correctiveActionRows, correctiveActionPhotoRows, deal } = loaded;
   const evidenceFingerprint = scorecardEvidenceFingerprint(photoRows);
   const activePhotoRows = photoRows.filter((photo) => photo.isActive && photo.deletedAt == null);
 
@@ -1125,7 +1181,41 @@ export async function renderAndStoreFieldScorecardArtifacts(
     const batch = photosToLoad.slice(index, index + PDF_EVIDENCE_DOWNLOAD_CONCURRENCY);
     photos.push(...await Promise.all(batch.map(loadPhoto)));
   }
-  const retryableFailure = photos.find((photo) => photo.resolution.failure?.retryable);
+  // Corrective-action RESPONSE photos resolve through the SAME pipeline, so a transient storage failure
+  // stays retryable and a permanently-bad object renders a placeholder rather than making the whole report
+  // unexportable.
+  //
+  // Cap BEFORE downloading bytes, exactly as the evidence path does. Nothing upstream bounds how many
+  // photos a response may carry (submitCorrectiveActionResponse validates ownership, not count), so
+  // resolving every row first would fetch and transcode tiles the renderer discards — and, worse, a
+  // transient failure on a photo BEYOND the cap would 503 the whole download for an image that was never
+  // going to appear. Slice in the SAME order the renderer consumes the budget (item order, then link time)
+  // so the kept set matches what buildScorecardPdfData would have kept.
+  const responsePhotoRowsInRenderOrder = sortResponsePhotosForRender(
+    correctiveActionPhotoRows,
+    correctiveActionRows,
+    card.actionItems ?? [],
+    card.criticalDeficiencies ?? [],
+  );
+  const responsePhotosToLoad = responsePhotoRowsInRenderOrder.slice(0, MAX_CORRECTIVE_ACTION_PHOTOS);
+  const omittedCorrectiveActionPhotoCount =
+    responsePhotoRowsInRenderOrder.length - responsePhotosToLoad.length;
+
+  const loadResponsePhoto = async (photo: typeof correctiveActionPhotoRows[number]) => ({
+    correctiveActionId: photo.correctiveActionId as string,
+    caption: photo.caption ?? null,
+    resolution: await resolveScorecardEvidenceImage(photo),
+  });
+  const correctiveActionPhotos: Awaited<ReturnType<typeof loadResponsePhoto>>[] = [];
+  for (let index = 0; index < responsePhotosToLoad.length; index += PDF_EVIDENCE_DOWNLOAD_CONCURRENCY) {
+    const batch = responsePhotosToLoad.slice(index, index + PDF_EVIDENCE_DOWNLOAD_CONCURRENCY);
+    correctiveActionPhotos.push(...await Promise.all(batch.map(loadResponsePhoto)));
+  }
+
+  // Evaluate BOTH photo sets against the retryable/permanent policy — a response photo that is only
+  // temporarily unavailable must block the version stamp exactly like an evidence photo would.
+  const allResolvedPhotos = [...photos, ...correctiveActionPhotos];
+  const retryableFailure = allResolvedPhotos.find((photo) => photo.resolution.failure?.retryable);
   if (retryableFailure) {
     throw new AppError(
       503,
@@ -1133,7 +1223,7 @@ export async function renderAndStoreFieldScorecardArtifacts(
       "SCORECARD_EVIDENCE_UNAVAILABLE",
     );
   }
-  const permanentFailures = photos
+  const permanentFailures = allResolvedPhotos
     .map((photo) => photo.resolution.failure?.reason)
     .filter((reason): reason is NonNullable<typeof reason> => reason != null);
   if (permanentFailures.length > 0) {
@@ -1170,6 +1260,19 @@ export async function renderAndStoreFieldScorecardArtifacts(
       image: photo.resolution.image,
     })),
     omittedEvidenceCount,
+    omittedCorrectiveActionPhotoCount,
+    correctiveActions: correctiveActionRows.map((row) => ({
+      itemType: row.itemType,
+      itemRef: row.itemRef,
+      itemLabel: row.itemLabel,
+      status: row.status,
+      responderName: row.responderName ?? row.responderEmail ?? null,
+      respondedAt: toIso(row.respondedAt),
+      responseComment: row.responseComment ?? null,
+      photos: correctiveActionPhotos
+        .filter((photo) => photo.correctiveActionId === row.id)
+        .map((photo) => ({ caption: photo.caption, image: photo.resolution.image })),
+    })),
   });
   const bucket = process.env.R2_BUCKET_NAME || "trock-crm-files";
 
@@ -1245,6 +1348,10 @@ export async function renderAndStoreFieldScorecardArtifacts(
         pdfR2Bucket: bucket,
         pdfGeneratedAt: new Date(),
         pdfRenderVersion: CURRENT_SCORECARD_PDF_RENDER_VERSION,
+        // Stamp the generation this render READ (migration 0200). The guarded WHERE below already proves
+        // updated_at has not moved since, so this is exactly the content the stored bytes represent.
+        // needsScorecardPdfRegeneration compares it against the live updated_at on the next download.
+        pdfContentGeneration: card.updatedAt as Date,
       })
       // Monotonic revision write: an older server finishing late during a rolling deploy must never point
       // the row back at its older version-specific object. <= permits repairing a missing v2 object.
@@ -1290,6 +1397,8 @@ export async function getFieldScorecardPdfArtifactState(
       dealId: fieldScorecards.dealId,
       pdfR2Key: fieldScorecards.pdfR2Key,
       pdfRenderVersion: fieldScorecards.pdfRenderVersion,
+      pdfContentGeneration: fieldScorecards.pdfContentGeneration,
+      currentGeneration: fieldScorecards.updatedAt,
       linkedPhotoCount: sql<number>`COUNT(${files.id})::int`,
     })
     .from(fieldScorecards)
@@ -1308,6 +1417,8 @@ export async function getFieldScorecardPdfArtifactState(
       fieldScorecards.dealId,
       fieldScorecards.pdfR2Key,
       fieldScorecards.pdfRenderVersion,
+      fieldScorecards.pdfContentGeneration,
+      fieldScorecards.updatedAt,
     )
     .limit(1);
   if (!card) throw new AppError(404, "Scorecard not found");
@@ -1316,8 +1427,57 @@ export async function getFieldScorecardPdfArtifactState(
     pdfR2Key: card.pdfR2Key,
     pdfRenderVersion: card.pdfRenderVersion,
     linkedPhotoCount: Number(card.linkedPhotoCount),
+    pdfContentGeneration: card.pdfContentGeneration,
+    currentGeneration: card.currentGeneration,
   };
   return { ...state, needsRegeneration: needsScorecardPdfRegeneration(state) };
+}
+
+/**
+ * Confirm the key about to be presigned is STILL the published, current-generation artifact.
+ *
+ * The artifact-state read runs inside a tenant transaction that is released before the R2 HEAD /
+ * regeneration / presign. A corrective-action response committing in that window advances updated_at while
+ * deliberately retaining pdf_r2_key, so the snapshot's "current" verdict goes stale and the route would hand
+ * out a URL for the PRE-response PDF — the exact defect this work fixes, on the surface it was reported from.
+ * The email workers gained a post-fetch guard; the download routes need the same one before presigning.
+ *
+ * Returns a VERDICT rather than a boolean because the future-renderer case must be distinguishable: the
+ * routes' early snapshot check can pass and the generation can then drift within the same request, and
+ * needsScorecardPdfRegeneration answers "can this instance supersede it?" (always false above CURRENT), never
+ * "is it current?". Collapsing the two here is precisely how a rolling-deploy download served stale bytes
+ * despite the route's own guard.
+ *
+ * Manages its own connection (like finalizeFieldScorecardArtifacts) precisely because the caller's
+ * transaction is already gone by this point.
+ */
+export async function recheckScorecardArtifactCurrency(
+  office: { id: string; slug: string },
+  scorecardId: string,
+  key: string,
+): Promise<ScorecardArtifactRecheck> {
+  return runInOffice(office, async (db) => {
+    const [row] = await db
+      .select({
+        pdfR2Key: fieldScorecards.pdfR2Key,
+        pdfRenderVersion: fieldScorecards.pdfRenderVersion,
+        pdfContentGeneration: fieldScorecards.pdfContentGeneration,
+        currentGeneration: fieldScorecards.updatedAt,
+      })
+      .from(fieldScorecards)
+      .where(and(eq(fieldScorecards.id, scorecardId), eq(fieldScorecards.isActive, true)))
+      .limit(1);
+    // A vanished row is handled by the caller's own availability checks; treat it as not-current here so the
+    // route surfaces a retryable error rather than presigning something it can no longer vouch for.
+    if (!row || row.pdfR2Key !== key) return "stale";
+    return classifyScorecardArtifactRecheck({
+      pdfR2Key: row.pdfR2Key,
+      pdfRenderVersion: row.pdfRenderVersion,
+      linkedPhotoCount: 0,
+      pdfContentGeneration: row.pdfContentGeneration,
+      currentGeneration: row.currentGeneration,
+    });
+  });
 }
 
 /** Verify that a stored key still resolves to a non-empty PDF before issuing a presigned URL. */
@@ -1804,4 +1964,36 @@ function scorecardContentChangedError(): AppError {
 function toIso(value: unknown): string {
   if (value instanceof Date) return value.toISOString();
   return String(value);
+}
+
+/**
+ * Corrective-action RESPONSE photo rows in the order the PDF renders them: by item (action items ahead of
+ * critical deficiencies, then NUMERIC item_ref — "10" follows "2"), then by link time within an item.
+ *
+ * The render-side photo budget is spent in exactly this order, so slicing here keeps the same photos the
+ * renderer would have kept. Sorting the ROWS is cheap; it is the byte downloads the cap exists to avoid.
+ * Rows whose parent item is missing sort last — they cannot render, so they are the first to be dropped.
+ */
+function sortResponsePhotosForRender<T extends { correctiveActionId: string | null }>(
+  photoRows: T[],
+  itemRows: Array<{ id: string; itemType: string; itemRef: string; itemLabel: string }>,
+  actionItems: readonly string[],
+  criticalDeficiencyKeys: readonly string[],
+): T[] {
+  // MUST use the same ranking the renderer uses. This function decides which photos survive the global cap;
+  // the renderer decides which item draws them. Rank by item_ref here while the renderer ranks by the live
+  // action-item list and the two disagree the moment an editor reorders the list — the cap then keeps photos
+  // for one item and the renderer draws a different one, so an item silently loses its evidence.
+  const rankById = new Map<string, number>();
+  orderCorrectiveActions(itemRows, actionItems, criticalDeficiencyKeys).forEach((item, index) =>
+    rankById.set(item.id, index),
+  );
+
+  // The incoming rows already arrive ordered by (created_at, id); Array.prototype.sort is stable, so that
+  // ordering is preserved within each item.
+  return [...photoRows].sort(
+    (left, right) =>
+      (rankById.get(left.correctiveActionId ?? "") ?? Number.MAX_SAFE_INTEGER) -
+      (rankById.get(right.correctiveActionId ?? "") ?? Number.MAX_SAFE_INTEGER),
+  );
 }

@@ -3,6 +3,7 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { describe, expect, it } from "vitest";
 import type { CorrectiveActionItemView, FieldScorecardDetail } from "@trock-crm/shared/types";
+import { isRenderableSignatureDataUrl, typedSignatureFallback } from "@trock-crm/shared/types";
 import {
   buildCorrectiveActionLookup,
   correctiveActionStatusBadge,
@@ -212,5 +213,82 @@ describe("ScorecardDetailView corrective-action threading", () => {
     expect(html.split("Fix rebar").length - 1).toBe(2);
     expect(html).toContain("First fix done");
     expect(html).toContain("Awaiting corrective-action response");
+  });
+});
+
+describe("ScorecardDetailView signatures", () => {
+  const PNG =
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
+  it("renders a handwritten signature as an image, never as raw base64 text", async () => {
+    // Reported bug: the tab printed the data URL as a text node under the SIGNATURES heading.
+    const html = await renderDetail({
+      ...BASE_DETAIL,
+      formVersion: 2,
+      superintendentSignature: PNG,
+      pmSignature: PNG,
+    });
+
+    expect(html).toContain(`alt="Superintendent signature"`);
+    expect(html).toContain(`alt="Project manager signature"`);
+    // The data URL may appear ONLY inside an img src, never as a text node.
+    expect(stripTags(html)).not.toContain("data:image/png;base64");
+  });
+
+  it("renders a legacy typed signature as text", async () => {
+    const html = await renderDetail({
+      ...BASE_DETAIL,
+      formVersion: 2,
+      superintendentSignature: "Sam Super",
+      pmSignature: null,
+    });
+
+    expect(stripTags(html)).toContain("Sam Super");
+    expect(html).not.toContain("alt=\"Superintendent signature\"");
+  });
+
+  it("renders an em dash for a missing or unsupported signature", async () => {
+    const html = await renderDetail({
+      ...BASE_DETAIL,
+      formVersion: 2,
+      superintendentSignature: null,
+      // An unsupported image type must fall back to the em dash, NOT be printed verbatim.
+      pmSignature: "data:image/svg+xml;base64,PHN2Zz4=",
+    });
+
+    expect(html).not.toContain("<img");
+    expect(stripTags(html)).not.toContain("data:image/svg+xml");
+    expect(html.split("—").length - 1).toBeGreaterThanOrEqual(2);
+  });
+});
+
+/** Text content only — used to prove a data URL never reaches the DOM as a text node. */
+function stripTags(html: string): string {
+  return html.replace(/<[^>]*>/g, " ");
+}
+
+describe("ScorecardDetailView signature decode failure", () => {
+  // The shared predicate validates the media type and the base64 ALPHABET but cannot prove the payload
+  // decodes to a real image. The PDF catches that at draw time; the web must too, or the two surfaces
+  // disagree on exactly the input the shared module exists to keep them agreeing on.
+  const UNDECODABLE = "data:image/png;base64,====";
+
+  it("classifies an undecodable-but-well-formed payload as renderable (so the runtime fallback matters)", () => {
+    expect(isRenderableSignatureDataUrl(UNDECODABLE)).toBe(true);
+    expect(typedSignatureFallback(UNDECODABLE)).toBeNull();
+  });
+
+  it("renders it as an image with an error fallback rather than raw text", async () => {
+    const html = await renderDetail({
+      ...BASE_DETAIL,
+      formVersion: 2,
+      superintendentSignature: UNDECODABLE,
+      pmSignature: null,
+    });
+
+    // It starts as an <img> (we cannot know it is bad until the browser tries), but the payload must never
+    // reach the DOM as a text node, and the element must carry an error handler to fall back.
+    expect(html).toContain('alt="Superintendent signature"');
+    expect(stripTags(html)).not.toContain("data:image/png;base64");
   });
 });

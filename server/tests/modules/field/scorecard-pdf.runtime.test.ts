@@ -1,14 +1,22 @@
 import { readFileSync } from "node:fs";
+import { inflateSync } from "node:zlib";
 import { describe, expect, it } from "vitest";
 import {
   buildScorecardPdfData,
   capEvidenceGroups,
+  formatDateTime,
   renderFieldScorecardPdf,
   signatureDataUrlToBuffer,
   typedSignatureFallback,
   type EvidenceGroup,
+  type ScorecardPdfCorrectiveAction,
+  MAX_CORRECTIVE_ACTION_PHOTOS,
   type ScorecardPdfPhoto,
 } from "../../../src/modules/field/scorecard-pdf.js";
+import {
+  isRenderableSignatureDataUrl,
+  typedSignatureFallback as sharedTypedSignatureFallback,
+} from "@trock-crm/shared/types";
 
 // Compact data URL used to exercise the handwritten-signature parsing helpers below. Evidence rendering
 // uses the tracked 32x32 PNG because PDFKit rejects this minimal 1x1 fixture while decoding an image tile.
@@ -160,7 +168,9 @@ describe("field scorecard PDF evidence", () => {
     // Substantial (multi-page evidence) but not runaway.
     expect(pdf.length).toBeGreaterThan(5_000);
     expect(pdf.length).toBeLessThan(5_000_000);
-  });
+    // Renders in well under a second in isolation but has been observed near 5s under full-suite parallel
+    // load, where it timed out against vitest's default. Give the slowest render in the file real headroom.
+  }, 30_000);
 });
 
 describe("buildScorecardPdfData omittedEvidenceCount", () => {
@@ -224,4 +234,495 @@ describe("scorecard signature rendering helpers", () => {
     expect(typedSignatureFallback(TINY_PNG_DATA_URL)).toBeNull();
     expect(typedSignatureFallback(null)).toBeNull();
   });
+
+  it("classifies identically to the shared predicate the web deal tab uses", () => {
+    // Both surfaces now route through shared/types/field-scorecard-signature. This locks them together:
+    // if they ever disagree, one shows a signature the other renders as an em dash.
+    for (const value of [
+      TINY_PNG_DATA_URL,
+      "Pat Q. Manager",
+      "data:image/gif;base64,AAAA",
+      "data:image/svg+xml;base64,PHN2Zz4=",
+      "data:text/html;base64,PHNjcmlwdD4=",
+      "DATA:IMAGE/PNG;BASE64,iVBORw0KGgo=",
+      "",
+      null,
+    ]) {
+      expect(signatureDataUrlToBuffer(value) !== null).toBe(isRenderableSignatureDataUrl(value));
+      expect(typedSignatureFallback(value)).toBe(sharedTypedSignatureFallback(value));
+    }
+  });
+
+  it("never renders an unsupported data URL as either an image or verbatim text", () => {
+    // The reported bug was a raw `data:image/png;base64,...` printed as text. Neither an unsupported image
+    // type nor an uppercase data URL may fall through to the verbatim-text branch.
+    for (const value of ["data:image/svg+xml;base64,PHN2Zz4=", "DATA:TEXT/HTML;BASE64,PHNjcmlwdD4="]) {
+      expect(signatureDataUrlToBuffer(value)).toBeNull();
+      expect(typedSignatureFallback(value)).toBeNull();
+    }
+  });
 });
+
+describe("corrective-action section", () => {
+  const base = {
+    dealName: "Arboretum at Lewisville",
+    projectNumber: "DFW-4-19426-ak",
+    weekOf: "2026-07-27",
+    superintendentName: "Adnaan Iqbal",
+    pmName: "Addy",
+    submittedByName: "Adnaan Iqbal",
+    submittedAt: "2026-07-27T12:00:00.000Z",
+    totalScore: 23,
+    formVersion: 2 as const,
+    rating: "corrective_action" as const,
+    items: [],
+    criticalDeficiencyKeys: [],
+    actionItems: [],
+  };
+
+  function ca(over: Partial<ScorecardPdfCorrectiveAction> & Pick<ScorecardPdfCorrectiveAction, "itemRef">): ScorecardPdfCorrectiveAction {
+    return {
+      itemType: "action_item",
+      itemLabel: `Item ${over.itemRef}`,
+      status: "open",
+      responderName: null,
+      respondedAt: null,
+      responseComment: null,
+      photos: [],
+      ...over,
+    };
+  }
+
+  it("orders deficiencies first, then action items NUMERICALLY by item_ref", () => {
+    // Deficiencies lead because the scorecard body renders "Critical Deficiencies" above "Action Items" in
+    // this same document, and the CRM threads responses under those sections in that order. Within the
+    // action items, lexical ordering would put "10" before "2".
+    const data = buildScorecardPdfData({
+      ...base,
+      correctiveActions: [
+        ca({ itemRef: "10" }),
+        ca({ itemRef: "2" }),
+        ca({ itemRef: "missed_hold_point", itemType: "critical_deficiency" }),
+        ca({ itemRef: "1" }),
+      ],
+    });
+
+    expect(data.correctiveActions.map((c) => c.itemRef)).toEqual(["missed_hold_point", "1", "2", "10"]);
+  });
+
+  it("REGRESSION: orders action items by the CURRENT list, not by the preserved item_ref", () => {
+    // Reconciliation deliberately preserves an action item's original item_ref across edits (it re-matches on
+    // itemLabel) so that reordering the list does not orphan an already-settled response. The consequence is
+    // that after a reorder, ref order IS the old order — so ranking by it printed the corrective actions in a
+    // different sequence from the ACTION ITEMS section directly above them in the same PDF, and from the CRM
+    // thread, which renders the live list.
+    const data = buildScorecardPdfData({
+      ...base,
+      actionItems: ["Item 2", "Item 1"], // the editor swapped them...
+      correctiveActions: [ca({ itemRef: "1" }), ca({ itemRef: "2" })], // ...but reconciliation kept the refs
+    });
+
+    expect(data.correctiveActions.map((c) => c.itemLabel)).toEqual(["Item 2", "Item 1"]);
+    // The whole point: the two sections of one PDF agree.
+    expect(data.actionItems).toEqual(data.correctiveActions.map((c) => c.itemLabel));
+  });
+
+  it("gives duplicate labels distinct positions instead of collapsing them onto the first", () => {
+    const data = buildScorecardPdfData({
+      ...base,
+      actionItems: ["Fix anchors", "Clear the deck", "Fix anchors"],
+      correctiveActions: [
+        ca({ itemRef: "5", itemLabel: "Fix anchors" }),
+        ca({ itemRef: "3", itemLabel: "Clear the deck" }),
+        ca({ itemRef: "9", itemLabel: "Fix anchors" }),
+      ],
+    });
+
+    // Positions 0 and 2 are consumed in base-ref order, so ref 3 lands between refs 5 and 9 — one-to-one and
+    // deterministic, rather than both "Fix anchors" rows piling onto position 0.
+    expect(data.correctiveActions.map((c) => c.itemRef)).toEqual(["5", "3", "9"]);
+  });
+
+  it("sorts a row the action-item list no longer contains last, on its stable ref", () => {
+    const data = buildScorecardPdfData({
+      ...base,
+      actionItems: ["Item 2"],
+      correctiveActions: [ca({ itemRef: "1" }), ca({ itemRef: "2" })],
+    });
+
+    // "Item 1" was removed from the list but its settled row survives; it keeps a stable place at the end
+    // rather than being interleaved arbitrarily.
+    expect(data.correctiveActions.map((c) => c.itemRef)).toEqual(["2", "1"]);
+  });
+
+  it("summarises partial and complete progress", () => {
+    const partial = buildScorecardPdfData({
+      ...base,
+      correctiveActions: [ca({ itemRef: "1", status: "resolved" }), ca({ itemRef: "2" })],
+    });
+    expect(partial.correctiveActionSummary).toBe("1 of 2 resolved");
+
+    const complete = buildScorecardPdfData({
+      ...base,
+      correctiveActions: [ca({ itemRef: "1", status: "resolved" })],
+    });
+    expect(complete.correctiveActionSummary).toBe("All items resolved");
+
+    expect(buildScorecardPdfData({ ...base }).correctiveActionSummary).toBeNull();
+  });
+
+  it("caps response photos across the whole report and reports the omitted count", () => {
+    const photos = (n: number) =>
+      Array.from({ length: n }, (_, i) => ({ caption: `Photo ${i}`, image: null }));
+    const data = buildScorecardPdfData({
+      ...base,
+      correctiveActions: [
+        ca({ itemRef: "1", status: "resolved", photos: photos(MAX_CORRECTIVE_ACTION_PHOTOS) }),
+        ca({ itemRef: "2", status: "resolved", photos: photos(5) }),
+      ],
+    });
+
+    // The budget is spent by the first item in render order; the second keeps none.
+    expect(data.correctiveActions[0].photos).toHaveLength(MAX_CORRECTIVE_ACTION_PHOTOS);
+    expect(data.correctiveActions[1].photos).toHaveLength(0);
+    expect(data.omittedCorrectiveActionPhotoCount).toBe(5);
+  });
+
+  it("renders a PDF carrying the corrective-action record", async () => {
+    const data = buildScorecardPdfData({
+      ...base,
+      correctiveActions: [
+        ca({
+          itemRef: "missed_hold_point",
+          itemType: "critical_deficiency",
+          itemLabel: "Missed hold point",
+          status: "resolved",
+          responderName: "Addy",
+          respondedAt: "2026-07-27T13:00:00.000Z",
+          responseComment: "Re-inspected and signed off by the PM.",
+          photos: [{ caption: "After", image: EVIDENCE_PNG }],
+        }),
+        ca({ itemRef: "1", itemLabel: "Still outstanding" }),
+      ],
+    });
+
+    const pdf = await renderFieldScorecardPdf(data);
+    expect(pdf.byteLength).toBeGreaterThan(1000);
+  });
+
+  it("renders byte-identically when the card has no corrective actions", async () => {
+    // The section must be entirely absent for the vast majority of cards that never go below band.
+    const [withoutField, withEmpty] = await Promise.all([
+      renderFieldScorecardPdf(buildScorecardPdfData({ ...base })),
+      renderFieldScorecardPdf(buildScorecardPdfData({ ...base, correctiveActions: [] })),
+    ]);
+    expect(withEmpty.byteLength).toBe(withoutField.byteLength);
+  });
+
+  it("survives a long comment and an undecodable response photo", async () => {
+    const data = buildScorecardPdfData({
+      ...base,
+      correctiveActions: [
+        ca({
+          itemRef: "1",
+          status: "resolved",
+          responderName: "Addy",
+          respondedAt: "2026-07-27T13:00:00.000Z",
+          responseComment: "Re-poured and cured. ".repeat(400),
+          photos: [{ caption: "Corrupt", image: Buffer.from("not an image") }],
+        }),
+      ],
+    });
+
+    const pdf = await renderFieldScorecardPdf(data);
+    expect(pdf.byteLength).toBeGreaterThan(1000);
+  });
+});
+
+
+/**
+ * Every text-positioning y-coordinate in the document's content streams, in PDF user space (bottom-left
+ * origin, so the 48pt bottom margin is y = 48 and anything lower has overflowed the printable area).
+ * PDFKit Flate-compresses its content streams, so they must be inflated before the operators are visible.
+ */
+function textYPositions(pdf: Buffer): number[] {
+  const raw = pdf.toString("latin1");
+  const ys: number[] = [];
+  const streamRe = /stream\r?\n/g;
+  let match: RegExpExecArray | null;
+  while ((match = streamRe.exec(raw)) !== null) {
+    const start = match.index + match[0].length;
+    const end = raw.indexOf("endstream", start);
+    if (end < 0) continue;
+    const body = Buffer.from(raw.slice(start, end), "latin1");
+    let text: string;
+    try {
+      text = inflateSync(body).toString("latin1");
+    } catch {
+      continue; // not a Flate stream (e.g. an embedded image) — skip it.
+    }
+    for (const tm of text.matchAll(/1 0 0 1 (-?[\d.]+) (-?[\d.]+) Tm/g)) {
+      ys.push(Number(tm[2]));
+    }
+  }
+  return ys;
+}
+
+describe("corrective-action page-break safety", () => {
+  const base = {
+    dealName: "Harbor Point",
+    projectNumber: "DFW-99999",
+    weekOf: "2026-07-27",
+    superintendentName: "Sam Super",
+    pmName: "Pat Manager",
+    submittedByName: "Sam Super",
+    submittedAt: "2026-07-27T12:00:00.000Z",
+    totalScore: 23,
+    formVersion: 2 as const,
+    rating: "corrective_action" as const,
+    items: [],
+    criticalDeficiencyKeys: [] as string[],
+    actionItems: [] as string[],
+  };
+
+  /**
+   * PDFKit disables auto-pagination for text drawn with an explicit `height`, which the response comment
+   * uses to bound a long dictation. An under-reserved page-break guard therefore lets the comment flow past
+   * the bottom margin to the page edge and drops the trailing hairline outside the media box.
+   *
+   * Walk the whole section with many resolved items carrying long comments — every item lands at a
+   * different starting y, so this sweeps the vulnerable window rather than guessing one offset.
+   */
+  it("never draws a response comment past the bottom margin", async () => {
+    const data = buildScorecardPdfData({
+      ...base,
+      correctiveActions: Array.from({ length: 14 }, (_, i) => ({
+        itemType: "action_item",
+        itemRef: String(i),
+        itemLabel: `Corrective item ${i}`,
+        status: "resolved",
+        responderName: "Pat Manager",
+        respondedAt: "2026-07-27T13:00:00.000Z",
+        // ~500 chars: long enough to fill the bounded comment box.
+        responseComment: "Re-poured and cured, then re-inspected with the safety lead. ".repeat(9),
+        photos: [],
+      })),
+    });
+
+    const pdf = await renderFieldScorecardPdf(data);
+
+    // Every text-positioning operator in the content streams must sit inside the printable area. PDF user
+    // space is bottom-left origin, so the 48pt bottom margin is y = 48; anything below that has overflowed.
+    const yPositions = textYPositions(pdf);
+    expect(yPositions.length).toBeGreaterThan(20);
+    expect(yPositions.filter((y) => y < 48)).toEqual([]);
+  });
+
+  it("never draws a response comment past the bottom margin for a mix of open and resolved items", async () => {
+    const data = buildScorecardPdfData({
+      ...base,
+      correctiveActions: Array.from({ length: 20 }, (_, i) => ({
+        itemType: "action_item",
+        itemRef: String(i),
+        itemLabel: `Item ${i}`,
+        status: i % 3 === 0 ? "open" : "resolved",
+        responderName: i % 3 === 0 ? null : "Pat Manager",
+        respondedAt: i % 3 === 0 ? null : "2026-07-27T13:00:00.000Z",
+        responseComment: i % 3 === 0 ? null : "Corrected on site and verified. ".repeat(12),
+        photos: [],
+      })),
+    });
+
+    const pdf = await renderFieldScorecardPdf(data);
+    const yPositions = textYPositions(pdf);
+    expect(yPositions.length).toBeGreaterThan(20);
+    expect(yPositions.filter((y) => y < 48)).toEqual([]);
+  });
+
+  it("REGRESSION: never draws past the bottom margin when the item LABEL wraps", async () => {
+    // Neither submission nor edit parsing bounds an action item's LENGTH — only how many there may be. A
+    // dictated item can wrap to several lines, pushing doc.y past the fixed 46pt allowance; the bounded
+    // response comment that follows is then drawn low enough to run through the bottom margin, because
+    // PDFKit disables auto-pagination for any text given an explicit height.
+    // These proportions are not arbitrary — they are the shape found by sweeping label length against item
+    // count: a label long enough to wrap to many lines, with a comment long enough that the unreserved
+    // overflow pushes the bounded (non-paginating) text through the 48pt margin. A shorter label does not
+    // reproduce it, which is why the first version of this test passed against the unfixed renderer.
+    const longLabel = "Re-inspect the north elevation framing connection detail. ".repeat(12);
+    const data = buildScorecardPdfData({
+      ...base,
+      correctiveActions: Array.from({ length: 5 }, (_, i) => ({
+        itemType: "action_item",
+        itemRef: String(i),
+        itemLabel: `${i}. ${longLabel}`,
+        status: "resolved",
+        responderName: "Pat Manager",
+        respondedAt: "2026-07-27T13:00:00.000Z",
+        responseComment: "Corrected on site and verified with the safety lead. ".repeat(4),
+        photos: [],
+      })),
+    });
+
+    const pdf = await renderFieldScorecardPdf(data);
+    const yPositions = textYPositions(pdf);
+    expect(yPositions.length).toBeGreaterThan(20);
+    expect(yPositions.filter((y) => y < 48)).toEqual([]);
+  });
+
+  it("REGRESSION: never draws past the bottom margin when the RESPONDER NAME wraps", async () => {
+    // The label is not the only unbounded run before the bounded comment. The responder attribution is a
+    // person's name — contact first/last names are each allowed up to 255 characters — so it wraps too, and a
+    // fixed single-line allowance for it reproduces the same overflow the label measurement was added to fix.
+    // Proportions found by sweeping name length x item count x comment length — the overflow window is
+    // narrow, and a shorter name passes against the UNFIXED renderer.
+    const longName = "Bartholomew Fitzwilliam-Montgomery ".repeat(24).trim();
+    const data = buildScorecardPdfData({
+      ...base,
+      correctiveActions: Array.from({ length: 4 }, (_, i) => ({
+        itemType: "action_item",
+        itemRef: String(i),
+        itemLabel: `Item ${i}`,
+        status: "resolved",
+        responderName: longName,
+        respondedAt: "2026-07-27T13:00:00.000Z",
+        responseComment: "Corrected on site and verified with the safety lead. ".repeat(8),
+        photos: [],
+      })),
+    });
+
+    const pdf = await renderFieldScorecardPdf(data);
+    const yPositions = textYPositions(pdf);
+    expect(yPositions.length).toBeGreaterThan(20);
+    expect(yPositions.filter((y) => y < 48)).toEqual([]);
+  });
+
+  it("REGRESSION: a long continuation heading does not push its photo off the page", async () => {
+    // The heading is drawn on the NEW page, AFTER the fit check that decided the row did not fit on the old
+    // one. Unbounded, it eats the fresh page's headroom and pushes the image past the bottom margin — the
+    // clipping the heading was added to prevent, moved one page along.
+    // ~4,280 characters. Also swept: the failing window is narrow, because an UNBOUNDED heading normally
+    // auto-paginates and lands harmlessly at the top of a further page. It only clips when its wrapped height
+    // leaves the fresh page with less than an image row of headroom — which is exactly why bounding the
+    // heading is the right fix rather than measuring it.
+    const longLabel = "word ".repeat(856);
+    const data = buildScorecardPdfData({
+      ...base,
+      correctiveActions: [
+        {
+          itemType: "action_item",
+          itemRef: "0",
+          itemLabel: longLabel,
+          status: "resolved",
+          responderName: "Pat Manager",
+          respondedAt: "2026-07-27T13:00:00.000Z",
+          responseComment: "Done.",
+          photos: Array.from({ length: 8 }, (_, i) => ({ caption: `p${i}`, image: null })),
+        },
+      ],
+    });
+
+    const pdf = await renderFieldScorecardPdf(data);
+    const yPositions = textYPositions(pdf);
+    expect(yPositions.filter((y) => y < 48)).toEqual([]);
+  });
+
+  it("REGRESSION: labels response photos that continue onto a new page", async () => {
+    // A page break between an item's text and its photos left the next page opening with unlabelled images.
+    // On a card where several items carry photos, nothing in the document then ties a photo to the item it
+    // documents — the one question the record exists to answer.
+    const data = buildScorecardPdfData({
+      ...base,
+      correctiveActions: [
+        {
+          itemType: "action_item",
+          itemRef: "0",
+          itemLabel: "Re-torque the anchors",
+          status: "resolved",
+          responderName: "Pat Manager",
+          respondedAt: "2026-07-27T13:00:00.000Z",
+          responseComment: "Done.",
+          // Enough tiles to force at least one continuation page.
+          photos: Array.from({ length: 8 }, (_, i) => ({ caption: `p${i}`, image: null })),
+        },
+      ],
+    });
+
+    const pdf = await renderFieldScorecardPdf(data);
+    const text = renderedTextFromPdf(pdf);
+    expect(text).toContain("Re-torque the anchors (continued)");
+  });
+
+  it("adds an upstream pre-cap omission to the render-side count", async () => {
+    // The artifact job caps response photos BEFORE downloading bytes (so a photo beyond the cap cannot 503
+    // the whole download). Its omitted count must reach the "available in the CRM" note, or the note would
+    // report only what this render discarded.
+    const data = buildScorecardPdfData({
+      ...base,
+      omittedCorrectiveActionPhotoCount: 7,
+      correctiveActions: [
+        {
+          itemType: "action_item",
+          itemRef: "0",
+          itemLabel: "Item",
+          status: "resolved",
+          responderName: "Pat",
+          respondedAt: "2026-07-27T13:00:00.000Z",
+          responseComment: "done",
+          photos: [{ caption: "a", image: null }],
+        },
+      ],
+    });
+
+    expect(data.omittedCorrectiveActionPhotoCount).toBe(7);
+    expect(data.correctiveActions[0].photos).toHaveLength(1);
+  });
+});
+
+describe("formatDateTime — the corrective-action response time", () => {
+  it("REGRESSION: keeps the TIME OF DAY, in business time, not a UTC calendar date", () => {
+    // responded_at is a timestamp, and the corrective-action record exists to show who did what WHEN.
+    // formatDate dropped the clock entirely, so several actions answered on the same day became
+    // indistinguishable in the exported audit record.
+    //
+    // 2026-07-28T01:30Z is 8:30 PM CDT on Jul 27 — the UTC date is already the NEXT day, so a UTC render
+    // misdates the response to a day after the responder finished.
+    const rendered = formatDateTime("2026-07-28T01:30:00.000Z");
+    expect(rendered).toMatch(/Jul 27, 2026/);
+    expect(rendered).toMatch(/8:30\s?PM/);
+    expect(rendered).toContain("CDT");
+  });
+
+  it("labels the zone in standard time too, so winter responses are not read as CDT", () => {
+    expect(formatDateTime("2026-01-15T02:30:00.000Z")).toMatch(/Jan 14, 2026, 8:30\s?PM CST/);
+  });
+
+  it("passes an unparseable value straight through rather than printing Invalid Date", () => {
+    expect(formatDateTime("not a timestamp")).toBe("not a timestamp");
+  });
+});
+
+/** The literal text drawn into the document — PDFKit emits hex-encoded TJ runs against a subsetted font. */
+function renderedTextFromPdf(pdf: Buffer): string {
+  const raw = pdf.toString("latin1");
+  const streamRe = /stream\r?\n/g;
+  const out: string[] = [];
+  let match: RegExpExecArray | null;
+  while ((match = streamRe.exec(raw)) !== null) {
+    const start = match.index + match[0].length;
+    const end = raw.indexOf("endstream", start);
+    if (end < 0) continue;
+    let text: string;
+    try {
+      text = inflateSync(Buffer.from(raw.slice(start, end), "latin1")).toString("latin1");
+    } catch {
+      continue;
+    }
+    for (const tj of text.matchAll(/\[((?:<[0-9A-Fa-f]*>|[-\d.\s])*)\]\s*TJ/g)) {
+      const run = [...tj[1].matchAll(/<([0-9A-Fa-f]*)>/g)]
+        .map((hex) => Buffer.from(hex[1], "hex").toString("latin1"))
+        .join("");
+      if (run) out.push(run);
+    }
+  }
+  return out.join(" ");
+}

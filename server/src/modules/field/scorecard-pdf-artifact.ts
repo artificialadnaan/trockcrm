@@ -3,16 +3,21 @@ import { createHash } from "node:crypto";
 /**
  * Revision of the scorecard PDF renderer currently deployed by the server.
  *
- * Version 1 is the legacy/unversioned artifact. Version 2 embeds linked evidence photos. Keeping this
+ * Version 1 is the legacy/unversioned artifact. Version 2 embeds linked evidence photos. Version 3 adds the
+ * corrective-action record (per-item status, responder, comment and response photos). Keeping this
  * independent of the scorecard form version lets artifact upgrades occur without changing scoring data.
  */
-export const CURRENT_SCORECARD_PDF_RENDER_VERSION = 2;
+export const CURRENT_SCORECARD_PDF_RENDER_VERSION = 3;
 
 /** Minimal persisted state needed to decide whether a scorecard PDF artifact must be rendered again. */
 export interface ScorecardPdfArtifactState {
   pdfR2Key: string | null;
   pdfRenderVersion: number;
   linkedPhotoCount: number;
+  /** The scorecard updated_at the stored artifact was rendered from (migration 0200); null pre-migration. */
+  pdfContentGeneration: Date | string | null;
+  /** The scorecard's CURRENT updated_at. null only when the row could not be read. */
+  currentGeneration: Date | string | null;
 }
 
 /**
@@ -24,12 +29,76 @@ export function needsScorecardPdfRegeneration(state: ScorecardPdfArtifactState):
   const key = state.pdfR2Key?.trim();
   if (!key) return true;
   if (state.pdfRenderVersion < CURRENT_SCORECARD_PDF_RENDER_VERSION) return true;
+  // A NEWER renderer's artifact. This instance must not downgrade it — its publish CAS is
+  // `lte(pdf_render_version, CURRENT)` and would match no row anyway — but "cannot supersede" is not the same
+  // as "is current": if a corrective-action response has advanced updated_at since that render, serving it
+  // reproduces the exact bug this work fixes, silently and indefinitely for every download that lands on an
+  // old instance. Callers get a RETRYABLE signal instead, so the retry can reach an upgraded instance that
+  // can actually re-render. See isFutureRendererArtifactStale.
   if (state.pdfRenderVersion > CURRENT_SCORECARD_PDF_RENDER_VERSION) return false;
+
+  // Content changed since the artifact was rendered — an edit, or a corrective-action response. The
+  // key/version pair alone cannot see this: a content-addressed key stays valid-looking forever, which is
+  // exactly why a documented corrective action never reached the downloaded PDF.
+  if (!isRenderedGenerationCurrent(state)) return true;
 
   // During the initial rolling deploy, a pre-version server can finish late and update only pdf_r2_key,
   // leaving the new pdf_render_version untouched. Treat that key/version mismatch as stale so the next
   // download repairs the pointer to the version-specific object.
   return !isContentAddressedScorecardPdfKey(key, CURRENT_SCORECARD_PDF_RENDER_VERSION);
+}
+
+/**
+ * A newer-renderer artifact whose generation is ALSO stale — this instance can neither serve it honestly nor
+ * replace it, so the caller should surface a retryable error rather than presign known-stale bytes.
+ *
+ * Only true during a rolling deploy (or a rollback) where a higher-version artifact exists. Deliberately
+ * narrow: a future-version artifact whose generation still MATCHES is perfectly serviceable and returns false.
+ */
+export function isFutureRendererArtifactStale(state: ScorecardPdfArtifactState): boolean {
+  if (state.pdfRenderVersion <= CURRENT_SCORECARD_PDF_RENDER_VERSION) return false;
+  return !isRenderedGenerationCurrent(state);
+}
+
+/** Outcome of the pre-presign recheck. Both non-current verdicts are retryable, for different reasons. */
+export type ScorecardArtifactRecheck = "current" | "stale" | "awaiting-newer-renderer";
+
+/**
+ * Is this artifact safe to presign RIGHT NOW, and if not, why?
+ *
+ * The order matters and is the whole point: needsScorecardPdfRegeneration answers "can this instance supersede
+ * it?", which is deliberately FALSE for any future-renderer artifact — so asking it first reports a
+ * newer-renderer artifact as current no matter how far its generation has drifted. That is how a download
+ * could still serve a PDF missing its corrective action despite a route-level guard for exactly that case.
+ */
+export function classifyScorecardArtifactRecheck(state: ScorecardPdfArtifactState): ScorecardArtifactRecheck {
+  if (isFutureRendererArtifactStale(state)) return "awaiting-newer-renderer";
+  return needsScorecardPdfRegeneration(state) ? "stale" : "current";
+}
+
+/**
+ * Whether the stored artifact was rendered from the scorecard's current content.
+ *
+ * A null RENDERED generation (every pre-0200 row) is stale. A null CURRENT generation means the row could
+ * not be read — treated as current so a vanished/unreadable card cannot spin the download in an endless
+ * regenerate loop; the caller's own 404/availability handling owns that case.
+ *
+ * Compared at millisecond precision: node-postgres materializes timestamps as millisecond Date objects
+ * while Postgres retains microseconds, so a raw comparison would report every artifact stale forever.
+ */
+function isRenderedGenerationCurrent(state: ScorecardPdfArtifactState): boolean {
+  if (state.currentGeneration == null) return true;
+  if (state.pdfContentGeneration == null) return false;
+  const rendered = toEpochMillis(state.pdfContentGeneration);
+  const current = toEpochMillis(state.currentGeneration);
+  // An unparseable timestamp on either side must not silently read as "current" (NaN !== NaN would make
+  // every comparison stale, which is the safe direction, but be explicit about it).
+  if (Number.isNaN(rendered) || Number.isNaN(current)) return false;
+  return rendered === current;
+}
+
+function toEpochMillis(value: Date | string): number {
+  return value instanceof Date ? value.getTime() : new Date(value).getTime();
 }
 
 /** True only for the immutable SHA-256 key shape emitted by the current artifact publisher. */

@@ -240,6 +240,8 @@ export async function getDealScorecardPdfArtifactState(
     .select({
       pdfR2Key: fieldScorecards.pdfR2Key,
       pdfRenderVersion: fieldScorecards.pdfRenderVersion,
+      pdfContentGeneration: fieldScorecards.pdfContentGeneration,
+      currentGeneration: fieldScorecards.updatedAt,
       linkedPhotoCount: sql<number>`COUNT(${files.id})::int`,
     })
     .from(fieldScorecards)
@@ -259,13 +261,21 @@ export async function getDealScorecardPdfArtifactState(
         eq(fieldScorecards.isActive, true),
       ),
     )
-    .groupBy(fieldScorecards.id, fieldScorecards.pdfR2Key, fieldScorecards.pdfRenderVersion)
+    .groupBy(
+      fieldScorecards.id,
+      fieldScorecards.pdfR2Key,
+      fieldScorecards.pdfRenderVersion,
+      fieldScorecards.pdfContentGeneration,
+      fieldScorecards.updatedAt,
+    )
     .limit(1);
   if (!card) throw new AppError(404, "Scorecard not found");
   const state: ScorecardPdfArtifactState = {
     pdfR2Key: card.pdfR2Key,
     pdfRenderVersion: card.pdfRenderVersion,
     linkedPhotoCount: Number(card.linkedPhotoCount),
+    pdfContentGeneration: card.pdfContentGeneration,
+    currentGeneration: card.currentGeneration,
   };
   return { ...state, needsRegeneration: needsScorecardPdfRegeneration(state) };
 }
