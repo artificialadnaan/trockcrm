@@ -133,8 +133,48 @@ describe("getStagePageListStageIds (terminal alias-family broadening — reconci
     expect([...ids].sort()).toEqual(stages.map((stage) => stage.id).sort());
   });
 
-  it("keeps a non-terminal stage as its single route id", () => {
-    expect(getStagePageListStageIds({ id: "s-est", slug: "estimating" }, allStages)).toEqual(["s-est"]);
+  it("broadens a non-terminal stage to its CANONICAL family so the list matches the header", () => {
+    // SUPERSEDES "keeps a non-terminal stage as its single route id" (2026-07-28). The server summary now
+    // spans the canonical family for OPEN stages; leaving the list single-id would put a header/list
+    // mismatch inside one page. Prod case: Estimating spans `estimating` + `estimate_in_progress`.
+    const stagesWithAlias = [
+      ...allStages,
+      { id: "s-eip", slug: "estimate_in_progress", workflowFamily: "standard_deal" },
+    ];
+    const ids = getStagePageListStageIds(
+      { id: "s-est", slug: "estimating", workflowFamily: "standard_deal" },
+      stagesWithAlias
+    );
+    expect([...ids].sort()).toEqual(["s-eip", "s-est"]);
+  });
+
+  it("does not pull the SERVICE estimating column into the standard one", () => {
+    // The route boundary in the direction where over-grouping is actually possible: service_estimating
+    // is its own board column, so a standard Estimating drill must not absorb it.
+    const stagesWithService = [
+      ...allStages,
+      { id: "s-eip", slug: "estimate_in_progress", workflowFamily: "standard_deal" },
+      { id: "s-svc-est", slug: "service_estimating", workflowFamily: "service_deal" },
+    ];
+    expect(
+      getStagePageListStageIds({ id: "s-est", slug: "estimating", workflowFamily: "standard_deal" }, stagesWithService)
+    ).not.toContain("s-svc-est");
+    // ...and the reverse drill stays in the service column.
+    expect(
+      getStagePageListStageIds({ id: "s-svc-est", slug: "service_estimating", workflowFamily: "service_deal" }, stagesWithService)
+    ).toEqual(["s-svc-est"]);
+  });
+
+  it("keeps a retired stage that canonicalizes into a TERMINAL family single-id", () => {
+    // `in_production` normalizes to `won` but sits outside WON_DEAL_STAGE_SLUGS; broadening it would drag
+    // realized deals through the open-stage path. Mirrors the server guard.
+    const stagesWithRetired = [
+      ...allStages,
+      { id: "s-in-prod", slug: "in_production", workflowFamily: "standard_deal" },
+    ];
+    expect(
+      getStagePageListStageIds({ id: "s-in-prod", slug: "in_production", workflowFamily: "standard_deal" }, stagesWithRetired)
+    ).toEqual(["s-in-prod"]);
   });
 
   it("falls back to the route stage id when the stage list is empty (load failure — never unscoped)", () => {

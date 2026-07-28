@@ -1312,6 +1312,11 @@ describe("listDealStagePage canonical stage family", () => {
     { id: "stage-sent-to-production", slug: "sent_to_production", name: "Sent to Production", displayOrder: 6, isTerminal: true, workflowFamily: "standard_deal" },
   ];
 
+  const CONTRACT_FAMILY_STAGES = [
+    { id: "stage-contract", slug: "contract", name: "Contract", displayOrder: 6, isTerminal: false, workflowFamily: "standard_deal" },
+    { id: "stage-svc-contract", slug: "service_contract_signed", name: "Service Contract", displayOrder: 6, isTerminal: false, workflowFamily: "service_deal" },
+  ];
+
   async function runStagePage(stageId: string) {
     dbState.responses = [ESTIMATING_FAMILY_STAGES];
     const execute = vi.fn()
@@ -1344,6 +1349,36 @@ describe("listDealStagePage canonical stage family", () => {
     const sqlText = await runStagePage("stage-estimating");
     expect(sqlText).not.toContain("stage-svc-estimating");
     expect(sqlText).not.toContain("stage-opportunity");
+  });
+
+  it("keeps the SERVICE estimating drill inside its own column", async () => {
+    // The direction that can actually over-group: `service_estimating` canonicalizes to its own slug, so
+    // drilling it must NOT absorb the standard estimating pair. Asserting only the standard->service
+    // direction is vacuous, because `estimating` and `service_estimating` canonicalize differently and the
+    // standard drill could never reach the service id regardless of the route rule.
+    const sqlText = await runStagePage("stage-svc-estimating");
+    expect(sqlText).toContain("stage-svc-estimating");
+    expect(sqlText).not.toContain("stage-estimating");
+    expect(sqlText).not.toContain("stage-eip");
+  });
+
+  it("keeps a canonical family that spans workflowFamily merged (contract)", async () => {
+    // Route-INVARIANT aliases DO belong together — the board folds contract + service_contract_signed into
+    // one Contract column. A naive "same workflowFamily" over-correction of the route rule would un-merge
+    // them silently, so pin the merge explicitly.
+    dbState.responses = [CONTRACT_FAMILY_STAGES];
+    const execute = vi.fn()
+      .mockResolvedValueOnce({ rows: [{ total_count: "2", active_count: "2", total_value: "0" }] })
+      .mockResolvedValueOnce({ rows: [] });
+    const tenantDb = { select: createOfficeScopeSelectMock(), execute } as any;
+    const { listDealStagePage } = await import("../../../src/modules/deals/service.js");
+    await listDealStagePage(tenantDb, {
+      role: "admin", userId: "admin-1", activeOfficeId: "office-1", scope: "all",
+      stageId: "stage-contract", page: 1, pageSize: 25, sort: "newest",
+    } as any);
+    const sqlText = extractSqlText(execute.mock.calls[0]![0]);
+    expect(sqlText).toContain("stage-contract");
+    expect(sqlText).toContain("stage-svc-contract");
   });
 
   it("resolves the same family when the drill enters via the alias id", async () => {
