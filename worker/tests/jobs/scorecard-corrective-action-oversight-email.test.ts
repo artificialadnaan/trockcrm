@@ -7,6 +7,7 @@ import {
 const SCORECARD = "11111111-1111-1111-1111-111111111111";
 const DEAL = "22222222-2222-2222-2222-222222222222";
 const CYCLE = "99999999-9999-9999-9999-999999999999";
+const OVERSIGHT_CYCLE = "88888888-8888-8888-8888-888888888888";
 const GENERATION = new Date("2026-07-27T14:00:00.000Z");
 
 const env = {
@@ -29,6 +30,7 @@ function payload(
     officeId: "00000000-0000-0000-0000-0000000000f1",
     phase: "opened",
     cycleNonce: CYCLE,
+    oversightCycle: OVERSIGHT_CYCLE,
     ...over,
   };
 }
@@ -67,6 +69,7 @@ interface ScorecardOverrides {
   /** false => the guarded stamp UPDATE matches no row (superseded mid-send). */
   stampMatches?: boolean;
   storedNonce?: string | null;
+  storedOversightCycle?: string | null;
   /** [] => the browsable/active gate filtered the row out entirely. */
   scorecardRows?: unknown[];
 }
@@ -101,6 +104,8 @@ function makeQuery(
               over.pdfContentGeneration === undefined ? GENERATION : over.pdfContentGeneration,
             updated_at: over.updatedAt ?? GENERATION,
             corrective_action_cycle_nonce: over.storedNonce === undefined ? CYCLE : over.storedNonce,
+            corrective_action_oversight_cycle:
+              over.storedOversightCycle === undefined ? OVERSIGHT_CYCLE : over.storedOversightCycle,
             corrective_action_oversight_opened_at: over.openedAt ?? null,
             corrective_action_oversight_closed_at: over.closedAt ?? null,
           },
@@ -666,5 +671,75 @@ describe("handleScorecardCorrectiveActionOversightEmail", () => {
     expect(options.text).toContain("Sam Super");
     // Names only — never a token or a responder link.
     expect(html).not.toMatch(/token=/i);
+  });
+
+  it("refuses to SEND when a newer cycle superseded this job, even if it was already claimed", async () => {
+    // Retiring queued jobs at the reopen misses a job the worker had already claimed, and the delivery stamp
+    // guard blocks only the stamp — never the send. This pre-send check is what closes that window.
+    const { query, stampUpdates } = makeQuery({ storedOversightCycle: "77777777-7777-7777-7777-777777777777" });
+    const sendEmail = makeSend();
+
+    await handleScorecardCorrectiveActionOversightEmail(payload(), null, {
+      query: query as never,
+      sendEmail: sendEmail as never,
+      env,
+      logger: makeLogger(),
+    });
+
+    expect(sendEmail).not.toHaveBeenCalled();
+    expect(stampUpdates).toHaveLength(0);
+  });
+
+  it("does NOT gate on the oversight marker when either side is absent (pre-0201 rows, in-flight jobs)", async () => {
+    const { query } = makeQuery({ storedOversightCycle: null });
+    const sendEmail = makeSend();
+
+    await handleScorecardCorrectiveActionOversightEmail(payload(), null, {
+      query: query as never,
+      sendEmail: sendEmail as never,
+      env,
+      logger: makeLogger(),
+    });
+
+    expect(sendEmail).toHaveBeenCalledOnce();
+  });
+
+  it("still sends when only the SHARED cycle nonce moved — that is responder self-repair, not supersession", async () => {
+    // The distinction the dedicated marker exists to draw. Gating on the shared nonce here would strand the
+    // notice; the oversight marker is unchanged, so this job is still the current one.
+    const { query } = makeQuery({ storedNonce: "11111111-1111-1111-1111-111111111111" });
+    const sendEmail = makeSend();
+
+    await handleScorecardCorrectiveActionOversightEmail(payload(), null, {
+      query: query as never,
+      sendEmail: sendEmail as never,
+      env,
+      logger: makeLogger(),
+    });
+
+    expect(sendEmail).toHaveBeenCalledOnce();
+  });
+
+  it("names only responders with a DELIVERABLE email", async () => {
+    // The resolution query returns a row whose email is missing or malformed, but the responder handler skips
+    // exactly those — naming them would tell oversight someone "has been asked" when nothing reached them.
+    const { query } = makeQuery({}, [
+      { email: "sam@trock.com", name: "Sam Super", role: "superintendent" } as never,
+      { email: null, name: "Unreachable Pat", role: "project_manager" } as never,
+      { email: "not-an-email", name: "Malformed Max", role: "project_manager" } as never,
+    ]);
+    const sendEmail = makeSend();
+
+    await handleScorecardCorrectiveActionOversightEmail(payload(), null, {
+      query: query as never,
+      sendEmail: sendEmail as never,
+      env,
+      logger: makeLogger(),
+    });
+
+    const [, , html] = sendEmail.mock.calls[0] as unknown as [string[], string, string];
+    expect(html).toContain("Sam Super");
+    expect(html).not.toContain("Unreachable Pat");
+    expect(html).not.toContain("Malformed Max");
   });
 });

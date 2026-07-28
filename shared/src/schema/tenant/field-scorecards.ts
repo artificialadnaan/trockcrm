@@ -95,6 +95,17 @@ export const fieldScorecards = pgTable(
      */
     correctiveActionOversightOpenedAt: timestamp("corrective_action_oversight_opened_at", { withTimezone: true }),
     correctiveActionOversightClosedAt: timestamp("corrective_action_oversight_closed_at", { withTimezone: true }),
+    /**
+     * INDEPENDENT supersession marker for the oversight flow (migration 0201), rotated ONLY where a genuinely
+     * new corrective-action cycle begins.
+     *
+     * correctiveActionCycleNonce cannot serve this purpose: the responder worker's self-repair rotates it
+     * without starting a new cycle, so a handler gating its SEND on that nonce could not tell "superseded by
+     * a reopen" (skip) from "the responder job repaired itself" (must still send). This one is unambiguous,
+     * which lets the oversight handler refuse to send before delivery — the only thing that closes the window
+     * where a job already CLAIMED by a worker would otherwise duplicate a notice.
+     */
+    correctiveActionOversightCycle: uuid("corrective_action_oversight_cycle"),
     isActive: boolean("is_active").default(true).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),

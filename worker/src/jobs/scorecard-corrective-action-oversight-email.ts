@@ -11,6 +11,7 @@ import {
   BROWSABLE_PROJECT_SQL,
   LOST_EXCLUDED_SLUGS,
   WON_BROWSABLE_SLUGS,
+  basicValidEmail,
   recipientResolutionSql,
 } from "./scorecard-corrective-action-email.js";
 
@@ -69,6 +70,12 @@ export interface ScorecardCorrectiveActionOversightEmailPayload {
    * the dedup note in the handler for why those two need different rules.
    */
   cycleNonce?: string;
+  /**
+   * The INDEPENDENT oversight supersession marker current at enqueue (migration 0201). Checked BEFORE
+   * sending: unlike cycleNonce, this rotates only where a genuinely new corrective-action cycle begins, so a
+   * mismatch unambiguously means "a reopen superseded me" rather than "the responder job repaired itself".
+   */
+  oversightCycle?: string;
 }
 
 interface HandlerDeps {
@@ -102,6 +109,7 @@ interface ScorecardRow {
   pdf_content_generation: Date | string | null;
   updated_at: Date | string | null;
   corrective_action_cycle_nonce: string | null;
+  corrective_action_oversight_cycle: string | null;
   corrective_action_oversight_opened_at: Date | null;
   corrective_action_oversight_closed_at: Date | null;
 }
@@ -169,7 +177,7 @@ export async function handleScorecardCorrectiveActionOversightEmail(
             sc.form_version, sc.status, sc.pdf_r2_key, sc.pdf_render_version,
             sc.pdf_content_generation, sc.updated_at,
             sc.corrective_action_oversight_opened_at, sc.corrective_action_oversight_closed_at,
-            sc.corrective_action_cycle_nonce,
+            sc.corrective_action_cycle_nonce, sc.corrective_action_oversight_cycle,
             d.name AS deal_name
        FROM ${tenantSchema}.field_scorecards sc
        JOIN ${tenantSchema}.deals d ON d.id = sc.deal_id
@@ -211,6 +219,24 @@ export async function handleScorecardCorrectiveActionOversightEmail(
   //     announce it as open while listing every item Resolved, immediately followed by the completed notice.
   // Return WITHOUT sending and WITHOUT stamping: the stamp stays available for a genuinely matching state,
   // and a real reopen clears it anyway.
+  // PRE-SEND SUPERSESSION CHECK. Retiring queued jobs at the reopen covers the common case, but a job the
+  // worker had already CLAIMED is past that point — and the delivery stamp guard blocks only the stamp, never
+  // the send, so without this a claimed cycle-A job still delivers a duplicate notice for cycle B.
+  //
+  // This gates on the dedicated oversight marker, NOT the shared cycle nonce. The nonce is also rotated by the
+  // responder worker's self-repair, which does not start a new cycle and enqueues no oversight job — gating on
+  // it would strand the notice entirely. Only compare when both sides are present, so pre-0201 rows and any
+  // in-flight job minted before this deploy keep the prior behaviour.
+  const payloadOversightCycle = normalizeText(payload.oversightCycle);
+  const storedOversightCycle = normalizeText(scorecard.corrective_action_oversight_cycle);
+  if (payloadOversightCycle && storedOversightCycle && payloadOversightCycle !== storedOversightCycle) {
+    logger.log(
+      "[CorrectiveActionOversightEmail] Superseded by a newer corrective-action cycle - skipping (no send, no stamp)",
+      { scorecardId, phase, payloadOversightCycle, storedOversightCycle },
+    );
+    return;
+  }
+
   const expectedStatus = phase === "opened" ? "corrective_action_open" : "corrective_action_closed";
   if (scorecard.status !== expectedStatus) {
     logger.log(
@@ -239,7 +265,16 @@ export async function handleScorecardCorrectiveActionOversightEmail(
   );
   // The opened notice names WHO was asked to respond — that context is the point of the notice, and
   // recipientResolutionSql already returns role and name. Names only: never their tokens or links.
+  //
+  // Only responders with a DELIVERABLE email are named. The resolution query still returns a row whose email
+  // is missing or malformed, but the responder handler skips exactly those — so naming them here would tell
+  // oversight that someone "has been asked" when no email ever reached them. False assurance on a QC gate is
+  // worse than saying less. Same validation the responder handler applies.
   const responders = responderRows
+    .filter((row) => {
+      const email = normalizeText(row.email);
+      return !!email && basicValidEmail(email);
+    })
     .map((row) => ({
       name: normalizeText(row.name) ?? normalizeText(row.email),
       role: normalizeText(row.role),

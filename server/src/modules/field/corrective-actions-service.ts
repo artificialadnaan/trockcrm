@@ -191,6 +191,7 @@ export async function enqueueCorrectiveActionOversightClosed(
     .select({
       dealId: fieldScorecards.dealId,
       cycleNonce: fieldScorecards.correctiveActionCycleNonce,
+      oversightCycle: fieldScorecards.correctiveActionOversightCycle,
     })
     .from(fieldScorecards)
     .where(eq(fieldScorecards.id, input.scorecardId))
@@ -210,6 +211,9 @@ export async function enqueueCorrectiveActionOversightClosed(
       // Null on a legacy card that predates the cycle-nonce column; the worker falls back to a "none"
       // dimension, which is still phase- and scorecard-scoped.
       cycleNonce: card.cycleNonce ?? undefined,
+      // Carries the marker CURRENT at close. A later reopen rotates it, so this job refuses to send a
+      // "completed" notice for a card that has since gone back to the responders.
+      oversightCycle: card.oversightCycle ?? undefined,
     },
     officeId: input.office.id,
     status: "pending",
@@ -618,6 +622,8 @@ export async function reconcileScorecardCorrectiveActions(
     // stale-cycle job (superseded by a later edit that minted a new nonce here) then updates 0 rows and does
     // NOT stamp, so the current cycle's matching-nonce job is the one that stamps.
     const cycleNonce = randomUUID();
+    // A separate identity for the oversight flow — see the field-scorecards schema comment.
+    const oversightCycle = randomUUID();
     // Reset the sent stamp AND stamp the active cycle nonce together (fresh cycle → the worker must send).
     await tx
       .update(fieldScorecards)
@@ -631,7 +637,15 @@ export async function reconcileScorecardCorrectiveActions(
         // "opened" every time an edit adds a flag or corrects a mis-picked superintendent — exactly the
         // inbox noise this feature avoids, and the same reason the restart helpers don't clear them.
         ...(transitioningIntoOpen
-          ? { correctiveActionOversightOpenedAt: null, correctiveActionOversightClosedAt: null }
+          ? {
+              correctiveActionOversightOpenedAt: null,
+              correctiveActionOversightClosedAt: null,
+              // Rotate the INDEPENDENT oversight marker. Unlike the shared cycle nonce (which the responder
+              // worker's self-repair also rotates), this moves ONLY here, so the oversight handler can gate
+              // its SEND on it without conflating supersession with self-repair. Retiring queued jobs below
+              // is not sufficient alone: a job already CLAIMED by a worker is past that point.
+              correctiveActionOversightCycle: oversightCycle,
+            }
           : {}),
       })
       .where(eq(fieldScorecards.id, input.scorecardId));
@@ -707,6 +721,7 @@ export async function reconcileScorecardCorrectiveActions(
           officeId: input.office.id,
           phase: "opened",
           cycleNonce,
+          oversightCycle,
         },
         officeId: input.office.id,
         status: "pending",

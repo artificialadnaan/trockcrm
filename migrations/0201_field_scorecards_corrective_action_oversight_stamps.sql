@@ -15,6 +15,15 @@
 -- 'corrective_action_open' — the corrective action never left open, so nothing new happened for oversight.
 -- Clearing there would re-send the "opened" notice on every team-tab reassignment.
 --
+-- Also adds corrective_action_oversight_cycle: an INDEPENDENT supersession marker for the oversight flow.
+-- corrective_action_cycle_nonce cannot serve that purpose, because the responder worker's self-repair path
+-- rotates it WITHOUT starting a new business cycle — so a handler gating its send on that nonce could not
+-- tell "my cycle was superseded by a reopen" (skip) from "the responder job repaired itself" (must still
+-- send), and choosing either answer breaks one of the two. This column is rotated ONLY where a genuinely new
+-- corrective-action cycle begins, so the oversight handler can safely refuse to send when it no longer
+-- matches. Retiring queued jobs at the reopen is not sufficient on its own: a job already CLAIMED by a worker
+-- is past that point, and the delivery stamp guard blocks only the stamp, never the send.
+--
 -- NOTE on the cycle nonce: the oversight handler dedups on THESE stamps alone and never compares its
 -- payload nonce against corrective_action_cycle_nonce. The responder worker has a self-repair path that
 -- rotates the stored nonce and re-enqueues itself; a pending oversight job minted with the older nonce
@@ -33,7 +42,8 @@ BEGIN
     EXECUTE format(
       'ALTER TABLE %I.field_scorecards
          ADD COLUMN IF NOT EXISTS corrective_action_oversight_opened_at timestamptz,
-         ADD COLUMN IF NOT EXISTS corrective_action_oversight_closed_at timestamptz',
+         ADD COLUMN IF NOT EXISTS corrective_action_oversight_closed_at timestamptz,
+         ADD COLUMN IF NOT EXISTS corrective_action_oversight_cycle uuid',
       schema_name
     );
   END LOOP;
@@ -43,5 +53,6 @@ END $tenant$;
 -- TENANT_SCHEMA_START
 ALTER TABLE office_dallas.field_scorecards
   ADD COLUMN IF NOT EXISTS corrective_action_oversight_opened_at timestamptz,
-  ADD COLUMN IF NOT EXISTS corrective_action_oversight_closed_at timestamptz;
+  ADD COLUMN IF NOT EXISTS corrective_action_oversight_closed_at timestamptz,
+  ADD COLUMN IF NOT EXISTS corrective_action_oversight_cycle uuid;
 -- TENANT_SCHEMA_END

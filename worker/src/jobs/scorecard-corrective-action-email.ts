@@ -98,7 +98,7 @@ interface FlaggedItem {
   itemLabel: string;
 }
 
-function basicValidEmail(email: string): boolean {
+export function basicValidEmail(email: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 }
 
