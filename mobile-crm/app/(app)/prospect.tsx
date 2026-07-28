@@ -379,6 +379,12 @@ export default function ProspectScreen() {
    * The denied state sends a rep to Settings and then never looks again, so granting it there returned
    * them to the same dead screen — the instruction worked and the app pretended it had not.
    */
+  // Clear a pending search on unmount. A timer that fires after the screen is gone starts a request
+  // nobody will read and resolves into a component that no longer exists.
+  useEffect(() => () => {
+    if (searchTimer.current) clearTimeout(searchTimer.current);
+  }, []);
+
   useEffect(() => {
     const sub = AppState.addEventListener("change", (next) => {
       if (next === "active" && location.state.status === "denied") void location.locate();

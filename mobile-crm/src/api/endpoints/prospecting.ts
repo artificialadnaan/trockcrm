@@ -310,8 +310,12 @@ export async function createLeadFromCapture(
       const body = err.body as
         | { error?: { code?: string; missingRequirements?: { fields?: LeadRequirement[] } } }
         | undefined;
-      if (body?.error?.code === "LEAD_CREATE_REQUIREMENTS_UNMET") {
-        return { missing: body.error.missingRequirements?.fields ?? [] };
+      // EITHER position. apiFetch lifts a top-level code onto the error, and this route nests it under
+      // `error`; reading only the nested one meant the outcome depended on which layer happened to
+      // surface it, and the whole point of this branch is that it must never be missed.
+      const code = body?.error?.code ?? err.code;
+      if (code === "LEAD_CREATE_REQUIREMENTS_UNMET") {
+        return { missing: body?.error?.missingRequirements?.fields ?? [] };
       }
     }
     throw err;
