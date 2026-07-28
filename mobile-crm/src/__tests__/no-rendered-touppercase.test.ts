@@ -128,16 +128,17 @@ const NEVER_RENDERED_PROPS = new Set([
   "ref",
   "style",
   "source",
+  // Enumerated values, not prose — RN validates them against fixed sets.
   "accessibilityRole",
   "accessibilityState",
-  "accessibilityHint",
   "keyboardType",
   "autoCapitalize",
   "placeholderTextColor",
-  "id",
-  "name",
-  "type",
 ]);
+// Deliberately NOT here: `accessibilityHint` (announced, and already text-bearing above), and the
+// ambiguous `name` / `title` / `label` / `type` / `id` — in this app `name` is usually a company's or
+// a property's and goes straight into a <Text>. Exempting a prop that turns out to be prose is the
+// invisible failure this whole rule is arranged to avoid.
 
 /** JSX convention: lowercase is a host element, Capitalised is a component this repo controls. */
 function isCustomComponent(attr: ts.JsxAttribute): boolean {
@@ -373,6 +374,13 @@ describe("no toUpperCase() on rendered text", () => {
     it("still exempts inert props on a custom component", () => {
       expect(check("const A = () => <RetryNotice testID={id.toUpperCase()} />;")).toBe(0);
       expect(check("const A = () => <BoardCard onPress={() => go(k.toUpperCase())} />;")).toBe(0);
+    });
+
+    it("does NOT exempt accessibilityHint or an ambiguous name on a custom component", () => {
+      // Both were in an early draft of the inert list. `accessibilityHint` is announced, and in this
+      // app `name` is usually a company's or a property's and goes straight into a <Text>.
+      expect(check("const A = () => <Card accessibilityHint={h.toUpperCase()} />;")).toBe(1);
+      expect(check("const A = () => <PropertyRow name={p.toUpperCase()} />;")).toBe(1);
     });
 
     it("is not fooled by the identifier appearing in a comment", () => {
