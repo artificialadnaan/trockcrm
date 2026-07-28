@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Pressable,
@@ -61,8 +61,14 @@ export default function ProspectScreen() {
    */
   const [company, setCompany] = useState<prospecting.CompanyRef | null>(null);
   const [companyQuery, setCompanyQuery] = useState("");
+  const companyQueryRef = useRef("");
   const [companyResults, setCompanyResults] = useState<prospecting.CompanyRef[] | null>(null);
   const [duplicateContacts, setDuplicateContacts] = useState<prospecting.DedupSuggestion[] | null>(null);
+  /** The rep said none of the suggestions is the building — the fallback has to appear. */
+  const [rejectedMatches, setRejectedMatches] = useState(false);
+  const [companySearchFailed, setCompanySearchFailed] = useState(false);
+  /** Set when the lead was created but the back-reference could not be written. */
+  const [linkFailed, setLinkFailed] = useState(false);
 
   const [type, setType] = useState<prospecting.FieldActivityType | null>("site_visit");
   const [body, setBody] = useState("");
@@ -153,19 +159,48 @@ export default function ProspectScreen() {
     },
   });
 
-  // Kick the match off as soon as a fix lands.
+  /**
+   * Kick the match off as soon as a fix lands — from an EFFECT, not during render.
+   *
+   * The previous version called setState and started a network request in the render body. React may
+   * render a component more than once for one commit (StrictMode does exactly that), so the request
+   * could fire twice for a single fix, and starting external work before the render is committed is
+   * the class of bug that appears only under concurrent rendering.
+   */
   const fix = location.state.status === "ready" ? location.state : null;
   const fixKey = fix ? `${fix.lat},${fix.lng}` : null;
-  const [matchedFor, setMatchedFor] = useState<string | null>(null);
-  if (fixKey && matchedFor !== fixKey && !runMatch.isPending) {
-    setMatchedFor(fixKey);
-    runMatch.mutate({ lat: fix!.lat, lng: fix!.lng });
-  }
+  const matchedFor = useRef<string | null>(null);
+  useEffect(() => {
+    if (!fixKey || !fix) return;
+    if (matchedFor.current === fixKey) return;
+    matchedFor.current = fixKey;
+    runMatch.mutate({ lat: fix.lat, lng: fix.lng });
+    // runMatch identity is stable for the mutation's lifetime; keying on the fix is the real trigger.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fixKey]);
 
+  /**
+   * Company search, with the response tied to the query that asked for it.
+   *
+   * Every keystroke starts an independent request and they do not finish in order — on a slow
+   * connection "pal" can land after "palm villas" and replace the right answers with stale ones. The
+   * query travels with the result so a late response for an abandoned query is dropped.
+   *
+   * A FAILURE is also not an empty result. Storing [] for a network error told the rep "no companies
+   * match", which is a factual claim the app has no basis for and which sends them off to the web to
+   * create a company that already exists.
+   */
   const findCompanies = useMutation({
-    mutationFn: (q: string) => prospecting.searchCompanies(fetcher, q),
-    onSuccess: setCompanyResults,
-    onError: () => setCompanyResults([]),
+    mutationFn: async (q: string) => ({ q, results: await prospecting.searchCompanies(fetcher, q) }),
+    onSuccess: ({ q, results }) => {
+      if (q.trim() !== companyQueryRef.current.trim()) return;
+      setCompanyResults(results);
+      setCompanySearchFailed(false);
+    },
+    onError: () => {
+      setCompanyResults(null);
+      setCompanySearchFailed(true);
+    },
   });
 
   const save = useMutation({
@@ -188,7 +223,9 @@ export default function ProspectScreen() {
           category: "property_manager",
           jobTitle: contactTitle.trim() || undefined,
           mobile: contactPhone.trim() || undefined,
-          companyId: property?.companyId,
+          // The FALLBACK company counts too. Without it a person met at a building the CRM has never
+          // seen was created with no company at all — the one case where the link matters most.
+          companyId: property?.companyId ?? company?.id,
         });
         contactId = created.created?.id;
         // SURFACED, not swallowed. The union exists so a duplicate cannot be mistaken for success, and
@@ -222,9 +259,17 @@ export default function ProspectScreen() {
     },
     onError: (err) => {
       setSavedActivityId(null);
+      /**
+       * A DROPPED RESPONSE IS NOT A FAILED SAVE.
+       *
+       * status 0 means the request never completed from our side — the server may well have committed
+       * it. Telling a rep "this didn't save, try again" turns every weak-signal moment into a second
+       * identical activity, and /activities has no idempotency key to collapse them. Saying the
+       * outcome is unknown is the honest version, and it puts the check before the retry.
+       */
       setSaveError(
         err instanceof ApiError && err.status === 0
-          ? "No signal — this didn't save. Try again once you're back in range."
+          ? "No signal — this may or may not have saved. Check the property's activity before logging it again."
           : err instanceof ApiError
             ? err.message
             : "Couldn't save this log.",
@@ -261,9 +306,11 @@ export default function ProspectScreen() {
         try {
           await prospecting.linkActivityToLead(fetcher, savedActivityId, lead.id);
         } catch {
-          // Swallowed ON PURPOSE. The lead is the artifact that matters and it exists; a missing
-          // back-reference is a traceability gap, not a failed promotion, and surfacing it as failure
-          // invites a duplicate lead.
+          // The lead EXISTS, so this is not a failed promotion and must not read as one — reporting
+          // failure here is how the same lead gets created twice. But swallowing it silently was the
+          // other error: the visit then never appears on the lead's timeline and nobody knows why.
+          // Recorded, and surfaced as the smaller thing it is.
+          setLinkFailed(true);
         }
       }
       return lead;
@@ -318,19 +365,27 @@ export default function ProspectScreen() {
             {property.companyName ? (
               <Text style={styles.chosenCompany}>{property.companyName}</Text>
             ) : null}
-            <Pressable
-              testID="prospect-change-property"
-              onPress={() => {
-                setProperty(null);
-                setMatches(null);
-                setMatchedFor(null);
-                location.reset();
-              }}
-              accessibilityRole="button"
-              style={styles.linkBtn}
-            >
-              <Text style={styles.linkText}>Change</Text>
-            </Pressable>
+            {/* FROZEN once the activity is saved.
+                Left active, a rep could save the visit against this property, change to another, and
+                promote THAT one — creating a lead for a building they never logged, with the activity
+                still pointing at the first. The target the log committed to is not editable after the
+                fact; logging another visit here starts a fresh capture. */}
+            {saved ? null : (
+              <Pressable
+                testID="prospect-change-property"
+                onPress={() => {
+                  setProperty(null);
+                  setMatches(null);
+                  setRejectedMatches(false);
+                  matchedFor.current = null;
+                  location.reset();
+                }}
+                accessibilityRole="button"
+                style={styles.linkBtn}
+              >
+                <Text style={styles.linkText}>Change</Text>
+              </Pressable>
+            )}
           </View>
         ) : (
           <View style={styles.card}>
@@ -413,6 +468,17 @@ export default function ProspectScreen() {
                     <Text style={styles.matchReason}>{describeMatch(m)}</Text>
                   </Pressable>
                 ))}
+                {/* The escape hatch. With candidates on screen the company fallback was hidden, so a
+                    rep whose building is simply not among them had no way forward — the suggestions
+                    became a set of wrong answers with no "none of these". */}
+                <Pressable
+                  testID="prospect-reject-matches"
+                  onPress={() => setRejectedMatches(true)}
+                  accessibilityRole="button"
+                  style={styles.linkBtn}
+                >
+                  <Text style={styles.linkText}>None of these — attach to a company</Text>
+                </Pressable>
               </View>
             ) : matches?.length === 0 ? (
               <Text testID="prospect-no-matches" style={styles.help}>
@@ -428,7 +494,13 @@ export default function ProspectScreen() {
                 server refuses an activity with no target. Without a company picker the "nothing
                 matched" state was a dead end that told them to do something the screen did not offer —
                 which is the case field prospecting exists for in the first place. */}
-            {matches?.length === 0 || location.state.status === "denied" || matchError ? (
+            {matches?.length === 0 ||
+            rejectedMatches ||
+            location.state.status === "denied" ||
+            // unavailable too: services off device-wide, or a fix that errored. Without this the rep
+            // was left with a "try again" that may never succeed and no other way to record the visit.
+            location.state.status === "unavailable" ||
+            matchError ? (
               <View style={styles.matchList}>
                 {company ? (
                   <View style={styles.matchRow}>
@@ -455,6 +527,8 @@ export default function ProspectScreen() {
                       value={companyQuery}
                       onChangeText={(next) => {
                         setCompanyQuery(next);
+                        companyQueryRef.current = next;
+                        setCompanySearchFailed(false);
                         if (next.trim().length >= 2) findCompanies.mutate(next);
                         else setCompanyResults(null);
                       }}
@@ -485,6 +559,11 @@ export default function ProspectScreen() {
                         </Text>
                       </Pressable>
                     ))}
+                    {companySearchFailed ? (
+                      <Text testID="prospect-company-search-failed" style={styles.warn}>
+                        Couldn&apos;t search companies — check your signal and try again.
+                      </Text>
+                    ) : null}
                     {companyResults?.length === 0 && companyQuery.trim().length >= 2 ? (
                       <Text testID="prospect-no-companies" style={styles.help}>
                         No companies match “{companyQuery.trim()}”. Add the property and company on the
@@ -531,6 +610,10 @@ export default function ProspectScreen() {
           testID="prospect-outcome"
           value={outcome}
           onChangeText={setOutcome}
+          // activities.outcome is varchar(100). Past that Postgres rejects the INSERT, so the whole
+          // capture fails on submit — after the rep has filled everything in and walked away from the
+          // building. Capped at the input instead, where it costs nothing.
+          maxLength={100}
           placeholder="Outcome — e.g. nobody in, walked the roof, wants a quote"
           placeholderTextColor={theme.color.textMuted}
           style={styles.input}
@@ -604,6 +687,9 @@ export default function ProspectScreen() {
               <Text testID="prospect-promoted" style={styles.help}>
                 Lead created{promoted.leadNumber ? ` — ${promoted.leadNumber}` : ""}. Finish it on the
                 web when you&apos;re back.
+                {linkFailed
+                  ? " This visit couldn't be attached to it — the lead is fine, the link is missing."
+                  : ""}
               </Text>
             ) : property ? (
               <Pressable
@@ -646,6 +732,8 @@ export default function ProspectScreen() {
                 setSavedActivityId(null);
                 setPromoted(null);
                 setPromoteError(null);
+                setLinkFailed(false);
+                setDuplicateContacts(null);
                 setBody("");
                 setOutcome("");
                 setNextStep("");

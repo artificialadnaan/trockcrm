@@ -119,3 +119,12 @@ describe("describeMatch", () => {
       .toBe("Nearby");
   });
 });
+
+describe("describeMatch — the suite caveat survives a distance reading", () => {
+  it("keeps 'check the suite' when coordinates are also present", () => {
+    // Coordinates prove the BUILDING, never the tenancy. "Same building · 12 m away" without the
+    // caveat reads as certainty about the wrong thing, and confirming the wrong suite attaches the
+    // visit to the neighbouring tenant.
+    expect(describeMatch(match({ addressMatch: "base", distanceMeters: 12 }))).toMatch(/check the suite/i);
+  });
+});

@@ -115,7 +115,10 @@ export function describeMatch(match: PropertyMatch): string {
   // "base" means the stored record names a suite and the geocode didn't (or the reverse) — a strong
   // hint, not a certainty, and saying so is what stops a rep confirming the wrong tenancy in a tower.
   if (match.addressMatch === "base") {
-    return distance ? `Same building · ${distance}` : "Same building — check the suite";
+    // The suite caveat survives a distance reading. Coordinates prove the BUILDING, never the tenancy,
+    // so "Same building · 12 m away" without it reads as certainty about the wrong thing — and
+    // confirming the wrong suite attaches the visit to the neighbouring tenant.
+    return distance ? `Same building · ${distance} — check the suite` : "Same building — check the suite";
   }
   return distance ?? "Nearby";
 }
