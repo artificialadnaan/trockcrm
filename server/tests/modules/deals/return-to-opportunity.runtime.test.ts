@@ -1193,6 +1193,79 @@ describe("returnDealToOpportunity — queued RFP work is cancelled with the cycl
     expect((await jobRows(D))[0].status).toBe("processing");
   });
 
+  // The THIRD RFP job type. rfp_vote_invitation was the one queued RFP job the cancel list did not
+  // name, so a move-back left it live. It is inert in prod today — ENABLE_RFP_VOTING is off, and only
+  // the voting branch enqueues it — but "inert because a flag is off" is a property of the config, not
+  // of this code, and the flag is a rollout lever. One string in an IN-list is cheaper than rediscovering
+  // this the day voting is switched on.
+  it("cancels a queued rfp_vote_invitation too, not just delivery and bid-board-create", async () => {
+    const D = U("d609");
+    await seedBidBoardDeal(D);
+    await queueRfpJob(D, "rfp_vote_invitation");
+
+    await returnDealToOpportunity(tdb, {
+      dealId: D, userId: ADMIN, userRole: "admin", reason: "Cancel the vote round's invitations", auditContext,
+    });
+
+    const { rows } = await pg.query<{ status: string; payload: Record<string, unknown> }>(
+      `SELECT status, payload FROM public.job_queue
+        WHERE payload->>'dealId' = '${D}' AND job_type = 'rfp_vote_invitation'`
+    );
+    expect(rows[0].status).toBe("completed");
+    expect(rows[0].payload.cancelledBy).toBe("return_to_opportunity");
+    expect(rows[0].payload.dealHandled).toBe(true);
+  });
+
+  // LOCK ORDER, not lock PRESENCE. Round 7 added the deal_rfp_delivery lock and pinned only that it was
+  // taken — which is exactly why it went unnoticed that it was taken in the WRONG PLACE: down inside
+  // cancelQueuedRfpJobs, i.e. AFTER `loadDealOrThrow(…, FOR UPDATE)`. The RFP workers take that advisory
+  // lock FIRST and then read the deal, so the two sides were on opposite orders. This asserts the
+  // SEQUENCE: both advisory locks must appear before the first row lock.
+  //
+  // A presence assertion passes under the inverted order; this one does not.
+  it("takes BOTH advisory locks before the first row lock (order, not presence)", async () => {
+    const D = U("d608");
+    await seedBidBoardDeal(D);
+
+    // Record the SQL this transaction issues, in order, by wrapping the PGlite client drizzle talks to.
+    const statements: string[] = [];
+    const recordingPg = new Proxy(pg, {
+      get(target, prop, receiver) {
+        const value = Reflect.get(target, prop, receiver);
+        if (prop === "query" && typeof value === "function") {
+          return (sqlText: string, ...rest: unknown[]) => {
+            // Params matter: the advisory-lock keys are BOUND ($1), not inlined, so recording the SQL
+            // text alone would never match "deal_commission:" / "deal_rfp_delivery:".
+            statements.push(`${String(sqlText)} -- params=${JSON.stringify(rest[0] ?? [])}`);
+            return (value as (...a: unknown[]) => unknown).call(target, sqlText, ...rest);
+          };
+        }
+        return typeof value === "function" ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+      },
+    });
+
+    await returnDealToOpportunity(drizzle(recordingPg as unknown as PGlite), {
+      dealId: D, userId: ADMIN, userRole: "admin", reason: "Order matters", auditContext,
+    });
+
+    const firstIndexMatching = (re: RegExp) => statements.findIndex((s) => re.test(s));
+    const commissionLock = firstIndexMatching(/deal_commission:/);
+    const deliveryLock = firstIndexMatching(/deal_rfp_delivery:/);
+    const firstRowLock = firstIndexMatching(/for update/i);
+
+    // All three actually happened — otherwise the ordering assertions below are vacuous.
+    expect(commissionLock).toBeGreaterThanOrEqual(0);
+    expect(deliveryLock).toBeGreaterThanOrEqual(0);
+    expect(firstRowLock).toBeGreaterThanOrEqual(0);
+
+    // THE PIN: every advisory lock precedes every row lock. Under the old code the delivery lock landed
+    // after the FOR UPDATE, which is the inversion against the workers.
+    expect(deliveryLock).toBeLessThan(firstRowLock);
+    expect(commissionLock).toBeLessThan(firstRowLock);
+    // And the two advisory locks themselves are in a fixed, documented order.
+    expect(commissionLock).toBeLessThan(deliveryLock);
+  });
+
   // AN ORPHAN SYNCHUB SUBMISSION CANNOT BE PREVENTED FROM HERE — an outbound POST is not retractable,
   // and the worker's pre-send lock is transaction-scoped, so it is released before it sends. What CAN
   // be done is DETECT it: the queue's claim transaction commits `status = 'processing'` before the

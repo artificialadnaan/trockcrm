@@ -52,6 +52,72 @@ describe("handleRfpBidBoardCreate", () => {
     expect(captured.init.headers["x-rfp-request-signature"]).toBe(expectedSig);
   });
 
+  // The create worker's recheck existed but was UNLOCKED, so it was advisory rather than binding: it
+  // could observe a live create round a microsecond before "Move back to Opportunity" committed and POST
+  // anyway. rfp_request_delivery took the deal_rfp_delivery lock for exactly this reason in round 7;
+  // this sibling did not, and ITS orphan is worse — a stray Bid Board PROJECT can never be linked back
+  // (the bid-board-created callback requires the round state the move-back cleared), so the CRM has no
+  // record it exists at all.
+  //
+  // Pins the SEQUENCE, not just that a lock happened: the lock must be the first statement inside the
+  // transaction and must precede the deal read, matching the order the move-back now uses.
+  it("authorizes the create under the deal_rfp_delivery lock, taken BEFORE the deal read", async () => {
+    const statements: string[] = [];
+    const params: unknown[][] = [];
+    const release = vi.fn();
+    const db = {
+      query: async () => ({ rows: [] }),
+      connect: async () => ({
+        query: async (sql: string, p?: unknown[]) => {
+          statements.push(sql);
+          params.push(p ?? []);
+          if (sql.includes("FROM public.offices")) return { rows: [{ slug: "test" }] };
+          if (/\.deals\b/.test(sql)) {
+            return {
+              rows: [{
+                is_active: true,
+                rfp_approval_status: "pending",
+                rfp_approval_request_id: null,
+                rfp_override_state: null,
+                rfp_approval_request_event_id: "round-1",
+              }],
+            };
+          }
+          return { rows: [] };
+        },
+        release,
+      }),
+    } as any;
+    // resolveOfficeSchema runs against the pool, not the locked client, so answer it there too.
+    db.query = async (sql: string) =>
+      sql.includes("FROM public.offices") ? { rows: [{ slug: "test" }] } : { rows: [] };
+
+    let fetchedAfter = -1;
+    const fetchImpl = vi.fn(async () => {
+      fetchedAfter = statements.length;
+      return { status: 202, ok: true, text: async () => "" } as any;
+    });
+
+    await handleRfpBidBoardCreate(makePayload(), "office-9", { fetchImpl: fetchImpl as any, secret: SECRET, db });
+
+    const lockIdx = statements.findIndex((s) => s.includes("pg_advisory_xact_lock"));
+    const readIdx = statements.findIndex((s) => /\.deals\b/.test(s));
+    const commitIdx = statements.findIndex((s) => s === "COMMIT");
+
+    expect(lockIdx).toBeGreaterThanOrEqual(0);
+    expect(readIdx).toBeGreaterThanOrEqual(0);
+    // Same lock KEY as the delivery worker — the move-back takes one lock per deal, so both workers must
+    // contend on it or it only serializes against one of them.
+    expect(params[lockIdx][0]).toBe("deal_rfp_delivery:deal-1");
+    // ORDER: lock first, then read.
+    expect(lockIdx).toBeLessThan(readIdx);
+    expect(statements[0]).toBe("BEGIN");
+    // And the POST happens OUTSIDE the transaction — a db transaction must not span an outbound HTTP call.
+    expect(commitIdx).toBeGreaterThanOrEqual(0);
+    expect(fetchedAfter).toBeGreaterThan(commitIdx);
+    expect(release).toHaveBeenCalled();
+  });
+
   it("throws on a non-2xx SyncHub response so the job retries", async () => {
     const fetchImpl = vi.fn(async () => ({ status: 500, ok: false, text: async () => "boom" } as any));
     await expect(

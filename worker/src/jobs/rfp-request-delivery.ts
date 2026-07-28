@@ -58,6 +58,20 @@ async function resolveOfficeSchema(
   return `office_${slug}`;
 }
 
+/**
+ * The RFP round a delivery payload belongs to, or null when it is unknown (a payload predating the
+ * format, or a malformed one). Every round check FAILS OPEN on null — an over-eager guard here would
+ * silently stop legitimate work, which is worse than the drift it prevents.
+ *
+ * Extracted so the pre-send recheck and the dead-letter sweep derive the round IDENTICALLY. They used
+ * to differ: the sweep derived nothing at all and wrote by deal id alone.
+ */
+function parseRoundEventId(body: unknown): string | null {
+  return (
+    /^crm:deal-stage:opportunity:(.+)$/.exec(String((body as any)?.sourceEventId ?? ""))?.[1] ?? null
+  );
+}
+
 function signBody(rawBody: string, secret: string): string {
   const digest = crypto.createHmac("sha256", secret).update(rawBody).digest("hex");
   return `sha256=${digest}`;
@@ -165,9 +179,7 @@ export async function handleRfpRequestDelivery(
 
   // The round this job was built for. Mirrors rfp_bidboard_create's binding; null when the payload
   // predates the format or is malformed, in which case every round check below fails OPEN.
-  const roundEventId =
-    /^crm:deal-stage:opportunity:(.+)$/.exec(String((payload.body as any)?.sourceEventId ?? ""))?.[1] ??
-    null;
+  const roundEventId = parseRoundEventId(payload.body);
 
   // AUTHORIZE THE SEND under the deal's advisory lock, then POST outside it.
   //
@@ -307,13 +319,34 @@ export async function runRfpRequestDeadLetterSweep(
         }
 
         const schemaName = await resolveOfficeSchema(client, job.office_id, { requireActive: false });
+        // GUARDED ON THE SWEEP'S OWN WRITE, not on whoever queued the job.
+        //
+        // This wrote `WHERE id = $2` alone — the only writer of rfp_approval_status in this worker that
+        // carried no predicate at all. `dealHandled` on the payload does protect the jobs "Move back to
+        // Opportunity" could reach, but it cancels only status IN ('pending','dead'); a job already
+        // CLAIMED ('processing') when the move-back ran is never stamped, and when it later exhausts its
+        // retries and lands 'dead' this sweep picks it up and writes `send_failed` onto a deal whose
+        // cycle was cleared. That repopulates rfp_approval_status, which re-locks the deal's scope
+        // (resolveDealScopeLockState), re-arms the callback's `rfp_approval_status IS NOT NULL`
+        // resurrection guard, and blocks re-triggering — the exact dead end this feature removes.
+        //
+        // Same two-part predicate the success and conflict write-backs use, so all three writers now
+        // agree: only touch a deal still AWAITING delivery, and only for THIS round. Fails open on an
+        // unknown round, matching its siblings.
         await client.query(
           `UPDATE ${quoteIdent(schemaName)}.deals
               SET rfp_approval_status = 'send_failed',
                   rfp_last_attempt_error = $1,
                   updated_at = NOW()
-            WHERE id = $2`,
-          [job.last_error ?? "RFP delivery exhausted retries", payload.dealId]
+            WHERE id = $2
+              AND rfp_approval_status IN ('pending_outbox', 'pending')
+              AND ($3::text IS NULL OR rfp_approval_request_event_id IS NULL
+                   OR rfp_approval_request_event_id::text = $3::text)`,
+          [
+            job.last_error ?? "RFP delivery exhausted retries",
+            payload.dealId,
+            parseRoundEventId(payload.body),
+          ]
         );
         await client.query(
           "UPDATE public.job_queue SET payload = jsonb_set(payload, '{dealHandled}', 'true'::jsonb, true) WHERE id = $1",

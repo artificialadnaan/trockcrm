@@ -18,6 +18,7 @@ import { AppError } from "../../middleware/error-handler.js";
 import { logActivity, type AuditContext } from "../audit/audit-logger.js";
 import { retireDealApprovals } from "./approval-retirement.js";
 import { lockDealCommissions } from "../commissions/deal-commission-lock.js";
+import { lockDealRfpDelivery } from "./deal-rfp-delivery-lock.js";
 import { removeCommissionForDeal } from "../commissions/service.js";
 import { getStageById, getStageBySlug } from "../pipeline/service.js";
 import { effectiveContractSignedDate } from "../shared/won-close-date.js";
@@ -229,16 +230,12 @@ async function cancelQueuedRfpJobs(
   tenantDb: TenantDb,
   dealId: string
 ): Promise<{ cancelled: number; deliveryInFlight: boolean }> {
-  // Serialize with the delivery worker's send-authorization, which takes this same lock across its
-  // pre-send recheck (worker/src/jobs/rfp-request-delivery.ts). Without it the worker can observe
-  // `pending_outbox` a microsecond before this transaction commits and POST anyway, creating an orphan
-  // SyncHub submission for a cycle that no longer exists. With it the two serialize: either the worker
-  // authorizes and this cancellation waits, or this commits first and the worker reads the cleared
-  // cycle and declines to send. Transaction-scoped, released at COMMIT/ROLLBACK.
-  await tenantDb.execute(
-    sql`select pg_advisory_xact_lock(hashtext(${`deal_rfp_delivery:${dealId}`}))`
-  );
-
+  // The deal_rfp_delivery lock that serializes this with the RFP workers is NOT taken here. It is taken
+  // by the caller as one of the transaction's first statements, BEFORE the deal row lock — see
+  // deal-rfp-delivery-lock.ts. Taking it here, after `loadDealOrThrow(…, FOR UPDATE)`, inverted the
+  // order against the workers (which take it first, then read the deal) and put a deadlock one
+  // `FOR UPDATE` away — one that both workers' fail-open rechecks would have swallowed into a stale
+  // send. By the time this runs the lock is already held, so the serialization argument is unchanged.
   const result = await tenantDb.execute(sql`
     UPDATE public.job_queue
        SET status = CASE WHEN status = 'pending' THEN 'completed'::job_status ELSE status END,
@@ -247,7 +244,7 @@ async function cancelQueuedRfpJobs(
              jsonb_set(payload, '{cancelledBy}', '"return_to_opportunity"'::jsonb, true),
              '{dealHandled}', 'true'::jsonb, true
            )
-     WHERE job_type IN ('rfp_request_delivery', 'rfp_bidboard_create')
+     WHERE job_type IN ('rfp_request_delivery', 'rfp_bidboard_create', 'rfp_vote_invitation')
        AND status IN ('pending', 'dead')
        AND payload->>'dealId' = ${dealId}
   `);
@@ -531,6 +528,12 @@ export async function returnDealToOpportunity(
   // then INSERTs, so without this it can add a row AFTER the delete and leave booked commission on a
   // deal the operator was told had been voided.
   await lockDealCommissions(tenantDb, input.dealId);
+
+  // SECOND, and still before ANY row lock. The RFP workers take this lock FIRST in their transactions
+  // and then read the deal, so acquiring it here — rather than down in cancelQueuedRfpJobs, after the
+  // FOR UPDATE below — is what keeps both sides on the same order. See deal-rfp-delivery-lock.ts for
+  // why an inverted order is unacceptable even though the current wait graph has no live cycle.
+  await lockDealRfpDelivery(tenantDb, input.dealId);
 
   // FOR UPDATE here and again inside changeDealStage; the second lock is a no-op re-acquire on the
   // same transaction and keeps changeDealStage usable standalone.
