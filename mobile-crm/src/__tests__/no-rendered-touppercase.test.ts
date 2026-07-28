@@ -43,6 +43,11 @@ import * as ts from "typescript";
  * unparseable input is fail-open, which is how a sibling guard was disarmed by a misplaced comment
  * (#958).
  *
+ * KNOWN LIMIT: a value that leaves a callback WITHOUT passing a comparison is assumed to be able to
+ * reach the screen, so `<Text>{xs.filter((i) => SAFE.has(i.c.toUpperCase())).length}</Text>` would be
+ * flagged although only a count is drawn. That direction is deliberate — a false positive is visible
+ * and fixable in one line, a false negative ships an unreadable label.
+ *
  * KNOWN LIMIT: single-file and syntactic. A helper that uppercases and is rendered elsewhere is not
  * caught, and neither is a missing `accessibilityLabel` — that is a judgement this cannot make. Green
  * means "no direct route", not a proof.
@@ -105,37 +110,63 @@ const TEXT_BEARING_PROPS = new Set([
   "children",
 ]);
 
+/** Operators that consume a string and yield a verdict — past one of these, nothing is displayed. */
+function isPredicateBoundary(node: ts.Node): boolean {
+  if (ts.isPrefixUnaryExpression(node) && node.operator === ts.SyntaxKind.ExclamationToken) return true;
+  if (!ts.isBinaryExpression(node)) return false;
+  switch (node.operatorToken.kind) {
+    case ts.SyntaxKind.EqualsEqualsEqualsToken:
+    case ts.SyntaxKind.ExclamationEqualsEqualsToken:
+    case ts.SyntaxKind.EqualsEqualsToken:
+    case ts.SyntaxKind.ExclamationEqualsToken:
+    case ts.SyntaxKind.LessThanToken:
+    case ts.SyntaxKind.GreaterThanToken:
+    case ts.SyntaxKind.LessThanEqualsToken:
+    case ts.SyntaxKind.GreaterThanEqualsToken:
+      return true;
+    default:
+      return false;
+  }
+}
+
 function isRenderedText(node: ts.Node): boolean {
+  // Whether the value has been consumed by a comparison on the way out. A callback that COMPARES the
+  // uppercase string returns a verdict; one that merely builds with it returns the string itself.
+  let consumedByPredicate = false;
+
   for (let cur = node.parent; cur; cur = cur.parent) {
+    if (isPredicateBoundary(cur)) consumedByPredicate = true;
+
     /**
-     * A callback's own value is a predicate, not output.
+     * A callback stops the walk only when its value is a VERDICT.
      *
-     * `<Text>{xs.find((i) => i.code.toUpperCase() === key)?.name}</Text>` displays the mixed-case
-     * `name`; the uppercase only feeds the comparison. An ancestor-only walk reached the outer
-     * expression and called it rendered, which would have blocked ordinary normalisation during
-     * render.
+     * `xs.find((i) => i.code.toUpperCase() === k)` renders `?.name`; the uppercase feeds the
+     * comparison and never reaches the screen. But `xs.map((i) => i.n.toUpperCase()).join(", ")`
+     * inside a Text renders exactly those uppercase strings — an unconditional stop here missed it,
+     * because the walk meets the map callback before the outer JSX expression.
      *
-     * Safe against the mirror mistake, and this is the whole reason the ORDER here matters: in
-     * `{xs.map((i) => <Text>{i.name.toUpperCase()}</Text>)}` the walk meets the inner Text's expression
-     * FIRST and returns true before ever reaching the arrow. So reaching a callback means we did not
-     * pass through rendered JSX on the way, which is exactly when the value is not displayed.
+     * So: past a comparison, the callback yields a boolean and nothing is displayed. Otherwise the
+     * value flows out through the callback's return and the walk continues to whatever consumes it —
+     * which is also why `onPress={() => SAFE.has(m.toUpperCase())}` still comes out false: it walks on
+     * and meets the `on*` attribute.
      */
     if (
       (ts.isArrowFunction(cur) || ts.isFunctionExpression(cur)) &&
       cur.parent &&
       ts.isCallExpression(cur.parent)
     ) {
-      return false;
+      if (consumedByPredicate) return false;
     }
+
     if (ts.isJsxAttribute(cur)) {
       const name = ts.isIdentifier(cur.name) ? cur.name.text : cur.name.getText();
       return TEXT_BEARING_PROPS.has(name);
     }
     if (ts.isJsxExpression(cur)) {
       const parent = cur.parent;
-      // A child-position expression renders; an attribute-position one is handled by the branch above
-      // on the next iteration.
-      if (parent && (ts.isJsxElement(parent) || ts.isJsxFragment(parent))) return true;
+      if (parent && (ts.isJsxElement(parent) || ts.isJsxFragment(parent))) {
+        return !consumedByPredicate;
+      }
     }
   }
   return false;
@@ -270,7 +301,23 @@ describe("no toUpperCase() on rendered text", () => {
       expect(check("const A = () => <Text children={label.toUpperCase()} />;")).toBe(1);
     });
 
-    it("is not fooled by the identifier appearing in a comment", () => {
+    it("catches a callback whose RETURN VALUE becomes the rendered text", () => {
+      // The case an unconditional callback-stop missed: these uppercase strings are exactly what the
+      // Text displays, and the walk meets the map callback before the outer expression.
+      expect(
+        check('const A = () => <Text>{xs.map((i) => i.n.toUpperCase()).join(", ")}</Text>;'),
+      ).toBe(1);
+    });
+
+    it("still allows the comparison form, which returns a verdict not a string", () => {
+      // The pair matters: the rule is "past a comparison nothing is displayed", so both directions have
+      // to hold or it is just a differently-shaped guess.
+      expect(
+        check("const A = () => <Text>{xs.filter((i) => i.c.toUpperCase() !== k).length}</Text>;"),
+      ).toBe(0);
+    });
+
+    it("is not fooled by the identifier appearing in a comment", () =>{
       expect(check("const A = () => <Text>{/* toUpperCase() is banned here */ s.label}</Text>;")).toBe(0);
     });
   });
