@@ -695,7 +695,10 @@ export async function updateProperty(tenantDb: TenantDb, propertyId: string, inp
   // An EXPLICIT coordinate in the same request wins over the reset — that request is "here is the new
   // address AND its geocode", which is exactly how a corrected property gets its position back. Only a
   // bare address edit, with no replacement offered, clears the pair.
-  const suppliedCoordinates = "lat" in patch || "lng" in patch;
+  // BOTH, not either. A PATCH supplying only one half would suppress the reset and leave the other
+  // half pointing at the OLD address — a mismatched pair that places the property somewhere neither
+  // address describes, which is worse than no coordinates at all.
+  const suppliedCoordinates = "lat" in patch && "lng" in patch;
   const coordinateReset = addressChanged && !suppliedCoordinates ? { lat: null, lng: null } : {};
 
   const [property] = await tenantDb

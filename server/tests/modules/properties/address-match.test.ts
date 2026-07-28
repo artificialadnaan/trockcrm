@@ -232,3 +232,24 @@ describe("localityContradicts — ZIP", () => {
     expect(localityContradicts({ zip: "75201" }, { zip: null })).toBe(false);
   });
 });
+
+describe("route-number addresses", () => {
+  /**
+   * "100 County Rd 123" — the street type is followed by a route number, so it is not the last token
+   * and stayed unexpanded. An uncoordinated legacy row spelling it "100 County Road 123" was then
+   * rejected, and a duplicate created.
+   */
+  it("expands a street type that precedes a route number", () => {
+    expect(compareAddressKeys("100 County Rd 123", "100 County Road 123")).toBe("exact");
+    expect(compareAddressKeys("55 State Hwy 7", "55 State Highway 7")).toBe("exact");
+  });
+
+  it("still keeps different route numbers apart", () => {
+    expect(compareAddressKeys("100 County Rd 123", "100 County Rd 456")).toBeNull();
+  });
+
+  it("does not mistake a house number for a route number", () => {
+    // "100 Main St" — the shift only fires when the token BEFORE the trailing number is a street type.
+    expect(compareAddressKeys("100 Main St", "100 Main Street")).toBe("exact");
+  });
+});

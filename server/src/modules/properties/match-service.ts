@@ -140,8 +140,13 @@ export function normalizeAddressKey(value: string | null | undefined): string {
    * North".
    */
   let typeIndex = baseEnd - 1;
-  if (typeIndex >= 1 && DIRECTIONALS[tokens[typeIndex]!] && STREET_TYPES[tokens[typeIndex - 1]!]) {
-    typeIndex -= 1;
+  // A trailing directional ("100 Main St N") or a ROUTE NUMBER ("100 County Rd 123") sits after the
+  // street type, so the type is one further left. Without this "Rd" is not in the type position, stays
+  // unexpanded, and "100 County Rd 123" never matches "100 County Road 123".
+  if (typeIndex >= 1) {
+    const last = tokens[typeIndex]!;
+    const prev = tokens[typeIndex - 1]!;
+    if ((DIRECTIONALS[last] || /^\d+$/.test(last)) && STREET_TYPES[prev]) typeIndex -= 1;
   }
 
   return tokens
@@ -318,11 +323,25 @@ export async function matchProperties(
       power(sin(radians((p.lng::float8 - ${lng}) / 2)), 2)
     ))`;
 
+  /**
+   * The longitude band, WRAPPED at the antimeridian.
+   *
+   * A BETWEEN across ±180 is empty — at longitude 179.999 the band runs to 180.001, which no stored
+   * value can satisfy, so a property 50 m away on the other side of the line is invisible and the
+   * capture creates a duplicate. Rare, and free to handle correctly.
+   */
+  const lngLow = lng - lngDelta;
+  const lngHigh = lng + lngDelta;
+  const lngBand =
+    lngLow < -180 || lngHigh > 180
+      ? sql`(p.lng::float8 >= ${((lngLow + 180 + 360) % 360) - 180} OR p.lng::float8 <= ${((lngHigh + 180 + 360) % 360) - 180})`
+      : sql`p.lng::float8 BETWEEN ${lngLow} AND ${lngHigh}`;
+
   const withinBox = hasPoint
     ? sql`(
         p.lat IS NOT NULL AND p.lng IS NOT NULL
         AND p.lat::float8 BETWEEN ${lat - latDelta} AND ${lat + latDelta}
-        AND p.lng::float8 BETWEEN ${lng - lngDelta} AND ${lng + lngDelta}
+        AND ${lngBand}
       )`
     : sql`false`;
 
@@ -361,9 +380,19 @@ export async function matchProperties(
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, " ")
     .trim();
-  const sameWholeAddress = punctuationKey
-    ? sql`${normalizedDbAddress} = ${punctuationKey}`
-    : sql`false`;
+  /**
+   * Two forms, because the punctuation-only key misses the pair this matcher exists for.
+   *
+   * "100 Main Street" against a stored "100 Main St" differs by the very abbreviation
+   * normalizeAddressKey canonicalises, so a punctuation-only comparison never fires — leaving that row
+   * to reach TypeScript only via the lead-token predicate, which the candidate cap can cut. Comparing
+   * the NORMALISED key too keeps it in front of the cap. Still not a mirror: this only promotes
+   * candidates, and addressKeysMatch remains the sole decision.
+   */
+  const sameWholeAddress =
+    punctuationKey || addressKey
+      ? sql`(${normalizedDbAddress} = ${punctuationKey} OR ${normalizedDbAddress} = ${addressKey})`
+      : sql`false`;
 
   const rows = await tenantDb.execute(sql`
     select
