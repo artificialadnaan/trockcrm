@@ -372,12 +372,24 @@ export default function ProspectScreen() {
       zip: manualZip.trim(),
     };
     if (!typed.address || !typed.city || !typed.state || !typed.zip) return null;
-    // Coordinates come from the FIX, not the typing — the rep is standing here either way, and storing
-    // them is what makes this building findable by the next capture.
-    return { ...typed, lat: address?.lat ?? null, lng: address?.lng ?? null };
-  }, [address, manualAddress, manualCity, manualState, manualZip]);
+    /**
+     * Coordinates come from the GPS FIX, not from `address`.
+     *
+     * When reverse geocoding fails, `address` is set to null — and reading the coordinates off it meant
+     * a manually typed building was stored with none at all. That is the precise defect this feature
+     * exists to end: properties.lat/lng went years with nothing writing them, so distance matching
+     * could never find an API-created property. The rep is standing here either way; the geocode
+     * failing says nothing about where they are.
+     */
+    return { ...typed, lat: fix?.lat ?? address?.lat ?? null, lng: fix?.lng ?? address?.lng ?? null };
+  }, [address, fix, manualAddress, manualCity, manualState, manualZip]);
   const createCompanyNamed = useMutation({
-    mutationFn: async (name: string) => prospecting.createCompany(fetcher, { name }),
+    mutationFn: async (input: { name: string; force?: boolean }) =>
+      prospecting.createCompany(fetcher, {
+        name: input.name,
+        // Only after the rep has seen the suggestions and rejected them.
+        skipDedupCheck: input.force || undefined,
+      }),
     onSuccess: async (result) => {
       if (!result.created) {
         setDuplicateCompanies(result.duplicates ?? []);
@@ -1079,7 +1091,7 @@ export default function ProspectScreen() {
                             That is the case field prospecting exists for. */}
                         <Pressable
                           testID="prospect-create-company"
-                          onPress={() => createCompanyNamed.mutate(companyQuery.trim())}
+                          onPress={() => createCompanyNamed.mutate({ name: companyQuery.trim() })}
                           disabled={locked || createCompanyNamed.isPending}
                           accessibilityRole="button"
                           accessibilityLabel={`Add ${companyQuery.trim()} as a new company`}
@@ -1128,6 +1140,28 @@ export default function ProspectScreen() {
                                 <Text style={styles.linkText}>Use</Text>
                               </Pressable>
                             ))}
+                            {/* NONE OF THESE. The server treats fuzzy matches as warnings and supports
+                                overriding them; without this a rep at a genuinely new company whose
+                                name merely resembles an existing one could not create it — and since
+                                both the building control and the activity target need a company, they
+                                could not log the visit at all. */}
+                            <Pressable
+                              testID="prospect-company-force-create"
+                              onPress={() =>
+                                createCompanyNamed.mutate({
+                                  name: companyQuery.trim(),
+                                  force: true,
+                                })
+                              }
+                              disabled={locked || createCompanyNamed.isPending}
+                              accessibilityRole="button"
+                              accessibilityLabel={`None of these — create ${companyQuery.trim()} anyway`}
+                              style={styles.linkBtn}
+                            >
+                              <Text style={styles.linkText}>
+                                None of these — create it anyway
+                              </Text>
+                            </Pressable>
                           </View>
                         ) : null}
                         {createCompanyError ? (

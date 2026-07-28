@@ -192,7 +192,23 @@ export type CompanyRef = {
 /** POST /companies → 201 `{ company }`, or 200 `{ company: null, dedupWarning, suggestions }`. */
 export async function createCompany(
   fetcher: Fetcher,
-  input: { name: string; address?: string; city?: string; state?: string; zip?: string; category?: string },
+  input: {
+    name: string;
+    address?: string;
+    city?: string;
+    state?: string;
+    zip?: string;
+    category?: string;
+    /**
+     * Only ever set after the rep has SEEN the suggestions and said none is theirs.
+     *
+     * The server treats fuzzy matches as warnings and supports overriding them, but without an
+     * override a net-new prospect whose company merely resembles an existing one could not be created
+     * at all — and since the building control and the activity target both need a company, that rep
+     * had no way to log the visit. Never sent on the first attempt: the prompt is the feature.
+     */
+    skipDedupCheck?: boolean;
+  },
 ): Promise<CreateResult<CompanyRef>> {
   const body = await fetcher<Record<string, unknown>>("/companies", { method: "POST", body: input });
   return readCreateResult<CompanyRef>(body, "company");

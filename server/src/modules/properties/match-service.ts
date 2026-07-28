@@ -99,6 +99,18 @@ const DIRECTIONALS: Record<string, string> = {
 };
 
 /**
+ * Directionals in EITHER spelling, for the trailing-token test.
+ *
+ * `DIRECTIONALS` is keyed by abbreviation, so "100 Main St North" did not shift the type position —
+ * `St` then fell through to the non-final alias and became "saint", giving "100 main saint north",
+ * which matches nothing and least of all "100 Main Street North".
+ */
+const DIRECTIONAL_TOKENS = new Set([
+  ...Object.keys(DIRECTIONALS),
+  ...Object.values(DIRECTIONALS),
+]);
+
+/**
  * Abbreviations that mean something DIFFERENT away from the street-type position.
  *
  * `st` is the whole reason this map exists. As the last token of a street line it is "Street"; anywhere
@@ -150,7 +162,7 @@ export function normalizeAddressKey(value: string | null | undefined): string {
     // left `hwy` looking non-final, so it never expanded and "Hwy 7A" could not match "Highway 7A" —
     // and with both addresses non-empty the conflict rule then stopped GPS from recovering it either.
     const routeNumber = (s: string) => /^\d+[a-z]?$/.test(s);
-    if ((DIRECTIONALS[last] || routeNumber(last)) && STREET_TYPES[prev]) typeIndex -= 1;
+    if ((DIRECTIONAL_TOKENS.has(last) || routeNumber(last)) && STREET_TYPES[prev]) typeIndex -= 1;
   }
 
   /**
@@ -554,6 +566,26 @@ export async function matchProperties(
         )`
       : sql`false`;
 
+  /**
+   * The stored row EXTENDS the queried building — the suite case, and the reason splitUnit exists.
+   *
+   * A geocode returns "100 Main St" while the legacy record stores "100 Main St Ste 200", so no
+   * equality holds and the row is selected only by the office-wide "100 %" lead token. Ordered by name
+   * after that, it can sit beyond the 200-candidate cap on any street where that many properties share
+   * a house number — and TypeScript never sees the one row that would have matched, so the capture
+   * offers to create a duplicate of it.
+   *
+   * A prefix test is deliberately cheap and generous: it only decides ORDERING here, and
+   * addressKeysMatch still makes the real decision downstream.
+   */
+  const extendsQueriedAddress =
+    rawQueryKey || addressKey
+      ? sql`(
+          ${normalizedDbAddress} LIKE ${`${rawQueryKey} %`}
+          OR ${normalizedDbAddress} LIKE ${`${addressKey} %`}
+        )`
+      : sql`false`;
+
   const rows = await tenantDb.execute(sql`
     select
       p.id,
@@ -588,6 +620,10 @@ export async function matchProperties(
       -- street where 200+ properties share a lead token the exact address could sit past the limit —
       -- producing "nothing here" and a duplicate for a property that exists.
       (${sameWholeAddress}) desc,
+      -- Then rows that EXTEND the queried building ("... Ste 200"). Without this they were ordered by
+      -- name alone and fell off the end of the cap, which is exactly how a suite-bearing legacy record
+      -- gets duplicated by a building-level geocode.
+      (${extendsQueriedAddress}) desc,
       case when ${withinBox} then ${distanceSql} else 1e9 end asc,
       p.name asc
     limit ${CANDIDATE_LIMIT}

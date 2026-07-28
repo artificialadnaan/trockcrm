@@ -303,3 +303,32 @@ describe("createProperty", () => {
       });
   });
 });
+
+describe("createCompany — the dedup override", () => {
+  it("does NOT send skipDedupCheck on a first attempt", async () => {
+    // The prompt is the feature: a rep who types a name that already exists should be shown it, not
+    // quietly given a second company.
+    const { fetcher, calls } = recording({ company: { id: "co1", name: "Palm Villas HOA" } });
+    await prospecting.createCompany(fetcher, { name: "Palm Villas HOA" });
+    expect((calls[0].opts.body as Record<string, unknown>).skipDedupCheck).toBeUndefined();
+  });
+
+  it("sends it once the rep has rejected the suggestions", async () => {
+    // Without an override a genuinely new company whose name resembles an existing one could not be
+    // created — and both the building control and the activity target need a company.
+    const { fetcher, calls } = recording({ company: { id: "co2", name: "Palm Villas North" } });
+    await prospecting.createCompany(fetcher, { name: "Palm Villas North", skipDedupCheck: true });
+    expect((calls[0].opts.body as Record<string, unknown>).skipDedupCheck).toBe(true);
+  });
+
+  it("still models a dedup answer as a non-success", async () => {
+    const { fetcher } = recording({
+      company: null,
+      dedupWarning: true,
+      suggestions: [{ id: "co1", name: "Palm Villas HOA" }],
+    });
+    const res = await prospecting.createCompany(fetcher, { name: "Palm Villas" });
+    expect(res.created).toBeUndefined();
+    expect(res.duplicates).toHaveLength(1);
+  });
+});
