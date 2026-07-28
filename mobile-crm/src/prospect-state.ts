@@ -102,7 +102,23 @@ export function describeMatch(match: PropertyMatch): string {
         : `${(match.distanceMeters / 1000).toFixed(1)} km away`
       : null;
 
-  if (match.addressMatch === "exact") return distance ? `Same address · ${distance}` : "Same address";
+  /**
+   * UNCORROBORATED means say so, rather than claiming certainty.
+   *
+   * An uncoordinated legacy row with no city/state/zip cannot be checked against the query's locality —
+   * `localityContradicts` has "cannot disprove" semantics, so it passes. That is right for MATCHING:
+   * those rows are exactly what address matching exists to recover. It is wrong for the LABEL. "100
+   * Main St" exists in every city, and calling one "Same address" with nothing corroborating it is the
+   * kind of confident wrong answer a rep in a hurry confirms — filing the visit against a building in
+   * another town.
+   */
+  const corroborated =
+    match.distanceMeters != null || Boolean(match.city || match.state || match.zip);
+
+  if (match.addressMatch === "exact") {
+    if (!corroborated) return "Same street line — no city on file, check this is the right one";
+    return distance ? `Same address · ${distance}` : "Same address";
+  }
   // "base" means the stored record names a suite and the geocode didn't (or the reverse) — a strong
   // hint, not a certainty, and saying so is what stops a rep confirming the wrong tenancy in a tower.
   if (match.addressMatch === "base") {

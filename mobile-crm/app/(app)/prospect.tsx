@@ -462,7 +462,19 @@ export default function ProspectScreen() {
        * have matched an uncoordinated legacy row, this minted the duplicate it was added to prevent.
        * The same rule the activity save and the contact write already follow.
        */
-      if (rematched.length > 0) return { created: null, rematched, at, under };
+      /**
+       * Only a CORROBORATED match blocks creation.
+       *
+       * A legacy row with no locality and no coordinates passes localityContradicts by "cannot
+       * disprove" — right for surfacing it, wrong as a veto. "100 Main St" exists in every city, so an
+       * uncoordinated row from another town would otherwise stop the rep adding the building they are
+       * standing at, permanently and with no way around it. Those rows are still shown (labelled "no
+       * city on file"); they simply do not decide.
+       */
+      const corroborated = rematched.filter(
+        (m) => m.distanceMeters != null || Boolean(m.city || m.state || m.zip),
+      );
+      if (corroborated.length > 0) return { created: null, rematched: corroborated, at, under };
 
       const created = await prospecting.createProperty(fetcher, {
         companyId: under.id,
@@ -798,11 +810,11 @@ export default function ProspectScreen() {
       <View style={styles.header}>
         <Pressable
           testID="prospect-back"
-          /* Locked WHILE SAVING only, not after. The request is not idempotent and leaving does not
-             cancel it, so a rep who walks away mid-write never sees the outcome — including the
-             "may or may not have saved" case — and logs the visit again. Once it has settled, leaving
-             is fine. */
-          disabled={save.isPending}
+          /* Locked while ANY non-idempotent write is in flight, not just the activity. Creating a
+             property or a company is equally uncancellable by navigation, and leaving mid-write left a
+             new record behind with no visit attached and no outcome shown. Locked WHILE writing only —
+             once everything has settled, leaving is fine. */
+          disabled={save.isPending || createPropertyHere.isPending || createCompanyNamed.isPending}
           onPress={() => goBack()}
           accessibilityRole="button"
           accessibilityLabel="Back"

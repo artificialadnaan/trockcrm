@@ -516,12 +516,6 @@ export async function matchProperties(
    */
   const normalizedDbAddress = sql`${sql.raw(NORMALIZED_ADDRESS_SQL("p.address"))}`;
 
-  const leadToken = addressKey.split(" ")[0] ?? "";
-  const sameLeadToken = leadToken
-    ? sql`${normalizedDbAddress} like ${`${leadToken} %`}`
-    : sql`false`;
-  // A street line with no usable lead token still has a full form worth comparing — cheaper than
-  // giving up and creating a duplicate. The punctuation-collapsed key is what the DB side can produce.
   /**
    * The RAW query key folds accents too, or the two sides disagree again.
    *
@@ -535,6 +529,27 @@ export async function matchProperties(
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, " ")
     .trim();
+
+  /**
+   * The lead token in BOTH spellings, because a numberless address starts with a word we expand.
+   *
+   * `normalizeAddressKey` canonicalises "North Main Street" to "north main street", so the lead token
+   * is "north" — while the stored row folds to "n main st". Neither the `north %` prefix nor any
+   * whole-address form (which only collapse street SUFFIXES) fetches it, so an uncoordinated row the
+   * comparator would happily call equal was never a candidate at all, and the typed-address flow went
+   * on to create a duplicate of it.
+   */
+  const leadToken = addressKey.split(" ")[0] ?? "";
+  const rawLeadToken = (punctuationKey.split(" ")[0] ?? "").trim();
+  const leadTokenVariants = [...new Set([leadToken, rawLeadToken].filter(Boolean))];
+  const sameLeadToken = leadTokenVariants.length
+    ? sql.join(
+        leadTokenVariants.map((tok) => sql`${normalizedDbAddress} like ${`${tok} %`}`),
+        sql` OR `,
+      )
+    : sql`false`;
+  // A street line with no usable lead token still has a full form worth comparing — cheaper than
+  // giving up and creating a duplicate. The punctuation-collapsed key is what the DB side can produce.
   /**
    * Two forms, because the punctuation-only key misses the pair this matcher exists for.
    *

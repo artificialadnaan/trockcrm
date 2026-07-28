@@ -308,3 +308,31 @@ describe("leadFlagNextStep — flagging a prospect for the office", () => {
     expect(leadFlagNextStep({ flagged: true, nextStep: "x" })!.startsWith("Create lead")).toBe(true);
   });
 });
+
+describe("describeMatch — uncorroborated address hits", () => {
+  it("does NOT claim 'Same address' when nothing corroborates it", () => {
+    // An uncoordinated legacy row with no locality passes localityContradicts by "cannot disprove",
+    // which is right for matching and wrong for the label: "100 Main St" is in every city.
+    expect(
+      describeMatch(
+        match({ addressMatch: "exact", distanceMeters: null, city: null, state: null, zip: null }),
+      ),
+    ).toMatch(/no city on file/i);
+  });
+
+  it("still says 'Same address' when the locality agrees", () => {
+    expect(
+      describeMatch(
+        match({ addressMatch: "exact", distanceMeters: null, city: "Dallas", state: "TX", zip: "75201" }),
+      ),
+    ).toBe("Same address");
+  });
+
+  it("treats a distance reading as corroboration on its own", () => {
+    expect(
+      describeMatch(
+        match({ addressMatch: "exact", distanceMeters: 12, city: null, state: null, zip: null }),
+      ),
+    ).toBe("Same address · 12 m away");
+  });
+});
