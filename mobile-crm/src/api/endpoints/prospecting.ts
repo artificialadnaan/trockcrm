@@ -80,6 +80,8 @@ export async function matchProperties(
     /** Sent so the server can DISPROVE a match — "100 Main St" exists in every city. */
     city?: string | null;
     state?: string | null;
+    /** ZIP separates two identical street lines in the SAME city, which city and state cannot. */
+    zip?: string | null;
   },
 ): Promise<PropertyMatch[]> {
   const res = await fetcher<{ matches: PropertyMatch[] }>("/properties/match", {
@@ -89,9 +91,21 @@ export async function matchProperties(
       address: params.address?.trim() || undefined,
       city: params.city?.trim() || undefined,
       state: params.state?.trim() || undefined,
+      zip: params.zip?.trim() || undefined,
     },
   });
   return res.matches ?? [];
+}
+
+/** GET /companies/search → `{ companies }`. The fallback target when no property matches. */
+export async function searchCompanies(
+  fetcher: Fetcher,
+  query: string,
+): Promise<CompanyRef[]> {
+  const q = query.trim();
+  if (q.length < 2) return [];
+  const res = await fetcher<{ companies: CompanyRef[] }>("/companies/search", { query: { q } });
+  return res.companies ?? [];
 }
 
 export type DedupSuggestion = { id: string; name?: string; firstName?: string; lastName?: string };
@@ -150,7 +164,11 @@ export async function createContact(
     firstName: string;
     lastName: string;
     category: string;
-    title?: string;
+    /**
+     * `jobTitle`, NOT `title`. The contacts service reads and persists `jobTitle`; an unknown `title`
+     * is forwarded and silently dropped, so the rep types a role and it vanishes with no error.
+     */
+    jobTitle?: string;
     phone?: string;
     mobile?: string;
     email?: string;
@@ -193,6 +211,16 @@ export async function createProperty(
 export const FIELD_ACTIVITY_TYPES = ["site_visit", "call", "meeting", "voicemail", "note"] as const;
 export type FieldActivityType = (typeof FIELD_ACTIVITY_TYPES)[number];
 
+/**
+ * WHICH entity the activity is ABOUT, sent explicitly.
+ *
+ * inferSourceEntity ranks lead > deal > contact > property > company, so attaching a newly created
+ * person to a site visit silently re-anchored the visit from the PROPERTY to the CONTACT — changing
+ * what the record means, and where it appears, with nothing to notice. The route accepts an explicit
+ * `sourceEntityType`, so the capture states its intent rather than depending on that ordering.
+ */
+export type ActivitySourceEntityType = "property" | "company" | "contact" | "deal" | "lead";
+
 export type ActivityTarget = {
   propertyId?: string;
   companyId?: string;
@@ -214,6 +242,8 @@ export type ActivityTarget = {
 export async function logActivity(
   fetcher: Fetcher,
   input: ActivityTarget & {
+    sourceEntityType?: ActivitySourceEntityType;
+    sourceEntityId?: string;
     type: FieldActivityType;
     subject?: string;
     body?: string;

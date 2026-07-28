@@ -54,6 +54,15 @@ export default function ProspectScreen() {
   const [address, setAddress] = useState<CapturedAddress | null>(null);
   const [property, setProperty] = useState<PropertyMatch | null>(null);
   const [matchError, setMatchError] = useState<string | null>(null);
+  /**
+   * The FALLBACK target. Without it the "no properties matched" state was a dead end: the copy told a
+   * rep to log against a company or contact and the screen offered neither, so a visit to a building
+   * the CRM has never seen could not be recorded at all — the exact case prospecting exists for.
+   */
+  const [company, setCompany] = useState<prospecting.CompanyRef | null>(null);
+  const [companyQuery, setCompanyQuery] = useState("");
+  const [companyResults, setCompanyResults] = useState<prospecting.CompanyRef[] | null>(null);
+  const [duplicateContacts, setDuplicateContacts] = useState<prospecting.DedupSuggestion[] | null>(null);
 
   const [type, setType] = useState<prospecting.FieldActivityType | null>("site_visit");
   const [body, setBody] = useState("");
@@ -69,9 +78,26 @@ export default function ProspectScreen() {
   const saved = savedActivityId !== null;
   const [saveError, setSaveError] = useState<string | null>(null);
 
+  /**
+   * The activity's target, with its source entity STATED.
+   *
+   * inferSourceEntity ranks contact above property, so attaching a newly created person would
+   * otherwise re-anchor a site visit from the building to the person — changing what the record is
+   * about, and where it shows, with nothing to notice.
+   */
   const target = useMemo(
-    () => (property ? { propertyId: property.id, companyId: property.companyId } : {}),
-    [property],
+    () =>
+      property
+        ? {
+            propertyId: property.id,
+            companyId: property.companyId,
+            sourceEntityType: "property" as const,
+            sourceEntityId: property.id,
+          }
+        : company
+          ? { companyId: company.id, sourceEntityType: "company" as const, sourceEntityId: company.id }
+          : {},
+    [property, company],
   );
   const blockedReason = submitBlockedReason({ target, type, body, outcome });
   const ready = canSubmit({ target, type, body, outcome });
@@ -95,6 +121,9 @@ export default function ProspectScreen() {
         address: geocoded?.address ?? null,
         city: geocoded?.city ?? null,
         state: geocoded?.state ?? null,
+        // ZIP disproves an otherwise identical address in the same city — two "100 Main St" in
+        // different postal areas. The server compares it; omitting it discarded that signal.
+        zip: geocoded?.zip ?? null,
       });
       return { geocoded, found };
     },
@@ -133,6 +162,12 @@ export default function ProspectScreen() {
     runMatch.mutate({ lat: fix!.lat, lng: fix!.lng });
   }
 
+  const findCompanies = useMutation({
+    mutationFn: (q: string) => prospecting.searchCompanies(fetcher, q),
+    onSuccess: setCompanyResults,
+    onError: () => setCompanyResults([]),
+  });
+
   const save = useMutation({
     mutationFn: async () => {
       let contactId: string | undefined;
@@ -151,11 +186,17 @@ export default function ProspectScreen() {
           firstName: first,
           lastName: last,
           category: "property_manager",
-          title: contactTitle.trim() || undefined,
+          jobTitle: contactTitle.trim() || undefined,
           mobile: contactPhone.trim() || undefined,
           companyId: property?.companyId,
         });
         contactId = created.created?.id;
+        // SURFACED, not swallowed. The union exists so a duplicate cannot be mistaken for success, and
+        // then discarding the suggestions here threw away the one useful thing about that answer — the
+        // rep would never learn the person is already in the CRM.
+        setDuplicateContacts(created.duplicates ?? null);
+      } else {
+        setDuplicateContacts(null);
       }
 
       return prospecting.logActivity(fetcher, {
@@ -174,6 +215,9 @@ export default function ProspectScreen() {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["properties"] }),
         queryClient.invalidateQueries({ queryKey: ["activities"] }),
+        // A save can create a CONTACT, and the directory is cached separately — without this the person
+        // a rep just added is missing from Contacts until the cache expires.
+        queryClient.invalidateQueries({ queryKey: ["contacts"] }),
       ]);
     },
     onError: (err) => {
@@ -373,9 +417,83 @@ export default function ProspectScreen() {
             ) : matches?.length === 0 ? (
               <Text testID="prospect-no-matches" style={styles.help}>
                 {address
-                  ? `Nothing on file at ${address.address}. Log it against a company or contact for now — creating the property comes next.`
-                  : "No properties matched here."}
+                  ? `Nothing on file at ${address.address}.`
+                  : "No properties matched here."}{" "}
+                Attach this to a company instead.
               </Text>
+            ) : null}
+
+            {/* THE FALLBACK, and it is not optional garnish.
+                A rep at a building the CRM has never seen still has a visit worth recording, and the
+                server refuses an activity with no target. Without a company picker the "nothing
+                matched" state was a dead end that told them to do something the screen did not offer —
+                which is the case field prospecting exists for in the first place. */}
+            {matches?.length === 0 || location.state.status === "denied" || matchError ? (
+              <View style={styles.matchList}>
+                {company ? (
+                  <View style={styles.matchRow}>
+                    <View style={styles.matchBody}>
+                      <Text style={styles.matchName} numberOfLines={1}>
+                        {company.name}
+                      </Text>
+                      <Text style={styles.matchMeta}>Company</Text>
+                    </View>
+                    <Pressable
+                      testID="prospect-clear-company"
+                      onPress={() => setCompany(null)}
+                      accessibilityRole="button"
+                      accessibilityLabel="Choose a different company"
+                      style={styles.linkBtn}
+                    >
+                      <Text style={styles.linkText}>Change</Text>
+                    </Pressable>
+                  </View>
+                ) : (
+                  <>
+                    <TextInput
+                      testID="prospect-company-search"
+                      value={companyQuery}
+                      onChangeText={(next) => {
+                        setCompanyQuery(next);
+                        if (next.trim().length >= 2) findCompanies.mutate(next);
+                        else setCompanyResults(null);
+                      }}
+                      placeholder="Search companies"
+                      placeholderTextColor={theme.color.textMuted}
+                      autoCapitalize="words"
+                      autoCorrect={false}
+                      style={styles.input}
+                    />
+                    {findCompanies.isPending ? (
+                      <ActivityIndicator color={theme.color.brandRed} />
+                    ) : null}
+                    {companyResults?.map((c) => (
+                      <Pressable
+                        key={c.id}
+                        testID={`prospect-company-${c.id}`}
+                        onPress={() => {
+                          setCompany(c);
+                          setCompanyResults(null);
+                          setCompanyQuery("");
+                        }}
+                        accessibilityRole="button"
+                        accessibilityLabel={`Attach this visit to ${c.name}`}
+                        style={styles.matchRow}
+                      >
+                        <Text style={styles.matchName} numberOfLines={1}>
+                          {c.name}
+                        </Text>
+                      </Pressable>
+                    ))}
+                    {companyResults?.length === 0 && companyQuery.trim().length >= 2 ? (
+                      <Text testID="prospect-no-companies" style={styles.help}>
+                        No companies match “{companyQuery.trim()}”. Add the property and company on the
+                        web, then log against them.
+                      </Text>
+                    ) : null}
+                  </>
+                )}
+              </View>
             ) : null}
           </View>
         )}
@@ -463,10 +581,15 @@ export default function ProspectScreen() {
           keyboardType="phone-pad"
           style={styles.input}
         />
-        {contactFirst.trim() && !contactLast.trim() ? (
+        {(contactFirst.trim() && !contactLast.trim()) || (!contactFirst.trim() && contactLast.trim()) ? (
           /* The server requires BOTH names and 400s otherwise. Said here rather than after a failed
              save, because the save also creates the activity and a rep should not lose the visit. */
-          <Text style={styles.warn}>A last name is needed to save the person.</Text>
+          /* BOTH directions. The first version warned only about a missing last name, so a rep who
+             typed just a surname got no warning and the person was silently dropped — the server
+             requires both, and the activity saves either way, so the loss is invisible. */
+          <Text testID="prospect-name-incomplete" style={styles.warn}>
+            Both a first and last name are needed to save the person — the visit will still be logged.
+          </Text>
         ) : null}
 
         {/* ---- Save ---- */}
@@ -498,6 +621,18 @@ export default function ProspectScreen() {
                   <Text style={styles.secondaryText}>Make this a lead</Text>
                 )}
               </Pressable>
+            ) : null}
+
+            {duplicateContacts?.length ? (
+              /* The dedup answer, shown rather than swallowed. The person is already in the CRM, the
+                 visit is logged against the property regardless, and the rep can link them properly on
+                 the web — which is a better outcome than a silent second copy. */
+              <Text testID="prospect-duplicate-contacts" style={styles.help}>
+                {duplicateContacts.length === 1
+                  ? "That person may already be in the CRM, so they weren't added again."
+                  : `${duplicateContacts.length} similar people are already in the CRM, so nobody was added.`}{" "}
+                The visit was logged.
+              </Text>
             ) : null}
 
             {promoteError ? (

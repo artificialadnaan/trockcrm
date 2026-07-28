@@ -116,6 +116,18 @@ export default function DashboardScreen() {
         ) : null}
 
         <View style={styles.grid}>
+          {/* LOG A VISIT leads the grid, because it is the only card here that CAPTURES rather than
+              browses — it is what a rep opens standing outside a building, and the one action that is
+              worthless if it takes a menu to find. Gated on leads, matching where a captured visit ends
+              up when it is promoted. */}
+          {canAccessSurface(user.role, "leads") ? (
+            <NavCard
+              testID="open-prospect"
+              icon="location-outline"
+              label="Log a visit"
+              onPress={() => router.push("/(app)/prospect")}
+            />
+          ) : null}
           {canAccessSurface(user.role, "deals") ? (
             <NavCard
               testID="open-deals"

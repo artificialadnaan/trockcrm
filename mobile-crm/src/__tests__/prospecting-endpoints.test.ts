@@ -182,3 +182,71 @@ describe("promotion to a lead", () => {
     expect(calls[0].opts.body).toEqual({ leadId: "l1" });
   });
 });
+
+describe("contact field names", () => {
+  it("sends jobTitle, not title", async () => {
+    // The contacts service reads and persists `jobTitle`. An unknown `title` is forwarded and silently
+    // dropped, so a rep types a role, sees no error, and the role is simply gone.
+    const { fetcher, calls } = recording({ contact: { id: "ct1", firstName: "Dana", lastName: "Reyes" } });
+    await prospecting.createContact(fetcher, {
+      firstName: "Dana",
+      lastName: "Reyes",
+      category: "property_manager",
+      jobTitle: "Property Manager",
+    });
+    const body = calls[0].opts.body as Record<string, unknown>;
+    expect(body.jobTitle).toBe("Property Manager");
+    expect(body.title).toBeUndefined();
+  });
+});
+
+describe("company search", () => {
+  it("does not query below two characters", async () => {
+    // The fallback picker searches as the rep types; a one-character query returns most of the office
+    // and costs a round trip on a truck's connection to do it.
+    const { fetcher, calls } = recording({ companies: [] });
+    await expect(prospecting.searchCompanies(fetcher, "a")).resolves.toEqual([]);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("unwraps { companies }", async () => {
+    const { fetcher, calls } = recording({ companies: [{ id: "c1", name: "Palm Villas HOA" }] });
+    await expect(prospecting.searchCompanies(fetcher, "palm")).resolves.toHaveLength(1);
+    expect(calls[0].path).toBe("/companies/search");
+    expect((calls[0].opts.query as Record<string, unknown>).q).toBe("palm");
+  });
+});
+
+describe("activity source entity", () => {
+  it("states the source explicitly so a contact cannot steal it from the property", async () => {
+    // inferSourceEntity ranks contact ABOVE property, so attaching a newly created person re-anchored
+    // the visit from the building to the person — changing what the record is about, and where it
+    // shows, with nothing to notice.
+    const { fetcher, calls } = recording({ activity: { id: "a1" } });
+    await prospecting.logActivity(fetcher, {
+      propertyId: "p1",
+      companyId: "c1",
+      contactId: "ct1",
+      sourceEntityType: "property",
+      sourceEntityId: "p1",
+      type: "site_visit",
+      body: "Met the super",
+    });
+    expect(calls[0].opts.body).toMatchObject({ sourceEntityType: "property", sourceEntityId: "p1" });
+  });
+});
+
+describe("match query forwards every disproving signal", () => {
+  it("sends city, state and zip", async () => {
+    const { fetcher, calls } = recording({ matches: [] });
+    await prospecting.matchProperties(fetcher, {
+      lat: 21.3,
+      lng: -157.8,
+      address: "100 Main St",
+      city: "Dallas",
+      state: "TX",
+      zip: "75201",
+    });
+    expect(calls[0].opts.query).toMatchObject({ city: "Dallas", state: "TX", zip: "75201" });
+  });
+});
