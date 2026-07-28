@@ -29,9 +29,18 @@ function stubDb(
   } = {},
 ) {
   const updates: Array<Record<string, unknown>> = [];
+  /**
+   * The lead is now read on EVERY call, because its liveness is checked before anything else — so the
+   * default here is a live one rather than "no read at all". Passing `lead: null` still means the row
+   * is gone, which is what the 404 case needs.
+   */
+  const lead =
+    options.lead === undefined
+      ? { propertyId: null, companyId: null, isActive: true, status: "open" }
+      : options.lead;
   const reads: unknown[][] = [
     existing ? [existing] : [],
-    ...(options.lead !== undefined ? [options.lead ? [options.lead] : []] : []),
+    lead ? [lead] : [],
     ...(options.anchor !== undefined ? [options.anchor ? [options.anchor] : []] : []),
     ...(options.afterRace ? [[options.afterRace]] : []),
   ];
@@ -293,6 +302,48 @@ describe("linkActivityToLead — contact-anchored consistency", () => {
     const { db } = stubDb(
       { id: "a1", leadId: null, propertyId: null, companyId: "cA", contactId: "ct1", responsibleUserId: "u1" },
       { lead: { propertyId: null, companyId: "cA" }, anchor: { companyId: "cZ" } },
+    );
+    await expect(
+      linkActivityToLead(db, { activityId: "a1", leadId: "l1", viewer: OWNER }),
+    ).resolves.toMatchObject({ leadId: "l1" });
+  });
+});
+
+describe("linkActivityToLead — an archived lead is not a target", () => {
+  /**
+   * Promotion is TWO calls, so this link can arrive late or be retried after its lead was archived.
+   * The access check reads existence and office, not state, so the write used to land on the tombstone
+   * — recording the association and refreshing last-touch on a row every active view hides.
+   */
+  it("refuses an archived open lead", async () => {
+    const { db, updates } = stubDb(
+      { id: "a1", leadId: null, responsibleUserId: "u1" },
+      { lead: { propertyId: null, companyId: null, isActive: false, status: "open" } },
+    );
+    await expect(
+      linkActivityToLead(db, { activityId: "a1", leadId: "l1", viewer: OWNER }),
+    ).rejects.toMatchObject({ statusCode: 409, code: "ACTIVITY_LEAD_ARCHIVED" });
+    // Nothing written — not the link, and not the lead's last-touch.
+    expect(updates).toEqual([]);
+  });
+
+  it("still allows a CONVERTED lead, which is inactive by design", async () => {
+    // Converted and disqualified leads are also is_active = false. That is the normal end of a lead's
+    // life, and its originating visit still belongs on it — refusing here would break the ordinary
+    // case in the name of the exceptional one.
+    const { db } = stubDb(
+      { id: "a1", leadId: null, responsibleUserId: "u1" },
+      { lead: { propertyId: null, companyId: null, isActive: false, status: "converted" } },
+    );
+    await expect(
+      linkActivityToLead(db, { activityId: "a1", leadId: "l1", viewer: OWNER }),
+    ).resolves.toMatchObject({ leadId: "l1" });
+  });
+
+  it("still allows a DISQUALIFIED lead", async () => {
+    const { db } = stubDb(
+      { id: "a1", leadId: null, responsibleUserId: "u1" },
+      { lead: { propertyId: null, companyId: null, isActive: false, status: "disqualified" } },
     );
     await expect(
       linkActivityToLead(db, { activityId: "a1", leadId: "l1", viewer: OWNER }),

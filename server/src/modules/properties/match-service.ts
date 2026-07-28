@@ -151,7 +151,11 @@ export function normalizeAddressKey(value: string | null | undefined): string {
   if (typeIndex >= 1) {
     const last = tokens[typeIndex]!;
     const prev = tokens[typeIndex - 1]!;
-    if ((DIRECTIONALS[last] || /^\d+$/.test(last)) && STREET_TYPES[prev]) typeIndex -= 1;
+    // Route numbers are not always plain digits: "55 State Hwy 7A", "US 41B". Accepting only /^\d+$/
+    // left `hwy` looking non-final, so it never expanded and "Hwy 7A" could not match "Highway 7A" —
+    // and with both addresses non-empty the conflict rule then stopped GPS from recovering it either.
+    const routeNumber = (s: string) => /^\d+[a-z]?$/.test(s);
+    if ((DIRECTIONALS[last] || routeNumber(last)) && STREET_TYPES[prev]) typeIndex -= 1;
   }
 
   /**
@@ -180,6 +184,36 @@ export function normalizeAddressKey(value: string | null | undefined): string {
     .join(" ");
 }
 
+/**
+ * The accented characters this folds, and what each becomes.
+ *
+ * SQL has no NFD. `unaccent` would, but it is an extension that would have to exist in every tenant
+ * database, so this is an explicit translate() pair instead — long enough to cover the accents that
+ * actually appear in US street names (Cañon, Peña, Muñoz, Cortés) rather than every codepoint.
+ *
+ * The TypeScript side folds with NFD, so without this the two disagreed exactly where it matters:
+ * `regexp_replace` turned "Cañon Rd" into "ca on rd" while normalizeAddressKey produced "canon road",
+ * and neither the lead-token nor the whole-address predicate could then select the row. An
+ * uncoordinated legacy row is unreachable by distance too, so the capture reported "no match" and
+ * minted a duplicate of a property that was sitting right there.
+ */
+const ACCENTED = "áàâäãåÁÀÂÄÃÅéèêëÉÈÊËíìîïÍÌÎÏóòôöõÓÒÔÖÕúùûüÚÙÛÜñÑçÇýÿÝ";
+// Uppercase accents map to LOWERCASE ascii deliberately: the key is lowercase, and under a C collation
+// lower() leaves non-ASCII alone, so this must not depend on lower() having folded them first.
+const UNACCENTED = "aaaaaaaaaaaaeeeeeeeeiiiiiiiioooooooooouuuuuuuunnccyyy";
+
+/**
+ * ONE definition of the folded address column, shared by the query and by migration 0201's index.
+ *
+ * Postgres matches an expression index SYNTACTICALLY, so if these two strings ever differ by so much
+ * as a character the index is silently ignored and the endpoint drops to a sequential scan with
+ * nothing failing to say so. Generating both from this function is what makes that impossible; the
+ * migration's runtime test asserts the index definition still contains it.
+ */
+export function FOLDED_ADDRESS_SQL(column: string): string {
+  return `translate(lower(coalesce(${column}, '')), '${ACCENTED}', '${UNACCENTED}')`;
+}
+
 /** Unit designators, as they appear at the END of a street line. */
 const UNIT_MARKERS = new Set(["ste", "suite", "unit", "apt", "apartment", "rm", "room", "fl", "floor", "bldg", "building"]);
 
@@ -202,6 +236,12 @@ const UNIT_MARKER_CANONICAL: Record<string, string> = {
   // is the failure this file trades everything else to avoid. Missing that pair costs a duplicate.
   apt: "apartment", apartment: "apartment",
   rm: "room", room: "room",
+  // Folded to their OWN word, not to each other and not into "unit". "Bldg A" and "Building A" are the
+  // same place written twice; left unmapped their base addresses agreed while their unit strings did
+  // not, so compareAddressKeys returned null and the capture minted a duplicate. Keeping each family
+  // separate is what stops "Fl 2" from ever equalling "Ste 2".
+  fl: "floor", floor: "floor",
+  bldg: "building", building: "building",
 };
 
 /**
@@ -423,8 +463,8 @@ export async function matchProperties(
    * the leading house number — and `addressKeysMatch` makes the actual decision in one place.
    */
   /**
-   * The candidate predicate collapses PUNCTUATION only — no suffix expansion, so it is not a second
-   * copy of the matching rule. It exists so TypeScript gets a chance to decide.
+   * The candidate predicate collapses PUNCTUATION and folds DIACRITICS only — no suffix expansion, so
+   * it is not a second copy of the matching rule. It exists so TypeScript gets a chance to decide.
    *
    * Matching on a bare `like '<digits> %'` against the raw column missed three real address shapes,
    * each of which then produced a duplicate because the distance branch cannot select an uncoordinated
@@ -432,7 +472,7 @@ export async function matchProperties(
    * number, so the raw prefix never matches), and street lines with no leading number at all.
    */
   const normalizedDbAddress = sql`
-    btrim(regexp_replace(lower(coalesce(p.address, '')), '[^a-z0-9]+', ' ', 'g'))`;
+    btrim(regexp_replace(${sql.raw(FOLDED_ADDRESS_SQL("p.address"))}, '[^a-z0-9]+', ' ', 'g'))`;
 
   const leadToken = addressKey.split(" ")[0] ?? "";
   const sameLeadToken = leadToken
@@ -492,6 +532,12 @@ export async function matchProperties(
       -- Soft-deleted properties stay in this table with is_active = false. Offering one would attach a
       -- rep's visit to a retired record, and nothing in the response says it is retired.
       and p.is_active = true
+      -- A property whose COMPANY is soft-deleted is unusable, not merely unusual: deleteCompany flips
+      -- only companies.is_active and leaves its properties active, while createLead requires an active
+      -- company. Offering one hands the rep a candidate that matching accepts and promotion then
+      -- rejects — and because a new property is offered only when matching comes back empty, that is a
+      -- dead end rather than a slower path. Null company_id is fine; an INACTIVE one is not.
+      and (p.company_id is null or c.is_active = true)
       and (
         ${sameLeadToken}
         or ${sameWholeAddress}
@@ -584,9 +630,18 @@ export async function matchProperties(
    */
   const corroborated = (m: PropertyMatch) =>
     m.distanceMeters != null && m.distanceMeters <= PROPERTY_MATCH_RADIUS_METERS;
+  /**
+   * Corroborated FIRST, then strength — which is what the paragraph above always claimed and what the
+   * ranking did not do. A base match the GPS agrees with is the building underfoot; an exact street
+   * line with no locality and no coordinates is "100 Main St" in an unknown city. Ranking every exact
+   * hit above every base one put the remote guess first, and with the list capped at eight it could
+   * push the property actually underfoot off the end.
+   */
   const rank = (m: PropertyMatch) => {
-    if (m.addressMatch === "exact") return corroborated(m) ? 0 : 1;
-    if (m.addressMatch === "base") return corroborated(m) ? 2 : 3;
+    if (m.addressMatch === "exact" && corroborated(m)) return 0;
+    if (m.addressMatch === "base" && corroborated(m)) return 1;
+    if (m.addressMatch === "exact") return 2;
+    if (m.addressMatch === "base") return 3;
     return 4;
   };
   matches.sort((a, b) => {

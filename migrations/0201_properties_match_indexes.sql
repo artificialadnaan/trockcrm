@@ -44,7 +44,7 @@ BEGIN
     EXECUTE format($idx$
       CREATE INDEX IF NOT EXISTS properties_normalized_address_idx
         ON %I.properties (
-          (btrim(regexp_replace(lower(coalesce(address, '')), '[^a-z0-9]+', ' ', 'g'))) text_pattern_ops
+          (btrim(regexp_replace(translate(lower(coalesce(address, '')), 'áàâäãåÁÀÂÄÃÅéèêëÉÈÊËíìîïÍÌÎÏóòôöõÓÒÔÖÕúùûüÚÙÛÜñÑçÇýÿÝ', 'aaaaaaaaaaaaeeeeeeeeiiiiiiiioooooooooouuuuuuuunnccyyy'), '[^a-z0-9]+', ' ', 'g'))) text_pattern_ops
         )
     $idx$, schema_name);
 
@@ -60,7 +60,7 @@ END $tenant$;
 -- TENANT_SCHEMA_START
 CREATE INDEX IF NOT EXISTS properties_normalized_address_idx
   ON office_dallas.properties (
-    (btrim(regexp_replace(lower(coalesce(address, '')), '[^a-z0-9]+', ' ', 'g'))) text_pattern_ops
+    (btrim(regexp_replace(translate(lower(coalesce(address, '')), 'áàâäãåÁÀÂÄÃÅéèêëÉÈÊËíìîïÍÌÎÏóòôöõÓÒÔÖÕúùûüÚÙÛÜñÑçÇýÿÝ', 'aaaaaaaaaaaaeeeeeeeeiiiiiiiioooooooooouuuuuuuunnccyyy'), '[^a-z0-9]+', ' ', 'g'))) text_pattern_ops
   );
 
 CREATE INDEX IF NOT EXISTS properties_lat_lng_idx

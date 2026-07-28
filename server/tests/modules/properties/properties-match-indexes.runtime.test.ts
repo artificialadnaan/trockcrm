@@ -22,7 +22,7 @@ const MIGRATION = readFileSync(
 
 /** The exact predicate match-service.ts sends. If this drifts, the index stops being used. */
 const QUERY_EXPRESSION =
-  "btrim(regexp_replace(lower(coalesce(address, '')), '[^a-z0-9]+', ' ', 'g'))";
+  "btrim(regexp_replace(translate(lower(coalesce(address, '')), 'áàâäãåÁÀÂÄÃÅéèêëÉÈÊËíìîïÍÌÎÏóòôöõÓÒÔÖÕúùûüÚÙÛÜñÑçÇýÿÝ', 'aaaaaaaaaaaaeeeeeeeeiiiiiiiioooooooooouuuuuuuunnccyyy'), '[^a-z0-9]+', ' ', 'g'))";
 
 const OFFICES = ["office_dallas", "office_atlanta"];
 

@@ -312,13 +312,35 @@ export async function linkActivityToLead(
    * thing both records agree on, so it is what is compared — and only when the activity actually has
    * one, since a company- or contact-anchored capture legitimately has no property.
    */
+  /**
+   * The lead is read UNCONDITIONALLY, because its liveness is not a consistency question.
+   *
+   * Promotion is two calls, so the link can arrive late or be retried after the lead it targets has
+   * been archived. assertLeadCollaboratorAccess checks existence and office, not state, so the write
+   * landed on the tombstone: the association was recorded and the lead's last-touch refreshed on a row
+   * every active view hides. Reading it here rather than only when the activity has other anchors is
+   * what makes the check unmissable.
+   *
+   * ARCHIVED means is_active = false while status is still `open`. A converted or disqualified lead is
+   * also inactive, and linking to one is legitimate — that is the normal end of a lead's life, and its
+   * originating visit still belongs on it.
+   */
+  const [lead] = await tenantDb
+    .select({
+      propertyId: leads.propertyId,
+      companyId: leads.companyId,
+      isActive: leads.isActive,
+      status: leads.status,
+    })
+    .from(leads)
+    .where(eq(leads.id, input.leadId))
+    .limit(1);
+  if (!lead) throw new AppError(404, "Lead not found");
+  if (lead.isActive === false && lead.status === "open") {
+    throw new AppError(409, "That lead has been archived", "ACTIVITY_LEAD_ARCHIVED");
+  }
+
   if (existing.propertyId || existing.companyId || existing.contactId || existing.dealId) {
-    const [lead] = await tenantDb
-      .select({ propertyId: leads.propertyId, companyId: leads.companyId })
-      .from(leads)
-      .where(eq(leads.id, input.leadId))
-      .limit(1);
-    if (!lead) throw new AppError(404, "Lead not found");
     if (existing.propertyId && lead.propertyId && lead.propertyId !== existing.propertyId) {
       throw new AppError(
         409,
