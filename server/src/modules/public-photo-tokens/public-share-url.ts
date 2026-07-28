@@ -26,3 +26,17 @@ export function publicViewerBaseUrl(req: Request): string {
 export function publicPhotoShareUrl(req: Request, rawToken: string): string {
   return `${publicViewerBaseUrl(req)}/p/${encodeURIComponent(rawToken)}`;
 }
+
+// Same precedence as publicViewerBaseUrl MINUS the request-derived fallback, for callers with no
+// `req` in scope (the RFP enqueue path runs from a job/service layer). Returns null when neither var
+// is configured — callers must then degrade rather than mint a link that resolves nowhere.
+export function publicViewerBaseUrlFromEnv(env: NodeJS.ProcessEnv = process.env): string | null {
+  const configured = env.PUBLIC_SHARE_BASE_URL?.trim() || env.FRONTEND_URL?.trim();
+  return configured ? configured.replace(/\/+$/, "") : null;
+}
+
+// Shareable link built without a `req`. Null when no public viewer base URL is configured.
+export function publicPhotoShareUrlFromEnv(rawToken: string, env: NodeJS.ProcessEnv = process.env): string | null {
+  const base = publicViewerBaseUrlFromEnv(env);
+  return base ? `${base}/p/${encodeURIComponent(rawToken)}` : null;
+}

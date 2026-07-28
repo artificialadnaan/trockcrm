@@ -135,7 +135,10 @@ export function registerAllJobs() {
   registerJobHandler("test_echo", handleTestEcho);
   registerJobHandler("domain_event", handleDomainEvent);
   registerJobHandler("rfp_request_delivery", async (payload, officeId) => {
-    await handleRfpRequestDelivery(payload, officeId);
+    // Return the handler's result: a 413 answers deadJob(...) so the row dead-letters immediately
+    // instead of retrying a payload that can never shrink. Swallowing it here would restore the
+    // ~2.7h of futile backoff (TRK-2607-H3X6).
+    return await handleRfpRequestDelivery(payload, officeId);
   });
   registerJobHandler(PROJECT_NUMBER_FIRST_SET_JOB, handleProjectNumberFirstSetEmail);
   registerJobHandler(DEAL_OPPORTUNITY_FIRST_ENTRY_JOB, handleDealOpportunityFirstEntryEmail);
