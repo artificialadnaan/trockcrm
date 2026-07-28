@@ -9,6 +9,7 @@ export default defineConfig({
       "@trock-crm/shared/utils": path.resolve(__dirname, "../shared/src/utils/normalize.ts"),
       "@trock-crm/shared/lib/correctiveActionOrder": path.resolve(__dirname, "../shared/src/lib/correctiveActionOrder.ts"),
       "@trock-crm/shared/lib/bidBoardStatusMap": path.resolve(__dirname, "../shared/src/lib/bidBoardStatusMap.ts"),
+      "@trock-crm/shared/lib/correctiveActionApprovers": path.resolve(__dirname, "../shared/src/lib/correctiveActionApprovers.ts"),
       "@trock-crm/shared/lib/rfpReviewerEmails": path.resolve(__dirname, "../shared/src/lib/rfpReviewerEmails.ts"),
       "@trock-crm/shared/lib/rfpVoterEmails": path.resolve(__dirname, "../shared/src/lib/rfpVoterEmails.ts"),
       "@trock-crm/shared/lib/rfpVoteState": path.resolve(__dirname, "../shared/src/lib/rfpVoteState.ts"),
