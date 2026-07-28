@@ -1424,6 +1424,47 @@ export async function getFieldScorecardPdfArtifactState(
   return { ...state, needsRegeneration: needsScorecardPdfRegeneration(state) };
 }
 
+/**
+ * Confirm the key about to be presigned is STILL the published, current-generation artifact.
+ *
+ * The artifact-state read runs inside a tenant transaction that is released before the R2 HEAD /
+ * regeneration / presign. A corrective-action response committing in that window advances updated_at while
+ * deliberately retaining pdf_r2_key, so the snapshot's "current" verdict goes stale and the route would hand
+ * out a URL for the PRE-response PDF — the exact defect this work fixes, on the surface it was reported from.
+ * The email workers gained a post-fetch guard; the download routes need the same one before presigning.
+ *
+ * Manages its own connection (like finalizeFieldScorecardArtifacts) precisely because the caller's
+ * transaction is already gone by this point.
+ */
+export async function isScorecardArtifactStillCurrent(
+  office: { id: string; slug: string },
+  scorecardId: string,
+  key: string,
+): Promise<boolean> {
+  return runInOffice(office, async (db) => {
+    const [row] = await db
+      .select({
+        pdfR2Key: fieldScorecards.pdfR2Key,
+        pdfRenderVersion: fieldScorecards.pdfRenderVersion,
+        pdfContentGeneration: fieldScorecards.pdfContentGeneration,
+        currentGeneration: fieldScorecards.updatedAt,
+      })
+      .from(fieldScorecards)
+      .where(and(eq(fieldScorecards.id, scorecardId), eq(fieldScorecards.isActive, true)))
+      .limit(1);
+    // A vanished row is handled by the caller's own availability checks; treat it as not-current here so the
+    // route surfaces a retryable error rather than presigning something it can no longer vouch for.
+    if (!row || row.pdfR2Key !== key) return false;
+    return !needsScorecardPdfRegeneration({
+      pdfR2Key: row.pdfR2Key,
+      pdfRenderVersion: row.pdfRenderVersion,
+      linkedPhotoCount: 0,
+      pdfContentGeneration: row.pdfContentGeneration,
+      currentGeneration: row.currentGeneration,
+    });
+  });
+}
+
 /** Verify that a stored key still resolves to a non-empty PDF before issuing a presigned URL. */
 export async function isStoredScorecardPdfAvailable(pdfR2Key: string | null): Promise<boolean> {
   const key = pdfR2Key?.trim();

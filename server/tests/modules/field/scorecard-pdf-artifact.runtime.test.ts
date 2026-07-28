@@ -3,6 +3,7 @@ import {
   CURRENT_SCORECARD_PDF_RENDER_VERSION,
   coalesceScorecardPdfFinalization,
   isContentAddressedScorecardPdfKey,
+  isFutureRendererArtifactStale,
   isScorecardPdfObjectMetadataValid,
   needsScorecardPdfRegeneration,
   scorecardEvidenceFingerprint,
@@ -200,5 +201,53 @@ describe("needsScorecardPdfRegeneration — content generation", () => {
     // A card whose row could not be read must not spin the download in an endless regenerate loop; the
     // caller's own 404/availability handling owns that case.
     expect(needsScorecardPdfRegeneration(artifact({ currentGeneration: null }))).toBe(false);
+  });
+});
+
+describe("isFutureRendererArtifactStale", () => {
+  const GEN = new Date("2026-07-27T12:00:00.000Z");
+  const futureKey = `office_dallas/deals/d/scorecards/s.${"a".repeat(64)}.v${CURRENT_SCORECARD_PDF_RENDER_VERSION + 1}.pdf`;
+
+  it("flags a NEWER renderer's artifact whose generation has since moved", () => {
+    // An old instance mid-rolling-deploy can neither supersede this artifact (its publish CAS is
+    // lte(version, CURRENT)) nor honestly serve it. Serving it silently reproduces the very defect this work
+    // fixes, for every download that lands on an old instance, indefinitely.
+    expect(
+      isFutureRendererArtifactStale(
+        artifact({
+          pdfR2Key: futureKey,
+          pdfRenderVersion: CURRENT_SCORECARD_PDF_RENDER_VERSION + 1,
+          pdfContentGeneration: GEN,
+          currentGeneration: new Date("2026-07-27T12:05:00.000Z"),
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it("does NOT flag a newer artifact that is still current — it is perfectly serviceable", () => {
+    expect(
+      isFutureRendererArtifactStale(
+        artifact({
+          pdfR2Key: futureKey,
+          pdfRenderVersion: CURRENT_SCORECARD_PDF_RENDER_VERSION + 1,
+          pdfContentGeneration: GEN,
+          currentGeneration: GEN,
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("never flags an artifact at or below this renderer — those take the normal regeneration path", () => {
+    for (const version of [CURRENT_SCORECARD_PDF_RENDER_VERSION, CURRENT_SCORECARD_PDF_RENDER_VERSION - 1]) {
+      expect(
+        isFutureRendererArtifactStale(
+          artifact({
+            pdfRenderVersion: version,
+            pdfContentGeneration: GEN,
+            currentGeneration: new Date("2026-07-27T13:00:00.000Z"),
+          }),
+        ),
+      ).toBe(false);
+    }
   });
 });

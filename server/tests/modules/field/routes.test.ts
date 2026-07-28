@@ -109,6 +109,10 @@ const scorecardMocks = vi.hoisted(() => ({
   getFieldScorecardDetail: vi.fn(),
   getFieldScorecardPdfArtifactState: vi.fn(),
   isStoredScorecardPdfAvailable: vi.fn(),
+  // The download route now revalidates the artifact immediately before presigning: the snapshot was taken
+  // in a transaction that has since been released, so a response committing in that window would otherwise
+  // hand out a URL for the pre-response PDF.
+  isScorecardArtifactStillCurrent: vi.fn(),
   listFieldScorecardsForProject: vi.fn(),
   listRecentFieldScorecards: vi.fn(),
   presignFieldScorecardPdf: vi.fn(),
@@ -173,6 +177,7 @@ describe("field routes", () => {
       needsRegeneration: true,
     });
     scorecardMocks.isStoredScorecardPdfAvailable.mockResolvedValue(true);
+    scorecardMocks.isScorecardArtifactStillCurrent.mockResolvedValue(true);
     scorecardMocks.finalizeFieldScorecardArtifacts.mockResolvedValue("scorecard.v2.pdf");
     scorecardMocks.presignFieldScorecardPdf.mockResolvedValue({
       url: "https://r2.example/scorecard.v2.pdf",

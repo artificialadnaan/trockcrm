@@ -29,6 +29,12 @@ export function needsScorecardPdfRegeneration(state: ScorecardPdfArtifactState):
   const key = state.pdfR2Key?.trim();
   if (!key) return true;
   if (state.pdfRenderVersion < CURRENT_SCORECARD_PDF_RENDER_VERSION) return true;
+  // A NEWER renderer's artifact. This instance must not downgrade it — its publish CAS is
+  // `lte(pdf_render_version, CURRENT)` and would match no row anyway — but "cannot supersede" is not the same
+  // as "is current": if a corrective-action response has advanced updated_at since that render, serving it
+  // reproduces the exact bug this work fixes, silently and indefinitely for every download that lands on an
+  // old instance. Callers get a RETRYABLE signal instead, so the retry can reach an upgraded instance that
+  // can actually re-render. See isFutureRendererArtifactStale.
   if (state.pdfRenderVersion > CURRENT_SCORECARD_PDF_RENDER_VERSION) return false;
 
   // Content changed since the artifact was rendered — an edit, or a corrective-action response. The
@@ -40,6 +46,18 @@ export function needsScorecardPdfRegeneration(state: ScorecardPdfArtifactState):
   // leaving the new pdf_render_version untouched. Treat that key/version mismatch as stale so the next
   // download repairs the pointer to the version-specific object.
   return !isContentAddressedScorecardPdfKey(key, CURRENT_SCORECARD_PDF_RENDER_VERSION);
+}
+
+/**
+ * A newer-renderer artifact whose generation is ALSO stale — this instance can neither serve it honestly nor
+ * replace it, so the caller should surface a retryable error rather than presign known-stale bytes.
+ *
+ * Only true during a rolling deploy (or a rollback) where a higher-version artifact exists. Deliberately
+ * narrow: a future-version artifact whose generation still MATCHES is perfectly serviceable and returns false.
+ */
+export function isFutureRendererArtifactStale(state: ScorecardPdfArtifactState): boolean {
+  if (state.pdfRenderVersion <= CURRENT_SCORECARD_PDF_RENDER_VERSION) return false;
+  return !isRenderedGenerationCurrent(state);
 }
 
 /**

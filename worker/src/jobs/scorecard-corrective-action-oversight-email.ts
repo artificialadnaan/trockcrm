@@ -280,8 +280,15 @@ export async function handleScorecardCorrectiveActionOversightEmail(
       role: normalizeText(row.role),
     }))
     .filter((r): r is { name: string; role: string | null } => !!r.name);
+  // Subtract the responders ONLY for the opened notice. The rationale for excluding them — "they already
+  // get the 'please fix this' email, so don't also tell them someone needs to fix it" — is specific to that
+  // phase. There is NO responder-facing completion job, so applying the same subtraction to `closed` means a
+  // watcher who happens to be a current super/PM silently never receives the completion notice, and they may
+  // not even be the person who submitted the final response.
   const recipients = dedupe(
-    configured.filter((email) => !responderEmails.has(email.trim().toLowerCase())),
+    phase === "opened"
+      ? configured.filter((email) => !responderEmails.has(email.trim().toLowerCase()))
+      : configured,
   );
   if (recipients.length === 0) {
     logger.warn(
@@ -353,7 +360,7 @@ export async function handleScorecardCorrectiveActionOversightEmail(
   // the lifecycle status or the cycle marker at all, so a check that omitted it would still deliver a notice
   // whose CRM link 404s. A miss here is indistinguishable from the row being gone: no send, no stamp.
   const revalidated = await query(
-    `SELECT sc.corrective_action_oversight_cycle, sc.status, sc.${column} AS phase_stamp
+    `SELECT sc.corrective_action_oversight_cycle, sc.status, sc.updated_at, sc.${column} AS phase_stamp
        FROM ${tenantSchema}.field_scorecards sc
        JOIN ${tenantSchema}.deals d ON d.id = sc.deal_id
        LEFT JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
@@ -364,7 +371,12 @@ export async function handleScorecardCorrectiveActionOversightEmail(
     [scorecardId, WON_BROWSABLE_SLUGS, LOST_EXCLUDED_SLUGS],
   );
   const current = revalidated.rows[0] as
-    | { corrective_action_oversight_cycle: string | null; status: string | null; phase_stamp: Date | null }
+    | {
+        corrective_action_oversight_cycle: string | null;
+        status: string | null;
+        updated_at: Date | string | null;
+        phase_stamp: Date | null;
+      }
     | undefined;
   if (!current) {
     logger.warn(
@@ -395,6 +407,21 @@ export async function handleScorecardCorrectiveActionOversightEmail(
     logger.log(
       "[CorrectiveActionOversightEmail] Card changed phase while preparing the notice - skipping (no send, no stamp)",
       { scorecardId, phase, expectedStatus, actualStatus: current.status },
+    );
+    return;
+  }
+  // The BODY is built from an item snapshot taken before the recipient/item queries and the R2 read. An edit
+  // can remove a settled item in that window without moving the status or the marker, leaving the email
+  // describing a responder, comment and photo count for something that no longer exists. The attachment guard
+  // catches the PDF but cannot repair the prose, so compare the generation the snapshot was taken at.
+  if (
+    scorecard.updated_at != null &&
+    current.updated_at != null &&
+    new Date(scorecard.updated_at).getTime() !== new Date(current.updated_at).getTime()
+  ) {
+    logger.log(
+      "[CorrectiveActionOversightEmail] Scorecard changed while preparing the notice - skipping (no send, no stamp; the next cycle's job notifies)",
+      { scorecardId, phase },
     );
     return;
   }

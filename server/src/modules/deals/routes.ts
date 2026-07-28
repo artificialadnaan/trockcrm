@@ -124,6 +124,10 @@ import {
 } from "./scorecards-service.js";
 import {
   finalizeFieldScorecardArtifacts,
+  isScorecardArtifactStillCurrent,
+} from "../field/scorecards-service.js";
+import { isFutureRendererArtifactStale } from "../field/scorecard-pdf-artifact.js";
+import {
   isStoredScorecardPdfAvailable,
 } from "../field/scorecards-service.js";
 import { assertValidUuid } from "../field/photos-service.js";
@@ -2569,6 +2573,17 @@ router.get("/:id/scorecards/:scorecardId/download", async (req, res, next) => {
     const office = { id: req.user!.activeOfficeId, slug: req.officeSlug };
     const userId = req.user!.id;
     await req.commitTransaction!();
+    // A NEWER renderer's artifact whose generation has since moved. This instance cannot supersede it (its
+    // publish CAS is lte(version, CURRENT)) and must not serve it either — doing so silently reproduces the
+    // exact "PDF omits the corrective action" defect for every download that lands on an old instance during
+    // a rolling deploy. Retryable, so the retry can reach an upgraded instance that CAN re-render.
+    if (isFutureRendererArtifactStale(artifact)) {
+      throw new AppError(
+        503,
+        "This scorecard's PDF is being updated by a newer release. Please try the download again shortly.",
+        "SCORECARD_PDF_AWAITING_NEWER_RENDERER",
+      );
+    }
     let pdfR2Key = artifact.pdfR2Key;
     const storedObjectAvailable = artifact.needsRegeneration
       ? false
@@ -2598,6 +2613,17 @@ router.get("/:id/scorecards/:scorecardId/download", async (req, res, next) => {
       }
     }
     if (!pdfR2Key) throw new AppError(503, "The scorecard PDF is not available yet. Please try again shortly.");
+    // Re-read immediately before presigning. The artifact snapshot was taken inside a transaction that has
+    // since been released, and a corrective-action response committing in that window advances updated_at
+    // while retaining pdf_r2_key — so the snapshot's "current" verdict can be stale and this route would
+    // hand out a URL for the pre-response PDF. Retryable, because the next attempt regenerates.
+    if (!(await isScorecardArtifactStillCurrent(office, req.params.scorecardId, pdfR2Key))) {
+      throw new AppError(
+        503,
+        "The scorecard changed while its PDF was being prepared. Please try the download again.",
+        "SCORECARD_PDF_STALE",
+      );
+    }
     const result = await presignDealScorecardPdf(req.params.scorecardId, pdfR2Key);
     res.json(result);
   } catch (err) {

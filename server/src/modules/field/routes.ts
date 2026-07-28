@@ -30,6 +30,10 @@ import {
 import {
   createFieldScorecard,
   finalizeFieldScorecardArtifacts,
+  isScorecardArtifactStillCurrent,
+} from "./scorecards-service.js";
+import { isFutureRendererArtifactStale } from "./scorecard-pdf-artifact.js";
+import {
   getFieldScorecardDetail,
   getFieldScorecardPdfArtifactState,
   isStoredScorecardPdfAvailable,
@@ -1180,6 +1184,17 @@ fieldRoutes.get("/scorecards/:id/download", requireFieldContractor, async (req, 
         }),
       "Scorecard not found",
     );
+    // A NEWER renderer's artifact whose generation has since moved. This instance cannot supersede it (its
+    // publish CAS is lte(version, CURRENT)) and must not serve it either — doing so silently reproduces the
+    // exact "PDF omits the corrective action" defect for every download that lands on an old instance during
+    // a rolling deploy. Retryable, so the retry can reach an upgraded instance that CAN re-render.
+    if (isFutureRendererArtifactStale(artifact)) {
+      throw new AppError(
+        503,
+        "This scorecard's PDF is being updated by a newer release. Please try the download again shortly.",
+        "SCORECARD_PDF_AWAITING_NEWER_RENDERER",
+      );
+    }
     let pdfR2Key = artifact.pdfR2Key;
     const storedObjectAvailable = artifact.needsRegeneration
       ? false
@@ -1205,6 +1220,16 @@ fieldRoutes.get("/scorecards/:id/download", requireFieldContractor, async (req, 
       }
     }
     if (!pdfR2Key) throw new AppError(503, "The scorecard PDF is not available yet. Please try again shortly.");
+    // Same pre-presign revalidation as the deal-tab download: the artifact snapshot was taken in a
+    // transaction that has since been released, and a corrective-action response committing in that window
+    // advances updated_at while retaining pdf_r2_key. Retryable — the next attempt regenerates.
+    if (!(await isScorecardArtifactStillCurrent(office, id, pdfR2Key))) {
+      throw new AppError(
+        503,
+        "The scorecard changed while its PDF was being prepared. Please try the download again.",
+        "SCORECARD_PDF_STALE",
+      );
+    }
     const value = await presignFieldScorecardPdf(id, pdfR2Key);
     res.json(value);
   } catch (err) {

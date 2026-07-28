@@ -74,6 +74,8 @@ interface ScorecardOverrides {
   revalidateOversightCycle?: string | null;
   revalidatePhaseStamp?: Date | null;
   revalidateStatus?: string;
+  /** updated_at the delivery-time recheck sees — an edit landing during preparation. */
+  revalidateUpdatedAt?: Date;
   /** Generation the POST-FETCH artifact recheck sees, modelling an edit during the R2 read. */
   postFetchGeneration?: Date | null;
   /** Key the POST-FETCH recheck sees — a replacement artifact published during the R2 read. */
@@ -123,6 +125,7 @@ function makeQuery(
                 ? (over.storedOversightCycle === undefined ? OVERSIGHT_CYCLE : over.storedOversightCycle)
                 : over.revalidateOversightCycle,
             status: over.revalidateStatus ?? over.status ?? "corrective_action_open",
+            updated_at: over.revalidateUpdatedAt ?? over.updatedAt ?? GENERATION,
             phase_stamp: over.revalidatePhaseStamp ?? null,
           },
         ],
@@ -989,5 +992,63 @@ describe("handleScorecardCorrectiveActionOversightEmail", () => {
       .find((text) => text.includes("AS phase_stamp"))!;
     expect(revalidateSql).toContain("sc.is_active = true");
     expect(revalidateSql).toContain("pipeline_stage_config psc");
+  });
+
+  it("keeps a responder-watcher on the CLOSED notice — there is no responder-facing completion job", async () => {
+    // Subtracting responders makes sense for `opened` (they already got "please fix this"). Applying it to
+    // `closed` silently drops the completion notice for a watcher who happens to be a current super/PM, and
+    // nothing else tells them.
+    const { query } = makeQuery({ status: "corrective_action_closed" }, [
+      { email: "james@trockgc.com", name: "James Helms", role: "superintendent" } as never,
+    ]);
+    const sendEmail = makeSend();
+
+    await handleScorecardCorrectiveActionOversightEmail(payload({ phase: "closed" }), null, {
+      query: query as never,
+      sendEmail: sendEmail as never,
+      getPdf: (async () => Buffer.from("%PDF-1.4")) as never,
+      env,
+      logger: makeLogger(),
+    });
+
+    const [to] = sendEmail.mock.calls[0] as unknown as [string[]];
+    expect(to).toContain("james@trockgc.com");
+  });
+
+  it("still subtracts a responder-watcher from the OPENED notice", async () => {
+    const { query } = makeQuery({}, [
+      { email: "james@trockgc.com", name: "James Helms", role: "superintendent" } as never,
+    ]);
+    const sendEmail = makeSend();
+
+    await handleScorecardCorrectiveActionOversightEmail(payload(), null, {
+      query: query as never,
+      sendEmail: sendEmail as never,
+      env,
+      logger: makeLogger(),
+    });
+
+    const [to] = sendEmail.mock.calls[0] as unknown as [string[]];
+    expect(to).toEqual(["ops@trockgc.com"]);
+  });
+
+  it("skips when the scorecard changed while the notice was being composed", async () => {
+    // The BODY is built from an item snapshot taken before the recipient/item queries and the R2 read. An
+    // edit removing a settled item in that window moves neither the status nor the marker, so the email
+    // would describe a responder, comment and photo count for something that no longer exists.
+    const { query, stampUpdates } = makeQuery({
+      revalidateUpdatedAt: new Date("2026-07-27T18:00:00.000Z"),
+    });
+    const sendEmail = makeSend();
+
+    await handleScorecardCorrectiveActionOversightEmail(payload(), null, {
+      query: query as never,
+      sendEmail: sendEmail as never,
+      env,
+      logger: makeLogger(),
+    });
+
+    expect(sendEmail).not.toHaveBeenCalled();
+    expect(stampUpdates).toHaveLength(0);
   });
 });
