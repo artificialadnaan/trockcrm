@@ -166,9 +166,9 @@ export default function StageDealsScreen() {
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: theme.color.canvas },
   header: { paddingHorizontal: theme.space.lg, paddingTop: theme.space.sm, gap: theme.space.xs },
-  back: { fontFamily: theme.font.semibold, fontSize: 15, color: theme.color.redText },
-  title: { fontFamily: theme.font.bold, fontSize: 22, color: theme.color.inkNavy },
-  subtitle: { fontFamily: theme.font.regular, fontSize: 13, color: theme.color.textMuted },
+  back: { ...theme.type.body, color: theme.color.redText },
+  title: { ...theme.type.h1, color: theme.color.textPrimary },
+  subtitle: { ...theme.type.label, color: theme.color.textMuted },
   list: { padding: theme.space.lg, gap: theme.space.md },
   listEmpty: { flexGrow: 1 },
   footerSpinner: { paddingVertical: theme.space.lg },
@@ -179,8 +179,8 @@ const styles = StyleSheet.create({
     padding: theme.space.xl,
     gap: theme.space.sm,
   },
-  errorTitle: { fontFamily: theme.font.bold, fontSize: 17, color: theme.color.inkNavy },
-  errorBody: { fontFamily: theme.font.regular, fontSize: 14, color: theme.color.textSecondary, textAlign: "center" },
+  errorTitle: { ...theme.type.h2, color: theme.color.textPrimary },
+  errorBody: { ...theme.type.body, color: theme.color.textSecondary, textAlign: "center" },
   retryBtn: {
     marginTop: theme.space.sm,
     borderWidth: 1,
@@ -189,5 +189,5 @@ const styles = StyleSheet.create({
     paddingHorizontal: theme.space.xl,
     paddingVertical: theme.space.md,
   },
-  retryText: { fontFamily: theme.font.bold, fontSize: 14, color: theme.color.redText },
+  retryText: { ...theme.type.body, color: theme.color.redText },
 });

@@ -25,7 +25,9 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: theme.space.md,
   },
-  label: { fontFamily: theme.font.regular, fontSize: 14, color: theme.color.textSecondary },
+  // caption over body for the LABEL: a tracked small-cap reads as a field name rather than as more
+  // prose, which is what let labels and values blur together at the old 14/14.
+  label: { ...theme.type.caption, color: theme.color.textMuted },
   value: {
     flexShrink: 1,
     textAlign: "right",
