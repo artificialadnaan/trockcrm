@@ -339,7 +339,7 @@ const styles = StyleSheet.create({
     borderColor: theme.color.border,
     backgroundColor: theme.color.surface,
   },
-  boardLinkText: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.brandRed },
+  boardLinkText: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.redText },
   scopeRow: { flexDirection: "row", gap: theme.space.sm, paddingHorizontal: theme.space.lg, paddingTop: theme.space.md },
   scopePill: {
     borderRadius: theme.radius.pill,
@@ -389,5 +389,5 @@ const styles = StyleSheet.create({
     paddingHorizontal: theme.space.xl,
     paddingVertical: theme.space.md,
   },
-  retryText: { fontFamily: theme.font.bold, fontSize: 14, color: theme.color.brandRed },
+  retryText: { fontFamily: theme.font.bold, fontSize: 14, color: theme.color.redText },
 });

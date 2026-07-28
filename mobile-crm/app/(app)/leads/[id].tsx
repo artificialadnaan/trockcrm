@@ -475,7 +475,7 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: theme.color.surfaceMuted },
   body: { padding: theme.space.lg, gap: theme.space.md, paddingBottom: theme.space.xxl },
-  back: { fontFamily: theme.font.semibold, fontSize: 15, color: theme.color.brandRed },
+  back: { fontFamily: theme.font.semibold, fontSize: 15, color: theme.color.redText },
   title: { fontFamily: theme.font.bold, fontSize: 24, color: theme.color.inkNavy },
   badges: { flexDirection: "row", alignItems: "center", gap: theme.space.sm, flexWrap: "wrap" },
   stage: { fontFamily: theme.font.semibold, fontSize: 13, color: theme.color.textSecondary },
@@ -488,7 +488,7 @@ const styles = StyleSheet.create({
     borderColor: theme.color.brandRed,
     paddingHorizontal: theme.space.lg,
   },
-  linkText: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.brandRed },
+  linkText: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.redText },
   section: { gap: theme.space.sm },
   sectionTitle: { fontFamily: theme.font.bold, fontSize: 13, color: theme.color.textMuted, textTransform: "uppercase" },
   sectionBody: {
@@ -520,7 +520,7 @@ const styles = StyleSheet.create({
   },
   refusalTitle: { fontFamily: theme.font.bold, fontSize: 14, color: theme.color.amberText },
   refusalItem: { fontFamily: theme.font.regular, fontSize: 13, color: theme.color.amberText },
-  error: { fontFamily: theme.font.semibold, fontSize: 13, color: theme.color.brandRedDeep },
+  error: { fontFamily: theme.font.semibold, fontSize: 13, color: theme.color.redText },
   center: {
     flex: 1,
     alignItems: "center",
@@ -538,5 +538,5 @@ const styles = StyleSheet.create({
     borderRadius: theme.radius.md,
     paddingHorizontal: theme.space.xl,
   },
-  retryText: { fontFamily: theme.font.bold, fontSize: 14, color: theme.color.brandRed },
+  retryText: { fontFamily: theme.font.bold, fontSize: 14, color: theme.color.redText },
 });

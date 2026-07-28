@@ -13,8 +13,13 @@ import { theme } from "../theme/theme";
  *
  * Two surface variants ship because the source artwork is a monogram designed for a DARK surface — red
  * "T", white "R". On a light surface those white parts collapse into a gray ghost, so light surfaces use
- * the inverted mark. This app is light throughout, but the variant is selectable so a future dark header
- * does not silently render a broken logo.
+ * the inverted mark.
+ *
+ * THE PROP NAMES THE SURFACE, and defaults to `dark`. It used to be a `tint` that took "dark" | "light"
+ * and meant the opposite of what it read like — `tint="light"` selected the on-DARK artwork — with a
+ * default that quietly assumed a light app. When the app went dark, every header kept rendering the
+ * on-light mark: the exact "silently render a broken logo" this note warned about, produced by the
+ * safeguard's own default. A prop that describes what it sits ON cannot be read backwards.
  *
  * expo-image, never React Native's <Image> — see the tree-wide guard in src/__tests__. Core <Image> has
  * a Fabric use-after-free that crashed the other app in production.
@@ -22,13 +27,14 @@ import { theme } from "../theme/theme";
 export function BrandLogo({
   size = 28,
   showWordmark = true,
-  tint = "dark",
+  surface = "dark",
 }: {
   size?: number;
   showWordmark?: boolean;
-  tint?: "dark" | "light";
+  /** The surface this logo sits on — NOT the colour of the logo. */
+  surface?: "dark" | "light";
 }) {
-  const onDarkSurface = tint === "light";
+  const onDarkSurface = surface === "dark";
   return (
     // ONE accessibility element. Left as two, a screen reader announces the mark and then the word
     // "CRM" as separate stops — noise on every screen, since this sits in the header of all of them.

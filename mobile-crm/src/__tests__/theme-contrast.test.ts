@@ -82,6 +82,14 @@ describe("theme contrast", () => {
     // Heading text on cards — ~17 sites still say inkNavy.
     ["inkNavy (headings)", "surface", c.inkNavy, c.surface],
     ["inkNavy (headings)", "canvas", c.inkNavy, c.canvas],
+    // formStyles.errorBox — red type on a red tint, and the worst pair the dark switch produced
+    // (brandRedDeep on redSurface was ~2.4:1). Missed by the first version of this table entirely.
+    ["redText (form error)", "redSurface", c.redText, c.redSurface],
+    // Back chevrons, retry labels, the Call action, board links — ~20 sites, all 13-15px.
+    ["redText (links & actions)", "surface", c.redText, c.surface],
+    ["redText (links & actions)", "canvas", c.redText, c.canvas],
+    // The active tab label, 11px on the black bar.
+    ["redText (active tab)", "chrome", c.redText, c.chrome],
   ])("%s on %s", (_fgName, _bgName, fg, bg) => {
     it("meets the 4.5:1 floor where it is actually used", () => {
       expect(contrastRatio(fg, bg)).toBeGreaterThanOrEqual(4.5);
@@ -99,6 +107,18 @@ describe("theme contrast", () => {
     // this ordering, so a token edited out of sequence makes "raised" read as recessed with no error.
     const ladder = [c.chrome, c.canvas, c.surfaceMuted, c.surface, c.surfaceRaised].map(luminance);
     expect(ladder).toEqual([...ladder].sort((a, b) => a - b));
+  });
+
+  it("keeps the status chip borders lighter than their own fills", () => {
+    // A tinted fill is nearly edgeless on a dark card, so each chip's border is what gives it an edge.
+    // Darker-than-fill would be invisible AND wrong, with nothing to catch it visually at 11px.
+    for (const [fill, border] of [
+      [c.amberSurface, c.amberBorder],
+      [c.redSurface, c.redBorder],
+      [c.greenSurface, c.greenBorder],
+    ]) {
+      expect(luminance(border)).toBeGreaterThan(luminance(fill));
+    }
   });
 
   it("rejects a malformed colour rather than scoring it", () => {

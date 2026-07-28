@@ -40,7 +40,7 @@ export const formStyles = StyleSheet.create({
   hint: {
     fontFamily: theme.font.regular,
     fontSize: 13,
-    color: theme.color.brandRed,
+    color: theme.color.redText,
     marginTop: theme.space.xs,
   },
   button: {
@@ -60,5 +60,5 @@ export const formStyles = StyleSheet.create({
     padding: theme.space.md,
     marginBottom: theme.space.sm,
   },
-  errorText: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.brandRedDeep },
+  errorText: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.redText },
 });

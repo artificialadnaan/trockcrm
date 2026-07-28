@@ -78,5 +78,5 @@ const styles = StyleSheet.create({
     borderColor: theme.color.brandRed,
   },
   buttonBusy: { opacity: 0.6 },
-  buttonText: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.brandRed },
+  buttonText: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.redText },
 });

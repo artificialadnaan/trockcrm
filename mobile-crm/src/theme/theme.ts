@@ -17,13 +17,32 @@
  * for. On a dark UI the failure mode is quieter than on white — mid-greys look fine indoors and vanish
  * in daylight — so the numbers are recorded rather than eyeballed.
  */
+/**
+ * Font families, named once.
+ *
+ * Declared above the theme so `type` can REFERENCE them instead of repeating the literal strings — the
+ * scale and the family list drifting apart is a silent failure (text falls back to the system font and
+ * simply looks slightly wrong, with nothing to catch it).
+ */
+const FONT = {
+  regular: "Inter_400Regular",
+  medium: "Inter_500Medium",
+  semibold: "Inter_600SemiBold",
+  bold: "Inter_700Bold",
+  /** Display weight — headline numbers and screen titles. The "rugged" half of the brief. */
+  black: "Inter_800ExtraBold",
+} as const;
+
 export const theme = {
   color: {
     /* ---- Brand ------------------------------------------------------------------------------- */
     /**
-     * A brighter red than the web's #CC0000. On a near-black surface #CC0000 is 2.6:1 and reads as
-     * dried blood; #E01B24 is 3.7:1, which clears the 3:1 bar for large/bold text and for UI fills.
-     * It is an ACCENT and a fill colour — never small body text. White on it is 4.8:1 (see onBrand).
+     * A FILL, never type.
+     *
+     * Brighter than the web's #CC0000, which is 2.6:1 on near-black and reads as dried blood. #E01B24
+     * is 3.7:1 — enough for a fill or a rule, and NOT enough for the 13-15px back-links, retry labels
+     * and call buttons that were using it. Red type uses `redText`; this colour fills the shape behind
+     * white (`onBrand`, 4.8:1).
      */
     brandRed: "#E01B24",
     /** The deeper fill, for pressed states and the darker half of a gradient. */
@@ -79,7 +98,22 @@ export const theme = {
     /** Tinted-surface + text pairs. Dark tints, not the light theme's pastels, which glow on black. */
     amberSurface: "#3A2A08",
     amberText: "#F5C451",
+    // Chip borders. A tinted fill alone is nearly edgeless on a dark card, so each status pair carries
+    // its own border a step lighter than the fill — tokenised here rather than left as literals in
+    // Badge.tsx, which is the duplication that file exists to prevent.
+    amberBorder: "#5A4210",
+    redBorder: "#5C1A1F",
+    greenBorder: "#17492C",
     redSurface: "#3A1013",
+    /**
+     * EVERY red that is TYPE. One token, one rule.
+     *
+     * Not just the status chip: back chevrons, retry labels, the "Call" action, board links and inline
+     * error text all used `brandRed` or `brandRedDeep` at 13-15px, which on this palette is 3.7:1 and
+     * 2.4:1 respectively — the error text inside `formStyles.errorBox` was the worst of them, red on a
+     * red tint. Splitting "red I fill with" from "red I set type in" is what makes both safe;
+     * 7.9:1 on surface, 9.3:1 on chrome, 7.4:1 on redSurface.
+     */
     redText: "#FF8A8F",
     greenSurface: "#0E2E1C",
     greenText: "#5DD98F",
@@ -105,14 +139,7 @@ export const theme = {
     navyHover: "#1C2027",
   },
 
-  font: {
-    regular: "Inter_400Regular",
-    medium: "Inter_500Medium",
-    semibold: "Inter_600SemiBold",
-    bold: "Inter_700Bold",
-    /** Display weight — headline numbers and screen titles. The "rugged" half of the brief. */
-    black: "Inter_800ExtraBold",
-  },
+  font: FONT,
 
   /**
    * A type SCALE, not a pile of font sizes.
@@ -126,13 +153,13 @@ export const theme = {
    * is carried without a second typeface.
    */
   type: {
-    display: { fontFamily: "Inter_800ExtraBold", fontSize: 34, lineHeight: 38, letterSpacing: -0.8 },
-    h1: { fontFamily: "Inter_800ExtraBold", fontSize: 26, lineHeight: 30, letterSpacing: -0.5 },
-    h2: { fontFamily: "Inter_700Bold", fontSize: 20, lineHeight: 24, letterSpacing: -0.3 },
-    title: { fontFamily: "Inter_600SemiBold", fontSize: 17, lineHeight: 22, letterSpacing: -0.2 },
-    body: { fontFamily: "Inter_400Regular", fontSize: 15, lineHeight: 21 },
-    label: { fontFamily: "Inter_600SemiBold", fontSize: 13, lineHeight: 17 },
-    caption: { fontFamily: "Inter_600SemiBold", fontSize: 11, lineHeight: 14, letterSpacing: 0.9 },
+    display: { fontFamily: FONT.black, fontSize: 34, lineHeight: 38, letterSpacing: -0.8 },
+    h1: { fontFamily: FONT.black, fontSize: 26, lineHeight: 30, letterSpacing: -0.5 },
+    h2: { fontFamily: FONT.bold, fontSize: 20, lineHeight: 24, letterSpacing: -0.3 },
+    title: { fontFamily: FONT.semibold, fontSize: 17, lineHeight: 22, letterSpacing: -0.2 },
+    body: { fontFamily: FONT.regular, fontSize: 15, lineHeight: 21 },
+    label: { fontFamily: FONT.semibold, fontSize: 13, lineHeight: 17 },
+    caption: { fontFamily: FONT.semibold, fontSize: 11, lineHeight: 14, letterSpacing: 0.9 },
   },
 
   space: {
@@ -156,9 +183,11 @@ export const theme = {
    * Elevation, as spreadable style objects.
    *
    * A dark UI cannot lean on shadow the way a light one does — a black shadow on a near-black canvas is
-   * nearly invisible. So each level pairs a real shadow with a lighter border: the BORDER does most of
-   * the separating work and the shadow supplies the weight. Using only one of the two is what made the
-   * previous cards read as flat rectangles.
+   * nearly invisible. Separation therefore takes BOTH a shadow and a lighter border, and the border is
+   * doing most of that work. These tokens carry only the shadow half; the border belongs to the
+   * component, because its colour and width vary by state (a pressed card moves to `borderStrong`).
+   * Spreading one of these WITHOUT also setting a border is what made the previous cards read as flat
+   * rectangles, so treat them as half of a pair rather than a complete recipe.
    */
   elevation: {
     card: {

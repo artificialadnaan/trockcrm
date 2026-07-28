@@ -350,7 +350,9 @@ const styles = StyleSheet.create({
   },
   segment: {
     flex: 1,
-    minHeight: 38,
+    // 44, not 38. The iOS HIG minimum is a 44pt target, and a control sized to LOOK right rather than
+    // to be hit is the specific way a redesign makes an app worse for someone wearing gloves.
+    minHeight: 44,
     alignItems: "center",
     justifyContent: "center",
     borderRadius: theme.radius.sm,
@@ -361,7 +363,9 @@ const styles = StyleSheet.create({
 
   /* Stage selector — underlined tabs. */
   stageRow: { paddingHorizontal: theme.space.lg, gap: theme.space.xl, alignItems: "flex-end" },
-  stageTab: { paddingTop: theme.space.sm },
+  // Same 44pt rule. The underline sits at the bottom of the tab, so the padding above it is what makes
+  // the target tall enough without pushing the rule away from the label.
+  stageTab: { minHeight: 44, justifyContent: "flex-end", paddingTop: theme.space.md },
   stageTabRow: { flexDirection: "row", alignItems: "center", gap: theme.space.sm },
   stageName: { ...theme.type.caption, color: theme.color.textMuted },
   stageNameActive: { color: theme.color.textPrimary },

@@ -23,7 +23,10 @@ export default function TabsLayout() {
     <Tabs
       screenOptions={{
         headerShown: false,
-        tabBarActiveTintColor: theme.color.brandRed,
+        // redText, not brandRed. The active tab is an 11px LABEL, and brandRed on the black bar is
+        // 4.35:1 — under the floor for text at that size, which is the one place the brand colour is
+        // most tempting and least legible. redText is 9.3:1 and still unmistakably the accent.
+        tabBarActiveTintColor: theme.color.redText,
         // textSecondary, NOT textMuted. These labels are 11pt, and the muted token is the first thing to
         // become unreadable on a phone held at arm's length on a job site. On the dark bar #A8B2BF is
         // 8.3:1 and still reads as clearly inactive beside the brand-red active state.

@@ -24,7 +24,10 @@ export function Badge({ label, tone }: { label: string; tone: BadgeTone }) {
   return (
     <View style={[styles.pill, t.pill]}>
       <View style={[styles.bar, t.bar]} />
-      <Text style={[styles.text, t.text]}>{label.toUpperCase()}</Text>
+      {/* Uppercased by STYLE, not by rewriting the string. VoiceOver and TalkBack read short all-caps
+          strings as initialisms — "O-N H-O-L-D" — so the transform stays presentational and the
+          accessible name keeps its natural case. */}
+      <Text style={[styles.text, t.text]}>{label}</Text>
     </View>
   );
 }
@@ -43,17 +46,20 @@ const styles = StyleSheet.create({
   bar: { width: 3, alignSelf: "stretch", borderRadius: 2, minHeight: 12 },
   // caption = 11px semibold + tracking, uppercased above. At this size letterspaced small-caps reads as
   // a deliberate label rather than shrunken body copy.
-  text: { ...theme.type.caption },
+  text: { ...theme.type.caption, textTransform: "uppercase" },
 
-  amber: { backgroundColor: theme.color.amberSurface, borderColor: "#5A4210" },
+  // Borders come from the TOKENS, not from three new hex literals. This file's own docblock says it
+  // exists to stop hardcoded colour duplication, and the first draft reintroduced exactly that two
+  // lines below the sentence saying so.
+  amber: { backgroundColor: theme.color.amberSurface, borderColor: theme.color.amberBorder },
   amberBar: { backgroundColor: theme.color.amberText },
   amberText: { color: theme.color.amberText },
 
-  red: { backgroundColor: theme.color.redSurface, borderColor: "#5C1A1F" },
+  red: { backgroundColor: theme.color.redSurface, borderColor: theme.color.redBorder },
   redBar: { backgroundColor: theme.color.redText },
   redText: { color: theme.color.redText },
 
-  green: { backgroundColor: theme.color.greenSurface, borderColor: "#17492C" },
+  green: { backgroundColor: theme.color.greenSurface, borderColor: theme.color.greenBorder },
   greenBar: { backgroundColor: theme.color.greenText },
   greenText: { color: theme.color.greenText },
 

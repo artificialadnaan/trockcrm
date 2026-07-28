@@ -289,7 +289,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: theme.space.xl,
     paddingVertical: theme.space.md,
   },
-  retryText: { fontFamily: theme.font.bold, fontSize: 14, color: theme.color.brandRed },
+  retryText: { fontFamily: theme.font.bold, fontSize: 14, color: theme.color.redText },
   search: {
     margin: theme.space.lg,
     marginBottom: theme.space.sm,
@@ -326,7 +326,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: theme.space.lg,
     paddingVertical: theme.space.sm,
   },
-  callText: { fontFamily: theme.font.bold, fontSize: 13, color: theme.color.brandRed },
+  callText: { fontFamily: theme.font.bold, fontSize: 13, color: theme.color.redText },
   center: { flex: 1, alignItems: "center", justifyContent: "center", padding: theme.space.xl, gap: theme.space.sm },
   emptyTitle: { fontFamily: theme.font.bold, fontSize: 17, color: theme.color.inkNavy },
   emptyBody: { fontFamily: theme.font.regular, fontSize: 14, color: theme.color.textSecondary, textAlign: "center" },

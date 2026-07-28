@@ -33,11 +33,15 @@ function isArchived(deal: { isActive?: boolean | null }): boolean {
  * is encoded at CARD scale rather than chip scale: scanning a column of twelve, the rail is legible in
  * peripheral vision where an 11px chip is not, and it survives being read at arm's length in sunlight.
  * It also encodes status as position + colour, so it does not depend on hue alone.
+ *
+ * Takes the already-resolved booleans rather than the deal: the caller computes `atRisk` and `onHold`
+ * for the badges anyway, and re-deriving them here is how a rail ends up disagreeing with the chip
+ * sitting two lines under it.
  */
-function railColor(deal: DealListItem, archived: boolean): string {
+function railColor(atRisk: boolean, onHold: boolean, archived: boolean): string {
   if (archived) return theme.color.borderSubtle;
-  if (showsAtRisk(deal)) return theme.color.brandRed;
-  if (deal.effectiveOnHold ?? deal.onHold) return theme.color.amber;
+  if (atRisk) return theme.color.brandRed;
+  if (onHold) return theme.color.amber;
   return theme.color.borderStrong;
 }
 
@@ -77,56 +81,73 @@ export function BoardCard({
         .filter(Boolean)
         .join(", ")}
       accessibilityState={{ disabled: archived }}
-      style={({ pressed }) => [
-        styles.card,
-        pressed && !archived && styles.cardPressed,
-        archived && styles.cardArchived,
-      ]}
+      /**
+       * TWO views, and the split is load-bearing on iOS.
+       *
+       * The outer one owns the shadow; the inner one owns `overflow: hidden`, which is what clips the
+       * status rail to the card's rounded corner. On iOS a view with `overflow: "hidden"` clips its own
+       * shadow as well, so having both on one view drew no shadow at all — the elevation this redesign
+       * is built on would have been silently absent on the only platform this app ships to.
+       */
+      style={({ pressed }) => [styles.shadow, archived && styles.cardArchived]}
     >
-      <View style={[styles.rail, { backgroundColor: railColor(deal, archived) }]} />
+      {({ pressed }: { pressed: boolean }) => (
+        <View style={[styles.card, pressed && !archived && styles.cardPressed]}>
+          <View style={[styles.rail, { backgroundColor: railColor(atRisk, onHold, archived) }]} />
 
-      <View style={styles.body}>
-        <View style={styles.cardHead}>
-          <Text style={styles.cardName} numberOfLines={2}>
-            {deal.name ?? "Untitled deal"}
-          </Text>
-          {/* The money is the second-loudest thing on the card, after the name. It was 14px semibold
-              sitting level with every other line, which is not how anyone reads a pipeline. */}
-          <Text style={styles.cardAmount} numberOfLines={1}>
-            {displayAmount(deal)}
-          </Text>
-        </View>
+          <View style={styles.body}>
+            <View style={styles.cardHead}>
+              <Text style={styles.cardName} numberOfLines={2}>
+                {deal.name ?? "Untitled deal"}
+              </Text>
+              {/* The money is the second-loudest thing on the card, after the name. It was 14px
+                  semibold sitting level with every other line, which is not how anyone reads a
+                  pipeline. */}
+              <Text style={styles.cardAmount} numberOfLines={1}>
+                {displayAmount(deal)}
+              </Text>
+            </View>
 
-        {deal.companyName ? (
-          <Text style={styles.cardCompany} numberOfLines={1}>
-            {deal.companyName.toUpperCase()}
-          </Text>
-        ) : null}
+            {deal.companyName ? (
+              /* Uppercased by STYLE, not by transforming the string, so the accessible name above keeps
+                 the company's real casing — VoiceOver reads short all-caps strings as initialisms. */
+              <Text style={styles.cardCompany} numberOfLines={1}>
+                {deal.companyName}
+              </Text>
+            ) : null}
 
-        {onHold || atRisk || canMove || archived ? (
-          <View style={styles.cardBadges}>
-            {onHold ? <Badge label="On hold" tone="amber" /> : null}
-            {atRisk ? <Badge label="At risk" tone="red" /> : null}
-            {/* Marking the ones you CAN move is more useful than offering an action that 403s. */}
-            {canMove && !archived ? <Badge label="Yours" tone="green" /> : null}
-            {archived ? <Badge label="Archived" tone="neutral" /> : null}
+            {onHold || atRisk || canMove || archived ? (
+              <View style={styles.cardBadges}>
+                {onHold ? <Badge label="On hold" tone="amber" /> : null}
+                {atRisk ? <Badge label="At risk" tone="red" /> : null}
+                {/* Marking the ones you CAN move is more useful than offering an action that 403s. */}
+                {canMove && !archived ? <Badge label="Yours" tone="green" /> : null}
+                {archived ? <Badge label="Archived" tone="neutral" /> : null}
+              </View>
+            ) : null}
           </View>
-        ) : null}
-      </View>
+        </View>
+      )}
     </Pressable>
   );
 }
 
 const styles = StyleSheet.create({
+  /**
+   * SHADOW ONLY, and deliberately no `overflow` — see the note on the Pressable.
+   *
+   * borderRadius is repeated here so the shadow is cast in the card's actual silhouette rather than as
+   * a rectangle behind a rounded card.
+   */
+  shadow: { borderRadius: theme.radius.lg, ...theme.elevation.card },
   card: {
     flexDirection: "row",
     backgroundColor: theme.color.surface,
     borderRadius: theme.radius.lg,
     borderWidth: 1,
     borderColor: theme.color.border,
-    // overflow hidden so the rail is clipped by the card's own radius rather than poking past the corner.
+    // Clips the status rail to the rounded corner. Safe here because this view casts no shadow.
     overflow: "hidden",
-    ...theme.elevation.card,
   },
   // A real pressed state. Nothing acknowledged a touch before, so on a slow network a tap looked ignored
   // and reps tapped again — which on the move screen is how a double-submit starts.
@@ -146,7 +167,7 @@ const styles = StyleSheet.create({
     // Tabular figures so a column of amounts aligns digit-for-digit instead of shimmering as it scrolls.
     fontVariant: ["tabular-nums"],
   },
-  cardCompany: { ...theme.type.caption, color: theme.color.textMuted },
+  cardCompany: { ...theme.type.caption, color: theme.color.textMuted, textTransform: "uppercase" },
   cardBadges: {
     flexDirection: "row",
     alignItems: "center",

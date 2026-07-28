@@ -28,7 +28,16 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
   scheme: "trockcrm",
   version: "1.0.0",
   orientation: "portrait",
-  userInterfaceStyle: "light",
+  /**
+   * DARK, matching the UI.
+   *
+   * This drives the NATIVE surfaces the app does not draw: the keyboard, system alerts, text-selection
+   * handles, the share sheet and the scroll indicators. Left on "light" they render as bright panels
+   * over a near-black app — the keyboard in particular is a white slab covering half the screen, which
+   * no amount of styling on our side can fix. Flipping the status-bar glyphs alone was treating one
+   * symptom of this.
+   */
+  userInterfaceStyle: "dark",
   newArchEnabled: true,
   // icon/splash are intentionally absent until brand assets exist for THIS app. Expo's defaults apply
   // meanwhile. Reusing mobile/assets would put T-Rock Cam's mark on the CRM app, which is worse than
