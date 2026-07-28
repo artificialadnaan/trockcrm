@@ -705,6 +705,8 @@ export async function matchProperties(
    * A prefix test is deliberately cheap and generous: it only decides ORDERING here, and
    * addressKeysMatch still makes the real decision downstream.
    */
+  // The query's BUILDING part — what remains once its own unit is split off.
+  const queryBaseKey = splitUnit(addressKey).base || addressKey;
   const extendsQueriedAddress =
     rawQueryKey || addressKey
       ? sql`(
@@ -715,6 +717,12 @@ export async function matchProperties(
           -- neither prefix, so a row compareAddressKeys would call a base match was ordered through
           -- the broad token set and could still fall past the cap.
           OR ${normalizedDbAddress} LIKE ${`${collapseSuffixes(rawQueryKey)} %`}
+          -- And the INVERSE. The three above ask "does the stored row extend the query?" — the suite
+          -- case where a geocode gives the building and the record names the tenancy. The opposite is
+          -- just as real: a rep TYPES "100 Main St Ste 200" against a stored "100 Main St".
+          -- compareAddressKeys calls that a base match too, but nothing here promoted it, so it stayed
+          -- in the broad token pool and could fall past the cap.
+          OR ${queryBaseKey} LIKE ${sql`${normalizedDbAddress} || ' %'`}
         )`
       : sql`false`;
 

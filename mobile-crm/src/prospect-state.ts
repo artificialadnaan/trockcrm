@@ -93,36 +93,44 @@ export function isPositionTooCoarse(accuracyMeters: number | null, thresholdMete
  * is actually being made — an unexplained suggestion is how the wrong property gets confirmed.
  */
 /**
- * Is there any SECOND signal agreeing this is the right building?
- *
- * One rule, one place. It decides two things that must never disagree: what the row is LABELLED, and
- * whether it may veto creating a new building. Spelled out at both sites — as it briefly was — a change
- * to one silently contradicts the other, producing a row labelled "no city on file" that still blocks
- * Add, or a "Same address" that does not.
- *
- * A distance reading is corroboration on its own; so is any locality field, because
- * `localityContradicts` has already ruled out a disagreeing one.
- */
-/**
  * The server's match radius, mirrored.
  *
  * `distanceMeters` is populated for every row the BOUNDING BOX returns, and a box corner sits about
- * 283 m out — but only rows within this radius earn the "distance" match reason. Treating any non-null
- * distance as corroboration therefore let a property most of a city block away veto adding the building
- * the rep is standing on.
+ * 283 m out — but only rows within this radius earn the "distance" match reason.
  */
 export const MATCH_RADIUS_METERS = 200;
 
-export function isCorroborated(match: PropertyMatch): boolean {
+/**
+ * Is there any SECOND signal AGREEING that this is the right building?
+ *
+ * One rule, one place. It decides two things that must never disagree: whether a row is a one-tap
+ * target, and whether it may veto adding a building. Spelled out at both sites — as it briefly was — a
+ * change to one silently contradicts the other.
+ *
+ * It takes the QUERY, because corroboration is agreement and agreement needs two sides. Checking only
+ * the candidate's fields meant that when the geocode returned a street line with no city — which
+ * parseMapboxFeatures permits — a candidate carrying its own ZIP counted as corroborated against
+ * nothing at all. The server's locality check is "cannot disprove", so it had not agreed either; the
+ * row simply had fields.
+ *
+ * A distance reading inside the radius is corroboration on its own: it is a measurement, not a claim
+ * needing a counterpart.
+ */
+export function isCorroborated(
+  match: PropertyMatch,
+  query?: { city?: string | null; state?: string | null; zip?: string | null } | null,
+): boolean {
   if (match.distanceMeters != null && match.distanceMeters <= MATCH_RADIUS_METERS) return true;
-  // ZIP alone discriminates; so does a city WITH its state. A state on its own does not — "TX" against
-  // a Dallas query agrees with every "100 Main St" in Texas, and since this verdict can VETO creating a
-  // building, one such row would block the rep from adding the real one however often they rejected it.
-  if (match.zip) return true;
-  return Boolean(match.city && match.state);
+  // Both sides must carry the field for its agreement to mean anything.
+  if (query?.zip && match.zip) return true;
+  if (query?.city && query?.state && match.city && match.state) return true;
+  return false;
 }
 
-export function describeMatch(match: PropertyMatch): string {
+export function describeMatch(
+  match: PropertyMatch,
+  query?: { city?: string | null; state?: string | null; zip?: string | null } | null,
+): string {
   const distance =
     match.distanceMeters != null
       ? match.distanceMeters < 1000
@@ -143,7 +151,7 @@ export function describeMatch(match: PropertyMatch): string {
    * another town.
    */
   if (match.addressMatch === "exact") {
-    if (!isCorroborated(match)) {
+    if (!isCorroborated(match, query)) {
       return "Same street line — no city on file, check this is the right one";
     }
     return distance ? `Same address · ${distance}` : "Same address";

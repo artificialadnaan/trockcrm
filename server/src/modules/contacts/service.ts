@@ -378,6 +378,22 @@ export async function checkForDuplicates(
     // not assignable, and returning only-inactive matches would leave the caller unable to create at all
     // (the exact-email/name HARD-block below still considers inactive, independently).
     .where(and(...conditions, or(...fuzzyConditions), eq(contacts.isActive, true)))
+    /**
+     * COMPANY MATCHES FIRST, because the cap is applied before the JS pass.
+     *
+     * `lastName OR (company AND lastName)` simplifies to `lastName`, so widening the predicate to the
+     * joined company name could not by itself change which rows survive: in an office with more than
+     * 50 active contacts sharing a surname, the actual same-company duplicate was still crowded out by
+     * an unordered LIMIT, and the Levenshtein filter never saw it. Ordering is what makes the new
+     * predicate matter.
+     */
+    .orderBy(
+      input.companyName?.trim()
+        ? desc(
+            sql`CASE WHEN LOWER(COALESCE(${companies.name}, ${contacts.companyName})) = LOWER(${input.companyName.trim()}) THEN 1 ELSE 0 END`
+          )
+        : sql`1`
+    )
     .limit(50); // fetch more candidates; JS Levenshtein narrows below
 
   // JS: filter by first-name Levenshtein distance < 3 to catch typos/nicknames

@@ -423,7 +423,20 @@ export default function ProspectScreen() {
      * could never find an API-created property. The rep is standing here either way; the geocode
      * failing says nothing about where they are.
      */
-    return { ...typed, lat: fix?.lat ?? address?.lat ?? null, lng: fix?.lng ?? address?.lng ?? null };
+    /**
+     * A COARSE fix is not a coordinate worth storing.
+     *
+     * `coarse` already tells the rep their position is only good to hundreds of metres. Writing that as
+     * the property's authoritative lat/lng puts the building at a point it is not at — and every later
+     * capture matches against it, so one bad fix seeds wrong answers indefinitely. Null coordinates are
+     * recoverable; confidently wrong ones are the thing this feature exists to stop.
+     */
+    const usableFix = fix && !coarse ? fix : null;
+    return {
+      ...typed,
+      lat: usableFix?.lat ?? address?.lat ?? null,
+      lng: usableFix?.lng ?? address?.lng ?? null,
+    };
   }, [address, correctingAddress, fix, manualAddress, manualCity, manualState, manualZip]);
   const createCompanyNamed = useMutation({
     mutationFn: async (input: { name: string; force?: boolean }) => {
@@ -530,7 +543,7 @@ export default function ProspectScreen() {
        * standing at, permanently and with no way around it. Those rows are still shown (labelled "no
        * city on file"); they simply do not decide.
        */
-      const corroborated = rematched.filter(isCorroborated);
+      const corroborated = rematched.filter((m) => isCorroborated(m, at));
       if (corroborated.length > 0) return { created: null, rematched: corroborated, at, under };
       /**
        * Uncorroborated hits are SHOWN, which the paragraph above promised and the code did not do — it
@@ -864,12 +877,12 @@ export default function ProspectScreen() {
    * tap target was the dangerous part.
    */
   const selectableMatches = useMemo(
-    () => (matches ?? []).filter((m) => m.addressMatch === null || isCorroborated(m)),
-    [matches],
+    () => (matches ?? []).filter((m) => m.addressMatch === null || isCorroborated(m, address)),
+    [matches, address],
   );
   const advisoryMatches = useMemo(
-    () => (matches ?? []).filter((m) => m.addressMatch !== null && !isCorroborated(m)),
-    [matches],
+    () => (matches ?? []).filter((m) => m.addressMatch !== null && !isCorroborated(m, address)),
+    [matches, address],
   );
 
   const personPartial = personDetailsWillBeDiscarded({
@@ -1149,7 +1162,7 @@ export default function ProspectScreen() {
                        reader announced the row as actionable while taps did nothing — the announcement
                        and the behaviour disagreeing is the accessibility defect, not the lock. */
                     accessibilityState={{ disabled: targetsLocked }}
-                    accessibilityLabel={`${m.name}${m.companyName ? `, ${m.companyName}` : ""}, ${describeMatch(m)}`}
+                    accessibilityLabel={`${m.name}${m.companyName ? `, ${m.companyName}` : ""}, ${describeMatch(m, address)}`}
                     style={[styles.matchRow, targetsLocked && styles.chipLocked]}
                   >
                     <View style={styles.matchBody}>
@@ -1166,7 +1179,7 @@ export default function ProspectScreen() {
                     </View>
                     {/* WHY it is being offered. "Same address" and "40 m away" are different claims, and
                         an unexplained suggestion is how the wrong property gets confirmed. */}
-                    <Text style={styles.matchReason}>{describeMatch(m)}</Text>
+                    <Text style={styles.matchReason}>{describeMatch(m, address)}</Text>
                   </Pressable>
                 ))}
                 {/* The escape hatch. With candidates on screen the company fallback was hidden, so a

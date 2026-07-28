@@ -100,7 +100,7 @@ describe("describeMatch", () => {
    * gets confirmed.
    */
   it("distinguishes an exact address from a same-building hint", () => {
-    expect(describeMatch(match({ addressMatch: "exact" }))).toBe("Same address");
+    expect(describeMatch(match({ addressMatch: "exact" }), QUERY)).toBe("Same address");
     // The suite case: the stored record names a tenancy the geocode didn't. Strong, not certain — and
     // saying so is what stops a rep confirming the wrong tenant in a tower.
     expect(describeMatch(match({ addressMatch: "base" }))).toMatch(/check the suite/i);
@@ -325,6 +325,7 @@ describe("describeMatch — uncorroborated address hits", () => {
     expect(
       describeMatch(
         match({ addressMatch: "exact", distanceMeters: null, city: "Dallas", state: "TX", zip: "75201" }),
+        QUERY,
       ),
     ).toBe("Same address");
   });
@@ -338,26 +339,37 @@ describe("describeMatch — uncorroborated address hits", () => {
   });
 });
 
+/** A geocode that DID return a locality — corroboration needs two sides to agree. */
+const QUERY = { city: "Dallas", state: "TX", zip: "75201" };
+
 describe("isCorroborated — ONE rule for the label and the veto", () => {
   // These two consumers must never disagree: a row labelled "no city on file" that still blocks Add,
   // or a "Same address" that does not, is the contradiction this function exists to make impossible.
   it("counts a distance reading on its own", () => {
-    expect(isCorroborated(match({ distanceMeters: 12, city: null, state: null, zip: null }))).toBe(true);
+    expect(isCorroborated(match({ distanceMeters: 12, city: null, state: null, zip: null }), null)).toBe(true);
   });
 
-  it("counts a ZIP, or a city WITH its state", () => {
-    expect(isCorroborated(match({ distanceMeters: null, city: null, state: null, zip: "75201" }))).toBe(true);
-    expect(isCorroborated(match({ distanceMeters: null, city: "Dallas", state: "TX", zip: null }))).toBe(true);
+  it("counts a ZIP, or a city WITH its state, when the QUERY has one to agree with", () => {
+    expect(isCorroborated(match({ distanceMeters: null, city: null, state: null, zip: "75201" }), QUERY)).toBe(true);
+    expect(isCorroborated(match({ distanceMeters: null, city: "Dallas", state: "TX", zip: null }), QUERY)).toBe(true);
+  });
+
+  it("does NOT corroborate when the geocode returned no locality at all", () => {
+    // parseMapboxFeatures permits a street line with no city. The candidate's own ZIP then agrees with
+    // nothing — the server's check is "cannot disprove", so it has not agreed either.
+    expect(
+      isCorroborated(match({ distanceMeters: null, city: "Austin", state: "TX", zip: "78701" }), null),
+    ).toBe(false);
   });
 
   it("does NOT count a state on its own", () => {
     // "TX" agrees with every "100 Main St" in Texas. Because this verdict can veto creating a building,
     // one such row would block the rep from adding the real one however often they rejected it.
-    expect(isCorroborated(match({ distanceMeters: null, city: null, state: "TX", zip: null }))).toBe(false);
+    expect(isCorroborated(match({ distanceMeters: null, city: null, state: "TX", zip: null }), QUERY)).toBe(false);
   });
 
   it("does not count a bare city either", () => {
-    expect(isCorroborated(match({ distanceMeters: null, city: "Springfield", state: null, zip: null }))).toBe(false);
+    expect(isCorroborated(match({ distanceMeters: null, city: "Springfield", state: null, zip: null }), QUERY)).toBe(false);
   });
 
   it("is false for a row with neither — the phantom that must not veto", () => {
@@ -369,11 +381,11 @@ describe("isCorroborated — a bounding-box corner is not proximity", () => {
   it("does not treat an out-of-radius distance as corroboration", () => {
     // The box returns rows up to ~283 m at its corners, but only <=200 m earns the "distance" reason.
     // Counting the rest let a property a block away veto adding the building underfoot.
-    expect(isCorroborated(match({ distanceMeters: 260, city: null, state: null, zip: null }))).toBe(false);
+    expect(isCorroborated(match({ distanceMeters: 260, city: null, state: null, zip: null }), null)).toBe(false);
   });
 
   it("still counts a distance inside the radius", () => {
-    expect(isCorroborated(match({ distanceMeters: 200, city: null, state: null, zip: null }))).toBe(true);
+    expect(isCorroborated(match({ distanceMeters: 200, city: null, state: null, zip: null }), null)).toBe(true);
   });
 });
 
@@ -381,7 +393,7 @@ describe("selectable vs advisory matches", () => {
   // The rule match-service.ts states and this enforces: when unsure, MISS. An address hit with no
   // locality and no coordinates is unsure — "100 Main St" is in every town — so it may be SHOWN but
   // must not be a one-tap target, because the tap attaches this visit and everything after it.
-  const isSelectable = (m: PropertyMatch) => m.addressMatch === null || isCorroborated(m);
+  const isSelectable = (m: PropertyMatch) => m.addressMatch === null || isCorroborated(m, QUERY);
 
   it("keeps an uncorroborated address hit OUT of the tappable list", () => {
     expect(
