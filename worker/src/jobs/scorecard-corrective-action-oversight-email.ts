@@ -336,6 +336,45 @@ export async function handleScorecardCorrectiveActionOversightEmail(
   // Resend key's dimension, never a value compared against a uuid column.
   const cycleNonceValue = normalizeText(payload.cycleNonce) ?? null;
   const cycleDimension = cycleNonceValue ?? "none";
+  // FINAL PRE-DELIVERY REVALIDATION. The check after the snapshot is a TOCTOU guard: the recipient and item
+  // queries — and, for a completed notice, the R2 attachment fetch — leave a substantial window before the
+  // send. A reopen landing in that window would otherwise still be delivered against, duplicating cycle B's
+  // notice. Re-reading one column immediately before the send narrows the window to microseconds.
+  //
+  // This deliberately stays SEND-then-stamp rather than becoming a claim-then-send. Claiming first would
+  // close the window completely but make a crash between claim and send lose the notification permanently
+  // (the retry sees a stamped row and skips). For a notification, a rare duplicate is a better failure than
+  // a silent miss, and the Resend idempotency key already dedups the crash-after-send retry.
+  const revalidated = await query(
+    `SELECT corrective_action_oversight_cycle, ${column} AS phase_stamp
+       FROM ${tenantSchema}.field_scorecards
+      WHERE id = $1::uuid
+      LIMIT 1`,
+    [scorecardId],
+  );
+  const current = revalidated.rows[0] as
+    | { corrective_action_oversight_cycle: string | null; phase_stamp: Date | null }
+    | undefined;
+  if (!current) {
+    logger.warn("[CorrectiveActionOversightEmail] Scorecard vanished before delivery - skipping", { scorecardId });
+    return;
+  }
+  if (current.phase_stamp) {
+    logger.log("[CorrectiveActionOversightEmail] Another run notified this cycle first - skipping", {
+      scorecardId,
+      phase,
+    });
+    return;
+  }
+  const currentOversightCycle = normalizeText(current.corrective_action_oversight_cycle);
+  if (payloadOversightCycle && currentOversightCycle && payloadOversightCycle !== currentOversightCycle) {
+    logger.log(
+      "[CorrectiveActionOversightEmail] Superseded while preparing the notice - skipping (no send, no stamp)",
+      { scorecardId, phase, payloadOversightCycle, currentOversightCycle },
+    );
+    return;
+  }
+
   const sendEmail = deps.sendEmail ?? sendSystemEmailWithMetadata;
   const result = await sendEmail(recipients, email.subject, email.html, {
     text: email.text,
@@ -545,9 +584,12 @@ export function buildOversightEmail(input: {
       return label ? `${r.name} (${label})` : r.name;
     })
     .join(", ");
+  // With no DELIVERABLE responder the old fallback still asserted that the super and PM "have been asked",
+  // which is exactly the false assurance the deliverable-email filter exists to remove — in that case the
+  // responder worker sends nothing at all. Say what is true instead, and make the gap visible.
   const askedText = responderList
     ? `${responderList} ${(input.responders ?? []).length === 1 ? "has" : "have"} been asked to document a fix for each flagged item.`
-    : "The assigned superintendent and project manager have been asked to document a fix for each flagged item.";
+    : "No assigned superintendent or project manager could be reached by email for this project, so nobody has been asked to document a fix yet — assign a responder with a valid email on the deal's Team tab.";
 
   const intro = opened
     ? `A field scorecard for <strong>${escapeHtml(input.dealName)}</strong>${input.projectNumber ? ` (${escapeHtml(input.projectNumber)})` : ""}${input.weekOf ? `, week of ${escapeHtml(input.weekOf)}` : ""} came in below standard (${escapeHtml(input.scoreText)}) and a corrective action has been opened. ${escapeHtml(askedText)}`

@@ -70,6 +70,9 @@ interface ScorecardOverrides {
   stampMatches?: boolean;
   storedNonce?: string | null;
   storedOversightCycle?: string | null;
+  /** Values the FINAL pre-delivery revalidation sees, modelling a change mid-preparation. */
+  revalidateOversightCycle?: string | null;
+  revalidatePhaseStamp?: Date | null;
   /** [] => the browsable/active gate filtered the row out entirely. */
   scorecardRows?: unknown[];
 }
@@ -84,6 +87,20 @@ function makeQuery(
     // Order matters: recipientResolutionSql ALSO selects `FROM office_dallas.field_scorecards sc`, so the
     // responder branch must be tested before the scorecard-snapshot branch or it is swallowed by it.
     if (sql.includes("WITH candidates AS")) return { rows: responders };
+    // The final pre-delivery revalidation — a narrow SELECT, distinct from the snapshot join above.
+    if (sql.includes("SELECT corrective_action_oversight_cycle")) {
+      return {
+        rows: [
+          {
+            corrective_action_oversight_cycle:
+              over.revalidateOversightCycle === undefined
+                ? (over.storedOversightCycle === undefined ? OVERSIGHT_CYCLE : over.storedOversightCycle)
+                : over.revalidateOversightCycle,
+            phase_stamp: over.revalidatePhaseStamp ?? null,
+          },
+        ],
+      };
+    }
     if (sql.includes("FROM office_dallas.field_scorecards sc")) {
       if (over.scorecardRows) return { rows: over.scorecardRows };
       return {
@@ -741,5 +758,65 @@ describe("handleScorecardCorrectiveActionOversightEmail", () => {
     expect(html).toContain("Sam Super");
     expect(html).not.toContain("Unreachable Pat");
     expect(html).not.toContain("Malformed Max");
+  });
+
+  it("revalidates the marker immediately before delivery, not just at the snapshot", async () => {
+    // TOCTOU: the recipient/item queries and the R2 attachment fetch leave a real window between the
+    // snapshot check and the send. A reopen landing there would otherwise be delivered against.
+    const { query, stampUpdates } = makeQuery({
+      revalidateOversightCycle: "77777777-7777-7777-7777-777777777777",
+    });
+    const sendEmail = makeSend();
+
+    await handleScorecardCorrectiveActionOversightEmail(payload(), null, {
+      query: query as never,
+      sendEmail: sendEmail as never,
+      env,
+      logger: makeLogger(),
+    });
+
+    expect(sendEmail).not.toHaveBeenCalled();
+    expect(stampUpdates).toHaveLength(0);
+  });
+
+  it("skips if another run stamped this phase while the notice was being prepared", async () => {
+    const { query, stampUpdates } = makeQuery({ revalidatePhaseStamp: new Date("2026-07-27T12:00:00.000Z") });
+    const sendEmail = makeSend();
+
+    await handleScorecardCorrectiveActionOversightEmail(payload(), null, {
+      query: query as never,
+      sendEmail: sendEmail as never,
+      env,
+      logger: makeLogger(),
+    });
+
+    expect(sendEmail).not.toHaveBeenCalled();
+    expect(stampUpdates).toHaveLength(0);
+  });
+
+  it("does not claim anyone was asked when NO responder is reachable", async () => {
+    // The deliverable-email filter empties the list; the old fallback still asserted the super and PM "have
+    // been asked", which is precisely the false assurance the filter exists to remove — in this case the
+    // responder worker sends nothing at all.
+    const { query } = makeQuery({}, [
+      { email: null, name: "Unreachable Pat", role: "project_manager" } as never,
+    ]);
+    const sendEmail = makeSend();
+
+    await handleScorecardCorrectiveActionOversightEmail(payload(), null, {
+      query: query as never,
+      sendEmail: sendEmail as never,
+      env,
+      logger: makeLogger(),
+    });
+
+    const [, , html, options] = sendEmail.mock.calls[0] as unknown as [
+      string[], string, string, { text: string },
+    ];
+    for (const body of [html, options.text]) {
+      expect(body).not.toMatch(/have been asked to document/i);
+      expect(body).toMatch(/could be reached by email/i);
+      expect(body).toMatch(/nobody has been asked/i);
+    }
   });
 });
