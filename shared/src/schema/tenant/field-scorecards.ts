@@ -96,6 +96,14 @@ export const fieldScorecards = pgTable(
     correctiveActionOversightOpenedAt: timestamp("corrective_action_oversight_opened_at", { withTimezone: true }),
     correctiveActionOversightClosedAt: timestamp("corrective_action_oversight_closed_at", { withTimezone: true }),
     /**
+     * "The approver has been told this cycle needs review." The THIRD phase stamp — each phase dedups on its
+     * OWN column, so reusing either oversight stamp would make an approval request suppress the opened or the
+     * completion notice for the same cycle. Cleared, like the others, when a genuine reopen mints a new cycle.
+     */
+    correctiveActionApprovalRequestedAt: timestamp("corrective_action_approval_requested_at", {
+      withTimezone: true,
+    }),
+    /**
      * INDEPENDENT supersession marker for the oversight flow (migration 0201), rotated ONLY where a genuinely
      * new corrective-action cycle begins.
      *
