@@ -146,6 +146,8 @@ export interface DedupCheckResult {
     lastName: string;
     email: string | null;
     companyName: string | null;
+    /** Joined from companies — authoritative, unlike the nullable free-text `companyName`. */
+    linkedCompanyName: string | null;
     // Candidates include soft-deleted contacts (email/name hard-block applies regardless of is_active), so
     // surface this flag — a "use this instead" consumer must not offer an inactive record (Codex P2).
     isActive: boolean;
@@ -346,9 +348,19 @@ export async function checkForDuplicates(
       lastName: contacts.lastName,
       email: contacts.email,
       companyName: contacts.companyName,
+      /**
+       * The AUTHORITATIVE employer, joined rather than read off the free-text column.
+       *
+       * `contacts.companyName` is nullable text that a linked contact often does not carry at all —
+       * and the field-capture screen sets only `companyId`, so its own contacts reach a duplicate
+       * prompt with no company and no email. Two active people with the same name then render as two
+       * identical rows, the rep picks blind, and the chosen id is attached to the visit permanently.
+       */
+      linkedCompanyName: companies.name,
       isActive: contacts.isActive,
     })
     .from(contacts)
+    .leftJoin(companies, eq(companies.id, contacts.companyId))
     // Only ACTIVE contacts are offered as "use this instead" suggestions — a soft-deleted/merged record is
     // not assignable, and returning only-inactive matches would leave the caller unable to create at all
     // (the exact-email/name HARD-block below still considers inactive, independently).

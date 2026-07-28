@@ -41,9 +41,17 @@ import { theme } from "../../src/theme/theme";
  * visit, nobody in" and leaves; a rep who met the property manager fills in the person too. The form
  * never demands the long version, because a capture tool that insists gets used once.
  */
-/** Today, as the server's date-only format. The flag is due now — that is the point of flagging it. */
+/**
+ * Today as the rep sees it, in the server's date-only format.
+ *
+ * toISOString() gives the UTC calendar day: a rep in Texas flagging a visit at 7pm sends TOMORROW, and
+ * a rep east of UTC early in the morning sends yesterday. "Due now" then lands on the wrong office day,
+ * which is the one thing this value is for.
+ */
 function todayIsoDate(): string {
-  return new Date().toISOString().slice(0, 10);
+  const now = new Date();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
 }
 
 const ACTIVITY_TYPES: Array<{ key: prospecting.FieldActivityType; label: string }> = [
@@ -549,6 +557,11 @@ export default function ProspectScreen() {
       <View style={styles.header}>
         <Pressable
           testID="prospect-back"
+          /* Locked WHILE SAVING only, not after. The request is not idempotent and leaving does not
+             cancel it, so a rep who walks away mid-write never sees the outcome — including the
+             "may or may not have saved" case — and logs the visit again. Once it has settled, leaving
+             is fine. */
+          disabled={save.isPending}
           onPress={() => goBack()}
           accessibilityRole="button"
           accessibilityLabel="Back"
@@ -708,7 +721,17 @@ export default function ProspectScreen() {
                   <Pressable
                     key={m.id}
                     testID={`prospect-match-${m.id}`}
-                    onPress={() => setProperty(m)}
+                    onPress={() => {
+                      setProperty(m);
+                      /* The THIRD way to change the target, and it needs the same cleanup as the other
+                         two: with a fallback contact still selected, the memo resolves to the property
+                         while the contact branch keeps saying "filed against" that person and submits
+                         a target without their id — dropping the association the screen claims. */
+                      setContact(null);
+                      setContactQuery("");
+                      contactQueryRef.current = "";
+                      setContactResults(null);
+                    }}
                     /* The THIRD target control, frozen with the property and company ones. A rep who
                        rejected the matches, logged against a company, then tapped a match still on
                        screen changed the displayed target after the write — and enabled promotion for a
@@ -832,6 +855,14 @@ export default function ProspectScreen() {
                           setCompany(c);
                           setCompanyResults(null);
                           setCompanyQuery("");
+                          /* ONE target. Both pickers stay on screen, so a rep could select a company
+                             and then a person and leave both set — and since the target memo ranks
+                             company first while the contact branch submits that same memo, the screen
+                             showed the person while the saved activity carried no contactId at all. */
+                          setContact(null);
+                          setContactQuery("");
+                          contactQueryRef.current = "";
+                          setContactResults(null);
                         }}
                         /* These rows ignored `locked`, so after a contact-backed save a leftover
                            company result was still tappable — the screen would then show a company the
@@ -841,9 +872,18 @@ export default function ProspectScreen() {
                         accessibilityLabel={`Attach this visit to ${c.name}`}
                         style={styles.matchRow}
                       >
-                        <Text style={styles.matchName} numberOfLines={1}>
-                          {c.name}
-                        </Text>
+                        <View style={styles.matchBody}>
+                          <Text style={styles.matchName} numberOfLines={1}>
+                            {c.name}
+                          </Text>
+                          {/* Two companies can share a name, and identical rows make the choice a coin
+                              flip whose result the activity carries. /companies/search already returns
+                              this; the picker was simply dropping it. */}
+                          <Text style={styles.matchMeta} numberOfLines={1}>
+                            {[c.category, c.ownerUserName].filter(Boolean).join(" · ") ||
+                              "No other details"}
+                          </Text>
+                        </View>
                       </Pressable>
                     ))}
                     {companySearchFailed ? (
@@ -925,6 +965,11 @@ export default function ProspectScreen() {
                               setContactResults(null);
                               setContactQuery("");
                               contactQueryRef.current = "";
+                              // The other half of the same rule — see the company row above.
+                              setCompany(null);
+                              setCompanyResults(null);
+                              setCompanyQuery("");
+                              companyQueryRef.current = "";
                             }}
                             accessibilityRole="button"
                             accessibilityLabel={`Attach this visit to ${c.firstName} ${c.lastName}`}
@@ -1031,7 +1076,8 @@ export default function ProspectScreen() {
         </Pressable>
         {flagForLead ? (
           <Text style={styles.help}>
-            The office will build the lead from this visit — they have the build year and bid dates.
+            Marks this visit as worth a lead. Tell your manager too — the office queue for these is not
+            built yet.
           </Text>
         ) : null}
 
@@ -1143,7 +1189,8 @@ export default function ProspectScreen() {
                         two identical rows, so the rep picked blind and could pin the visit to the wrong
                         person for good. The server already returns both of these. */}
                     <Text style={styles.matchMeta} numberOfLines={1}>
-                      {[s.companyName, s.email].filter(Boolean).join(" · ") || "No other details"}
+                      {[s.linkedCompanyName ?? s.companyName, s.email].filter(Boolean).join(" · ") ||
+                        "No other details"}
                     </Text>
                   </View>
                   <Text style={styles.linkText}>Use</Text>
@@ -1174,9 +1221,14 @@ export default function ProspectScreen() {
           <View testID="prospect-saved" style={styles.savedBox}>
             <Text style={styles.savedText}>Logged.</Text>
 
+            {/* HONEST about reach. The marker is stored on the activity, but nothing queries it yet
+                and the property Activity tab is still a placeholder, so a rep told "the office will
+                build it" would reasonably stop chasing it. Promising a workflow that does not exist is
+                the same defect as reporting a save that did not happen. */}
             {flagForLead ? (
               <Text testID="prospect-flagged" style={styles.help}>
-                Flagged for a lead. The office will build it from this visit.
+                Marked as worth a lead. Follow up with the office — this doesn&apos;t reach them on its
+                own yet.
               </Text>
             ) : null}
 

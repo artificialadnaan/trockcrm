@@ -139,6 +139,14 @@ export type DedupSuggestion = {
   firstName?: string;
   lastName?: string;
   companyName?: string | null;
+  /**
+   * Joined from companies, and the one to prefer.
+   *
+   * `companyName` is the contact's nullable free-text column; a linked contact often has nothing in it
+   * — and every contact this screen creates sets only `companyId` — so two same-named people arrived
+   * here with no company and no email, rendering as identical rows in a choice that is permanent.
+   */
+  linkedCompanyName?: string | null;
   email?: string | null;
   isActive?: boolean;
   matchReason?: string;
@@ -173,7 +181,13 @@ function readCreateResult<T>(
   return { created: entity as T };
 }
 
-export type CompanyRef = { id: string; name: string };
+export type CompanyRef = {
+  id: string;
+  name: string;
+  /** Identifying context, because two companies can share a name and the choice is carried by the log. */
+  category?: string | null;
+  ownerUserName?: string | null;
+};
 
 /** POST /companies → 201 `{ company }`, or 200 `{ company: null, dedupWarning, suggestions }`. */
 export async function createCompany(
