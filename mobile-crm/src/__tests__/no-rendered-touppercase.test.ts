@@ -110,6 +110,47 @@ const TEXT_BEARING_PROPS = new Set([
   "children",
 ]);
 
+/**
+ * Props that are definitively NOT perceived, whatever component they are on.
+ *
+ * Used for CUSTOM components, where the allowlist above cannot work: this app's own text props are
+ * named for their meaning (`RetryNotice.message`, `RetryBlock.body`, `ScreenHeader.context`), each
+ * renders into a `<Text>` — `message` also becomes an accessibilityLabel — and a list of them would
+ * need editing every time a component gains one. Silence would then be indistinguishable from safety.
+ *
+ * So the assumption inverts by element kind: for a custom component an unknown prop is treated as
+ * rendered, and only these known-inert ones are exempt. Drift now costs a visible false positive
+ * instead of an invisible miss.
+ */
+const NEVER_RENDERED_PROPS = new Set([
+  "testID",
+  "key",
+  "ref",
+  "style",
+  "source",
+  "accessibilityRole",
+  "accessibilityState",
+  "accessibilityHint",
+  "keyboardType",
+  "autoCapitalize",
+  "placeholderTextColor",
+  "id",
+  "name",
+  "type",
+]);
+
+/** JSX convention: lowercase is a host element, Capitalised is a component this repo controls. */
+function isCustomComponent(attr: ts.JsxAttribute): boolean {
+  const opening = attr.parent.parent;
+  if (!ts.isJsxOpeningElement(opening) && !ts.isJsxSelfClosingElement(opening)) return false;
+  const tag = opening.tagName.getText();
+  const first = tag.split(".")[0] ?? "";
+  return /^[A-Z]/.test(first) && !RN_TEXT_HOSTS.has(tag);
+}
+
+/** Built-ins whose prop surface the allowlist above already describes precisely. */
+const RN_TEXT_HOSTS = new Set(["Text", "TextInput", "View", "Pressable", "Image", "ScrollView"]);
+
 /** Operators that consume a string and yield a verdict — past one of these, nothing is displayed. */
 function isPredicateBoundary(node: ts.Node): boolean {
   if (ts.isPrefixUnaryExpression(node) && node.operator === ts.SyntaxKind.ExclamationToken) return true;
@@ -160,6 +201,11 @@ function isRenderedText(node: ts.Node): boolean {
 
     if (ts.isJsxAttribute(cur)) {
       const name = ts.isIdentifier(cur.name) ? cur.name.text : cur.name.getText();
+      if (consumedByPredicate) return false;
+      // Handlers are never displayed, on any element.
+      if (/^on[A-Z]/.test(name)) return false;
+      // Custom component: assume rendered unless the prop is known inert. See NEVER_RENDERED_PROPS.
+      if (isCustomComponent(cur)) return !NEVER_RENDERED_PROPS.has(name);
       return TEXT_BEARING_PROPS.has(name);
     }
     if (ts.isJsxExpression(cur)) {
@@ -317,7 +363,19 @@ describe("no toUpperCase() on rendered text", () => {
       ).toBe(0);
     });
 
-    it("is not fooled by the identifier appearing in a comment", () =>{
+    it("catches a custom component's text prop, which no allowlist could keep up with", () => {
+      // RetryNotice.message renders as a <Text> AND becomes its accessibilityLabel; RetryBlock.body and
+      // ScreenHeader.context are the same shape. Naming them would need editing per new component.
+      expect(check("const A = () => <RetryNotice message={msg.toUpperCase()} />;")).toBe(1);
+      expect(check("const A = () => <ScreenHeader context={office.toUpperCase()} />;")).toBe(1);
+    });
+
+    it("still exempts inert props on a custom component", () => {
+      expect(check("const A = () => <RetryNotice testID={id.toUpperCase()} />;")).toBe(0);
+      expect(check("const A = () => <BoardCard onPress={() => go(k.toUpperCase())} />;")).toBe(0);
+    });
+
+    it("is not fooled by the identifier appearing in a comment", () => {
       expect(check("const A = () => <Text>{/* toUpperCase() is banned here */ s.label}</Text>;")).toBe(0);
     });
   });
