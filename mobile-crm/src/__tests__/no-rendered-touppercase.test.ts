@@ -100,10 +100,33 @@ const TEXT_BEARING_PROPS = new Set([
   "placeholder",
   "value",
   "defaultValue",
+  // `<Text children={label.toUpperCase()} />` displays and announces exactly like the child-position
+  // form this bans, so omitting it left an ordinary equivalent syntax as a way straight through.
+  "children",
 ]);
 
 function isRenderedText(node: ts.Node): boolean {
   for (let cur = node.parent; cur; cur = cur.parent) {
+    /**
+     * A callback's own value is a predicate, not output.
+     *
+     * `<Text>{xs.find((i) => i.code.toUpperCase() === key)?.name}</Text>` displays the mixed-case
+     * `name`; the uppercase only feeds the comparison. An ancestor-only walk reached the outer
+     * expression and called it rendered, which would have blocked ordinary normalisation during
+     * render.
+     *
+     * Safe against the mirror mistake, and this is the whole reason the ORDER here matters: in
+     * `{xs.map((i) => <Text>{i.name.toUpperCase()}</Text>)}` the walk meets the inner Text's expression
+     * FIRST and returns true before ever reaching the arrow. So reaching a callback means we did not
+     * pass through rendered JSX on the way, which is exactly when the value is not displayed.
+     */
+    if (
+      (ts.isArrowFunction(cur) || ts.isFunctionExpression(cur)) &&
+      cur.parent &&
+      ts.isCallExpression(cur.parent)
+    ) {
+      return false;
+    }
     if (ts.isJsxAttribute(cur)) {
       const name = ts.isIdentifier(cur.name) ? cur.name.text : cur.name.getText();
       return TEXT_BEARING_PROPS.has(name);
@@ -227,6 +250,24 @@ describe("no toUpperCase() on rendered text", () => {
       // accessibility invariant block changes that have nothing to do with accessibility.
       expect(check("const A = () => <View testID={id.toUpperCase()} />;")).toBe(0);
       expect(check("const A = () => <View key={code.toUpperCase()} />;")).toBe(0);
+    });
+
+    it("allows normalisation inside a predicate callback during render", () => {
+      // The displayed value here is `name`, mixed-case. The uppercase only feeds the comparison.
+      expect(
+        check("const A = () => <Text>{xs.find((i) => i.code.toUpperCase() === k)?.name}</Text>;"),
+      ).toBe(0);
+    });
+
+    it("still catches uppercase in the JSX a callback RETURNS", () => {
+      // Guards the ordering the rule above depends on: inner JSX must decide before the callback does.
+      expect(
+        check("const A = () => <View>{xs.map((i) => <Text>{i.n.toUpperCase()}</Text>)}</View>;"),
+      ).toBe(1);
+    });
+
+    it("catches the children PROP, which renders exactly like a child", () => {
+      expect(check("const A = () => <Text children={label.toUpperCase()} />;")).toBe(1);
     });
 
     it("is not fooled by the identifier appearing in a comment", () => {
