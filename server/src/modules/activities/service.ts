@@ -210,33 +210,40 @@ export async function createActivity(
   const linkedEntities = normalizeLinkedEntities(input);
 
   /**
-   * The TARGET must still exist and be live.
+   * The entity this activity is ABOUT must still be live.
    *
-   * Nothing here checked, so an activity could be written against a soft-deleted property or company —
-   * where no surface lists it, because every read filters on is_active. The visit is then not merely
-   * misfiled, it is invisible: the rep sees "Logged" and the record is unreachable.
+   * Scoped to the SOURCE entity, not every id on the row. An activity whose subject is soft-deleted is
+   * unreachable — every read filters on is_active — so the rep sees "Logged" and no surface will ever
+   * show it. But the other ids are denormalised riders: a site visit sourced to a PROPERTY also carries
+   * that property's companyId, and a visit sourced to a CONTACT carries their employer's.
    *
-   * Both are guarded, not just the property the review named. Guarding one and leaving its twin is the
-   * half-applied predicate that becomes the next defect, and the two are the same shape.
-   *
-   * Same rejection style as the lead paths (leads/service.ts:857): the lookup itself carries
-   * `is_active = true`, so gone and retired answer alike.
+   * Checking all of them was too strict and produced a dead end: `deleteCompany` sets only
+   * `companies.is_active = false` and leaves linked contacts active, so a contact whose company was
+   * retired is still returned by the picker — and rejecting on its rider companyId meant a valid,
+   * selectable person could not receive a visit at all. Reachability follows the SOURCE, so that is
+   * what is guarded.
    */
-  if (linkedEntities.propertyId) {
-    const [row] = await tenantDb
-      .select({ id: properties.id })
-      .from(properties)
-      .where(and(eq(properties.id, linkedEntities.propertyId), eq(properties.isActive, true)))
-      .limit(1);
-    if (!row) throw new AppError(400, "Property not found");
-  }
-  if (linkedEntities.companyId) {
-    const [row] = await tenantDb
-      .select({ id: companies.id })
-      .from(companies)
-      .where(and(eq(companies.id, linkedEntities.companyId), eq(companies.isActive, true)))
-      .limit(1);
-    if (!row) throw new AppError(400, "Company not found");
+  const sourceGuards: Record<string, () => Promise<boolean>> = {
+    property: async () => {
+      const [row] = await tenantDb
+        .select({ id: properties.id })
+        .from(properties)
+        .where(and(eq(properties.id, input.sourceEntityId), eq(properties.isActive, true)))
+        .limit(1);
+      return Boolean(row);
+    },
+    company: async () => {
+      const [row] = await tenantDb
+        .select({ id: companies.id })
+        .from(companies)
+        .where(and(eq(companies.id, input.sourceEntityId), eq(companies.isActive, true)))
+        .limit(1);
+      return Boolean(row);
+    },
+  };
+  const guard = sourceGuards[input.sourceEntityType];
+  if (guard && !(await guard())) {
+    throw new AppError(400, `${input.sourceEntityType === "property" ? "Property" : "Company"} not found`);
   }
 
   const result = await tenantDb

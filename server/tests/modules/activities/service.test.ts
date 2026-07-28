@@ -471,6 +471,34 @@ describe("createActivity — the target must still be live", () => {
     expect(insertMock.values).not.toHaveBeenCalled();
   });
 
+  it("ALLOWS a contact-sourced visit whose company was retired", async () => {
+    /**
+     * deleteCompany sets only companies.is_active = false and leaves linked contacts active, so the
+     * picker still returns that person — and their companyId rides along on the activity. Guarding
+     * every id rejected the save outright, so a valid, selectable contact could not receive a visit.
+     * Reachability follows the SOURCE, and the source here is the contact.
+     */
+    const insertMock = createInsertMock();
+    const tenantDb = {
+      insert: insertMock.insert,
+      update: vi.fn(),
+      // Would answer "gone" if anything asked — nothing should, because the source is a contact.
+      select: liveTargetSelect([]),
+    } as any;
+
+    await createActivity(tenantDb, {
+      type: "note",
+      responsibleUserId: "rep-1",
+      performedByUserId: "rep-1",
+      body: "Met Dana",
+      contactId: "contact-1",
+      companyId: "company-retired",
+      sourceEntityType: "contact",
+      sourceEntityId: "contact-1",
+    });
+    expect(insertMock.values).toHaveBeenCalledTimes(1);
+  });
+
   it("writes normally against a live target", async () => {
     const insertMock = createInsertMock();
     const tenantDb = {
