@@ -76,6 +76,10 @@ interface ScorecardOverrides {
   revalidateStatus?: string;
   /** Generation the POST-FETCH artifact recheck sees, modelling an edit during the R2 read. */
   postFetchGeneration?: Date | null;
+  /** Key the POST-FETCH recheck sees — a replacement artifact published during the R2 read. */
+  postFetchKey?: string | null;
+  /** [] => the card became non-browsable during preparation. */
+  revalidateRows?: unknown[];
   /** [] => the browsable/active gate filtered the row out entirely. */
   scorecardRows?: unknown[];
 }
@@ -92,10 +96,14 @@ function makeQuery(
     if (sql.includes("WITH candidates AS")) return { rows: responders };
     // The final pre-delivery revalidation — a narrow SELECT, distinct from the snapshot join above.
     // The POST-FETCH artifact recheck — narrower than both the snapshot and the delivery revalidation.
-    if (sql.includes("SELECT pdf_content_generation")) {
+    if (sql.includes("SELECT pdf_r2_key, pdf_content_generation")) {
       return {
         rows: [
           {
+            pdf_r2_key:
+              over.postFetchKey === undefined
+                ? (over.pdfR2Key === undefined ? `sc.${"a".repeat(64)}.v3.pdf` : over.pdfR2Key)
+                : over.postFetchKey,
             pdf_content_generation:
               over.postFetchGeneration === undefined
                 ? (over.pdfContentGeneration === undefined ? GENERATION : over.pdfContentGeneration)
@@ -105,7 +113,8 @@ function makeQuery(
         ],
       };
     }
-    if (sql.includes("SELECT corrective_action_oversight_cycle")) {
+    if (sql.includes("AS phase_stamp")) {
+      if (over.revalidateRows) return { rows: over.revalidateRows };
       return {
         rows: [
           {
@@ -920,5 +929,65 @@ describe("handleScorecardCorrectiveActionOversightEmail", () => {
       string[], string, string, { attachments?: unknown[] },
     ];
     expect(options.attachments).toBeUndefined();
+  });
+
+  it("drops the attachment when a REPLACEMENT artifact was published during the fetch", async () => {
+    // Generations alone are not enough: if the background finalizer publishes a new artifact mid-fetch, the
+    // row describes the NEW object and its generations match — while the buffer in hand came from the OLD
+    // key. Content-addressed keys make this an exact test.
+    const { query } = makeQuery({
+      status: "corrective_action_closed",
+      postFetchKey: `sc.${"b".repeat(64)}.v3.pdf`,
+    });
+    const sendEmail = makeSend();
+    const getPdf = vi.fn(async () => Buffer.from("%PDF-1.4 from the old key"));
+
+    await handleScorecardCorrectiveActionOversightEmail(payload({ phase: "closed" }), null, {
+      query: query as never,
+      sendEmail: sendEmail as never,
+      getPdf: getPdf as never,
+      env,
+      logger: makeLogger(),
+    });
+
+    const [, , , options] = sendEmail.mock.calls[0] as unknown as [
+      string[], string, string, { attachments?: unknown[] },
+    ];
+    expect(options.attachments).toBeUndefined();
+  });
+
+  it("does not deliver when the card became non-browsable during preparation", async () => {
+    // Soft-deleting the scorecard or archiving its deal changes neither the lifecycle status nor the cycle
+    // marker, so only re-applying the browsable predicate catches it. The CRM link would 404.
+    const { query, stampUpdates } = makeQuery({ revalidateRows: [] });
+    const sendEmail = makeSend();
+
+    await handleScorecardCorrectiveActionOversightEmail(payload(), null, {
+      query: query as never,
+      sendEmail: sendEmail as never,
+      env,
+      logger: makeLogger(),
+    });
+
+    expect(sendEmail).not.toHaveBeenCalled();
+    expect(stampUpdates).toHaveLength(0);
+  });
+
+  it("re-applies the active + browsable predicate in the delivery-time query", async () => {
+    const { query } = makeQuery();
+    const sendEmail = makeSend();
+
+    await handleScorecardCorrectiveActionOversightEmail(payload(), null, {
+      query: query as never,
+      sendEmail: sendEmail as never,
+      env,
+      logger: makeLogger(),
+    });
+
+    const revalidateSql = query.mock.calls
+      .map((call) => call[0] as string)
+      .find((text) => text.includes("AS phase_stamp"))!;
+    expect(revalidateSql).toContain("sc.is_active = true");
+    expect(revalidateSql).toContain("pipeline_stage_config psc");
   });
 });

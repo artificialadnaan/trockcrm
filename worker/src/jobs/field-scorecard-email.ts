@@ -58,14 +58,20 @@ async function isStoredArtifactStillCurrent(
   query: typeof pool.query,
   tenantSchema: string,
   scorecardId: string,
+  fetchedKey: string,
 ): Promise<boolean> {
   const res = await query(
-    `SELECT status, pdf_render_version, pdf_content_generation, updated_at
+    `SELECT status, pdf_r2_key, pdf_render_version, pdf_content_generation, updated_at
        FROM ${tenantSchema}.field_scorecards WHERE id = $1::uuid LIMIT 1`,
     [scorecardId],
   );
   const row = res.rows[0];
   if (!row) return false;
+  // The KEY must still be the published one. Comparing generations alone is not enough: if the background
+  // finalizer publishes a REPLACEMENT artifact while getPdf is in flight, the row describes the NEW object
+  // and its generations match — while the buffer in hand came from the OLD key. Content-addressed keys make
+  // this an exact test.
+  if (row.pdf_r2_key !== fetchedKey) return false;
   // Require the corrective-action-bearing renderer ONLY for a card that actually has corrective actions.
   // Demanding v3 unconditionally would refuse to attach a perfectly good v2 artifact for the ordinary
   // above-band scorecard during a rolling deploy — a regression far wider than the case being guarded.
@@ -249,7 +255,9 @@ export async function handleFieldScorecardEmail(
     // updated_at while deliberately leaving the old key in place until the best-effort rerender lands — so
     // the bytes now in hand can be stale even though every pre-fetch check passed. Re-read the generation
     // and drop the attachment if the artifact is no longer current; the CRM link always regenerates.
-    const stillCurrent = buffer ? await isStoredArtifactStillCurrent(query, tenantSchema, scorecardId) : true;
+    const stillCurrent = buffer
+      ? await isStoredArtifactStillCurrent(query, tenantSchema, scorecardId, pdfR2Key)
+      : true;
     if (!buffer) {
       logger.warn("[FieldScorecardEmail] PDF not available in R2 - sending without attachment", { scorecardId, pdfR2Key });
     } else if (!stillCurrent) {

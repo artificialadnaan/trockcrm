@@ -348,18 +348,29 @@ export async function handleScorecardCorrectiveActionOversightEmail(
   // close the window completely but make a crash between claim and send lose the notification permanently
   // (the retry sees a stamped row and skips). For a notification, a rare duplicate is a better failure than
   // a silent miss, and the Resend idempotency key already dedups the crash-after-send retry.
+  // Repeats the ACTIVE + BROWSABLE predicate as well as the marker/status/stamp. Eligibility can change
+  // during preparation — the scorecard soft-deleted, or its deal archived or moved to Lost — without moving
+  // the lifecycle status or the cycle marker at all, so a check that omitted it would still deliver a notice
+  // whose CRM link 404s. A miss here is indistinguishable from the row being gone: no send, no stamp.
   const revalidated = await query(
-    `SELECT corrective_action_oversight_cycle, status, ${column} AS phase_stamp
-       FROM ${tenantSchema}.field_scorecards
-      WHERE id = $1::uuid
+    `SELECT sc.corrective_action_oversight_cycle, sc.status, sc.${column} AS phase_stamp
+       FROM ${tenantSchema}.field_scorecards sc
+       JOIN ${tenantSchema}.deals d ON d.id = sc.deal_id
+       LEFT JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
+      WHERE sc.id = $1::uuid
+        AND sc.is_active = true
+        AND ${BROWSABLE_PROJECT_SQL.replace(/\$(\d+)/g, (_m, n) => "$" + (Number(n) + 1))}
       LIMIT 1`,
-    [scorecardId],
+    [scorecardId, WON_BROWSABLE_SLUGS, LOST_EXCLUDED_SLUGS],
   );
   const current = revalidated.rows[0] as
     | { corrective_action_oversight_cycle: string | null; status: string | null; phase_stamp: Date | null }
     | undefined;
   if (!current) {
-    logger.warn("[CorrectiveActionOversightEmail] Scorecard vanished before delivery - skipping", { scorecardId });
+    logger.warn(
+      "[CorrectiveActionOversightEmail] Scorecard vanished or became non-browsable before delivery - skipping (no send, no stamp)",
+      { scorecardId },
+    );
     return;
   }
   if (current.phase_stamp) {
@@ -521,14 +532,16 @@ async function loadPdfAttachment(
     // rerender succeeds. Marker, status and phase stamp would all still match, so only re-reading the
     // generation catches it. Drop the attachment rather than send a "Completed" notice with stale bytes.
     const fresh = await query(
-      `SELECT pdf_content_generation, updated_at
+      `SELECT pdf_r2_key, pdf_content_generation, updated_at
          FROM ${tenantSchema}.field_scorecards WHERE id = $1::uuid LIMIT 1`,
       [scorecardId],
     );
     const freshRow = fresh.rows[0] as
-      | { pdf_content_generation: Date | string | null; updated_at: Date | string | null }
+      | { pdf_r2_key: string | null; pdf_content_generation: Date | string | null; updated_at: Date | string | null }
       | undefined;
-    if (!freshRow || !isStoredPdfCurrent(freshRow as ScorecardRow)) {
+    // The KEY must still be the published one: a replacement artifact finalized during the fetch leaves the
+    // generations matching for the NEW object while the buffer in hand came from the OLD key.
+    if (!freshRow || freshRow.pdf_r2_key !== pdfR2Key || !isStoredPdfCurrent(freshRow as ScorecardRow)) {
       logger.warn(
         "[CorrectiveActionOversightEmail] Scorecard changed while the PDF was being fetched - sending without attachment (the CRM link regenerates)",
         { scorecardId },

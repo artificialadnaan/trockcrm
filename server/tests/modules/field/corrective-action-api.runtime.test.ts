@@ -465,7 +465,7 @@ describe("submitCorrectiveActionResponse", () => {
         respondedBy: { userId: USER, name: "Sam", email: null },
         office: TEST_OFFICE,
       }),
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual({ resolved: false });
 
     // The winner's response is preserved.
     const items = await getCorrectiveActionItems(tdb, scorecard.id);
@@ -545,7 +545,7 @@ describe("submitCorrectiveActionResponse", () => {
         respondedBy: { userId: USER, name: "Sam", email: null },
         office: TEST_OFFICE,
       }),
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual({ resolved: false });
 
     // The item keeps the ORIGINAL response (comment/responder unchanged) and its EXACT two photos — no dup rows.
     const items = await getCorrectiveActionItems(tdb, scorecard.id);
@@ -584,7 +584,7 @@ describe("submitCorrectiveActionResponse", () => {
         respondedBy: { userId: null, name: "Ext PM", email: "pm@x.com" },
         office: TEST_OFFICE,
       }),
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual({ resolved: false });
 
     const links = await tdb.execute(
       sql`SELECT file_id FROM field_scorecard_photos WHERE corrective_action_id = ${first.id}`,
