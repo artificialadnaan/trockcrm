@@ -171,7 +171,7 @@ export default function OnboardingRequiredScreen() {
 }
 
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: theme.color.surfaceMuted },
+  safe: { flex: 1, backgroundColor: theme.color.canvas },
   center: { flex: 1, alignItems: "center", justifyContent: "center" },
   body: { flex: 1, justifyContent: "center", padding: theme.space.xl, gap: theme.space.md },
   kicker: {
@@ -179,7 +179,7 @@ const styles = StyleSheet.create({
     fontSize: 12,
     letterSpacing: 1,
     textTransform: "uppercase",
-    color: theme.color.brandRed,
+    color: theme.color.redText,
   },
   title: { fontFamily: theme.font.bold, fontSize: 26, color: theme.color.inkNavy },
   copy: { fontFamily: theme.font.regular, fontSize: 15, lineHeight: 22, color: theme.color.textSecondary },
@@ -198,7 +198,7 @@ const styles = StyleSheet.create({
     paddingVertical: theme.space.md,
     alignItems: "center",
   },
-  secondaryText: { fontFamily: theme.font.bold, fontSize: 15, color: theme.color.brandRed },
+  secondaryText: { fontFamily: theme.font.bold, fontSize: 15, color: theme.color.redText },
   note: { fontFamily: theme.font.regular, fontSize: 13, color: theme.color.textMuted, textAlign: "center" },
   signOut: { marginTop: theme.space.sm, alignItems: "center", paddingVertical: theme.space.md },
   signOutText: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.textSecondary },

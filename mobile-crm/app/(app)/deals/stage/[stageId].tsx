@@ -164,9 +164,9 @@ export default function StageDealsScreen() {
 }
 
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: theme.color.surfaceMuted },
+  safe: { flex: 1, backgroundColor: theme.color.canvas },
   header: { paddingHorizontal: theme.space.lg, paddingTop: theme.space.sm, gap: theme.space.xs },
-  back: { fontFamily: theme.font.semibold, fontSize: 15, color: theme.color.brandRed },
+  back: { fontFamily: theme.font.semibold, fontSize: 15, color: theme.color.redText },
   title: { fontFamily: theme.font.bold, fontSize: 22, color: theme.color.inkNavy },
   subtitle: { fontFamily: theme.font.regular, fontSize: 13, color: theme.color.textMuted },
   list: { padding: theme.space.lg, gap: theme.space.md },
@@ -189,5 +189,5 @@ const styles = StyleSheet.create({
     paddingHorizontal: theme.space.xl,
     paddingVertical: theme.space.md,
   },
-  retryText: { fontFamily: theme.font.bold, fontSize: 14, color: theme.color.brandRed },
+  retryText: { fontFamily: theme.font.bold, fontSize: 14, color: theme.color.redText },
 });

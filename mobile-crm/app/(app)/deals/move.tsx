@@ -677,11 +677,11 @@ function MissingList({ verdict }: { verdict: pipelineApi.StagePreflight }) {
 }
 
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: theme.color.surfaceMuted },
+  safe: { flex: 1, backgroundColor: theme.color.canvas },
   flex: { flex: 1 },
   body: { padding: theme.space.lg, gap: theme.space.sm, paddingBottom: theme.space.xxl },
   center: { flex: 1, alignItems: "center", justifyContent: "center", gap: theme.space.md },
-  back: { fontFamily: theme.font.semibold, fontSize: 15, color: theme.color.brandRed },
+  back: { fontFamily: theme.font.semibold, fontSize: 15, color: theme.color.redText },
   title: { fontFamily: theme.font.bold, fontSize: 26, color: theme.color.inkNavy },
   subtitle: { fontFamily: theme.font.semibold, fontSize: 15, color: theme.color.textSecondary },
   label: {
@@ -705,7 +705,7 @@ const styles = StyleSheet.create({
   stageOptionActive: { borderColor: theme.color.brandRed, backgroundColor: theme.color.redSurface },
   stageOptionDisabled: { opacity: 0.4 },
   stageOptionText: { fontFamily: theme.font.semibold, fontSize: 13, color: theme.color.textSecondary },
-  stageOptionTextActive: { color: theme.color.brandRedDeep },
+  stageOptionTextActive: { color: theme.color.redText },
   checkingRow: { flexDirection: "row", alignItems: "center", gap: theme.space.sm, marginTop: theme.space.md },
   checkingText: { fontFamily: theme.font.regular, fontSize: 13, color: theme.color.textMuted },
   verdictBox: {
@@ -735,7 +735,7 @@ const styles = StyleSheet.create({
     minHeight: 88,
     textAlignVertical: "top",
     borderWidth: 1,
-    borderColor: theme.color.border,
+    borderColor: theme.color.borderControl,
     borderRadius: theme.radius.md,
     padding: theme.space.md,
     fontFamily: theme.font.regular,
@@ -743,7 +743,7 @@ const styles = StyleSheet.create({
     color: theme.color.textPrimary,
     backgroundColor: theme.color.surface,
   },
-  error: { marginTop: theme.space.md, fontFamily: theme.font.regular, fontSize: 13, color: theme.color.brandRedDeep },
+  error: { marginTop: theme.space.md, fontFamily: theme.font.regular, fontSize: 13, color: theme.color.redText },
   primary: {
     marginTop: theme.space.xl,
     backgroundColor: theme.color.brandRed,

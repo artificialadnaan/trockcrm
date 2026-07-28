@@ -23,17 +23,21 @@ export default function TabsLayout() {
     <Tabs
       screenOptions={{
         headerShown: false,
-        tabBarActiveTintColor: theme.color.brandRed,
-        // textSecondary, NOT textMuted. On the white tab bar, #8A95A3 is 3.04:1 against the background
-        // and these labels are 11pt — below the 4.5:1 floor for normal text, which on a phone held at
-        // arm's length on a job site is exactly where it matters. #4B5563 is 7.6:1 and still reads as
-        // clearly inactive next to the brand-red active state.
+        // redText, not brandRed. The active tab is an 11px LABEL, and brandRed on the black bar is
+        // 4.35:1 — under the floor for text at that size, which is the one place the brand colour is
+        // most tempting and least legible. redText is 9.3:1 and still unmistakably the accent.
+        tabBarActiveTintColor: theme.color.redText,
+        // textSecondary, NOT textMuted. These labels are 11pt, and the muted token is the first thing to
+        // become unreadable on a phone held at arm's length on a job site. On the dark bar #A8B2BF is
+        // 8.3:1 and still reads as clearly inactive beside the brand-red active state.
         tabBarInactiveTintColor: theme.color.textSecondary,
         tabBarStyle: {
-          backgroundColor: theme.color.surface,
-          borderTopColor: theme.color.borderSubtle,
+          // `chrome`, matching the board header and the app icon's own background, so the bar reads as
+          // part of the frame rather than as one more card floating at the bottom of the screen.
+          backgroundColor: theme.color.chrome,
+          borderTopColor: theme.color.border,
         },
-        tabBarLabelStyle: { fontFamily: theme.font.semibold, fontSize: 11 },
+        tabBarLabelStyle: { fontFamily: theme.font.semibold, fontSize: 11, letterSpacing: 0.3 },
       }}
     >
       <Tabs.Screen

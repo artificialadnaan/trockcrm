@@ -9,7 +9,7 @@ import { theme } from "./theme";
  * specific bits stay in the screens; only what must MATCH lives here.
  */
 export const formStyles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: theme.color.surface },
+  safe: { flex: 1, backgroundColor: theme.color.canvas },
   flex: { flex: 1 },
   centre: { flex: 1, alignItems: "center", justifyContent: "center" },
   body: { padding: theme.space.xl, flexGrow: 1, justifyContent: "center" },
@@ -28,7 +28,8 @@ export const formStyles = StyleSheet.create({
   },
   input: {
     borderWidth: 1,
-    borderColor: theme.color.border,
+    // borderControl, not border: this hairline IS the credential field. See the token's note.
+    borderColor: theme.color.borderControl,
     borderRadius: theme.radius.md,
     paddingHorizontal: theme.space.md,
     paddingVertical: theme.space.md,
@@ -40,7 +41,7 @@ export const formStyles = StyleSheet.create({
   hint: {
     fontFamily: theme.font.regular,
     fontSize: 13,
-    color: theme.color.brandRed,
+    color: theme.color.redText,
     marginTop: theme.space.xs,
   },
   button: {
@@ -53,12 +54,12 @@ export const formStyles = StyleSheet.create({
   buttonDisabled: { opacity: 0.5 },
   buttonText: { fontFamily: theme.font.bold, fontSize: 16, color: theme.color.textInverse },
   errorBox: {
-    backgroundColor: "#FEF2F2",
+    backgroundColor: theme.color.redSurface,
     borderColor: theme.color.brandRed,
     borderWidth: 1,
     borderRadius: theme.radius.md,
     padding: theme.space.md,
     marginBottom: theme.space.sm,
   },
-  errorText: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.brandRedDeep },
+  errorText: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.redText },
 });

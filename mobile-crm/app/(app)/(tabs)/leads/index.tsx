@@ -261,7 +261,7 @@ export default function LeadsListScreen() {
 }
 
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: theme.color.surfaceMuted },
+  safe: { flex: 1, backgroundColor: theme.color.canvas },
   header: {
     flexDirection: "row",
     alignItems: "baseline",
@@ -285,16 +285,19 @@ const styles = StyleSheet.create({
     paddingVertical: theme.space.sm,
     backgroundColor: theme.color.surface,
   },
-  scopePillActive: { backgroundColor: theme.color.inkNavy, borderColor: theme.color.inkNavy },
+  // surfaceRaised, NOT inkNavy. inkNavy is a TEXT colour on the dark theme (it points at the
+  // primary text), so using it as a fill made the selected pill a light slab with white text on
+  // it — invisible. A raised surface is what "selected" means everywhere else in this app.
+  scopePillActive: { backgroundColor: theme.color.surfaceRaised, borderColor: theme.color.borderStrong },
   scopeText: { fontFamily: theme.font.semibold, fontSize: 13, color: theme.color.textSecondary },
-  scopeTextActive: { color: theme.color.textInverse },
+  scopeTextActive: { color: theme.color.textPrimary },
   search: {
     margin: theme.space.lg,
     marginBottom: theme.space.sm,
     minHeight: 44,
     borderRadius: theme.radius.md,
     borderWidth: 1,
-    borderColor: theme.color.border,
+    borderColor: theme.color.borderControl,
     backgroundColor: theme.color.surface,
     paddingHorizontal: theme.space.md,
     fontFamily: theme.font.regular,
@@ -326,5 +329,5 @@ const styles = StyleSheet.create({
     paddingHorizontal: theme.space.xl,
     paddingVertical: theme.space.md,
   },
-  retryText: { fontFamily: theme.font.bold, fontSize: 14, color: theme.color.brandRed },
+  retryText: { fontFamily: theme.font.bold, fontSize: 14, color: theme.color.redText },
 });

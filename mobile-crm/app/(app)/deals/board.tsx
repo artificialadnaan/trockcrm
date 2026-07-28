@@ -110,30 +110,43 @@ export default function PipelineBoardScreen() {
           screen was the iOS edge-swipe — which switch-control and other assistive-technology users
           cannot perform, leaving them stuck on the board. The detail and stage-list screens already
           carry one; this was the screen that didn't. */}
-      <Pressable
-        testID="board-back"
-        onPress={() => goBack()}
-        accessibilityRole="button"
-        accessibilityLabel="Back to deals"
-        hitSlop={8}
-        style={styles.backRow}
-      >
-        <Text style={styles.back}>‹ Deals</Text>
-      </Pressable>
+      <View style={styles.header}>
+        <Pressable
+          testID="board-back"
+          onPress={() => goBack()}
+          accessibilityRole="button"
+          accessibilityLabel="Back to deals"
+          hitSlop={12}
+          style={styles.backBtn}
+        >
+          <Text style={styles.backChevron}>‹</Text>
+        </Pressable>
+        <Text style={styles.headerTitle}>PIPELINE</Text>
+        {/* Balances the back control so the title stays optically centred without a second row. */}
+        <View style={styles.headerSpacer} />
+      </View>
 
-      <View style={styles.scopeRow}>
-        {SCOPES.map((s) => (
-          <Pressable
-            key={s.key}
-            testID={`board-scope-${s.key}`}
-            onPress={() => setScope(s.key)}
-            accessibilityRole="button"
-            accessibilityState={{ selected: scope === s.key }}
-            style={[styles.scopePill, scope === s.key && styles.scopePillActive]}
-          >
-            <Text style={[styles.scopeText, scope === s.key && styles.scopeTextActive]}>{s.label}</Text>
-          </Pressable>
-        ))}
+      {/* A SEGMENTED control, not three loose pills. Three separate bordered pills read as three
+          unrelated buttons; one recessed track with a single raised segment says "pick one of these",
+          which is what this actually is. */}
+      <View style={styles.segmentTrack}>
+        {SCOPES.map((s) => {
+          const active = scope === s.key;
+          return (
+            <Pressable
+              key={s.key}
+              testID={`board-scope-${s.key}`}
+              onPress={() => setScope(s.key)}
+              accessibilityRole="button"
+              accessibilityState={{ selected: active }}
+              style={[styles.segment, active && styles.segmentActive]}
+            >
+              <Text style={[styles.segmentText, active && styles.segmentTextActive]}>
+                {s.label.toUpperCase()}
+              </Text>
+            </Pressable>
+          );
+        })}
       </View>
 
       {state.kind === "loading" ? (
@@ -179,14 +192,25 @@ export default function PipelineBoardScreen() {
                   onPress={() => setActiveStageId(col.stage.id)}
                   accessibilityRole="button"
                   accessibilityState={{ selected: isActive }}
-                  style={[styles.stageChip, isActive && styles.stageChipActive]}
+                  /* A TAB with an underline, not a pill. Pills all look equally "on"; an underlined tab
+                     has an unambiguous selected state, and the red rule ties the selection to the brand
+                     instead of tinting the whole chip pink. */
+                  style={styles.stageTab}
                 >
-                  <Text style={[styles.stageName, isActive && styles.stageNameActive]}>
-                    {col.stage.name}
-                  </Text>
-                  <Text style={[styles.stageCount, isActive && styles.stageCountActive]}>
-                    {col.activeCount}
-                  </Text>
+                  <View style={styles.stageTabRow}>
+                    <Text
+                      style={[styles.stageName, isActive && styles.stageNameActive]}
+                      numberOfLines={1}
+                    >
+                      {col.stage.name.toUpperCase()}
+                    </Text>
+                    <View style={[styles.stageCountWrap, isActive && styles.stageCountWrapActive]}>
+                      <Text style={[styles.stageCount, isActive && styles.stageCountActive]}>
+                        {col.activeCount}
+                      </Text>
+                    </View>
+                  </View>
+                  <View style={[styles.stageUnderline, isActive && styles.stageUnderlineActive]} />
                 </Pressable>
               );
             })}
@@ -215,6 +239,7 @@ export default function PipelineBoardScreen() {
               }
               ListHeaderComponent={
                 <View style={styles.columnSummary}>
+                  <Text style={styles.columnLabel}>{selected.stage.name.toUpperCase()} · TOTAL</Text>
                   <Text style={styles.columnValue}>{formatColumnValue(selected.totalValue)}</Text>
                   {/* TWO server facts, not a third derived from them. `activeCount` counts only the
                       STORED on_hold flag (deals/service.ts:2000-2002), while a card is badged "On hold"
@@ -292,67 +317,114 @@ function formatColumnValue(total: number): string {
 }
 
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: theme.color.surfaceMuted },
-  backRow: { paddingHorizontal: theme.space.lg, paddingTop: theme.space.sm, minHeight: 44, justifyContent: "center" },
-  back: { fontFamily: theme.font.semibold, fontSize: 15, color: theme.color.brandRed },
-  scopeRow: {
-    flexDirection: "row",
-    gap: theme.space.sm,
-    paddingHorizontal: theme.space.lg,
-    paddingTop: theme.space.sm,
-  },
-  scopePill: {
-    borderRadius: theme.radius.pill,
-    borderWidth: 1,
-    borderColor: theme.color.border,
-    paddingHorizontal: theme.space.lg,
-    paddingVertical: theme.space.sm,
-    backgroundColor: theme.color.surface,
-  },
-  scopePillActive: { backgroundColor: theme.color.inkNavy, borderColor: theme.color.inkNavy },
-  scopeText: { fontFamily: theme.font.semibold, fontSize: 13, color: theme.color.textSecondary },
-  scopeTextActive: { color: theme.color.textInverse },
-  stageRow: { paddingHorizontal: theme.space.lg, paddingVertical: theme.space.md, gap: theme.space.sm },
-  stageChip: {
+  safe: { flex: 1, backgroundColor: theme.color.canvas },
+
+  /* Chrome — black, so the screen is framed by the brand rather than by a grey bar. */
+  header: {
     flexDirection: "row",
     alignItems: "center",
-    gap: theme.space.sm,
-    borderRadius: theme.radius.pill,
+    backgroundColor: theme.color.chrome,
+    paddingHorizontal: theme.space.sm,
+    paddingBottom: theme.space.md,
+    paddingTop: theme.space.xs,
+    // The red rule under the chrome. One 2px line does more brand work here than tinting a whole
+    // surface, and it separates the header from the canvas without a grey divider.
+    borderBottomWidth: 2,
+    borderBottomColor: theme.color.brandRed,
+  },
+  backBtn: { width: 44, height: 44, alignItems: "center", justifyContent: "center" },
+  backChevron: { fontFamily: theme.font.bold, fontSize: 30, lineHeight: 34, color: theme.color.textPrimary },
+  headerTitle: { flex: 1, textAlign: "center", ...theme.type.caption, fontSize: 12, color: theme.color.textPrimary },
+  headerSpacer: { width: 44 },
+
+  /* Scope — one recessed track, one raised segment. */
+  segmentTrack: {
+    flexDirection: "row",
+    margin: theme.space.lg,
+    marginBottom: theme.space.sm,
+    padding: 3,
+    borderRadius: theme.radius.md,
+    backgroundColor: theme.color.surfaceMuted,
     borderWidth: 1,
     borderColor: theme.color.border,
-    backgroundColor: theme.color.surface,
-    paddingHorizontal: theme.space.md,
-    paddingVertical: theme.space.sm,
   },
-  stageChipActive: { borderColor: theme.color.brandRed, backgroundColor: theme.color.redSurface },
-  stageName: { fontFamily: theme.font.semibold, fontSize: 13, color: theme.color.textSecondary },
-  stageNameActive: { color: theme.color.brandRedDeep },
-  stageCount: { fontFamily: theme.font.bold, fontSize: 13, color: theme.color.textMuted },
-  stageCountActive: { color: theme.color.brandRedDeep },
-  noticeWrap: { paddingHorizontal: theme.space.lg },
-  columnSummary: { paddingBottom: theme.space.md },
-  columnValue: { fontFamily: theme.font.bold, fontSize: 24, color: theme.color.inkNavy },
-  columnMeta: { fontFamily: theme.font.regular, fontSize: 13, color: theme.color.textMuted },
-  list: { padding: theme.space.lg, paddingTop: theme.space.sm, gap: theme.space.md },
-  listEmpty: { flexGrow: 1 },
-  previewNoteBtn: { paddingVertical: theme.space.sm, minHeight: 44, justifyContent: "center" },
-  previewNote: {
-    paddingTop: theme.space.md,
-    textAlign: "center",
-    fontFamily: theme.font.regular,
-    fontSize: 12,
-    color: theme.color.textMuted,
+  segment: {
+    flex: 1,
+    // 44, not 38. The iOS HIG minimum is a 44pt target, and a control sized to LOOK right rather than
+    // to be hit is the specific way a redesign makes an app worse for someone wearing gloves.
+    minHeight: 44,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: theme.radius.sm,
   },
-  center: { flex: 1, alignItems: "center", justifyContent: "center", padding: theme.space.xl, gap: theme.space.sm },
-  errorTitle: { fontFamily: theme.font.bold, fontSize: 17, color: theme.color.inkNavy },
-  errorBody: { fontFamily: theme.font.regular, fontSize: 14, color: theme.color.textSecondary, textAlign: "center" },
-  retryBtn: {
-    marginTop: theme.space.sm,
+  segmentActive: { backgroundColor: theme.color.surfaceRaised, ...theme.elevation.card },
+  segmentText: { ...theme.type.caption, color: theme.color.textMuted },
+  segmentTextActive: { color: theme.color.textPrimary },
+
+  /* Stage selector — underlined tabs. */
+  stageRow: { paddingHorizontal: theme.space.lg, gap: theme.space.xl, alignItems: "flex-end" },
+  // Same 44pt rule. The underline sits at the bottom of the tab, so the padding above it is what makes
+  // the target tall enough without pushing the rule away from the label.
+  stageTab: { minHeight: 44, justifyContent: "flex-end", paddingTop: theme.space.md },
+  stageTabRow: { flexDirection: "row", alignItems: "center", gap: theme.space.sm },
+  stageName: { ...theme.type.caption, color: theme.color.textMuted },
+  stageNameActive: { color: theme.color.textPrimary },
+  stageCountWrap: {
+    minWidth: 22,
+    alignItems: "center",
+    borderRadius: theme.radius.sm,
+    backgroundColor: theme.color.surfaceMuted,
     borderWidth: 1,
-    borderColor: theme.color.brandRed,
-    borderRadius: theme.radius.md,
-    paddingHorizontal: theme.space.xl,
-    paddingVertical: theme.space.md,
+    borderColor: theme.color.border,
+    paddingHorizontal: 5,
+    paddingVertical: 1,
   },
-  retryText: { fontFamily: theme.font.bold, fontSize: 14, color: theme.color.brandRed },
+  stageCountWrapActive: { backgroundColor: theme.color.brandRed, borderColor: theme.color.brandRed },
+  stageCount: { fontFamily: theme.font.bold, fontSize: 11, color: theme.color.textMuted },
+  stageCountActive: { color: theme.color.onBrand },
+  stageUnderline: { height: 2, marginTop: theme.space.sm, backgroundColor: "transparent" },
+  stageUnderlineActive: { backgroundColor: theme.color.brandRed },
+
+  noticeWrap: { paddingHorizontal: theme.space.lg },
+
+  /* Column header — the one place a big number belongs. */
+  columnSummary: { paddingBottom: theme.space.lg, gap: 2 },
+  columnLabel: { ...theme.type.caption, color: theme.color.textMuted },
+  columnValue: {
+    ...theme.type.display,
+    color: theme.color.textPrimary,
+    // Tabular so the figure does not jitter horizontally when switching stages.
+    fontVariant: ["tabular-nums"],
+  },
+  columnMeta: { ...theme.type.caption, color: theme.color.textSecondary },
+
+  list: { padding: theme.space.lg, paddingTop: theme.space.lg, gap: theme.space.md },
+  listEmpty: { flexGrow: 1 },
+  previewNoteBtn: {
+    marginTop: theme.space.md,
+    minHeight: 44,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: theme.radius.md,
+    borderWidth: 1,
+    borderColor: theme.color.border,
+    backgroundColor: theme.color.surfaceMuted,
+  },
+  previewNote: { ...theme.type.caption, color: theme.color.textSecondary },
+
+  center: { flex: 1, alignItems: "center", justifyContent: "center", padding: theme.space.xl, gap: theme.space.sm },
+  errorTitle: { ...theme.type.h2, color: theme.color.textPrimary },
+  errorBody: { ...theme.type.body, color: theme.color.textSecondary, textAlign: "center" },
+  retryBtn: {
+    marginTop: theme.space.md,
+    minHeight: 48,
+    justifyContent: "center",
+    borderRadius: theme.radius.md,
+    backgroundColor: theme.color.brandRed,
+    paddingHorizontal: theme.space.xxl,
+    ...theme.elevation.card,
+  },
+  // White on brandRed is 4.8:1. The old outline-only button was red-on-near-black at 3.7:1, which is
+  // under the floor for a 14px label — the primary action was the least readable thing on the screen.
+  retryText: { ...theme.type.label, color: theme.color.onBrand, textAlign: "center" },
 });

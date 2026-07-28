@@ -319,7 +319,7 @@ export default function DealsListScreen() {
 }
 
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: theme.color.surfaceMuted },
+  safe: { flex: 1, backgroundColor: theme.color.canvas },
   header: {
     paddingHorizontal: theme.space.lg,
     paddingTop: theme.space.sm,
@@ -339,7 +339,7 @@ const styles = StyleSheet.create({
     borderColor: theme.color.border,
     backgroundColor: theme.color.surface,
   },
-  boardLinkText: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.brandRed },
+  boardLinkText: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.redText },
   scopeRow: { flexDirection: "row", gap: theme.space.sm, paddingHorizontal: theme.space.lg, paddingTop: theme.space.md },
   scopePill: {
     borderRadius: theme.radius.pill,
@@ -349,14 +349,17 @@ const styles = StyleSheet.create({
     paddingVertical: theme.space.sm,
     backgroundColor: theme.color.surface,
   },
-  scopePillActive: { backgroundColor: theme.color.inkNavy, borderColor: theme.color.inkNavy },
+  // surfaceRaised, NOT inkNavy. inkNavy is a TEXT colour on the dark theme (it points at the
+  // primary text), so using it as a fill made the selected pill a light slab with white text on
+  // it — invisible. A raised surface is what "selected" means everywhere else in this app.
+  scopePillActive: { backgroundColor: theme.color.surfaceRaised, borderColor: theme.color.borderStrong },
   scopeText: { fontFamily: theme.font.semibold, fontSize: 13, color: theme.color.textSecondary },
-  scopeTextActive: { color: theme.color.textInverse },
+  scopeTextActive: { color: theme.color.textPrimary },
   search: {
     margin: theme.space.lg,
     marginBottom: theme.space.sm,
     borderWidth: 1,
-    borderColor: theme.color.border,
+    borderColor: theme.color.borderControl,
     borderRadius: theme.radius.md,
     paddingHorizontal: theme.space.md,
     paddingVertical: theme.space.md,
@@ -386,5 +389,5 @@ const styles = StyleSheet.create({
     paddingHorizontal: theme.space.xl,
     paddingVertical: theme.space.md,
   },
-  retryText: { fontFamily: theme.font.bold, fontSize: 14, color: theme.color.brandRed },
+  retryText: { fontFamily: theme.font.bold, fontSize: 14, color: theme.color.redText },
 });
