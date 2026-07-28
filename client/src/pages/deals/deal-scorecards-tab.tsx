@@ -162,13 +162,21 @@ export function DealScorecardsTab({ dealId }: { dealId: string }) {
         </h3>
       </div>
       {scorecards.map((sc) => (
-        <ScorecardRow key={sc.id} dealId={dealId} summary={sc} />
+        <ScorecardRow key={sc.id} dealId={dealId} summary={sc} onCardChanged={refetch} />
       ))}
     </div>
   );
 }
 
-function ScorecardRow({ dealId, summary }: { dealId: string; summary: FieldScorecardSummary }) {
+function ScorecardRow({
+  dealId,
+  summary,
+  onCardChanged,
+}: {
+  dealId: string;
+  summary: FieldScorecardSummary;
+  onCardChanged?: () => void;
+}) {
   const [expanded, setExpanded] = useState(false);
   const [detail, setDetail] = useState<FieldScorecardDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -303,7 +311,11 @@ function ScorecardRow({ dealId, summary }: { dealId: string; summary: FieldScore
               // The server is the source of truth for every one of them; optimistically patching the local
               // copy would risk showing a state the server did not actually reach.
               onApprovalChange={() => {
+                // BOTH: the expanded thread AND the row header's lifecycle badge, which renders from the
+                // list's summary. Refreshing only the detail left the row still reading "Awaiting Approval"
+                // beside a thread showing the item approved — the same card contradicting itself on screen.
                 void fetchDealScorecardDetail(dealId, summary.id).then(setDetail).catch(() => {});
+                onCardChanged?.();
               }}
             />
           )}

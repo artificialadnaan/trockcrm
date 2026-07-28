@@ -21,7 +21,12 @@ export const scorecardCorrectiveActionEvents = pgTable(
      * correctness bug rather than a cosmetic one.
      */
     seq: bigserial("seq", { mode: "number" }).notNull(),
-    correctiveActionId: uuid("corrective_action_id").notNull(),
+    /**
+     * Nullable, matching migration 0202's ON DELETE SET NULL. An edit that removes a flagged item must not
+     * erase the approver's rejection and the responder's answer — that history is what the PDF and the CRM
+     * exist to show, and scorecard_id keeps a detached event readable as part of its card's record.
+     */
+    correctiveActionId: uuid("corrective_action_id"),
     /** Denormalized: the whole thread for a card is one indexed read. */
     scorecardId: uuid("scorecard_id").notNull(),
     /** 'submitted' | 'approved' | 'rejected' */

@@ -4,10 +4,20 @@ import { createHash } from "node:crypto";
  * Revision of the scorecard PDF renderer currently deployed by the server.
  *
  * Version 1 is the legacy/unversioned artifact. Version 2 embeds linked evidence photos. Version 3 adds the
- * corrective-action record (per-item status, responder, comment and response photos). Keeping this
- * independent of the scorecard form version lets artifact upgrades occur without changing scoring data.
+ * corrective-action record (per-item status, responder, comment and response photos). Version 4 replaces
+ * that record's two-state open/resolved rows with the four-state approval THREAD — every submission, every
+ * rejection with its reason, the approval that closed it.
+ *
+ * v4 is a required bump, not cosmetic. The publish CAS and the regeneration check both key on this number,
+ * so leaving it at 3 during a rolling deploy would let an OLD instance publish a v3-shaped artifact for a
+ * new generation, after which upgraded instances classify it as current forever — and every artifact cached
+ * before this deploy would keep serving the pre-approval layout, because the migration alone does not
+ * invalidate them.
+ *
+ * Keeping this independent of the scorecard form version lets artifact upgrades occur without changing
+ * scoring data.
  */
-export const CURRENT_SCORECARD_PDF_RENDER_VERSION = 3;
+export const CURRENT_SCORECARD_PDF_RENDER_VERSION = 4;
 
 /** Minimal persisted state needed to decide whether a scorecard PDF artifact must be rendered again. */
 export interface ScorecardPdfArtifactState {

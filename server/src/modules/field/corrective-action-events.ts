@@ -34,7 +34,8 @@ export interface RecordCorrectiveActionEventInput {
 
 export interface CorrectiveActionEventRow {
   id: string;
-  correctiveActionId: string;
+  /** Null once its item is removed by an edit — the event survives as part of the card's record. */
+  correctiveActionId: string | null;
   eventType: string;
   actorUserId: string | null;
   actorName: string | null;
@@ -104,6 +105,9 @@ function groupByItem(
 ): Map<string, CorrectiveActionEventRow[]> {
   const byItem = new Map<string, CorrectiveActionEventRow[]>();
   for (const row of rows) {
+    // A detached event (its item was removed by an edit) belongs to no item bucket. It stays in the table as
+    // part of the card's history; the per-item readers simply have nothing to thread it under.
+    if (!row.correctiveActionId) continue;
     const list = byItem.get(row.correctiveActionId) ?? [];
     list.push({
       ...row,

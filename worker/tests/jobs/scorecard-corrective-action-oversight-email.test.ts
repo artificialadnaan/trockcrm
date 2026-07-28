@@ -125,7 +125,7 @@ function makeQuery(
           {
             pdf_r2_key:
               over.postFetchKey === undefined
-                ? (over.pdfR2Key === undefined ? `sc.${"a".repeat(64)}.v3.pdf` : over.pdfR2Key)
+                ? (over.pdfR2Key === undefined ? `sc.${"a".repeat(64)}.v4.pdf` : over.pdfR2Key)
                 : over.postFetchKey,
             pdf_content_generation:
               over.postFetchGeneration === undefined
@@ -167,8 +167,8 @@ function makeQuery(
             form_version: 2,
             status: over.status ?? "corrective_action_open",
             action_items: over.actionItems ?? ["Re-inspect slab 2"],
-            pdf_r2_key: over.pdfR2Key === undefined ? `sc.${"a".repeat(64)}.v3.pdf` : over.pdfR2Key,
-            pdf_render_version: over.pdfRenderVersion ?? 3,
+            pdf_r2_key: over.pdfR2Key === undefined ? `sc.${"a".repeat(64)}.v4.pdf` : over.pdfR2Key,
+            pdf_render_version: over.pdfRenderVersion ?? 4,
             pdf_content_generation:
               over.pdfContentGeneration === undefined ? GENERATION : over.pdfContentGeneration,
             updated_at: over.updatedAt ?? GENERATION,
@@ -1123,10 +1123,14 @@ describe("handleScorecardCorrectiveActionOversightEmail", () => {
   });
 
   it("renders a response time with the TIME OF DAY, not just a UTC calendar date", async () => {
+    // A SUBMITTED item — attribution for an approved one belongs to the approver, tested separately.
     // responded_at is a timestamp. Truncating it to a date made every action answered on the same day look
     // simultaneous in what is meant to be the audit trail, and ISO-slicing it silently reported UTC — so an
     // evening CT response was dated to the following day.
-    const { query } = makeQuery({ status: "corrective_action_closed" });
+    const { query } = makeQuery({
+      status: "corrective_action_closed",
+      items: [{ ...ITEMS[0], status: "submitted" }],
+    });
     const sendEmail = makeSend();
 
     await handleScorecardCorrectiveActionOversightEmail(payload({ phase: "closed" }), null, {
@@ -1174,7 +1178,10 @@ describe("handleScorecardCorrectiveActionOversightEmail", () => {
   it("names the responder by EMAIL when they have no display name", async () => {
     // A session responder with no first/last name stores a null responder_name but a non-null email. Without
     // the fallback the notice reports when a fix landed but not who filed it.
-    const { query } = makeQuery({ status: "corrective_action_closed" });
+    const { query } = makeQuery({
+      status: "corrective_action_closed",
+      items: [{ ...ITEMS[0], status: "submitted", responder_name: null }],
+    });
     const sendEmail = makeSend();
     ITEMS[0].responder_name = null;
     try {
@@ -1467,5 +1474,43 @@ describe("handleScorecardCorrectiveActionOversightEmail", () => {
     expect(html).toContain("Sam Super");
     expect(html).toContain("Re-poured and cured.");
     expect(html).toContain("2 photos");
+  });
+
+  it("REGRESSION: attributes an APPROVED item to the approver, not the responder", async () => {
+    // The item row's responder columns describe the SUBMISSION. Using them for an approved item made the
+    // audit-facing notice read "Approved — <responder> · <their submission time>", i.e. as though the
+    // responder signed off their own work. The verdict and its actor live on the thread.
+    const { query } = makeQuery({
+      status: "corrective_action_closed",
+      items: [
+        {
+          ...ITEMS[0],
+          status: "approved",
+          responder_name: "Sam Super",
+          approved_by: "James Helms",
+          approved_at: new Date("2026-07-29T15:00:00.000Z"),
+        },
+      ],
+    });
+    const sendEmail = makeSend();
+
+    await handleScorecardCorrectiveActionOversightEmail(payload({ phase: "closed" }), null, {
+      query: query as never,
+      sendEmail: sendEmail as never,
+      getPdf: (async () => Buffer.from("%PDF-1.4")) as never,
+      env,
+      logger: makeLogger(),
+    });
+
+    const [, , html, options] = sendEmail.mock.calls[0] as unknown as [
+      string[],
+      string,
+      string,
+      { text: string },
+    ];
+    expect(html).toContain("James Helms");
+    expect(options.text).toContain("James Helms");
+    // The approval line carries the VERDICT time, not the submission time.
+    expect(html).toMatch(/Jul 29, 2026/);
   });
 });

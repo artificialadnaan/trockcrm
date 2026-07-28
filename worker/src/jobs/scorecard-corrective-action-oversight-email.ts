@@ -35,11 +35,14 @@ export const SCORECARD_CORRECTIVE_ACTION_OVERSIGHT_EMAIL_JOB =
   "scorecard_corrective_action_oversight_email";
 
 /**
- * Renderer revision that first embedded the corrective-action record. Attaching an older artifact to a
- * "corrective action completed" email would show the card WITHOUT the corrective action on it — precisely
- * the defect this feature exists to fix — so a pre-v3 artifact is dropped in favour of the CRM link.
+ * Renderer revision that embeds the corrective-action THREAD. v3 carried a two-state open/resolved record;
+ * v4 carries the full back-and-forth, which is what an approval-era notice is announcing.
+ *
+ * Attaching an older artifact would show the card WITHOUT the thread — an "Approved" email whose PDF does
+ * not show the approval, which is the same defect this whole line of work exists to fix. A pre-v4 artifact
+ * is dropped in favour of the CRM link rather than sent as if it were the record.
  */
-const MIN_PDF_RENDER_VERSION_WITH_CORRECTIVE_ACTIONS = 3;
+const MIN_PDF_RENDER_VERSION_WITH_CORRECTIVE_ACTIONS = 4;
 
 // Mirrors field-scorecard-email: Resend warns around 28 MB and base64 inflates a binary attachment by ~33%,
 // so keep the raw PDF under ~20 MB. A larger PDF is delivered as a CRM link instead.
@@ -187,6 +190,8 @@ interface ItemRow {
   responder_name: string | null;
   responder_email: string | null;
   responded_at: Date | null;
+  approved_by: string | null;
+  approved_at: Date | null;
   response_comment: string | null;
   photo_count: number | string;
 }
@@ -382,6 +387,17 @@ export async function handleScorecardCorrectiveActionOversightEmail(
             -- email. Without this the notice reports WHEN a fix landed but not WHO filed it.
             ca.responder_email, ca.responded_at,
             ca.response_comment,
+            -- WHO signed this off, and when. The item row's responder columns describe the SUBMISSION; using
+            -- them for an approved item makes the audit notice read "Approved — <responder> · <their
+            -- submission time>", i.e. as though the responder approved their own work. The verdict lives on
+            -- the thread. Ordered by seq, not created_at: events written in one transaction share a
+            -- timestamp and the uuid PK is random.
+            (SELECT e.actor_name FROM ${tenantSchema}.scorecard_corrective_action_events e
+              WHERE e.corrective_action_id = ca.id AND e.event_type = 'approved'
+              ORDER BY e.seq DESC LIMIT 1) AS approved_by,
+            (SELECT e.created_at FROM ${tenantSchema}.scorecard_corrective_action_events e
+              WHERE e.corrective_action_id = ca.id AND e.event_type = 'approved'
+              ORDER BY e.seq DESC LIMIT 1) AS approved_at,
             -- Count only photos that are ACTUALLY renderable. Both other surfaces for this data apply the
             -- same filter (the PDF loader and the CRM item read), so counting soft-deleted rows here would
             -- have the email say "3 photos" while the attached PDF and the CRM both show 2.
@@ -872,8 +888,12 @@ export function buildOversightEmail(input: {
     ? `<ul style="margin:12px 0 0 0;padding-left:20px;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:20px;color:#111111;">${input.items
         .map((item) => {
           const state = itemState(item.status);
-          const who = normalizeText(item.responder_name) ?? normalizeText(item.responder_email);
-          const when = formatRespondedAt(item.responded_at);
+          // An APPROVED item is attributed to whoever approved it; anything else to whoever submitted it.
+          const approved = item.status === "approved";
+          const who = approved
+            ? normalizeText(item.approved_by)
+            : normalizeText(item.responder_name) ?? normalizeText(item.responder_email);
+          const when = formatRespondedAt(approved ? item.approved_at : item.responded_at);
           const comment = emailCommentExcerpt(item.response_comment);
           const photos = Number(item.photo_count ?? 0);
           const detail = state.answered
@@ -889,8 +909,11 @@ export function buildOversightEmail(input: {
         .map((item) => {
           const state = itemState(item.status);
           if (!state.answered) return `• ${emailLabelExcerpt(item.item_label)} — ${state.label}`;
-          const who = normalizeText(item.responder_name) ?? normalizeText(item.responder_email);
-          const when = formatRespondedAt(item.responded_at);
+          const approved = item.status === "approved";
+          const who = approved
+            ? normalizeText(item.approved_by)
+            : normalizeText(item.responder_name) ?? normalizeText(item.responder_email);
+          const when = formatRespondedAt(approved ? item.approved_at : item.responded_at);
           const comment = emailCommentExcerpt(item.response_comment);
           const photos = Number(item.photo_count ?? 0);
           return (

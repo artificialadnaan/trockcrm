@@ -80,8 +80,13 @@ BEGIN
          -- the thread would render in an arbitrary order — for an audit trail whose whole value is the
          -- sequence of what happened, that is a correctness bug, not a cosmetic one.
          seq bigserial NOT NULL,
-         corrective_action_id uuid NOT NULL
-           REFERENCES %I.scorecard_corrective_actions(id) ON DELETE CASCADE,
+         -- SET NULL, not CASCADE. This table is the append-only record of what happened, and an edit that
+         -- removes a flagged item is one of the things that happened -- cascading would erase the approver
+         -- rejection and the responder answer along with it, which is precisely the history the PDF and the
+         -- CRM exist to show. scorecard_id is denormalized for exactly this reason, so a detached event is
+         -- still readable as part of the card record.
+         corrective_action_id uuid
+           REFERENCES %I.scorecard_corrective_actions(id) ON DELETE SET NULL,
          -- Denormalized so the whole thread for a card is one indexed read, and so the row survives as a
          -- scorecard-scoped record even as items are added/removed by an edit.
          scorecard_id uuid NOT NULL
@@ -179,8 +184,8 @@ DROP INDEX IF EXISTS office_dallas.scorecard_corrective_actions_open_idx;
 CREATE TABLE IF NOT EXISTS office_dallas.scorecard_corrective_action_events (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   seq bigserial NOT NULL,
-  corrective_action_id uuid NOT NULL
-    REFERENCES office_dallas.scorecard_corrective_actions(id) ON DELETE CASCADE,
+  corrective_action_id uuid
+    REFERENCES office_dallas.scorecard_corrective_actions(id) ON DELETE SET NULL,
   scorecard_id uuid NOT NULL
     REFERENCES office_dallas.field_scorecards(id) ON DELETE CASCADE,
   event_type text NOT NULL CHECK (event_type IN ('submitted', 'approved', 'rejected')),
