@@ -161,13 +161,20 @@ export function normalizeAddressKey(value: string | null | undefined): string {
    * merges two distinct addresses, and a false match is the failure this file refuses to trade for a
    * missed one. A directional with a name after it ("100 N Main St") is unambiguous and still expands.
    */
-  const nameIsSingleLetter = baseEnd === 3 && tokens[1]!.length === 1;
+  /**
+   * A one-letter token immediately before the street type is the NAME, wherever it sits.
+   *
+   * Keying on index 1 assumed a house number came first, so a bare "E St" — no number — fell through
+   * and expanded to "east street", merging it with "East St" again from the other direction.
+   */
+  const nameIndex = typeIndex - 1;
+  const nameIsSingleLetter = nameIndex >= 0 && (tokens[nameIndex]?.length ?? 0) === 1;
 
   return tokens
     .map((token, index) => {
       if (index >= baseEnd) return UNIT_MARKER_CANONICAL[token] ?? token;
       if (index === typeIndex) return STREET_TYPES[token] ?? DIRECTIONALS[token] ?? token;
-      if (index === 1 && nameIsSingleLetter) return token;
+      if (index === nameIndex && nameIsSingleLetter) return token;
       return DIRECTIONALS[token] ?? NON_FINAL_ALIASES[token] ?? token;
     })
     .join(" ");
@@ -280,7 +287,17 @@ export function localityContradicts(
   // raw comparison calls that a CONTRADICTION — actively disproving a correct match and sending the
   // capture off to create a duplicate. Disproof has to be certain to be useful.
   const norm = (v: string | null | undefined) =>
-    typeof v === "string" ? v.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim() : "";
+    typeof v === "string"
+      ? v
+          .toLowerCase()
+          // Same NFD fold as the street line: "San José" and "San Jose" are one city, and deleting the
+          // accent instead of folding it turns agreement into a CONTRADICTION — actively rejecting a
+          // correct match, which is the worst direction for a disproof rule to fail in.
+          .normalize("NFD")
+          .replace(/[\u0300-\u036f]/g, "")
+          .replace(/[^a-z0-9]+/g, " ")
+          .trim()
+      : "";
   const qCity = norm(query.city);
   const rCity = norm(row.city);
   if (qCity && rCity && qCity !== rCity) return true;
@@ -503,7 +520,26 @@ export async function matchProperties(
       ? null
       : compareAddressKeys(input.address, row.address as string | null);
     const byAddress = addressMatch !== null;
-    const byDistance = distanceMeters != null && distanceMeters <= PROPERTY_MATCH_RADIUS_METERS;
+
+    /**
+     * PROXIMITY MUST NOT OVERRULE A KNOWN CONFLICT.
+     *
+     * compareAddressKeys already refuses to fold "Ste 200" into "Ste 400" — and then distance let them
+     * through anyway, because two tenancies in one tower are metres apart. Same for a locality that
+     * actively disagrees: a stored "100 Main St, Austin" sitting inside the GPS box of a query for
+     * "100 Main St, Dallas" is a data error, not a match.
+     *
+     * Distance is the RECOVERING signal, for rows whose address text cannot be compared. Where the text
+     * CAN be compared and says no, that answer stands — otherwise the whole false-match asymmetry this
+     * file is built on is undone by the weaker signal.
+     */
+    const addressesConflict =
+      contradicted ||
+      (normalizeAddressKey(input.address) !== "" &&
+        normalizeAddressKey(row.address as string | null) !== "" &&
+        addressMatch === null);
+    const byDistance =
+      !addressesConflict && distanceMeters != null && distanceMeters <= PROPERTY_MATCH_RADIUS_METERS;
     // A candidate sharing only a lead token is a different street. Dropping it here is why SQL is
     // allowed to be generous above.
     if (!byAddress && !byDistance) continue;

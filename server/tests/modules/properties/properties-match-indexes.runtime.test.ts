@@ -89,7 +89,10 @@ describe("0201 properties match indexes", () => {
 
   it("keeps the coordinate index partial, since almost every row has no coordinates", async () => {
     const def = await indexDef("office_dallas", "properties_lat_lng_idx");
+    // BOTH columns. Asserting only lat would pass with `lng IS NOT NULL` deleted, letting the paired
+    // predicate regress silently — the index would then cover rows the query can never use.
     expect(def).toMatch(/WHERE .*lat IS NOT NULL/i);
+    expect(def).toMatch(/lng IS NOT NULL/i);
   });
 
   it("is idempotent — re-running the migration is a no-op", async () => {

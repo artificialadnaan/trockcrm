@@ -280,3 +280,41 @@ describe("diacritics and single-letter street names", () => {
     expect(compareAddressKeys("100 N Main St", "100 North Main Street")).toBe("exact");
   });
 });
+
+describe("proximity must not overrule a known conflict", () => {
+  /**
+   * The hole under the whole design.
+   *
+   * compareAddressKeys correctly refuses to fold "Ste 200" into "Ste 400" — and distance then let them
+   * through anyway, because two tenancies in one tower are metres apart. The weaker signal was undoing
+   * the asymmetry the stronger one exists to protect.
+   *
+   * These assert the RULE via compareAddressKeys; matchProperties consumes it through addressesConflict.
+   */
+  it("keeps two explicit units distinct no matter how close they are", () => {
+    expect(compareAddressKeys("1420 Bishop St Ste 200", "1420 Bishop St Ste 400")).toBeNull();
+  });
+
+  it("still says nothing when one side has no comparable address", () => {
+    // A row with no address text cannot conflict — that is precisely when distance should decide.
+    expect(compareAddressKeys("1420 Bishop St", null)).toBeNull();
+    expect(normalizeAddressKey(null)).toBe("");
+  });
+});
+
+describe("locality folds diacritics too", () => {
+  it("does not treat San José and San Jose as different cities", () => {
+    // Deleting the accent instead of folding it turned agreement into a CONTRADICTION — the worst
+    // direction for a disproof rule to fail in, because it rejects correct matches.
+    expect(localityContradicts({ city: "San José" }, { city: "San Jose" })).toBe(false);
+  });
+});
+
+describe("single-letter street name without a house number", () => {
+  it("does not expand a bare 'E St'", () => {
+    // Keying the safeguard on index 1 assumed a house number came first, so this fell through and
+    // merged with "East St" from the other direction.
+    expect(compareAddressKeys("E St", "East St")).toBeNull();
+    expect(compareAddressKeys("E St", "E Street")).toBe("exact");
+  });
+});

@@ -1,6 +1,6 @@
 import { and, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
-import { activities, deals, leads, users } from "@trock-crm/shared/schema";
+import { activities, contacts, deals, leads, users } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
 
@@ -312,7 +312,7 @@ export async function linkActivityToLead(
    * thing both records agree on, so it is what is compared — and only when the activity actually has
    * one, since a company- or contact-anchored capture legitimately has no property.
    */
-  if (existing.propertyId || existing.companyId) {
+  if (existing.propertyId || existing.companyId || existing.contactId) {
     const [lead] = await tenantDb
       .select({ propertyId: leads.propertyId, companyId: leads.companyId })
       .from(leads)
@@ -341,6 +341,27 @@ export async function linkActivityToLead(
         "ACTIVITY_LEAD_COMPANY_MISMATCH"
       );
     }
+    /**
+     * A CONTACT-anchored capture is checked through that contact's company.
+     *
+     * A log against a person alone carries no property and — when the person was created without one —
+     * no company either, so both guards above skipped and any accessible lead could claim it. The
+     * contact's own company is the only anchor such a row has.
+     */
+    if (!existing.companyId && existing.contactId && lead.companyId) {
+      const [contact] = await tenantDb
+        .select({ companyId: contacts.companyId })
+        .from(contacts)
+        .where(eq(contacts.id, existing.contactId))
+        .limit(1);
+      if (contact?.companyId && contact.companyId !== lead.companyId) {
+        throw new AppError(
+          409,
+          "That lead is for a different company than this contact",
+          "ACTIVITY_LEAD_COMPANY_MISMATCH"
+        );
+      }
+    }
   }
 
   /**
@@ -357,7 +378,25 @@ export async function linkActivityToLead(
     .where(and(eq(activities.id, input.activityId), isNull(activities.leadId)))
     .returning();
 
-  if (updated) return updated;
+  if (updated) {
+    /**
+     * The lead's last-touch now includes this visit.
+     *
+     * Linking wrote only activities.lead_id, so a lead promoted from a site visit showed no activity —
+     * every surface that sorts or filters on last touch treated a lead created FROM a visit as
+     * untouched, which is the opposite of what happened. Best-effort: the link is the authoritative
+     * change and must not fail because a denormalised timestamp could not be refreshed.
+     */
+    try {
+      await tenantDb
+        .update(leads)
+        .set({ lastActivityAt: updated.occurredAt ?? new Date() })
+        .where(eq(leads.id, input.leadId));
+    } catch {
+      // ignore — see above
+    }
+    return updated;
+  }
 
   // Lost the race. Re-read to answer with the same rules as above: the winner may have been this very
   // lead (a concurrent retry, which is a success) or a different one (a genuine conflict).
