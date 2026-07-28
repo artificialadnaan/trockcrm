@@ -73,6 +73,15 @@ export default function ProspectScreen() {
   const [linkFailed, setLinkFailed] = useState(false);
   /** The person could not be saved, but the visit was. Reported, never silent. */
   const [contactFailed, setContactFailed] = useState(false);
+  /**
+   * A contact that was already COMMITTED, kept across retries.
+   *
+   * The id lived only in the mutation's local scope, so when the activity request failed after the
+   * contact succeeded, a retry created the person again — and the dedup response for that same person
+   * returns no id, so the activity then saved WITHOUT them. The rep types someone once and loses them
+   * by retrying.
+   */
+  const createdContactId = useRef<string | undefined>(undefined);
 
   const [type, setType] = useState<prospecting.FieldActivityType | null>("site_visit");
   const [body, setBody] = useState("");
@@ -229,7 +238,7 @@ export default function ProspectScreen() {
        * twice should be told, not silently given a second record. So a dedup reply leaves contactId
        * undefined and the activity still attaches to the property.
        */
-      if (first && last) {
+      if (first && last && !createdContactId.current) {
         /**
          * The PERSON is optional; the VISIT is not.
          *
@@ -249,12 +258,16 @@ export default function ProspectScreen() {
           companyId: property?.companyId ?? company?.id,
         });
           contactId = created.created?.id;
+          createdContactId.current = contactId;
           duplicates = created.duplicates ?? null;
         } catch {
           // Recorded and reported after the activity lands; the visit continues regardless.
           contactFailed = true;
         }
       }
+
+      // Reuse the already-committed contact rather than making a second one.
+      contactId = contactId ?? createdContactId.current;
 
       const activity = await prospecting.logActivity(fetcher, {
         ...target,
@@ -441,6 +454,13 @@ export default function ProspectScreen() {
                   setProperty(null);
                   setMatches(null);
                   setRejectedMatches(false);
+                  // The COMPANY goes too. Leaving it selected while hiding the fallback UI let the
+                  // computed target silently fall back to it: Save stayed enabled and would attach the
+                  // visit to an entity the screen was no longer showing.
+                  setCompany(null);
+                  setCompanyResults(null);
+                  setCompanyQuery("");
+                  companyQueryRef.current = "";
                   matchedFor.current = null;
                   location.reset();
                 }}
@@ -518,7 +538,29 @@ export default function ProspectScreen() {
               </Text>
             ) : null}
 
-            {matchError ? <Text style={styles.warn}>{matchError}</Text> : null}
+            {matchError ? (
+              <>
+                <Text style={styles.warn}>{matchError}</Text>
+                {/* A REAL retry. Clearing the guard ref does nothing on its own: the effect keys on
+                    the fix, which does not change while the location stays "ready", so a transient
+                    lookup failure disabled matching for the rest of the session and pushed the rep
+                    onto the company fallback permanently. This re-runs the lookup directly. */}
+                {fix ? (
+                  <Pressable
+                    testID="prospect-retry-match"
+                    onPress={() => {
+                      setMatchError(null);
+                      matchedFor.current = null;
+                      runMatch.mutate({ lat: fix.lat, lng: fix.lng });
+                    }}
+                    accessibilityRole="button"
+                    style={styles.secondaryBtn}
+                  >
+                    <Text style={styles.secondaryText}>Look again</Text>
+                  </Pressable>
+                ) : null}
+              </>
+            ) : null}
 
             {matches?.length ? (
               <View style={styles.matchList}>
@@ -844,6 +886,7 @@ export default function ProspectScreen() {
                 setLeadMissing(null);
                 setLinkFailed(false);
                 setContactFailed(false);
+                createdContactId.current = undefined;
                 setDuplicateContacts(null);
                 setBody("");
                 setOutcome("");
