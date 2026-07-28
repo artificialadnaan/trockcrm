@@ -1763,6 +1763,19 @@ export default function ProspectScreen() {
                 contactQueryRef.current = "";
                 setContactResults(null);
                 setContactSearchFailed(false);
+                /* Everything the LAST capture put on screen, including the paths added late in review.
+                   Without these, "Log another here" opened a fresh draft still showing the previous
+                   one's company error, property error, duplicate prompt and rematch notice — the same
+                   hidden-state shape as the rest of this screen's defects, on the control whose whole
+                   job is to start clean. */
+                setDuplicateCompanies(null);
+                setCreateCompanyError(null);
+                setCreatePropertyError(null);
+                setRematchNotice(null);
+                setManualAddress("");
+                setManualCity("");
+                setManualState("");
+                setManualZip("");
                 setBody("");
                 setOutcome("");
                 setNextStep("");
