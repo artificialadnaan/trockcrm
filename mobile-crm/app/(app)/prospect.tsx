@@ -81,7 +81,7 @@ export default function ProspectScreen() {
    * returns no id, so the activity then saved WITHOUT them. The rep types someone once and loses them
    * by retrying.
    */
-  const createdContactId = useRef<string | undefined>(undefined);
+  const createdContactId = useRef<{ id: string; key: string } | undefined>(undefined);
 
   const [type, setType] = useState<prospecting.FieldActivityType | null>("site_visit");
   const [body, setBody] = useState("");
@@ -238,6 +238,19 @@ export default function ProspectScreen() {
        * twice should be told, not silently given a second record. So a dedup reply leaves contactId
        * undefined and the activity still attaches to the property.
        */
+      /**
+       * The retained id is keyed to WHO it was for.
+       *
+       * Holding a bare id meant that if the rep corrected the name after a failed save — the obvious
+       * thing to do when a save fails — the retry reused the id of the PREVIOUS person, filing the
+       * visit against someone the rep had already replaced. Recovery is only safe while the draft
+       * still describes the same person at the same company.
+       */
+      const contactKey = `${first.toLowerCase()}|${last.toLowerCase()}|${property?.companyId ?? company?.id ?? ""}`;
+      if (createdContactId.current && createdContactId.current.key !== contactKey) {
+        createdContactId.current = undefined;
+      }
+
       if (first && last && !createdContactId.current) {
         /**
          * The PERSON is optional; the VISIT is not.
@@ -258,7 +271,7 @@ export default function ProspectScreen() {
           companyId: property?.companyId ?? company?.id,
         });
           contactId = created.created?.id;
-          createdContactId.current = contactId;
+          if (contactId) createdContactId.current = { id: contactId, key: contactKey };
           duplicates = created.duplicates ?? null;
         } catch {
           // Recorded and reported after the activity lands; the visit continues regardless.
@@ -267,7 +280,7 @@ export default function ProspectScreen() {
       }
 
       // Reuse the already-committed contact rather than making a second one.
-      contactId = contactId ?? createdContactId.current;
+      contactId = contactId ?? createdContactId.current?.id;
 
       const activity = await prospecting.logActivity(fetcher, {
         ...target,
