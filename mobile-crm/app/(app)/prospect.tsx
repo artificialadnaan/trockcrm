@@ -132,6 +132,8 @@ export default function ProspectScreen() {
    */
   const resolvedContactId = useRef<string | null>(null);
   const contactWaived = useRef(false);
+  /** The rep said none of the suggestions is them AND that this is a new person. */
+  const contactForceCreate = useRef(false);
   /** Shown after the save so the rep can see which existing person the visit carries. */
   const [resolvedContactName, setResolvedContactName] = useState<string | null>(null);
 
@@ -148,6 +150,7 @@ export default function ProspectScreen() {
     // pinned — or with the waiver still set, silently skipping the person they just typed.
     resolvedContactId.current = null;
     contactWaived.current = false;
+    contactForceCreate.current = false;
     setResolvedContactName(null);
     setter(next);
   };
@@ -351,6 +354,8 @@ export default function ProspectScreen() {
    * whole path exists to avoid. A ref, because onError cannot see the mutation's locals.
    */
   const propertyCreateAttempted = useRef(false);
+  /** Address hits with nothing corroborating them: shown after the create, never allowed to block it. */
+  const uncorroboratedRematch = useRef<prospecting.PropertyMatch[] | null>(null);
 
   /**
    * The address, typed, for when the geocode could not supply one.
@@ -370,13 +375,20 @@ export default function ProspectScreen() {
    * was filled, so the last keystroke of the ZIP dropped the keyboard and removed every control that
    * could fix a typo. The fields stay mounted for as long as the geocode has not supplied an address.
    */
+  /** The rep is overriding a geocode that came back complete but wrong. */
+  const [correctingAddress, setCorrectingAddress] = useState(false);
+
   const geocodeComplete = Boolean(
     address?.address && address.city && address.state && address.zip,
   );
 
   /** Whatever address we actually have: the geocode first, the rep's typing second. */
   const effectiveAddress = useMemo(() => {
-    if (address?.address && address.city && address.state && address.zip) return address;
+    // While correcting, the rep's typing WINS — otherwise the override control would open fields whose
+    // contents are then ignored in favour of the address they are correcting.
+    if (!correctingAddress && address?.address && address.city && address.state && address.zip) {
+      return address;
+    }
     const typed = {
       address: manualAddress.trim(),
       city: manualCity.trim(),
@@ -394,7 +406,7 @@ export default function ProspectScreen() {
      * failing says nothing about where they are.
      */
     return { ...typed, lat: fix?.lat ?? address?.lat ?? null, lng: fix?.lng ?? address?.lng ?? null };
-  }, [address, fix, manualAddress, manualCity, manualState, manualZip]);
+  }, [address, correctingAddress, fix, manualAddress, manualCity, manualState, manualZip]);
   const createCompanyNamed = useMutation({
     mutationFn: async (input: { name: string; force?: boolean }) => {
       const created = await prospecting.createCompany(fetcher, {
@@ -502,6 +514,13 @@ export default function ProspectScreen() {
        */
       const corroborated = rematched.filter(isCorroborated);
       if (corroborated.length > 0) return { created: null, rematched: corroborated, at, under };
+      /**
+       * Uncorroborated hits are SHOWN, which the paragraph above promised and the code did not do — it
+       * discarded them and created immediately. They cannot VETO, because "100 Main St" with no
+       * locality agrees with every town; but silently dropping the one row that might be this building,
+       * on the path whose whole job is to avoid duplicating it, is the wrong half to keep.
+       */
+      uncorroboratedRematch.current = rematched.length > 0 ? rematched : null;
 
       propertyCreateAttempted.current = true;
       const created = await prospecting.createProperty(fetcher, {
@@ -544,6 +563,12 @@ export default function ProspectScreen() {
        * /properties/match runs first and why this control appears only after it came back empty.
        */
       setCreatePropertyError(null);
+      if (uncorroboratedRematch.current?.length) {
+        setRematchNotice(
+          "Added. There are already records with this street line but no city on file — worth a look on the web.",
+        );
+        uncorroboratedRematch.current = null;
+      }
       setProperty({
         id: created.id,
         name: created.name,
@@ -633,7 +658,9 @@ export default function ProspectScreen() {
         if (dropRetained) createdContactId.current = undefined;
         if (plan.action === "reuse") contactId = plan.contactId;
 
-        if (plan.action === "create") {
+        // Forcing overrides the "skip" a bare waiver would produce: the rep asked for this person to be
+      // added, not for the person to be dropped.
+      if (plan.action === "create" || contactForceCreate.current) {
           /**
            * The PERSON is optional; the VISIT is not.
            *
@@ -645,6 +672,8 @@ export default function ProspectScreen() {
             const created = await prospecting.createContact(fetcher, {
               firstName: first,
               lastName: last,
+              // Set only once the rep has seen the suggestions and said this is someone new.
+              skipDedupCheck: contactForceCreate.current || undefined,
               /**
                * NEUTRAL, because the screen never asks.
                *
@@ -907,6 +936,14 @@ export default function ProspectScreen() {
                   setContactQuery("");
                   contactQueryRef.current = "";
                   setContactResults(null);
+                  /* The ADDRESS goes too. Change cleared the property, the matches and the fix but left
+                     the geocoded and typed addresses behind, so picking the company fallback afterwards
+                     reused the previous building's address for the next one created. */
+                  setAddress(null);
+                  setManualAddress("");
+                  setManualCity("");
+                  setManualState("");
+                  setManualZip("");
                   setCompanyResults(null);
                   setCompanyQuery("");
                   companyQueryRef.current = "";
@@ -1360,6 +1397,7 @@ export default function ProspectScreen() {
                             contactQueryRef.current = next;
                             setContactSearchFailed(false);
                 setRematchNotice(null);
+                setCorrectingAddress(false);
                             // Stale rows are wrong the moment the text changes, and they stay tappable
                             // through the debounce otherwise.
                             setContactResults(null);
@@ -1434,7 +1472,7 @@ export default function ProspectScreen() {
                       control that captures a new building disappeared for good in exactly the
                       conditions a rep hits outdoors, and nothing else on this screen could take an
                       address. */}
-                  {company && !geocodeComplete ? (
+                  {company && (!geocodeComplete || correctingAddress) ? (
                     <View style={styles.dupBox}>
                       <Text style={styles.warn}>
                         Couldn&apos;t work out the address here. Type it to add the building, or just log
@@ -1485,6 +1523,28 @@ export default function ProspectScreen() {
                         style={styles.input}
                       />
                     </View>
+                  ) : null}
+
+                  {/* A COMPLETE geocode can still be the wrong building — GPS drift, or a large parcel
+                      whose centroid resolves to the neighbour. Without a way in, the rep who has
+                      already rejected every match has no route to the right address at all. */}
+                  {company && geocodeComplete && !correctingAddress ? (
+                    <Pressable
+                      testID="prospect-correct-address"
+                      onPress={() => {
+                        setCorrectingAddress(true);
+                        setManualAddress(address?.address ?? "");
+                        setManualCity(address?.city ?? "");
+                        setManualState(address?.state ?? "");
+                        setManualZip(address?.zip ?? "");
+                      }}
+                      disabled={targetsLocked}
+                      accessibilityRole="button"
+                      accessibilityLabel="Correct this address"
+                      style={styles.linkBtn}
+                    >
+                      <Text style={styles.linkText}>Not this address? Type the right one</Text>
+                    </Pressable>
                   ) : null}
 
                   {company && effectiveAddress ? (
@@ -1730,6 +1790,23 @@ export default function ProspectScreen() {
                 </Pressable>
               );
             })}
+            {/* "None of these" usually means THIS IS SOMEONE NEW, not "forget the person" — the same
+                choice the company prompt already offers. Waiving alone silently dropped a genuinely new
+                John Smith at a different company, with the screen still saying Logged. */}
+            <Pressable
+              testID="prospect-duplicate-force-contact"
+              onPress={() => {
+                contactForceCreate.current = true;
+                setDuplicateContacts(null);
+                save.mutate();
+              }}
+              disabled={save.isPending}
+              accessibilityRole="button"
+              accessibilityLabel="None of these — add this person as new"
+              style={styles.linkBtn}
+            >
+              <Text style={styles.linkText}>None of these — add as a new person</Text>
+            </Pressable>
             <Pressable
               testID="prospect-duplicate-skip"
               onPress={() => {
@@ -1791,6 +1868,7 @@ export default function ProspectScreen() {
                 createdContactId.current = undefined;
                 resolvedContactId.current = null;
                 contactWaived.current = false;
+                contactForceCreate.current = false;
                 setResolvedContactName(null);
                 setContactIndeterminate(false);
                 setDuplicateContacts(null);

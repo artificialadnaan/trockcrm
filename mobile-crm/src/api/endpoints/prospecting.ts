@@ -275,6 +275,13 @@ export async function createContact(
     mobile?: string;
     email?: string;
     companyId?: string;
+    /**
+     * Only after the rep has SEEN the suggestions and said none of them is this person.
+     *
+     * Mirrors the company path. Never sent on a first attempt — the prompt is the feature — but without
+     * it a rep who meets a genuinely new John Smith at a different company cannot add him at all.
+     */
+    skipDedupCheck?: boolean;
   },
 ): Promise<CreateResult<ContactRef>> {
   const body = await fetcher<Record<string, unknown>>("/contacts", { method: "POST", body: input });
