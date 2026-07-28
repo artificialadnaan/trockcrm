@@ -163,9 +163,14 @@ export const theme = {
    * and its metadata carried nearly the same weight and nothing on screen led. These steps are far
    * enough apart to establish rank at a glance.
    *
-   * `caption` is uppercase with positive tracking on purpose: at 11px, letterspaced small-caps reads as
-   * a deliberate label rather than shrunken body text, and it is how the industrial/technical register
-   * is carried without a second typeface.
+   * `caption` carries positive tracking on purpose: at 11px, letterspacing reads as a deliberate label
+   * rather than shrunken body text, and it is how the industrial/technical register is carried without
+   * a second typeface.
+   *
+   * It does NOT include `textTransform` — spreading it is only half the treatment. The transform stays
+   * with the component because the token serves two roles: field NAMES ("Days in stage", a Badge) want
+   * uppercase, while caption-sized CONTENT (a card's preview note) must not be shouted. A token that
+   * uppercased everything would silently shout the second group, so each site opts in.
    */
   type: {
     display: { fontFamily: FONT.black, fontSize: 34, lineHeight: 38, letterSpacing: -0.8 },

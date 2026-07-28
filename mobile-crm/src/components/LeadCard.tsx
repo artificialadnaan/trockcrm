@@ -94,14 +94,14 @@ const styles = StyleSheet.create({
     gap: theme.space.xs,
   },
   head: { flexDirection: "row", justifyContent: "space-between", gap: theme.space.sm },
-  name: { flex: 1, fontFamily: theme.font.bold, fontSize: 15, color: theme.color.inkNavy },
-  stage: { fontFamily: theme.font.semibold, fontSize: 12, color: theme.color.textSecondary },
-  company: { fontFamily: theme.font.semibold, fontSize: 13, color: theme.color.textSecondary },
+  name: { flex: 1, ...theme.type.title, color: theme.color.textPrimary },
+  stage: { ...theme.type.caption, color: theme.color.textSecondary },
+  company: { ...theme.type.caption, color: theme.color.textMuted, textTransform: "uppercase" },
   /* textSecondary, NOT textMuted — the same call the tab bar already documents. On the white card,
      #8A95A3 is about 3.0:1 and this line is 13pt, under the 4.5:1 floor for normal text; #4B5563 is
      7.6:1 and still reads as secondary against the 15pt name above it. This is the whole content of
      the card besides the name: project type, location and the assigned rep. */
-  meta: { fontFamily: theme.font.regular, fontSize: 13, color: theme.color.textSecondary },
+  meta: { ...theme.type.label, color: theme.color.textSecondary },
   badges: {
     flexDirection: "row",
     alignItems: "center",
@@ -109,5 +109,5 @@ const styles = StyleSheet.create({
     gap: theme.space.sm,
     marginTop: theme.space.xs,
   },
-  date: { fontFamily: theme.font.regular, fontSize: 12, color: theme.color.textSecondary },
+  date: { ...theme.type.caption, color: theme.color.textSecondary },
 });

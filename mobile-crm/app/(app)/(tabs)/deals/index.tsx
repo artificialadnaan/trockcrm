@@ -327,8 +327,8 @@ const styles = StyleSheet.create({
     alignItems: "baseline",
     justifyContent: "space-between",
   },
-  title: { fontFamily: theme.font.bold, fontSize: 26, color: theme.color.inkNavy },
-  count: { fontFamily: theme.font.regular, fontSize: 13, color: theme.color.textMuted },
+  title: { ...theme.type.h1, color: theme.color.textPrimary },
+  count: { ...theme.type.label, color: theme.color.textMuted },
   boardLink: {
     marginHorizontal: theme.space.lg,
     marginTop: theme.space.sm,
@@ -339,7 +339,7 @@ const styles = StyleSheet.create({
     borderColor: theme.color.border,
     backgroundColor: theme.color.surface,
   },
-  boardLinkText: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.redText },
+  boardLinkText: { ...theme.type.body, color: theme.color.redText },
   scopeRow: { flexDirection: "row", gap: theme.space.sm, paddingHorizontal: theme.space.lg, paddingTop: theme.space.md },
   scopePill: {
     borderRadius: theme.radius.pill,
@@ -353,7 +353,7 @@ const styles = StyleSheet.create({
   // primary text), so using it as a fill made the selected pill a light slab with white text on
   // it — invisible. A raised surface is what "selected" means everywhere else in this app.
   scopePillActive: { backgroundColor: theme.color.surfaceRaised, borderColor: theme.color.borderStrong },
-  scopeText: { fontFamily: theme.font.semibold, fontSize: 13, color: theme.color.textSecondary },
+  scopeText: { ...theme.type.label, color: theme.color.textSecondary },
   scopeTextActive: { color: theme.color.textPrimary },
   search: {
     margin: theme.space.lg,
@@ -363,24 +363,22 @@ const styles = StyleSheet.create({
     borderRadius: theme.radius.md,
     paddingHorizontal: theme.space.md,
     paddingVertical: theme.space.md,
-    fontFamily: theme.font.regular,
-    fontSize: 15,
+        ...theme.type.body,
     color: theme.color.textPrimary,
     backgroundColor: theme.color.surface,
   },
   searchHint: {
     marginHorizontal: theme.space.lg,
     marginBottom: theme.space.sm,
-    fontFamily: theme.font.regular,
-    fontSize: 13,
+        ...theme.type.label,
     color: theme.color.textMuted,
   },
   list: { padding: theme.space.lg, paddingTop: theme.space.sm, gap: theme.space.md },
   listEmpty: { flexGrow: 1 },
   footer: { paddingVertical: theme.space.lg },
   center: { flex: 1, alignItems: "center", justifyContent: "center", padding: theme.space.xl, gap: theme.space.sm },
-  errorTitle: { fontFamily: theme.font.bold, fontSize: 17, color: theme.color.inkNavy },
-  errorBody: { fontFamily: theme.font.regular, fontSize: 14, color: theme.color.textSecondary, textAlign: "center" },
+  errorTitle: { ...theme.type.h2, color: theme.color.textPrimary },
+  errorBody: { ...theme.type.body, color: theme.color.textSecondary, textAlign: "center" },
   retryBtn: {
     marginTop: theme.space.sm,
     borderWidth: 1,
@@ -389,5 +387,5 @@ const styles = StyleSheet.create({
     paddingHorizontal: theme.space.xl,
     paddingVertical: theme.space.md,
   },
-  retryText: { fontFamily: theme.font.bold, fontSize: 14, color: theme.color.redText },
+  retryText: { ...theme.type.body, color: theme.color.redText },
 });

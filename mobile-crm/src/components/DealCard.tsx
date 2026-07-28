@@ -165,10 +165,12 @@ const styles = StyleSheet.create({
     gap: theme.space.xs,
   },
   headerRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start", gap: theme.space.sm },
-  name: { flex: 1, fontFamily: theme.font.bold, fontSize: 16, color: theme.color.inkNavy },
-  amount: { fontFamily: theme.font.bold, fontSize: 15, color: theme.color.textPrimary },
-  company: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.textSecondary },
-  meta: { fontFamily: theme.font.regular, fontSize: 13, color: theme.color.textMuted },
+  name: { flex: 1, ...theme.type.title, color: theme.color.textPrimary },
+  // h2 + tabular figures, matching BoardCard — the same deal must not look different depending on
+  // which list it is in, and money that shifts width as it scrolls reads as noise.
+  amount: { ...theme.type.h2, color: theme.color.textPrimary, fontVariant: ["tabular-nums"] },
+  company: { ...theme.type.caption, color: theme.color.textMuted, textTransform: "uppercase" },
+  meta: { ...theme.type.label, color: theme.color.textSecondary },
   badgeRow: {
     flexDirection: "row",
     alignItems: "center",
@@ -182,10 +184,10 @@ const styles = StyleSheet.create({
     paddingHorizontal: theme.space.md,
     paddingVertical: 3,
   },
-  stagePillText: { fontFamily: theme.font.semibold, fontSize: 12, color: theme.color.textSecondary },
+  stagePillText: { ...theme.type.caption, color: theme.color.textSecondary },
   // textSecondary, not textMuted: #8A95A3 on white is ~3:1, under the 4.5:1 floor for normal
   // text, and at 12px on a phone outdoors it is the first thing to become unreadable.
-  closeDate: { fontFamily: theme.font.regular, fontSize: 12, color: theme.color.textSecondary },
+  closeDate: { ...theme.type.caption, color: theme.color.textSecondary },
 });
 
 /**

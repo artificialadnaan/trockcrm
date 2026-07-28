@@ -66,8 +66,8 @@ const styles = StyleSheet.create({
     gap: theme.space.sm,
     alignItems: "flex-start",
   },
-  title: { fontFamily: theme.font.semibold, fontSize: 15, color: theme.color.textPrimary },
-  body: { fontFamily: theme.font.regular, fontSize: 13, color: theme.color.textSecondary },
+  title: { ...theme.type.title, color: theme.color.textPrimary },
+  body: { ...theme.type.label, color: theme.color.textSecondary },
   button: {
     marginTop: theme.space.xs,
     minHeight: 44,
@@ -78,5 +78,5 @@ const styles = StyleSheet.create({
     borderColor: theme.color.brandRed,
   },
   buttonBusy: { opacity: 0.6 },
-  buttonText: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.redText },
+  buttonText: { ...theme.type.label, color: theme.color.redText },
 });
