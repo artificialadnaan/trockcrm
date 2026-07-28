@@ -57,18 +57,18 @@ export interface AtRiskDealInput {
   /** The deal's close target (= expected_close_date); drives close-target suppression / auto-on-hold. */
   expectedCloseDate?: string | Date | null;
   /**
-   * The deal's BID due date (`deals.bid_due_date`). Used ONLY for the 90+ day auto-on-hold exclusion, and
-   * ONLY while the deal is in the genuine 'estimating' stage, where it replaces the close target as the
-   * auto-park horizon (2026-07-27). It deliberately does NOT feed the shorter close-target SLA
-   * suppression, which stays keyed on expected_close_date in every stage. A caller that forgets to select
-   * it does not error — the row silently keeps the old close-target rule, so every at-risk row source
-   * must forward it.
+   * The deal's BID due date (`deals.bid_due_date`). Read ONLY while the deal is in the genuine
+   * 'estimating' stage, where it replaces the close target as the horizon for BOTH the 90+ day
+   * auto-on-hold exclusion (2026-07-27) AND the shorter at-risk SLA suppression (2026-07-28, superseding
+   * the original decision to scope it to auto-park alone). Every other stage stays on
+   * expected_close_date. A caller that forgets to select it does not error — the row silently keeps the
+   * close-target rule, so every at-risk row source must forward it.
    */
   bidDueDate?: string | Date | null;
   /**
-   * Whether a today-or-future close target inside the auto-hold window should suppress risk.
+   * Whether a today-or-future hold horizon date inside the auto-hold window should suppress risk.
    * Defaults to true for deal-detail style SLA messaging. Callers that only want the 90+ day
-   * effective-hold exclusion should pass false while still forwarding expectedCloseDate.
+   * effective-hold exclusion should pass false while still forwarding expectedCloseDate/bidDueDate.
    */
   applyCloseTargetSuppression?: boolean;
 }
@@ -305,6 +305,11 @@ export function getDealAtRiskResult(
       applyCloseTargetSuppression &&
       isAtRiskSuppressedByCloseTarget({
         expectedCloseDate: deal.expectedCloseDate,
+        // Estimating deals are measured against the BID due date on BOTH legs (2026-07-28). Passing the
+        // same bidDueDate/isEstimating pair the auto-park above receives is what keeps one deal from
+        // being parked off one date and nagged off another.
+        bidDueDate: deal.bidDueDate,
+        isEstimating: canonicalStageSlug === ESTIMATING_STAGE_SLUG,
         now,
       }),
   });
