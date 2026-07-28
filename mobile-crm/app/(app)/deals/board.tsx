@@ -141,7 +141,15 @@ export default function PipelineBoardScreen() {
               accessibilityState={{ selected: active }}
               style={[styles.segment, active && styles.segmentActive]}
             >
-              <Text style={[styles.segmentText, active && styles.segmentTextActive]}>
+              {/* The label is stated explicitly because textTransform is NOT enough on its own:
+                  RCTAttributedTextUtils applies the transform before building the attributed string,
+                  and RCTParagraphComponentView.accessibilityLabel falls back to that transformed
+                  string — so VoiceOver would still say "M-I-N-E". An explicit label wins over the
+                  fallback, which is the only way to draw caps and speak words. */}
+              <Text
+                accessibilityLabel={s.label}
+                style={[styles.segmentText, active && styles.segmentTextActive]}
+              >
                 {s.label}
               </Text>
             </Pressable>
@@ -199,6 +207,7 @@ export default function PipelineBoardScreen() {
                 >
                   <View style={styles.stageTabRow}>
                     <Text
+                      accessibilityLabel={col.stage.name}
                       style={[styles.stageName, isActive && styles.stageNameActive]}
                       numberOfLines={1}
                     >
@@ -239,7 +248,12 @@ export default function PipelineBoardScreen() {
               }
               ListHeaderComponent={
                 <View style={styles.columnSummary}>
-                  <Text style={styles.columnLabel}>{selected.stage.name} · Total</Text>
+                  <Text
+                    accessibilityLabel={`${selected.stage.name} · Total`}
+                    style={styles.columnLabel}
+                  >
+                    {selected.stage.name} · Total
+                  </Text>
                   <Text style={styles.columnValue}>{formatColumnValue(selected.totalValue)}</Text>
                   {/* TWO server facts, not a third derived from them. `activeCount` counts only the
                       STORED on_hold flag (deals/service.ts:2000-2002), while a card is badged "On hold"

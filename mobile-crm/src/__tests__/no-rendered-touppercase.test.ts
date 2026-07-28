@@ -3,38 +3,49 @@ import path from "path";
 import * as ts from "typescript";
 
 /**
- * Tree-wide guard: uppercase is a STYLE, never a string operation on rendered text.
+ * Tree-wide guard: never uppercase rendered text with a string operation.
  *
  * VoiceOver reads a short all-caps string as an initialism — "WON" becomes "W-O-N", a stage tab reads
- * letter by letter, and the board's scope segments ("MINE", "ALL") stop being words. `textTransform:
- * "uppercase"` changes only the glyphs drawn; the accessible name stays "Won", so the same screen looks
- * identical and reads correctly. `String.toUpperCase()` changes the text itself and there is no way to
- * recover the original downstream.
+ * letter by letter, and the board's scope segments ("MINE", "ALL") stop being words.
+ *
+ * TEXTTRANSFORM ALONE DOES NOT FIX THIS ON iOS, which is worth stating plainly because the obvious
+ * belief is that it does. In the bundled RN 0.81.5,
+ * `RCTAttributedTextUtils.mm` applies `RCTNSStringFromStringApplyingTextTransform` to the fragment
+ * BEFORE building the attributed string, and `RCTParagraphComponentView.accessibilityLabel` returns
+ * `self.attributedText.string` whenever no explicit label is set. The transformed text is therefore
+ * exactly what gets spoken. Correct output needs BOTH:
+ *
+ *   - `textTransform: "uppercase"` in the style, so the glyphs are drawn in caps; and
+ *   - an explicit mixed-case `accessibilityLabel`, which takes priority over that fallback.
+ *
+ * So why ban the string call at all, if a label is required either way? Because `.toUpperCase()`
+ * destroys the mixed-case original AT THE SOURCE — there is then nothing left to label with, and the
+ * accessible name cannot be recovered downstream. Keeping the string intact is what makes the label
+ * possible; this guard protects that, not the visual result.
  *
  * Three sites shipped in #976 before this existed — the scope segments, the stage tabs, and the column
  * summary — and all three passed review and a green build, because nothing about them looks wrong in a
  * diff. That is what this file is for.
  *
- * WHAT IT FLAGS: a `.toUpperCase()` call that is reachable from JSX — inside a JSX expression container
- * (`{x.toUpperCase()}`) or a JSX attribute (`accessibilityLabel={x.toUpperCase()}`). That is the exact
- * shape that reaches a screen reader.
+ * WHAT IT FLAGS: `.toUpperCase()` / `.toLocaleUpperCase()` whose result is rendered — a child-position
+ * JSX expression, or a non-handler attribute such as `accessibilityLabel`.
  *
- * WHAT IT DELIBERATELY ALLOWS, because none of it is displayed as shouted text:
+ * WHAT IT DELIBERATELY ALLOWS, because none of it is spoken:
  *   - normalisation and comparison — `method.toUpperCase()` when building a request header;
- *   - title-casing helpers — `s.charAt(0).toUpperCase() + s.slice(1)`, which produces "Site visit",
- *     not "SITE VISIT", and is a different operation that happens to share a method name.
- * Both live in ordinary functions, so restricting the check to JSX separates them structurally rather
- * than by maintaining a list of blessed filenames.
+ *   - title-casing helpers — `s.charAt(0).toUpperCase() + s.slice(1)`, which yields "Site visit", a
+ *     different operation that happens to share a method name;
+ *   - event handlers — `onPress={() => SAFE.has(m.toUpperCase())}`, whose value is never displayed.
+ * These are separated STRUCTURALLY, by where the value goes, rather than by a list of blessed files.
  *
  * WHY IT PARSES INSTEAD OF GREPPING. `grep toUpperCase` cannot tell a header from a label, and its
- * failure mode is the dangerous direction: a guard that cannot classify tends to get an allowlist, and
- * an allowlist entry is permanent. Against a syntax tree the question "is this call inside JSX?" is a
- * walk up the parent chain. A file that fails to parse is reported as a FAILURE rather than skipped —
- * silently dropping unparseable input is fail-open, which is how a sibling guard was disarmed by a
- * comment sitting in the wrong place (#958).
+ * failure mode runs the wrong way: a guard that cannot classify acquires an allowlist, and an allowlist
+ * entry is permanent. A file that fails to parse is a FAILURE rather than a skip — silently dropping
+ * unparseable input is fail-open, which is how a sibling guard was disarmed by a misplaced comment
+ * (#958).
  *
  * KNOWN LIMIT: single-file and syntactic. A helper that uppercases and is rendered elsewhere is not
- * caught. Green means "no direct route", not a proof.
+ * caught, and neither is a missing `accessibilityLabel` — that is a judgement this cannot make. Green
+ * means "no direct route", not a proof.
  */
 
 const ROOT = path.resolve(__dirname, "../..");
@@ -54,20 +65,49 @@ function sourceFiles(dir: string): string[] {
   return out;
 }
 
-/** True when the node sits inside rendered JSX — an expression container or an attribute value. */
-function isInsideJsx(node: ts.Node): boolean {
+/**
+ * True when the call's result reaches a screen reader.
+ *
+ * The first version stopped at a *function boundary* to exempt event handlers, which was wrong twice
+ * over. It only recognised declarations, so `onPress={() => SAFE.has(m.toUpperCase())}` — an arrow, the
+ * form every handler here actually uses — was still reported. And had it stopped at arrows, it would
+ * have gone blind to `{items.map((i) => <Text>{i.name.toUpperCase()}</Text>)}`, which is how most
+ * rendered text in this app is produced. A boundary cannot separate these: the arrow is inside JSX in
+ * both, and what differs is where its VALUE goes.
+ *
+ * So walk outward and let the nearest JSX context decide:
+ *   - a child-position expression (`<Text>{...}</Text>`) is rendered;
+ *   - an `on*` attribute is a handler — its return value is never spoken;
+ *   - any other attribute (`accessibilityLabel`, `title`) IS spoken.
+ * The map case resolves against the inner `<Text>` it returns, which is the correct answer.
+ */
+function isRenderedText(node: ts.Node): boolean {
   for (let cur = node.parent; cur; cur = cur.parent) {
-    if (ts.isJsxExpression(cur) || ts.isJsxAttribute(cur)) return true;
-    // A function boundary ends the search: a callback defined inside JSX (an onPress handler) is not
-    // itself rendered, and its uppercase would be normalisation rather than display.
-    if (ts.isFunctionDeclaration(cur) || ts.isMethodDeclaration(cur)) return false;
+    if (ts.isJsxAttribute(cur)) {
+      const name = ts.isIdentifier(cur.name) ? cur.name.text : cur.name.getText();
+      // Handlers are named onPress/onChangeText/... — their result is not displayed.
+      return !/^on[A-Z]/.test(name);
+    }
+    if (ts.isJsxExpression(cur)) {
+      const parent = cur.parent;
+      // A child-position expression renders; an attribute-position one is handled by the branch above
+      // on the next iteration.
+      if (parent && (ts.isJsxElement(parent) || ts.isJsxFragment(parent))) return true;
+    }
   }
   return false;
 }
 
+/** Both spellings mutate the accessible string identically. */
+const UPPERCASE_METHODS = new Set(["toUpperCase", "toLocaleUpperCase"]);
+
 function findings(file: string): string[] {
   const text = fs.readFileSync(file, "utf8");
-  const sf = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  // ScriptKind by EXTENSION. Parsing a .ts file as TSX makes valid TypeScript-only angle-bracket
+  // syntax — `const x = <Foo>value`, a generic arrow — read as unclosed JSX, and since diagnostics
+  // deliberately fail this guard, one ordinary .ts addition would break the suite for no reason.
+  const kind = file.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS;
+  const sf = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, kind);
   // A parse failure must FAIL, not skip — a guard that silently drops what it cannot read is worse
   // than no guard, because the green tick still gets reported.
   const syntactic = (sf as unknown as { parseDiagnostics?: ts.Diagnostic[] }).parseDiagnostics ?? [];
@@ -80,8 +120,8 @@ function findings(file: string): string[] {
     if (
       ts.isCallExpression(node) &&
       ts.isPropertyAccessExpression(node.expression) &&
-      node.expression.name.text === "toUpperCase" &&
-      isInsideJsx(node)
+      UPPERCASE_METHODS.has(node.expression.name.text) &&
+      isRenderedText(node)
     ) {
       const { line } = sf.getLineAndCharacterOfPosition(node.getStart(sf));
       hits.push(`${path.relative(ROOT, file)}:${line + 1}`);
@@ -112,8 +152,8 @@ describe("no toUpperCase() on rendered text", () => {
         if (
           ts.isCallExpression(node) &&
           ts.isPropertyAccessExpression(node.expression) &&
-          node.expression.name.text === "toUpperCase" &&
-          isInsideJsx(node)
+          UPPERCASE_METHODS.has(node.expression.name.text) &&
+          isRenderedText(node)
         ) {
           hits.push("hit");
         }
@@ -142,6 +182,24 @@ describe("no toUpperCase() on rendered text", () => {
 
     it("allows a title-casing helper", () => {
       expect(check("function cap(s: string) { return s.charAt(0).toUpperCase() + s.slice(1); }")).toBe(0);
+    });
+
+    it("catches the locale-aware spelling, which mutates the string identically", () => {
+      expect(check("const A = () => <Text>{s.name.toLocaleUpperCase()}</Text>;")).toBe(1);
+    });
+
+    it("allows an INLINE arrow handler — the form every handler here actually uses", () => {
+      // The first walker only treated declarations as boundaries, so this ordinary onPress was
+      // reported as rendered text.
+      expect(check("const A = () => <Pressable onPress={() => SAFE.has(m.toUpperCase())} />;")).toBe(0);
+    });
+
+    it("still catches uppercase inside a .map that RETURNS JSX", () => {
+      // The mirror risk: exempting arrows outright would blind the guard to how most rendered text in
+      // this app is produced.
+      expect(
+        check("const A = () => <View>{xs.map((i) => <Text>{i.name.toUpperCase()}</Text>)}</View>;"),
+      ).toBe(1);
     });
 
     it("is not fooled by the identifier appearing in a comment", () => {
