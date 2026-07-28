@@ -8,6 +8,7 @@ import {
 } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import {
+  RFP_ROUND_SCOPED_JOB_TYPES,
   commissionAckKey,
   evaluateReturnToOpportunityEligibility,
   type ReturnToOpportunityEligibility,
@@ -173,6 +174,53 @@ function buildBidBoardDetachUpdate(
  *     guard is what stops a late 'created' from re-approving + re-owning the deal. It only fires if we
  *     null the status.
  */
+/**
+ * The terminal-outcome fields, cleared by THIS action rather than inherited from changeDealStage.
+ *
+ * THE RULE, decided once so it stops being rediscovered field by field:
+ *
+ *   The move-back owes a deal everything that makes it a LIVE OPPORTUNITY again — regardless of whether
+ *   the stage id actually changed. It does NOT owe stage-TRANSITION bookkeeping, because on the
+ *   already-at-Opportunity path no transition happened.
+ *
+ * WHY IT HAS TO OWN THIS. changeDealStage returns through a same-stage no-op (stage-change.ts:176)
+ * before ANY of its body runs, and this action explicitly supports moving back a deal that is already
+ * at Opportunity — the mirror parks Won-family deals there while they still carry a signed date, money
+ * and terminal dates. So on that path the entire tail of changeDealStage is skipped. Approval
+ * retirement was the first casualty of this and is already owned here; this is the second, and the
+ * pattern is what is being fixed rather than the instance.
+ *
+ * Both halves matter:
+ *  • actual_close_date / won_closed_date — won_closed_date is the app-owned Won-period reporting basis
+ *    (migration 0141) that every Won report keys off, and open-deal forecast fallbacks can select a
+ *    stale actual_close_date. A deal sitting at Opportunity carrying either is precisely the
+ *    "simultaneously an open opportunity AND closed business" drift this repo keeps re-introducing.
+ *  • lost_reason_id / lost_notes / lost_competitor / lost_at — a Lost-family deal walked back to
+ *    Opportunity by the mirror keeps a loss reason that no longer describes anything.
+ *
+ * Idempotent by construction: when the stage DOES change, changeDealStage clears the same six fields a
+ * moment later (Opportunity is non-terminal, so it only clears and never re-sets). Overlapping is free;
+ * a gap is not.
+ *
+ * WHAT IS DELIBERATELY NOT CLAIMED HERE — stated so it is a decision, not an omission. The same-stage
+ * path also skips changeDealStage's stage-history insert, its stage timers, its logActivity call and
+ * its stage-change domain events. Those all describe a stage TRANSITION, and on this path the deal did
+ * not transition — synthesising an Opportunity→Opportunity history row or a deal.stage.changed event
+ * would be fabricating a move that never happened, and deal_stage_history drift is a known hazard here.
+ * The action is not silent on that path either: it writes its own audit_log header row and its own
+ * deal_history timeline row unconditionally, which is what makes the move discoverable.
+ */
+function buildTerminalOutcomeReset() {
+  return {
+    actualCloseDate: null,
+    wonClosedDate: null,
+    lostReasonId: null,
+    lostNotes: null,
+    lostCompetitor: null,
+    lostAt: null,
+  } as const;
+}
+
 function buildRfpCycleReset() {
   return {
     rfpApprovalStatus: null,
@@ -226,10 +274,7 @@ function buildRfpCycleReset() {
  * also refuses to write RFP state back onto a deal that is no longer in the round the job was built for
  * (worker/src/jobs/rfp-request-delivery.ts). Neither half suffices alone.
  */
-async function cancelQueuedRfpJobs(
-  tenantDb: TenantDb,
-  dealId: string
-): Promise<{ cancelled: number; deliveryInFlight: boolean }> {
+async function cancelQueuedRfpJobs(tenantDb: TenantDb, dealId: string): Promise<number> {
   // The deal_rfp_delivery lock that serializes this with the RFP workers is NOT taken here. It is taken
   // by the caller as one of the transaction's first statements, BEFORE the deal row lock — see
   // deal-rfp-delivery-lock.ts. Taking it here, after `loadDealOrThrow(…, FOR UPDATE)`, inverted the
@@ -244,40 +289,59 @@ async function cancelQueuedRfpJobs(
              jsonb_set(payload, '{cancelledBy}', '"return_to_opportunity"'::jsonb, true),
              '{dealHandled}', 'true'::jsonb, true
            )
-     WHERE job_type IN ('rfp_request_delivery', 'rfp_bidboard_create', 'rfp_vote_invitation')
+     -- Bound as an array parameter, driven by the ONE shared constant rather than a hand-written list.
+     -- The inline list here covered 3 of the 7 rfp_* job types and gained exactly one per review round;
+     -- a list nobody can check is a list that drifts. RFP_ROUND_SCOPED_JOB_TYPES is asserted against the
+     -- worker's real handler registry, so a new rfp_* job cannot silently miss this cancellation.
+     -- Interpolating a JS array here expands to a bound tuple ($1, $2, ...), i.e. an IN-list — NOT a
+     -- single array parameter, so an = ANY(...) form would be a syntax error.
+     WHERE job_type IN ${[...RFP_ROUND_SCOPED_JOB_TYPES]}
        AND status IN ('pending', 'dead')
        AND payload->>'dealId' = ${dealId}
   `);
 
-  // A delivery job a worker is RUNNING RIGHT NOW cannot be cancelled — the cancel above deliberately
-  // only touches 'pending'/'dead'. It can, however, be OBSERVED, and that is the one thing this
-  // transaction was previously unable to do.
-  //
-  // 'processing' is stamped by the queue's claim transaction (worker/src/queue.ts) and COMMITTED before
-  // the handler runs, so unlike the handler's own advisory lock — which is transaction-scoped and gone
-  // by the time it POSTs — the marker survives across the send. Reading it under the same
-  // deal_rfp_delivery lock is therefore a reservation the two sides can detect each other through: if a
-  // row is here, a worker holds this deal's delivery and may already have put a request on the wire.
-  //
-  // It CANNOT tell us whether the POST actually happened: if this transaction won the lock race the
-  // worker's pre-send recheck will read the cleared cycle and decline, and if it lost, the worker sent.
-  // Both look identical from here. So this is deliberately reported as "a submission MAY exist", not as
-  // a fact — an over-warning the operator can resolve by looking, which is strictly better than the
-  // silence it replaces. Preventing the submission outright is not achievable on this side at all: an
-  // outbound POST is not retractable, and any reservation that made this transaction wait or refuse
-  // would only move the orphan later, not remove it. That needs a SyncHub-side handshake.
-  const inFlight = await tenantDb.execute(sql`
-    SELECT 1
+  return (result as unknown as { rowCount?: number }).rowCount ?? 0;
+}
+
+/**
+ * Which of this deal's RFP jobs a worker is RUNNING RIGHT NOW.
+ *
+ * A claimed job cannot be cancelled — cancelQueuedRfpJobs deliberately only touches 'pending'/'dead' —
+ * but it CAN be observed, and that is the one thing this transaction was previously unable to do.
+ * `status = 'processing'` is stamped by the queue's claim transaction (worker/src/queue.ts) and
+ * COMMITTED before the handler runs, so unlike the handlers' own advisory lock — transaction-scoped, and
+ * already released by the time they POST — the marker survives across the send. Read under the same
+ * deal_rfp_delivery lock, it is a reservation the two sides can detect each other through.
+ *
+ * It CANNOT tell us whether the POST actually happened: if this transaction won the lock race the
+ * worker's pre-send recheck reads the cleared cycle and declines; if it lost, the worker sent. The two
+ * are indistinguishable from here, so both flags mean MAY, never DID. An over-warning the operator can
+ * resolve by looking is strictly better than the silence it replaces. Preventing either send outright is
+ * not achievable on this side: an outbound POST is not retractable, and any reservation that made this
+ * transaction wait or refuse would only move the orphan later. That needs a SyncHub-side handshake.
+ *
+ * Runs BEFORE the detach UPDATE precisely because `createInFlight` feeds wasBidBoardLinked, which the
+ * UPDATE persists.
+ */
+async function probeInFlightRfpJobs(
+  tenantDb: TenantDb,
+  dealId: string
+): Promise<{ deliveryInFlight: boolean; createInFlight: boolean }> {
+  const rows = await tenantDb.execute(sql`
+    SELECT job_type
       FROM public.job_queue
-     WHERE job_type = 'rfp_request_delivery'
+     WHERE job_type IN ('rfp_request_delivery', 'rfp_bidboard_create')
        AND status = 'processing'
        AND payload->>'dealId' = ${dealId}
-     LIMIT 1
   `);
-
+  const claimed = new Set(
+    (((rows as unknown as { rows?: Array<{ job_type?: string }> }).rows ?? []) as Array<{
+      job_type?: string;
+    }>).map((row) => row.job_type)
+  );
   return {
-    cancelled: (result as unknown as { rowCount?: number }).rowCount ?? 0,
-    deliveryInFlight: ((inFlight as unknown as { rows?: unknown[] }).rows ?? []).length > 0,
+    deliveryInFlight: claimed.has("rfp_request_delivery"),
+    createInFlight: claimed.has("rfp_bidboard_create"),
   };
 }
 
@@ -605,7 +669,25 @@ export async function returnDealToOpportunity(
   const now = new Date();
   // Same predicate the preview used to tell the operator "go delete this from the Bid Board", so the
   // audit trail can never disagree with the instruction the operator was given.
-  const wasBidBoardLinked = isDealBidBoardLinked(deal);
+  // Probe BEFORE the detach UPDATE: an in-flight Bid Board create changes what this deal can honestly
+  // claim about its linkage, and the UPDATE persists that claim.
+  const { deliveryInFlight, createInFlight } = await probeInFlightRfpJobs(tenantDb, input.dealId);
+
+  // "Was this deal bound to a real Bid Board project?" — now including "…or may have just become bound,
+  // because a create was on the wire as this ran."
+  //
+  // The false branch is not merely unreported, it is INVISIBLE: for a deal with no prior linkage the
+  // standing banner and the toast both assert nothing was linked, so a project the create job may have
+  // just produced externally has NOTHING anywhere pointing at it — not the banner, not the timeline, not
+  // the CRM at all. That is strictly worse than the delivery-side orphan, where the reminder is at least
+  // on screen. The POST is not retractable, so the fix is to make the REPORTING honest: if a create was
+  // claimed, the operator is told to go look, exactly as they would be for a project that certainly
+  // existed. Over-warning costs one glance at the Bid Board; under-warning costs an orphan nobody knows
+  // to look for.
+  //
+  // The audit metadata records bidBoardCreateInFlight separately, so the trail can still distinguish
+  // "a project definitely existed" from "one may have just been created".
+  const wasBidBoardLinked = isDealBidBoardLinked(deal) || createInFlight;
 
   // Clearing the contract-signed date alongside the commission void is NOT optional. The Contracts
   // Signed YTD/MTD query (buildRepContractsSignedSql, dashboard/service.ts) has NO stage predicate at
@@ -624,6 +706,10 @@ export async function returnDealToOpportunity(
       deal.bidBoardDetachedWasLinked === true
     ),
     ...buildRfpCycleReset(),
+    // Owned here, not inherited: changeDealStage's same-stage no-op returns before its terminal-field
+    // clear, and this action explicitly supports a deal that is ALREADY at Opportunity. See
+    // buildTerminalOutcomeReset for the rule and for what is deliberately not claimed.
+    ...buildTerminalOutcomeReset(),
     ...(eligibility.voidsCommission
       ? { contractSignedDate: null, contractSignedAt: null }
       : {}),
@@ -655,7 +741,7 @@ export async function returnDealToOpportunity(
   // payload and write the cycle straight back. Cancelled in THIS transaction so it commits atomically
   // with the reset — a job cancelled but a reset that rolled back, or vice versa, is the incoherent
   // outcome. See cancelQueuedRfpJobs for why the worker carries the other half of this guard.
-  const { deliveryInFlight } = await cancelQueuedRfpJobs(tenantDb, input.dealId);
+  await cancelQueuedRfpJobs(tenantDb, input.dealId);
 
   // Did this move-back retire a cycle SyncHub already has a copy of? The CRM cannot withdraw a
   // submission, so — exactly as with the Bid Board project this action also cannot delete — the honest
@@ -811,6 +897,9 @@ export async function returnDealToOpportunity(
         // "SyncHub had already answered" without re-deriving it.
         rfpStatusCleared,
         rfpDeliveryInFlight: deliveryInFlight,
+        // Kept separate from wasBidBoardLinked so the trail distinguishes "a Bid Board project
+        // definitely existed" from "a create was on the wire, so one may have just been produced".
+        bidBoardCreateInFlight: createInFlight,
         rfpSubmissionMayExist,
         fromStageSlug: currentStage?.slug ?? null,
       },

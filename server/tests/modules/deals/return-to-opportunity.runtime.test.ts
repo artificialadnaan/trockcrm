@@ -10,6 +10,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
+import { RFP_ROUND_SCOPED_JOB_TYPES } from "@trock-crm/shared/types";
 import {
   auditLog,
   dealApprovals,
@@ -846,6 +847,41 @@ describe("returnDealToOpportunity — permissions and state blocks", () => {
     expect(rows).toHaveLength(0);
   });
 
+  // THE SAME-STAGE SKIP SET, second instance. changeDealStage returns through its same-stage no-op
+  // (stage-change.ts:176) before its whole body runs, and this action explicitly supports a deal already
+  // parked at Opportunity by the mirror while still carrying Won/Lost state. Approval retirement was the
+  // first thing that fell through that hole; the terminal fields are the second, so the move-back now
+  // owns them outright rather than inheriting them.
+  //
+  // won_closed_date is the one that actually corrupts reporting: it is the app-owned Won-period basis
+  // (0141) every Won report keys off, so a deal sitting at Opportunity carrying it is counted as closed
+  // business AND open pipeline at once. A stale actual_close_date gets picked up by open-deal forecast
+  // fallbacks. All six are asserted, because naming only the ones a reviewer happened to mention is how
+  // this became a two-round finding in the first place.
+  it("clears ALL SIX terminal fields even when Opportunity is ALREADY the current stage", async () => {
+    const D = U("d218");
+    await seedBidBoardDeal(D, { stageId: OPP_STAGE });
+    await pg.exec(
+      `UPDATE public.deals
+          SET actual_close_date = '2026-04-01', won_closed_date = '2026-04-01',
+              lost_reason_id = NULL, lost_notes = 'undercut', lost_competitor = 'Acme Roofing',
+              lost_at = '2026-04-02T00:00:00Z'
+        WHERE id = '${D}'`
+    );
+
+    await returnDealToOpportunity(tdb, {
+      dealId: D, userId: ADMIN, userRole: "admin", reason: "Mirror parked it at Opportunity still closed", auditContext,
+    });
+
+    const row = await dealRow(D);
+    expect(row.actual_close_date).toBeNull();
+    expect(row.won_closed_date).toBeNull();
+    expect(row.lost_reason_id).toBeNull();
+    expect(row.lost_notes).toBeNull();
+    expect(row.lost_competitor).toBeNull();
+    expect(row.lost_at).toBeNull();
+  });
+
   // REQUIREMENT (a): the retirement must leave the deal ABLE to request that approval again.
   //
   // `deal_approvals` is UNIQUE on (deal_id, target_stage_id, required_role) with `status` NOT in the
@@ -1214,6 +1250,75 @@ describe("returnDealToOpportunity — queued RFP work is cancelled with the cycl
     expect(rows[0].status).toBe("completed");
     expect(rows[0].payload.cancelledBy).toBe("return_to_opportunity");
     expect(rows[0].payload.dealHandled).toBe(true);
+  });
+
+  // ALL SEVEN rfp_* job types, from the shared constant. The inline list covered three and gained
+  // exactly one per review round; the set is now derived from RFP_ROUND_SCOPED_JOB_TYPES and checked
+  // against the worker's real handler registry by an invariant test, so this asserts the SQL actually
+  // consumes the whole constant rather than a subset of it.
+  it("cancels EVERY round-scoped rfp_* job type, not a hand-picked subset", async () => {
+    const D = U("d610");
+    await seedBidBoardDeal(D);
+    for (const jobType of RFP_ROUND_SCOPED_JOB_TYPES) {
+      await queueRfpJob(D, jobType);
+    }
+
+    await returnDealToOpportunity(tdb, {
+      dealId: D, userId: ADMIN, userRole: "admin", reason: "Retire the whole cycle", auditContext,
+    });
+
+    // Scoped to rfp_* — the move-back also writes its own outbox domain_event carrying the same dealId.
+    const { rows } = await pg.query<{ job_type: string; status: string; payload: Record<string, unknown> }>(
+      `SELECT job_type, status, payload FROM public.job_queue
+        WHERE payload->>'dealId' = '${D}' AND job_type LIKE 'rfp\\_%'
+        ORDER BY job_type`
+    );
+    expect(rows.map((row) => row.job_type)).toEqual([...RFP_ROUND_SCOPED_JOB_TYPES].sort());
+    for (const row of rows) {
+      expect(row.status).toBe("completed");
+      expect(row.payload.cancelledBy).toBe("return_to_opportunity");
+    }
+  });
+
+  // A CLAIMED Bid Board create cannot be cancelled, and its orphan is invisible rather than merely
+  // unreported: for a deal with no prior linkage the standing banner and the toast both assert nothing
+  // was linked, so a project the create may have just produced has nothing anywhere pointing at it.
+  // The POST is not retractable; the reporting is what gets fixed.
+  it("does not claim 'nothing was linked' while a Bid Board CREATE was in flight", async () => {
+    const D = U("d611");
+    // No Bid Board linkage at all — the case where the banner would otherwise stay silent.
+    await seedBidBoardDeal(D, { isBidBoardOwned: false });
+    // Every arm of isDealBidBoardLinked cleared, identity columns included — otherwise the seed's
+    // procore_bid_id alone makes the deal "linked" and the assertion below would pass without the fix.
+    await pg.exec(
+      `UPDATE public.deals
+          SET is_bid_board_owned = false, bid_board_project_number = NULL,
+              bid_board_linked_at = NULL, read_only_synced_at = NULL,
+              procore_bid_id = NULL, synchub_bid_board_id = NULL, procore_company_id = NULL
+        WHERE id = '${D}'`
+    );
+    await queueRfpJob(D, "rfp_bidboard_create", "processing");
+
+    const result = await returnDealToOpportunity(tdb, {
+      dealId: D, userId: ADMIN, userRole: "admin", reason: "Moved while a create was claimed", auditContext,
+    });
+
+    // The operator is pointed at the Bid Board instead of being told there was nothing there…
+    expect(result.wasBidBoardLinked).toBe(true);
+    const row = await dealRow(D);
+    expect(row.bid_board_detached_was_linked).toBe(true);
+    const { rows: history } = await pg.query<{ reason: string }>(
+      `SELECT reason FROM public.deal_history WHERE deal_id = '${D}' AND source = 'return_to_opportunity'`
+    );
+    expect(history[0].reason).toContain("disconnected from Bid Board");
+
+    // …while the audit trail still distinguishes "may have just been created" from "definitely existed".
+    const { rows: audits } = await pg.query<{ full_row: Record<string, unknown> }>(
+      `SELECT full_row FROM public.audit_log
+        WHERE record_id = '${D}' AND table_name = 'deals'
+          AND full_row ->> 'source' = 'return_to_opportunity'`
+    );
+    expect(audits[0].full_row.bidBoardCreateInFlight).toBe(true);
   });
 
   // LOCK ORDER, not lock PRESENCE. Round 7 added the deal_rfp_delivery lock and pinned only that it was
