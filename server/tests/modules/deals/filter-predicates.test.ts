@@ -32,6 +32,7 @@ import {
   buildStalledPredicate,
   buildOutcomeAwareDatePredicate,
   buildDealFilterBarConditions,
+  buildBoardPopulationPredicate,
 } from "../../../src/modules/deals/deal-filter-predicates.js";
 
 describe("assigned-rep predicate", () => {
@@ -309,5 +310,26 @@ describe("registry driver buildDealFilterBarConditions", () => {
   it("drops gated stalled predicate from the set when the flag is off", () => {
     const conditions = buildDealFilterBarConditions({ minAgeDays: 30 }, { stageEntryDateEnabled: false });
     expect(conditions).toEqual([]);
+  });
+});
+
+describe("board-population predicate (Bid Board mirror exclusion)", () => {
+  it("omits when unset — every non-stage-page caller is unchanged", () => {
+    expect(buildBoardPopulationPredicate({})).toBeUndefined();
+    expect(buildBoardPopulationPredicate({ boardPopulation: false })).toBeUndefined();
+  });
+
+  it("excludes rows whose Bid Board mirror already reached a terminal stage", () => {
+    // Pairs with the stage SUMMARY's boardPopulation. Without it the header and pagination dropped a
+    // mirrored-terminal deal that the list underneath still rendered (Codex P2 on #983).
+    const sqlText = text(buildBoardPopulationPredicate({ boardPopulation: true }));
+    expect(sqlText).toContain("bid_board_stage_slug");
+    expect(sqlText).toContain("not in");
+    expect(sqlText).toContain("coalesce");
+  });
+
+  it("is wired into the shared driver so the list and the summary cannot drift", () => {
+    const joined = buildDealFilterBarConditions({ boardPopulation: true }, {}).map(text).join(" ");
+    expect(joined).toContain("bid_board_stage_slug");
   });
 });

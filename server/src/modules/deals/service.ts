@@ -27,6 +27,7 @@ import {
   isGenuineEstimatingDealStageSlug,
   isGenuineWonDealStageSlug,
   isOpportunityStageSlug,
+  toCanonicalDealStageSlug,
   resolveEffectiveStageEnteredAt,
   USER_ROLES,
   type AtRiskResult,
@@ -382,6 +383,15 @@ export interface DealFilters {
   // reportable filter. The Won stage-page / drill-down list opts in so it reconciles to the Won count;
   // every other caller omits it (on-hold included, unchanged). Applied via the predicate registry.
   excludeOnHold?: boolean;
+  /**
+   * Reproduce the BOARD's population: drop OPEN rows whose Bid Board mirror has already reached a terminal
+   * stage. The kanban applies this (nonTerminalMirroredStageCondition) and the stage-page SUMMARY applies
+   * it under the same name, but this list endpoint never did — so a stage page that opted the summary in
+   * would exclude a deal from its header and pagination while still rendering it in the list below
+   * (Codex P2 on #983). Opt-in, and the caller must send it ONLY for non-terminal stages: a won/lost list
+   * is realized and legitimately carries terminal mirror slugs.
+   */
+  boardPopulation?: boolean;
   // Inclusive YYYY-MM-DD bounds against deals.contract_signed_at::date, with
   // deals.contract_signed_date as a transition fallback. RESERVED for the
   // commissions / contracts-signed surfaces (§6.5) — do NOT use for Won-period.
@@ -932,6 +942,8 @@ export interface DealStagePageInput extends DealBoardInput {
    * Off by default so the web workspace, which also uses this endpoint, is unchanged.
    */
   boardPopulation?: boolean;
+  /** Opt-in canonical-family expansion for OPEN stages — see readStageInput and canonicalDealStageFamilyIds. */
+  canonicalStageFamily?: boolean;
   page: number;
   pageSize: number;
   sort?: StagePageSort;
@@ -1410,6 +1422,59 @@ type PipelineValueSource = "won" | "estimating" | "current";
 // standard_deal | service_deal). Used to canonicalize a STAGE's slug for the estimating classification.
 function dealRouteForStageFamily(workflowFamily: string | null | undefined): WorkflowRoute {
   return workflowFamily === "service_deal" ? "service" : "normal";
+}
+
+/**
+ * Every stage id that belongs to the SAME canonical board column as `stage`.
+ *
+ * The kanban does not render raw stages — buildCanonicalDealBoardColumns (client
+ * `canonical-deal-board.ts`) folds every stage whose slug normalizes to the same canonical slug into ONE
+ * column and, for non-Won/Lost slugs, SUMS their aggregates. The stage drill-down previously expanded to a
+ * family only for the Won/Lost slug sets and queried `[input.stageId]` for everything else, so an OPEN
+ * column backed by more than one raw stage produced a header total the stage page could not reproduce, and
+ * cards visible on the board were unreachable from the drill.
+ *
+ * Prod (office_dallas, 2026-07-28): the Estimating header read $11.0M — 13 deals on `estimating` ($6.54M)
+ * plus 3 on the retired `estimate_in_progress` alias ($4.46M) — while the drill showed only $6.5M. The
+ * alias is `is_active_pipeline = false` yet still held live deals, which is exactly when the split bites.
+ *
+ * ROUTE-SPECIFIC, mirroring the client's buildCanonicalDealStageFamilies: each stage maps through ITS OWN
+ * route (workflowFamily → route), so the route-dependent estimating pair never cross-pollinates — a
+ * standard `estimating` stage joins only the normal Estimating column, a service one only
+ * `service_estimating`. Route-INVARIANT aliases still land together, matching the board and the existing
+ * ESTIMATE_SENT_STAGE_SLUGS grouping (estimate_sent_to_client + service_estimate_sent_to_client +
+ * bid_sent). Falls back to the clicked stage alone when the slug has no canonical mapping, so an
+ * unrecognised or bespoke stage can never widen its own drill-down.
+ *
+ * OPT-IN (input.canonicalStageFamily). mobile-crm renders UNMERGED raw board columns and opens this same
+ * endpoint with the raw stage id, so expanding unconditionally would make its "see all 13" return 16.
+ * Shipped mobile builds cannot start sending a flag, so narrow stays the default and the web workspace
+ * opts in. Same shape as the existing boardPopulation opt-in.
+ *
+ * TERMINAL FAMILIES ARE DELIBERATELY EXCLUDED. Won/Lost drills are served by the audited
+ * WON/LOST_TERMINAL_STAGE_SLUGS branch above, which also brings the won/lost date windows, the
+ * realized-value rules and the is_active handling those pages need. A handful of retired stages
+ * (`in_production`, `close_out`) canonicalize to `won` while sitting OUTSIDE WON_DEAL_STAGE_SLUGS, so
+ * without this guard they would fall through to here and drag the entire Won family — 438 live deals on
+ * prod — through the OPEN-stage code path, valuing realized revenue with the far-out auto-park rules.
+ * Keeping them single-id preserves today's behaviour exactly.
+ */
+function canonicalDealStageFamilyIds(
+  stages: readonly { id: string; slug: string; workflowFamily?: string | null }[],
+  stage: { id: string; slug: string; workflowFamily?: string | null }
+): string[] {
+  const canonicalSlug = toCanonicalDealStageSlug(stage.slug, dealRouteForStageFamily(stage.workflowFamily));
+  if (canonicalSlug == null) return [stage.id];
+  if (TERMINAL_STAGE_SLUGS.includes(canonicalSlug)) return [stage.id];
+  const familyIds = stages
+    .filter(
+      (item) =>
+        toCanonicalDealStageSlug(item.slug, dealRouteForStageFamily(item.workflowFamily)) === canonicalSlug
+    )
+    .map((item) => item.id);
+  // `stage` came out of `stages`, so it is normally already here; the guard keeps a caller that hands us a
+  // detached stage row from silently querying an EMPTY id list (which would render the page as zero deals).
+  return familyIds.includes(stage.id) ? familyIds : [stage.id, ...familyIds];
 }
 
 function pipelineValueSourceForStageSlug(
@@ -3730,7 +3795,9 @@ export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePage
       : null;
   const stageIds =
     stageSlugs == null
-      ? [input.stageId]
+      ? input.canonicalStageFamily
+        ? canonicalDealStageFamilyIds(stages, stage)
+        : [input.stageId]
       : stages
           .filter((item) => (stageSlugs as readonly string[]).includes(item.slug))
           .map((item) => item.id);

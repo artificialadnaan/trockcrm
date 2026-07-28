@@ -65,6 +65,14 @@ export interface DealFilterBarInput {
    * reconcile to that count. Opt-in — omit to include on-hold (every non-Won caller, unchanged).
    */
   excludeOnHold?: boolean;
+  /**
+   * Reproduce the BOARD's population: drop OPEN rows whose Bid Board mirror has already reached a terminal
+   * stage. The kanban applies this and the stage-page SUMMARY applies it under `boardPopulation`; without
+   * it here, a stage page that opted its summary in would exclude a deal from the header and pagination
+   * while still rendering it in the list below (Codex P2 on #983). Opt-in, and callers must send it ONLY
+   * for non-terminal stages — a won/lost list is realized and legitimately carries terminal mirror slugs.
+   */
+  boardPopulation?: boolean;
 }
 
 /** Context shared by the gated/classified predicates (date + stalled). */
@@ -404,6 +412,15 @@ export function buildExcludeOnHoldPredicate(input: DealFilterBarInput): SQL | un
   return input.excludeOnHold ? aliasedActiveDealCountFilterSql("deals") : undefined;
 }
 
+/** The board's own mirror exclusion (nonTerminalMirroredStageCondition), opt-in via input.boardPopulation. */
+export function buildBoardPopulationPredicate(input: DealFilterBarInput): SQL | undefined {
+  if (!input.boardPopulation) return undefined;
+  return sql`COALESCE(${sql.raw("deals.bid_board_stage_slug")}, '') NOT IN (${sql.join(
+    TERMINAL_STAGE_SLUGS.map((slug) => sql`${slug}`),
+    sql`, `
+  )})`;
+}
+
 export type DealFilterPredicate = (
   input: DealFilterBarInput,
   ctx: DealFilterContext
@@ -420,6 +437,7 @@ export const DEAL_FILTER_PREDICATES: DealFilterPredicate[] = [
   (input, ctx) => buildStalledPredicate(input, ctx),
   (input, ctx) => buildOutcomeAwareDatePredicate(input, ctx),
   (input) => buildExcludeOnHoldPredicate(input),
+  (input) => buildBoardPopulationPredicate(input),
 ];
 
 /**

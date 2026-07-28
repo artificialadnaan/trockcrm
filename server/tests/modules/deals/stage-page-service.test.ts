@@ -1288,3 +1288,159 @@ describe("listDealStagePage", () => {
     expect(avgTerms).toBe(2);
   });
 });
+
+describe("listDealStagePage canonical stage family", () => {
+  beforeEach(() => {
+    dbState.responses = [];
+  });
+
+  // The kanban renders CANONICAL columns: buildCanonicalDealBoardColumns folds every raw stage whose slug
+  // normalizes to the same canonical slug into one column and SUMS their aggregates. The drill-down used to
+  // expand to a stage FAMILY only for Won/Lost, so an OPEN column backed by more than one raw stage showed a
+  // header total the stage page could not reproduce and cards it could not reach.
+  //
+  // Prod, office_dallas 2026-07-28: Estimating header read $11.0M (13 deals on `estimating` = $6.54M PLUS
+  // 3 on the retired `estimate_in_progress` alias = $4.46M) while clicking it showed $6.5M.
+  const ESTIMATING_FAMILY_STAGES = [
+    { id: "stage-estimating", slug: "estimating", name: "Estimating", displayOrder: 3, isTerminal: false, workflowFamily: "standard_deal" },
+    { id: "stage-eip", slug: "estimate_in_progress", name: "Estimating", displayOrder: 3, isTerminal: false, workflowFamily: "standard_deal" },
+    { id: "stage-svc-estimating", slug: "service_estimating", name: "Service Estimating", displayOrder: 3, isTerminal: false, workflowFamily: "service_deal" },
+    { id: "stage-opportunity", slug: "opportunity", name: "Opportunity", displayOrder: 2, isTerminal: false, workflowFamily: "standard_deal" },
+    // Retired stages that canonicalize to `won` but sit OUTSIDE WON_DEAL_STAGE_SLUGS.
+    { id: "stage-in-production", slug: "in_production", name: "In Production", displayOrder: 4, isTerminal: false, workflowFamily: "standard_deal" },
+    { id: "stage-won", slug: "won", name: "Won", displayOrder: 7, isTerminal: true, workflowFamily: "standard_deal" },
+    { id: "stage-sent-to-production", slug: "sent_to_production", name: "Sent to Production", displayOrder: 6, isTerminal: true, workflowFamily: "standard_deal" },
+  ];
+
+  const CONTRACT_FAMILY_STAGES = [
+    { id: "stage-contract", slug: "contract", name: "Contract", displayOrder: 6, isTerminal: false, workflowFamily: "standard_deal" },
+    { id: "stage-svc-contract", slug: "service_contract_signed", name: "Service Contract", displayOrder: 6, isTerminal: false, workflowFamily: "service_deal" },
+  ];
+
+  async function runStagePage(stageId: string) {
+    dbState.responses = [ESTIMATING_FAMILY_STAGES];
+    const execute = vi.fn()
+      .mockResolvedValueOnce({ rows: [{ total_count: "16", active_count: "13", total_value: "10998463.55" }] })
+      .mockResolvedValueOnce({ rows: [] });
+    const tenantDb = { select: createOfficeScopeSelectMock(), execute } as any;
+    const { listDealStagePage } = await import("../../../src/modules/deals/service.js");
+    await listDealStagePage(tenantDb, {
+      role: "admin",
+      userId: "admin-1",
+      activeOfficeId: "office-1",
+      scope: "all",
+      stageId,
+      canonicalStageFamily: true,
+      page: 1,
+      pageSize: 25,
+      sort: "newest",
+    } as any);
+    return extractSqlText(execute.mock.calls[0]![0]);
+  }
+
+  it("pairs canonical membership with the board population, matching the column that opened it", async () => {
+    // Canonical membership alone is half of "what the board counted" — the board also drops open rows
+    // whose Bid Board mirror already closed. Sending the family WITHOUT boardPopulation would broaden the
+    // page past the column that opened it (Codex P2).
+    dbState.responses = [ESTIMATING_FAMILY_STAGES];
+    const execute = vi.fn()
+      .mockResolvedValueOnce({ rows: [{ total_count: "16", active_count: "13", total_value: "0" }] })
+      .mockResolvedValueOnce({ rows: [] });
+    const tenantDb = { select: createOfficeScopeSelectMock(), execute } as any;
+    const { listDealStagePage } = await import("../../../src/modules/deals/service.js");
+    await listDealStagePage(tenantDb, {
+      role: "admin", userId: "admin-1", activeOfficeId: "office-1", scope: "all",
+      stageId: "stage-estimating", canonicalStageFamily: true, boardPopulation: true,
+      page: 1, pageSize: 25, sort: "newest",
+    } as any);
+    const sqlText = extractSqlText(execute.mock.calls[0]![0]);
+    expect(sqlText).toContain("stage-eip");
+    expect(sqlText).toContain("bid_board_stage_slug");
+  });
+
+  it("stays scoped to the clicked stage when the caller does NOT opt in (raw mobile board)", async () => {
+    // mobile-crm renders UNMERGED raw columns and opens this endpoint with the raw stage id; expanding by
+    // default would make its "see all 13" return 16. Shipped builds cannot start sending a flag, so narrow
+    // is the default (Codex P2).
+    dbState.responses = [ESTIMATING_FAMILY_STAGES];
+    const execute = vi.fn()
+      .mockResolvedValueOnce({ rows: [{ total_count: "13", active_count: "11", total_value: "6536024.55" }] })
+      .mockResolvedValueOnce({ rows: [] });
+    const tenantDb = { select: createOfficeScopeSelectMock(), execute } as any;
+    const { listDealStagePage } = await import("../../../src/modules/deals/service.js");
+    await listDealStagePage(tenantDb, {
+      role: "admin", userId: "admin-1", activeOfficeId: "office-1", scope: "all",
+      stageId: "stage-estimating", page: 1, pageSize: 25, sort: "newest",
+    } as any);
+    const sqlText = extractSqlText(execute.mock.calls[0]![0]);
+    expect(sqlText).toContain("stage-estimating");
+    expect(sqlText).not.toContain("stage-eip");
+  });
+
+  it("queries the whole canonical family for an OPEN stage, not just the clicked id", async () => {
+    const sqlText = await runStagePage("stage-estimating");
+    expect(sqlText).toContain("stage-estimating");
+    // The retired alias folds into the same board column, so the drill MUST include it.
+    expect(sqlText).toContain("stage-eip");
+  });
+
+  it("does not cross the route boundary into the service estimating column", async () => {
+    // service_estimating is its own board column; over-grouping would over-show the sibling column.
+    const sqlText = await runStagePage("stage-estimating");
+    expect(sqlText).not.toContain("stage-svc-estimating");
+    expect(sqlText).not.toContain("stage-opportunity");
+  });
+
+  it("keeps the SERVICE estimating drill inside its own column", async () => {
+    // The direction that can actually over-group: `service_estimating` canonicalizes to its own slug, so
+    // drilling it must NOT absorb the standard estimating pair. Asserting only the standard->service
+    // direction is vacuous, because `estimating` and `service_estimating` canonicalize differently and the
+    // standard drill could never reach the service id regardless of the route rule.
+    const sqlText = await runStagePage("stage-svc-estimating");
+    expect(sqlText).toContain("stage-svc-estimating");
+    expect(sqlText).not.toContain("stage-estimating");
+    expect(sqlText).not.toContain("stage-eip");
+  });
+
+  it("keeps a canonical family that spans workflowFamily merged (contract)", async () => {
+    // Route-INVARIANT aliases DO belong together — the board folds contract + service_contract_signed into
+    // one Contract column. A naive "same workflowFamily" over-correction of the route rule would un-merge
+    // them silently, so pin the merge explicitly.
+    dbState.responses = [CONTRACT_FAMILY_STAGES];
+    const execute = vi.fn()
+      .mockResolvedValueOnce({ rows: [{ total_count: "2", active_count: "2", total_value: "0" }] })
+      .mockResolvedValueOnce({ rows: [] });
+    const tenantDb = { select: createOfficeScopeSelectMock(), execute } as any;
+    const { listDealStagePage } = await import("../../../src/modules/deals/service.js");
+    await listDealStagePage(tenantDb, {
+      role: "admin", userId: "admin-1", activeOfficeId: "office-1", scope: "all",
+      stageId: "stage-contract", canonicalStageFamily: true, page: 1, pageSize: 25, sort: "newest",
+    } as any);
+    const sqlText = extractSqlText(execute.mock.calls[0]![0]);
+    expect(sqlText).toContain("stage-contract");
+    expect(sqlText).toContain("stage-svc-contract");
+  });
+
+  it("resolves the same family when the drill enters via the alias id", async () => {
+    const sqlText = await runStagePage("stage-eip");
+    expect(sqlText).toContain("stage-estimating");
+    expect(sqlText).toContain("stage-eip");
+  });
+
+  it("never widens a retired stage that canonicalizes into a TERMINAL family", async () => {
+    // `in_production` normalizes to `won` but is not in WON_DEAL_STAGE_SLUGS, so it falls through to the
+    // general branch. Expanding it there would drag the whole Won family through the OPEN-stage code path
+    // (is_active filter + far-out auto-park valuation) and price realized revenue with forecast rules.
+    const sqlText = await runStagePage("stage-in-production");
+    expect(sqlText).toContain("stage-in-production");
+    expect(sqlText).not.toContain("stage-won");
+    expect(sqlText).not.toContain("stage-sent-to-production");
+  });
+
+  it("leaves a single-stage canonical column querying exactly one id", async () => {
+    const sqlText = await runStagePage("stage-opportunity");
+    expect(sqlText).toContain("stage-opportunity");
+    expect(sqlText).not.toContain("stage-estimating");
+    expect(sqlText).not.toContain("stage-eip");
+  });
+});

@@ -147,7 +147,18 @@ describe("DealStagePage", () => {
     const props = lastListProps();
     expect(props.filterBar.dimensions).not.toContain("stage");
     expect(props.filterBar.defaultStageIds).toEqual(["stage-estimating"]);
-    expect(props.baseFilters).toEqual({ stageIds: ["stage-estimating"] });
+    // boardPopulation pairs with the stage SUMMARY's own flag so the header, pagination and this list all
+    // describe ONE population — without it a mirrored-terminal deal is dropped from the count while still
+    // rendering in the list (Codex P2 on #983). Non-terminal stages only.
+    expect(props.baseFilters).toEqual({ stageIds: ["stage-estimating"], boardPopulation: true });
+  });
+
+  it("omits boardPopulation on a TERMINAL stage page", () => {
+    // A won/lost list is realized and legitimately carries terminal mirror slugs, which is why the stage
+    // summary skips the predicate there too.
+    setStage({ id: "stage-won", name: "Won", slug: "won" });
+    renderStage("/deals/stages/stage-won?scope=team");
+    expect((lastListProps().baseFilters as Record<string, unknown>).boardPopulation).toBeUndefined();
   });
 
   it("folds the bespoke rep select into the bar for admins, omits it for non-admins", () => {
