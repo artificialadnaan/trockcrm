@@ -294,7 +294,7 @@ const styles = StyleSheet.create({
     margin: theme.space.lg,
     marginBottom: theme.space.sm,
     borderWidth: 1,
-    borderColor: theme.color.border,
+    borderColor: theme.color.borderControl,
     borderRadius: theme.radius.md,
     paddingHorizontal: theme.space.md,
     paddingVertical: theme.space.md,

@@ -297,7 +297,7 @@ const styles = StyleSheet.create({
     minHeight: 44,
     borderRadius: theme.radius.md,
     borderWidth: 1,
-    borderColor: theme.color.border,
+    borderColor: theme.color.borderControl,
     backgroundColor: theme.color.surface,
     paddingHorizontal: theme.space.md,
     fontFamily: theme.font.regular,

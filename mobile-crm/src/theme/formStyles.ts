@@ -28,7 +28,8 @@ export const formStyles = StyleSheet.create({
   },
   input: {
     borderWidth: 1,
-    borderColor: theme.color.border,
+    // borderControl, not border: this hairline IS the credential field. See the token's note.
+    borderColor: theme.color.borderControl,
     borderRadius: theme.radius.md,
     paddingHorizontal: theme.space.md,
     paddingVertical: theme.space.md,

@@ -735,7 +735,7 @@ const styles = StyleSheet.create({
     minHeight: 88,
     textAlignVertical: "top",
     borderWidth: 1,
-    borderColor: theme.color.border,
+    borderColor: theme.color.borderControl,
     borderRadius: theme.radius.md,
     padding: theme.space.md,
     fontFamily: theme.font.regular,

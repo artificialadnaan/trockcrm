@@ -63,9 +63,24 @@ export const theme = {
     surfaceMuted: "#101317",
 
     /* ---- Lines ------------------------------------------------------------------------------- */
+    /**
+     * DECORATIVE separators and card edges. 1.26:1 against `surface` — deliberately quiet, and
+     * deliberately NOT for anything a finger is meant to find.
+     */
     border: "#262B33",
+    /** A card's hover/pressed edge, and any divider that needs to read as a deliberate rule. */
     borderStrong: "#39414D",
     borderSubtle: "#1A1E24",
+    /**
+     * The boundary of an INPUT — 3.4:1 on surface, clearing WCAG 1.4.11's 3:1 for the visual
+     * information required to identify a control.
+     *
+     * A text field draws no fill of its own worth speaking of, so this hairline is the entire control:
+     * on the login and change-password screens it is the only thing separating a credential field from
+     * the page. At `border`'s 1.26:1 the field was effectively invisible until focused. Separators can
+     * be whisper-quiet; the box you are asked to type a password into cannot.
+     */
+    borderControl: "#616C7D",
 
     /* ---- Text -------------------------------------------------------------------------------- */
     /** 16.6:1 on surface. Names, money, anything that must be read at arm's length. */

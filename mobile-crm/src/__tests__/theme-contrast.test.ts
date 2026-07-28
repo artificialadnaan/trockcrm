@@ -109,6 +109,16 @@ describe("theme contrast", () => {
     expect(ladder).toEqual([...ladder].sort((a, b) => a - b));
   });
 
+  it("gives control boundaries the 3:1 WCAG 1.4.11 minimum", () => {
+    // A text field has no fill of its own to speak of, so its hairline IS the control. `border` is
+    // 1.26:1 and correct for a decorative separator; using it on an input made the login and
+    // change-password fields effectively invisible until focused.
+    expect(contrastRatio(c.borderControl, c.surface)).toBeGreaterThanOrEqual(3);
+    expect(contrastRatio(c.borderControl, c.canvas)).toBeGreaterThanOrEqual(3);
+    // And it must actually be the stronger of the two, or the distinction is decorative itself.
+    expect(luminance(c.borderControl)).toBeGreaterThan(luminance(c.border));
+  });
+
   it("keeps the status chip borders lighter than their own fills", () => {
     // A tinted fill is nearly edgeless on a dark card, so each chip's border is what gives it an edge.
     // Darker-than-fill would be invisible AND wrong, with nothing to catch it visually at 11px.

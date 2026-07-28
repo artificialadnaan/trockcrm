@@ -529,7 +529,7 @@ const styles = StyleSheet.create({
   link: { color: theme.color.redText },
   noteInput: {
     borderWidth: 1,
-    borderColor: theme.color.border,
+    borderColor: theme.color.borderControl,
     borderRadius: theme.radius.md,
     padding: theme.space.md,
     minHeight: 88,
