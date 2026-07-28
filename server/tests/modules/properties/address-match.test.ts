@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   addressKeysMatch,
+  compareAddressKeys,
+  localityContradicts,
   matchProperties,
   normalizeAddressKey,
+  splitUnit,
 } from "../../../src/modules/properties/match-service.js";
 
 /**
@@ -105,5 +108,67 @@ describe("matchProperties guards", () => {
     ["an out-of-range longitude", { lat: 21.3, lng: 200 }],
   ])("returns [] and does not query for %s", async (_label, input) => {
     await expect(matchProperties(neverCalled, input)).resolves.toEqual([]);
+  });
+});
+
+describe("compareAddressKeys — suite handling", () => {
+  /**
+   * The case a review caught and my own docblock got wrong.
+   *
+   * A legacy property stores the tenancy ("1420 Bishop St Ste 200") with NULL coordinates; a reverse
+   * geocode returns the building ("1420 Bishop St"). Exact comparison rejects the pair, and distance
+   * cannot rescue it — the stored row has no point. The comment claimed distance covered this; it
+   * cannot, precisely for the uncoordinated rows where it matters most, so the capture would report
+   * "nothing here" and mint a duplicate of a property sitting right in front of the rep.
+   */
+  it("matches a building-level address against a stored suite, as BASE not exact", () => {
+    expect(compareAddressKeys("1420 Bishop St", "1420 Bishop St Ste 200")).toBe("base");
+    expect(compareAddressKeys("1420 Bishop St Ste 200", "1420 Bishop St")).toBe("base");
+  });
+
+  it("still refuses to fold two DIFFERENT suites", () => {
+    // The asymmetry that governs this whole file: a miss costs a duplicate, a false match corrupts two
+    // tenancies' records at once.
+    expect(compareAddressKeys("1420 Bishop St Ste 200", "1420 Bishop St Ste 400")).toBeNull();
+    expect(compareAddressKeys("1420 Bishop St Unit A", "1420 Bishop St Unit B")).toBeNull();
+  });
+
+  it("reports an identical line as exact", () => {
+    expect(compareAddressKeys("1420 Bishop St Ste 200", "1420 bishop street ste 200")).toBe("exact");
+    expect(compareAddressKeys("1420 Bishop St", "1420 bishop street")).toBe("exact");
+  });
+
+  it("does not treat a different building as a base match", () => {
+    expect(compareAddressKeys("1420 Bishop St Ste 200", "1422 Bishop St")).toBeNull();
+  });
+
+  it("does not strip a leading token that happens to be a unit word", () => {
+    // splitUnit scans from index 1, so a street literally named "Unit" cannot swallow the house number.
+    expect(splitUnit("100 unit 5").base).toBe("100");
+  });
+});
+
+describe("localityContradicts", () => {
+  /**
+   * "100 Main St" exists in every city in the country. Without this, an office spanning two of them
+   * matches every copy — and those remote matches OUTRANK genuine proximity hits, so they can fill the
+   * candidate list and stop the capture ever offering "add new" for the building underfoot.
+   */
+  it("rejects a same-street match in a different city or state", () => {
+    expect(localityContradicts({ city: "Dallas" }, { city: "Austin" })).toBe(true);
+    expect(localityContradicts({ state: "TX" }, { state: "HI" })).toBe(true);
+  });
+
+  it("allows a match when either side is silent", () => {
+    // Legacy rows routinely have a null city. Requiring equality would drop exactly the uncoordinated
+    // properties this matcher exists to find — "cannot disprove", not "must agree".
+    expect(localityContradicts({ city: "Dallas" }, { city: null })).toBe(false);
+    expect(localityContradicts({}, { city: "Austin", state: "TX" })).toBe(false);
+    expect(localityContradicts({ city: "  " }, { city: "Austin" })).toBe(false);
+  });
+
+  it("ignores case and padding", () => {
+    expect(localityContradicts({ city: " dallas " }, { city: "Dallas" })).toBe(false);
+    expect(localityContradicts({ state: "tx" }, { state: "TX" })).toBe(false);
   });
 });

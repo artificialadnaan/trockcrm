@@ -22,6 +22,20 @@ import { generateAndStoreThumbnail, probeStorableImageFormat, transcodeHeicToSto
 
 const router = Router();
 
+/**
+ * A query-string coordinate, or null.
+ *
+ * `Number("")` is 0, not NaN, so a blank `?lat=` reads as the equator: a bad position that matches
+ * nothing rather than an absent one that degrades to address-only matching. Blank-checked BEFORE
+ * coercion for that reason.
+ */
+function readCoordinateParam(raw: unknown, limit: number): number | null {
+  if (typeof raw !== "string" || raw.trim() === "") return null;
+  const value = Number(raw);
+  return Number.isFinite(value) && Math.abs(value) <= limit ? value : null;
+}
+
+
 router.get("/", async (req, res, next) => {
   try {
     const { search, companyId, type, sortBy, sortDir, page, limit, isActive, minLinkedValue, maxLinkedValue } =
@@ -56,15 +70,19 @@ router.get("/", async (req, res, next) => {
  */
 router.get("/match", async (req, res, next) => {
   try {
-    const rawLat = Number(req.query.lat);
-    const rawLng = Number(req.query.lng);
     const matches = await matchProperties(req.tenantDb!, {
-      // Number("") is 0 and Number(undefined) is NaN — a missing coordinate must not read as a point
-      // at the equator, which would match nothing and quietly degrade to address-only.
-      lat: Number.isFinite(rawLat) && req.query.lat !== "" ? rawLat : null,
-      lng: Number.isFinite(rawLng) && req.query.lng !== "" ? rawLng : null,
+      lat: readCoordinateParam(req.query.lat, 90),
+      lng: readCoordinateParam(req.query.lng, 180),
       address: typeof req.query.address === "string" ? req.query.address : null,
+      // Locality can only DISPROVE an address match — "100 Main St" exists in every city, and without
+      // these the copy two towns over outranks the building the rep is standing on.
+      city: typeof req.query.city === "string" ? req.query.city : null,
+      state: typeof req.query.state === "string" ? req.query.state : null,
     });
+    // Commit like every sibling handler. Without it this tenant-scoped request falls through to the
+    // close-event rollback and holds its pooled client until the response finishes — avoidable pool
+    // pressure on the one route a rep hits at every stop.
+    await req.commitTransaction!();
     res.json({ matches });
   } catch (err) {
     next(err);

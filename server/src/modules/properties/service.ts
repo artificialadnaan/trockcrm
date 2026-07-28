@@ -605,6 +605,9 @@ export async function listProperties(
  */
 function validateOptionalCoordinate(value: unknown, limit: number): string | null {
   if (value == null) return null;
+  // A blank or whitespace string is ABSENT, not zero. Number("") is 0, which would store the property
+  // at the equator — a coordinate that is present, plausible to the database, and matches nothing.
+  if (typeof value === "string" && value.trim() === "") return null;
   const numeric = typeof value === "number" ? value : Number(value);
   if (!Number.isFinite(numeric) || Math.abs(numeric) > limit) return null;
   return String(numeric);
@@ -659,10 +662,26 @@ export async function updateProperty(tenantDb: TenantDb, propertyId: string, inp
     return existing ? redactPropertyImageKeys(existing) : null;
   }
 
+  /**
+   * An address edit INVALIDATES the stored coordinates.
+   *
+   * The pair is a geocode of a specific street line, and this route can change that line without
+   * touching them. Left in place, a corrected or relocated property keeps matching field captures at
+   * its OLD position forever — a rep standing at the new address is told they are somewhere else, and a
+   * rep at the old one is offered a building that has moved. Both are silent.
+   *
+   * Cleared rather than re-geocoded: geocoding belongs on the write path that has the canonical Mapbox
+   * result to hand, and a null coordinate degrades honestly to address matching, which is the signal
+   * most of this table relies on anyway. The next field visit repopulates it.
+   */
+  const addressChanged = ADDRESS_FIELDS.some((field) => field in patch);
+  const coordinateReset = addressChanged ? { lat: null, lng: null } : {};
+
   const [property] = await tenantDb
     .update(properties)
     .set({
       ...patch,
+      ...coordinateReset,
       updatedAt: new Date(),
     })
     .where(eq(properties.id, propertyId))
@@ -670,6 +689,9 @@ export async function updateProperty(tenantDb: TenantDb, propertyId: string, inp
 
   return property ? redactPropertyImageKeys(property) : null;
 }
+
+/** The fields whose change makes a stored geocode wrong. */
+const ADDRESS_FIELDS = ["address", "city", "state", "zip"] as const;
 
 export async function deleteProperty(tenantDb: TenantDb, propertyId: string) {
   const [existing] = await tenantDb
