@@ -1,19 +1,207 @@
-import { eq, and, desc, gte, sql, type SQL } from "drizzle-orm";
+import { eq, and, desc, gte, inArray, isNull, sql, type SQL } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { files, deals, users, dealCompanycamProjects } from "@trock-crm/shared/schema";
+import { PHOTO_CATEGORIES, PHOTO_CATEGORY_LABELS } from "@trock-crm/shared/types";
 import type * as schema from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
+import { isPostgresCalendarDate, isPostgresTzOffset } from "../../lib/pg-timestamp.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
+
+/**
+ * Where a photo came from. This is DERIVED, not stored: on a photo row `files.subcategory` only ever
+ * holds 'CompanyCam' or NULL (prod census 2026-07-27: 19,734 'CompanyCam' vs 8,607 NULL + 3,280 with a
+ * photo_category and no subcategory), so despite its name it is a SOURCE flag, not the phase dimension.
+ * The phase dimension is `files.photo_category`. Exposing subcategory as "category" in the UI would
+ * offer a dropdown with exactly one real option.
+ */
+export const PHOTO_FEED_SOURCES = ["companycam", "trock"] as const;
+
+/**
+ * A photo's PHASE, normalized across the two columns that carry it.
+ *
+ * `files.photo_category` is the typed column, but the CRM web capture flow still writes the phase the
+ * user picked into `files.subcategory` — `photo-capture-page.tsx` says so in as many words ("The 6 phase
+ * categories (shared source of truth). Stored on the `subcategory`"), and the deal photo timeline
+ * already reads both (`photo-timeline-filters.ts`). Comparing only `photo_category` would mean a photo
+ * captured through that flow is missing from its own phase AND wrongly counted as Uncategorized — the
+ * same value meaning two different things on two surfaces, which is the class of bug this feed work
+ * exists to remove.
+ *
+ * Production census (office_dallas, 2026-07-27) finds ZERO phase-valued subcategories today — only
+ * 'CompanyCam' (48,986) and NULL (12,433) — so this changes no current row. The WRITE PATH is live
+ * though, so the first user to pick a phase on the capture page would have hit it.
+ *
+ * 'CompanyCam' is excluded because on that row it is a SOURCE flag, not a phase (see PHOTO_FEED_SOURCES).
+ * That is a deliberate divergence from the deal timeline, whose Uncategorized arm requires
+ * `subcategory IS NULL` and therefore excludes every CompanyCam photo. On this surface CompanyCam is
+ * ~80% of the library, so importing that rule would make "Uncategorized" almost empty and wrong.
+ */
+/**
+ * `subcategory` -> canonical phase token, DERIVED from the constants rather than hand-typed, so a
+ * renamed folder or a new phase cannot silently create a second representation again.
+ *
+ * Three writers put three different shapes in that column:
+ *   - `photo-capture-page.tsx` writes a canonical token (`site_visit`);
+ *   - the deal Files-tab folder picker writes the FOLDER'S DISPLAY NAME (`deal-file-tab.tsx` uses
+ *     `sub.name`), and the Photos folder's subfolders are "Site Visits", "Progress",
+ *     "Final Walkthrough", "Damage" (`DEAL_FOLDER_TEMPLATE`);
+ *   - CompanyCam sync writes the source flag.
+ *
+ * Lowercasing alone therefore yields `site visits` alongside `site_visit` — the facet lists one phase
+ * twice and picking either excludes the other's photos, which is precisely the divergence this shared
+ * expression exists to prevent.
+ *
+ * Built by matching each folder name against the human labels in `PHOTO_CATEGORY_LABELS`, allowing the
+ * plural the folder tree uses ("Site Visits" -> label "Site Visit" -> token `site_visit`). A folder with
+ * no canonical equivalent — "Final Walkthrough" has none; `final_completion` is a different thing — is
+ * deliberately left unmapped rather than guessed at, so it stays its own self-consistent value on both
+ * the facet and the filter instead of being quietly folded into a phase it is not.
+ */
+const SUBCATEGORY_PHASE_ALIASES: ReadonlyMap<string, string> = (() => {
+  const aliases = new Map<string, string>();
+  for (const [token, label] of Object.entries(PHOTO_CATEGORY_LABELS)) {
+    aliases.set(label.toLowerCase(), token);
+    aliases.set(`${label.toLowerCase()}s`, token); // the folder tree pluralizes ("Site Visits")
+  }
+  // Canonical tokens map to themselves; set last so a token always wins over a colliding label.
+  for (const token of PHOTO_CATEGORIES) aliases.set(token.toLowerCase(), token);
+  return aliases;
+})();
+
+/**
+ * The normalized phase, as SQL. Used by BOTH the row predicate and the facet — that identity is the
+ * whole point, so the alias mapping lives here rather than at either call site.
+ *
+ * 'CompanyCam' is excluded because on that row it is a SOURCE flag, not a phase (see
+ * PHOTO_FEED_SOURCES). Deliberate divergence from the deal timeline, whose Uncategorized arm requires
+ * `subcategory IS NULL` and therefore excludes every CompanyCam photo: here CompanyCam is ~80% of the
+ * library, so importing that rule would make "Uncategorized" almost empty and wrong.
+ */
+const photoPhaseSql = (() => {
+  const whens = Array.from(SUBCATEGORY_PHASE_ALIASES.entries())
+    .filter(([alias, token]) => alias !== token) // identity rows need no CASE arm
+    .map(([alias, token]) => sql`WHEN ${alias} THEN ${token}`);
+  const aliasCase = whens.length > 0
+    ? sql`CASE LOWER(${files.subcategory}) ${sql.join(whens, sql` `)} ELSE LOWER(${files.subcategory}) END`
+    : sql`LOWER(${files.subcategory})`;
+  return sql`COALESCE(
+    ${files.photoCategory}::text,
+    CASE WHEN LOWER(${files.subcategory}) = 'companycam' THEN NULL ELSE ${aliasCase} END
+  )`;
+})();
+export type PhotoFeedSource = (typeof PHOTO_FEED_SOURCES)[number];
 
 export interface PhotoFeedFilters {
   dealId?: string;
   uploadedBy?: string;
   subcategory?: string;
+  /** Phase filter over `files.photo_category`. The literal string "uncategorized" selects NULLs. */
+  photoCategory?: string;
+  source?: PhotoFeedSource;
   dateFrom?: string;
   dateTo?: string;
   page?: number;
   limit?: number;
+}
+
+/**
+ * The photo-scope predicate shared by BOTH feed tabs — the Photos tab (`getPhotoFeed`) and the
+ * Projects tab (`getProjectPhotoStats`).
+ *
+ * Extracted deliberately rather than duplicated: when a filter reached one tab and not the other, a
+ * Projects row kept reporting the deal's UNFILTERED total ("900 photos") while the filtered Photos tab
+ * listed 12 of them. One builder makes that divergence structurally impossible — a new filter cannot be
+ * added to one surface and forgotten on the other.
+ */
+/**
+ * Superseded-version exclusion, shared by the row predicate AND the facet scope.
+ *
+ * DELIBERATELY the cheap child-check, NOT the canonical latestActiveVersionCondition() the deal timeline
+ * uses — a measured trade, not an oversight. The canonical form COALESCEs `parent_file_id` on BOTH
+ * sides, so neither side is a plain column and `files_version_chain_idx` cannot serve it; it degrades to
+ * a hash anti-join over the whole photo table. Measured on production (EXPLAIN ANALYZE, 31,621
+ * deal-linked photos, 2026-07-27):
+ *     canonical form ......... 125 ms   (Hash Anti Join, 61k-row hash build)
+ *     this form ...............  65 ms   (Index Scan on files_version_chain_idx, 0 rows)
+ *     the code this replaced ..  69 ms
+ * The feed is a cross-deal aggregate over every photo in the tenant, so it pays that on every sort and
+ * filter change; the deal timeline pays it over one deal and is right to prefer exactness. It also buys
+ * nothing today: production holds ZERO versioned photos.
+ *
+ * Named and shared so the FACET scope cannot drift from the row scope. When it did, a superseded row
+ * could contribute an uploader or phase to a dropdown that no visible feed row matches — selecting it
+ * would return an unexplained empty result.
+ *
+ * Known limitation, inherited unchanged: in a 3+ version family this excludes only the ROOT, so an
+ * intermediate v2 still reads as latest. If versioning becomes common, add an index on
+ * ((COALESCE(parent_file_id, id)), version) WHERE is_active and switch to the canonical helper.
+ */
+const notSupersededSql = sql`NOT EXISTS (SELECT 1 FROM files f2 WHERE f2.parent_file_id = files.id AND f2.is_active = true)`;
+
+/**
+ * `requireDeal` is the ONLY sanctioned difference between the feed's row scope and any other scope
+ * derived from it — expressed as a parameter on the shared builder rather than as a second hand-written
+ * condition, because hand-maintaining two predicates that must agree has now failed twice in this file:
+ * once when the facet scope omitted the superseded-version exclusion, and again when the fix for that
+ * added `deal_id IS NOT NULL` to the facets while `getPhotoFeed` has no deal requirement at all — so an
+ * uploader or phase belonging only to an unassigned or lead-linked photo appeared in the GRID but not in
+ * its own dropdown. Production holds 29,564 such photos across 4 uploaders, so that is not a corner case.
+ *
+ * Anything that needs to differ goes here as a named option. Nothing gets a second copy of the base rule.
+ */
+interface FeedScopeOptions {
+  /** Restrict to deal-linked photos. Only the PROJECT-shaped readers want this. */
+  requireDeal?: boolean;
+}
+
+function buildFeedPhotoConditions(filters: PhotoFeedFilters, options: FeedScopeOptions = {}): SQL[] {
+  const conditions: SQL[] = [
+    eq(files.category, "photo"),
+    eq(files.isActive, true),
+    // Superseded-version exclusion — see notSupersededSql above for why it is the cheap child-check.
+    notSupersededSql,
+  ];
+
+  if (options.requireDeal) conditions.push(sql`${files.dealId} IS NOT NULL`);
+
+  if (filters.dealId) conditions.push(eq(files.dealId, filters.dealId));
+  if (filters.uploadedBy) conditions.push(eq(files.uploadedBy, filters.uploadedBy));
+  if (filters.subcategory) conditions.push(eq(files.subcategory, filters.subcategory));
+
+  if (filters.photoCategory) {
+    // "uncategorized" is a first-class option, not a missing value: ~90% of production photos carry no
+    // phase at all, so without it the dropdown could only ever reach 10% of the library.
+    // Compares the normalized COLUMN expression cast to text (not the value cast to the enum), so an
+    // unknown/stale value from a bookmarked URL filters to nothing instead of aborting the query with a
+    // 22P02 enum error -> 500.
+    conditions.push(
+      filters.photoCategory === "uncategorized"
+        ? sql`${photoPhaseSql} IS NULL`
+        : sql`${photoPhaseSql} = ${filters.photoCategory.toLowerCase()}`,
+    );
+  }
+
+  if (filters.source === "companycam") {
+    conditions.push(eq(files.subcategory, "CompanyCam"));
+  } else if (filters.source === "trock") {
+    // IS DISTINCT FROM, not <>: subcategory is NULL on every field/CRM-captured photo, and `NULL <>
+    // 'CompanyCam'` is NULL (row dropped), which would make this filter return zero rows.
+    conditions.push(sql`${files.subcategory} IS DISTINCT FROM 'CompanyCam'`);
+  }
+
+  if (filters.dateFrom) {
+    conditions.push(
+      sql`COALESCE(${files.takenAt}, ${files.createdAt}) >= ${filters.dateFrom}::timestamptz`
+    );
+  }
+  if (filters.dateTo) {
+    conditions.push(
+      sql`COALESCE(${files.takenAt}, ${files.createdAt}) <= ${filters.dateTo}::timestamptz`
+    );
+  }
+
+  return conditions;
 }
 
 /**
@@ -46,35 +234,16 @@ export async function getPhotoFeed(
   }>;
   pagination: { page: number; limit: number; total: number; totalPages: number };
 }> {
-  const page = filters.page ?? 1;
-  const limit = Math.min(filters.limit ?? 40, 200);
+  // Clamp rather than trust: `?page=abc` parses to NaN, and `Math.min(NaN, 200)` is NaN, which reaches
+  // SQL as `LIMIT NaN` and 500s the feed. Same guard the other paged readers in this file apply.
+  const page = Number.isFinite(filters.page) && (filters.page as number) >= 1 ? Math.floor(filters.page as number) : 1;
+  const limit = Number.isFinite(filters.limit) && (filters.limit as number) >= 1
+    ? Math.min(Math.floor(filters.limit as number), 200)
+    : 40;
   const offset = (page - 1) * limit;
 
-  const conditions: SQL[] = [
-    eq(files.category, "photo"),
-    eq(files.isActive, true),
-    // Exclude superseded versions
-    sql`NOT EXISTS (SELECT 1 FROM files f2 WHERE f2.parent_file_id = files.id AND f2.is_active = true)`,
-  ];
-
   // All users can see all deal photos — no rep filtering
-
-  if (filters.dealId) conditions.push(eq(files.dealId, filters.dealId));
-  if (filters.uploadedBy) conditions.push(eq(files.uploadedBy, filters.uploadedBy));
-  if (filters.subcategory) conditions.push(eq(files.subcategory, filters.subcategory));
-
-  if (filters.dateFrom) {
-    conditions.push(
-      sql`COALESCE(${files.takenAt}, ${files.createdAt}) >= ${filters.dateFrom}::timestamptz`
-    );
-  }
-  if (filters.dateTo) {
-    conditions.push(
-      sql`COALESCE(${files.takenAt}, ${files.createdAt}) <= ${filters.dateTo}::timestamptz`
-    );
-  }
-
-  const where = and(...conditions);
+  const where = and(...buildFeedPhotoConditions(filters));
 
   const countResult = await tenantDb.select({ count: sql<number>`count(*)` }).from(files).where(where);
   const photoRows = await tenantDb
@@ -100,7 +269,11 @@ export async function getPhotoFeed(
     .leftJoin(deals, eq(deals.id, files.dealId))
     .leftJoin(users, eq(users.id, files.uploadedBy))
     .where(where)
-    .orderBy(desc(sql`COALESCE(${files.takenAt}, ${files.createdAt})`))
+    // `files.id` tiebreaker: bulk imports (a CompanyCam sync, one day's field upload) land with
+    // IDENTICAL timestamps, and OFFSET paging over a non-deterministic order lets Postgres arrange tied
+    // rows differently per page — the same photo shows on two pages while another never appears. Same
+    // fix, same reason, as getDealPhotoTimeline.
+    .orderBy(desc(sql`COALESCE(${files.takenAt}, ${files.createdAt})`), desc(files.id))
     .limit(limit)
     .offset(offset);
 
@@ -113,119 +286,429 @@ export async function getPhotoFeed(
 }
 
 /**
- * Aggregate photo stats grouped by project (deal).
- * Returns one row per deal that has at least one photo.
+ * Sort keys the Projects tab offers. Whitelisted (never interpolated from the query string) — the sort
+ * expression lands in an ORDER BY, so an open-ended value would be an injection point.
+ */
+export const PROJECT_PHOTO_SORTS = ["recent", "most_photos", "least_photos"] as const;
+export type ProjectPhotoSort = (typeof PROJECT_PHOTO_SORTS)[number];
+
+/**
+ * KEYSET (cursor) paging for the Projects tab, replacing OFFSET.
+ *
+ * OFFSET is only correct over a set that does not move. This aggregate moves constantly: every photo
+ * upload changes a project's `count(*)` and its `max(taken_at)`, which are the exact values the list is
+ * ordered by. A project that gains photos between two requests jumps ahead of the cursor, so page 2
+ * re-delivers a project page 1 already showed and the project that was pushed past the boundary is never
+ * delivered at all. No amount of client-side de-duplication fixes that, because the client cannot tell
+ * "this page repeated rows because the window drifted" from "this page repeated rows because the list
+ * ended" — that information does not exist on the client. Guarding it there produced, in sequence, a
+ * never-retry bug, an infinite-retry bug, and a silent-truncation bug.
+ *
+ * A cursor carries the position IN THE ORDERING rather than a row count, so a reorder cannot skip a row:
+ * the next page is defined as "everything ordered after this exact (sortValue, dealId)", which stays
+ * meaningful however the set changes. `dealId` is the tiebreak that makes the key unique — without it,
+ * the dozens of projects sharing a photo count would have no stable boundary.
+ *
+ * A project can still be RE-DELIVERED if its own sort value changes enough to move it back across the
+ * cursor (a project that loses photos under `most_photos`). That is a duplicate, not a gap: the client
+ * de-dupes on `dealId` for its React keys anyway, and no project is ever silently dropped.
+ */
+export interface ProjectPhotoCursor {
+  /** The ordering value of the last row delivered — a timestamp or a photo count, as text. */
+  sortValue: string;
+  dealId: string;
+}
+
+/** Opaque to the client: it is a position, not a page number, and must not be arithmetic'd on. */
+export function encodeProjectCursor(cursor: ProjectPhotoCursor): string {
+  return Buffer.from(`${cursor.sortValue}\u0000${cursor.dealId}`, "utf8").toString("base64url");
+}
+
+/**
+ * Whether `value` is a Postgres timestamptz literal that Postgres will actually accept.
+ *
+ * `Date.parse` is not sufficient: it NORMALIZES out-of-range calendar dates (`2026-02-30` becomes
+ * March 2) and reports success, while Postgres rejects the original string outright. Anything the
+ * regex or the round-trip refuses is treated as a malformed cursor and the list restarts.
+ */
+function isPostgresTimestampText(value: string): boolean {
+  // Shape and the time-of-day fields are bounded in the pattern itself — an unbounded `\d{2}` for the
+  // hour accepts "99:00:00", which looks well-formed and is then rejected at the cast. The YEAR and the
+  // TIMEZONE OFFSET are checked by lib/pg-timestamp.ts, shared with `parseFileDateParam`: these two
+  // validators used to answer the same question differently, and each carried a hole the other did not
+  // (year zero here, offsets past ±15:59 there).
+  const match = /^(\d{4})-(\d{2})-(\d{2})[ T]([01]\d|2[0-3]):([0-5]\d):([0-5]\d)(\.\d{1,6})?(Z|[+-]\d{2}(?::?\d{2})?)?$/.exec(
+    value,
+  );
+  if (!match) return false;
+  const [, year, month, day] = match;
+  return isPostgresCalendarDate(year, month, day) && isPostgresTzOffset(match[8]);
+}
+
+export function decodeProjectCursor(raw: unknown, sort: ProjectPhotoSort): ProjectPhotoCursor | undefined {
+  if (typeof raw !== "string" || raw.length === 0 || raw.length > 512) return undefined;
+  let decoded: string;
+  try {
+    decoded = Buffer.from(raw, "base64url").toString("utf8");
+  } catch {
+    return undefined;
+  }
+  const separator = decoded.indexOf("\u0000");
+  if (separator <= 0) return undefined;
+  const sortValue = decoded.slice(0, separator);
+  const dealId = decoded.slice(separator + 1);
+  // The dealId half lands in a uuid comparison, so a malformed cursor must be DROPPED here rather than
+  // reaching Postgres as a bad cast (22P02 -> 500). A stale or hand-edited cursor restarts the list,
+  // which is the harmless outcome.
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(dealId)) return undefined;
+  if (sortValue.length === 0 || sortValue.length > 64) return undefined;
+  // The sortValue half is cast too — to bigint for the count sorts, timestamptz for recency — so it needs
+  // the SAME treatment as the uuid half. Validating only the uuid left `base64url("abc\0<valid-uuid>")`
+  // reaching Postgres as a bad cast: a 500 where the documented behaviour is "restart the list".
+  const sortValueValid = sort === "recent"
+    ? isPostgresTimestampText(sortValue)
+    // bigint, and bounded so a 40-digit count cannot overflow the cast either.
+    : /^\d{1,18}$/.test(sortValue);
+  if (!sortValueValid) return undefined;
+  return { sortValue, dealId };
+}
+
+const PROJECT_STATS_DEFAULT_LIMIT = 50;
+const PROJECT_STATS_MAX_LIMIT = 100;
+const PROJECT_RECENT_PHOTO_COUNT = 5;
+const PROJECT_RECENT_UPLOADER_COUNT = 10;
+
+export interface ProjectPhotoStatsOptions extends PhotoFeedFilters {
+  sort?: ProjectPhotoSort;
+  /** Keyset position from the previous page's `nextCursor`. Absent = first page. */
+  cursor?: string;
+  /** Restrict to deals owned by this rep — the "My Projects" pill. */
+  assignedRepId?: string;
+  /** Free-text match over deal name / number / property city — the search box. */
+  search?: string;
+}
+
+export interface ProjectPhotoStat {
+  dealId: string;
+  dealName: string;
+  dealNumber: string;
+  /** Owner of the deal. Powers the "My Projects" pill, which had nothing to filter on before. */
+  assignedRepId: string | null;
+  propertyCity: string | null;
+  propertyState: string | null;
+  photoCount: number;
+  lastPhotoAt: string | null;
+  recentUploaders: string[];
+  recentPhotoIds: string[];
+  recentPhotos: Array<{
+    id: string;
+    displayName: string | null;
+    mimeType: string | null;
+    r2Key: string | null;
+    externalUrl: string | null;
+    externalThumbnailUrl: string | null;
+  }>;
+}
+
+/** JSON columns arrive parsed under node-postgres but as text under some drivers — accept both. */
+function parseJsonColumn<T>(value: unknown, fallback: T): T {
+  if (value == null) return fallback;
+  if (typeof value === "string") {
+    try {
+      return JSON.parse(value) as T;
+    } catch {
+      return fallback;
+    }
+  }
+  return value as T;
+}
+
+/**
+ * Aggregate photo stats grouped by project (deal) — the Projects tab of the photo feed.
+ *
+ * SORTING IS SERVER-SIDE BY CONSTRUCTION. The rows are ordered and then paged in SQL, so "most photos"
+ * means the most-photographed projects in the tenant. Sorting the response array in the browser would
+ * instead rank whatever the server happened to return — i.e. "the most-photographed of the N most
+ * RECENT projects" — which looks plausible and is wrong. `project-stats-sort.runtime.test.ts` seeds
+ * more projects than one page holds specifically to fail if that ever regresses.
+ *
+ * COST. Two statements, both bounded:
+ *   1. the grouped aggregate (unavoidable — you cannot order by a count without computing it), which
+ *      the existing partial index `files_photo_timeline_idx (deal_id, category, COALESCE(taken_at,
+ *      created_at) DESC) WHERE category='photo' AND is_active=TRUE` already serves as a pre-sorted
+ *      GroupAggregate: 11ms for 31,621 photos across 166 projects on production (EXPLAIN ANALYZE,
+ *      2026-07-27). No denormalized counter column is warranted for that, and one would add write-path
+ *      drift for no measurable read gain.
+ *   2. the recent-photo strip for ONLY the projects on the returned page.
+ * This replaces three CORRELATED SUBQUERIES that each re-scanned a deal's photos per group (3xN lateral
+ * scans per request, N = up to 100 groups) — the previous shape got strictly worse under a sort that
+ * can surface the largest galleries first. The single-pass row_number() window mirrors
+ * getUnassignedCompanyCamProjects below.
+ *
+ * `tenantDb` is one transaction-bound pg client, so the two statements MUST run sequentially —
+ * Promise.all would trip "client already executing" and 500 the page.
  */
 export async function getProjectPhotoStats(
-  tenantDb: TenantDb
+  tenantDb: TenantDb,
+  options: ProjectPhotoStatsOptions = {},
 ): Promise<{
-  projects: Array<{
-    dealId: string;
-    dealName: string;
-    dealNumber: string;
-    propertyCity: string | null;
-    propertyState: string | null;
-    photoCount: number;
-    lastPhotoAt: string | null;
-    recentUploaders: string[];
-    recentPhotoIds: string[];
-    recentPhotos: Array<{
-      id: string;
-      displayName: string | null;
-      mimeType: string | null;
-      r2Key: string | null;
-      externalUrl: string | null;
-      externalThumbnailUrl: string | null;
-    }>;
-  }>;
+  projects: ProjectPhotoStat[];
+  pagination: {
+    limit: number;
+    /**
+     * Total matching projects. Computed ONLY on the first page: the keyset predicate lives in HAVING, so
+     * the `count(*) OVER ()` window would otherwise count what REMAINS after the cursor and the header
+     * would count down as the user paged. `null` on cursor pages means "unchanged" — the client keeps
+     * the figure it already has.
+     */
+    total: number | null;
+    /** Position to resume from, or `null` when the server has nothing further. The ONLY end signal. */
+    nextCursor: string | null;
+  };
 }> {
-  // Aggregate counts, last photo timestamp, recent uploaders, and recent photo IDs per deal
+  const sort: ProjectPhotoSort = PROJECT_PHOTO_SORTS.includes(options.sort as ProjectPhotoSort)
+    ? (options.sort as ProjectPhotoSort)
+    : "recent";
+  const limit = Number.isFinite(options.limit) && (options.limit as number) >= 1
+    ? Math.min(Math.floor(options.limit as number), PROJECT_STATS_MAX_LIMIT)
+    : PROJECT_STATS_DEFAULT_LIMIT;
+  // A malformed/stale cursor decodes to undefined and simply restarts the list — never a 400, never a
+  // bad uuid cast reaching Postgres.
+  const cursor = decodeProjectCursor(options.cursor, sort);
+
+  // Ownership and search narrow the SAME query the sort and paging run on. Filtering them in the
+  // browser instead would repeat the sort-after-truncation mistake in a second place: under
+  // `most_photos`, "My Projects" would quietly mean "the rep's projects among the 100
+  // most-photographed", and the header's project count would describe a different set than the rows
+  // beneath it.
+  // TWO predicates, on purpose. `photoWhere` touches only `files` columns, so it can be reused verbatim
+  // inside the strip CTE (which selects `FROM files` and never joins `deals`); the deal-level narrowing
+  // below would not resolve there. The strip is already confined to the page's deal ids, so it does not
+  // need them.
+  const photoWhere = and(...buildFeedPhotoConditions(options, { requireDeal: true }))!;
+  const projectConditions: SQL[] = [photoWhere];
+  if (options.assignedRepId) projectConditions.push(eq(deals.assignedRepId, options.assignedRepId));
+  if (options.search) {
+    // Escape LIKE wildcards so a literal % or _ typed into the search box matches itself rather than
+    // silently widening the search to everything.
+    const term = `%${options.search.replace(/[\\%_]/g, (char) => `\\${char}`)}%`;
+    projectConditions.push(
+      sql`(${deals.name} ILIKE ${term} OR ${deals.dealNumber} ILIKE ${term} OR ${deals.propertyCity} ILIKE ${term})`,
+    );
+  }
+  const where = and(...projectConditions)!;
+
+  const lastPhotoAtSql = sql`max(COALESCE(${files.takenAt}, ${files.createdAt}))`;
+  const orderBy: SQL = sort === "most_photos"
+    ? sql`count(*) DESC`
+    : sort === "least_photos"
+      ? sql`count(*) ASC`
+      : sql`${lastPhotoAtSql} DESC NULLS LAST`;
+
+  // The keyset predicate: "strictly after this position in THIS ordering". Written per sort because the
+  // comparison direction has to match the ORDER BY — a `<` where the ordering ascends silently returns
+  // the rows already delivered. `deal_id` breaks the tie, and its `>` is the same in all three because
+  // the tiebreak is always ascending.
+  //
+  // ACCEPTED LIMITATION — the cursor is stable, the ORDERING KEY is not. `count(*)` and `max(taken_at)`
+  // both move when photos are uploaded, so a project that gains photos mid-scroll can jump AHEAD of an
+  // already-issued cursor and then fail this predicate for the rest of the walk: the user reaches the end
+  // without seeing it. No cursor scheme fixes this; it needs an ordering SNAPSHOT or a client-side
+  // refresh-and-merge of earlier pages.
+  //
+  // Deliberately not built, on severity. This is an INTERNAL list and the worst case is that someone
+  // scrolling misses a project that changed while they scrolled — a refresh shows it. The same class on
+  // the public share viewer was worth chasing because there it meant a CLIENT silently received fewer
+  // photos than were sent; that is a different order of consequence, and that surface is out of scope
+  // for this PR anyway. What keyset DOES remove here is the shifting-window class, where an unrelated
+  // write drops a row the user was entitled to see — see the runtime test that pins it.
+  //
+  // `files.created_at` is NOT NULL, so `max(COALESCE(taken_at, created_at))` is never NULL for a group
+  // that exists — the NULLS LAST above is defensive, and the cursor never has to encode a null.
+  const havingCursor: SQL | undefined = cursor
+    ? sort === "most_photos"
+      ? sql`(count(*) < ${cursor.sortValue}::bigint OR (count(*) = ${cursor.sortValue}::bigint AND ${files.dealId} > ${cursor.dealId}::uuid))`
+      : sort === "least_photos"
+        ? sql`(count(*) > ${cursor.sortValue}::bigint OR (count(*) = ${cursor.sortValue}::bigint AND ${files.dealId} > ${cursor.dealId}::uuid))`
+        : sql`(${lastPhotoAtSql} < ${cursor.sortValue}::timestamptz OR (${lastPhotoAtSql} = ${cursor.sortValue}::timestamptz AND ${files.dealId} > ${cursor.dealId}::uuid))`
+    : undefined;
+
   const rows = await tenantDb
     .select({
       dealId: files.dealId,
       dealName: deals.name,
       dealNumber: deals.dealNumber,
+      assignedRepId: deals.assignedRepId,
       propertyCity: deals.propertyCity,
       propertyState: deals.propertyState,
       photoCount: sql<number>`count(*)::int`,
-      lastPhotoAt: sql<string>`max(COALESCE(${files.takenAt}, ${files.createdAt}))::text`,
-      recentUploaders: sql<string>`
-        (SELECT array_to_json(array_agg(DISTINCT u.display_name))
-         FROM (
-           SELECT COALESCE(u2.display_name, 'Unknown') as display_name
-           FROM files f2
-           LEFT JOIN users u2 ON u2.id = f2.uploaded_by
-           WHERE f2.deal_id = ${files.dealId}
-             AND f2.category = 'photo'
-             AND f2.is_active = true
-           ORDER BY COALESCE(f2.taken_at, f2.created_at) DESC
-           LIMIT 10
-         ) u
-        )::text`,
-      recentPhotoIds: sql<string>`
-        (SELECT array_to_json(array_agg(f3.id))
-         FROM (
-           SELECT f3.id
-           FROM files f3
-           WHERE f3.deal_id = ${files.dealId}
-             AND f3.category = 'photo'
-             AND f3.is_active = true
-           ORDER BY COALESCE(f3.taken_at, f3.created_at) DESC
-           LIMIT 5
-         ) f3
-        )::text`,
-      recentPhotos: sql<string>`
-        (SELECT COALESCE(json_agg(json_build_object(
-          'id', recent.id,
-          'displayName', recent.display_name,
-          'mimeType', recent.mime_type,
-          'r2Key', recent.r2_key,
-          'externalUrl', recent.external_url,
-          'externalThumbnailUrl', recent.external_thumbnail_url
-        )), '[]'::json)
-         FROM (
-           SELECT
-             f4.id,
-             f4.display_name,
-             f4.mime_type,
-             f4.r2_key,
-             f4.external_url,
-             f4.external_thumbnail_url
-           FROM files f4
-           WHERE f4.deal_id = ${files.dealId}
-             AND f4.category = 'photo'
-             AND f4.is_active = true
-           ORDER BY COALESCE(f4.taken_at, f4.created_at) DESC
-           LIMIT 5
-         ) recent
-        )::text`,
+      lastPhotoAt: sql<string>`${lastPhotoAtSql}::text`,
+      // Window over the GROUPED result (window functions run after GROUP BY, before LIMIT), so this is
+      // the number of matching projects — no second COUNT(DISTINCT deal_id) round-trip. Only meaningful
+      // on the first page; past a cursor it counts what REMAINS (the keyset predicate is in HAVING).
+      totalProjects: sql<number>`(count(*) OVER ())::int`,
     })
     .from(files)
     .innerJoin(deals, eq(deals.id, files.dealId))
-    .where(
-      and(
-        eq(files.category, "photo"),
-        eq(files.isActive, true),
-        sql`${files.dealId} IS NOT NULL`
+    .where(where)
+    .groupBy(files.dealId, deals.name, deals.dealNumber, deals.assignedRepId, deals.propertyCity, deals.propertyState)
+    .having(havingCursor)
+    // Tiebreaker is load-bearing, not cosmetic: on `most_photos` dozens of projects share a count, and
+    // without a deterministic second key the cursor has no unique boundary to resume from.
+    .orderBy(orderBy, files.dealId)
+    .limit(limit);
+
+  const total = cursor ? null : Number(rows[0]?.totalProjects ?? 0);
+  // A full page MAY have more after it; a short page cannot. At worst this costs one extra request at an
+  // exact multiple of the page size, which then returns nothing and ends the walk — bounded, and never
+  // the reverse error of stopping while rows remain.
+  const lastRow = rows.length === limit ? rows[rows.length - 1] : undefined;
+  const nextCursor = lastRow?.dealId
+    ? encodeProjectCursor({
+        sortValue: sort === "recent" ? String(lastRow.lastPhotoAt) : String(lastRow.photoCount),
+        dealId: lastRow.dealId,
+      })
+    : null;
+  const dealIds = rows.map((row) => row.dealId).filter((id): id is string => Boolean(id));
+
+  // Recent-photo strip + uploader avatars, for the RETURNED PAGE ONLY. Same `where` as the aggregate, so
+  // a filtered Projects row's thumbnails are drawn from the same photos its count was computed over.
+  const stripByDeal = new Map<string, { recentPhotos: ProjectPhotoStat["recentPhotos"]; recentUploaders: string[] }>();
+  if (dealIds.length > 0) {
+    const stripResult = await tenantDb.execute(sql`
+      WITH ranked AS (
+        SELECT
+          ${files.dealId} AS deal_id,
+          ${files.id} AS id,
+          ${files.displayName} AS display_name,
+          ${files.mimeType} AS mime_type,
+          ${files.r2Key} AS r2_key,
+          ${files.externalUrl} AS external_url,
+          ${files.externalThumbnailUrl} AS external_thumbnail_url,
+          COALESCE(uploader.display_name, 'Unknown') AS uploader_name,
+          row_number() OVER (
+            PARTITION BY ${files.dealId}
+            ORDER BY COALESCE(${files.takenAt}, ${files.createdAt}) DESC NULLS LAST, ${files.id} DESC
+          ) AS rn
+        FROM ${files}
+        LEFT JOIN ${users} uploader ON uploader.id = ${files.uploadedBy}
+        WHERE ${photoWhere} AND ${inArray(files.dealId, dealIds)}
       )
-    )
-    .groupBy(files.dealId, deals.name, deals.dealNumber, deals.propertyCity, deals.propertyState)
-    .orderBy(desc(sql`max(COALESCE(${files.takenAt}, ${files.createdAt}))`))
-    .limit(100);
+      SELECT
+        deal_id AS "dealId",
+        COALESCE(json_agg(json_build_object(
+          'id', id,
+          'displayName', display_name,
+          'mimeType', mime_type,
+          'r2Key', r2_key,
+          'externalUrl', external_url,
+          'externalThumbnailUrl', external_thumbnail_url
+        ) ORDER BY rn) FILTER (WHERE rn <= ${PROJECT_RECENT_PHOTO_COUNT}), '[]'::json) AS "recentPhotos",
+        COALESCE(json_agg(DISTINCT uploader_name) FILTER (WHERE rn <= ${PROJECT_RECENT_UPLOADER_COUNT}), '[]'::json) AS "recentUploaders"
+      FROM ranked
+      GROUP BY deal_id
+    `);
+
+    const stripRows = ((stripResult as unknown as { rows?: unknown[] }).rows ?? stripResult) as Array<{
+      dealId: string;
+      recentPhotos: unknown;
+      recentUploaders: unknown;
+    }>;
+    for (const row of stripRows) {
+      stripByDeal.set(row.dealId, {
+        recentPhotos: parseJsonColumn(row.recentPhotos, [] as ProjectPhotoStat["recentPhotos"]),
+        recentUploaders: parseJsonColumn(row.recentUploaders, [] as string[]),
+      });
+    }
+  }
 
   return {
-    projects: rows.map((r) => ({
-      dealId: r.dealId!,
-      dealName: r.dealName,
-      dealNumber: r.dealNumber,
-      propertyCity: r.propertyCity,
-      propertyState: r.propertyState,
-      photoCount: r.photoCount,
-      lastPhotoAt: r.lastPhotoAt,
-      recentUploaders: r.recentUploaders ? JSON.parse(r.recentUploaders) : [],
-      recentPhotoIds: r.recentPhotoIds ? JSON.parse(r.recentPhotoIds) : [],
-      recentPhotos: r.recentPhotos ? JSON.parse(r.recentPhotos) : [],
-    })),
+    projects: rows.map((row) => {
+      const strip = stripByDeal.get(row.dealId!) ?? { recentPhotos: [], recentUploaders: [] };
+      return {
+        dealId: row.dealId!,
+        dealName: row.dealName,
+        dealNumber: row.dealNumber,
+        assignedRepId: row.assignedRepId ?? null,
+        propertyCity: row.propertyCity,
+        propertyState: row.propertyState,
+        photoCount: row.photoCount,
+        lastPhotoAt: row.lastPhotoAt,
+        recentUploaders: strip.recentUploaders,
+        // Kept for the client's degraded-payload fallback path (it renders ids when recentPhotos is
+        // empty). Derived from the same strip instead of a third correlated subquery.
+        recentPhotoIds: strip.recentPhotos.map((photo) => photo.id),
+        recentPhotos: strip.recentPhotos,
+      };
+    }),
+    pagination: { limit, total, nextCursor },
+  };
+}
+
+/**
+ * Options for the feed's filter dropdowns.
+ *
+ * Derived from the WHOLE photo library and deliberately ignoring the currently-applied filters — the
+ * same rule getDealPhotoUploaders applies to the deal-level timeline. If the options were narrowed to
+ * the current result set, the option the user just selected could vanish from its own dropdown the
+ * instant it took effect, leaving no way to undo it.
+ *
+ * Only dimensions the data actually carries are offered. Verified against production 2026-07-27:
+ * 25 distinct uploaders / 0 null; photo_category present on 3,280 of 31,621 deal-linked photos
+ * (construction 1,701, estimating 994, preconstruction 552, site_visit 33) with the rest NULL — hence
+ * the "uncategorized" option. Source is a fixed two-value list, not a facet (see PHOTO_FEED_SOURCES).
+ */
+export async function getPhotoFeedFacets(tenantDb: TenantDb): Promise<{
+  uploaders: Array<{ id: string; name: string }>;
+  photoCategories: string[];
+  projects: Array<{ id: string; name: string }>;
+}> {
+  // Literally the feed's own row predicate, with no filters applied — not a re-statement of it. An
+  // option that cannot match a feed row (or a feed row whose uploader has no option) is exactly what
+  // hand-maintaining a second copy produced, twice.
+  const scope = and(...buildFeedPhotoConditions({}))!;
+  // The PROJECT picker is the one facet that legitimately needs a deal, because it lists deals. Same
+  // builder, one named option — so it cannot drift from the rest either.
+  const projectScope = and(...buildFeedPhotoConditions({}, { requireDeal: true }))!;
+
+  // Sequential, not Promise.all — tenantDb is a single transaction-bound pg client.
+  const uploaderRows = await tenantDb
+    .selectDistinct({
+      id: files.uploadedBy,
+      name: sql<string>`COALESCE(${users.displayName}, 'Unknown')`.as("uploader_name"),
+    })
+    .from(files)
+    .leftJoin(users, eq(users.id, files.uploadedBy))
+    .where(scope);
+
+  // Same normalized expression as the predicate, so an option can never appear in the dropdown that the
+  // filter then cannot match (or vice versa).
+  const categoryRows = await tenantDb
+    .selectDistinct({ value: sql<string | null>`${photoPhaseSql}` })
+    .from(files)
+    .where(scope);
+
+  // The Photos tab's project picker. It has to come from the FULL project list, not from the currently
+  // filtered project rows: those are narrowed and paged, so the project a user had already selected
+  // could drop out of its own dropdown the moment they applied a date range — the select would render
+  // blank while still sending its dealId to the feed, leaving no way to undo the selection.
+  const projectRows = await tenantDb
+    .selectDistinct({ id: files.dealId, name: deals.name })
+    .from(files)
+    .innerJoin(deals, eq(deals.id, files.dealId))
+    .where(projectScope);
+
+  return {
+    uploaders: uploaderRows
+      .filter((row): row is { id: string; name: string } => Boolean(row.id))
+      .sort((left, right) => left.name.localeCompare(right.name)),
+    photoCategories: categoryRows
+      .map((row) => row.value)
+      .filter((value): value is string => Boolean(value))
+      .sort(),
+    projects: projectRows
+      .filter((row): row is { id: string; name: string } => Boolean(row.id))
+      .sort((left, right) => (left.name ?? "").localeCompare(right.name ?? "")),
   };
 }
 
@@ -382,7 +865,8 @@ export async function getUnassignedCompanyCamPhotos(
     .from(files)
     .leftJoin(users, eq(users.id, files.uploadedBy))
     .where(where)
-    .orderBy(desc(sql`COALESCE(${files.takenAt}, ${files.createdAt})`))
+    // Deterministic tiebreaker, same rationale as getPhotoFeed — this reader pages too.
+    .orderBy(desc(sql`COALESCE(${files.takenAt}, ${files.createdAt})`), desc(files.id))
     .limit(safeLimit)
     .offset(offset);
 

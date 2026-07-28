@@ -18,9 +18,11 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { photoCategoryLabel } from "@trock-crm/shared/types";
 import { formatDealDisplayNumber } from "@/lib/deal-utils";
 import { api } from "@/lib/api";
-import { usePhotoFeed, type FeedFilters, type FeedPhoto } from "@/hooks/use-photo-feed";
+import { endOfCalendarDayIso, startOfCalendarDayIso } from "@/lib/calendar-day-range";
+import { usePhotoFeed, type FeedFilters, type FeedPhoto, type FeedSource } from "@/hooks/use-photo-feed";
 import { PhotoLightbox } from "@/components/photos/photo-lightbox";
 import { getFileMediaKind, type FileMediaKind } from "@/lib/file-media";
 import {
@@ -44,6 +46,8 @@ interface ProjectStat {
   dealId: string;
   dealName: string;
   dealNumber: string;
+  /** Deal owner. The "My Projects" pill had nothing to compare against before this was returned. */
+  assignedRepId: string | null;
   propertyCity: string | null;
   propertyState: string | null;
   photoCount: number;
@@ -52,6 +56,36 @@ interface ProjectStat {
   recentPhotoIds: string[];
   recentPhotos?: ProjectRecentPhoto[];
 }
+
+interface FeedFacets {
+  uploaders: Array<{ id: string; name: string }>;
+  photoCategories: string[];
+  projects: Array<{ id: string; name: string }>;
+}
+
+/**
+ * Sort options for the Projects tab. The value is sent to the server, which owns the ordering — sorting
+ * the returned array here would only reorder the page the server already picked, so "most photos" would
+ * silently mean "most-photographed of the most recent N projects".
+ */
+const PROJECT_SORT_OPTIONS = [
+  { value: "recent", label: "Most recent photos" },
+  { value: "most_photos", label: "Most photos" },
+  { value: "least_photos", label: "Fewest photos" },
+] as const;
+
+type ProjectSort = (typeof PROJECT_SORT_OPTIONS)[number]["value"];
+
+// Projects fetched per request. Kept at the server's own max so "Load more" is a rare click on the
+// 166-project production library, while still never asking for an unbounded aggregate.
+const PROJECT_PAGE_SIZE = 100;
+
+// Source is a fixed two-value dimension, not a facet: on a photo row `subcategory` only ever holds
+// 'CompanyCam' or NULL, so there is nothing else for the server to report.
+const SOURCE_OPTIONS = [
+  { value: "companycam", label: "CompanyCam" },
+  { value: "trock", label: "T-Rock capture" },
+] as const;
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -919,6 +953,123 @@ function UnassignedTab({ onDataChanged }: { onDataChanged: () => void }) {
   );
 }
 
+// ─── Shared Filter Controls ─────────────────────────────────────────────────
+
+function FilterField({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="flex flex-col gap-1">
+      <label className="text-[11px] font-medium text-gray-500 uppercase tracking-wide">{label}</label>
+      {children}
+    </div>
+  );
+}
+
+const SELECT_CLASS =
+  "h-9 rounded-md border border-gray-200 bg-white px-3 text-sm text-gray-700 min-w-[150px]";
+
+/**
+ * The uploader / phase / source / date controls, rendered on BOTH tabs from ONE piece of state.
+ *
+ * Shared deliberately. When a filter applied to the photo list but not the project aggregate, a user
+ * narrowing to one uploader saw a project row still claiming its full "900 photos" next to a Photos tab
+ * listing 12 — the same rule reaching one surface and not the other. Here the same values are sent to
+ * both endpoints, which route them through one server-side predicate builder.
+ */
+function FacetsRetryNotice({ onRetry }: { onRetry: () => void }) {
+  return (
+    <div className="flex items-end gap-2">
+      <p className="text-xs text-gray-500 pb-2">Filter options unavailable.</p>
+      <Button variant="outline" size="sm" onClick={onRetry} className="h-9 text-xs">
+        Retry
+      </Button>
+    </div>
+  );
+}
+
+function FeedFilterControls({
+  facets,
+  uploader,
+  onUploaderChange,
+  photoCategory,
+  onPhotoCategoryChange,
+  source,
+  onSourceChange,
+  dateFrom,
+  onDateFromChange,
+  dateTo,
+  onDateToChange,
+}: {
+  facets: FeedFacets;
+  uploader: string;
+  onUploaderChange: (value: string) => void;
+  photoCategory: string;
+  onPhotoCategoryChange: (value: string) => void;
+  source: string;
+  onSourceChange: (value: string) => void;
+  dateFrom: string;
+  onDateFromChange: (value: string) => void;
+  dateTo: string;
+  onDateToChange: (value: string) => void;
+}) {
+  return (
+    <>
+      <FilterField label="Uploaded By">
+        <select value={uploader} onChange={(e) => onUploaderChange(e.target.value)} className={SELECT_CLASS}>
+          <option value="">Anyone</option>
+          {facets.uploaders.map((u) => (
+            <option key={u.id} value={u.id}>
+              {u.name}
+            </option>
+          ))}
+        </select>
+      </FilterField>
+      <FilterField label="Phase">
+        <select
+          value={photoCategory}
+          onChange={(e) => onPhotoCategoryChange(e.target.value)}
+          className={SELECT_CLASS}
+        >
+          <option value="">Any phase</option>
+          {facets.photoCategories.map((value) => (
+            <option key={value} value={value}>
+              {photoCategoryLabel(value) ?? value}
+            </option>
+          ))}
+          {/* Most photos carry no phase, so "Uncategorized" has to be selectable or the dropdown can
+              only ever reach a small slice of the library. */}
+          <option value="uncategorized">Uncategorized</option>
+        </select>
+      </FilterField>
+      <FilterField label="Source">
+        <select value={source} onChange={(e) => onSourceChange(e.target.value)} className={SELECT_CLASS}>
+          <option value="">Any source</option>
+          {SOURCE_OPTIONS.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+      </FilterField>
+      <FilterField label="Start Date">
+        <Input
+          type="date"
+          value={dateFrom}
+          onChange={(e) => onDateFromChange(e.target.value)}
+          className="bg-white w-[150px] h-9 text-sm"
+        />
+      </FilterField>
+      <FilterField label="End Date">
+        <Input
+          type="date"
+          value={dateTo}
+          onChange={(e) => onDateToChange(e.target.value)}
+          className="bg-white w-[150px] h-9 text-sm"
+        />
+      </FilterField>
+    </>
+  );
+}
+
 // ─── Main Component ─────────────────────────────────────────────────────────
 
 export function PhotoFeedPage() {
@@ -927,13 +1078,38 @@ export function PhotoFeedPage() {
 
   // ── Projects tab state ──
   const [projectStats, setProjectStats] = useState<ProjectStat[]>([]);
+  const [projectTotal, setProjectTotal] = useState(0);
+  // Keyset position for the next page, or null when the server has nothing further. This IS the end
+  // signal — there is no count-based "are we done yet?" heuristic, because the ordering keys (photo
+  // count, latest photo time) move with every upload and a count cannot tell drift from the end.
+  const [projectNextCursor, setProjectNextCursor] = useState<string | null>(null);
   const [projectsLoading, setProjectsLoading] = useState(true);
   const [projectSearch, setProjectSearch] = useState("");
   const [projectFilter, setProjectFilter] = useState<"all" | "my">("all");
+  const [projectSort, setProjectSort] = useState<ProjectSort>("recent");
+  // A failed request must not leave rows from a DIFFERENT query on screen pretending to be this one.
+  const [projectError, setProjectError] = useState(false);
+  // True while a first-page (replacement) request is in flight — see fetchProjectStats.
+  const [projectsReplacing, setProjectsReplacing] = useState(true);
+  // The search box now drives a server query, so debounce it — otherwise every keystroke is a
+  // cross-deal photo aggregate.
+  const [debouncedSearch, setDebouncedSearch] = useState("");
 
-  // ── Photos tab state ──
+  // ── Filters shared by BOTH tabs (see FeedFilterControls) ──
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
+  const [uploaderFilter, setUploaderFilter] = useState("");
+  const [categoryFilter, setCategoryFilter] = useState("");
+  const [sourceFilter, setSourceFilter] = useState("");
+  const [facets, setFacets] = useState<FeedFacets>({ uploaders: [], photoCategories: [], projects: [] });
+  // Bumped whenever the photo LIBRARY changes (not the selection) — an unassigned-photo assignment, or
+  // the user loading newly-polled photos. Drives the facets refetch.
+  const [libraryVersion, setLibraryVersion] = useState(0);
+  const [facetsError, setFacetsError] = useState(false);
+  // Bumped by the retry control; separate from libraryVersion so a retry does not imply the library moved.
+  const [facetsAttempt, setFacetsAttempt] = useState(0);
+
+  // ── Photos tab state ──
   const [projectFilterId, setProjectFilterId] = useState("");
   const [selectedPhotoIndex, setSelectedPhotoIndex] = useState<number | null>(null);
   // Bumped after a successful unassigned-photo assignment so the Photos feed refetches (the newly-linked
@@ -943,68 +1119,202 @@ export function PhotoFeedPage() {
   // Build filters for photo feed
   const feedFilters = useMemo<FeedFilters>(() => {
     const f: FeedFilters = { refreshToken: feedRefreshToken };
-    if (dateFrom) f.dateFrom = new Date(dateFrom).toISOString();
-    if (dateTo) {
-      const end = new Date(dateTo);
-      end.setHours(23, 59, 59, 999);
-      f.dateTo = end.toISOString();
-    }
+    // Local calendar-day bounds. `new Date("YYYY-MM-DD")` parses as UTC midnight while `setHours` mutates
+    // in LOCAL time, so the old pairing collapsed a same-day selection to a few hours ending the previous
+    // local evening — see lib/calendar-day-range.ts.
+    if (dateFrom) f.dateFrom = startOfCalendarDayIso(dateFrom);
+    if (dateTo) f.dateTo = endOfCalendarDayIso(dateTo);
     if (projectFilterId) f.dealId = projectFilterId;
+    if (uploaderFilter) f.uploadedBy = uploaderFilter;
+    if (categoryFilter) f.photoCategory = categoryFilter;
+    if (sourceFilter) f.source = sourceFilter as FeedSource;
     return f;
-  }, [dateFrom, dateTo, projectFilterId, feedRefreshToken]);
+  }, [dateFrom, dateTo, projectFilterId, uploaderFilter, categoryFilter, sourceFilter, feedRefreshToken]);
 
-  const { photos, page, totalPages, total, loading, newCount, loadNewPhotos, goToPage } =
+  const { photos, page, totalPages, total, loading, error: photosError, newCount, loadNewPhotos, goToPage } =
     usePhotoFeed(feedFilters);
 
   const dateGroups = useMemo(() => groupPhotosByDate(photos), [photos]);
 
-  // Fetch project stats
-  const fetchProjectStats = useCallback(async () => {
-    setProjectsLoading(true);
-    try {
-      const data = await api<{ projects: ProjectStat[] }>(
-        "/files/photos/project-stats"
-      );
-      setProjectStats(data.projects);
-    } catch (err) {
-      console.error("Failed to fetch project stats:", err);
-    } finally {
-      setProjectsLoading(false);
-    }
-  }, []);
+  // The same filter values the Photos tab sends, as a project-stats query string. Sort and paging live
+  // here too: both decide WHICH projects come back, so both must be resolved server-side.
+  const projectStatsQuery = useMemo(() => {
+    const params = new URLSearchParams();
+    params.set("sort", projectSort);
+    params.set("limit", String(PROJECT_PAGE_SIZE));
+    // Ownership and search go to the SERVER alongside the sort. Narrowing them here instead would
+    // repeat the sort-after-truncation mistake: under "Most photos", "My Projects" would silently mean
+    // "the rep's projects among the 100 most-photographed", and the count above the list would describe
+    // a different set than the rows below it.
+    if (projectFilter === "my") params.set("mine", "1");
+    if (debouncedSearch) params.set("q", debouncedSearch);
+    if (uploaderFilter) params.set("uploadedBy", uploaderFilter);
+    if (categoryFilter) params.set("photoCategory", categoryFilter);
+    if (sourceFilter) params.set("source", sourceFilter);
+    // SAME helper as the Photos tab above — the two tabs share one filter state, so they must also
+    // share one interpretation of what a picked day means.
+    const from = dateFrom ? startOfCalendarDayIso(dateFrom) : undefined;
+    const to = dateTo ? endOfCalendarDayIso(dateTo) : undefined;
+    if (from) params.set("dateFrom", from);
+    if (to) params.set("dateTo", to);
+    return params;
+  }, [projectSort, projectFilter, debouncedSearch, uploaderFilter, categoryFilter, sourceFilter, dateFrom, dateTo]);
+
+  // Monotonic request id — a sort/filter change can leave an older request in flight that would
+  // otherwise resolve last and clobber the fresh list (same guard as usePhotoFeed).
+  const projectRequestSeq = useRef(0);
+  // Deal ids already rendered. Keyset paging cannot SKIP a project, but a project whose own sort value
+  // changes enough to move back across the cursor can be delivered twice — a duplicate React key would
+  // crash the list, so dedupe on append.
+  const projectSeenIdsRef = useRef<Set<string>>(new Set());
+
+  const fetchProjectStats = useCallback(
+    async (cursor?: string) => {
+      const seq = ++projectRequestSeq.current;
+      const isFirstPage = !cursor;
+      setProjectsLoading(true);
+      // A first-page request REPLACES the list. Until it lands, the rows on screen answer the PREVIOUS
+      // query — visible and clickable underneath the controls the user just changed. Tracked separately
+      // from `projectsLoading` because a load-more must keep its rows: that request adds to the list
+      // rather than replacing it.
+      if (isFirstPage) setProjectsReplacing(true);
+      try {
+        const params = new URLSearchParams(projectStatsQuery);
+        if (cursor) params.set("cursor", cursor);
+        const data = await api<{
+          projects: ProjectStat[];
+          pagination: { limit: number; total: number | null; nextCursor: string | null };
+        }>(`/files/photos/project-stats?${params}`);
+        if (seq !== projectRequestSeq.current) return;
+
+        // Dedupe on append. Keyset paging cannot skip a project, but one whose sort value moves back
+        // across the cursor can arrive twice, and a duplicate React key would crash the list.
+        const seen = isFirstPage ? new Set<string>() : projectSeenIdsRef.current;
+        if (isFirstPage) seen.clear();
+        const fresh = data.projects.filter((project) => {
+          if (seen.has(project.dealId)) return false;
+          seen.add(project.dealId);
+          return true;
+        });
+        projectSeenIdsRef.current = seen;
+
+        setProjectStats((prev) => (isFirstPage ? fresh : [...prev, ...fresh]));
+        // The ONLY end signal. No `loaded < total` arithmetic: that count can never close its gap once
+        // the ordering drifts, which is what kept "Load more" visible forever fetching pages that do not
+        // exist — and the client-side attempts to detect the end instead each introduced a new bug.
+        setProjectNextCursor(data.pagination.nextCursor);
+        setProjectError(false);
+        // `total` is computed only on the first page (the keyset predicate is in HAVING, so past a
+        // cursor the window would count what remains and the header would count down as the user pages).
+        if (data.pagination.total !== null) setProjectTotal(data.pagination.total);
+      } catch (err) {
+        if (seq !== projectRequestSeq.current) return;
+        console.error("Failed to fetch project stats:", err);
+        setProjectError(true);
+        if (isFirstPage) {
+          // A first-page request is a REPLACEMENT: the sort, search, ownership pill or filters just
+          // changed. Leaving the previous query's rows and total on screen would label one query's
+          // results with another query's controls, and the retained cursor belongs to the OLD ordering —
+          // so the next "Load more" would append a page of the NEW query into the OLD list. Drop the
+          // stale result and the stale position together.
+          setProjectStats([]);
+          setProjectTotal(0);
+          setProjectNextCursor(null);
+          projectSeenIdsRef.current.clear();
+        }
+        // A later-page failure keeps its rows: nothing on screen is stale, the user simply did not get
+        // MORE. `projectNextCursor` is untouched, so the retry resumes from the same position.
+        // Deliberately NOT terminal — a transient error must never be mistaken for the end of the list.
+      } finally {
+        if (seq === projectRequestSeq.current) {
+          setProjectsLoading(false);
+          setProjectsReplacing(false);
+        }
+      }
+    },
+    [projectStatsQuery],
+  );
 
   // After photos are assigned out of the Unassigned tab, refresh the Projects stats + the Photos feed so
   // their counts/lists aren't stale when the user switches tabs (Codex).
   const handleUnassignedDataChanged = useCallback(() => {
     void fetchProjectStats();
     setFeedRefreshToken((t) => t + 1);
+    setLibraryVersion((v) => v + 1);
+  }, [fetchProjectStats]);
+
+  // Pulling in newly-uploaded photos can introduce a project, uploader or phase that has no filter
+  // option yet. Same invalidation as an assignment — the library changed, so the facets did too.
+  const handleLoadNewPhotos = useCallback(() => {
+    loadNewPhotos();
+    setLibraryVersion((v) => v + 1);
+    // ...and the PROJECT rows too. New uploads move both of that tab's ordering keys — `count(*)` and
+    // `max(taken_at)` — so leaving it alone means switching to Projects shows stale counts in a stale
+    // order, and a project whose first photo just arrived is missing entirely until some other control
+    // changes. Exactly what the assignment handler already refreshes, for the same reason.
+    void fetchProjectStats();
+  }, [loadNewPhotos, fetchProjectStats]);
+
+  useEffect(() => {
+    void fetchProjectStats();
   }, [fetchProjectStats]);
 
   useEffect(() => {
-    fetchProjectStats();
-  }, [fetchProjectStats]);
+    const timer = setTimeout(() => setDebouncedSearch(projectSearch.trim()), 300);
+    return () => clearTimeout(timer);
+  }, [projectSearch]);
 
-  // Filter projects by search
-  const filteredProjects = useMemo(() => {
-    let result = projectStats;
-    if (projectSearch) {
-      const q = projectSearch.toLowerCase();
-      result = result.filter(
-        (p) =>
-          p.dealName.toLowerCase().includes(q) ||
-          p.dealNumber.toLowerCase().includes(q) ||
-          (p.propertyCity && p.propertyCity.toLowerCase().includes(q))
-      );
-    }
-    return result;
-  }, [projectStats, projectSearch, projectFilter]);
+  // Filter options come from the whole library and never change with the SELECTION, so they're fetched
+  // once rather than alongside every sort/filter change — but they DO change when the library itself
+  // does, and there are two ways that happens here: assigning rescued photos onto a deal that previously
+  // had none (which makes that deal newly eligible — the facet scope requires a non-null dealId), and
+  // the 30-second poll surfacing photos the user then Loads. Both bump `libraryVersion`, so the
+  // dropdowns cannot show a grid full of photos whose project or uploader has no filter option.
+  useEffect(() => {
+    let cancelled = false;
+    void api<FeedFacets>("/files/photos/feed/facets")
+      .then((data) => {
+        if (cancelled) return;
+        setFacets(data);
+        setFacetsError(false);
+      })
+      .catch((err) => {
+        console.error("Failed to fetch photo feed facets:", err);
+        // Surfaced, not swallowed: a transient failure here leaves every option list EMPTY, and nothing
+        // else refetches unless the library happens to change. Without a retry the uploader, phase and
+        // project filters are simply unusable until a full page reload, with no explanation on screen.
+        if (!cancelled) setFacetsError(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [libraryVersion, facetsAttempt]);
 
-  // Unique uploaders for the Users filter dropdown
-  const allUploaders = useMemo(() => {
-    const set = new Set<string>();
-    projectStats.forEach((p) => p.recentUploaders.forEach((u) => set.add(u)));
-    return Array.from(set).sort();
-  }, [projectStats]);
+  // No client-side narrowing left: sort, filters, ownership, search and paging are ALL resolved by the
+  // server, so the rows on screen and the count above them always describe the same set.
+  const filteredProjects = projectStats;
+
+  // Shared across both tabs. `projectFilterId` is NOT here: the Project selector is only rendered on the
+  // Photos tab and is not sent in projectStatsQuery, so counting it would put a "Clear Filters" action on
+  // the Projects tab with every visible control at its default — and clicking it would silently clear an
+  // off-screen selection the user cannot see.
+  const hasSharedFilters = Boolean(dateFrom || dateTo || uploaderFilter || categoryFilter || sourceFilter);
+  const hasPhotosTabFilters = hasSharedFilters || Boolean(projectFilterId);
+
+  /**
+   * `includeProject` is the whole point of the parameter. The Project selector is rendered only on the
+   * Photos tab, so clearing from the PROJECTS tab must leave it alone — otherwise the action silently
+   * mutates a selection the user cannot see and did not ask about. Clearing from the Photos tab, where
+   * the control is on screen, does reset it.
+   */
+  function clearFilters(includeProject: boolean) {
+    setDateFrom("");
+    setDateTo("");
+    setUploaderFilter("");
+    setCategoryFilter("");
+    setSourceFilter("");
+    if (includeProject) setProjectFilterId("");
+  }
 
   return (
     <div className="flex flex-col h-full bg-gray-50">
@@ -1062,7 +1372,7 @@ export function PhotoFeedPage() {
           <Button
             variant="outline"
             size="sm"
-            onClick={loadNewPhotos}
+            onClick={handleLoadNewPhotos}
             className="border-white/40 text-white hover:bg-white/20 hover:text-white h-7 text-xs"
           >
             Load
@@ -1115,10 +1425,62 @@ export function PhotoFeedPage() {
               </div>
             </div>
 
+            {/* Sort + filter bar */}
+            <div className="flex flex-wrap items-end gap-3 mb-5">
+              <FilterField label="Sort By">
+                <select
+                  value={projectSort}
+                  onChange={(e) => setProjectSort(e.target.value as ProjectSort)}
+                  className={SELECT_CLASS}
+                >
+                  {PROJECT_SORT_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </FilterField>
+              <FeedFilterControls
+                facets={facets}
+                uploader={uploaderFilter}
+                onUploaderChange={setUploaderFilter}
+                photoCategory={categoryFilter}
+                onPhotoCategoryChange={setCategoryFilter}
+                source={sourceFilter}
+                onSourceChange={setSourceFilter}
+                dateFrom={dateFrom}
+                onDateFromChange={setDateFrom}
+                dateTo={dateTo}
+                onDateToChange={setDateTo}
+              />
+              {facetsError && <FacetsRetryNotice onRetry={() => setFacetsAttempt((n) => n + 1)} />}
+              {hasSharedFilters && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => clearFilters(false)}
+                  className="text-xs text-gray-500 hover:text-gray-700 h-9"
+                >
+                  Clear Filters
+                </Button>
+              )}
+            </div>
+
             {/* Project list */}
-            {projectsLoading ? (
+            {projectsReplacing ? (
               <div className="flex items-center justify-center py-20">
                 <Loader2 className="h-8 w-8 animate-spin text-gray-400" />
+              </div>
+            ) : projectError && projectStats.length === 0 ? (
+              /* The replacement query failed, so there is nothing trustworthy to show under these
+                 controls. An empty-state would claim "no projects match", which is a different and
+                 wrong statement. */
+              <div className="flex flex-col items-center justify-center py-20 text-center">
+                <h2 className="text-lg font-semibold text-gray-700 mb-1">Couldn't load projects</h2>
+                <p className="text-sm text-gray-500 mb-4">These filters couldn't be applied just now.</p>
+                <Button variant="outline" size="sm" onClick={() => void fetchProjectStats()}>
+                  Try again
+                </Button>
               </div>
             ) : filteredProjects.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-20 text-center">
@@ -1135,76 +1497,86 @@ export function PhotoFeedPage() {
                 </p>
               </div>
             ) : (
-              <div className="space-y-2">
-                {filteredProjects.map((project) => (
-                  <ProjectRow
-                    key={project.dealId}
-                    project={project}
-                    onClick={() => navigate(`/deals/${project.dealId}`)}
-                  />
-                ))}
-              </div>
+              <>
+                <p className="text-xs text-gray-500 mb-3">
+                  {projectTotal} project{projectTotal !== 1 ? "s" : ""}
+                  {projectStats.length < projectTotal ? ` · showing ${projectStats.length}` : ""}
+                </p>
+                <div className="space-y-2">
+                  {filteredProjects.map((project) => (
+                    <ProjectRow
+                      key={project.dealId}
+                      project={project}
+                      onClick={() => navigate(`/deals/${project.dealId}`)}
+                    />
+                  ))}
+                </div>
+                {/* Driven by the SERVER's cursor, not by `loaded < total`. The count kept this visible
+                    forever once the ordering drifted, and every click fetched a page that does not
+                    exist. A failed page keeps the control (as a retry) because a transient error is not
+                    the end of the list. */}
+                {(projectNextCursor !== null || projectError) && (
+                  <div className="flex flex-col items-center gap-2 pt-4">
+                    {projectError && <p className="text-xs text-gray-500">Couldn't load more projects.</p>}
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={projectsLoading}
+                      onClick={() => void fetchProjectStats(projectNextCursor ?? undefined)}
+                    >
+                      {projectsLoading ? "Loading..." : projectError ? "Try again" : "Load more projects"}
+                    </Button>
+                  </div>
+                )}
+              </>
             )}
           </div>
         ) : (
           /* ═══════════════════ PHOTOS TAB ═══════════════════ */
           <div className="px-6 py-4">
-            {/* Filters bar */}
-            <div className="flex flex-wrap gap-3 mb-5">
-              <div className="flex flex-col gap-1">
-                <label className="text-[11px] font-medium text-gray-500 uppercase tracking-wide">
-                  Start Date
-                </label>
-                <Input
-                  type="date"
-                  value={dateFrom}
-                  onChange={(e) => setDateFrom(e.target.value)}
-                  className="bg-white w-[150px] h-9 text-sm"
-                />
-              </div>
-              <div className="flex flex-col gap-1">
-                <label className="text-[11px] font-medium text-gray-500 uppercase tracking-wide">
-                  End Date
-                </label>
-                <Input
-                  type="date"
-                  value={dateTo}
-                  onChange={(e) => setDateTo(e.target.value)}
-                  className="bg-white w-[150px] h-9 text-sm"
-                />
-              </div>
-              <div className="flex flex-col gap-1">
-                <label className="text-[11px] font-medium text-gray-500 uppercase tracking-wide">
-                  Project
-                </label>
+            {/* Filters bar — same controls and same state as the Projects tab, so a narrowed selection
+                means the same thing on both. */}
+            <div className="flex flex-wrap items-end gap-3 mb-5">
+              <FilterField label="Project">
                 <select
                   value={projectFilterId}
                   onChange={(e) => setProjectFilterId(e.target.value)}
-                  className="h-9 rounded-md border border-gray-200 bg-white px-3 text-sm text-gray-700 min-w-[180px]"
+                  className={`${SELECT_CLASS} min-w-[180px]`}
                 >
                   <option value="">All Projects</option>
-                  {projectStats.map((p) => (
-                    <option key={p.dealId} value={p.dealId}>
-                      {p.dealName}
+                  {/* From the FULL project facet, not the filtered/paged rows — otherwise applying a
+                      date range could drop the already-selected project out of its own dropdown while
+                      its dealId was still being sent to the feed, with no way to undo it. */}
+                  {facets.projects.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name}
                     </option>
                   ))}
                 </select>
-              </div>
-              {(dateFrom || dateTo || projectFilterId) && (
-                <div className="flex items-end">
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => {
-                      setDateFrom("");
-                      setDateTo("");
-                      setProjectFilterId("");
-                    }}
-                    className="text-xs text-gray-500 hover:text-gray-700 h-9"
-                  >
-                    Clear Filters
-                  </Button>
-                </div>
+              </FilterField>
+              <FeedFilterControls
+                facets={facets}
+                uploader={uploaderFilter}
+                onUploaderChange={setUploaderFilter}
+                photoCategory={categoryFilter}
+                onPhotoCategoryChange={setCategoryFilter}
+                source={sourceFilter}
+                onSourceChange={setSourceFilter}
+                dateFrom={dateFrom}
+                onDateFromChange={setDateFrom}
+                dateTo={dateTo}
+                onDateToChange={setDateTo}
+              />
+              {facetsError && <FacetsRetryNotice onRetry={() => setFacetsAttempt((n) => n + 1)} />}
+              {hasPhotosTabFilters && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => clearFilters(true)}
+                  className="text-xs text-gray-500 hover:text-gray-700 h-9"
+                >
+                  Clear Filters
+                </Button>
               )}
             </div>
 
@@ -1212,6 +1584,16 @@ export function PhotoFeedPage() {
             {loading ? (
               <div className="flex items-center justify-center py-20">
                 <Loader2 className="h-8 w-8 animate-spin text-gray-400" />
+              </div>
+            ) : photosError && photos.length === 0 ? (
+              /* The request failed, so "No photos yet" would be a different and wrong claim — the query
+                 never ran. Mirrors the Projects tab's failed-replacement surface. */
+              <div className="flex flex-col items-center justify-center py-20 text-center">
+                <h2 className="text-lg font-semibold text-gray-700 mb-1">Couldn't load photos</h2>
+                <p className="text-sm text-gray-500 mb-4">These filters couldn't be applied just now.</p>
+                <Button variant="outline" size="sm" onClick={() => goToPage(1)}>
+                  Try again
+                </Button>
               </div>
             ) : photos.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-20 text-center">
