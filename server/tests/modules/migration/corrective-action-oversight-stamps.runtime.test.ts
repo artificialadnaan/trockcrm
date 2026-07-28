@@ -73,6 +73,21 @@ describe("migration 0201 — corrective-action oversight stamps (runtime, PGlite
     expect(await openedStamp(pg, OPEN_CARD)).toBeInstanceOf(Date);
   });
 
+  it("REGRESSION: also MINTS an oversight cycle marker for the grandfathered card", async () => {
+    // The stamp alone suppresses the phantom opened notice, but the card's eventual CLOSED job would then
+    // carry no oversight marker — and BOTH worker supersession checks require the payload marker and the
+    // stored marker to be present. A claimed closed job for a card that reopens and re-closes could not be
+    // superseded, and the two jobs carry distinct idempotency keys, so oversight gets the completion twice.
+    pg = await setup();
+    const rows = await pg.query<{ corrective_action_oversight_cycle: string | null }>(
+      `SELECT corrective_action_oversight_cycle FROM ${SCHEMA}.field_scorecards WHERE id = $1`,
+      [OPEN_CARD],
+    );
+    expect(rows.rows[0]?.corrective_action_oversight_cycle).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+    );
+  });
+
   it("leaves every other card unstamped, so real notices are not suppressed", async () => {
     // Only in-flight cycles are grandfathered. A closed card has no pending notice to suppress, and stamping
     // a card that has not tripped the band would silently swallow its FIRST genuine opened notice.
@@ -83,9 +98,19 @@ describe("migration 0201 — corrective-action oversight stamps (runtime, PGlite
 
   it("is idempotent — a rerun does not re-stamp or move an existing stamp", async () => {
     pg = await setup();
+    const marker = async () =>
+      (
+        await pg!.query<{ corrective_action_oversight_cycle: string | null }>(
+          `SELECT corrective_action_oversight_cycle FROM ${SCHEMA}.field_scorecards WHERE id = $1`,
+          [OPEN_CARD],
+        )
+      ).rows[0]?.corrective_action_oversight_cycle ?? null;
     const first = await openedStamp(pg, OPEN_CARD);
+    const firstMarker = await marker();
     await pg.exec(MIGRATION_SQL);
     expect(await openedStamp(pg, OPEN_CARD)).toEqual(first);
+    // A rerun must not ROTATE the marker either: that would orphan any job already carrying the old one.
+    expect(await marker()).toEqual(firstMarker);
   });
 
   it("runs across EVERY office_* schema, not just the template", async () => {

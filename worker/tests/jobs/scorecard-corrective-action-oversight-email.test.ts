@@ -1233,4 +1233,28 @@ describe("handleScorecardCorrectiveActionOversightEmail", () => {
     expect(html).toContain("is assigned to document a fix");
     expect(html).not.toContain("has been asked to document a fix");
   });
+
+  it("REGRESSION: bounds the item LABEL too, not only the comment", async () => {
+    // Parsing caps the NUMBER of action items (50), never each item's length. Bounding only the comments
+    // left a card with several long dictated labels able to produce an arbitrarily large body on its own.
+    const longLabel = "Re-inspect the north elevation framing connection detail and log it. ".repeat(60);
+    const { query } = makeQuery({
+      status: "corrective_action_closed",
+      items: [{ ...ITEMS[0], item_label: longLabel, response_comment: "Done." }],
+    });
+    const sendEmail = makeSend();
+
+    await handleScorecardCorrectiveActionOversightEmail(payload({ phase: "closed" }), null, {
+      query: query as never,
+      sendEmail: sendEmail as never,
+      getPdf: (async () => Buffer.from("%PDF-1.4")) as never,
+      env,
+      logger: makeLogger(),
+    });
+
+    const [, , html, options] = sendEmail.mock.calls[0] as unknown as [string[], string, string, { text: string }];
+    expect(html).not.toContain(longLabel);
+    expect(options.text).not.toContain(longLabel);
+    expect(html.length).toBeLessThan(longLabel.length);
+  });
 });

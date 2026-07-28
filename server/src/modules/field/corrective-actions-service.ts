@@ -828,14 +828,19 @@ async function restartCorrectiveActionCyclesForCards(
 
   // Clear the sent stamp (so the worker re-sends this cycle) AND stamp each scorecard's new ACTIVE cycle
   // nonce. Per-row because the nonce differs per scorecard (a single bulk update can't set per-row values).
-  const now = new Date();
   for (const scorecardId of scorecardIds) {
     await tx
       .update(fieldScorecards)
       .set({
         correctiveActionEmailSentAt: null,
         correctiveActionCycleNonce: cycleNonceByScorecardId.get(scorecardId)!,
-        updatedAt: now,
+        // MONOTONIC, not a JS timestamp captured before the loop. updated_at is now the PDF's content
+        // generation, and the currency check is an equality against it — so it must only ever increase. A
+        // client-captured `new Date()` can move it BACKWARD: if this transaction selected the open cards and
+        // then blocked behind a concurrent corrective-action response, that response advances the generation,
+        // and writing the earlier timestamp here can restore the exact value stamped on the PRE-response
+        // artifact. The stale PDF then classifies as current forever, which is the original bug, latched.
+        updatedAt: nextGeneration(),
         // The OVERSIGHT stamps are deliberately NOT cleared here. This helper only ever touches scorecards
         // already at status 'corrective_action_open' (see the id query above): the corrective action never
         // left open, so from oversight's point of view nothing new happened — a responder was reassigned.

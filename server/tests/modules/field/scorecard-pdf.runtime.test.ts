@@ -569,6 +569,63 @@ describe("corrective-action page-break safety", () => {
     expect(yPositions.filter((y) => y < 48)).toEqual([]);
   });
 
+  it("REGRESSION: never draws past the bottom margin when the RESPONDER NAME wraps", async () => {
+    // The label is not the only unbounded run before the bounded comment. The responder attribution is a
+    // person's name — contact first/last names are each allowed up to 255 characters — so it wraps too, and a
+    // fixed single-line allowance for it reproduces the same overflow the label measurement was added to fix.
+    // Proportions found by sweeping name length x item count x comment length — the overflow window is
+    // narrow, and a shorter name passes against the UNFIXED renderer.
+    const longName = "Bartholomew Fitzwilliam-Montgomery ".repeat(24).trim();
+    const data = buildScorecardPdfData({
+      ...base,
+      correctiveActions: Array.from({ length: 4 }, (_, i) => ({
+        itemType: "action_item",
+        itemRef: String(i),
+        itemLabel: `Item ${i}`,
+        status: "resolved",
+        responderName: longName,
+        respondedAt: "2026-07-27T13:00:00.000Z",
+        responseComment: "Corrected on site and verified with the safety lead. ".repeat(8),
+        photos: [],
+      })),
+    });
+
+    const pdf = await renderFieldScorecardPdf(data);
+    const yPositions = textYPositions(pdf);
+    expect(yPositions.length).toBeGreaterThan(20);
+    expect(yPositions.filter((y) => y < 48)).toEqual([]);
+  });
+
+  it("REGRESSION: a long continuation heading does not push its photo off the page", async () => {
+    // The heading is drawn on the NEW page, AFTER the fit check that decided the row did not fit on the old
+    // one. Unbounded, it eats the fresh page's headroom and pushes the image past the bottom margin — the
+    // clipping the heading was added to prevent, moved one page along.
+    // ~4,280 characters. Also swept: the failing window is narrow, because an UNBOUNDED heading normally
+    // auto-paginates and lands harmlessly at the top of a further page. It only clips when its wrapped height
+    // leaves the fresh page with less than an image row of headroom — which is exactly why bounding the
+    // heading is the right fix rather than measuring it.
+    const longLabel = "word ".repeat(856);
+    const data = buildScorecardPdfData({
+      ...base,
+      correctiveActions: [
+        {
+          itemType: "action_item",
+          itemRef: "0",
+          itemLabel: longLabel,
+          status: "resolved",
+          responderName: "Pat Manager",
+          respondedAt: "2026-07-27T13:00:00.000Z",
+          responseComment: "Done.",
+          photos: Array.from({ length: 8 }, (_, i) => ({ caption: `p${i}`, image: null })),
+        },
+      ],
+    });
+
+    const pdf = await renderFieldScorecardPdf(data);
+    const yPositions = textYPositions(pdf);
+    expect(yPositions.filter((y) => y < 48)).toEqual([]);
+  });
+
   it("REGRESSION: labels response photos that continue onto a new page", async () => {
     // A page break between an item's text and its photos left the next page opening with unlabelled images.
     // On a card where several items carry photos, nothing in the document then ties a photo to the item it

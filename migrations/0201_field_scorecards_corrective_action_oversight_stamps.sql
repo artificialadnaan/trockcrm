@@ -65,7 +65,14 @@ BEGIN
     -- normally from that point on.
     EXECUTE format(
       'UPDATE %I.field_scorecards
-          SET corrective_action_oversight_opened_at = now()
+          SET corrective_action_oversight_opened_at = now(),
+              -- Also MINT a marker. The stamp alone suppresses the phantom opened notice, but the eventual
+              -- CLOSED job for this card would carry no oversight cycle -- and both worker supersession
+              -- checks require the payload marker AND the stored marker to be present. A claimed closed job
+              -- for a card that then reopens and re-closes could not be superseded, and the two jobs carry
+              -- distinct idempotency keys, so oversight would receive the completion notice twice.
+              corrective_action_oversight_cycle
+                = COALESCE(corrective_action_oversight_cycle, gen_random_uuid())
         WHERE status = ''corrective_action_open''
           AND corrective_action_oversight_opened_at IS NULL',
       schema_name
@@ -80,7 +87,9 @@ ALTER TABLE office_dallas.field_scorecards
   ADD COLUMN IF NOT EXISTS corrective_action_oversight_closed_at timestamptz,
   ADD COLUMN IF NOT EXISTS corrective_action_oversight_cycle uuid;
 UPDATE office_dallas.field_scorecards
-   SET corrective_action_oversight_opened_at = now()
+   SET corrective_action_oversight_opened_at = now(),
+       corrective_action_oversight_cycle
+         = COALESCE(corrective_action_oversight_cycle, gen_random_uuid())
  WHERE status = 'corrective_action_open'
    AND corrective_action_oversight_opened_at IS NULL;
 -- TENANT_SCHEMA_END

@@ -48,9 +48,13 @@ const CORRECTIVE_ACTION_COMMENT_MAX_HEIGHT = 72;
 // Label (11pt) + status chip (9pt) + attribution (9pt) + the 4pt gap before the comment, rounded up. The
 // page-break guard adds CORRECTIVE_ACTION_COMMENT_MAX_HEIGHT on top for a resolved item.
 const CORRECTIVE_ACTION_LABEL_BLOCK_HEIGHT = 46;
-// The single-line label height already counted inside the block above. A wrapped label's EXTRA height is
-// measured at draw time and added to the reservation — item text has no length cap.
-const CORRECTIVE_ACTION_SINGLE_LINE_LABEL_HEIGHT = 14;
+// Enough room for a label line plus its status chip, so an item heading is not stranded alone at a page foot.
+// Purely cosmetic — the page-break CORRECTNESS guarantee is ensureRoom, applied before each bounded run.
+const CORRECTIVE_ACTION_HEADING_ORPHAN_GUARD = 46;
+// The continuation heading repeated above photos that spill onto a new page. BOUNDED rather than measured:
+// it is wayfinding, not the record (the full label sits on the item's own block), and an unbounded heading
+// on a fresh page can itself push the photo row past the bottom margin.
+const CORRECTIVE_ACTION_CONTINUATION_LABEL_HEIGHT = 24;
 // Bound each critical-deficiency description on the summary page so one long (up to 4000-char) note can't
 // blow the layout across pages; the same note also appears (bounded) as the evidence-group subtitle.
 const DEFICIENCY_NOTE_MAX_HEIGHT = 54;
@@ -684,16 +688,24 @@ export function typedSignatureFallback(signature: string | null): string | null 
  * it, when, what they said and what they photographed. An open item deliberately shows only the label and
  * status: there is nothing yet to document.
  */
+/**
+ * Ensure `needed` points of room remain, breaking the page if not.
+ *
+ * Called immediately BEFORE every explicitly-height-bounded text run. Reserving space up front is not
+ * sufficient on its own: an unbounded run before it (the item label, the responder attribution) auto-paginates
+ * when it is long, so it can END low on a later page no matter what was reserved on the first. Only a check
+ * taken after those runs — right where the bounded text is about to be drawn — is actually load-bearing,
+ * because a bounded run is the one thing PDFKit will NOT paginate for itself.
+ */
+function ensureRoom(doc: PDFKit.PDFDocument, needed: number): void {
+  if (doc.y + needed > PAGE.height - PAGE.margin) doc.addPage();
+}
+
 function drawCorrectiveAction(doc: PDFKit.PDFDocument, item: ScorecardPdfCorrectiveAction): void {
   const resolved = item.status === "resolved";
-  // MEASURE the label rather than assuming it fits one line. Neither submission nor edit parsing bounds an
-  // action item's LENGTH (only how many there may be), so a dictated item can wrap to several lines. The
-  // fixed allowance below covers the status chip and attribution; if the label itself is taller than one
-  // line, the extra height has to be part of the reservation or the bounded comment — which PDFKit will not
-  // auto-paginate — starts low enough to run past the bottom margin.
-  doc.font("Helvetica-Bold").fontSize(11);
-  const labelHeight = doc.heightOfString(item.itemLabel, { width: CONTENT_WIDTH });
-  const labelOverflow = Math.max(0, labelHeight - CORRECTIVE_ACTION_SINGLE_LINE_LABEL_HEIGHT);
+  const who = item.responderName?.trim();
+  const when = item.respondedAt ? formatDateTime(item.respondedAt) : null;
+  const attribution = [who, when].filter(Boolean).join("  ·  ");
   // Reserve the WHOLE text block, not just the heading.
   //
   // PDFKit disables auto-pagination for any text drawn with an explicit `height` (its LineWrapper caps at
@@ -701,12 +713,13 @@ function drawCorrectiveAction(doc: PDFKit.PDFDocument, item: ScorecardPdfCorrect
   // bound a long dictation. So an under-reserved guard does not merely orphan a heading — the comment flows
   // straight through the bottom margin to the page edge, and the trailing hairline is then stroked outside
   // the media box and silently dropped. Reserve label + status + attribution + the comment box.
-  const textBlockHeight =
-    labelOverflow +
-    (resolved
-      ? CORRECTIVE_ACTION_LABEL_BLOCK_HEIGHT + CORRECTIVE_ACTION_COMMENT_MAX_HEIGHT
-      : CORRECTIVE_ACTION_LABEL_BLOCK_HEIGHT);
-  if (doc.y + textBlockHeight > PAGE.height - PAGE.margin) doc.addPage();
+  // COSMETIC only: keep a heading off the very bottom of a page so it is not orphaned from its content.
+  // Correctness is NOT carried here — see ensureRoom. An earlier version measured the label and the
+  // attribution and reserved their true heights, which looks more rigorous but cannot work: both runs are
+  // unbounded, so a long one auto-paginates and ends low on a LATER page regardless of what was reserved on
+  // this one. The measurement was redundant with the re-check that actually holds, and no test could
+  // distinguish it, so it is gone.
+  ensureRoom(doc, CORRECTIVE_ACTION_HEADING_ORPHAN_GUARD);
 
   doc.font("Helvetica-Bold").fontSize(11).fillColor(BRAND_BLACK).text(item.itemLabel, PAGE.margin, doc.y, {
     width: CONTENT_WIDTH,
@@ -719,9 +732,6 @@ function drawCorrectiveAction(doc: PDFKit.PDFDocument, item: ScorecardPdfCorrect
   );
 
   if (resolved) {
-    const who = item.responderName?.trim();
-    const when = item.respondedAt ? formatDateTime(item.respondedAt) : null;
-    const attribution = [who, when].filter(Boolean).join("  ·  ");
     if (attribution) {
       doc.font("Helvetica").fontSize(9).fillColor(BRAND_MUTED).text(attribution, PAGE.margin, doc.y + 2, {
         width: CONTENT_WIDTH,
@@ -729,6 +739,8 @@ function drawCorrectiveAction(doc: PDFKit.PDFDocument, item: ScorecardPdfCorrect
     }
     const comment = item.responseComment?.trim();
     if (comment) {
+      // The label and attribution above are unbounded and may have paginated; re-check here, where it counts.
+      ensureRoom(doc, CORRECTIVE_ACTION_COMMENT_MAX_HEIGHT + 4);
       doc.font("Helvetica").fontSize(10).fillColor(BRAND_BLACK).text(comment, PAGE.margin, doc.y + 4, {
         width: CONTENT_WIDTH,
         height: CORRECTIVE_ACTION_COMMENT_MAX_HEIGHT,
@@ -764,13 +776,20 @@ function drawCorrectiveActionPhotos(
     if (doc.y + EVIDENCE_IMAGE_HEIGHT + captionHeight + 8 > PAGE.height - PAGE.margin) {
       doc.addPage();
       if (itemLabel) {
+        // BOUNDED, and its height is part of the budget. The fit check above decides whether the row fits on
+        // the CURRENT page; this heading is then drawn at the top of the NEW one, so an unbounded label would
+        // consume the fresh page's headroom and push the image itself past the bottom margin — the very
+        // clipping this heading was added to prevent, moved one page along.
         doc.font("Helvetica-Bold").fontSize(9).fillColor(BRAND_MUTED).text(
           `${itemLabel} (continued)`,
           PAGE.margin,
           doc.y,
-          { width: CONTENT_WIDTH },
+          { width: CONTENT_WIDTH, height: CORRECTIVE_ACTION_CONTINUATION_LABEL_HEIGHT, ellipsis: true },
         );
         doc.moveDown(0.4);
+        // Re-check AFTER the heading. It is bounded, so on a fresh page it always leaves room — but the
+        // check is what makes that a guarantee rather than an assumption about the constant's value.
+        ensureRoom(doc, EVIDENCE_IMAGE_HEIGHT + captionHeight + 8);
       }
     }
     const rowTop = doc.y;

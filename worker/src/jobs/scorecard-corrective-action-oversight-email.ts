@@ -55,6 +55,21 @@ const OVERSIGHT_EMAIL_TIMEZONE = "America/Chicago";
 // and what gets clipped is the end: the CTA. The PDF renderer already bounds the same text; this is the
 // email's equivalent, with the full text one click away in the CRM.
 const MAX_EMAIL_COMMENT_CHARS = 280;
+const MAX_EMAIL_LABEL_CHARS = 160;
+
+/**
+ * The item LABEL is bounded for exactly the same reason as the comment: submission and edit parsing cap the
+ * NUMBER of action items (50), never each item's length, so a handful of long dictated labels produce an
+ * arbitrarily large body on their own. Bounding only the comments fixed half the problem.
+ *
+ * Shorter than the comment allowance because a label is a heading — enough to identify the item, with the
+ * full text one click away in the CRM.
+ */
+function emailLabelExcerpt(label: string | null | undefined): string {
+  const text = normalizeText(label) ?? "(untitled item)";
+  if (text.length <= MAX_EMAIL_LABEL_CHARS) return text;
+  return `${text.slice(0, MAX_EMAIL_LABEL_CHARS).trimEnd()}…`;
+}
 
 /** Quote a comment for an email body, bounded, with an explicit marker that it was shortened. */
 function emailCommentExcerpt(comment: string | null | undefined): string | null {
@@ -807,7 +822,7 @@ export function buildOversightEmail(input: {
           const detail = resolved
             ? `<span style="color:#16a34a;font-weight:bold;">Resolved</span>${who || when ? ` — ${escapeHtml([who, when].filter(Boolean).join(" · "))}` : ""}${comment ? `<br /><span style="color:#475569;">${escapeHtml(comment)}</span>` : ""}${photos > 0 ? `<br /><span style="color:#94a3b8;font-size:12px;">${photos} photo${photos === 1 ? "" : "s"}</span>` : ""}`
             : `<span style="color:#CC0000;font-weight:bold;">Open</span>`;
-          return `<li style="margin-bottom:10px;">${escapeHtml(item.item_label)}<br />${detail}</li>`;
+          return `<li style="margin-bottom:10px;">${escapeHtml(emailLabelExcerpt(item.item_label))}<br />${detail}</li>`;
         })
         .join("")}</ul>`
     : `<p style="margin:12px 0 0 0;font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#64748b;">See the CRM for the flagged items.</p>`;
@@ -816,13 +831,13 @@ export function buildOversightEmail(input: {
     ? input.items
         .map((item) => {
           const resolved = item.status === "resolved";
-          if (!resolved) return `• ${item.item_label} — Open`;
+          if (!resolved) return `• ${emailLabelExcerpt(item.item_label)} — Open`;
           const who = normalizeText(item.responder_name) ?? normalizeText(item.responder_email);
           const when = formatRespondedAt(item.responded_at);
           const comment = emailCommentExcerpt(item.response_comment);
           const photos = Number(item.photo_count ?? 0);
           return (
-            `• ${item.item_label} — Resolved` +
+            `• ${emailLabelExcerpt(item.item_label)} — Resolved` +
             `${who || when ? ` (${[who, when].filter(Boolean).join(" · ")})` : ""}` +
             `${comment ? `\n    ${comment}` : ""}` +
             `${photos > 0 ? `\n    ${photos} photo${photos === 1 ? "" : "s"}` : ""}`
