@@ -1288,3 +1288,84 @@ describe("listDealStagePage", () => {
     expect(avgTerms).toBe(2);
   });
 });
+
+describe("listDealStagePage canonical stage family", () => {
+  beforeEach(() => {
+    dbState.responses = [];
+  });
+
+  // The kanban renders CANONICAL columns: buildCanonicalDealBoardColumns folds every raw stage whose slug
+  // normalizes to the same canonical slug into one column and SUMS their aggregates. The drill-down used to
+  // expand to a stage FAMILY only for Won/Lost, so an OPEN column backed by more than one raw stage showed a
+  // header total the stage page could not reproduce and cards it could not reach.
+  //
+  // Prod, office_dallas 2026-07-28: Estimating header read $11.0M (13 deals on `estimating` = $6.54M PLUS
+  // 3 on the retired `estimate_in_progress` alias = $4.46M) while clicking it showed $6.5M.
+  const ESTIMATING_FAMILY_STAGES = [
+    { id: "stage-estimating", slug: "estimating", name: "Estimating", displayOrder: 3, isTerminal: false, workflowFamily: "standard_deal" },
+    { id: "stage-eip", slug: "estimate_in_progress", name: "Estimating", displayOrder: 3, isTerminal: false, workflowFamily: "standard_deal" },
+    { id: "stage-svc-estimating", slug: "service_estimating", name: "Service Estimating", displayOrder: 3, isTerminal: false, workflowFamily: "service_deal" },
+    { id: "stage-opportunity", slug: "opportunity", name: "Opportunity", displayOrder: 2, isTerminal: false, workflowFamily: "standard_deal" },
+    // Retired stages that canonicalize to `won` but sit OUTSIDE WON_DEAL_STAGE_SLUGS.
+    { id: "stage-in-production", slug: "in_production", name: "In Production", displayOrder: 4, isTerminal: false, workflowFamily: "standard_deal" },
+    { id: "stage-won", slug: "won", name: "Won", displayOrder: 7, isTerminal: true, workflowFamily: "standard_deal" },
+    { id: "stage-sent-to-production", slug: "sent_to_production", name: "Sent to Production", displayOrder: 6, isTerminal: true, workflowFamily: "standard_deal" },
+  ];
+
+  async function runStagePage(stageId: string) {
+    dbState.responses = [ESTIMATING_FAMILY_STAGES];
+    const execute = vi.fn()
+      .mockResolvedValueOnce({ rows: [{ total_count: "16", active_count: "13", total_value: "10998463.55" }] })
+      .mockResolvedValueOnce({ rows: [] });
+    const tenantDb = { select: createOfficeScopeSelectMock(), execute } as any;
+    const { listDealStagePage } = await import("../../../src/modules/deals/service.js");
+    await listDealStagePage(tenantDb, {
+      role: "admin",
+      userId: "admin-1",
+      activeOfficeId: "office-1",
+      scope: "all",
+      stageId,
+      page: 1,
+      pageSize: 25,
+      sort: "newest",
+    } as any);
+    return extractSqlText(execute.mock.calls[0]![0]);
+  }
+
+  it("queries the whole canonical family for an OPEN stage, not just the clicked id", async () => {
+    const sqlText = await runStagePage("stage-estimating");
+    expect(sqlText).toContain("stage-estimating");
+    // The retired alias folds into the same board column, so the drill MUST include it.
+    expect(sqlText).toContain("stage-eip");
+  });
+
+  it("does not cross the route boundary into the service estimating column", async () => {
+    // service_estimating is its own board column; over-grouping would over-show the sibling column.
+    const sqlText = await runStagePage("stage-estimating");
+    expect(sqlText).not.toContain("stage-svc-estimating");
+    expect(sqlText).not.toContain("stage-opportunity");
+  });
+
+  it("resolves the same family when the drill enters via the alias id", async () => {
+    const sqlText = await runStagePage("stage-eip");
+    expect(sqlText).toContain("stage-estimating");
+    expect(sqlText).toContain("stage-eip");
+  });
+
+  it("never widens a retired stage that canonicalizes into a TERMINAL family", async () => {
+    // `in_production` normalizes to `won` but is not in WON_DEAL_STAGE_SLUGS, so it falls through to the
+    // general branch. Expanding it there would drag the whole Won family through the OPEN-stage code path
+    // (is_active filter + far-out auto-park valuation) and price realized revenue with forecast rules.
+    const sqlText = await runStagePage("stage-in-production");
+    expect(sqlText).toContain("stage-in-production");
+    expect(sqlText).not.toContain("stage-won");
+    expect(sqlText).not.toContain("stage-sent-to-production");
+  });
+
+  it("leaves a single-stage canonical column querying exactly one id", async () => {
+    const sqlText = await runStagePage("stage-opportunity");
+    expect(sqlText).toContain("stage-opportunity");
+    expect(sqlText).not.toContain("stage-estimating");
+    expect(sqlText).not.toContain("stage-eip");
+  });
+});
