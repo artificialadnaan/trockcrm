@@ -124,7 +124,7 @@ import {
 } from "./scorecards-service.js";
 import {
   finalizeFieldScorecardArtifacts,
-  isScorecardArtifactStillCurrent,
+  recheckScorecardArtifactCurrency,
 } from "../field/scorecards-service.js";
 import { isFutureRendererArtifactStale } from "../field/scorecard-pdf-artifact.js";
 import {
@@ -2617,7 +2617,15 @@ router.get("/:id/scorecards/:scorecardId/download", async (req, res, next) => {
     // since been released, and a corrective-action response committing in that window advances updated_at
     // while retaining pdf_r2_key — so the snapshot's "current" verdict can be stale and this route would
     // hand out a URL for the pre-response PDF. Retryable, because the next attempt regenerates.
-    if (!(await isScorecardArtifactStillCurrent(office, req.params.scorecardId, pdfR2Key))) {
+    const recheck = await recheckScorecardArtifactCurrency(office, req.params.scorecardId, pdfR2Key);
+    if (recheck === "awaiting-newer-renderer") {
+      throw new AppError(
+        503,
+        "This scorecard's PDF is being updated by a newer release. Please try the download again shortly.",
+        "SCORECARD_PDF_AWAITING_NEWER_RENDERER",
+      );
+    }
+    if (recheck !== "current") {
       throw new AppError(
         503,
         "The scorecard changed while its PDF was being prepared. Please try the download again.",

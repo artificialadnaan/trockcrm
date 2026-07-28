@@ -3,6 +3,7 @@ import {
   CURRENT_SCORECARD_PDF_RENDER_VERSION,
   coalesceScorecardPdfFinalization,
   isContentAddressedScorecardPdfKey,
+  classifyScorecardArtifactRecheck,
   isFutureRendererArtifactStale,
   isScorecardPdfObjectMetadataValid,
   needsScorecardPdfRegeneration,
@@ -249,5 +250,59 @@ describe("isFutureRendererArtifactStale", () => {
         ),
       ).toBe(false);
     }
+  });
+});
+
+describe("classifyScorecardArtifactRecheck", () => {
+  const GEN = new Date("2026-07-27T12:00:00.000Z");
+  const MOVED = new Date("2026-07-27T12:05:00.000Z");
+  const futureKey = `office_dallas/deals/d/scorecards/s.${"a".repeat(64)}.v${CURRENT_SCORECARD_PDF_RENDER_VERSION + 1}.pdf`;
+
+  it("REGRESSION: a stale future-renderer artifact is awaiting-newer-renderer, not current", () => {
+    // The pre-presign recheck used to ask needsScorecardPdfRegeneration directly. That function answers "can
+    // this instance supersede it?" — always false above CURRENT — so it reported this artifact as current no
+    // matter how far the generation had drifted. The download routes' own future-renderer guard runs on the
+    // EARLIER snapshot, so a response committing between the two checks slipped straight through and the route
+    // presigned a PDF missing its corrective action: the exact defect this branch exists to fix, on the exact
+    // surface it was reported from.
+    expect(
+      classifyScorecardArtifactRecheck(
+        artifact({
+          pdfR2Key: futureKey,
+          pdfRenderVersion: CURRENT_SCORECARD_PDF_RENDER_VERSION + 1,
+          pdfContentGeneration: GEN,
+          currentGeneration: MOVED,
+        }),
+      ),
+    ).toBe("awaiting-newer-renderer");
+  });
+
+  it("still serves a future-renderer artifact whose generation MATCHES", () => {
+    // Deliberately narrow. A rollback must not 503 every download — only the cards that actually changed.
+    expect(
+      classifyScorecardArtifactRecheck(
+        artifact({
+          pdfR2Key: futureKey,
+          pdfRenderVersion: CURRENT_SCORECARD_PDF_RENDER_VERSION + 1,
+          pdfContentGeneration: GEN,
+          currentGeneration: GEN,
+        }),
+      ),
+    ).toBe("current");
+  });
+
+  it("reports a current artifact as current and a drifted one as stale", () => {
+    expect(
+      classifyScorecardArtifactRecheck(artifact({ pdfContentGeneration: GEN, currentGeneration: GEN })),
+    ).toBe("current");
+    expect(
+      classifyScorecardArtifactRecheck(artifact({ pdfContentGeneration: GEN, currentGeneration: MOVED })),
+    ).toBe("stale");
+  });
+
+  it("reports a legacy pre-0200 artifact (null rendered generation) as stale, so it regenerates", () => {
+    expect(
+      classifyScorecardArtifactRecheck(artifact({ pdfContentGeneration: null, currentGeneration: GEN })),
+    ).toBe("stale");
   });
 });

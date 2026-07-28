@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildScorecardPdfData,
   capEvidenceGroups,
+  formatDateTime,
   renderFieldScorecardPdf,
   signatureDataUrlToBuffer,
   typedSignatureFallback,
@@ -307,6 +308,51 @@ describe("corrective-action section", () => {
     expect(data.correctiveActions.map((c) => c.itemRef)).toEqual(["1", "2", "10", "missed_hold_point"]);
   });
 
+  it("REGRESSION: orders action items by the CURRENT list, not by the preserved item_ref", () => {
+    // Reconciliation deliberately preserves an action item's original item_ref across edits (it re-matches on
+    // itemLabel) so that reordering the list does not orphan an already-settled response. The consequence is
+    // that after a reorder, ref order IS the old order — so ranking by it printed the corrective actions in a
+    // different sequence from the ACTION ITEMS section directly above them in the same PDF, and from the CRM
+    // thread, which renders the live list.
+    const data = buildScorecardPdfData({
+      ...base,
+      actionItems: ["Item 2", "Item 1"], // the editor swapped them...
+      correctiveActions: [ca({ itemRef: "1" }), ca({ itemRef: "2" })], // ...but reconciliation kept the refs
+    });
+
+    expect(data.correctiveActions.map((c) => c.itemLabel)).toEqual(["Item 2", "Item 1"]);
+    // The whole point: the two sections of one PDF agree.
+    expect(data.actionItems).toEqual(data.correctiveActions.map((c) => c.itemLabel));
+  });
+
+  it("gives duplicate labels distinct positions instead of collapsing them onto the first", () => {
+    const data = buildScorecardPdfData({
+      ...base,
+      actionItems: ["Fix anchors", "Clear the deck", "Fix anchors"],
+      correctiveActions: [
+        ca({ itemRef: "5", itemLabel: "Fix anchors" }),
+        ca({ itemRef: "3", itemLabel: "Clear the deck" }),
+        ca({ itemRef: "9", itemLabel: "Fix anchors" }),
+      ],
+    });
+
+    // Positions 0 and 2 are consumed in base-ref order, so ref 3 lands between refs 5 and 9 — one-to-one and
+    // deterministic, rather than both "Fix anchors" rows piling onto position 0.
+    expect(data.correctiveActions.map((c) => c.itemRef)).toEqual(["5", "3", "9"]);
+  });
+
+  it("sorts a row the action-item list no longer contains last, on its stable ref", () => {
+    const data = buildScorecardPdfData({
+      ...base,
+      actionItems: ["Item 2"],
+      correctiveActions: [ca({ itemRef: "1" }), ca({ itemRef: "2" })],
+    });
+
+    // "Item 1" was removed from the list but its settled row survives; it keeps a stable place at the end
+    // rather than being interleaved arbitrarily.
+    expect(data.correctiveActions.map((c) => c.itemRef)).toEqual(["2", "1"]);
+  });
+
   it("summarises partial and complete progress", () => {
     const partial = buildScorecardPdfData({
       ...base,
@@ -514,5 +560,28 @@ describe("corrective-action page-break safety", () => {
 
     expect(data.omittedCorrectiveActionPhotoCount).toBe(7);
     expect(data.correctiveActions[0].photos).toHaveLength(1);
+  });
+});
+
+describe("formatDateTime — the corrective-action response time", () => {
+  it("REGRESSION: keeps the TIME OF DAY, in business time, not a UTC calendar date", () => {
+    // responded_at is a timestamp, and the corrective-action record exists to show who did what WHEN.
+    // formatDate dropped the clock entirely, so several actions answered on the same day became
+    // indistinguishable in the exported audit record.
+    //
+    // 2026-07-28T01:30Z is 8:30 PM CDT on Jul 27 — the UTC date is already the NEXT day, so a UTC render
+    // misdates the response to a day after the responder finished.
+    const rendered = formatDateTime("2026-07-28T01:30:00.000Z");
+    expect(rendered).toMatch(/Jul 27, 2026/);
+    expect(rendered).toMatch(/8:30\s?PM/);
+    expect(rendered).toContain("CDT");
+  });
+
+  it("labels the zone in standard time too, so winter responses are not read as CDT", () => {
+    expect(formatDateTime("2026-01-15T02:30:00.000Z")).toMatch(/Jan 14, 2026, 8:30\s?PM CST/);
+  });
+
+  it("passes an unparseable value straight through rather than printing Invalid Date", () => {
+    expect(formatDateTime("not a timestamp")).toBe("not a timestamp");
   });
 });

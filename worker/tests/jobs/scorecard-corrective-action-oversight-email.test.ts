@@ -42,7 +42,9 @@ const ITEMS = [
     item_label: "Re-inspect slab 2",
     status: "resolved",
     responder_name: "Sam Super",
-    responded_at: new Date("2026-07-27T13:00:00.000Z"),
+    // Deliberately an evening-CT instant whose UTC CALENDAR DATE is the following day: 8:30 PM CDT on Jul 27
+    // is Jul 28 in UTC. Any renderer that slices the ISO string dates this response to the wrong day.
+    responded_at: new Date("2026-07-28T01:30:00.000Z"),
     response_comment: "Re-poured and cured.",
     photo_count: 2,
   },
@@ -84,6 +86,12 @@ interface ScorecardOverrides {
   revalidateRows?: unknown[];
   /** [] => the browsable/active gate filtered the row out entirely. */
   scorecardRows?: unknown[];
+  /**
+   * Does the scorecard ROW still exist when the browsable gate misses? This is the difference between a
+   * deleted card (nothing to notify, complete the job) and a merely-hidden project (restorable, so retry).
+   * Defaults to false = gone.
+   */
+  rowAlive?: boolean;
 }
 
 /** Query mock routing on SQL text — no DB. Captures the stamp UPDATE for assertion. */
@@ -96,6 +104,8 @@ function makeQuery(
     // Order matters: recipientResolutionSql ALSO selects `FROM office_dallas.field_scorecards sc`, so the
     // responder branch must be tested before the scorecard-snapshot branch or it is swallowed by it.
     if (sql.includes("WITH candidates AS")) return { rows: responders };
+    // The alive probe run when the browsable gate misses — matched on SELECT 1, which no other query uses.
+    if (sql.includes("SELECT 1 FROM")) return { rows: over.rowAlive ? [{ "?column?": 1 }] : [] };
     // The final pre-delivery revalidation — a narrow SELECT, distinct from the snapshot join above.
     // The POST-FETCH artifact recheck — narrower than both the snapshot and the delivery revalidation.
     if (sql.includes("SELECT pdf_r2_key, pdf_content_generation")) {
@@ -667,8 +677,8 @@ describe("handleScorecardCorrectiveActionOversightEmail", () => {
     expect(snapshotSql).not.toContain("$4::text[]");
   });
 
-  it("sends nothing and stamps nothing for a hidden scorecard", async () => {
-    const { query, stampUpdates } = makeQuery({ scorecardRows: [] });
+  it("sends nothing and stamps nothing for a DELETED scorecard, and completes the job", async () => {
+    const { query, stampUpdates } = makeQuery({ scorecardRows: [], rowAlive: false });
     const sendEmail = makeSend();
 
     await handleScorecardCorrectiveActionOversightEmail(payload(), null, {
@@ -677,6 +687,28 @@ describe("handleScorecardCorrectiveActionOversightEmail", () => {
       env,
       logger: makeLogger(),
     });
+
+    expect(sendEmail).not.toHaveBeenCalled();
+    expect(stampUpdates).toHaveLength(0);
+  });
+
+  it("REGRESSION: THROWS for a live card whose project is merely hidden, instead of losing the notice", async () => {
+    // A deleted card and a temporarily-hidden project look identical at the browsable gate but are opposites
+    // for the queue. Returning in both cases completes the job with the phase stamp still null — and NOTHING
+    // re-enqueues it, because the only enqueue sites are the corrective-action open/close transitions.
+    // Restoring the deal from archive, or moving it out of Lost, fires neither. So the card that was hidden
+    // for the ~120s until this job ran would lose its oversight notice permanently and silently.
+    const { query, stampUpdates } = makeQuery({ scorecardRows: [], rowAlive: true });
+    const sendEmail = makeSend();
+
+    await expect(
+      handleScorecardCorrectiveActionOversightEmail(payload(), null, {
+        query: query as never,
+        sendEmail: sendEmail as never,
+        env,
+        logger: makeLogger(),
+      }),
+    ).rejects.toThrow(/not browsable/i);
 
     expect(sendEmail).not.toHaveBeenCalled();
     expect(stampUpdates).toHaveLength(0);
@@ -959,10 +991,10 @@ describe("handleScorecardCorrectiveActionOversightEmail", () => {
     expect(options.attachments).toBeUndefined();
   });
 
-  it("does not deliver when the card became non-browsable during preparation", async () => {
+  it("does not deliver when the card was DELETED during preparation", async () => {
     // Soft-deleting the scorecard or archiving its deal changes neither the lifecycle status nor the cycle
     // marker, so only re-applying the browsable predicate catches it. The CRM link would 404.
-    const { query, stampUpdates } = makeQuery({ revalidateRows: [] });
+    const { query, stampUpdates } = makeQuery({ revalidateRows: [], rowAlive: false });
     const sendEmail = makeSend();
 
     await handleScorecardCorrectiveActionOversightEmail(payload(), null, {
@@ -971,6 +1003,24 @@ describe("handleScorecardCorrectiveActionOversightEmail", () => {
       env,
       logger: makeLogger(),
     });
+
+    expect(sendEmail).not.toHaveBeenCalled();
+    expect(stampUpdates).toHaveLength(0);
+  });
+
+  it("throws when the card is still live but its project went non-browsable during preparation", async () => {
+    // Same triage as the snapshot gate, at the delivery gate: restorable => retry, not silent completion.
+    const { query, stampUpdates } = makeQuery({ revalidateRows: [], rowAlive: true });
+    const sendEmail = makeSend();
+
+    await expect(
+      handleScorecardCorrectiveActionOversightEmail(payload(), null, {
+        query: query as never,
+        sendEmail: sendEmail as never,
+        env,
+        logger: makeLogger(),
+      }),
+    ).rejects.toThrow(/not browsable/i);
 
     expect(sendEmail).not.toHaveBeenCalled();
     expect(stampUpdates).toHaveLength(0);
@@ -1032,23 +1082,52 @@ describe("handleScorecardCorrectiveActionOversightEmail", () => {
     expect(to).toEqual(["ops@trockgc.com"]);
   });
 
-  it("skips when the scorecard changed while the notice was being composed", async () => {
+  it("REGRESSION: THROWS when the scorecard changed while the notice was being composed", async () => {
     // The BODY is built from an item snapshot taken before the recipient/item queries and the R2 read. An
     // edit removing a settled item in that window moves neither the status nor the marker, so the email
     // would describe a responder, comment and photo count for something that no longer exists.
+    //
+    // It must THROW, not skip. The drift that reaches this branch is typically ONE item being answered while
+    // others remain open: updated_at advances, the status stays `corrective_action_open`, the marker does not
+    // rotate — so nothing is enqueued. Skipping would complete the only opened-notice job with its stamp null
+    // and no successor, losing the notification permanently. The retry rebuilds against the settled state.
     const { query, stampUpdates } = makeQuery({
       revalidateUpdatedAt: new Date("2026-07-27T18:00:00.000Z"),
     });
     const sendEmail = makeSend();
 
-    await handleScorecardCorrectiveActionOversightEmail(payload(), null, {
+    await expect(
+      handleScorecardCorrectiveActionOversightEmail(payload(), null, {
+        query: query as never,
+        sendEmail: sendEmail as never,
+        env,
+        logger: makeLogger(),
+      }),
+    ).rejects.toThrow(/went stale/i);
+
+    expect(sendEmail).not.toHaveBeenCalled();
+    expect(stampUpdates).toHaveLength(0);
+  });
+
+  it("renders a response time with the TIME OF DAY, not just a UTC calendar date", async () => {
+    // responded_at is a timestamp. Truncating it to a date made every action answered on the same day look
+    // simultaneous in what is meant to be the audit trail, and ISO-slicing it silently reported UTC — so an
+    // evening CT response was dated to the following day.
+    const { query } = makeQuery({ status: "corrective_action_closed" });
+    const sendEmail = makeSend();
+
+    await handleScorecardCorrectiveActionOversightEmail(payload({ phase: "closed" }), null, {
       query: query as never,
       sendEmail: sendEmail as never,
+      getPdf: (async () => Buffer.from("%PDF-1.4")) as never,
       env,
       logger: makeLogger(),
     });
 
-    expect(sendEmail).not.toHaveBeenCalled();
-    expect(stampUpdates).toHaveLength(0);
+    const [, , html] = sendEmail.mock.calls[0] as unknown as [string[], string, string];
+    // ITEMS carries 2026-07-28T01:30Z = 8:30 PM CDT on Jul 27. The old ISO slice printed "2026-07-28",
+    // reporting the response on a day the responder had already finished.
+    expect(html).toMatch(/Jul 27, 2026, 8:30\s?PM CDT/);
+    expect(html).not.toContain("2026-07-28");
   });
 });

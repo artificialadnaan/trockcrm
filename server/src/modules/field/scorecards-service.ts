@@ -21,10 +21,12 @@ import {
 } from "./scorecard-pdf.js";
 import {
   CURRENT_SCORECARD_PDF_RENDER_VERSION,
+  classifyScorecardArtifactRecheck,
   coalesceScorecardPdfFinalization,
   isScorecardPdfObjectMetadataValid,
   needsScorecardPdfRegeneration,
   scorecardEvidenceFingerprint,
+  type ScorecardArtifactRecheck,
   type ScorecardPdfArtifactState,
 } from "./scorecard-pdf-artifact.js";
 import { prioritizeAndCapEvidencePhotos, resolveScorecardEvidenceImage } from "./scorecard-evidence-image.js";
@@ -1433,14 +1435,20 @@ export async function getFieldScorecardPdfArtifactState(
  * out a URL for the PRE-response PDF — the exact defect this work fixes, on the surface it was reported from.
  * The email workers gained a post-fetch guard; the download routes need the same one before presigning.
  *
+ * Returns a VERDICT rather than a boolean because the future-renderer case must be distinguishable: the
+ * routes' early snapshot check can pass and the generation can then drift within the same request, and
+ * needsScorecardPdfRegeneration answers "can this instance supersede it?" (always false above CURRENT), never
+ * "is it current?". Collapsing the two here is precisely how a rolling-deploy download served stale bytes
+ * despite the route's own guard.
+ *
  * Manages its own connection (like finalizeFieldScorecardArtifacts) precisely because the caller's
  * transaction is already gone by this point.
  */
-export async function isScorecardArtifactStillCurrent(
+export async function recheckScorecardArtifactCurrency(
   office: { id: string; slug: string },
   scorecardId: string,
   key: string,
-): Promise<boolean> {
+): Promise<ScorecardArtifactRecheck> {
   return runInOffice(office, async (db) => {
     const [row] = await db
       .select({
@@ -1454,8 +1462,8 @@ export async function isScorecardArtifactStillCurrent(
       .limit(1);
     // A vanished row is handled by the caller's own availability checks; treat it as not-current here so the
     // route surfaces a retryable error rather than presigning something it can no longer vouch for.
-    if (!row || row.pdfR2Key !== key) return false;
-    return !needsScorecardPdfRegeneration({
+    if (!row || row.pdfR2Key !== key) return "stale";
+    return classifyScorecardArtifactRecheck({
       pdfR2Key: row.pdfR2Key,
       pdfRenderVersion: row.pdfRenderVersion,
       linkedPhotoCount: 0,

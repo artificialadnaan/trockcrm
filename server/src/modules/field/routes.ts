@@ -30,7 +30,7 @@ import {
 import {
   createFieldScorecard,
   finalizeFieldScorecardArtifacts,
-  isScorecardArtifactStillCurrent,
+  recheckScorecardArtifactCurrency,
 } from "./scorecards-service.js";
 import { isFutureRendererArtifactStale } from "./scorecard-pdf-artifact.js";
 import {
@@ -1223,7 +1223,15 @@ fieldRoutes.get("/scorecards/:id/download", requireFieldContractor, async (req, 
     // Same pre-presign revalidation as the deal-tab download: the artifact snapshot was taken in a
     // transaction that has since been released, and a corrective-action response committing in that window
     // advances updated_at while retaining pdf_r2_key. Retryable — the next attempt regenerates.
-    if (!(await isScorecardArtifactStillCurrent(office, id, pdfR2Key))) {
+    const recheck = await recheckScorecardArtifactCurrency(office, id, pdfR2Key);
+    if (recheck === "awaiting-newer-renderer") {
+      throw new AppError(
+        503,
+        "This scorecard's PDF is being updated by a newer release. Please try the download again shortly.",
+        "SCORECARD_PDF_AWAITING_NEWER_RENDERER",
+      );
+    }
+    if (recheck !== "current") {
       throw new AppError(
         503,
         "The scorecard changed while its PDF was being prepared. Please try the download again.",

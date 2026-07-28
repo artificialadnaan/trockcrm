@@ -43,6 +43,11 @@ const MIN_PDF_RENDER_VERSION_WITH_CORRECTIVE_ACTIONS = 3;
 // so keep the raw PDF under ~20 MB. A larger PDF is delivered as a CRM link instead.
 const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 
+// The business timezone every reader of this email is in. Must match the server's canonical BUSINESS_TIMEZONE
+// (server/src/lib/period.ts) so a response time reads identically in the email and in the attached PDF; the
+// worker cannot import from the server package, and it already hardcodes this same zone for its cron schedules.
+const OVERSIGHT_EMAIL_TIMEZONE = "America/Chicago";
+
 /**
  * True only for the immutable `${scorecardId}.${sha256}.v${version}.pdf` shape the artifact publisher emits.
  * Mirrors the identical guard in field-scorecard-email.ts — the two scorecard email jobs must agree on what
@@ -166,8 +171,9 @@ export async function handleScorecardCorrectiveActionOversightEmail(
   // Gate on the ACTIVE + BROWSABLE record, exactly as the responder job does. This job runs ~120s after
   // enqueue, and in that window the scorecard can be soft-deleted or its deal archived / moved to Lost —
   // none of which changes the corrective-action lifecycle status, so a status-only guard would still send an
-  // oversight notice whose CRM link 404s. A miss here is indistinguishable from a nonexistent id and returns
-  // WITHOUT sending or stamping, so a restore can still notify.
+  // oversight notice whose CRM link 404s. A miss is triaged by handleIneligibleScorecard, which distinguishes
+  // a deleted card (complete) from a merely-hidden project (retry) — the two are NOT interchangeable, because
+  // nothing re-enqueues this job when a deal is restored.
   //
   // BROWSABLE_PROJECT_SQL authors its placeholders as $1/$2; here they occupy $2/$3 after $1 = scorecardId.
   // Renumber in a SINGLE atomic pass — a chained replace would CASCADE $1→$2→$3 and collapse both slug
@@ -190,12 +196,7 @@ export async function handleScorecardCorrectiveActionOversightEmail(
   );
   const scorecard = scorecardResult.rows[0] as ScorecardRow | undefined;
   if (!scorecard) {
-    // Genuinely nonexistent OR hidden (soft-deleted card / archived-or-Lost deal) — indistinguishable here,
-    // matching the responder's 404. No send, no stamp, so a restore can still notify.
-    logger.warn(
-      "[CorrectiveActionOversightEmail] Scorecard not found or no longer browsable - skipping (no send, no stamp)",
-      { scorecardId },
-    );
+    await handleIneligibleScorecard(query, tenantSchema, scorecardId, phase, logger, "before preparing");
     return;
   }
 
@@ -379,10 +380,7 @@ export async function handleScorecardCorrectiveActionOversightEmail(
       }
     | undefined;
   if (!current) {
-    logger.warn(
-      "[CorrectiveActionOversightEmail] Scorecard vanished or became non-browsable before delivery - skipping (no send, no stamp)",
-      { scorecardId },
-    );
+    await handleIneligibleScorecard(query, tenantSchema, scorecardId, phase, logger, "before delivery");
     return;
   }
   if (current.phase_stamp) {
@@ -414,16 +412,25 @@ export async function handleScorecardCorrectiveActionOversightEmail(
   // can remove a settled item in that window without moving the status or the marker, leaving the email
   // describing a responder, comment and photo count for something that no longer exists. The attachment guard
   // catches the PDF but cannot repair the prose, so compare the generation the snapshot was taken at.
+  //
+  // THROW rather than return. There is no "next cycle's job" to fall back on: the drift that reaches this
+  // branch is usually an item being answered while other items remain open, which advances updated_at without
+  // moving the status or rotating the marker — and therefore enqueues nothing. Completing here would leave the
+  // only opened-notice job stamped null with no successor, losing the notification permanently. A retry
+  // re-reads the card from scratch and rebuilds the body against the settled state, which is what this branch
+  // actually wants; a card edited continuously past max_attempts dead-letters visibly.
   if (
     scorecard.updated_at != null &&
     current.updated_at != null &&
     new Date(scorecard.updated_at).getTime() !== new Date(current.updated_at).getTime()
   ) {
-    logger.log(
-      "[CorrectiveActionOversightEmail] Scorecard changed while preparing the notice - skipping (no send, no stamp; the next cycle's job notifies)",
+    logger.warn(
+      "[CorrectiveActionOversightEmail] Scorecard changed while preparing the notice - throwing to retry against the settled state",
       { scorecardId, phase },
     );
-    return;
+    throw new Error(
+      `[CorrectiveActionOversightEmail] Snapshot for ${scorecardId} (${phase}) went stale while preparing - retrying`,
+    );
   }
 
   const sendEmail = deps.sendEmail ?? sendSystemEmailWithMetadata;
@@ -629,6 +636,49 @@ function dedupe(emails: string[]): string[] {
   return out;
 }
 
+/**
+ * The browsable gate failed. Decide whether that is PERMANENT (complete the job) or RESTORABLE (retry).
+ *
+ * These two look identical at the gate but are opposites for the queue. Returning in both cases completes the
+ * job with the phase stamp still null — and nothing re-enqueues it, because the ONLY enqueue sites are the
+ * corrective-action open/close transitions. Restoring a deal from archive, or moving it out of a Lost stage,
+ * fires neither. So a card that was merely hidden for the ~120s until this job ran would lose its oversight
+ * notice permanently and silently, which is exactly the failure this whole change exists to prevent.
+ *
+ * So: probe the scorecard row itself, without the deal-visibility join.
+ *   - Row alive => only the DEAL's visibility failed, and that is reversible. THROW, so the queue retries with
+ *     backoff. If the deal never comes back the job eventually dead-letters — a visible record that oversight
+ *     was never told, which is the honest outcome.
+ *   - Row gone (hard- or soft-deleted) => there is nothing to notify about and nothing to restore the job for.
+ *     Complete quietly, matching the responder job's 404.
+ */
+async function handleIneligibleScorecard(
+  query: typeof pool.query,
+  tenantSchema: string,
+  scorecardId: string,
+  phase: CorrectiveActionOversightPhase,
+  logger: Pick<Console, "log" | "warn" | "error">,
+  stage: string,
+): Promise<void> {
+  const alive = await query(
+    `SELECT 1 FROM ${tenantSchema}.field_scorecards WHERE id = $1::uuid AND is_active = true LIMIT 1`,
+    [scorecardId],
+  );
+  if (alive.rows.length > 0) {
+    logger.warn(
+      `[CorrectiveActionOversightEmail] Scorecard is alive but its project is not browsable ${stage} - throwing to retry (a restore cannot re-enqueue this job)`,
+      { scorecardId, phase },
+    );
+    throw new Error(
+      `[CorrectiveActionOversightEmail] Project not browsable for ${scorecardId} (${phase}) ${stage} - retrying`,
+    );
+  }
+  logger.warn(
+    `[CorrectiveActionOversightEmail] Scorecard no longer exists ${stage} - skipping (no send, no stamp)`,
+    { scorecardId, phase },
+  );
+}
+
 function formatWeekOf(weekOf: string | Date | null): string | null {
   if (!weekOf) return null;
   return weekOf instanceof Date ? weekOf.toISOString().slice(0, 10) : String(weekOf).slice(0, 10);
@@ -642,10 +692,25 @@ function formatScore(scorecard: ScorecardRow): string {
   return `${scorecard.total_score ?? 0}`;
 }
 
+/**
+ * responded_at is a TIMESTAMP. Truncating it to a calendar date made every action answered on the same day
+ * look simultaneous in what is supposed to be the audit trail of the back-and-forth, and ISO-slicing it also
+ * silently reported UTC — so an evening CT response was dated to the following day. Render date + time in the
+ * business timezone, matching the PDF record this email links to.
+ */
 function formatRespondedAt(value: Date | null): string | null {
   if (!value) return null;
   const date = value instanceof Date ? value : new Date(value);
-  return Number.isNaN(date.getTime()) ? null : date.toISOString().slice(0, 10);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toLocaleString("en-US", {
+    timeZone: OVERSIGHT_EMAIL_TIMEZONE,
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    timeZoneName: "short",
+  });
 }
 
 /**

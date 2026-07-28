@@ -16,6 +16,7 @@ import {
   type ScorecardFormVersion,
 } from "@trock-crm/shared/types";
 import { TROCK_LOGO_PNG_BASE64 } from "./pdf-logo.js";
+import { BUSINESS_TIMEZONE } from "../../lib/period.js";
 
 // Self-contained scoring-form PDF: Helvetica (pdfkit built-in — zero font-asset bundling risk) + the brand
 // logo + a flowing layout that page-breaks naturally. This is the INTERNAL weekly form, distinct from the
@@ -222,15 +223,47 @@ export function buildScorecardPdfData(input: ScorecardPdfInput): ScorecardPdfDat
       })();
   const actionItems = kind === "leadership" ? [] : input.actionItems.map((s) => s.trim()).filter((s) => s.length > 0);
 
-  // Numeric-aware ordering. item_ref is an action-item INDEX for action items — where "10" must follow "2",
-  // not precede it (the lpad guard from the corrective-action work) — and an opaque key for critical
+  // Numeric-aware BASE ordering. item_ref is an action-item INDEX for action items — where "10" must follow
+  // "2", not precede it (the lpad guard from the corrective-action work) — and an opaque key for critical
   // deficiencies (lexical). Action items sort ahead of deficiencies so this matches the deal-thread order.
-  const orderedCorrectiveActions = [...(input.correctiveActions ?? [])].sort((left, right) => {
+  const refOrderedCorrectiveActions = [...(input.correctiveActions ?? [])].sort((left, right) => {
     if (left.itemType !== right.itemType) return left.itemType === "action_item" ? -1 : 1;
     const leftNum = Number(left.itemRef);
     const rightNum = Number(right.itemRef);
     if (Number.isFinite(leftNum) && Number.isFinite(rightNum)) return leftNum - rightNum;
     return left.itemRef.localeCompare(right.itemRef);
+  });
+
+  // ...but item_ref is a STABLE IDENTITY, not a live position. Reconciliation deliberately preserves an
+  // action item's original ref across edits (it re-matches on itemLabel) so that reordering the list does not
+  // orphan an already-settled response. The consequence: after a reorder, ref order is the OLD order. Sorting
+  // the record by it would print the corrective actions in a different sequence from the ACTION ITEMS section
+  // directly above them in the same PDF — and from the CRM thread, which renders the live list.
+  //
+  // So rank by position in the CURRENT action-item list. Duplicate labels consume their positions in base-ref
+  // order, keeping the mapping one-to-one and deterministic. Anything the list no longer contains (a critical
+  // deficiency, or a settled row whose action item an edit removed) ranks last and keeps its base order.
+  const actionItemPositions = new Map<string, number[]>();
+  actionItems.forEach((label, index) => {
+    const bucket = actionItemPositions.get(label);
+    if (bucket) bucket.push(index);
+    else actionItemPositions.set(label, [index]);
+  });
+  const rankByRow = new Map<ScorecardPdfCorrectiveAction, number>();
+  for (const row of refOrderedCorrectiveActions) {
+    if (row.itemType !== "action_item") continue;
+    const bucket = actionItemPositions.get(row.itemLabel.trim());
+    // shift(), so a second row sharing a label takes the NEXT occurrence rather than colliding on the first.
+    const position = bucket?.shift();
+    if (position !== undefined) rankByRow.set(row, position);
+  }
+  // Array#sort is stable, so equal ranks (and every unranked row) retain the base ref ordering above.
+  const orderedCorrectiveActions = [...refOrderedCorrectiveActions].sort((left, right) => {
+    if (left.itemType !== right.itemType) return left.itemType === "action_item" ? -1 : 1;
+    const leftRank = rankByRow.get(left) ?? Number.POSITIVE_INFINITY;
+    const rightRank = rankByRow.get(right) ?? Number.POSITIVE_INFINITY;
+    if (leftRank === rightRank) return 0;
+    return leftRank - rightRank;
   });
 
   // Apply the response-photo cap ACROSS the whole report, in the order items render, so the kept set is
@@ -707,7 +740,7 @@ function drawCorrectiveAction(doc: PDFKit.PDFDocument, item: ScorecardPdfCorrect
 
   if (resolved) {
     const who = item.responderName?.trim();
-    const when = item.respondedAt ? formatDate(item.respondedAt) : null;
+    const when = item.respondedAt ? formatDateTime(item.respondedAt) : null;
     const attribution = [who, when].filter(Boolean).join("  ·  ");
     if (attribution) {
       doc.font("Helvetica").fontSize(9).fillColor(BRAND_MUTED).text(attribution, PAGE.margin, doc.y + 2, {
@@ -789,4 +822,26 @@ function formatDate(iso: string): string {
   if (Number.isNaN(d.getTime())) return iso;
   // Format in UTC so the same submittedAt renders identically regardless of the server's local timezone.
   return d.toLocaleDateString("en-US", { timeZone: "UTC", month: "short", day: "numeric", year: "numeric" });
+}
+
+/**
+ * Date AND time for true instants, in the business timezone.
+ *
+ * responded_at is a timestamp, not a date. Rendering it date-only makes several actions answered on the same
+ * day indistinguishable in what is meant to be an audit record of the back-and-forth — and the record's whole
+ * purpose is showing who did what, when. Business tz rather than UTC because the reader is in it: a 7pm CT
+ * response printed as the next calendar day reads as wrong to the person who filed it.
+ */
+export function formatDateTime(value: string | Date): string {
+  const d = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(d.getTime())) return typeof value === "string" ? value : "";
+  return d.toLocaleString("en-US", {
+    timeZone: BUSINESS_TIMEZONE,
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    timeZoneName: "short",
+  });
 }

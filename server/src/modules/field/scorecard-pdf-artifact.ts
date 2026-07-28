@@ -60,6 +60,22 @@ export function isFutureRendererArtifactStale(state: ScorecardPdfArtifactState):
   return !isRenderedGenerationCurrent(state);
 }
 
+/** Outcome of the pre-presign recheck. Both non-current verdicts are retryable, for different reasons. */
+export type ScorecardArtifactRecheck = "current" | "stale" | "awaiting-newer-renderer";
+
+/**
+ * Is this artifact safe to presign RIGHT NOW, and if not, why?
+ *
+ * The order matters and is the whole point: needsScorecardPdfRegeneration answers "can this instance supersede
+ * it?", which is deliberately FALSE for any future-renderer artifact — so asking it first reports a
+ * newer-renderer artifact as current no matter how far its generation has drifted. That is how a download
+ * could still serve a PDF missing its corrective action despite a route-level guard for exactly that case.
+ */
+export function classifyScorecardArtifactRecheck(state: ScorecardPdfArtifactState): ScorecardArtifactRecheck {
+  if (isFutureRendererArtifactStale(state)) return "awaiting-newer-renderer";
+  return needsScorecardPdfRegeneration(state) ? "stale" : "current";
+}
+
 /**
  * Whether the stored artifact was rendered from the scorecard's current content.
  *
