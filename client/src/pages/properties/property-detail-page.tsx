@@ -548,8 +548,15 @@ function PropertyTabContent({
         entityType="property"
         entityId={property.id}
         emptyLabel="property"
-        // A soft-deleted property is read-only everywhere else on this page, and POST /activities does
-        // not check the target is active — so without this a deleted building accepted new visits.
+        /**
+         * A soft-deleted property is read-only everywhere else on this page, so the log form goes too.
+         *
+         * This is the UI half only. The authoritative check is server-side in createActivity, which
+         * refuses an activity whose property or company is inactive — added in #977 (`638ce173`),
+         * because that branch owns activities/service.ts and a main-based change would conflict. Until
+         * #977 lands, an authenticated caller can still POST directly; this hides the form, it does not
+         * secure the endpoint.
+         */
         readOnly={!property.isActive}
       />
     );
