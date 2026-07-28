@@ -629,6 +629,13 @@ export async function listProperties(
  * deliberate: a property with a bad coordinate is still a property worth creating, and a rep standing
  * in front of the building should not lose the record because the device reported a junk fix.
  */
+/** Both halves, or neither. Half a coordinate is not a position. */
+function coordinatePair(rawLat: unknown, rawLng: unknown): { lat: string | null; lng: string | null } {
+  const lat = validateOptionalCoordinate(rawLat, 90);
+  const lng = validateOptionalCoordinate(rawLng, 180);
+  return lat != null && lng != null ? { lat, lng } : { lat: null, lng: null };
+}
+
 function validateOptionalCoordinate(value: unknown, limit: number): string | null {
   if (value == null) return null;
   // A blank or whitespace string is ABSENT, not zero. Number("") is 0, which would store the property
@@ -669,8 +676,10 @@ export async function createProperty(tenantDb: TenantDb, input: CreatePropertyIn
       // numeric(10,7) columns — Drizzle takes them as strings. Validated first so a NaN or an
       // out-of-range value is stored as null rather than poisoning every later distance calculation
       // with a coordinate that silently matches nothing.
-      lat: validateOptionalCoordinate(input.lat, 90),
-      lng: validateOptionalCoordinate(input.lng, 180),
+      // A PAIR or nothing — the same rule the edit path applies. Persisting a valid half beside a null
+      // makes the property permanently unmatchable by distance (matchProperties requires both), which
+      // is precisely the state this feature exists to stop creating.
+      ...coordinatePair(input.lat, input.lng),
       isActive: true,
     })
     .returning();

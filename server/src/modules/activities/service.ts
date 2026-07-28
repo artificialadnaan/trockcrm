@@ -265,10 +265,11 @@ export async function createActivity(
  */
 export async function linkActivityToLead(
   tenantDb: TenantDb,
-  input: { activityId: string; leadId: string }
+  input: { activityId: string; leadId: string; viewer: { id: string; role: string } }
 ) {
   if (!input.activityId) throw new AppError(400, "activityId is required");
   if (!input.leadId) throw new AppError(400, "leadId is required");
+  if (!input.viewer?.id) throw new AppError(400, "viewer is required");
 
   const [existing] = await tenantDb
     .select()
@@ -277,6 +278,23 @@ export async function linkActivityToLead(
     .limit(1);
 
   if (!existing) throw new AppError(404, "Activity not found");
+
+  /**
+   * AUTHORISE THE ACTIVITY, not only the lead.
+   *
+   * Checking access to the target lead alone let a caller pass ANY activity id — including another
+   * rep's — and receive the row back. getActivities deliberately hides email activities from everyone
+   * but their responsible user, because those rows carry the subject and up to 1000 characters of
+   * body; routing around that filter here turned a linking endpoint into a mailbox read.
+   *
+   * 404, not 403: an id the caller may not touch should not be confirmed to exist.
+   */
+  const isOwner =
+    existing.responsibleUserId === input.viewer.id || existing.performedByUserId === input.viewer.id;
+  const isPrivileged = input.viewer.role === "admin" || input.viewer.role === "director";
+  if (!isOwner && !(isPrivileged && existing.type !== "email")) {
+    throw new AppError(404, "Activity not found");
+  }
 
   if (existing.leadId) {
     // Same lead — the retry case, and a success.
@@ -294,18 +312,33 @@ export async function linkActivityToLead(
    * thing both records agree on, so it is what is compared — and only when the activity actually has
    * one, since a company- or contact-anchored capture legitimately has no property.
    */
-  if (existing.propertyId) {
+  if (existing.propertyId || existing.companyId) {
     const [lead] = await tenantDb
-      .select({ propertyId: leads.propertyId })
+      .select({ propertyId: leads.propertyId, companyId: leads.companyId })
       .from(leads)
       .where(eq(leads.id, input.leadId))
       .limit(1);
     if (!lead) throw new AppError(404, "Lead not found");
-    if (lead.propertyId && lead.propertyId !== existing.propertyId) {
+    if (existing.propertyId && lead.propertyId && lead.propertyId !== existing.propertyId) {
       throw new AppError(
         409,
         "That lead is for a different property than this visit",
         "ACTIVITY_LEAD_PROPERTY_MISMATCH"
+      );
+    }
+    /**
+     * The COMPANY-anchored capture needs the same guard.
+     *
+     * Skipping validation whenever propertyId was null let an activity for Company A be linked to a
+     * lead for Company B — the activity keeps Company A while appearing as the origin of B's lead,
+     * which is exactly the cross-record attribution the property check exists to stop. It is also the
+     * fallback path, so the case is common rather than exotic.
+     */
+    if (existing.companyId && lead.companyId && lead.companyId !== existing.companyId) {
+      throw new AppError(
+        409,
+        "That lead is for a different company than this visit",
+        "ACTIVITY_LEAD_COMPANY_MISMATCH"
       );
     }
   }

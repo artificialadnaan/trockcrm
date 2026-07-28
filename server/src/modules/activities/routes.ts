@@ -99,9 +99,12 @@ router.post("/:id/link-lead", async (req, res, next) => {
     const activity = await linkActivityToLead(req.tenantDb!, {
       activityId: req.params.id as string,
       leadId,
+      viewer: { id: req.user!.id, role: req.user!.role },
     });
     await req.commitTransaction!();
-    res.json({ activity });
+    // The IDS ONLY. This endpoint's job is to confirm a link, and echoing the full row was how it
+    // became a way to read an activity — defence in depth behind the ownership check in the service.
+    res.json({ activity: { id: activity.id, leadId: activity.leadId } });
   } catch (err) {
     next(err);
   }
