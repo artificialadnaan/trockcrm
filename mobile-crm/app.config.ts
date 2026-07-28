@@ -30,11 +30,35 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
   orientation: "portrait",
   userInterfaceStyle: "light",
   newArchEnabled: true,
-  // icon/splash are intentionally absent until brand assets exist for THIS app. Expo's defaults apply
-  // meanwhile. Reusing mobile/assets would put T-Rock Cam's mark on the CRM app, which is worse than
-  // a placeholder. Tracked in README "Before the first TestFlight build".
+  /**
+   * The T-Rock mark, 1024x1024 and OPAQUE.
+   *
+   * No alpha channel on purpose: App Store Connect rejects an icon that has one, and it rejects
+   * pre-rounded corners too — iOS applies its own mask, so the artwork is a full-bleed square and the
+   * mark carries its own padding to survive that crop.
+   *
+   * Its own copy under mobile-crm/assets rather than a path into mobile/assets. The two apps are
+   * separate Expo projects with separate EAS builds, and a shared asset would mean a T-Rock Cam brand
+   * change silently re-skinning the CRM app on its next build.
+   */
+  icon: "./assets/icon.png",
+  /**
+   * backgroundColor MATCHES the artwork's own background (verified pure #000000 to the edge).
+   *
+   * `contain` letterboxes a square image on a tall screen and fills the remainder with this colour, so
+   * any other value would frame the splash with a visible black square instead of reading as one
+   * surface. The app itself is light (userInterfaceStyle above); the brand mark is not.
+   */
+  splash: {
+    image: "./assets/splash.png",
+    resizeMode: "contain",
+    backgroundColor: "#000000",
+  },
   ios: {
     bundleIdentifier: "com.trockgc.trockcrm",
+    // Declared HERE as well as at the top level, matching T-Rock Cam: the platform key is what iOS
+    // actually builds from, and a top-level-only icon has silently fallen back to Expo's default.
+    icon: "./assets/icon.png",
     supportsTablet: false,
     infoPlist: {
       ITSAppUsesNonExemptEncryption: false,

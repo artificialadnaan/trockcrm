@@ -75,8 +75,10 @@ switcher must stay explicit and visible for that reason.
 
 Blocked on account access, not code:
 
-1. **App icon and splash.** `app.config.ts` intentionally declares neither, so Expo's defaults apply.
-   Reusing `mobile/assets` would put T-Rock Cam's mark on the CRM app.
+1. ~~App icon and splash~~ — **done 2026-07-27.** `assets/icon.png` + `assets/splash.png`: the T-Rock
+   mark, 1024x1024, fully opaque (App Store Connect rejects an alpha channel, and iOS applies its own
+   corner mask, so the artwork is full-bleed square). Its own copy rather than a path into
+   `mobile/assets`, so a T-Rock Cam brand change cannot re-skin this app on its next build.
 2. ~~App Store Connect record~~ — **done 2026-07-27.** `ascAppId` `6795188442` is in `eas.json`.
 3. ~~`eas init`~~ — **done 2026-07-27.** Project `129671d5-0cdb-4df5-992e-91301502bb99`
    (`@adnaan.iqbal/trockcrm-mobile`), committed as the default in `app.config.ts`. It has to be
