@@ -245,3 +245,52 @@ export async function createActivity(
 
   return activity;
 }
+
+/**
+ * Record that a captured activity became a lead.
+ *
+ * WHY THIS IS A SEPARATE STEP rather than a "promote" endpoint that creates the lead itself: lead
+ * creation carries office-code resolution, rep assignment, a due-diligence approval dispatch and its
+ * own requirements-error contract, all wired into POST /leads. Re-implementing that path for
+ * promotion would be a second copy of the rules that decide what a lead IS — the mirroring this
+ * codebase has repeatedly paid for. So the client creates the lead through the one endpoint that owns
+ * those rules, and this records the linkage.
+ *
+ * The trade-off, stated rather than hidden: the two calls are not atomic. If this one fails the lead
+ * still exists and simply is not linked back — visible, retryable, and harmless, because the lead is
+ * the artifact that matters. The reverse ordering (link first) has no such safe failure.
+ *
+ * IDEMPOTENT. A retry after a dropped response must not look like an error, and re-linking the SAME
+ * lead is exactly what a retry does.
+ */
+export async function linkActivityToLead(
+  tenantDb: TenantDb,
+  input: { activityId: string; leadId: string }
+) {
+  if (!input.activityId) throw new AppError(400, "activityId is required");
+  if (!input.leadId) throw new AppError(400, "leadId is required");
+
+  const [existing] = await tenantDb
+    .select()
+    .from(activities)
+    .where(eq(activities.id, input.activityId))
+    .limit(1);
+
+  if (!existing) throw new AppError(404, "Activity not found");
+
+  if (existing.leadId) {
+    // Same lead — the retry case, and a success.
+    if (existing.leadId === input.leadId) return existing;
+    // A DIFFERENT lead. Silently repointing would move a visit's history off the lead it created and
+    // onto another, so this refuses and says which one holds it.
+    throw new AppError(409, "This activity is already linked to a different lead", "ACTIVITY_LEAD_CONFLICT");
+  }
+
+  const [updated] = await tenantDb
+    .update(activities)
+    .set({ leadId: input.leadId })
+    .where(eq(activities.id, input.activityId))
+    .returning();
+
+  return updated ?? existing;
+}

@@ -3,7 +3,7 @@ import { jobQueue } from "@trock-crm/shared/schema";
 import { DOMAIN_EVENTS } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
 import { eventBus } from "../../events/bus.js";
-import { getActivities, createActivity } from "./service.js";
+import { getActivities, createActivity, linkActivityToLead } from "./service.js";
 import { assertDealCollaboratorAccess, assertLeadCollaboratorAccess } from "../../lib/collaboration-access.js";
 
 const router = Router();
@@ -82,6 +82,31 @@ router.get("/", async (req, res, next) => {
 });
 
 // POST /api/activities — create an activity (call, note, meeting)
+/**
+ * POST /api/activities/:id/link-lead — record that this captured visit became a lead.
+ *
+ * The lead is created by POST /leads, which owns every rule about what a lead is. This only writes the
+ * back-reference, so the visit shows on the lead's timeline and the lead's origin is traceable.
+ *
+ * Access is checked through the LEAD, not the activity: a rep allowed to see the lead is allowed to
+ * attach its originating visit, and the lead is the record with the ownership rules.
+ */
+router.post("/:id/link-lead", async (req, res, next) => {
+  try {
+    const { leadId } = req.body ?? {};
+    if (!leadId) throw new AppError(400, "leadId is required");
+    await assertLeadCollaboratorAccess(req.tenantDb!, leadId, req.user!);
+    const activity = await linkActivityToLead(req.tenantDb!, {
+      activityId: req.params.id as string,
+      leadId,
+    });
+    await req.commitTransaction!();
+    res.json({ activity });
+  } catch (err) {
+    next(err);
+  }
+});
+
 router.post("/", async (req, res, next) => {
   try {
     const {
