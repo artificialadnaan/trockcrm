@@ -58,7 +58,7 @@ function saveButton(c: HTMLElement): HTMLButtonElement {
 let roots: Root[] = [];
 let containers: HTMLElement[] = [];
 
-function render(currentDate: string | null = null, officeId?: string | null) {
+function render(currentDate: string | null = null, officeId?: string | null, slaFollowsBidDueDate = false) {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
@@ -70,6 +70,7 @@ function render(currentDate: string | null = null, officeId?: string | null) {
         dealId="deal-1"
         currentDate={currentDate}
         officeId={officeId}
+        slaFollowsBidDueDate={slaFollowsBidDueDate}
         onSaved={mocks.onSaved}
       />
     );
@@ -90,6 +91,37 @@ afterEach(() => {
   for (const c of containers) c.remove();
   roots = [];
   containers = [];
+});
+
+describe("MoveCloseDateDialog — estimating SLA follows the bid due date", () => {
+  it("stops promising an SLA pause and relabels the removal as a forecast edit", () => {
+    // Codex P2: fixing only the description left "Remove postponement" claiming an SLA effect it no
+    // longer has — in estimating the bid due date governs suppression, so this clears a forecast date.
+    const c = render(FUTURE, null, true);
+    expect(c.textContent).toContain("SLA follows the BID due date");
+    expect(c.textContent).not.toContain("The SLA pauses until that date");
+    expect(c.textContent).toContain("Remove close date");
+    expect(c.textContent).not.toContain("Remove postponement");
+  });
+
+  it("keeps the postponement wording and the SLA promise everywhere else", () => {
+    const c = render(FUTURE, null, false);
+    expect(c.textContent).toContain("The SLA pauses until that date");
+    expect(c.textContent).toContain("Remove postponement");
+    expect(c.textContent).not.toContain("SLA follows the BID due date");
+  });
+
+  it("does not claim an SLA effect in the note it logs when clearing a forecast date", async () => {
+    const c = render(FUTURE, null, true);
+    const removeBtn = [...c.querySelectorAll("button")].find((b) =>
+      (b.textContent ?? "").includes("Remove close date")
+    ) as HTMLButtonElement;
+    await act(async () => {
+      removeBtn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(mocks.updateDeal).toHaveBeenCalledWith("deal-1", { expectedCloseDate: null }, { officeId: null });
+    expect(mocks.createActivity.mock.calls[0]![0].body).toContain("continues to follow the bid due date");
+  });
 });
 
 describe("MoveCloseDateDialog", () => {

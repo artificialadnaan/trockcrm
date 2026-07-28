@@ -70,8 +70,10 @@ export function MoveCloseDateDialog({ open, onOpenChange, dealId, currentDate, o
   const isPastDate = date !== "" && date < businessToday;
   const canSave = date !== "" && !isPastDate && reason.trim() !== "" && !saving;
 
-  // Whether the deal currently HAS an SLA-postponing close target (a saved today-or-future date) that
-  // can be removed to drop the deal back to its normal stage-age SLA.
+  // Whether the deal currently has a saved today-or-future close target that can be cleared. It is an
+  // SLA postponement everywhere EXCEPT estimating-with-a-bid-date, where the same date is forecast-only —
+  // the label and the logged note branch on slaFollowsBidDueDate rather than hiding the action, since
+  // clearing a stale forecast date is still legitimate there.
   const hasActivePostponement = currentDate != null && currentDate >= businessToday;
 
   const handleSave = async () => {
@@ -111,8 +113,10 @@ export function MoveCloseDateDialog({ open, onOpenChange, dealId, currentDate, o
     onOpenChange(false);
   };
 
-  // "Remove postponement" — clear the close target so the deal drops straight back to its normal
-  // stage-age SLA (the at-risk engine has nothing to suppress once expected_close_date is null).
+  // Clear the close target. Normally that drops the deal straight back to its normal stage-age SLA (the
+  // at-risk engine has nothing to suppress once expected_close_date is null). In the estimating stage with
+  // a usable bid date it is a FORECAST edit only — suppression stays governed by the bid due date — so the
+  // affordance is relabelled and the logged note must not claim an SLA effect (Codex P2).
   const handleRemove = async () => {
     if (saving) return;
     setSaving(true);
@@ -122,7 +126,13 @@ export function MoveCloseDateDialog({ open, onOpenChange, dealId, currentDate, o
     try {
       await updateDeal(dealId, { expectedCloseDate: null }, { officeId });
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Couldn't remove the postponement. Please try again.");
+      setError(
+        e instanceof Error
+          ? e.message
+          : slaFollowsBidDueDate
+            ? "Couldn't remove the close date. Please try again."
+            : "Couldn't remove the postponement. Please try again."
+      );
       setSaving(false);
       return;
     }
@@ -134,7 +144,9 @@ export function MoveCloseDateDialog({ open, onOpenChange, dealId, currentDate, o
         // at-risk engine checks the hold before close-target suppression, so clearing the target does
         // NOT resume the normal stage-age SLA. The note records the fact; the SLA follows the engine.
         subject: "Close target removed",
-        body: "Close target removed — the deal's close-date postponement was cleared.",
+        body: slaFollowsBidDueDate
+          ? "Close target removed — forecast date cleared. The estimating SLA continues to follow the bid due date."
+          : "Close target removed — the deal's close-date postponement was cleared.",
         dealId,
       });
     } catch {
@@ -203,7 +215,7 @@ export function MoveCloseDateDialog({ open, onOpenChange, dealId, currentDate, o
               disabled={saving}
               className="mr-auto text-red-600 hover:bg-red-50 hover:text-red-700"
             >
-              Remove postponement
+              {slaFollowsBidDueDate ? "Remove close date" : "Remove postponement"}
             </Button>
           ) : null}
           <Button variant="outline" onClick={() => onOpenChange(false)} disabled={saving}>
