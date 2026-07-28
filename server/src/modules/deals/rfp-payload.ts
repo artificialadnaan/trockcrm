@@ -230,6 +230,32 @@ export const RFP_BODY_BYTE_BUDGET = 90 * 1024;
 
 const DESCRIPTION_TRUNCATED_SUFFIX = " […] (truncated for delivery — open the deal in the CRM for the full description)";
 
+/**
+ * Optional display fields, in the order we are willing to lose them. Every one is `.nullable()` in
+ * SyncHub's contract, so dropping one can never turn a 413 into a 422.
+ */
+const SACRIFICIAL_DEAL_FIELDS = [
+  "estimator",
+  "clientPhone",
+  "clientEmail",
+  "contactName",
+  "companyName",
+  "ownerEmail",
+  "ownerName",
+  "description",
+] as const;
+
+/**
+ * Hard ceiling for the fields SyncHub requires to be non-empty (`.min(1)`). `deals.project_type`,
+ * `deals.project_number`, `deals.estimator`, `deals.property_address` and `deals.property_country`
+ * are all unbounded `text` columns, so a pathological value has to be clamped rather than dropped.
+ */
+const REQUIRED_FIELD_MAX_CHARS = 500;
+
+function clampRequired(value: string): string {
+  return value.length > REQUIRED_FIELD_MAX_CHARS ? value.slice(0, REQUIRED_FIELD_MAX_CHARS) : value;
+}
+
 function serializedBytes(body: unknown): number {
   return Buffer.byteLength(JSON.stringify(body));
 }
@@ -257,6 +283,32 @@ function fitWithinBudget(body: NormalizedRfpRequestBody, budget: number): void {
     body.attachments.pop();
     body.attachmentsOmitted += 1;
   }
+
+  if (serializedBytes(body) <= budget) return;
+
+  // Backstop. Shrinking only the description and the attachments is NOT a total guarantee: several
+  // deal columns are unbounded `text` (estimator, property_address, property_country, project_type,
+  // project_number), as are the joined company/contact names. Once the two passes above are
+  // exhausted a pathological value in any of them would otherwise be returned oversized — the exact
+  // 413 this cap exists to prevent.
+  //
+  // Give up the whole address block first (several unbounded parts, purely informational), then the
+  // optional display fields in priority order.
+  body.deal.address = null;
+  for (const field of SACRIFICIAL_DEAL_FIELDS) {
+    if (serializedBytes(body) <= budget) return;
+    body.deal[field] = null;
+  }
+
+  // Only fields SyncHub requires to be non-empty remain, so clamp rather than drop. Each is
+  // guaranteed non-empty on the way in (name falls back to "Untitled Deal", projectNumber to the
+  // deal id, projectType to a resolved code), and slicing a non-empty string keeps it non-empty —
+  // this bounds the floor to a few KB, well under any sane budget.
+  body.deal.name = clampRequired(body.deal.name);
+  body.deal.projectNumber = clampRequired(body.deal.projectNumber);
+  body.deal.projectType = clampRequired(body.deal.projectType);
+  body.sourceDealId = clampRequired(body.sourceDealId);
+  body.sourceEventId = clampRequired(body.sourceEventId);
 }
 
 export function buildNormalizedRfpRequestBody(input: {

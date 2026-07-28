@@ -107,6 +107,66 @@ describe("RFP request body stays within SyncHub's parser limit", () => {
     expect(body.deal.description).toContain("truncated");
   });
 
+  // `estimator`, `property_address`, `property_country`, `project_type` and `project_number` are all
+  // unbounded `text` columns. Shrinking only the description and the attachment list therefore did NOT
+  // make the cap total: once both were exhausted the body was returned oversized and SyncHub 413'd it
+  // anyway — the very failure this cap exists to prevent.
+  it.each([
+    ["estimator", { estimator: "E".repeat(200_000) }],
+    ["propertyAddress", { propertyAddress: "A".repeat(200_000) }],
+    ["propertyCountry", { propertyCountry: "C".repeat(200_000) }],
+    ["companyName", { companyName: "N".repeat(200_000) }],
+  ])("bounds the body when the unbounded text field %s is pathological", (_label, overrides) => {
+    const body = buildNormalizedRfpRequestBody({
+      deal: { ...baseDeal, ...(overrides as object) },
+      sourceEventId: "crm:deal-stage:opportunity:evt-1",
+      attachments: [],
+    });
+
+    expect(bodyBytes(body)).toBeLessThanOrEqual(SYNCHUB_JSON_BODY_LIMIT_BYTES);
+  });
+
+  it("bounds the body when a REQUIRED text field is pathological, while keeping it non-empty", () => {
+    // name/projectNumber/projectType are `.min(1)` in SyncHub's zod — clamping them must not empty
+    // them out, or we would trade a 413 for a 422.
+    const body = buildNormalizedRfpRequestBody({
+      deal: {
+        ...baseDeal,
+        name: "N".repeat(200_000),
+        projectNumber: "P".repeat(200_000),
+        dealNumber: "P".repeat(200_000),
+      },
+      sourceEventId: "crm:deal-stage:opportunity:evt-1",
+      attachments: [],
+    });
+
+    expect(bodyBytes(body)).toBeLessThanOrEqual(SYNCHUB_JSON_BODY_LIMIT_BYTES);
+    expect(body.deal.name.length).toBeGreaterThan(0);
+    expect(body.deal.projectNumber.length).toBeGreaterThan(0);
+    expect(body.deal.projectType.length).toBeGreaterThan(0);
+    expect(body.sourceDealId.length).toBeGreaterThan(0);
+    expect(body.sourceEventId.length).toBeGreaterThan(0);
+  });
+
+  it("never exceeds the limit even when every unbounded input is oversized at once", () => {
+    const body = buildNormalizedRfpRequestBody({
+      deal: {
+        ...baseDeal,
+        name: "N".repeat(120_000),
+        description: "S".repeat(120_000),
+        estimator: "E".repeat(120_000),
+        propertyAddress: "A".repeat(120_000),
+        propertyCountry: "C".repeat(120_000),
+        companyName: "M".repeat(120_000),
+        contactName: "T".repeat(120_000),
+      },
+      sourceEventId: "crm:deal-stage:opportunity:evt-1",
+      attachments: Array.from({ length: 300 }, (_, i) => makeAttachment(i)),
+    });
+
+    expect(bodyBytes(body)).toBeLessThanOrEqual(SYNCHUB_JSON_BODY_LIMIT_BYTES);
+  });
+
   it("never exceeds the limit even when description AND attachments are both oversized", () => {
     const body = buildNormalizedRfpRequestBody({
       deal: { ...baseDeal, description: "S".repeat(200_000) },
