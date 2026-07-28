@@ -54,7 +54,9 @@ describe("linkActivityToLead", () => {
   it("writes the lead id onto an unlinked activity", async () => {
     const { db, updates } = stubDb({ id: "a1", leadId: null, responsibleUserId: "u1" });
     const result = await linkActivityToLead(db, { activityId: "a1", leadId: "l1", viewer: OWNER });
-    expect(updates).toEqual([{ leadId: "l1" }]);
+    // TWO writes now: the link itself, then the lead's denormalised last-touch. Asserting the whole
+    // array made the timestamp refresh read as a regression rather than the feature it is.
+    expect(updates[0]).toEqual({ leadId: "l1" });
     expect(result).toMatchObject({ id: "a1", leadId: "l1", responsibleUserId: "u1" });
   });
 
@@ -134,7 +136,7 @@ describe("linkActivityToLead — concurrency and consistency", () => {
     await expect(linkActivityToLead(db, { activityId: "a1", leadId: "l1", viewer: OWNER })).resolves.toMatchObject({
       leadId: "l1",
     });
-    expect(updates).toEqual([{ leadId: "l1" }]);
+    expect(updates[0]).toEqual({ leadId: "l1" });
   });
 
   it("skips the property check for a company-anchored capture", async () => {
@@ -222,5 +224,40 @@ describe("linkActivityToLead — missing lead", () => {
       linkActivityToLead(db, { activityId: "a1", leadId: "gone", viewer: OWNER }),
     ).rejects.toMatchObject({ statusCode: 404 });
     expect(updates).toEqual([]);
+  });
+});
+
+describe("linkActivityToLead — the lead's last touch", () => {
+  it("refreshes the lead's lastActivityAt after linking", async () => {
+    // Linking wrote only activities.lead_id, so a lead promoted FROM a site visit showed as untouched
+    // on every surface that sorts or filters by last activity — the opposite of what happened.
+    const occurred = new Date("2026-07-28T08:00:00Z");
+    const { db, updates } = stubDb({ id: "a1", leadId: null, responsibleUserId: "u1", occurredAt: occurred });
+    await linkActivityToLead(db, { activityId: "a1", leadId: "l1", viewer: OWNER });
+    expect(updates).toContainEqual({ lastActivityAt: occurred });
+  });
+
+  it("still returns the link when the timestamp refresh throws", async () => {
+    // Best-effort by design: the link is the authoritative change and must not fail because a
+    // denormalised value could not be updated.
+    const existing = { id: "a1", leadId: null, responsibleUserId: "u1" };
+    let call = 0;
+    const db = {
+      select: () => ({ from: () => ({ where: () => ({ limit: async () => [existing] }) }) }),
+      update: () => ({
+        set: (patch: Record<string, unknown>) => ({
+          where: () => ({
+            returning: async () => {
+              call += 1;
+              if (call > 1) throw new Error("timestamp write failed");
+              return [{ ...existing, ...patch }];
+            },
+          }),
+        }),
+      }),
+    } as unknown as Parameters<typeof linkActivityToLead>[0];
+    await expect(
+      linkActivityToLead(db, { activityId: "a1", leadId: "l1", viewer: OWNER }),
+    ).resolves.toMatchObject({ leadId: "l1" });
   });
 });
