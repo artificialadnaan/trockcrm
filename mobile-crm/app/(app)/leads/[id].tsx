@@ -475,11 +475,11 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: theme.color.canvas },
   body: { padding: theme.space.lg, gap: theme.space.md, paddingBottom: theme.space.xxl },
-  back: { fontFamily: theme.font.semibold, fontSize: 15, color: theme.color.redText },
-  title: { fontFamily: theme.font.bold, fontSize: 24, color: theme.color.inkNavy },
+  back: { ...theme.type.body, color: theme.color.redText },
+  title: { ...theme.type.h1, color: theme.color.textPrimary },
   badges: { flexDirection: "row", alignItems: "center", gap: theme.space.sm, flexWrap: "wrap" },
-  stage: { fontFamily: theme.font.semibold, fontSize: 13, color: theme.color.textSecondary },
-  staleNote: { fontFamily: theme.font.regular, fontSize: 12, color: theme.color.amberText },
+  stage: { ...theme.type.label, color: theme.color.textSecondary },
+  staleNote: { ...theme.type.caption, color: theme.color.amberText },
   linkBtn: {
     minHeight: 44,
     justifyContent: "center",
@@ -488,9 +488,9 @@ const styles = StyleSheet.create({
     borderColor: theme.color.brandRed,
     paddingHorizontal: theme.space.lg,
   },
-  linkText: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.redText },
+  linkText: { ...theme.type.body, color: theme.color.redText },
   section: { gap: theme.space.sm },
-  sectionTitle: { fontFamily: theme.font.bold, fontSize: 13, color: theme.color.textMuted, textTransform: "uppercase" },
+  sectionTitle: { ...theme.type.label, color: theme.color.textMuted, textTransform: "uppercase" },
   sectionBody: {
     backgroundColor: theme.color.surface,
     borderRadius: theme.radius.lg,
@@ -499,7 +499,7 @@ const styles = StyleSheet.create({
     padding: theme.space.lg,
     gap: theme.space.sm,
   },
-  help: { fontFamily: theme.font.regular, fontSize: 13, color: theme.color.textSecondary },
+  help: { ...theme.type.label, color: theme.color.textSecondary },
   stageGrid: { flexDirection: "row", flexWrap: "wrap", gap: theme.space.sm },
   stageOption: {
     minHeight: 44,
@@ -511,16 +511,16 @@ const styles = StyleSheet.create({
     backgroundColor: theme.color.surface,
   },
   stageOptionDisabled: { opacity: 0.5 },
-  stageOptionText: { fontFamily: theme.font.semibold, fontSize: 13, color: theme.color.textPrimary },
+  stageOptionText: { ...theme.type.label, color: theme.color.textPrimary },
   refusalBox: {
     borderRadius: theme.radius.md,
     backgroundColor: theme.color.amberSurface,
     padding: theme.space.md,
     gap: theme.space.xs,
   },
-  refusalTitle: { fontFamily: theme.font.bold, fontSize: 14, color: theme.color.amberText },
-  refusalItem: { fontFamily: theme.font.regular, fontSize: 13, color: theme.color.amberText },
-  error: { fontFamily: theme.font.semibold, fontSize: 13, color: theme.color.redText },
+  refusalTitle: { ...theme.type.body, color: theme.color.amberText },
+  refusalItem: { ...theme.type.label, color: theme.color.amberText },
+  error: { ...theme.type.label, color: theme.color.redText },
   center: {
     flex: 1,
     alignItems: "center",
@@ -528,7 +528,7 @@ const styles = StyleSheet.create({
     padding: theme.space.xl,
     gap: theme.space.sm,
   },
-  errorTitle: { fontFamily: theme.font.bold, fontSize: 17, color: theme.color.inkNavy },
+  errorTitle: { ...theme.type.h2, color: theme.color.textPrimary },
   retryBtn: {
     marginTop: theme.space.sm,
     minHeight: 44,
@@ -538,5 +538,5 @@ const styles = StyleSheet.create({
     borderRadius: theme.radius.md,
     paddingHorizontal: theme.space.xl,
   },
-  retryText: { fontFamily: theme.font.bold, fontSize: 14, color: theme.color.redText },
+  retryText: { ...theme.type.body, color: theme.color.redText },
 });
