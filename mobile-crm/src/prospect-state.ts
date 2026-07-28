@@ -113,3 +113,75 @@ export function describeMatch(match: PropertyMatch): string {
   }
   return distance ?? "Nearby";
 }
+
+/**
+ * What to do about the PERSON before the visit is written.
+ *
+ * This lived inline in the save mutation, where three separate defects hid in it: a retained id keyed
+ * on nothing reused the previous person after a rename; a dedup reply logged the visit against nobody
+ * while the screen said "Logged"; and an edited phone number was silently discarded because the retry
+ * treated the committed contact as unchanged. All three are decisions, not effects — so they belong
+ * here, where a test can hold them still.
+ */
+export type ContactPlan =
+  | { action: "reuse"; contactId: string }
+  | { action: "create" }
+  | { action: "skip" };
+
+export function planContact(input: {
+  first: string;
+  last: string;
+  /** Every editable person field, joined. A subset silently reuses a stale contact. */
+  key: string;
+  /** A duplicate the rep picked from the prompt. */
+  resolvedContactId: string | null;
+  /** The rep said none of the suggestions is the person. */
+  waived: boolean;
+  /** Committed by an attempt whose activity write then failed. */
+  retained?: { id: string; key: string };
+}): { plan: ContactPlan; dropRetained: boolean } {
+  // A stale retention is dropped BEFORE anything else looks at it — the whole point is that it must
+  // never be reachable once the draft describes a different person, or the same person differently.
+  const dropRetained = Boolean(input.retained && input.retained.key !== input.key);
+  const retained = dropRetained ? undefined : input.retained;
+
+  if (input.resolvedContactId) {
+    return { plan: { action: "reuse", contactId: input.resolvedContactId }, dropRetained };
+  }
+  if (retained) return { plan: { action: "reuse", contactId: retained.id }, dropRetained };
+  if (input.waived) return { plan: { action: "skip" }, dropRetained };
+  if (input.first && input.last) return { plan: { action: "create" }, dropRetained };
+  return { plan: { action: "skip" }, dropRetained };
+}
+
+/**
+ * A dedup reply must STOP the save.
+ *
+ * `POST /contacts` answers 200 with no id and the ids of the people it matched. Writing the activity
+ * anyway attaches it to nobody — permanently, since this app cannot edit an activity — while reporting
+ * success. The rep has to answer first.
+ */
+export function haltsForDuplicates(input: {
+  createdId?: string;
+  duplicates?: { id: string }[] | null;
+}): boolean {
+  return !input.createdId && Boolean(input.duplicates?.length);
+}
+
+/**
+ * Person details the save will throw away, because a contact is only created with BOTH names.
+ *
+ * Keyed on the names alone this missed a rep who typed only a phone number or a title: no warning, and
+ * "Logged" over details that were never sent anywhere.
+ */
+export function personDetailsWillBeDiscarded(input: {
+  first: string;
+  last: string;
+  phone: string;
+  title: string;
+}): boolean {
+  const any = Boolean(
+    input.first.trim() || input.last.trim() || input.phone.trim() || input.title.trim(),
+  );
+  return any && !(input.first.trim() && input.last.trim());
+}

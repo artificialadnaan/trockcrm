@@ -1,7 +1,10 @@
 import {
   canSubmit,
   describeMatch,
+  haltsForDuplicates,
   isPositionTooCoarse,
+  personDetailsWillBeDiscarded,
+  planContact,
   submitBlockedReason,
 } from "../prospect-state";
 import type { PropertyMatch } from "../api/endpoints/prospecting";
@@ -144,5 +147,115 @@ describe("isPositionTooCoarse — the boundary", () => {
     // recorded that choice.
     expect(isPositionTooCoarse(100, 100)).toBe(false);
     expect(isPositionTooCoarse(100.1, 100)).toBe(true);
+  });
+});
+
+describe("planContact — who the visit is filed against", () => {
+  const base = { first: "Dana", last: "Reyes", key: "dana|reyes||", resolvedContactId: null, waived: false };
+
+  it("creates a contact when the draft names one and nothing is committed", () => {
+    expect(planContact(base).plan).toEqual({ action: "create" });
+  });
+
+  it("skips the person when the draft has no complete name", () => {
+    expect(planContact({ ...base, last: "" }).plan).toEqual({ action: "skip" });
+  });
+
+  it("reuses a contact committed by a failed attempt rather than creating a second one", () => {
+    const { plan } = planContact({ ...base, retained: { id: "c1", key: "dana|reyes||" } });
+    expect(plan).toEqual({ action: "reuse", contactId: "c1" });
+  });
+
+  it("DROPS a retained contact once the name changes", () => {
+    // The rep corrected the name after a failed save. Reusing here filed the visit against the person
+    // they had just replaced.
+    const { plan, dropRetained } = planContact({
+      ...base,
+      last: "Ruiz",
+      key: "dana|ruiz||",
+      retained: { id: "c1", key: "dana|reyes||" },
+    });
+    expect(dropRetained).toBe(true);
+    expect(plan).toEqual({ action: "create" });
+  });
+
+  it("DROPS a retained contact when only the phone or title changed", () => {
+    // Keyed on the name alone this read as unchanged, so the corrected phone number never left the
+    // phone while the rep sat looking at it.
+    const { plan, dropRetained } = planContact({
+      ...base,
+      key: "dana|reyes|5551234|super|",
+      retained: { id: "c1", key: "dana|reyes||super|" },
+    });
+    expect(dropRetained).toBe(true);
+    expect(plan).toEqual({ action: "create" });
+  });
+
+  it("DROPS a retained contact when the company target changes", () => {
+    const { plan } = planContact({
+      ...base,
+      key: "dana|reyes||co-2",
+      retained: { id: "c1", key: "dana|reyes||co-1" },
+    });
+    expect(plan).toEqual({ action: "create" });
+  });
+
+  it("uses the duplicate the rep picked, in preference to anything else", () => {
+    const { plan } = planContact({
+      ...base,
+      resolvedContactId: "existing-9",
+      retained: { id: "c1", key: "dana|reyes||" },
+    });
+    expect(plan).toEqual({ action: "reuse", contactId: "existing-9" });
+  });
+
+  it("does not re-create after the rep waived the person", () => {
+    // Without this the resubmit calls /contacts again, gets the same dedup answer, and the screen asks
+    // the question the rep just answered — forever.
+    expect(planContact({ ...base, waived: true }).plan).toEqual({ action: "skip" });
+  });
+});
+
+describe("haltsForDuplicates", () => {
+  it("halts when the reply carries suggestions and no new id", () => {
+    expect(haltsForDuplicates({ duplicates: [{ id: "a" }] })).toBe(true);
+  });
+
+  it("proceeds once a contact was actually created", () => {
+    expect(haltsForDuplicates({ createdId: "c1", duplicates: [] })).toBe(false);
+  });
+
+  it("proceeds when there is nothing to ask about", () => {
+    expect(haltsForDuplicates({ duplicates: null })).toBe(false);
+  });
+});
+
+describe("personDetailsWillBeDiscarded", () => {
+  const d = (o: Partial<Record<"first" | "last" | "phone" | "title", string>>) =>
+    personDetailsWillBeDiscarded({ first: "", last: "", phone: "", title: "", ...o });
+
+  it("warns on a phone with no name — the case that showed nothing at all", () => {
+    expect(d({ phone: "555-1234" })).toBe(true);
+  });
+
+  it("warns on a title with no name", () => {
+    expect(d({ title: "Property manager" })).toBe(true);
+  });
+
+  it("warns on a half-typed name in either direction", () => {
+    expect(d({ first: "Dana" })).toBe(true);
+    expect(d({ last: "Reyes" })).toBe(true);
+  });
+
+  it("stays quiet on a complete person", () => {
+    expect(d({ first: "Dana", last: "Reyes", phone: "555-1234" })).toBe(false);
+  });
+
+  it("stays quiet on an empty person block, which is the normal case", () => {
+    expect(d({})).toBe(false);
+  });
+
+  it("treats whitespace as empty", () => {
+    expect(d({ first: "  ", last: "  " })).toBe(false);
   });
 });

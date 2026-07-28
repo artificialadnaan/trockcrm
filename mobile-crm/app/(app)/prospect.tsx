@@ -19,6 +19,9 @@ import { useGoBack } from "../../src/lib/go-back";
 import { COARSE_ACCURACY_METERS, useCurrentLocation } from "../../src/lib/use-current-location";
 import {
   canSubmit,
+  haltsForDuplicates,
+  personDetailsWillBeDiscarded,
+  planContact,
   describeMatch,
   isPositionTooCoarse,
   submitBlockedReason,
@@ -82,6 +85,28 @@ export default function ProspectScreen() {
    * by retrying.
    */
   const createdContactId = useRef<{ id: string; key: string } | undefined>(undefined);
+  /**
+   * A duplicate the rep RESOLVED, and their decision to log without a person.
+   *
+   * Refs, not state: both are set in the same handler that resubmits, and mutationFn closes over the
+   * render it was created in — reading these from state would run the resubmit against the values from
+   * before the choice, which is the defect this whole block exists to prevent.
+   */
+  const resolvedContactId = useRef<string | null>(null);
+  const contactWaived = useRef(false);
+  /** Shown after the save so the rep can see which existing person the visit carries. */
+  const [resolvedContactName, setResolvedContactName] = useState<string | null>(null);
+
+  /**
+   * Editing the person retires an unanswered duplicate prompt.
+   *
+   * The suggestions answer a question about the name that was submitted. Left on screen while the rep
+   * types a different person, "Use" would attach the visit to someone the draft no longer names.
+   */
+  const editPerson = (setter: (next: string) => void) => (next: string) => {
+    setDuplicateContacts(null);
+    setter(next);
+  };
 
   const [type, setType] = useState<prospecting.FieldActivityType | null>("site_visit");
   const [body, setBody] = useState("");
@@ -235,20 +260,36 @@ export default function ProspectScreen() {
        *
        * A duplicate answer is not a failure — `POST /contacts` replies 200 with suggestions rather than
        * 201, and that prompt is the useful outcome: a rep who meets the same property manager twice
-       * should be told, not silently given a second record. So a dedup reply leaves contactId undefined
-       * and the activity still attaches to the property.
+       * should be asked which one, not silently given a second record.
        *
-       * A contact already committed by a FAILED attempt is reused rather than created again — but only
-       * while the draft still describes the same person. Holding a bare id meant that correcting the
-       * name after a failed save (the obvious thing to do) reused the previous person's id, filing the
-       * visit against someone the rep had already replaced.
+       * Every rule about WHICH contact — reuse one already committed, drop it once the draft describes
+       * someone (or something) different, honour a picked duplicate, respect a waiver — is decided by
+       * planContact, which is unit-tested. Deciding it inline here is what produced three separate
+       * defects on this screen.
+       *
+       * The key covers EVERY editable field, not just the name: keyed on the name alone, fixing a
+       * mistyped phone number before retrying read as unchanged, so the retry reused the committed
+       * contact and the correction the rep was looking at was never sent anywhere.
        */
-      const contactKey = `${first.toLowerCase()}|${last.toLowerCase()}|${property?.companyId ?? company?.id ?? ""}`;
-      if (createdContactId.current && createdContactId.current.key !== contactKey) {
-        createdContactId.current = undefined;
-      }
+      const contactKey = [
+        first.toLowerCase(),
+        last.toLowerCase(),
+        contactPhone.trim(),
+        contactTitle.trim().toLowerCase(),
+        property?.companyId ?? company?.id ?? "",
+      ].join("|");
+      const { plan, dropRetained } = planContact({
+        first,
+        last,
+        key: contactKey,
+        resolvedContactId: resolvedContactId.current,
+        waived: contactWaived.current,
+        retained: createdContactId.current,
+      });
+      if (dropRetained) createdContactId.current = undefined;
+      if (plan.action === "reuse") contactId = plan.contactId;
 
-      if (first && last && !createdContactId.current) {
+      if (plan.action === "create") {
         /**
          * The PERSON is optional; the VISIT is not.
          *
@@ -270,14 +311,23 @@ export default function ProspectScreen() {
           contactId = created.created?.id;
           if (contactId) createdContactId.current = { id: contactId, key: contactKey };
           duplicates = created.duplicates ?? null;
+          /**
+           * STOP. Do not write the activity yet.
+           *
+           * A dedup reply carries no new id but it DOES carry the ids of the people it matched, so the
+           * person is knowable — and logging here attached the visit to nobody while the screen said
+           * "Logged". That is unrecoverable: /activities has no update path in this app, so a rep who
+           * meets a property manager the CRM already knows loses them silently, which is precisely the
+           * case the prompt exists to catch. Hand the choice back instead.
+           */
+          if (haltsForDuplicates({ createdId: contactId, duplicates })) {
+            return { activity: null, duplicates, contactFailed: false } as const;
+          }
         } catch {
           // Recorded and reported after the activity lands; the visit continues regardless.
           contactFailed = true;
         }
       }
-
-      // Reuse the already-committed contact rather than making a second one.
-      contactId = contactId ?? createdContactId.current?.id;
 
       const activity = await prospecting.logActivity(fetcher, {
         ...target,
@@ -292,10 +342,16 @@ export default function ProspectScreen() {
       return { activity, duplicates, contactFailed };
     },
     onSuccess: async ({ activity, duplicates, contactFailed }) => {
-      setSavedActivityId(activity.id);
-      setSaveError(null);
       setDuplicateContacts(duplicates);
       setContactFailed(contactFailed);
+      // Halted on a duplicate: nothing was written, so the draft stays live and editable and the picker
+      // below asks who this is. Reporting "Logged" here is the defect.
+      if (!activity) {
+        setSaveError(null);
+        return;
+      }
+      setSavedActivityId(activity.id);
+      setSaveError(null);
       // The property's activity feed and any list showing last-touch are now stale.
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["properties"] }),
@@ -323,6 +379,24 @@ export default function ProspectScreen() {
             : "Couldn't save this log.",
       );
     },
+  });
+
+  /**
+   * The draft is FROZEN once it is in flight or written.
+   *
+   * The mutation captured the values from the render that submitted it, and there is no update request
+   * behind this screen. Left live, a rep on a slow connection could keep typing after tapping Save — or
+   * fix a typo after "Logged" — and read their correction on screen while the server held the earlier
+   * text. "Log another here" then wiped the edit without it ever having been sent.
+   */
+  const locked = save.isPending || saved;
+
+  /** Person details the save will discard, because a contact needs BOTH names to be created. */
+  const personPartial = personDetailsWillBeDiscarded({
+    first: contactFirst,
+    last: contactLast,
+    phone: contactPhone,
+    title: contactTitle,
   });
 
   const [promoted, setPromoted] = useState<prospecting.LeadRef | null>(null);
@@ -639,15 +713,20 @@ export default function ProspectScreen() {
                       </Text>
                       <Text style={styles.matchMeta}>Company</Text>
                     </View>
-                    <Pressable
-                      testID="prospect-clear-company"
-                      onPress={() => setCompany(null)}
-                      accessibilityRole="button"
-                      accessibilityLabel="Choose a different company"
-                      style={styles.linkBtn}
-                    >
-                      <Text style={styles.linkText}>Change</Text>
-                    </Pressable>
+                    {/* Frozen on the same states as the property target above. Left live, a rep could
+                        switch companies mid-save and read the NEW company beside "Logged" while the
+                        activity carried the old one. */}
+                    {locked ? null : (
+                      <Pressable
+                        testID="prospect-clear-company"
+                        onPress={() => setCompany(null)}
+                        accessibilityRole="button"
+                        accessibilityLabel="Choose a different company"
+                        style={styles.linkBtn}
+                      >
+                        <Text style={styles.linkText}>Change</Text>
+                      </Pressable>
+                    )}
                   </View>
                 ) : (
                   <>
@@ -724,9 +803,10 @@ export default function ProspectScreen() {
                 key={t.key}
                 testID={`prospect-type-${t.key}`}
                 onPress={() => setType(t.key)}
+                disabled={locked}
                 accessibilityRole="button"
-                accessibilityState={{ selected: active }}
-                style={[styles.typeChip, active && styles.typeChipActive]}
+                accessibilityState={{ selected: active, disabled: locked }}
+                style={[styles.typeChip, active && styles.typeChipActive, locked && styles.chipLocked]}
               >
                 <Text style={[styles.typeText, active && styles.typeTextActive]}>{t.label}</Text>
               </Pressable>
@@ -736,6 +816,7 @@ export default function ProspectScreen() {
 
         <TextInput
           testID="prospect-body"
+          editable={!locked}
           value={body}
           onChangeText={setBody}
           placeholder="What did you find? Roof age, condition, who you spoke to…"
@@ -745,6 +826,7 @@ export default function ProspectScreen() {
         />
         <TextInput
           testID="prospect-outcome"
+          editable={!locked}
           value={outcome}
           onChangeText={setOutcome}
           // activities.outcome is varchar(100). Past that Postgres rejects the INSERT, so the whole
@@ -757,6 +839,7 @@ export default function ProspectScreen() {
         />
         <TextInput
           testID="prospect-next-step"
+          editable={!locked}
           value={nextStep}
           onChangeText={setNextStep}
           placeholder="Next step (optional)"
@@ -769,16 +852,18 @@ export default function ProspectScreen() {
         <View style={styles.nameRow}>
           <TextInput
             testID="prospect-first"
+          editable={!locked}
             value={contactFirst}
-            onChangeText={setContactFirst}
+            onChangeText={editPerson(setContactFirst)}
             placeholder="First name"
             placeholderTextColor={theme.color.textMuted}
             style={[styles.input, styles.half]}
           />
           <TextInput
             testID="prospect-last"
+          editable={!locked}
             value={contactLast}
-            onChangeText={setContactLast}
+            onChangeText={editPerson(setContactLast)}
             placeholder="Last name"
             placeholderTextColor={theme.color.textMuted}
             style={[styles.input, styles.half]}
@@ -786,30 +871,94 @@ export default function ProspectScreen() {
         </View>
         <TextInput
           testID="prospect-title"
+          editable={!locked}
           value={contactTitle}
-          onChangeText={setContactTitle}
+          onChangeText={editPerson(setContactTitle)}
           placeholder="Title (optional)"
           placeholderTextColor={theme.color.textMuted}
           style={styles.input}
         />
         <TextInput
           testID="prospect-phone"
+          editable={!locked}
           value={contactPhone}
-          onChangeText={setContactPhone}
+          onChangeText={editPerson(setContactPhone)}
           placeholder="Phone (optional)"
           placeholderTextColor={theme.color.textMuted}
           keyboardType="phone-pad"
           style={styles.input}
         />
-        {(contactFirst.trim() && !contactLast.trim()) || (!contactFirst.trim() && contactLast.trim()) ? (
+        {personPartial ? (
           /* The server requires BOTH names and 400s otherwise. Said here rather than after a failed
              save, because the save also creates the activity and a rep should not lose the visit. */
-          /* BOTH directions. The first version warned only about a missing last name, so a rep who
-             typed just a surname got no warning and the person was silently dropped — the server
-             requires both, and the activity saves either way, so the loss is invisible. */
+          /* ANY populated person field, not just a half-typed name. Keyed on the names alone, a rep who
+             entered only a phone number or a title saw no warning at all and read "Logged" while every
+             detail they typed about that person was dropped — the contact is created only when both
+             names are present, and nothing else on this screen carries them. */
           <Text testID="prospect-name-incomplete" style={styles.warn}>
-            Both a first and last name are needed to save the person — the visit will still be logged.
+            {contactFirst.trim() || contactLast.trim()
+              ? "Both a first and last name are needed to save the person — the visit will still be logged."
+              : "Add a first and last name to save this person — a phone or title on its own isn't stored."}
           </Text>
+        ) : null}
+
+        {duplicateContacts?.length && !saved ? (
+          /**
+           * THE CHOICE, made before anything is written.
+           *
+           * The dedup reply carries the ids of the people it matched, so the rep can attach the visit to
+           * the right one in a tap. Logging first and reporting the duplicate afterwards — what this did
+           * — threw those ids away and filed the visit against nobody, permanently, since there is no
+           * way to edit an activity from this app. Meeting a property manager the CRM already knows is
+           * the ORDINARY case out here, not an edge case.
+           */
+          <View testID="prospect-duplicate-picker" style={styles.dupBox}>
+            <Text style={styles.warn}>
+              {duplicateContacts.length === 1
+                ? "Someone with this name is already in the CRM. Is this them?"
+                : `${duplicateContacts.length} people with this name are already in the CRM. Which one did you meet?`}
+            </Text>
+            {duplicateContacts.map((s) => {
+              const name = s.name ?? [s.firstName, s.lastName].filter(Boolean).join(" ");
+              return (
+                <Pressable
+                  key={s.id}
+                  testID={`prospect-duplicate-${s.id}`}
+                  onPress={() => {
+                    resolvedContactId.current = s.id;
+                    setResolvedContactName(name || "this contact");
+                    setDuplicateContacts(null);
+                    save.mutate();
+                  }}
+                  disabled={save.isPending}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Log this visit with ${name || "this contact"}`}
+                  style={styles.matchRow}
+                >
+                  <Text style={styles.matchName} numberOfLines={1}>
+                    {name || "Existing contact"}
+                  </Text>
+                  <Text style={styles.linkText}>Use</Text>
+                </Pressable>
+              );
+            })}
+            <Pressable
+              testID="prospect-duplicate-skip"
+              onPress={() => {
+                // An explicit waiver, so the create call is not retried on the resubmit. The rep said
+                // none of these is the person; the VISIT still has to be recorded.
+                contactWaived.current = true;
+                setDuplicateContacts(null);
+                save.mutate();
+              }}
+              disabled={save.isPending}
+              accessibilityRole="button"
+              accessibilityLabel="Log this visit without a person"
+              style={styles.linkBtn}
+            >
+              <Text style={styles.linkText}>None of these — log without them</Text>
+            </Pressable>
+          </View>
         ) : null}
 
         {/* ---- Save ---- */}
@@ -852,15 +1001,12 @@ export default function ProspectScreen() {
               </Text>
             ) : null}
 
-            {duplicateContacts?.length ? (
-              /* The dedup answer, shown rather than swallowed. The person is already in the CRM, the
-                 visit is logged against the property regardless, and the rep can link them properly on
-                 the web — which is a better outcome than a silent second copy. */
+            {resolvedContactName ? (
+              /* Which existing person the visit carries. The copy here used to announce that a duplicate
+                 had been found AFTER logging without anybody — a report of the loss rather than a fix
+                 for it. The choice now happens before the write, so this states the outcome. */
               <Text testID="prospect-duplicate-contacts" style={styles.help}>
-                {duplicateContacts.length === 1
-                  ? "That person may already be in the CRM, so they weren't added again."
-                  : `${duplicateContacts.length} similar people are already in the CRM, so nobody was added.`}{" "}
-                The visit was logged.
+                Logged with {resolvedContactName}, who was already in the CRM.
               </Text>
             ) : null}
 
@@ -897,6 +1043,9 @@ export default function ProspectScreen() {
                 setLinkFailed(false);
                 setContactFailed(false);
                 createdContactId.current = undefined;
+                resolvedContactId.current = null;
+                contactWaived.current = false;
+                setResolvedContactName(null);
                 setDuplicateContacts(null);
                 setBody("");
                 setOutcome("");
@@ -995,6 +1144,17 @@ const styles = StyleSheet.create({
   error: { ...theme.type.label, color: theme.color.redText },
 
   matchList: { gap: theme.space.sm },
+  /* The unresolved-duplicate block. Bordered, because it is a question the rep has to answer before the
+     visit is written — not a notice they can read past. */
+  dupBox: {
+    gap: theme.space.sm,
+    padding: theme.space.md,
+    borderRadius: theme.radius.md,
+    borderWidth: 1,
+    borderColor: theme.color.borderControl,
+    backgroundColor: theme.color.surfaceMuted,
+  },
+  chipLocked: { opacity: 0.5 },
   matchRow: {
     flexDirection: "row",
     alignItems: "center",
