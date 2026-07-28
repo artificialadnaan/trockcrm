@@ -1421,9 +1421,22 @@ export default function ProspectScreen() {
             service refuses one that disagrees with sourceEntityId, so offering to name a second person
             here could only build a visit that cannot be saved. */}
         {contact ? (
-          <Text testID="prospect-who-is-target" style={styles.help}>
-            This visit is filed against {`${contact.firstName} ${contact.lastName}`.trim()}.
-          </Text>
+          <>
+            <Text testID="prospect-who-is-target" style={styles.help}>
+              This visit is filed against {`${contact.firstName} ${contact.lastName}`.trim()}.
+            </Text>
+            {/* The WHO fields keep their contents while hidden, and the contact branch ignores them —
+                so a rep who typed a person and THEN picked a contact target lost what they typed with
+                no warning at all, because the discard notice below is suppressed once a contact is
+                set. Hidden is not the same as empty. */}
+            {contactFirst.trim() || contactLast.trim() || contactPhone.trim() || contactTitle.trim() ? (
+              <Text testID="prospect-who-discarded" style={styles.warn}>
+                The person details you typed won&apos;t be saved — this visit is already filed against{" "}
+                {`${contact.firstName} ${contact.lastName}`.trim()}. Clear the person target to use them
+                instead.
+              </Text>
+            ) : null}
+          </>
         ) : (
           <>
         <Text style={styles.stepLabel}>WHO YOU MET (OPTIONAL)</Text>
