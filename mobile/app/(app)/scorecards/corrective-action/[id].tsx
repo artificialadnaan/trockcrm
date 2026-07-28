@@ -37,8 +37,15 @@ function toStr(v: string | string[] | undefined): string {
   return Array.isArray(v) ? v[0] ?? "" : v ?? "";
 }
 
+/**
+ * Is this item still the RESPONDER'S to answer?
+ *
+ * `open` and `rejected` both are. After migration 0202 an approver can send work back, and gating on
+ * `open` alone left a rejected item read-only on the phone — the responder could see the approver asked for
+ * a fix and had no way to give one.
+ */
 function isOpen(item: CorrectiveActionItem): boolean {
-  return item.status === "open";
+  return item.status === "open" || item.status === "rejected";
 }
 
 export default function CorrectiveActionScreen() {
@@ -352,7 +359,7 @@ function CorrectiveActionItemCard({
     // copy dir IF the screen has since unmounted — the user backed out (or the app was killed) while this
     // request was in flight, so the unmount-cleanup effect skipped the delete (submitting was true) and its
     // state setters below are no-ops. Without this the full-size durable copies leak in document storage
-    // indefinitely. While still mounted the setters + (for already_resolved) the resolved-card unmount handle
+    // indefinitely. While still mounted the setters + (for already_submitted) the resolved-card unmount handle
     // cleanup; on genuine success the dir is already deleted (submittedOk) so this never double-deletes.
     const reclaimIfAbandoned = () => {
       const g = cleanupGuardRef.current;
@@ -380,7 +387,7 @@ function CorrectiveActionItemCard({
         reclaimIfAbandoned();
         return;
       }
-      if (result.status === "already_resolved") {
+      if (result.status === "already_submitted") {
         // A concurrent responder resolved this item first — our uploads were discarded and did NOT attach.
         // Do NOT claim this as the user's submission: refresh so the parent swaps in the read-only resolved
         // card (whose unmount reclaims the synthetic draft dir), inform the user, and leave submittedOk unset.

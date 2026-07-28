@@ -461,7 +461,9 @@ export function ScorecardDetailView({
   const { deficiencyByKey, actionByLabel } = buildCorrectiveActionLookup(correctiveActions);
   // Per-label occurrence counter so duplicate action labels each consume a distinct seeded row (multiset).
   const actionLabelSeen = new Map<string, number>();
-  const resolvedCount = (correctiveActions ?? []).filter((i) => i.status === "resolved").length;
+  // APPROVED, not merely answered — and "resolved" is a value migration 0202 renamed away, so this counter
+  // read zero on every card until now.
+  const resolvedCount = (correctiveActions ?? []).filter((i) => i.status === "approved").length;
   const totalCount = correctiveActions?.length ?? 0;
   const allResolved =
     detail.status === "corrective_action_closed" || (totalCount > 0 && resolvedCount === totalCount);
@@ -500,7 +502,7 @@ export function ScorecardDetailView({
         <div className="flex items-center justify-between">
           <h4 className="text-xs font-semibold uppercase tracking-wide text-gray-500">Corrective Actions</h4>
           <span className={`text-xs font-medium ${allResolved ? "text-green-700" : "text-red-600"}`}>
-            {resolvedCount} / {totalCount} resolved
+            {resolvedCount} / {totalCount} approved
           </span>
         </div>
       )}

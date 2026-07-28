@@ -4,6 +4,7 @@ import { CheckCircle2, Loader2, Upload, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { isApiError } from "@/lib/api";
+import { isCorrectiveActionOutstanding } from "@trock-crm/shared/types";
 import {
   useCorrectiveActions,
   submitCorrectiveActionResponse,
@@ -67,7 +68,13 @@ export default function CorrectiveActionResponderPage() {
 
   const { items, loading, error, errorStatus, refetch } = useCorrectiveActions(id, token);
 
-  const openCount = useMemo(() => items.filter((i) => i.status !== "resolved").length, [items]);
+  // OUTSTANDING = open or rejected. Counting "anything not resolved" as open broke twice over after
+  // migration 0202: `resolved` no longer exists, so every settled item counted as open — and a rejected item
+  // genuinely IS still theirs to fix, which the old predicate could not express.
+  const openCount = useMemo(
+    () => items.filter((i) => isCorrectiveActionOutstanding(i.status)).length,
+    [items],
+  );
   const allResolved = items.length > 0 && openCount === 0;
 
   // A missing token is as unusable as an expired one — the server would 401 anyway; short-circuit with the
@@ -201,7 +208,9 @@ function ItemCard({
   const discardArgsRef = useRef({ scorecardId, token });
   discardArgsRef.current = { scorecardId, token };
 
-  const isResolved = item.status === "resolved";
+  // Settled = submitted (with the approver) or approved. Only an OUTSTANDING item keeps an active form;
+  // otherwise a responder could post repeatedly over work already sitting in the approver's queue.
+  const isResolved = !isCorrectiveActionOutstanding(item.status);
 
   const onPickFiles = useCallback(
     async (files: FileList | null) => {

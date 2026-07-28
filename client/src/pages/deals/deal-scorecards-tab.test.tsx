@@ -121,7 +121,7 @@ describe("ScorecardDetailView corrective-action threading", () => {
           itemType: "critical_deficiency",
           itemRef: "failed_inspection",
           itemLabel: "Failed inspection",
-          status: "resolved",
+          status: "approved",
           responseComment: "Re-inspected and passed",
           responderName: "Dana Director",
           respondedAt: "2026-07-02T12:00:00Z",
@@ -132,7 +132,7 @@ describe("ScorecardDetailView corrective-action threading", () => {
           itemType: "action_item",
           itemRef: "0",
           itemLabel: "Re-pour slab",
-          status: "resolved",
+          status: "approved",
           responseComment: "Slab re-poured and cured",
           responderName: "Sam Super",
           respondedAt: "2026-07-03T12:00:00Z",
@@ -147,8 +147,8 @@ describe("ScorecardDetailView corrective-action threading", () => {
     expect(html).toContain("Dana Director");
     expect(html).toContain("Slab re-poured and cured");
     expect(html).toContain("Sam Super");
-    // The header summary reflects 2 / 2 resolved (closed reads).
-    expect(html).toContain("2 / 2 resolved");
+    // The header summary counts APPROVED, not merely answered — the gate exists to distinguish them.
+    expect(html).toContain("2 / 2 approved");
 
     // No separate duplicated "Corrective Actions" item list: each flagged label appears exactly once.
     expect(html.split("Re-pour slab").length - 1).toBe(1);
@@ -165,7 +165,7 @@ describe("ScorecardDetailView corrective-action threading", () => {
           itemType: "action_item",
           itemRef: "0",
           itemLabel: "Re-pour slab",
-          status: "resolved",
+          status: "approved",
           responseComment: "done",
           responderName: "Sam Super",
           respondedAt: "2026-07-03T12:00:00Z",
@@ -195,7 +195,7 @@ describe("ScorecardDetailView corrective-action threading", () => {
     const html = await renderDetail(detail);
     expect(html).toContain("Failed inspection");
     expect(html).toContain("Awaiting corrective-action response");
-    expect(html).toContain("0 / 1 resolved");
+    expect(html).toContain("0 / 1 approved");
   });
 
   it("threads duplicate action labels under distinct occurrences", async () => {
@@ -208,7 +208,7 @@ describe("ScorecardDetailView corrective-action threading", () => {
           itemType: "action_item",
           itemRef: "0",
           itemLabel: "Fix rebar",
-          status: "resolved",
+          status: "approved",
           responseComment: "First fix done",
           responderName: "Sam Super",
           respondedAt: "2026-07-03T12:00:00Z",

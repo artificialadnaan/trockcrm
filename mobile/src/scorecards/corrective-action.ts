@@ -198,13 +198,13 @@ export type SubmitCorrectiveActionItemInput = {
 };
 
 export type SubmitCorrectiveActionItemResult =
-  | { status: "resolved"; items: CorrectiveActionItem[] }
+  | { status: "submitted"; items: CorrectiveActionItem[] }
   | { status: "photos_pending"; remaining: number }
   | { status: "photos_failed"; failed: number }
   // The item was resolved by ANOTHER responder after this caller uploaded its photos — the response POST
   // 409'd (CORRECTIVE_ACTION_ALREADY_RESOLVED) and the uploaded fileIds did NOT attach. Distinct from a
   // genuine success: the screen must refresh + inform the user, not claim this as their submission.
-  | { status: "already_resolved" };
+  | { status: "already_submitted" };
 
 /**
  * Best-effort reclaim of corrective-action uploads that were confirmed (persistent files rows on the deal)
@@ -228,7 +228,7 @@ async function discardUploadedFileIds(fetcher: Fetcher, scorecardId: string, fil
  * If the response POST FAILS for ANY reason after the uploads confirmed (a 409 already-resolved race, or a
  * network / 5xx / timeout), the fileIds did NOT attach, so we DISCARD them (best-effort) so a retry doesn't
  * re-upload the same evidence and orphan duplicates on the deal. A CORRECTIVE_ACTION_ALREADY_RESOLVED 409 then
- * returns already_resolved (NOT a success) — the screen refreshes to show the other responder's resolution and
+ * returns already_submitted (NOT a success) — the screen refreshes to show the other responder's resolution and
  * tells the user, without claiming this as their submission; every other error rethrows after the cleanup.
  *
  * Unlike the durable-queue field-capture path, this is eager (per-submit) and not offline-resilient: routing
@@ -271,7 +271,7 @@ export async function submitCorrectiveActionItem(
       comment: input.comment,
       photoFileIds,
     });
-    return { status: "resolved", items };
+    return { status: "submitted", items };
   } catch (error) {
     // The POST failed AFTER we confirmed the uploads — for ANY failure (409, network, 5xx, timeout) the
     // fileIds never attached, so reclaim them (best-effort) before we do anything else. Otherwise a retry
@@ -280,7 +280,7 @@ export async function submitCorrectiveActionItem(
     // A concurrent responder already resolved this item — surface a distinct status so the caller doesn't
     // treat this lost race as its own success. Every other error rethrows (already cleaned up above).
     if (error instanceof ApiError && error.status === 409 && error.code === "CORRECTIVE_ACTION_ALREADY_RESOLVED") {
-      return { status: "already_resolved" };
+      return { status: "already_submitted" };
     }
     throw error;
   }
