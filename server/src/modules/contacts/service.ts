@@ -677,11 +677,31 @@ export async function createContact(
 
   // Run dedup check unless explicitly skipped
   if (!skipDedupCheck) {
+    /**
+     * Resolve the company NAME from the id when the caller only sent one.
+     *
+     * Dedup matches and ranks on the company name, but the field capture creates a contact with
+     * `companyId` alone — it has picked a company record, not typed a string. So the strongest signal
+     * available was dropped on the one path most likely to be re-entering a person: same-company
+     * candidates were neither preferred by the predicate nor ordered ahead of the 50-row cap.
+     */
+    const companyNameForDedup =
+      input.companyName?.trim() ||
+      (input.companyId
+        ? (
+            await tenantDb
+              .select({ name: companies.name })
+              .from(companies)
+              .where(eq(companies.id, input.companyId))
+              .limit(1)
+          )[0]?.name
+        : undefined);
+
     const dedupResult = await checkForDuplicates(tenantDb, {
       firstName: input.firstName,
       lastName: input.lastName,
       email: input.email,
-      companyName: input.companyName,
+      companyName: companyNameForDedup ?? undefined,
     });
 
     if (dedupResult.hardBlock) {

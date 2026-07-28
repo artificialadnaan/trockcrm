@@ -3,6 +3,19 @@ import { getTableName } from "drizzle-orm";
 
 type InsertValues = Record<string, unknown>;
 
+/**
+ * A target lookup that answers LIVE.
+ *
+ * createActivity now verifies the property and company it is about still exist and are active, so
+ * every stub needs to answer that — and the default is the ordinary case. A test that wants the
+ * soft-deleted path opts in by returning [].
+ */
+function liveTargetSelect(rows: unknown[] = [{ id: "target-1" }]) {
+  return vi.fn(() => ({
+    from: () => ({ where: () => ({ limit: async () => rows }) }),
+  }));
+}
+
 function createInsertMock() {
   let insertedValues: InsertValues | null = null;
 
@@ -173,6 +186,7 @@ describe("activities service", () => {
       const tenantDb = {
         insert: insertMock.insert,
         update,
+        select: liveTargetSelect(),
       } as any;
 
       const activity = await createActivity(tenantDb, {
@@ -206,6 +220,7 @@ describe("activities service", () => {
     const tenantDb = {
       insert: insertMock.insert,
       update: vi.fn(),
+      select: liveTargetSelect(),
     } as any;
 
     await expect(
@@ -363,12 +378,12 @@ describe("createActivity — who maintains the last touch", () => {
       updates.push(getTableName(table as Parameters<typeof getTableName>[0]));
       return { set: updateSet };
     });
-    return { insertMock, update, updates, updateSet, updateWhere };
+    return { insertMock, update, updates, updateSet, updateWhere, select: liveTargetSelect() };
   }
 
   it("refreshes the DEAL, which no trigger covers", async () => {
     const { insertMock, update, updates, updateSet, updateWhere } = harness();
-    await createActivity({ insert: insertMock.insert, update } as any, {
+    await createActivity({ insert: insertMock.insert, update, select: liveTargetSelect() } as any, {
       type: "note",
       responsibleUserId: "rep-1",
       performedByUserId: "rep-1",
@@ -387,7 +402,7 @@ describe("createActivity — who maintains the last touch", () => {
 
   it("does NOT duplicate the trigger's property/company writes", async () => {
     const { insertMock, update, updates } = harness();
-    await createActivity({ insert: insertMock.insert, update } as any, {
+    await createActivity({ insert: insertMock.insert, update, select: liveTargetSelect() } as any, {
       type: "note",
       responsibleUserId: "rep-1",
       performedByUserId: "rep-1",
@@ -403,4 +418,77 @@ describe("createActivity — who maintains the last touch", () => {
     // busy office touches constantly.
     expect(updates).toEqual([]);
   });
+
+describe("createActivity — the target must still be live", () => {
+  /**
+   * Every read filters on is_active, so an activity written against a soft-deleted property or company
+   * is not merely misfiled — it is unreachable. The rep sees "Logged" and no surface will ever show it.
+   */
+  it("refuses a soft-deleted PROPERTY", async () => {
+    const insertMock = createInsertMock();
+    const tenantDb = {
+      insert: insertMock.insert,
+      update: vi.fn(),
+      select: liveTargetSelect([]),
+    } as any;
+
+    await expect(
+      createActivity(tenantDb, {
+        type: "note",
+        responsibleUserId: "rep-1",
+        performedByUserId: "rep-1",
+        body: "Visit",
+        propertyId: "property-gone",
+        sourceEntityType: "property",
+        sourceEntityId: "property-gone",
+      })
+    ).rejects.toMatchObject({ statusCode: 400 });
+    // And nothing was written.
+    expect(insertMock.values).not.toHaveBeenCalled();
+  });
+
+  it("refuses a soft-deleted COMPANY", async () => {
+    // Guarded alongside the property rather than after the next review round: the two are the same
+    // shape, and half-applying the predicate is what turns one defect into two.
+    const insertMock = createInsertMock();
+    const tenantDb = {
+      insert: insertMock.insert,
+      update: vi.fn(),
+      select: liveTargetSelect([]),
+    } as any;
+
+    await expect(
+      createActivity(tenantDb, {
+        type: "note",
+        responsibleUserId: "rep-1",
+        performedByUserId: "rep-1",
+        body: "Call",
+        companyId: "company-gone",
+        sourceEntityType: "company",
+        sourceEntityId: "company-gone",
+      })
+    ).rejects.toMatchObject({ statusCode: 400 });
+    expect(insertMock.values).not.toHaveBeenCalled();
+  });
+
+  it("writes normally against a live target", async () => {
+    const insertMock = createInsertMock();
+    const tenantDb = {
+      insert: insertMock.insert,
+      update: vi.fn(),
+      select: liveTargetSelect(),
+    } as any;
+
+    await createActivity(tenantDb, {
+      type: "note",
+      responsibleUserId: "rep-1",
+      performedByUserId: "rep-1",
+      body: "Visit",
+      propertyId: "property-1",
+      sourceEntityType: "property",
+      sourceEntityId: "property-1",
+    });
+    expect(insertMock.values).toHaveBeenCalledTimes(1);
+  });
+});
 });

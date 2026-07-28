@@ -209,6 +209,36 @@ export async function createActivity(
 
   const linkedEntities = normalizeLinkedEntities(input);
 
+  /**
+   * The TARGET must still exist and be live.
+   *
+   * Nothing here checked, so an activity could be written against a soft-deleted property or company —
+   * where no surface lists it, because every read filters on is_active. The visit is then not merely
+   * misfiled, it is invisible: the rep sees "Logged" and the record is unreachable.
+   *
+   * Both are guarded, not just the property the review named. Guarding one and leaving its twin is the
+   * half-applied predicate that becomes the next defect, and the two are the same shape.
+   *
+   * Same rejection style as the lead paths (leads/service.ts:857): the lookup itself carries
+   * `is_active = true`, so gone and retired answer alike.
+   */
+  if (linkedEntities.propertyId) {
+    const [row] = await tenantDb
+      .select({ id: properties.id })
+      .from(properties)
+      .where(and(eq(properties.id, linkedEntities.propertyId), eq(properties.isActive, true)))
+      .limit(1);
+    if (!row) throw new AppError(400, "Property not found");
+  }
+  if (linkedEntities.companyId) {
+    const [row] = await tenantDb
+      .select({ id: companies.id })
+      .from(companies)
+      .where(and(eq(companies.id, linkedEntities.companyId), eq(companies.isActive, true)))
+      .limit(1);
+    if (!row) throw new AppError(400, "Company not found");
+  }
+
   const result = await tenantDb
     .insert(activities)
     .values({

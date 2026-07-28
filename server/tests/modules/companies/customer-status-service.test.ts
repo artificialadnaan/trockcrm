@@ -223,8 +223,10 @@ describe("markCompanyRejected", () => {
             return {
               where() {
                 return {
+                  // createActivity now verifies the company it is about is still live, so this answers
+                  // as one. Rejecting a company sets a verification STATUS; it stays active.
                   limit() {
-                    return Promise.resolve([]);
+                    return Promise.resolve([{ id: "company-1" }]);
                   },
                   then(onfulfilled: (rows: unknown[]) => unknown) {
                     return Promise.resolve([]).then(onfulfilled);

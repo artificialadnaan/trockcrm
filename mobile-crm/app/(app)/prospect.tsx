@@ -401,6 +401,19 @@ export default function ProspectScreen() {
   );
 
   /** Whatever address we actually have: the geocode first, the rep's typing second. */
+  /**
+   * Declared BEFORE effectiveAddress, which reads `coarse` during render.
+   *
+   * It used to sit just above the return, so the memo hit a temporal dead zone the moment a manual
+   * address became complete — a ReferenceError that crashed the screen instead of showing the Add
+   * Building action. `coarse` is already false unless the fix is ready, so re-checking the status
+   * inside the message below could never take its fallback branch.
+   */
+  const coarseAccuracy = location.state.status === "ready" ? location.state.accuracyMeters ?? 0 : 0;
+  const coarse =
+    location.state.status === "ready" &&
+    isPositionTooCoarse(location.state.accuracyMeters, COARSE_ACCURACY_METERS);
+
   const effectiveAddress = useMemo(() => {
     // While correcting, the rep's typing WINS — otherwise the override control would open fields whose
     // contents are then ignored in favour of the address they are correcting.
@@ -938,13 +951,6 @@ export default function ProspectScreen() {
     });
     return () => sub.remove();
   }, [locationStatus, locate]);
-
-  // Resolved once. `coarse` is already false unless the fix is ready, so re-checking the status inside
-  // the message could never take its fallback branch — dead code that read as a guard.
-  const coarseAccuracy = location.state.status === "ready" ? location.state.accuracyMeters ?? 0 : 0;
-  const coarse =
-    location.state.status === "ready" &&
-    isPositionTooCoarse(location.state.accuracyMeters, COARSE_ACCURACY_METERS);
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
