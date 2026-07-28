@@ -329,7 +329,10 @@ export async function handleScorecardCorrectiveActionOversightEmail(
     scoreText: formatScore(scorecard),
     items,
     responders,
-    link: `${resolveFrontendUrl(env)}/deals/${scorecard.deal_id ?? ""}?tab=scorecards`,
+    // Carry the OWNING office: the client derives its x-office-id routing header from this query param, so
+    // without it a watcher whose active office differs from the scorecard's follows the CTA into the wrong
+    // tenant and gets a 404. Matches how the other cross-office worker emails build their links.
+    link: buildScorecardLink(env, scorecard.deal_id, payload.officeId),
   });
 
   // The raw payload nonce (null when absent) drives the stamp guard; the "none" fallback is only ever the
@@ -346,14 +349,14 @@ export async function handleScorecardCorrectiveActionOversightEmail(
   // (the retry sees a stamped row and skips). For a notification, a rare duplicate is a better failure than
   // a silent miss, and the Resend idempotency key already dedups the crash-after-send retry.
   const revalidated = await query(
-    `SELECT corrective_action_oversight_cycle, ${column} AS phase_stamp
+    `SELECT corrective_action_oversight_cycle, status, ${column} AS phase_stamp
        FROM ${tenantSchema}.field_scorecards
       WHERE id = $1::uuid
       LIMIT 1`,
     [scorecardId],
   );
   const current = revalidated.rows[0] as
-    | { corrective_action_oversight_cycle: string | null; phase_stamp: Date | null }
+    | { corrective_action_oversight_cycle: string | null; status: string | null; phase_stamp: Date | null }
     | undefined;
   if (!current) {
     logger.warn("[CorrectiveActionOversightEmail] Scorecard vanished before delivery - skipping", { scorecardId });
@@ -371,6 +374,16 @@ export async function handleScorecardCorrectiveActionOversightEmail(
     logger.log(
       "[CorrectiveActionOversightEmail] Superseded while preparing the notice - skipping (no send, no stamp)",
       { scorecardId, phase, payloadOversightCycle, currentOversightCycle },
+    );
+    return;
+  }
+  // The marker alone does not cover ORDINARY transitions: the last item being answered moves the card
+  // open -> submitted, and an edit can move it back, neither of which rotates the marker. Re-check the phase
+  // status too, or an obsolete "Corrective Action Opened" can still go out for a card that just closed.
+  if (current.status !== expectedStatus) {
+    logger.log(
+      "[CorrectiveActionOversightEmail] Card changed phase while preparing the notice - skipping (no send, no stamp)",
+      { scorecardId, phase, expectedStatus, actualStatus: current.status },
     );
     return;
   }
@@ -408,15 +421,23 @@ export async function handleScorecardCorrectiveActionOversightEmail(
   // A job that carries NO payload nonce came from a card whose stored nonce was null (pre-0197). It must
   // still assert the cycle has not moved: without a clause, a reopen that mints a nonce and clears the
   // stamps would be stamped by this stale job on id alone, and the new cycle's job would then skip.
-  const nonceClause = cycleNonceValue
-    ? " AND (corrective_action_cycle_nonce IS NULL OR corrective_action_cycle_nonce = $2::uuid)"
-    : " AND corrective_action_cycle_nonce IS NULL";
+  // Scope the stamp to the OVERSIGHT marker — the same signal the send decision used.
+  //
+  // It previously used the shared cycle nonce, which contradicted the send: when the responder worker's
+  // self-repair rotates that nonce, this handler intentionally still sends (the oversight marker is
+  // unchanged), but the stamp then matched no row. The job completed with the phase stamp permanently null
+  // and nothing re-enqueued, so the durable dedup guard was defeated and a later requeue — once provider
+  // idempotency expired — would resend the notice. The oversight marker distinguishes a real reopen while
+  // staying stable across self-repair, so it is the correct scope for both decisions.
+  const markerClause = payloadOversightCycle
+    ? " AND (corrective_action_oversight_cycle IS NULL OR corrective_action_oversight_cycle = $2::uuid)"
+    : " AND corrective_action_oversight_cycle IS NULL";
   const stamped = await query(
     `UPDATE ${tenantSchema}.field_scorecards
         SET ${column} = NOW()
       WHERE id = $1::uuid
-        AND ${column} IS NULL${nonceClause}`,
-    cycleNonceValue ? [scorecardId, cycleNonceValue] : [scorecardId],
+        AND ${column} IS NULL${markerClause}`,
+    payloadOversightCycle ? [scorecardId, payloadOversightCycle] : [scorecardId],
   );
   if (!stamped.rowCount) {
     // Superseded mid-send. The email went out describing the older cycle, which is accurate for what it
@@ -519,6 +540,17 @@ function toEpochMillis(value: Date | string | null): number | null {
   if (value == null) return null;
   const ms = value instanceof Date ? value.getTime() : new Date(value).getTime();
   return Number.isNaN(ms) ? null : ms;
+}
+
+/** Deep link to the deal's Scorecards tab, office-qualified so cross-office watchers land in the right tenant. */
+function buildScorecardLink(
+  env: NodeJS.ProcessEnv,
+  dealId: string | null,
+  officeId: string | null | undefined,
+): string {
+  const base = `${resolveFrontendUrl(env)}/deals/${dealId ?? ""}?tab=scorecards`;
+  const office = normalizeText(officeId);
+  return office ? `${base}&officeId=${encodeURIComponent(office)}` : base;
 }
 
 function dedupe(emails: string[]): string[] {

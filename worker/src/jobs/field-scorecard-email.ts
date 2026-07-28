@@ -138,7 +138,8 @@ export async function handleFieldScorecardEmail(
   // Idempotency: skip if this scorecard's email was already sent. tenantSchema is regex-validated above, so
   // interpolating it as the schema qualifier is safe (identifiers can't be $-parametrized).
   const existing = await query(
-    `SELECT email_sent_at, pdf_r2_key, pdf_render_version FROM ${tenantSchema}.field_scorecards WHERE id = $1::uuid LIMIT 1`,
+    `SELECT email_sent_at, pdf_r2_key, pdf_render_version, pdf_content_generation, updated_at
+       FROM ${tenantSchema}.field_scorecards WHERE id = $1::uuid LIMIT 1`,
     [scorecardId]
   );
   if (existing.rows.length === 0) {
@@ -166,10 +167,26 @@ export async function handleFieldScorecardEmail(
   // artifact. The key must also match the stamped renderer revision: this rejects both known photo-less
   // v1 artifacts and a legacy writer that finished late and overwrote only pdf_r2_key after v2 was stamped.
   // Never fetch a stale payload-only/key-mismatched artifact that may omit or expose outdated evidence.
+  // The stored artifact must also be rendered from the CURRENT content, not merely be the right revision.
+  // A corrective-action response advances updated_at but deliberately leaves pdf_r2_key in place while the
+  // post-commit refresh runs best-effort; if this delayed job runs in between, a version-only check would
+  // attach the PRE-response PDF. pdf_content_generation (migration 0200) is what proves that stale.
+  // Only BLOCKS when we can actually prove staleness. A null rendered generation means the artifact
+  // predates migration 0200 and there is nothing to compare — treating that as stale would silently drop the
+  // attachment for every legacy card, a regression far broader than the edge this guards. The case Codex
+  // raised always has a non-null generation, because the v3 render is what writes it.
+  const renderedGeneration = existing.rows[0].pdf_content_generation;
+  const currentGeneration = existing.rows[0].updated_at;
+  const storedArtifactIsProvablyStale =
+    renderedGeneration != null &&
+    currentGeneration != null &&
+    new Date(renderedGeneration).getTime() !== new Date(currentGeneration).getTime();
+
   const storedArtifactIsCurrent =
     storedPdfR2Key != null &&
     storedPdfRenderVersion != null &&
-    isCurrentScorecardPdfArtifactKey(storedPdfR2Key, storedPdfRenderVersion);
+    isCurrentScorecardPdfArtifactKey(storedPdfR2Key, storedPdfRenderVersion) &&
+    !storedArtifactIsProvablyStale;
   const pdfR2Key = storedArtifactIsCurrent ? storedPdfR2Key : null;
   let attachments: SendSystemEmailAttachment[] | undefined;
   // Track PDF availability SEPARATELY from whether we attached it: an oversized PDF exists (it's

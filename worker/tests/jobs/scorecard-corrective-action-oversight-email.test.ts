@@ -73,6 +73,7 @@ interface ScorecardOverrides {
   /** Values the FINAL pre-delivery revalidation sees, modelling a change mid-preparation. */
   revalidateOversightCycle?: string | null;
   revalidatePhaseStamp?: Date | null;
+  revalidateStatus?: string;
   /** [] => the browsable/active gate filtered the row out entirely. */
   scorecardRows?: unknown[];
 }
@@ -96,6 +97,7 @@ function makeQuery(
               over.revalidateOversightCycle === undefined
                 ? (over.storedOversightCycle === undefined ? OVERSIGHT_CYCLE : over.storedOversightCycle)
                 : over.revalidateOversightCycle,
+            status: over.revalidateStatus ?? over.status ?? "corrective_action_open",
             phase_stamp: over.revalidatePhaseStamp ?? null,
           },
         ],
@@ -555,9 +557,11 @@ describe("handleScorecardCorrectiveActionOversightEmail", () => {
     });
 
     expect(stampUpdates).toHaveLength(1);
-    expect(stampUpdates[0].sql).toContain("corrective_action_cycle_nonce = $2::uuid");
-    expect(stampUpdates[0].sql).toContain("corrective_action_cycle_nonce IS NULL");
-    expect(stampUpdates[0].params).toEqual([SCORECARD, CYCLE]);
+    // Scoped to the OVERSIGHT marker — the same signal the send decision used. Scoping it to the shared
+    // nonce instead meant a self-repair rotation let the send happen but the stamp match nothing.
+    expect(stampUpdates[0].sql).toContain("corrective_action_oversight_cycle = $2::uuid");
+    expect(stampUpdates[0].sql).toContain("corrective_action_oversight_cycle IS NULL");
+    expect(stampUpdates[0].params).toEqual([SCORECARD, OVERSIGHT_CYCLE]);
   });
 
   it("logs rather than throwing when the stamp is superseded mid-send", async () => {
@@ -650,20 +654,20 @@ describe("handleScorecardCorrectiveActionOversightEmail", () => {
     expect(stampUpdates).toHaveLength(0);
   });
 
-  it("a nonce-less job asserts the cycle is STILL nonce-less before stamping", async () => {
-    // Otherwise a reopen that mints a nonce and clears the stamps would be stamped by this stale job on id
+  it("a marker-less job asserts the cycle is STILL marker-less before stamping", async () => {
+    // Otherwise a reopen that mints a marker and clears the stamps would be stamped by this stale job on id
     // alone, and the new cycle's job would then skip its notice.
-    const { query, stampUpdates } = makeQuery({ storedNonce: null });
+    const { query, stampUpdates } = makeQuery({ storedOversightCycle: null });
     const sendEmail = makeSend();
 
-    await handleScorecardCorrectiveActionOversightEmail(payload({ cycleNonce: undefined }), null, {
+    await handleScorecardCorrectiveActionOversightEmail(payload({ oversightCycle: undefined }), null, {
       query: query as never,
       sendEmail: sendEmail as never,
       env,
       logger: makeLogger(),
     });
 
-    expect(stampUpdates[0].sql).toContain("corrective_action_cycle_nonce IS NULL");
+    expect(stampUpdates[0].sql).toContain("corrective_action_oversight_cycle IS NULL");
     expect(stampUpdates[0].params).toEqual([SCORECARD]);
   });
 
@@ -818,5 +822,58 @@ describe("handleScorecardCorrectiveActionOversightEmail", () => {
       expect(body).toMatch(/could be reached by email/i);
       expect(body).toMatch(/nobody has been asked/i);
     }
+  });
+
+  it("skips when the card changed PHASE while the notice was being prepared", async () => {
+    // The marker does not rotate on ordinary transitions — the last item being answered moves the card
+    // open -> submitted. Without a status re-check an obsolete "Corrective Action Opened" still goes out.
+    const { query, stampUpdates } = makeQuery({ revalidateStatus: "corrective_action_closed" });
+    const sendEmail = makeSend();
+
+    await handleScorecardCorrectiveActionOversightEmail(payload(), null, {
+      query: query as never,
+      sendEmail: sendEmail as never,
+      env,
+      logger: makeLogger(),
+    });
+
+    expect(sendEmail).not.toHaveBeenCalled();
+    expect(stampUpdates).toHaveLength(0);
+  });
+
+  it("stamps against the OVERSIGHT marker, not the shared nonce", async () => {
+    // Sending on one signal and stamping on another was self-contradictory: when self-repair rotated the
+    // shared nonce the handler still sent (marker unchanged) but the stamp matched no row, leaving the
+    // durable dedup guard permanently unset.
+    const { query, stampUpdates } = makeQuery({ storedNonce: "11111111-1111-1111-1111-111111111111" });
+    const sendEmail = makeSend();
+
+    await handleScorecardCorrectiveActionOversightEmail(payload(), null, {
+      query: query as never,
+      sendEmail: sendEmail as never,
+      env,
+      logger: makeLogger(),
+    });
+
+    expect(sendEmail).toHaveBeenCalledOnce();
+    expect(stampUpdates).toHaveLength(1);
+    expect(stampUpdates[0].sql).toContain("corrective_action_oversight_cycle = $2::uuid");
+    expect(stampUpdates[0].sql).not.toContain("corrective_action_cycle_nonce");
+    expect(stampUpdates[0].params).toEqual([SCORECARD, OVERSIGHT_CYCLE]);
+  });
+
+  it("office-qualifies the CRM link so a cross-office watcher lands in the right tenant", async () => {
+    const { query } = makeQuery();
+    const sendEmail = makeSend();
+
+    await handleScorecardCorrectiveActionOversightEmail(payload(), null, {
+      query: query as never,
+      sendEmail: sendEmail as never,
+      env,
+      logger: makeLogger(),
+    });
+
+    const [, , html] = sendEmail.mock.calls[0] as unknown as [string[], string, string];
+    expect(html).toContain("tab=scorecards&amp;officeId=00000000-0000-0000-0000-0000000000f1");
   });
 });
