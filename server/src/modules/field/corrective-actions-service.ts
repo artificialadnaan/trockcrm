@@ -227,6 +227,7 @@ export async function enqueueCorrectiveActionApprovalRequested(
     .select({
       dealId: fieldScorecards.dealId,
       oversightCycle: fieldScorecards.correctiveActionOversightCycle,
+      cycleNonce: fieldScorecards.correctiveActionCycleNonce,
     })
     .from(fieldScorecards)
     .where(eq(fieldScorecards.id, input.scorecardId))
@@ -242,6 +243,10 @@ export async function enqueueCorrectiveActionApprovalRequested(
       officeId: input.office.id,
       phase: "awaiting_approval",
       oversightCycle: card.oversightCycle ?? undefined,
+      // The CURRENT cycle nonce, so each review round gets a distinct provider idempotency key. Without it
+      // every round keys on "...-cycle-none" and Resend dedups the second request against the first — the
+      // approver is never told the rework is ready.
+      cycleNonce: card.cycleNonce ?? undefined,
     },
     officeId: input.office.id,
     status: "pending",
@@ -939,6 +944,10 @@ export async function restartCorrectiveActionCyclesForCards(
       .update(fieldScorecards)
       .set({
         correctiveActionEmailSentAt: null,
+        // Clear the approval-request stamp too. A resubmission after a rejection is a NEW review round: the
+        // approver has to be asked again. Leaving the stamp set makes the worker treat the second request as
+        // already delivered, so the rework sits in their queue with nobody told it is ready.
+        correctiveActionApprovalRequestedAt: null,
         correctiveActionCycleNonce: cycleNonceByScorecardId.get(scorecardId)!,
         // MONOTONIC, not a JS timestamp captured before the loop. updated_at is now the PDF's content
         // generation, and the currency check is an equality against it — so it must only ever increase. A
