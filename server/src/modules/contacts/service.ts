@@ -335,7 +335,13 @@ export async function checkForDuplicates(
   if (input.companyName && input.companyName.trim().length > 0) {
     fuzzyConditions.push(
       and(
-        sql`LOWER(${contacts.companyName}) = LOWER(${input.companyName.trim()})`,
+        /* EITHER company name. A contact linked by companyId usually has nothing in the free-text
+           column, so matching on that alone left real duplicates outside the candidate set — and with
+           LIMIT 50 they could be crowded out before the Levenshtein pass ever saw them. */
+        or(
+          sql`LOWER(${contacts.companyName}) = LOWER(${input.companyName.trim()})`,
+          sql`LOWER(${companies.name}) = LOWER(${input.companyName.trim()})`,
+        ),
         sql`LOWER(${contacts.lastName}) = LOWER(${input.lastName.trim()})`
       )
     );
@@ -379,7 +385,8 @@ export async function checkForDuplicates(
     matchReason:
       normalizeName(match.firstName, match.lastName) === normalizedInput
         ? "Exact name match"
-        : match.companyName?.toLowerCase() === input.companyName?.toLowerCase()
+        : (match.linkedCompanyName ?? match.companyName)?.toLowerCase() ===
+            input.companyName?.toLowerCase()
           ? "Same last name + company"
           : "Same name",
   }));

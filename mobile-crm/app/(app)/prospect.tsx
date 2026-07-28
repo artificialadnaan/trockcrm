@@ -481,6 +481,15 @@ export default function ProspectScreen() {
              * meets a property manager the CRM already knows loses them silently, which is precisely the
              * case the prompt exists to catch. Hand the choice back instead.
              */
+          /**
+           * A null contact with NO suggestions is a refusal we cannot explain — and it must not pass
+           * silently. readCreateResult maps `{ contact: null }` to `duplicates: []`, which halts
+           * nothing, so the save continued with no contactId, no warning, and a screen saying "Logged":
+           * the person the rep typed vanished with nothing to indicate it. Reported as a failed person,
+           * which is exactly what it is.
+           */
+          if (!contactId && !duplicates?.length) contactFailed = true;
+
             if (haltsForDuplicates({ createdId: contactId, duplicates })) {
               return {
                 activity: null,
@@ -613,12 +622,21 @@ export default function ProspectScreen() {
     if (contactSearchTimer.current) clearTimeout(contactSearchTimer.current);
   }, []);
 
+  /**
+   * Re-check permission when the app comes back to the foreground.
+   *
+   * Keyed on the STATUS and the stable `locate`, not the hook object: useCurrentLocation returns a new
+   * object every render, so `[location]` never compared equal and this listener was torn down and
+   * re-added on every keystroke in the note field.
+   */
+  const locationStatus = location.state.status;
+  const locate = location.locate;
   useEffect(() => {
     const sub = AppState.addEventListener("change", (next) => {
-      if (next === "active" && location.state.status === "denied") void location.locate();
+      if (next === "active" && locationStatus === "denied") void locate();
     });
     return () => sub.remove();
-  }, [location]);
+  }, [locationStatus, locate]);
 
   // Resolved once. `coarse` is already false unless the fix is ready, so re-checking the status inside
   // the message could never take its fallback branch — dead code that read as a guard.

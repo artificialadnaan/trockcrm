@@ -245,3 +245,61 @@ describe("match query forwards every disproving signal", () => {
   });
 });
 
+
+describe("contactCompanyLabel — which employer is shown", () => {
+  it("prefers the JOINED company over the free-text column", () => {
+    // Both were present and disagreeing is the case that matters: the free-text field goes stale when a
+    // contact is re-linked, and showing it labels the person with a former employer.
+    expect(
+      prospecting.contactCompanyLabel({
+        id: "c1",
+        firstName: "Dana",
+        lastName: "Reyes",
+        companyName: "Old Text Co",
+        linkedCompanyName: "Palm Villas HOA",
+      }),
+    ).toBe("Palm Villas HOA");
+  });
+
+  it("falls back to the free-text column when there is no link", () => {
+    expect(
+      prospecting.contactCompanyLabel({
+        id: "c1",
+        firstName: "Dana",
+        lastName: "Reyes",
+        companyName: "Unlinked Co",
+      }),
+    ).toBe("Unlinked Co");
+  });
+
+  it("returns null when neither is known, so the caller can say so", () => {
+    expect(
+      prospecting.contactCompanyLabel({ id: "c1", firstName: "Dana", lastName: "Reyes" }),
+    ).toBeNull();
+  });
+});
+
+describe("createProperty", () => {
+  it("forwards lat/lng — the whole point of creating it from a capture", () => {
+    // properties.lat/lng existed for years with nothing writing them, so distance matching could never
+    // find an API-created property. A capture that dropped them would recreate that defect exactly.
+    const { fetcher, calls } = recording({ property: { id: "p1", name: "1420 Bishop St", companyId: "co1" } });
+    return prospecting
+      .createProperty(fetcher, {
+        companyId: "co1",
+        name: "1420 Bishop St",
+        address: "1420 Bishop St",
+        city: "Dallas",
+        state: "TX",
+        zip: "75201",
+        lat: 32.7767,
+        lng: -96.797,
+      })
+      .then(() => {
+        const body = calls[0].opts.body as Record<string, unknown>;
+        expect(body.lat).toBe(32.7767);
+        expect(body.lng).toBe(-96.797);
+        expect(calls[0].path).toBe("/properties");
+      });
+  });
+});

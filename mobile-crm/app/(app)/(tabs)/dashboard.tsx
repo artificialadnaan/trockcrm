@@ -240,9 +240,13 @@ const styles = StyleSheet.create({
   statValue: { fontFamily: theme.font.bold, fontSize: 34, color: theme.color.inkNavy },
   statHintStale: { color: theme.color.amberText },
   statHint: { fontFamily: theme.font.regular, fontSize: 13, color: theme.color.textSecondary },
-  grid: { flexDirection: "row", gap: theme.space.md },
+  /* WRAPS. A role with all four surfaces put four flex:1 cards in one row, so at 320-360 dp "Log a
+     visit" and "Contacts" squeezed to unreadable. minWidth forces the fourth onto a second line
+     instead. */
+  grid: { flexDirection: "row", flexWrap: "wrap", gap: theme.space.md },
   navCard: {
     flex: 1,
+    minWidth: 140,
     backgroundColor: theme.color.surface,
     borderRadius: theme.radius.lg,
     borderWidth: 1,

@@ -1,6 +1,15 @@
 import type { ExpoConfig, ConfigContext } from "expo/config";
 
 /**
+ * The location prompt, in one place.
+ *
+ * iOS shows this verbatim, and it has to be set twice — see the plugin block below. Two literals with a
+ * comment saying they must match is exactly the arrangement that drifts.
+ */
+const LOCATION_PERMISSION_COPY =
+  "T-Rock CRM uses your location only while you are logging a site visit, to find the property you are standing at instead of making you type its address.";
+
+/**
  * T-Rock CRM — iOS-only Expo config (dynamic).
  *
  * A SEPARATE app from T-Rock Cam (mobile/): different bundle identifier, different EAS project,
@@ -71,8 +80,7 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
     supportsTablet: false,
     infoPlist: {
       ITSAppUsesNonExemptEncryption: false,
-      NSLocationWhenInUseUsageDescription:
-        "T-Rock CRM uses your location only while you are logging a site visit, to find the property you are standing at instead of making you type its address.",
+      NSLocationWhenInUseUsageDescription: LOCATION_PERMISSION_COPY,
     },
   },
   plugins: [
@@ -82,11 +90,10 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
     [
       "expo-location",
       {
-        // Repeated here because the config plugin writes the Info.plist entry on prebuild; the
-        // infoPlist block above is what applies when the value is set directly. Keeping them identical
-        // means the string a reviewer sees does not depend on which path produced the build.
-        locationWhenInUsePermission:
-          "T-Rock CRM uses your location only while you are logging a site visit, to find the property you are standing at instead of making you type its address.",
+        // Set in BOTH places because the config plugin writes the Info.plist entry on prebuild while
+        // the infoPlist block applies when the value is set directly — so which one wins depends on how
+        // the build was produced. One constant, because two literals that "must stay identical" drift.
+        locationWhenInUsePermission: LOCATION_PERMISSION_COPY,
       },
     ],
   ],
