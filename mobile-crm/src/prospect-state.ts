@@ -103,8 +103,18 @@ export function isPositionTooCoarse(accuracyMeters: number | null, thresholdMete
  * A distance reading is corroboration on its own; so is any locality field, because
  * `localityContradicts` has already ruled out a disagreeing one.
  */
+/**
+ * The server's match radius, mirrored.
+ *
+ * `distanceMeters` is populated for every row the BOUNDING BOX returns, and a box corner sits about
+ * 283 m out — but only rows within this radius earn the "distance" match reason. Treating any non-null
+ * distance as corroboration therefore let a property most of a city block away veto adding the building
+ * the rep is standing on.
+ */
+export const MATCH_RADIUS_METERS = 200;
+
 export function isCorroborated(match: PropertyMatch): boolean {
-  if (match.distanceMeters != null) return true;
+  if (match.distanceMeters != null && match.distanceMeters <= MATCH_RADIUS_METERS) return true;
   // ZIP alone discriminates; so does a city WITH its state. A state on its own does not — "TX" against
   // a Dallas query agrees with every "100 Main St" in Texas, and since this verdict can VETO creating a
   // building, one such row would block the rep from adding the real one however often they rejected it.

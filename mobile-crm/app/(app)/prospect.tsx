@@ -976,6 +976,9 @@ export default function ProspectScreen() {
                   setManualCity("");
                   setManualState("");
                   setManualZip("");
+                  /* The OVERRIDE goes too. Left on, effectiveAddress keeps ignoring the geocode, so the
+                     next building had to be typed by hand even though it resolved perfectly. */
+                  setCorrectingAddress(false);
                   setCompanyResults(null);
                   setCompanyQuery("");
                   companyQueryRef.current = "";

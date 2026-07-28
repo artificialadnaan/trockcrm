@@ -364,3 +364,15 @@ describe("isCorroborated — ONE rule for the label and the veto", () => {
     expect(isCorroborated(match({ distanceMeters: null, city: null, state: null, zip: null }))).toBe(false);
   });
 });
+
+describe("isCorroborated — a bounding-box corner is not proximity", () => {
+  it("does not treat an out-of-radius distance as corroboration", () => {
+    // The box returns rows up to ~283 m at its corners, but only <=200 m earns the "distance" reason.
+    // Counting the rest let a property a block away veto adding the building underfoot.
+    expect(isCorroborated(match({ distanceMeters: 260, city: null, state: null, zip: null }))).toBe(false);
+  });
+
+  it("still counts a distance inside the radius", () => {
+    expect(isCorroborated(match({ distanceMeters: 200, city: null, state: null, zip: null }))).toBe(true);
+  });
+});
