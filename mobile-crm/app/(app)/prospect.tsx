@@ -403,6 +403,19 @@ export default function ProspectScreen() {
                 >
                   <Text style={styles.primaryText}>Find this property</Text>
                 </Pressable>
+                {/* GPS IS NOT ALWAYS THE POINT.
+                    Half the types here — call, voicemail, meeting — happen nowhere near the building,
+                    and routing them through a location lookup makes a rep in a truck wait on a fix
+                    they do not need and cannot use. The company path is offered from the start rather
+                    than only after a failed or rejected match. */}
+                <Pressable
+                  testID="prospect-skip-location"
+                  onPress={() => setRejectedMatches(true)}
+                  accessibilityRole="button"
+                  style={styles.linkBtn}
+                >
+                  <Text style={styles.linkText}>Not at a property — attach to a company</Text>
+                </Pressable>
               </>
             ) : location.state.status === "locating" || runMatch.isPending ? (
               <View style={styles.centerRow}>
