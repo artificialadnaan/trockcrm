@@ -141,8 +141,16 @@ export default function PipelineBoardScreen() {
               accessibilityState={{ selected: active }}
               style={[styles.segment, active && styles.segmentActive]}
             >
-              <Text style={[styles.segmentText, active && styles.segmentTextActive]}>
-                {s.label.toUpperCase()}
+              {/* The label is stated explicitly because textTransform is NOT enough on its own:
+                  RCTAttributedTextUtils applies the transform before building the attributed string,
+                  and RCTParagraphComponentView.accessibilityLabel falls back to that transformed
+                  string — so VoiceOver would still say "M-I-N-E". An explicit label wins over the
+                  fallback, which is the only way to draw caps and speak words. */}
+              <Text
+                accessibilityLabel={s.label}
+                style={[styles.segmentText, active && styles.segmentTextActive]}
+              >
+                {s.label}
               </Text>
             </Pressable>
           );
@@ -199,10 +207,11 @@ export default function PipelineBoardScreen() {
                 >
                   <View style={styles.stageTabRow}>
                     <Text
+                      accessibilityLabel={col.stage.name}
                       style={[styles.stageName, isActive && styles.stageNameActive]}
                       numberOfLines={1}
                     >
-                      {col.stage.name.toUpperCase()}
+                      {col.stage.name}
                     </Text>
                     <View style={[styles.stageCountWrap, isActive && styles.stageCountWrapActive]}>
                       <Text style={[styles.stageCount, isActive && styles.stageCountActive]}>
@@ -239,7 +248,12 @@ export default function PipelineBoardScreen() {
               }
               ListHeaderComponent={
                 <View style={styles.columnSummary}>
-                  <Text style={styles.columnLabel}>{selected.stage.name.toUpperCase()} · TOTAL</Text>
+                  <Text
+                    accessibilityLabel={`${selected.stage.name} · Total`}
+                    style={styles.columnLabel}
+                  >
+                    {selected.stage.name} · Total
+                  </Text>
                   <Text style={styles.columnValue}>{formatColumnValue(selected.totalValue)}</Text>
                   {/* TWO server facts, not a third derived from them. `activeCount` counts only the
                       STORED on_hold flag (deals/service.ts:2000-2002), while a card is badged "On hold"
@@ -358,7 +372,7 @@ const styles = StyleSheet.create({
     borderRadius: theme.radius.sm,
   },
   segmentActive: { backgroundColor: theme.color.surfaceRaised, ...theme.elevation.card },
-  segmentText: { ...theme.type.caption, color: theme.color.textMuted },
+  segmentText: { ...theme.type.caption, textTransform: "uppercase", color: theme.color.textMuted },
   segmentTextActive: { color: theme.color.textPrimary },
 
   /* Stage selector — underlined tabs. */
@@ -367,7 +381,7 @@ const styles = StyleSheet.create({
   // the target tall enough without pushing the rule away from the label.
   stageTab: { minHeight: 44, justifyContent: "flex-end", paddingTop: theme.space.md },
   stageTabRow: { flexDirection: "row", alignItems: "center", gap: theme.space.sm },
-  stageName: { ...theme.type.caption, color: theme.color.textMuted },
+  stageName: { ...theme.type.caption, textTransform: "uppercase", color: theme.color.textMuted },
   stageNameActive: { color: theme.color.textPrimary },
   stageCountWrap: {
     minWidth: 22,
@@ -389,7 +403,7 @@ const styles = StyleSheet.create({
 
   /* Column header — the one place a big number belongs. */
   columnSummary: { paddingBottom: theme.space.lg, gap: 2 },
-  columnLabel: { ...theme.type.caption, color: theme.color.textMuted },
+  columnLabel: { ...theme.type.caption, textTransform: "uppercase", color: theme.color.textMuted },
   columnValue: {
     ...theme.type.display,
     color: theme.color.textPrimary,
