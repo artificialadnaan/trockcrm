@@ -318,3 +318,121 @@ describe("single-letter street name without a house number", () => {
     expect(compareAddressKeys("E St", "E Street")).toBe("exact");
   });
 });
+
+/**
+ * The GLUE, end to end.
+ *
+ * Everything above tests the pure helpers in isolation. The row-processing path is where they get
+ * wired together — locality nulling addressMatch, a real contradiction disabling byDistance, the
+ * reason string, and the corroborated-first sort — and none of that was covered: a rank() regression
+ * or a mis-derived reason would have shipped with a fully green suite.
+ */
+function dbReturning(rows: Record<string, unknown>[]) {
+  return {
+    execute: async () => ({ rows }),
+  } as unknown as Parameters<typeof matchProperties>[0];
+}
+
+const AT = { lat: 32.7767, lng: -96.797 };
+describe("matchProperties — row processing and ranking", () => {
+  it("ranks a corroborated BASE match above an uncorroborated EXACT one", async () => {
+    // The finding this pins: an exact street line with no locality and no coordinates is "100 Main St"
+    // in an unknown city, while a base match the GPS agrees with is the building underfoot. Ranking
+    // strength before corroboration put the remote guess first, and the list is capped.
+    const db = dbReturning([
+      {
+        id: "remote", name: "Remote exact", address: "1420 Bishop St", city: null, state: null,
+        zip: null, company_id: "c1", company_name: null, distance_meters: null,
+      },
+      {
+        id: "underfoot", name: "Underfoot suite", address: "1420 Bishop St Ste 200", city: "Dallas",
+        state: "TX", zip: "75201", company_id: "c1", company_name: null, distance_meters: 40,
+      },
+    ]);
+    const out = await matchProperties(db, {
+      ...AT, address: "1420 Bishop Street", city: "Dallas", state: "TX", zip: "75201",
+    });
+    expect(out.map((m) => m.id)).toEqual(["underfoot", "remote"]);
+    expect(out[0]!.addressMatch).toBe("base");
+    expect(out[0]!.reason).toBe("address+distance");
+    expect(out[1]!.reason).toBe("address");
+  });
+
+  it("keeps a nearby property whose address merely DIFFERS — the fallback exists for exactly that", async () => {
+    // A venue name, an old spelling or a typo is not a contradiction. Treating every unequal address as
+    // one switched the distance branch off for any row that has an address, so the bounding box fetched
+    // this property only to discard it and the capture duplicated the building.
+    const db = dbReturning([
+      {
+        id: "clubhouse", name: "Palm Villas Clubhouse", address: "Palm Villas Clubhouse",
+        city: "Dallas", state: "TX", zip: "75201", company_id: "c1", company_name: null,
+        distance_meters: 40,
+      },
+    ]);
+    const out = await matchProperties(db, {
+      ...AT, address: "1420 Bishop Street", city: "Dallas", state: "TX", zip: "75201",
+    });
+    expect(out).toHaveLength(1);
+    expect(out[0]!.reason).toBe("distance");
+    expect(out[0]!.addressMatch).toBeNull();
+  });
+
+  it("drops a nearby property whose UNITS contradict", async () => {
+    // Ste 200 is not Ste 400, and proximity must not overrule that.
+    const db = dbReturning([
+      {
+        id: "ste400", name: "Suite 400", address: "1420 Bishop St Ste 400", city: "Dallas",
+        state: "TX", zip: "75201", company_id: "c1", company_name: null, distance_meters: 12,
+      },
+    ]);
+    const out = await matchProperties(db, {
+      ...AT, address: "1420 Bishop Street Ste 200", city: "Dallas", state: "TX", zip: "75201",
+    });
+    expect(out).toEqual([]);
+  });
+
+  it("drops a nearby property in a contradicting LOCALITY", async () => {
+    const db = dbReturning([
+      {
+        id: "elsewhere", name: "Same street, other city", address: "1420 Bishop St", city: "Austin",
+        state: "TX", zip: "78701", company_id: "c1", company_name: null, distance_meters: 30,
+      },
+    ]);
+    const out = await matchProperties(db, {
+      ...AT, address: "1420 Bishop Street", city: "Dallas", state: "TX", zip: "75201",
+    });
+    expect(out).toEqual([]);
+  });
+
+  it("nulls addressMatch when the locality disagrees, rather than reporting an address hit", async () => {
+    // The row survives on distance alone; claiming "Same address" for a different city is the kind of
+    // confident wrong answer that gets confirmed by a rep in a hurry.
+    const db = dbReturning([
+      {
+        id: "p1", name: "P", address: "1420 Bishop St", city: "Austin", state: "TX", zip: "78701",
+        company_id: "c1", company_name: null, distance_meters: null,
+      },
+    ]);
+    const out = await matchProperties(db, {
+      ...AT, address: "1420 Bishop Street", city: "Dallas", state: "TX", zip: "75201",
+    });
+    expect(out).toEqual([]);
+  });
+
+  it("orders two corroborated hits by distance once their rank ties", async () => {
+    const db = dbReturning([
+      {
+        id: "far", name: "Far", address: "1420 Bishop St", city: "Dallas", state: "TX", zip: "75201",
+        company_id: "c1", company_name: null, distance_meters: 150,
+      },
+      {
+        id: "close", name: "Close", address: "1420 Bishop St", city: "Dallas", state: "TX",
+        zip: "75201", company_id: "c1", company_name: null, distance_meters: 10,
+      },
+    ]);
+    const out = await matchProperties(db, {
+      ...AT, address: "1420 Bishop Street", city: "Dallas", state: "TX", zip: "75201",
+    });
+    expect(out.map((m) => m.id)).toEqual(["close", "far"]);
+  });
+});

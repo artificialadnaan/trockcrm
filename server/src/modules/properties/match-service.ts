@@ -214,6 +214,30 @@ export function FOLDED_ADDRESS_SQL(column: string): string {
   return `translate(lower(coalesce(${column}, '')), '${ACCENTED}', '${UNACCENTED}')`;
 }
 
+/**
+ * How much of an address the index will hold.
+ *
+ * `properties.address` is unbounded text and no validator caps it, while a btree tuple cannot exceed
+ * roughly 2.7 KB. One pasted or badly imported value above that aborts the migration outright — and,
+ * once the index exists, every INSERT or UPDATE of such a row fails too. 512 is far past any real
+ * street line and far below the limit.
+ *
+ * Truncation can only cost a MISS, never a false match: two addresses agreeing for 512 characters and
+ * differing after are not something this file will ever see, and a miss costs a mergeable duplicate.
+ */
+const ADDRESS_INDEX_MAX_CHARS = 512;
+
+/**
+ * THE normalised-address expression — one definition for the query and for migration 0201's index.
+ *
+ * Postgres matches an expression index syntactically, so if these two ever differ by a character the
+ * index is silently ignored and the endpoint drops to a sequential scan with nothing failing to say
+ * so. Generating both from here is what makes that impossible.
+ */
+export function NORMALIZED_ADDRESS_SQL(column: string): string {
+  return `left(btrim(regexp_replace(${FOLDED_ADDRESS_SQL(column)}, '[^a-z0-9]+', ' ', 'g')), ${ADDRESS_INDEX_MAX_CHARS})`;
+}
+
 /** Unit designators, as they appear at the END of a street line. */
 const UNIT_MARKERS = new Set(["ste", "suite", "unit", "apt", "apartment", "rm", "room", "fl", "floor", "bldg", "building"]);
 
@@ -471,8 +495,7 @@ export async function matchProperties(
    * row either: "12A Main St" (first token not all digits), "12-14 Main St" (punctuation inside the
    * number, so the raw prefix never matches), and street lines with no leading number at all.
    */
-  const normalizedDbAddress = sql`
-    btrim(regexp_replace(${sql.raw(FOLDED_ADDRESS_SQL("p.address"))}, '[^a-z0-9]+', ' ', 'g'))`;
+  const normalizedDbAddress = sql`${sql.raw(NORMALIZED_ADDRESS_SQL("p.address"))}`;
 
   const leadToken = addressKey.split(" ")[0] ?? "";
   const sameLeadToken = leadToken
@@ -584,11 +607,26 @@ export async function matchProperties(
      * CAN be compared and says no, that answer stands — otherwise the whole false-match asymmetry this
      * file is built on is undone by the weaker signal.
      */
-    const addressesConflict =
-      contradicted ||
-      (normalizeAddressKey(input.address) !== "" &&
-        normalizeAddressKey(row.address as string | null) !== "" &&
-        addressMatch === null);
+    /**
+     * A CONFLICT is a contradiction, not merely a difference.
+     *
+     * Treating every unequal address as a conflict switched the distance branch off for any row that
+     * has an address at all — which is nearly all of them — so a property 40 m away whose stored text
+     * is a typo, an old spelling, or the venue's name ("Palm Villas Clubhouse" vs "1420 Bishop St")
+     * was fetched by the bounding box and then thrown away. That is the branch's entire purpose, and
+     * the capture minted a duplicate of a building the rep was standing on.
+     *
+     * Two things genuinely contradict:
+     *   - the LOCALITY disagrees — a different city, state or ZIP is a different place;
+     *   - both sides name a unit and the units DIFFER — Ste 200 is not Ste 400.
+     * Everything else is two spellings of an unknown, and proximity is allowed to speak. This stays
+     * safe because a distance match is a SUGGESTION the rep confirms, shown with "40 m away" beside
+     * it — not a silent merge.
+     */
+    const queryUnit = splitUnit(normalizeAddressKey(input.address)).unit;
+    const rowUnit = splitUnit(normalizeAddressKey(row.address as string | null)).unit;
+    const unitsContradict = queryUnit !== null && rowUnit !== null && queryUnit !== rowUnit;
+    const addressesConflict = contradicted || unitsContradict;
     const byDistance =
       !addressesConflict && distanceMeters != null && distanceMeters <= PROPERTY_MATCH_RADIUS_METERS;
     // A candidate sharing only a lead token is a different street. Dropping it here is why SQL is

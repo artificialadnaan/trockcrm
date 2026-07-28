@@ -22,7 +22,7 @@ const MIGRATION = readFileSync(
 
 /** The exact predicate match-service.ts sends. If this drifts, the index stops being used. */
 const QUERY_EXPRESSION =
-  "btrim(regexp_replace(translate(lower(coalesce(address, '')), 'áàâäãåÁÀÂÄÃÅéèêëÉÈÊËíìîïÍÌÎÏóòôöõÓÒÔÖÕúùûüÚÙÛÜñÑçÇýÿÝ', 'aaaaaaaaaaaaeeeeeeeeiiiiiiiioooooooooouuuuuuuunnccyyy'), '[^a-z0-9]+', ' ', 'g'))";
+  "left(btrim(regexp_replace(translate(lower(coalesce(address, '')), 'áàâäãåÁÀÂÄÃÅéèêëÉÈÊËíìîïÍÌÎÏóòôöõÓÒÔÖÕúùûüÚÙÛÜñÑçÇýÿÝ', 'aaaaaaaaaaaaeeeeeeeeiiiiiiiioooooooooouuuuuuuunnccyyy'), '[^a-z0-9]+', ' ', 'g')), 512)";
 
 const OFFICES = ["office_dallas", "office_atlanta"];
 
@@ -78,7 +78,11 @@ describe("0201 properties match indexes", () => {
     // Case-insensitive and cast-insensitive: pg_indexes echoes the expression with keywords
     // upper-cased (COALESCE) and an explicit ::text on the literal. Neither changes what the planner
     // matches — only the literal STRUCTURE has to agree with the query.
-    const strip = (s: string) => s.replace(/\s+/g, " ").replace(/::text/g, "").toLowerCase();
+    // pg_indexes echoes the expression with keywords upper-cased, an explicit ::text on literals, and
+    // `left` double-quoted because it is a reserved word. None of that changes what the planner
+    // matches — only the literal STRUCTURE has to agree — so all three are normalised away.
+    const strip = (s: string) =>
+      s.replace(/\s+/g, " ").replace(/::text/g, "").replace(/"/g, "").toLowerCase();
     expect(strip(def ?? "")).toContain(strip(QUERY_EXPRESSION));
   });
 
@@ -114,5 +118,9 @@ describe("0201 properties match indexes", () => {
     expect(block).toContain("properties_lat_lng_idx");
     // The provisioner swaps this literal for the new schema name.
     expect(block).toContain("office_dallas.properties");
+    // And it must index the SAME expression as the loop above and as the query. The template is a
+    // hand-copied second occurrence, so it is exactly the thing that drifts — and a divergence here is
+    // invisible until a brand-new office is large enough to be slow.
+    expect(block.replace(/\s+/g, " ")).toContain(QUERY_EXPRESSION.replace(/\s+/g, " "));
   });
 });

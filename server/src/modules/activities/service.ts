@@ -297,7 +297,15 @@ export async function linkActivityToLead(
   }
 
   if (existing.leadId) {
-    // Same lead — the retry case, and a success.
+    /**
+     * Same lead — the retry case, and a success.
+     *
+     * Deliberately ahead of the archived check below, which is about not WRITING to a tombstone. This
+     * branch writes nothing: the link already exists, so the honest answer to "did my visit get
+     * attached?" is yes. Refusing here would report failure for work that completed, which is how the
+     * same promotion gets attempted twice. The late-retry case the archived guard exists for is the
+     * one where the FIRST call failed — and there existing.leadId is null, so it still fires.
+     */
     if (existing.leadId === input.leadId) return existing;
     // A DIFFERENT lead. Silently repointing would move a visit's history off the lead it created and
     // onto another, so this refuses and says which one holds it.
@@ -377,7 +385,15 @@ export async function linkActivityToLead(
      * and could be linked to any lead the caller could see — the widest hole of the four, because a
      * deal is the anchor most likely to belong to a different company than the lead being promoted.
      */
-    if (existing.dealId && lead.companyId) {
+    /**
+     * Guarded on `!existing.companyId`, matching the contact rule below.
+     *
+     * An activity that STATES its company has already been checked against the lead's, so re-deriving
+     * one from the deal could only overrule the activity's own claim — and a deal whose company was
+     * later reassigned would then veto a link the activity and the lead already agree on. Two adjacent
+     * branches with two different precedences is the inconsistency, not the strictness.
+     */
+    if (!existing.companyId && existing.dealId && lead.companyId) {
       const [deal] = await tenantDb
         .select({ companyId: deals.companyId })
         .from(deals)
