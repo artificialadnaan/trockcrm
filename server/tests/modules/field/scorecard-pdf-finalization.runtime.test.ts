@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { inflateSync } from "node:zlib";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
@@ -32,7 +33,13 @@ import {
   renderAndStoreFieldScorecardArtifacts,
 } from "../../../src/modules/field/scorecards-service.js";
 import { CURRENT_SCORECARD_PDF_RENDER_VERSION } from "../../../src/modules/field/scorecard-pdf-artifact.js";
-import { fieldScorecards, fieldScorecardItems, fieldScorecardPhotos, scorecardCorrectiveActions } from "@trock-crm/shared/schema";
+import {
+  fieldScorecards,
+  fieldScorecardItems,
+  fieldScorecardPhotos,
+  scorecardCorrectiveActions,
+  scorecardCorrectiveActionEvents,
+} from "@trock-crm/shared/schema";
 import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
 
 const DEAL = "11111111-1111-1111-1111-111111111111";
@@ -58,6 +65,8 @@ const INTERLEAVED_CARD = "55555555-5555-5555-5555-000000000005";
 const CONTENT_CHANGED_CARD = "55555555-5555-5555-5555-000000000006";
 const CONCURRENT_CARD = "55555555-5555-5555-5555-000000000007";
 const CONTENT_GENERATION_CARD = "55555555-5555-5555-5555-000000000009";
+const THREAD_CARD = "55555555-5555-5555-5555-000000000011";
+const THREAD_CORRECTIVE_ACTION = "77777777-7777-7777-7777-000000000004";
 const GENERATION_UNPUBLISHED_CARD = "55555555-5555-5555-5555-000000000010";
 const EVIDENCE_PNG = readFileSync(new URL("../../../../client-field/public/favicon-32x32.png", import.meta.url));
 
@@ -79,7 +88,7 @@ beforeAll(async () => {
       created_at timestamptz DEFAULT NOW()
     );
   `);
-  await pg.exec(tenantSchemaSql("public", [fieldScorecards, fieldScorecardItems, fieldScorecardPhotos, scorecardCorrectiveActions]));
+  await pg.exec(tenantSchemaSql("public", [fieldScorecards, fieldScorecardItems, fieldScorecardPhotos, scorecardCorrectiveActions, scorecardCorrectiveActionEvents]));
   await pg.exec(`
     INSERT INTO deals VALUES ('${DEAL}', 'Maple Street Tower', 'DFW-10432');
     INSERT INTO files VALUES (
@@ -341,7 +350,7 @@ describe("finalizeFieldScorecardArtifacts", () => {
       itemType: "action_item",
       itemRef: "0",
       itemLabel: "Re-inspect framing",
-      status: "resolved",
+      status: "approved",
       responderName: "Pat Manager",
       responseComment: "Re-inspected and corrected.",
       respondedAt: new Date(),
@@ -434,7 +443,7 @@ describe("finalizeFieldScorecardArtifacts", () => {
         itemType: "action_item",
         itemRef: "0",
         itemLabel: "Item A",
-        status: "resolved",
+        status: "approved",
         responderName: "Pat Manager",
         responseComment: "A done.",
         respondedAt: new Date(),
@@ -445,7 +454,7 @@ describe("finalizeFieldScorecardArtifacts", () => {
         itemType: "action_item",
         itemRef: "1",
         itemLabel: "Item B",
-        status: "resolved",
+        status: "approved",
         responderName: "Pat Manager",
         responseComment: "B done.",
         respondedAt: new Date(),
@@ -466,4 +475,103 @@ describe("finalizeFieldScorecardArtifacts", () => {
     // item_ref would put "thumbs/a.jpg" first.
     expect(responseFetchOrder).toEqual(["thumbs/b.jpg", "thumbs/a.jpg"]);
   });
+
+  it("writes the whole back-and-forth into the PDF, not just the outcome", async () => {
+    // The end-to-end claim of this feature: "all back and forth is documented into the pdf of the score card
+    // report". The item row holds only the LATEST attempt, so without the event thread reaching the renderer
+    // the document could show that the fix was approved but never that it was once sent back, or why.
+    await seedScorecard(THREAD_CARD);
+    await db.insert(scorecardCorrectiveActions).values({
+      id: THREAD_CORRECTIVE_ACTION,
+      scorecardId: THREAD_CARD,
+      itemType: "action_item",
+      itemRef: "0",
+      itemLabel: "Re-torque the anchors",
+      status: "approved",
+      responderName: "Pat Manager",
+      responseComment: "Re-torqued to spec, values logged.",
+      respondedAt: new Date(),
+    });
+    await db.insert(scorecardCorrectiveActionEvents).values([
+      {
+        correctiveActionId: THREAD_CORRECTIVE_ACTION,
+        scorecardId: THREAD_CARD,
+        eventType: "submitted",
+        actorName: "Pat Manager",
+        comment: "Anchors tightened.",
+      },
+      {
+        correctiveActionId: THREAD_CORRECTIVE_ACTION,
+        scorecardId: THREAD_CARD,
+        eventType: "rejected",
+        actorName: "James Helms",
+        comment: "Torque values were not documented.",
+      },
+      {
+        correctiveActionId: THREAD_CORRECTIVE_ACTION,
+        scorecardId: THREAD_CARD,
+        eventType: "submitted",
+        actorName: "Pat Manager",
+        comment: "Re-torqued to spec, values logged.",
+      },
+      {
+        correctiveActionId: THREAD_CORRECTIVE_ACTION,
+        scorecardId: THREAD_CARD,
+        eventType: "approved",
+        actorName: "James Helms",
+        comment: null,
+      },
+    ]);
+
+    const key = await finalizeFieldScorecardArtifacts({ id: "office-1", slug: "dallas" }, USER, THREAD_CARD);
+    expect(key).toBeTruthy();
+
+    const written = r2Mocks.putObject.mock.calls.at(-1)?.[1] as Buffer;
+    const text = renderedText(written);
+    // The REJECTION and its reason — the part that exists only in the thread.
+    expect(text).toContain("Rejected by James Helms");
+    expect(text).toContain("Torque values were not documented.");
+    // Both attempts, in order, and the approval that closed it.
+    expect(text).toContain("Anchors tightened.");
+    expect(text).toContain("Re-torqued to spec, values logged.");
+    expect(text).toContain("Approved by James Helms");
+    expect(text.indexOf("Anchors tightened.")).toBeLessThan(text.indexOf("Torque values were not documented."));
+    // And the item is labelled APPROVED, not merely answered.
+    expect(text).toContain("APPROVED");
+  });
 });
+
+/**
+ * The literal text drawn into the document, so a render can be asserted on its CONTENT rather than its size.
+ *
+ * PDFKit writes runs as hex-encoded TJ arrays against a subsetted font — `[<48656c6c6f> 20 <21> 0] TJ` — with
+ * the numbers being kerning adjustments, not characters. Concatenating the hex chunks of one array
+ * reconstructs the run; a plain `(text) Tj` is handled too for any run PDFKit emits literally.
+ */
+function renderedText(pdf: Buffer): string {
+  const raw = pdf.toString("latin1");
+  const streamRe = /stream\r?\n/g;
+  const out: string[] = [];
+  let match: RegExpExecArray | null;
+  while ((match = streamRe.exec(raw)) !== null) {
+    const start = match.index + match[0].length;
+    const end = raw.indexOf("endstream", start);
+    if (end < 0) continue;
+    let text: string;
+    try {
+      text = inflateSync(Buffer.from(raw.slice(start, end), "latin1")).toString("latin1");
+    } catch {
+      continue; // not a Flate stream (e.g. an embedded image)
+    }
+    for (const tj of text.matchAll(/\[((?:<[0-9A-Fa-f]*>|[-\d.\s])*)\]\s*TJ/g)) {
+      const run = [...tj[1].matchAll(/<([0-9A-Fa-f]*)>/g)]
+        .map((hex) => Buffer.from(hex[1], "hex").toString("latin1"))
+        .join("");
+      if (run) out.push(run);
+    }
+    for (const tj of text.matchAll(/\(((?:\\.|[^\\)])*)\)\s*Tj/g)) {
+      out.push(tj[1].replace(/\\([()\\])/g, "$1"));
+    }
+  }
+  return out.join(" ");
+}

@@ -9,10 +9,16 @@ import {
 } from "drizzle-orm/pg-core";
 
 // Per-office (cloned into every office_* schema). One row per flagged item on a below-band scorecard,
-// seeded `open` at submit; flips to `resolved` when the super/PM documents corrective action. The
-// scorecard auto-closes once no `open` rows remain. FKs (scorecard_id -> field_scorecards) and the
-// (scorecard_id, item_type, item_ref) uniqueness are owned by migration 0192; Drizzle keeps bare uuid
-// columns to match the closeout-checklist / field-scorecards convention.
+// seeded `open` at submit; flips to `submitted` when the super/PM documents corrective action, then to
+// `approved` or `rejected` once the approver rules on it (migration 0202). The card closes only when no
+// OUTSTANDING row remains — `open` OR `rejected`, since a rejection returns the item to the responder.
+//
+// These response columns hold the LATEST attempt only: a resubmission overwrites them. The full
+// back-and-forth lives in scorecard_corrective_action_events, which is what the PDF and the CRM render.
+//
+// FKs (scorecard_id -> field_scorecards) and the (scorecard_id, item_type, item_ref) uniqueness are owned
+// by migration 0192; Drizzle keeps bare uuid columns to match the closeout-checklist / field-scorecards
+// convention.
 export const scorecardCorrectiveActions = pgTable(
   "scorecard_corrective_actions",
   {

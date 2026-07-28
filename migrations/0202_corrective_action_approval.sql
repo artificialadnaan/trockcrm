@@ -104,6 +104,45 @@ BEGIN
          REFERENCES %I.scorecard_corrective_action_events(id) ON DELETE SET NULL',
       schema_name, schema_name
     );
+
+    -- 5. SEED the thread from responses that predate it.
+    --
+    -- Without this, every corrective action answered before this deploy renders an EMPTY thread in the PDF
+    -- and the CRM, because the thread is now the source for that record while their response only ever
+    -- existed in the single-valued columns above. A historical response is a real event; it just happened
+    -- before there was a table to record it in. Backdated to responded_at, NOT now(), so the thread does not
+    -- claim every old fix was submitted at deploy time.
+    --
+    -- Idempotent via NOT EXISTS: a rerun, or an item that has since accrued real events, is skipped.
+    EXECUTE format(
+      'INSERT INTO %I.scorecard_corrective_action_events
+         (corrective_action_id, scorecard_id, event_type, actor_user_id, actor_name, actor_email,
+          comment, created_at)
+       SELECT ca.id, ca.scorecard_id, ''submitted'', ca.responded_by_user_id, ca.responder_name,
+              ca.responder_email, ca.response_comment, COALESCE(ca.responded_at, ca.updated_at, now())
+         FROM %I.scorecard_corrective_actions ca
+        WHERE ca.status <> ''open''
+          AND NOT EXISTS (
+            SELECT 1 FROM %I.scorecard_corrective_action_events e
+             WHERE e.corrective_action_id = ca.id
+          )',
+      schema_name, schema_name, schema_name
+    );
+
+    -- Attribute existing response photos to that seeded event, but ONLY for an item whose thread is that
+    -- single event — anything with real history is left alone rather than guessed at.
+    EXECUTE format(
+      'UPDATE %I.field_scorecard_photos p
+          SET corrective_action_event_id = e.id
+         FROM %I.scorecard_corrective_action_events e
+        WHERE e.corrective_action_id = p.corrective_action_id
+          AND p.corrective_action_event_id IS NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM %I.scorecard_corrective_action_events e2
+             WHERE e2.corrective_action_id = e.corrective_action_id AND e2.seq <> e.seq
+          )',
+      schema_name, schema_name, schema_name
+    );
   END LOOP;
 END $tenant$;
 
@@ -137,4 +176,24 @@ CREATE INDEX IF NOT EXISTS scorecard_corrective_action_events_item_idx
 ALTER TABLE office_dallas.field_scorecard_photos
   ADD COLUMN IF NOT EXISTS corrective_action_event_id uuid
   REFERENCES office_dallas.scorecard_corrective_action_events(id) ON DELETE SET NULL;
+INSERT INTO office_dallas.scorecard_corrective_action_events
+  (corrective_action_id, scorecard_id, event_type, actor_user_id, actor_name, actor_email,
+   comment, created_at)
+SELECT ca.id, ca.scorecard_id, 'submitted', ca.responded_by_user_id, ca.responder_name,
+       ca.responder_email, ca.response_comment, COALESCE(ca.responded_at, ca.updated_at, now())
+  FROM office_dallas.scorecard_corrective_actions ca
+ WHERE ca.status <> 'open'
+   AND NOT EXISTS (
+     SELECT 1 FROM office_dallas.scorecard_corrective_action_events e
+      WHERE e.corrective_action_id = ca.id
+   );
+UPDATE office_dallas.field_scorecard_photos p
+   SET corrective_action_event_id = e.id
+  FROM office_dallas.scorecard_corrective_action_events e
+ WHERE e.corrective_action_id = p.corrective_action_id
+   AND p.corrective_action_event_id IS NULL
+   AND NOT EXISTS (
+     SELECT 1 FROM office_dallas.scorecard_corrective_action_events e2
+      WHERE e2.corrective_action_id = e.corrective_action_id AND e2.seq <> e.seq
+   );
 -- TENANT_SCHEMA_END

@@ -32,6 +32,10 @@ import {
 import { prioritizeAndCapEvidencePhotos, resolveScorecardEvidenceImage } from "./scorecard-evidence-image.js";
 import { orderCorrectiveActions } from "@trock-crm/shared/lib/correctiveActionOrder";
 import {
+  getCorrectiveActionEventsByItem,
+  type CorrectiveActionEventRow,
+} from "./corrective-action-events.js";
+import {
   FIELD_SCORECARD_LEADERSHIP_SECTION_KEYS,
   FIELD_SCORECARD_LEADERSHIP_SUMMARY_SECTION_KEY,
   FIELD_SCORECARD_SECTION_KEYS,
@@ -1130,6 +1134,10 @@ export async function renderAndStoreFieldScorecardArtifacts(
     const correctiveActionPhotoRows = correctiveActionRows.length === 0 ? [] : await db
       .select({
         correctiveActionId: fieldScorecardPhotos.correctiveActionId,
+        // Which ATTEMPT filed this photo. Null for every response that predates migration 0202 (and for the
+        // few the 0202 seed left alone because their item already had real history) — those fall back to the
+        // item's first submission, so a legacy photo still appears rather than vanishing from the record.
+        correctiveActionEventId: fieldScorecardPhotos.correctiveActionEventId,
         fileId: files.id,
         caption: files.description,
         r2Key: files.r2Key,
@@ -1151,15 +1159,38 @@ export async function renderAndStoreFieldScorecardArtifacts(
       // Deterministic order so the MAX_CORRECTIVE_ACTION_PHOTOS cap keeps the SAME photos across renders.
       .orderBy(fieldScorecardPhotos.createdAt, fieldScorecardPhotos.id);
 
+    // The append-only back-and-forth. One query for the whole card — the renderer needs every item's thread,
+    // and a per-item fetch would be N+1 on a read that already loads photos per item.
+    const correctiveActionEventsByItem =
+      correctiveActionRows.length === 0
+        ? new Map<string, CorrectiveActionEventRow[]>()
+        : await getCorrectiveActionEventsByItem(db, scorecardId);
+
     const [deal] = await db
       .select({ name: deals.name, dealNumber: deals.dealNumber })
       .from(deals)
       .where(eq(deals.id, card.dealId))
       .limit(1);
-    return { card, itemRows, photoRows, correctiveActionRows, correctiveActionPhotoRows, deal: deal ?? null };
+    return {
+      card,
+      itemRows,
+      photoRows,
+      correctiveActionRows,
+      correctiveActionPhotoRows,
+      correctiveActionEventsByItem,
+      deal: deal ?? null,
+    };
   });
   if (!loaded) return null;
-  const { card, itemRows, photoRows, correctiveActionRows, correctiveActionPhotoRows, deal } = loaded;
+  const {
+    card,
+    itemRows,
+    photoRows,
+    correctiveActionRows,
+    correctiveActionPhotoRows,
+    correctiveActionEventsByItem,
+    deal,
+  } = loaded;
   const evidenceFingerprint = scorecardEvidenceFingerprint(photoRows);
   const activePhotoRows = photoRows.filter((photo) => photo.isActive && photo.deletedAt == null);
 
@@ -1210,6 +1241,7 @@ export async function renderAndStoreFieldScorecardArtifacts(
 
   const loadResponsePhoto = async (photo: typeof correctiveActionPhotoRows[number]) => ({
     correctiveActionId: photo.correctiveActionId as string,
+    correctiveActionEventId: photo.correctiveActionEventId ?? null,
     caption: photo.caption ?? null,
     resolution: await resolveScorecardEvidenceImage(photo),
   });
@@ -1268,18 +1300,47 @@ export async function renderAndStoreFieldScorecardArtifacts(
     })),
     omittedEvidenceCount,
     omittedCorrectiveActionPhotoCount,
-    correctiveActions: correctiveActionRows.map((row) => ({
-      itemType: row.itemType,
-      itemRef: row.itemRef,
-      itemLabel: row.itemLabel,
-      status: row.status,
-      responderName: row.responderName ?? row.responderEmail ?? null,
-      respondedAt: toIso(row.respondedAt),
-      responseComment: row.responseComment ?? null,
-      photos: correctiveActionPhotos
-        .filter((photo) => photo.correctiveActionId === row.id)
-        .map((photo) => ({ caption: photo.caption, image: photo.resolution.image })),
-    })),
+    correctiveActions: correctiveActionRows.map((row) => {
+      const itemPhotos = correctiveActionPhotos.filter((photo) => photo.correctiveActionId === row.id);
+      const events = correctiveActionEventsByItem.get(row.id) ?? [];
+      // Attribute each photo to the attempt that filed it. A photo with no event id — every pre-0202
+      // response photo — attaches to the item's FIRST submission, which is where it was in fact filed and
+      // the only attempt it could have belonged to before resubmission existed. Falling through to nothing
+      // would silently drop it from the record.
+      const firstSubmissionId = events.find((event) => event.eventType === "submitted")?.id ?? null;
+      const photosByEvent = new Map<string, typeof itemPhotos>();
+      for (const photo of itemPhotos) {
+        const key = photo.correctiveActionEventId ?? firstSubmissionId;
+        if (!key) continue;
+        const bucket = photosByEvent.get(key);
+        if (bucket) bucket.push(photo);
+        else photosByEvent.set(key, [photo]);
+      }
+      return {
+        itemType: row.itemType,
+        itemRef: row.itemRef,
+        itemLabel: row.itemLabel,
+        status: row.status,
+        responderName: row.responderName ?? row.responderEmail ?? null,
+        respondedAt: toIso(row.respondedAt),
+        responseComment: row.responseComment ?? null,
+        // The aggregate, used ONLY when there is no thread at all (a card the 0202 seed did not reach).
+        // With a thread present the renderer draws the per-event sets instead, never both.
+        photos: itemPhotos.map((photo) => ({ caption: photo.caption, image: photo.resolution.image })),
+        events: events.map((event) => ({
+          eventType: event.eventType,
+          // Same name-or-email rule as the item row: an actor with no display name must still
+          // be identifiable, or the thread records what happened but not who did it.
+          actorName: event.actorName ?? event.actorEmail ?? null,
+          createdAt: event.createdAt,
+          comment: event.comment,
+          photos: (photosByEvent.get(event.id) ?? []).map((photo) => ({
+            caption: photo.caption,
+            image: photo.resolution.image,
+          })),
+        })),
+      };
+    }),
   });
   const bucket = process.env.R2_BUCKET_NAME || "trock-crm-files";
 
