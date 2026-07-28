@@ -40,7 +40,10 @@ const ITEMS = [
     item_type: "action_item",
     item_ref: "0",
     item_label: "Re-inspect slab 2",
-    status: "resolved",
+    // A REAL post-0202 status. This fixture said "resolved" — a value migration 0202 renamed away — and the
+    // renderer compared against the same dead string, so several assertions passed while testing a state the
+    // database can no longer produce.
+    status: "approved",
     responder_name: "Sam Super",
     responder_email: "pat@trockgc.com",
     // Deliberately an evening-CT instant whose UTC CALENDAR DATE is the following day: 8:30 PM CDT on Jul 27
@@ -1407,5 +1410,62 @@ describe("handleScorecardCorrectiveActionOversightEmail", () => {
     expect(subject).toMatch(/approved/i);
     expect(html).toMatch(/has been <strong>approved<\/strong>/i);
     expect(html).not.toMatch(/Every flagged item has been documented\./i);
+  });
+
+  it("REGRESSION: renders every post-0202 item state, not a value the schema no longer has", async () => {
+    // The renderer compared status against "resolved", which migration 0202 RENAMED to "submitted". Nothing
+    // errored — the comparison simply never matched, so every item printed as "Open" with no responder, no
+    // comment and no photo count. That strips the approval notice of exactly what the approver needs to
+    // decide, and it is invisible in review because the code and the old fixture agreed on a dead string.
+    const states = [
+      { status: "submitted", expect: "Awaiting approval" },
+      { status: "approved", expect: "Approved" },
+      { status: "rejected", expect: "Sent back" },
+      { status: "open", expect: "Open" },
+    ];
+
+    for (const state of states) {
+      const { query } = makeQuery({
+        status: "corrective_action_submitted",
+        items: [{ ...ITEMS[0], status: state.status, item_label: `Item ${state.status}` }],
+      });
+      const sendEmail = makeSend();
+
+      await handleScorecardCorrectiveActionOversightEmail(payload({ phase: "awaiting_approval" }), null, {
+        query: query as never,
+        sendEmail: sendEmail as never,
+        env: { ...env, QC_APPROVER_EMAILS: "james@trockgc.com" } as unknown as NodeJS.ProcessEnv,
+        logger: makeLogger(),
+      });
+
+      const [, , html, options] = sendEmail.mock.calls[0] as unknown as [
+        string[],
+        string,
+        string,
+        { text: string },
+      ];
+      expect(html).toContain(state.expect);
+      expect(options.text).toContain(state.expect);
+    }
+  });
+
+  it("shows WHO answered and what they said on an answered item, which is the point of the notice", async () => {
+    const { query } = makeQuery({
+      status: "corrective_action_submitted",
+      items: [{ ...ITEMS[0], status: "submitted" }],
+    });
+    const sendEmail = makeSend();
+
+    await handleScorecardCorrectiveActionOversightEmail(payload({ phase: "awaiting_approval" }), null, {
+      query: query as never,
+      sendEmail: sendEmail as never,
+      env: { ...env, QC_APPROVER_EMAILS: "james@trockgc.com" } as unknown as NodeJS.ProcessEnv,
+      logger: makeLogger(),
+    });
+
+    const [, , html] = sendEmail.mock.calls[0] as unknown as [string[], string, string];
+    expect(html).toContain("Sam Super");
+    expect(html).toContain("Re-poured and cured.");
+    expect(html).toContain("2 photos");
   });
 });

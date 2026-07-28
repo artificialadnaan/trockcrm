@@ -50,6 +50,25 @@ const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 // worker cannot import from the server package, and it already hardcodes this same zone for its cron schedules.
 const OVERSIGHT_EMAIL_TIMEZONE = "America/Chicago";
 
+/**
+ * How each ITEM state reads in the notice, matching the PDF and the CRM so the three cannot disagree.
+ *
+ * This used to test `status === "resolved"`, a value migration 0202 RENAMED to `submitted`. Nothing errored:
+ * the comparison simply never matched, so every item rendered as "Open" with no responder, no comment and no
+ * photo count — stripping the approval notice of exactly the information the approver needs to decide.
+ */
+const ITEM_STATE_LABEL: Record<string, { label: string; color: string; answered: boolean }> = {
+  open: { label: "Open", color: "#CC0000", answered: false },
+  // Distinct from `open`: it was answered and sent back, and the responder needs to see that difference.
+  rejected: { label: "Sent back", color: "#CC0000", answered: true },
+  submitted: { label: "Awaiting approval", color: "#D97706", answered: true },
+  approved: { label: "Approved", color: "#16a34a", answered: true },
+};
+
+function itemState(status: string): { label: string; color: string; answered: boolean } {
+  return ITEM_STATE_LABEL[status] ?? ITEM_STATE_LABEL.open;
+}
+
 // Bound each response comment quoted in the email body. The response API accepts up to 5,000 characters per
 // item and a card can carry 50 action items plus deficiencies, so quoting every comment in full can produce
 // hundreds of kilobytes of body — before HTML escaping expands it further. Mail clients clip long bodies,
@@ -852,14 +871,14 @@ export function buildOversightEmail(input: {
   const htmlItems = input.items.length
     ? `<ul style="margin:12px 0 0 0;padding-left:20px;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:20px;color:#111111;">${input.items
         .map((item) => {
-          const resolved = item.status === "resolved";
+          const state = itemState(item.status);
           const who = normalizeText(item.responder_name) ?? normalizeText(item.responder_email);
           const when = formatRespondedAt(item.responded_at);
           const comment = emailCommentExcerpt(item.response_comment);
           const photos = Number(item.photo_count ?? 0);
-          const detail = resolved
-            ? `<span style="color:#16a34a;font-weight:bold;">Resolved</span>${who || when ? ` — ${escapeHtml([who, when].filter(Boolean).join(" · "))}` : ""}${comment ? `<br /><span style="color:#475569;">${escapeHtml(comment)}</span>` : ""}${photos > 0 ? `<br /><span style="color:#94a3b8;font-size:12px;">${photos} photo${photos === 1 ? "" : "s"}</span>` : ""}`
-            : `<span style="color:#CC0000;font-weight:bold;">Open</span>`;
+          const detail = state.answered
+            ? `<span style="color:${state.color};font-weight:bold;">${state.label}</span>${who || when ? ` — ${escapeHtml([who, when].filter(Boolean).join(" · "))}` : ""}${comment ? `<br /><span style="color:#475569;">${escapeHtml(comment)}</span>` : ""}${photos > 0 ? `<br /><span style="color:#94a3b8;font-size:12px;">${photos} photo${photos === 1 ? "" : "s"}</span>` : ""}`
+            : `<span style="color:${state.color};font-weight:bold;">${state.label}</span>`;
           return `<li style="margin-bottom:10px;">${escapeHtml(emailLabelExcerpt(item.item_label))}<br />${detail}</li>`;
         })
         .join("")}</ul>`
@@ -868,14 +887,14 @@ export function buildOversightEmail(input: {
   const textItems = input.items.length
     ? input.items
         .map((item) => {
-          const resolved = item.status === "resolved";
-          if (!resolved) return `• ${emailLabelExcerpt(item.item_label)} — Open`;
+          const state = itemState(item.status);
+          if (!state.answered) return `• ${emailLabelExcerpt(item.item_label)} — ${state.label}`;
           const who = normalizeText(item.responder_name) ?? normalizeText(item.responder_email);
           const when = formatRespondedAt(item.responded_at);
           const comment = emailCommentExcerpt(item.response_comment);
           const photos = Number(item.photo_count ?? 0);
           return (
-            `• ${emailLabelExcerpt(item.item_label)} — Resolved` +
+            `• ${emailLabelExcerpt(item.item_label)} — ${state.label}` +
             `${who || when ? ` (${[who, when].filter(Boolean).join(" · ")})` : ""}` +
             `${comment ? `\n    ${comment}` : ""}` +
             `${photos > 0 ? `\n    ${photos} photo${photos === 1 ? "" : "s"}` : ""}`
