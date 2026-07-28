@@ -49,6 +49,25 @@ const RECIPIENTS = [
 ];
 // Each open corrective-action row carries an id (used by the worker to derive the per-cycle fingerprint for
 // the CRM/no-token idempotency key — finding 4).
+/**
+ * Honour the query's SELECT list.
+ *
+ * Returning every fixture field regardless of what was asked for made this mock unable to model a projection
+ * difference — which is exactly the bug that shipped: the pre-send re-read selected fewer columns than the
+ * initial load, the mapper dropped `status` and `latest_rejection`, and every rejection notice silently
+ * reverted to the ordinary wording. With the mock over-supplying, no test could tell.
+ */
+function project<T extends Record<string, unknown>>(rows: T[], sqlText: string): Array<Partial<T>> {
+  const wantsRejection = /latest_rejection/i.test(sqlText);
+  const wantsStatus = /\bstatus\b/i.test(sqlText.split("FROM")[0] ?? "");
+  return rows.map((row) => {
+    const out: Record<string, unknown> = { ...row };
+    if (!wantsRejection) delete out.latest_rejection;
+    if (!wantsStatus) delete out.status;
+    return out as Partial<T>;
+  });
+}
+
 const FLAGGED = [
   { id: "ca-1", item_type: "action_item", item_ref: "0", item_label: "Re-inspect slab 2" },
   { id: "ca-2", item_type: "critical_deficiency", item_ref: "missed_hold_point", item_label: "Missed hold point" },
@@ -353,9 +372,9 @@ function makeQuery(
       // P2: the SECOND read of the open rows is the pre-send re-read. If the test models a partial resolution,
       // return the reduced `freshFlagged` set there so the emailed body reflects only the still-open item(s).
       if (flaggedReadCalls >= 2 && opts.freshFlagged) {
-        return { rows: opts.freshFlagged };
+        return { rows: project(opts.freshFlagged, text) };
       }
-      return { rows: opts.flagged ?? FLAGGED };
+      return { rows: project(opts.flagged ?? FLAGGED, text) };
     }
     if (/FROM \S*deals/i.test(text)) {
       return { rows: [{ name: "Maple Street Tower", deal_number: "DFW-10432", project_number: "DFW-10432" }] };
@@ -1965,5 +1984,41 @@ describe("scorecard corrective-action notification email", () => {
     expect(email.html).not.toContain(long);
     // The CTA still survives the body.
     expect(email.html).toContain("token=x");
+  });
+
+  it("REGRESSION: the HANDLER delivers the changes-requested wording, not just the body builder", async () => {
+    // My first test for this exercised buildCorrectiveActionEmail directly and passed — while the handler
+    // path was broken. The mandatory pre-send re-read projected fewer columns than the initial load, so the
+    // mapper dropped `status` and `latest_rejection` and isReturn was ALWAYS false in the real send. Testing
+    // the builder proved nothing about what actually goes out; this drives the handler end to end.
+    const { query } = makeQuery({
+      recipients: [{ email: "pat@trockgc.com", name: "Pat Manager", role: "project_manager" }] as never,
+      assignedRoles: [{ role: "project_manager" }] as never,
+      flagged: [
+        {
+          id: "ca-1",
+          item_type: "action_item",
+          item_ref: "0",
+          item_label: "Re-torque the anchors",
+          status: "rejected",
+          latest_rejection: "Torque values were not documented.",
+        },
+      ],
+    });
+    const sent: Array<{ subject: string; html: string }> = [];
+
+    await handleScorecardCorrectiveActionEmail(payload, null, {
+      query: query as never,
+      sendEmail: (async (_to: string, subject: string, html: string) => {
+        sent.push({ subject, html });
+        return { success: true, messageId: "m" };
+      }) as never,
+      env,
+      logger: makeLogger(),
+    });
+
+    expect(sent.length).toBeGreaterThan(0);
+    expect(sent[0].subject).toMatch(/changes requested/i);
+    expect(sent[0].html).toContain("Torque values were not documented.");
   });
 });

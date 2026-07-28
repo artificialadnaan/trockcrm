@@ -107,6 +107,40 @@ interface FlaggedItem {
 // the END of a long body — which is where the response link lives.
 const MAX_EMAIL_REASON_CHARS = 280;
 
+/**
+ * The outstanding corrective-action rows for a card, with each item's most recent rejection reason.
+ *
+ * ONE definition because there are TWO reads — an initial load and a mandatory pre-send refresh — and they
+ * must not drift. When the refresh projected fewer columns than the load, the mapper silently dropped
+ * `status` and `latest_rejection`, so `isReturn` was always false in the real send path and the changes-
+ * requested wording only ever appeared in a direct unit test of the body builder.
+ *
+ * Ordered by seq, not created_at: events written in one transaction share a timestamp to the microsecond and
+ * the uuid PK is random, so a timestamp sort picks an arbitrary "latest".
+ */
+function outstandingItemsSql(tenantSchema: string): string {
+  return `SELECT id, item_type, item_label, status,
+                 (SELECT e.comment
+                    FROM ${tenantSchema}.scorecard_corrective_action_events e
+                   WHERE e.corrective_action_id = scorecard_corrective_actions.id
+                     AND e.event_type = 'rejected'
+                   ORDER BY e.seq DESC
+                   LIMIT 1) AS latest_rejection
+            FROM ${tenantSchema}.scorecard_corrective_actions
+           WHERE scorecard_id = $1::uuid AND status IN (${CORRECTIVE_ACTION_OUTSTANDING_SQL_LIST})
+           ORDER BY item_type, item_ref`;
+}
+
+/** The one mapper for both reads, so a column added to the SELECT reaches the body from either path. */
+function toFlaggedItem(row: Record<string, unknown>): FlaggedItem {
+  return {
+    itemType: String(row.item_type),
+    itemLabel: String(row.item_label),
+    status: String(row.status ?? "open"),
+    latestRejection: row.latest_rejection == null ? null : String(row.latest_rejection),
+  };
+}
+
 export function basicValidEmail(email: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 }
@@ -477,23 +511,8 @@ export async function handleScorecardCorrectiveActionEmail(
 
   // Flagged items for the email body (the open corrective-action rows). We also select each row's id to
   // derive the per-cycle fingerprint below (reuses this one query — no extra round-trip).
-  const flaggedRes = await query(
-    `SELECT id, item_type, item_label, status,
-            -- The approver's most recent reason for sending this item back, so the responder is told what to
-            -- fix rather than just that something is wrong. Ordered by seq, NOT created_at: events written in
-            -- one transaction share a timestamp and the uuid PK is random, so a timestamp sort picks an
-            -- arbitrary one.
-            (SELECT e.comment
-               FROM ${tenantSchema}.scorecard_corrective_action_events e
-              WHERE e.corrective_action_id = scorecard_corrective_actions.id
-                AND e.event_type = 'rejected'
-              ORDER BY e.seq DESC
-              LIMIT 1) AS latest_rejection
-       FROM ${tenantSchema}.scorecard_corrective_actions
-      WHERE scorecard_id = $1::uuid AND status IN (${CORRECTIVE_ACTION_OUTSTANDING_SQL_LIST})
-      ORDER BY item_type, item_ref`,
-    [scorecardId]
-  );
+  const flaggedRes = await query(outstandingItemsSql(tenantSchema), [scorecardId]);
+
   // NOTE: flaggedRows/flagged are RE-READ + rebuilt from the live open set immediately before send (P2) so the
   // emailed body + the stamp's emitted-id array never carry an item resolved after this initial load. Declared
   // `let` so that fresh read can replace them.
@@ -630,12 +649,8 @@ export async function handleScorecardCorrectiveActionEmail(
   // emitted-id array from the CURRENT open rows makes recipients get an accurate list. If the fresh set is now
   // empty (every item resolved in a tighter race than the has_open recheck caught), bail via the same
   // nothing-to-notify guard — never send the empty-fallback item text, never stamp (a later reopen re-notifies).
-  const freshFlaggedRes = await query(
-    `SELECT id, item_type, item_label FROM ${tenantSchema}.scorecard_corrective_actions
-      WHERE scorecard_id = $1::uuid AND status IN (${CORRECTIVE_ACTION_OUTSTANDING_SQL_LIST})
-      ORDER BY item_type, item_ref`,
-    [scorecardId]
-  );
+  const freshFlaggedRes = await query(outstandingItemsSql(tenantSchema), [scorecardId]);
+
   flaggedRows = freshFlaggedRes.rows as any[];
   if (flaggedRows.length === 0) {
     logger.log(
@@ -644,10 +659,7 @@ export async function handleScorecardCorrectiveActionEmail(
     );
     return;
   }
-  flagged = flaggedRows.map((r) => ({
-    itemType: String(r.item_type),
-    itemLabel: String(r.item_label),
-  }));
+  flagged = flaggedRows.map(toFlaggedItem);
 
   // Per-cycle dimension for the CRM (no-token) idempotency key, computed from the FRESH open set (P2) so a legacy
   // (no-nonce) job's key hashes exactly the ids it is emailing. The preferred `nonce` (read above) is unaffected

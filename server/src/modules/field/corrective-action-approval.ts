@@ -92,6 +92,7 @@ async function recomputeCardStatus(
   scorecardId: string,
   items: Array<{ status: string }>,
   currentStatus: string,
+  itemsChanged: boolean,
 ): Promise<{ cardStatus: string; changed: boolean }> {
   const outstanding = items.filter((item) =>
     (CORRECTIVE_ACTION_OUTSTANDING_STATUSES as readonly string[]).includes(item.status),
@@ -105,7 +106,12 @@ async function recomputeCardStatus(
         ? CORRECTIVE_ACTION_CARD_AWAITING_APPROVAL
         : CORRECTIVE_ACTION_CARD_CLOSED;
 
-  // ALWAYS write, even when the card's own status does not move.
+  // Nothing changed at ALL — a duplicate approve, or approve-all with nothing left awaiting. Writing here
+  // would advance the generation and invalidate a perfectly current PDF, forcing a pointless re-render on
+  // every double-click of an operation documented as idempotent.
+  if (!itemsChanged && cardStatus === currentStatus) return { cardStatus, changed: false };
+
+  // Otherwise ALWAYS write, even when the card's own status does not move.
   //
   // updated_at is the PDF's content generation and the currency check is an equality against it, so any item
   // change is content change. Approving 1 of 3 items leaves the card in corrective_action_submitted; an early
@@ -187,7 +193,13 @@ export async function approveCorrectiveActionItems(
   const after = items.map((item) =>
     changedItemIds.includes(item.id) ? { ...item, status: "approved" } : item,
   );
-  const { cardStatus } = await recomputeCardStatus(tx, input.scorecardId, after, currentStatus);
+  const { cardStatus } = await recomputeCardStatus(
+    tx,
+    input.scorecardId,
+    after,
+    currentStatus,
+    changedItemIds.length > 0,
+  );
 
   return {
     changedItemIds,
@@ -250,7 +262,7 @@ export async function rejectCorrectiveActionItem(
   const after = items.map((item) =>
     item.id === input.itemId ? { ...item, status: "rejected" } : item,
   );
-  const { cardStatus } = await recomputeCardStatus(tx, input.scorecardId, after, currentStatus);
+  const { cardStatus } = await recomputeCardStatus(tx, input.scorecardId, after, currentStatus, true);
 
   return {
     changedItemIds: [input.itemId],
@@ -325,10 +337,17 @@ export async function rejectAndRestart(
     actor: input.actor,
   });
 
-  // Only on a REAL transition back to the responders. A no-op rejection (already rejected, or resubmitted
-  // since the approver loaded the page), or one on a card that was already open, must not churn the cycle —
-  // that would revoke a link the responder may be using right now and re-notify them about no change.
-  if (!outcome.reopened) return outcome;
+  // Restart whenever an item ACTUALLY moved to `rejected` — not only when the CARD transitioned back to
+  // open. If a sibling was already open the card never transitions, but the approver has still returned real
+  // work with a new comment, and gating on the card transition means the responders are never told about it.
+  //
+  // This does revoke a link they may hold from the previous cycle. That is the right trade: the replacement
+  // email lists EVERY outstanding item with its reason, so they get a strictly more complete picture
+  // immediately. Silence about a returned item is the worse failure.
+  //
+  // A genuine no-op (already rejected, or resubmitted since the approver loaded the page) changes nothing and
+  // is filtered here, so a double-clicked Reject cannot churn the cycle.
+  if (outcome.changedItemIds.length === 0) return outcome;
 
   const [card] = await tx
     .select({ dealId: fieldScorecards.dealId })

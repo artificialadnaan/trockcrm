@@ -198,9 +198,14 @@ describe("rejectAndRestart", () => {
     expect(await responderJobs()).toBe(jobsAfterFirst);
   });
 
-  it("does not restart when the card stays with the approver", async () => {
-    // Rejecting one of two items on a card whose sibling is still `submitted` leaves outstanding work, so the
-    // card DOES reopen — but rejecting when the card was already open is not a transition and must be quiet.
+  it("REGRESSION: notifies when a SECOND item is rejected on an already-open card", async () => {
+    // My first version of this test asserted the opposite — that an already-open card is "not a transition"
+    // and must stay quiet. That was wrong: the card not moving says nothing about whether the APPROVER
+    // returned real work. A sibling already open means the card never transitions, so gating on the card
+    // transition left responders never told that a second item came back, with a new comment.
+    //
+    // The replacement email lists every outstanding item and its reason, so revoking their older link is a
+    // strictly more complete picture delivered immediately. Silence about returned work is the worse failure.
     const ids = await seedAwaitingApproval(2);
     await tdb.execute(sql`UPDATE scorecard_corrective_actions SET status = 'open' WHERE id = ${ids[1]}`);
     await tdb.execute(sql`UPDATE field_scorecards SET status = 'corrective_action_open' WHERE id = ${CARD}`);
@@ -214,10 +219,33 @@ describe("rejectAndRestart", () => {
       actor: APPROVER,
     });
 
-    // The card was ALREADY open, so there is no transition to notify about and the responders' current cycle
-    // (which they may be answering right now) must not be revoked underneath them.
-    expect((await cardState()).nonce).toBe(before.nonce);
-    expect(await responderJobs()).toBe(0);
+    expect((await cardState()).nonce).not.toBe(before.nonce);
+    expect(await responderJobs()).toBe(1);
+  });
+
+  it("REGRESSION: a no-op approve does not advance the generation and invalidate the PDF", async () => {
+    // Task 1 made the card write unconditional so an item change that leaves the card status alone still
+    // advances the generation. "Nothing changed at all" is a third case: a duplicate approve, or approve-all
+    // with nothing left awaiting, would otherwise invalidate a perfectly current PDF on every double-click of
+    // an operation documented as idempotent.
+    const [itemId] = await seedAwaitingApproval();
+    await approveAndNotify(tdb, { office: OFFICE, scorecardId: CARD, itemIds: [itemId], actor: APPROVER });
+    const afterFirst = await tdb.execute(sql`SELECT updated_at FROM field_scorecards WHERE id = ${CARD}`);
+    const generation = new Date((afterFirst.rows[0] as { updated_at: string }).updated_at);
+
+    // Re-approve: nothing is `submitted` any more, so nothing changes.
+    const outcome = await approveAndNotify(tdb, {
+      office: OFFICE,
+      scorecardId: CARD,
+      itemIds: [itemId],
+      actor: APPROVER,
+    });
+
+    expect(outcome.changedItemIds).toEqual([]);
+    const afterSecond = await tdb.execute(sql`SELECT updated_at FROM field_scorecards WHERE id = ${CARD}`);
+    expect(new Date((afterSecond.rows[0] as { updated_at: string }).updated_at).getTime()).toBe(
+      generation.getTime(),
+    );
   });
 
   it("REGRESSION: approving the LAST item enqueues the approved notice", async () => {
