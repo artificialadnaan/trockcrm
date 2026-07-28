@@ -59,8 +59,21 @@ export const theme = {
      * that fails contrast is a trap, because it reads as permission to use it for real content.
      */
     textMuted: "#7D8896",
-    /** On light/brand fills. */
-    textInverse: "#0A0C0F",
+    /**
+     * Text ON A FILLED CONTROL — which in this app means brand red, every time.
+     *
+     * WHITE, not the near-black that "inverse" suggests. Every primary button in the app (login,
+     * change password, onboarding, save note, contacts action, the move commit, and the shared
+     * formStyles.button) is `textInverse` on `brandRed`. Pointing this at the canvas colour made all
+     * ten of them near-black on red at ~3.2:1 — the login button, the first thing anyone sees, became
+     * the least readable control in the product.
+     *
+     * That was the cost of re-pointing a token by its NAME rather than by its call sites: "inverse of
+     * the text colour" is a description of the light theme, and the actual usage is "on a brand fill".
+     * White on #E01B24 is 4.83:1. Identical to `onBrand`, and kept as a separate name only because a
+     * dozen call sites already say `textInverse`; the sweep collapses them.
+     */
+    textInverse: "#FFFFFF",
 
     /* ---- Status ------------------------------------------------------------------------------ */
     /** Tinted-surface + text pairs. Dark tints, not the light theme's pastels, which glow on black. */
@@ -77,9 +90,16 @@ export const theme = {
     green: "#22C55E",
 
     /**
-     * KEPT for compatibility. In the light theme this was the near-black ink used for headings; on a
-     * dark surface that would be invisible, so it now points at the primary text colour. Screens still
-     * referencing it therefore stay readable, and the sweep can retire it screen by screen.
+     * KEPT for compatibility, as a TEXT colour only.
+     *
+     * In the light theme this was the near-black ink used for headings, and on a dark surface that is
+     * invisible — so it now points at the primary text colour and its ~17 heading call sites stay
+     * readable until the sweep retires them.
+     *
+     * The catch, and the reason this is spelled out: two screens also used it as a BACKGROUND (the
+     * active scope pill on the deals and leads lists). A token used for both roles cannot survive a
+     * re-point — inverting it fixes the text and breaks the fill in the same edit. Those two sites now
+     * use `surfaceRaised`; do not reintroduce `inkNavy` as a fill.
      */
     inkNavy: "#F5F7FA",
     navyHover: "#1C2027",

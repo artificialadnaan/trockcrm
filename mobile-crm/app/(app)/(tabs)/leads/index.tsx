@@ -285,9 +285,12 @@ const styles = StyleSheet.create({
     paddingVertical: theme.space.sm,
     backgroundColor: theme.color.surface,
   },
-  scopePillActive: { backgroundColor: theme.color.inkNavy, borderColor: theme.color.inkNavy },
+  // surfaceRaised, NOT inkNavy. inkNavy is a TEXT colour on the dark theme (it points at the
+  // primary text), so using it as a fill made the selected pill a light slab with white text on
+  // it — invisible. A raised surface is what "selected" means everywhere else in this app.
+  scopePillActive: { backgroundColor: theme.color.surfaceRaised, borderColor: theme.color.borderStrong },
   scopeText: { fontFamily: theme.font.semibold, fontSize: 13, color: theme.color.textSecondary },
-  scopeTextActive: { color: theme.color.textInverse },
+  scopeTextActive: { color: theme.color.textPrimary },
   search: {
     margin: theme.space.lg,
     marginBottom: theme.space.sm,
