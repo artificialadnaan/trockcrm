@@ -7,7 +7,10 @@ import { isRenderableSignatureDataUrl, typedSignatureFallback } from "@trock-crm
 import {
   buildCorrectiveActionLookup,
   correctiveActionStatusBadge,
+  isRejectionCommentValid,
   ScorecardDetailView,
+  shouldShowApprovalControls,
+  shouldShowApproveAll,
 } from "./deal-scorecards-tab";
 
 function flush() {
@@ -301,5 +304,36 @@ describe("ScorecardDetailView signature decode failure", () => {
     // reach the DOM as a text node, and the element must carry an error handler to fall back.
     expect(html).toContain('alt="Superintendent signature"');
     expect(stripTags(html)).not.toContain("data:image/png;base64");
+  });
+});
+
+describe("approval controls", () => {
+  const item = (status: string) => ({ status }) as { status: string };
+
+  it("shows the controls only for an approver, and only on items awaiting approval", () => {
+    // The control is UX; the route's 403 is the guarantee. But a button that always 403s trains people to
+    // ignore errors, and one on an already-approved item invites a no-op that reads as a bug.
+    expect(shouldShowApprovalControls(item("submitted"), true)).toBe(true);
+    expect(shouldShowApprovalControls(item("submitted"), false)).toBe(false);
+    expect(shouldShowApprovalControls(item("approved"), true)).toBe(false);
+    expect(shouldShowApprovalControls(item("rejected"), true)).toBe(false);
+    // `open` means the responder has not answered yet — there is nothing to approve.
+    expect(shouldShowApprovalControls(item("open"), true)).toBe(false);
+  });
+
+  it("offers Approve all only when MORE THAN ONE item is waiting", () => {
+    // With a single item the per-item button already does it; a second control would just be noise.
+    expect(shouldShowApproveAll([item("submitted"), item("submitted")], true)).toBe(true);
+    expect(shouldShowApproveAll([item("submitted"), item("approved")], true)).toBe(false);
+    expect(shouldShowApproveAll([item("submitted"), item("submitted")], false)).toBe(false);
+    expect(shouldShowApproveAll([], true)).toBe(false);
+  });
+
+  it("refuses an empty rejection comment before it reaches the server", () => {
+    // Telling the responder what to fix IS the rejection. A blank one wastes a round trip on both sides and
+    // the server rejects it anyway — this just fails faster and says why.
+    expect(isRejectionCommentValid("   ")).toBe(false);
+    expect(isRejectionCommentValid("")).toBe(false);
+    expect(isRejectionCommentValid("Re-torque and log the values.")).toBe(true);
   });
 });

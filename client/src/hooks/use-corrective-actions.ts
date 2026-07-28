@@ -263,3 +263,41 @@ export function useCorrectiveActions(scorecardId: string | undefined, token?: st
 
   return { items, loading, error, errorStatus, refetch };
 }
+
+/** The approve/reject verbs. These live on the DEAL router (session-only) — an approver always has a CRM
+ *  session, and deliberately no token path exists: a token is a higher-privilege credential than a
+ *  responder's, and one that made approving frictionless while rejection still needed typed comments would
+ *  bias the gate toward rubber-stamping. */
+export interface ApprovalOutcomeView {
+  changedItemIds: string[];
+  cardStatus: string;
+  closed: boolean;
+  reopened: boolean;
+}
+
+/** Approve specific items, or every item awaiting approval when `itemIds` is omitted (approve-all). */
+export async function approveCorrectiveActions(
+  dealId: string,
+  scorecardId: string,
+  itemIds?: string[],
+): Promise<ApprovalOutcomeView> {
+  const res = await api<{ outcome: ApprovalOutcomeView }>(
+    `/deals/${dealId}/scorecards/${scorecardId}/corrective-actions/approve`,
+    { method: "POST", json: itemIds ? { itemIds } : {} },
+  );
+  return res.outcome;
+}
+
+/** Send ONE item back. The comment is required — telling the responder what to fix IS the rejection. */
+export async function rejectCorrectiveAction(
+  dealId: string,
+  scorecardId: string,
+  itemId: string,
+  comment: string,
+): Promise<ApprovalOutcomeView> {
+  const res = await api<{ outcome: ApprovalOutcomeView }>(
+    `/deals/${dealId}/scorecards/${scorecardId}/corrective-actions/${itemId}/reject`,
+    { method: "POST", json: { comment } },
+  );
+  return res.outcome;
+}

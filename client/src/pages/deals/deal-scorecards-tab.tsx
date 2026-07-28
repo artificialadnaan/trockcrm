@@ -18,6 +18,7 @@ import {
   typedSignatureFallback,
 } from "@trock-crm/shared/types";
 import { isApiError } from "@/lib/api";
+import { approveCorrectiveActions, rejectCorrectiveAction } from "@/hooks/use-corrective-actions";
 import { useDealScorecards, fetchDealScorecardDetail, downloadDealScorecardPdf } from "@/hooks/use-deal-scorecards";
 
 const RATING_BADGE: Record<ScorecardRating, string> = {
@@ -295,7 +296,16 @@ function ScorecardRow({ dealId, summary }: { dealId: string; summary: FieldScore
           ) : isLeadership ? (
             <LeadershipDetailView detail={detail} />
           ) : (
-            <ScorecardDetailView detail={detail} />
+            <ScorecardDetailView
+              detail={detail}
+              dealId={dealId}
+              // Re-read after an approval so the badges, the thread and the card status all move together.
+              // The server is the source of truth for every one of them; optimistically patching the local
+              // copy would risk showing a state the server did not actually reach.
+              onApprovalChange={() => {
+                void fetchDealScorecardDetail(dealId, summary.id).then(setDetail).catch(() => {});
+              }}
+            />
           )}
         </div>
       )}
@@ -410,7 +420,37 @@ export function LeadershipDetailView({ detail }: { detail: FieldScorecardDetail 
   );
 }
 
-export function ScorecardDetailView({ detail }: { detail: FieldScorecardDetail }) {
+export function ScorecardDetailView({
+  detail,
+  dealId,
+  onApprovalChange,
+}: {
+  detail: FieldScorecardDetail;
+  dealId?: string;
+  onApprovalChange?: () => void;
+}) {
+  // The server decides; this only chooses whether to RENDER the controls.
+  const canApprove = detail.canApproveCorrectiveActions === true;
+  const approve = dealId
+    ? async (itemId: string) => {
+        await approveCorrectiveActions(dealId, detail.id, [itemId]);
+        onApprovalChange?.();
+      }
+    : undefined;
+  const reject = dealId
+    ? async (itemId: string, comment: string) => {
+        await rejectCorrectiveAction(dealId, detail.id, itemId, comment);
+        onApprovalChange?.();
+      }
+    : undefined;
+  const approveAll = dealId
+    ? async () => {
+        // No itemIds — the server approves everything currently awaiting approval, in one transaction, so a
+        // sibling answered between render and click cannot be silently skipped or wrongly included.
+        await approveCorrectiveActions(dealId, detail.id);
+        onApprovalChange?.();
+      }
+    : undefined;
   const isV2 = detail.formVersion === 2;
   const sectionTitle = isV2 ? V2_SECTION_TITLE : SECTION_TITLE;
   const deficiencyLabel = isV2 ? V2_DEFICIENCY_LABEL : DEFICIENCY_LABEL;
@@ -444,6 +484,18 @@ export function ScorecardDetailView({ detail }: { detail: FieldScorecardDetail }
         </div>
       </div>
 
+      {approveAll && shouldShowApproveAll(correctiveActions ?? [], canApprove) && (
+        <div className="flex justify-end">
+          <button
+            type="button"
+            onClick={() => void approveAll()}
+            className="rounded-md bg-green-700 px-3 py-1 text-xs font-medium text-white"
+          >
+            Approve all
+          </button>
+        </div>
+      )}
+
       {hasCorrectiveActions && totalCount > 0 && (
         <div className="flex items-center justify-between">
           <h4 className="text-xs font-semibold uppercase tracking-wide text-gray-500">Corrective Actions</h4>
@@ -463,7 +515,14 @@ export function ScorecardDetailView({ detail }: { detail: FieldScorecardDetail }
                 <li key={key}>
                   {deficiencyLabel.get(key) ?? key}
                   {detail.criticalDeficiencyNotes?.[key] ? <span className="ml-1 text-gray-500">— {detail.criticalDeficiencyNotes[key]}</span> : null}
-                  {ca && <CorrectiveActionResponse item={ca} />}
+                  {ca && (
+                    <CorrectiveActionResponse
+                      item={ca}
+                      canApprove={canApprove}
+                      onApprove={approve}
+                      onReject={reject}
+                    />
+                  )}
                 </li>
               );
             })}
@@ -487,7 +546,14 @@ export function ScorecardDetailView({ detail }: { detail: FieldScorecardDetail }
               return (
                 <li key={i}>
                   {a}
-                  {ca && <CorrectiveActionResponse item={ca} />}
+                  {ca && (
+                    <CorrectiveActionResponse
+                      item={ca}
+                      canApprove={canApprove}
+                      onApprove={approve}
+                      onReject={reject}
+                    />
+                  )}
                 </li>
               );
             })}
@@ -582,6 +648,27 @@ function SignatureBlock({ label, value }: { label: string; value: string | null 
 // critical deficiency) — an open/resolved pill, then responder + date + comment + response photos (spec §9).
 // A resolved item reads as the before/after; a still-open item shows an "Awaiting response" hint. Rendered
 // under each original list item by ScorecardDetailView, so the flagged label is never duplicated.
+/**
+ * Whether to render Approve / Reject for one item.
+ *
+ * Only for an authorized approver, and only while the item is actually waiting on them. A control that
+ * always 403s trains people to ignore errors; one on an already-settled item invites a no-op that reads as
+ * a bug. This is UX only — the route's allowlist check is the guarantee.
+ */
+export function shouldShowApprovalControls(item: { status: string }, canApprove: boolean): boolean {
+  return canApprove && item.status === "submitted";
+}
+
+/** Approve-all earns its place only with more than one item waiting; otherwise it duplicates the per-item button. */
+export function shouldShowApproveAll(items: Array<{ status: string }>, canApprove: boolean): boolean {
+  return canApprove && items.filter((i) => i.status === "submitted").length > 1;
+}
+
+/** Telling the responder what to fix IS the rejection, so an empty comment is refused before the round trip. */
+export function isRejectionCommentValid(comment: string): boolean {
+  return comment.trim().length > 0;
+}
+
 /** Response photos as a thumbnail grid. Shared by the thread entries and the pre-thread fallback. */
 function CorrectiveActionPhotoGrid({ photos }: { photos: CorrectiveActionItemView["photos"] }) {
   if (photos.length === 0) return null;
@@ -609,7 +696,107 @@ function CorrectiveActionPhotoGrid({ photos }: { photos: CorrectiveActionItemVie
   );
 }
 
-export function CorrectiveActionResponse({ item }: { item: CorrectiveActionItemView }) {
+/**
+ * Approve / Reject for one item. Rendered only when shouldShowApprovalControls says so; the route's
+ * allowlist check remains the actual gate.
+ */
+function ApprovalControls({
+  item,
+  onApprove,
+  onReject,
+}: {
+  item: CorrectiveActionItemView;
+  onApprove: (itemId: string) => Promise<void>;
+  onReject: (itemId: string, comment: string) => Promise<void>;
+}) {
+  const [rejecting, setRejecting] = useState(false);
+  const [comment, setComment] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const run = async (action: () => Promise<void>) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await action();
+    } catch (err) {
+      setError(isApiError(err) ? err.message : "Something went wrong. Please try again.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (rejecting) {
+    return (
+      <div className="mt-2 rounded-md border border-red-200 bg-red-50 p-2">
+        <label className="block text-xs font-medium text-gray-700" htmlFor={`reject-${item.id}`}>
+          What still has to be fixed?
+        </label>
+        <textarea
+          id={`reject-${item.id}`}
+          value={comment}
+          onChange={(e) => setComment(e.target.value)}
+          rows={3}
+          className="mt-1 w-full rounded-md border border-gray-300 p-2 text-sm"
+          placeholder="The responder sees this, so say what is missing."
+        />
+        {error && <p className="mt-1 text-xs text-red-700">{error}</p>}
+        <div className="mt-2 flex gap-2">
+          <button
+            type="button"
+            disabled={busy || !isRejectionCommentValid(comment)}
+            onClick={() => run(async () => { await onReject(item.id, comment.trim()); })}
+            className="rounded-md bg-red-600 px-3 py-1 text-xs font-medium text-white disabled:opacity-50"
+          >
+            {busy ? "Sending back…" : "Send back"}
+          </button>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => { setRejecting(false); setComment(""); setError(null); }}
+            className="rounded-md border border-gray-300 px-3 py-1 text-xs font-medium text-gray-700"
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-2 flex items-center gap-2">
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => run(async () => { await onApprove(item.id); })}
+        className="rounded-md bg-green-700 px-3 py-1 text-xs font-medium text-white disabled:opacity-50"
+      >
+        {busy ? "Approving…" : "Approve"}
+      </button>
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => setRejecting(true)}
+        className="rounded-md border border-red-300 px-3 py-1 text-xs font-medium text-red-700"
+      >
+        Reject
+      </button>
+      {error && <span className="text-xs text-red-700">{error}</span>}
+    </div>
+  );
+}
+
+export function CorrectiveActionResponse({
+  item,
+  canApprove = false,
+  onApprove,
+  onReject,
+}: {
+  item: CorrectiveActionItemView;
+  canApprove?: boolean;
+  onApprove?: (itemId: string) => Promise<void>;
+  onReject?: (itemId: string, comment: string) => Promise<void>;
+}) {
   const badge = ITEM_STATUS_BADGE[item.status] ?? ITEM_STATUS_BADGE.open;
   const events = item.events ?? [];
   // No thread but an answered item: a response filed before the event table existed, on a card the
@@ -663,6 +850,10 @@ export function CorrectiveActionResponse({ item }: { item: CorrectiveActionItemV
 
       {events.length === 0 && !showsFallbackResponse && (
         <p className="mt-1 text-xs italic text-gray-400">Awaiting corrective-action response.</p>
+      )}
+
+      {onApprove && onReject && shouldShowApprovalControls(item, canApprove) && (
+        <ApprovalControls item={item} onApprove={onApprove} onReject={onReject} />
       )}
     </div>
   );
