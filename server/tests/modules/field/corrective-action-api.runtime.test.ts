@@ -921,4 +921,5 @@ describe("submitCorrectiveActionResponse", () => {
     expect(submissions[0].photos.map((p) => p.caption)).toEqual(["attempt one"]);
     expect(submissions[1].photos.map((p) => p.caption)).toEqual(["attempt two"]);
   });
+
 });

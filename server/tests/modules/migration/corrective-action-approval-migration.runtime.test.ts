@@ -104,4 +104,37 @@ describe("migration 0202 — corrective-action approval (runtime, PGlite)", () =
     expect(await statuses(pg, CLOSED_CARD)).toEqual(["approved"]);
     expect(await statuses(pg, OPEN_CARD)).toEqual(["submitted", "open"]);
   });
+
+  it("REGRESSION: an event SURVIVES its item being removed by an edit", async () => {
+    // The table is the append-only record of what happened. ON DELETE CASCADE would erase the approver's
+    // rejection and the responder's answer when an edit drops the flagged item — exactly the history the PDF
+    // and the CRM exist to show. SET NULL detaches it instead, and scorecard_id (denormalized for this
+    // reason) keeps it readable as part of the card's record.
+    pg = await setup();
+    const [item] = (
+      await pg.query<{ id: string }>(
+        `SELECT id FROM ${SCHEMA}.scorecard_corrective_actions WHERE scorecard_id = $1`,
+        [CLOSED_CARD],
+      )
+    ).rows;
+
+    await pg.query(
+      `INSERT INTO ${SCHEMA}.scorecard_corrective_action_events
+         (corrective_action_id, scorecard_id, event_type, actor_name, comment)
+       VALUES ($1, $2, 'rejected', 'James Helms', 'Send it back.')`,
+      [item.id, CLOSED_CARD],
+    );
+
+    await pg.query(`DELETE FROM ${SCHEMA}.scorecard_corrective_actions WHERE id = $1`, [item.id]);
+
+    const rows = await pg.query<{ corrective_action_id: string | null; comment: string; scorecard_id: string }>(
+      `SELECT corrective_action_id, comment, scorecard_id
+         FROM ${SCHEMA}.scorecard_corrective_action_events WHERE event_type = 'rejected'`,
+    );
+    // Still there, detached, and still attributable to its card.
+    expect(rows.rows).toHaveLength(1);
+    expect(rows.rows[0].corrective_action_id).toBeNull();
+    expect(rows.rows[0].comment).toBe("Send it back.");
+    expect(rows.rows[0].scorecard_id).toBe(CLOSED_CARD);
+  });
 });

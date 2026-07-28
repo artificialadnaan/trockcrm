@@ -102,7 +102,11 @@ export default function CorrectiveActionScreen() {
   const isLoadError = itemsQuery.isError && !isMissing;
 
   const openCount = items.filter(isOpen).length;
-  const allResolved = items.length > 0 && openCount === 0;
+  // NOTHING LEFT FOR THE RESPONDER is not the same as APPROVED. With the last item submitted the card sits
+  // at corrective_action_submitted and an approver can still send it back; announcing "complete" there is a
+  // promise this screen cannot keep.
+  const nothingOutstanding = items.length > 0 && openCount === 0;
+  const allApproved = nothingOutstanding && items.every((i) => i.status === "approved");
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
@@ -138,14 +142,21 @@ export default function CorrectiveActionScreen() {
                 {scorecard?.projectName ?? scorecard?.projectNumber ?? "Project"}
               </Text>
               <Text style={styles.meta}>
-                {allResolved
-                  ? "All items resolved."
-                  : `${openCount} of ${items.length} item${items.length === 1 ? "" : "s"} still open. Document the corrective action for each.`}
+                {allApproved
+                  ? "All items approved."
+                  : nothingOutstanding
+                    ? "Submitted — awaiting approval."
+                    : `${openCount} of ${items.length} item${items.length === 1 ? "" : "s"} still open. Document the corrective action for each.`}
               </Text>
             </View>
 
-            {allResolved ? (
-              <Banner tone="success" message="Corrective action complete — every flagged item has a documented response." />
+            {allApproved ? (
+              <Banner tone="success" message="Corrective action approved — every flagged item was accepted." />
+            ) : nothingOutstanding ? (
+              <Banner
+                tone="info"
+                message="Your responses are with the approver. If anything needs more work you'll get another notification with the reason."
+              />
             ) : null}
 
             {items.map((item) => (
@@ -255,7 +266,10 @@ function CorrectiveActionItemCard({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  if (item.status !== "open") {
+  // Use the SAME predicate the parent counts with. This gate was independently hard-coded to `open`, so a
+  // rejected item counted as outstanding at the top of the screen while the card itself rendered read-only —
+  // the responder was told they had work to do and given no controls to do it with.
+  if (!isOpen(item)) {
     return <ResolvedItemCard item={item} />;
   }
 

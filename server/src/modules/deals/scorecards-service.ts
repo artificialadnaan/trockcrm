@@ -28,6 +28,7 @@ import {
   needsScorecardPdfRegeneration,
   type ScorecardPdfArtifactState,
 } from "../field/scorecard-pdf-artifact.js";
+import { getCorrectiveActionEventsByItem } from "../field/corrective-action-events.js";
 
 // Tenant-scoped (web CRM) reads of the Field Scorecards a rep submitted from T-Rock Cam. The DEAL ROUTE
 // already gates access (assertDealCollaboratorAccess) before these run, so — unlike the field module's
@@ -181,6 +182,8 @@ async function getScorecardCorrectiveActionThread(
     .select({
       id: fieldScorecardPhotos.id,
       correctiveActionId: fieldScorecardPhotos.correctiveActionId,
+      // Which ATTEMPT filed it, so the thread can show each round's own evidence rather than one merged pile.
+      correctiveActionEventId: fieldScorecardPhotos.correctiveActionEventId,
       fileId: fieldScorecardPhotos.fileId,
       caption: files.description,
     })
@@ -194,13 +197,36 @@ async function getScorecardCorrectiveActionThread(
     )
     .where(inArray(fieldScorecardPhotos.correctiveActionId, itemIds));
 
-  const photosByItem = new Map<string, { id: string; fileId: string; caption: string | null }[]>();
+  type PhotoRow = { id: string; fileId: string; caption: string | null };
+  const photosByItem = new Map<string, PhotoRow[]>();
+  const photosByEvent = new Map<string, PhotoRow[]>();
   for (const p of photoRows) {
     if (!p.correctiveActionId) continue;
+    const view: PhotoRow = { id: p.id, fileId: p.fileId, caption: p.caption ?? null };
     const list = photosByItem.get(p.correctiveActionId) ?? [];
-    list.push({ id: p.id, fileId: p.fileId, caption: p.caption ?? null });
+    list.push(view);
     photosByItem.set(p.correctiveActionId, list);
+    if (p.correctiveActionEventId) {
+      const perEvent = photosByEvent.get(p.correctiveActionEventId) ?? [];
+      perEvent.push(view);
+      photosByEvent.set(p.correctiveActionEventId, perEvent);
+    }
   }
+
+  // THE thread. This mapper is a second implementation of the same view as corrective-action-api.ts, and it
+  // silently lacked events entirely — so the approval UI rendered an empty thread on the CRM surface the
+  // whole feature exists for, while the responder API returned it correctly. A parity test now pins that the
+  // two readers agree; until they are merged, anything added to one has to be added here too.
+  const eventsByItem = await getCorrectiveActionEventsByItem(tenantDb, scorecardId);
+  const resolvePhotos = async (photos: PhotoRow[]) =>
+    Promise.all(
+      photos.map(async (p) => ({
+        id: p.id,
+        fileId: p.fileId,
+        url: resolvePhotoUrl ? await resolvePhotoUrl(p.fileId) : null,
+        caption: p.caption,
+      })),
+    );
 
   return Promise.all(
     rows.map(async (r) => ({
@@ -214,12 +240,16 @@ async function getScorecardCorrectiveActionThread(
       responderName: r.responderName ?? null,
       responderEmail: r.responderEmail ?? null,
       respondedAt: r.respondedAt ? r.respondedAt.toISOString() : null,
-      photos: await Promise.all(
-        (photosByItem.get(r.id) ?? []).map(async (p) => ({
-          id: p.id,
-          fileId: p.fileId,
-          url: resolvePhotoUrl ? await resolvePhotoUrl(p.fileId) : null,
-          caption: p.caption,
+      photos: await resolvePhotos(photosByItem.get(r.id) ?? []),
+      events: await Promise.all(
+        (eventsByItem.get(r.id) ?? []).map(async (event) => ({
+          id: event.id,
+          eventType: event.eventType,
+          actorName: event.actorName ?? event.actorEmail ?? null,
+          actorEmail: event.actorEmail,
+          comment: event.comment,
+          createdAt: event.createdAt,
+          photos: await resolvePhotos(photosByEvent.get(event.id) ?? []),
         })),
       ),
     })),

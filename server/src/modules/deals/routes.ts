@@ -2616,13 +2616,28 @@ router.post("/:id/scorecards/:scorecardId/corrective-actions/approve", async (re
     if (!req.officeSlug) throw new AppError(500, "Office context not available");
     // approveAndNotify, not approveCorrectiveActionItems: a final approval CLOSES the card, and oversight
     // must be told. Composed server-side so the route cannot do half of it silently.
+    const office = { id: req.user!.activeOfficeId, slug: req.officeSlug };
     const outcome = await approveAndNotify(req.tenantDb!, {
-      office: { id: req.user!.activeOfficeId, slug: req.officeSlug },
+      office,
       scorecardId: req.params.scorecardId,
       itemIds,
       actor,
     });
     await req.commitTransaction!();
+    // Refresh the artifact AFTER the commit, mirroring the responder route. An approval advances the card's
+    // generation, so the stored PDF is stale by definition — and the oversight worker only attaches one whose
+    // generation matches, so without this the "Approved" email silently loses its attachment unless someone
+    // happens to download the card during the delay. Only on a real change: an idempotent re-approve moved
+    // nothing, and re-rendering would re-download every evidence image for an unchanged generation.
+    if (outcome.changedItemIds.length > 0) {
+      void finalizeFieldScorecardArtifacts(office, req.user!.id, req.params.scorecardId).catch((err) => {
+        console.error("[CorrectiveActionApproval] Post-approval PDF refresh failed", {
+          scorecardId: req.params.scorecardId,
+          err,
+        });
+      });
+    }
+
     res.json({ outcome });
   } catch (err) {
     next(err);
@@ -2641,14 +2656,29 @@ router.post("/:id/scorecards/:scorecardId/corrective-actions/:itemId/reject", as
     if (!req.officeSlug) throw new AppError(500, "Office context not available");
     // rejectAndRestart, not rejectCorrectiveActionItem: the responders' tokens were deleted when they
     // submitted, so a rejection without a fresh cycle hands them a notice they cannot act on.
+    const office = { id: req.user!.activeOfficeId, slug: req.officeSlug };
     const outcome = await rejectAndRestart(req.tenantDb!, {
-      office: { id: req.user!.activeOfficeId, slug: req.officeSlug },
+      office,
       scorecardId: req.params.scorecardId,
       itemId: req.params.itemId,
       comment,
       actor,
     });
     await req.commitTransaction!();
+    // Refresh the artifact AFTER the commit, mirroring the responder route. An approval advances the card's
+    // generation, so the stored PDF is stale by definition — and the oversight worker only attaches one whose
+    // generation matches, so without this the "Approved" email silently loses its attachment unless someone
+    // happens to download the card during the delay. Only on a real change: an idempotent re-approve moved
+    // nothing, and re-rendering would re-download every evidence image for an unchanged generation.
+    if (outcome.changedItemIds.length > 0) {
+      void finalizeFieldScorecardArtifacts(office, req.user!.id, req.params.scorecardId).catch((err) => {
+        console.error("[CorrectiveActionApproval] Post-approval PDF refresh failed", {
+          scorecardId: req.params.scorecardId,
+          err,
+        });
+      });
+    }
+
     res.json({ outcome });
   } catch (err) {
     next(err);

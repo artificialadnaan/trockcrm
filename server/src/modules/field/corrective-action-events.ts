@@ -1,4 +1,4 @@
-import { asc, eq, inArray } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull } from "drizzle-orm";
 import { AppError } from "../../middleware/error-handler.js";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
@@ -124,6 +124,34 @@ function groupByItem(
  * ONE query for the whole card rather than one per item — the PDF renderer and the deal-tab read both need
  * the full thread, and a per-item fetch would be N+1 on a surface that already loads photos per item.
  */
+/**
+ * Events whose item an edit removed. They keep the card's history honest — a rejection and the answer to it
+ * are things that happened, and the item disappearing does not unhappen them.
+ *
+ * Returned separately rather than dropped: the per-item readers have nothing to thread them under, but the
+ * scorecard-level record can still show them. Ordered by the same monotonic sequence.
+ */
+export async function getDetachedCorrectiveActionEvents(
+  db: TenantDb,
+  scorecardId: string,
+): Promise<CorrectiveActionEventRow[]> {
+  const rows = await db
+    .select(eventColumns())
+    .from(scorecardCorrectiveActionEvents)
+    .where(
+      and(
+        eq(scorecardCorrectiveActionEvents.scorecardId, scorecardId),
+        isNull(scorecardCorrectiveActionEvents.correctiveActionId),
+      ),
+    )
+    .orderBy(asc(scorecardCorrectiveActionEvents.seq));
+
+  return rows.map((row) => ({
+    ...row,
+    createdAt: row.createdAt instanceof Date ? row.createdAt.toISOString() : (row.createdAt ?? null),
+  }));
+}
+
 export async function getCorrectiveActionEventsByItem(
   db: TenantDb,
   scorecardId: string,
