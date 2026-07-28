@@ -78,7 +78,7 @@ export function EntityActivityTab({
   emptyLabel,
   showRecordings = false,
   closeTargetDate = null,
-  slaFollowsBidDueDate = false,
+  slaFollowsBidDueDate,
   onDealChanged,
   canMoveCloseDate = false,
   officeId = null,

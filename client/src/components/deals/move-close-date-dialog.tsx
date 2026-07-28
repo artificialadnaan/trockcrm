@@ -33,6 +33,13 @@ interface MoveCloseDateDialogProps {
    * a pause it cannot deliver there — moving the close date is still a real forecast edit, just not an
    * SLA postponement.
    */
+  /**
+   * Tri-state. `false` = the close target IS the SLA postponement (every stage but estimating). `true` =
+   * the deal is in estimating WITH a usable bid due date, so the close target is forecast-only. `undefined`
+   * = the caller cannot classify the deal (e.g. the Monday Showcase evidence drawer, whose records carry
+   * no stage or bid date) — the copy then claims NOTHING about the SLA rather than guessing wrong
+   * (Codex P2). Callers that can classify should always pass an explicit boolean.
+   */
   slaFollowsBidDueDate?: boolean;
 }
 
@@ -49,7 +56,9 @@ function formatHuman(ymd: string): string {
  * reason is logged as a note on the deal's activity feed. The date write is load-bearing (it drives the
  * SLA), so it runs first; the note is a best-effort audit trail layered on top.
  */
-export function MoveCloseDateDialog({ open, onOpenChange, dealId, currentDate, officeId, onSaved, slaFollowsBidDueDate = false }: MoveCloseDateDialogProps) {
+export function MoveCloseDateDialog({ open, onOpenChange, dealId, currentDate, officeId, onSaved, slaFollowsBidDueDate }: MoveCloseDateDialogProps) {
+  // Only claim an SLA pause when we KNOW the close target drives it.
+  const closeDatePausesSla = slaFollowsBidDueDate === false;
   const [date, setDate] = useState(currentDate ?? "");
   const [reason, setReason] = useState("");
   const [saving, setSaving] = useState(false);
@@ -74,7 +83,11 @@ export function MoveCloseDateDialog({ open, onOpenChange, dealId, currentDate, o
   // SLA postponement everywhere EXCEPT estimating-with-a-bid-date, where the same date is forecast-only —
   // the label and the logged note branch on slaFollowsBidDueDate rather than hiding the action, since
   // clearing a stale forecast date is still legitimate there.
-  const hasActivePostponement = currentDate != null && currentDate >= businessToday;
+  // A today-or-future target is the removable postponement. When the SLA follows the BID due date the
+  // close target is forecast-only, so a STALE PAST one must still be clearable — handleRemove supports it
+  // and otherwise the rep can only overwrite it with another future date (Codex P2).
+  const hasActivePostponement =
+    currentDate != null && (slaFollowsBidDueDate === true || currentDate >= businessToday);
 
   const handleSave = async () => {
     if (!canSave) return;
@@ -129,9 +142,9 @@ export function MoveCloseDateDialog({ open, onOpenChange, dealId, currentDate, o
       setError(
         e instanceof Error
           ? e.message
-          : slaFollowsBidDueDate
-            ? "Couldn't remove the close date. Please try again."
-            : "Couldn't remove the postponement. Please try again."
+          : closeDatePausesSla
+            ? "Couldn't remove the postponement. Please try again."
+            : "Couldn't remove the close date. Please try again."
       );
       setSaving(false);
       return;
@@ -144,9 +157,11 @@ export function MoveCloseDateDialog({ open, onOpenChange, dealId, currentDate, o
         // at-risk engine checks the hold before close-target suppression, so clearing the target does
         // NOT resume the normal stage-age SLA. The note records the fact; the SLA follows the engine.
         subject: "Close target removed",
-        body: slaFollowsBidDueDate
-          ? "Close target removed — forecast date cleared. The estimating SLA continues to follow the bid due date."
-          : "Close target removed — the deal's close-date postponement was cleared.",
+        body: closeDatePausesSla
+          ? "Close target removed — the deal's close-date postponement was cleared."
+          : slaFollowsBidDueDate === true
+            ? "Close target removed — forecast date cleared. The estimating SLA continues to follow the bid due date."
+            : "Close target removed.",
         dealId,
       });
     } catch {
@@ -172,9 +187,11 @@ export function MoveCloseDateDialog({ open, onOpenChange, dealId, currentDate, o
         <DialogHeader>
           <DialogTitle>Move close date</DialogTitle>
           <DialogDescription>
-            {slaFollowsBidDueDate
-              ? "Pick a new close target and add a short note on why. Your note is logged to the activity feed. In the estimating stage the SLA follows the BID due date, so moving this date updates the forecast but does not pause the SLA."
-              : "Pick a new close target and add a short note on why. The SLA pauses until that date, and your note is logged to the activity feed."}
+            {closeDatePausesSla
+              ? "Pick a new close target and add a short note on why. The SLA pauses until that date, and your note is logged to the activity feed."
+              : slaFollowsBidDueDate === true
+                ? "Pick a new close target and add a short note on why. Your note is logged to the activity feed. In the estimating stage the SLA follows the BID due date, so moving this date updates the forecast but does not pause the SLA."
+                : "Pick a new close target and add a short note on why. Your note is logged to the activity feed."}
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-4 py-1">
@@ -189,9 +206,9 @@ export function MoveCloseDateDialog({ open, onOpenChange, dealId, currentDate, o
             />
             {isPastDate ? (
               <p className="text-xs text-amber-600">
-                {slaFollowsBidDueDate
-                  ? "Pick today or a future date."
-                  : "Pick today or a future date — a past date won't postpone the SLA."}
+                {closeDatePausesSla
+                  ? "Pick today or a future date — a past date won't postpone the SLA."
+                  : "Pick today or a future date."}
               </p>
             ) : null}
           </div>
@@ -215,7 +232,7 @@ export function MoveCloseDateDialog({ open, onOpenChange, dealId, currentDate, o
               disabled={saving}
               className="mr-auto text-red-600 hover:bg-red-50 hover:text-red-700"
             >
-              {slaFollowsBidDueDate ? "Remove close date" : "Remove postponement"}
+              {closeDatePausesSla ? "Remove postponement" : "Remove close date"}
             </Button>
           ) : null}
           <Button variant="outline" onClick={() => onOpenChange(false)} disabled={saving}>
