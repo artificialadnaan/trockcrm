@@ -240,6 +240,24 @@ export default function ProspectScreen() {
             }
           : null,
       );
+      /**
+       * A successful lookup retires the FALLBACK.
+       *
+       * A rep who hit denied/unavailable/failed, picked a company or a person, then retried and got
+       * candidates would keep that fallback as the live target — and the picker that shows it is not
+       * rendered once matches exist, so the visit filed against something invisible. Whatever they
+       * choose from the candidates becomes the target instead.
+       */
+      if (found.length > 0) {
+        setCompany(null);
+        setCompanyResults(null);
+        setCompanyQuery("");
+        companyQueryRef.current = "";
+        setContact(null);
+        setContactResults(null);
+        setContactQuery("");
+        contactQueryRef.current = "";
+      }
       setMatches(found);
     },
     onError: (err) => {
@@ -658,9 +676,13 @@ export default function ProspectScreen() {
         if (dropRetained) createdContactId.current = undefined;
         if (plan.action === "reuse") contactId = plan.contactId;
 
-        // Forcing overrides the "skip" a bare waiver would produce: the rep asked for this person to be
-      // added, not for the person to be dropped.
-      if (plan.action === "create" || contactForceCreate.current) {
+        /**
+       * Forcing overrides the SKIP a bare waiver would produce — the rep asked for this person to be
+       * added, not dropped. It must never override a REUSE: if the contact was already committed and
+       * only the activity write failed, retrying would create a second copy of the person the retry
+       * exists to preserve, and with dedup bypassed there is nothing to stop it.
+       */
+      if (plan.action === "create" || (contactForceCreate.current && plan.action === "skip")) {
           /**
            * The PERSON is optional; the VISIT is not.
            *
@@ -904,6 +926,16 @@ export default function ProspectScreen() {
         {/* ---- 1. WHERE. The only mandatory part, because the server requires a target. ---- */}
         <Text style={styles.stepLabel}>WHERE</Text>
 
+        {/* OUTSIDE the property branch. This lived in the no-property half, and the one path that
+            sets it — creating a building after an uncorroborated hit — calls setProperty immediately
+            afterwards, so the warning unmounted before it could be read. Sixth instance of this
+            screen's hidden-container shape, and one I introduced while fixing the fifth. */}
+        {rematchNotice ? (
+          <Text testID="prospect-rematch-notice" style={styles.warn}>
+            {rematchNotice}
+          </Text>
+        ) : null}
+
         {property ? (
           <View style={styles.chosenCard}>
             <Text style={styles.chosenName}>{property.name}</Text>
@@ -1021,12 +1053,6 @@ export default function ProspectScreen() {
               <Text testID="prospect-coarse" style={styles.warn}>
                 Your position is only accurate to about {Math.round(coarseAccuracy)} m —
                 double-check the building before you confirm it.
-              </Text>
-            ) : null}
-
-            {rematchNotice ? (
-              <Text testID="prospect-rematch-notice" style={styles.warn}>
-                {rematchNotice}
               </Text>
             ) : null}
 
@@ -1400,8 +1426,6 @@ export default function ProspectScreen() {
                             setContactQuery(next);
                             contactQueryRef.current = next;
                             setContactSearchFailed(false);
-                setRematchNotice(null);
-                setCorrectingAddress(false);
                             // Stale rows are wrong the moment the text changes, and they stay tappable
                             // through the debounce otherwise.
                             setContactResults(null);
@@ -1883,6 +1907,8 @@ export default function ProspectScreen() {
                 contactQueryRef.current = "";
                 setContactResults(null);
                 setContactSearchFailed(false);
+                setRematchNotice(null);
+                setCorrectingAddress(false);
                 /* Everything the LAST capture put on screen, including the paths added late in review.
                    Without these, "Log another here" opened a fresh draft still showing the previous
                    one's company error, property error, duplicate prompt and rematch notice — the same
