@@ -2,7 +2,14 @@ import React from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Stack } from "expo-router";
 import { StatusBar } from "expo-status-bar";
-import { useFonts, Inter_400Regular, Inter_600SemiBold, Inter_700Bold } from "@expo-google-fonts/inter";
+import {
+  useFonts,
+  Inter_400Regular,
+  Inter_500Medium,
+  Inter_600SemiBold,
+  Inter_700Bold,
+  Inter_800ExtraBold,
+} from "@expo-google-fonts/inter";
 import { AuthProvider } from "../src/auth/AuthContext";
 
 // Generous staleTime because this app is used on job sites: a screen opened on arrival should still
@@ -19,7 +26,15 @@ const queryClient = new QueryClient({
 });
 
 export default function RootLayout() {
-  const [fontsLoaded, fontError] = useFonts({ Inter_400Regular, Inter_600SemiBold, Inter_700Bold });
+  // ExtraBold carries the display sizes (screen titles, column money) and Medium the denser metadata —
+  // the old three weights left 12-15px semibold doing every job at once, which is why nothing led.
+  const [fontsLoaded, fontError] = useFonts({
+    Inter_400Regular,
+    Inter_500Medium,
+    Inter_600SemiBold,
+    Inter_700Bold,
+    Inter_800ExtraBold,
+  });
 
   // Hold the first paint until fonts resolve, so text doesn't reflow from the system font to Inter.
   // But `useFonts` also reports FAILURE, and gating on `loaded` alone would leave the app on a blank
@@ -30,7 +45,9 @@ export default function RootLayout() {
   return (
     <QueryClientProvider client={queryClient}>
       <AuthProvider>
-        <StatusBar style="dark" />
+        {/* LIGHT glyphs — the app is dark now. `dark` painted black status-bar text on a black
+            header, which hides the clock and battery rather than merely looking wrong. */}
+        <StatusBar style="light" />
         <Stack screenOptions={{ headerShown: false }} />
       </AuthProvider>
     </QueryClientProvider>

@@ -26,6 +26,21 @@ function isArchived(deal: { isActive?: boolean | null }): boolean {
   return deal.isActive === false;
 }
 
+/**
+ * The card's status rail — the 3px stripe down its leading edge.
+ *
+ * At-risk outranks on-hold because it is the one that needs action today. This is the only place status
+ * is encoded at CARD scale rather than chip scale: scanning a column of twelve, the rail is legible in
+ * peripheral vision where an 11px chip is not, and it survives being read at arm's length in sunlight.
+ * It also encodes status as position + colour, so it does not depend on hue alone.
+ */
+function railColor(deal: DealListItem, archived: boolean): string {
+  if (archived) return theme.color.borderSubtle;
+  if (showsAtRisk(deal)) return theme.color.brandRed;
+  if (deal.effectiveOnHold ?? deal.onHold) return theme.color.amber;
+  return theme.color.borderStrong;
+}
+
 export function BoardCard({
   deal,
   canMove,
@@ -39,6 +54,8 @@ export function BoardCard({
   testIDPrefix?: string;
 }) {
   const archived = isArchived(deal);
+  const atRisk = showsAtRisk(deal);
+  const onHold = Boolean(deal.effectiveOnHold ?? deal.onHold);
 
   return (
     <Pressable
@@ -46,29 +63,55 @@ export function BoardCard({
       onPress={archived ? undefined : onPress}
       disabled={archived}
       accessibilityRole="button"
-      accessibilityLabel={[deal.name ?? "Untitled deal", archived ? "Archived, can't be opened" : null]
+      /* The spoken label REPLACES the text assembled from the children, so anything omitted here becomes
+         unreachable rather than merely unannounced — the company and the amount are why one card is
+         distinguishable from the next. */
+      accessibilityLabel={[
+        deal.name ?? "Untitled deal",
+        deal.companyName,
+        displayAmount(deal),
+        onHold ? "On hold" : null,
+        atRisk ? "At risk" : null,
+        archived ? "Archived, can't be opened" : null,
+      ]
         .filter(Boolean)
         .join(", ")}
       accessibilityState={{ disabled: archived }}
-      style={[styles.card, archived && styles.cardArchived]}
+      style={({ pressed }) => [
+        styles.card,
+        pressed && !archived && styles.cardPressed,
+        archived && styles.cardArchived,
+      ]}
     >
-      <View style={styles.cardHead}>
-        <Text style={styles.cardName} numberOfLines={1}>
-          {deal.name ?? "Untitled deal"}
-        </Text>
-        <Text style={styles.cardAmount}>{displayAmount(deal)}</Text>
-      </View>
-      {deal.companyName ? (
-        <Text style={styles.cardCompany} numberOfLines={1}>
-          {deal.companyName}
-        </Text>
-      ) : null}
-      <View style={styles.cardBadges}>
-        {(deal.effectiveOnHold ?? deal.onHold) ? <Badge label="On hold" tone="amber" /> : null}
-        {showsAtRisk(deal) ? <Badge label="At risk" tone="red" /> : null}
-        {/* Marking the ones you CAN move is more useful than offering an action that 403s. */}
-        {canMove && !archived ? <Text style={styles.yours}>Yours</Text> : null}
-        {archived ? <Text style={styles.archived}>Archived</Text> : null}
+      <View style={[styles.rail, { backgroundColor: railColor(deal, archived) }]} />
+
+      <View style={styles.body}>
+        <View style={styles.cardHead}>
+          <Text style={styles.cardName} numberOfLines={2}>
+            {deal.name ?? "Untitled deal"}
+          </Text>
+          {/* The money is the second-loudest thing on the card, after the name. It was 14px semibold
+              sitting level with every other line, which is not how anyone reads a pipeline. */}
+          <Text style={styles.cardAmount} numberOfLines={1}>
+            {displayAmount(deal)}
+          </Text>
+        </View>
+
+        {deal.companyName ? (
+          <Text style={styles.cardCompany} numberOfLines={1}>
+            {deal.companyName.toUpperCase()}
+          </Text>
+        ) : null}
+
+        {onHold || atRisk || canMove || archived ? (
+          <View style={styles.cardBadges}>
+            {onHold ? <Badge label="On hold" tone="amber" /> : null}
+            {atRisk ? <Badge label="At risk" tone="red" /> : null}
+            {/* Marking the ones you CAN move is more useful than offering an action that 403s. */}
+            {canMove && !archived ? <Badge label="Yours" tone="green" /> : null}
+            {archived ? <Badge label="Archived" tone="neutral" /> : null}
+          </View>
+        ) : null}
       </View>
     </Pressable>
   );
@@ -76,25 +119,40 @@ export function BoardCard({
 
 const styles = StyleSheet.create({
   card: {
+    flexDirection: "row",
     backgroundColor: theme.color.surface,
     borderRadius: theme.radius.lg,
     borderWidth: 1,
     borderColor: theme.color.border,
-    padding: theme.space.lg,
-    gap: theme.space.xs,
+    // overflow hidden so the rail is clipped by the card's own radius rather than poking past the corner.
+    overflow: "hidden",
+    ...theme.elevation.card,
   },
-  cardHead: { flexDirection: "row", justifyContent: "space-between", gap: theme.space.sm },
-  cardName: { flex: 1, fontFamily: theme.font.bold, fontSize: 15, color: theme.color.inkNavy },
-  cardAmount: { fontFamily: theme.font.bold, fontSize: 14, color: theme.color.textPrimary },
-  cardCompany: { fontFamily: theme.font.semibold, fontSize: 13, color: theme.color.textSecondary },
+  // A real pressed state. Nothing acknowledged a touch before, so on a slow network a tap looked ignored
+  // and reps tapped again — which on the move screen is how a double-submit starts.
+  cardPressed: { backgroundColor: theme.color.surfaceRaised, borderColor: theme.color.borderStrong },
+  rail: { width: 3 },
+  body: { flex: 1, padding: theme.space.lg, gap: 6 },
+  cardHead: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "flex-start",
+    gap: theme.space.md,
+  },
+  cardName: { flex: 1, ...theme.type.title, color: theme.color.textPrimary },
+  cardAmount: {
+    ...theme.type.h2,
+    color: theme.color.textPrimary,
+    // Tabular figures so a column of amounts aligns digit-for-digit instead of shimmering as it scrolls.
+    fontVariant: ["tabular-nums"],
+  },
+  cardCompany: { ...theme.type.caption, color: theme.color.textMuted },
   cardBadges: {
     flexDirection: "row",
     alignItems: "center",
     flexWrap: "wrap",
     gap: theme.space.sm,
-    marginTop: theme.space.xs,
+    marginTop: 2,
   },
-  yours: { fontFamily: theme.font.semibold, fontSize: 12, color: theme.color.green },
-  cardArchived: { opacity: 0.6 },
-  archived: { fontFamily: theme.font.semibold, fontSize: 12, color: theme.color.textSecondary },
+  cardArchived: { opacity: 0.55 },
 });

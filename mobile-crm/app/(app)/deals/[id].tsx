@@ -479,7 +479,7 @@ const styles = StyleSheet.create({
   badgeRow: { flexDirection: "row", alignItems: "center", gap: theme.space.sm, marginTop: theme.space.xs },
   amount: { fontFamily: theme.font.bold, fontSize: 20, color: theme.color.textPrimary },
   badgeText: { fontFamily: theme.font.semibold, fontSize: 12 },
-  badgeTextAmber: { color: "#92400E" },
+  badgeTextAmber: { color: theme.color.amberText },
   badgeTextRed: { color: theme.color.brandRedDeep },
   moveBtn: {
     marginTop: theme.space.sm,
@@ -548,11 +548,11 @@ const styles = StyleSheet.create({
   staleBanner: {
     marginTop: theme.space.sm,
     borderRadius: theme.radius.md,
-    backgroundColor: "#FEF3C7",
+    backgroundColor: theme.color.amberSurface,
     paddingHorizontal: theme.space.md,
     paddingVertical: theme.space.sm,
   },
-  staleText: { fontFamily: theme.font.semibold, fontSize: 13, color: "#92400E" },
+  staleText: { fontFamily: theme.font.semibold, fontSize: 13, color: theme.color.amberText },
   saveNote: {
     backgroundColor: theme.color.brandRed,
     borderRadius: theme.radius.md,

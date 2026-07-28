@@ -53,7 +53,7 @@ export const formStyles = StyleSheet.create({
   buttonDisabled: { opacity: 0.5 },
   buttonText: { fontFamily: theme.font.bold, fontSize: 16, color: theme.color.textInverse },
   errorBox: {
-    backgroundColor: "#FEF2F2",
+    backgroundColor: theme.color.redSurface,
     borderColor: theme.color.brandRed,
     borderWidth: 1,
     borderRadius: theme.radius.md,

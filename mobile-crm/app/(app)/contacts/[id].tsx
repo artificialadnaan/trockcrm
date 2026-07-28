@@ -350,11 +350,11 @@ const styles = StyleSheet.create({
   staleBanner: {
     marginTop: theme.space.sm,
     borderRadius: theme.radius.md,
-    backgroundColor: "#FEF3C7",
+    backgroundColor: theme.color.amberSurface,
     paddingHorizontal: theme.space.md,
     paddingVertical: theme.space.sm,
   },
-  staleText: { fontFamily: theme.font.semibold, fontSize: 13, color: "#92400E" },
+  staleText: { fontFamily: theme.font.semibold, fontSize: 13, color: theme.color.amberText },
   retryText: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.brandRed },
   dealRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingVertical: theme.space.sm },
   dealName: { flex: 1, fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.textPrimary },
