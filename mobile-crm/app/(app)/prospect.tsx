@@ -582,6 +582,8 @@ export default function ProspectScreen() {
    * text. "Log another here" then wiped the edit without it ever having been sent.
    */
   const locked = save.isPending || saved;
+  /** Save is unavailable while the building is still being written, too — see the button below. */
+  const saveBlocked = !ready || save.isPending || createPropertyHere.isPending;
 
   /** Person details the save will discard, because a contact needs BOTH names to be created. */
   const personPartial = personDetailsWillBeDiscarded({
@@ -1414,13 +1416,21 @@ export default function ProspectScreen() {
           </View>
         ) : (
           <>
+            {/**
+              * Also blocked while the BUILDING is being created.
+              *
+              * `ready` is already true on the company the rep picked, so tapping Save during that
+              * request filed the visit against the company — and the property mutation's onSuccess then
+              * swapped the displayed target to the new building. The screen showed a property-backed
+              * visit that the property's own history would never contain.
+              */}
             <Pressable
               testID="prospect-save"
               onPress={() => save.mutate()}
-              disabled={!ready || save.isPending}
+              disabled={saveBlocked}
               accessibilityRole="button"
-              accessibilityState={{ disabled: !ready || save.isPending, busy: save.isPending }}
-              style={[styles.primaryBtn, (!ready || save.isPending) && styles.primaryBtnDisabled]}
+              accessibilityState={{ disabled: saveBlocked, busy: save.isPending }}
+              style={[styles.primaryBtn, saveBlocked && styles.primaryBtnDisabled]}
             >
               {save.isPending ? (
                 <ActivityIndicator color={theme.color.onBrand} />
@@ -1429,7 +1439,11 @@ export default function ProspectScreen() {
               )}
             </Pressable>
             {/* A disabled button with no explanation is the same defect as a dead one. */}
-            {blockedReason ? (
+            {createPropertyHere.isPending ? (
+              <Text testID="prospect-blocked" style={styles.help}>
+                Adding the building…
+              </Text>
+            ) : blockedReason ? (
               <Text testID="prospect-blocked" style={styles.help}>
                 {blockedReason}
               </Text>
