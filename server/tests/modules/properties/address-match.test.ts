@@ -172,3 +172,63 @@ describe("localityContradicts", () => {
     expect(localityContradicts({ state: "tx" }, { state: "TX" })).toBe(false);
   });
 });
+
+describe("position-aware suffix expansion", () => {
+  /**
+   * "St" is Street at the end of a line and Saint anywhere else.
+   *
+   * Expanding it everywhere turned "1 St Charles Ave" into "1 street charles avenue", so an
+   * uncoordinated legacy row spelling the same building "1 Saint Charles Avenue" was rejected and a
+   * duplicate created. A silent false negative — the rep sees "nothing here" and has no reason to doubt it.
+   */
+  it("reads St as Saint inside a street name", () => {
+    expect(compareAddressKeys("1 St Charles Ave", "1 Saint Charles Avenue")).toBe("exact");
+  });
+
+  it("still reads St as Street in the type position", () => {
+    expect(compareAddressKeys("1420 Bishop St", "1420 Bishop Street")).toBe("exact");
+  });
+
+  it("handles both at once", () => {
+    expect(compareAddressKeys("1 St Charles St", "1 Saint Charles Street")).toBe("exact");
+  });
+
+  it("expands directionals wherever they sit", () => {
+    expect(compareAddressKeys("100 N Main St", "100 North Main Street")).toBe("exact");
+    expect(compareAddressKeys("100 Main St N", "100 Main Street North")).toBe("exact");
+  });
+});
+
+describe("hash-style units", () => {
+  /**
+   * "#200" is what people actually type, and stripping the hash to whitespace destroyed the unit:
+   * "1420 Bishop St #200" became "1420 bishop street 200", which splitUnit cannot see. The suite case
+   * was handled for the spelled-out markers and missed for the common one.
+   */
+  it("treats #200 as a unit, so a building-level geocode still matches", () => {
+    expect(compareAddressKeys("1420 Bishop St #200", "1420 Bishop St")).toBe("base");
+  });
+
+  it("still keeps two different hash units apart", () => {
+    expect(compareAddressKeys("1420 Bishop St #200", "1420 Bishop St #400")).toBeNull();
+  });
+
+  it("treats # and Ste as the same marker", () => {
+    expect(compareAddressKeys("1420 Bishop St #200", "1420 Bishop St Ste 200")).toBe("exact");
+  });
+});
+
+describe("localityContradicts — ZIP", () => {
+  it("separates two same-street properties in one city but different ZIPs", () => {
+    // City and state agree; only the postal area disproves it. A large city has several "100 Main St".
+    expect(localityContradicts({ city: "Dallas", zip: "75201" }, { city: "Dallas", zip: "75204" })).toBe(true);
+  });
+
+  it("compares only the 5-digit prefix, so ZIP+4 does not create a false conflict", () => {
+    expect(localityContradicts({ zip: "75201-1234" }, { zip: "75201" })).toBe(false);
+  });
+
+  it("stays silent when either ZIP is missing", () => {
+    expect(localityContradicts({ zip: "75201" }, { zip: null })).toBe(false);
+  });
+});

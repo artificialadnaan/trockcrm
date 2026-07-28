@@ -78,6 +78,7 @@ router.get("/match", async (req, res, next) => {
       // these the copy two towns over outranks the building the rep is standing on.
       city: typeof req.query.city === "string" ? req.query.city : null,
       state: typeof req.query.state === "string" ? req.query.state : null,
+      zip: typeof req.query.zip === "string" ? req.query.zip : null,
     });
     // Commit like every sibling handler. Without it this tenant-scoped request falls through to the
     // close-event rollback and holds its pooled client until the response finishes — avoidable pool
@@ -123,7 +124,11 @@ router.post("/", async (req, res, next) => {
 
 router.patch("/:id", async (req, res, next) => {
   try {
-    const allowedFields = ["address", "city", "state", "zip", "buildYear", "unitCount"] as const;
+    // lat/lng included so a cleared geocode can be RESTORED. An address edit wipes the pair (a geocode
+    // of the old line is worse than none), and without a write path here the only way to set
+    // coordinates was creation — leaving every edited or legacy property permanently address-only, and
+    // making the "the next field visit repopulates it" note a promise nothing could keep.
+    const allowedFields = ["address", "city", "state", "zip", "buildYear", "unitCount", "lat", "lng"] as const;
     const input: Parameters<typeof updateProperty>[2] = {};
     for (const field of allowedFields) {
       if (Object.prototype.hasOwnProperty.call(req.body, field)) {

@@ -74,7 +74,7 @@ export interface PropertyMatch {
  * two spellings mean the same thing, and a wrong claim silently merges two real buildings — a worse
  * failure than missing a match, because the rep cannot see it happen.
  */
-const STREET_SUFFIXES: Record<string, string> = {
+const STREET_TYPES: Record<string, string> = {
   st: "street", str: "street",
   ave: "avenue", av: "avenue",
   rd: "road",
@@ -90,9 +90,23 @@ const STREET_SUFFIXES: Record<string, string> = {
   expy: "expressway",
   sq: "square",
   trl: "trail",
+};
+
+/** Directionals read the same wherever they sit — "100 N Main St", "100 Main St N". */
+const DIRECTIONALS: Record<string, string> = {
   n: "north", s: "south", e: "east", w: "west",
   ne: "northeast", nw: "northwest", se: "southeast", sw: "southwest",
 };
+
+/**
+ * Abbreviations that mean something DIFFERENT away from the street-type position.
+ *
+ * `st` is the whole reason this map exists. As the last token of a street line it is "Street"; anywhere
+ * else it is "Saint". Expanding it everywhere turned "1 St Charles Ave" into "1 street charles avenue"
+ * and rejected an uncoordinated legacy row spelling the same building "1 Saint Charles Avenue" — a
+ * silent false negative, and a duplicate.
+ */
+const NON_FINAL_ALIASES: Record<string, string> = { st: "saint" };
 
 /**
  * A comparable key for a street address.
@@ -105,19 +119,58 @@ export function normalizeAddressKey(value: string | null | undefined): string {
   if (typeof value !== "string") return "";
   const cleaned = value
     .toLowerCase()
-    .replace(/[.,#]/g, " ")
+    // "#200" is a UNIT, and stripping the hash to whitespace destroyed that: "1420 Bishop St #200"
+    // became "1420 bishop street 200", which splitUnit cannot recognise — so a legacy row storing the
+    // tenancy was rejected against a building-level geocode and a duplicate created. The suite case was
+    // handled for the spelled-out markers and missed for the one people actually type.
+    .replace(/#\s*/g, " unit ")
     .replace(/[^a-z0-9\s]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
   if (!cleaned) return "";
-  return cleaned
-    .split(" ")
-    .map((token) => STREET_SUFFIXES[token] ?? token)
+
+  const tokens = cleaned.split(" ");
+  const unitAt = findUnitIndex(tokens);
+  const baseEnd = unitAt === -1 ? tokens.length : unitAt;
+
+  /**
+   * Where the street TYPE sits — normally the last token of the base, but one further left when a
+   * trailing directional follows it ("100 Main St N"). Without that step the "St" in such a line is not
+   * in the type position, so it expands to "Saint" and "100 Main St N" stops matching "100 Main Street
+   * North".
+   */
+  let typeIndex = baseEnd - 1;
+  if (typeIndex >= 1 && DIRECTIONALS[tokens[typeIndex]!] && STREET_TYPES[tokens[typeIndex - 1]!]) {
+    typeIndex -= 1;
+  }
+
+  return tokens
+    .map((token, index) => {
+      if (index >= baseEnd) return UNIT_MARKER_CANONICAL[token] ?? token;
+      if (index === typeIndex) return STREET_TYPES[token] ?? DIRECTIONALS[token] ?? token;
+      return DIRECTIONALS[token] ?? NON_FINAL_ALIASES[token] ?? token;
+    })
     .join(" ");
 }
 
 /** Unit designators, as they appear at the END of a street line. */
 const UNIT_MARKERS = new Set(["ste", "suite", "unit", "apt", "apartment", "rm", "room", "fl", "floor", "bldg", "building"]);
+
+/**
+ * Markers that name the SAME kind of slot, folded to one word.
+ *
+ * "1420 Bishop St #200" and "1420 Bishop St Ste 200" are the same tenancy written two ways, and left
+ * un-canonicalised they compare as two different units — a false negative that costs a duplicate.
+ *
+ * `fl`/`floor` and `bldg`/`building` are deliberately NOT in here. A floor is not a suite: folding them
+ * would make "Fl 2" and "Ste 2" the same space, which is a false MATCH, and those cost far more than a
+ * duplicate.
+ */
+const UNIT_MARKER_CANONICAL: Record<string, string> = {
+  ste: "unit", suite: "unit", unit: "unit",
+  apt: "unit", apartment: "unit",
+  rm: "unit", room: "unit",
+};
 
 /**
  * Split "1420 bishop street ste 200" into its building part and its unit part.
@@ -131,12 +184,23 @@ const UNIT_MARKERS = new Set(["ste", "suite", "unit", "apt", "apartment", "rm", 
  */
 export function splitUnit(key: string): { base: string; unit: string | null } {
   const tokens = key.split(" ").filter(Boolean);
+  const at = findUnitIndex(tokens);
+  if (at === -1) return { base: tokens.join(" "), unit: null };
+  return { base: tokens.slice(0, at).join(" "), unit: tokens.slice(at).join(" ") };
+}
+
+/**
+ * Index of the unit marker, or -1. Shared with normalizeAddressKey so the two agree on where a street
+ * line ends — they disagreeing is how a street type stops being expanded in the right place.
+ *
+ * Scans from index 1 and requires a token after the marker, so a street literally named "Unit" cannot
+ * swallow the house number and a dangling marker is not read as a unit.
+ */
+function findUnitIndex(tokens: string[]): number {
   for (let i = tokens.length - 2; i >= 1; i -= 1) {
-    if (UNIT_MARKERS.has(tokens[i]!)) {
-      return { base: tokens.slice(0, i).join(" "), unit: tokens.slice(i).join(" ") };
-    }
+    if (UNIT_MARKERS.has(tokens[i]!)) return i;
   }
-  return { base: tokens.join(" "), unit: null };
+  return -1;
 }
 
 export type AddressMatchQuality = "exact" | "base" | null;
@@ -189,8 +253,8 @@ export function addressKeysMatch(a: string | null | undefined, b: string | null 
  * disagreement.
  */
 export function localityContradicts(
-  query: { city?: string | null; state?: string | null },
-  row: { city?: string | null; state?: string | null }
+  query: { city?: string | null; state?: string | null; zip?: string | null },
+  row: { city?: string | null; state?: string | null; zip?: string | null }
 ): boolean {
   const norm = (v: string | null | undefined) => (typeof v === "string" ? v.trim().toLowerCase() : "");
   const qCity = norm(query.city);
@@ -199,6 +263,11 @@ export function localityContradicts(
   const qState = norm(query.state);
   const rState = norm(row.state);
   if (qState && rState && qState !== rState) return true;
+  // ZIP catches what city and state cannot: two "100 Main St" in the SAME city, in different postal
+  // areas — a large city has several, and city+state agree on both.
+  const qZip = norm(query.zip).slice(0, 5);
+  const rZip = norm(row.zip).slice(0, 5);
+  if (qZip && rZip && qZip !== rZip) return true;
   return false;
 }
 
@@ -209,6 +278,7 @@ export interface PropertyMatchInput {
   /** Used only to DISPROVE an address match — see localityContradicts. */
   city?: string | null;
   state?: string | null;
+  zip?: string | null;
 }
 
 function isFiniteCoordinate(value: unknown, limit: number): value is number {
@@ -317,7 +387,14 @@ export async function matchProperties(
         or ${sameWholeAddress}
         or (${withinBox} and ${distanceSql} <= ${PROPERTY_MATCH_RADIUS_METERS})
       )
-    order by case when ${withinBox} then ${distanceSql} else 1e9 end asc, p.name asc
+    order by
+      -- WHOLE-ADDRESS hits first, so the cap cannot discard the one row that would have matched.
+      -- Without GPS every candidate scores the same 1e9 distance and falls back to name order, so on a
+      -- street where 200+ properties share a lead token the exact address could sit past the limit —
+      -- producing "nothing here" and a duplicate for a property that exists.
+      (${sameWholeAddress}) desc,
+      case when ${withinBox} then ${distanceSql} else 1e9 end asc,
+      p.name asc
     limit ${CANDIDATE_LIMIT}
   `);
 
@@ -332,6 +409,7 @@ export async function matchProperties(
     const contradicted = localityContradicts(input, {
       city: row.city as string | null,
       state: row.state as string | null,
+      zip: row.zip as string | null,
     });
     const addressMatch = contradicted
       ? null
