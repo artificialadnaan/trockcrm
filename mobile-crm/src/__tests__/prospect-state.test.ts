@@ -128,3 +128,21 @@ describe("describeMatch — the suite caveat survives a distance reading", () =>
     expect(describeMatch(match({ addressMatch: "base", distanceMeters: 12 }))).toMatch(/check the suite/i);
   });
 });
+
+describe("describeMatch — precision", () => {
+  it("rounds metres rather than printing a raw float", () => {
+    // distanceMeters is a number, not an integer. "40.7318 m away" reads as false precision from a GPS
+    // fix that is accurate to tens of metres.
+    expect(describeMatch(match({ addressMatch: null, reason: "distance", distanceMeters: 40.7318 })))
+      .toBe("41 m away");
+  });
+});
+
+describe("isPositionTooCoarse — the boundary", () => {
+  it("treats a fix exactly at the threshold as acceptable", () => {
+    // Strict >, deliberately: the threshold is the largest fix still worth trusting, and nothing else
+    // recorded that choice.
+    expect(isPositionTooCoarse(100, 100)).toBe(false);
+    expect(isPositionTooCoarse(100.1, 100)).toBe(true);
+  });
+});

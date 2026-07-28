@@ -1,3 +1,4 @@
+import { hasActivityTarget } from "./api/endpoints/prospecting";
 import type { ActivityTarget, FieldActivityType, PropertyMatch } from "./api/endpoints/prospecting";
 
 /**
@@ -50,14 +51,7 @@ export function canSubmit(input: {
   body: string;
   outcome: string;
 }): boolean {
-  const hasTarget = Boolean(
-    input.target.propertyId ||
-      input.target.companyId ||
-      input.target.contactId ||
-      input.target.dealId ||
-      input.target.leadId,
-  );
-  if (!hasTarget || !input.type) return false;
+  if (!hasActivityTarget(input.target) || !input.type) return false;
   return input.body.trim().length > 0 || input.outcome.trim().length > 0;
 }
 
@@ -74,14 +68,9 @@ export function submitBlockedReason(input: {
   outcome: string;
 }): string | null {
   if (canSubmit(input)) return null;
-  const hasTarget = Boolean(
-    input.target.propertyId ||
-      input.target.companyId ||
-      input.target.contactId ||
-      input.target.dealId ||
-      input.target.leadId,
-  );
-  if (!hasTarget) return "Pick the property, company or contact this visit was about.";
+  if (!hasActivityTarget(input.target)) {
+    return "Pick the property, company or contact this visit was about.";
+  }
   if (!input.type) return "Choose what happened — a visit, a call, a meeting.";
   return "Add a note or an outcome so this log says something.";
 }
@@ -107,7 +96,9 @@ export function describeMatch(match: PropertyMatch): string {
   const distance =
     match.distanceMeters != null
       ? match.distanceMeters < 1000
-        ? `${match.distanceMeters} m away`
+        // ROUNDED. distanceMeters is a number, not an integer — a server value of 40.7318 rendered
+        // "40.7318 m away", which reads as false precision from a GPS fix accurate to tens of metres.
+        ? `${Math.round(match.distanceMeters)} m away`
         : `${(match.distanceMeters / 1000).toFixed(1)} km away`
       : null;
 

@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
+  AppState,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -62,6 +63,7 @@ export default function ProspectScreen() {
   const [company, setCompany] = useState<prospecting.CompanyRef | null>(null);
   const [companyQuery, setCompanyQuery] = useState("");
   const companyQueryRef = useRef("");
+  const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [companyResults, setCompanyResults] = useState<prospecting.CompanyRef[] | null>(null);
   const [duplicateContacts, setDuplicateContacts] = useState<prospecting.DedupSuggestion[] | null>(null);
   /** The rep said none of the suggestions is the building — the fallback has to appear. */
@@ -151,6 +153,10 @@ export default function ProspectScreen() {
       setMatches(found);
     },
     onError: (err) => {
+      // RETRYABLE. The ref is cleared so a later fix — or the same one, re-requested — starts a fresh
+      // lookup; leaving it set meant a transient failure locked the screen out of matching for good
+      // while the location stayed "ready".
+      matchedFor.current = null;
       // The rep is standing outside. A failed lookup must leave them able to log against a company or
       // contact instead, never stranded on a spinner.
       setMatchError(
@@ -199,7 +205,10 @@ export default function ProspectScreen() {
       setCompanyResults(results);
       setCompanySearchFailed(false);
     },
-    onError: () => {
+    onError: (_err, q) => {
+      // Successes were already checked against the live query; failures were not, so an abandoned
+      // request could paint an error over results the rep is currently reading.
+      if (q.trim() !== companyQueryRef.current.trim()) return;
       setCompanyResults(null);
       setCompanySearchFailed(true);
     },
@@ -364,6 +373,22 @@ export default function ProspectScreen() {
     },
   });
 
+  /**
+   * Re-check permission when the app comes back to the foreground.
+   *
+   * The denied state sends a rep to Settings and then never looks again, so granting it there returned
+   * them to the same dead screen — the instruction worked and the app pretended it had not.
+   */
+  useEffect(() => {
+    const sub = AppState.addEventListener("change", (next) => {
+      if (next === "active" && location.state.status === "denied") void location.locate();
+    });
+    return () => sub.remove();
+  }, [location]);
+
+  // Resolved once. `coarse` is already false unless the fix is ready, so re-checking the status inside
+  // the message could never take its fallback branch — dead code that read as a guard.
+  const coarseAccuracy = location.state.status === "ready" ? location.state.accuracyMeters ?? 0 : 0;
   const coarse =
     location.state.status === "ready" &&
     isPositionTooCoarse(location.state.accuracyMeters, COARSE_ACCURACY_METERS);
@@ -482,7 +507,7 @@ export default function ProspectScreen() {
               /* A fix wider than the matcher's own radius makes "the property you're at" a guess. Say
                  so rather than presenting the nearest building as an answer. */
               <Text testID="prospect-coarse" style={styles.warn}>
-                Your position is only accurate to about {Math.round(location.state.status === "ready" ? (location.state.accuracyMeters ?? 0) : 0)} m —
+                Your position is only accurate to about {Math.round(coarseAccuracy)} m —
                 double-check the building before you confirm it.
               </Text>
             ) : null}
@@ -575,8 +600,16 @@ export default function ProspectScreen() {
                         setCompanyQuery(next);
                         companyQueryRef.current = next;
                         setCompanySearchFailed(false);
-                        if (next.trim().length >= 2) findCompanies.mutate(next);
-                        else setCompanyResults(null);
+                        /* DEBOUNCED. One request per keystroke sent ten for "palm villas" — on a
+                           truck's connection that is ten round trips racing each other to answer a
+                           query the rep has already moved past. 250ms matches the web's own
+                           address-autocomplete debounce. */
+                        if (searchTimer.current) clearTimeout(searchTimer.current);
+                        if (next.trim().length >= 2) {
+                          searchTimer.current = setTimeout(() => findCompanies.mutate(next), 250);
+                        } else {
+                          setCompanyResults(null);
+                        }
                       }}
                       placeholder="Search companies"
                       placeholderTextColor={theme.color.textMuted}
