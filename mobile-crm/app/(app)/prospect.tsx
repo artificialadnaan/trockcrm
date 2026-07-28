@@ -754,6 +754,16 @@ export default function ProspectScreen() {
   const saveBlocked =
     !ready || save.isPending || createPropertyHere.isPending || createCompanyNamed.isPending;
 
+  /**
+   * The TARGET is frozen while anything is being written against it.
+   *
+   * `locked` covers the activity write. It does not cover creating a company or a property — and both
+   * of those read the target at submit time and apply their result afterwards, so a rep who changed
+   * the company mid-flight got a building filed under the company they had just left. Every control
+   * that can change what the visit is ABOUT uses this instead.
+   */
+  const targetsLocked = locked || createPropertyHere.isPending || createCompanyNamed.isPending;
+
   /** Person details the save will discard, because a contact needs BOTH names to be created. */
   const personPartial = personDetailsWillBeDiscarded({
     first: contactFirst,
@@ -1006,11 +1016,11 @@ export default function ProspectScreen() {
                        rejected the matches, logged against a company, then tapped a match still on
                        screen changed the displayed target after the write — and enabled promotion for a
                        property that was never part of the saved capture. */
-                    disabled={locked}
+                    disabled={targetsLocked}
                     accessibilityRole="button"
                     accessibilityState={{ disabled: locked }}
                     accessibilityLabel={`${m.name}${m.companyName ? `, ${m.companyName}` : ""}, ${describeMatch(m)}`}
-                    style={[styles.matchRow, locked && styles.chipLocked]}
+                    style={[styles.matchRow, targetsLocked && styles.chipLocked]}
                   >
                     <View style={styles.matchBody}>
                       <Text style={styles.matchName} numberOfLines={1}>
@@ -1035,7 +1045,7 @@ export default function ProspectScreen() {
                 <Pressable
                   testID="prospect-reject-matches"
                   onPress={() => setRejectedMatches(true)}
-                  disabled={locked}
+                  disabled={targetsLocked}
                   accessibilityRole="button"
                   style={styles.linkBtn}
                 >
@@ -1075,7 +1085,7 @@ export default function ProspectScreen() {
                     {/* Frozen on the same states as the property target above. Left live, a rep could
                         switch companies mid-save and read the NEW company beside "Logged" while the
                         activity carried the old one. */}
-                    {locked ? null : (
+                    {targetsLocked ? null : (
                       <Pressable
                         testID="prospect-clear-company"
                         onPress={() => setCompany(null)}
@@ -1091,7 +1101,7 @@ export default function ProspectScreen() {
                   <>
                     <TextInput
                       testID="prospect-company-search"
-                      editable={!locked}
+                      editable={!targetsLocked}
                       value={companyQuery}
                       onChangeText={(next) => {
                         setCompanyQuery(next);
@@ -1146,7 +1156,7 @@ export default function ProspectScreen() {
                         /* These rows ignored `locked`, so after a contact-backed save a leftover
                            company result was still tappable — the screen would then show a company the
                            committed activity never carried, and "Log another" kept it. */
-                        disabled={locked}
+                        disabled={targetsLocked}
                         accessibilityRole="button"
                         accessibilityLabel={`Attach this visit to ${c.name}`}
                         style={styles.matchRow}
@@ -1299,7 +1309,7 @@ export default function ProspectScreen() {
                             {prospecting.contactCompanyLabel(contact) || "Contact"}
                           </Text>
                         </View>
-                        {locked ? null : (
+                        {targetsLocked ? null : (
                           <Pressable
                             testID="prospect-clear-contact"
                             onPress={() => setContact(null)}
@@ -1315,7 +1325,7 @@ export default function ProspectScreen() {
                       <>
                         <TextInput
                           testID="prospect-contact-search"
-                          editable={!locked}
+                          editable={!targetsLocked}
                           value={contactQuery}
                           onChangeText={(next) => {
                             setContactQuery(next);
@@ -1346,7 +1356,7 @@ export default function ProspectScreen() {
                           <Pressable
                             key={c.id}
                             testID={`prospect-contact-${c.id}`}
-                            disabled={locked}
+                            disabled={targetsLocked}
                             onPress={() => {
                               setContact(c);
                               setContactResults(null);
@@ -1404,7 +1414,7 @@ export default function ProspectScreen() {
                       </Text>
                       <TextInput
                         testID="prospect-manual-address"
-                        editable={!locked}
+                        editable={!targetsLocked}
                         value={manualAddress}
                         onChangeText={setManualAddress}
                         placeholder="Street address"
@@ -1415,7 +1425,7 @@ export default function ProspectScreen() {
                       <View style={styles.nameRow}>
                         <TextInput
                           testID="prospect-manual-city"
-                          editable={!locked}
+                          editable={!targetsLocked}
                           value={manualCity}
                           onChangeText={setManualCity}
                           placeholder="City"
@@ -1425,7 +1435,7 @@ export default function ProspectScreen() {
                         />
                         <TextInput
                           testID="prospect-manual-state"
-                          editable={!locked}
+                          editable={!targetsLocked}
                           value={manualState}
                           onChangeText={setManualState}
                           placeholder="State"
@@ -1437,7 +1447,7 @@ export default function ProspectScreen() {
                       </View>
                       <TextInput
                         testID="prospect-manual-zip"
-                        editable={!locked}
+                        editable={!targetsLocked}
                         value={manualZip}
                         onChangeText={setManualZip}
                         placeholder="ZIP"
