@@ -2,6 +2,7 @@ import crypto from "crypto";
 import { describe, expect, it, vi } from "vitest";
 import { WON_DEAL_STAGE_SLUGS, LOST_DEAL_STAGE_SLUGS } from "@trock-crm/shared/types";
 import {
+  buildCorrectiveActionEmail,
   handleScorecardCorrectiveActionEmail,
   type ScorecardCorrectiveActionEmailPayload,
 } from "../../src/jobs/scorecard-corrective-action-email.js";
@@ -1877,5 +1878,92 @@ describe("scorecard corrective-action notification email", () => {
     expect(stampCalls).toHaveLength(1);
     expect(tokenDeletes).toHaveLength(0);
     expect(jobEnqueues).toHaveLength(0);
+  });
+
+  it("REGRESSION: treats a REJECTED item as outstanding, or a returned card notifies nobody", async () => {
+    // The queries filtered status = 'open'. Under the approval gate a rejected item is equally outstanding —
+    // the approver sent it back and the responder owes a fix — so a card whose items are all `rejected` read
+    // as having nothing to do. The email would skip, the responders would never learn what to fix, and the
+    // card would sit in corrective_action_open forever.
+    const { query } = makeQuery();
+    const sends: string[] = [];
+
+    await handleScorecardCorrectiveActionEmail(payload, null, {
+      query: query as never,
+      sendEmail: (async (to: string[]) => {
+        sends.push(...to);
+        return { success: true, messageId: "m" };
+      }) as never,
+      env,
+      logger: makeLogger(),
+    });
+
+    // Both queries must ask for the OUTSTANDING set, not `open` alone.
+    const outstandingQueries = query.mock.calls
+      .map((call) => call[0] as string)
+      .filter((text) => text.includes("scorecard_corrective_actions"));
+    expect(outstandingQueries.length).toBeGreaterThan(0);
+    for (const text of outstandingQueries) {
+      expect(text).toMatch(/status IN \('open','rejected'\)/);
+    }
+  });
+
+  it("reads as a RETURN, with the approver's reason, when an item was sent back", async () => {
+    const email = buildCorrectiveActionEmail({
+      recipientName: "Pat Manager",
+      dealName: "Maple St",
+      projectNumber: "DFW-1",
+      scoreText: "23/50",
+      ratingLabel: "Corrective action",
+      flagged: [
+        {
+          itemType: "action_item",
+          itemLabel: "Re-torque the anchors",
+          status: "rejected",
+          latestRejection: "Torque values were not documented.",
+        },
+      ],
+      link: "https://trockcrm.com/field/corrective-actions?token=x",
+    });
+
+    expect(email.subject).toMatch(/changes requested/i);
+    expect(email.html).toContain("Torque values were not documented.");
+    expect(email.text).toContain("Torque values were not documented.");
+  });
+
+  it("still reads as a FIRST request when nothing was sent back", async () => {
+    const email = buildCorrectiveActionEmail({
+      recipientName: "Pat Manager",
+      dealName: "Maple St",
+      projectNumber: "DFW-1",
+      scoreText: "23/50",
+      ratingLabel: "Corrective action",
+      flagged: [{ itemType: "action_item", itemLabel: "Re-torque the anchors", status: "open" }],
+      link: "https://trockcrm.com/field/corrective-actions?token=x",
+    });
+
+    expect(email.subject).toMatch(/corrective action required/i);
+    expect(email.subject).not.toMatch(/changes requested/i);
+    expect(email.html).not.toContain("Sent back");
+  });
+
+  it("bounds a long rejection reason so the response link is not clipped away", async () => {
+    const long = "Re-torque every anchor and photograph the calibrated wrench reading. ".repeat(30);
+    const email = buildCorrectiveActionEmail({
+      recipientName: "Pat Manager",
+      dealName: "Maple St",
+      projectNumber: "DFW-1",
+      scoreText: "23/50",
+      ratingLabel: "Corrective action",
+      flagged: [
+        { itemType: "action_item", itemLabel: "Anchors", status: "rejected", latestRejection: long },
+      ],
+      link: "https://trockcrm.com/field/corrective-actions?token=x",
+    });
+
+    expect(email.html).toContain("full comment in the CRM");
+    expect(email.html).not.toContain(long);
+    // The CTA still survives the body.
+    expect(email.html).toContain("token=x");
   });
 });

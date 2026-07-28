@@ -15,6 +15,7 @@ import {
   WON_DEAL_STAGE_SLUGS,
   LOST_DEAL_STAGE_SLUGS,
 } from "@trock-crm/shared/types";
+import { CORRECTIVE_ACTION_OUTSTANDING_SQL_LIST } from "@trock-crm/shared/types";
 
 const SCORECARD_RATING_SET = new Set<string>(FIELD_SCORECARD_RATINGS);
 
@@ -96,7 +97,15 @@ interface ResolvedRecipient {
 interface FlaggedItem {
   itemType: string;
   itemLabel: string;
+  /** 'open' | 'rejected' — both outstanding, but only one means the approver sent it back. */
+  status?: string;
+  /** The approver's most recent reason for returning this item, when there is one. */
+  latestRejection?: string | null;
 }
+
+// Bounds an approver's rejection reason in the email body. Nothing caps its length, and mail clients clip
+// the END of a long body — which is where the response link lives.
+const MAX_EMAIL_REASON_CHARS = 280;
 
 export function basicValidEmail(email: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
@@ -469,8 +478,19 @@ export async function handleScorecardCorrectiveActionEmail(
   // Flagged items for the email body (the open corrective-action rows). We also select each row's id to
   // derive the per-cycle fingerprint below (reuses this one query — no extra round-trip).
   const flaggedRes = await query(
-    `SELECT id, item_type, item_label FROM ${tenantSchema}.scorecard_corrective_actions
-      WHERE scorecard_id = $1::uuid AND status = 'open'
+    `SELECT id, item_type, item_label, status,
+            -- The approver's most recent reason for sending this item back, so the responder is told what to
+            -- fix rather than just that something is wrong. Ordered by seq, NOT created_at: events written in
+            -- one transaction share a timestamp and the uuid PK is random, so a timestamp sort picks an
+            -- arbitrary one.
+            (SELECT e.comment
+               FROM ${tenantSchema}.scorecard_corrective_action_events e
+              WHERE e.corrective_action_id = scorecard_corrective_actions.id
+                AND e.event_type = 'rejected'
+              ORDER BY e.seq DESC
+              LIMIT 1) AS latest_rejection
+       FROM ${tenantSchema}.scorecard_corrective_actions
+      WHERE scorecard_id = $1::uuid AND status IN (${CORRECTIVE_ACTION_OUTSTANDING_SQL_LIST})
       ORDER BY item_type, item_ref`,
     [scorecardId]
   );
@@ -481,6 +501,8 @@ export async function handleScorecardCorrectiveActionEmail(
   let flagged: FlaggedItem[] = flaggedRows.map((r) => ({
     itemType: String(r.item_type),
     itemLabel: String(r.item_label),
+    status: String(r.status ?? "open"),
+    latestRejection: r.latest_rejection == null ? null : String(r.latest_rejection),
   }));
 
   // Empty-open-set race (finding 5). We read `scorecard.status` at the TOP of this run, THEN queried the open
@@ -585,7 +607,7 @@ export async function handleScorecardCorrectiveActionEmail(
     `SELECT status,
             EXISTS (
               SELECT 1 FROM ${tenantSchema}.scorecard_corrective_actions
-               WHERE scorecard_id = $1::uuid AND status = 'open'
+               WHERE scorecard_id = $1::uuid AND status IN (${CORRECTIVE_ACTION_OUTSTANDING_SQL_LIST})
             ) AS has_open
        FROM ${tenantSchema}.field_scorecards WHERE id = $1::uuid LIMIT 1`,
     [scorecardId]
@@ -610,7 +632,7 @@ export async function handleScorecardCorrectiveActionEmail(
   // nothing-to-notify guard — never send the empty-fallback item text, never stamp (a later reopen re-notifies).
   const freshFlaggedRes = await query(
     `SELECT id, item_type, item_label FROM ${tenantSchema}.scorecard_corrective_actions
-      WHERE scorecard_id = $1::uuid AND status = 'open'
+      WHERE scorecard_id = $1::uuid AND status IN (${CORRECTIVE_ACTION_OUTSTANDING_SQL_LIST})
       ORDER BY item_type, item_ref`,
     [scorecardId]
   );
@@ -947,11 +969,11 @@ export async function handleScorecardCorrectiveActionEmail(
         AND status = 'corrective_action_open'
         AND EXISTS (
           SELECT 1 FROM ${tenantSchema}.scorecard_corrective_actions
-           WHERE scorecard_id = $1::uuid AND status = 'open'
+           WHERE scorecard_id = $1::uuid AND status IN (${CORRECTIVE_ACTION_OUTSTANDING_SQL_LIST})
         )
         AND NOT EXISTS (
           SELECT 1 FROM ${tenantSchema}.scorecard_corrective_actions
-           WHERE scorecard_id = $1::uuid AND status = 'open' AND NOT (id = ANY($2::uuid[]))
+           WHERE scorecard_id = $1::uuid AND status IN (${CORRECTIVE_ACTION_OUTSTANDING_SQL_LIST}) AND NOT (id = ANY($2::uuid[]))
         )${nonceClause}`,
     stampParams as any[]
   );
@@ -967,7 +989,7 @@ export async function handleScorecardCorrectiveActionEmail(
       `SELECT corrective_action_email_sent_at,
               EXISTS (
                 SELECT 1 FROM ${tenantSchema}.scorecard_corrective_actions
-                 WHERE scorecard_id = $1::uuid AND status = 'open' AND NOT (id = ANY($2::uuid[]))
+                 WHERE scorecard_id = $1::uuid AND status IN (${CORRECTIVE_ACTION_OUTSTANDING_SQL_LIST}) AND NOT (id = ANY($2::uuid[]))
               ) AS has_new_open
          FROM ${tenantSchema}.field_scorecards WHERE id = $1::uuid LIMIT 1`,
       [scorecardId, emailedIds]
@@ -990,17 +1012,43 @@ export function buildCorrectiveActionEmail(input: {
   flagged: FlaggedItem[];
   link: string;
 }) {
-  const subject = input.projectNumber
-    ? `Corrective action required: ${input.projectNumber} — ${input.scoreText}`
-    : `Corrective action required: ${input.dealName} — ${input.scoreText}`;
+  // DERIVED from state, never carried in the payload. This job runs ~120s after enqueue and the payload
+  // cannot be re-checked, while state can — the same reasoning that put the browsable gate and the status
+  // guard at delivery time rather than enqueue time. If anything is `rejected` when we send, the approver
+  // sent work back and the responder needs to be told that, not asked afresh.
+  const isReturn = input.flagged.some((f) => f.status === "rejected");
+  const where = input.projectNumber ? input.projectNumber : input.dealName;
+  const subject = isReturn
+    ? `Changes requested: ${where} — corrective action returned`
+    : `Corrective action required: ${where} — ${input.scoreText}`;
+
+  // The reason is bounded for the same reason the oversight email bounds its comments: nothing caps an
+  // approver's comment length, and a long one would push the CTA past where mail clients clip.
+  const reason = (f: FlaggedItem) => {
+    const text = f.latestRejection?.trim();
+    if (!text) return null;
+    return text.length <= MAX_EMAIL_REASON_CHARS
+      ? text
+      : `${text.slice(0, MAX_EMAIL_REASON_CHARS).trimEnd()}… (full comment in the CRM)`;
+  };
 
   const itemsList = input.flagged.length
-    ? input.flagged.map((f) => `• ${f.itemLabel}`).join("\n")
+    ? input.flagged
+        .map((f) => {
+          const why = reason(f);
+          return why ? `• ${f.itemLabel}\n    Sent back: ${why}` : `• ${f.itemLabel}`;
+        })
+        .join("\n")
     : "• (see the CRM for the flagged items)";
 
   const htmlItems = input.flagged.length
     ? `<ul style="margin:8px 0 0 0;padding-left:20px;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:20px;color:#111111;">${input.flagged
-        .map((f) => `<li>${escapeHtml(f.itemLabel)}</li>`)
+        .map((f) => {
+          const why = reason(f);
+          return why
+            ? `<li>${escapeHtml(f.itemLabel)}<br /><span style="color:#CC0000;">Sent back:</span> <span style="color:#475569;">${escapeHtml(why)}</span></li>`
+            : `<li>${escapeHtml(f.itemLabel)}</li>`;
+        })
         .join("")}</ul>`
     : `<p style="margin:8px 0 0 0;font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#64748b;">See the CRM for the flagged items.</p>`;
 
