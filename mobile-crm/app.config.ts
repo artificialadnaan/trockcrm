@@ -71,9 +71,25 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
     supportsTablet: false,
     infoPlist: {
       ITSAppUsesNonExemptEncryption: false,
+      NSLocationWhenInUseUsageDescription:
+        "T-Rock CRM uses your location only while you are logging a site visit, to find the property you are standing at instead of making you type its address.",
     },
   },
-  plugins: ["expo-router", "expo-secure-store", "expo-font"],
+  plugins: [
+    "expo-router",
+    "expo-secure-store",
+    "expo-font",
+    [
+      "expo-location",
+      {
+        // Repeated here because the config plugin writes the Info.plist entry on prebuild; the
+        // infoPlist block above is what applies when the value is set directly. Keeping them identical
+        // means the string a reviewer sees does not depend on which path produced the build.
+        locationWhenInUsePermission:
+          "T-Rock CRM uses your location only while you are logging a site visit, to find the property you are standing at instead of making you type its address.",
+      },
+    ],
+  ],
   experiments: {
     typedRoutes: true,
   },
