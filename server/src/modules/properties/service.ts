@@ -51,6 +51,16 @@ function propertyOrderExpr(col: unknown, dir: "asc" | "desc") {
 }
 
 /**
+ * A coordinate as it arrives on the wire.
+ *
+ * ONE type for create and update, because `validateOptionalCoordinate` accepts a number OR a numeric
+ * string and JSON bodies routinely carry the latter. Create declared only `number | null`, so a caller
+ * sending the string the runtime happily accepts was a type error — narrower than the behaviour, and
+ * different from update for no reason anyone could act on.
+ */
+type OptionalCoordinate = number | string | null;
+
+/**
  * ORDER BY for the properties directory, applied over the FULL filtered set before LIMIT/OFFSET so the
  * sort is global, not just the visible page. Directly-orderable columns — Property name, Type, Owner
  * company, Sq ft (COALESCE(roof_area, unit_count)) — plus Linked value, which is folded into the main
@@ -117,8 +127,8 @@ export interface CreatePropertyInput {
    * of them, so field capture would create a fresh duplicate at a building it had itself created the
    * week before. Accepting them here is what lets the data heal as it is used.
    */
-  lat?: number | null;
-  lng?: number | null;
+  lat?: OptionalCoordinate;
+  lng?: OptionalCoordinate;
 }
 
 export interface UpdatePropertyInput {
@@ -135,8 +145,8 @@ export interface UpdatePropertyInput {
    * a write path here, creation was the only way to set them, leaving every edited or legacy property
    * permanently address-only with no way back.
    */
-  lat?: number | string | null;
-  lng?: number | string | null;
+  lat?: OptionalCoordinate;
+  lng?: OptionalCoordinate;
 }
 
 const US_STATE_PATTERN = /^[A-Z]{2}$/;

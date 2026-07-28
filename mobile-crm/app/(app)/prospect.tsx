@@ -1078,7 +1078,11 @@ export default function ProspectScreen() {
                        property that was never part of the saved capture. */
                     disabled={targetsLocked}
                     accessibilityRole="button"
-                    accessibilityState={{ disabled: locked }}
+                    /* The SAME flag the prop uses. My earlier sweep retargeted `disabled` and
+                       `editable` but not this line, so during a company or property write a screen
+                       reader announced the row as actionable while taps did nothing — the announcement
+                       and the behaviour disagreeing is the accessibility defect, not the lock. */
+                    accessibilityState={{ disabled: targetsLocked }}
                     accessibilityLabel={`${m.name}${m.companyName ? `, ${m.companyName}` : ""}, ${describeMatch(m)}`}
                     style={[styles.matchRow, targetsLocked && styles.chipLocked]}
                   >

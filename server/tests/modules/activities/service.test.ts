@@ -363,11 +363,11 @@ describe("createActivity — who maintains the last touch", () => {
       updates.push(getTableName(table as Parameters<typeof getTableName>[0]));
       return { set: updateSet };
     });
-    return { insertMock, update, updates };
+    return { insertMock, update, updates, updateSet, updateWhere };
   }
 
   it("refreshes the DEAL, which no trigger covers", async () => {
-    const { insertMock, update, updates } = harness();
+    const { insertMock, update, updates, updateSet, updateWhere } = harness();
     await createActivity({ insert: insertMock.insert, update } as any, {
       type: "note",
       responsibleUserId: "rep-1",
@@ -378,6 +378,11 @@ describe("createActivity — who maintains the last touch", () => {
       sourceEntityId: "deal-1",
     });
     expect(updates).toContain("deals");
+    // Table name alone would survive a regression that dropped lastActivityAt, or dropped the WHERE and
+    // updated EVERY deal. Assert what is written and that it is scoped.
+    expect(updateSet).toHaveBeenCalledTimes(1);
+    expect(Object.keys(updateSet.mock.calls[0]?.[0] ?? {})).toEqual(["lastActivityAt"]);
+    expect(updateWhere).toHaveBeenCalledTimes(1);
   });
 
   it("does NOT duplicate the trigger's property/company writes", async () => {
@@ -394,5 +399,8 @@ describe("createActivity — who maintains the last touch", () => {
     });
     expect(updates).not.toContain("properties");
     expect(updates).not.toContain("companies");
+    // And NO update at all — the trigger owns both, so any statement here is redundant work on rows a
+    // busy office touches constantly.
+    expect(updates).toEqual([]);
   });
 });
