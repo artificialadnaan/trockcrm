@@ -128,6 +128,15 @@ export interface UpdatePropertyInput {
   zip?: string | null;
   buildYear?: number | string | null;
   unitCount?: number | string | null;
+  /**
+   * Coordinates, so a cleared geocode can be RESTORED.
+   *
+   * An address edit wipes the pair below — a geocode of the old street line is worse than none. Without
+   * a write path here, creation was the only way to set them, leaving every edited or legacy property
+   * permanently address-only with no way back.
+   */
+  lat?: number | string | null;
+  lng?: number | string | null;
 }
 
 const US_STATE_PATTERN = /^[A-Z]{2}$/;
@@ -279,6 +288,14 @@ export function buildPropertyUpdatePatch(input: UpdatePropertyInput): Partial<ty
   }
   if (Object.prototype.hasOwnProperty.call(input, "unitCount")) {
     patch.unitCount = validateOptionalPropertyUnitCount(input.unitCount);
+  }
+  // Same validation as create: a blank or out-of-range value degrades to null rather than storing a
+  // coordinate the database accepts and no query will ever match.
+  if (Object.prototype.hasOwnProperty.call(input, "lat")) {
+    patch.lat = validateOptionalCoordinate(input.lat, 90);
+  }
+  if (Object.prototype.hasOwnProperty.call(input, "lng")) {
+    patch.lng = validateOptionalCoordinate(input.lng, 180);
   }
 
   return patch;
@@ -675,7 +692,11 @@ export async function updateProperty(tenantDb: TenantDb, propertyId: string, inp
    * most of this table relies on anyway. The next field visit repopulates it.
    */
   const addressChanged = ADDRESS_FIELDS.some((field) => field in patch);
-  const coordinateReset = addressChanged ? { lat: null, lng: null } : {};
+  // An EXPLICIT coordinate in the same request wins over the reset — that request is "here is the new
+  // address AND its geocode", which is exactly how a corrected property gets its position back. Only a
+  // bare address edit, with no replacement offered, clears the pair.
+  const suppliedCoordinates = "lat" in patch || "lng" in patch;
+  const coordinateReset = addressChanged && !suppliedCoordinates ? { lat: null, lng: null } : {};
 
   const [property] = await tenantDb
     .update(properties)
