@@ -233,18 +233,15 @@ export default function ProspectScreen() {
       /**
        * The person block creates a REAL contact, and only when it is filled.
        *
-       * A duplicate answer is not a failure here — `POST /contacts` replies 200 with suggestions rather
-       * than 201, and that prompt is the useful outcome: a rep who meets the same property manager
-       * twice should be told, not silently given a second record. So a dedup reply leaves contactId
-       * undefined and the activity still attaches to the property.
-       */
-      /**
-       * The retained id is keyed to WHO it was for.
+       * A duplicate answer is not a failure — `POST /contacts` replies 200 with suggestions rather than
+       * 201, and that prompt is the useful outcome: a rep who meets the same property manager twice
+       * should be told, not silently given a second record. So a dedup reply leaves contactId undefined
+       * and the activity still attaches to the property.
        *
-       * Holding a bare id meant that if the rep corrected the name after a failed save — the obvious
-       * thing to do when a save fails — the retry reused the id of the PREVIOUS person, filing the
-       * visit against someone the rep had already replaced. Recovery is only safe while the draft
-       * still describes the same person at the same company.
+       * A contact already committed by a FAILED attempt is reused rather than created again — but only
+       * while the draft still describes the same person. Holding a bare id meant that correcting the
+       * name after a failed save (the obvious thing to do) reused the previous person's id, filing the
+       * visit against someone the rep had already replaced.
        */
       const contactKey = `${first.toLowerCase()}|${last.toLowerCase()}|${property?.companyId ?? company?.id ?? ""}`;
       if (createdContactId.current && createdContactId.current.key !== contactKey) {
@@ -261,15 +258,15 @@ export default function ProspectScreen() {
          */
         try {
           const created = await prospecting.createContact(fetcher, {
-          firstName: first,
-          lastName: last,
-          category: "property_manager",
-          jobTitle: contactTitle.trim() || undefined,
-          mobile: contactPhone.trim() || undefined,
-          // The FALLBACK company counts too. Without it a person met at a building the CRM has never
-          // seen was created with no company at all — the one case where the link matters most.
-          companyId: property?.companyId ?? company?.id,
-        });
+            firstName: first,
+            lastName: last,
+            category: "property_manager",
+            jobTitle: contactTitle.trim() || undefined,
+            mobile: contactPhone.trim() || undefined,
+            // The FALLBACK company counts too. Without it a person met at a building the CRM has never
+            // seen was created with no company at all — the one case where the link matters most.
+            companyId: property?.companyId ?? company?.id,
+          });
           contactId = created.created?.id;
           if (contactId) createdContactId.current = { id: contactId, key: contactKey };
           duplicates = created.duplicates ?? null;
