@@ -1091,6 +1091,10 @@ export function useDealStagePage(input: StagePageQuery & { stageId: string; scop
       ...(input.filters.lostSince ? { lost_since: input.filters.lostSince } : {}),
       ...(input.filters.lostUntil ? { lost_until: input.filters.lostUntil } : {}),
       ...(input.filters.lostAllTime ? { lost_all_time: "true" } : {}),
+      // The WEB board renders CANONICAL columns (aliases merged, aggregates summed), so its drill-down
+      // must query the same family or the page's header and list disagree with the board that opened it.
+      // Opt-in because mobile-crm shares this endpoint with UNMERGED raw columns (Codex P2 on #983).
+      canonicalStageFamily: "true",
     });
 
     setLoading(true);

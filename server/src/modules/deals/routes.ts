@@ -628,6 +628,12 @@ function readStageInput(req: Parameters<typeof router.get>[1] extends never ? ne
     // so a drill-down opened from the board lists what the board counted. Default off — the web
     // workspace uses this endpoint too and its behaviour is unchanged.
     boardPopulation: req.query.boardPopulation === "true",
+    // Opt-in: broaden an OPEN stage drill to the CANONICAL stage family (the board's own column
+    // membership). Default off, and deliberately so: mobile-crm renders UNMERGED raw columns and opens
+    // this same endpoint with the raw stage id, so expanding by default would make its "see all 13" open
+    // a list of 16. Already-shipped mobile builds cannot start sending a flag, so the narrow behaviour has
+    // to be the default and the web workspace — whose board DOES merge — opts in (Codex P2).
+    canonicalStageFamily: req.query.canonicalStageFamily === "true",
     page: parseNumber(req.query.page) ?? 1,
     pageSize: parseNumber(req.query.pageSize) ?? 25,
     sort: normalizeStagePageSort(req.query.sort as string | undefined),

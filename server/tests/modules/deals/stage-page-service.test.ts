@@ -1330,12 +1330,32 @@ describe("listDealStagePage canonical stage family", () => {
       activeOfficeId: "office-1",
       scope: "all",
       stageId,
+      canonicalStageFamily: true,
       page: 1,
       pageSize: 25,
       sort: "newest",
     } as any);
     return extractSqlText(execute.mock.calls[0]![0]);
   }
+
+  it("stays scoped to the clicked stage when the caller does NOT opt in (raw mobile board)", async () => {
+    // mobile-crm renders UNMERGED raw columns and opens this endpoint with the raw stage id; expanding by
+    // default would make its "see all 13" return 16. Shipped builds cannot start sending a flag, so narrow
+    // is the default (Codex P2).
+    dbState.responses = [ESTIMATING_FAMILY_STAGES];
+    const execute = vi.fn()
+      .mockResolvedValueOnce({ rows: [{ total_count: "13", active_count: "11", total_value: "6536024.55" }] })
+      .mockResolvedValueOnce({ rows: [] });
+    const tenantDb = { select: createOfficeScopeSelectMock(), execute } as any;
+    const { listDealStagePage } = await import("../../../src/modules/deals/service.js");
+    await listDealStagePage(tenantDb, {
+      role: "admin", userId: "admin-1", activeOfficeId: "office-1", scope: "all",
+      stageId: "stage-estimating", page: 1, pageSize: 25, sort: "newest",
+    } as any);
+    const sqlText = extractSqlText(execute.mock.calls[0]![0]);
+    expect(sqlText).toContain("stage-estimating");
+    expect(sqlText).not.toContain("stage-eip");
+  });
 
   it("queries the whole canonical family for an OPEN stage, not just the clicked id", async () => {
     const sqlText = await runStagePage("stage-estimating");
@@ -1374,7 +1394,7 @@ describe("listDealStagePage canonical stage family", () => {
     const { listDealStagePage } = await import("../../../src/modules/deals/service.js");
     await listDealStagePage(tenantDb, {
       role: "admin", userId: "admin-1", activeOfficeId: "office-1", scope: "all",
-      stageId: "stage-contract", page: 1, pageSize: 25, sort: "newest",
+      stageId: "stage-contract", canonicalStageFamily: true, page: 1, pageSize: 25, sort: "newest",
     } as any);
     const sqlText = extractSqlText(execute.mock.calls[0]![0]);
     expect(sqlText).toContain("stage-contract");

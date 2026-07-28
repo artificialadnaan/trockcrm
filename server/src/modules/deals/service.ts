@@ -933,6 +933,8 @@ export interface DealStagePageInput extends DealBoardInput {
    * Off by default so the web workspace, which also uses this endpoint, is unchanged.
    */
   boardPopulation?: boolean;
+  /** Opt-in canonical-family expansion for OPEN stages — see readStageInput and canonicalDealStageFamilyIds. */
+  canonicalStageFamily?: boolean;
   page: number;
   pageSize: number;
   sort?: StagePageSort;
@@ -1434,6 +1436,11 @@ function dealRouteForStageFamily(workflowFamily: string | null | undefined): Wor
  * ESTIMATE_SENT_STAGE_SLUGS grouping (estimate_sent_to_client + service_estimate_sent_to_client +
  * bid_sent). Falls back to the clicked stage alone when the slug has no canonical mapping, so an
  * unrecognised or bespoke stage can never widen its own drill-down.
+ *
+ * OPT-IN (input.canonicalStageFamily). mobile-crm renders UNMERGED raw board columns and opens this same
+ * endpoint with the raw stage id, so expanding unconditionally would make its "see all 13" return 16.
+ * Shipped mobile builds cannot start sending a flag, so narrow stays the default and the web workspace
+ * opts in. Same shape as the existing boardPopulation opt-in.
  *
  * TERMINAL FAMILIES ARE DELIBERATELY EXCLUDED. Won/Lost drills are served by the audited
  * WON/LOST_TERMINAL_STAGE_SLUGS branch above, which also brings the won/lost date windows, the
@@ -3779,7 +3786,9 @@ export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePage
       : null;
   const stageIds =
     stageSlugs == null
-      ? canonicalDealStageFamilyIds(stages, stage)
+      ? input.canonicalStageFamily
+        ? canonicalDealStageFamilyIds(stages, stage)
+        : [input.stageId]
       : stages
           .filter((item) => (stageSlugs as readonly string[]).includes(item.slug))
           .map((item) => item.id);
