@@ -12,7 +12,7 @@ import {
   isR2Configured,
 } from "../../lib/r2-client.js";
 import { activeLatestFileConditions, buildDealFileScopeCondition } from "../files/service.js";
-import { generatePublicToken } from "../public-photo-tokens/service.js";
+import { PUBLIC_VIEWER_PAGE_SIZE, generatePublicToken, isPublicProxyServable } from "../public-photo-tokens/service.js";
 import { publicPhotoShareUrlFromEnv, publicViewerBaseUrlFromEnv } from "../public-photo-tokens/public-share-url.js";
 import { buildNormalizedRfpRequestBody, buildRfpAttachments, buildRfpRequestDeliveryPayload, resolveSyncHubCreateFromRfpUrl, resolveSyncHubRfpRequestUrl } from "./rfp-payload.js";
 
@@ -197,9 +197,11 @@ export async function loadRfpAttachmentsForDeal(
   const scopeCondition = await buildDealFileScopeCondition(tenantDb, dealId);
   const rows = await tenantDb
     .select({
+      id: files.id,
       displayName: files.displayName,
       fileExtension: files.fileExtension,
       mimeType: files.mimeType,
+      fileSizeBytes: files.fileSizeBytes,
       r2Key: files.r2Key,
       category: files.category,
     })
@@ -213,14 +215,20 @@ export async function loadRfpAttachmentsForDeal(
       isR2Configured()
         ? await generateDownloadUrl(r2Key, RFP_ATTACHMENT_URL_TTL_SECONDS, filename)
         : generateMockDownloadUrl(r2Key),
-    mintPhotoShareUrl: async () => {
+    // Only photos the public viewer can actually serve may be collapsed into the link: it refuses
+    // HEIC/HEIF outright and will not transcode an oversized raster, so collapsing one of those
+    // would leave the reviewer a placeholder and no file at all.
+    canViewerServe: (file) => isPublicProxyServable(file.mimeType, file.fileExtension, file.fileSizeBytes),
+    // The viewer renders a single page with no pagination, so anything past it stays individual.
+    viewerPhotoLimit: PUBLIC_VIEWER_PAGE_SIZE,
+    mintPhotoShareUrl: async (photoIds) => {
       if (!share?.userId || !share.officeId) return null;
       // Cheap pre-check: without a configured viewer host the link would resolve nowhere, so skip
       // the token INSERT entirely rather than leave an orphan row behind.
       if (!publicViewerBaseUrlFromEnv()) return null;
       try {
-        // No photoIds => a WHOLE-DEAL token, so this is not bound by the 200-photo selection cap
-        // and stays correct as photos are added while the RFP sits in review.
+        // Scoped to exactly the photo ids the link will list, so the "Project Photos (N)" label can
+        // never promise more than the viewer will show.
         // NOTE: this writes to public.public_photo_tokens on the GLOBAL connection, so it is not
         // part of the caller's tenant transaction. A rollback after this point leaves an unused
         // token row, which is inert (it grants nothing that the deal's own photos don't) and ages
@@ -229,7 +237,7 @@ export async function loadRfpAttachmentsForDeal(
           dealId,
           createdByUserId: share.userId,
           tenantId: share.officeId,
-          photoIds: null,
+          photoIds,
           expiresAt: new Date(Date.now() + RFP_PHOTO_SHARE_TTL_MS),
         });
         return publicPhotoShareUrlFromEnv(created.rawToken);

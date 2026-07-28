@@ -81,12 +81,27 @@ export interface RfpAttachment {
  * testable without R2 or a database.
  */
 export interface RfpAttachmentSourceFile {
+  /** `files.id` — needed to scope the photo share token to exactly the photos the link will show. */
+  id?: string;
   displayName: string;
   fileExtension: string | null;
   mimeType: string;
+  /** `files.file_size_bytes` — the public viewer refuses to transcode oversized non-JPEG rasters. */
+  fileSizeBytes?: number | null;
   r2Key: string;
   /** `files.category`. "photo" rows collapse into a single share link — see buildRfpAttachments. */
   category?: string | null;
+}
+
+/**
+ * Marks the one attachment that is a viewer link rather than a file. It is placed first and is the
+ * ONLY route to a collapsed deal's photos, so the size cap protects it (see fitWithinBudget).
+ */
+export const RFP_PHOTO_SHARE_CONTENT_TYPE = "text/html";
+
+/** How many leading attachments the size cap must preserve: the photo share link, when present. */
+export function protectedAttachmentCount(attachments: RfpAttachment[]): number {
+  return attachments[0]?.contentType === RFP_PHOTO_SHARE_CONTENT_TYPE ? 1 : 0;
 }
 
 /**
@@ -128,18 +143,39 @@ export async function buildRfpAttachments(
   files: RfpAttachmentSourceFile[],
   deps: {
     resolveUrl: (input: { r2Key: string; filename: string }) => Promise<string>;
-    mintPhotoShareUrl: (photoCount: number) => Promise<string | null>;
+    /** Mints a `/p/<token>` link scoped to exactly these photo ids. Null when none can be minted. */
+    mintPhotoShareUrl: (photoIds: string[]) => Promise<string | null>;
+    /** True when the public viewer can actually serve this photo (JPEG always; other rasters only
+     *  under the transcode size cap; HEIC/HEIF never). Defaults to "all", for callers that pass a
+     *  pre-filtered list. */
+    canViewerServe?: (file: RfpAttachmentSourceFile) => boolean;
+    /** The viewer renders ONE page and exposes no pagination, so only this many photos are reachable
+     *  through the link. */
+    viewerPhotoLimit?: number;
   }
 ): Promise<RfpAttachment[]> {
-  const photos = files.filter((file) => file.category === "photo");
-  const shareUrl = photos.length > 0 ? await deps.mintPhotoShareUrl(photos.length) : null;
+  const canServe = deps.canViewerServe ?? (() => true);
+  const limit = deps.viewerPhotoLimit ?? Number.POSITIVE_INFINITY;
 
-  const individually = shareUrl ? files.filter((file) => file.category !== "photo") : files;
+  const photos = files.filter((file) => file.category === "photo");
+  // Only photos the viewer will BOTH list (page-1 limit) and serve (format/size) may be collapsed.
+  // Everything else keeps its own presigned attachment — otherwise the label promises the reviewer
+  // photos the link cannot show, and for HEIC/HEIF they would get a placeholder and no file at all.
+  const collapsible = photos.filter((file) => file.id && canServe(file)).slice(0, limit);
+  const collapsedIds = new Set(collapsible.map((file) => file.id));
+
+  const shareUrl = collapsible.length > 0 ? await deps.mintPhotoShareUrl(collapsible.map((f) => f.id!)) : null;
+
+  const individually = shareUrl ? files.filter((file) => !file.id || !collapsedIds.has(file.id)) : files;
   const attachments = await buildRfpAttachmentsFromFiles(individually, deps.resolveUrl);
 
   if (!shareUrl) return attachments;
   return [
-    { name: `Project Photos (${photos.length})`, url: shareUrl, contentType: "text/html" },
+    {
+      name: `Project Photos (${collapsible.length})`,
+      url: shareUrl,
+      contentType: RFP_PHOTO_SHARE_CONTENT_TYPE,
+    },
     ...attachments,
   ];
 }
@@ -252,8 +288,11 @@ const SACRIFICIAL_DEAL_FIELDS = [
  */
 const REQUIRED_FIELD_MAX_CHARS = 500;
 
-function clampRequired(value: string): string {
-  return value.length > REQUIRED_FIELD_MAX_CHARS ? value.slice(0, REQUIRED_FIELD_MAX_CHARS) : value;
+function clampRequired<T>(value: T): T {
+  // Only clamps strings; a stored payload of an older shape may carry something else here, and the
+  // limiter must not throw on it.
+  if (typeof value !== "string" || value.length <= REQUIRED_FIELD_MAX_CHARS) return value;
+  return value.slice(0, REQUIRED_FIELD_MAX_CHARS) as unknown as T;
 }
 
 function serializedBytes(body: unknown): number {
@@ -266,8 +305,39 @@ function serializedBytes(body: unknown): number {
  * description first (it has a CRM fallback), then drop attachments from the TAIL, which callers
  * order newest-first so the most relevant documents survive.
  */
-function fitWithinBudget(body: NormalizedRfpRequestBody, budget: number): void {
-  const original = body.deal.description;
+/**
+ * Trims `body.attachments` to the longest leading run that fits, keeping at least `minKeep`.
+ *
+ * Serialized JSON is a flat concatenation, so an attachment's byte cost is INDEPENDENT of the
+ * others: `total(k) = base + Σ len(item_i) + (k-1) commas`. That means one serialization per
+ * attachment plus one for the rest of the body — linear. Popping one at a time and re-serializing
+ * was quadratic: ~1,900 full serializations of a multi-megabyte payload for a 2,000-photo deal,
+ * blocking the event loop while the tenant transaction is open.
+ */
+function trimAttachmentsToBudget(body: NormalizedRfpRequestBody, budget: number, minKeep: number): void {
+  const attachments = body.attachments;
+  if (attachments.length === 0) return;
+
+  const withoutAttachments = { ...body, attachments: [] as RfpAttachment[] };
+  const baseBytes = serializedBytes(withoutAttachments);
+
+  let keep = 0;
+  let running = baseBytes;
+  for (let i = 0; i < attachments.length; i += 1) {
+    // +1 for the comma separating this item from the previous one.
+    running += Buffer.byteLength(JSON.stringify(attachments[i])) + (i > 0 ? 1 : 0);
+    if (running > budget) break;
+    keep = i + 1;
+  }
+
+  const target = Math.max(minKeep, keep);
+  if (target >= attachments.length) return;
+  body.attachmentsOmitted += attachments.length - target;
+  attachments.length = target;
+}
+
+function fitWithinBudget(body: NormalizedRfpRequestBody, budget: number, protectedCount = 0): void {
+  const original = body.deal?.description;
   if (original && serializedBytes(body) > budget) {
     // Geometric shrink: guaranteed progress, terminates in O(log n), and exactness doesn't
     // matter here — only that the result is parseable.
@@ -279,10 +349,10 @@ function fitWithinBudget(body: NormalizedRfpRequestBody, budget: number): void {
     }
   }
 
-  while (body.attachments.length > 0 && serializedBytes(body) > budget) {
-    body.attachments.pop();
-    body.attachmentsOmitted += 1;
-  }
+  // Trim attachments, but never below the protected prefix: the photo share link is the ONLY route
+  // to a collapsed deal's photos, so a pathological `estimator` must not be what evicts it. Oversized
+  // optional deal fields are surrendered first, below.
+  trimAttachmentsToBudget(body, budget, protectedCount);
 
   if (serializedBytes(body) <= budget) return;
 
@@ -294,21 +364,56 @@ function fitWithinBudget(body: NormalizedRfpRequestBody, budget: number): void {
   //
   // Give up the whole address block first (several unbounded parts, purely informational), then the
   // optional display fields in priority order.
-  body.deal.address = null;
-  for (const field of SACRIFICIAL_DEAL_FIELDS) {
-    if (serializedBytes(body) <= budget) return;
-    body.deal[field] = null;
+  if (body.deal) {
+    body.deal.address = null;
+    for (const field of SACRIFICIAL_DEAL_FIELDS) {
+      if (serializedBytes(body) <= budget) return;
+      body.deal[field] = null;
+    }
+
+    body.deal.name = clampRequired(body.deal.name);
+    body.deal.projectNumber = clampRequired(body.deal.projectNumber);
+    body.deal.projectType = clampRequired(body.deal.projectType);
   }
 
   // Only fields SyncHub requires to be non-empty remain, so clamp rather than drop. Each is
   // guaranteed non-empty on the way in (name falls back to "Untitled Deal", projectNumber to the
   // deal id, projectType to a resolved code), and slicing a non-empty string keeps it non-empty —
   // this bounds the floor to a few KB, well under any sane budget.
-  body.deal.name = clampRequired(body.deal.name);
-  body.deal.projectNumber = clampRequired(body.deal.projectNumber);
-  body.deal.projectType = clampRequired(body.deal.projectType);
   body.sourceDealId = clampRequired(body.sourceDealId);
   body.sourceEventId = clampRequired(body.sourceEventId);
+
+  // Absolute last resort: with every field surrendered and still no room, the protected link has to
+  // go too — an unparseable body helps nobody. Unreachable for any realistic input, since the floor
+  // above is a few KB.
+  if (serializedBytes(body) > budget) trimAttachmentsToBudget(body, budget, 0);
+}
+
+/**
+ * Re-applies the size cap to a body whose attachments were replaced after it was first built.
+ *
+ * The retry route splices freshly-minted presigned URLs into the DEAD job's already-capped body.
+ * Without this the limiter never runs on the new list, so a deal whose file set grew since the
+ * original enqueue re-enqueues an oversized body and the worker dead-letters it with another 413.
+ * Returns a new object — the caller's body (and the dead job's stored payload) is left untouched —
+ * and recomputes `attachmentsOmitted` rather than inheriting the stale count.
+ */
+export function capRfpRequestBody(
+  body: NormalizedRfpRequestBody,
+  maxBodyBytes?: number
+): NormalizedRfpRequestBody {
+  // The retry path feeds us a body read back out of job_queue, which may predate this shape (older
+  // dead jobs carry no attachmentsOmitted) — so tolerate a partial record rather than throwing and
+  // turning a retry into a 500.
+  const deal = (body.deal ?? {}) as NormalizedRfpRequestBody["deal"];
+  const next: NormalizedRfpRequestBody = {
+    ...body,
+    deal: { ...deal, address: deal.address ? { ...deal.address } : null },
+    attachments: [...(body.attachments ?? [])],
+    attachmentsOmitted: 0,
+  };
+  fitWithinBudget(next, maxBodyBytes ?? RFP_BODY_BYTE_BUDGET, protectedAttachmentCount(next.attachments));
+  return next;
 }
 
 export function buildNormalizedRfpRequestBody(input: {
@@ -317,6 +422,8 @@ export function buildNormalizedRfpRequestBody(input: {
   attachments?: RfpAttachment[];
   /** Override the byte budget (tests). Defaults to RFP_BODY_BYTE_BUDGET. */
   maxBodyBytes?: number;
+  /** Leading attachments the cap must preserve. Defaults to detecting the photo share link. */
+  protectedAttachmentCount?: number;
 }): NormalizedRfpRequestBody {
   const { deal, sourceEventId } = input;
   const body: NormalizedRfpRequestBody = {
@@ -357,7 +464,11 @@ export function buildNormalizedRfpRequestBody(input: {
     attachmentsOmitted: 0,
   };
 
-  fitWithinBudget(body, input.maxBodyBytes ?? RFP_BODY_BYTE_BUDGET);
+  fitWithinBudget(
+    body,
+    input.maxBodyBytes ?? RFP_BODY_BYTE_BUDGET,
+    input.protectedAttachmentCount ?? protectedAttachmentCount(body.attachments)
+  );
   return body;
 }
 

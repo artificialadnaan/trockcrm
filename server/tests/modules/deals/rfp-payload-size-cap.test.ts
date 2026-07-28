@@ -3,6 +3,7 @@ import {
   RFP_BODY_BYTE_BUDGET,
   SYNCHUB_JSON_BODY_LIMIT_BYTES,
   buildNormalizedRfpRequestBody,
+  capRfpRequestBody,
 } from "../../../src/modules/deals/rfp-payload.js";
 
 /**
@@ -175,5 +176,98 @@ describe("RFP request body stays within SyncHub's parser limit", () => {
     });
 
     expect(bodyBytes(body)).toBeLessThanOrEqual(SYNCHUB_JSON_BODY_LIMIT_BYTES);
+  });
+});
+
+describe("cap performance and priority", () => {
+  it("stays linear in attachment count instead of reserializing per removal", () => {
+    // The pop-and-reserialize loop was O(n^2): 2,000 oversized attachments meant ~1,900 full JSON
+    // serializations of a ~1.7MB payload, blocking the event loop while the tenant transaction is
+    // open — precisely on the file-heavy inputs this cap targets.
+    const attachments = Array.from({ length: 4000 }, (_, i) => makeAttachment(i));
+
+    const started = process.hrtime.bigint();
+    const body = buildNormalizedRfpRequestBody({
+      deal: baseDeal,
+      sourceEventId: "crm:deal-stage:opportunity:evt-1",
+      attachments,
+    });
+    const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
+
+    expect(bodyBytes(body)).toBeLessThanOrEqual(SYNCHUB_JSON_BODY_LIMIT_BYTES);
+    expect(body.attachmentsOmitted).toBe(4000 - body.attachments.length);
+    // Quadratic behaviour takes seconds here; linear is milliseconds. Generous bound to stay stable
+    // on slow CI without being satisfiable by the old implementation.
+    expect(elapsedMs).toBeLessThan(1000);
+  });
+
+  it("sacrifices oversized deal fields before dropping the protected photo share link", () => {
+    // The link is the ONLY route to a collapsed deal's photos, so a pathological `estimator` must
+    // not be what evicts it.
+    const shareLink = {
+      name: "Project Photos (250)",
+      url: "https://crm.example.com/p/tok-abc",
+      contentType: "text/html",
+    };
+
+    const body = buildNormalizedRfpRequestBody({
+      deal: { ...baseDeal, estimator: "E".repeat(200_000) },
+      sourceEventId: "crm:deal-stage:opportunity:evt-1",
+      attachments: [shareLink, ...Array.from({ length: 200 }, (_, i) => makeAttachment(i))],
+      protectedAttachmentCount: 1,
+    });
+
+    expect(bodyBytes(body)).toBeLessThanOrEqual(SYNCHUB_JSON_BODY_LIMIT_BYTES);
+    expect(body.attachments[0]).toEqual(shareLink);
+    expect(body.deal.estimator).toBeNull();
+  });
+});
+
+describe("capRfpRequestBody (retry path)", () => {
+  it("re-caps a body whose attachments were swapped in after the original pass", () => {
+    // The retry route splices freshly-minted attachment URLs into the DEAD job's already-capped
+    // body. Without re-running the limiter, a deal whose file set grew since the original enqueue
+    // re-enqueues an oversized body and the worker immediately dead-letters it with another 413.
+    const original = buildNormalizedRfpRequestBody({
+      deal: baseDeal,
+      sourceEventId: "crm:deal-stage:opportunity:evt-1",
+      attachments: [makeAttachment(0)],
+    });
+
+    const recapped = capRfpRequestBody({
+      ...original,
+      attachments: Array.from({ length: 400 }, (_, i) => makeAttachment(i)),
+    });
+
+    expect(bodyBytes(recapped)).toBeLessThanOrEqual(SYNCHUB_JSON_BODY_LIMIT_BYTES);
+    expect(recapped.attachments.length).toBeLessThan(400);
+    expect(recapped.attachmentsOmitted).toBe(400 - recapped.attachments.length);
+  });
+
+  it("recomputes attachmentsOmitted rather than inheriting the dead job's stale count", () => {
+    const stale = buildNormalizedRfpRequestBody({
+      deal: baseDeal,
+      sourceEventId: "crm:deal-stage:opportunity:evt-1",
+      attachments: Array.from({ length: 400 }, (_, i) => makeAttachment(i)),
+    });
+    expect(stale.attachmentsOmitted).toBeGreaterThan(0);
+
+    const recapped = capRfpRequestBody({ ...stale, attachments: [makeAttachment(0)] });
+
+    expect(recapped.attachmentsOmitted).toBe(0);
+    expect(recapped.attachments).toHaveLength(1);
+  });
+
+  it("does not mutate the body it was given", () => {
+    const original = buildNormalizedRfpRequestBody({
+      deal: { ...baseDeal, description: "S".repeat(200_000) },
+      sourceEventId: "crm:deal-stage:opportunity:evt-1",
+      attachments: [makeAttachment(0)],
+    });
+    const before = JSON.stringify(original);
+
+    capRfpRequestBody({ ...original, attachments: Array.from({ length: 400 }, (_, i) => makeAttachment(i)) });
+
+    expect(JSON.stringify(original)).toBe(before);
   });
 });

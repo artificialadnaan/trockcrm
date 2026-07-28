@@ -366,9 +366,14 @@ function publicPhotoAssetUrl(assetBaseUrl: string, rawToken: string, photoId: st
 // non-JPEG rasters are buffered + transcoded, so they're capped at MAX_TRANSCODE_BYTES. An oversized
 // transcodable photo is therefore NOT servable — so the viewer/download advertise nothing (placeholder),
 // matching the asset endpoint's 422, instead of a broken <img>. Unknown/NaN size is treated as
+// The viewer renders exactly ONE page and neither the public route nor the client exposes pagination,
+// so this is the hard ceiling on how many photos a share link can actually surface. Exported so the
+// RFP payload builder collapses only the photos the link can really show (TRK-2607-H3X6).
+export const PUBLIC_VIEWER_PAGE_SIZE = 500;
+
 // within-cap (the asset endpoint's HEAD-gate is the authoritative backstop). HEIC/HEIF (no libheif) and
 // non-rasters are never servable.
-function isPublicProxyServable(
+export function isPublicProxyServable(
   mimeType: string | null | undefined,
   fileExtension: string | null | undefined,
   fileSizeBytes: number | string | null | undefined,
@@ -414,7 +419,7 @@ export async function getPublicPhotoViewer(
     const deal = ((dealResult as any).rows ?? dealResult)[0];
     if (!deal) throw new AppError(404, "Photo link not found");
 
-    const timeline = await getDealPhotoTimeline(tenantDb, token.dealId, 1, 500, {
+    const timeline = await getDealPhotoTimeline(tenantDb, token.dealId, 1, PUBLIC_VIEWER_PAGE_SIZE, {
       ...filters,
       includeDeleted: false,
       // Subset token (non-null photo_ids) -> the viewer lists ONLY those photos; whole-deal token -> all.

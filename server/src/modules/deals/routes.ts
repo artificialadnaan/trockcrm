@@ -190,7 +190,7 @@ import {
   listEstimateMarkets,
   setDealMarketOverride,
 } from "../estimating/deal-market-override-service.js";
-import { resolveSyncHubRfpRequestUrl } from "./rfp-payload.js";
+import { capRfpRequestBody, resolveSyncHubRfpRequestUrl, type NormalizedRfpRequestBody } from "./rfp-payload.js";
 import { enqueueRfpBidBoardCreate, enqueueRfpVoteInvitation, insertOpportunityRfpRequestJob, loadRfpAttachmentsForDeal } from "./rfp-enqueue.js";
 import { isOpportunityRfpEventEnabled, isRfpVotingEnabled } from "../../config/feature-flags.js";
 import { allRfpVotersHaveOfficeAccess, authorizeAndCastRfpVote, hasSufficientRfpVoters, isServiceRfp, openRfpVoteRound, rfpVotesTableExists } from "./rfp-vote-service.js";
@@ -1695,7 +1695,15 @@ router.post("/:id/rfp-retry", async (req, res, next) => {
     const payload: RfpRequestDeliveryPayload = {
       ...deadJob.payload,
       syncHubUrl: resolveSyncHubRfpRequestUrl(),
-      body: { ...deadJob.payload.body, attachments: freshAttachments },
+      // Re-run the byte limiter over the NEW attachment list. The dead job's body was capped against
+      // the file set as it stood at the original enqueue; a deal whose files grew since would
+      // otherwise re-enqueue an oversized body and be dead-lettered again with another 413.
+      // capRfpRequestBody also recomputes attachmentsOmitted rather than inheriting the stale count.
+      // The stored payload is typed as a loose record, so bridge it to the builder's shape here.
+      body: capRfpRequestBody({
+        ...(deadJob.payload.body as unknown as NormalizedRfpRequestBody),
+        attachments: freshAttachments,
+      }) as unknown as Record<string, unknown>,
     };
     delete payload.dealHandled;
     // Atomically re-claim the send-failed state BEFORE enqueuing, so a Return to Opportunity that lands
