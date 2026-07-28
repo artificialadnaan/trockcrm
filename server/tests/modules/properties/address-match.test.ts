@@ -496,3 +496,58 @@ describe("localityContradicts — abbreviated place names", () => {
     ).toBe(true);
   });
 });
+
+/**
+ * Drizzle's sql template, flattened to text INCLUDING bound values.
+ *
+ * The LIKE prefixes are parameters, not literals, so a text-only dump shows `$1` and proves nothing
+ * about which variants were offered. Local copy because that is this suite's convention — the same
+ * helper already appears in two other server tests.
+ */
+function extractSqlText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (!value || typeof value !== "object") return "";
+  if (Array.isArray((value as { queryChunks?: unknown[] }).queryChunks)) {
+    return (value as { queryChunks: unknown[] }).queryChunks.map(extractSqlText).join(" ");
+  }
+  if ("value" in (value as Record<string, unknown>)) {
+    const chunkValue = (value as { value: unknown }).value;
+    if (Array.isArray(chunkValue)) return chunkValue.map(extractSqlText).join(" ");
+    if (typeof chunkValue === "string") return chunkValue;
+  }
+  if ("name" in (value as Record<string, unknown>) && typeof (value as { name?: unknown }).name === "string") {
+    return (value as { name: string }).name;
+  }
+  return "";
+}
+
+describe("matchProperties — the SQL must fetch what the comparator would accept", () => {
+  /**
+   * The candidate predicate is allowed to be generous, but it is NOT allowed to be narrower than the
+   * decision it feeds: a row addressKeysMatch would call equal, never fetched, is a duplicate the
+   * matcher can never prevent — and TypeScript never even gets to look at it.
+   */
+  it("fetches an abbreviated stored directional for a spelled-out numberless query", async () => {
+    // normalizeAddressKey only EXPANDS, so both the canonical and raw lead tokens are "north" while the
+    // stored row folds to "n main st". Without the abbreviated variant nothing selects it.
+    let captured = "";
+    const db = {
+      execute: async (q: unknown) => {
+        captured = extractSqlText(q);
+        return { rows: [] };
+      },
+    } as unknown as Parameters<typeof matchProperties>[0];
+
+    await matchProperties(db, {
+      lat: null,
+      lng: null,
+      address: "North Main Street",
+      city: "Dallas",
+      state: "TX",
+      zip: "75201",
+    });
+    // The WHERE clause must offer the abbreviated prefix as well as the expanded one.
+    expect(captured).toContain("n %");
+    expect(captured).toContain("north %");
+  });
+});

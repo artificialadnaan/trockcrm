@@ -111,6 +111,18 @@ const DIRECTIONAL_TOKENS = new Set([
 ]);
 
 /**
+ * Spelled-out directional back to its abbreviation ("north" → "n").
+ *
+ * normalizeAddressKey only ever EXPANDS, so a numberless query written either way canonicalises to
+ * "north main street" — and the stored row folds to "n main st". Both the canonical and the raw lead
+ * token are therefore "north", and no whole-address form abbreviates a leading word (they collapse
+ * street SUFFIXES), so the row was never fetched and the comparator never got to agree with it.
+ */
+const DIRECTIONAL_ABBREVIATIONS: Record<string, string> = Object.fromEntries(
+  Object.entries(DIRECTIONALS).map(([abbr, full]) => [full, abbr]),
+);
+
+/**
  * Abbreviations that mean something DIFFERENT away from the street-type position.
  *
  * `st` is the whole reason this map exists. As the last token of a street line it is "Street"; anywhere
@@ -631,7 +643,17 @@ export async function matchProperties(
    */
   const leadToken = addressKey.split(" ")[0] ?? "";
   const rawLeadToken = (punctuationKey.split(" ")[0] ?? "").trim();
-  const leadTokenVariants = [...new Set([leadToken, rawLeadToken].filter(Boolean))];
+  const leadTokenVariants = [
+    ...new Set(
+      [
+        leadToken,
+        rawLeadToken,
+        // The ABBREVIATED form, which is the only one a stored "N Main St" starts with.
+        DIRECTIONAL_ABBREVIATIONS[leadToken],
+        DIRECTIONAL_ABBREVIATIONS[rawLeadToken],
+      ].filter(Boolean),
+    ),
+  ];
   const sameLeadToken = leadTokenVariants.length
     ? sql.join(
         leadTokenVariants.map((tok) => sql`${normalizedDbAddress} like ${`${tok} %`}`),
