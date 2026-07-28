@@ -20,12 +20,19 @@ const OWNER = { id: "u1", role: "rep" };
  */
 function stubDb(
   existing: Record<string, unknown> | undefined,
-  options: { lead?: Record<string, unknown> | null; updateReturns?: unknown[]; afterRace?: Record<string, unknown> } = {},
+  options: {
+    lead?: Record<string, unknown> | null;
+    /** The deal or contact the activity is anchored to — read only when the activity carries one. */
+    anchor?: Record<string, unknown> | null;
+    updateReturns?: unknown[];
+    afterRace?: Record<string, unknown>;
+  } = {},
 ) {
   const updates: Array<Record<string, unknown>> = [];
   const reads: unknown[][] = [
     existing ? [existing] : [],
     ...(options.lead !== undefined ? [options.lead ? [options.lead] : []] : []),
+    ...(options.anchor !== undefined ? [options.anchor ? [options.anchor] : []] : []),
     ...(options.afterRace ? [[options.afterRace]] : []),
   ];
   let readIndex = 0;
@@ -207,6 +214,85 @@ describe("linkActivityToLead — company-anchored consistency", () => {
     const { db } = stubDb(
       { id: "a1", leadId: null, propertyId: null, companyId: "cA", responsibleUserId: "u1" },
       { lead: { propertyId: null, companyId: "cA" } },
+    );
+    await expect(
+      linkActivityToLead(db, { activityId: "a1", leadId: "l1", viewer: OWNER }),
+    ).resolves.toMatchObject({ leadId: "l1" });
+  });
+});
+
+describe("linkActivityToLead — deal-anchored consistency", () => {
+  /**
+   * An activity created with ONLY a dealId carries none of the other anchors, so it skips the property
+   * and company checks entirely. Without this branch it could be linked to any lead in the office —
+   * the widest of the three cross-record attribution holes, and the one with no test.
+   */
+  it("refuses a lead whose company differs from the deal's", async () => {
+    const { db, updates } = stubDb(
+      { id: "a1", leadId: null, propertyId: null, companyId: null, dealId: "d1", responsibleUserId: "u1" },
+      { lead: { propertyId: null, companyId: "cB" }, anchor: { companyId: "cA" } },
+    );
+    await expect(
+      linkActivityToLead(db, { activityId: "a1", leadId: "l1", viewer: OWNER }),
+    ).rejects.toMatchObject({ statusCode: 409, code: "ACTIVITY_LEAD_COMPANY_MISMATCH" });
+    expect(updates).toEqual([]);
+  });
+
+  it("allows a lead whose company matches the deal's", async () => {
+    const { db } = stubDb(
+      { id: "a1", leadId: null, propertyId: null, companyId: null, dealId: "d1", responsibleUserId: "u1" },
+      { lead: { propertyId: null, companyId: "cA" }, anchor: { companyId: "cA" } },
+    );
+    await expect(
+      linkActivityToLead(db, { activityId: "a1", leadId: "l1", viewer: OWNER }),
+    ).resolves.toMatchObject({ leadId: "l1" });
+  });
+
+  it("allows the link when the deal has no company to contradict", async () => {
+    // "Cannot disprove" semantics: a null company is not evidence of a mismatch, and refusing here
+    // would block a legitimate promotion on missing data rather than on a conflict.
+    const { db } = stubDb(
+      { id: "a1", leadId: null, propertyId: null, companyId: null, dealId: "d1", responsibleUserId: "u1" },
+      { lead: { propertyId: null, companyId: "cB" }, anchor: { companyId: null } },
+    );
+    await expect(
+      linkActivityToLead(db, { activityId: "a1", leadId: "l1", viewer: OWNER }),
+    ).resolves.toMatchObject({ leadId: "l1" });
+  });
+});
+
+describe("linkActivityToLead — contact-anchored consistency", () => {
+  it("refuses a lead whose company differs from the contact's", async () => {
+    const { db, updates } = stubDb(
+      { id: "a1", leadId: null, propertyId: null, companyId: null, contactId: "ct1", responsibleUserId: "u1" },
+      { lead: { propertyId: null, companyId: "cB" }, anchor: { companyId: "cA" } },
+    );
+    await expect(
+      linkActivityToLead(db, { activityId: "a1", leadId: "l1", viewer: OWNER }),
+    ).rejects.toMatchObject({ statusCode: 409, code: "ACTIVITY_LEAD_COMPANY_MISMATCH" });
+    expect(updates).toEqual([]);
+  });
+
+  it("allows a lead whose company matches the contact's", async () => {
+    const { db } = stubDb(
+      { id: "a1", leadId: null, propertyId: null, companyId: null, contactId: "ct1", responsibleUserId: "u1" },
+      { lead: { propertyId: null, companyId: "cA" }, anchor: { companyId: "cA" } },
+    );
+    await expect(
+      linkActivityToLead(db, { activityId: "a1", leadId: "l1", viewer: OWNER }),
+    ).resolves.toMatchObject({ leadId: "l1" });
+  });
+
+  it("defers to the activity's OWN company rather than the contact's", async () => {
+    // The contact check is guarded on `!existing.companyId`, so an activity that states its company
+    // is judged on that. Dropping the guard would let a contact who has moved employers veto a link
+    // the activity itself agrees with.
+    // The anchor CONTRADICTS. With the guard in place the contact is never read and this link stands;
+    // without it, this row is what would (wrongly) refuse — which is what makes this a real test
+    // rather than one that passes because nothing was looked up.
+    const { db } = stubDb(
+      { id: "a1", leadId: null, propertyId: null, companyId: "cA", contactId: "ct1", responsibleUserId: "u1" },
+      { lead: { propertyId: null, companyId: "cA" }, anchor: { companyId: "cZ" } },
     );
     await expect(
       linkActivityToLead(db, { activityId: "a1", leadId: "l1", viewer: OWNER }),
