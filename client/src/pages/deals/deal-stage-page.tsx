@@ -235,6 +235,10 @@ export function DealStagePage() {
         baseFilters={{
           stageIds: listStageIds,
           ...(excludeOnHold ? { excludeOnHold: true } : {}),
+          // Pair with the summary's boardPopulation so the header/pagination and this list describe ONE
+          // population. Non-terminal only: a won/lost list is realized and legitimately carries terminal
+          // mirror slugs, which is exactly why the summary skips the predicate there too (Codex P2).
+          ...(isTerminalStage(stage.slug) ? {} : { boardPopulation: true }),
         }}
         filterBar={{
           dimensions: getDrilldownFilterBarDimensions({ pinnedStage: true, ownRep: user?.role === "admin" }),

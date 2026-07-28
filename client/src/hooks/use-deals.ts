@@ -389,6 +389,10 @@ export interface DealFilters {
   // Exclude on-hold (migration parking-lot) deals, matching the Won board/summary. The Won stage-page /
   // drill-down list sets this so it reconciles to the Won count; other surfaces omit it.
   excludeOnHold?: boolean;
+  /** Reproduce the board's population (drop open rows whose Bid Board mirror already closed). Non-terminal
+   *  stage pages only — it pairs with the stage summary's boardPopulation so header, pagination and list
+   *  describe one population (Codex P2 on #983). */
+  boardPopulation?: boolean;
   status?: "active" | "on_hold" | "inactive" | "any";
   workflowRoute?: "normal" | "service";
   valueMin?: number;
@@ -552,6 +556,7 @@ export function buildDealsQueryParams(filters: DealFilters): URLSearchParams {
   if (filters.dateTo) params.set("dateTo", filters.dateTo);
   if (filters.stageEntryDateWindow) params.set("stage_entry_window", "true");
   if (filters.excludeOnHold) params.set("exclude_on_hold", "true");
+  if (filters.boardPopulation) params.set("boardPopulation", "true");
   if (filters.workflowRoute) params.set("workflowRoute", filters.workflowRoute);
   if (filters.valueMin !== undefined) params.set("valueMin", String(filters.valueMin));
   if (filters.valueMax !== undefined) params.set("valueMax", String(filters.valueMax));
@@ -618,6 +623,7 @@ export function useDeals(filters: DealFilters = {}, options: { enabled?: boolean
     filters.dateTo,
     filters.stageEntryDateWindow,
     filters.excludeOnHold,
+    filters.boardPopulation,
     filters.status,
     filters.workflowRoute,
     filters.valueMin,

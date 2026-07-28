@@ -935,6 +935,9 @@ router.get("/", async (req, res, next) => {
       stageEntryDateWindow:
         req.query.stage_entry_window === "true" || req.query.stageEntryDateWindow === "true",
       excludeOnHold: req.query.exclude_on_hold === "true" || req.query.excludeOnHold === "true",
+      // Mirrors the stage SUMMARY's boardPopulation so a stage page's header, pagination and list all
+      // describe one population (Codex P2 on #983).
+      boardPopulation: req.query.boardPopulation === "true",
       sortBy: req.query.sortBy as any,
       sortDir: req.query.sortDir as "asc" | "desc" | undefined,
       page: req.query.page ? parseInt(req.query.page as string, 10) : undefined,

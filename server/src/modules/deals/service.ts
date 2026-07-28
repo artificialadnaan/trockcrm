@@ -383,6 +383,15 @@ export interface DealFilters {
   // reportable filter. The Won stage-page / drill-down list opts in so it reconciles to the Won count;
   // every other caller omits it (on-hold included, unchanged). Applied via the predicate registry.
   excludeOnHold?: boolean;
+  /**
+   * Reproduce the BOARD's population: drop OPEN rows whose Bid Board mirror has already reached a terminal
+   * stage. The kanban applies this (nonTerminalMirroredStageCondition) and the stage-page SUMMARY applies
+   * it under the same name, but this list endpoint never did — so a stage page that opted the summary in
+   * would exclude a deal from its header and pagination while still rendering it in the list below
+   * (Codex P2 on #983). Opt-in, and the caller must send it ONLY for non-terminal stages: a won/lost list
+   * is realized and legitimately carries terminal mirror slugs.
+   */
+  boardPopulation?: boolean;
   // Inclusive YYYY-MM-DD bounds against deals.contract_signed_at::date, with
   // deals.contract_signed_date as a transition fallback. RESERVED for the
   // commissions / contracts-signed surfaces (§6.5) — do NOT use for Won-period.
