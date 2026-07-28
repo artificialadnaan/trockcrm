@@ -577,6 +577,19 @@ export interface CorrectiveActionResponsePhotoView {
  * corrective-action response, threaded under the original item on the deal Scorecards tab (spec §9). Mirrors
  * the server corrective-action-api.ts CorrectiveActionItemView.
  */
+/** One entry in an item's back-and-forth: a submission, an approval, or a rejection with its reason. */
+export interface CorrectiveActionEventView {
+  id: string;
+  /** `submitted` | `approved` | `rejected` (a string, so a new value never breaks the parse). */
+  eventType: string;
+  actorName: string | null;
+  actorEmail: string | null;
+  comment: string | null;
+  createdAt: string | null;
+  /** Photos filed with THIS attempt. Empty for approvals and rejections. */
+  photos: CorrectiveActionResponsePhotoView[];
+}
+
 export interface CorrectiveActionItemView {
   id: string;
   /** `action_item` | `critical_deficiency` (varchar — kept a string so a new value never breaks the parse). */
@@ -585,7 +598,7 @@ export interface CorrectiveActionItemView {
   itemRef: string;
   /** The denormalized human label captured at seed time (action text / deficiency label). */
   itemLabel: string;
-  /** `open` | `resolved`. */
+  /** `open` | `submitted` | `approved` | `rejected` — see shared/types/corrective-action-status. */
   status: string;
   responseComment: string | null;
   respondedByUserId: string | null;
@@ -593,6 +606,12 @@ export interface CorrectiveActionItemView {
   responderEmail: string | null;
   respondedAt: string | null;
   photos: CorrectiveActionResponsePhotoView[];
+  /**
+   * The full thread, oldest first. The response columns above hold only the LATEST attempt — a resubmission
+   * overwrites them — so this is the only place a rejection and what it asked for survives. Optional so a
+   * client build can outlive a server that predates the thread.
+   */
+  events?: CorrectiveActionEventView[];
 }
 export interface FieldScorecardDetail extends FieldScorecardSummary {
   items: FieldScorecardItemView[];

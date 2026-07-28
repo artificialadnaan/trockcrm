@@ -99,7 +99,7 @@ beforeAll(async () => {
       fieldScorecardItems,
       fieldScorecardPhotos,
       scorecardCorrectiveActions,
-  scorecardCorrectiveActionEvents,
+      scorecardCorrectiveActionEvents,
       scorecardCorrectiveActionTokens,
       scorecardCorrectiveActionUploads,
       dealTeamMembers,
@@ -157,9 +157,12 @@ describe("getCorrectiveActionItems", () => {
     expect(items).toHaveLength(3);
     expect(items.every((i) => i.status === "open")).toBe(true);
     expect(items.every((i) => i.responseComment === null)).toBe(true);
-    // Shape: id, itemType, itemRef, itemLabel, status, responseComment, responder fields, respondedAt.
+    // Shape: id, itemType, itemRef, itemLabel, status, responseComment, responder fields, respondedAt,
+    // photos, and the append-only `events` thread (empty until someone responds).
+    expect(items.every((i) => i.events.length === 0)).toBe(true);
     expect(Object.keys(items[0]).sort()).toEqual(
       [
+        "events",
         "id",
         "itemLabel",
         "itemRef",
@@ -799,5 +802,69 @@ describe("submitCorrectiveActionResponse", () => {
     const evidenceFileIds = (evidence.rows as { file_id: string }[]).map((r) => r.file_id);
     expect(evidenceFileIds).toContain(FILE_A);
     expect(evidenceFileIds).not.toContain(FILE_B);
+  });
+
+  it("returns the full back-and-forth, not just the latest attempt", async () => {
+    // The response COLUMNS hold one attempt: a resubmission overwrites them. Without the thread the CRM
+    // could show that a fix was approved but never that it was once rejected, or what it was asked to fix —
+    // which is the whole point of routing submissions through an approver.
+    const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
+    const [item] = await getCorrectiveActionItems(tdb, scorecard.id);
+
+    await tdb.insert(scorecardCorrectiveActionEvents).values([
+      {
+        correctiveActionId: item.id,
+        scorecardId: scorecard.id,
+        eventType: "submitted",
+        actorName: "Pat Manager",
+        comment: "Anchors tightened.",
+      },
+      {
+        correctiveActionId: item.id,
+        scorecardId: scorecard.id,
+        eventType: "rejected",
+        actorName: "James Helms",
+        comment: "Torque values were not documented.",
+      },
+      {
+        correctiveActionId: item.id,
+        scorecardId: scorecard.id,
+        eventType: "submitted",
+        actorName: "Pat Manager",
+        comment: "Re-torqued to spec, values logged.",
+      },
+    ]);
+
+    const [refreshed] = await getCorrectiveActionItems(tdb, scorecard.id);
+    expect(refreshed.events.map((e) => e.eventType)).toEqual(["submitted", "rejected", "submitted"]);
+    expect(refreshed.events[1].comment).toBe("Torque values were not documented.");
+    expect(refreshed.events[1].actorName).toBe("James Helms");
+  });
+
+  it("orders the thread by its monotonic SEQUENCE, provably not by created_at", async () => {
+    // Events written inside one transaction share a timestamp to the microsecond and the uuid PK is random,
+    // so a created_at sort renders them in a nondeterministic order — for a record whose entire value is the
+    // sequence of what happened, that is a correctness bug, not a cosmetic one.
+    //
+    // Tied timestamps cannot prove which key is used (a created_at sort may return insertion order by
+    // accident), so this INVERTS them: created_at decreases as seq increases. Only a query ordering by seq
+    // returns insertion order here; one ordering by created_at returns the exact reverse.
+    const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
+    const [item] = await getCorrectiveActionItems(tdb, scorecard.id);
+    const labels = ["first", "second", "third", "fourth"];
+
+    for (const [index, label] of labels.entries()) {
+      await tdb.insert(scorecardCorrectiveActionEvents).values({
+        correctiveActionId: item.id,
+        scorecardId: scorecard.id,
+        eventType: "submitted",
+        actorName: "Pat Manager",
+        comment: label,
+        createdAt: new Date(Date.parse("2026-07-28T12:00:00.000Z") - index * 60_000),
+      });
+    }
+
+    const [refreshed] = await getCorrectiveActionItems(tdb, scorecard.id);
+    expect(refreshed.events.map((e) => e.comment)).toEqual(labels);
   });
 });

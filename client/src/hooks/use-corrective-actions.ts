@@ -12,6 +12,18 @@ export interface CorrectiveActionResponsePhoto {
   url?: string | null;
 }
 
+/** One entry in an item's back-and-forth. Mirrors the server CorrectiveActionEventView. */
+export interface CorrectiveActionEvent {
+  id: string;
+  /** 'submitted' | 'approved' | 'rejected' */
+  eventType: string;
+  actorName: string | null;
+  actorEmail: string | null;
+  comment: string | null;
+  createdAt: string | null;
+  photos: CorrectiveActionResponsePhoto[];
+}
+
 export interface CorrectiveActionItem {
   id: string;
   itemType: string;
@@ -24,6 +36,12 @@ export interface CorrectiveActionItem {
   responderEmail: string | null;
   respondedAt: string | null;
   photos: CorrectiveActionResponsePhoto[];
+  /**
+   * The full thread, oldest first. The single response columns above hold only the LATEST attempt, so a
+   * reject-then-resubmit overwrites them — this is the only place the rejection and its reason survive.
+   * Optional so a client build can outlive a server that predates the thread.
+   */
+  events?: CorrectiveActionEvent[];
 }
 
 interface CorrectiveActionsResponse {

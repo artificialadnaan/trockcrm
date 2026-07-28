@@ -18,8 +18,19 @@ describe("correctiveActionStatusBadge", () => {
   it("returns an Open badge for corrective_action_open", () => {
     expect(correctiveActionStatusBadge("corrective_action_open")?.label).toBe("Corrective Action Open");
   });
-  it("returns a Closed badge for corrective_action_closed", () => {
-    expect(correctiveActionStatusBadge("corrective_action_closed")?.label).toBe("Corrective Action Closed");
+  it("returns an APPROVED badge for corrective_action_closed", () => {
+    // The stored value keeps its name (renaming it would churn the QC dashboard, reports, and every
+    // fixture), but under the approval gate it now means the approver accepted the fix — so the LABEL says
+    // approved. "Closed" would imply the card finished the moment the responder answered, which is exactly
+    // the claim the gate exists to deny.
+    expect(correctiveActionStatusBadge("corrective_action_closed")?.label).toBe("Corrective Action Approved");
+  });
+
+  it("returns an Awaiting Approval badge for the middle state", () => {
+    const badge = correctiveActionStatusBadge("corrective_action_submitted");
+    expect(badge?.label).toBe("Awaiting Approval");
+    // Amber, not green: work has been documented but nobody has accepted it yet.
+    expect(badge?.className).toContain("amber");
   });
   it("returns null for a plain submitted card", () => {
     expect(correctiveActionStatusBadge("submitted")).toBeNull();

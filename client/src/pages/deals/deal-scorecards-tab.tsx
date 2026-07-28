@@ -26,26 +26,54 @@ const RATING_BADGE: Record<ScorecardRating, string> = {
   needs_improvement: "bg-amber-100 text-amber-800 border-amber-200",
   corrective_action: "bg-red-100 text-red-800 border-red-200",
 };
-// Corrective-action lifecycle badge (spec §9): open = a response is required, closed = every flagged item
-// resolved. A plain `submitted` card has no badge (returns null).
+// Corrective-action lifecycle badge (spec §9). Three states now: a response is required, the response is
+// with the approver, or the approver accepted it. A plain `submitted` scorecard has no badge (returns null).
 export function correctiveActionStatusBadge(
   status: string | undefined,
 ): { label: string; className: string } | null {
   if (status === "corrective_action_open") {
     return { label: "Corrective Action Open", className: "bg-red-100 text-red-800 border-red-200" };
   }
+  if (status === "corrective_action_submitted") {
+    // Amber, deliberately not green: work has been documented but nobody has accepted it yet.
+    return { label: "Awaiting Approval", className: "bg-amber-100 text-amber-800 border-amber-200" };
+  }
   if (status === "corrective_action_closed") {
-    return { label: "Corrective Action Closed", className: "bg-green-100 text-green-800 border-green-200" };
+    // Retains its stored name; it now means APPROVED, which is what the label says.
+    return { label: "Corrective Action Approved", className: "bg-green-100 text-green-800 border-green-200" };
   }
   return null;
 }
 
+// Date AND time: these are timestamps, and several actions answered on the same day are otherwise
+// indistinguishable in what is meant to be the record of who did what when. Matches the PDF and the emails.
 function formatRespondedAt(iso: string | null): string | null {
   if (!iso) return null;
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
-  return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+  return d.toLocaleString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
 }
+
+/** Per-item state presentation, matching the PDF record's vocabulary and colours. */
+const ITEM_STATUS_BADGE: Record<string, { label: string; className: string }> = {
+  open: { label: "Open", className: "bg-red-100 text-red-800 border-red-200" },
+  submitted: { label: "Awaiting approval", className: "bg-amber-100 text-amber-800 border-amber-200" },
+  approved: { label: "Approved", className: "bg-green-100 text-green-800 border-green-200" },
+  // Red like `open`, because it IS outstanding — the approver sent it back and the responder owes a fix.
+  rejected: { label: "Rejected — needs rework", className: "bg-red-100 text-red-800 border-red-200" },
+};
+
+const EVENT_PRESENTATION: Record<string, { verb: string; className: string }> = {
+  submitted: { verb: "Submitted", className: "text-gray-700" },
+  approved: { verb: "Approved", className: "text-green-700" },
+  rejected: { verb: "Rejected", className: "text-red-700" },
+};
 
 // Match each ORIGINAL flagged item (a critical-deficiency key or an action-item text) to its seeded
 // corrective-action row, so the inline response threads directly beneath the item (spec §9). Mirrors how
@@ -554,22 +582,71 @@ function SignatureBlock({ label, value }: { label: string; value: string | null 
 // critical deficiency) — an open/resolved pill, then responder + date + comment + response photos (spec §9).
 // A resolved item reads as the before/after; a still-open item shows an "Awaiting response" hint. Rendered
 // under each original list item by ScorecardDetailView, so the flagged label is never duplicated.
+/** Response photos as a thumbnail grid. Shared by the thread entries and the pre-thread fallback. */
+function CorrectiveActionPhotoGrid({ photos }: { photos: CorrectiveActionItemView["photos"] }) {
+  if (photos.length === 0) return null;
+  return (
+    <div className="mt-2 grid grid-cols-3 gap-2 sm:grid-cols-4">
+      {photos.map((p) =>
+        p.url ? (
+          <a key={p.id} href={p.url} target="_blank" rel="noopener noreferrer" className="group block">
+            <img
+              src={p.url}
+              alt={p.caption ?? "Corrective action photo"}
+              className="aspect-square w-full rounded-md object-cover ring-1 ring-gray-200 group-hover:ring-gray-400"
+            />
+            {/* Persisted caption shown visually beneath the thumbnail, mirroring evidence-photo captions
+                above (not just the img alt). */}
+            {p.caption && <p className="mt-0.5 truncate text-[11px] text-gray-500">{p.caption}</p>}
+          </a>
+        ) : (
+          <div key={p.id} className="flex aspect-square items-center justify-center rounded-md bg-gray-100 text-[11px] text-gray-400">
+            Unavailable
+          </div>
+        ),
+      )}
+    </div>
+  );
+}
+
 export function CorrectiveActionResponse({ item }: { item: CorrectiveActionItemView }) {
+  const badge = ITEM_STATUS_BADGE[item.status] ?? ITEM_STATUS_BADGE.open;
+  const events = item.events ?? [];
+  // No thread but an answered item: a response filed before the event table existed, on a card the
+  // migration seed did not reach. Render the single stored response rather than an empty box.
+  const showsFallbackResponse = events.length === 0 && item.status !== "open";
   const respondedAt = formatRespondedAt(item.respondedAt);
-  const isResolved = item.status === "resolved";
+
   return (
     <div className="mt-1.5 rounded-md border border-gray-200 bg-white p-2.5">
-      <Badge
-        variant="outline"
-        className={
-          isResolved
-            ? "bg-green-100 text-green-800 border-green-200"
-            : "bg-amber-100 text-amber-800 border-amber-200"
-        }
-      >
-        {isResolved ? "Resolved" : "Open"}
+      <Badge variant="outline" className={badge.className}>
+        {badge.label}
       </Badge>
-      {isResolved ? (
+
+      {events.length > 0 && (
+        <ol className="mt-2 space-y-3">
+          {events.map((event) => {
+            const presentation = EVENT_PRESENTATION[event.eventType] ?? EVENT_PRESENTATION.submitted;
+            const who = event.actorName ?? event.actorEmail ?? "Unknown";
+            const when = formatRespondedAt(event.createdAt);
+            return (
+              <li key={event.id} className="border-l-2 border-gray-200 pl-3">
+                <div className="flex flex-wrap items-center gap-x-2 text-xs text-gray-500">
+                  <span className={`font-semibold ${presentation.className}`}>{presentation.verb}</span>
+                  <span className="font-medium text-gray-700">{who}</span>
+                  {when && <span>· {when}</span>}
+                </div>
+                {event.comment && (
+                  <p className="mt-1 whitespace-pre-wrap text-sm text-gray-900">{event.comment}</p>
+                )}
+                <CorrectiveActionPhotoGrid photos={event.photos} />
+              </li>
+            );
+          })}
+        </ol>
+      )}
+
+      {showsFallbackResponse && (
         <div className="mt-2 border-l-2 border-gray-200 pl-3">
           <div className="flex items-center gap-2 text-xs text-gray-500">
             <span className="font-medium text-gray-700">
@@ -580,30 +657,11 @@ export function CorrectiveActionResponse({ item }: { item: CorrectiveActionItemV
           {item.responseComment && (
             <p className="mt-1 whitespace-pre-wrap text-sm text-gray-900">{item.responseComment}</p>
           )}
-          {item.photos.length > 0 && (
-            <div className="mt-2 grid grid-cols-3 gap-2 sm:grid-cols-4">
-              {item.photos.map((p) =>
-                p.url ? (
-                  <a key={p.id} href={p.url} target="_blank" rel="noopener noreferrer" className="group block">
-                    <img
-                      src={p.url}
-                      alt={p.caption ?? "Corrective action photo"}
-                      className="aspect-square w-full rounded-md object-cover ring-1 ring-gray-200 group-hover:ring-gray-400"
-                    />
-                    {/* Persisted caption shown visually beneath the thumbnail, mirroring evidence-photo
-                        captions above (not just the img alt). */}
-                    {p.caption && <p className="mt-0.5 truncate text-[11px] text-gray-500">{p.caption}</p>}
-                  </a>
-                ) : (
-                  <div key={p.id} className="flex aspect-square items-center justify-center rounded-md bg-gray-100 text-[11px] text-gray-400">
-                    Unavailable
-                  </div>
-                ),
-              )}
-            </div>
-          )}
+          <CorrectiveActionPhotoGrid photos={item.photos} />
         </div>
-      ) : (
+      )}
+
+      {events.length === 0 && !showsFallbackResponse && (
         <p className="mt-1 text-xs italic text-gray-400">Awaiting corrective-action response.</p>
       )}
     </div>

@@ -13,6 +13,7 @@ import {
   enqueueCorrectiveActionApprovalRequested,
   resolveCorrectiveActionItemTx,
 } from "./corrective-actions-service.js";
+import { getCorrectiveActionEventsForItems } from "./corrective-action-events.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -29,6 +30,19 @@ export interface CorrectiveActionResponsePhoto {
   caption: string | null;
 }
 
+/** One entry in an item's back-and-forth: a submission, an approval, or a rejection with its reason. */
+export interface CorrectiveActionEventView {
+  id: string;
+  /** 'submitted' | 'approved' | 'rejected' */
+  eventType: string;
+  actorName: string | null;
+  actorEmail: string | null;
+  comment: string | null;
+  createdAt: string | null;
+  /** Photos filed with THIS attempt. Empty for approvals and rejections. */
+  photos: CorrectiveActionResponsePhoto[];
+}
+
 export interface CorrectiveActionItemView {
   id: string;
   itemType: string;
@@ -42,6 +56,11 @@ export interface CorrectiveActionItemView {
   respondedAt: string | null;
   /** Response-evidence photos linked to this item (corrective_action_id = this item). */
   photos: CorrectiveActionResponsePhoto[];
+  /**
+   * The full thread, oldest first. The columns above hold only the LATEST attempt — a resubmission
+   * overwrites them — so this is the only place a rejection and what it asked for survives.
+   */
+  events: CorrectiveActionEventView[];
 }
 
 /**
@@ -82,6 +101,7 @@ export async function getCorrectiveActionItems(
           fileId: fieldScorecardPhotos.fileId,
           clientUploadId: files.clientUploadId,
           caption: files.description,
+          correctiveActionEventId: fieldScorecardPhotos.correctiveActionEventId,
         })
         .from(fieldScorecardPhotos)
         .innerJoin(
@@ -104,18 +124,27 @@ export async function getCorrectiveActionItems(
   }
 
   const photosByItem = new Map<string, CorrectiveActionResponsePhoto[]>();
+  const photosByEvent = new Map<string, CorrectiveActionResponsePhoto[]>();
   for (const p of photoRows) {
     if (!p.correctiveActionId) continue;
-    const list = photosByItem.get(p.correctiveActionId) ?? [];
-    list.push({
+    const view: CorrectiveActionResponsePhoto = {
       id: p.id,
       fileId: p.fileId,
       clientUploadId: p.clientUploadId ?? null,
       url: urlByFileId.get(p.fileId) ?? null,
       caption: p.caption ?? null,
-    });
+    };
+    const list = photosByItem.get(p.correctiveActionId) ?? [];
+    list.push(view);
     photosByItem.set(p.correctiveActionId, list);
+    if (p.correctiveActionEventId) {
+      const perEvent = photosByEvent.get(p.correctiveActionEventId) ?? [];
+      perEvent.push(view);
+      photosByEvent.set(p.correctiveActionEventId, perEvent);
+    }
   }
+
+  const eventsByItem = await getCorrectiveActionEventsForItems(db, itemIds);
 
   return rows.map((r) => ({
     id: r.id,
@@ -129,6 +158,17 @@ export async function getCorrectiveActionItems(
     responderEmail: r.responderEmail ?? null,
     respondedAt: r.respondedAt ? r.respondedAt.toISOString() : null,
     photos: photosByItem.get(r.id) ?? [],
+    events: (eventsByItem.get(r.id) ?? []).map((event) => ({
+      id: event.id,
+      eventType: event.eventType,
+      actorName: event.actorName,
+      actorEmail: event.actorEmail,
+      comment: event.comment,
+      createdAt: event.createdAt,
+      // Photos with no event id are pre-0202 rows the migration seed did not reach; they stay on the item
+      // aggregate rather than being guessed onto an attempt.
+      photos: photosByEvent.get(event.id) ?? [],
+    })),
   }));
 }
 
