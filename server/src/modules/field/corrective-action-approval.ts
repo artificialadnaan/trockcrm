@@ -101,12 +101,20 @@ async function recomputeCardStatus(
         ? CORRECTIVE_ACTION_CARD_AWAITING_APPROVAL
         : CORRECTIVE_ACTION_CARD_CLOSED;
 
-  if (cardStatus === currentStatus) return { cardStatus, changed: false };
+  // ALWAYS write, even when the card's own status does not move.
+  //
+  // updated_at is the PDF's content generation and the currency check is an equality against it, so any item
+  // change is content change. Approving 1 of 3 items leaves the card in corrective_action_submitted; an early
+  // return here leaves the stale artifact comparing equal, classified as current, and the download omits the
+  // approval — the reported bug, re-created one layer in. Same for rejecting one item of a card that already
+  // had another open.
+  //
+  // `changed` still reports whether the STATUS moved, which is what the notification callers switch on.
   await tx
     .update(fieldScorecards)
     .set({ status: cardStatus, updatedAt: nextGeneration() })
     .where(eq(fieldScorecards.id, scorecardId));
-  return { cardStatus, changed: true };
+  return { cardStatus, changed: cardStatus !== currentStatus };
 }
 
 async function readCardStatus(tx: TenantDb, scorecardId: string): Promise<string> {

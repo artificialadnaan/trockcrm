@@ -297,4 +297,53 @@ describe("the event thread", () => {
     expect(thread[1].comment).toBe("Re-torqued and re-photographed.");
     expect(await cardStatus()).toBe("corrective_action_closed");
   });
+
+  it("REGRESSION: advances the card generation even when the CARD status does not move", async () => {
+    // updated_at IS the PDF's content generation, and the currency check is an equality against it.
+    // Approving one item of three changes what the PDF renders (the thread gains an `approved` event) while
+    // leaving the card in corrective_action_submitted — so an early return here leaves the stale artifact
+    // comparing equal and classified as current, and the download omits the approval. That is exactly the
+    // bug this whole line of work exists to fix, re-created one layer in.
+    const ids = await seedAwaitingApproval(3);
+    const before = await tdb.execute(sql`SELECT updated_at FROM field_scorecards WHERE id = ${CARD}`);
+    const priorGeneration = new Date((before.rows[0] as { updated_at: string }).updated_at);
+
+    await approveCorrectiveActionItems(tdb, {
+      scorecardId: CARD,
+      itemIds: [ids[0]],
+      actor: APPROVER,
+    });
+
+    // The card has NOT moved — two items still await approval...
+    expect(await cardStatus()).toBe("corrective_action_submitted");
+    // ...but its generation has, so the next download re-renders and carries the approval.
+    const after = await tdb.execute(sql`SELECT updated_at FROM field_scorecards WHERE id = ${CARD}`);
+    const newGeneration = new Date((after.rows[0] as { updated_at: string }).updated_at);
+    expect(newGeneration.getTime()).toBeGreaterThan(priorGeneration.getTime());
+  });
+
+  it("advances the generation on a rejection that leaves the card open", async () => {
+    // Same hazard on the other verb: rejecting one item of a card that already had another item open leaves
+    // the card in corrective_action_open, so the status does not move and the rejection reason would never
+    // reach the PDF.
+    const ids = await seedAwaitingApproval(2, "corrective_action_open");
+    await tdb.execute(
+      sql`UPDATE scorecard_corrective_actions SET status = 'open' WHERE id = ${ids[1]}`,
+    );
+    const before = await tdb.execute(sql`SELECT updated_at FROM field_scorecards WHERE id = ${CARD}`);
+    const priorGeneration = new Date((before.rows[0] as { updated_at: string }).updated_at);
+
+    await rejectCorrectiveActionItem(tdb, {
+      scorecardId: CARD,
+      itemId: ids[0],
+      comment: "Torque values were not documented.",
+      actor: APPROVER,
+    });
+
+    expect(await cardStatus()).toBe("corrective_action_open");
+    const after = await tdb.execute(sql`SELECT updated_at FROM field_scorecards WHERE id = ${CARD}`);
+    expect(new Date((after.rows[0] as { updated_at: string }).updated_at).getTime()).toBeGreaterThan(
+      priorGeneration.getTime(),
+    );
+  });
 });
