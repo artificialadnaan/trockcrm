@@ -445,10 +445,19 @@ export default function ProspectScreen() {
      * recoverable; confidently wrong ones are the thing this feature exists to stop.
      */
     const usableFix = fix && !coarse ? fix : null;
+    /**
+     * A CORRECTED address must not inherit the rejected geocode's coordinates.
+     *
+     * The fallback to `address` exists for the case where the geocode gave a point but not a usable
+     * street line. Once the rep has said "not this address", that point belongs to a building they just
+     * rejected — restoring it stores the new address at the old one's location, which is worse than
+     * storing nothing and is exactly what the coarse-fix rule was added to prevent.
+     */
+    const geocodeFallback = correctingAddress ? null : address;
     return {
       ...typed,
-      lat: usableFix?.lat ?? address?.lat ?? null,
-      lng: usableFix?.lng ?? address?.lng ?? null,
+      lat: usableFix?.lat ?? geocodeFallback?.lat ?? null,
+      lng: usableFix?.lng ?? geocodeFallback?.lng ?? null,
     };
   }, [address, correctingAddress, fix, manualAddress, manualCity, manualState, manualZip]);
   const createCompanyNamed = useMutation({
@@ -778,6 +787,16 @@ export default function ProspectScreen() {
             contactFailed = true;
             contactIndeterminate =
               err instanceof ApiError && (err.status === 0 || err.status === 408);
+            /**
+             * A dropped response may have COMMITTED the person, and a forced retry cannot find out.
+             *
+             * `skipDedupCheck` is what the rep asked for the first time — but if the activity write
+             * then fails and they retry, forcing again bypasses the very check that would spot the
+             * contact this attempt may already have created. Standing the flag down sends the retry
+             * through dedup, so it sees them and offers the prompt instead of silently making a second
+             * copy of someone the rep only ever entered once.
+             */
+            if (contactIndeterminate) contactForceCreate.current = false;
           }
         }
       }
@@ -863,7 +882,15 @@ export default function ProspectScreen() {
      * visit against that company, and then runMatch's success cleared the fallback and showed
      * candidates instead. The screen ended up presenting a target the committed activity never had.
      */
-    runMatch.isPending;
+    runMatch.isPending ||
+    /**
+     * ...and while the FIX is still being acquired.
+     *
+     * `locating` precedes runMatch by up to the 12-second location deadline, and with a fallback
+     * already chosen `ready` is true throughout — so Save stayed live for the whole wait, and a save in
+     * that window filed the visit against the fallback moments before the lookup replaced it.
+     */
+    location.state.status === "locating";
 
   /**
    * The TARGET is frozen while anything is being written against it.
@@ -2038,9 +2065,9 @@ export default function ProspectScreen() {
               )}
             </Pressable>
             {/* A disabled button with no explanation is the same defect as a dead one. */}
-            {runMatch.isPending ? (
+            {runMatch.isPending || location.state.status === "locating" ? (
               <Text testID="prospect-blocked" style={styles.help}>
-                Checking what&apos;s here…
+                {location.state.status === "locating" ? "Finding where you are…" : "Checking what's here…"}
               </Text>
             ) : createPropertyHere.isPending || createCompanyNamed.isPending ? (
               /* Both writes disable Save, so both need a reason — a button that goes dead without

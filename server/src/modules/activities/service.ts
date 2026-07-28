@@ -240,10 +240,27 @@ export async function createActivity(
         .limit(1);
       return Boolean(row);
     },
+    // A contact can be the source too — the fallback target when there is no building and no company.
+    // Omitting it left a hole exactly where a STALE picker result lands: the person is archived between
+    // the search and the save, and the foreign key happily accepts the write.
+    contact: async () => {
+      const [row] = await tenantDb
+        .select({ id: contacts.id })
+        .from(contacts)
+        .where(and(eq(contacts.id, input.sourceEntityId), eq(contacts.isActive, true)))
+        .limit(1);
+      return Boolean(row);
+    },
   };
   const guard = sourceGuards[input.sourceEntityType];
   if (guard && !(await guard())) {
-    throw new AppError(400, `${input.sourceEntityType === "property" ? "Property" : "Company"} not found`);
+    const label =
+      input.sourceEntityType === "property"
+        ? "Property"
+        : input.sourceEntityType === "company"
+          ? "Company"
+          : "Contact";
+    throw new AppError(400, `${label} not found`);
   }
 
   const result = await tenantDb

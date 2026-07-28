@@ -479,12 +479,10 @@ describe("createActivity — the target must still be live", () => {
      * Reachability follows the SOURCE, and the source here is the contact.
      */
     const insertMock = createInsertMock();
-    const tenantDb = {
-      insert: insertMock.insert,
-      update: vi.fn(),
-      // Would answer "gone" if anything asked — nothing should, because the source is a contact.
-      select: liveTargetSelect([]),
-    } as any;
+    // Answers LIVE — and is asked exactly once, for the CONTACT. The retired company is never queried,
+    // which is the whole point: it is a rider, not the subject.
+    const select = liveTargetSelect();
+    const tenantDb = { insert: insertMock.insert, update: vi.fn(), select } as any;
 
     await createActivity(tenantDb, {
       type: "note",
@@ -497,6 +495,29 @@ describe("createActivity — the target must still be live", () => {
       sourceEntityId: "contact-1",
     });
     expect(insertMock.values).toHaveBeenCalledTimes(1);
+    expect(select).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses an ARCHIVED contact source — the stale-picker case", async () => {
+    const insertMock = createInsertMock();
+    const tenantDb = {
+      insert: insertMock.insert,
+      update: vi.fn(),
+      select: liveTargetSelect([]),
+    } as any;
+
+    await expect(
+      createActivity(tenantDb, {
+        type: "note",
+        responsibleUserId: "rep-1",
+        performedByUserId: "rep-1",
+        body: "Met Dana",
+        contactId: "contact-gone",
+        sourceEntityType: "contact",
+        sourceEntityId: "contact-gone",
+      })
+    ).rejects.toMatchObject({ statusCode: 400 });
+    expect(insertMock.values).not.toHaveBeenCalled();
   });
 
   it("writes normally against a live target", async () => {
