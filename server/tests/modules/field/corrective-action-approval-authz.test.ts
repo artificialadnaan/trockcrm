@@ -101,4 +101,15 @@ describe("request parsing", () => {
       MAX_REJECTION_COMMENT_LENGTH,
     );
   });
+
+  it("NEVER discloses the allowlist itself — only the boolean", () => {
+    // The allowlist is authorization config. A UI that received it would be telling every CRM user exactly
+    // who can sign off, and would invite the client to re-derive a gate that must stay server-authoritative.
+    const capability = canApproveCorrectiveActions(
+      req("james@trockgc.com"),
+      env({ QC_APPROVER_EMAILS: "james@trockgc.com,someone@trockgc.com" }),
+    );
+    expect(typeof capability).toBe("boolean");
+    expect(JSON.stringify({ canApproveCorrectiveActions: capability })).not.toContain("@");
+  });
 });

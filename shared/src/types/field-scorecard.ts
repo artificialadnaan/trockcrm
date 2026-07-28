@@ -614,6 +614,12 @@ export interface CorrectiveActionItemView {
   events?: CorrectiveActionEventView[];
 }
 export interface FieldScorecardDetail extends FieldScorecardSummary {
+  /**
+   * Whether THIS caller may approve or reject this card's corrective actions. A capability boolean, never
+   * the allowlist — that is authorization config, and shipping it would disclose who can sign off. Absent on
+   * reads that do not carry a session (the field app).
+   */
+  canApproveCorrectiveActions?: boolean;
   items: FieldScorecardItemView[];
   criticalDeficiencies: string[];
   criticalDeficiencyNotes?: Record<string, string>;

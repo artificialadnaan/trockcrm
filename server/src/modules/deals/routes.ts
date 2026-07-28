@@ -119,6 +119,7 @@ import { confirmUpload, getFileById, getFileDownloadUrl, getPendingUploadMetadat
 import {
   approveCorrectiveActionItems,
   assertCorrectiveActionApprover,
+  canApproveCorrectiveActions,
   assertScorecardBelongsToDeal,
   parseApproveItemIds,
   parseRejectionComment,
@@ -2590,7 +2591,10 @@ router.get("/:id/scorecards/:scorecardId", async (req, res, next) => {
           .catch(() => null),
     });
     await req.commitTransaction!();
-    res.json({ scorecard });
+    // Whether to RENDER the approve/reject controls. A boolean, never the allowlist itself: that is
+    // authorization config, and shipping it would tell every CRM user who can sign off. The client must not
+    // re-derive the gate either — hiding the controls is UX, the route's 403 is the guarantee.
+    res.json({ scorecard: { ...scorecard, canApproveCorrectiveActions: canApproveCorrectiveActions(req) } });
   } catch (err) {
     next(err);
   }
