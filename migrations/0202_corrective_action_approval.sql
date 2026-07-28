@@ -59,6 +59,11 @@ BEGIN
     EXECUTE format(
       'CREATE TABLE IF NOT EXISTS %I.scorecard_corrective_action_events (
          id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+         -- Monotonic insertion order. created_at ALONE is not a stable sort: several events can be written
+         -- inside one transaction and share a timestamp to the microsecond, and the uuid PK is random, so
+         -- the thread would render in an arbitrary order — for an audit trail whose whole value is the
+         -- sequence of what happened, that is a correctness bug, not a cosmetic one.
+         seq bigserial NOT NULL,
          corrective_action_id uuid NOT NULL
            REFERENCES %I.scorecard_corrective_actions(id) ON DELETE CASCADE,
          -- Denormalized so the whole thread for a card is one indexed read, and so the row survives as a
@@ -83,12 +88,12 @@ BEGIN
     );
     EXECUTE format(
       'CREATE INDEX IF NOT EXISTS scorecard_corrective_action_events_scorecard_idx
-         ON %I.scorecard_corrective_action_events (scorecard_id, created_at)',
+         ON %I.scorecard_corrective_action_events (scorecard_id, seq)',
       schema_name
     );
     EXECUTE format(
       'CREATE INDEX IF NOT EXISTS scorecard_corrective_action_events_item_idx
-         ON %I.scorecard_corrective_action_events (corrective_action_id, created_at)',
+         ON %I.scorecard_corrective_action_events (corrective_action_id, seq)',
       schema_name
     );
 
@@ -111,6 +116,7 @@ CREATE INDEX IF NOT EXISTS scorecard_corrective_actions_outstanding_idx
 DROP INDEX IF EXISTS office_dallas.scorecard_corrective_actions_open_idx;
 CREATE TABLE IF NOT EXISTS office_dallas.scorecard_corrective_action_events (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  seq bigserial NOT NULL,
   corrective_action_id uuid NOT NULL
     REFERENCES office_dallas.scorecard_corrective_actions(id) ON DELETE CASCADE,
   scorecard_id uuid NOT NULL
@@ -125,9 +131,9 @@ CREATE TABLE IF NOT EXISTS office_dallas.scorecard_corrective_action_events (
   created_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS scorecard_corrective_action_events_scorecard_idx
-  ON office_dallas.scorecard_corrective_action_events (scorecard_id, created_at);
+  ON office_dallas.scorecard_corrective_action_events (scorecard_id, seq);
 CREATE INDEX IF NOT EXISTS scorecard_corrective_action_events_item_idx
-  ON office_dallas.scorecard_corrective_action_events (corrective_action_id, created_at);
+  ON office_dallas.scorecard_corrective_action_events (corrective_action_id, seq);
 ALTER TABLE office_dallas.field_scorecard_photos
   ADD COLUMN IF NOT EXISTS corrective_action_event_id uuid
   REFERENCES office_dallas.scorecard_corrective_action_events(id) ON DELETE SET NULL;

@@ -115,9 +115,9 @@ export async function getCorrectiveActionEventsByItem(
     .select(EVENT_COLUMNS)
     .from(scorecardCorrectiveActionEvents)
     .where(eq(scorecardCorrectiveActionEvents.scorecardId, scorecardId))
-    // created_at then id: two events written in the same transaction share a timestamp, and the thread must
-    // still render in a stable order across reads rather than an arbitrary physical-row order.
-    .orderBy(asc(scorecardCorrectiveActionEvents.createdAt), asc(scorecardCorrectiveActionEvents.id));
+    // Ordered by the monotonic sequence, NOT created_at: events written in one transaction share a
+    // timestamp and the uuid PK is random, so a timestamp sort renders the thread in an arbitrary order.
+    .orderBy(asc(scorecardCorrectiveActionEvents.seq));
 
   return groupByItem(rows);
 }
@@ -132,7 +132,7 @@ export async function getCorrectiveActionEventsForItems(
     .select(EVENT_COLUMNS)
     .from(scorecardCorrectiveActionEvents)
     .where(inArray(scorecardCorrectiveActionEvents.correctiveActionId, itemIds))
-    .orderBy(asc(scorecardCorrectiveActionEvents.createdAt), asc(scorecardCorrectiveActionEvents.id));
+    .orderBy(asc(scorecardCorrectiveActionEvents.seq));
 
   return groupByItem(rows);
 }

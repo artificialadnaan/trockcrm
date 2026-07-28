@@ -59,8 +59,13 @@ export function correctiveActionCell(status: string | undefined): { label: strin
   if (status === "corrective_action_open") {
     return { label: "Open", className: "border-red-200 bg-red-50 text-brand-red" };
   }
+  if (status === "corrective_action_submitted") {
+    // Neither the responders' problem nor done — it is sitting in the approver's queue.
+    return { label: "Awaiting Approval", className: "border-amber-200 bg-amber-50 text-amber-700" };
+  }
   if (status === "corrective_action_closed") {
-    return { label: "Closed", className: "border-emerald-200 bg-emerald-50 text-emerald-700" };
+    // `corrective_action_closed` means APPROVED since the approval gate landed.
+    return { label: "Approved", className: "border-emerald-200 bg-emerald-50 text-emerald-700" };
   }
   return null;
 }
@@ -94,7 +99,7 @@ export default function QcReportsPage() {
   const [superintendent, setSuperintendent] = useState("");
   const [rating, setRating] = useState("");
   const [flaggedOnly, setFlaggedOnly] = useState(false);
-  const [correctiveActionStatus, setCorrectiveActionStatus] = useState<"" | "open" | "closed">("");
+  const [correctiveActionStatus, setCorrectiveActionStatus] = useState<"" | "open" | "awaiting_approval" | "closed">("");
   const [search, setSearch] = useState("");
 
   // Debounce the search box so keystrokes don't spam the server-side query.
@@ -115,10 +120,13 @@ export default function QcReportsPage() {
   const stats = useMemo(() => {
     const avg = rows.length ? Math.round(rows.reduce((s, r) => s + scoreOutOfTen(r), 0) / rows.length * 10) / 10 : null;
     const corrective = rows.filter((r) => r.rating === "corrective_action");
+    // The approver's queue. Counted from the same `rows` the drill-down receives, so the KPI and its
+    // drill can never disagree — the reconciliation rule this dashboard is already held to.
+    const awaitingApproval = rows.filter((r) => r.status === "corrective_action_submitted");
     const flagged = rows.filter((r) => r.deficiencyCount > 0);
     const weekAgo = isoDaysAgo(7);
     const thisWeek = rows.filter((r) => r.submittedAt.slice(0, 10) >= weekAgo);
-    return { avg, corrective, flagged, thisWeek };
+    return { avg, corrective, awaitingApproval, flagged, thisWeek };
   }, [rows]);
 
   const [drill, setDrill] = useState<{ title: string; rows: QcScorecardRow[] } | null>(null);
@@ -152,6 +160,16 @@ export default function QcReportsPage() {
           value={String(stats.corrective.length)}
           meta="scorecards rated corrective action"
           onClick={() => stats.corrective.length && setDrill({ title: "Corrective Action", rows: stats.corrective })}
+        />
+        <StatCard
+          tone="warn"
+          label="Awaiting Approval"
+          value={String(stats.awaitingApproval.length)}
+          meta="corrective actions in the approver's queue"
+          onClick={() =>
+            stats.awaitingApproval.length &&
+            setDrill({ title: "Awaiting Approval", rows: stats.awaitingApproval })
+          }
         />
         <StatCard
           tone="warn"
@@ -192,9 +210,11 @@ export default function QcReportsPage() {
         <FilterSelect
           label="Corrective Action Status"
           value={correctiveActionStatus}
-          onChange={(value) => setCorrectiveActionStatus(value as "" | "open" | "closed")}
-          options={["open", "closed"]}
-          renderOption={(v) => (v === "open" ? "Open" : "Closed")}
+          onChange={(value) => setCorrectiveActionStatus(value as "" | "open" | "awaiting_approval" | "closed")}
+          options={["open", "awaiting_approval", "closed"]}
+          renderOption={(v) =>
+            v === "open" ? "Open" : v === "awaiting_approval" ? "Awaiting Approval" : "Approved"
+          }
           allLabel="Any status"
         />
         <div className="flex items-center gap-1.5">

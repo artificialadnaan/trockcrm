@@ -18,9 +18,12 @@ export interface QcScorecardsFilters {
   rating?: string | null;
   flaggedOnly?: boolean;
   search?: string | null;
-  // Narrow to open vs closed corrective-action scorecards. `open` → status = corrective_action_open;
-  // `closed` → status = corrective_action_closed. Any other/absent value = no corrective-action filter.
-  correctiveActionStatus?: "open" | "closed" | null;
+  // Narrow by corrective-action lifecycle stage:
+  //   `open`               → status = corrective_action_open        (the responders' queue)
+  //   `awaiting_approval`  → status = corrective_action_submitted   (the approver's queue)
+  //   `closed`             → status = corrective_action_closed      (approved)
+  // Any other/absent value = no corrective-action filter.
+  correctiveActionStatus?: "open" | "awaiting_approval" | "closed" | null;
 }
 
 export interface QcScorecardRow {
@@ -40,7 +43,8 @@ export interface QcScorecardRow {
   submittedAt: string;
   submittedByName: string | null;
   pdfAvailable: boolean;
-  // Lifecycle status: `submitted` | `corrective_action_open` | `corrective_action_closed`. Drives the QC
+  // Lifecycle status: `submitted` | `corrective_action_open` | `corrective_action_submitted` |
+  // `corrective_action_closed`. Note `corrective_action_closed` now means APPROVED. Drives the QC
   // dashboard's Corrective-Action column + filter.
   status: string;
 }
@@ -98,6 +102,8 @@ export async function getQcScorecardsReport(
   // narrows to exactly the below-band cards in the requested state.
   if (filters.correctiveActionStatus === "open") {
     rowConditions.push(sql`sc.status = 'corrective_action_open'`);
+  } else if (filters.correctiveActionStatus === "awaiting_approval") {
+    rowConditions.push(sql`sc.status = 'corrective_action_submitted'`);
   } else if (filters.correctiveActionStatus === "closed") {
     rowConditions.push(sql`sc.status = 'corrective_action_closed'`);
   }

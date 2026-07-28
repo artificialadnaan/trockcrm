@@ -1,4 +1,4 @@
-import { pgTable, uuid, text, timestamp, index } from "drizzle-orm/pg-core";
+import { pgTable, uuid, text, timestamp, index, bigserial } from "drizzle-orm/pg-core";
 
 // Per-office (cloned into every office_* schema). The APPEND-ONLY thread documenting a corrective action's
 // full back-and-forth: submitted -> rejected (with the approver's reason) -> resubmitted -> approved.
@@ -14,6 +14,13 @@ export const scorecardCorrectiveActionEvents = pgTable(
   "scorecard_corrective_action_events",
   {
     id: uuid("id").primaryKey().defaultRandom(),
+    /**
+     * Monotonic insertion order — the ONLY stable sort for this thread. created_at alone is not: several
+     * events can be written in one transaction and share a timestamp, and the uuid PK is random, so the
+     * thread would render in an arbitrary order. For an audit trail whose value IS the sequence, that is a
+     * correctness bug rather than a cosmetic one.
+     */
+    seq: bigserial("seq", { mode: "number" }).notNull(),
     correctiveActionId: uuid("corrective_action_id").notNull(),
     /** Denormalized: the whole thread for a card is one indexed read. */
     scorecardId: uuid("scorecard_id").notNull(),
@@ -29,7 +36,7 @@ export const scorecardCorrectiveActionEvents = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => [
-    index("scorecard_corrective_action_events_scorecard_idx").on(table.scorecardId, table.createdAt),
-    index("scorecard_corrective_action_events_item_idx").on(table.correctiveActionId, table.createdAt),
+    index("scorecard_corrective_action_events_scorecard_idx").on(table.scorecardId, table.seq),
+    index("scorecard_corrective_action_events_item_idx").on(table.correctiveActionId, table.seq),
   ],
 );
