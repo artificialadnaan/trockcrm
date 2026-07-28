@@ -12,7 +12,10 @@ import {
   jobQueue,
 } from "@trock-crm/shared/schema";
 import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
-import { rejectAndRestart } from "../../../src/modules/field/corrective-action-approval.js";
+import {
+  approveAndNotify,
+  rejectAndRestart,
+} from "../../../src/modules/field/corrective-action-approval.js";
 
 // A rejection sends the item back to the super/PM — but their response tokens were DELETED when they
 // submitted. A rejection notice carrying no live token is an email the recipient cannot act on: they click,
@@ -215,5 +218,64 @@ describe("rejectAndRestart", () => {
     // (which they may be answering right now) must not be revoked underneath them.
     expect((await cardState()).nonce).toBe(before.nonce);
     expect(await responderJobs()).toBe(0);
+  });
+
+  it("REGRESSION: approving the LAST item enqueues the approved notice", async () => {
+    // approveCorrectiveActionItems returns closed: true documented as "the caller fires the approved notice
+    // once" — and the route never did. James would approve the final item, the card would close, and
+    // oversight would never be told. Exactly the shape of the awaiting-approval bug: a notification wired at
+    // one end only, silent because nothing errors.
+    const [itemId] = await seedAwaitingApproval();
+
+    const outcome = await approveAndNotify(tdb, {
+      office: OFFICE,
+      scorecardId: CARD,
+      itemIds: [itemId],
+      actor: APPROVER,
+    });
+
+    expect(outcome.closed).toBe(true);
+    expect((await cardState()).status).toBe("corrective_action_closed");
+    const jobs = await tdb.execute(sql`
+      SELECT payload FROM job_queue WHERE job_type = 'scorecard_corrective_action_oversight_email'
+    `);
+    const closedJobs = (jobs.rows as Array<{ payload: { phase: string } }>).filter(
+      (r) => r.payload.phase === "closed",
+    );
+    expect(closedJobs).toHaveLength(1);
+  });
+
+  it("does NOT notify when the approval leaves items still awaiting", async () => {
+    // Approving 1 of 2 does not close the card, so there is nothing to announce yet. Firing here would tell
+    // oversight the corrective action was approved while half of it is still in the queue.
+    const ids = await seedAwaitingApproval(2);
+
+    const outcome = await approveAndNotify(tdb, {
+      office: OFFICE,
+      scorecardId: CARD,
+      itemIds: [ids[0]],
+      actor: APPROVER,
+    });
+
+    expect(outcome.closed).toBe(false);
+    expect((await cardState()).status).toBe("corrective_action_submitted");
+    const jobs = await tdb.execute(sql`
+      SELECT count(*)::int AS n FROM job_queue WHERE job_type = 'scorecard_corrective_action_oversight_email'
+    `);
+    expect((jobs.rows[0] as { n: number }).n).toBe(0);
+  });
+
+  it("notifies ONCE when a re-approve is a no-op", async () => {
+    // A double-clicked Approve must not announce the same closure twice — the state machine reports closed
+    // only on the transition, and the enqueue follows that, not the request.
+    const [itemId] = await seedAwaitingApproval();
+    const args = { office: OFFICE, scorecardId: CARD, itemIds: [itemId], actor: APPROVER };
+    await approveAndNotify(tdb, args);
+    await approveAndNotify(tdb, args);
+
+    const jobs = await tdb.execute(sql`
+      SELECT count(*)::int AS n FROM job_queue WHERE job_type = 'scorecard_corrective_action_oversight_email'
+    `);
+    expect((jobs.rows[0] as { n: number }).n).toBe(1);
   });
 });

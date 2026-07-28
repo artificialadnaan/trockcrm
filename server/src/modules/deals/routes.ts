@@ -124,7 +124,7 @@ import {
   parseApproveItemIds,
   parseRejectionComment,
 } from "../field/corrective-action-approval-routes.js";
-import { rejectAndRestart } from "../field/corrective-action-approval.js";
+import { approveAndNotify, rejectAndRestart } from "../field/corrective-action-approval.js";
 import {
   getDealScorecardDetail,
   getDealScorecardPdfArtifactState,
@@ -2613,7 +2613,11 @@ router.post("/:id/scorecards/:scorecardId/corrective-actions/approve", async (re
     const itemIds = parseApproveItemIds(req.body);
     await assertScorecardBelongsToDeal(req.tenantDb!, req.params.id, req.params.scorecardId);
 
-    const outcome = await approveCorrectiveActionItems(req.tenantDb!, {
+    if (!req.officeSlug) throw new AppError(500, "Office context not available");
+    // approveAndNotify, not approveCorrectiveActionItems: a final approval CLOSES the card, and oversight
+    // must be told. Composed server-side so the route cannot do half of it silently.
+    const outcome = await approveAndNotify(req.tenantDb!, {
+      office: { id: req.user!.activeOfficeId, slug: req.officeSlug },
       scorecardId: req.params.scorecardId,
       itemIds,
       actor,

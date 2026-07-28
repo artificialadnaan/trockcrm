@@ -10,7 +10,10 @@ import {
 } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
 import { recordCorrectiveActionEvent } from "./corrective-action-events.js";
-import { restartCorrectiveActionCyclesForCards } from "./corrective-actions-service.js";
+import {
+  enqueueCorrectiveActionOversightClosed,
+  restartCorrectiveActionCyclesForCards,
+} from "./corrective-actions-service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -339,5 +342,38 @@ export async function rejectAndRestart(
     [{ id: input.scorecardId, dealId: card.dealId }],
     input.office,
   );
+  return outcome;
+}
+
+/**
+ * Approve items AND tell oversight when that closed the card, in one transaction.
+ *
+ * The counterpart to rejectAndRestart, and it exists for the same reason: approveCorrectiveActionItems
+ * reports `closed` but cannot act on it, and a route that forgets to is silent — the card closes, the
+ * approver sees success, and oversight is simply never told. That is the same failure shape as an enqueued
+ * job nobody handles: nothing errors, so nothing surfaces it.
+ *
+ * Enqueued on the TRANSITION, not the request, so a double-clicked Approve announces one closure.
+ */
+export async function approveAndNotify(
+  tx: TenantDb,
+  input: {
+    office: { id: string; slug: string };
+    scorecardId: string;
+    itemIds?: string[];
+    actor: ApprovalActor;
+  },
+): Promise<ApprovalOutcome> {
+  const outcome = await approveCorrectiveActionItems(tx, {
+    scorecardId: input.scorecardId,
+    itemIds: input.itemIds,
+    actor: input.actor,
+  });
+  if (outcome.closed) {
+    await enqueueCorrectiveActionOversightClosed(tx, {
+      office: input.office,
+      scorecardId: input.scorecardId,
+    });
+  }
   return outcome;
 }
