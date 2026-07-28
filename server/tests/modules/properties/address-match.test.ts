@@ -471,3 +471,28 @@ describe("localityContradicts — state spelling is not a contradiction", () => 
     ).toBe(false);
   });
 });
+
+describe("localityContradicts — abbreviated place names", () => {
+  it("treats 'St Louis' and 'Saint Louis' as one city", () => {
+    // Punctuation-insensitivity already handled "St. Louis" vs "St Louis"; this is the other half,
+    // where the two are different TOKENS and the comparison called one city two.
+    expect(
+      localityContradicts({ city: "St Louis", state: "MO", zip: null }, { city: "Saint Louis", state: "MO", zip: null }),
+    ).toBe(false);
+  });
+
+  it("handles Ft/Fort and Mt/Mount the same way", () => {
+    expect(
+      localityContradicts({ city: "Ft Worth", state: "TX", zip: null }, { city: "Fort Worth", state: "TX", zip: null }),
+    ).toBe(false);
+    expect(
+      localityContradicts({ city: "Mt Pleasant", state: "SC", zip: null }, { city: "Mount Pleasant", state: "SC", zip: null }),
+    ).toBe(false);
+  });
+
+  it("still contradicts two genuinely different cities", () => {
+    expect(
+      localityContradicts({ city: "Saint Louis", state: null, zip: null }, { city: "Saint Paul", state: null, zip: null }),
+    ).toBe(true);
+  });
+});

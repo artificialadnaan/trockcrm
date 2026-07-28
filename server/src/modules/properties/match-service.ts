@@ -445,18 +445,37 @@ export function localityContradicts(
   // capture off to create a duplicate. Disproof has to be certain to be useful.
   const norm = (v: string | null | undefined) =>
     typeof v === "string"
-      ? v
+      ? // Same fold as the street line — "San José" and "San Jose" are one city, and deleting the
+        // accent instead of folding it turns agreement into a CONTRADICTION, the worst direction for a
+        // disproof rule to fail in. Shared helper, so the two sides cannot drift.
+        foldDiacritics(v)
           .toLowerCase()
-          // Same NFD fold as the street line: "San José" and "San Jose" are one city, and deleting the
-          // accent instead of folding it turns agreement into a CONTRADICTION — actively rejecting a
-          // correct match, which is the worst direction for a disproof rule to fail in.
-          .normalize("NFD")
-          .replace(/[\u0300-\u036f]/g, "")
           .replace(/[^a-z0-9]+/g, " ")
           .trim()
       : "";
-  const qCity = norm(query.city);
-  const rCity = norm(row.city);
+
+  /**
+   * Abbreviated place words, spelled out.
+   *
+   * Punctuation-insensitivity already handles "St. Louis" against "St Louis", but not against "Saint
+   * Louis" — different TOKENS, so the comparison called one city two and disabled matching for the
+   * row. Mirrors NON_FINAL_ALIASES on the street side, and for the same reason.
+   */
+  const CITY_ALIASES: Record<string, string> = {
+    st: "saint",
+    ste: "sainte",
+    ft: "fort",
+    mt: "mount",
+    pt: "point",
+  };
+  const canonicalCity = (v: string) =>
+    v
+      .split(" ")
+      .filter(Boolean)
+      .map((tok) => CITY_ALIASES[tok] ?? tok)
+      .join(" ");
+  const qCity = canonicalCity(norm(query.city));
+  const rCity = canonicalCity(norm(row.city));
   if (qCity && rCity && qCity !== rCity) return true;
   // Canonicalised, so "Texas" and "TX" are one state rather than a contradiction that would disable
   // matching for the row entirely.
