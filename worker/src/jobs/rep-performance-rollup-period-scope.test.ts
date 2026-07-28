@@ -69,10 +69,17 @@ describe("rep performance rollup period scoping", () => {
     await runRepPerformanceRollup(new Date("2026-05-07T12:00:00.000Z"));
 
     const insertSql = queries.find((query) => query.includes("INSERT INTO public.rep_performance_snapshots"));
-    const pipelineValueSql =
-      /COALESCE\(SUM\(COALESCE\([\s\S]*?CASE WHEN d\.awarded_amount > 0 THEN d\.awarded_amount END,[\s\S]*?0[\s\S]*?\)([\s\S]*?)\), 0\)::numeric AS pipeline_value/.exec(
-        insertSql ?? ""
-      )?.[1];
+    // Pin the FILTER semantics, not the shape of the value expression. The old matcher inlined the
+    // awarded-amount CASE, so when pipeline_value moved to a composed `periodAwarePipelineValueSql`
+    // (the effective-value/auto-park work) it silently matched NOTHING and the assertions below became
+    // vacuous — the failure only surfaced once these files were actually wired into a runner.
+    const pipelineValueSql = (() => {
+      const marker = ")::numeric AS pipeline_value";
+      const end = (insertSql ?? "").indexOf(marker);
+      if (end < 0) return undefined;
+      const start = (insertSql ?? "").lastIndexOf("COALESCE(SUM(", end);
+      return start < 0 ? undefined : (insertSql ?? "").slice(start, end);
+    })();
     const historicalPipelineValueBranch =
       /WHEN \$1::text IN \('last_month', 'last_quarter', 'last_year'\) THEN([\s\S]*?)ELSE d\.is_active = true AND NOT psc\.is_terminal AND psc\.is_active_pipeline/.exec(
         pipelineValueSql ?? ""

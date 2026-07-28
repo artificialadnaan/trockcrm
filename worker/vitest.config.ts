@@ -23,7 +23,10 @@ export default defineConfig({
   test: {
     globals: false,
     environment: "node",
-    include: ["tests/**/*.test.ts"],
+    // `src/**` is included deliberately: 14 test files (~100 tests) lived beside their jobs and were
+    // matched by NOTHING, so they had never run in CI or locally via `npm test`. See test:ci in
+    // package.json for the other half of the gap.
+    include: ["tests/**/*.test.ts", "src/**/*.test.ts"],
     maxWorkers: 4,
     minWorkers: 1,
     testTimeout: 15_000,
