@@ -48,6 +48,9 @@ const CORRECTIVE_ACTION_COMMENT_MAX_HEIGHT = 72;
 // Label (11pt) + status chip (9pt) + attribution (9pt) + the 4pt gap before the comment, rounded up. The
 // page-break guard adds CORRECTIVE_ACTION_COMMENT_MAX_HEIGHT on top for a resolved item.
 const CORRECTIVE_ACTION_LABEL_BLOCK_HEIGHT = 46;
+// The single-line label height already counted inside the block above. A wrapped label's EXTRA height is
+// measured at draw time and added to the reservation — item text has no length cap.
+const CORRECTIVE_ACTION_SINGLE_LINE_LABEL_HEIGHT = 14;
 // Bound each critical-deficiency description on the summary page so one long (up to 4000-char) note can't
 // blow the layout across pages; the same note also appears (bounded) as the evidence-group subtitle.
 const DEFICIENCY_NOTE_MAX_HEIGHT = 54;
@@ -227,7 +230,11 @@ export function buildScorecardPdfData(input: ScorecardPdfInput): ScorecardPdfDat
   // Ranked against the CURRENT action-item list, not `item_ref` — see orderCorrectiveActions for why ref
   // order is the OLD order after an edit. The PDF loader's photo cap and the oversight email rank through
   // the same function: three surfaces show this record side by side, and a reader compares them.
-  const orderedCorrectiveActions = orderCorrectiveActions(input.correctiveActions ?? [], actionItems);
+  const orderedCorrectiveActions = orderCorrectiveActions(
+    input.correctiveActions ?? [],
+    actionItems,
+    input.criticalDeficiencyKeys,
+  );
 
   // Apply the response-photo cap ACROSS the whole report, in the order items render, so the kept set is
   // deterministic rather than dependent on which item happened to be read first.
@@ -679,6 +686,14 @@ export function typedSignatureFallback(signature: string | null): string | null 
  */
 function drawCorrectiveAction(doc: PDFKit.PDFDocument, item: ScorecardPdfCorrectiveAction): void {
   const resolved = item.status === "resolved";
+  // MEASURE the label rather than assuming it fits one line. Neither submission nor edit parsing bounds an
+  // action item's LENGTH (only how many there may be), so a dictated item can wrap to several lines. The
+  // fixed allowance below covers the status chip and attribution; if the label itself is taller than one
+  // line, the extra height has to be part of the reservation or the bounded comment — which PDFKit will not
+  // auto-paginate — starts low enough to run past the bottom margin.
+  doc.font("Helvetica-Bold").fontSize(11);
+  const labelHeight = doc.heightOfString(item.itemLabel, { width: CONTENT_WIDTH });
+  const labelOverflow = Math.max(0, labelHeight - CORRECTIVE_ACTION_SINGLE_LINE_LABEL_HEIGHT);
   // Reserve the WHOLE text block, not just the heading.
   //
   // PDFKit disables auto-pagination for any text drawn with an explicit `height` (its LineWrapper caps at
@@ -686,9 +701,11 @@ function drawCorrectiveAction(doc: PDFKit.PDFDocument, item: ScorecardPdfCorrect
   // bound a long dictation. So an under-reserved guard does not merely orphan a heading — the comment flows
   // straight through the bottom margin to the page edge, and the trailing hairline is then stroked outside
   // the media box and silently dropped. Reserve label + status + attribution + the comment box.
-  const textBlockHeight = resolved
-    ? CORRECTIVE_ACTION_LABEL_BLOCK_HEIGHT + CORRECTIVE_ACTION_COMMENT_MAX_HEIGHT
-    : CORRECTIVE_ACTION_LABEL_BLOCK_HEIGHT;
+  const textBlockHeight =
+    labelOverflow +
+    (resolved
+      ? CORRECTIVE_ACTION_LABEL_BLOCK_HEIGHT + CORRECTIVE_ACTION_COMMENT_MAX_HEIGHT
+      : CORRECTIVE_ACTION_LABEL_BLOCK_HEIGHT);
   if (doc.y + textBlockHeight > PAGE.height - PAGE.margin) doc.addPage();
 
   doc.font("Helvetica-Bold").fontSize(11).fillColor(BRAND_BLACK).text(item.itemLabel, PAGE.margin, doc.y, {
@@ -718,7 +735,7 @@ function drawCorrectiveAction(doc: PDFKit.PDFDocument, item: ScorecardPdfCorrect
         ellipsis: true,
       });
     }
-    drawCorrectiveActionPhotos(doc, item.photos);
+    drawCorrectiveActionPhotos(doc, item.photos, item.itemLabel);
   }
 
   doc.moveDown(0.8);
@@ -728,17 +745,34 @@ function drawCorrectiveAction(doc: PDFKit.PDFDocument, item: ScorecardPdfCorrect
 /**
  * Response photos in a 2-up grid, reusing the evidence tile geometry and the same "Image unavailable"
  * placeholder so a permanently-bad object degrades identically to original evidence.
+ *
+ * `itemLabel` is repeated as a continuation heading whenever a row spills onto a new page. Without it the
+ * previous page ends with the response text and the next one opens with unlabelled images — on a card where
+ * several items carry photos, there is then nothing in the document tying a photo to the item it documents,
+ * which is precisely the question an audit record exists to answer.
  */
 function drawCorrectiveActionPhotos(
   doc: PDFKit.PDFDocument,
   photos: ScorecardPdfCorrectiveActionPhoto[],
+  itemLabel?: string,
 ): void {
   if (photos.length === 0) return;
   doc.moveDown(0.4);
   const captionHeight = 20;
   for (let index = 0; index < photos.length; index += 2) {
     const row = photos.slice(index, index + 2);
-    if (doc.y + EVIDENCE_IMAGE_HEIGHT + captionHeight + 8 > PAGE.height - PAGE.margin) doc.addPage();
+    if (doc.y + EVIDENCE_IMAGE_HEIGHT + captionHeight + 8 > PAGE.height - PAGE.margin) {
+      doc.addPage();
+      if (itemLabel) {
+        doc.font("Helvetica-Bold").fontSize(9).fillColor(BRAND_MUTED).text(
+          `${itemLabel} (continued)`,
+          PAGE.margin,
+          doc.y,
+          { width: CONTENT_WIDTH },
+        );
+        doc.moveDown(0.4);
+      }
+    }
     const rowTop = doc.y;
     row.forEach((photo, column) => {
       const x = PAGE.margin + column * (EVIDENCE_IMAGE_WIDTH + 16);

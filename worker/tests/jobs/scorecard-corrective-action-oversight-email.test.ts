@@ -1185,4 +1185,52 @@ describe("handleScorecardCorrectiveActionOversightEmail", () => {
       ITEMS[0].responder_name = "Sam Super";
     }
   });
+
+  it("REGRESSION: bounds each quoted comment instead of pasting 5,000 characters into the body", async () => {
+    // The response API accepts up to 5,000 characters per item and a card can carry 50 action items plus
+    // deficiencies. Quoting every comment in full can produce hundreds of kilobytes of body before escaping
+    // expands it further — and mail clients clip the END of a long body, which is where the CTA lives.
+    const longComment = "We re-poured the slab and cured it under blankets overnight. ".repeat(120);
+    const { query } = makeQuery({
+      status: "corrective_action_closed",
+      items: [{ ...ITEMS[0], response_comment: longComment }],
+    });
+    const sendEmail = makeSend();
+
+    await handleScorecardCorrectiveActionOversightEmail(payload({ phase: "closed" }), null, {
+      query: query as never,
+      sendEmail: sendEmail as never,
+      getPdf: (async () => Buffer.from("%PDF-1.4")) as never,
+      env,
+      logger: makeLogger(),
+    });
+
+    const [, , html, options] = sendEmail.mock.calls[0] as unknown as [string[], string, string, { text: string }];
+    expect(html).toContain("full comment in the CRM");
+    expect(options.text).toContain("full comment in the CRM");
+    // Bounded, not merely shortened: the body must not scale with the comment.
+    expect(html.length).toBeLessThan(longComment.length);
+    expect(options.text).not.toContain(longComment);
+  });
+
+  it("describes responders as ASSIGNED, not as already notified", async () => {
+    // This job and the responder job share a delay and the queue runs a claimed batch concurrently, so this
+    // notice can go out FIRST — and the responder send can dead-letter. Nothing here reads a delivery
+    // record, so asserting they "have been asked" is an assurance the handler cannot support.
+    const { query } = makeQuery({}, [
+      { email: "sam@trockgc.com", name: "Sam Super", role: "superintendent" } as never,
+    ]);
+    const sendEmail = makeSend();
+
+    await handleScorecardCorrectiveActionOversightEmail(payload(), null, {
+      query: query as never,
+      sendEmail: sendEmail as never,
+      env,
+      logger: makeLogger(),
+    });
+
+    const [, , html] = sendEmail.mock.calls[0] as unknown as [string[], string, string];
+    expect(html).toContain("is assigned to document a fix");
+    expect(html).not.toContain("has been asked to document a fix");
+  });
 });

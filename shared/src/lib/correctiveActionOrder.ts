@@ -24,15 +24,21 @@ export interface CorrectiveActionOrderable {
 }
 
 /**
- * Stable base order: action items before deficiencies, then NUMERICALLY by ref — "10" must follow "2", not
- * precede it. Deficiency refs are opaque keys and sort lexically. Used on its own only when there is no
- * action-item list to rank against (a leadership card, or a caller that has not loaded one).
+ * Stable base order: critical deficiencies before action items, then NUMERICALLY by ref for action items —
+ * "10" must follow "2", not precede it. Deficiency refs are opaque keys and fall back to lexical only when no
+ * live deficiency list is supplied.
+ *
+ * DEFICIENCIES FIRST because that is what every other surface shows. The scorecard body renders "Critical
+ * Deficiencies" above "Action Items" in the same PDF, and the CRM detail threads responses under the same two
+ * sections in the same order. An earlier version of this sorter put action items first with a comment
+ * claiming it "matches the deal-thread order" — it did not, and any card carrying both kinds disagreed with
+ * itself one page apart.
  */
 export function compareCorrectiveActionsByRef(
   left: CorrectiveActionOrderable,
   right: CorrectiveActionOrderable,
 ): number {
-  if (left.itemType !== right.itemType) return left.itemType === "action_item" ? -1 : 1;
+  if (left.itemType !== right.itemType) return left.itemType === "critical_deficiency" ? -1 : 1;
   const leftNum = Number(left.itemRef);
   const rightNum = Number(right.itemRef);
   if (Number.isFinite(leftNum) && Number.isFinite(rightNum)) return leftNum - rightNum;
@@ -53,6 +59,7 @@ export function compareCorrectiveActionsByRef(
 export function orderCorrectiveActions<T extends CorrectiveActionOrderable>(
   rows: readonly T[],
   actionItems: readonly string[],
+  criticalDeficiencyKeys: readonly string[] = [],
 ): T[] {
   const refOrdered = [...rows].sort(compareCorrectiveActionsByRef);
 
@@ -64,9 +71,22 @@ export function orderCorrectiveActions<T extends CorrectiveActionOrderable>(
     else positions.set(key, [index]);
   });
 
+  // Deficiencies rank by their position in the STORED key array, which is the order the card body renders
+  // them in — not lexically. A card whose deficiencies were selected out of alphabetical order would
+  // otherwise list its corrective actions in a different order from the deficiencies section above them.
+  const deficiencyRank = new Map<string, number>();
+  criticalDeficiencyKeys.forEach((key, index) => {
+    const trimmed = key.trim();
+    if (!deficiencyRank.has(trimmed)) deficiencyRank.set(trimmed, index);
+  });
+
   const rankByRow = new Map<T, number>();
   for (const row of refOrdered) {
-    if (row.itemType !== "action_item") continue;
+    if (row.itemType === "critical_deficiency") {
+      const rank = deficiencyRank.get(row.itemRef.trim());
+      if (rank !== undefined) rankByRow.set(row, rank);
+      continue;
+    }
     // shift(), so a second row sharing a label takes the NEXT occurrence rather than colliding on the first.
     const position = positions.get(row.itemLabel.trim())?.shift();
     if (position !== undefined) rankByRow.set(row, position);
@@ -74,7 +94,7 @@ export function orderCorrectiveActions<T extends CorrectiveActionOrderable>(
 
   // Array#sort is stable, so equal ranks (and every unranked row) retain the base ref ordering above.
   return refOrdered.sort((left, right) => {
-    if (left.itemType !== right.itemType) return left.itemType === "action_item" ? -1 : 1;
+    if (left.itemType !== right.itemType) return left.itemType === "critical_deficiency" ? -1 : 1;
     const leftRank = rankByRow.get(left) ?? Number.POSITIVE_INFINITY;
     const rightRank = rankByRow.get(right) ?? Number.POSITIVE_INFINITY;
     if (leftRank === rightRank) return 0;

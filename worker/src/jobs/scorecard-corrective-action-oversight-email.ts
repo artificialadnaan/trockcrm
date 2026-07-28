@@ -49,6 +49,21 @@ const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 // worker cannot import from the server package, and it already hardcodes this same zone for its cron schedules.
 const OVERSIGHT_EMAIL_TIMEZONE = "America/Chicago";
 
+// Bound each response comment quoted in the email body. The response API accepts up to 5,000 characters per
+// item and a card can carry 50 action items plus deficiencies, so quoting every comment in full can produce
+// hundreds of kilobytes of body — before HTML escaping expands it further. Mail clients clip long bodies,
+// and what gets clipped is the end: the CTA. The PDF renderer already bounds the same text; this is the
+// email's equivalent, with the full text one click away in the CRM.
+const MAX_EMAIL_COMMENT_CHARS = 280;
+
+/** Quote a comment for an email body, bounded, with an explicit marker that it was shortened. */
+function emailCommentExcerpt(comment: string | null | undefined): string | null {
+  const text = normalizeText(comment);
+  if (!text) return null;
+  if (text.length <= MAX_EMAIL_COMMENT_CHARS) return text;
+  return `${text.slice(0, MAX_EMAIL_COMMENT_CHARS).trimEnd()}… (full comment in the CRM)`;
+}
+
 /**
  * True only for the immutable `${scorecardId}.${sha256}.v${version}.pdf` shape the artifact publisher emits.
  * Mirrors the identical guard in field-scorecard-email.ts — the two scorecard email jobs must agree on what
@@ -111,6 +126,8 @@ interface ScorecardRow {
   status: string | null;
   /** The CURRENT action-item list — what the corrective-action rows must be ordered against. */
   action_items: string[] | null;
+  /** The stored deficiency keys, in the order the card body renders them. */
+  critical_deficiencies: string[] | null;
   pdf_r2_key: string | null;
   pdf_render_version: number | null;
   /** The scorecard updated_at the stored PDF was rendered from (migration 0200); null pre-migration. */
@@ -184,7 +201,8 @@ export async function handleScorecardCorrectiveActionOversightEmail(
   // arrays onto $3. (The responder job documents this trap at length; same fragment, same hazard.)
   const scorecardResult = await query(
     `SELECT sc.deal_id, sc.project_number, sc.week_of, sc.total_score, sc.average_score, sc.rating,
-            sc.form_version, sc.status, sc.action_items, sc.pdf_r2_key, sc.pdf_render_version,
+            sc.form_version, sc.status, sc.action_items, sc.critical_deficiencies,
+            sc.pdf_r2_key, sc.pdf_render_version,
             sc.pdf_content_generation, sc.updated_at,
             sc.corrective_action_oversight_opened_at, sc.corrective_action_oversight_closed_at,
             sc.corrective_action_cycle_nonce, sc.corrective_action_oversight_cycle,
@@ -333,6 +351,7 @@ export async function handleScorecardCorrectiveActionOversightEmail(
       itemLabel: row.item_label,
     })),
     scorecard.action_items ?? [],
+    scorecard.critical_deficiencies ?? [],
   );
 
   // The completed notice carries the refreshed PDF — which is only meaningful from v3, the revision that
@@ -757,11 +776,16 @@ export function buildOversightEmail(input: {
       return label ? `${r.name} (${label})` : r.name;
     })
     .join(", ");
-  // With no DELIVERABLE responder the old fallback still asserted that the super and PM "have been asked",
-  // which is exactly the false assurance the deliverable-email filter exists to remove — in that case the
-  // responder worker sends nothing at all. Say what is true instead, and make the gap visible.
+  // Describes ASSIGNMENT, not delivery — deliberately. This job and the responder job carry the same delay
+  // and the queue runs a claimed batch concurrently, so this notice can go out FIRST; the responder send can
+  // also fail and eventually dead-letter. Nothing here reads corrective_action_email_sent_at or any
+  // per-recipient delivery record, so "has been asked" would be an assurance this handler cannot support.
+  // "is assigned to" is true the moment the cycle opens, whatever the responder job goes on to do.
+  //
+  // The empty case still says the harder thing plainly: with no deliverable address the responder worker
+  // sends nothing at all, and that gap is the actionable part of the notice.
   const askedText = responderList
-    ? `${responderList} ${(input.responders ?? []).length === 1 ? "has" : "have"} been asked to document a fix for each flagged item.`
+    ? `${responderList} ${(input.responders ?? []).length === 1 ? "is" : "are"} assigned to document a fix for each flagged item.`
     : "No assigned superintendent or project manager could be reached by email for this project, so nobody has been asked to document a fix yet — assign a responder with a valid email on the deal's Team tab.";
 
   const intro = opened
@@ -778,7 +802,7 @@ export function buildOversightEmail(input: {
           const resolved = item.status === "resolved";
           const who = normalizeText(item.responder_name) ?? normalizeText(item.responder_email);
           const when = formatRespondedAt(item.responded_at);
-          const comment = normalizeText(item.response_comment);
+          const comment = emailCommentExcerpt(item.response_comment);
           const photos = Number(item.photo_count ?? 0);
           const detail = resolved
             ? `<span style="color:#16a34a;font-weight:bold;">Resolved</span>${who || when ? ` — ${escapeHtml([who, when].filter(Boolean).join(" · "))}` : ""}${comment ? `<br /><span style="color:#475569;">${escapeHtml(comment)}</span>` : ""}${photos > 0 ? `<br /><span style="color:#94a3b8;font-size:12px;">${photos} photo${photos === 1 ? "" : "s"}</span>` : ""}`
@@ -795,7 +819,7 @@ export function buildOversightEmail(input: {
           if (!resolved) return `• ${item.item_label} — Open`;
           const who = normalizeText(item.responder_name) ?? normalizeText(item.responder_email);
           const when = formatRespondedAt(item.responded_at);
-          const comment = normalizeText(item.response_comment);
+          const comment = emailCommentExcerpt(item.response_comment);
           const photos = Number(item.photo_count ?? 0);
           return (
             `• ${item.item_label} — Resolved` +

@@ -1195,6 +1195,7 @@ export async function renderAndStoreFieldScorecardArtifacts(
     correctiveActionPhotoRows,
     correctiveActionRows,
     card.actionItems ?? [],
+    card.criticalDeficiencies ?? [],
   );
   const responsePhotosToLoad = responsePhotoRowsInRenderOrder.slice(0, MAX_CORRECTIVE_ACTION_PHOTOS);
   const omittedCorrectiveActionPhotoCount =
@@ -1977,13 +1978,16 @@ function sortResponsePhotosForRender<T extends { correctiveActionId: string | nu
   photoRows: T[],
   itemRows: Array<{ id: string; itemType: string; itemRef: string; itemLabel: string }>,
   actionItems: readonly string[],
+  criticalDeficiencyKeys: readonly string[],
 ): T[] {
   // MUST use the same ranking the renderer uses. This function decides which photos survive the global cap;
   // the renderer decides which item draws them. Rank by item_ref here while the renderer ranks by the live
   // action-item list and the two disagree the moment an editor reorders the list — the cap then keeps photos
   // for one item and the renderer draws a different one, so an item silently loses its evidence.
   const rankById = new Map<string, number>();
-  orderCorrectiveActions(itemRows, actionItems).forEach((item, index) => rankById.set(item.id, index));
+  orderCorrectiveActions(itemRows, actionItems, criticalDeficiencyKeys).forEach((item, index) =>
+    rankById.set(item.id, index),
+  );
 
   // The incoming rows already arrive ordered by (created_at, id); Array.prototype.sort is stable, so that
   // ordering is preserved within each item.

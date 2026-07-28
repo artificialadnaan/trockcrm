@@ -293,8 +293,10 @@ describe("corrective-action section", () => {
     };
   }
 
-  it("orders items NUMERICALLY by item_ref, action items before deficiencies", () => {
-    // Lexical ordering puts "10" before "2". This must match the deal-thread order.
+  it("orders deficiencies first, then action items NUMERICALLY by item_ref", () => {
+    // Deficiencies lead because the scorecard body renders "Critical Deficiencies" above "Action Items" in
+    // this same document, and the CRM threads responses under those sections in that order. Within the
+    // action items, lexical ordering would put "10" before "2".
     const data = buildScorecardPdfData({
       ...base,
       correctiveActions: [
@@ -305,7 +307,7 @@ describe("corrective-action section", () => {
       ],
     });
 
-    expect(data.correctiveActions.map((c) => c.itemRef)).toEqual(["1", "2", "10", "missed_hold_point"]);
+    expect(data.correctiveActions.map((c) => c.itemRef)).toEqual(["missed_hold_point", "1", "2", "10"]);
   });
 
   it("REGRESSION: orders action items by the CURRENT list, not by the preserved item_ref", () => {
@@ -537,6 +539,62 @@ describe("corrective-action page-break safety", () => {
     expect(yPositions.filter((y) => y < 48)).toEqual([]);
   });
 
+  it("REGRESSION: never draws past the bottom margin when the item LABEL wraps", async () => {
+    // Neither submission nor edit parsing bounds an action item's LENGTH — only how many there may be. A
+    // dictated item can wrap to several lines, pushing doc.y past the fixed 46pt allowance; the bounded
+    // response comment that follows is then drawn low enough to run through the bottom margin, because
+    // PDFKit disables auto-pagination for any text given an explicit height.
+    // These proportions are not arbitrary — they are the shape found by sweeping label length against item
+    // count: a label long enough to wrap to many lines, with a comment long enough that the unreserved
+    // overflow pushes the bounded (non-paginating) text through the 48pt margin. A shorter label does not
+    // reproduce it, which is why the first version of this test passed against the unfixed renderer.
+    const longLabel = "Re-inspect the north elevation framing connection detail. ".repeat(12);
+    const data = buildScorecardPdfData({
+      ...base,
+      correctiveActions: Array.from({ length: 5 }, (_, i) => ({
+        itemType: "action_item",
+        itemRef: String(i),
+        itemLabel: `${i}. ${longLabel}`,
+        status: "resolved",
+        responderName: "Pat Manager",
+        respondedAt: "2026-07-27T13:00:00.000Z",
+        responseComment: "Corrected on site and verified with the safety lead. ".repeat(4),
+        photos: [],
+      })),
+    });
+
+    const pdf = await renderFieldScorecardPdf(data);
+    const yPositions = textYPositions(pdf);
+    expect(yPositions.length).toBeGreaterThan(20);
+    expect(yPositions.filter((y) => y < 48)).toEqual([]);
+  });
+
+  it("REGRESSION: labels response photos that continue onto a new page", async () => {
+    // A page break between an item's text and its photos left the next page opening with unlabelled images.
+    // On a card where several items carry photos, nothing in the document then ties a photo to the item it
+    // documents — the one question the record exists to answer.
+    const data = buildScorecardPdfData({
+      ...base,
+      correctiveActions: [
+        {
+          itemType: "action_item",
+          itemRef: "0",
+          itemLabel: "Re-torque the anchors",
+          status: "resolved",
+          responderName: "Pat Manager",
+          respondedAt: "2026-07-27T13:00:00.000Z",
+          responseComment: "Done.",
+          // Enough tiles to force at least one continuation page.
+          photos: Array.from({ length: 8 }, (_, i) => ({ caption: `p${i}`, image: null })),
+        },
+      ],
+    });
+
+    const pdf = await renderFieldScorecardPdf(data);
+    const text = renderedTextFromPdf(pdf);
+    expect(text).toContain("Re-torque the anchors (continued)");
+  });
+
   it("adds an upstream pre-cap omission to the render-side count", async () => {
     // The artifact job caps response photos BEFORE downloading bytes (so a photo beyond the cap cannot 503
     // the whole download). Its omitted count must reach the "available in the CRM" note, or the note would
@@ -585,3 +643,29 @@ describe("formatDateTime — the corrective-action response time", () => {
     expect(formatDateTime("not a timestamp")).toBe("not a timestamp");
   });
 });
+
+/** The literal text drawn into the document — PDFKit emits hex-encoded TJ runs against a subsetted font. */
+function renderedTextFromPdf(pdf: Buffer): string {
+  const raw = pdf.toString("latin1");
+  const streamRe = /stream\r?\n/g;
+  const out: string[] = [];
+  let match: RegExpExecArray | null;
+  while ((match = streamRe.exec(raw)) !== null) {
+    const start = match.index + match[0].length;
+    const end = raw.indexOf("endstream", start);
+    if (end < 0) continue;
+    let text: string;
+    try {
+      text = inflateSync(Buffer.from(raw.slice(start, end), "latin1")).toString("latin1");
+    } catch {
+      continue;
+    }
+    for (const tj of text.matchAll(/\[((?:<[0-9A-Fa-f]*>|[-\d.\s])*)\]\s*TJ/g)) {
+      const run = [...tj[1].matchAll(/<([0-9A-Fa-f]*)>/g)]
+        .map((hex) => Buffer.from(hex[1], "hex").toString("latin1"))
+        .join("");
+      if (run) out.push(run);
+    }
+  }
+  return out.join(" ");
+}

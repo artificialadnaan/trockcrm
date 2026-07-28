@@ -46,6 +46,30 @@ BEGIN
          ADD COLUMN IF NOT EXISTS corrective_action_oversight_cycle uuid',
       schema_name
     );
+
+    -- GRANDFATHER cycles that were already open when this deployed.
+    --
+    -- The opened-notice enqueue fires only on the TRANSITION into corrective_action_open. A card sitting in
+    -- that state right now never made that transition under the new code, so it will never get an opened
+    -- notice — but it WILL get a "Corrective Action Completed" email the moment it closes, because the closed
+    -- enqueue has no such precondition. Oversight would receive a completion for a cycle it was never told
+    -- about, which reads as a bug in the notifications rather than a rollout artifact.
+    --
+    -- Stamping the opened phase as already-notified is the honest resolution of a genuinely awkward choice.
+    -- The alternative — blasting an "opened" notice for every in-flight card on deploy — announces corrective
+    -- actions that may be weeks old as though they were new, which is worse noise on a QC gate. The closed
+    -- notice still fires, and it is self-contained: it carries the full item list and the PDF.
+    --
+    -- Only cards whose stamp is NULL are touched, so a rerun is a no-op and no real notification is
+    -- suppressed. A genuine REOPEN clears these stamps, so a grandfathered card that reopens later notifies
+    -- normally from that point on.
+    EXECUTE format(
+      'UPDATE %I.field_scorecards
+          SET corrective_action_oversight_opened_at = now()
+        WHERE status = ''corrective_action_open''
+          AND corrective_action_oversight_opened_at IS NULL',
+      schema_name
+    );
   END LOOP;
 END $tenant$;
 
@@ -55,4 +79,8 @@ ALTER TABLE office_dallas.field_scorecards
   ADD COLUMN IF NOT EXISTS corrective_action_oversight_opened_at timestamptz,
   ADD COLUMN IF NOT EXISTS corrective_action_oversight_closed_at timestamptz,
   ADD COLUMN IF NOT EXISTS corrective_action_oversight_cycle uuid;
+UPDATE office_dallas.field_scorecards
+   SET corrective_action_oversight_opened_at = now()
+ WHERE status = 'corrective_action_open'
+   AND corrective_action_oversight_opened_at IS NULL;
 -- TENANT_SCHEMA_END

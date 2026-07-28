@@ -8,7 +8,7 @@ const row = (itemRef: string, itemLabel: string, itemType = "action_item") => ({
 });
 
 describe("compareCorrectiveActionsByRef", () => {
-  it("sorts action items before deficiencies, and refs numerically not lexically", () => {
+  it("sorts DEFICIENCIES before action items, and action refs numerically not lexically", () => {
     const sorted = [
       row("10", "Ten"),
       row("missed_hold_point", "Missed hold point", "critical_deficiency"),
@@ -16,8 +16,10 @@ describe("compareCorrectiveActionsByRef", () => {
       row("1", "One"),
     ].sort(compareCorrectiveActionsByRef);
 
-    // "10" after "2" — lexical ordering gets this wrong the moment a card has 11+ items.
-    expect(sorted.map((r) => r.itemRef)).toEqual(["1", "2", "10", "missed_hold_point"]);
+    // Deficiencies first, because the scorecard body renders "Critical Deficiencies" above "Action Items"
+    // and the CRM threads responses under the same two sections in that order. And "10" after "2" — lexical
+    // ordering gets that wrong the moment a card has 11+ items.
+    expect(sorted.map((r) => r.itemRef)).toEqual(["missed_hold_point", "1", "2", "10"]);
   });
 });
 
@@ -49,7 +51,9 @@ describe("orderCorrectiveActions", () => {
       ],
       ["Still here"],
     );
-    expect(ordered.map((r) => r.itemRef)).toEqual(["1", "0", "2", "k"]);
+    // The deficiency leads (deficiencies render first), then the ranked action item, then the two whose
+    // labels the list no longer contains — in their stable ref order rather than an arbitrary one.
+    expect(ordered.map((r) => r.itemRef)).toEqual(["k", "1", "0", "2"]);
   });
 
   it("falls back to ref order when there is no action-item list", () => {
@@ -69,5 +73,38 @@ describe("orderCorrectiveActions", () => {
     const rows = [row("1", "B"), row("0", "A")];
     orderCorrectiveActions(rows, ["A", "B"]);
     expect(rows.map((r) => r.itemRef)).toEqual(["1", "0"]);
+  });
+
+  it("REGRESSION: ranks deficiencies by the STORED key order, not lexically", () => {
+    // The card body renders deficiencies in the order they are stored in critical_deficiencies. Sorting the
+    // corrective actions lexically made a card whose deficiencies were picked out of alphabetical order
+    // disagree with its own deficiencies section, one page apart in the same document.
+    const ordered = orderCorrectiveActions(
+      [
+        row("alpha_issue", "Alpha", "critical_deficiency"),
+        row("zulu_issue", "Zulu", "critical_deficiency"),
+      ],
+      [],
+      ["zulu_issue", "alpha_issue"],
+    );
+    expect(ordered.map((r) => r.itemRef)).toEqual(["zulu_issue", "alpha_issue"]);
+  });
+
+  it("puts deficiencies ahead of action items even when both are ranked", () => {
+    const ordered = orderCorrectiveActions(
+      [row("0", "Do the thing"), row("k", "A deficiency", "critical_deficiency")],
+      ["Do the thing"],
+      ["k"],
+    );
+    expect(ordered.map((r) => r.itemType)).toEqual(["critical_deficiency", "action_item"]);
+  });
+
+  it("falls back to lexical for a deficiency the stored list no longer contains", () => {
+    const ordered = orderCorrectiveActions(
+      [row("zulu", "Z", "critical_deficiency"), row("alpha", "A", "critical_deficiency")],
+      [],
+      [],
+    );
+    expect(ordered.map((r) => r.itemRef)).toEqual(["alpha", "zulu"]);
   });
 });
