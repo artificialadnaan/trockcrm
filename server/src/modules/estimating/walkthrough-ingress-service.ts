@@ -4,10 +4,16 @@
 // turn requires a `files` row — so a walkthrough has to synthesize a document chain before its scope
 // rows can land. The synthetic "document" is a contact-sheet image of the walkthrough's evidence
 // frames: a real artifact a human can open, and `image/*` is one of only two mime families the
-// estimating path accepts. This module builds the first link of that chain, the `files` row.
+// estimating path accepts. This module builds that chain link by link: the `files` row, then the
+// already-parsed source document and its activated parse run.
+import { eq } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
-import { files } from "@trock-crm/shared/schema";
+import {
+  estimateDocumentParseRuns,
+  estimateSourceDocuments,
+  files,
+} from "@trock-crm/shared/schema";
 
 /** Same alias document-service.ts:6 uses. */
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -65,4 +71,84 @@ export async function createWalkthroughContactSheetFile({
     .returning({ id: files.id });
 
   return row.id;
+}
+
+/** Second link of the chain. Narrow input as above; the `WalkthroughIngressPayload` mapping lives in
+ *  `ingestWalkthrough`. */
+export interface CreateWalkthroughSourceDocumentArgs {
+  tenantDb: TenantDb;
+  input: {
+    dealId: string;
+    projectId: string | null;
+    fileId: string;
+    walkthroughId: string;
+    siteLabel: string;
+    capturedAt: string;
+    mimeType: ContactSheetMimeType;
+    storageKey: string;
+    bytes: number;
+    userId: string;
+  };
+}
+
+/**
+ * Create the source document a walkthrough's extractions hang off — already parsed.
+ *
+ * `createEstimateSourceDocument` (document-service.ts:99) cannot be reused: it hardcodes
+ * `parseStatus: "queued"` / `activeParseRunId: null` and enqueues an OCR job that would re-derive
+ * filename stubs over an image whose real content is a transcript we already have. A walkthrough
+ * arrives with its parse ALREADY DONE upstream in trock-scope, so the document is born `completed`
+ * with a completed parse run made active — which is the state workbench-service.ts:153-172 requires
+ * before it will show any of the walkthrough's rows.
+ */
+export async function createWalkthroughSourceDocument({
+  tenantDb,
+  input,
+}: CreateWalkthroughSourceDocumentArgs): Promise<{ documentId: string; parseRunId: string }> {
+  const [document] = await tenantDb
+    .insert(estimateSourceDocuments)
+    .values({
+      dealId: input.dealId,
+      projectId: input.projectId,
+      fileId: input.fileId,
+      rootFileId: input.fileId,
+      documentType: "walkthrough",
+      filename: `Walkthrough ${input.siteLabel} ${input.capturedAt}`,
+      storageKey: input.storageKey,
+      mimeType: input.mimeType,
+      fileSize: input.bytes,
+      // Deliberate: the walkthrough id IS the content hash. document-service.ts:104-130 dedupes on
+      // (dealId, projectId, contentHash), so re-ingesting the same walkthrough becomes detectable
+      // rather than silently producing a second document and a duplicate set of extractions.
+      contentHash: input.walkthroughId,
+      parseStatus: "completed",
+      ocrStatus: "completed",
+      parseProvider: "trock-scope",
+      parseProfile: "walkthrough",
+      parseMeasurementsEnabled: false,
+      parsedAt: new Date(),
+      uploadedByUserId: input.userId,
+    })
+    .returning({ id: estimateSourceDocuments.id });
+
+  const [parseRun] = await tenantDb
+    .insert(estimateDocumentParseRuns)
+    .values({
+      documentId: document.id,
+      status: "completed",
+      parseProvider: "trock-scope",
+      parseProfile: "walkthrough",
+      parseMeasurementsEnabled: false,
+      completedAt: new Date(),
+    })
+    .returning({ id: estimateDocumentParseRuns.id });
+
+  // The run can only be pointed at after it exists (the FK runs document -> run), so activation is a
+  // second statement rather than part of the insert above.
+  await tenantDb
+    .update(estimateSourceDocuments)
+    .set({ activeParseRunId: parseRun.id })
+    .where(eq(estimateSourceDocuments.id, document.id));
+
+  return { documentId: document.id, parseRunId: parseRun.id };
 }

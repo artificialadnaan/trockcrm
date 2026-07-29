@@ -18,14 +18,22 @@ import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { files } from "@trock-crm/shared/schema";
+import {
+  estimateDocumentParseRuns,
+  estimateSourceDocuments,
+  files,
+} from "@trock-crm/shared/schema";
 import { tenantSchemaSql } from "../../../tests/helpers/tenant-schema-from-drizzle.js";
-import { createWalkthroughContactSheetFile } from "./walkthrough-ingress-service.js";
+import {
+  createWalkthroughContactSheetFile,
+  createWalkthroughSourceDocument,
+} from "./walkthrough-ingress-service.js";
 
 const U = (s: string) => `00000000-0000-4000-8000-${s.padStart(12, "0")}`;
 const DEAL = U("11111");
 const WALKTHROUGH = U("22222");
 const USER = U("33333");
+const PROJECT = U("44444");
 
 let pg: PGlite;
 // The service is typed against NodePgDatabase; the PGlite driver is wire-compatible for these queries
@@ -35,8 +43,10 @@ let tenantDb: any;
 
 beforeAll(async () => {
   pg = new PGlite();
-  // "public" (not office_*) so the unqualified Drizzle `files` table resolves on the default search_path.
-  await pg.exec(tenantSchemaSql("public", [files]));
+  // "public" (not office_*) so the unqualified Drizzle tables resolve on the default search_path.
+  await pg.exec(
+    tenantSchemaSql("public", [files, estimateSourceDocuments, estimateDocumentParseRuns])
+  );
   tenantDb = drizzle(pg);
 }, 60_000);
 
@@ -80,5 +90,83 @@ describe("createWalkthroughContactSheetFile", () => {
     // Provenance the rest of the chain (and any human opening the file) needs.
     expect(row.dealId).toBe(DEAL);
     expect(row.uploadedBy).toBe(USER);
+  });
+});
+
+describe("createWalkthroughSourceDocument", () => {
+  it("births the document already parsed, with an activated completed parse run", async () => {
+    const fileId = await createWalkthroughContactSheetFile({
+      tenantDb,
+      input: {
+        dealId: DEAL,
+        walkthroughId: WALKTHROUGH,
+        siteLabel: "Unit 12B",
+        r2Key: "walkthroughs/22222222/contact-sheet.jpg",
+        r2Bucket: "trock-scope",
+        bytes: 184320,
+        mimeType: "image/jpeg",
+        userId: USER,
+      },
+    });
+
+    const { documentId, parseRunId } = await createWalkthroughSourceDocument({
+      tenantDb,
+      input: {
+        dealId: DEAL,
+        projectId: PROJECT,
+        fileId,
+        walkthroughId: WALKTHROUGH,
+        siteLabel: "Unit 12B",
+        capturedAt: "2026-07-29T14:05:00Z",
+        mimeType: "image/jpeg",
+        storageKey: "walkthroughs/22222222/contact-sheet.jpg",
+        bytes: 184320,
+        userId: USER,
+      },
+    });
+
+    const [doc] = await tenantDb
+      .select()
+      .from(estimateSourceDocuments)
+      .where(eq(estimateSourceDocuments.id, documentId));
+
+    expect(doc).toBeDefined();
+    // The whole point of this helper: the document is born parsed, so nothing downstream waits on an
+    // OCR job that will never run. `activeParseRunId` is what workbench-service.ts:153-172 reads to
+    // decide a row is a live artifact — a null here silently hides every extraction.
+    expect(doc.activeParseRunId).toBe(parseRunId);
+    expect(doc.parseStatus).toBe("completed");
+    expect(doc.ocrStatus).toBe("completed");
+    expect(doc.parsedAt).not.toBeNull();
+    expect(doc.mimeType).toBe("image/jpeg");
+    // contentHash carries the walkthrough id deliberately: document-service.ts:104-130 dedupes on
+    // (dealId, projectId, contentHash), so a re-ingest of the same walkthrough is detectable.
+    expect(doc.contentHash).toBe(WALKTHROUGH);
+    expect(doc.dealId).toBe(DEAL);
+    expect(doc.projectId).toBe(PROJECT);
+    expect(doc.fileId).toBe(fileId);
+    expect(doc.rootFileId).toBe(fileId);
+    expect(doc.documentType).toBe("walkthrough");
+    expect(doc.filename).toContain("Unit 12B");
+    expect(doc.filename).toContain("2026-07-29T14:05:00Z");
+    expect(doc.parseProvider).toBe("trock-scope");
+    expect(doc.parseProfile).toBe("walkthrough");
+    expect(doc.parseMeasurementsEnabled).toBe(false);
+    expect(doc.fileSize).toBe(184320);
+    expect(doc.storageKey).toBe("walkthroughs/22222222/contact-sheet.jpg");
+    expect(doc.uploadedByUserId).toBe(USER);
+
+    const [run] = await tenantDb
+      .select()
+      .from(estimateDocumentParseRuns)
+      .where(eq(estimateDocumentParseRuns.id, parseRunId));
+
+    expect(run).toBeDefined();
+    expect(run.status).toBe("completed");
+    expect(run.documentId).toBe(documentId);
+    expect(run.completedAt).not.toBeNull();
+    expect(run.parseProvider).toBe("trock-scope");
+    expect(run.parseProfile).toBe("walkthrough");
+    expect(run.parseMeasurementsEnabled).toBe(false);
   });
 });
