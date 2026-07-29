@@ -25,6 +25,10 @@ type ValueFields = Pick<
   | "bidBoardTotalSales"
   | "stageSlug"
   | "workflowRoute"
+  // REQUIRED, not optional, because DealListItem declares it so. Every production caller passes a whole
+  // DealListItem/DealDetail, and requiring it means a hand-built object that forgets the flag fails to
+  // COMPILE rather than silently pricing a deductive change order at $0 on the fallback chain.
+  | "isChangeOrder"
 >;
 
 /**
@@ -73,6 +77,27 @@ export function resolveDealValue(deal: ValueFields): number {
   // mixed-version deployment produces if the fallback is narrower than the badge.
   if (deal.effectiveOnHold === true || deal.onHold === true) return 0;
 
+  /**
+   * A CHANGE ORDER carries its awarded amount and nothing else.
+   *
+   * A CO child has no other value column to fall back to, and a DEDUCTIVE CO is NEGATIVE, so every
+   * `> 0` candidate below would drop it to 0 and the phone would price a -$50,000 deduction at nothing.
+   * Mirrors server deal-value-sql.ts withChangeOrderBranch, shared getRawDealValue and client
+   * resolveBestEstimate — those three and this one MUST NOT drift. Gated on the FLAG, not on the sign:
+   * an ordinary deal with a negative awarded amount still falls through the chain exactly as before.
+   *
+   * BELOW the hold check on purpose, matching SQL: storedOnHoldDealValueSql wraps the CO branch, so a
+   * held deal is worth 0 whether or not it is a change order.
+   *
+   * Arrived on main in #989 while this logic was being moved out of DealCard.tsx in a stacked PR, so it
+   * had to be carried across by hand — the class of thing a merge resolves silently in the wrong
+   * direction.
+   */
+  if (deal.isChangeOrder === true) {
+    const awarded = parseFloat(deal.awardedAmount ?? "0");
+    return Number.isFinite(awarded) ? awarded : 0;
+  }
+
   const isEstimating = isGenuineEstimatingStage(deal.stageSlug, deal.workflowRoute);
   const candidates = isEstimating
     ? [deal.awardedAmount, deal.ddEstimate, deal.bidBoardTotalSales, deal.bidEstimate]
@@ -87,7 +112,9 @@ export function resolveDealValue(deal: ValueFields): number {
 
 export function displayAmount(deal: ValueFields): string {
   const value = resolveDealValue(deal);
-  return value > 0 ? formatMoney(value) : "—";
+  // `!== 0`, not `> 0`: a deductive change order is NEGATIVE and real, and the `> 0` form printed an em
+  // dash over a -$50,000 deduction. Also carried across from #989 by hand.
+  return value !== 0 ? formatMoney(value) : "—";
 }
 
 /**
