@@ -94,7 +94,15 @@ async function lockAndReadItems(tx: TenantDb, scorecardId: string) {
     .for("update");
 
   return tx
-    .select({ id: scorecardCorrectiveActions.id, status: scorecardCorrectiveActions.status })
+    .select({
+      id: scorecardCorrectiveActions.id,
+      status: scorecardCorrectiveActions.status,
+      // Carried so each event can snapshot the item it was about — a detached event with no identity is
+      // unreadable, and this read is already the locked source of truth.
+      itemType: scorecardCorrectiveActions.itemType,
+      itemRef: scorecardCorrectiveActions.itemRef,
+      itemLabel: scorecardCorrectiveActions.itemLabel,
+    })
     .from(scorecardCorrectiveActions)
     .where(eq(scorecardCorrectiveActions.scorecardId, scorecardId));
 }
@@ -205,6 +213,10 @@ export async function approveCorrectiveActionItems(
       correctiveActionId: itemId,
       scorecardId: input.scorecardId,
       eventType: "approved",
+      // Snapshot identity so the event survives its item being removed by a later edit.
+      itemType: items.find((i) => i.id === itemId)?.itemType ?? null,
+      itemRef: items.find((i) => i.id === itemId)?.itemRef ?? null,
+      itemLabel: items.find((i) => i.id === itemId)?.itemLabel ?? null,
       actorUserId: input.actor.userId,
       actorName: input.actor.name,
       actorEmail: input.actor.email,
@@ -276,6 +288,9 @@ export async function rejectCorrectiveActionItem(
     correctiveActionId: input.itemId,
     scorecardId: input.scorecardId,
     eventType: "rejected",
+    itemType: target.itemType ?? null,
+    itemRef: target.itemRef ?? null,
+    itemLabel: target.itemLabel ?? null,
     actorUserId: input.actor.userId,
     actorName: input.actor.name,
     actorEmail: input.actor.email,

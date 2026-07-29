@@ -30,6 +30,10 @@ export interface RecordCorrectiveActionEventInput {
   actorEmail: string | null;
   /** The response text, or the rejection reason. Required for `rejected` — enforced here AND by a CHECK. */
   comment: string | null;
+  /** The item's identity, snapshotted so the event stays readable if an edit later removes the item. */
+  itemType?: string | null;
+  itemRef?: string | null;
+  itemLabel?: string | null;
 }
 
 export interface CorrectiveActionEventRow {
@@ -42,6 +46,10 @@ export interface CorrectiveActionEventRow {
   actorEmail: string | null;
   comment: string | null;
   createdAt: string | null;
+  /** Snapshotted item identity — the only way to read a detached event. */
+  itemType: string | null;
+  itemRef: string | null;
+  itemLabel: string | null;
 }
 
 /**
@@ -74,6 +82,9 @@ export async function recordCorrectiveActionEvent(
       actorName: input.actorName,
       actorEmail: input.actorEmail,
       comment,
+      itemType: input.itemType ?? null,
+      itemRef: input.itemRef ?? null,
+      itemLabel: input.itemLabel ?? null,
     })
     .returning({ id: scorecardCorrectiveActionEvents.id });
   return row.id;
@@ -97,6 +108,9 @@ function eventColumns() {
     actorEmail: scorecardCorrectiveActionEvents.actorEmail,
     comment: scorecardCorrectiveActionEvents.comment,
     createdAt: scorecardCorrectiveActionEvents.createdAt,
+    itemType: scorecardCorrectiveActionEvents.itemType,
+    itemRef: scorecardCorrectiveActionEvents.itemRef,
+    itemLabel: scorecardCorrectiveActionEvents.itemLabel,
   } as const;
 }
 

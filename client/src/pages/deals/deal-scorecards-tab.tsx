@@ -547,6 +547,42 @@ export function ScorecardDetailView({
         </div>
       )}
 
+      {(detail.removedItemEvents?.length ?? 0) > 0 && (
+        <div>
+          <h4 className="mb-1 text-xs font-semibold uppercase tracking-wide text-gray-500">
+            Removed by a later edit
+          </h4>
+          <p className="mb-2 text-xs italic text-gray-500">
+            These flagged items were removed when the scorecard was edited. Their history is kept here.
+          </p>
+          <ol className="space-y-3 rounded-md border border-gray-200 bg-white p-2.5">
+            {detail.removedItemEvents!.map((event) => {
+              const presentation = EVENT_PRESENTATION[event.eventType] ?? EVENT_PRESENTATION.submitted;
+              return (
+                <li key={event.id} className="border-l-2 border-gray-200 pl-3">
+                  {/* The item's own label — these have no item block above them to sit under. */}
+                  {event.itemLabel && (
+                    <p className="text-sm font-semibold text-gray-900">{event.itemLabel}</p>
+                  )}
+                  <div className="flex flex-wrap items-center gap-x-2 text-xs text-gray-500">
+                    <span className={`font-semibold ${presentation.className}`}>{presentation.verb}</span>
+                    <span className="font-medium text-gray-700">
+                      {event.actorName ?? event.actorEmail ?? "Unknown"}
+                    </span>
+                    {formatRespondedAt(event.createdAt) && (
+                      <span>· {formatRespondedAt(event.createdAt)}</span>
+                    )}
+                  </div>
+                  {event.comment && (
+                    <p className="mt-1 whitespace-pre-wrap text-sm text-gray-900">{event.comment}</p>
+                  )}
+                </li>
+              );
+            })}
+          </ol>
+        </div>
+      )}
+
       {detail.criticalDeficiencies.length > 0 && (
         <div>
           <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-red-600">Critical Deficiencies</h4>

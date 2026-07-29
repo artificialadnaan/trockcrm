@@ -132,6 +132,8 @@ export interface ScorecardPdfCorrectiveActionPhoto {
 export interface ScorecardPdfCorrectiveActionEvent {
   /** 'submitted' | 'approved' | 'rejected' */
   eventType: string;
+  /** The item this was about, snapshotted — the only way a DETACHED entry is readable. */
+  itemLabel?: string | null;
   actorName: string | null;
   /** ISO timestamp. */
   createdAt: string | null;
@@ -508,10 +510,13 @@ export async function renderFieldScorecardPdf(data: ScorecardPdfData): Promise<B
   // Placed after the signed card body and before the original-evidence pages, so each item renders
   // self-contained: its status, response and photos stay adjacent instead of being split across the report.
   // Applies to BOTH kinds — a leadership card can trip the corrective-action band too.
-  if (data.correctiveActions.length > 0) {
+  // EITHER collection. When an edit removes the last tracked item, correctiveActions is empty while
+  // removedItemEvents is not — and that is precisely the case the unconditional query was added for, so
+  // gating on correctiveActions alone omitted the history in the one scenario it exists to cover.
+  if (data.correctiveActions.length > 0 || data.removedItemEvents.length > 0) {
     doc.addPage();
     heading(doc, "Corrective Actions");
-    if (data.correctiveActionSummary) {
+    if (data.correctiveActions.length > 0 && data.correctiveActionSummary) {
       doc.font("Helvetica").fontSize(10).fillColor(BRAND_MUTED).text(
         data.correctiveActionSummary,
         PAGE.margin,
@@ -760,8 +765,16 @@ function drawRemovedItemEvents(
     { width: CONTENT_WIDTH },
   );
   for (const event of events) {
+    // The item's own label, because these entries have no item block above them to sit under. Without it two
+    // removed deficiencies render as two indistinguishable rows.
+    const label = event.itemLabel?.trim();
+    if (label) {
+      doc.font("Helvetica-Bold").fontSize(10).fillColor(BRAND_BLACK).text(label, PAGE.margin, doc.y + 6, {
+        width: CONTENT_WIDTH,
+      });
+    }
     const heading = correctiveActionEventHeading(event);
-    doc.font("Helvetica-Bold").fontSize(9).fillColor(heading.color).text(heading.text, PAGE.margin, doc.y + 6, {
+    doc.font("Helvetica-Bold").fontSize(9).fillColor(heading.color).text(heading.text, PAGE.margin, doc.y + 4, {
       width: CONTENT_WIDTH,
     });
     const comment = event.comment?.trim();

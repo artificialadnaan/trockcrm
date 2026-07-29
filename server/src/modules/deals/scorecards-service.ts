@@ -146,6 +146,7 @@ export async function getDealScorecardDetail(
   const removedItemEvents = (await getDetachedCorrectiveActionEvents(tenantDb, scorecardId)).map((event) => ({
     id: event.id,
     eventType: event.eventType,
+    itemLabel: event.itemLabel,
     actorName: event.actorName ?? event.actorEmail ?? null,
     actorEmail: event.actorEmail,
     comment: event.comment,

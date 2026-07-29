@@ -31,11 +31,43 @@
 
 DO $tenant$
 DECLARE schema_name text;
+        constraint_name text;
 BEGIN
   FOR schema_name IN SELECT nspname FROM pg_namespace WHERE nspname ~ '^office_' ORDER BY nspname LOOP
     IF to_regclass(format('%I.scorecard_corrective_actions', schema_name)) IS NULL THEN
       CONTINUE;
     END IF;
+
+    -- 0. REPLACE THE STATUS CHECK FIRST.
+    --
+    -- Migration 0192 created this table with an inline CHECK (status IN ('open','resolved')). Every write
+    -- below -- and every runtime write of submitted/approved/rejected afterwards -- violates it, so without
+    -- this the migration itself fails on deploy and the feature never ships. The constraint is unnamed in
+    -- 0192, so Postgres generated one; find it by definition rather than guessing at the name, which differs
+    -- between a table created by 0192 and one cloned into a newer office schema.
+    FOR constraint_name IN
+      SELECT con.conname
+        FROM pg_constraint con
+        JOIN pg_class rel ON rel.oid = con.conrelid
+        JOIN pg_namespace nsp ON nsp.oid = rel.relnamespace
+       WHERE nsp.nspname = schema_name
+         AND rel.relname = 'scorecard_corrective_actions'
+         AND con.contype = 'c'
+         AND pg_get_constraintdef(con.oid) ILIKE '%status%'
+    LOOP
+      EXECUTE format(
+        'ALTER TABLE %I.scorecard_corrective_actions DROP CONSTRAINT %I',
+        schema_name, constraint_name
+      );
+    END LOOP;
+
+    EXECUTE format(
+      'ALTER TABLE %I.scorecard_corrective_actions
+         ADD CONSTRAINT scorecard_corrective_actions_status_check
+         CHECK (status IN (''open'', ''submitted'', ''approved'', ''rejected''))
+         NOT VALID',
+      schema_name
+    );
 
     -- 1. resolved -> submitted or approved, depending on what the card's outcome ALREADY was.
     --
@@ -57,6 +89,14 @@ BEGIN
         WHERE sc.id = ca.scorecard_id
           AND ca.status = ''resolved''',
       schema_name, schema_name
+    );
+
+    -- Now that every row holds a permitted value, promote the constraint from NOT VALID to validated. Split
+    -- in two so the ADD does not scan (and fail on) rows the UPDATE above has not reached yet.
+    EXECUTE format(
+      'ALTER TABLE %I.scorecard_corrective_actions
+         VALIDATE CONSTRAINT scorecard_corrective_actions_status_check',
+      schema_name
     );
 
     -- 2. The outstanding-set index. Drop the narrower one only after the wider one exists.
@@ -93,6 +133,13 @@ BEGIN
            REFERENCES %I.field_scorecards(id) ON DELETE CASCADE,
          event_type text NOT NULL
            CHECK (event_type IN (''submitted'', ''approved'', ''rejected'')),
+         -- The item this was ABOUT, snapshotted. corrective_action_id goes null when an edit removes the
+         -- item, and an event that survives with only a type, an actor and a timestamp is unreadable -- two
+         -- removed deficiencies produce two indistinguishable rows, and an approval carries no comment at
+         -- all. Captured at write time like actor_name, for the same reason: the source can disappear.
+         item_type text,
+         item_ref text,
+         item_label text,
          -- Null for a token responder, who has no CRM user id.
          actor_user_id uuid,
          -- Captured at write time so a later rename, archive or role change cannot rewrite history.
@@ -118,6 +165,33 @@ BEGIN
       schema_name
     );
 
+    -- 4a. Photo links must OUTLIVE their item. 0192 attached them with ON DELETE CASCADE, so an edit that
+    -- removes a flagged item deletes every response-photo row with it -- and the event history this migration
+    -- works to preserve then points at evidence that no longer exists. SET NULL keeps the row (and its
+    -- corrective_action_event_id, added below) so the attempt's photos remain part of the record.
+    FOR constraint_name IN
+      SELECT con.conname
+        FROM pg_constraint con
+        JOIN pg_class rel ON rel.oid = con.conrelid
+        JOIN pg_namespace nsp ON nsp.oid = rel.relnamespace
+       WHERE nsp.nspname = schema_name
+         AND rel.relname = 'field_scorecard_photos'
+         AND con.contype = 'f'
+         AND pg_get_constraintdef(con.oid) ILIKE '%corrective_action_id%'
+    LOOP
+      EXECUTE format(
+        'ALTER TABLE %I.field_scorecard_photos DROP CONSTRAINT %I',
+        schema_name, constraint_name
+      );
+    END LOOP;
+    EXECUTE format(
+      'ALTER TABLE %I.field_scorecard_photos
+         ADD CONSTRAINT field_scorecard_photos_corrective_action_fk
+         FOREIGN KEY (corrective_action_id)
+         REFERENCES %I.scorecard_corrective_actions(id) ON DELETE SET NULL',
+      schema_name, schema_name
+    );
+
     -- 4. Per-attempt photo attribution.
     EXECUTE format(
       'ALTER TABLE %I.field_scorecard_photos
@@ -138,9 +212,10 @@ BEGIN
     EXECUTE format(
       'INSERT INTO %I.scorecard_corrective_action_events
          (corrective_action_id, scorecard_id, event_type, actor_user_id, actor_name, actor_email,
-          comment, created_at)
+          comment, created_at, item_type, item_ref, item_label)
        SELECT ca.id, ca.scorecard_id, ''submitted'', ca.responded_by_user_id, ca.responder_name,
-              ca.responder_email, ca.response_comment, COALESCE(ca.responded_at, ca.updated_at, now())
+              ca.responder_email, ca.response_comment, COALESCE(ca.responded_at, ca.updated_at, now()),
+              ca.item_type, ca.item_ref, ca.item_label
          FROM %I.scorecard_corrective_actions ca
         WHERE ca.status <> ''open''
           AND NOT EXISTS (
@@ -169,6 +244,11 @@ END $tenant$;
 
 -- New tenants: cloned by the office provisioner (office_dallas -> new schema).
 -- TENANT_SCHEMA_START
+ALTER TABLE office_dallas.scorecard_corrective_actions
+  DROP CONSTRAINT IF EXISTS scorecard_corrective_actions_status_check;
+ALTER TABLE office_dallas.scorecard_corrective_actions
+  ADD CONSTRAINT scorecard_corrective_actions_status_check
+  CHECK (status IN ('open', 'submitted', 'approved', 'rejected'));
 UPDATE office_dallas.scorecard_corrective_actions ca
    SET status = CASE
                   WHEN sc.status = 'corrective_action_closed' THEN 'approved'
@@ -189,6 +269,9 @@ CREATE TABLE IF NOT EXISTS office_dallas.scorecard_corrective_action_events (
   scorecard_id uuid NOT NULL
     REFERENCES office_dallas.field_scorecards(id) ON DELETE CASCADE,
   event_type text NOT NULL CHECK (event_type IN ('submitted', 'approved', 'rejected')),
+  item_type text,
+  item_ref text,
+  item_label text,
   actor_user_id uuid,
   actor_name text,
   actor_email text,
@@ -202,13 +285,20 @@ CREATE INDEX IF NOT EXISTS scorecard_corrective_action_events_scorecard_idx
 CREATE INDEX IF NOT EXISTS scorecard_corrective_action_events_item_idx
   ON office_dallas.scorecard_corrective_action_events (corrective_action_id, seq);
 ALTER TABLE office_dallas.field_scorecard_photos
+  DROP CONSTRAINT IF EXISTS field_scorecard_photos_corrective_action_fk;
+ALTER TABLE office_dallas.field_scorecard_photos
+  ADD CONSTRAINT field_scorecard_photos_corrective_action_fk
+  FOREIGN KEY (corrective_action_id)
+  REFERENCES office_dallas.scorecard_corrective_actions(id) ON DELETE SET NULL;
+ALTER TABLE office_dallas.field_scorecard_photos
   ADD COLUMN IF NOT EXISTS corrective_action_event_id uuid
   REFERENCES office_dallas.scorecard_corrective_action_events(id) ON DELETE SET NULL;
 INSERT INTO office_dallas.scorecard_corrective_action_events
   (corrective_action_id, scorecard_id, event_type, actor_user_id, actor_name, actor_email,
-   comment, created_at)
+   comment, created_at, item_type, item_ref, item_label)
 SELECT ca.id, ca.scorecard_id, 'submitted', ca.responded_by_user_id, ca.responder_name,
-       ca.responder_email, ca.response_comment, COALESCE(ca.responded_at, ca.updated_at, now())
+       ca.responder_email, ca.response_comment, COALESCE(ca.responded_at, ca.updated_at, now()),
+       ca.item_type, ca.item_ref, ca.item_label
   FROM office_dallas.scorecard_corrective_actions ca
  WHERE ca.status <> 'open'
    AND NOT EXISTS (

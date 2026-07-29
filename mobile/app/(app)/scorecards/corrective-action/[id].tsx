@@ -273,6 +273,13 @@ function CorrectiveActionItemCard({
     return <ResolvedItemCard item={item} />;
   }
 
+  // WHY it came back, on the form where the rework happens. The web responder shows this; without it here an
+  // in-app responder following a rejection notification sees a blank form and has to go find the email.
+  const latestRejection =
+    item.status === "rejected"
+      ? [...(item.events ?? [])].reverse().find((e) => e.eventType === "rejected") ?? null
+      : null;
+
   const busy = savingPhotos > 0 || submitting || voiceBusy || captionVoiceBusy;
   const captionPhoto = state.photos.find((p) => p.key === captionKey) ?? null;
 
@@ -437,6 +444,14 @@ function CorrectiveActionItemCard({
         <Badge label="Open" color={theme.color.surfaceMuted} />
       </View>
       <Text style={styles.itemLabel}>{item.itemLabel}</Text>
+      {latestRejection ? (
+        <View style={styles.rejectionNote}>
+          <Text style={styles.rejectionNoteTitle}>
+            {latestRejection.actorName ? `Sent back by ${latestRejection.actorName}` : "Sent back"}
+          </Text>
+          <Text style={styles.rejectionNoteBody}>{latestRejection.comment}</Text>
+        </View>
+      ) : null}
 
       {notice ? <Banner message={notice.text} tone={notice.tone} /> : null}
 
@@ -632,6 +647,17 @@ const styles = StyleSheet.create({
   },
   itemCardResolved: { opacity: 0.92 },
   itemHeader: { flexDirection: "row", gap: theme.space.sm, alignItems: "center" },
+  rejectionNote: {
+    marginTop: theme.space.xs,
+    padding: theme.space.sm,
+    borderRadius: 8,
+    backgroundColor: "#FEF2F2",
+    borderWidth: 1,
+    borderColor: "#FECACA",
+    gap: 4,
+  },
+  rejectionNoteTitle: { fontSize: 11, fontWeight: "700", color: "#B91C1C", textTransform: "uppercase" },
+  rejectionNoteBody: { fontSize: 14, color: "#7F1D1D" },
   itemLabel: { fontFamily: theme.font.medium, fontSize: 15, color: theme.color.textPrimary },
   commentInput: { minHeight: 96, textAlignVertical: "top" },
   resolvedComment: { fontFamily: theme.font.body, fontSize: 14, color: theme.color.textPrimary },

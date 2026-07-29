@@ -31,6 +31,17 @@ export const scorecardCorrectiveActionEvents = pgTable(
     scorecardId: uuid("scorecard_id").notNull(),
     /** 'submitted' | 'approved' | 'rejected' */
     eventType: text("event_type").notNull(),
+    /**
+     * The item this event was ABOUT, snapshotted at write time.
+     *
+     * corrective_action_id goes null when an edit removes the item (migration 0202 uses ON DELETE SET NULL so
+     * the history survives). An event left with only a type, an actor and a timestamp is unreadable — two
+     * removed deficiencies produce two indistinguishable rows, and an approval carries no comment at all.
+     * Same reasoning as actor_name: capture it, because the source can disappear.
+     */
+    itemType: text("item_type"),
+    itemRef: text("item_ref"),
+    itemLabel: text("item_label"),
     /** Null for a token responder, who has no CRM user id. */
     actorUserId: uuid("actor_user_id"),
     /** Captured at write time so a later rename/archive cannot rewrite history. */

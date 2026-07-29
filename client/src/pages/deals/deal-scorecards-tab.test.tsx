@@ -307,6 +307,34 @@ describe("ScorecardDetailView signature decode failure", () => {
   });
 });
 
+describe("removed-item history", () => {
+  it("REGRESSION: renders events whose item an edit removed, rather than silently dropping them", async () => {
+    // The server preserves these (ON DELETE SET NULL) precisely so the record survives an edit. Emitting them
+    // and never rendering them preserves nothing a user can see — which is the shape of bug this feature line
+    // has produced repeatedly: the data lands, no consumer reads it, and every test still passes.
+    const detail = {
+      ...BASE_DETAIL,
+      correctiveActions: [],
+      removedItemEvents: [
+        {
+          id: "e1",
+          eventType: "rejected",
+          actorName: "James Helms",
+          actorEmail: null,
+          comment: "Torque values were not documented.",
+          createdAt: "2026-07-28T12:00:00.000Z",
+          photos: [],
+        },
+      ],
+    } as unknown as FieldScorecardDetail;
+
+    const html = await renderDetail(detail);
+    expect(html).toContain("Removed by a later edit");
+    expect(html).toContain("James Helms");
+    expect(html).toContain("Torque values were not documented.");
+  });
+});
+
 describe("approval controls", () => {
   const item = (status: string) => ({ status }) as { status: string };
 

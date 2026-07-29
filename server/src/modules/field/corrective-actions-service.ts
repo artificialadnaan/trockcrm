@@ -146,7 +146,13 @@ export async function resolveCorrectiveActionItemTx(
         inArray(scorecardCorrectiveActions.status, [...CORRECTIVE_ACTION_OUTSTANDING_STATUSES]),
       ),
     )
-    .returning({ id: scorecardCorrectiveActions.id });
+    // Identity comes back with the winning update, so the event can snapshot it without a second read.
+    .returning({
+      id: scorecardCorrectiveActions.id,
+      itemType: scorecardCorrectiveActions.itemType,
+      itemRef: scorecardCorrectiveActions.itemRef,
+      itemLabel: scorecardCorrectiveActions.itemLabel,
+    });
 
   if (updated.length === 0) return { resolved: false, awaitingApproval: false }; // already answered — no-op.
 
@@ -159,6 +165,9 @@ export async function resolveCorrectiveActionItemTx(
     correctiveActionId: input.itemId,
     scorecardId: input.scorecardId,
     eventType: "submitted",
+    itemType: updated[0].itemType ?? null,
+    itemRef: updated[0].itemRef ?? null,
+    itemLabel: updated[0].itemLabel ?? null,
     actorUserId: input.respondedBy.userId,
     actorName: input.respondedBy.name,
     actorEmail: input.respondedBy.email,
@@ -669,10 +678,17 @@ export async function reconcileScorecardCorrectiveActions(
   // An EDIT can move the card through the lifecycle too, not just a responder or an approver: removing the
   // last outstanding flag hands it to the approver, and removing the last unapproved one completes it.
   // Without these, a card could change stage with nobody told — and nothing would enqueue for it later.
-  if (
-    nextStatus === CORRECTIVE_ACTION_CARD_AWAITING_APPROVAL &&
-    input.currentStatus !== CORRECTIVE_ACTION_CARD_AWAITING_APPROVAL
-  ) {
+  // Gated on REACHING the state, not on transitioning into it. An edit can add a flagged item to a card
+  // already awaiting review and have it answered in the same pass: the status never moves, but what the
+  // approver is being asked to judge has changed, and the previous request's stamp would make the worker skip
+  // the new one. The stamp is cleared alongside, so this enqueue is not deduped against the earlier round.
+  if (nextStatus === CORRECTIVE_ACTION_CARD_AWAITING_APPROVAL) {
+    if (input.currentStatus === CORRECTIVE_ACTION_CARD_AWAITING_APPROVAL) {
+      await tx
+        .update(fieldScorecards)
+        .set({ correctiveActionApprovalRequestedAt: null })
+        .where(eq(fieldScorecards.id, input.scorecardId));
+    }
     await enqueueCorrectiveActionApprovalRequested(tx, {
       office: input.office,
       scorecardId: input.scorecardId,

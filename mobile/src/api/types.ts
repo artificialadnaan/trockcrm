@@ -179,8 +179,11 @@ export type FieldScorecardSummary = {
   officeSlug?: string;
   officeId?: string;
   /**
-   * Submitted-card lifecycle status: `submitted` | `corrective_action_open` | `corrective_action_closed`.
-   * Drives the project Scorecards list affordance (open → "Corrective action required", closed → "Resolved").
+   * Submitted-card lifecycle status: `submitted` | `corrective_action_open` | `corrective_action_submitted`
+   * | `corrective_action_closed`. Note `corrective_action_submitted` is the APPROVER'S queue — the responder
+   * has answered and is waiting on a verdict — and `corrective_action_closed` now means APPROVED.
+   * Drives the project Scorecards list affordance (open → "Corrective action required", submitted →
+   * "Awaiting approval", closed → "Approved").
    * Optional so older API deployments that don't emit it still parse (a missing value reads as `submitted`).
    */
   status?: string;

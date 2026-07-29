@@ -580,6 +580,8 @@ export interface CorrectiveActionResponsePhotoView {
 /** One entry in an item's back-and-forth: a submission, an approval, or a rejection with its reason. */
 export interface CorrectiveActionEventView {
   id: string;
+  /** The item this was about, snapshotted — the only way a DETACHED entry is readable. */
+  itemLabel?: string | null;
   /** `submitted` | `approved` | `rejected` (a string, so a new value never breaks the parse). */
   eventType: string;
   actorName: string | null;

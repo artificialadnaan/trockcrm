@@ -1312,6 +1312,7 @@ export async function renderAndStoreFieldScorecardArtifacts(
     // the answer to it are things that happened and belong in the audit trail.
     removedItemEvents: detachedCorrectiveActionEvents.map((event) => ({
       eventType: event.eventType,
+      itemLabel: event.itemLabel,
       actorName: event.actorName ?? event.actorEmail ?? null,
       createdAt: event.createdAt,
       comment: event.comment,
