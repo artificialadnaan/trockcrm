@@ -7,6 +7,13 @@
 // 23502 at INSERT that no amount of type-checking catches, because Drizzle's insert type only knows
 // about columns without defaults. The table is built from the REAL Drizzle definition via
 // tenantSchemaSql, so the NOT NULLs and the file_category enum here are prod's, by construction.
+//
+// KNOWN TEST/PROD GAP: prod's `files` carries a `files_association_check` CHECK (migrations/
+// 0001_initial.sql:660-662, redefined in 0058_allow_lead_file_attachments.sql:47-56) requiring at least
+// one of deal_id / lead_id / contact_id / procore_project_id / change_order_id to be non-null. Drizzle
+// declares no `check(...)` for it, so tenantSchemaSql cannot reproduce it and THIS TEST IS BLIND TO IT.
+// The implementation satisfies it only by setting `dealId`; a future change that drops dealId would
+// still pass here and fail in prod with a 23514. Do not assume this suite covers that.
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
 import { eq } from "drizzle-orm";
@@ -65,10 +72,11 @@ describe("createWalkthroughContactSheetFile", () => {
     expect(row.r2Bucket).toBe("trock-scope");
     expect(row.displayName).toContain("Unit 12B");
     expect(row.isActive).toBe(true);
-    // `category` is a NOT NULL pgEnum — an unset or off-enum value is a 23502/22P02 at insert, so the
-    // only meaningful assertion is that it is populated with a real file_category member.
-    expect(row.category).toBeTruthy();
-    expect(files.category.enumValues).toContain(row.category);
+    expect(row.category).toBe("estimate");
+    // The walkthrough id reaches the DB ONLY through these two filename columns — nothing else on the
+    // row carries it — so they are the only place its provenance can be pinned.
+    expect(row.systemFilename).toContain(WALKTHROUGH);
+    expect(row.originalFilename).toContain(WALKTHROUGH);
     // Provenance the rest of the chain (and any human opening the file) needs.
     expect(row.dealId).toBe(DEAL);
     expect(row.uploadedBy).toBe(USER);

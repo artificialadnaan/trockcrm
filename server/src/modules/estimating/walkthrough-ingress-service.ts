@@ -12,6 +12,8 @@ import { files } from "@trock-crm/shared/schema";
 /** Same alias document-service.ts:6 uses. */
 type TenantDb = NodePgDatabase<typeof schema>;
 
+/** Narrow, storage-shaped input for ONE link of the chain; `WalkthroughIngressPayload`'s wire names
+ *  (contactSheetR2Key/…) are mapped onto it in `ingestWalkthrough`. */
 export interface CreateWalkthroughContactSheetFileArgs {
   tenantDb: TenantDb;
   input: {
@@ -26,7 +28,11 @@ export interface CreateWalkthroughContactSheetFileArgs {
   };
 }
 
-const EXTENSION_BY_MIME: Record<string, string> = {
+/** Keyed off the args' own mime union, so adding a third accepted mime type is a compile error here
+ *  rather than an `undefined` extension at runtime. */
+type ContactSheetMimeType = CreateWalkthroughContactSheetFileArgs["input"]["mimeType"];
+
+const EXTENSION_BY_MIME: Record<ContactSheetMimeType, string> = {
   "image/jpeg": "jpg",
   "application/pdf": "pdf",
 };

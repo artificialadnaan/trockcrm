@@ -8,7 +8,7 @@ export interface WalkthroughScopeRow {
   /** Only ever set when the quantity was spoken and human-confirmed. */
   quantity: number | null;
   unit: string | null;
-  /** 0-1 scale, matching extraction-service.ts:57. */
+  /** 0-1 scale, matching extraction-service.ts:62. */
   confidence: number;
   /** Verbatim transcript utterance. */
   evidenceText: string;
