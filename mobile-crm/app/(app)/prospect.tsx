@@ -1172,12 +1172,6 @@ export default function ProspectScreen() {
         <View style={styles.headerSpacer} />
       </View>
 
-      {/* The bar is pinned, so the keyboard would otherwise sit on top of it while a rep types the
-          note — the one moment they are most likely to reach for Save next. */}
-      <KeyboardAvoidingView
-        style={styles.fill}
-        behavior={Platform.OS === "ios" ? "padding" : undefined}
-      >
       <ScrollView contentContainerStyle={styles.body} keyboardShouldPersistTaps="handled">
         {/* ---- 1. WHERE. The only mandatory part, because the server requires a target. ---- */}
         <Text style={styles.stepLabel}>WHERE</Text>
@@ -2263,6 +2257,15 @@ export default function ProspectScreen() {
         * Pinning it puts the commit, the reason it is unavailable, and any error in the same place,
         * always reachable, without changing a single rule about WHEN it is allowed.
         */}
+      {/**
+        * Wrapping ONLY the bar, not the scroll.
+        *
+        * `padding` lifts this view's content by the keyboard height, which is all that is needed —
+        * a pinned footer is otherwise sat on by the keyboard at the exact moment a rep finishes the
+        * note and reaches for Save. Wrapping the ScrollView instead would nest eleven hundred lines a
+        * level deeper, and re-indenting them would bury this PR's actual diff in whitespace.
+        */}
+      <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined}>
       <View style={styles.actionBar}>
         {saveError ? (
           <Text testID="prospect-save-error" style={styles.error}>
@@ -2322,7 +2325,6 @@ export default function ProspectScreen() {
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: theme.color.canvas },
-  fill: { flex: 1 },
   /* Sits ON the canvas with a top rule rather than floating: the form scrolls underneath it, and the
      line is what tells you the content continues rather than ends. */
   actionBar: {
