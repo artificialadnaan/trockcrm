@@ -10,11 +10,16 @@ import {
 } from "../../../src/modules/email/service.js";
 
 const U = (s: string) => `00000000-0000-0000-0000-${s.padStart(12, "0")}`;
-const USER_A = U("a01"), USER_B = U("b01");
+// USER_C is a third participant on the conversation with NO user_graph_tokens row (no connected
+// mailbox) — used to pin the swallow half of the catch in resolveMailboxAccountIdsForConversation.
+const USER_A = U("a01"), USER_B = U("b01"), USER_C = U("c01");
 // "m" is not a valid hex digit, so U("m0a")/U("m0b") would not be valid UUID literals — use hex-safe
 // suffixes instead.
 const MBX_A = U("e0a"), MBX_B = U("e0b");
 const DEAL_OLD = U("d001"), DEAL_NEW = U("d002");
+// The oldest seeded message lives on a THIRD deal, distinct from DEAL_OLD, so the oldest-first
+// ordering in previewThreadReassignmentImpact is actually exercised rather than being unverified.
+const DEAL_OLDEST = U("d000");
 const CONV = "conv-multi-mailbox-1";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -128,14 +133,17 @@ beforeEach(async () => {
       (${MBX_B}, ${USER_B}, 'active')
   `);
   await tdb.execute(sql`
-    INSERT INTO deals (id) VALUES (${DEAL_OLD}), (${DEAL_NEW})
+    INSERT INTO deals (id) VALUES (${DEAL_OLD}), (${DEAL_NEW}), (${DEAL_OLDEST})
   `);
-  // The same conversation landed in BOTH mailboxes, bound to the wrong deal in each.
+  // The same conversation landed in BOTH mailboxes, bound to the wrong deal in each. Distinct sent_at
+  // values (oldest first: m1, m2, m3) with the oldest message on its own deal exercise the
+  // oldest-first ordering in previewThreadReassignmentImpact instead of leaving it to random uuid tie-
+  // breaking.
   await tdb.execute(sql`
-    INSERT INTO emails (graph_message_id, graph_conversation_id, deal_id, user_id) VALUES
-      ('m1', ${CONV}, ${DEAL_OLD}, ${USER_A}),
-      ('m2', ${CONV}, ${DEAL_OLD}, ${USER_A}),
-      ('m3', ${CONV}, ${DEAL_OLD}, ${USER_B})
+    INSERT INTO emails (graph_message_id, graph_conversation_id, deal_id, user_id, sent_at) VALUES
+      ('m1', ${CONV}, ${DEAL_OLDEST}, ${USER_A}, '2026-07-01T00:00:00Z'),
+      ('m2', ${CONV}, ${DEAL_OLD}, ${USER_A}, '2026-07-02T00:00:00Z'),
+      ('m3', ${CONV}, ${DEAL_OLD}, ${USER_B}, '2026-07-03T00:00:00Z')
   `);
   await tdb.execute(sql`
     INSERT INTO email_thread_bindings (mailbox_account_id, provider, provider_conversation_id, deal_id)
@@ -158,6 +166,18 @@ async function activeBindings() {
 
 describe("multi-mailbox conversations", () => {
   it("resolves every mailbox holding the conversation", async () => {
+    const ids = await resolveMailboxAccountIdsForConversation(tdb, CONV);
+    expect(ids.sort()).toEqual([MBX_A, MBX_B].sort());
+  });
+
+  it("skips a participant with no connected mailbox, keeping the rest", async () => {
+    // A third participant on the SAME conversation with no user_graph_tokens row at all — the exact
+    // case the try/catch's 409 swallow exists for. This must not break the whole rebind; it should
+    // just be left out of the result, leaving MBX_A/MBX_B intact.
+    await tdb.execute(sql`
+      INSERT INTO emails (graph_message_id, graph_conversation_id, deal_id, user_id, sent_at) VALUES
+        ('m4', ${CONV}, ${DEAL_OLD}, ${USER_C}, '2026-07-04T00:00:00Z')
+    `);
     const ids = await resolveMailboxAccountIdsForConversation(tdb, CONV);
     expect(ids.sort()).toEqual([MBX_A, MBX_B].sort());
   });
@@ -191,5 +211,15 @@ describe("multi-mailbox conversations", () => {
       providerConversationId: CONV, nextDealId: DEAL_NEW,
     });
     expect(preview.affectedMessageCount).toBe(3);
+  });
+
+  it("currentDealId is the OLDEST message's deal, not an arbitrary one", async () => {
+    // m1 is the oldest (2026-07-01) and sits on DEAL_OLDEST, while m2/m3 (later) sit on DEAL_OLD —
+    // if the ordering added to previewThreadReassignmentImpact regressed to unordered, this would be
+    // flaky/arbitrary instead of deterministically DEAL_OLDEST.
+    const preview = await previewThreadReassignmentImpact(tdb, {
+      providerConversationId: CONV, nextDealId: DEAL_NEW,
+    });
+    expect(preview.currentDealId).toBe(DEAL_OLDEST);
   });
 });
