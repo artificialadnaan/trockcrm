@@ -151,7 +151,15 @@ describe("QcReportsPage", () => {
       Array.from(select.options).some((option) => option.textContent === "Any status"),
     );
     expect(caFilter).toBeTruthy();
-    expect(Array.from(caFilter!.options).map((o) => o.textContent)).toEqual(["Any status", "Open", "Closed"]);
+    // `corrective_action_submitted` sits between open and approved — the approver's queue — so the filter
+    // carries its own option. "Closed" is now labelled "Approved", which is what that state means since the
+    // approval gate landed.
+    expect(Array.from(caFilter!.options).map((o) => o.textContent)).toEqual([
+      "Any status",
+      "Open",
+      "Awaiting Approval",
+      "Approved",
+    ]);
   });
 
   it.each([

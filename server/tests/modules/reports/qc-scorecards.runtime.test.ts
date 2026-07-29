@@ -195,4 +195,32 @@ describe("getQcScorecardsReport — corrective-action status", () => {
     const { scorecards } = await getQcScorecardsReport(tdb, { ...JUNE, correctiveActionStatus: "closed" });
     expect(scorecards.map((s) => s.scorecardId)).toEqual([SC1]);
   });
+
+  it("narrows to the APPROVER's queue with correctiveActionStatus=awaiting_approval", async () => {
+    // corrective_action_submitted is neither open nor closed. Without its own bucket a card in the
+    // approver's queue would be invisible on every filter, and the dashboard's counts would not add up.
+    await tdb.execute(sql`UPDATE field_scorecards SET status = 'corrective_action_submitted' WHERE id = ${SC3}`);
+    try {
+      const awaiting = await getQcScorecardsReport(tdb, { ...JUNE, correctiveActionStatus: "awaiting_approval" });
+      expect(awaiting.scorecards.map((s) => s.scorecardId)).toEqual([SC3]);
+
+      // ...and it is NOT double-counted in either neighbouring bucket.
+      const open = await getQcScorecardsReport(tdb, { ...JUNE, correctiveActionStatus: "open" });
+      expect(open.scorecards.map((s) => s.scorecardId)).toEqual([]);
+      const closed = await getQcScorecardsReport(tdb, { ...JUNE, correctiveActionStatus: "closed" });
+      expect(closed.scorecards.map((s) => s.scorecardId)).toEqual([SC1]);
+    } finally {
+      await tdb.execute(sql`UPDATE field_scorecards SET status = 'corrective_action_open' WHERE id = ${SC3}`);
+    }
+  });
+
+  it("surfaces the awaiting-approval status on the row, so the table pill can render it", async () => {
+    await tdb.execute(sql`UPDATE field_scorecards SET status = 'corrective_action_submitted' WHERE id = ${SC3}`);
+    try {
+      const { scorecards } = await getQcScorecardsReport(tdb, JUNE);
+      expect(scorecards.find((s) => s.scorecardId === SC3)!.status).toBe("corrective_action_submitted");
+    } finally {
+      await tdb.execute(sql`UPDATE field_scorecards SET status = 'corrective_action_open' WHERE id = ${SC3}`);
+    }
+  });
 });

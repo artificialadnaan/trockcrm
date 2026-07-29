@@ -35,7 +35,7 @@ export interface QcScorecardFilters {
   flaggedOnly?: boolean;
   search?: string;
   /** Narrow to open vs closed corrective-action cards. */
-  correctiveActionStatus?: "open" | "closed";
+  correctiveActionStatus?: "open" | "awaiting_approval" | "closed";
 }
 
 interface QcScorecardsResponse {

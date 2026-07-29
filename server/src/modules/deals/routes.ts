@@ -117,6 +117,18 @@ import { inferDealBidBoardOwnership } from "./workflow-backfill.js";
 import { getPendingRfpDeals, cancelPendingRfp } from "./pending-rfp-service.js";
 import { confirmUpload, getFileById, getFileDownloadUrl, getPendingUploadMetadata } from "../files/service.js";
 import {
+  approveCorrectiveActionItems,
+  assertCorrectiveActionApprover,
+  canApproveCorrectiveActions,
+  assertScorecardBelongsToDeal,
+  parseApproveItemIds,
+  parseReviewedAttempts,
+  parseReviewedAttempt,
+  parseReviewedGeneration,
+  parseRejectionComment,
+} from "../field/corrective-action-approval-routes.js";
+import { approveAndNotify, rejectAndRestart } from "../field/corrective-action-approval.js";
+import {
   getDealScorecardDetail,
   getDealScorecardPdfArtifactState,
   listDealScorecards,
@@ -2582,7 +2594,107 @@ router.get("/:id/scorecards/:scorecardId", async (req, res, next) => {
           .catch(() => null),
     });
     await req.commitTransaction!();
-    res.json({ scorecard });
+    // Whether to RENDER the approve/reject controls. A boolean, never the allowlist itself: that is
+    // authorization config, and shipping it would tell every CRM user who can sign off. The client must not
+    // re-derive the gate either — hiding the controls is UX, the route's 403 is the guarantee.
+    res.json({ scorecard: { ...scorecard, canApproveCorrectiveActions: canApproveCorrectiveActions(req) } });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/deals/:id/scorecards/:scorecardId/corrective-actions/approve — approve specific items, or
+// every item awaiting approval when `itemIds` is omitted (approve-all).
+//
+// Authorization is TWO gates, both required: assertDealRouteAccess proves the caller can see this deal, and
+// the QC_APPROVER_EMAILS allowlist proves they may exercise the approval verb. The allowlist is global, so
+// the deal check is what keeps an approver from acting on records they cannot otherwise read.
+router.post("/:id/scorecards/:scorecardId/corrective-actions/approve", async (req, res, next) => {
+  try {
+    await assertDealRouteAccess(req, req.params.id);
+    const actor = assertCorrectiveActionApprover(req);
+    const itemIds = parseApproveItemIds(req.body);
+    // Which ATTEMPT the approver reviewed, so a response filed after they opened the page cannot be approved
+    // under their name. Absent from older clients, which keep the previous status-only behaviour.
+    const reviewedAttempts = parseReviewedAttempts(req.body);
+    // ...and which VERSION OF THE CARD they were looking at. An edit while it awaits approval moves no
+    // corrective-action event, so the attempt guard alone would let a stale click approve unseen content.
+    const reviewedGeneration = parseReviewedGeneration(req.body);
+    await assertScorecardBelongsToDeal(req.tenantDb!, req.params.id, req.params.scorecardId);
+
+    if (!req.officeSlug) throw new AppError(500, "Office context not available");
+    // approveAndNotify, not approveCorrectiveActionItems: a final approval CLOSES the card, and oversight
+    // must be told. Composed server-side so the route cannot do half of it silently.
+    const office = { id: req.user!.activeOfficeId, slug: req.officeSlug };
+    const outcome = await approveAndNotify(req.tenantDb!, {
+      office,
+      scorecardId: req.params.scorecardId,
+      itemIds,
+      actor,
+      reviewedAttempts,
+      reviewedGeneration,
+    });
+    await req.commitTransaction!();
+    // Refresh the artifact AFTER the commit, mirroring the responder route. An approval advances the card's
+    // generation, so the stored PDF is stale by definition — and the oversight worker only attaches one whose
+    // generation matches, so without this the "Approved" email silently loses its attachment unless someone
+    // happens to download the card during the delay. Only on a real change: an idempotent re-approve moved
+    // nothing, and re-rendering would re-download every evidence image for an unchanged generation.
+    if (outcome.changedItemIds.length > 0) {
+      void finalizeFieldScorecardArtifacts(office, req.user!.id, req.params.scorecardId).catch((err) => {
+        console.error("[CorrectiveActionApproval] Post-approval PDF refresh failed", {
+          scorecardId: req.params.scorecardId,
+          err,
+        });
+      });
+    }
+
+    res.json({ outcome });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/deals/:id/scorecards/:scorecardId/corrective-actions/:itemId/reject — send ONE item back with a
+// required reason. Only that item reopens; approved siblings keep their verdict.
+router.post("/:id/scorecards/:scorecardId/corrective-actions/:itemId/reject", async (req, res, next) => {
+  try {
+    await assertDealRouteAccess(req, req.params.id);
+    const actor = assertCorrectiveActionApprover(req);
+    const comment = parseRejectionComment(req.body);
+    const reviewedAttempt = parseReviewedAttempt(req.body);
+    const reviewedGeneration = parseReviewedGeneration(req.body);
+    await assertScorecardBelongsToDeal(req.tenantDb!, req.params.id, req.params.scorecardId);
+
+    if (!req.officeSlug) throw new AppError(500, "Office context not available");
+    // rejectAndRestart, not rejectCorrectiveActionItem: the responders' tokens were deleted when they
+    // submitted, so a rejection without a fresh cycle hands them a notice they cannot act on.
+    const office = { id: req.user!.activeOfficeId, slug: req.officeSlug };
+    const outcome = await rejectAndRestart(req.tenantDb!, {
+      office,
+      scorecardId: req.params.scorecardId,
+      itemId: req.params.itemId,
+      comment,
+      actor,
+      reviewedAttempt,
+      reviewedGeneration,
+    });
+    await req.commitTransaction!();
+    // Refresh the artifact AFTER the commit, mirroring the responder route. A rejection advances the card's
+    // generation and restarts the responders' cycle, so the stored PDF is stale by definition — and the
+    // responder notice that follows carries the record they are being asked to correct. Only on a real
+    // change: an idempotent re-reject moved nothing, and re-rendering would re-download every evidence image
+    // for an unchanged generation.
+    if (outcome.changedItemIds.length > 0) {
+      void finalizeFieldScorecardArtifacts(office, req.user!.id, req.params.scorecardId).catch((err) => {
+        console.error("[CorrectiveActionApproval] Post-approval PDF refresh failed", {
+          scorecardId: req.params.scorecardId,
+          err,
+        });
+      });
+    }
+
+    res.json({ outcome });
   } catch (err) {
     next(err);
   }

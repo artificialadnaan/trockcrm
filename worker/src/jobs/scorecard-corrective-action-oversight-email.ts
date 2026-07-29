@@ -7,6 +7,7 @@ import { getObjectBuffer } from "../lib/r2-client.js";
 import { escapeHtml, normalizeText, isSafeTenantSchema } from "../lib/email-format.js";
 import { resolveFrontendUrl, TROCK_LOGO_EMAIL_URL } from "./project-number-email.js";
 import { resolveFieldScorecardRecipients } from "@trock-crm/shared/lib/fieldScorecardEmails";
+import { resolveCorrectiveActionApprovers } from "@trock-crm/shared/lib/correctiveActionApprovers";
 import { orderCorrectiveActions } from "@trock-crm/shared/lib/correctiveActionOrder";
 import {
   BROWSABLE_PROJECT_SQL,
@@ -34,11 +35,14 @@ export const SCORECARD_CORRECTIVE_ACTION_OVERSIGHT_EMAIL_JOB =
   "scorecard_corrective_action_oversight_email";
 
 /**
- * Renderer revision that first embedded the corrective-action record. Attaching an older artifact to a
- * "corrective action completed" email would show the card WITHOUT the corrective action on it — precisely
- * the defect this feature exists to fix — so a pre-v3 artifact is dropped in favour of the CRM link.
+ * Renderer revision that embeds the corrective-action THREAD. v3 carried a two-state open/resolved record;
+ * v4 carries the full back-and-forth, which is what an approval-era notice is announcing.
+ *
+ * Attaching an older artifact would show the card WITHOUT the thread — an "Approved" email whose PDF does
+ * not show the approval, which is the same defect this whole line of work exists to fix. A pre-v4 artifact
+ * is dropped in favour of the CRM link rather than sent as if it were the record.
  */
-const MIN_PDF_RENDER_VERSION_WITH_CORRECTIVE_ACTIONS = 3;
+const MIN_PDF_RENDER_VERSION_WITH_CORRECTIVE_ACTIONS = 4;
 
 // Mirrors field-scorecard-email: Resend warns around 28 MB and base64 inflates a binary attachment by ~33%,
 // so keep the raw PDF under ~20 MB. A larger PDF is delivered as a CRM link instead.
@@ -48,6 +52,25 @@ const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 // (server/src/lib/period.ts) so a response time reads identically in the email and in the attached PDF; the
 // worker cannot import from the server package, and it already hardcodes this same zone for its cron schedules.
 const OVERSIGHT_EMAIL_TIMEZONE = "America/Chicago";
+
+/**
+ * How each ITEM state reads in the notice, matching the PDF and the CRM so the three cannot disagree.
+ *
+ * This used to test `status === "resolved"`, a value migration 0202 RENAMED to `submitted`. Nothing errored:
+ * the comparison simply never matched, so every item rendered as "Open" with no responder, no comment and no
+ * photo count — stripping the approval notice of exactly the information the approver needs to decide.
+ */
+const ITEM_STATE_LABEL: Record<string, { label: string; color: string; answered: boolean }> = {
+  open: { label: "Open", color: "#CC0000", answered: false },
+  // Distinct from `open`: it was answered and sent back, and the responder needs to see that difference.
+  rejected: { label: "Sent back", color: "#CC0000", answered: true },
+  submitted: { label: "Awaiting approval", color: "#D97706", answered: true },
+  approved: { label: "Approved", color: "#16a34a", answered: true },
+};
+
+function itemState(status: string): { label: string; color: string; answered: boolean } {
+  return ITEM_STATE_LABEL[status] ?? ITEM_STATE_LABEL.open;
+}
 
 // Bound each response comment quoted in the email body. The response API accepts up to 5,000 characters per
 // item and a card can carry 50 action items plus deficiencies, so quoting every comment in full can produce
@@ -91,7 +114,9 @@ function isCurrentScorecardPdfArtifactKey(r2Key: string, renderVersion: number):
   return new RegExp(`\\.[a-f0-9]{64}\\.v${renderVersion}\\.pdf$`).test(r2Key);
 }
 
-export type CorrectiveActionOversightPhase = "opened" | "closed";
+export type CorrectiveActionOversightPhase = "opened" | "closed" | "awaiting_approval";
+
+const VALID_PHASES: readonly CorrectiveActionOversightPhase[] = ["opened", "closed", "awaiting_approval"];
 
 export interface ScorecardCorrectiveActionOversightEmailPayload {
   tenantSchema?: string;
@@ -124,9 +149,11 @@ interface HandlerDeps {
 
 /** The phase's own stamp column. A literal switch — the phase never reaches SQL as interpolated text. */
 function stampColumn(phase: CorrectiveActionOversightPhase): string {
-  return phase === "opened"
-    ? "corrective_action_oversight_opened_at"
-    : "corrective_action_oversight_closed_at";
+  if (phase === "opened") return "corrective_action_oversight_opened_at";
+  // Its OWN column: reusing either oversight stamp would make an approval request suppress the opened or the
+  // completion notice for the same cycle.
+  if (phase === "awaiting_approval") return "corrective_action_approval_requested_at";
+  return "corrective_action_oversight_closed_at";
 }
 
 interface ScorecardRow {
@@ -152,6 +179,7 @@ interface ScorecardRow {
   corrective_action_oversight_cycle: string | null;
   corrective_action_oversight_opened_at: Date | null;
   corrective_action_oversight_closed_at: Date | null;
+  corrective_action_approval_requested_at: Date | null;
 }
 
 interface ItemRow {
@@ -162,8 +190,68 @@ interface ItemRow {
   responder_name: string | null;
   responder_email: string | null;
   responded_at: Date | null;
+  approved_by: string | null;
+  approved_at: Date | null;
   response_comment: string | null;
   photo_count: number | string;
+}
+
+/**
+ * The oversight email's per-item read, exported so its SQL can be EXERCISED rather than string-matched.
+ *
+ * The worker's tests mock `query` by matching on substrings, which cannot tell a correct query from one that
+ * merely contains the right words — and this one carries the arithmetic the approver reads. Sharing the exact
+ * string with a runtime test that runs it on Postgres is what makes the counts verifiable; a test that
+ * re-typed the query would only prove the copy in the test file is right.
+ */
+export function correctiveActionItemsSql(tenantSchema: string): string {
+  return `SELECT ca.item_type, ca.item_ref, ca.item_label, ca.status, ca.responder_name,
+            -- A session responder with no first/last name stores a null responder_name but a non-null
+            -- email. Without this the notice reports WHEN a fix landed but not WHO filed it.
+            ca.responder_email, ca.responded_at,
+            ca.response_comment,
+            -- WHO signed this off, and when. The item row's responder columns describe the SUBMISSION; using
+            -- them for an approved item makes the audit notice read "Approved — <responder> · <their
+            -- submission time>", i.e. as though the responder approved their own work. The verdict lives on
+            -- the thread. Ordered by seq, not created_at: events written in one transaction share a
+            -- timestamp and the uuid PK is random.
+            -- name OR email, same rule the responder attribution uses: an approver with no display name
+            -- must still be identifiable, or the audit notice says an approval happened and not by whom.
+            (SELECT COALESCE(e.actor_name, e.actor_email)
+               FROM ${tenantSchema}.scorecard_corrective_action_events e
+              WHERE e.corrective_action_id = ca.id AND e.event_type = 'approved'
+              ORDER BY e.seq DESC LIMIT 1) AS approved_by,
+            (SELECT e.created_at FROM ${tenantSchema}.scorecard_corrective_action_events e
+              WHERE e.corrective_action_id = ca.id AND e.event_type = 'approved'
+              ORDER BY e.seq DESC LIMIT 1) AS approved_at,
+            -- Count only photos that are ACTUALLY renderable. Both other surfaces for this data apply the
+            -- same filter (the PDF loader and the CRM item read), so counting soft-deleted rows here would
+            -- have the email say "3 photos" while the attached PDF and the CRM both show 2.
+            --
+            -- ...and only the photos filed with the ATTEMPT this row describes. response_comment, responder
+            -- and responded_at all come from the latest submission, so an item-wide count put the newest
+            -- comment beside every photo the item ever collected: three from a rejected attempt plus one
+            -- rework photo read as "4 photos" attached to a one-photo response. The approver is deciding
+            -- whether the evidence supports the fix, so an inflated count argues for approval.
+            (SELECT COUNT(*)
+               FROM ${tenantSchema}.field_scorecard_photos p
+               JOIN ${tenantSchema}.files f ON f.id = p.file_id
+              WHERE p.corrective_action_id = ca.id
+                AND f.is_active = TRUE
+                AND f.deleted_at IS NULL
+                -- No thread (a pre-0202 card, or photos predating the event backfill) means the item-wide
+                -- set IS this attempt's set; with a thread, only what was filed WITH this attempt counts.
+                AND (latest_submission.id IS NULL
+                     OR p.corrective_action_event_id = latest_submission.id)) AS photo_count
+       FROM ${tenantSchema}.scorecard_corrective_actions ca
+       LEFT JOIN LATERAL (
+              SELECT e.id
+                FROM ${tenantSchema}.scorecard_corrective_action_events e
+               WHERE e.corrective_action_id = ca.id AND e.event_type = 'submitted'
+               ORDER BY e.seq DESC
+               LIMIT 1
+            ) latest_submission ON TRUE
+      WHERE ca.scorecard_id = $1::uuid`;
 }
 
 /**
@@ -192,7 +280,7 @@ export async function handleScorecardCorrectiveActionOversightEmail(
   const tenantSchema = payload.tenantSchema;
   const scorecardId = normalizeText(payload.scorecardId);
   const phase = payload.phase;
-  if (!isSafeTenantSchema(tenantSchema) || !scorecardId || (phase !== "opened" && phase !== "closed")) {
+  if (!isSafeTenantSchema(tenantSchema) || !scorecardId || !phase || !VALID_PHASES.includes(phase)) {
     logger.warn("[CorrectiveActionOversightEmail] Invalid job payload - skipping", {
       tenantSchema,
       scorecardId,
@@ -220,6 +308,7 @@ export async function handleScorecardCorrectiveActionOversightEmail(
             sc.pdf_r2_key, sc.pdf_render_version,
             sc.pdf_content_generation, sc.updated_at,
             sc.corrective_action_oversight_opened_at, sc.corrective_action_oversight_closed_at,
+            sc.corrective_action_approval_requested_at,
             sc.corrective_action_cycle_nonce, sc.corrective_action_oversight_cycle,
             d.name AS deal_name
        FROM ${tenantSchema}.field_scorecards sc
@@ -240,7 +329,9 @@ export async function handleScorecardCorrectiveActionOversightEmail(
   const alreadySent =
     phase === "opened"
       ? scorecard.corrective_action_oversight_opened_at
-      : scorecard.corrective_action_oversight_closed_at;
+      : phase === "awaiting_approval"
+        ? scorecard.corrective_action_approval_requested_at
+        : scorecard.corrective_action_oversight_closed_at;
   if (alreadySent) {
     logger.log("[CorrectiveActionOversightEmail] Already notified for this cycle - skipping", {
       scorecardId,
@@ -267,6 +358,26 @@ export async function handleScorecardCorrectiveActionOversightEmail(
   // in-flight job minted before this deploy keep the prior behaviour.
   const payloadOversightCycle = normalizeText(payload.oversightCycle);
   const storedOversightCycle = normalizeText(scorecard.corrective_action_oversight_cycle);
+
+  // The APPROVAL REQUEST supersedes on the REVIEW cycle, not the oversight marker.
+  //
+  // A rejection rotates corrective_action_cycle_nonce and deliberately leaves the oversight marker alone
+  // (the corrective action never re-opened from oversight's point of view). So an awaiting-approval job that
+  // sent but crashed before stamping would, on retry after a reject-and-resubmit, pass every marker-scoped
+  // check, reuse the already-delivered provider key, read Resend's idempotent response as success, and stamp
+  // the NEW round — whose own job then skips. The approver never hears about the rework.
+  if (phase === "awaiting_approval") {
+    const payloadReviewCycle = normalizeText(payload.cycleNonce);
+    const storedReviewCycle = normalizeText(scorecard.corrective_action_cycle_nonce);
+    if (payloadReviewCycle && storedReviewCycle && payloadReviewCycle !== storedReviewCycle) {
+      logger.log(
+        "[CorrectiveActionOversightEmail] Approval request superseded by a newer review round - skipping",
+        { scorecardId, payloadReviewCycle, storedReviewCycle },
+      );
+      return;
+    }
+  }
+
   if (payloadOversightCycle && storedOversightCycle && payloadOversightCycle !== storedOversightCycle) {
     logger.log(
       "[CorrectiveActionOversightEmail] Superseded by a newer corrective-action cycle - skipping (no send, no stamp)",
@@ -275,7 +386,12 @@ export async function handleScorecardCorrectiveActionOversightEmail(
     return;
   }
 
-  const expectedStatus = phase === "opened" ? "corrective_action_open" : "corrective_action_closed";
+  const expectedStatus =
+    phase === "opened"
+      ? "corrective_action_open"
+      : phase === "awaiting_approval"
+        ? "corrective_action_submitted"
+        : "corrective_action_closed";
   if (scorecard.status !== expectedStatus) {
     logger.log(
       "[CorrectiveActionOversightEmail] Scorecard is no longer in the state this notice describes - skipping (no send, no stamp)",
@@ -286,7 +402,14 @@ export async function handleScorecardCorrectiveActionOversightEmail(
 
   // Oversight recipients MINUS the cycle's responders: a superintendent who is also on the env list should
   // get "please fix this", not additionally "someone needs to fix this" for the same card.
-  const configured = resolveFieldScorecardRecipients(env);
+  // WHO to tell depends on the question. opened/closed INFORM the watchers
+  // (FIELD_SCORECARD_EMAIL_RECIPIENTS); awaiting_approval ASKS the people who can act
+  // (QC_APPROVER_EMAILS) — the same config the API authorizes the verb against, so the set notified and the
+  // set able to act are one definition and cannot drift into asking someone who will only get a 403.
+  const configured =
+    phase === "awaiting_approval"
+      ? resolveCorrectiveActionApprovers(env)
+      : resolveFieldScorecardRecipients(env);
   const responderResult = await query(recipientResolutionSql(tenantSchema), [
     scorecard.deal_id,
     scorecardId,
@@ -329,6 +452,20 @@ export async function handleScorecardCorrectiveActionOversightEmail(
       : configured,
   );
   if (recipients.length === 0) {
+    // For `opened` and `closed` this is genuinely not an error: those are SUPPLEMENTARY notices to watchers,
+    // and the responders have their own job. Completing quietly is right.
+    //
+    // The approval request is not supplementary — it is the ONLY thing that tells an approver work is
+    // waiting, and the card sits in corrective_action_submitted until someone acts. QC_APPROVER_EMAILS
+    // unset in production would therefore have this job log, succeed, and never run again: setting the
+    // variable later re-enqueues nothing, so every card submitted in the meantime stays silently
+    // unannounced, and the queue shows no failure to explain it. Throw instead, so the job retries and the
+    // backlog drains the moment the allowlist is configured.
+    if (phase === "awaiting_approval") {
+      throw new Error(
+        `No corrective-action approvers configured (QC_APPROVER_EMAILS) — cannot notify anyone that scorecard ${scorecardId} is awaiting approval. Retrying.`,
+      );
+    }
     logger.warn(
       "[CorrectiveActionOversightEmail] No oversight recipients after excluding responders - skipping (not an error: the responders were notified by their own job)",
       { scorecardId, phase, configuredCount: configured.length },
@@ -336,25 +473,7 @@ export async function handleScorecardCorrectiveActionOversightEmail(
     return;
   }
 
-  const itemsResult = await query(
-    `SELECT ca.item_type, ca.item_ref, ca.item_label, ca.status, ca.responder_name,
-            -- A session responder with no first/last name stores a null responder_name but a non-null
-            -- email. Without this the notice reports WHEN a fix landed but not WHO filed it.
-            ca.responder_email, ca.responded_at,
-            ca.response_comment,
-            -- Count only photos that are ACTUALLY renderable. Both other surfaces for this data apply the
-            -- same filter (the PDF loader and the CRM item read), so counting soft-deleted rows here would
-            -- have the email say "3 photos" while the attached PDF and the CRM both show 2.
-            (SELECT COUNT(*)
-               FROM ${tenantSchema}.field_scorecard_photos p
-               JOIN ${tenantSchema}.files f ON f.id = p.file_id
-              WHERE p.corrective_action_id = ca.id
-                AND f.is_active = TRUE
-                AND f.deleted_at IS NULL) AS photo_count
-       FROM ${tenantSchema}.scorecard_corrective_actions ca
-      WHERE ca.scorecard_id = $1::uuid`,
-    [scorecardId],
-  );
+  const itemsResult = await query(correctiveActionItemsSql(tenantSchema), [scorecardId]);
   // Ordered against the CURRENT action-item list, NOT item_ref. Reconciliation preserves an action item's
   // original ref across edits, so ref order is the OLD order after a reorder — and this email sits beside the
   // PDF it attaches and the deal thread it links to. All three rank through orderCorrectiveActions.
@@ -373,7 +492,12 @@ export async function handleScorecardCorrectiveActionOversightEmail(
   // first embedded the corrective-action record. Best-effort: a missing or oversized object degrades to a
   // no-attachment send rather than blocking the notification.
   let attachments: SendSystemEmailAttachment[] | undefined;
-  if (phase === "closed") {
+  // BOTH review-facing notices carry the artifact. The approver is being asked to judge documented work, so
+  // sending them a link and no record forces them into the CRM to see the very thing the email is about —
+  // and the enqueue path already delays specifically so the refreshed PDF exists by the time this runs.
+  // The currency and version checks inside loadPdfAttachment still apply: a stale or pre-v4 artifact is
+  // dropped in favour of the link rather than sent as if it were the record.
+  if (phase === "closed" || phase === "awaiting_approval") {
     attachments = await loadPdfAttachment(scorecard, scorecardId, tenantSchema, query, deps, logger);
   }
 
@@ -525,12 +649,38 @@ export async function handleScorecardCorrectiveActionOversightEmail(
   const markerClause = payloadOversightCycle
     ? " AND (corrective_action_oversight_cycle IS NULL OR corrective_action_oversight_cycle = $2::uuid)"
     : " AND corrective_action_oversight_cycle IS NULL";
+  const params: unknown[] = payloadOversightCycle ? [scorecardId, payloadOversightCycle] : [scorecardId];
+
+  // ...and for the APPROVAL REQUEST, the review cycle too — the same scope its send decision used.
+  //
+  // The marker clause alone cannot carry this phase. A rejection rotates corrective_action_cycle_nonce and
+  // deliberately leaves the oversight marker unchanged, so the marker comparison still passes for a cycle-A
+  // worker that entered the provider call before the reject-and-resubmit. It would then stamp cycle B's
+  // corrective_action_approval_requested_at, and cycle B's own job — seeing a non-null stamp — skips. The
+  // approver is never told about the rework, permanently: nothing clears that stamp again.
+  //
+  // I scoped the SEND to the review cycle last round and left the STAMP on the marker, which is the same
+  // defect one statement further down: a supersession check that does not also scope the write it guards is
+  // only narrowing the window, not closing it.
+  let reviewClause = "";
+  if (phase === "awaiting_approval") {
+    const payloadReviewCycle = normalizeText(payload.cycleNonce);
+    if (payloadReviewCycle) {
+      params.push(payloadReviewCycle);
+      reviewClause = ` AND (corrective_action_cycle_nonce IS NULL OR corrective_action_cycle_nonce = $${params.length}::uuid)`;
+    } else {
+      // No payload nonce means the card had none when this job was minted (pre-0197). It must still assert
+      // the round has not moved, exactly as the marker clause does for the same case.
+      reviewClause = " AND corrective_action_cycle_nonce IS NULL";
+    }
+  }
+
   const stamped = await query(
     `UPDATE ${tenantSchema}.field_scorecards
         SET ${column} = NOW()
       WHERE id = $1::uuid
-        AND ${column} IS NULL${markerClause}`,
-    payloadOversightCycle ? [scorecardId, payloadOversightCycle] : [scorecardId],
+        AND ${column} IS NULL${markerClause}${reviewClause}`,
+    params,
   );
   if (!stamped.rowCount) {
     // Superseded mid-send. The email went out describing the older cycle, which is accurate for what it
@@ -777,11 +927,21 @@ export function buildOversightEmail(input: {
   link: string;
 }) {
   const opened = input.phase === "opened";
-  const title = opened ? "Corrective Action Opened" : "Corrective Action Completed";
+  const awaiting = input.phase === "awaiting_approval";
+  const title = opened
+    ? "Corrective Action Opened"
+    : awaiting
+      ? "Awaiting Your Approval"
+      // Says APPROVED, not "completed". Under the approval gate the card only reaches this state on the
+      // approver's acceptance, and "documented" is a weaker claim than "accepted" — the distinction is the
+      // entire point of the gate.
+      : "Corrective Action Approved";
   const project = input.projectNumber ? `${input.projectNumber} — ${input.dealName}` : input.dealName;
   const subject = opened
     ? `Corrective action opened: ${project} (${input.scoreText})`
-    : `Corrective action completed: ${project}`;
+    : awaiting
+      ? `Corrective action awaiting your approval: ${project}`
+      : `Corrective action approved: ${project}`;
 
   const roleLabel = (role: string | null) =>
     role === "superintendent" ? "Superintendent" : role === "project_manager" ? "Project manager" : null;
@@ -803,25 +963,36 @@ export function buildOversightEmail(input: {
     ? `${responderList} ${(input.responders ?? []).length === 1 ? "is" : "are"} assigned to document a fix for each flagged item.`
     : "No assigned superintendent or project manager could be reached by email for this project, so nobody has been asked to document a fix yet — assign a responder with a valid email on the deal's Team tab.";
 
+  const where = `${input.projectNumber ? ` (${input.projectNumber})` : ""}${input.weekOf ? `, week of ${input.weekOf}` : ""}`;
+  const whereHtml = `${input.projectNumber ? ` (${escapeHtml(input.projectNumber)})` : ""}${input.weekOf ? `, week of ${escapeHtml(input.weekOf)}` : ""}`;
+
   const intro = opened
-    ? `A field scorecard for <strong>${escapeHtml(input.dealName)}</strong>${input.projectNumber ? ` (${escapeHtml(input.projectNumber)})` : ""}${input.weekOf ? `, week of ${escapeHtml(input.weekOf)}` : ""} came in below standard (${escapeHtml(input.scoreText)}) and a corrective action has been opened. ${escapeHtml(askedText)}`
-    : `The corrective action for <strong>${escapeHtml(input.dealName)}</strong>${input.projectNumber ? ` (${escapeHtml(input.projectNumber)})` : ""}${input.weekOf ? `, week of ${escapeHtml(input.weekOf)}` : ""} is complete. Every flagged item has been documented. The updated scorecard is attached where available.`;
+    ? `A field scorecard for <strong>${escapeHtml(input.dealName)}</strong>${whereHtml} came in below standard (${escapeHtml(input.scoreText)}) and a corrective action has been opened. ${escapeHtml(askedText)}`
+    : awaiting
+      ? `The corrective action for <strong>${escapeHtml(input.dealName)}</strong>${whereHtml} has been documented and is <strong>waiting for your review</strong>. Approve each item, or send one back with a comment saying what still has to be fixed.`
+      : `The corrective action for <strong>${escapeHtml(input.dealName)}</strong>${whereHtml} has been <strong>approved</strong>. Every flagged item was documented and accepted. The updated scorecard is attached where available.`;
 
   const textIntro = opened
-    ? `A field scorecard for ${input.dealName}${input.projectNumber ? ` (${input.projectNumber})` : ""}${input.weekOf ? `, week of ${input.weekOf}` : ""} came in below standard (${input.scoreText}) and a corrective action has been opened. ${askedText}`
-    : `The corrective action for ${input.dealName}${input.projectNumber ? ` (${input.projectNumber})` : ""}${input.weekOf ? `, week of ${input.weekOf}` : ""} is complete.`;
+    ? `A field scorecard for ${input.dealName}${where} came in below standard (${input.scoreText}) and a corrective action has been opened. ${askedText}`
+    : awaiting
+      ? `The corrective action for ${input.dealName}${where} has been documented and is waiting for your review. Approve each item, or send one back with a comment saying what still has to be fixed.`
+      : `The corrective action for ${input.dealName}${where} has been approved. Every flagged item was documented and accepted.`;
 
   const htmlItems = input.items.length
     ? `<ul style="margin:12px 0 0 0;padding-left:20px;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:20px;color:#111111;">${input.items
         .map((item) => {
-          const resolved = item.status === "resolved";
-          const who = normalizeText(item.responder_name) ?? normalizeText(item.responder_email);
-          const when = formatRespondedAt(item.responded_at);
+          const state = itemState(item.status);
+          // An APPROVED item is attributed to whoever approved it; anything else to whoever submitted it.
+          const approved = item.status === "approved";
+          const who = approved
+            ? normalizeText(item.approved_by)
+            : normalizeText(item.responder_name) ?? normalizeText(item.responder_email);
+          const when = formatRespondedAt(approved ? item.approved_at : item.responded_at);
           const comment = emailCommentExcerpt(item.response_comment);
           const photos = Number(item.photo_count ?? 0);
-          const detail = resolved
-            ? `<span style="color:#16a34a;font-weight:bold;">Resolved</span>${who || when ? ` — ${escapeHtml([who, when].filter(Boolean).join(" · "))}` : ""}${comment ? `<br /><span style="color:#475569;">${escapeHtml(comment)}</span>` : ""}${photos > 0 ? `<br /><span style="color:#94a3b8;font-size:12px;">${photos} photo${photos === 1 ? "" : "s"}</span>` : ""}`
-            : `<span style="color:#CC0000;font-weight:bold;">Open</span>`;
+          const detail = state.answered
+            ? `<span style="color:${state.color};font-weight:bold;">${state.label}</span>${who || when ? ` — ${escapeHtml([who, when].filter(Boolean).join(" · "))}` : ""}${comment ? `<br /><span style="color:#475569;">${escapeHtml(comment)}</span>` : ""}${photos > 0 ? `<br /><span style="color:#94a3b8;font-size:12px;">${photos} photo${photos === 1 ? "" : "s"}</span>` : ""}`
+            : `<span style="color:${state.color};font-weight:bold;">${state.label}</span>`;
           return `<li style="margin-bottom:10px;">${escapeHtml(emailLabelExcerpt(item.item_label))}<br />${detail}</li>`;
         })
         .join("")}</ul>`
@@ -830,14 +1001,17 @@ export function buildOversightEmail(input: {
   const textItems = input.items.length
     ? input.items
         .map((item) => {
-          const resolved = item.status === "resolved";
-          if (!resolved) return `• ${emailLabelExcerpt(item.item_label)} — Open`;
-          const who = normalizeText(item.responder_name) ?? normalizeText(item.responder_email);
-          const when = formatRespondedAt(item.responded_at);
+          const state = itemState(item.status);
+          if (!state.answered) return `• ${emailLabelExcerpt(item.item_label)} — ${state.label}`;
+          const approved = item.status === "approved";
+          const who = approved
+            ? normalizeText(item.approved_by)
+            : normalizeText(item.responder_name) ?? normalizeText(item.responder_email);
+          const when = formatRespondedAt(approved ? item.approved_at : item.responded_at);
           const comment = emailCommentExcerpt(item.response_comment);
           const photos = Number(item.photo_count ?? 0);
           return (
-            `• ${emailLabelExcerpt(item.item_label)} — Resolved` +
+            `• ${emailLabelExcerpt(item.item_label)} — ${state.label}` +
             `${who || when ? ` (${[who, when].filter(Boolean).join(" · ")})` : ""}` +
             `${comment ? `\n    ${comment}` : ""}` +
             `${photos > 0 ? `\n    ${photos} photo${photos === 1 ? "" : "s"}` : ""}`

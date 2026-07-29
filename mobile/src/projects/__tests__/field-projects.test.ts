@@ -323,4 +323,12 @@ describe("correctiveAffordance", () => {
     expect(correctiveAffordance(undefined, true)).toBe("none");
     expect(correctiveAffordance("submitted", false)).toBe("none");
   });
+
+  it("REGRESSION: maps the awaiting-approval card to a visible, non-tappable status", () => {
+    // Between open and closed since the approval gate. Falling through to "none" removed every corrective
+    // indicator while the card sat in the approver's queue, so the project screen looked as though the
+    // workflow had simply ended. Never tappable — there is nothing for the responder to do until it returns.
+    expect(correctiveAffordance("corrective_action_submitted", true)).toBe("awaiting_status");
+    expect(correctiveAffordance("corrective_action_submitted", false)).toBe("awaiting_status");
+  });
 });

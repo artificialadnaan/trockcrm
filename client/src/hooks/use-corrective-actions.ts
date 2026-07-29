@@ -12,6 +12,18 @@ export interface CorrectiveActionResponsePhoto {
   url?: string | null;
 }
 
+/** One entry in an item's back-and-forth. Mirrors the server CorrectiveActionEventView. */
+export interface CorrectiveActionEvent {
+  id: string;
+  /** 'submitted' | 'approved' | 'rejected' */
+  eventType: string;
+  actorName: string | null;
+  actorEmail: string | null;
+  comment: string | null;
+  createdAt: string | null;
+  photos: CorrectiveActionResponsePhoto[];
+}
+
 export interface CorrectiveActionItem {
   id: string;
   itemType: string;
@@ -24,6 +36,12 @@ export interface CorrectiveActionItem {
   responderEmail: string | null;
   respondedAt: string | null;
   photos: CorrectiveActionResponsePhoto[];
+  /**
+   * The full thread, oldest first. The single response columns above hold only the LATEST attempt, so a
+   * reject-then-resubmit overwrites them — this is the only place the rejection and its reason survive.
+   * Optional so a client build can outlive a server that predates the thread.
+   */
+  events?: CorrectiveActionEvent[];
 }
 
 interface CorrectiveActionsResponse {
@@ -244,4 +262,69 @@ export function useCorrectiveActions(scorecardId: string | undefined, token?: st
   }, [refetch]);
 
   return { items, loading, error, errorStatus, refetch };
+}
+
+/** The approve/reject verbs. These live on the DEAL router (session-only) — an approver always has a CRM
+ *  session, and deliberately no token path exists: a token is a higher-privilege credential than a
+ *  responder's, and one that made approving frictionless while rejection still needed typed comments would
+ *  bias the gate toward rubber-stamping. */
+export interface ApprovalOutcomeView {
+  changedItemIds: string[];
+  cardStatus: string;
+  closed: boolean;
+  reopened: boolean;
+  /**
+   * The card generation AFTER the verdict. Every verdict advances it, so a reviewer acting on several items
+   * from one page load carries this into the next call rather than 409ing against the generation their own
+   * previous click created.
+   */
+  generation?: string | null;
+}
+
+/** Approve specific items, or every item awaiting approval when `itemIds` is omitted (approve-all). */
+export async function approveCorrectiveActions(
+  dealId: string,
+  scorecardId: string,
+  itemIds?: string[],
+  /** itemId → the submission event id on screen, so a response filed since cannot be approved unseen. */
+  reviewedAttempts?: Record<string, string>,
+  /** The card generation on screen — an edit while it awaits approval moves no corrective-action event. */
+  reviewedGeneration?: string | null,
+): Promise<ApprovalOutcomeView> {
+  const res = await api<{ outcome: ApprovalOutcomeView }>(
+    `/deals/${dealId}/scorecards/${scorecardId}/corrective-actions/approve`,
+    {
+      method: "POST",
+      json: {
+        ...(itemIds ? { itemIds } : {}),
+        ...(reviewedAttempts && Object.keys(reviewedAttempts).length > 0 ? { reviewedAttempts } : {}),
+        ...(reviewedGeneration ? { reviewedGeneration } : {}),
+      },
+    },
+  );
+  return res.outcome;
+}
+
+/** Send ONE item back. The comment is required — telling the responder what to fix IS the rejection. */
+export async function rejectCorrectiveAction(
+  dealId: string,
+  scorecardId: string,
+  itemId: string,
+  comment: string,
+  /** The submission event on screen — a reject is as attempt-bound as an approve. */
+  reviewedAttempt?: string,
+  reviewedGeneration?: string | null,
+): Promise<ApprovalOutcomeView> {
+  const res = await api<{ outcome: ApprovalOutcomeView }>(
+    `/deals/${dealId}/scorecards/${scorecardId}/corrective-actions/${itemId}/reject`,
+    {
+      method: "POST",
+      json: {
+        comment,
+        ...(reviewedAttempt ? { reviewedAttempt } : {}),
+        ...(reviewedGeneration ? { reviewedGeneration } : {}),
+      },
+    },
+  );
+  return res.outcome;
 }

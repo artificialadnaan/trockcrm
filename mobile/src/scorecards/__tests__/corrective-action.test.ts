@@ -40,7 +40,7 @@ jest.mock("../../api/endpoints", () => ({
   })),
   confirmCorrectiveActionUpload: jest.fn(async (_f: unknown, _scorecardId: string) => ({ fileId: "file-x" })),
   discardCorrectiveActionPhoto: jest.fn(async () => ({ discarded: true })),
-  submitCorrectiveActionResponse: jest.fn(async () => ({ items: [{ id: "item-1", status: "resolved" }] })),
+  submitCorrectiveActionResponse: jest.fn(async () => ({ items: [{ id: "item-1", status: "submitted" }] })),
 }));
 
 import {
@@ -99,7 +99,7 @@ describe("shouldReclaimDraftDirOnSettle", () => {
   });
 
   it("does NOT reclaim while the screen is still mounted (the mounted screen owns cleanup)", () => {
-    // Still mounted: the branch's own setState + (for already_resolved) the resolved-card unmount reclaim it,
+    // Still mounted: the branch's own setState + (for already_submitted) the resolved-card unmount reclaim it,
     // and deleting here could race a delete-out-from-under a still-referenced photo.
     expect(shouldReclaimDraftDirOnSettle({ mounted: true, submittedOk: false })).toBe(false);
   });
@@ -157,11 +157,11 @@ describe("submitCorrectiveActionItem", () => {
     (confirmCorrectiveActionUpload as jest.Mock).mockResolvedValue({ fileId: "file-x" });
     (discardCorrectiveActionPhoto as jest.Mock).mockResolvedValue({ discarded: true });
     (submitCorrectiveActionResponse as jest.Mock).mockResolvedValue({
-      items: [{ id: "item-1", status: "resolved" }],
+      items: [{ id: "item-1", status: "submitted" }],
     });
   });
 
-  it("with no photos: skips upload and POSTs just the comment → resolved", async () => {
+  it("with no photos: skips upload and POSTs just the comment → submitted", async () => {
     const result = await submitCorrectiveActionItem(fetcher, {
       scorecardId: "sc-1",
       itemId: "item-1",
@@ -176,7 +176,7 @@ describe("submitCorrectiveActionItem", () => {
       comment: "No evidence needed.",
       photoFileIds: [],
     });
-    expect(result).toEqual({ status: "resolved", items: [{ id: "item-1", status: "resolved" }] });
+    expect(result).toEqual({ status: "submitted", items: [{ id: "item-1", status: "submitted" }] });
   });
 
   it("uploads each photo through the SCORECARD-SCOPED endpoints (office resolves from the scorecard) and flows the fileIds into the response POST, in order", async () => {
@@ -222,7 +222,7 @@ describe("submitCorrectiveActionItem", () => {
     expect(call[2]).toBe("item-1");
     expect(call[3].comment).toBe("Corrected.");
     expect(call[3].photoFileIds).toEqual(["file-for-obj-111", "file-for-obj-222"]);
-    expect(result.status).toBe("resolved");
+    expect(result.status).toBe("submitted");
   });
 
   it("with a photo whose R2 PUT fails: returns photos_failed and does NOT POST", async () => {
@@ -379,7 +379,7 @@ describe("submitCorrectiveActionItem", () => {
   // Finding I — a concurrent responder resolved the item after our uploads; the POST 409s
   // (CORRECTIVE_ACTION_ALREADY_RESOLVED) and our fileIds never attached. Discard them + surface a DISTINCT
   // status (not a normal success).
-  it("with a 409 already-resolved response: discards the uploads and returns already_resolved", async () => {
+  it("with a 409 already-resolved response: discards the uploads and returns already_submitted", async () => {
     (confirmCorrectiveActionUpload as jest.Mock)
       .mockResolvedValueOnce({ fileId: "file-1" })
       .mockResolvedValueOnce({ fileId: "file-2" });
@@ -395,7 +395,7 @@ describe("submitCorrectiveActionItem", () => {
       comment: "Corrected.",
     });
 
-    expect(result).toEqual({ status: "already_resolved" });
+    expect(result).toEqual({ status: "already_submitted" });
     expect(submitCorrectiveActionResponse).toHaveBeenCalledTimes(1);
     // Both uploaded-but-unattached ids are reclaimed.
     expect(discardCorrectiveActionPhoto).toHaveBeenCalledTimes(2);
@@ -403,7 +403,7 @@ describe("submitCorrectiveActionItem", () => {
     expect(discardCorrectiveActionPhoto).toHaveBeenCalledWith(fetcher, "sc-1", "file-2");
   });
 
-  it("rethrows a non-409 response error (does NOT swallow it as already_resolved)", async () => {
+  it("rethrows a non-409 response error (does NOT swallow it as already_submitted)", async () => {
     (submitCorrectiveActionResponse as jest.Mock).mockRejectedValue(new ApiError("Server error", 500));
     await expect(
       submitCorrectiveActionItem(fetcher, {

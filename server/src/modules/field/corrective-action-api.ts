@@ -1,4 +1,4 @@
-import { and, eq, inArray, isNull, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
 import {
@@ -6,12 +6,15 @@ import {
   fieldScorecards,
   files,
   scorecardCorrectiveActions,
+  scorecardCorrectiveActionEvents,
 } from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
+import { isCorrectiveActionOutstanding } from "@trock-crm/shared/types";
 import {
-  enqueueCorrectiveActionOversightClosed,
+  enqueueCorrectiveActionApprovalRequested,
   resolveCorrectiveActionItemTx,
 } from "./corrective-actions-service.js";
+import { getCorrectiveActionEventsForItems } from "./corrective-action-events.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -28,6 +31,19 @@ export interface CorrectiveActionResponsePhoto {
   caption: string | null;
 }
 
+/** One entry in an item's back-and-forth: a submission, an approval, or a rejection with its reason. */
+export interface CorrectiveActionEventView {
+  id: string;
+  /** 'submitted' | 'approved' | 'rejected' */
+  eventType: string;
+  actorName: string | null;
+  actorEmail: string | null;
+  comment: string | null;
+  createdAt: string | null;
+  /** Photos filed with THIS attempt. Empty for approvals and rejections. */
+  photos: CorrectiveActionResponsePhoto[];
+}
+
 export interface CorrectiveActionItemView {
   id: string;
   itemType: string;
@@ -41,6 +57,11 @@ export interface CorrectiveActionItemView {
   respondedAt: string | null;
   /** Response-evidence photos linked to this item (corrective_action_id = this item). */
   photos: CorrectiveActionResponsePhoto[];
+  /**
+   * The full thread, oldest first. The columns above hold only the LATEST attempt — a resubmission
+   * overwrites them — so this is the only place a rejection and what it asked for survives.
+   */
+  events: CorrectiveActionEventView[];
 }
 
 /**
@@ -81,6 +102,7 @@ export async function getCorrectiveActionItems(
           fileId: fieldScorecardPhotos.fileId,
           clientUploadId: files.clientUploadId,
           caption: files.description,
+          correctiveActionEventId: fieldScorecardPhotos.correctiveActionEventId,
         })
         .from(fieldScorecardPhotos)
         .innerJoin(
@@ -103,18 +125,27 @@ export async function getCorrectiveActionItems(
   }
 
   const photosByItem = new Map<string, CorrectiveActionResponsePhoto[]>();
+  const photosByEvent = new Map<string, CorrectiveActionResponsePhoto[]>();
   for (const p of photoRows) {
     if (!p.correctiveActionId) continue;
-    const list = photosByItem.get(p.correctiveActionId) ?? [];
-    list.push({
+    const view: CorrectiveActionResponsePhoto = {
       id: p.id,
       fileId: p.fileId,
       clientUploadId: p.clientUploadId ?? null,
       url: urlByFileId.get(p.fileId) ?? null,
       caption: p.caption ?? null,
-    });
+    };
+    const list = photosByItem.get(p.correctiveActionId) ?? [];
+    list.push(view);
     photosByItem.set(p.correctiveActionId, list);
+    if (p.correctiveActionEventId) {
+      const perEvent = photosByEvent.get(p.correctiveActionEventId) ?? [];
+      perEvent.push(view);
+      photosByEvent.set(p.correctiveActionEventId, perEvent);
+    }
   }
+
+  const eventsByItem = await getCorrectiveActionEventsForItems(db, itemIds);
 
   return rows.map((r) => ({
     id: r.id,
@@ -128,6 +159,17 @@ export async function getCorrectiveActionItems(
     responderEmail: r.responderEmail ?? null,
     respondedAt: r.respondedAt ? r.respondedAt.toISOString() : null,
     photos: photosByItem.get(r.id) ?? [],
+    events: (eventsByItem.get(r.id) ?? []).map((event) => ({
+      id: event.id,
+      eventType: event.eventType,
+      actorName: event.actorName,
+      actorEmail: event.actorEmail,
+      comment: event.comment,
+      createdAt: event.createdAt,
+      // Photos with no event id are pre-0202 rows the migration seed did not reach; they stay on the item
+      // aggregate rather than being guessed onto an attempt.
+      photos: photosByEvent.get(event.id) ?? [],
+    })),
   }));
 }
 
@@ -138,7 +180,11 @@ export interface SubmitCorrectiveActionResponseInput {
   /** Already-uploaded file ids to attach as response evidence (must belong to the scorecard's deal). */
   photoFileIds?: string[];
   respondedBy: { userId: string | null; name: string | null; email: string | null };
-  /** Office context for the oversight "completed" job enqueued when this response closes the scorecard. */
+  /**
+   * Office context for the "awaiting approval" notice enqueued when this response answers the last
+   * outstanding item. A response no longer CLOSES anything — only approveCorrectiveActionItems can reach
+   * corrective_action_closed — so this hands the card to the approver rather than completing it.
+   */
   office: { id: string; slug: string };
 }
 
@@ -240,7 +286,10 @@ export async function submitCorrectiveActionResponse(
   //     set): a genuine competing/stale submission carrying fresh uploads that did NOT attach. Signal a CONFLICT
   //     (409, code CORRECTIVE_ACTION_ALREADY_RESOLVED) so the caller discards those now-orphaned uploads (web
   //     clears its pending-discard set / calls the discard endpoint; mobile deletes its local draft).
-  if (item.status !== "open") {
+  // OUTSTANDING, not just `open`: an item the approver REJECTED is the responder's to answer again, so a
+  // fresh response on it is a legitimate first attempt of the next round — not a replay of a settled one.
+  // Checking `!== "open"` here would 409 every rework submission and make rejection a dead end.
+  if (!isCorrectiveActionOutstanding(item.status)) {
     // Same responder? A session caller (userId non-null) matches on responded_by_user_id; a token caller
     // (userId null) matches on responder_email (the token recipient's email).
     const sameResponder =
@@ -253,11 +302,32 @@ export async function submitCorrectiveActionResponse(
       // a DIFFERENT responder is a race loser and must get the conflict, not a phantom success.
       if (sameResponder) return { resolved: false };
     } else if (sameResponder) {
-      // The response-photo file_ids ALREADY linked to THIS item (corrective_action_id = item.id).
+      // The photos of the LATEST ATTEMPT, not every photo ever linked to this item.
+      //
+      // Once a rejected item can be resubmitted, an item accumulates one photo set per round. Comparing the
+      // aggregate against a retry's current-attempt ids can never match — the sizes differ by the earlier
+      // rounds — so a genuine idempotent retry of a successful rework would 409 and the client would discard
+      // uploads that did commit. Scope by the attempt's own event.
+      const latestSubmission = await db
+        .select({ id: scorecardCorrectiveActionEvents.id })
+        .from(scorecardCorrectiveActionEvents)
+        .where(
+          and(
+            eq(scorecardCorrectiveActionEvents.correctiveActionId, item.id),
+            eq(scorecardCorrectiveActionEvents.eventType, "submitted"),
+          ),
+        )
+        .orderBy(desc(scorecardCorrectiveActionEvents.seq))
+        .limit(1);
       const linked = await db
         .select({ fileId: fieldScorecardPhotos.fileId })
         .from(fieldScorecardPhotos)
-        .where(eq(fieldScorecardPhotos.correctiveActionId, item.id));
+        .where(
+          latestSubmission.length > 0
+            ? eq(fieldScorecardPhotos.correctiveActionEventId, latestSubmission[0].id)
+            // Pre-0202 rows carry no event id; the aggregate IS the single attempt for them.
+            : eq(fieldScorecardPhotos.correctiveActionId, item.id),
+        );
       const linkedIds = new Set(linked.map((r) => r.fileId));
       const suppliedIds = new Set(photoFileIds);
       const sameFileSet =
@@ -270,7 +340,7 @@ export async function submitCorrectiveActionResponse(
     // signal the conflict so the caller discards its orphaned uploads / surfaces the lost race.
     throw new AppError(
       409,
-      "This corrective action was already resolved; discard the uploaded photos.",
+      "This corrective action has already been answered; discard the uploaded photos.",
       "CORRECTIVE_ACTION_ALREADY_RESOLVED",
     );
   }
@@ -371,7 +441,7 @@ export async function submitCorrectiveActionResponse(
   }
 
   // Resolve within the SAME (caller-supplied) transaction so a resolve failure rolls back the photo inserts.
-  const { closed } = await resolveCorrectiveActionItemTx(db, {
+  const { awaitingApproval, submissionEventId } = await resolveCorrectiveActionItemTx(db, {
     scorecardId: input.scorecardId,
     itemId: input.itemId,
     responseComment: comment,
@@ -379,11 +449,29 @@ export async function submitCorrectiveActionResponse(
     photoFileIds,
   });
 
-  // This response answered the LAST open item — tell oversight the corrective action is complete. Enqueued
-  // in the SAME transaction as the close, so the job cannot exist for a close that rolled back, and only on
-  // the winning write (an idempotent replay returns closed: false).
-  if (closed) {
-    await enqueueCorrectiveActionOversightClosed(db, {
+  // Attribute the photos THIS call inserted to the event THIS call created. Scoped by fileId and by a null
+  // event id so a resubmission cannot re-stamp an earlier attempt's evidence onto the new one.
+  if (photoFileIds.length > 0 && submissionEventId) {
+    await db
+      .update(fieldScorecardPhotos)
+      .set({ correctiveActionEventId: submissionEventId })
+      .where(
+        and(
+          eq(fieldScorecardPhotos.correctiveActionId, input.itemId),
+          inArray(fieldScorecardPhotos.fileId, photoFileIds),
+          isNull(fieldScorecardPhotos.correctiveActionEventId),
+        ),
+      );
+  }
+
+  // This response answered the LAST outstanding item, so the card now sits with the APPROVER rather than
+  // being complete. Notify them in the SAME transaction as the state change, so the job cannot exist for a
+  // transition that rolled back, and only on the winning write (an idempotent replay returns false).
+  //
+  // The oversight "completed" notice is NOT fired here any more — completion now means APPROVED, and only
+  // approveCorrectiveActionItems can reach that state.
+  if (awaitingApproval) {
+    await enqueueCorrectiveActionApprovalRequested(db, {
       office: input.office,
       scorecardId: input.scorecardId,
     });

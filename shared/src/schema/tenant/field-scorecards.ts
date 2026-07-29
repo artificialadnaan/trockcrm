@@ -96,6 +96,14 @@ export const fieldScorecards = pgTable(
     correctiveActionOversightOpenedAt: timestamp("corrective_action_oversight_opened_at", { withTimezone: true }),
     correctiveActionOversightClosedAt: timestamp("corrective_action_oversight_closed_at", { withTimezone: true }),
     /**
+     * "The approver has been told this cycle needs review." The THIRD phase stamp — each phase dedups on its
+     * OWN column, so reusing either oversight stamp would make an approval request suppress the opened or the
+     * completion notice for the same cycle. Cleared, like the others, when a genuine reopen mints a new cycle.
+     */
+    correctiveActionApprovalRequestedAt: timestamp("corrective_action_approval_requested_at", {
+      withTimezone: true,
+    }),
+    /**
      * INDEPENDENT supersession marker for the oversight flow (migration 0201), rotated ONLY where a genuinely
      * new corrective-action cycle begins.
      *
@@ -147,6 +155,13 @@ export const fieldScorecardPhotos = pgTable(
     // row is deleted (a removed flag's row is purged on edit), its RESPONSE-photo LINK rows go with it, so a
     // null-corrective_action_id row is never left behind to be mis-read as original section evidence.
     correctiveActionId: uuid("corrective_action_id"),
+    /**
+     * The specific response ATTEMPT these photos document (migration 0202), so "the photos from attempt 2"
+     * stays answerable after attempt 3. Null for original evidence and for every pre-approval response
+     * photo; correctiveActionId still means "photos for this item" in aggregate. ON DELETE SET NULL, not
+     * CASCADE: losing an event row must not delete the photo LINK, which the item-level id still governs.
+     */
+    correctiveActionEventId: uuid("corrective_action_event_id"),
     fileId: uuid("file_id").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },

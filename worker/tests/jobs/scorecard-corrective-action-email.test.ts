@@ -2,6 +2,7 @@ import crypto from "crypto";
 import { describe, expect, it, vi } from "vitest";
 import { WON_DEAL_STAGE_SLUGS, LOST_DEAL_STAGE_SLUGS } from "@trock-crm/shared/types";
 import {
+  buildCorrectiveActionEmail,
   handleScorecardCorrectiveActionEmail,
   type ScorecardCorrectiveActionEmailPayload,
 } from "../../src/jobs/scorecard-corrective-action-email.js";
@@ -48,6 +49,25 @@ const RECIPIENTS = [
 ];
 // Each open corrective-action row carries an id (used by the worker to derive the per-cycle fingerprint for
 // the CRM/no-token idempotency key — finding 4).
+/**
+ * Honour the query's SELECT list.
+ *
+ * Returning every fixture field regardless of what was asked for made this mock unable to model a projection
+ * difference — which is exactly the bug that shipped: the pre-send re-read selected fewer columns than the
+ * initial load, the mapper dropped `status` and `latest_rejection`, and every rejection notice silently
+ * reverted to the ordinary wording. With the mock over-supplying, no test could tell.
+ */
+function project<T extends Record<string, unknown>>(rows: T[], sqlText: string): Array<Partial<T>> {
+  const wantsRejection = /latest_rejection/i.test(sqlText);
+  const wantsStatus = /\bstatus\b/i.test(sqlText.split("FROM")[0] ?? "");
+  return rows.map((row) => {
+    const out: Record<string, unknown> = { ...row };
+    if (!wantsRejection) delete out.latest_rejection;
+    if (!wantsStatus) delete out.status;
+    return out as Partial<T>;
+  });
+}
+
 const FLAGGED = [
   { id: "ca-1", item_type: "action_item", item_ref: "0", item_label: "Re-inspect slab 2" },
   { id: "ca-2", item_type: "critical_deficiency", item_ref: "missed_hold_point", item_label: "Missed hold point" },
@@ -352,9 +372,9 @@ function makeQuery(
       // P2: the SECOND read of the open rows is the pre-send re-read. If the test models a partial resolution,
       // return the reduced `freshFlagged` set there so the emailed body reflects only the still-open item(s).
       if (flaggedReadCalls >= 2 && opts.freshFlagged) {
-        return { rows: opts.freshFlagged };
+        return { rows: project(opts.freshFlagged, text) };
       }
-      return { rows: opts.flagged ?? FLAGGED };
+      return { rows: project(opts.flagged ?? FLAGGED, text) };
     }
     if (/FROM \S*deals/i.test(text)) {
       return { rows: [{ name: "Maple Street Tower", deal_number: "DFW-10432", project_number: "DFW-10432" }] };
@@ -1877,5 +1897,173 @@ describe("scorecard corrective-action notification email", () => {
     expect(stampCalls).toHaveLength(1);
     expect(tokenDeletes).toHaveLength(0);
     expect(jobEnqueues).toHaveLength(0);
+  });
+
+  it("REGRESSION: treats a REJECTED item as outstanding, or a returned card notifies nobody", async () => {
+    // The queries filtered status = 'open'. Under the approval gate a rejected item is equally outstanding —
+    // the approver sent it back and the responder owes a fix — so a card whose items are all `rejected` read
+    // as having nothing to do. The email would skip, the responders would never learn what to fix, and the
+    // card would sit in corrective_action_open forever.
+    const { query } = makeQuery();
+    const sends: string[] = [];
+
+    await handleScorecardCorrectiveActionEmail(payload, null, {
+      query: query as never,
+      sendEmail: (async (to: string[]) => {
+        sends.push(...to);
+        return { success: true, messageId: "m" };
+      }) as never,
+      env,
+      logger: makeLogger(),
+    });
+
+    // Both queries must ask for the OUTSTANDING set, not `open` alone.
+    const outstandingQueries = query.mock.calls
+      .map((call) => call[0] as string)
+      .filter((text) => text.includes("scorecard_corrective_actions"));
+    expect(outstandingQueries.length).toBeGreaterThan(0);
+    for (const text of outstandingQueries) {
+      expect(text).toMatch(/status IN \('open','rejected'\)/);
+    }
+  });
+
+  it("reads as a RETURN, with the approver's reason, when an item was sent back", async () => {
+    const email = buildCorrectiveActionEmail({
+      recipientName: "Pat Manager",
+      dealName: "Maple St",
+      projectNumber: "DFW-1",
+      scoreText: "23/50",
+      ratingLabel: "Corrective action",
+      flagged: [
+        {
+          itemType: "action_item",
+          itemLabel: "Re-torque the anchors",
+          status: "rejected",
+          latestRejection: "Torque values were not documented.",
+        },
+      ],
+      link: "https://trockcrm.com/field/corrective-actions?token=x",
+    });
+
+    expect(email.subject).toMatch(/changes requested/i);
+    expect(email.html).toContain("Torque values were not documented.");
+    expect(email.text).toContain("Torque values were not documented.");
+  });
+
+  it("still reads as a FIRST request when nothing was sent back", async () => {
+    const email = buildCorrectiveActionEmail({
+      recipientName: "Pat Manager",
+      dealName: "Maple St",
+      projectNumber: "DFW-1",
+      scoreText: "23/50",
+      ratingLabel: "Corrective action",
+      flagged: [{ itemType: "action_item", itemLabel: "Re-torque the anchors", status: "open" }],
+      link: "https://trockcrm.com/field/corrective-actions?token=x",
+    });
+
+    expect(email.subject).toMatch(/corrective action required/i);
+    expect(email.subject).not.toMatch(/changes requested/i);
+    expect(email.html).not.toContain("Sent back");
+  });
+
+  it("bounds a long rejection reason so the response link is not clipped away", async () => {
+    const long = "Re-torque every anchor and photograph the calibrated wrench reading. ".repeat(30);
+    const email = buildCorrectiveActionEmail({
+      recipientName: "Pat Manager",
+      dealName: "Maple St",
+      projectNumber: "DFW-1",
+      scoreText: "23/50",
+      ratingLabel: "Corrective action",
+      flagged: [
+        { itemType: "action_item", itemLabel: "Anchors", status: "rejected", latestRejection: long },
+      ],
+      link: "https://trockcrm.com/field/corrective-actions?token=x",
+    });
+
+    expect(email.html).toContain("full comment in the CRM");
+    expect(email.html).not.toContain(long);
+    // The CTA still survives the body.
+    expect(email.html).toContain("token=x");
+  });
+
+  it("REGRESSION: the HANDLER delivers the changes-requested wording, not just the body builder", async () => {
+    // My first test for this exercised buildCorrectiveActionEmail directly and passed — while the handler
+    // path was broken. The mandatory pre-send re-read projected fewer columns than the initial load, so the
+    // mapper dropped `status` and `latest_rejection` and isReturn was ALWAYS false in the real send. Testing
+    // the builder proved nothing about what actually goes out; this drives the handler end to end.
+    const { query } = makeQuery({
+      recipients: [{ email: "pat@trockgc.com", name: "Pat Manager", role: "project_manager" }] as never,
+      assignedRoles: [{ role: "project_manager" }] as never,
+      flagged: [
+        {
+          id: "ca-1",
+          item_type: "action_item",
+          item_ref: "0",
+          item_label: "Re-torque the anchors",
+          status: "rejected",
+          latest_rejection: "Torque values were not documented.",
+        },
+      ],
+    });
+    const sent: Array<{ subject: string; html: string }> = [];
+
+    await handleScorecardCorrectiveActionEmail(payload, null, {
+      query: query as never,
+      sendEmail: (async (_to: string, subject: string, html: string) => {
+        sent.push({ subject, html });
+        return { success: true, messageId: "m" };
+      }) as never,
+      env,
+      logger: makeLogger(),
+    });
+
+    expect(sent.length).toBeGreaterThan(0);
+    expect(sent[0].subject).toMatch(/changes requested/i);
+    expect(sent[0].html).toContain("Torque values were not documented.");
+    // ...and the BODY has to agree with that subject — see the next test for why.
+    expect(sent[0].html).toContain("Changes Requested");
+    expect(sent[0].html).not.toContain("came in below standard");
+  });
+
+  it("a returned card's heading, lead-in and CTA read as a return, not as a fresh request", () => {
+    // The subject switched on isReturn while the <title>, <h1>, lead-in paragraph, CTA button and the whole
+    // text part stayed hardcoded to the first-request wording. So a rework arrived titled "Changes
+    // requested" over a body saying the scorecard "came in below standard… please document the corrective
+    // action taken" — indistinguishable from the original email, with the approver's actual instruction
+    // buried in a bullet. Subject-only branching is not a branch; it is a label on unchanged content.
+    const base = {
+      recipientName: "Pat Manager",
+      dealName: "Riverfront Tower",
+      projectNumber: "24-118",
+      scoreText: "23/50",
+      ratingLabel: "Corrective action",
+      link: "https://trockcrm.com/field/corrective-actions?token=x",
+    };
+    const returned = buildCorrectiveActionEmail({
+      ...base,
+      flagged: [
+        { itemType: "action_item", itemLabel: "Anchors", status: "rejected", latestRejection: "Missing torque values." },
+      ],
+    });
+    const first = buildCorrectiveActionEmail({
+      ...base,
+      flagged: [{ itemType: "action_item", itemLabel: "Anchors", status: "open", latestRejection: null }],
+    });
+
+    for (const part of [returned.html, returned.text]) {
+      expect(part).toContain("Changes Requested");
+      expect(part).toContain("was reviewed and sent back");
+      expect(part).not.toContain("came in below standard");
+      expect(part).not.toContain("Corrective Action Required");
+    }
+    expect(returned.html).toContain("Update Corrective Action");
+    expect(returned.text).toContain("Update the corrective action:");
+
+    // The first request is untouched by the branch.
+    for (const part of [first.html, first.text]) {
+      expect(part).toContain("came in below standard");
+      expect(part).not.toContain("was reviewed and sent back");
+    }
+    expect(first.html).toContain("Document Corrective Action");
   });
 });

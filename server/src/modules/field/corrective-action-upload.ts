@@ -336,8 +336,11 @@ async function assertOpenCorrectiveAction(db: TenantDb, scorecardId: string): Pr
     WHERE s.id = ${scorecardId}
       AND s.status = 'corrective_action_open'
       AND EXISTS (
+        -- OUTSTANDING, not open alone. A rejected item is the responder's to fix, and the rework round is
+        -- precisely when the approver asked for more evidence -- requiring status = open let them post a
+        -- comment while every photo presign failed with "this corrective action is closed".
         SELECT 1 FROM scorecard_corrective_actions ca
-        WHERE ca.scorecard_id = s.id AND ca.status = 'open'
+        WHERE ca.scorecard_id = s.id AND ca.status IN ('open', 'rejected')
       )
     LIMIT 1
   `);

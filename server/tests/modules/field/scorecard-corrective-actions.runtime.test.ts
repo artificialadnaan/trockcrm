@@ -14,6 +14,7 @@ import {
   fieldScorecardItems,
   fieldScorecardPhotos,
   scorecardCorrectiveActions,
+  scorecardCorrectiveActionEvents,
   scorecardCorrectiveActionTokens,
   dealTeamMembers,
   contacts,
@@ -131,6 +132,7 @@ beforeAll(async () => {
       fieldScorecardItems,
       fieldScorecardPhotos,
       scorecardCorrectiveActions,
+  scorecardCorrectiveActionEvents,
       scorecardCorrectiveActionTokens,
       dealTeamMembers,
       contacts,
@@ -365,10 +367,10 @@ describe("resolveCorrectiveActionItem closure", () => {
         respondedBy: { userId: null, name: "Ext PM", email: "pm@x.com" },
       });
     }
-    expect((await getScorecardRow(scorecard.id)).status).toBe("corrective_action_closed");
+    expect((await getScorecardRow(scorecard.id)).status).toBe("corrective_action_submitted");
 
     const resolved = await getCorrectiveActions(scorecard.id);
-    expect(resolved.every((i) => i.status === "resolved")).toBe(true);
+    expect(resolved.every((i) => i.status === "submitted")).toBe(true);
   });
 
   it("stamps the responder identity + comment on the resolved item", async () => {
@@ -385,7 +387,7 @@ describe("resolveCorrectiveActionItem closure", () => {
       FROM scorecard_corrective_actions WHERE id = ${first.id}
     `);
     const row = res.rows[0];
-    expect(row.status).toBe("resolved");
+    expect(row.status).toBe("submitted");
     expect(row.response_comment).toBe("Slab re-inspected, hold point cleared");
     expect(row.responded_by_user_id).toBe(USER);
     expect(row.responder_name).toBe("Sam Field");
@@ -404,7 +406,7 @@ describe("resolveCorrectiveActionItem closure", () => {
         respondedBy: { userId: USER, name: "Sam", email: null },
       });
     }
-    expect((await getScorecardRow(scorecard.id)).status).toBe("corrective_action_closed");
+    expect((await getScorecardRow(scorecard.id)).status).toBe("corrective_action_submitted");
 
     // Re-resolving the first item again is a no-op — no throw, still closed.
     await expect(
@@ -415,7 +417,7 @@ describe("resolveCorrectiveActionItem closure", () => {
         respondedBy: { userId: USER, name: "Sam", email: null },
       }),
     ).resolves.toBeUndefined();
-    expect((await getScorecardRow(scorecard.id)).status).toBe("corrective_action_closed");
+    expect((await getScorecardRow(scorecard.id)).status).toBe("corrective_action_submitted");
 
     // The original responder/comment on item 0 is untouched (guarded update skipped it).
     const after = await tdb.execute(
@@ -518,7 +520,7 @@ describe("resolve advances the scorecard content generation", () => {
     });
 
     expect((await getUpdatedAt(scorecard.id)).getTime()).toBeGreaterThan(before.getTime());
-    expect((await getScorecardRow(scorecard.id)).status).toBe("corrective_action_closed");
+    expect((await getScorecardRow(scorecard.id)).status).toBe("corrective_action_submitted");
   });
 
   it("does NOT advance updated_at on an idempotent re-resolve", async () => {
@@ -579,7 +581,7 @@ describe("corrective-action oversight email enqueue", () => {
     expect(jobs[0].payload.cycleNonce).toBe(await responderJobNonce(scorecard.id));
   });
 
-  it("enqueues a 'closed' oversight job when the LAST item is answered", async () => {
+  it("enqueues an 'awaiting_approval' job when the LAST item is answered — completion now needs approval", async () => {
     const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
     const items = await getCorrectiveActions(scorecard.id);
     await tdb.execute(sql`DELETE FROM public.job_queue`);
@@ -596,10 +598,10 @@ describe("corrective-action oversight email enqueue", () => {
       });
     }
 
-    expect((await getScorecardRow(scorecard.id)).status).toBe("corrective_action_closed");
+    expect((await getScorecardRow(scorecard.id)).status).toBe("corrective_action_submitted");
     const jobs = await oversightJobs();
     expect(jobs).toHaveLength(1);
-    expect(jobs[0].payload.phase).toBe("closed");
+    expect(jobs[0].payload.phase).toBe("awaiting_approval");
     expect(jobs[0].payload.scorecardId).toBe(scorecard.id);
     expect(jobs[0].payload.dealId).toBe(DEAL);
   });
@@ -784,9 +786,10 @@ describe("corrective-action oversight — review-round regressions", () => {
     expect(new Date((await stamps(scorecard.id)).opened!).getTime()).toBe(stampedAt.getTime());
   });
 
-  it("enqueues a 'closed' oversight job when an EDIT closes the card, not only a responder", async () => {
-    // Removing the last still-open flag closes the card through reconcile. Without an enqueue here the
-    // watchers who were told it opened would never learn it completed, and nothing would enqueue later.
+  it("enqueues an 'awaiting_approval' job when an EDIT answers the last item, not only a responder", async () => {
+    // Removing the last still-outstanding flag hands the card to the APPROVER through reconcile — it no
+    // longer closes it, since completion now requires an approval. Without an enqueue here the approver
+    // would never learn the card is waiting on them, and nothing would enqueue for it later.
     const { scorecard } = await createFieldScorecard(
       tdb,
       belowBandSubmission({ actionItems: ["Keep this", "Drop this"], criticalDeficiencies: [] }),
@@ -814,10 +817,10 @@ describe("corrective-action oversight — review-round regressions", () => {
       } as any);
     });
 
-    expect((await getScorecardRow(scorecard.id)).status).toBe("corrective_action_closed");
+    expect((await getScorecardRow(scorecard.id)).status).toBe("corrective_action_submitted");
     const jobs = await oversightJobs();
     expect(jobs).toHaveLength(1);
-    expect(jobs[0].payload.phase).toBe("closed");
+    expect(jobs[0].payload.phase).toBe("awaiting_approval");
   });
 
   it("advances updated_at STRICTLY, even past a future-dated generation", async () => {

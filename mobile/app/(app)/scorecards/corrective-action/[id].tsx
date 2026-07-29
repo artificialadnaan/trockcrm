@@ -22,7 +22,7 @@ import {
   type CorrectiveResponsePhoto,
 } from "../../../../src/scorecards/corrective-action";
 import { formatShortDate } from "../../../../src/scorecards/detail-view";
-import type { CorrectiveActionItem } from "../../../../src/api/types";
+import type { CorrectiveActionItem, CorrectiveActionResponsePhoto } from "../../../../src/api/types";
 import { Badge, Button, EmptyState, LoadingState, SectionLabel, TextInput } from "../../../../src/components/ui";
 import { Banner } from "../../../../src/components/Banner";
 import { ScreenHeader } from "../../../../src/components/ScreenHeader";
@@ -37,8 +37,15 @@ function toStr(v: string | string[] | undefined): string {
   return Array.isArray(v) ? v[0] ?? "" : v ?? "";
 }
 
+/**
+ * Is this item still the RESPONDER'S to answer?
+ *
+ * `open` and `rejected` both are. After migration 0202 an approver can send work back, and gating on
+ * `open` alone left a rejected item read-only on the phone — the responder could see the approver asked for
+ * a fix and had no way to give one.
+ */
 function isOpen(item: CorrectiveActionItem): boolean {
-  return item.status === "open";
+  return item.status === "open" || item.status === "rejected";
 }
 
 export default function CorrectiveActionScreen() {
@@ -95,7 +102,11 @@ export default function CorrectiveActionScreen() {
   const isLoadError = itemsQuery.isError && !isMissing;
 
   const openCount = items.filter(isOpen).length;
-  const allResolved = items.length > 0 && openCount === 0;
+  // NOTHING LEFT FOR THE RESPONDER is not the same as APPROVED. With the last item submitted the card sits
+  // at corrective_action_submitted and an approver can still send it back; announcing "complete" there is a
+  // promise this screen cannot keep.
+  const nothingOutstanding = items.length > 0 && openCount === 0;
+  const allApproved = nothingOutstanding && items.every((i) => i.status === "approved");
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
@@ -131,14 +142,21 @@ export default function CorrectiveActionScreen() {
                 {scorecard?.projectName ?? scorecard?.projectNumber ?? "Project"}
               </Text>
               <Text style={styles.meta}>
-                {allResolved
-                  ? "All items resolved."
-                  : `${openCount} of ${items.length} item${items.length === 1 ? "" : "s"} still open. Document the corrective action for each.`}
+                {allApproved
+                  ? "All items approved."
+                  : nothingOutstanding
+                    ? "Submitted — awaiting approval."
+                    : `${openCount} of ${items.length} item${items.length === 1 ? "" : "s"} still open. Document the corrective action for each.`}
               </Text>
             </View>
 
-            {allResolved ? (
-              <Banner tone="success" message="Corrective action complete — every flagged item has a documented response." />
+            {allApproved ? (
+              <Banner tone="success" message="Corrective action approved — every flagged item was accepted." />
+            ) : nothingOutstanding ? (
+              <Banner
+                tone="info"
+                message="Your responses are with the approver. If anything needs more work you'll get another notification with the reason."
+              />
             ) : null}
 
             {items.map((item) => (
@@ -248,9 +266,48 @@ function CorrectiveActionItemCard({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  if (item.status !== "open") {
+  // A REWORK cycle starts a fresh draft, so NOTHING from the previous cycle may carry into it.
+  //
+  // This component instance survives every status transition — the resolved view is an early return from this
+  // same component under a stable `key`, so the hooks below never unmount. A successful submit deliberately
+  // leaves `submitting` true (the screen is going away, and clearing it would flash an enabled form), sets
+  // submittedOk, and keeps the reducer's comment and photos. When the approver then rejects, the form comes
+  // BACK on that instance: every control renders disabled off the stale `submitting`, `onSubmit` returns at
+  // its own `if (submitting) return` guard, and the previous attempt's comment and photo list are sitting in
+  // the form. The responder cannot file the rework at all without backing out and reopening the screen —
+  // which is precisely the round trip the in-app rejection notice exists to save them.
+  //
+  // Resetting only submittedOk (which is all this did) fixed the photo-dir leak and left the form dead.
+  //
+  // Keyed on the BOOLEAN, not on `item.status` and not on `item`.
+  //
+  // `[item]` — which is what an exhaustive-deps autofix would produce, since the body reads it — re-fires on
+  // every refetch identity change and would wipe a response mid-typing. `[item.status]` is nearly right but
+  // still fires on any status change within the outstanding set. The boolean fires exactly when the item
+  // BECOMES the responder's again, which is the whole intent, and it leaves the body reading nothing the
+  // deps array does not name — so there is no lint to suppress and nothing for a future autofix to "correct".
+  const outstanding = isOpen(item);
+  useEffect(() => {
+    if (!outstanding) return;
+    cleanupGuardRef.current.submittedOk = false;
+    setSubmitting(false);
+    dispatch({ type: "reset" });
+    setNotice(null);
+  }, [outstanding]);
+
+  // Use the SAME predicate the parent counts with. This gate was independently hard-coded to `open`, so a
+  // rejected item counted as outstanding at the top of the screen while the card itself rendered read-only —
+  // the responder was told they had work to do and given no controls to do it with.
+  if (!outstanding) {
     return <ResolvedItemCard item={item} />;
   }
+
+  // WHY it came back, on the form where the rework happens. The web responder shows this; without it here an
+  // in-app responder following a rejection notification sees a blank form and has to go find the email.
+  const latestRejection =
+    item.status === "rejected"
+      ? [...(item.events ?? [])].reverse().find((e) => e.eventType === "rejected") ?? null
+      : null;
 
   const busy = savingPhotos > 0 || submitting || voiceBusy || captionVoiceBusy;
   const captionPhoto = state.photos.find((p) => p.key === captionKey) ?? null;
@@ -352,7 +409,7 @@ function CorrectiveActionItemCard({
     // copy dir IF the screen has since unmounted — the user backed out (or the app was killed) while this
     // request was in flight, so the unmount-cleanup effect skipped the delete (submitting was true) and its
     // state setters below are no-ops. Without this the full-size durable copies leak in document storage
-    // indefinitely. While still mounted the setters + (for already_resolved) the resolved-card unmount handle
+    // indefinitely. While still mounted the setters + (for already_submitted) the resolved-card unmount handle
     // cleanup; on genuine success the dir is already deleted (submittedOk) so this never double-deletes.
     const reclaimIfAbandoned = () => {
       const g = cleanupGuardRef.current;
@@ -380,7 +437,7 @@ function CorrectiveActionItemCard({
         reclaimIfAbandoned();
         return;
       }
-      if (result.status === "already_resolved") {
+      if (result.status === "already_submitted") {
         // A concurrent responder resolved this item first — our uploads were discarded and did NOT attach.
         // Do NOT claim this as the user's submission: refresh so the parent swaps in the read-only resolved
         // card (whose unmount reclaims the synthetic draft dir), inform the user, and leave submittedOk unset.
@@ -413,9 +470,23 @@ function CorrectiveActionItemCard({
     <View style={styles.itemCard}>
       <View style={styles.itemHeader}>
         <Badge label={item.itemType === "critical_deficiency" ? "Critical deficiency" : "Action item"} />
-        <Badge label="Open" color={theme.color.surfaceMuted} />
+        {/* Derived, not hard-coded: isOpen now admits `rejected`, so this branch renders items the approver
+            SENT BACK. Labelling those "Open" tells the responder nobody has looked at their work. */}
+        <Badge
+          label={item.status === "rejected" ? "Changes requested" : "Open"}
+          color={item.status === "rejected" ? "#FEE2E2" : theme.color.surfaceMuted}
+          textColor={item.status === "rejected" ? "#B91C1C" : undefined}
+        />
       </View>
       <Text style={styles.itemLabel}>{item.itemLabel}</Text>
+      {latestRejection ? (
+        <View style={styles.rejectionNote}>
+          <Text style={styles.rejectionNoteTitle}>
+            {latestRejection.actorName ? `Sent back by ${latestRejection.actorName}` : "Sent back"}
+          </Text>
+          <Text style={styles.rejectionNoteBody}>{latestRejection.comment}</Text>
+        </View>
+      ) : null}
 
       {notice ? <Banner message={notice.text} tone={notice.tone} /> : null}
 
@@ -534,21 +605,66 @@ function ResponsePhotoThumb({
   );
 }
 
+/**
+ * The read-only card for an item that is no longer the responder's to answer.
+ *
+ * Its badge is derived, not hard-coded: `submitted` and `approved` both land here, and labelling both
+ * "Resolved" in terminal-success green told the responder their work was accepted while it was still sitting
+ * with an approver who could send it back — directly contradicting the awaiting-approval banner above it.
+ */
+function settledPresentation(status: string): { label: string; color: string; textColor: string } {
+  return status === "approved"
+    ? { label: "Approved", color: "#DCFCE7", textColor: "#166534" }
+    : { label: "Awaiting approval", color: "#FEF3C7", textColor: "#92400E" };
+}
+
 function ResolvedItemCard({ item }: { item: CorrectiveActionItem }) {
   // The read endpoint resolves a presigned `url` per response photo — render them as tappable thumbnails so
   // the documented evidence is inspectable in TRock Cam (mirrors the scorecard detail evidence grid: tap →
   // open the presigned url in the system browser). Fall back to the count only for photos without a url (an
   // older API deployment, or a failed presign).
-  const photosWithUrl = item.photos.filter((p) => Boolean(p.url));
-  const withoutUrl = item.photos.length - photosWithUrl.length;
+  // The aggregate is the NO-THREAD fallback only. With a thread present each attempt renders its own photos
+  // above; also showing the merged set would repeat them and reattach the rejected round's evidence to the
+  // replacement response — the exact confusion the per-attempt split exists to remove.
+  const hasThread = (item.events?.length ?? 0) > 0;
+  const photosWithUrl = hasThread ? [] : item.photos.filter((p) => Boolean(p.url));
+  const withoutUrl = hasThread ? 0 : item.photos.length - photosWithUrl.length;
   return (
     <View style={[styles.itemCard, styles.itemCardResolved]}>
       <View style={styles.itemHeader}>
         <Badge label={item.itemType === "critical_deficiency" ? "Critical deficiency" : "Action item"} />
-        <Badge label="Resolved" color="#DCFCE7" textColor="#166534" />
+        <Badge {...settledPresentation(item.status)} />
       </View>
       <Text style={styles.itemLabel}>{item.itemLabel}</Text>
-      {item.responseComment ? <Text style={styles.resolvedComment}>{item.responseComment}</Text> : null}
+      {/* The THREAD, per attempt. Pairing the latest responseComment with item.photos — the aggregate of
+          every photo ever linked — showed the rejected attempt's evidence as the newest response and hid the
+          rejection and approval entirely. The API returns per-attempt sets; the aggregate is the fallback for
+          a card with no thread. */}
+      {(item.events?.length ?? 0) > 0 ? (
+        item.events!.map((event) => (
+          <View key={event.id} style={styles.attemptBlock}>
+            <Text style={styles.attemptHeading}>
+              {event.eventType === "approved"
+                ? "Approved"
+                : event.eventType === "rejected"
+                  ? "Sent back"
+                  : "Submitted"}
+              {event.actorName ? ` · ${event.actorName}` : ""}
+            </Text>
+            {event.comment ? <Text style={styles.resolvedComment}>{event.comment}</Text> : null}
+            {/* This attempt's OWN evidence. The aggregate gallery below is the no-thread fallback; showing
+                both would put the rejected round's photos under the replacement response.
+
+                The url-less COUNT has to move here with the thumbnails. Moving the photos per-attempt while
+                leaving the count on the aggregate (which a threaded card forces to zero) made a failed
+                presign render as no evidence at all — silently, which is the one thing the count exists to
+                prevent: the responder cannot tell "nothing was attached" from "the link did not come back". */}
+            <AttemptPhotos photos={event.photos} />
+          </View>
+        ))
+      ) : item.responseComment ? (
+        <Text style={styles.resolvedComment}>{item.responseComment}</Text>
+      ) : null}
       {photosWithUrl.length > 0 ? (
         <View style={styles.photoRow}>
           {photosWithUrl.map((photo) => (
@@ -582,6 +698,35 @@ function ResolvedItemCard({ item }: { item: CorrectiveActionItem }) {
   );
 }
 
+/** One attempt's evidence: the thumbnails that presigned, plus a count for any that did not. */
+function AttemptPhotos({ photos }: { photos: CorrectiveActionResponsePhoto[] }) {
+  const withUrl = photos.filter((p) => Boolean(p.url));
+  const withoutUrl = photos.length - withUrl.length;
+  return (
+    <>
+      {withUrl.length > 0 ? (
+        <View style={styles.photoRow}>
+          {withUrl.map((photo) => (
+            <Pressable
+              key={photo.id}
+              onPress={() => photo.url && void Linking.openURL(photo.url).catch(() => undefined)}
+              accessibilityRole="imagebutton"
+              accessibilityLabel={photo.caption ?? "Response photo"}
+            >
+              <ExpoImage source={{ uri: photo.url! }} style={styles.thumb} contentFit="cover" />
+            </Pressable>
+          ))}
+        </View>
+      ) : null}
+      {withoutUrl > 0 ? (
+        <Text style={styles.metaSmall}>
+          {withoutUrl} response photo{withoutUrl === 1 ? "" : "s"} attached
+        </Text>
+      ) : null}
+    </>
+  );
+}
+
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: theme.color.surfaceApp },
   body: { padding: theme.space.lg, gap: theme.space.lg, paddingBottom: theme.space.xxl },
@@ -598,6 +743,19 @@ const styles = StyleSheet.create({
   },
   itemCardResolved: { opacity: 0.92 },
   itemHeader: { flexDirection: "row", gap: theme.space.sm, alignItems: "center" },
+  attemptBlock: { marginTop: theme.space.xs, gap: 2 },
+  attemptHeading: { fontSize: 12, fontWeight: "700", color: theme.color.textMuted },
+  rejectionNote: {
+    marginTop: theme.space.xs,
+    padding: theme.space.sm,
+    borderRadius: 8,
+    backgroundColor: "#FEF2F2",
+    borderWidth: 1,
+    borderColor: "#FECACA",
+    gap: 4,
+  },
+  rejectionNoteTitle: { fontSize: 11, fontWeight: "700", color: "#B91C1C", textTransform: "uppercase" },
+  rejectionNoteBody: { fontSize: 14, color: "#7F1D1D" },
   itemLabel: { fontFamily: theme.font.medium, fontSize: 15, color: theme.color.textPrimary },
   commentInput: { minHeight: 96, textAlignVertical: "top" },
   resolvedComment: { fontFamily: theme.font.body, fontSize: 14, color: theme.color.textPrimary },

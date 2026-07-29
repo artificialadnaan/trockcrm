@@ -46,7 +46,7 @@ export const MAX_CORRECTIVE_ACTION_PHOTOS = 24;
 // Bound one response comment so a long dictation cannot run away; the full text lives in the CRM.
 const CORRECTIVE_ACTION_COMMENT_MAX_HEIGHT = 72;
 // Label (11pt) + status chip (9pt) + attribution (9pt) + the 4pt gap before the comment, rounded up. The
-// page-break guard adds CORRECTIVE_ACTION_COMMENT_MAX_HEIGHT on top for a resolved item.
+// page-break guard adds CORRECTIVE_ACTION_COMMENT_MAX_HEIGHT on top for an item with a response to show.
 const CORRECTIVE_ACTION_LABEL_BLOCK_HEIGHT = 46;
 // Enough room for a label line plus its status chip, so an item heading is not stranded alone at a page foot.
 // Purely cosmetic — the page-break CORRECTNESS guarantee is ensureRoom, applied before each bounded run.
@@ -100,6 +100,12 @@ export interface ScorecardPdfInput {
   /** Response photos already dropped upstream (capped before download) — added to the render-side cap's
    *  omitted count so the "available in the CRM" note reflects the true total. Mirrors omittedEvidenceCount. */
   omittedCorrectiveActionPhotoCount?: number;
+  /**
+   * Thread entries whose flagged item a later edit removed. They have no item to sit under, but a rejection
+   * and the answer to it are things that happened — dropping them would make the "append-only" record a
+   * record of only the items that survived editing.
+   */
+  removedItemEvents?: ScorecardPdfCorrectiveActionEvent[];
 }
 
 export interface ScorecardPdfPhoto {
@@ -119,19 +125,41 @@ export interface ScorecardPdfCorrectiveActionPhoto {
  * One corrective-action item on a below-band scorecard: the flagged action item / critical deficiency, and
  * (once answered) who fixed it, when, what they said and what they photographed.
  */
+/**
+ * One entry in a corrective action's back-and-forth: a submission, an approval, or a rejection with the
+ * reason. Rendered in order, so the record shows what was sent back and why, not only the final outcome.
+ */
+export interface ScorecardPdfCorrectiveActionEvent {
+  /** 'submitted' | 'approved' | 'rejected' */
+  eventType: string;
+  /** The item this was about, snapshotted — the only way a DETACHED entry is readable. */
+  itemLabel?: string | null;
+  actorName: string | null;
+  /** ISO timestamp. */
+  createdAt: string | null;
+  comment: string | null;
+  /** Photos filed with THIS attempt. Empty for approvals/rejections. */
+  photos: ScorecardPdfCorrectiveActionPhoto[];
+}
+
 export interface ScorecardPdfCorrectiveAction {
   /** 'action_item' | 'critical_deficiency' */
   itemType: string;
   /** Action-item index as a string, or the critical-deficiency key. */
   itemRef: string;
   itemLabel: string;
-  /** 'open' | 'resolved' */
+  /** 'open' | 'submitted' | 'approved' | 'rejected' — see shared/types/corrective-action-status. */
   status: string;
   responderName: string | null;
   /** ISO timestamp, or null while open. */
   respondedAt: string | null;
   responseComment: string | null;
   photos: ScorecardPdfCorrectiveActionPhoto[];
+  /**
+   * The full thread, oldest first. Empty only for an item nobody has answered — migration 0202 seeds one
+   * `submitted` event for every response that predates the thread, so a historical card is not a blank.
+   */
+  events?: ScorecardPdfCorrectiveActionEvent[];
 }
 
 export interface ScorecardPdfSection {
@@ -178,6 +206,8 @@ export interface ScorecardPdfData {
   correctiveActionSummary: string | null;
   /** Response photos dropped by MAX_CORRECTIVE_ACTION_PHOTOS. */
   omittedCorrectiveActionPhotoCount: number;
+  /** Thread entries whose item an edit removed, rendered under their own heading after the per-item record. */
+  removedItemEvents: ScorecardPdfCorrectiveActionEvent[];
 }
 
 /**
@@ -247,19 +277,39 @@ export function buildScorecardPdfData(input: ScorecardPdfInput): ScorecardPdfDat
   // note reflects the TRUE total rather than only what this render discarded.
   let omittedCorrectiveActionPhotoCount = Math.max(0, input.omittedCorrectiveActionPhotoCount ?? 0);
   const cappedCorrectiveActions = orderedCorrectiveActions.map((item) => {
+    const events = item.events ?? [];
+    // With a thread, photos render under the attempt that filed them, so the budget is spent event by event
+    // in order and the item-level aggregate is NOT drawn again — doing both would duplicate every photo.
+    if (events.length > 0) {
+      const cappedEvents = events.map((event) => {
+        const keptForEvent = event.photos.slice(0, Math.max(0, correctiveActionPhotoBudget));
+        omittedCorrectiveActionPhotoCount += event.photos.length - keptForEvent.length;
+        correctiveActionPhotoBudget -= keptForEvent.length;
+        return { ...event, photos: keptForEvent };
+      });
+      return { ...item, photos: [], events: cappedEvents };
+    }
     const kept = item.photos.slice(0, Math.max(0, correctiveActionPhotoBudget));
     omittedCorrectiveActionPhotoCount += item.photos.length - kept.length;
     correctiveActionPhotoBudget -= kept.length;
-    return { ...item, photos: kept };
+    return { ...item, photos: kept, events };
   });
 
-  const resolvedCount = cappedCorrectiveActions.filter((item) => item.status === "resolved").length;
+  // Counts APPROVED, not answered. Under the approval gate a submitted item is not finished work — saying
+  // "All items resolved" while they sit in the approver's queue is the exact claim the gate exists to deny.
+  const approvedCount = cappedCorrectiveActions.filter((item) => item.status === "approved").length;
+  const awaitingCount = cappedCorrectiveActions.filter((item) => item.status === "submitted").length;
   const correctiveActionSummary =
     cappedCorrectiveActions.length === 0
       ? null
-      : resolvedCount === cappedCorrectiveActions.length
-        ? "All items resolved"
-        : `${resolvedCount} of ${cappedCorrectiveActions.length} resolved`;
+      : approvedCount === cappedCorrectiveActions.length
+        ? "All items approved"
+        : [
+            `${approvedCount} of ${cappedCorrectiveActions.length} approved`,
+            awaitingCount > 0 ? `${awaitingCount} awaiting approval` : null,
+          ]
+            .filter(Boolean)
+            .join("  ·  ");
 
   return {
     dealName: input.dealName,
@@ -294,6 +344,7 @@ export function buildScorecardPdfData(input: ScorecardPdfInput): ScorecardPdfDat
     correctiveActions: cappedCorrectiveActions,
     correctiveActionSummary,
     omittedCorrectiveActionPhotoCount,
+    removedItemEvents: input.removedItemEvents ?? [],
   };
 }
 
@@ -459,10 +510,13 @@ export async function renderFieldScorecardPdf(data: ScorecardPdfData): Promise<B
   // Placed after the signed card body and before the original-evidence pages, so each item renders
   // self-contained: its status, response and photos stay adjacent instead of being split across the report.
   // Applies to BOTH kinds — a leadership card can trip the corrective-action band too.
-  if (data.correctiveActions.length > 0) {
+  // EITHER collection. When an edit removes the last tracked item, correctiveActions is empty while
+  // removedItemEvents is not — and that is precisely the case the unconditional query was added for, so
+  // gating on correctiveActions alone omitted the history in the one scenario it exists to cover.
+  if (data.correctiveActions.length > 0 || data.removedItemEvents.length > 0) {
     doc.addPage();
     heading(doc, "Corrective Actions");
-    if (data.correctiveActionSummary) {
+    if (data.correctiveActions.length > 0 && data.correctiveActionSummary) {
       doc.font("Helvetica").fontSize(10).fillColor(BRAND_MUTED).text(
         data.correctiveActionSummary,
         PAGE.margin,
@@ -484,6 +538,7 @@ export async function renderFieldScorecardPdf(data: ScorecardPdfData): Promise<B
         { width: CONTENT_WIDTH },
       );
     }
+    drawRemovedItemEvents(doc, data.removedItemEvents);
   }
 
   const evidenceGroups: EvidenceGroup[] = isLeadership
@@ -684,9 +739,85 @@ export function typedSignatureFallback(signature: string | null): string | null 
 }
 
 /**
- * One corrective-action item: the flagged label, an Open/Resolved status, and — once answered — who fixed
- * it, when, what they said and what they photographed. An open item deliberately shows only the label and
- * status: there is nothing yet to document.
+ * The back-and-forth on items a later edit REMOVED.
+ *
+ * They have no item left to sit under, so they get their own heading rather than being dropped. An edit that
+ * deletes a flagged item does not unhappen the rejection that was written against it, and a record that
+ * silently omits them is a record of the items that survived editing — not of what occurred.
+ */
+function drawRemovedItemEvents(
+  doc: PDFKit.PDFDocument,
+  events: ScorecardPdfCorrectiveActionEvent[],
+): void {
+  if (events.length === 0) return;
+  ensureRoom(doc, CORRECTIVE_ACTION_HEADING_ORPHAN_GUARD);
+  doc.moveDown(0.6);
+  doc.font("Helvetica-Bold").fontSize(10).fillColor(BRAND_MUTED).text(
+    "Removed by a later edit",
+    PAGE.margin,
+    doc.y,
+    { width: CONTENT_WIDTH },
+  );
+  doc.font("Helvetica-Oblique").fontSize(9).fillColor(BRAND_MUTED).text(
+    "These flagged items were removed when the scorecard was edited. Their history is kept here.",
+    PAGE.margin,
+    doc.y + 2,
+    { width: CONTENT_WIDTH },
+  );
+  for (const event of events) {
+    // The item's own label, because these entries have no item block above them to sit under. Without it two
+    // removed deficiencies render as two indistinguishable rows.
+    const label = event.itemLabel?.trim();
+    if (label) {
+      doc.font("Helvetica-Bold").fontSize(10).fillColor(BRAND_BLACK).text(label, PAGE.margin, doc.y + 6, {
+        width: CONTENT_WIDTH,
+      });
+    }
+    const heading = correctiveActionEventHeading(event);
+    doc.font("Helvetica-Bold").fontSize(9).fillColor(heading.color).text(heading.text, PAGE.margin, doc.y + 4, {
+      width: CONTENT_WIDTH,
+    });
+    const comment = event.comment?.trim();
+    if (comment) {
+      ensureRoom(doc, CORRECTIVE_ACTION_COMMENT_MAX_HEIGHT + 2);
+      doc.font("Helvetica").fontSize(10).fillColor(BRAND_BLACK).text(comment, PAGE.margin, doc.y + 2, {
+        width: CONTENT_WIDTH,
+        height: CORRECTIVE_ACTION_COMMENT_MAX_HEIGHT,
+        ellipsis: true,
+      });
+    }
+    // Their evidence survives the item (0202 detaches rather than cascades) and the loader now resolves it —
+    // rendering the words while dropping the photos would preserve half the record.
+    drawCorrectiveActionPhotos(doc, event.photos, label ?? undefined);
+  }
+}
+
+/** How each item state is labelled and coloured in the record. */
+const CORRECTIVE_ACTION_STATUS_DISPLAY: Record<string, { label: string; color: string }> = {
+  open: { label: "OPEN", color: BRAND_RED },
+  // Amber, deliberately not green: work has been done but nobody has accepted it yet, and the card is
+  // sitting in the approver's queue. Showing it as resolved is what the approval gate exists to stop.
+  submitted: { label: "AWAITING APPROVAL", color: "#D97706" },
+  approved: { label: "APPROVED", color: "#16A34A" },
+  // Red like `open`, because it IS outstanding — the approver sent it back and the responder owes a fix.
+  rejected: { label: "REJECTED — NEEDS REWORK", color: BRAND_RED },
+};
+
+/** The thread line for one event: who did what. */
+function correctiveActionEventHeading(event: ScorecardPdfCorrectiveActionEvent): { text: string; color: string } {
+  const who = event.actorName?.trim();
+  const when = event.createdAt ? formatDateTime(event.createdAt) : null;
+  const verb =
+    event.eventType === "approved" ? "Approved" : event.eventType === "rejected" ? "Rejected" : "Submitted";
+  const color =
+    event.eventType === "approved" ? "#16A34A" : event.eventType === "rejected" ? BRAND_RED : BRAND_MUTED;
+  return { text: [`${verb} by ${who || "—"}`, when].filter(Boolean).join("  ·  "), color };
+}
+
+/**
+ * One corrective-action item: the flagged label, its current state, and the full back-and-forth beneath it —
+ * each submission, each rejection with its reason, the approval that closed it. An unanswered item
+ * deliberately shows only the label and status: there is nothing yet to document.
  */
 /**
  * Ensure `needed` points of room remain, breaking the page if not.
@@ -702,36 +833,58 @@ function ensureRoom(doc: PDFKit.PDFDocument, needed: number): void {
 }
 
 function drawCorrectiveAction(doc: PDFKit.PDFDocument, item: ScorecardPdfCorrectiveAction): void {
-  const resolved = item.status === "resolved";
+  const display = CORRECTIVE_ACTION_STATUS_DISPLAY[item.status] ?? CORRECTIVE_ACTION_STATUS_DISPLAY.open;
+  const events = item.events ?? [];
+  const showsFallbackResponse = events.length === 0 && item.status !== "open";
   const who = item.responderName?.trim();
   const when = item.respondedAt ? formatDateTime(item.respondedAt) : null;
   const attribution = [who, when].filter(Boolean).join("  ·  ");
   // Reserve the WHOLE text block, not just the heading.
   //
   // PDFKit disables auto-pagination for any text drawn with an explicit `height` (its LineWrapper caps at
-  // startY + height and never calls continueOnNewPage), and the comment below is drawn exactly that way to
+  // startY + height and never calls continueOnNewPage), and every comment below is drawn exactly that way to
   // bound a long dictation. So an under-reserved guard does not merely orphan a heading — the comment flows
   // straight through the bottom margin to the page edge, and the trailing hairline is then stroked outside
-  // the media box and silently dropped. Reserve label + status + attribution + the comment box.
+  // the media box and silently dropped.
+  //
   // COSMETIC only: keep a heading off the very bottom of a page so it is not orphaned from its content.
-  // Correctness is NOT carried here — see ensureRoom. An earlier version measured the label and the
-  // attribution and reserved their true heights, which looks more rigorous but cannot work: both runs are
-  // unbounded, so a long one auto-paginates and ends low on a LATER page regardless of what was reserved on
-  // this one. The measurement was redundant with the re-check that actually holds, and no test could
-  // distinguish it, so it is gone.
+  // Correctness is NOT carried here — see ensureRoom, called before each bounded run below. An earlier
+  // version measured the label and the attribution and reserved their true heights, which looks more
+  // rigorous but cannot work: both runs are unbounded, so a long one auto-paginates and ends low on a LATER
+  // page regardless of what was reserved on this one.
   ensureRoom(doc, CORRECTIVE_ACTION_HEADING_ORPHAN_GUARD);
 
   doc.font("Helvetica-Bold").fontSize(11).fillColor(BRAND_BLACK).text(item.itemLabel, PAGE.margin, doc.y, {
     width: CONTENT_WIDTH,
   });
-  doc.font("Helvetica-Bold").fontSize(9).fillColor(resolved ? "#16A34A" : BRAND_RED).text(
-    resolved ? "RESOLVED" : "OPEN",
-    PAGE.margin,
-    doc.y + 2,
-    { width: CONTENT_WIDTH },
-  );
+  doc.font("Helvetica-Bold").fontSize(9).fillColor(display.color).text(display.label, PAGE.margin, doc.y + 2, {
+    width: CONTENT_WIDTH,
+  });
 
-  if (resolved) {
+  if (events.length > 0) {
+    for (const event of events) {
+      const heading = correctiveActionEventHeading(event);
+      doc.font("Helvetica-Bold").fontSize(9).fillColor(heading.color).text(heading.text, PAGE.margin, doc.y + 6, {
+        width: CONTENT_WIDTH,
+      });
+      const comment = event.comment?.trim();
+      if (comment) {
+        // The heading above is unbounded and may have paginated; re-check immediately before the bounded
+        // comment, which is the one run PDFKit will not paginate for itself.
+        ensureRoom(doc, CORRECTIVE_ACTION_COMMENT_MAX_HEIGHT + 2);
+        doc.font("Helvetica").fontSize(10).fillColor(BRAND_BLACK).text(comment, PAGE.margin, doc.y + 2, {
+          width: CONTENT_WIDTH,
+          height: CORRECTIVE_ACTION_COMMENT_MAX_HEIGHT,
+          ellipsis: true,
+        });
+      }
+      // Same continuation heading as the legacy path: a photo row spilling to a new page must stay
+      // attributable to its item, and a thread has MORE rows to spill than a single response did.
+      drawCorrectiveActionPhotos(doc, event.photos, item.itemLabel);
+    }
+  } else if (showsFallbackResponse) {
+    // No thread, but the item was answered — a response that predates the event table on a card the 0202
+    // seed did not reach. Fall back to the single-valued response columns rather than printing a blank.
     if (attribution) {
       doc.font("Helvetica").fontSize(9).fillColor(BRAND_MUTED).text(attribution, PAGE.margin, doc.y + 2, {
         width: CONTENT_WIDTH,

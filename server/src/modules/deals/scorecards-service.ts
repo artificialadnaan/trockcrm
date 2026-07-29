@@ -28,6 +28,11 @@ import {
   needsScorecardPdfRegeneration,
   type ScorecardPdfArtifactState,
 } from "../field/scorecard-pdf-artifact.js";
+import {
+  getCorrectiveActionEventsByItem,
+  getDetachedCorrectiveActionEvents,
+} from "../field/corrective-action-events.js";
+import { isOriginalEvidencePhoto } from "../field/scorecard-evidence-predicate.js";
 
 // Tenant-scoped (web CRM) reads of the Field Scorecards a rep submitted from T-Rock Cam. The DEAL ROUTE
 // already gates access (assertDealCollaboratorAccess) before these run, so — unlike the field module's
@@ -117,7 +122,7 @@ export async function getDealScorecardDetail(
         // under correctiveActions[] below; excluding it here keeps it from double-rendering in the Evidence
         // grid AND avoids emitting a sectionKey: null row (a DTO violation — response photos have no section),
         // matching the PDF/edit evidence reads.
-        isNull(fieldScorecardPhotos.correctiveActionId),
+        isOriginalEvidencePhoto(),
       ),
     );
 
@@ -136,6 +141,58 @@ export async function getDealScorecardDetail(
   // responses so the tab can thread each response under its original item (spec §9). A passing card has no
   // rows → correctiveActions is []. Response photos resolve their URL through the same presigner as evidence.
   const correctiveActions = await getScorecardCorrectiveActionThread(tenantDb, scorecardId, opts?.resolvePhotoUrl);
+  // Thread entries whose flagged item a later edit removed. Loaded UNCONDITIONALLY: the case that matters is
+  // the one where every item was removed, which is precisely when a per-item read returns nothing and the
+  // history would silently disappear from the CRM.
+  const detached = await getDetachedCorrectiveActionEvents(tenantDb, scorecardId);
+  // Their photos SURVIVE the item now (0202 sets the item link null rather than cascading), so hard-coding
+  // an empty set would discard the very evidence the detachment was designed to keep.
+  const detachedPhotoRows = detached.length
+    ? await tenantDb
+        .select({
+          id: fieldScorecardPhotos.id,
+          correctiveActionEventId: fieldScorecardPhotos.correctiveActionEventId,
+          fileId: fieldScorecardPhotos.fileId,
+          caption: files.description,
+        })
+        .from(fieldScorecardPhotos)
+        .innerJoin(
+          files,
+          and(eq(files.id, fieldScorecardPhotos.fileId), eq(files.isActive, true), isNull(files.deletedAt)),
+        )
+        .where(
+          inArray(
+            fieldScorecardPhotos.correctiveActionEventId,
+            detached.map((e) => e.id),
+          ),
+        )
+    : [];
+  const detachedByEvent = new Map<string, typeof detachedPhotoRows>();
+  for (const row of detachedPhotoRows) {
+    if (!row.correctiveActionEventId) continue;
+    const list = detachedByEvent.get(row.correctiveActionEventId) ?? [];
+    list.push(row);
+    detachedByEvent.set(row.correctiveActionEventId, list);
+  }
+  const removedItemEvents = await Promise.all(
+    detached.map(async (event) => ({
+      id: event.id,
+      eventType: event.eventType,
+      itemLabel: event.itemLabel,
+      actorName: event.actorName ?? event.actorEmail ?? null,
+      actorEmail: event.actorEmail,
+      comment: event.comment,
+      createdAt: event.createdAt,
+      photos: await Promise.all(
+        (detachedByEvent.get(event.id) ?? []).map(async (p) => ({
+          id: p.id,
+          fileId: p.fileId,
+          url: opts?.resolvePhotoUrl ? await opts.resolvePhotoUrl(p.fileId) : null,
+          caption: p.caption ?? null,
+        })),
+      ),
+    })),
+  );
 
   return {
     ...toSummary(card),
@@ -149,6 +206,7 @@ export async function getDealScorecardDetail(
     // Leadership Project Summary free text; null for project cards.
     summary: card.summary ?? null,
     correctiveActions,
+    removedItemEvents,
   };
 }
 
@@ -181,6 +239,8 @@ async function getScorecardCorrectiveActionThread(
     .select({
       id: fieldScorecardPhotos.id,
       correctiveActionId: fieldScorecardPhotos.correctiveActionId,
+      // Which ATTEMPT filed it, so the thread can show each round's own evidence rather than one merged pile.
+      correctiveActionEventId: fieldScorecardPhotos.correctiveActionEventId,
       fileId: fieldScorecardPhotos.fileId,
       caption: files.description,
     })
@@ -194,13 +254,36 @@ async function getScorecardCorrectiveActionThread(
     )
     .where(inArray(fieldScorecardPhotos.correctiveActionId, itemIds));
 
-  const photosByItem = new Map<string, { id: string; fileId: string; caption: string | null }[]>();
+  type PhotoRow = { id: string; fileId: string; caption: string | null };
+  const photosByItem = new Map<string, PhotoRow[]>();
+  const photosByEvent = new Map<string, PhotoRow[]>();
   for (const p of photoRows) {
     if (!p.correctiveActionId) continue;
+    const view: PhotoRow = { id: p.id, fileId: p.fileId, caption: p.caption ?? null };
     const list = photosByItem.get(p.correctiveActionId) ?? [];
-    list.push({ id: p.id, fileId: p.fileId, caption: p.caption ?? null });
+    list.push(view);
     photosByItem.set(p.correctiveActionId, list);
+    if (p.correctiveActionEventId) {
+      const perEvent = photosByEvent.get(p.correctiveActionEventId) ?? [];
+      perEvent.push(view);
+      photosByEvent.set(p.correctiveActionEventId, perEvent);
+    }
   }
+
+  // THE thread. This mapper is a second implementation of the same view as corrective-action-api.ts, and it
+  // silently lacked events entirely — so the approval UI rendered an empty thread on the CRM surface the
+  // whole feature exists for, while the responder API returned it correctly. A parity test now pins that the
+  // two readers agree; until they are merged, anything added to one has to be added here too.
+  const eventsByItem = await getCorrectiveActionEventsByItem(tenantDb, scorecardId);
+  const resolvePhotos = async (photos: PhotoRow[]) =>
+    Promise.all(
+      photos.map(async (p) => ({
+        id: p.id,
+        fileId: p.fileId,
+        url: resolvePhotoUrl ? await resolvePhotoUrl(p.fileId) : null,
+        caption: p.caption,
+      })),
+    );
 
   return Promise.all(
     rows.map(async (r) => ({
@@ -214,12 +297,16 @@ async function getScorecardCorrectiveActionThread(
       responderName: r.responderName ?? null,
       responderEmail: r.responderEmail ?? null,
       respondedAt: r.respondedAt ? r.respondedAt.toISOString() : null,
-      photos: await Promise.all(
-        (photosByItem.get(r.id) ?? []).map(async (p) => ({
-          id: p.id,
-          fileId: p.fileId,
-          url: resolvePhotoUrl ? await resolvePhotoUrl(p.fileId) : null,
-          caption: p.caption,
+      photos: await resolvePhotos(photosByItem.get(r.id) ?? []),
+      events: await Promise.all(
+        (eventsByItem.get(r.id) ?? []).map(async (event) => ({
+          id: event.id,
+          eventType: event.eventType,
+          actorName: event.actorName ?? event.actorEmail ?? null,
+          actorEmail: event.actorEmail,
+          comment: event.comment,
+          createdAt: event.createdAt,
+          photos: await resolvePhotos(photosByEvent.get(event.id) ?? []),
         })),
       ),
     })),
@@ -306,6 +393,7 @@ interface ScorecardRow {
   pdfR2Key: string | null;
   pdfGeneratedAt: unknown;
   status?: string | null;
+  updatedAt?: unknown;
 }
 
 /** The rating-band label for the card's kind/version — leadership + V2 reuse the 1-10 bands. */
@@ -340,6 +428,11 @@ function toSummary(row: ScorecardRow): FieldScorecardSummary {
     // Lifecycle status: `submitted` | `corrective_action_open` | `corrective_action_closed`. Drives the deal
     // tab's open/closed badge + the QC dashboard status column. Older rows default to `submitted`.
     status: row.status ?? "submitted",
+    // The content generation, which the shared type already documents as the optimistic-concurrency token.
+    // An approver sends it back with their verdict: the attempt guard binds to the corrective-action
+    // RESPONSE, and a card stays editable while it awaits approval, so scores/notes/signatures/original
+    // evidence can change under a reviewer without touching any event this thread contains.
+    updatedAt: row.updatedAt == null ? undefined : toIso(row.updatedAt),
   };
 }
 

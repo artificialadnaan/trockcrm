@@ -9,11 +9,17 @@ import {
   scorecardCorrectiveActionTokens,
 } from "@trock-crm/shared/schema";
 import {
+  CORRECTIVE_ACTION_CARD_AWAITING_APPROVAL,
+  CORRECTIVE_ACTION_CARD_CLOSED,
+  CORRECTIVE_ACTION_CARD_OPEN,
+  CORRECTIVE_ACTION_OUTSTANDING_STATUSES,
+  isCorrectiveActionOutstanding,
   enumerateFlaggedItems,
   isCorrectiveActionBand,
   type FlaggedItem,
   type ScorecardRating,
 } from "@trock-crm/shared/types";
+import { recordCorrectiveActionEvent } from "./corrective-action-events.js";
 
 // Matches the alias the field scorecard services use (scorecards-service.ts): the per-office tenant db.
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -94,14 +100,16 @@ export async function resolveCorrectiveActionItem(
  * concurrent/stale submit whose item is no longer `open` never leaves orphan photos (the caller checks the
  * status under the same lock before inserting). See resolveCorrectiveActionItem for the concurrency rationale.
  *
- * Returns `{ resolved, closed }`: `resolved` is true when it flipped an open item (false on the idempotent
- * no-op — an already-resolved or unknown id), and `closed` is true only on the winning write that answered
- * the LAST open item. The caller uses `closed` to fire the oversight "completed" notification exactly once.
+ * Returns `{ resolved, awaitingApproval, submissionEventId }`: `resolved` is true when it accepted a response (false on the
+ * idempotent no-op — an already-answered or unknown id), and `awaitingApproval` is true only on the winning
+ * write that answered the LAST outstanding item. The caller uses it to notify the approver exactly once.
+ *
+ * NOTE: this no longer closes anything. A card reaches `corrective_action_closed` only via an approval.
  */
 export async function resolveCorrectiveActionItemTx(
   tx: TenantDb,
   input: ResolveCorrectiveActionInput,
-): Promise<{ resolved: boolean; closed: boolean }> {
+): Promise<{ resolved: boolean; awaitingApproval: boolean; submissionEventId?: string }> {
   // Serialize resolves for the SAME scorecard. Office transactions run at READ COMMITTED, so two
   // responders closing out the final two open items in separate transactions could each run their
   // `stillOpen` SELECT before seeing the other's uncommitted resolve → neither observes zero open
@@ -119,7 +127,9 @@ export async function resolveCorrectiveActionItemTx(
   const updated = await tx
     .update(scorecardCorrectiveActions)
     .set({
-      status: "resolved",
+      // `submitted`, not `resolved`: the responder has answered, but answering no longer completes anything.
+      // The item now waits on an approver, who either approves it or sends it back.
+      status: "submitted",
       responseComment: input.responseComment,
       respondedByUserId: input.respondedBy.userId,
       responderName: input.respondedBy.name,
@@ -131,21 +141,48 @@ export async function resolveCorrectiveActionItemTx(
       and(
         eq(scorecardCorrectiveActions.id, input.itemId),
         eq(scorecardCorrectiveActions.scorecardId, input.scorecardId),
-        // Idempotent: only an OPEN item transitions. Already-resolved / unknown ids update no row.
-        eq(scorecardCorrectiveActions.status, "open"),
+        // Idempotent, and covers the REWORK case: an item the approver rejected is outstanding again, so a
+        // fresh response must be accepted. Anything already submitted/approved updates no row.
+        inArray(scorecardCorrectiveActions.status, [...CORRECTIVE_ACTION_OUTSTANDING_STATUSES]),
       ),
     )
-    .returning({ id: scorecardCorrectiveActions.id });
+    // Identity comes back with the winning update, so the event can snapshot it without a second read.
+    .returning({
+      id: scorecardCorrectiveActions.id,
+      itemType: scorecardCorrectiveActions.itemType,
+      itemRef: scorecardCorrectiveActions.itemRef,
+      itemLabel: scorecardCorrectiveActions.itemLabel,
+    });
 
-  if (updated.length === 0) return { resolved: false, closed: false }; // already resolved / unknown — no-op.
+  if (updated.length === 0) return { resolved: false, awaitingApproval: false }; // already answered — no-op.
 
-  const stillOpen = await tx
+  // Record the attempt on the append-only thread BEFORE recomputing state, so the history exists even if a
+  // later statement in this transaction fails and rolls the whole thing back together.
+  // Returned to the caller so the photos it just inserted can be attributed to THIS attempt. Without that
+  // link every event's photo set is empty, and the PDF falls back to hanging every unattributed photo off
+  // the first submission — so a reject/resubmit shows attempt two's evidence under attempt one.
+  const submissionEventId = await recordCorrectiveActionEvent(tx, {
+    correctiveActionId: input.itemId,
+    scorecardId: input.scorecardId,
+    eventType: "submitted",
+    itemType: updated[0].itemType ?? null,
+    itemRef: updated[0].itemRef ?? null,
+    itemLabel: updated[0].itemLabel ?? null,
+    actorUserId: input.respondedBy.userId,
+    actorName: input.respondedBy.name,
+    actorEmail: input.respondedBy.email,
+    comment: input.responseComment,
+  });
+
+  // OUTSTANDING, not just `open`: an item the approver rejected is still the responder's to fix, so the card
+  // is not ready for review until those are answered too.
+  const stillOutstanding = await tx
     .select({ id: scorecardCorrectiveActions.id })
     .from(scorecardCorrectiveActions)
     .where(
       and(
         eq(scorecardCorrectiveActions.scorecardId, input.scorecardId),
-        eq(scorecardCorrectiveActions.status, "open"),
+        inArray(scorecardCorrectiveActions.status, [...CORRECTIVE_ACTION_OUTSTANDING_STATUSES]),
       ),
     );
 
@@ -158,17 +195,19 @@ export async function resolveCorrectiveActionItemTx(
   //
   // Only reached when `updated.length > 0` — an idempotent re-resolve returned false above — so a duplicate
   // submit does not churn the artifact.
-  const closing = stillOpen.length === 0;
+  // Answering the last outstanding item no longer CLOSES the card — it hands it to the approver. Closure is
+  // now only reachable through approveCorrectiveActionItems.
+  const awaitingApproval = stillOutstanding.length === 0;
   await tx
     .update(fieldScorecards)
     .set(
-      closing
-        ? { status: "corrective_action_closed", updatedAt: nextGeneration() }
+      awaitingApproval
+        ? { status: CORRECTIVE_ACTION_CARD_AWAITING_APPROVAL, updatedAt: nextGeneration() }
         : { updatedAt: nextGeneration() },
     )
     .where(eq(fieldScorecards.id, input.scorecardId));
 
-  return { resolved: true, closed: closing };
+  return { resolved: true, awaitingApproval, submissionEventId };
 }
 
 /**
@@ -183,6 +222,53 @@ export async function resolveCorrectiveActionItemTx(
  * Only the winning close reaches here (resolveCorrectiveActionItemTx returns closed: true exactly once), and
  * the worker's own closed-stamp is the second line of defence against a duplicate send.
  */
+/**
+ * Enqueue the "awaiting your approval" notice for a card whose last outstanding item was just answered.
+ *
+ * Called from the responder funnel inside the SAME transaction as the state change, so the job cannot exist
+ * for a transition that rolled back, and only on the winning write.
+ *
+ * Addressed to the QC_APPROVER_EMAILS allowlist — the same set the server authorizes the approve/reject verbs
+ * against — so the people notified and the people able to act are defined by one config and cannot drift.
+ */
+export async function enqueueCorrectiveActionApprovalRequested(
+  tx: TenantDb,
+  input: { office: { id: string; slug: string }; scorecardId: string },
+): Promise<void> {
+  const [card] = await tx
+    .select({
+      dealId: fieldScorecards.dealId,
+      oversightCycle: fieldScorecards.correctiveActionOversightCycle,
+      cycleNonce: fieldScorecards.correctiveActionCycleNonce,
+    })
+    .from(fieldScorecards)
+    .where(eq(fieldScorecards.id, input.scorecardId))
+    .limit(1);
+  if (!card) return;
+
+  await tx.insert(jobQueue).values({
+    jobType: SCORECARD_CORRECTIVE_ACTION_OVERSIGHT_EMAIL_JOB,
+    payload: {
+      tenantSchema: `office_${input.office.slug}`,
+      scorecardId: input.scorecardId,
+      dealId: card.dealId,
+      officeId: input.office.id,
+      phase: "awaiting_approval",
+      oversightCycle: card.oversightCycle ?? undefined,
+      // The CURRENT cycle nonce, so each review round gets a distinct provider idempotency key. Without it
+      // every round keys on "...-cycle-none" and Resend dedups the second request against the first — the
+      // approver is never told the rework is ready.
+      cycleNonce: card.cycleNonce ?? undefined,
+    },
+    officeId: input.office.id,
+    status: "pending",
+    // The approver's notice attaches the refreshed PDF, which the responder route re-renders post-commit.
+    // Same head start the other scorecard emails take so the attachment is normally ready.
+    runAfter: new Date(Date.now() + SCORECARD_EMAIL_RUN_AFTER_SECONDS * 1000),
+    maxAttempts: 6,
+  });
+}
+
 export async function enqueueCorrectiveActionOversightClosed(
   tx: TenantDb,
   input: { office: { id: string; slug: string }; scorecardId: string },
@@ -259,14 +345,17 @@ function resolvedIdsForNoLongerFlaggedItems(
 
   // Deficiencies: a resolved row whose ref is no longer flagged is stale history.
   for (const row of existing) {
-    if (row.itemType !== "critical_deficiency" || row.status !== "resolved") continue;
+    // SETTLED (not outstanding) rather than the old single `resolved` value: an item can now be settled as
+    // `submitted`, `approved` or awaiting rework. Only rows the responder no longer owes work on are
+    // candidates for the removed-item purge.
+    if (row.itemType !== "critical_deficiency" || isCorrectiveActionOutstanding(row.status)) continue;
     if (!flaggedDeficiencyRefs.has(row.itemRef)) removed.push(row.id);
   }
 
   // Action items: per label, keep up to flaggedCount resolved rows (still-flagged history), delete the surplus.
   const resolvedActionByLabel = new Map<string, ExistingCorrectiveActionRow[]>();
   for (const row of existing) {
-    if (row.itemType !== "action_item" || row.status !== "resolved") continue;
+    if (row.itemType !== "action_item" || isCorrectiveActionOutstanding(row.status)) continue;
     const bucket = resolvedActionByLabel.get(row.itemLabel) ?? [];
     bucket.push(row);
     resolvedActionByLabel.set(row.itemLabel, bucket);
@@ -391,7 +480,10 @@ export async function reconcileScorecardCorrectiveActions(
       flaggedDeficiencyRefs,
       flaggedActionCountByLabel,
     );
-    const openIds = existing.filter((row) => row.status === "open").map((row) => row.id);
+    // OUTSTANDING, not just `open`: a rejected item is still the responder's to answer.
+    const openIds = existing
+      .filter((row) => isCorrectiveActionOutstanding(row.status))
+      .map((row) => row.id);
     const idsToDelete = [...openIds, ...staleResolvedIds];
     if (idsToDelete.length > 0) {
       await tx.delete(scorecardCorrectiveActions).where(inArray(scorecardCorrectiveActions.id, idsToDelete));
@@ -401,9 +493,14 @@ export async function reconcileScorecardCorrectiveActions(
     // ALSO revert — otherwise the QC report + mobile/deal status badges keep showing a "resolved corrective
     // action" that no longer exists. Both are corrective-action statuses that must not survive an edit that
     // dropped the card out of the band / removed every flag.
+    // `corrective_action_submitted` belongs in this list too. A card awaiting approval that is lifted out of
+    // the band has no live corrective action either, and omitting it would strand the card in the approver's
+    // queue forever — with its items deleted, so there would be nothing left to approve. That is strictly
+    // worse than the stale-badge problem this branch already exists to prevent.
     if (
-      input.currentStatus === "corrective_action_open" ||
-      input.currentStatus === "corrective_action_closed"
+      input.currentStatus === CORRECTIVE_ACTION_CARD_OPEN ||
+      input.currentStatus === CORRECTIVE_ACTION_CARD_AWAITING_APPROVAL ||
+      input.currentStatus === CORRECTIVE_ACTION_CARD_CLOSED
     ) {
       await tx
         .update(fieldScorecards)
@@ -479,7 +576,12 @@ export async function reconcileScorecardCorrectiveActions(
     existingActionByLabel.set(row.itemLabel, bucket);
   }
   for (const bucket of existingActionByLabel.values()) {
-    bucket.sort((a, b) => (a.status === "resolved" ? 0 : 1) - (b.status === "resolved" ? 0 : 1));
+    // Settled rows first, outstanding rows last — which is what the tail-first trim below relies on: a
+    // shrinking duplicate set therefore removes OUTSTANDING duplicates first and preserves settled history.
+    bucket.sort(
+      (a, b) =>
+        (isCorrectiveActionOutstanding(a.status) ? 1 : 0) - (isCorrectiveActionOutstanding(b.status) ? 1 : 0),
+    );
   }
   const flaggedActionCountByLabel = new Map<string, number>();
   for (const f of flagged) {
@@ -538,26 +640,56 @@ export async function reconcileScorecardCorrectiveActions(
   }
 
   // Recompute open/closed from the post-reconcile set: surviving resolved rows + surviving open rows + inserts.
-  // survivingOpen already restricts to status === "open", so deleted resolved rows (now also in staleIds) can't
-  // perturb it; anyItems subtracts every deleted row (open + resolved) from the pre-reconcile count.
-  const survivingOpen = existing.filter(
-    (row) => row.status === "open" && !staleIds.includes(row.id),
-  ).length;
-  const openCount = survivingOpen + toInsert.length;
+  // survivingOutstanding restricts to the OUTSTANDING set (open OR rejected), so deleted settled rows (now
+  // also in staleIds) can't perturb it; anyItems subtracts every deleted row from the pre-reconcile count.
+  const surviving = existing.filter((row) => !staleIds.includes(row.id));
+  const survivingOutstanding = surviving.filter((row) => isCorrectiveActionOutstanding(row.status)).length;
+  const outstandingCount = survivingOutstanding + toInsert.length;
+  // Items answered and now sitting with the APPROVER. A card with these — and nothing outstanding — is
+  // awaiting review, which is neither open nor closed.
+  const awaitingApprovalCount = surviving.filter((row) => row.status === "submitted").length;
   const anyItems = existing.length - staleIds.length + toInsert.length > 0;
-
-  let nextStatus: "corrective_action_open" | "corrective_action_closed";
-  if (anyItems && openCount === 0) {
-    nextStatus = "corrective_action_closed";
+  // Did an APPROVER actually accept everything that remains? A card can also derive `closed` because an edit
+  // DELETED its last unapproved item, and that is not an approval — see the enqueue guard below.
+  // Every surviving item approved AND nothing unapproved was removed to get there.
+  //
+  // Looking only at survivors is not enough: a card with one approved item and one still submitted can be
+  // edited to DELETE the unapproved one, after which the survivors are trivially all-approved and the card
+  // derives closed — announcing "Corrective Action Approved" for a response that was deleted rather than
+  // accepted. Deleting work is not a way to get it approved.
+  const removedUnapproved = existing.some(
+    (row) => staleIds.includes(row.id) && row.status !== "approved",
+  );
+  // Three derived states, mirroring recomputeCardStatus in corrective-action-approval.ts — the two must
+  // agree or an edit and an approval could compute different statuses for the same item set.
+  let nextStatus: string;
+  if (outstandingCount > 0 || !anyItems) {
+    nextStatus = CORRECTIVE_ACTION_CARD_OPEN;
+  } else if (awaitingApprovalCount > 0) {
+    nextStatus = CORRECTIVE_ACTION_CARD_AWAITING_APPROVAL;
+  } else if (removedUnapproved) {
+    // Every SURVIVING item is approved, but only because the unapproved one was deleted. Suppressing the
+    // "approved" email here was not enough — my first fix did exactly that and left the TRANSITION alone, so
+    // the card still went to corrective_action_closed: the CRM badge, the QC report and the PDF all read
+    // "Approved", and (since an approved card is locked) the record froze in a verdict nobody gave. That
+    // hands the submitter a way to close their own corrective action by deleting the flag, which is the one
+    // thing this gate exists to prevent. Back to the approver instead: the card CHANGED, and an approver
+    // accepting it as it now stands is the only thing that can close it.
+    nextStatus = CORRECTIVE_ACTION_CARD_AWAITING_APPROVAL;
   } else {
-    nextStatus = "corrective_action_open";
+    // Every surviving item is APPROVED, with none deleted to get there — the only route to a closed card.
+    nextStatus = CORRECTIVE_ACTION_CARD_CLOSED;
   }
-  if (input.currentStatus !== nextStatus) {
-    await tx
-      .update(fieldScorecards)
-      .set({ status: nextStatus, updatedAt: nextGeneration() })
-      .where(eq(fieldScorecards.id, input.scorecardId));
-  }
+  // Equivalent to the CLOSED branch by construction: nothing outstanding, nothing awaiting, items present,
+  // and nothing unapproved removed. Kept as a name because the enqueue below reads better for it.
+  const everySurvivingItemApproved = nextStatus === CORRECTIVE_ACTION_CARD_CLOSED;
+  // ALWAYS write. An edit can add, remove or relabel items without moving the CARD status — and updated_at
+  // is the PDF's content generation, compared by equality, so skipping the write leaves the stored artifact
+  // classified as current while the record it shows has changed. Same defect the approval path had.
+  await tx
+    .update(fieldScorecards)
+    .set({ status: nextStatus, updatedAt: nextGeneration() })
+    .where(eq(fieldScorecards.id, input.scorecardId));
 
   // An EDIT can close the card too, not just a responder answering the last item: deleting the text of the
   // only still-open flag leaves `anyItems` true with `openCount === 0`, so this reconcile flips the card to
@@ -566,7 +698,49 @@ export async function reconcileScorecardCorrectiveActions(
   //
   // Distinct from the CANCEL path (an edit lifting the card above band), which walks it to `submitted` and
   // deletes its items in the not-in-band branch above; that is not a completion and stays silent.
-  if (nextStatus === "corrective_action_closed" && input.currentStatus !== "corrective_action_closed") {
+  // An EDIT can move the card through the lifecycle too, not just a responder or an approver: removing the
+  // last outstanding flag hands it to the approver, and removing the last unapproved one completes it.
+  // Without these, a card could change stage with nobody told — and nothing would enqueue for it later.
+  // Gated on reaching the state AND on the item set actually having changed.
+  //
+  // Two failure modes, pulling opposite ways. Gating purely on the TRANSITION misses a real case: an edit can
+  // add a flagged item to a card already awaiting review and have it answered in the same pass, so the status
+  // never moves while what the approver must judge has changed. But gating purely on the STATE is worse in
+  // the common case: every reconcile that lands on awaiting-approval — including edits that touch nothing
+  // about the items — would clear the stamp, rotate the cycle and re-ask, turning any unrelated save into
+  // another email.
+  //
+  // `itemSetChanged` is the honest predicate: re-ask when the thing being judged moved, stay quiet otherwise.
+  const itemSetChanged = toInsert.length > 0 || staleIds.length > 0;
+  const enteringApproverQueue = input.currentStatus !== CORRECTIVE_ACTION_CARD_AWAITING_APPROVAL;
+  if (nextStatus === CORRECTIVE_ACTION_CARD_AWAITING_APPROVAL && (enteringApproverQueue || itemSetChanged)) {
+    if (!enteringApproverQueue) {
+      // Already in the queue, but WHAT is being judged has changed. Clearing the stamp alone is not enough:
+      // the enqueue below copies the card's CURRENT cycle nonce, and that nonce is the provider idempotency
+      // dimension — reusing it makes Resend answer invalid_idempotent_request, system-email read that as
+      // delivered, and the worker stamp, so the approver never sees the edited card. Mint a fresh cycle so
+      // the re-ask is genuinely a new message.
+      await tx
+        .update(fieldScorecards)
+        .set({
+          correctiveActionApprovalRequestedAt: null,
+          correctiveActionCycleNonce: randomUUID(),
+        })
+        .where(eq(fieldScorecards.id, input.scorecardId));
+    }
+    await enqueueCorrectiveActionApprovalRequested(tx, {
+      office: input.office,
+      scorecardId: input.scorecardId,
+    });
+  } else if (
+    nextStatus === CORRECTIVE_ACTION_CARD_CLOSED &&
+    input.currentStatus !== CORRECTIVE_ACTION_CARD_CLOSED &&
+    // ...but ONLY when every surviving item was genuinely approved. An edit that DELETES the last
+    // unapproved item also derives a closed card, and announcing "Corrective Action Approved" for a
+    // response nobody accepted — because it was removed — tells oversight something that did not happen.
+    // Under the gate only an approver can approve; reconcile can only observe that they already did.
+    everySurvivingItemApproved
+  ) {
     await enqueueCorrectiveActionOversightClosed(tx, {
       office: input.office,
       scorecardId: input.scorecardId,
@@ -640,6 +814,12 @@ export async function reconcileScorecardCorrectiveActions(
           ? {
               correctiveActionOversightOpenedAt: null,
               correctiveActionOversightClosedAt: null,
+              // The APPROVAL-request stamp clears here too. An edit can walk a card from `submitted` or
+              // `closed` back to open by adding or replacing a flagged item; when that new work is answered
+              // the card returns to the approver, and a stamp left over from the PREVIOUS request makes the
+              // worker skip it as already notified. The card then sits in the approver's queue with nobody
+              // told. Clearing it only on the rejection restart path covered one of the two ways back.
+              correctiveActionApprovalRequestedAt: null,
               // Rotate the INDEPENDENT oversight marker. Unlike the shared cycle nonce (which the responder
               // worker's self-repair also rotates), this moves ONLY here, so the oversight handler can gate
               // its SEND on it without conflating supersession with self-repair. Retiring queued jobs below
@@ -807,7 +987,7 @@ export async function restartCorrectiveActionNotificationCycleForResponder(
  * responder-scoped entry points above so the two can never drift on the nonce/token/enqueue trio, which the
  * worker's delivery stamp depends on being applied together.
  */
-async function restartCorrectiveActionCyclesForCards(
+export async function restartCorrectiveActionCyclesForCards(
   tx: TenantDb,
   openScorecards: Array<{ id: string; dealId: string }>,
   office: { id: string; slug: string },
@@ -833,6 +1013,10 @@ async function restartCorrectiveActionCyclesForCards(
       .update(fieldScorecards)
       .set({
         correctiveActionEmailSentAt: null,
+        // Clear the approval-request stamp too. A resubmission after a rejection is a NEW review round: the
+        // approver has to be asked again. Leaving the stamp set makes the worker treat the second request as
+        // already delivered, so the rework sits in their queue with nobody told it is ready.
+        correctiveActionApprovalRequestedAt: null,
         correctiveActionCycleNonce: cycleNonceByScorecardId.get(scorecardId)!,
         // MONOTONIC, not a JS timestamp captured before the loop. updated_at is now the PDF's content
         // generation, and the currency check is an equality against it — so it must only ever increase. A

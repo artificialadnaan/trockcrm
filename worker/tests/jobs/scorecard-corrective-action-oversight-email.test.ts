@@ -8,6 +8,8 @@ const SCORECARD = "11111111-1111-1111-1111-111111111111";
 const DEAL = "22222222-2222-2222-2222-222222222222";
 const CYCLE = "99999999-9999-9999-9999-999999999999";
 const OVERSIGHT_CYCLE = "88888888-8888-8888-8888-888888888888";
+/** The REVIEW round — rotated by a rejection, unlike OVERSIGHT_CYCLE, which a rejection leaves alone. */
+const REVIEW_CYCLE = "77777777-7777-7777-7777-777777777777";
 const GENERATION = new Date("2026-07-27T14:00:00.000Z");
 
 const env = {
@@ -40,7 +42,10 @@ const ITEMS = [
     item_type: "action_item",
     item_ref: "0",
     item_label: "Re-inspect slab 2",
-    status: "resolved",
+    // A REAL post-0202 status. This fixture said "resolved" — a value migration 0202 renamed away — and the
+    // renderer compared against the same dead string, so several assertions passed while testing a state the
+    // database can no longer produce.
+    status: "approved",
     responder_name: "Sam Super",
     responder_email: "pat@trockgc.com",
     // Deliberately an evening-CT instant whose UTC CALENDAR DATE is the following day: 8:30 PM CDT on Jul 27
@@ -90,6 +95,8 @@ interface ScorecardOverrides {
   scorecardRows?: unknown[];
   /** The card's CURRENT action-item list — what the corrective-action rows are ordered against. */
   actionItems?: string[];
+  /** Non-null => the approver has already been told about this cycle. */
+  approvalRequestedAt?: Date | null;
   /** Override the corrective-action rows (e.g. two action items, to assert ordering). */
   items?: unknown[];
   /**
@@ -120,7 +127,7 @@ function makeQuery(
           {
             pdf_r2_key:
               over.postFetchKey === undefined
-                ? (over.pdfR2Key === undefined ? `sc.${"a".repeat(64)}.v3.pdf` : over.pdfR2Key)
+                ? (over.pdfR2Key === undefined ? `sc.${"a".repeat(64)}.v4.pdf` : over.pdfR2Key)
                 : over.postFetchKey,
             pdf_content_generation:
               over.postFetchGeneration === undefined
@@ -162,8 +169,8 @@ function makeQuery(
             form_version: 2,
             status: over.status ?? "corrective_action_open",
             action_items: over.actionItems ?? ["Re-inspect slab 2"],
-            pdf_r2_key: over.pdfR2Key === undefined ? `sc.${"a".repeat(64)}.v3.pdf` : over.pdfR2Key,
-            pdf_render_version: over.pdfRenderVersion ?? 3,
+            pdf_r2_key: over.pdfR2Key === undefined ? `sc.${"a".repeat(64)}.v4.pdf` : over.pdfR2Key,
+            pdf_render_version: over.pdfRenderVersion ?? 4,
             pdf_content_generation:
               over.pdfContentGeneration === undefined ? GENERATION : over.pdfContentGeneration,
             updated_at: over.updatedAt ?? GENERATION,
@@ -172,6 +179,7 @@ function makeQuery(
               over.storedOversightCycle === undefined ? OVERSIGHT_CYCLE : over.storedOversightCycle,
             corrective_action_oversight_opened_at: over.openedAt ?? null,
             corrective_action_oversight_closed_at: over.closedAt ?? null,
+            corrective_action_approval_requested_at: over.approvalRequestedAt ?? null,
           },
         ],
       };
@@ -231,8 +239,8 @@ describe("handleScorecardCorrectiveActionOversightEmail", () => {
       string,
       { attachments?: Array<{ filename: string }> },
     ];
-    expect(subject).toContain("Corrective action completed");
-    expect(html).toContain("Corrective Action Completed");
+    expect(subject).toContain("Corrective action approved");
+    expect(html).toContain("Corrective Action Approved");
     expect(options.attachments).toHaveLength(1);
     expect(options.attachments![0].filename).toBe(`field-scorecard-${SCORECARD}.pdf`);
   });
@@ -1117,10 +1125,14 @@ describe("handleScorecardCorrectiveActionOversightEmail", () => {
   });
 
   it("renders a response time with the TIME OF DAY, not just a UTC calendar date", async () => {
+    // A SUBMITTED item — attribution for an approved one belongs to the approver, tested separately.
     // responded_at is a timestamp. Truncating it to a date made every action answered on the same day look
     // simultaneous in what is meant to be the audit trail, and ISO-slicing it silently reported UTC — so an
     // evening CT response was dated to the following day.
-    const { query } = makeQuery({ status: "corrective_action_closed" });
+    const { query } = makeQuery({
+      status: "corrective_action_closed",
+      items: [{ ...ITEMS[0], status: "submitted" }],
+    });
     const sendEmail = makeSend();
 
     await handleScorecardCorrectiveActionOversightEmail(payload({ phase: "closed" }), null, {
@@ -1168,7 +1180,10 @@ describe("handleScorecardCorrectiveActionOversightEmail", () => {
   it("names the responder by EMAIL when they have no display name", async () => {
     // A session responder with no first/last name stores a null responder_name but a non-null email. Without
     // the fallback the notice reports when a fix landed but not who filed it.
-    const { query } = makeQuery({ status: "corrective_action_closed" });
+    const { query } = makeQuery({
+      status: "corrective_action_closed",
+      items: [{ ...ITEMS[0], status: "submitted", responder_name: null }],
+    });
     const sendEmail = makeSend();
     ITEMS[0].responder_name = null;
     try {
@@ -1256,5 +1271,406 @@ describe("handleScorecardCorrectiveActionOversightEmail", () => {
     expect(html).not.toContain(longLabel);
     expect(options.text).not.toContain(longLabel);
     expect(html.length).toBeLessThan(longLabel.length);
+  });
+
+  const approverEnv = { ...env, QC_APPROVER_EMAILS: "james@trockgc.com" } as unknown as NodeJS.ProcessEnv;
+
+  it("REGRESSION: an awaiting_approval job actually SENDS — it used to be dropped by the payload guard", async () => {
+    // enqueueCorrectiveActionApprovalRequested has always enqueued this phase; the worker's union rejected
+    // it, so the job completed successfully having notified nobody. A silently-dropped notification is worse
+    // than a dead-letter, because nothing surfaces it — the queue reports success.
+    const { query } = makeQuery({ status: "corrective_action_submitted" });
+    const sendEmail = makeSend();
+
+    await handleScorecardCorrectiveActionOversightEmail(payload({ phase: "awaiting_approval" }), null, {
+      query: query as never,
+      sendEmail: sendEmail as never,
+      env: approverEnv,
+      logger: makeLogger(),
+    });
+
+    expect(sendEmail).toHaveBeenCalledTimes(1);
+    const [to, subject] = sendEmail.mock.calls[0] as unknown as [string[], string];
+    expect(to).toEqual(["james@trockgc.com"]);
+    expect(subject).toMatch(/awaiting your approval/i);
+  });
+
+  it("addresses the APPROVER list, never the oversight watcher list", async () => {
+    // Different question, different config. FIELD_SCORECARD_EMAIL_RECIPIENTS is who WATCHES;
+    // QC_APPROVER_EMAILS is who can ACT. Asking a watcher to approve sends them to a 403.
+    const { query } = makeQuery({ status: "corrective_action_submitted" });
+    const sendEmail = makeSend();
+
+    await handleScorecardCorrectiveActionOversightEmail(payload({ phase: "awaiting_approval" }), null, {
+      query: query as never,
+      sendEmail: sendEmail as never,
+      env: approverEnv,
+      logger: makeLogger(),
+    });
+
+    const [to] = sendEmail.mock.calls[0] as unknown as [string[]];
+    expect(to).not.toContain("ops@trockgc.com");
+  });
+
+  it("does NOT subtract responders from the approver list", async () => {
+    // The subtraction exists so a super does not get "someone must fix this" on top of "please fix this".
+    // An approver who also happens to be a super on this card still has to be asked to approve it.
+    const { query } = makeQuery({ status: "corrective_action_submitted" }, [
+      { email: "james@trockgc.com", name: "James Helms", role: "superintendent" } as never,
+    ]);
+    const sendEmail = makeSend();
+
+    await handleScorecardCorrectiveActionOversightEmail(payload({ phase: "awaiting_approval" }), null, {
+      query: query as never,
+      sendEmail: sendEmail as never,
+      env: approverEnv,
+      logger: makeLogger(),
+    });
+
+    const [to] = sendEmail.mock.calls[0] as unknown as [string[]];
+    expect(to).toEqual(["james@trockgc.com"]);
+  });
+
+  it("stamps its OWN column, so it cannot suppress the opened or completed notice", async () => {
+    const { query, stampUpdates } = makeQuery({ status: "corrective_action_submitted" });
+    const sendEmail = makeSend();
+
+    await handleScorecardCorrectiveActionOversightEmail(payload({ phase: "awaiting_approval" }), null, {
+      query: query as never,
+      sendEmail: sendEmail as never,
+      env: approverEnv,
+      logger: makeLogger(),
+    });
+
+    expect(stampUpdates).toHaveLength(1);
+    expect(stampUpdates[0].sql).toContain("corrective_action_approval_requested_at");
+    expect(stampUpdates[0].sql).not.toContain("oversight_opened_at");
+    expect(stampUpdates[0].sql).not.toContain("oversight_closed_at");
+  });
+
+  it("skips a card that has LEFT the approver queue before the job ran", async () => {
+    // Same send-time state guard the other phases apply: an approver who acted within the ~120s delay must
+    // not then receive "awaiting your approval" for something already approved.
+    const { query, stampUpdates } = makeQuery({ status: "corrective_action_closed" });
+    const sendEmail = makeSend();
+
+    await handleScorecardCorrectiveActionOversightEmail(payload({ phase: "awaiting_approval" }), null, {
+      query: query as never,
+      sendEmail: sendEmail as never,
+      env: approverEnv,
+      logger: makeLogger(),
+    });
+
+    expect(sendEmail).not.toHaveBeenCalled();
+    expect(stampUpdates).toHaveLength(0);
+  });
+
+  it("does not re-ask an approver already told about this cycle", async () => {
+    const { query, stampUpdates } = makeQuery({
+      status: "corrective_action_submitted",
+      approvalRequestedAt: new Date("2026-07-28T12:00:00.000Z"),
+    });
+    const sendEmail = makeSend();
+
+    await handleScorecardCorrectiveActionOversightEmail(payload({ phase: "awaiting_approval" }), null, {
+      query: query as never,
+      sendEmail: sendEmail as never,
+      env: approverEnv,
+      logger: makeLogger(),
+    });
+
+    expect(sendEmail).not.toHaveBeenCalled();
+    expect(stampUpdates).toHaveLength(0);
+  });
+
+  it("says APPROVED, not merely documented, on the completion notice", async () => {
+    // Under the gate the card reaches this state only on the approver's acceptance. "Complete. Every flagged
+    // item has been documented" describes the PRE-gate behaviour and tells oversight the wrong thing about
+    // what actually happened — documented is not accepted.
+    const { query } = makeQuery({ status: "corrective_action_closed" });
+    const sendEmail = makeSend();
+
+    await handleScorecardCorrectiveActionOversightEmail(payload({ phase: "closed" }), null, {
+      query: query as never,
+      sendEmail: sendEmail as never,
+      getPdf: (async () => Buffer.from("%PDF-1.4")) as never,
+      env,
+      logger: makeLogger(),
+    });
+
+    const [, subject, html] = sendEmail.mock.calls[0] as unknown as [string[], string, string];
+    expect(subject).toMatch(/approved/i);
+    expect(html).toMatch(/has been <strong>approved<\/strong>/i);
+    expect(html).not.toMatch(/Every flagged item has been documented\./i);
+  });
+
+  it("REGRESSION: renders every post-0202 item state, not a value the schema no longer has", async () => {
+    // The renderer compared status against "resolved", which migration 0202 RENAMED to "submitted". Nothing
+    // errored — the comparison simply never matched, so every item printed as "Open" with no responder, no
+    // comment and no photo count. That strips the approval notice of exactly what the approver needs to
+    // decide, and it is invisible in review because the code and the old fixture agreed on a dead string.
+    const states = [
+      { status: "submitted", expect: "Awaiting approval" },
+      { status: "approved", expect: "Approved" },
+      { status: "rejected", expect: "Sent back" },
+      { status: "open", expect: "Open" },
+    ];
+
+    for (const state of states) {
+      const { query } = makeQuery({
+        status: "corrective_action_submitted",
+        items: [{ ...ITEMS[0], status: state.status, item_label: `Item ${state.status}` }],
+      });
+      const sendEmail = makeSend();
+
+      await handleScorecardCorrectiveActionOversightEmail(payload({ phase: "awaiting_approval" }), null, {
+        query: query as never,
+        sendEmail: sendEmail as never,
+        env: { ...env, QC_APPROVER_EMAILS: "james@trockgc.com" } as unknown as NodeJS.ProcessEnv,
+        logger: makeLogger(),
+      });
+
+      const [, , html, options] = sendEmail.mock.calls[0] as unknown as [
+        string[],
+        string,
+        string,
+        { text: string },
+      ];
+      expect(html).toContain(state.expect);
+      expect(options.text).toContain(state.expect);
+    }
+  });
+
+  it("shows WHO answered and what they said on an answered item, which is the point of the notice", async () => {
+    const { query } = makeQuery({
+      status: "corrective_action_submitted",
+      items: [{ ...ITEMS[0], status: "submitted" }],
+    });
+    const sendEmail = makeSend();
+
+    await handleScorecardCorrectiveActionOversightEmail(payload({ phase: "awaiting_approval" }), null, {
+      query: query as never,
+      sendEmail: sendEmail as never,
+      env: { ...env, QC_APPROVER_EMAILS: "james@trockgc.com" } as unknown as NodeJS.ProcessEnv,
+      logger: makeLogger(),
+    });
+
+    const [, , html] = sendEmail.mock.calls[0] as unknown as [string[], string, string];
+    expect(html).toContain("Sam Super");
+    expect(html).toContain("Re-poured and cured.");
+    expect(html).toContain("2 photos");
+  });
+
+  it("REGRESSION: attributes an APPROVED item to the approver, not the responder", async () => {
+    // The item row's responder columns describe the SUBMISSION. Using them for an approved item made the
+    // audit-facing notice read "Approved — <responder> · <their submission time>", i.e. as though the
+    // responder signed off their own work. The verdict and its actor live on the thread.
+    const { query } = makeQuery({
+      status: "corrective_action_closed",
+      items: [
+        {
+          ...ITEMS[0],
+          status: "approved",
+          responder_name: "Sam Super",
+          approved_by: "James Helms",
+          approved_at: new Date("2026-07-29T15:00:00.000Z"),
+        },
+      ],
+    });
+    const sendEmail = makeSend();
+
+    await handleScorecardCorrectiveActionOversightEmail(payload({ phase: "closed" }), null, {
+      query: query as never,
+      sendEmail: sendEmail as never,
+      getPdf: (async () => Buffer.from("%PDF-1.4")) as never,
+      env,
+      logger: makeLogger(),
+    });
+
+    const [, , html, options] = sendEmail.mock.calls[0] as unknown as [
+      string[],
+      string,
+      string,
+      { text: string },
+    ];
+    expect(html).toContain("James Helms");
+    expect(options.text).toContain("James Helms");
+    // The approval line carries the VERDICT time, not the submission time.
+    expect(html).toMatch(/Jul 29, 2026/);
+  });
+
+  it("REGRESSION: attaches the PDF to the awaiting-approval notice, not only the completion one", async () => {
+    // The approver is being asked to JUDGE documented work. A link with no record forces them into the CRM to
+    // see the very thing the email is about — and the enqueue path already delays specifically so the
+    // refreshed artifact exists by the time this job runs.
+    const { query } = makeQuery({ status: "corrective_action_submitted" });
+    const sendEmail = makeSend();
+
+    await handleScorecardCorrectiveActionOversightEmail(payload({ phase: "awaiting_approval" }), null, {
+      query: query as never,
+      sendEmail: sendEmail as never,
+      getPdf: (async () => Buffer.from("%PDF-1.4")) as never,
+      env: { ...env, QC_APPROVER_EMAILS: "james@trockgc.com" } as unknown as NodeJS.ProcessEnv,
+      logger: makeLogger(),
+    });
+
+    const [, , , options] = sendEmail.mock.calls[0] as unknown as [
+      string[],
+      string,
+      string,
+      { attachments?: unknown[] },
+    ];
+    expect(options.attachments).toHaveLength(1);
+  });
+
+  it("REGRESSION: an approval request superseded by a new REVIEW round does not send or stamp", async () => {
+    // A rejection rotates the review cycle but deliberately leaves the OVERSIGHT marker alone — the
+    // corrective action never reopened from oversight's point of view. So a retry of a crashed-before-stamp
+    // approval request passed every marker-scoped check, reused the delivered provider key, read Resend's
+    // idempotent answer as success, and stamped the NEW round — whose own job then skipped. The approver
+    // would never hear that the rework was ready.
+    const { query, stampUpdates } = makeQuery({
+      status: "corrective_action_submitted",
+      storedNonce: "11111111-1111-1111-1111-111111111111",
+    });
+    const sendEmail = makeSend();
+
+    await handleScorecardCorrectiveActionOversightEmail(
+      payload({ phase: "awaiting_approval", cycleNonce: "22222222-2222-2222-2222-222222222222" }),
+      null,
+      {
+        query: query as never,
+        sendEmail: sendEmail as never,
+        env: { ...env, QC_APPROVER_EMAILS: "james@trockgc.com" } as unknown as NodeJS.ProcessEnv,
+        logger: makeLogger(),
+      },
+    );
+
+    expect(sendEmail).not.toHaveBeenCalled();
+    expect(stampUpdates).toHaveLength(0);
+  });
+
+  it("REGRESSION: the approval-request STAMP is scoped to the review cycle, not only the marker", async () => {
+    // Scoping the SEND and leaving the STAMP on the marker narrows the window; it does not close it. The
+    // check above passes at read time, then the provider call runs — and a rejection plus fast resubmit
+    // during it rotates the review nonce while deliberately leaving the oversight marker alone. Without this
+    // clause the cycle-A worker's UPDATE still matches, stamping cycle B's approval_requested_at; cycle B's
+    // own job then sees a non-null stamp and skips, and the approver never learns the rework is ready.
+    // Nothing clears that stamp again, so the loss is permanent.
+    const { query, stampUpdates } = makeQuery({
+      status: "corrective_action_submitted",
+      storedNonce: REVIEW_CYCLE,
+    });
+    const sendEmail = makeSend();
+
+    await handleScorecardCorrectiveActionOversightEmail(
+      payload({ phase: "awaiting_approval", cycleNonce: REVIEW_CYCLE }),
+      null,
+      {
+        query: query as never,
+        sendEmail: sendEmail as never,
+        env: { ...env, QC_APPROVER_EMAILS: "james@trockgc.com" } as unknown as NodeJS.ProcessEnv,
+        logger: makeLogger(),
+      },
+    );
+
+    expect(sendEmail).toHaveBeenCalledOnce();
+    expect(stampUpdates).toHaveLength(1);
+    // BOTH scopes: the marker still guards a real reopen, the review nonce guards a rework round.
+    expect(stampUpdates[0].sql).toContain("corrective_action_oversight_cycle = $2::uuid");
+    expect(stampUpdates[0].sql).toContain("corrective_action_cycle_nonce = $3::uuid");
+    expect(stampUpdates[0].params).toEqual([SCORECARD, OVERSIGHT_CYCLE, REVIEW_CYCLE]);
+  });
+
+  it("a nonce-less approval request asserts the round is STILL nonce-less before stamping", async () => {
+    // Pre-0197 cards carried no nonce. Omitting the clause entirely would let such a job stamp on id alone
+    // after a rework minted one — the same permanent loss, reached from the legacy side.
+    const { query, stampUpdates } = makeQuery({ status: "corrective_action_submitted" });
+    const sendEmail = makeSend();
+
+    await handleScorecardCorrectiveActionOversightEmail(
+      payload({ phase: "awaiting_approval", cycleNonce: undefined }),
+      null,
+      {
+        query: query as never,
+        sendEmail: sendEmail as never,
+        env: { ...env, QC_APPROVER_EMAILS: "james@trockgc.com" } as unknown as NodeJS.ProcessEnv,
+        logger: makeLogger(),
+      },
+    );
+
+    expect(stampUpdates).toHaveLength(1);
+    expect(stampUpdates[0].sql).toContain("corrective_action_cycle_nonce IS NULL");
+  });
+
+  it("RETRIES rather than completing when no approver is configured", async () => {
+    // This REPLACES an earlier expectation of mine — "logs and returns; nobody can approve, so nobody is
+    // asked" — whose reasoning (it matches the API, which 403s everyone when the list is empty) held for the
+    // API and not for a queued job. The API re-evaluates on the next request; a completed job never runs
+    // again.
+    //
+    // QC_APPROVER_EMAILS unset in production is the difference between this feature working and being
+    // silently inert — and the empty-recipient branch was written for SUPPLEMENTARY watcher notices, where
+    // completing quietly is right. Applied to the approval request it is not: this is the only thing that
+    // tells an approver work is waiting, the card sits in corrective_action_submitted until someone acts,
+    // and setting the variable later re-enqueues nothing. Every card submitted in the meantime would stay
+    // unannounced with no failed job to explain it.
+    const { query, stampUpdates } = makeQuery({ status: "corrective_action_submitted" });
+    const sendEmail = makeSend();
+
+    await expect(
+      handleScorecardCorrectiveActionOversightEmail(
+        payload({ phase: "awaiting_approval" }),
+        null,
+        {
+          query: query as never,
+          sendEmail: sendEmail as never,
+          env: { ...env, QC_APPROVER_EMAILS: "" } as unknown as NodeJS.ProcessEnv,
+          logger: makeLogger(),
+        },
+      ),
+    ).rejects.toThrow(/QC_APPROVER_EMAILS/);
+
+    expect(sendEmail).not.toHaveBeenCalled();
+    // Crucially NOT stamped: a stamp would make the retry skip, which is the failure this throw prevents.
+    expect(stampUpdates).toHaveLength(0);
+  });
+
+  it("...but the supplementary watcher notices still complete quietly with no recipients", async () => {
+    // The opened/closed notices are additional to the responders' own email. Failing them would retry
+    // forever on a config that is legitimately empty.
+    const { query } = makeQuery();
+    const sendEmail = makeSend();
+
+    await expect(
+      handleScorecardCorrectiveActionOversightEmail(payload(), null, {
+        query: query as never,
+        sendEmail: sendEmail as never,
+        env: { ...env, FIELD_SCORECARD_EMAIL_RECIPIENTS: "" } as unknown as NodeJS.ProcessEnv,
+        logger: makeLogger(),
+      }),
+    ).resolves.toBeUndefined();
+    expect(sendEmail).not.toHaveBeenCalled();
+  });
+
+  it("still sends an approval request whose review cycle is current", async () => {
+    const { query } = makeQuery({
+      status: "corrective_action_submitted",
+      storedNonce: "22222222-2222-2222-2222-222222222222",
+    });
+    const sendEmail = makeSend();
+
+    await handleScorecardCorrectiveActionOversightEmail(
+      payload({ phase: "awaiting_approval", cycleNonce: "22222222-2222-2222-2222-222222222222" }),
+      null,
+      {
+        query: query as never,
+        sendEmail: sendEmail as never,
+        env: { ...env, QC_APPROVER_EMAILS: "james@trockgc.com" } as unknown as NodeJS.ProcessEnv,
+        logger: makeLogger(),
+      },
+    );
+
+    expect(sendEmail).toHaveBeenCalledTimes(1);
   });
 });

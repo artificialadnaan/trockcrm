@@ -355,18 +355,34 @@ describe("corrective-action section", () => {
     expect(data.correctiveActions.map((c) => c.itemRef)).toEqual(["2", "1"]);
   });
 
-  it("summarises partial and complete progress", () => {
+  it("summarises progress by APPROVED, not merely answered", () => {
+    // Under the approval gate a submitted item is not finished work. Counting it as resolved would print
+    // "All items resolved" over a card still sitting in the approver's queue — the precise claim the gate
+    // exists to deny.
+    const awaiting = buildScorecardPdfData({
+      ...base,
+      correctiveActions: [ca({ itemRef: "1", status: "submitted" }), ca({ itemRef: "2" })],
+    });
+    expect(awaiting.correctiveActionSummary).toBe("0 of 2 approved  ·  1 awaiting approval");
+
     const partial = buildScorecardPdfData({
       ...base,
-      correctiveActions: [ca({ itemRef: "1", status: "resolved" }), ca({ itemRef: "2" })],
+      correctiveActions: [ca({ itemRef: "1", status: "approved" }), ca({ itemRef: "2" })],
     });
-    expect(partial.correctiveActionSummary).toBe("1 of 2 resolved");
+    expect(partial.correctiveActionSummary).toBe("1 of 2 approved");
 
     const complete = buildScorecardPdfData({
       ...base,
-      correctiveActions: [ca({ itemRef: "1", status: "resolved" })],
+      correctiveActions: [ca({ itemRef: "1", status: "approved" })],
     });
-    expect(complete.correctiveActionSummary).toBe("All items resolved");
+    expect(complete.correctiveActionSummary).toBe("All items approved");
+
+    // A rejected item is outstanding, so it must never read as complete.
+    const rejected = buildScorecardPdfData({
+      ...base,
+      correctiveActions: [ca({ itemRef: "1", status: "approved" }), ca({ itemRef: "2", status: "rejected" })],
+    });
+    expect(rejected.correctiveActionSummary).toBe("1 of 2 approved");
 
     expect(buildScorecardPdfData({ ...base }).correctiveActionSummary).toBeNull();
   });
@@ -500,7 +516,7 @@ describe("corrective-action page-break safety", () => {
         itemType: "action_item",
         itemRef: String(i),
         itemLabel: `Corrective item ${i}`,
-        status: "resolved",
+        status: "submitted",
         responderName: "Pat Manager",
         respondedAt: "2026-07-27T13:00:00.000Z",
         // ~500 chars: long enough to fill the bounded comment box.
@@ -518,14 +534,14 @@ describe("corrective-action page-break safety", () => {
     expect(yPositions.filter((y) => y < 48)).toEqual([]);
   });
 
-  it("never draws a response comment past the bottom margin for a mix of open and resolved items", async () => {
+  it("never draws a response comment past the bottom margin for a mix of open and answered items", async () => {
     const data = buildScorecardPdfData({
       ...base,
       correctiveActions: Array.from({ length: 20 }, (_, i) => ({
         itemType: "action_item",
         itemRef: String(i),
         itemLabel: `Item ${i}`,
-        status: i % 3 === 0 ? "open" : "resolved",
+        status: i % 3 === 0 ? "open" : "submitted",
         responderName: i % 3 === 0 ? null : "Pat Manager",
         respondedAt: i % 3 === 0 ? null : "2026-07-27T13:00:00.000Z",
         responseComment: i % 3 === 0 ? null : "Corrected on site and verified. ".repeat(12),
@@ -555,7 +571,7 @@ describe("corrective-action page-break safety", () => {
         itemType: "action_item",
         itemRef: String(i),
         itemLabel: `${i}. ${longLabel}`,
-        status: "resolved",
+        status: "submitted",
         responderName: "Pat Manager",
         respondedAt: "2026-07-27T13:00:00.000Z",
         responseComment: "Corrected on site and verified with the safety lead. ".repeat(4),
@@ -637,7 +653,7 @@ describe("corrective-action page-break safety", () => {
           itemType: "action_item",
           itemRef: "0",
           itemLabel: "Re-torque the anchors",
-          status: "resolved",
+          status: "approved",
           responderName: "Pat Manager",
           respondedAt: "2026-07-27T13:00:00.000Z",
           responseComment: "Done.",
@@ -652,6 +668,136 @@ describe("corrective-action page-break safety", () => {
     expect(text).toContain("Re-torque the anchors (continued)");
   });
 
+  it("renders the whole back-and-forth, not just the final outcome", async () => {
+    // The point of the thread. The item row holds only the LATEST attempt, so a reject-then-resubmit
+    // overwrites it; without the events the record could show the approval but never what was sent back.
+    const data = buildScorecardPdfData({
+      ...base,
+      correctiveActions: [
+        {
+          itemType: "action_item",
+          itemRef: "0",
+          itemLabel: "Re-torque the anchors",
+          status: "approved",
+          responderName: "Pat Manager",
+          respondedAt: "2026-07-27T13:00:00.000Z",
+          responseComment: "Re-torqued to spec.",
+          photos: [],
+          events: [
+            { eventType: "submitted", actorName: "Pat Manager", createdAt: "2026-07-27T13:00:00.000Z", comment: "Tightened.", photos: [] },
+            { eventType: "rejected", actorName: "James Helms", createdAt: "2026-07-27T15:00:00.000Z", comment: "Torque values not documented.", photos: [] },
+            { eventType: "submitted", actorName: "Pat Manager", createdAt: "2026-07-27T17:00:00.000Z", comment: "Re-torqued to spec, values logged.", photos: [] },
+            { eventType: "approved", actorName: "James Helms", createdAt: "2026-07-27T18:00:00.000Z", comment: null, photos: [] },
+          ],
+        },
+      ],
+    });
+
+    const pdf = await renderFieldScorecardPdf(data);
+    const text = renderedTextFromPdf(pdf);
+
+    // Assert against the DRAWN text, not the builder passthrough. Checking `data.events` proves only that
+    // the mapper copied its input, and `%PDF-` proves only that PDFKit produced a file — both stay green if
+    // the renderer never draws a single event. The whole claim of this test is that the reader of the
+    // finished document can see what was sent back, so the finished document is what it has to read.
+    expect(text).toContain("Rejected by James Helms");
+    expect(text).toContain("Torque values not documented.");
+    // ...and both attempts, in order, around it — the first is what the item row itself no longer holds.
+    expect(text).toContain("Tightened.");
+    expect(text).toContain("Re-torqued to spec, values logged.");
+    expect(text).toContain("Approved by James Helms");
+    expect(text.indexOf("Tightened.")).toBeLessThan(text.indexOf("Torque values not documented."));
+    expect(text.indexOf("Torque values not documented.")).toBeLessThan(
+      text.indexOf("Re-torqued to spec, values logged."),
+    );
+  });
+
+  it("spends the photo budget across THREAD entries, and never draws the aggregate twice", () => {
+    // Photos hang off the attempt that filed them. Counting the item-level aggregate as well would both
+    // double-render every photo and exhaust the cap at half the real content.
+    const photos = (n: number) => Array.from({ length: n }, (_, i) => ({ caption: `p${i}`, image: null }));
+    const data = buildScorecardPdfData({
+      ...base,
+      correctiveActions: [
+        {
+          itemType: "action_item",
+          itemRef: "0",
+          itemLabel: "Item",
+          status: "approved",
+          responderName: "Pat",
+          respondedAt: "2026-07-27T13:00:00.000Z",
+          responseComment: "done",
+          // The aggregate the loader also carries — must NOT be drawn on top of the per-event sets.
+          photos: photos(6),
+          events: [
+            { eventType: "submitted", actorName: "Pat", createdAt: "2026-07-27T13:00:00.000Z", comment: "a", photos: photos(2) },
+            { eventType: "submitted", actorName: "Pat", createdAt: "2026-07-27T17:00:00.000Z", comment: "b", photos: photos(4) },
+          ],
+        },
+      ],
+    });
+
+    expect(data.correctiveActions[0].photos).toEqual([]);
+    expect(data.correctiveActions[0].events?.map((e) => e.photos.length)).toEqual([2, 4]);
+    expect(data.omittedCorrectiveActionPhotoCount).toBe(0);
+  });
+
+  it("caps thread photos across the WHOLE report, reporting the overflow rather than dropping it", () => {
+    const photos = (n: number) => Array.from({ length: n }, (_, i) => ({ caption: `p${i}`, image: null }));
+    const data = buildScorecardPdfData({
+      ...base,
+      correctiveActions: Array.from({ length: 3 }, (_, i) => ({
+        itemType: "action_item",
+        itemRef: String(i),
+        itemLabel: `Item ${i}`,
+        status: "approved",
+        responderName: "Pat",
+        respondedAt: "2026-07-27T13:00:00.000Z",
+        responseComment: "done",
+        photos: [],
+        events: [
+          { eventType: "submitted", actorName: "Pat", createdAt: "2026-07-27T13:00:00.000Z", comment: "a", photos: photos(10) },
+        ],
+      })),
+    });
+
+    const kept = data.correctiveActions.flatMap((item) => item.events ?? []).reduce((n, e) => n + e.photos.length, 0);
+    expect(kept).toBe(MAX_CORRECTIVE_ACTION_PHOTOS);
+    expect(data.omittedCorrectiveActionPhotoCount).toBe(30 - MAX_CORRECTIVE_ACTION_PHOTOS);
+  });
+
+  it("never draws a THREAD comment past the bottom margin", async () => {
+    // Same PDFKit trap as the single-comment case: a bounded (explicit-height) text run disables
+    // auto-pagination, so an under-reserved guard sends the comment through the bottom margin and the
+    // trailing hairline gets stroked outside the media box and silently dropped. A long back-and-forth
+    // exercises it far harder than one response ever did.
+    const data = buildScorecardPdfData({
+      ...base,
+      correctiveActions: Array.from({ length: 6 }, (_, i) => ({
+        itemType: "action_item",
+        itemRef: String(i),
+        itemLabel: `Corrective item ${i}`,
+        status: "approved",
+        responderName: "Pat Manager",
+        respondedAt: "2026-07-27T13:00:00.000Z",
+        responseComment: "done",
+        photos: [],
+        events: Array.from({ length: 4 }, (_, j) => ({
+          eventType: j % 2 === 0 ? "submitted" : "rejected",
+          actorName: j % 2 === 0 ? "Pat Manager" : "James Helms",
+          createdAt: "2026-07-27T13:00:00.000Z",
+          comment: "Re-poured and cured, then re-inspected with the safety lead. ".repeat(9),
+          photos: [],
+        })),
+      })),
+    });
+
+    const pdf = await renderFieldScorecardPdf(data);
+    const yPositions = textYPositions(pdf);
+    expect(yPositions.length).toBeGreaterThan(20);
+    expect(yPositions.filter((y) => y < 48)).toEqual([]);
+  });
+
   it("adds an upstream pre-cap omission to the render-side count", async () => {
     // The artifact job caps response photos BEFORE downloading bytes (so a photo beyond the cap cannot 503
     // the whole download). Its omitted count must reach the "available in the CRM" note, or the note would
@@ -664,7 +810,7 @@ describe("corrective-action page-break safety", () => {
           itemType: "action_item",
           itemRef: "0",
           itemLabel: "Item",
-          status: "resolved",
+          status: "submitted",
           responderName: "Pat",
           respondedAt: "2026-07-27T13:00:00.000Z",
           responseComment: "done",

@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ClipboardCheck, Download, ChevronDown, ChevronRight, AlertTriangle, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -18,6 +18,7 @@ import {
   typedSignatureFallback,
 } from "@trock-crm/shared/types";
 import { isApiError } from "@/lib/api";
+import { approveCorrectiveActions, rejectCorrectiveAction } from "@/hooks/use-corrective-actions";
 import { useDealScorecards, fetchDealScorecardDetail, downloadDealScorecardPdf } from "@/hooks/use-deal-scorecards";
 
 const RATING_BADGE: Record<ScorecardRating, string> = {
@@ -26,26 +27,54 @@ const RATING_BADGE: Record<ScorecardRating, string> = {
   needs_improvement: "bg-amber-100 text-amber-800 border-amber-200",
   corrective_action: "bg-red-100 text-red-800 border-red-200",
 };
-// Corrective-action lifecycle badge (spec §9): open = a response is required, closed = every flagged item
-// resolved. A plain `submitted` card has no badge (returns null).
+// Corrective-action lifecycle badge (spec §9). Three states now: a response is required, the response is
+// with the approver, or the approver accepted it. A plain `submitted` scorecard has no badge (returns null).
 export function correctiveActionStatusBadge(
   status: string | undefined,
 ): { label: string; className: string } | null {
   if (status === "corrective_action_open") {
     return { label: "Corrective Action Open", className: "bg-red-100 text-red-800 border-red-200" };
   }
+  if (status === "corrective_action_submitted") {
+    // Amber, deliberately not green: work has been documented but nobody has accepted it yet.
+    return { label: "Awaiting Approval", className: "bg-amber-100 text-amber-800 border-amber-200" };
+  }
   if (status === "corrective_action_closed") {
-    return { label: "Corrective Action Closed", className: "bg-green-100 text-green-800 border-green-200" };
+    // Retains its stored name; it now means APPROVED, which is what the label says.
+    return { label: "Corrective Action Approved", className: "bg-green-100 text-green-800 border-green-200" };
   }
   return null;
 }
 
+// Date AND time: these are timestamps, and several actions answered on the same day are otherwise
+// indistinguishable in what is meant to be the record of who did what when. Matches the PDF and the emails.
 function formatRespondedAt(iso: string | null): string | null {
   if (!iso) return null;
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
-  return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+  return d.toLocaleString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
 }
+
+/** Per-item state presentation, matching the PDF record's vocabulary and colours. */
+const ITEM_STATUS_BADGE: Record<string, { label: string; className: string }> = {
+  open: { label: "Open", className: "bg-red-100 text-red-800 border-red-200" },
+  submitted: { label: "Awaiting approval", className: "bg-amber-100 text-amber-800 border-amber-200" },
+  approved: { label: "Approved", className: "bg-green-100 text-green-800 border-green-200" },
+  // Red like `open`, because it IS outstanding — the approver sent it back and the responder owes a fix.
+  rejected: { label: "Rejected — needs rework", className: "bg-red-100 text-red-800 border-red-200" },
+};
+
+const EVENT_PRESENTATION: Record<string, { verb: string; className: string }> = {
+  submitted: { verb: "Submitted", className: "text-gray-700" },
+  approved: { verb: "Approved", className: "text-green-700" },
+  rejected: { verb: "Rejected", className: "text-red-700" },
+};
 
 // Match each ORIGINAL flagged item (a critical-deficiency key or an action-item text) to its seeded
 // corrective-action row, so the inline response threads directly beneath the item (spec §9). Mirrors how
@@ -133,13 +162,21 @@ export function DealScorecardsTab({ dealId }: { dealId: string }) {
         </h3>
       </div>
       {scorecards.map((sc) => (
-        <ScorecardRow key={sc.id} dealId={dealId} summary={sc} />
+        <ScorecardRow key={sc.id} dealId={dealId} summary={sc} onCardChanged={refetch} />
       ))}
     </div>
   );
 }
 
-function ScorecardRow({ dealId, summary }: { dealId: string; summary: FieldScorecardSummary }) {
+function ScorecardRow({
+  dealId,
+  summary,
+  onCardChanged,
+}: {
+  dealId: string;
+  summary: FieldScorecardSummary;
+  onCardChanged?: () => void;
+}) {
   const [expanded, setExpanded] = useState(false);
   const [detail, setDetail] = useState<FieldScorecardDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -267,7 +304,20 @@ function ScorecardRow({ dealId, summary }: { dealId: string; summary: FieldScore
           ) : isLeadership ? (
             <LeadershipDetailView detail={detail} />
           ) : (
-            <ScorecardDetailView detail={detail} />
+            <ScorecardDetailView
+              detail={detail}
+              dealId={dealId}
+              // Re-read after an approval so the badges, the thread and the card status all move together.
+              // The server is the source of truth for every one of them; optimistically patching the local
+              // copy would risk showing a state the server did not actually reach.
+              onApprovalChange={() => {
+                // BOTH: the expanded thread AND the row header's lifecycle badge, which renders from the
+                // list's summary. Refreshing only the detail left the row still reading "Awaiting Approval"
+                // beside a thread showing the item approved — the same card contradicting itself on screen.
+                void fetchDealScorecardDetail(dealId, summary.id).then(setDetail).catch(() => {});
+                onCardChanged?.();
+              }}
+            />
           )}
         </div>
       )}
@@ -382,7 +432,165 @@ export function LeadershipDetailView({ detail }: { detail: FieldScorecardDetail 
   );
 }
 
-export function ScorecardDetailView({ detail }: { detail: FieldScorecardDetail }) {
+/**
+ * Bulk approve, with the same busy + error treatment as the per-item controls.
+ *
+ * Discarding the rejected promise left a transient network failure or an authorization change completely
+ * invisible: nothing was approved, the UI did not move, and the only signal was the absence of a change —
+ * which reads as a slow request, not a failure.
+ */
+function ApproveAllButton({
+  onApproveAll,
+  label = "Approve all",
+}: {
+  onApproveAll: () => Promise<void>;
+  label?: string;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  return (
+    <div className="flex items-center justify-end gap-2">
+      {error && <span className="text-xs text-red-700">{error}</span>}
+      <button
+        type="button"
+        disabled={busy}
+        onClick={async () => {
+          setBusy(true);
+          setError(null);
+          try {
+            await onApproveAll();
+          } catch (err) {
+            setError(isApiError(err) ? err.message : "Could not approve. Please try again.");
+          } finally {
+            setBusy(false);
+          }
+        }}
+        className="rounded-md bg-green-700 px-3 py-1 text-xs font-medium text-white disabled:opacity-50"
+      >
+        {busy ? "Approving…" : label}
+      </button>
+    </div>
+  );
+}
+
+/** The submission each awaiting item is showing, so an approval refers to the work actually reviewed. */
+function reviewedAttemptsOf(items: CorrectiveActionItemView[] | undefined): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const item of items ?? []) {
+    if (item.status !== "submitted") continue;
+    const latest = [...(item.events ?? [])].reverse().find((e) => e.eventType === "submitted");
+    if (latest) out[item.id] = latest.id;
+  }
+  return out;
+}
+
+export function ScorecardDetailView({
+  detail,
+  dealId,
+  onApprovalChange,
+}: {
+  detail: FieldScorecardDetail;
+  dealId?: string;
+  onApprovalChange?: () => void;
+}) {
+  // The server decides; this only chooses whether to RENDER the controls.
+  const canApprove = detail.canApproveCorrectiveActions === true;
+  // The card generation the reviewer is acting on. Starts as the one this render came from; each verdict
+  // returns the generation it produced, because every verdict advances it — without carrying that forward,
+  // approving a second item before the refetch settles would 409 against the reviewer's OWN first click.
+  const reviewedGeneration = useRef<string | null | undefined>(detail.updatedAt);
+  useEffect(() => {
+    reviewedGeneration.current = detail.updatedAt;
+  }, [detail.updatedAt]);
+  // A supersession 409 has to REFRESH, not just complain.
+  //
+  // The guards tell the reviewer to refresh, and there was nothing that did: collapsing and reopening the
+  // row re-fetches only when `detail` is null, so the reviewer stayed on the same stale generation and every
+  // retry returned the same 409 until they reloaded the page. A guard whose only escape hatch does not work
+  // is worse than no guard — it reads as the feature being broken. Refetching here puts them on the current
+  // version (and the effect above rebinds the generation), so the retry is the natural next click. The error
+  // still surfaces, because the reviewer must know their verdict did NOT land and must be re-formed against
+  // what they can now see.
+  const refreshOnSupersession = async <T,>(verdict: () => Promise<T>): Promise<T> => {
+    try {
+      return await verdict();
+    } catch (err) {
+      if (
+        isApiError(err) &&
+        err.status === 409 &&
+        (err.code === "CORRECTIVE_ACTION_CARD_SUPERSEDED" ||
+          err.code === "CORRECTIVE_ACTION_ATTEMPT_SUPERSEDED")
+      ) {
+        onApprovalChange?.();
+      }
+      throw err;
+    }
+  };
+  const approve = dealId
+    ? async (itemId: string) => {
+        const outcome = await refreshOnSupersession(() =>
+          approveCorrectiveActions(
+          dealId,
+          detail.id,
+            [itemId],
+            reviewedAttemptsOf(correctiveActions),
+            reviewedGeneration.current,
+          ),
+        );
+        reviewedGeneration.current = outcome.generation ?? reviewedGeneration.current;
+        onApprovalChange?.();
+      }
+    : undefined;
+  const reject = dealId
+    ? async (itemId: string, comment: string) => {
+        // Same binding as approve: the reason has to land on the attempt that earned it. Without this a
+        // rejecter looking at a stale page sends back work they never read, and restarts the responder's
+        // cycle for a fault the responder may already have corrected.
+        const outcome = await refreshOnSupersession(() =>
+          rejectCorrectiveAction(
+            dealId,
+            detail.id,
+            itemId,
+            comment,
+            reviewedAttemptsOf(correctiveActions)[itemId],
+            reviewedGeneration.current,
+          ),
+        );
+        reviewedGeneration.current = outcome.generation ?? reviewedGeneration.current;
+        onApprovalChange?.();
+      }
+    : undefined;
+  const approveAll = dealId
+    ? async () => {
+        // The IDs THE APPROVER IS LOOKING AT, not "everything awaiting approval at execution time".
+        //
+        // My first version omitted itemIds with a comment claiming it avoided skipping a sibling. It does the
+        // opposite: a responder can submit another item between this page rendering and the click, and the
+        // server would approve that unseen response too — potentially closing the card and sending the
+        // approved notice for work nobody reviewed. Approving something the approver never saw is a far worse
+        // failure than leaving a late arrival for the next pass, which is all this now does.
+        const reviewed = (correctiveActions ?? [])
+          .filter((i) => i.status === "submitted")
+          .map((i) => i.id);
+        // An empty list means the approver is accepting a card that reached "everything approved" by an
+        // edit deleting the unapproved item, not that there is nothing to do — returning early, as this did,
+        // left such a card with no way out. Send it as OMITTED rather than `[]`, which the route rejects:
+        // absent means "everything awaiting approval", which here is correctly nothing. The server approves
+        // no item, recomputes, and closes the card on the strength of the approver's acceptance.
+        const outcome = await refreshOnSupersession(() =>
+          approveCorrectiveActions(
+            dealId,
+            detail.id,
+            reviewed.length > 0 ? reviewed : undefined,
+            reviewedAttemptsOf(correctiveActions),
+            reviewedGeneration.current,
+          ),
+        );
+        reviewedGeneration.current = outcome.generation ?? reviewedGeneration.current;
+        onApprovalChange?.();
+      }
+    : undefined;
   const isV2 = detail.formVersion === 2;
   const sectionTitle = isV2 ? V2_SECTION_TITLE : SECTION_TITLE;
   const deficiencyLabel = isV2 ? V2_DEFICIENCY_LABEL : DEFICIENCY_LABEL;
@@ -393,7 +601,9 @@ export function ScorecardDetailView({ detail }: { detail: FieldScorecardDetail }
   const { deficiencyByKey, actionByLabel } = buildCorrectiveActionLookup(correctiveActions);
   // Per-label occurrence counter so duplicate action labels each consume a distinct seeded row (multiset).
   const actionLabelSeen = new Map<string, number>();
-  const resolvedCount = (correctiveActions ?? []).filter((i) => i.status === "resolved").length;
+  // APPROVED, not merely answered — and "resolved" is a value migration 0202 renamed away, so this counter
+  // read zero on every card until now.
+  const resolvedCount = (correctiveActions ?? []).filter((i) => i.status === "approved").length;
   const totalCount = correctiveActions?.length ?? 0;
   const allResolved =
     detail.status === "corrective_action_closed" || (totalCount > 0 && resolvedCount === totalCount);
@@ -416,12 +626,55 @@ export function ScorecardDetailView({ detail }: { detail: FieldScorecardDetail }
         </div>
       </div>
 
+      {approveAll && shouldShowApproveAll(correctiveActions ?? [], canApprove, detail.status) && (
+        <ApproveAllButton onApproveAll={approveAll} label={approveAllLabel(correctiveActions ?? [])} />
+      )}
+
       {hasCorrectiveActions && totalCount > 0 && (
         <div className="flex items-center justify-between">
           <h4 className="text-xs font-semibold uppercase tracking-wide text-gray-500">Corrective Actions</h4>
           <span className={`text-xs font-medium ${allResolved ? "text-green-700" : "text-red-600"}`}>
-            {resolvedCount} / {totalCount} resolved
+            {resolvedCount} / {totalCount} approved
           </span>
+        </div>
+      )}
+
+      {(detail.removedItemEvents?.length ?? 0) > 0 && (
+        <div>
+          <h4 className="mb-1 text-xs font-semibold uppercase tracking-wide text-gray-500">
+            Removed by a later edit
+          </h4>
+          <p className="mb-2 text-xs italic text-gray-500">
+            These flagged items were removed when the scorecard was edited. Their history is kept here.
+          </p>
+          <ol className="space-y-3 rounded-md border border-gray-200 bg-white p-2.5">
+            {detail.removedItemEvents!.map((event) => {
+              const presentation = EVENT_PRESENTATION[event.eventType] ?? EVENT_PRESENTATION.submitted;
+              return (
+                <li key={event.id} className="border-l-2 border-gray-200 pl-3">
+                  {/* The item's own label — these have no item block above them to sit under. */}
+                  {event.itemLabel && (
+                    <p className="text-sm font-semibold text-gray-900">{event.itemLabel}</p>
+                  )}
+                  <div className="flex flex-wrap items-center gap-x-2 text-xs text-gray-500">
+                    <span className={`font-semibold ${presentation.className}`}>{presentation.verb}</span>
+                    <span className="font-medium text-gray-700">
+                      {event.actorName ?? event.actorEmail ?? "Unknown"}
+                    </span>
+                    {formatRespondedAt(event.createdAt) && (
+                      <span>· {formatRespondedAt(event.createdAt)}</span>
+                    )}
+                  </div>
+                  {event.comment && (
+                    <p className="mt-1 whitespace-pre-wrap text-sm text-gray-900">{event.comment}</p>
+                  )}
+                  {/* Their evidence survives the item too — showing the words and hiding the photos would
+                      claim the history is preserved while withholding half of it. */}
+                  <CorrectiveActionPhotoGrid photos={event.photos} />
+                </li>
+              );
+            })}
+          </ol>
         </div>
       )}
 
@@ -435,7 +688,14 @@ export function ScorecardDetailView({ detail }: { detail: FieldScorecardDetail }
                 <li key={key}>
                   {deficiencyLabel.get(key) ?? key}
                   {detail.criticalDeficiencyNotes?.[key] ? <span className="ml-1 text-gray-500">— {detail.criticalDeficiencyNotes[key]}</span> : null}
-                  {ca && <CorrectiveActionResponse item={ca} />}
+                  {ca && (
+                    <CorrectiveActionResponse
+                      item={ca}
+                      canApprove={canApprove}
+                      onApprove={approve}
+                      onReject={reject}
+                    />
+                  )}
                 </li>
               );
             })}
@@ -459,7 +719,14 @@ export function ScorecardDetailView({ detail }: { detail: FieldScorecardDetail }
               return (
                 <li key={i}>
                   {a}
-                  {ca && <CorrectiveActionResponse item={ca} />}
+                  {ca && (
+                    <CorrectiveActionResponse
+                      item={ca}
+                      canApprove={canApprove}
+                      onApprove={approve}
+                      onReject={reject}
+                    />
+                  )}
                 </li>
               );
             })}
@@ -554,22 +821,209 @@ function SignatureBlock({ label, value }: { label: string; value: string | null 
 // critical deficiency) — an open/resolved pill, then responder + date + comment + response photos (spec §9).
 // A resolved item reads as the before/after; a still-open item shows an "Awaiting response" hint. Rendered
 // under each original list item by ScorecardDetailView, so the flagged label is never duplicated.
-export function CorrectiveActionResponse({ item }: { item: CorrectiveActionItemView }) {
+/**
+ * Whether to render Approve / Reject for one item.
+ *
+ * Only for an authorized approver, and only while the item is actually waiting on them. A control that
+ * always 403s trains people to ignore errors; one on an already-settled item invites a no-op that reads as
+ * a bug. This is UX only — the route's allowlist check is the guarantee.
+ */
+export function shouldShowApprovalControls(item: { status: string }, canApprove: boolean): boolean {
+  return canApprove && item.status === "submitted";
+}
+
+/** Approve-all earns its place only with more than one item waiting; otherwise it duplicates the per-item button. */
+export function shouldShowApproveAll(
+  items: Array<{ status: string }>,
+  canApprove: boolean,
+  cardStatus?: string,
+): boolean {
+  if (!canApprove) return false;
+  const awaiting = items.filter((i) => i.status === "submitted").length;
+  if (awaiting > 1) return true;
+  // A card can also sit in the approver's queue with NOTHING awaiting: an edit deleted its last unapproved
+  // item, so every survivor is approved but reaching that state was a deletion, not a verdict. The server
+  // refuses to call that closed, and per-item controls render on `submitted` items — of which there are none
+  // — so without this the card would sit in the queue with no control that acts on it, forever. This button
+  // is the approver accepting the card as it now stands, which is the only thing that can close it.
+  return awaiting === 0 && items.length > 0 && cardStatus === "corrective_action_submitted";
+}
+
+/** What the approve-all control is actually doing, which is not the same act in both cases. */
+export function approveAllLabel(items: Array<{ status: string }>): string {
+  return items.some((i) => i.status === "submitted") ? "Approve all" : "Accept edited card";
+}
+
+/** Telling the responder what to fix IS the rejection, so an empty comment is refused before the round trip. */
+export function isRejectionCommentValid(comment: string): boolean {
+  return comment.trim().length > 0;
+}
+
+/** Response photos as a thumbnail grid. Shared by the thread entries and the pre-thread fallback. */
+function CorrectiveActionPhotoGrid({ photos }: { photos: CorrectiveActionItemView["photos"] }) {
+  if (photos.length === 0) return null;
+  return (
+    <div className="mt-2 grid grid-cols-3 gap-2 sm:grid-cols-4">
+      {photos.map((p) =>
+        p.url ? (
+          <a key={p.id} href={p.url} target="_blank" rel="noopener noreferrer" className="group block">
+            <img
+              src={p.url}
+              alt={p.caption ?? "Corrective action photo"}
+              className="aspect-square w-full rounded-md object-cover ring-1 ring-gray-200 group-hover:ring-gray-400"
+            />
+            {/* Persisted caption shown visually beneath the thumbnail, mirroring evidence-photo captions
+                above (not just the img alt). */}
+            {p.caption && <p className="mt-0.5 truncate text-[11px] text-gray-500">{p.caption}</p>}
+          </a>
+        ) : (
+          <div key={p.id} className="flex aspect-square items-center justify-center rounded-md bg-gray-100 text-[11px] text-gray-400">
+            Unavailable
+          </div>
+        ),
+      )}
+    </div>
+  );
+}
+
+/**
+ * Approve / Reject for one item. Rendered only when shouldShowApprovalControls says so; the route's
+ * allowlist check remains the actual gate.
+ */
+function ApprovalControls({
+  item,
+  onApprove,
+  onReject,
+}: {
+  item: CorrectiveActionItemView;
+  onApprove: (itemId: string) => Promise<void>;
+  onReject: (itemId: string, comment: string) => Promise<void>;
+}) {
+  const [rejecting, setRejecting] = useState(false);
+  const [comment, setComment] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const run = async (action: () => Promise<void>) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await action();
+    } catch (err) {
+      setError(isApiError(err) ? err.message : "Something went wrong. Please try again.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (rejecting) {
+    return (
+      <div className="mt-2 rounded-md border border-red-200 bg-red-50 p-2">
+        <label className="block text-xs font-medium text-gray-700" htmlFor={`reject-${item.id}`}>
+          What still has to be fixed?
+        </label>
+        <textarea
+          id={`reject-${item.id}`}
+          value={comment}
+          onChange={(e) => setComment(e.target.value)}
+          rows={3}
+          className="mt-1 w-full rounded-md border border-gray-300 p-2 text-sm"
+          placeholder="The responder sees this, so say what is missing."
+        />
+        {error && <p className="mt-1 text-xs text-red-700">{error}</p>}
+        <div className="mt-2 flex gap-2">
+          <button
+            type="button"
+            disabled={busy || !isRejectionCommentValid(comment)}
+            onClick={() => run(async () => { await onReject(item.id, comment.trim()); })}
+            className="rounded-md bg-red-600 px-3 py-1 text-xs font-medium text-white disabled:opacity-50"
+          >
+            {busy ? "Sending back…" : "Send back"}
+          </button>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => { setRejecting(false); setComment(""); setError(null); }}
+            className="rounded-md border border-gray-300 px-3 py-1 text-xs font-medium text-gray-700"
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-2 flex items-center gap-2">
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => run(async () => { await onApprove(item.id); })}
+        className="rounded-md bg-green-700 px-3 py-1 text-xs font-medium text-white disabled:opacity-50"
+      >
+        {busy ? "Approving…" : "Approve"}
+      </button>
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => setRejecting(true)}
+        className="rounded-md border border-red-300 px-3 py-1 text-xs font-medium text-red-700"
+      >
+        Reject
+      </button>
+      {error && <span className="text-xs text-red-700">{error}</span>}
+    </div>
+  );
+}
+
+export function CorrectiveActionResponse({
+  item,
+  canApprove = false,
+  onApprove,
+  onReject,
+}: {
+  item: CorrectiveActionItemView;
+  canApprove?: boolean;
+  onApprove?: (itemId: string) => Promise<void>;
+  onReject?: (itemId: string, comment: string) => Promise<void>;
+}) {
+  const badge = ITEM_STATUS_BADGE[item.status] ?? ITEM_STATUS_BADGE.open;
+  const events = item.events ?? [];
+  // No thread but an answered item: a response filed before the event table existed, on a card the
+  // migration seed did not reach. Render the single stored response rather than an empty box.
+  const showsFallbackResponse = events.length === 0 && item.status !== "open";
   const respondedAt = formatRespondedAt(item.respondedAt);
-  const isResolved = item.status === "resolved";
+
   return (
     <div className="mt-1.5 rounded-md border border-gray-200 bg-white p-2.5">
-      <Badge
-        variant="outline"
-        className={
-          isResolved
-            ? "bg-green-100 text-green-800 border-green-200"
-            : "bg-amber-100 text-amber-800 border-amber-200"
-        }
-      >
-        {isResolved ? "Resolved" : "Open"}
+      <Badge variant="outline" className={badge.className}>
+        {badge.label}
       </Badge>
-      {isResolved ? (
+
+      {events.length > 0 && (
+        <ol className="mt-2 space-y-3">
+          {events.map((event) => {
+            const presentation = EVENT_PRESENTATION[event.eventType] ?? EVENT_PRESENTATION.submitted;
+            const who = event.actorName ?? event.actorEmail ?? "Unknown";
+            const when = formatRespondedAt(event.createdAt);
+            return (
+              <li key={event.id} className="border-l-2 border-gray-200 pl-3">
+                <div className="flex flex-wrap items-center gap-x-2 text-xs text-gray-500">
+                  <span className={`font-semibold ${presentation.className}`}>{presentation.verb}</span>
+                  <span className="font-medium text-gray-700">{who}</span>
+                  {when && <span>· {when}</span>}
+                </div>
+                {event.comment && (
+                  <p className="mt-1 whitespace-pre-wrap text-sm text-gray-900">{event.comment}</p>
+                )}
+                <CorrectiveActionPhotoGrid photos={event.photos} />
+              </li>
+            );
+          })}
+        </ol>
+      )}
+
+      {showsFallbackResponse && (
         <div className="mt-2 border-l-2 border-gray-200 pl-3">
           <div className="flex items-center gap-2 text-xs text-gray-500">
             <span className="font-medium text-gray-700">
@@ -580,31 +1034,16 @@ export function CorrectiveActionResponse({ item }: { item: CorrectiveActionItemV
           {item.responseComment && (
             <p className="mt-1 whitespace-pre-wrap text-sm text-gray-900">{item.responseComment}</p>
           )}
-          {item.photos.length > 0 && (
-            <div className="mt-2 grid grid-cols-3 gap-2 sm:grid-cols-4">
-              {item.photos.map((p) =>
-                p.url ? (
-                  <a key={p.id} href={p.url} target="_blank" rel="noopener noreferrer" className="group block">
-                    <img
-                      src={p.url}
-                      alt={p.caption ?? "Corrective action photo"}
-                      className="aspect-square w-full rounded-md object-cover ring-1 ring-gray-200 group-hover:ring-gray-400"
-                    />
-                    {/* Persisted caption shown visually beneath the thumbnail, mirroring evidence-photo
-                        captions above (not just the img alt). */}
-                    {p.caption && <p className="mt-0.5 truncate text-[11px] text-gray-500">{p.caption}</p>}
-                  </a>
-                ) : (
-                  <div key={p.id} className="flex aspect-square items-center justify-center rounded-md bg-gray-100 text-[11px] text-gray-400">
-                    Unavailable
-                  </div>
-                ),
-              )}
-            </div>
-          )}
+          <CorrectiveActionPhotoGrid photos={item.photos} />
         </div>
-      ) : (
+      )}
+
+      {events.length === 0 && !showsFallbackResponse && (
         <p className="mt-1 text-xs italic text-gray-400">Awaiting corrective-action response.</p>
+      )}
+
+      {onApprove && onReject && shouldShowApprovalControls(item, canApprove) && (
+        <ApprovalControls item={item} onApprove={onApprove} onReject={onReject} />
       )}
     </div>
   );

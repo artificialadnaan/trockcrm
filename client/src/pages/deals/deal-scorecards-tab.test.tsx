@@ -1,13 +1,24 @@
 // @vitest-environment jsdom
 import { act } from "react";
 import { createRoot } from "react-dom/client";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { CorrectiveActionItemView, FieldScorecardDetail } from "@trock-crm/shared/types";
 import { isRenderableSignatureDataUrl, typedSignatureFallback } from "@trock-crm/shared/types";
+const approveMock = vi.fn();
+const rejectMock = vi.fn();
+vi.mock("@/hooks/use-corrective-actions", () => ({
+  approveCorrectiveActions: (...args: unknown[]) => approveMock(...args),
+  rejectCorrectiveAction: (...args: unknown[]) => rejectMock(...args),
+}));
+
+import { ApiError } from "@/lib/api";
 import {
   buildCorrectiveActionLookup,
   correctiveActionStatusBadge,
+  isRejectionCommentValid,
   ScorecardDetailView,
+  shouldShowApprovalControls,
+  shouldShowApproveAll,
 } from "./deal-scorecards-tab";
 
 function flush() {
@@ -18,8 +29,19 @@ describe("correctiveActionStatusBadge", () => {
   it("returns an Open badge for corrective_action_open", () => {
     expect(correctiveActionStatusBadge("corrective_action_open")?.label).toBe("Corrective Action Open");
   });
-  it("returns a Closed badge for corrective_action_closed", () => {
-    expect(correctiveActionStatusBadge("corrective_action_closed")?.label).toBe("Corrective Action Closed");
+  it("returns an APPROVED badge for corrective_action_closed", () => {
+    // The stored value keeps its name (renaming it would churn the QC dashboard, reports, and every
+    // fixture), but under the approval gate it now means the approver accepted the fix — so the LABEL says
+    // approved. "Closed" would imply the card finished the moment the responder answered, which is exactly
+    // the claim the gate exists to deny.
+    expect(correctiveActionStatusBadge("corrective_action_closed")?.label).toBe("Corrective Action Approved");
+  });
+
+  it("returns an Awaiting Approval badge for the middle state", () => {
+    const badge = correctiveActionStatusBadge("corrective_action_submitted");
+    expect(badge?.label).toBe("Awaiting Approval");
+    // Amber, not green: work has been documented but nobody has accepted it yet.
+    expect(badge?.className).toContain("amber");
   });
   it("returns null for a plain submitted card", () => {
     expect(correctiveActionStatusBadge("submitted")).toBeNull();
@@ -107,7 +129,7 @@ describe("ScorecardDetailView corrective-action threading", () => {
           itemType: "critical_deficiency",
           itemRef: "failed_inspection",
           itemLabel: "Failed inspection",
-          status: "resolved",
+          status: "approved",
           responseComment: "Re-inspected and passed",
           responderName: "Dana Director",
           respondedAt: "2026-07-02T12:00:00Z",
@@ -118,7 +140,7 @@ describe("ScorecardDetailView corrective-action threading", () => {
           itemType: "action_item",
           itemRef: "0",
           itemLabel: "Re-pour slab",
-          status: "resolved",
+          status: "approved",
           responseComment: "Slab re-poured and cured",
           responderName: "Sam Super",
           respondedAt: "2026-07-03T12:00:00Z",
@@ -133,8 +155,8 @@ describe("ScorecardDetailView corrective-action threading", () => {
     expect(html).toContain("Dana Director");
     expect(html).toContain("Slab re-poured and cured");
     expect(html).toContain("Sam Super");
-    // The header summary reflects 2 / 2 resolved (closed reads).
-    expect(html).toContain("2 / 2 resolved");
+    // The header summary counts APPROVED, not merely answered — the gate exists to distinguish them.
+    expect(html).toContain("2 / 2 approved");
 
     // No separate duplicated "Corrective Actions" item list: each flagged label appears exactly once.
     expect(html.split("Re-pour slab").length - 1).toBe(1);
@@ -151,7 +173,7 @@ describe("ScorecardDetailView corrective-action threading", () => {
           itemType: "action_item",
           itemRef: "0",
           itemLabel: "Re-pour slab",
-          status: "resolved",
+          status: "approved",
           responseComment: "done",
           responderName: "Sam Super",
           respondedAt: "2026-07-03T12:00:00Z",
@@ -181,7 +203,7 @@ describe("ScorecardDetailView corrective-action threading", () => {
     const html = await renderDetail(detail);
     expect(html).toContain("Failed inspection");
     expect(html).toContain("Awaiting corrective-action response");
-    expect(html).toContain("0 / 1 resolved");
+    expect(html).toContain("0 / 1 approved");
   });
 
   it("threads duplicate action labels under distinct occurrences", async () => {
@@ -194,7 +216,7 @@ describe("ScorecardDetailView corrective-action threading", () => {
           itemType: "action_item",
           itemRef: "0",
           itemLabel: "Fix rebar",
-          status: "resolved",
+          status: "approved",
           responseComment: "First fix done",
           responderName: "Sam Super",
           respondedAt: "2026-07-03T12:00:00Z",
@@ -290,5 +312,179 @@ describe("ScorecardDetailView signature decode failure", () => {
     // reach the DOM as a text node, and the element must carry an error handler to fall back.
     expect(html).toContain('alt="Superintendent signature"');
     expect(stripTags(html)).not.toContain("data:image/png;base64");
+  });
+});
+
+describe("removed-item history", () => {
+  it("REGRESSION: renders events whose item an edit removed, rather than silently dropping them", async () => {
+    // The server preserves these (ON DELETE SET NULL) precisely so the record survives an edit. Emitting them
+    // and never rendering them preserves nothing a user can see — which is the shape of bug this feature line
+    // has produced repeatedly: the data lands, no consumer reads it, and every test still passes.
+    const detail = {
+      ...BASE_DETAIL,
+      correctiveActions: [],
+      removedItemEvents: [
+        {
+          id: "e1",
+          eventType: "rejected",
+          actorName: "James Helms",
+          actorEmail: null,
+          comment: "Torque values were not documented.",
+          createdAt: "2026-07-28T12:00:00.000Z",
+          photos: [],
+        },
+      ],
+    } as unknown as FieldScorecardDetail;
+
+    const html = await renderDetail(detail);
+    expect(html).toContain("Removed by a later edit");
+    expect(html).toContain("James Helms");
+    expect(html).toContain("Torque values were not documented.");
+  });
+});
+
+describe("approval controls", () => {
+  const item = (status: string) => ({ status }) as { status: string };
+
+  it("shows the controls only for an approver, and only on items awaiting approval", () => {
+    // The control is UX; the route's 403 is the guarantee. But a button that always 403s trains people to
+    // ignore errors, and one on an already-approved item invites a no-op that reads as a bug.
+    expect(shouldShowApprovalControls(item("submitted"), true)).toBe(true);
+    expect(shouldShowApprovalControls(item("submitted"), false)).toBe(false);
+    expect(shouldShowApprovalControls(item("approved"), true)).toBe(false);
+    expect(shouldShowApprovalControls(item("rejected"), true)).toBe(false);
+    // `open` means the responder has not answered yet — there is nothing to approve.
+    expect(shouldShowApprovalControls(item("open"), true)).toBe(false);
+  });
+
+  it("offers Approve all only when MORE THAN ONE item is waiting", () => {
+    // With a single item the per-item button already does it; a second control would just be noise.
+    expect(shouldShowApproveAll([item("submitted"), item("submitted")], true)).toBe(true);
+    expect(shouldShowApproveAll([item("submitted"), item("approved")], true)).toBe(false);
+    expect(shouldShowApproveAll([item("submitted"), item("submitted")], false)).toBe(false);
+    expect(shouldShowApproveAll([], true)).toBe(false);
+  });
+
+  it("refuses an empty rejection comment before it reaches the server", () => {
+    // Telling the responder what to fix IS the rejection. A blank one wastes a round trip on both sides and
+    // the server rejects it anyway — this just fails faster and says why.
+    expect(isRejectionCommentValid("   ")).toBe(false);
+    expect(isRejectionCommentValid("")).toBe(false);
+    expect(isRejectionCommentValid("Re-torque and log the values.")).toBe(true);
+  });
+});
+
+describe("ScorecardDetailView supersession conflicts", () => {
+  it("REFETCHES the card when a verdict is refused as superseded, so the retry is not the same 409", async () => {
+    // The guards tell the reviewer to refresh and, until this, nothing did: collapsing and reopening the row
+    // re-fetches only when `detail` is null, so the reviewer stayed on the same stale generation and every
+    // retry produced the same 409 until they reloaded the page. A guard whose only escape hatch does not
+    // work reads as the feature being broken, which is how guards get removed.
+    approveMock.mockRejectedValueOnce(
+      new ApiError(409, {
+        message: "This scorecard changed after you opened it. Refresh to review the current version.",
+        code: "CORRECTIVE_ACTION_CARD_SUPERSEDED",
+      }),
+    );
+    const onApprovalChange = vi.fn();
+    const detail: FieldScorecardDetail = {
+      ...BASE_DETAIL,
+      status: "corrective_action_submitted",
+      updatedAt: "2026-06-30T12:00:00.000Z",
+      canApproveCorrectiveActions: true,
+      actionItems: ["Re-torque the anchors"],
+      correctiveActions: [
+        {
+          id: "ca-1",
+          itemType: "action_item",
+          itemRef: "0",
+          itemLabel: "Re-torque the anchors",
+          status: "submitted",
+          responseComment: "Done.",
+          respondedByUserId: null,
+          responderName: "Pat Manager",
+          responderEmail: null,
+          respondedAt: "2026-06-30T13:00:00.000Z",
+          photos: [],
+        } satisfies CorrectiveActionItemView,
+      ],
+    };
+
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <ScorecardDetailView detail={detail} dealId="deal-1" onApprovalChange={onApprovalChange} />,
+      );
+      await flush();
+    });
+
+    const approveButton = Array.from(container.querySelectorAll("button")).find(
+      (b) => b.textContent === "Approve",
+    );
+    expect(approveButton).toBeTruthy();
+    await act(async () => {
+      approveButton!.click();
+      await flush();
+    });
+
+    // The refresh fired...
+    expect(onApprovalChange).toHaveBeenCalled();
+    // ...AND the reviewer is told, because their verdict did not land and has to be re-formed against what
+    // they can now see. Silently refreshing would look like the click worked.
+    expect(container.innerHTML).toContain("Refresh to review the current version");
+
+    await act(async () => {
+      root.unmount();
+      await flush();
+    });
+  });
+
+  it("does NOT refetch on an unrelated failure — that would hide the error behind a reload", async () => {
+    approveMock.mockRejectedValueOnce(new ApiError(500, { message: "Something went wrong" }));
+    const onApprovalChange = vi.fn();
+    const detail: FieldScorecardDetail = {
+      ...BASE_DETAIL,
+      status: "corrective_action_submitted",
+      canApproveCorrectiveActions: true,
+      actionItems: ["Re-torque the anchors"],
+      correctiveActions: [
+        {
+          id: "ca-1",
+          itemType: "action_item",
+          itemRef: "0",
+          itemLabel: "Re-torque the anchors",
+          status: "submitted",
+          responseComment: "Done.",
+          respondedByUserId: null,
+          responderName: "Pat Manager",
+          responderEmail: null,
+          respondedAt: "2026-06-30T13:00:00.000Z",
+          photos: [],
+        } satisfies CorrectiveActionItemView,
+      ],
+    };
+
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <ScorecardDetailView detail={detail} dealId="deal-1" onApprovalChange={onApprovalChange} />,
+      );
+      await flush();
+    });
+    const approveButton = Array.from(container.querySelectorAll("button")).find(
+      (b) => b.textContent === "Approve",
+    );
+    await act(async () => {
+      approveButton!.click();
+      await flush();
+    });
+
+    expect(onApprovalChange).not.toHaveBeenCalled();
+    await act(async () => {
+      root.unmount();
+      await flush();
+    });
   });
 });

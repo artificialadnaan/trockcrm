@@ -21,6 +21,10 @@
       "types": "./dist/lib/bidBoardStatusMap.d.ts",
       "default": "./dist/lib/bidBoardStatusMap.js"
     },
+    "./lib/correctiveActionApprovers": {
+      "types": "./dist/lib/correctiveActionApprovers.d.ts",
+      "default": "./dist/lib/correctiveActionApprovers.js"
+    },
     "./lib/correctiveActionOrder": {
       "types": "./dist/lib/correctiveActionOrder.d.ts",
       "default": "./dist/lib/correctiveActionOrder.js"
