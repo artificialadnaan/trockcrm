@@ -1099,17 +1099,31 @@ function resolveUserName(names: Map<string, string>, value: unknown): string | n
   return names.get(v.toLowerCase()) ?? null;
 }
 
-// Deal value from a mutation snapshot, in canonical DEAL_VALUE_PRIORITY_CHAIN order. Positive-gated
-// to match the resolver (deal-value-sql.ts / deal-hold.ts): a 0/negative candidate is SKIPPED, not
-// shown, so it falls through to the next positive estimate.
+// Deal value from a mutation snapshot, matching the canonical resolver (deal-value-sql.ts /
+// deal-hold.ts): a CHANGE-ORDER child (0156) is taken from awardedAmount VERBATIM — it carries no other
+// value column and a DEDUCTIVE CO carries a NEGATIVE amount — and every other deal runs the
+// DEAL_VALUE_PRIORITY_CHAIN positive-gated, where a 0/negative candidate is SKIPPED, not shown, so it
+// falls through to the next positive estimate.
+//
+// This is the value the alert email REPORTS. Migration 0184 installs no INSERT trigger, so creating a
+// deductive CO fires nothing — but it does install AFTER UPDATE OF (… awarded_amount …), so editing a
+// CO's amount downward does fire, and without the branch the email would price that deduction at $0 (or
+// at a stale fallback estimate).
 function snapshotBestValue(snapshot: unknown): number | null {
   const s = parseJson(snapshot);
   if (!isRecord(s)) return null;
+  if (snapshotIsChangeOrder(s)) return numericValue(s.awardedAmount);
   for (const key of ["awardedAmount", "bidBoardTotalSales", "bidEstimate", "ddEstimate"]) {
     const v = numericValue(s[key]);
     if (v != null && v > 0) return v;
   }
   return null;
+}
+
+// The trigger writes isChangeOrder as a JSON boolean, but a snapshot that has round-tripped through a
+// text column can arrive as the string "true" — accept both rather than silently taking the non-CO path.
+function snapshotIsChangeOrder(snapshot: Record<string, unknown>): boolean {
+  return snapshot.isChangeOrder === true || snapshot.isChangeOrder === "true";
 }
 
 // True when the snapshot actually carries value columns (even if they are 0), vs. an empty snapshot
@@ -1120,8 +1134,9 @@ function snapshotHasValueKeys(snapshot: unknown): boolean {
   return ["awardedAmount", "bidBoardTotalSales", "bidEstimate", "ddEstimate"].some((k) => s[k] != null);
 }
 
-// Effective Won value of a snapshot: the best positive candidate, or 0 when the snapshot IS populated
-// with value columns but every candidate is non-positive (a genuine reduce-to-zero), else null (no data).
+// Effective Won value of a snapshot: whatever snapshotBestValue resolves (the best positive candidate,
+// or a change order's verbatim — possibly negative — awarded amount), or 0 when the snapshot IS populated
+// with value columns but nothing resolved (a genuine reduce-to-zero), else null (no data).
 function effectiveSnapshotValue(snapshot: unknown): number | null {
   const best = snapshotBestValue(snapshot);
   if (best != null) return best;

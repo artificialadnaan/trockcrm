@@ -88,13 +88,24 @@ describe("rep performance rollup period scoping", () => {
     const filterClause = pipelineAggregate!.slice(filterAt);
 
     // --- the VALUE expression: which arm gets the auto-park guard --------------------------------
-    // Nested chains use `CASE WHEN x > 0 THEN x END` with no ELSE, so the first ELSE after the period
-    // THEN is the period CASE's own ELSE.
+    // The nested value chain carries a CASE ... ELSE ... END of its own (the change-order branch), so
+    // "the first ELSE after the period THEN" is NOT the period CASE's ELSE. Walk CASE/END depth and split
+    // on the ELSE at depth 0 — the period CASE's own — instead of the first one textually.
     const periodSelector = "CASE WHEN $1::text IN ('last_month', 'last_quarter', 'last_year') THEN";
     const valueThenAt = valueExpression.indexOf(periodSelector);
     expect(valueThenAt).toBeGreaterThan(-1);
     const afterThen = valueExpression.slice(valueThenAt + periodSelector.length);
-    const elseAt = afterThen.indexOf("ELSE");
+    const elseAt = (() => {
+      const tokens = /\bCASE\b|\bEND\b|\bELSE\b/g;
+      let depth = 0;
+      let token: RegExpExecArray | null;
+      while ((token = tokens.exec(afterThen)) !== null) {
+        if (token[0] === "CASE") depth += 1;
+        else if (token[0] === "END") depth -= 1;
+        else if (depth === 0) return token.index;
+      }
+      return -1;
+    })();
     expect(elseAt).toBeGreaterThan(-1);
     const historicalValueArm = afterThen.slice(0, elseAt);
     const currentValueArm = afterThen.slice(elseAt);

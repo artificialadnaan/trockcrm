@@ -36,7 +36,8 @@ export interface SearchResult {
   rank: number;
   // True when this deal result is a change-order child deal, so the UI can badge it. Deal results only.
   isChangeOrder?: boolean;
-  // Assigned rep display name + best-value deal amount (awarded>bbts>bid>dd, raw string). Deal results only.
+  // Assigned rep display name + best-value deal amount (awarded>bbts>bid>dd, raw string — or awarded_amount
+  // verbatim, possibly NEGATIVE, for a change-order child). Deal results only.
   assignedRepName?: string | null;
   dealValue?: string | null;
 }
@@ -418,14 +419,32 @@ export async function searchDeals(tenantDb: TenantDb, query: string, limit: numb
     // Deliberately the RAW best-value (awarded>bbts>bid>dd, canonical DEAL_VALUE_PRIORITY_CHAIN),
     // NOT the on-hold-zeroed effective value: search is a display surface (on-hold already shows a
     // badge), not a reporting aggregate. Matches the Won-metric email builder's snapshotBestValue.
-    dealValue: firstPositiveValue(r.awardedAmount, r.bidBoardTotalSales, r.bidEstimate, r.ddEstimate),
+    dealValue: bestDealSearchValue(r.isChangeOrder === true, r.awardedAmount, r.bidBoardTotalSales, r.bidEstimate, r.ddEstimate),
   }));
 }
 
-// Best-value amount for a deal search result: awarded_amount > bid_board_total_sales > bid_estimate
-// > dd_estimate, positive-gated to match the canonical resolver (deal-value-sql.ts / deal-hold.ts):
-// a 0/negative candidate is SKIPPED so it falls through to the next positive estimate. numeric(14,2)
-// arrives as a string from pg; the first positive candidate is returned in its raw string form, else null.
+// Best-value amount for a deal search result, matching the canonical resolver (deal-value-sql.ts /
+// deal-hold.ts): a CHANGE-ORDER child (0156) is priced from awarded_amount VERBATIM — it carries no other
+// value column and a DEDUCTIVE CO carries a NEGATIVE amount — and every other deal runs the positive-gated
+// awarded_amount > bid_board_total_sales > bid_estimate > dd_estimate chain, where a 0/negative candidate
+// is SKIPPED so it falls through to the next positive estimate. Search already badges a CO on this same
+// row, so before the CO branch a deductive CO surfaced WITH its badge and NO amount at all.
+// The CO branch reads the SAME `awardedAmount` argument the chain leads with, so the flag and the amount
+// cannot be paired wrong at the call site. numeric(14,2) arrives as a string from pg; the winning
+// candidate is returned in its raw string form, else null (no value to display).
+function bestDealSearchValue(
+  isChangeOrder: boolean,
+  awardedAmount: string | number | null,
+  ...fallbacks: Array<string | number | null>
+): string | null {
+  if (isChangeOrder) {
+    if (awardedAmount == null) return null;
+    const n = Number(awardedAmount);
+    return Number.isFinite(n) ? String(awardedAmount) : null;
+  }
+  return firstPositiveValue(awardedAmount, ...fallbacks);
+}
+
 function firstPositiveValue(...values: Array<string | number | null>): string | null {
   for (const v of values) {
     if (v == null) continue;

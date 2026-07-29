@@ -34,15 +34,34 @@ export function workerBidBoardTerminalSql(alias = "d"): string {
   return `COALESCE(${alias}.bid_board_stage_slug, '') IN (${TERMINAL_BID_BOARD_SLUG_LIST})`;
 }
 
+/**
+ * A change-order child deal (0156) carries its value ONLY in awarded_amount, and a DEDUCTIVE CO carries it
+ * NEGATIVE — so it is taken VERBATIM, ahead of the `> 0` chain, which would drop the negative and report
+ * the deduction as $0. The raw-string twin of the server's withChangeOrderBranch
+ * (server/src/modules/shared/deal-value-sql.ts); the two MUST NOT drift. Inert for a positive CO (its
+ * awarded_amount was already the only candidate that could match). REQUIRED COLUMN at `alias`:
+ * is_change_order, in addition to the four value columns.
+ *
+ * EXPORTED so the worker's other hand-built chain (rep-performance-rollup's awarded-first closed-value
+ * expression) wraps itself with THIS branch rather than a second hand-copy of it — the CO rule stays in
+ * one place even though the two chains deliberately order their candidates differently.
+ */
+export function withWorkerChangeOrderBranch(alias: string, chainSql: string): string {
+  return `CASE WHEN COALESCE(${alias}.is_change_order, false) THEN COALESCE(${alias}.awarded_amount, 0) ELSE ${chainSql} END`;
+}
+
 /** RAW (never zeroed) current deal value — the digest/rollup value chain. */
 export function workerCurrentDealValueSql(alias = "d"): string {
-  return `COALESCE(
+  return withWorkerChangeOrderBranch(
+    alias,
+    `COALESCE(
   CASE WHEN ${alias}.bid_board_total_sales > 0 THEN ${alias}.bid_board_total_sales END,
   CASE WHEN ${alias}.bid_estimate > 0 THEN ${alias}.bid_estimate END,
   CASE WHEN ${alias}.dd_estimate > 0 THEN ${alias}.dd_estimate END,
   CASE WHEN ${alias}.awarded_amount > 0 THEN ${alias}.awarded_amount END,
   0
-)`;
+)`
+  );
 }
 
 /**

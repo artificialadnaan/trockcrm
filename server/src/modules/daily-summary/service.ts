@@ -207,11 +207,14 @@ export async function computeDailySummary(client: QueryClient, schema: string, d
 
 // CANONICAL Won-today value — effective-won (on-hold -> 0, awarded-first fallback chain), mirroring
 // aliasedEffectiveWonDealValueSql / region-report-service so the email's "$X won" ties to Showcase/Region.
-const WON_VALUE_SQL = `CASE WHEN COALESCE(d.on_hold, false) THEN 0 ELSE COALESCE(
+// Includes that chain's change-order branch (withChangeOrderBranch): a CO child (0156) carries its value
+// ONLY in awarded_amount and a DEDUCTIVE CO carries it NEGATIVE, so it is taken verbatim ahead of the
+// `> 0` candidates — without it the digest would price a deduction at $0 and stop tying to Showcase/Region.
+const WON_VALUE_SQL = `CASE WHEN COALESCE(d.on_hold, false) THEN 0 ELSE CASE WHEN COALESCE(d.is_change_order, false) THEN COALESCE(d.awarded_amount, 0) ELSE COALESCE(
   CASE WHEN d.awarded_amount > 0 THEN d.awarded_amount END,
   CASE WHEN d.bid_board_total_sales > 0 THEN d.bid_board_total_sales END,
   CASE WHEN d.bid_estimate > 0 THEN d.bid_estimate END,
-  CASE WHEN d.dd_estimate > 0 THEN d.dd_estimate END, 0) END`;
+  CASE WHEN d.dd_estimate > 0 THEN d.dd_estimate END, 0) END END`;
 
 /**
  * Deals Won today, named — the CANONICAL won_closed_date cohort (won stage slug + usable won date +

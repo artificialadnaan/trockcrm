@@ -138,37 +138,32 @@ function aliasedDealValueChainSql(alias: string, columns: readonly DealValueColu
   return withAliasedChangeOrderBranch(alias, chain);
 }
 
-// SCOPE — partial rollout as of this commit (Task 2 of the deductive-change-order branch made the shared TS
-// twin CO-aware; Task 3 made client/src/lib/deal-utils.ts's resolveBestEstimate CO-aware; the canonical SQL
-// chain in THIS file was already done by Task 1). This is a NON-EXHAUSTIVE ledger of the hand-copied/
-// hand-rolled twins of this chain that this branch has identified and is retiring — not a complete
-// inventory of every `> 0`-gated mirror in the repo. Three tracked here still use the pre-CO `> 0`-gated
-// logic, so each still reports a deductive CO as $0 on its own surface:
-//   - server/src/modules/daily-summary/service.ts:208-214 (claims to mirror aliasedEffectiveWonDealValueSql
-//     "so the email's '$X won' ties to Showcase/Region")
-//   - worker/src/jobs/rep-performance-rollup.ts:21-27
-//   - server/src/modules/admin/routes.ts:1096-1099
-// shared/src/types/deal-hold.ts (getRawDealValue / getRawAwardedDealValue) and client/src/lib/deal-utils.ts
-// (resolveBestEstimate) are now CO-aware (Tasks 2-3) and are struck from this list.
+// SCOPE — the ledger of hand-copied/hand-rolled twins of this chain that the deductive-change-order branch
+// identified and retired. Every twin previously listed here is now CO-aware and struck: shared/src/types/
+// deal-hold.ts (getRawDealValue / getRawAwardedDealValue, Task 2), client/src/lib/deal-utils.ts
+// (resolveBestEstimate, Task 3), and — Task 4 — server/src/modules/daily-summary/service.ts,
+// server/src/modules/admin/routes.ts (both cross-office aggregates), server/src/modules/search/service.ts,
+// worker/src/jobs/deal-value-sql.ts, worker/src/jobs/rep-performance-rollup.ts, worker/src/jobs/index.ts
+// and worker/src/jobs/won-metric-reduction-alert.ts.
 //
-// Four more twins have since surfaced, all covered by a later task on this same branch and landing in the
-// same PR as this file (same hedge as the three above — this ledger being non-exhaustive is not license to
-// treat any one twin as an accidental gap once it's named here):
-//   - server/src/modules/search/service.ts:429-436 (firstPositiveValue, applied at :421) — its own comment
-//     at :425-428 says it is "positive-gated to match the canonical resolver (deal-value-sql.ts /
-//     deal-hold.ts)" and that "a 0/negative candidate is SKIPPED". Search already selects isChangeOrder at
-//     :416, so a deductive CO would surface WITH its CO badge but a null dealValue.
-//   - worker/src/jobs/won-metric-reduction-alert.ts:1105-1113 (snapshotBestValue) — an awarded-first,
-//     `> 0`-gated TS chain feeding a Won-value alert, exactly the "surface that sums Won deals" the field
-//     comments in this file and deal-hold.ts warn about.
-//   - worker/src/jobs/deal-value-sql.ts:38-46 (workerCurrentDealValueSql) — a deliberately bid-board-first
-//     chain (see :18-21) rather than awarded-first, but still `> 0`-gated and still $0s a deductive CO;
-//     consumed at rep-performance-rollup.ts:20, one line above the :21-27 block already cited above.
-//   - mobile-crm/src/components/DealCard.tsx:61-80 (resolveDealValue) — a hand-copied `> 0`-gated chain in
-//     mobile-crm, a standalone Expo app deliberately NOT an npm workspace member, so it cannot import
-//     shared/ and cannot be pointed at getRawDealValue directly; also has its own display gate at
-//     DealCard.tsx:83-86 (`value > 0 ? formatMoney(value) : "—"`) that discards a correct negative even if
-//     resolveDealValue itself is fixed.
+// ONE twin remains: mobile-crm/src/components/DealCard.tsx:61-80 (resolveDealValue) — a hand-copied
+// `> 0`-gated chain in mobile-crm, a standalone Expo app deliberately NOT an npm workspace member, so it
+// cannot import shared/ and cannot be pointed at getRawDealValue directly; it also has its own display gate
+// at DealCard.tsx:83-86 (`value > 0 ? formatMoney(value) : "—"`) that discards a correct negative even if
+// resolveDealValue itself is fixed. It is tracked by its own task on this branch.
+//
+// What Task 4 actually swept, so the next reader knows the edges of this claim: `awarded_amount > 0` and
+// the equivalent TS candidate-chain shapes across server/src, worker/src, client/src, shared/src (tests
+// excluded), plus scripts/ and migrations/. That sweep also turned up two twins OUTSIDE the app source —
+// scripts/verify-won-closed-date-parity.ts and scripts/lib/bid-board-won-date-reconcile.ts, both of which
+// claimed in comments to mirror aliasedEffectiveWonDealValueSql — and both were fixed with the eight.
+// It did NOT sweep client-field/, mobile/ or any non-TS/SQL surface, and it makes no claim about them.
+//
+// STILL OUTSTANDING and NOT fixed here: the plpgsql Won-value chain inside
+// migrations/0184_won_metric_reduction_alerts.sql (won_metric_reduction_impacts, old_value/new_value) is a
+// `> 0`-gated twin that runs with p_exclude_change_orders = false for the canonical impacts, so a deductive
+// CO's contribution is computed as $0 when the alert trigger fires. It is a shipped migration, so fixing it
+// needs a NEW migration rather than an edit here.
 
 export function dealBestEstimateSql(table: DealValueTable): SQL {
   return dealValueChainSql(table, DEAL_VALUE_PRIORITY_CHAIN);

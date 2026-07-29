@@ -8,6 +8,7 @@ import {
 } from "@trock-crm/shared/types";
 import { pool } from "../db.js";
 import {
+  withWorkerChangeOrderBranch,
   workerCurrentDealValueSql,
   workerEffectiveCurrentDealValueSql,
 } from "./deal-value-sql.js";
@@ -18,13 +19,20 @@ const REPORTABLE_DEAL_SQL = reportableDealSqlPredicate("d");
 // which weekly-digest also uses and the cross-surface reconciliation test executes directly — so the two
 // jobs and the test can no longer hold three hand-copied versions of the same rule.
 const currentDealValueSql = workerCurrentDealValueSql("d");
-const awardedFirstDealValueSql = `COALESCE(
+// The closed-value chain stays awarded-first here (unlike the bid-board-first digest/rollup chain above),
+// but the change-order branch is the SHARED one from the leaf module: a CO child's value is awarded_amount
+// verbatim, so a DEDUCTIVE (negative) CO reduces closed value instead of falling through every `> 0`
+// candidate to $0. Exported so the CO-branch parity test can execute the PRODUCTION string.
+export const awardedFirstDealValueSql = withWorkerChangeOrderBranch(
+  "d",
+  `COALESCE(
   CASE WHEN d.awarded_amount > 0 THEN d.awarded_amount END,
   CASE WHEN d.bid_board_total_sales > 0 THEN d.bid_board_total_sales END,
   CASE WHEN d.bid_estimate > 0 THEN d.bid_estimate END,
   CASE WHEN d.dd_estimate > 0 THEN d.dd_estimate END,
   0
-)`;
+)`
+);
 const wonStageSqlList = WON_DEAL_STAGE_SLUGS.map((slug) => `'${slug}'`).join(", ");
 const lostStageSqlList = LOST_DEAL_STAGE_SLUGS.map((slug) => `'${slug}'`).join(", ");
 const terminalStageSqlList = [...WON_DEAL_STAGE_SLUGS, ...LOST_DEAL_STAGE_SLUGS]

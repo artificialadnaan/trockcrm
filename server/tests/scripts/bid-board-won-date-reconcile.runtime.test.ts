@@ -31,6 +31,7 @@ beforeAll(async () => {
     CREATE TABLE office_test.deals (
       id uuid PRIMARY KEY, sales_source_user_id uuid, deal_number text, name text, stage_id uuid NOT NULL,
       is_active boolean NOT NULL DEFAULT true, is_bid_board_owned boolean NOT NULL DEFAULT false,
+      is_change_order boolean NOT NULL DEFAULT false,
       on_hold boolean NOT NULL DEFAULT false, bid_board_status text,
       stage_entered_at timestamptz, won_closed_date date, contract_signed_date date, contract_signed_at timestamptz,
       awarded_amount numeric, bid_board_total_sales numeric, bid_estimate numeric, dd_estimate numeric,
@@ -57,6 +58,12 @@ beforeAll(async () => {
       ('${U("d09")}','DFW-NODATE-01','No Resolvable Date','${ST_WON}', true, true, 'Won', NULL, NULL, NULL, NULL, NULL, 4000),
       -- CONTROL not bid-board-owned: never touched
       ('${U("a01")}','DFW-NONBB-01','Manual Won', '${ST_WON}', true, false, NULL, '2026-04-01T10:00:00Z', NULL, NULL, NULL, NULL, 9999);
+    -- FILL: a DEDUCTIVE change-order child. Its value lives ONLY in awarded_amount and is NEGATIVE, so the
+    -- reconcile's net-$ impact must LOWER entersWon rather than count it as $0.
+    INSERT INTO office_test.deals
+      (id, deal_number, name, stage_id, is_active, is_bid_board_owned, is_change_order, bid_board_status,
+       stage_entered_at, won_closed_date, awarded_amount) VALUES
+      ('${U("f04")}','DFW-FILL-CO','Deductive Change Order','${ST_WON}', true, true, true, 'Won', '2026-06-05T10:00:00Z', NULL, -25000);
   `);
 });
 
@@ -76,7 +83,12 @@ describe("bid-board won_closed_date reconcile (runtime)", () => {
   it("plans the FILL and CLEAR sets with the real per-deal date and net $ impact", async () => {
     const plan = await planWonDateReconcile(client, SCHEMA);
 
-    expect(plan.fill.map((d) => d.dealNumber).sort()).toEqual(["DFW-FILL-01", "DFW-FILL-02", "DFW-FILL-03"]);
+    expect(plan.fill.map((d) => d.dealNumber).sort()).toEqual([
+      "DFW-FILL-01",
+      "DFW-FILL-02",
+      "DFW-FILL-03",
+      "DFW-FILL-CO",
+    ]);
     // a genuinely-won deal with NO resolvable real date is NOT a fill candidate (stays excluded)
     expect(plan.fill.map((d) => d.dealNumber)).not.toContain("DFW-NODATE-01");
     expect(plan.clear.map((d) => d.dealNumber)).toEqual(["DFW-CLR-01"]);
@@ -84,19 +96,23 @@ describe("bid-board won_closed_date reconcile (runtime)", () => {
     expect(plan.fill.find((d) => d.dealNumber === "DFW-FILL-01")?.newWonClosedDate).toBe("2026-06-03");
     expect(plan.fill.find((d) => d.dealNumber === "DFW-FILL-02")?.newWonClosedDate).toBe("2026-05-20");
     expect(plan.fill.find((d) => d.dealNumber === "DFW-FILL-03")?.newWonClosedDate).toBe("2026-02-10");
+    expect(plan.fill.find((d) => d.dealNumber === "DFW-FILL-CO")?.newWonClosedDate).toBe("2026-06-05");
+    // A change-order child is valued from awarded_amount VERBATIM, so the deductive CO lowers the impact.
+    expect(plan.fill.find((d) => d.dealNumber === "DFW-FILL-CO")?.wonValue).toBeCloseTo(-25000, 2);
     // $ impact via the Won-revenue chain (awarded -> bid_board_total_sales -> bid_estimate -> dd)
-    expect(plan.entersWon).toBeCloseTo(39340.17 + 1000 + 2000, 2);
+    expect(plan.entersWon).toBeCloseTo(39340.17 + 1000 + 2000 - 25000, 2);
     expect(plan.leavesWon).toBeCloseTo(937.5, 2);
   });
 
   it("applies the reconcile, then is idempotent (a second plan is empty)", async () => {
     const result = await applyWonDateReconcile(client, SCHEMA);
-    expect(result.filled).toBe(3);
+    expect(result.filled).toBe(4);
     expect(result.cleared).toBe(1);
 
     expect(await wonDate(U("f01"))).toBe("2026-06-03");
     expect(await wonDate(U("f02"))).toBe("2026-05-20");
     expect(await wonDate(U("f03"))).toBe("2026-02-10");
+    expect(await wonDate(U("f04"))).toBe("2026-06-05");
     expect(await wonDate(U("c01"))).toBeNull();
     // controls untouched
     expect(await wonDate(U("e01"))).toBe("2026-04-01");
