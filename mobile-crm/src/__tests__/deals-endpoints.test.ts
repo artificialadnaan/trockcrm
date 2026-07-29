@@ -415,6 +415,14 @@ describe("a DEDUCTIVE change order — the negative must survive to the screen",
     ).toBe(0);
   });
 
+  it("falls back to 0 for an UNPARSEABLE awarded amount rather than NaN", () => {
+    // The CO branch returns awardedAmount directly instead of running the `> 0` chain that would have
+    // filtered a NaN out, so it owns the Number.isFinite check itself. Without it the card renders
+    // "$NaN" — the failure mode the web dashboard has hit before.
+    expect(resolveDealValue({ ...empty, isChangeOrder: true, awardedAmount: "not-a-number" })).toBe(0);
+    expect(displayAmount({ ...empty, isChangeOrder: true, awardedAmount: "not-a-number" })).toBe("—");
+  });
+
   it("shows an em dash for a change order with no awarded amount, never '-$0'", () => {
     expect(displayAmount({ ...empty, isChangeOrder: true })).toBe("—");
   });

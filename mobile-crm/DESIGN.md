@@ -44,12 +44,16 @@ quieter than on white. Mid-greys look fine indoors and vanish in daylight. So ev
 `src/__tests__/theme-contrast.test.ts` asserts the pairs **the app actually renders** rather than the
 ones we meant to ship. A contrast test over intended combinations is a test of your intentions.
 
-## 2. `theme.ts` is the only source of colour, type and spacing
+## 2. `theme.ts` is the token source of truth — fully honoured for colour and spacing
 
 `src/theme/theme.ts` is not a suggestion layer. Measured across `app/` and `src/components/`: **zero**
 hard-coded colours in style values, **13** raw spacing literals (all 1–6pt hairlines) against 260
 `theme.space.*` references, and zero `fontWeight`. That discipline is the reason the app could be turned
 dark coherently in one change instead of leaving one redesigned screen beside twelve light ones.
+
+**Type is the exception, and it is a migration in progress.** Colour and spacing are done; font size is
+not — roughly 140 `fontSize` literals remain in the detail and move screens. The rule below is binding
+for anything you write, but do not read this section as a description of the tree as it stands.
 
 Two rules that are not obvious from reading the token list:
 
@@ -131,10 +135,18 @@ exact and visible in a diff. `hitSlop` is welcome and stacks, but it does not su
 touch region, and the thing a gloved rep aims at in sunlight is the drawn control. Guarded by
 `src/__tests__/touch-targets-declare-a-floor.test.ts`.
 
-**A disabled control says it is disabled.** `disabled` stops the press and changes nothing a screen
-reader hears, so every `disabled` is paired with `accessibilityState={{ disabled }}` — plus `busy` when
-a mutation is in flight. Guarded by `disabled-controls-announce-disabled.test.ts`. The visual signal
-(`opacity: 0.5`) is not a signal to someone who cannot see it.
+**Announce `busy`; do NOT hand-write `disabled`.** React Native merges the `disabled` PROP into the
+accessibility state and gives it precedence over anything written by hand — `Pressable.js:228`:
+`_accessibilityState = disabled != null ? {..._accessibilityState, disabled} : _accessibilityState`.
+`Button` and the `Touchable*` family do the same. So `<Pressable disabled={busy}>` already announces as
+disabled, and spelling it out again is a no-op that reads as a rule.
+
+What RN does NOT derive is `busy`, which it takes only from an explicit `accessibilityState` (or
+`aria-busy`). Say it while a mutation is in flight — that is exactly when a rep taps a control and
+nothing appears to happen.
+
+An earlier draft of this file asserted the opposite and cited a guard enforcing it. Both were wrong and
+both are gone; the note is kept because the wrong version is the intuitive one.
 
 **One label for a card, or none of it is reachable.** An explicit `accessibilityLabel` on a grouping
 Pressable *replaces* the text composed from its children. Anything left out becomes unreachable rather

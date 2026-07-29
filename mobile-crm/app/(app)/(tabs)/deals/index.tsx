@@ -99,6 +99,11 @@ export default function DealsListScreen() {
       <DealCard
         deal={item}
         variant="list"
+        // The list had its own prefix before the two cards merged, and inheriting the component's
+        // "board-card" default silently renamed every testID on the most-opened screen. NOT
+        // "stage-card" — that belongs to the stage drill-down, and sharing it would make the two
+        // indistinguishable, which is the problem rather than the fix.
+        testIDPrefix="deal-card"
         stageName={stageLabelFor(item, stageIndex)}
         // The list is not stage-scoped, so it has no cheap way to know whose deal this is and does not
         // claim to: "Yours" is a board affordance, where the next tap is a stage move.

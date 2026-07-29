@@ -107,6 +107,10 @@ function DealCardComponent({
         stageName,
         onHold ? "On hold" : null,
         atRisk ? "At risk" : null,
+        // The "Yours" badge, which the JSX renders on the same condition. Left out, the one affordance
+        // telling a rep this deal is theirs to move was visible and unreachable — the exact failure
+        // this label was rebuilt to fix, missed on the badge added last.
+        canMove && !archived ? "Yours" : null,
         archived ? "Archived, can't be opened" : null,
         closeDate ? `Close ${closeDate}` : null,
       ]
