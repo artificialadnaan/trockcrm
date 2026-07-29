@@ -120,9 +120,11 @@ export async function createWalkthroughSourceDocument({
       storageKey: input.storageKey,
       mimeType: input.mimeType,
       fileSize: input.bytes,
-      // Deliberate: the walkthrough id IS the content hash. document-service.ts:104-130 dedupes on
-      // (dealId, projectId, contentHash), so re-ingesting the same walkthrough becomes detectable
-      // rather than silently producing a second document and a duplicate set of extractions.
+      // Deliberate: the walkthrough id IS the content hash, so a re-ingest of the same walkthrough is
+      // DETECTABLE by a future caller — on the same (dealId, projectId, contentHash) triple
+      // document-service.ts:104-130 dedupes against. Detection is all this buys: no dedupe check runs
+      // here and the column carries no unique constraint, so calling this twice today writes a second
+      // document and a second set of extractions without complaint.
       contentHash: input.walkthroughId,
       parseStatus: "completed",
       ocrStatus: "completed",
@@ -176,8 +178,10 @@ export interface InsertWalkthroughExtractionsArgs {
  * A row is only USEFUL if it clears four independent gates, none of which the schema enforces — miss
  * any one and the row lands in the table but is invisible to everything downstream:
  *   1. `status = 'pending'` — estimate-generation.ts:256-261 filters candidates on it.
- *   2. `metadataJson.activeArtifact = "true"` as a STRING — estimate-generation.ts:262 compares with
- *      `->>`, which yields text.
+ *   2. `metadataJson.activeArtifact` — written as the JSON BOOLEAN `true`, the encoding every other
+ *      writer of this key uses (document-parse-orchestrator.ts:166-179, :298, :331). Both consumers
+ *      accept it: `->>` renders JSON `true` as the text `'true'` for estimate-generation.ts:262, and
+ *      workbench-service.ts:171 asks only that it not be `false`.
  *   3. `metadataJson.sourceParseRunId` equal to the document's `activeParseRunId` —
  *      workbench-service.ts:153-172 hides the row otherwise.
  *   4. a resolved pricing scope, via the SAME resolver extraction-service.ts uses, so walkthrough rows
@@ -217,16 +221,25 @@ export async function insertWalkthroughExtractions({
         },
         status: "pending",
         metadataJson: {
-          activeArtifact: "true",
+          activeArtifact: true,
           sourceParseRunId: input.parseRunId,
           sourceWalkthroughId: input.walkthroughId,
           sourceScopeItemId: row.sourceScopeItemId,
           locationLabel: row.locationLabel,
+          // Kept for provenance: the trade the walkthrough classified this row as, independent of
+          // whatever the resolver below turns it into.
+          trade: row.trade,
           extractionProvider: "trock-scope",
           extractionMethod: "walkthrough_grounding",
+          // The walkthrough already KNOWS the trade, so it is handed over as `tradeHint` rather than
+          // left to be re-guessed. Without it the resolver falls through to text inference
+          // (pricing-service.ts:222), which scans rawLabel against a 19-member hardcoded set — and a
+          // roofing row reading "Replace rotted carpentry at eave" would price as carpentry.
+          // Precedence note: the tradeHint branch (pricing-service.ts:212-220) returns BEFORE the
+          // divisionHint branch (:231-236), so the authoritative trade wins over divisionHint.
           ...resolvePricingScopeFromExtraction({
             divisionHint: row.divisionHint,
-            metadataJson: {},
+            metadataJson: { tradeHint: row.trade },
             normalizedIntent: row.rawLabel,
             rawLabel: row.rawLabel,
           }),

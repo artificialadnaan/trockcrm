@@ -147,8 +147,11 @@ describe("createWalkthroughSourceDocument", () => {
     expect(doc.ocrStatus).toBe("completed");
     expect(doc.parsedAt).not.toBeNull();
     expect(doc.mimeType).toBe("image/jpeg");
-    // contentHash carries the walkthrough id deliberately: document-service.ts:104-130 dedupes on
-    // (dealId, projectId, contentHash), so a re-ingest of the same walkthrough is detectable.
+    // contentHash carries the walkthrough id deliberately: it gives a future caller (or a backfill
+    // query) a key on which a re-ingest of the same walkthrough is DETECTABLE, on the same
+    // (dealId, projectId, contentHash) triple document-service.ts:104-130 dedupes against. This
+    // helper itself performs no dedupe check and the column carries no unique constraint, so calling
+    // it twice still writes a second document — detection is available, not enforced.
     expect(doc.contentHash).toBe(WALKTHROUGH);
     expect(doc.dealId).toBe(DEAL);
     expect(doc.projectId).toBe(PROJECT);
@@ -285,11 +288,13 @@ describe("insertWalkthroughExtractions", () => {
     // the walkthrough's rows are simply never fed to generation.
     expect(row.status).toBe("pending");
 
-    // GATE 2 — estimate-generation.ts:262 compares with `->>`, which yields TEXT. A JSON boolean true
-    // stringifies to "true" and would coincidentally match, but writing the STRING is what the
-    // comparison is actually specified against; a JSON `true` is one refactor away from breaking.
-    expect(row.metadataJson.activeArtifact).toBe("true");
-    expect(typeof row.metadataJson.activeArtifact).toBe("string");
+    // GATE 2 — a JSON BOOLEAN, matching every other writer of this key
+    // (document-parse-orchestrator.ts:166-179 builds it with jsonb_build_object over a boolean
+    // expression; :298 and :331 write a JS `false`). Both consumers accept it: Postgres renders JSON
+    // `true` as the text `'true'` under `->>`, so estimate-generation.ts:262 still matches, and
+    // workbench-service.ts:171 tests `!== false`, which `true` passes.
+    expect(row.metadataJson.activeArtifact).toBe(true);
+    expect(typeof row.metadataJson.activeArtifact).toBe("boolean");
 
     // GATE 3 — workbench-service.ts:153-172 hides any row whose metadata sourceParseRunId is not
     // strictly equal to its document's activeParseRunId.
@@ -302,14 +307,20 @@ describe("insertWalkthroughExtractions", () => {
 
     // GATE 4 — pricing needs a scope type/key; resolvePricingScopeFromExtraction is the same resolver
     // extraction-service.ts uses, so walkthrough rows price on the identical basis as parsed ones.
-    // NOTE: with a non-null divisionHint the resolver returns "division", NOT "trade" — the trade
-    // branch (pricing-service.ts:224-229) is guarded by `!input.divisionHint`. Verified against the
-    // real function, not assumed.
-    expect(row.metadataJson.pricingScopeType).toBe("division");
+    // The row's authoritative `trade` is handed over as `metadataJson.tradeHint`, and the resolver's
+    // tradeHint branch (pricing-service.ts:212-220) runs BEFORE its divisionHint branch (:231-236),
+    // so the scope is "trade"/<trade> even though divisionHint is set. Verified against the real
+    // function, not assumed.
+    expect(row.metadataJson.pricingScopeType).toBe("trade");
     expect(row.metadataJson.pricingScopeKey).toBe("carpentry");
+    // The classification itself is kept on the row for provenance, not just consumed by the resolver.
+    expect(row.metadataJson.trade).toBe("carpentry");
 
     // All four gates again, this time through the ACTUAL SQL the worker runs, so a change to how the
     // metadata is encoded fails here rather than silently emptying the candidate set in prod.
+    // Every predicate estimate-generation.ts:254-286 applies is reproduced, including the two on the
+    // DOCUMENT (parse_status / ocr_status, :282-283) that the exists(...) sub-select carries — a
+    // document born anything other than fully completed drops its whole extraction set here.
     const candidates = await pg.query<{ id: string }>(
       `SELECT e.id
          FROM public.estimate_extractions e
@@ -318,6 +329,8 @@ describe("insertWalkthroughExtractions", () => {
           AND (e.status = 'pending' OR e.extraction_type = 'measurement_candidate')
           AND e.metadata_json->>'activeArtifact' = 'true'
           AND e.metadata_json->>'sourceParseRunId' = d.active_parse_run_id::text
+          AND d.parse_status = 'completed'
+          AND d.ocr_status = 'completed'
           AND e.document_id = $2`,
       [DEAL, documentId]
     );
@@ -374,10 +387,48 @@ describe("insertWalkthroughExtractions", () => {
       .from(estimateExtractions)
       .where(eq(estimateExtractions.id, ids[0]));
 
-    // Same resolver, other branch: with no divisionHint it infers the trade from the label text.
+    // Same resolver, same tradeHint branch: dropping divisionHint changes nothing, because the trade
+    // was never being inferred from prose in the first place — the row told us what it is.
     expect(row.metadataJson.pricingScopeType).toBe("trade");
     expect(row.metadataJson.pricingScopeKey).toBe("carpentry");
     expect(row.divisionHint).toBeNull();
+  });
+
+  it("prices from the row's authoritative trade, not from the words in the label", async () => {
+    const walkthroughId = U("22227");
+    const { documentId, parseRunId } = await seedChain(walkthroughId);
+
+    // The adversarial case the whole tradeHint pass-through exists for: a ROOFING row whose prose
+    // says "carpentry" and whose divisionHint says "carpentry" too. Left to itself the resolver's
+    // text-inference (pricing-service.ts:222) scans rawLabel against the 19-member tradeScopeHints
+    // set and lands on "carpentry"; its divisionHint branch (:231-236) would land there as well.
+    // Only the authoritative classification off the walkthrough can produce "roofing".
+    const ids = await insertWalkthroughExtractions({
+      tenantDb,
+      input: {
+        dealId: DEAL,
+        projectId: PROJECT,
+        documentId,
+        parseRunId,
+        walkthroughId,
+        rows: [{ ...CARPENTRY_ROW, trade: "roofing" }],
+      },
+    });
+
+    const [row] = await tenantDb
+      .select()
+      .from(estimateExtractions)
+      .where(eq(estimateExtractions.id, ids[0]));
+
+    // PRECEDENCE, verified against the real resolver: the tradeHint branch (pricing-service.ts:212)
+    // returns BEFORE the divisionHint branch (:231) is ever reached, so the trade wins outright.
+    expect(row.metadataJson.pricingScopeType).toBe("trade");
+    expect(row.metadataJson.pricingScopeKey).toBe("roofing");
+    // The prose and the division hint are both still "carpentry" — proving the key above came from
+    // `trade` and not from either of them.
+    expect(row.rawLabel).toContain("carpentry");
+    expect(row.divisionHint).toBe("carpentry");
+    expect(row.metadataJson.trade).toBe("roofing");
   });
 
   it("writes SQL NULL for a row whose quantity was never spoken", async () => {
