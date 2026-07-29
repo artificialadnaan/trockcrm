@@ -254,7 +254,7 @@ export default function PipelineBoardScreen() {
                   >
                     {selected.stage.name} · Total
                   </Text>
-                  <Text style={styles.columnValue}>{formatColumnValue(selected.totalValue)}</Text>
+                  <Text style={styles.columnValue}>{pipelineApi.formatColumnTotal(selected)}</Text>
                   {/* TWO server facts, not a third derived from them. `activeCount` counts only the
                       STORED on_hold flag (deals/service.ts:2000-2002), while a card is badged "On hold"
                       when it is EFFECTIVELY held — which also covers a close target more than 90 days
@@ -318,16 +318,6 @@ export default function PipelineBoardScreen() {
       )}
     </SafeAreaView>
   );
-}
-
-/** Column totals arrive as a number already summed server-side with the canonical hold rule applied. */
-function formatColumnValue(total: number): string {
-  if (!Number.isFinite(total) || total <= 0) return "—";
-  return total.toLocaleString("en-US", {
-    style: "currency",
-    currency: "USD",
-    maximumFractionDigits: 0,
-  });
 }
 
 const styles = StyleSheet.create({

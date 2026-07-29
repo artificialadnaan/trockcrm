@@ -87,8 +87,16 @@ function isStale(value: string | null | undefined) {
 export function hasActiveOpportunities(property: PropertySurface): boolean {
   return property.leadCount + (property.activeDealsCount ?? property.dealCount) > 0;
 }
+// CONTRIBUTES to the card's number, not "is positive". The card sums `linkedValue` over every loaded
+// property with no sign test, and the server's SUM behind that column (propertyLinkedDealValueSql) is
+// change-order-aware — so a DEDUCTIVE change order, a Won child deal inheriting its parent's property_id
+// and carrying a negative awarded_amount, can leave a property netting below zero. A `> 0` gate dropped
+// exactly those properties out of the drill while their money stayed in the total above it, so the list
+// could not be made to add up to the card and the site responsible for the difference was unreachable.
+// $0 properties stay excluded: they move the sum by nothing, so omitting them narrows the list without
+// breaking the reconciliation.
 export function hasLinkedPipeline(property: PropertySurface): boolean {
-  return numeric(property.linkedValue ?? property.activePipelineValue) > 0;
+  return numeric(property.linkedValue ?? property.activePipelineValue) !== 0;
 }
 export function isStaleProperty(property: PropertySurface): boolean {
   return isStale(property.lastActivityAt);

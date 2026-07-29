@@ -188,6 +188,34 @@ function aliasedDealValueChainSql(alias: string, columns: readonly DealValueColu
 // completeness sweep of the repo — it rests on Task 4's sweep, whose edges are stated next. The plpgsql
 // chain in migration 0184 remains outstanding separately, described at the end of this comment.
 //
+// ONE LEVEL UP from those per-deal display gates sat two AGGREGATE gates. Each broke the card/drill/
+// aggregate rule rather than a single number, and both are now fixed:
+//
+//   • the mobile-crm board's COLUMN TOTAL. `<= 0` drew "—" for a column whose net went negative, while
+//     the web header for the same stage (client/src/components/pipeline/pipeline-board-column.tsx:73)
+//     formats `column.totalValue ?? 0` ungated and shows "-$30,000" — one office, two answers, depending
+//     on which screen the rep is holding. Reachable through a CO child: it is Won, active and never
+//     on-hold, so it is inside the Won column's SUM, and the `watched` scope is deal_subscriptions in
+//     ISOLATION — watch the child without its parent and that column IS one deduction (the board asks
+//     for won_all_time, so it is not a window that nets back out). Now formatColumnTotal in
+//     mobile-crm/src/api/endpoints/pipeline.ts, moved off the screen so it is testable without a
+//     renderer (the same split go-back.ts makes), rendering every column that summed anything. Zero is
+//     treated differently here than on a CARD, deliberately: a column carries `activeCount`, computed
+//     under the SAME on_hold FILTER as its SUM (deals/service.ts:3682-3684), so "nothing entered the
+//     sum" and "the deals that did, summing to zero" are distinguishable — the ambiguity displayAmount
+//     is stuck with simply does not exist one level up.
+//
+//   • client/src/pages/properties/property-list-page.tsx's hasLinkedPipeline, the membership test behind
+//     the "Linked pipeline" card's drill. `> 0` dropped a property whose linked value nets negative out
+//     of the drilled list while its money stayed inside the card's total, so the list could not be made
+//     to add up and the site responsible for the gap was not on screen to be found — a vanished row is
+//     worse than a wrong number. propertyLinkedDealValueSql SUMs signed, CO-aware values over a
+//     property's active deals and a CO child inherits its parent's property_id, so a property nets
+//     negative whenever its deductions outweigh what else still counts there (a soft-deleted parent is
+//     out of that SUM entirely — it filters is_active — and a held one contributes 0, while the child
+//     inherits neither flag). Now `!== 0`: "contributes to the number", which is the invariant the card
+//     and its drill actually share. $0 properties stay excluded — they move the sum by nothing.
+//
 // What Task 4 actually swept, so the next reader knows the edges of this claim: `awarded_amount > 0` and
 // the equivalent TS candidate-chain shapes across server/src, worker/src, client/src, shared/src (tests
 // excluded), plus scripts/ and migrations/. That sweep also turned up two twins OUTSIDE the app source —
