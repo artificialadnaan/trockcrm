@@ -19,13 +19,25 @@ import { drizzle } from "drizzle-orm/pglite";
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
+  deals,
+  estimateDealMarketOverrides,
   estimateDocumentParseRuns,
+  estimateExtractionMatches,
   estimateExtractions,
+  estimateGenerationRuns,
+  estimateMarketFallbackGeographies,
+  estimateMarketZipMappings,
+  estimateMarkets,
+  estimatePricingRecommendationOptions,
+  estimatePricingRecommendations,
+  estimateReviewEvents,
   estimateSourceDocuments,
   files,
+  properties,
 } from "@trock-crm/shared/schema";
 import type { WalkthroughIngressPayload, WalkthroughScopeRow } from "@trock-crm/shared/types";
 import { tenantSchemaSql } from "../../../tests/helpers/tenant-schema-from-drizzle.js";
+import { buildEstimatingWorkbenchState } from "./workbench-service.js";
 import {
   createWalkthroughContactSheetFile,
   createWalkthroughSourceDocument,
@@ -38,6 +50,11 @@ const DEAL = U("11111");
 const WALKTHROUGH = U("22222");
 const USER = U("33333");
 const PROJECT = U("44444");
+/** Own deals for the workbench tests, so "the state contains exactly this row" / "…contains nothing"
+ *  are exact counts rather than containment checks against every row the rest of the suite wrote. */
+const WORKBENCH_DEAL = U("55551");
+const WORKBENCH_NEGATIVE_DEAL = U("55552");
+const DEFAULT_MARKET = U("66661");
 
 let pg: PGlite;
 // The service is typed against NodePgDatabase; the PGlite driver is wire-compatible for these queries
@@ -48,15 +65,58 @@ let tenantDb: any;
 beforeAll(async () => {
   pg = new PGlite();
   // "public" (not office_*) so the unqualified Drizzle tables resolve on the default search_path.
+  //
+  // The first four tables are the ingress chain itself. Everything after them exists because
+  // buildEstimatingWorkbenchState reads it: matches/pricing/options/review-events/generation-runs are
+  // queried unconditionally per deal, and the market block is reached through
+  // getDealEffectiveMarketContext (deal-market-override-service.ts:164) — which loads the DEAL row
+  // (404 if absent) and then resolves a market, so `deals`, `properties` and the four market tables
+  // are all on the read path even though a walkthrough writes none of them.
   await pg.exec(
     tenantSchemaSql("public", [
       files,
       estimateSourceDocuments,
       estimateDocumentParseRuns,
       estimateExtractions,
+      estimateExtractionMatches,
+      estimatePricingRecommendations,
+      estimatePricingRecommendationOptions,
+      estimateReviewEvents,
+      estimateGenerationRuns,
+      deals,
+      properties,
+      estimateMarkets,
+      estimateMarketZipMappings,
+      estimateMarketFallbackGeographies,
+      estimateDealMarketOverrides,
     ])
   );
   tenantDb = drizzle(pg);
+
+  // A global default market. Without one, resolveMarketContext (market-resolution-service.ts:159-162)
+  // throws "No default estimating market is configured" and the workbench never renders for ANY deal —
+  // a prod precondition, not a test artifact.
+  await tenantDb
+    .insert(estimateMarkets)
+    .values({ id: DEFAULT_MARKET, name: "Global Default", slug: "global-default", type: "global" });
+  await tenantDb
+    .insert(estimateMarketFallbackGeographies)
+    .values({ marketId: DEFAULT_MARKET, resolutionType: "global", resolutionKey: "default" });
+
+  await tenantDb.insert(deals).values([
+    {
+      id: WORKBENCH_DEAL,
+      dealNumber: "WB-0001",
+      name: "Walkthrough workbench deal",
+      stageId: U("77771"),
+    },
+    {
+      id: WORKBENCH_NEGATIVE_DEAL,
+      dealNumber: "WB-0002",
+      name: "Walkthrough workbench negative deal",
+      stageId: U("77771"),
+    },
+  ]);
 }, 60_000);
 
 afterAll(async () => {
@@ -596,5 +656,93 @@ describe("ingestWalkthrough", () => {
     // Without the transaction this leaves an orphan file + a document whose extractions never
     // arrived — permanently visible in the workbench documents list with nothing under it.
     expect(await tableCounts()).toEqual(before);
+  });
+});
+
+// THE POINT OF THE WHOLE SEAM. Everything above proves rows land in the right columns; this proves a
+// walkthrough actually SHOWS UP for an estimator. buildEstimatingWorkbenchState is the real service
+// behind GET /api/estimating/deals/:dealId/workbench — unmodified, called exactly as the route calls
+// it — so the row either survives its filters or it doesn't.
+describe("walkthrough rows in the estimating workbench", () => {
+  it("renders an ingested walkthrough row, id and label intact", async () => {
+    const walkthroughId = U("44001");
+
+    const result = await ingestWalkthrough({
+      tenantDb,
+      payload: walkthroughPayload(walkthroughId, { dealId: WORKBENCH_DEAL }),
+    });
+
+    const state = await buildEstimatingWorkbenchState(tenantDb, WORKBENCH_DEAL);
+
+    // Exactly one, because this deal is the walkthrough's alone — so this is "the walkthrough row and
+    // nothing else", not "at least one row from somewhere".
+    expect(state.extractionRows).toHaveLength(1);
+    expect(state.extractionRows[0].id).toBe(result.extractionIds[0]);
+    // The estimator's eyes land on the label; an id-only assertion would pass on a blank row.
+    expect(state.extractionRows[0].rawLabel).toBe(CARPENTRY_ROW.rawLabel);
+    expect(state.extractionRows[0].evidenceText).toBe(CARPENTRY_ROW.evidenceText);
+
+    // The counters the workbench header renders off.
+    expect(state.summary.extractions.total).toBe(1);
+    expect(state.summary.extractions.pending).toBe(1);
+
+    // And the contact sheet is listed as the source document it came from, not queued or failed.
+    expect(state.documents).toHaveLength(1);
+    expect(state.documents[0].id).toBe(result.documentId);
+    expect(state.summary.documents.queued).toBe(0);
+    expect(state.summary.documents.failed).toBe(0);
+  });
+
+  it("drops the row when ONLY its sourceParseRunId stops matching", async () => {
+    const walkthroughId = U("44002");
+    const strangerRunId = U("44003");
+
+    const result = await ingestWalkthrough({
+      tenantDb,
+      payload: walkthroughPayload(walkthroughId, { dealId: WORKBENCH_NEGATIVE_DEAL }),
+    });
+
+    // Baseline: it renders. Without this the disappearance below could be a row that never appeared.
+    const before = await buildEstimatingWorkbenchState(tenantDb, WORKBENCH_NEGATIVE_DEAL);
+    expect(before.extractionRows.map((row) => row.id)).toEqual(result.extractionIds);
+
+    // Break gate 3 and NOTHING else — the row keeps its pending status, its activeArtifact, its deal,
+    // its document; the document keeps its completed parse and its active run. Only the pointer from
+    // the extraction back to that run is changed.
+    await pg.query(
+      `UPDATE public.estimate_extractions
+          SET metadata_json = jsonb_set(metadata_json, '{sourceParseRunId}', to_jsonb($1::text))
+        WHERE id = $2`,
+      [strangerRunId, result.extractionIds[0]]
+    );
+
+    const after = await buildEstimatingWorkbenchState(tenantDb, WORKBENCH_NEGATIVE_DEAL);
+
+    // Gone. This is what makes the positive test above meaningful: the workbench really is filtering
+    // on the run pointer, so a row that renders is a row that cleared the gate rather than one the
+    // service happened to wave through.
+    expect(after.extractionRows).toHaveLength(0);
+    expect(after.summary.extractions.total).toBe(0);
+    expect(after.summary.extractions.pending).toBe(0);
+    // The document itself is still listed — the row vanished, not the paperwork around it.
+    expect(after.documents).toHaveLength(1);
+
+    // Proof the row is still in the table and still satisfies every OTHER gate, so its absence above
+    // is attributable to the one field that changed.
+    const [row] = await tenantDb
+      .select()
+      .from(estimateExtractions)
+      .where(eq(estimateExtractions.id, result.extractionIds[0]));
+    expect(row.status).toBe("pending");
+    expect(row.metadataJson.activeArtifact).toBe(true);
+    expect(row.metadataJson.sourceParseRunId).toBe(strangerRunId);
+    expect(row.documentId).toBe(result.documentId);
+
+    const [doc] = await tenantDb
+      .select()
+      .from(estimateSourceDocuments)
+      .where(eq(estimateSourceDocuments.id, result.documentId));
+    expect(doc.activeParseRunId).toBe(result.parseRunId);
+    expect(doc.parseStatus).toBe("completed");
   });
 });
