@@ -91,13 +91,13 @@ export function EmailRow({ email, onClick, onReassign, onUnassign }: EmailRowPro
             {onReassign && (
               <DropdownMenuItem onClick={() => onReassign(email)}>
                 <RefreshCw className="h-4 w-4 mr-2" />
-                Reassign to another deal…
+                Reassign…
               </DropdownMenuItem>
             )}
             {onUnassign && (
               <DropdownMenuItem onClick={() => onUnassign(email)}>
                 <Unlink2 className="h-4 w-4 mr-2" />
-                Unassign from this deal
+                Unassign
               </DropdownMenuItem>
             )}
           </DropdownMenuContent>
