@@ -120,13 +120,23 @@ export function DealEstimatesCard({
         </div>
         <div className="flex justify-between items-center">
           <span className="text-sm text-muted-foreground">Change Orders</span>
-          <span className="text-sm font-medium" data-testid="change-order-total">
+          <span
+            className={`text-sm font-medium${combinedCo < 0 ? " text-red-600" : ""}`}
+            data-testid="change-order-total"
+          >
             {formatCurrency(combinedCo)}
           </span>
         </div>
         <div className="border-t pt-2 flex justify-between items-center">
           <span className="text-sm font-medium">Current Contract Value</span>
-          <span className="text-base font-bold text-green-600">{formatCurrency(ccv)}</span>
+          {/* Deductive COs can drive the CCV negative; the green "healthy contract value" treatment
+              would then read as a positive number at a glance, so a below-zero CCV goes red. */}
+          <span
+            className={`text-base font-bold ${ccv < 0 ? "text-red-600" : "text-green-600"}`}
+            data-testid="current-contract-value"
+          >
+            {formatCurrency(ccv)}
+          </span>
         </div>
 
         {changeOrders.length > 0 && (
@@ -138,7 +148,15 @@ export function DealEstimatesCard({
                 data-testid="change-order-row"
               >
                 <div className="min-w-0">
-                  <span className="font-medium">{formatCurrency(co.amount)}</span>
+                  {/* formatCurrency already renders a deduction as "-$2,000", but a lone minus sign
+                      is easy to miss in a list of look-alike rows — reuse the card's existing red to
+                      make the sign legible. No new visual language. */}
+                  <span
+                    className={`font-medium${(parseFloat(co.amount) || 0) < 0 ? " text-red-600" : ""}`}
+                    data-testid="change-order-amount"
+                  >
+                    {formatCurrency(co.amount)}
+                  </span>
                   <span className="text-muted-foreground"> · {co.signedDate}</span>
                   {co.description ? (
                     <span className="text-muted-foreground"> · {co.description}</span>
@@ -178,6 +196,10 @@ export function DealEstimatesCard({
         open={dialogOpen}
         onOpenChange={setDialogOpen}
         existing={editing}
+        // Baseline for the below-zero warning: the Current Contract Value with the CO being edited
+        // REMOVED. An edit replaces that CO's amount, it doesn't add to it — baselining against the
+        // raw CCV would count the old amount twice and warn on edits that are actually fine.
+        baselineContractValue={ccv - (editing ? parseFloat(editing.amount) || 0 : 0)}
         onSaved={() => {
           setDialogOpen(false);
           onChanged?.();
@@ -187,15 +209,26 @@ export function DealEstimatesCard({
   );
 }
 
+// Signed money string — MUST stay identical to the server's CHANGE_ORDER_AMOUNT_PATTERN in
+// server/src/modules/deals/change-order-service.ts: an optional leading '-', 1-12 integer digits and
+// up to 2 decimals (the NUMERIC(14,2) ceiling, 999,999,999,999.99, by construction). A NEGATIVE amount
+// is a deductive change order. Zero is meaningless and rejected separately, below.
+const CHANGE_ORDER_AMOUNT_PATTERN = /^-?\d{1,12}(\.\d{1,2})?$/;
+
 interface ChangeOrderDialogProps {
   dealId: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   existing: DealChangeOrder | null;
+  /**
+   * Current Contract Value EXCLUDING the change order being edited — the baseline the submitted
+   * amount is applied to when deciding whether to warn about a below-zero contract value.
+   */
+  baselineContractValue: number;
   onSaved: () => void;
 }
 
-function ChangeOrderDialog({ dealId, open, onOpenChange, existing, onSaved }: ChangeOrderDialogProps) {
+function ChangeOrderDialog({ dealId, open, onOpenChange, existing, baselineContractValue, onSaved }: ChangeOrderDialogProps) {
   const [signedDate, setSignedDate] = useState("");
   const [amount, setAmount] = useState("");
   const [description, setDescription] = useState("");
@@ -218,10 +251,29 @@ function ChangeOrderDialog({ dealId, open, onOpenChange, existing, onSaved }: Ch
       setError("Signed date is required");
       return;
     }
-    // Mirror the server: a positive money value with at most 2 decimals (no sub-cent / silent rounding).
-    if (!/^\d{1,12}(\.\d{1,2})?$/.test(trimmedAmount) || Number(trimmedAmount) <= 0) {
-      setError("Enter a positive amount with at most 2 decimals");
+    // Mirror the server's normalizeChangeOrderAmount exactly — same two checks, same wording, so the
+    // client never blocks a value the API would take (a silent feature block) nor forwards one it
+    // would 400 on. A negative amount is allowed: that is a deductive change order.
+    if (!CHANGE_ORDER_AMOUNT_PATTERN.test(trimmedAmount)) {
+      setError("Change order amount must be a number with at most 2 decimals (max 999,999,999,999.99).");
       return;
+    }
+    if (Number(trimmedAmount) === 0) {
+      // Covers "0", "0.00", "-0" and "-0.00" — all of which the server rejects too.
+      setError("Change order amount cannot be 0.");
+      return;
+    }
+    // Advisory only (product decision): a deductive CO may legitimately exceed the contract value, and
+    // there is NO server-side rejection — scripts and the API can still write one. Confirm, then save.
+    // Round to cents first: these are float sums of 2-decimal money strings, and a CO that exactly
+    // zeroes the contract value can land a hair below it (2.9 + 0.7 - 3.6 === -4.4e-16), which would
+    // pop a "below $0" warning on a break-even change order.
+    const projectedContractValue = Math.round((baselineContractValue + Number(trimmedAmount)) * 100) / 100;
+    if (projectedContractValue < 0) {
+      const proceed = window.confirm(
+        `This change order takes the Current Contract Value to ${formatCurrency(projectedContractValue)}, below $0. Save it anyway?`
+      );
+      if (!proceed) return;
     }
     setSubmitting(true);
     setError(null);
@@ -252,8 +304,9 @@ function ChangeOrderDialog({ dealId, open, onOpenChange, existing, onSaved }: Ch
         <DialogHeader>
           <DialogTitle>{existing ? "Edit Change Order" : "Add Change Order"}</DialogTitle>
           <DialogDescription>
-            Capture a signed change order. Its amount adds to the Current Contract Value and is
-            reported in the period of its signed date.
+            Capture a signed change order. Its amount adjusts the Current Contract Value and is
+            reported in the period of its signed date. Enter a negative amount to record a deductive
+            change order, which reduces the contract value.
           </DialogDescription>
         </DialogHeader>
         <form onSubmit={handleSubmit} className="space-y-4">
@@ -268,10 +321,11 @@ function ChangeOrderDialog({ dealId, open, onOpenChange, existing, onSaved }: Ch
           </div>
           <div className="space-y-1.5">
             <Label htmlFor="co-amount">Amount ($)</Label>
+            {/* No `min`: a min of 0.01 makes the browser reject a deductive amount before the submit
+                handler ever runs. The amount contract is enforced in handleSubmit (server parity). */}
             <Input
               id="co-amount"
               type="number"
-              min="0.01"
               step="0.01"
               value={amount}
               onChange={(e) => setAmount(e.target.value)}

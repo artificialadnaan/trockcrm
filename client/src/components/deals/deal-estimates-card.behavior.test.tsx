@@ -181,7 +181,7 @@ describe("DealEstimatesCard change orders", () => {
     expect(mocks.onChanged).toHaveBeenCalled();
   });
 
-  it("blocks a non-positive amount in the dialog without calling the API", async () => {
+  it("blocks a zero amount in the dialog without calling the API (server's wording)", async () => {
     const container = render({ deal: baseDeal, changeOrders: [], changeOrderTotal: "0", canManage: true, onChanged: mocks.onChanged });
     clickButtonByText(container, "Add Change Order");
     act(() => {
@@ -192,7 +192,7 @@ describe("DealEstimatesCard change orders", () => {
       container.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     });
     expect(mocks.addDealChangeOrder).not.toHaveBeenCalled();
-    expect(container.textContent).toContain("Enter a positive amount with at most 2 decimals");
+    expect(container.textContent).toContain("Change order amount cannot be 0.");
   });
 
   it("rejects an extra-precision amount client-side (mirrors the server), without calling the API", async () => {
@@ -206,7 +206,7 @@ describe("DealEstimatesCard change orders", () => {
       container.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     });
     expect(mocks.addDealChangeOrder).not.toHaveBeenCalled();
-    expect(container.textContent).toContain("Enter a positive amount with at most 2 decimals");
+    expect(container.textContent).toContain("Change order amount must be a number with at most 2 decimals");
   });
 
   it("edits an existing change order through the dialog (prefilled) and PATCHes it", async () => {
@@ -260,5 +260,263 @@ describe("DealEstimatesCard change orders", () => {
     expect(mocks.deleteDealChangeOrder).toHaveBeenCalledWith("deal-1", "co-1");
     expect(mocks.onChanged).toHaveBeenCalled();
     confirmSpy.mockRestore();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Deductive change orders (a NEGATIVE amount reduces the parent's contract value).
+// ---------------------------------------------------------------------------
+
+function makeCo(overrides: Partial<{ id: string; signedDate: string; amount: string; description: string | null }> = {}) {
+  return {
+    id: "co-1",
+    dealId: "deal-1",
+    signedDate: "2026-05-01",
+    amount: "2000",
+    description: null,
+    createdBy: null,
+    updatedBy: null,
+    createdAt: "",
+    updatedAt: "",
+    ...overrides,
+  };
+}
+
+/** Open the Add dialog, fill the two required fields, submit. */
+async function submitNewChangeOrder(container: HTMLElement, amount: string, signedDate = "2026-03-15") {
+  clickButtonByText(container, "Add Change Order");
+  act(() => {
+    setValue(container.querySelector<HTMLInputElement>("#co-signed-date")!, signedDate);
+    setValue(container.querySelector<HTMLInputElement>("#co-amount")!, amount);
+  });
+  await act(async () => {
+    container.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+  });
+}
+
+describe("DealEstimatesCard — deductive change orders", () => {
+  it("submits a negative amount verbatim (deductive CO)", async () => {
+    const container = render({
+      deal: baseDeal, // awarded 100000 + Procore 5000 — a -2500 CO leaves CCV well above zero
+      changeOrders: [],
+      changeOrderTotal: "0",
+      canManage: true,
+      onChanged: mocks.onChanged,
+    });
+
+    await submitNewChangeOrder(container, "-2500");
+
+    expect(mocks.addDealChangeOrder).toHaveBeenCalledWith("deal-1", {
+      signedDate: "2026-03-15",
+      amount: "-2500",
+      description: null,
+    });
+    expect(mocks.onChanged).toHaveBeenCalled();
+  });
+
+  it("does not set min on the amount input (the browser would block a negative before the handler runs)", () => {
+    const container = render({ deal: baseDeal, changeOrders: [], changeOrderTotal: "0", canManage: true, onChanged: mocks.onChanged });
+    clickButtonByText(container, "Add Change Order");
+    const input = container.querySelector<HTMLInputElement>("#co-amount")!;
+    expect(input.getAttribute("min")).toBeNull();
+    expect(input.getAttribute("step")).toBe("0.01");
+  });
+
+  it("rejects -0.00 with the server's zero wording, without calling the API", async () => {
+    const container = render({ deal: baseDeal, changeOrders: [], changeOrderTotal: "0", canManage: true, onChanged: mocks.onChanged });
+    await submitNewChangeOrder(container, "-0.00");
+    expect(mocks.addDealChangeOrder).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("Change order amount cannot be 0.");
+  });
+
+  it("rejects a magnitude over the NUMERIC(14,2) ceiling with the server's pattern wording", async () => {
+    const container = render({ deal: baseDeal, changeOrders: [], changeOrderTotal: "0", canManage: true, onChanged: mocks.onChanged });
+    await submitNewChangeOrder(container, "-1000000000000"); // 13 integer digits
+    expect(mocks.addDealChangeOrder).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("Change order amount must be a number with at most 2 decimals");
+  });
+
+  it("asks for confirmation when the CO would take the Current Contract Value below $0, and blocks when declined", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    const container = render({
+      deal: { id: "deal-1", ddEstimate: "0", bidEstimate: "0", awardedAmount: "1000", changeOrderTotal: "0" } as any,
+      changeOrders: [],
+      changeOrderTotal: "0",
+      canManage: true,
+      onChanged: mocks.onChanged,
+    });
+
+    await submitNewChangeOrder(container, "-5000"); // 1000 - 5000 = -4000
+
+    expect(confirmSpy).toHaveBeenCalled();
+    expect(mocks.addDealChangeOrder).not.toHaveBeenCalled();
+    expect(mocks.onChanged).not.toHaveBeenCalled();
+    // The dialog stays open so the user can correct the amount.
+    expect(container.querySelector('[data-testid="dialog"]')).not.toBeNull();
+    confirmSpy.mockRestore();
+  });
+
+  it("saves the below-zero change order when the confirmation is accepted (advisory guard, not enforced)", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const container = render({
+      deal: { id: "deal-1", ddEstimate: "0", bidEstimate: "0", awardedAmount: "1000", changeOrderTotal: "0" } as any,
+      changeOrders: [],
+      changeOrderTotal: "0",
+      canManage: true,
+      onChanged: mocks.onChanged,
+    });
+
+    await submitNewChangeOrder(container, "-5000");
+
+    expect(confirmSpy).toHaveBeenCalled();
+    expect(mocks.addDealChangeOrder).toHaveBeenCalledWith("deal-1", {
+      signedDate: "2026-03-15",
+      amount: "-5000",
+      description: null,
+    });
+    expect(mocks.onChanged).toHaveBeenCalled();
+    confirmSpy.mockRestore();
+  });
+
+  it("does not confirm for a positive change order (existing flow untouched)", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const container = render({
+      deal: { id: "deal-1", ddEstimate: "0", bidEstimate: "0", awardedAmount: "1000", changeOrderTotal: "0" } as any,
+      changeOrders: [],
+      changeOrderTotal: "0",
+      canManage: true,
+      onChanged: mocks.onChanged,
+    });
+
+    await submitNewChangeOrder(container, "500");
+
+    expect(confirmSpy).not.toHaveBeenCalled();
+    expect(mocks.addDealChangeOrder).toHaveBeenCalledWith("deal-1", {
+      signedDate: "2026-03-15",
+      amount: "500",
+      description: null,
+    });
+    confirmSpy.mockRestore();
+  });
+
+  it("excludes the edited CO's own amount from the below-zero baseline (no double-count)", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    // Base 1000 with an existing -800 CO ⇒ CCV 200. Re-editing that CO to -900 leaves CCV at
+    // 1000 - 900 = 100, still above zero — only a baseline that double-counted the old -800 would warn.
+    const container = render({
+      deal: { id: "deal-1", ddEstimate: "0", bidEstimate: "0", awardedAmount: "1000", changeOrderTotal: "0" } as any,
+      changeOrders: [makeCo({ amount: "-800" })] as any,
+      changeOrderTotal: "-800",
+      canManage: true,
+      onChanged: mocks.onChanged,
+    });
+
+    act(() => {
+      container.querySelector<HTMLButtonElement>('[aria-label="Edit change order"]')!.dispatchEvent(
+        new MouseEvent("click", { bubbles: true }),
+      );
+    });
+    act(() => {
+      setValue(container.querySelector<HTMLInputElement>("#co-amount")!, "-900");
+    });
+    await act(async () => {
+      container.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+
+    expect(confirmSpy).not.toHaveBeenCalled();
+    expect(mocks.updateDealChangeOrder).toHaveBeenCalledWith("deal-1", "co-1", {
+      signedDate: "2026-05-01",
+      amount: "-900",
+      description: null,
+    });
+    confirmSpy.mockRestore();
+  });
+
+  it("still warns when the EDITED amount itself takes the contract value below zero", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    const container = render({
+      deal: { id: "deal-1", ddEstimate: "0", bidEstimate: "0", awardedAmount: "1000", changeOrderTotal: "0" } as any,
+      changeOrders: [makeCo({ amount: "-800" })] as any,
+      changeOrderTotal: "-800",
+      canManage: true,
+      onChanged: mocks.onChanged,
+    });
+
+    act(() => {
+      container.querySelector<HTMLButtonElement>('[aria-label="Edit change order"]')!.dispatchEvent(
+        new MouseEvent("click", { bubbles: true }),
+      );
+    });
+    act(() => {
+      setValue(container.querySelector<HTMLInputElement>("#co-amount")!, "-1200"); // 1000 - 1200 = -200
+    });
+    await act(async () => {
+      container.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+
+    expect(confirmSpy).toHaveBeenCalled();
+    expect(mocks.updateDealChangeOrder).not.toHaveBeenCalled();
+    confirmSpy.mockRestore();
+  });
+
+  it("does not warn when the CO lands the contract value exactly at $0 (float noise)", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    // 2.9 + 0.7 - 3.6 === -4.44e-16 in IEEE-754: an exactly break-even CO must not read as below zero.
+    const container = render({
+      deal: { id: "deal-1", ddEstimate: "0", bidEstimate: "0", awardedAmount: "2.90", changeOrderTotal: "0.70" } as any,
+      changeOrders: [],
+      changeOrderTotal: "0",
+      canManage: true,
+      onChanged: mocks.onChanged,
+    });
+
+    await submitNewChangeOrder(container, "-3.60");
+
+    expect(confirmSpy).not.toHaveBeenCalled();
+    expect(mocks.addDealChangeOrder).toHaveBeenCalledWith("deal-1", {
+      signedDate: "2026-03-15",
+      amount: "-3.60",
+      description: null,
+    });
+    confirmSpy.mockRestore();
+  });
+
+  it("tells the user a negative amount records a deductive change order", () => {
+    const container = render({ deal: baseDeal, changeOrders: [], changeOrderTotal: "0", canManage: true, onChanged: mocks.onChanged });
+    clickButtonByText(container, "Add Change Order");
+    expect(container.textContent).toContain("deductive change order");
+    // The old copy claimed the amount only ADDS to the contract value.
+    expect(container.textContent).not.toContain("adds to the Current Contract Value");
+  });
+
+  it("marks a deductive row so it reads as a deduction, not an addition", () => {
+    const container = render({
+      deal: baseDeal,
+      changeOrders: [makeCo({ id: "co-plus", amount: "2000" }), makeCo({ id: "co-minus", amount: "-2000" })] as any,
+      changeOrderTotal: "0",
+    });
+
+    const rows = Array.from(container.querySelectorAll('[data-testid="change-order-row"]'));
+    expect(rows.length).toBe(2);
+    const amounts = rows.map((r) => r.querySelector('[data-testid="change-order-amount"]'));
+    expect(amounts[0]?.textContent).toBe("$2,000");
+    expect(amounts[1]?.textContent).toBe("-$2,000");
+    // The minus sign alone is easy to miss at a glance — the deductive row also carries the card's
+    // existing red treatment, and the additive row must NOT.
+    expect(amounts[1]?.getAttribute("class")).toContain("text-red-600");
+    expect(amounts[0]?.getAttribute("class")).not.toContain("text-red-600");
+  });
+
+  it("does not paint a below-zero Current Contract Value in the positive (green) treatment", () => {
+    const container = render({
+      deal: { id: "deal-1", ddEstimate: "0", bidEstimate: "0", awardedAmount: "1000", changeOrderTotal: "0" } as any,
+      changeOrders: [makeCo({ amount: "-4000" })] as any,
+      changeOrderTotal: "-4000",
+    });
+
+    const ccv = container.querySelector('[data-testid="current-contract-value"]');
+    expect(ccv?.textContent).toBe("-$3,000");
+    expect(ccv?.getAttribute("class")).not.toContain("text-green-600");
+    expect(ccv?.getAttribute("class")).toContain("text-red-600");
   });
 });
