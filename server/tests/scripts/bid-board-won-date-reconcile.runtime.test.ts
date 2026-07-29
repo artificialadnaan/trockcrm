@@ -60,6 +60,10 @@ beforeAll(async () => {
       ('${U("a01")}','DFW-NONBB-01','Manual Won', '${ST_WON}', true, false, NULL, '2026-04-01T10:00:00Z', NULL, NULL, NULL, NULL, 9999);
     -- FILL: a DEDUCTIVE change-order child. Its value lives ONLY in awarded_amount and is NEGATIVE, so the
     -- reconcile's net-$ impact must LOWER entersWon rather than count it as $0.
+    -- SYNTHETIC: is_bid_board_owned is prod-impossible on a CO child (bid-board-sync/service.ts excludes
+    -- change orders from ownership), but it is the ONLY way to route a CO through this script's fill
+    -- predicate, which is bid-board-owned by construction. The row exists to exercise WON_VALUE_EXPR's
+    -- change-order branch, not to model a real deal.
     INSERT INTO office_test.deals
       (id, deal_number, name, stage_id, is_active, is_bid_board_owned, is_change_order, bid_board_status,
        stage_entered_at, won_closed_date, awarded_amount) VALUES

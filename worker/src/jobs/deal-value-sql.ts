@@ -15,10 +15,12 @@ import {
  * one place: it imports NO worker db/pool, so tests — including the server-side cross-surface
  * reconciliation suite — can import and execute the real production expression instead of retyping it.
  *
- * NOTE the value CHAIN here is deliberately bid-board-first (bid_board_total_sales > bid_estimate >
- * dd_estimate > awarded_amount), which is NOT the server's awarded-first DEAL_VALUE_PRIORITY_CHAIN. That
- * divergence predates this module and is preserved verbatim — unifying the two chains would move the
- * digest/rollup dollars and belongs in its own change.
+ * NOTE the OPEN/current chain here (workerCurrentDealValueSql) is deliberately bid-board-first
+ * (bid_board_total_sales > bid_estimate > dd_estimate > awarded_amount), which is NOT the server's
+ * awarded-first DEAL_VALUE_PRIORITY_CHAIN. That divergence predates this module and is preserved verbatim —
+ * unifying the two chains would move the digest/rollup dollars and belongs in its own change. The CLOSED
+ * chain (workerAwardedFirstDealValueSql) IS awarded-first, matching the server. Both live here, side by
+ * side, precisely so that divergence is visible rather than buried in two different job modules.
  */
 
 const TERMINAL_BID_BOARD_SLUG_LIST = [...WON_DEAL_STAGE_SLUGS, ...LOST_DEAL_STAGE_SLUGS]
@@ -42,15 +44,14 @@ export function workerBidBoardTerminalSql(alias = "d"): string {
  * awarded_amount was already the only candidate that could match). REQUIRED COLUMN at `alias`:
  * is_change_order, in addition to the four value columns.
  *
- * EXPORTED so the worker's other hand-built chain (rep-performance-rollup's awarded-first closed-value
- * expression) wraps itself with THIS branch rather than a second hand-copy of it — the CO rule stays in
- * one place even though the two chains deliberately order their candidates differently.
+ * Both chains below wrap themselves with THIS one branch, so the CO rule stays in a single place even
+ * though they deliberately order their candidates differently.
  */
-export function withWorkerChangeOrderBranch(alias: string, chainSql: string): string {
+function withWorkerChangeOrderBranch(alias: string, chainSql: string): string {
   return `CASE WHEN COALESCE(${alias}.is_change_order, false) THEN COALESCE(${alias}.awarded_amount, 0) ELSE ${chainSql} END`;
 }
 
-/** RAW (never zeroed) current deal value — the digest/rollup value chain. */
+/** RAW (never zeroed) current deal value — the OPEN/digest/rollup chain, bid-board-first (see above). */
 export function workerCurrentDealValueSql(alias = "d"): string {
   return withWorkerChangeOrderBranch(
     alias,
@@ -59,6 +60,25 @@ export function workerCurrentDealValueSql(alias = "d"): string {
   CASE WHEN ${alias}.bid_estimate > 0 THEN ${alias}.bid_estimate END,
   CASE WHEN ${alias}.dd_estimate > 0 THEN ${alias}.dd_estimate END,
   CASE WHEN ${alias}.awarded_amount > 0 THEN ${alias}.awarded_amount END,
+  0
+)`
+  );
+}
+
+/**
+ * RAW (never zeroed) CLOSED/terminal deal value — awarded-first, matching the server's
+ * DEAL_VALUE_PRIORITY_CHAIN. Used by the rep-performance rollup's closed_value and by the large-loss
+ * alert; both used to hand-build this identical CASE (and, after the change-order branch landed, a
+ * hand-copy of that branch too), so it lives here with its bid-board-first sibling instead.
+ */
+export function workerAwardedFirstDealValueSql(alias = "d"): string {
+  return withWorkerChangeOrderBranch(
+    alias,
+    `COALESCE(
+  CASE WHEN ${alias}.awarded_amount > 0 THEN ${alias}.awarded_amount END,
+  CASE WHEN ${alias}.bid_board_total_sales > 0 THEN ${alias}.bid_board_total_sales END,
+  CASE WHEN ${alias}.bid_estimate > 0 THEN ${alias}.bid_estimate END,
+  CASE WHEN ${alias}.dd_estimate > 0 THEN ${alias}.dd_estimate END,
   0
 )`
   );

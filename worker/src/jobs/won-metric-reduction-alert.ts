@@ -1112,18 +1112,12 @@ function resolveUserName(names: Map<string, string>, value: unknown): string | n
 function snapshotBestValue(snapshot: unknown): number | null {
   const s = parseJson(snapshot);
   if (!isRecord(s)) return null;
-  if (snapshotIsChangeOrder(s)) return numericValue(s.awardedAmount);
+  if (s.isChangeOrder === true) return numericValue(s.awardedAmount);
   for (const key of ["awardedAmount", "bidBoardTotalSales", "bidEstimate", "ddEstimate"]) {
     const v = numericValue(s[key]);
     if (v != null && v > 0) return v;
   }
   return null;
-}
-
-// The trigger writes isChangeOrder as a JSON boolean, but a snapshot that has round-tripped through a
-// text column can arrive as the string "true" — accept both rather than silently taking the non-CO path.
-function snapshotIsChangeOrder(snapshot: Record<string, unknown>): boolean {
-  return snapshot.isChangeOrder === true || snapshot.isChangeOrder === "true";
 }
 
 // True when the snapshot actually carries value columns (even if they are 0), vs. an empty snapshot

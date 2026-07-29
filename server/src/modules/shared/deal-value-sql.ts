@@ -146,11 +146,13 @@ function aliasedDealValueChainSql(alias: string, columns: readonly DealValueColu
 // worker/src/jobs/deal-value-sql.ts, worker/src/jobs/rep-performance-rollup.ts, worker/src/jobs/index.ts
 // and worker/src/jobs/won-metric-reduction-alert.ts.
 //
-// ONE twin remains: mobile-crm/src/components/DealCard.tsx:61-80 (resolveDealValue) — a hand-copied
-// `> 0`-gated chain in mobile-crm, a standalone Expo app deliberately NOT an npm workspace member, so it
-// cannot import shared/ and cannot be pointed at getRawDealValue directly; it also has its own display gate
-// at DealCard.tsx:83-86 (`value > 0 ? formatMoney(value) : "—"`) that discards a correct negative even if
-// resolveDealValue itself is fixed. It is tracked by its own task on this branch.
+// One TypeScript twin remains in app source; the plpgsql chain in migration 0184 is outstanding
+// separately, described at the end of this comment. The TS one is mobile-crm/src/components/DealCard.tsx:
+// 61-80 (resolveDealValue) — a hand-copied `> 0`-gated chain in mobile-crm, a standalone Expo app
+// deliberately NOT an npm workspace member, so it cannot import shared/ and cannot be pointed at
+// getRawDealValue directly; it also has its own display gate at DealCard.tsx:83-86 (`value > 0 ?
+// formatMoney(value) : "—"`) that discards a correct negative even if resolveDealValue itself is fixed.
+// It is tracked by its own task on this branch.
 //
 // What Task 4 actually swept, so the next reader knows the edges of this claim: `awarded_amount > 0` and
 // the equivalent TS candidate-chain shapes across server/src, worker/src, client/src, shared/src (tests
@@ -159,10 +161,15 @@ function aliasedDealValueChainSql(alias: string, columns: readonly DealValueColu
 // claimed in comments to mirror aliasedEffectiveWonDealValueSql — and both were fixed with the eight.
 // It did NOT sweep client-field/, mobile/ or any non-TS/SQL surface, and it makes no claim about them.
 //
-// STILL OUTSTANDING and NOT fixed here: the plpgsql Won-value chain inside
+// STILL OUTSTANDING and NOT fixed here (its own follow-up PR): the plpgsql Won-value chain inside
 // migrations/0184_won_metric_reduction_alerts.sql (won_metric_reduction_impacts, old_value/new_value) is a
-// `> 0`-gated twin that runs with p_exclude_change_orders = false for the canonical impacts, so a deductive
-// CO's contribution is computed as $0 when the alert trigger fires. It is a shipped migration, so fixing it
+// `> 0`-gated twin, and the canonical impacts call passes p_exclude_change_orders = false, so change
+// orders ARE in scope for it. The effect is worse than a wrong number: for a pure deductive-amount edit
+// (say -10,000 -> -25,000) both old_value and new_value compute to 0 and both counts stay 1, so v_impacts
+// is '{}' and the trigger returns without creating an event AT ALL. Sign flips and deletions still move
+// the computed value, so they do fire and DO reach the worker's snapshotBestValue fix above. Until 0184 is
+// fixed, such an email can read "Amount: -$25,000.00" beside an impacts line computed as "$50,000 ->
+// $0.00" — internally inconsistent, though still strictly better than the old "Amount: $0.00". Fixing it
 // needs a NEW migration rather than an edit here.
 
 export function dealBestEstimateSql(table: DealValueTable): SQL {

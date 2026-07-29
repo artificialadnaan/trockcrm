@@ -416,9 +416,10 @@ export async function searchDeals(tenantDb: TenantDb, query: string, limit: numb
     rank: Number(r.relevance ?? 0),
     isChangeOrder: r.isChangeOrder === true,
     assignedRepName: r.assignedRepName ?? null,
-    // Deliberately the RAW best-value (awarded>bbts>bid>dd, canonical DEAL_VALUE_PRIORITY_CHAIN),
-    // NOT the on-hold-zeroed effective value: search is a display surface (on-hold already shows a
-    // badge), not a reporting aggregate. Matches the Won-metric email builder's snapshotBestValue.
+    // Deliberately the RAW best-value (awarded>bbts>bid>dd, canonical DEAL_VALUE_PRIORITY_CHAIN — or, for
+    // a change-order child, awarded_amount verbatim, possibly NEGATIVE), NOT the on-hold-zeroed effective
+    // value: search is a display surface (on-hold already shows a badge), not a reporting aggregate.
+    // Matches the Won-metric email builder's snapshotBestValue.
     dealValue: bestDealSearchValue(r.isChangeOrder === true, r.awardedAmount, r.bidBoardTotalSales, r.bidEstimate, r.ddEstimate),
   }));
 }
@@ -445,6 +446,8 @@ function bestDealSearchValue(
   return firstPositiveValue(awardedAmount, ...fallbacks);
 }
 
+// The positive-gated half of the chain: returns the first candidate greater than 0 in its raw string form,
+// else null. Reached only for a NON-change-order deal (see bestDealSearchValue above).
 function firstPositiveValue(...values: Array<string | number | null>): string | null {
   for (const v of values) {
     if (v == null) continue;

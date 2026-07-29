@@ -1,25 +1,21 @@
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
-
-// rep-performance-rollup imports the worker pool at module load; nothing in this file executes a job, so a
-// stub is enough to reach its value-chain constant (same idiom as at-risk-close-target.test.ts).
-vi.mock("../../src/db.js", () => ({ pool: { connect: vi.fn() }, db: {} }));
-
 import {
+  workerAwardedFirstDealValueSql,
   workerCurrentDealValueSql,
   workerEffectiveCurrentDealValueSql,
 } from "../../src/jobs/deal-value-sql.js";
-import { awardedFirstDealValueSql } from "../../src/jobs/rep-performance-rollup.js";
 
 /**
- * REAL-SQL (PGlite) proof that the three WORKER value chains resolve a change-order child deal from
+ * REAL-SQL (PGlite) proof that the WORKER value chains resolve a change-order child deal from
  * awarded_amount VERBATIM — so a DEDUCTIVE (negative) CO reports its negative instead of falling through
  * every `> 0` candidate to $0 — while staying byte-for-byte INERT for a normal deal and a positive CO.
  *
- * The chains under test are the PRODUCTION builders/strings, not reproductions: a hand-copied paste would
- * keep passing while the real worker SQL drifted, which is exactly the class of bug this branch retires.
+ * The chains under test are the PRODUCTION builders, not reproductions: a hand-copied paste would keep
+ * passing while the real worker SQL drifted, which is exactly the class of bug this branch retires.
+ * deal-value-sql.ts is a leaf module (no pool/db import), so importing it here needs no mocks.
  */
 
 const D = {
@@ -32,31 +28,20 @@ const D = {
 
 let db: PGlite;
 
-/** The large-loss alert's inline chain, read out of the PRODUCTION source rather than retyped. */
-function largeLossDealValueExpression(): string {
-  const source = fs.readFileSync(fileURLToPath(new URL("../../src/jobs/index.ts", import.meta.url)), "utf8");
-  // `[^\`]` keeps the match inside ONE template literal, so an earlier query in the file can't be
-  // stitched onto this one's tail.
-  const match = source.match(/`SELECT\s+([^`]*?)::numeric AS deal_value/);
-  if (!match) {
-    throw new Error("could not locate the large-loss deal_value expression in worker/src/jobs/index.ts");
-  }
-  return match[1];
-}
-
-async function evaluate(expression: string): Promise<Map<string, number>> {
-  const { rows } = await db.query<{ id: string; v: string }>(
+/** Raw text per row, so a NULL stays distinguishable from 0 (`Number(null)` is 0 — a silent false pass). */
+async function evaluate(expression: string): Promise<Map<string, string | null>> {
+  const { rows } = await db.query<{ id: string; v: string | null }>(
     `SELECT d.id, (${expression})::numeric::text AS v FROM deals d ORDER BY d.id`
   );
-  return new Map(rows.map((r) => [r.id, Number(r.v)]));
+  return new Map(rows.map((r) => [r.id, r.v]));
 }
 
-/** The unaliased large-loss chain reads bare column names, so it needs its own (alias-free) projection. */
-async function evaluateUnaliased(expression: string): Promise<Map<string, number>> {
-  const { rows } = await db.query<{ id: string; v: string }>(
-    `SELECT id, (${expression})::numeric::text AS v FROM deals ORDER BY id`
-  );
-  return new Map(rows.map((r) => [r.id, Number(r.v)]));
+/** Assert the expression produced a value at all, THEN compare it numerically. */
+function valueOf(values: Map<string, string | null>, id: string): number {
+  const raw = values.get(id);
+  expect(raw, `row ${id} missing from the result set`).toBeDefined();
+  expect(raw, `row ${id} produced no value`).not.toBeNull();
+  return Number(raw);
 }
 
 beforeAll(async () => {
@@ -80,8 +65,8 @@ beforeAll(async () => {
       is_active boolean NOT NULL DEFAULT true
     );
     -- A normal deal whose awarded and bid-board amounts DIFFER, so the two worker chains stay
-    -- distinguishable: the digest/rollup chain is deliberately bid-board-FIRST, the rollup's
-    -- closed-value chain is awarded-first. Nothing here may flatten that divergence.
+    -- distinguishable: the open/digest chain is deliberately bid-board-FIRST, the closed chain is
+    -- awarded-first. Nothing here may flatten that divergence.
     INSERT INTO deals (id, stage_id, is_change_order, awarded_amount, bid_board_total_sales, bid_estimate, dd_estimate)
     VALUES ('${D.normal}', 'won', false, 1000.00, 2000.00, 3000.00, 4000.00);
     -- CO children mirror prod: awarded_amount is the ONLY populated value column (all 30 in prod).
@@ -99,64 +84,74 @@ afterAll(async () => {
   await db?.close();
 });
 
-describe("workerCurrentDealValueSql — the digest/rollup chain", () => {
+describe("workerCurrentDealValueSql — the OPEN/digest/rollup chain", () => {
   it("keeps its deliberate BID-BOARD-FIRST order for a normal deal", async () => {
     const values = await evaluate(workerCurrentDealValueSql("d"));
     // 2000 (bid_board_total_sales), NOT 1000 (awarded) — the documented divergence from the server chain.
-    expect(values.get(D.normal)).toBe(2000);
+    expect(valueOf(values, D.normal)).toBe(2000);
   });
 
   it("is INERT for a POSITIVE change order", async () => {
     const values = await evaluate(workerCurrentDealValueSql("d"));
-    expect(values.get(D.coPos)).toBe(25000);
+    expect(valueOf(values, D.coPos)).toBe(25000);
   });
 
   it("returns the NEGATIVE amount for a deductive change order", async () => {
     const values = await evaluate(workerCurrentDealValueSql("d"));
-    expect(values.get(D.coNeg)).toBe(-50000);
+    expect(valueOf(values, D.coNeg)).toBe(-50000);
   });
 
   it("returns 0 for a zero-amount change order", async () => {
     const values = await evaluate(workerCurrentDealValueSql("d"));
-    expect(values.get(D.coZero)).toBe(0);
+    expect(valueOf(values, D.coZero)).toBe(0);
   });
 });
 
 describe("workerEffectiveCurrentDealValueSql — the auto-park wrapper still applies", () => {
   it("carries the deductive CO's negative through when the close target is not far out", async () => {
     const values = await evaluate(workerEffectiveCurrentDealValueSql("d"));
-    expect(values.get(D.coNeg)).toBe(-50000);
+    expect(valueOf(values, D.coNeg)).toBe(-50000);
   });
 
   it("still zeroes a far-out (auto-parked) deal, change order or not", async () => {
     const values = await evaluate(workerEffectiveCurrentDealValueSql("d"));
-    expect(values.get(D.coNegFarOut)).toBe(0);
+    expect(valueOf(values, D.coNegFarOut)).toBe(0);
   });
 });
 
-describe("rep-performance-rollup awardedFirstDealValueSql — the closed-value chain", () => {
+describe("workerAwardedFirstDealValueSql — the CLOSED chain (rollup closed_value + large-loss alert)", () => {
   it("stays awarded-first for a normal deal", async () => {
-    const values = await evaluate(awardedFirstDealValueSql);
-    expect(values.get(D.normal)).toBe(1000); // awarded, NOT the bid-board 2000
+    const values = await evaluate(workerAwardedFirstDealValueSql("d"));
+    expect(valueOf(values, D.normal)).toBe(1000); // awarded, NOT the bid-board 2000
   });
 
   it("is INERT for a POSITIVE change order and returns the NEGATIVE for a deductive one", async () => {
-    const values = await evaluate(awardedFirstDealValueSql);
-    expect(values.get(D.coPos)).toBe(25000);
-    expect(values.get(D.coNeg)).toBe(-50000);
-    expect(values.get(D.coZero)).toBe(0);
+    const values = await evaluate(workerAwardedFirstDealValueSql("d"));
+    expect(valueOf(values, D.coPos)).toBe(25000);
+    expect(valueOf(values, D.coNeg)).toBe(-50000);
+    expect(valueOf(values, D.coZero)).toBe(0);
   });
 });
 
-describe("large-loss alert deal_value chain (worker/src/jobs/index.ts)", () => {
-  it("stays awarded-first for a normal deal", async () => {
-    const values = await evaluateUnaliased(largeLossDealValueExpression());
-    expect(values.get(D.normal)).toBe(1000);
+describe("the closed-chain CONSUMERS compose the shared builder rather than re-pasting it", () => {
+  // ROT GUARD: the value assertions above run the builder directly, so they would stay green if a job
+  // quietly went back to an inline chain. These pin that each consumer still routes through it.
+  it("the large-loss alert query interpolates the shared builder on an aliased deals table", () => {
+    const source = fs.readFileSync(fileURLToPath(new URL("../../src/jobs/index.ts", import.meta.url)), "utf8");
+
+    expect(source).toContain('${workerAwardedFirstDealValueSql("d")})::numeric AS deal_value');
+    expect(source).toContain(".deals d WHERE d.id = $1");
+    // No inline `awarded_amount > 0` chain left anywhere in the job registry.
+    expect(source).not.toMatch(/awarded_amount\s*>\s*0/);
   });
 
-  it("is INERT for a POSITIVE change order and returns the NEGATIVE for a deductive one", async () => {
-    const values = await evaluateUnaliased(largeLossDealValueExpression());
-    expect(values.get(D.coPos)).toBe(25000);
-    expect(values.get(D.coNeg)).toBe(-50000);
+  it("the rep-performance rollup's closed_value uses the shared builder", () => {
+    const source = fs.readFileSync(
+      fileURLToPath(new URL("../../src/jobs/rep-performance-rollup.ts", import.meta.url)),
+      "utf8"
+    );
+
+    expect(source).toContain('workerAwardedFirstDealValueSql("d")');
+    expect(source).not.toMatch(/awarded_amount\s*>\s*0/);
   });
 });

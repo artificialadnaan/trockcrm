@@ -25,6 +25,7 @@ import { runAiInterventionManagerAlerts } from "./ai-intervention-manager-alerts
 import { handleRfpRequestDelivery } from "./rfp-request-delivery.js";
 import { runReportsExecutionTick } from "./reports-execution.js";
 import { runRepPerformanceRollup } from "./rep-performance-rollup.js";
+import { workerAwardedFirstDealValueSql } from "./deal-value-sql.js";
 import {
   handleDealOpportunityFirstEntryEmail,
   handleProjectNumberFirstSetEmail,
@@ -481,20 +482,14 @@ export function registerAllJobs() {
           if (slugRegex.test(slug)) {
             const schemaName = `office_${slug}`;
 
-            // Look up terminal deal value with positive awarded-first fallback. A change-order child (0156)
-            // is taken from awarded_amount VERBATIM — it has no other value column, and a deductive CO is
-            // negative, which every `> 0` candidate would drop to $0 (mirrors the canonical
-            // withChangeOrderBranch in server/src/modules/shared/deal-value-sql.ts).
+            // Terminal deal value via the SHARED closed/awarded-first chain (deal-value-sql.ts), which
+            // carries the change-order branch: a CO child (0156) is taken from awarded_amount VERBATIM,
+            // since it has no other value column and a deductive CO is negative — which every `> 0`
+            // candidate would drop to $0. Aliased `d` so the shared builder can qualify its columns.
             const dealRes = await lossPool.query(
-              `SELECT (CASE WHEN COALESCE(is_change_order, false) THEN COALESCE(awarded_amount, 0) ELSE COALESCE(
-                        CASE WHEN awarded_amount > 0 THEN awarded_amount END,
-                        CASE WHEN bid_board_total_sales > 0 THEN bid_board_total_sales END,
-                        CASE WHEN bid_estimate > 0 THEN bid_estimate END,
-                        CASE WHEN dd_estimate > 0 THEN dd_estimate END,
-                        0
-                      ) END)::numeric AS deal_value,
-                      lost_notes
-               FROM ${schemaName}.deals WHERE id = $1`,
+              `SELECT (${workerAwardedFirstDealValueSql("d")})::numeric AS deal_value,
+                      d.lost_notes
+               FROM ${schemaName}.deals d WHERE d.id = $1`,
               [payload.dealId]
             );
 

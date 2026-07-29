@@ -55,7 +55,11 @@ beforeAll(async () => {
       ('co_deduct_open','opportunity', true,  false, true,  -5000.00,  NULL),
       -- on-hold and soft-deleted rows must stay excluded from BOTH sums, CO or not
       ('co_on_hold',    'won',         true,  true,  true,  -9999.00,  NULL),
-      ('co_inactive',   'won',         true,  false, false, -8888.00,  NULL);
+      ('co_inactive',   'won',         true,  false, false, -8888.00,  NULL),
+      -- NON-terminal twins of those two. Without these, psc.is_terminal alone would mask a dropped
+      -- on_hold / is_active guard on total_pipeline_value and only the source-string test would notice.
+      ('co_on_hold_open',  'opportunity', true, true,  true,  -7777.00, NULL),
+      ('co_inactive_open', 'opportunity', true, false, false, -6666.00, NULL);
   `);
 }, 30000);
 
@@ -70,7 +74,7 @@ describe("cross-office pipeline report — deductive change orders", () => {
     );
 
     // 100000 (won parent) - 25000 (terminal deductive CO) - 5000 (open deductive CO; this sum is
-    // deliberately NOT terminal-filtered). The on-hold (-9999) and inactive (-8888) COs stay out.
+    // deliberately NOT terminal-filtered). All four on-hold/inactive COs stay out.
     expect(Number(rows[0].total_awarded_value)).toBe(70000);
   });
 
@@ -78,7 +82,9 @@ describe("cross-office pipeline report — deductive change orders", () => {
     const { rows } = await db.query<{ total_pipeline_value: string }>(crossOfficePipelineQuery());
 
     // 3000 (open non-CO, bid_estimate) + -5000 (open deductive CO, awarded verbatim). The terminal rows
-    // (won parent, terminal CO) are excluded by the psc.is_terminal guard, which must survive this change.
+    // (won parent, terminal CO) are excluded by the psc.is_terminal guard, which must survive this change,
+    // and the two NON-terminal on-hold/inactive COs (-7777, -6666) are excluded by their own guards — so
+    // this number independently proves all three still hold on the pipeline sum.
     expect(Number(rows[0].total_pipeline_value)).toBe(-2000);
   });
 });
