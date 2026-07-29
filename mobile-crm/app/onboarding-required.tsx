@@ -138,10 +138,7 @@ export default function OnboardingRequiredScreen() {
           onPress={() => void checkAgain()}
           disabled={checking || gate === "checking"}
           accessibilityRole="button"
-          accessibilityState={{
-            disabled: checking || gate === "checking",
-            busy: checking || gate === "checking",
-          }}
+          accessibilityState={{ busy: checking || gate === "checking" }}
           style={styles.secondary}
         >
           {checking ? (

@@ -892,11 +892,10 @@ export default function ProspectScreen() {
   /**
    * Any non-idempotent write is in flight — the visit, a new property, or a new company.
    *
-   * Named because THREE things ask it: the back button (which locks while writing but releases once
-   * "Logged" is on screen), `targetsLocked` (which stays locked after, because the target is no longer
-   * editable), and now each control's `accessibilityState`. Spelled out inline it was already written
-   * twice with two different spellings, which is how the announcement and the press guard end up
-   * disagreeing about whether a control is available.
+   * Named because two things ask it: the back button (which locks while writing but releases once
+   * "Logged" is on screen) and `targetsLocked` (which stays locked after, because the target is no
+   * longer editable). Spelled out inline it was already written twice with two different spellings,
+   * which is how two guards over one condition end up disagreeing.
    */
   const writeInFlight =
     save.isPending || createPropertyHere.isPending || createCompanyNamed.isPending;
@@ -1060,7 +1059,7 @@ export default function ProspectScreen() {
              new record behind with no visit attached and no outcome shown. Locked WHILE writing only —
              once everything has settled, leaving is fine. */
           disabled={writeInFlight}
-          accessibilityState={{ disabled: writeInFlight, busy: writeInFlight }}
+          accessibilityState={{ busy: writeInFlight }}
           onPress={() => goBack()}
           accessibilityRole="button"
           accessibilityLabel="Back"
@@ -1270,8 +1269,7 @@ export default function ProspectScreen() {
                        `editable` but not this line, so during a company or property write a screen
                        reader announced the row as actionable while taps did nothing — the announcement
                        and the behaviour disagreeing is the accessibility defect, not the lock. */
-                    accessibilityState={{ disabled: targetsLocked }}
-                    accessibilityLabel={`${m.name}${m.companyName ? `, ${m.companyName}` : ""}, ${describeMatch(m, effectiveAddress ?? address)}`}
+                      accessibilityLabel={`${m.name}${m.companyName ? `, ${m.companyName}` : ""}, ${describeMatch(m, effectiveAddress ?? address)}`}
                     style={[styles.matchRow, targetsLocked && styles.chipLocked]}
                   >
                     <View style={styles.matchBody}>
@@ -1316,7 +1314,6 @@ export default function ProspectScreen() {
                   testID="prospect-reject-matches"
                   onPress={() => setRejectedMatches(true)}
                   disabled={targetsLocked}
-                  accessibilityState={{ disabled: targetsLocked }}
                   accessibilityRole="button"
                   style={styles.linkBtn}
                 >
@@ -1428,8 +1425,7 @@ export default function ProspectScreen() {
                            company result was still tappable — the screen would then show a company the
                            committed activity never carried, and "Log another" kept it. */
                         disabled={targetsLocked}
-                        accessibilityState={{ disabled: targetsLocked }}
-                        accessibilityRole="button"
+                              accessibilityRole="button"
                         accessibilityLabel={`Attach this visit to ${c.name}`}
                         style={styles.matchRow}
                       >
@@ -1500,8 +1496,7 @@ export default function ProspectScreen() {
                                    POST still committed — so the callback discarded a mismatched result
                                    and an unwanted company was created anyway. */
                                 disabled={targetsLocked}
-                                accessibilityState={{ disabled: targetsLocked }}
-                                onPress={() => {
+                                              onPress={() => {
                                   setCompany({ id: s.id, name: s.name ?? "Existing company" });
                                   setDuplicateCompanies(null);
                                   setCompanyResults(null);
@@ -1554,7 +1549,6 @@ export default function ProspectScreen() {
                                 })
                               }
                               disabled={locked || createCompanyNamed.isPending}
-                              accessibilityState={{ disabled: locked || createCompanyNamed.isPending }}
                               accessibilityRole="button"
                               accessibilityLabel={`None of these — create ${companyQuery.trim()} anyway`}
                               style={styles.linkBtn}
@@ -1635,8 +1629,7 @@ export default function ProspectScreen() {
                             key={c.id}
                             testID={`prospect-contact-${c.id}`}
                             disabled={targetsLocked}
-                            accessibilityState={{ disabled: targetsLocked }}
-                            onPress={() => {
+                                      onPress={() => {
                               setContact(c);
                               setContactResults(null);
                               setContactQuery("");
@@ -1739,8 +1732,7 @@ export default function ProspectScreen() {
                             setManualZip("");
                           }}
                           disabled={targetsLocked}
-                          accessibilityState={{ disabled: targetsLocked }}
-                          accessibilityRole="button"
+                                  accessibilityRole="button"
                           accessibilityLabel="Use the detected address instead"
                           style={styles.linkBtn}
                         >
@@ -1775,8 +1767,7 @@ export default function ProspectScreen() {
                         setManualZip(address?.zip ?? "");
                       }}
                       disabled={targetsLocked}
-                      accessibilityState={{ disabled: targetsLocked }}
-                      accessibilityRole="button"
+                          accessibilityRole="button"
                       accessibilityLabel="Correct this address"
                       style={styles.linkBtn}
                     >
@@ -2007,7 +1998,7 @@ export default function ProspectScreen() {
                     save.mutate();
                   }}
                   disabled={save.isPending}
-                  accessibilityState={{ disabled: save.isPending, busy: save.isPending }}
+                  accessibilityState={{ busy: save.isPending }}
                   accessibilityRole="button"
                   accessibilityLabel={`Log this visit with ${name || "this contact"}`}
                   style={styles.matchRow}
@@ -2039,7 +2030,7 @@ export default function ProspectScreen() {
                 save.mutate();
               }}
               disabled={save.isPending}
-              accessibilityState={{ disabled: save.isPending, busy: save.isPending }}
+              accessibilityState={{ busy: save.isPending }}
               accessibilityRole="button"
               accessibilityLabel="None of these — add this person as new"
               style={styles.linkBtn}
@@ -2056,7 +2047,7 @@ export default function ProspectScreen() {
                 save.mutate();
               }}
               disabled={save.isPending}
-              accessibilityState={{ disabled: save.isPending, busy: save.isPending }}
+              accessibilityState={{ busy: save.isPending }}
               accessibilityRole="button"
               accessibilityLabel="Log this visit without a person"
               style={styles.linkBtn}

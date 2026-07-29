@@ -265,12 +265,12 @@ export default function ChangePasswordScreen() {
             disabled={!canSubmit}
             accessibilityRole="button"
             accessibilityLabel="Update password"
-            /* Matches login.tsx, which is the point: this is the SAME shared formStyles control, and the
-               two screens had already drifted once — that is why formStyles exists. Extracting the
-               styles did not stop them drifting again on the half nobody can see, so the pairing is now
-               held by src/__tests__/disabled-controls-announce-disabled.test.ts rather than by care.
-               Without it the only disabled signal here is buttonDisabled's opacity: 0.5. */
-            accessibilityState={{ disabled: !canSubmit, busy }}
+            /* `busy` only. RN already merges the `disabled` PROP into the accessibility state, and it
+               takes precedence over anything written here (Pressable.js:228) — so the disabled half is
+               announced whether or not a screen spells it out. What is NOT derived is `busy`, and login
+               said it while this screen did not: the same shared formStyles control, drifted again on
+               the half nobody can see. That is the half worth writing down. */
+            accessibilityState={{ busy }}
             style={[formStyles.button, !canSubmit && formStyles.buttonDisabled]}
           >
             {busy ? (
@@ -293,7 +293,6 @@ export default function ChangePasswordScreen() {
             disabled={busy}
             accessibilityRole="button"
             accessibilityLabel="Sign out"
-            accessibilityState={{ disabled: busy }}
             style={styles.signOut}
           >
             <Text style={styles.signOutText}>Sign out</Text>

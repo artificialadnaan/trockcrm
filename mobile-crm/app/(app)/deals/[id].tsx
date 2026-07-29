@@ -104,9 +104,8 @@ export default function DealDetailScreen() {
     },
   });
 
-  // Derived once, above the JSX: the press guard, the greyed style and the announcement all ask this
-  // same question, and three copies of it is three chances for the button to be pressable while looking
-  // dead, or to read as available while refusing the press.
+  // Derived once, above the JSX: the press guard and the greyed style ask the same question, and two
+  // spellings of it is two chances for the button to look dead while still taking a press.
   const noteBlocked = note.trim().length === 0 || logNote.isPending;
 
   const watch = useMutation({
@@ -229,13 +228,10 @@ export default function DealDetailScreen() {
           onPress={() => watch.mutate(!deal.isWatching)}
           disabled={watch.isPending}
           accessibilityRole="button"
-          /* `selected` alone read as an available control while the toggle was in flight — the state
-             object existed, which is exactly why nobody noticed the half that was missing. */
-          accessibilityState={{
-            selected: deal.isWatching,
-            disabled: watch.isPending,
-            busy: watch.isPending,
-          }}
+          /* `busy`, not `disabled`. RN merges the `disabled` PROP into the accessibility state and it
+             takes precedence (Pressable.js:228), so writing it here would be a no-op — but `busy` is
+             not derived from anything, and mid-toggle is exactly when it is worth saying. */
+          accessibilityState={{ selected: deal.isWatching, busy: watch.isPending }}
           style={styles.watchBtn}
         >
           <Text style={styles.watchText}>{deal.isWatching ? "★ Watching" : "☆ Watch"}</Text>
@@ -330,16 +326,15 @@ export default function DealDetailScreen() {
                 : "Couldn't save that note."}
             </Text>
           ) : null}
-          {/* One predicate, three consumers. It was already written twice — the press guard and the
-              greyed style — and announcing it would have made a third copy of an expression that must
-              agree everywhere or the button lies to somebody. */}
+          {/* One predicate, two consumers. It was already written twice — the press guard and the
+              greyed style — which is two chances for the button to look dead while still pressable. */}
           <Pressable
             testID="save-note"
             onPress={() => logNote.mutate(note.trim())}
             disabled={noteBlocked}
             accessibilityRole="button"
             accessibilityLabel="Save note"
-            accessibilityState={{ disabled: noteBlocked, busy: logNote.isPending }}
+            accessibilityState={{ busy: logNote.isPending }}
             style={[styles.saveNote, noteBlocked && styles.saveNoteDisabled]}
           >
             {logNote.isPending ? (
@@ -415,10 +410,7 @@ export default function DealDetailScreen() {
               }}
               disabled={activitiesQuery.isFetchingNextPage}
               accessibilityRole="button"
-              accessibilityState={{
-                disabled: activitiesQuery.isFetchingNextPage,
-                busy: activitiesQuery.isFetchingNextPage,
-              }}
+              accessibilityState={{ busy: activitiesQuery.isFetchingNextPage }}
               style={styles.retry}
             >
               {activitiesQuery.isFetchingNextPage ? (

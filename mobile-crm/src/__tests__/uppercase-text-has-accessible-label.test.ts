@@ -17,8 +17,9 @@ import * as ts from "typescript";
  * mixed-case original so a label was POSSIBLE. Nothing yet required anyone to write one.
  *
  * The gap was not theoretical. #981 fixed the three board sites by hand and added the string guard;
- * thirteen other uppercase `<Text>` nodes across nine files were never touched, including every status
- * badge, the section titles on all three detail screens, and all five form labels on the move screen.
+ * twelve other uppercase `<Text>` nodes were never touched, including every status badge, the
+ * label/value `Row` used by the dashboard and all three detail screens, the section titles, and all
+ * five form labels on the move screen.
  * `Badge.tsx` additionally carried a comment asserting the OPPOSITE of the platform behaviour — that the
  * transform "stays presentational and the accessible name keeps its natural case" — which is how twelve
  * of those sites passed review: the reasoning had already been written down, and it was wrong.
@@ -26,9 +27,9 @@ import * as ts from "typescript";
  * WHAT IT FLAGS: a `<Text>` whose resolved style carries `textTransform: "uppercase"` and which has no
  * `accessibilityLabel`.
  *
- * WHAT IT ALLOWS: `accessibilityElementsHidden` / `importantForAccessibility="no-hide-descendants"`, and
- * a Text nested inside an element that supplies the accessible name itself (`accessible` with a label on
- * the parent Pressable) — in both cases the fragment is not independently announced.
+ * WHAT IT ALLOWS: an element genuinely hidden from the accessibility tree, and a Text nested inside an
+ * element that supplies the accessible name itself. Both are checked by VALUE — see
+ * `hiddenFromAccessibility`, which an earlier version got backwards.
  *
  * KNOWN LIMIT: single-file and syntactic, like its sibling. A style object imported from another module
  * (`formStyles`) is not resolved, so a transform declared there and consumed here is invisible. Neither
@@ -132,8 +133,44 @@ const GROUPS_BY_DEFAULT = new Set([
  * groups but carries NO label of its own is not exempt: RN then composes the name from the descendants'
  * text, which is the transformed string again.
  */
+/**
+ * Is this element hidden from the accessibility tree — by VALUE, not by the prop merely being present?
+ *
+ * `accessibilityElementsHidden={false}` and `importantForAccessibility="yes"` say the opposite of what
+ * their names suggest at a glance, and an earlier version of this guard exempted both because `attr()`
+ * returns a node either way. That is the worst possible direction for an accessibility check: the
+ * element is visible to VoiceOver, and the guard waves through exactly the missing label it exists to
+ * catch. A bare prop (`accessibilityElementsHidden`) is JSX shorthand for `={true}`, so that still
+ * counts; anything unresolvable is treated as NOT hidden, because a false negative here is silent.
+ */
+function hiddenFromAccessibility(el: ts.JsxOpeningElement | ts.JsxSelfClosingElement): boolean {
+  const hidden = attr(el, "accessibilityElementsHidden");
+  if (hidden) {
+    // No initializer at all is `={true}`.
+    if (!hidden.initializer) return true;
+    if (ts.isJsxExpression(hidden.initializer)) {
+      const e = hidden.initializer.expression;
+      if (e && e.kind === ts.SyntaxKind.TrueKeyword) return true;
+    }
+  }
+  const important = attr(el, "importantForAccessibility");
+  if (important?.initializer) {
+    // "no" hides the element; "no-hide-descendants" hides it and everything under it. "yes" and
+    // "auto" do not hide anything.
+    const text = ts.isStringLiteralLike(important.initializer)
+      ? important.initializer.text
+      : ts.isJsxExpression(important.initializer) &&
+          important.initializer.expression &&
+          ts.isStringLiteralLike(important.initializer.expression)
+        ? important.initializer.expression.text
+        : null;
+    if (text === "no" || text === "no-hide-descendants") return true;
+  }
+  return false;
+}
+
 function coveredByAncestor(el: ts.JsxOpeningElement | ts.JsxSelfClosingElement): boolean {
-  if (attr(el, "accessibilityElementsHidden") || attr(el, "importantForAccessibility")) return true;
+  if (hiddenFromAccessibility(el)) return true;
   for (let cur: ts.Node | undefined = el.parent; cur; cur = cur.parent) {
     const open = ts.isJsxElement(cur)
       ? cur.openingElement
@@ -141,7 +178,7 @@ function coveredByAncestor(el: ts.JsxOpeningElement | ts.JsxSelfClosingElement):
         ? cur
         : undefined;
     if (!open) continue;
-    if (attr(open, "accessibilityElementsHidden")) return true;
+    if (hiddenFromAccessibility(open)) return true;
     const groups = attr(open, "accessible") || GROUPS_BY_DEFAULT.has(open.tagName.getText());
     if (groups && attr(open, "accessibilityLabel")) return true;
   }
@@ -291,6 +328,24 @@ describe("uppercase Text carries an explicit accessibilityLabel", () => {
       expect(
         check(`${SHEET} const A = () => <Text accessibilityElementsHidden style={styles.cap}>x</Text>;`),
       ).toBe(0);
+      expect(
+        check(`${SHEET} const A = () => <Text accessibilityElementsHidden={true} style={styles.cap}>x</Text>;`),
+      ).toBe(0);
+      expect(
+        check(`${SHEET} const A = () => <Text importantForAccessibility="no-hide-descendants" style={styles.cap}>x</Text>;`),
+      ).toBe(0);
+    });
+
+    it("reads the hiding props by VALUE — `={false}` and \"yes\" hide nothing", () => {
+      // The first version exempted these, because the prop node exists either way. That is the worst
+      // direction for the check to fail in: the element is visible to VoiceOver and the guard waves
+      // through the exact missing label it exists to catch.
+      expect(
+        check(`${SHEET} const A = () => <Text accessibilityElementsHidden={false} style={styles.cap}>x</Text>;`),
+      ).toBe(1);
+      expect(
+        check(`${SHEET} const A = () => <Text importantForAccessibility="yes" style={styles.cap}>x</Text>;`),
+      ).toBe(1);
     });
 
     it("finds the transform when it sits beside a spread token", () => {
