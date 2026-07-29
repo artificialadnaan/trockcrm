@@ -637,3 +637,37 @@ describe("estimating-stage hold rule — the BID due date is the auto-park horiz
     expect(getEffectiveDealValue(deal, FIXED_NOW)).toBe(925000);
   });
 });
+
+describe("getEffectiveDealValue — change-order children", () => {
+  it("returns the negative amount for a deductive change order", () => {
+    expect(
+      getEffectiveDealValue({
+        isChangeOrder: true,
+        awardedAmount: "-50000.00",
+        stageSlug: "won",
+      })
+    ).toBe(-50000);
+  });
+
+  it("is inert for a positive change order", () => {
+    expect(
+      getEffectiveDealValue({
+        isChangeOrder: true,
+        awardedAmount: "25000.00",
+        stageSlug: "won",
+      })
+    ).toBe(25000);
+  });
+
+  it("does not change a normal deal's fallback behaviour", () => {
+    expect(
+      getEffectiveDealValue({
+        isChangeOrder: false,
+        awardedAmount: null,
+        bidEstimate: "7500.00",
+        ddEstimate: "9000.00",
+        stageSlug: "won",
+      })
+    ).toBe(7500);
+  });
+});

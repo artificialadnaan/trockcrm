@@ -12,7 +12,9 @@ type DealValueTable = {
   // A change-order child deal (0156) carries its value ONLY in awarded_amount, and a DEDUCTIVE CO carries
   // it NEGATIVE. REQUIRED, not optional: the sole production constructor is the real Drizzle `deals` table,
   // which always carries this column, so requiring it here means a hand-built table missing the field fails
-  // to COMPILE — instead of silently falling back to the pre-CO chain the way an optional field would.
+  // to COMPILE in `server/src` — instead of silently falling back to the pre-CO chain the way an optional
+  // field would. `server/tests` is not typechecked (server/tsconfig.json includes only src/**/*), so a test
+  // literal missing the field is backstopped instead by the assertions in deal-value-sql.test.ts.
   isChangeOrder: unknown;
 };
 
@@ -136,17 +138,19 @@ function aliasedDealValueChainSql(alias: string, columns: readonly DealValueColu
   return withAliasedChangeOrderBranch(alias, chain);
 }
 
-// SCOPE — partial rollout as of this commit (Task 1 of the deductive-change-order branch): only the
-// canonical chain in THIS file is change-order aware. Five hand-copied/hand-rolled twins of this chain still
-// use the pre-CO `> 0`-gated logic, so each still reports a deductive CO as $0 on its own surface:
+// SCOPE — partial rollout as of this commit (Task 2 of the deductive-change-order branch made the shared TS
+// twin below CO-aware; the canonical SQL chain in THIS file was already done by Task 1). Four remaining
+// hand-copied/hand-rolled twins of this chain still use the pre-CO `> 0`-gated logic, so each still reports
+// a deductive CO as $0 on its own surface:
 //   - server/src/modules/daily-summary/service.ts:208-214 (claims to mirror aliasedEffectiveWonDealValueSql
 //     "so the email's '$X won' ties to Showcase/Region")
 //   - client/src/lib/deal-utils.ts:111 ("mirrors server deal-value-sql.ts + shared getRawDealValue")
-//   - shared/src/types/deal-hold.ts:81 ("mirrors server deal-value-sql.ts")
 //   - worker/src/jobs/rep-performance-rollup.ts:21-27
 //   - server/src/modules/admin/routes.ts:1096-1099
-// All five are made CO-aware by later tasks on this same branch and land in the same PR as this file — this
-// is not an accidental gap. If this branch is ever split, treat these five as the outstanding work.
+// shared/src/types/deal-hold.ts (getRawDealValue / getRawAwardedDealValue) is now CO-aware (Task 2) and is
+// struck from this list. All four remaining are made CO-aware by later tasks on this same branch and land in
+// the same PR as this file — this is not an accidental gap. If this branch is ever split, treat these four as
+// the outstanding work.
 
 export function dealBestEstimateSql(table: DealValueTable): SQL {
   return dealValueChainSql(table, DEAL_VALUE_PRIORITY_CHAIN);
