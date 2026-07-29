@@ -156,6 +156,16 @@ describe("getDealScorecardDetail", () => {
     expect(detail.photos[0].caption).toBe("Slab crack");
   });
 
+  it("carries updatedAt — the token an approver's verdict is bound to, whose absence turns the guard OFF", async () => {
+    // A verdict sends back the card generation it was formed against, and the server refuses one that no
+    // longer matches. That check is deliberately SKIPPED when the client sends nothing, so older builds keep
+    // working — which means dropping `updatedAt` from this payload disables the guard everywhere with no
+    // error, no 400, and no failing test anywhere else. Fail-open protections need their input pinned, or
+    // the protection quietly stops existing.
+    const detail = await getDealScorecardDetail(tdb, DEAL, SC_NEWER);
+    expect(detail.updatedAt).toBe("2026-06-30T18:00:00.000Z");
+  });
+
   it("404s a scorecard fetched through the WRONG deal (id is scoped by dealId)", async () => {
     await expect(getDealScorecardDetail(tdb, OTHER_DEAL, SC_NEWER)).rejects.toMatchObject({ statusCode: 404 });
   });
