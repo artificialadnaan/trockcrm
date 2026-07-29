@@ -41,8 +41,10 @@ import { buildEstimatingWorkbenchState } from "./workbench-service.js";
 import {
   createWalkthroughContactSheetFile,
   createWalkthroughSourceDocument,
+  getCrmFileBucket,
   ingestWalkthrough,
   insertWalkthroughExtractions,
+  MAX_WALKTHROUGH_SCOPE_ROWS,
 } from "./walkthrough-ingress-service.js";
 
 const U = (s: string) => `00000000-0000-4000-8000-${s.padStart(12, "0")}`;
@@ -55,6 +57,11 @@ const PROJECT = U("44444");
 const WORKBENCH_DEAL = U("55551");
 const WORKBENCH_NEGATIVE_DEAL = U("55552");
 const DEFAULT_MARKET = U("66661");
+/** The bucket the CRM presigns every download against. A `files` row recorded against any other
+ *  bucket yields a download URL for an object that is not there (r2-client.ts:168-186 signs the key
+ *  against the CONFIGURED bucket and never reads files.r2_bucket), which is why ingress refuses a
+ *  foreign one — see "refuses a contact sheet stored outside the CRM's own bucket" below. */
+const CRM_BUCKET = getCrmFileBucket();
 
 let pg: PGlite;
 // The service is typed against NodePgDatabase; the PGlite driver is wire-compatible for these queries
@@ -132,9 +139,10 @@ describe("createWalkthroughContactSheetFile", () => {
         walkthroughId: WALKTHROUGH,
         siteLabel: "Unit 12B",
         r2Key: "walkthroughs/22222222/contact-sheet.jpg",
-        r2Bucket: "trock-scope",
+        r2Bucket: CRM_BUCKET,
         bytes: 184320,
         mimeType: "image/jpeg",
+        capturedAt: "2026-07-29T14:05:00Z",
         userId: USER,
       },
     });
@@ -145,20 +153,53 @@ describe("createWalkthroughContactSheetFile", () => {
 
     expect(row).toBeDefined();
     expect(row.mimeType).toBe("image/jpeg");
-    expect(row.fileExtension).toBe("jpg");
+    // WITH the leading dot, because buildFileDownloadUrlFromRecord (files/service.ts:1518) builds the
+    // download filename as `displayName + (fileExtension ?? "")`. A bare "jpg" would hand an estimator
+    // a file called "Walkthrough evidence — Unit 12Bjpg". confirmUpload derives it the same way
+    // (files/service.ts:790-792 slices from the dot INCLUSIVE), so this matches every other row.
+    expect(row.fileExtension).toBe(".jpg");
+    expect(row.displayName + row.fileExtension).toBe("Walkthrough evidence — Unit 12B.jpg");
     expect(row.fileSizeBytes).toBe(184320);
     expect(row.r2Key).toBe("walkthroughs/22222222/contact-sheet.jpg");
-    expect(row.r2Bucket).toBe("trock-scope");
+    expect(row.r2Bucket).toBe(CRM_BUCKET);
     expect(row.displayName).toContain("Unit 12B");
     expect(row.isActive).toBe(true);
     expect(row.category).toBe("estimate");
     // The walkthrough id reaches the DB ONLY through these two filename columns — nothing else on the
-    // row carries it — so they are the only place its provenance can be pinned.
-    expect(row.systemFilename).toContain(WALKTHROUGH);
-    expect(row.originalFilename).toContain(WALKTHROUGH);
+    // row carries it — so they are the only place its provenance can be pinned. Exactly one dot: the
+    // extension carries its own, so the filename must not have doubled it.
+    expect(row.systemFilename).toBe(`walkthrough-${WALKTHROUGH}.jpg`);
+    expect(row.originalFilename).toBe(`walkthrough-${WALKTHROUGH}.jpg`);
+    // WHEN the walkthrough was captured, stored as a timestamp rather than as characters inside the
+    // document filename. Everything that orders files chronologically reads
+    // COALESCE(taken_at, created_at) (files/service.ts:2031), so a null here would date the evidence
+    // to whenever the export happened to post rather than to when the estimator walked the building.
+    expect(row.takenAt).not.toBeNull();
+    expect(new Date(row.takenAt).toISOString()).toBe("2026-07-29T14:05:00.000Z");
     // Provenance the rest of the chain (and any human opening the file) needs.
     expect(row.dealId).toBe(DEAL);
     expect(row.uploadedBy).toBe(USER);
+  });
+
+  it("derives the pdf extension with its dot too", async () => {
+    const fileId = await createWalkthroughContactSheetFile({
+      tenantDb,
+      input: {
+        dealId: DEAL,
+        walkthroughId: U("22299"),
+        siteLabel: "Unit 12B",
+        r2Key: "walkthroughs/22299/contact-sheet.pdf",
+        r2Bucket: CRM_BUCKET,
+        bytes: 184320,
+        mimeType: "application/pdf",
+        capturedAt: "2026-07-29T14:05:00Z",
+        userId: USER,
+      },
+    });
+
+    const [row] = await tenantDb.select().from(files).where(eq(files.id, fileId));
+    expect(row.fileExtension).toBe(".pdf");
+    expect(row.systemFilename).toBe(`walkthrough-${U("22299")}.pdf`);
   });
 });
 
@@ -171,9 +212,10 @@ describe("createWalkthroughSourceDocument", () => {
         walkthroughId: WALKTHROUGH,
         siteLabel: "Unit 12B",
         r2Key: "walkthroughs/22222222/contact-sheet.jpg",
-        r2Bucket: "trock-scope",
+        r2Bucket: CRM_BUCKET,
         bytes: 184320,
         mimeType: "image/jpeg",
+        capturedAt: "2026-07-29T14:05:00Z",
         userId: USER,
       },
     });
@@ -252,9 +294,10 @@ async function seedChain(walkthroughId: string) {
       walkthroughId,
       siteLabel: "Unit 12B",
       r2Key: `walkthroughs/${walkthroughId}/contact-sheet.jpg`,
-      r2Bucket: "trock-scope",
+      r2Bucket: CRM_BUCKET,
       bytes: 184320,
       mimeType: "image/jpeg",
+      capturedAt: "2026-07-29T14:05:00Z",
       userId: USER,
     },
   });
@@ -377,11 +420,17 @@ describe("insertWalkthroughExtractions", () => {
     // The classification itself is kept on the row for provenance, not just consumed by the resolver.
     expect(row.metadataJson.trade).toBe("carpentry");
 
-    // All four gates again, this time through the ACTUAL SQL the worker runs, so a change to how the
-    // metadata is encoded fails here rather than silently emptying the candidate set in prod.
-    // Every predicate estimate-generation.ts:254-286 applies is reproduced, including the two on the
-    // DOCUMENT (parse_status / ocr_status, :282-283) that the exists(...) sub-select carries — a
-    // document born anything other than fully completed drops its whole extraction set here.
+    // All four gates again, this time as executable SQL, so a change to how the metadata is encoded
+    // fails here rather than silently emptying the candidate set in prod.
+    //
+    // This is a HAND-TRANSCRIBED COPY of the worker's candidate filter (estimate-generation.ts:254-286
+    // builds it as Drizzle fragments, not as a statement this test could import and run), NOT the
+    // worker's own query. Every predicate it applies is reproduced — including the two on the DOCUMENT
+    // (parse_status / ocr_status, :282-283) the exists(...) sub-select carries, so a document born
+    // anything other than fully completed drops its whole extraction set here. Kept verbatim on
+    // purpose rather than rewritten as an independently-worded predicate: a mirror written in its own
+    // words can drift from the worker without either side going red, which is precisely the failure
+    // this replay exists to catch. If the worker's filter changes, re-transcribe it here.
     const candidates = await pg.query<{ id: string }>(
       `SELECT e.id
          FROM public.estimate_extractions e
@@ -539,7 +588,7 @@ function walkthroughPayload(
     dealId: DEAL,
     projectId: PROJECT,
     contactSheetR2Key: `walkthroughs/${walkthroughId}/contact-sheet.jpg`,
-    contactSheetBucket: "trock-scope",
+    contactSheetBucket: CRM_BUCKET,
     contactSheetBytes: 184320,
     contactSheetMimeType: "image/jpeg",
     siteLabel: "Unit 12B",
@@ -586,7 +635,7 @@ describe("ingestWalkthrough", () => {
     // The wire contract's contactSheet* fields landed on the storage-shaped columns — this mapping is
     // the only thing that connects WalkthroughIngressPayload to the three narrow helper inputs.
     expect(file.r2Key).toBe(`walkthroughs/${walkthroughId}/contact-sheet.jpg`);
-    expect(file.r2Bucket).toBe("trock-scope");
+    expect(file.r2Bucket).toBe(CRM_BUCKET);
     expect(file.fileSizeBytes).toBe(184320);
     expect(file.mimeType).toBe("image/jpeg");
 
@@ -641,14 +690,16 @@ describe("ingestWalkthrough", () => {
   it("rolls the whole chain back when the last link fails", async () => {
     const before = await tableCounts();
 
-    // confidence is numeric(5,2) (estimate-extractions.ts:40), so 12345 overflows at INSERT with a
-    // 22003 — a real SQL failure in the THIRD write, after the file, the document, the parse run and
-    // the activation UPDATE have all already succeeded.
+    // quantity is numeric(14,3) (estimate-extractions.ts:37), so it holds ELEVEN integer digits; 1e12
+    // has thirteen and overflows at INSERT with a 22003. Chosen over an out-of-range confidence
+    // because validation now rejects that before the transaction ever opens, and what this test needs
+    // is a real SQL failure in the THIRD write — after the file, the document, the parse run and the
+    // activation UPDATE have all already succeeded.
     await expect(
       ingestWalkthrough({
         tenantDb,
         payload: walkthroughPayload(U("33003"), {
-          rows: [{ ...CARPENTRY_ROW, confidence: 12345 }],
+          rows: [{ ...CARPENTRY_ROW, quantity: 1e12 }],
         }),
       })
     ).rejects.toThrow();
@@ -656,6 +707,197 @@ describe("ingestWalkthrough", () => {
     // Without the transaction this leaves an orphan file + a document whose extractions never
     // arrived — permanently visible in the workbench documents list with nothing under it.
     expect(await tableCounts()).toEqual(before);
+  });
+
+  // THE RECEIVER DOES NOT TRUST THE SENDER. trock-scope withholds rows with no spoken quantity, but a
+  // walkthrough quantity that reaches storage as null is priced as ONE UNIT downstream
+  // (`Number(extraction.quantity ?? 1)`, three sites in worker/src/jobs/estimate-generation.ts) — so a
+  // single bad deploy on the other side of the wire would put confident invented numbers on estimates
+  // a human signs. Refused at the door instead.
+  it("refuses a row with no spoken quantity, naming it, without writing anything", async () => {
+    const before = await tableCounts();
+
+    await expect(
+      ingestWalkthrough({
+        tenantDb,
+        payload: walkthroughPayload(U("33004"), {
+          rows: [CARPENTRY_ROW, { ...CARPENTRY_ROW, sourceScopeItemId: "scope-item-9002", quantity: null }],
+        }),
+      })
+    ).rejects.toMatchObject({
+      statusCode: 400,
+      // Named, because "one of your rows is bad" is not something the sender can act on...
+      message: expect.stringContaining("scope-item-9002"),
+    });
+    // ...and DIAGNOSED, because "quantity must be a finite number" would leave the sender guessing
+    // that a null is a type error rather than the one rule this export is built on.
+    await expect(
+      ingestWalkthrough({
+        tenantDb,
+        payload: walkthroughPayload(U("33004"), {
+          rows: [{ ...CARPENTRY_ROW, quantity: null }],
+        }),
+      })
+    ).rejects.toMatchObject({ message: expect.stringContaining("has no spoken quantity") });
+
+    // Not "the bad row was skipped" — the WHOLE walkthrough is refused, including its good first row.
+    expect(await tableCounts()).toEqual(before);
+  });
+
+  // The bucket the row is stamped with is the bucket its download is presigned against — except that
+  // buildFileDownloadUrlFromRecord (files/service.ts:1513-1524) never reads files.r2_bucket at all: it
+  // hands generateDownloadUrl the KEY, which signs against the CRM's configured bucket
+  // (r2-client.ts:168-186). A contact sheet announced from another bucket is therefore a link to
+  // nothing — and this seam performs no object I/O, so it cannot copy the bytes across. Loud 400.
+  it("refuses a contact sheet stored outside the CRM's own bucket", async () => {
+    const before = await tableCounts();
+
+    await expect(
+      ingestWalkthrough({
+        tenantDb,
+        payload: walkthroughPayload(U("33005"), { contactSheetBucket: "trock-scope" }),
+      })
+    ).rejects.toMatchObject({
+      statusCode: 400,
+      message: expect.stringContaining(CRM_BUCKET),
+    });
+
+    expect(await tableCounts()).toEqual(before);
+  });
+
+  it.each<[string, Partial<WalkthroughIngressPayload>]>([
+    ["a row is null", { rows: [null] as unknown as WalkthroughScopeRow[] }],
+    ["a row has no rawLabel", { rows: [{ ...CARPENTRY_ROW, rawLabel: undefined }] as unknown as WalkthroughScopeRow[] }],
+    ["confidence is out of the 0-1 range", { rows: [{ ...CARPENTRY_ROW, confidence: 12345 }] }],
+    ["confidence is not a number", { rows: [{ ...CARPENTRY_ROW, confidence: "high" }] as unknown as WalkthroughScopeRow[] }],
+    ["capturedAt is unparseable", { capturedAt: "last tuesday" }],
+    ["contactSheetMimeType is not an accepted family", { contactSheetMimeType: "image/png" as never }],
+    ["contactSheetBytes is not a positive integer", { contactSheetBytes: 0 }],
+    ["siteLabel is blank", { siteLabel: "   " }],
+    ["evidence is missing", { rows: [{ ...CARPENTRY_ROW, evidence: undefined }] as unknown as WalkthroughScopeRow[] }],
+  ])("rejects a payload where %s, without writing anything", async (_label, overrides) => {
+    const before = await tableCounts();
+
+    await expect(
+      ingestWalkthrough({
+        tenantDb,
+        payload: walkthroughPayload(U("33006"), overrides),
+      })
+    ).rejects.toMatchObject({ statusCode: 400 });
+
+    // Every one of these used to be a 500 from inside the transaction (a NOT NULL violation, a
+    // `.toFixed` on a string, a 22003) or, worse, a row that inserted and priced wrong.
+    expect(await tableCounts()).toEqual(before);
+  });
+
+  it("refuses more scope rows than one walkthrough can plausibly carry", async () => {
+    const before = await tableCounts();
+
+    const tooMany = Array.from({ length: MAX_WALKTHROUGH_SCOPE_ROWS + 1 }, (_, index) => ({
+      ...CARPENTRY_ROW,
+      sourceScopeItemId: `scope-flood-${index}`,
+    }));
+
+    await expect(
+      ingestWalkthrough({ tenantDb, payload: walkthroughPayload(U("33007"), { rows: tooMany }) })
+    ).rejects.toMatchObject({ statusCode: 400 });
+
+    expect(await tableCounts()).toEqual(before);
+  });
+
+  // Rows are inserted in chunks of 200 because each binds 15 parameters against Postgres's 65535-per-
+  // statement cap. This walkthrough straddles two chunks, so a chunking bug (dropped tail, duplicated
+  // slice, wrong offset) shows up as a wrong count or a wrong last row rather than passing quietly.
+  it("writes every row of a multi-chunk walkthrough exactly once, in order", async () => {
+    const walkthroughId = U("33008");
+    const rows = Array.from({ length: 250 }, (_, index) => ({
+      ...CARPENTRY_ROW,
+      sourceScopeItemId: `scope-chunk-${index}`,
+      rawLabel: `Chunked scope row ${index}`,
+    }));
+
+    const result = await ingestWalkthrough({
+      tenantDb,
+      payload: walkthroughPayload(walkthroughId, { rows }),
+    });
+
+    expect(result.extractionIds).toHaveLength(250);
+    expect(new Set(result.extractionIds).size).toBe(250);
+
+    const written = await tenantDb
+      .select({ rawLabel: estimateExtractions.rawLabel })
+      .from(estimateExtractions)
+      .where(eq(estimateExtractions.documentId, result.documentId));
+    expect(written).toHaveLength(250);
+
+    // The returned ids are in payload order across the chunk boundary, not just present in bulk.
+    const [firstOfSecondChunk] = await tenantDb
+      .select({ rawLabel: estimateExtractions.rawLabel })
+      .from(estimateExtractions)
+      .where(eq(estimateExtractions.id, result.extractionIds[200]));
+    expect(firstOfSecondChunk.rawLabel).toBe("Chunked scope row 200");
+  });
+
+  // IDEMPOTENCY. A lost response is indistinguishable from a lost request, so trock-scope retries. On
+  // the old code the retry either died on `files.r2_key`'s unique index (23505, after the first call
+  // had already built the whole chain) or — with a regenerated key — succeeded into a SECOND document
+  // and a second set of extractions, silently doubling the deal's estimating work.
+  it("replays the first call's ids on a retry, writing nothing the second time", async () => {
+    const walkthroughId = U("33009");
+    const rows = [
+      CARPENTRY_ROW,
+      { ...CARPENTRY_ROW, sourceScopeItemId: "scope-item-9101", rawLabel: "Reflash the parapet" },
+    ];
+
+    const first = await ingestWalkthrough({
+      tenantDb,
+      payload: walkthroughPayload(walkthroughId, { rows }),
+    });
+
+    const afterFirst = await tableCounts();
+
+    const second = await ingestWalkthrough({
+      tenantDb,
+      payload: walkthroughPayload(walkthroughId, { rows }),
+    });
+
+    // Same answer, id for id — the caller cannot tell which attempt won, which is the whole point.
+    expect(second).toEqual(first);
+    // And nothing moved: no second file, no second document, no second parse run, no second row set.
+    expect(await tableCounts()).toEqual(afterFirst);
+
+    const documents = await tenantDb
+      .select({ id: estimateSourceDocuments.id })
+      .from(estimateSourceDocuments)
+      .where(eq(estimateSourceDocuments.contentHash, walkthroughId));
+    expect(documents).toHaveLength(1);
+
+    const extractions = await tenantDb
+      .select({ id: estimateExtractions.id })
+      .from(estimateExtractions)
+      .where(eq(estimateExtractions.documentId, first.documentId));
+    expect(extractions).toHaveLength(2);
+  });
+
+  it("scopes the retry check to the deal, so the same walkthrough on another deal still ingests", async () => {
+    const walkthroughId = U("33010");
+
+    const first = await ingestWalkthrough({
+      tenantDb,
+      payload: walkthroughPayload(walkthroughId),
+    });
+    const other = await ingestWalkthrough({
+      tenantDb,
+      payload: walkthroughPayload(walkthroughId, {
+        dealId: U("11112"),
+        // A retry reuses its key; a genuinely different ingress has its own object.
+        contactSheetR2Key: `walkthroughs/${walkthroughId}/contact-sheet-b.jpg`,
+      }),
+    });
+
+    // Dedupe is on (dealId, projectId, contentHash) — the same triple document-service.ts:104-130
+    // uses — so it cannot swallow a legitimate second ingress onto a different deal.
+    expect(other.documentId).not.toBe(first.documentId);
   });
 });
 

@@ -10,6 +10,7 @@
 // what is under test — not express, and not the middleware chain in front of it.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { WalkthroughIngressPayload, WalkthroughScopeRow } from "@trock-crm/shared/types";
+import { getCrmFileBucket } from "../../../src/modules/estimating/walkthrough-ingress-service.js";
 
 const dealsServiceMocks = vi.hoisted(() => ({
   getDealById: vi.fn(),
@@ -60,6 +61,12 @@ function findRouteHandler(method: "post", path: string) {
   return routeLayer.handle as (req: any, res: any, next: (err?: unknown) => void) => Promise<unknown>;
 }
 
+/** The per-call mocks of the LAST invocation, so a call that REJECTS can still be inspected —
+ *  `invokeRoute` cannot return them once the rethrowing `next` below turns the failure into a
+ *  rejection, and "commitTransaction was never called" is exactly what the failure paths must prove. */
+let lastCommitTransaction: ReturnType<typeof vi.fn>;
+let lastNext: ReturnType<typeof vi.fn>;
+
 async function invokeRoute(
   method: "post",
   path: string,
@@ -67,6 +74,7 @@ async function invokeRoute(
 ) {
   const handler = findRouteHandler(method, path);
   const commitTransaction = vi.fn(async () => {});
+  lastCommitTransaction = commitTransaction;
   const req = {
     params: options?.params ?? {},
     body: options?.body ?? {},
@@ -99,9 +107,10 @@ async function invokeRoute(
   const next = vi.fn((err?: unknown) => {
     if (err) throw err;
   });
+  lastNext = next;
 
   await handler(req, res, next);
-  return { req, res, commitTransaction };
+  return { req, res, commitTransaction, next };
 }
 
 const SCOPE_ROW: WalkthroughScopeRow = {
@@ -109,7 +118,9 @@ const SCOPE_ROW: WalkthroughScopeRow = {
   rawLabel: "Replace wall base throughout the corridor",
   trade: "flooring",
   divisionHint: "09",
-  quantity: null,
+  // Spoken and confirmed. A null here is refused by validateWalkthroughIngressPayload — see the
+  // "no spoken quantity" case below — because downstream a null is priced as one unit.
+  quantity: 64,
   unit: "LF",
   confidence: 0.84,
   evidenceText: "we'll need to replace the wall base throughout",
@@ -123,6 +134,7 @@ const SECOND_SCOPE_ROW: WalkthroughScopeRow = {
   rawLabel: "Patch and paint the ceiling at the water stain",
   trade: "painting",
   divisionHint: "09",
+  quantity: 1,
   unit: null,
   evidenceText: "patch and paint that ceiling where the stain is",
   evidence: { clipId: "clip-1", timelineMs: 88_000, frameKey: null },
@@ -134,7 +146,7 @@ const BODY: Omit<WalkthroughIngressPayload, "dealId" | "userId"> = {
   walkthroughId: "walkthrough-1",
   projectId: null,
   contactSheetR2Key: "walkthroughs/walkthrough-1/contact-sheet.jpg",
-  contactSheetBucket: "trock-scope",
+  contactSheetBucket: getCrmFileBucket(),
   contactSheetBytes: 92_160,
   contactSheetMimeType: "image/jpeg",
   siteLabel: "Corridor 2",
@@ -156,15 +168,45 @@ describe("POST /:id/estimating/walkthrough-extractions", () => {
     // `.length`, which is why the guard tests Array.isArray rather than truthiness.
     ["rows is not an array", { ...BODY_WITHOUT_ROWS, rows: { "0": SCOPE_ROW, length: 1 } }],
     ["rows is an empty array", { ...BODY_WITHOUT_ROWS, rows: [] }],
+    // Everything below reached the service before this PR: `rows: [null]` and a row missing rawLabel
+    // both died as a 500 from inside the transaction, and a foreign bucket succeeded into a file row
+    // whose download URL points at an object that is not there.
+    ["a row is null", { ...BODY_WITHOUT_ROWS, rows: [null] }],
+    ["a row has no rawLabel", { ...BODY_WITHOUT_ROWS, rows: [{ ...SCOPE_ROW, rawLabel: undefined }] }],
+    ["confidence is outside 0-1", { ...BODY_WITHOUT_ROWS, rows: [{ ...SCOPE_ROW, confidence: 42 }] }],
+    ["capturedAt is unparseable", { ...BODY, capturedAt: "last tuesday" }],
+    ["contactSheetMimeType is not accepted", { ...BODY, contactSheetMimeType: "image/png" }],
+    ["the contact sheet is in another bucket", { ...BODY, contactSheetBucket: "trock-scope" }],
+    ["siteLabel is missing", { ...BODY, siteLabel: undefined }],
   ])("rejects with 400 when %s, without touching the database", async (_label, body) => {
     await expect(
       invokeRoute("post", ROUTE_PATH, { params: { id: "deal-1" }, body })
     ).rejects.toMatchObject({ statusCode: 400 });
 
-    // The point of validating first: a walkthrough with nothing to estimate must not buy a
-    // contact-sheet file row and a parse run to hold nothing, and must not be reported as a success.
+    // The point of validating first: a malformed walkthrough must not buy a contact-sheet file row
+    // and a parse run to hold nothing, must not cost a deal lookup, and must not be reported as a
+    // success. Committing an empty transaction would report exactly that.
     expect(walkthroughIngressMocks.ingestWalkthrough).not.toHaveBeenCalled();
     expect(dealsServiceMocks.getDealById).not.toHaveBeenCalled();
+    expect(lastCommitTransaction).not.toHaveBeenCalled();
+  });
+
+  // Called out separately from the table above because it is the rule the whole export is built on,
+  // and because the message has to NAME the row: downstream a quantity-less row is priced as one unit
+  // (`Number(extraction.quantity ?? 1)`), so the sender needs to know which utterance to go fix.
+  it("rejects with 400, naming the row, when a scope row has no spoken quantity", async () => {
+    await expect(
+      invokeRoute("post", ROUTE_PATH, {
+        params: { id: "deal-1" },
+        body: { ...BODY, rows: [SCOPE_ROW, { ...SECOND_SCOPE_ROW, quantity: null }] },
+      })
+    ).rejects.toMatchObject({
+      statusCode: 400,
+      message: expect.stringContaining("scope-2"),
+    });
+
+    expect(walkthroughIngressMocks.ingestWalkthrough).not.toHaveBeenCalled();
+    expect(lastCommitTransaction).not.toHaveBeenCalled();
   });
 
   it("creates the ingress chain and answers 201 with the result", async () => {
@@ -243,5 +285,26 @@ describe("POST /:id/estimating/walkthrough-extractions", () => {
     ).rejects.toMatchObject({ statusCode: 404 });
 
     expect(walkthroughIngressMocks.ingestWalkthrough).not.toHaveBeenCalled();
+    expect(lastCommitTransaction).not.toHaveBeenCalled();
+  });
+
+  // The path everything else in this file assumes but nothing was proving: the ingress itself fails.
+  // The handler must hand that error to `next` (so the error middleware renders it and the tenant
+  // middleware rolls the request's transaction back) and must NOT commit — a commit here would turn a
+  // failed ingress into a 201 with a body built from an exception that never produced any rows.
+  it("hands an ingress failure to next without committing", async () => {
+    const failure = Object.assign(new Error("Walkthrough ingress requires at least one scope row"), {
+      statusCode: 400,
+    });
+    walkthroughIngressMocks.ingestWalkthrough.mockRejectedValue(failure);
+
+    await expect(
+      invokeRoute("post", ROUTE_PATH, { params: { id: "deal-1" }, body: BODY })
+    ).rejects.toBe(failure);
+
+    expect(walkthroughIngressMocks.ingestWalkthrough).toHaveBeenCalledTimes(1);
+    expect(lastNext).toHaveBeenCalledTimes(1);
+    expect(lastNext).toHaveBeenCalledWith(failure);
+    expect(lastCommitTransaction).not.toHaveBeenCalled();
   });
 });

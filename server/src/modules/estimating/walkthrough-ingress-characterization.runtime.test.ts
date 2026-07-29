@@ -10,14 +10,20 @@
 // comment describes.
 //
 // Defect 1 — a null quantity is priced as one unit (worker/src/jobs/estimate-generation.ts).
+//            INGRESS NOW BLOCKS THIS HAZARD AT ITS OWN DOOR: `ingestWalkthrough` refuses any row with
+//            no spoken quantity, so a walkthrough can no longer be the thing that feeds the coercion.
+//            The defect itself is UNREPAIRED — every other producer of `estimate_extractions` still
+//            reaches those three call sites — so the characterization stays, now written as "the
+//            coercion is still there, and we are refusing to hand it anything" rather than as "watch
+//            our own null go through it".
 // Defect 2 — natural-language scope prose scores zero name points against the catalog
 //            (server/src/modules/estimating/matching-service.ts:69).
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
-import { asc, eq } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   estimateDocumentParseRuns,
@@ -28,7 +34,7 @@ import {
 import type { WalkthroughIngressPayload, WalkthroughScopeRow } from "@trock-crm/shared/types";
 import { tenantSchemaSql } from "../../../tests/helpers/tenant-schema-from-drizzle.js";
 import { rankExtractionMatches } from "./matching-service.js";
-import { ingestWalkthrough } from "./walkthrough-ingress-service.js";
+import { getCrmFileBucket, ingestWalkthrough } from "./walkthrough-ingress-service.js";
 
 const U = (s: string) => `00000000-0000-4000-8000-${s.padStart(12, "0")}`;
 const DEAL = U("c1111");
@@ -36,15 +42,14 @@ const WALKTHROUGH = U("c2222");
 const USER = U("c3333");
 const CATALOG_ITEM = U("c4444");
 
-/** The exact expression the worker prices with. Kept as one string so the source lock below and the
- *  arithmetic assertion cannot drift apart. */
+/** The exact expression the worker prices with, kept as one string so the source lock below cannot
+ *  drift from the prose describing it. Recorded at the time of writing at
+ *  worker/src/jobs/estimate-generation.ts:424 (buildPricingRecommendation input), :470
+ *  (persistPricingRecommendationBundle, transactional branch) and :500 (same, non-transactional
+ *  branch) — counted rather than pinned by line number, so unrelated edits above those lines do not
+ *  fail the suite. */
 const WORKER_QUANTITY_COERCION = "Number(extraction.quantity ?? 1)";
-
-/** Line numbers, at the time of writing, of every site that applies the coercion:
- *  worker/src/jobs/estimate-generation.ts:424 (buildPricingRecommendation input),
- *  :470 (persistPricingRecommendationBundle, transactional branch),
- *  :500 (persistPricingRecommendationBundle, non-transactional branch). */
-const WORKER_QUANTITY_COERCION_LINES = [424, 470, 500];
+const WORKER_QUANTITY_COERCION_SITES = 3;
 
 const WORKER_ESTIMATE_GENERATION_PATH = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -72,8 +77,8 @@ const UNSPOKEN_QUANTITY_ROW: WalkthroughScopeRow = {
   locationLabel: "Corridor",
 };
 
-/** The rare case: a number was spoken and confirmed. Present as a control, so the assertions below
- *  are demonstrably about NULL handling and not about quantities in general. */
+/** The case ingress accepts: a number was spoken and confirmed. Present as a control, so the
+ *  assertions below are demonstrably about NULL handling and not about quantities in general. */
 const SPOKEN_QUANTITY_ROW: WalkthroughScopeRow = {
   sourceScopeItemId: "scope-spoken",
   rawLabel: "Replace 50 lf of base at the east wall",
@@ -92,7 +97,7 @@ const PAYLOAD: WalkthroughIngressPayload = {
   dealId: DEAL,
   projectId: null,
   contactSheetR2Key: "walkthroughs/c2222/contact-sheet.jpg",
-  contactSheetBucket: "trock-scope",
+  contactSheetBucket: getCrmFileBucket(),
   contactSheetBytes: 92_160,
   contactSheetMimeType: "image/jpeg",
   siteLabel: "Corridor 2",
@@ -121,64 +126,69 @@ afterAll(async () => {
 });
 
 describe("DEFECT 1 — a walkthrough row with no spoken quantity is priced as one unit", () => {
-  it("writes null to the database and the worker's coercion turns that null into 1", async () => {
-    const { extractionIds } = await ingestWalkthrough({ tenantDb, payload: PAYLOAD });
-    expect(extractionIds).toHaveLength(2);
+  it("is now refused at ingress, so the coercion is never handed one of our rows", async () => {
+    // The hazard, stated once: downstream, `Number(extraction.quantity ?? 1)` turns "nobody said how
+    // much" into "exactly one of it" and prices it. At a $3.25/LF baseline the unpriceable row does
+    // not surface as unpriceable — it surfaces as a confident $3.25 line item on an estimate a human
+    // will sign. That is why ingress refuses the row rather than exporting the null and hoping.
+    await expect(ingestWalkthrough({ tenantDb, payload: PAYLOAD })).rejects.toMatchObject({
+      statusCode: 400,
+      // The refusal names the row AND says why, so the sender is not left reading "quantity must be a
+      // finite number" and concluding it sent the wrong TYPE.
+      message: expect.stringContaining(UNSPOKEN_QUANTITY_ROW.sourceScopeItemId),
+    });
+    await expect(ingestWalkthrough({ tenantDb, payload: PAYLOAD })).rejects.toMatchObject({
+      message: expect.stringContaining("has no spoken quantity"),
+    });
 
+    // The WHOLE walkthrough is refused, not just the offending row — including the good spoken one
+    // alongside it. Nothing at all was written.
     const rows = await tenantDb
-      .select({
-        rawLabel: estimateExtractions.rawLabel,
-        quantity: estimateExtractions.quantity,
-      })
+      .select({ id: estimateExtractions.id })
       .from(estimateExtractions)
-      .where(eq(estimateExtractions.dealId, DEAL))
-      .orderBy(asc(estimateExtractions.rawLabel));
+      .where(eq(estimateExtractions.dealId, DEAL));
+    expect(rows).toHaveLength(0);
+  });
 
-    const unspoken = rows.find((row: { rawLabel: string }) => row.rawLabel === UNSPOKEN_QUANTITY_ROW.rawLabel);
-    const spoken = rows.find((row: { rawLabel: string }) => row.rawLabel === SPOKEN_QUANTITY_ROW.rawLabel);
+  it("still writes a spoken quantity through unchanged", async () => {
+    // The control. Same payload minus the unspoken row: this is not "ingress rejects walkthroughs",
+    // it is "ingress rejects rows with nothing to price".
+    const { extractionIds } = await ingestWalkthrough({
+      tenantDb,
+      payload: { ...PAYLOAD, rows: [SPOKEN_QUANTITY_ROW] },
+    });
 
-    // Our half of the contract holds: "no quantity was spoken" reaches storage as NULL, not as 0 and
-    // not as 1. Everything below is what happens to that NULL after it leaves us.
-    expect(unspoken?.quantity).toBeNull();
-    expect(Number(spoken?.quantity)).toBe(50);
+    expect(extractionIds).toHaveLength(1);
 
-    // THE DEFECT. This is the worker's expression, applied verbatim to the row we just wrote. An
-    // utterance that named no quantity is about to be priced as exactly one of whatever it matched.
-    //
-    // IF THIS ASSERTION EVER FAILS, THE WORKER WAS FIXED. Go revisit the "never export a null
-    // quantity" rule in walkthrough-ingress-service.ts (`quantity: row.quantity === null ? null :
-    // String(row.quantity)`): that rule is written on the assumption that null survives to a human,
-    // and if the worker now skips, flags, or zeroes null-quantity rows instead of silently pricing
-    // them at 1, exporting null may finally be safe — or may have become a different kind of wrong.
-    // Decide deliberately. Do not just update the number.
-    expect(Number(unspoken?.quantity ?? 1)).toBe(1);
+    const [row] = await tenantDb
+      .select({ quantity: estimateExtractions.quantity })
+      .from(estimateExtractions)
+      .where(eq(estimateExtractions.id, extractionIds[0]));
 
-    // What that costs, concretely: at a $3.25/LF baseline the unpriceable row does not surface as
-    // unpriceable — it surfaces as a confident $3.25 line item on an estimate a human will sign.
-    expect(Number(unspoken?.quantity ?? 1) * 3.25).toBe(3.25);
+    expect(Number(row.quantity)).toBe(50);
   });
 
   it("still applies that coercion at all three call sites in the worker", () => {
-    // A source lock, not a behavior test. The arithmetic above would keep passing if the worker were
-    // repaired, because `??` is JavaScript, not our code — so the only way to notice the repair is to
-    // look at the worker itself. Counted rather than pinned by line number so that unrelated edits
-    // above these lines do not fail the suite; the line numbers are recorded in
-    // WORKER_QUANTITY_COERCION_LINES for whoever comes to find them.
+    // A SOURCE LOCK, not a behavior test — and the only assertion in this file that can notice the
+    // defect being repaired. Our own rows no longer reach the coercion, but every other producer of
+    // `estimate_extractions` still does, so the hazard is unrepaired and the ingress guard above is
+    // load-bearing. The day this count changes, re-read the guard in walkthrough-ingress-service.ts:
+    // if the worker now skips, flags, or zeroes quantity-less rows instead of silently pricing them at
+    // 1, refusing them at ingress may no longer be the right call. Decide deliberately.
+    if (!existsSync(WORKER_ESTIMATE_GENERATION_PATH)) {
+      throw new Error(
+        `CHARACTERIZATION TEST CANNOT RUN: expected the worker's estimate-generation job at ` +
+          `${WORKER_ESTIMATE_GENERATION_PATH}, and it is not there. This test reads the worker's ` +
+          `SOURCE across packages on purpose (the coercion is JavaScript's \`??\`, not our code, so ` +
+          `no runtime assertion can see it repaired). If the file moved, update ` +
+          `WORKER_ESTIMATE_GENERATION_PATH — do not delete this test.`
+      );
+    }
+
     const source = readFileSync(WORKER_ESTIMATE_GENERATION_PATH, "utf8");
     const occurrences = source.split(WORKER_QUANTITY_COERCION).length - 1;
 
-    expect(WORKER_QUANTITY_COERCION_LINES).toHaveLength(3);
-    expect(occurrences).toBe(WORKER_QUANTITY_COERCION_LINES.length);
-
-    // Recorded so the failure message names the sites rather than making the next reader grep:
-    // :424 pricing input, :470 transactional persist, :500 non-transactional persist.
-    const lines = source.split("\n");
-    const stillPresentAtRecordedLines = WORKER_QUANTITY_COERCION_LINES.filter((lineNumber) =>
-      lines[lineNumber - 1]?.includes(WORKER_QUANTITY_COERCION)
-    );
-    // Soft: if the file shifted, this drops below 3 while the count above still holds. That is a
-    // stale-comment signal, not a defect signal — update WORKER_QUANTITY_COERCION_LINES.
-    expect(stillPresentAtRecordedLines.length).toBeGreaterThan(0);
+    expect(occurrences).toBe(WORKER_QUANTITY_COERCION_SITES);
   });
 });
 
