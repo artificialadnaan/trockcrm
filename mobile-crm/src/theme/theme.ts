@@ -178,6 +178,22 @@ export const theme = {
     h2: { fontFamily: FONT.bold, fontSize: 20, lineHeight: 24, letterSpacing: -0.3 },
     title: { fontFamily: FONT.semibold, fontSize: 17, lineHeight: 22, letterSpacing: -0.2 },
     body: { fontFamily: FONT.regular, fontSize: 15, lineHeight: 21 },
+    /**
+     * The step the scale was missing, and the reason most of the app never joined it.
+     *
+     * `label` is 13 SEMIBOLD — a field name, something that introduces other content. Secondary prose
+     * at the same size (an email under a greeting, a hint under a number, an explanatory note) is
+     * 13 REGULAR, and the scale had no such step: the only options were `body` at 15, which makes a
+     * subordinate line the same size as the main one, or `label`, which bolds an ordinary sentence.
+     * So screens kept writing `fontSize: 13` by hand — and the count says so. Across 22 files the app
+     * had 15 distinct literal sizes against a 7-step scale, and 69 of those uses were sizes the scale
+     * did not contain at all.
+     *
+     * A scale you have to leave to say an ordinary thing is not a scale anyone will keep. Added rather
+     * than re-pointing an existing step, because re-pointing a token by NAME is what broke ten primary
+     * buttons the last time (see `textInverse` below).
+     */
+    small: { fontFamily: FONT.regular, fontSize: 13, lineHeight: 18 },
     label: { fontFamily: FONT.semibold, fontSize: 13, lineHeight: 17 },
     caption: { fontFamily: FONT.semibold, fontSize: 11, lineHeight: 14, letterSpacing: 0.9 },
   },

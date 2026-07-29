@@ -1,6 +1,6 @@
 import * as deals from "../api/endpoints/deals";
 import type { Fetcher } from "../api/endpoints/auth";
-import { displayAmount, resolveDealValue, showsAtRisk } from "../components/DealCard";
+import { displayAmount, resolveDealValue, showsAtRisk } from "../deal-value";
 import type { AtRiskResult } from "../api/types";
 
 function recording(result: unknown = {}) {

@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useCallback, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   FlatList,
@@ -18,7 +18,7 @@ import * as pipelineApi from "../../../src/api/endpoints/pipeline";
 import type { DealListItem } from "../../../src/api/types";
 import { useAuth } from "../../../src/auth/AuthContext";
 import { useQueryScope } from "../../../src/auth/useOfficeId";
-import { BoardCard } from "../../../src/components/BoardCard";
+import { DealCard } from "../../../src/components/DealCard";
 import { RetryNotice } from "../../../src/components/RetryNotice";
 import { resolveListState } from "../../../src/list-state";
 import { theme } from "../../../src/theme/theme";
@@ -39,6 +39,14 @@ const SCOPES: Array<{ key: pipelineApi.PipelineScope; label: string }> = [
 
 export default function PipelineBoardScreen() {
   const router = useRouter();
+
+  // ONE stable handler for every card on screen. Inline, each card got a fresh closure per render,
+  // which is precisely what defeats DealCard's React.memo — the memo compares props, and a new function
+  // never equals the last one.
+  const openDeal = useCallback(
+    (deal: DealListItem) => router.push(`/(app)/deals/${deal.id}`),
+    [router],
+  );
   const goBack = useGoBack("/(app)/deals");
   const { session, fetcher } = useAuth();
   const cacheScope = useQueryScope();
@@ -306,10 +314,10 @@ export default function PipelineBoardScreen() {
                 ) : null
               }
               renderItem={({ item }) => (
-                <BoardCard
+                <DealCard
                   deal={item}
                   canMove={pipelineApi.canMoveStage(item, session?.user.id)}
-                  onPress={() => router.push(`/(app)/deals/${item.id}`)}
+                  onPress={openDeal}
                 />
               )}
             />

@@ -18,7 +18,7 @@ import * as pipelineApi from "../../../src/api/endpoints/pipeline";
 import { useAuth } from "../../../src/auth/AuthContext";
 import { useQueryScope } from "../../../src/auth/useOfficeId";
 import { BackLink } from "../../../src/components/BackLink";
-import { displayAmount, showsAtRisk } from "../../../src/components/DealCard";
+import { displayAmount, showsAtRisk } from "../../../src/deal-value";
 import { Badge } from "../../../src/components/Badge";
 import { RetryNotice } from "../../../src/components/RetryNotice";
 import { Row } from "../../../src/components/Row";
@@ -592,8 +592,9 @@ const styles = StyleSheet.create({
   retryText: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.redText },
   emptyActivity: { fontFamily: theme.font.regular, fontSize: 14, color: theme.color.textMuted },
   activity: { gap: 2, paddingVertical: theme.space.sm },
-  // textSecondary, not textMuted: #8A95A3 on white is ~3:1, under the 4.5:1 floor for normal
-  // text, and at 12px on a phone outdoors it is the first thing to become unreadable.
+  // textSecondary (8.3:1 on surface), not textMuted (4.99:1): this is the smallest text on the screen
+  // and outdoors it is the first thing to become unreadable. Ratios are against the DARK surface — the
+  // "on white" figures this comment used to carry described the light theme.
   activityMeta: { fontFamily: theme.font.regular, fontSize: 12, color: theme.color.textSecondary },
   activitySubject: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.textPrimary },
   activityNotes: { fontFamily: theme.font.regular, fontSize: 14, color: theme.color.textSecondary },

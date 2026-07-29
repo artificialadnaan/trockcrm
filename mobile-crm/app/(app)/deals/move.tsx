@@ -746,7 +746,10 @@ const styles = StyleSheet.create({
   },
   blockTitle: { fontFamily: theme.font.bold, fontSize: 15, color: theme.color.amberText },
   warnTitle: { fontFamily: theme.font.bold, fontSize: 15, color: theme.color.amberText },
-  okTitle: { fontFamily: theme.font.bold, fontSize: 15, color: theme.color.green },
+  // greenText, not `green`. theme.ts reserves the raw accents for "charts, dots, non-text", and this
+  // is a heading. It measured 7.88:1 so no contrast test could catch it — the rule it broke is about
+  // which token means what, and that kind of rule has to be read to be kept.
+  okTitle: { fontFamily: theme.font.bold, fontSize: 15, color: theme.color.greenText },
   blockBody: { fontFamily: theme.font.regular, fontSize: 14, color: theme.color.textSecondary },
   missingWrap: { marginTop: theme.space.sm, gap: 2 },
   missingItem: { fontFamily: theme.font.regular, fontSize: 13, color: theme.color.textSecondary },
