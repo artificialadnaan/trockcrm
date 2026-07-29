@@ -1,5 +1,5 @@
 import React from "react";
-import { Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
+import { ActivityIndicator, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
@@ -46,6 +46,14 @@ export default function DashboardScreen() {
   const total = mine.data?.pagination.total;
   // An error is only worth reporting once the query has stopped trying; mid-retry it is not news.
   const countFailed = Boolean(mine.error) && !mine.isFetching;
+  /**
+   * LOADING is not the same as "we have never had a number".
+   *
+   * Both rendered "—" under "Pull to refresh", so the very first open of the app told a rep to retry
+   * something that was already in flight. `isLoading` is true only for a first fetch with nothing
+   * cached, which is exactly the case that needed its own words.
+   */
+  const countLoading = mine.isLoading;
   const countOffline = mine.error instanceof ApiError && mine.error.status === 0;
 
   /**
@@ -60,14 +68,19 @@ export default function DashboardScreen() {
     ? countOffline
       ? "You're offline — this may be out of date. Pull to retry."
       : "Couldn't refresh — this may be out of date. Pull to retry."
-    : total === undefined
-      ? "Pull to refresh"
-      : total === 0
-        ? "Nothing assigned to you yet"
-        : "Tap to open your pipeline";
+    : countLoading
+      ? "Counting…"
+      : total === undefined
+        ? "Pull to refresh"
+        : total === 0
+          ? "Nothing assigned to you yet"
+          : "Tap to open your pipeline";
 
-  const countLabel =
-    total === undefined ? "Your deals, count unavailable" : `Your deals, ${total}`;
+  const countLabel = countLoading
+    ? "Your deals, counting"
+    : total === undefined
+      ? "Your deals, count unavailable"
+      : `Your deals, ${total}`;
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
@@ -103,7 +116,13 @@ export default function DashboardScreen() {
                 it also covers deals you created, are subscribed to, or have activity on. Labelling it
                 as assignment would make the number disagree with the rep's own idea of their book. */}
             <Text style={styles.statLabel}>Your deals</Text>
-            <Text style={styles.statValue}>{total === undefined ? "—" : total}</Text>
+            {/* A spinner while counting, an em dash only once we have genuinely failed to get one.
+                The dash meant both, so a first load looked like a permanent absence. */}
+            {countLoading ? (
+              <ActivityIndicator color={theme.color.brandRed} style={styles.statSpinner} />
+            ) : (
+              <Text style={styles.statValue}>{total === undefined ? "—" : total}</Text>
+            )}
             {/* No at-risk count here. It was derived from this query's rows — a limit:1 page — so it
                 could only ever be 0 or 1 regardless of the real number. A wrong count is worse than
                 none, and counting properly would mean pulling the whole set just to measure it. */}
@@ -244,6 +263,8 @@ const styles = StyleSheet.create({
   // 34 EXTRABOLD with -0.8 tracking, reserved for exactly this — the one number a rep opens the app for.
   // It was 34 bold, the right size at the wrong weight.
   statValue: { ...theme.type.display, color: theme.color.inkNavy },
+  // Reserves the display line's height so the card does not jump when the number lands.
+  statSpinner: { height: theme.type.display.lineHeight, alignSelf: "flex-start" },
   statHintStale: { color: theme.color.amberText },
   statHint: { ...theme.type.small, color: theme.color.textSecondary },
   /* WRAPS. A role with all four surfaces put four flex:1 cards in one row, so at 320-360 dp "Log a

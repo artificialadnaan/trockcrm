@@ -17,8 +17,10 @@ import * as leadsApi from "../../../../src/api/endpoints/leads";
 import type { LeadListItem } from "../../../../src/api/types";
 import { useAuth } from "../../../../src/auth/AuthContext";
 import { useQueryScope } from "../../../../src/auth/useOfficeId";
+import { useOffices } from "../../../../src/auth/useOffices";
 import { LeadCard } from "../../../../src/components/LeadCard";
 import { RetryNotice } from "../../../../src/components/RetryNotice";
+import { ScreenHeader } from "../../../../src/components/ScreenHeader";
 import { resolveListState } from "../../../../src/list-state";
 import { qk } from "../../../../src/query/keys";
 import { useDebouncedSearch } from "../../../../src/lib/use-debounced-search";
@@ -57,6 +59,7 @@ export default function LeadsListScreen() {
   const router = useRouter();
   const { fetcher } = useAuth();
   const cacheScope = useQueryScope();
+  const { activeOfficeName } = useOffices();
   const [scope, setScope] = useState<leadsApi.LeadScope>("mine");
   const [lifecycle, setLifecycle] = useState<"true" | "false">("true");
   const [search, setSearch] = useState("");
@@ -142,17 +145,23 @@ export default function LeadsListScreen() {
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
-      <View style={styles.header}>
-        <Text style={styles.title}>Leads</Text>
-        {listState.kind === "loaded" ? (
-          <Text style={styles.count}>
-            {leads.length}
-            {/* The server caps this list, so a full page is "at least this many", not a total. Saying
-                "100 leads" when there are 240 would be a number the rep plans around. */}
-            {leads.length >= 100 ? "+ shown" : ""}
-          </Text>
-        ) : null}
-      </View>
+      {/* The SHARED header, like every other list. Leads was the one screen still rolling its own,
+          so it was also the one with no brand mark and no office name — and a rep with access to more
+          than one office could not tell whose leads they were reading. */}
+      <ScreenHeader
+        title="Leads"
+        context={activeOfficeName ?? undefined}
+        right={
+          listState.kind === "loaded" ? (
+            <Text style={styles.count}>
+              {leads.length}
+              {/* The server caps this list, so a full page is "at least this many", not a total.
+                  Saying "100 leads" when there are 240 would be a number the rep plans around. */}
+              {leads.length >= 100 ? "+ shown" : ""}
+            </Text>
+          ) : undefined
+        }
+      />
 
       <View style={styles.scopeRow}>
         {SCOPES.map((s) => (
@@ -259,14 +268,6 @@ export default function LeadsListScreen() {
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: theme.color.canvas },
-  header: {
-    flexDirection: "row",
-    alignItems: "baseline",
-    justifyContent: "space-between",
-    paddingHorizontal: theme.space.lg,
-    paddingTop: theme.space.sm,
-  },
-  title: { ...theme.type.h1, color: theme.color.textPrimary },
   count: { ...theme.type.label, color: theme.color.textMuted },
   scopeRow: {
     flexDirection: "row",

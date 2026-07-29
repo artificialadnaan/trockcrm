@@ -19,6 +19,7 @@ import * as prospecting from "../../src/api/endpoints/prospecting";
 import type { PropertyMatch } from "../../src/api/endpoints/prospecting";
 import { useAuth } from "../../src/auth/AuthContext";
 import { useGoBack } from "../../src/lib/go-back";
+import { activityTypeLabel } from "../../src/activity-label";
 import { COARSE_ACCURACY_METERS, useCurrentLocation } from "../../src/lib/use-current-location";
 import {
   canSubmit,
@@ -70,13 +71,15 @@ function todayIsoDate(): string {
   return noon.toISOString();
 }
 
-const ACTIVITY_TYPES: Array<{ key: prospecting.FieldActivityType; label: string }> = [
-  { key: "site_visit", label: "Site visit" },
-  { key: "call", label: "Call" },
-  { key: "meeting", label: "Meeting" },
-  { key: "voicemail", label: "Voicemail" },
-  { key: "note", label: "Note" },
-];
+/**
+ * The five types a FIELD capture can write, in chip order.
+ *
+ * The words come from `activityTypeLabel` so the chip a rep taps and the line the deal feed renders
+ * cannot drift — they were two lists, and the feed's was the raw column.
+ */
+const ACTIVITY_TYPES: Array<{ key: prospecting.FieldActivityType; label: string }> = (
+  ["site_visit", "call", "meeting", "voicemail", "note"] as const
+).map((key) => ({ key, label: activityTypeLabel(key) }));
 
 export default function ProspectScreen() {
   const goBack = useGoBack("/(app)/(tabs)/dashboard");
