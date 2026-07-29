@@ -473,7 +473,6 @@ export async function approveAndNotify(
   return outcome;
 }
 
-/** The most recent `submitted` event per item — what an approval must be pinned to. */
 /**
  * Refuse any target whose latest submission is NOT the one the reviewer had on screen.
  *
@@ -507,6 +506,7 @@ async function assertReviewedAttemptsAreLatest(
   }
 }
 
+/** The most recent `submitted` event per item — what a verdict must be pinned to. */
 async function latestSubmissionByItem(
   tx: TenantDb,
   itemIds: string[],
