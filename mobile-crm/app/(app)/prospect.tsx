@@ -3,6 +3,7 @@ import {
   AccessibilityInfo,
   ActivityIndicator,
   AppState,
+  KeyboardAvoidingView,
   Platform,
   Pressable,
   ScrollView,
@@ -219,6 +220,56 @@ export default function ProspectScreen() {
    */
   const matchedFor = useRef<string | null>(null);
 
+  /**
+   * Start a fresh capture at the SAME building.
+   *
+   * Lifted out of the JSX when the action bar was pinned: the button now lives in the footer and the
+   * confirmation it used to sit inside stays in the scroll, so an inline handler this long would have
+   * been separated from everything it resets. It clears every piece of the last capture — including
+   * the error and prompt states added late in review, which is the part that kept being missed.
+   */
+  const startAnotherCapture = useCallback(() => {
+              setSavedActivityId(null);
+              setFlagForLead(false);
+              setContactFailed(false);
+              createdContactId.current = undefined;
+              resolvedContactId.current = null;
+              contactWaived.current = false;
+              contactForceCreate.current = false;
+              setResolvedContactName(null);
+              setContactIndeterminate(false);
+              setDuplicateContacts(null);
+              // The person TARGET is a separate thing from the person being described; a fresh log at
+              // the same spot keeps the building, not who the last visit was with.
+              setContact(null);
+              setContactQuery("");
+              contactQueryRef.current = "";
+              setContactResults(null);
+              setContactSearchFailed(false);
+              setRematchNotice(null);
+              setCorrectingAddress(false);
+              /* Everything the LAST capture put on screen, including the paths added late in review.
+                 Without these, "Log another here" opened a fresh draft still showing the previous
+                 one's company error, property error, duplicate prompt and rematch notice — the same
+                 hidden-state shape as the rest of this screen's defects, on the control whose whole
+                 job is to start clean. */
+              setDuplicateCompanies(null);
+              setCreateCompanyError(null);
+              setCreatePropertyError(null);
+              setRematchNotice(null);
+              setManualAddress("");
+              setManualCity("");
+              setManualState("");
+              setManualZip("");
+              setBody("");
+              setOutcome("");
+              setNextStep("");
+              setContactFirst("");
+              setContactLast("");
+              setContactPhone("");
+              setContactTitle("");
+  }, []);
+
   const findProperty = useCallback(async () => {
     setMatchError(null);
     setMatches(null);
@@ -339,6 +390,15 @@ export default function ProspectScreen() {
    * still the current one. Same shape `use-current-location` uses for the fix itself.
    */
   const matchGeneration = useRef(0);
+  /**
+   * The scroll, so an OUTCOME can be brought to the rep rather than waiting to be found.
+   *
+   * This did not matter while Save sat at the bottom of the form: reaching it meant scrolling past
+   * everything, so whatever mounted there was already in view. Pinning the action bar removed that
+   * accident — Save is now reachable from anywhere, so a rep can commit from halfway up and the
+   * confirmation, its caveats, or a duplicate prompt mount somewhere they are not looking.
+   */
+  const scrollRef = useRef<ScrollView | null>(null);
   useEffect(() => {
     if (!fixKey || !fix) return;
     if (matchedFor.current === fixKey) return;
@@ -963,6 +1023,15 @@ export default function ProspectScreen() {
      */
     runMatch.isPending ||
     /**
+     * ...and while a DUPLICATE is unanswered.
+     *
+     * `haltsForDuplicates` makes the mutation return without writing, so tapping Save again just
+     * re-runs the dedup check and halts again. That was invisible while the button sat below the
+     * prompt; pinned, it re-enables in the rep's hand with the picker off-screen, and a sighted rep
+     * can sit there re-tapping a control that has already decided not to save.
+     */
+    Boolean(duplicateContacts?.length) ||
+    /**
      * ...and while the FIX is still being acquired.
      *
      * `locating` precedes runMatch by up to the 12-second location deadline, and with a fallback
@@ -1064,9 +1133,17 @@ export default function ProspectScreen() {
   });
 
   useEffect(() => {
-    if (Platform.OS === "ios" && announcement.length > 0) {
-      AccessibilityInfo.announceForAccessibility(announcement);
-    }
+    if (announcement.length === 0) return;
+    if (Platform.OS === "ios") AccessibilityInfo.announceForAccessibility(announcement);
+    /**
+     * ...and scroll it into view for everyone else.
+     *
+     * `announcement` is non-empty exactly when the capture has reached an outcome — saved, or halted on
+     * a duplicate — and both of those render as the LAST thing in the scroll, so end-scrolling reaches
+     * either. One effect for one event: the sighted rep and the VoiceOver rep are told the same thing
+     * at the same moment, which is the only way those two stay in agreement.
+     */
+    scrollRef.current?.scrollToEnd({ animated: true });
   }, [announcement]);
 
   /**
@@ -1099,7 +1176,7 @@ export default function ProspectScreen() {
   }, [locationStatus, locate]);
 
   return (
-    <SafeAreaView style={styles.safe} edges={["top"]}>
+    <SafeAreaView style={styles.safe} edges={["top", "bottom"]}>
       <View style={styles.header}>
         <Pressable
           testID="prospect-back"
@@ -1121,7 +1198,11 @@ export default function ProspectScreen() {
         <View style={styles.headerSpacer} />
       </View>
 
-      <ScrollView contentContainerStyle={styles.body} keyboardShouldPersistTaps="handled">
+      <ScrollView
+        ref={scrollRef}
+        contentContainerStyle={styles.body}
+        keyboardShouldPersistTaps="handled"
+      >
         {/* ---- 1. WHERE. The only mandatory part, because the server requires a target. ---- */}
         <Text style={styles.stepLabel}>WHERE</Text>
 
@@ -2154,7 +2235,10 @@ export default function ProspectScreen() {
           </View>
         ) : null}
 
-        {/* ---- Save ---- */}
+        {/* ---- Saved ----
+             The EXPLANATION stays here; the action moved to the pinned bar below. A rep reads these
+             once and scrolls past them, while the thing they tap next has to be reachable without
+             scrolling at all. */}
         {saved ? (
           <View testID="prospect-saved" style={styles.savedBox}>
             <Text style={styles.savedText}>Logged.</Text>
@@ -2187,65 +2271,66 @@ export default function ProspectScreen() {
               </Text>
             ) : null}
 
-            <Pressable
-              testID="prospect-log-another"
-              onPress={() => {
-                setSavedActivityId(null);
-                setFlagForLead(false);
-                setContactFailed(false);
-                createdContactId.current = undefined;
-                resolvedContactId.current = null;
-                contactWaived.current = false;
-                contactForceCreate.current = false;
-                setResolvedContactName(null);
-                setContactIndeterminate(false);
-                setDuplicateContacts(null);
-                // The person TARGET is a separate thing from the person being described; a fresh log at
-                // the same spot keeps the building, not who the last visit was with.
-                setContact(null);
-                setContactQuery("");
-                contactQueryRef.current = "";
-                setContactResults(null);
-                setContactSearchFailed(false);
-                setRematchNotice(null);
-                setCorrectingAddress(false);
-                /* Everything the LAST capture put on screen, including the paths added late in review.
-                   Without these, "Log another here" opened a fresh draft still showing the previous
-                   one's company error, property error, duplicate prompt and rematch notice — the same
-                   hidden-state shape as the rest of this screen's defects, on the control whose whole
-                   job is to start clean. */
-                setDuplicateCompanies(null);
-                setCreateCompanyError(null);
-                setCreatePropertyError(null);
-                setRematchNotice(null);
-                setManualAddress("");
-                setManualCity("");
-                setManualState("");
-                setManualZip("");
-                setBody("");
-                setOutcome("");
-                setNextStep("");
-                setContactFirst("");
-                setContactLast("");
-                setContactPhone("");
-                setContactTitle("");
-              }}
-              accessibilityRole="button"
-              style={styles.secondaryBtn}
-            >
-              <Text style={styles.secondaryText}>Log another here</Text>
-            </Pressable>
           </View>
+        ) : null}
+      </ScrollView>
+
+      {/**
+        * THE ACTION BAR, pinned.
+        *
+        * Save used to live at the bottom of a form three screens long, and when it was disabled the
+        * reason rendered beside it — so a rep who scrolled down to commit met a dead button whose
+        * explanation, and whose fix, were back at the top. Three findings in one control: the thumb
+        * zone, the working-memory gap where the chosen building scrolls out of sight, and "I tapped
+        * Save and nothing happened".
+        *
+        * Pinning it puts the commit, the reason it is unavailable, and any error in the same place,
+        * always reachable, without changing a single rule about WHEN it is allowed.
+        */}
+      {/**
+        * Wrapping ONLY the bar, not the scroll.
+        *
+        * `padding` lifts this view's content by the keyboard height, which is all that is needed —
+        * a pinned footer is otherwise sat on by the keyboard at the exact moment a rep finishes the
+        * note and reaches for Save. Wrapping the ScrollView instead would nest eleven hundred lines a
+        * level deeper, and re-indenting them would bury this PR's actual diff in whitespace.
+        */}
+      <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined}>
+      <View style={styles.actionBar}>
+        {saveError ? (
+          <Text testID="prospect-save-error" style={styles.error}>
+            {saveError}
+          </Text>
+        ) : null}
+
+        {saved ? (
+          <Pressable
+            testID="prospect-log-another"
+            onPress={startAnotherCapture}
+            accessibilityRole="button"
+            style={styles.secondaryBtn}
+          >
+            <Text style={styles.secondaryText}>Log another here</Text>
+          </Pressable>
         ) : (
           <>
-            {/**
-              * Also blocked while the BUILDING is being created.
-              *
-              * `ready` is already true on the company the rep picked, so tapping Save during that
-              * request filed the visit against the company — and the property mutation's onSuccess then
-              * swapped the displayed target to the new building. The screen showed a property-backed
-              * visit that the property's own history would never contain.
-              */}
+            {/* The reason ABOVE the button: it explains the control you are about to reach for, so it
+                has to be read first. */}
+          {runMatch.isPending || location.state.status === "locating" ? (
+            <Text testID="prospect-blocked" style={styles.help}>
+              {location.state.status === "locating" ? "Finding where you are…" : "Checking what's here…"}
+            </Text>
+          ) : createPropertyHere.isPending || createCompanyNamed.isPending ? (
+            /* Both writes disable Save, so both need a reason — a button that goes dead without
+               explanation is the defect this line exists to prevent. */
+            <Text testID="prospect-blocked" style={styles.help}>
+              {createPropertyHere.isPending ? "Adding the building…" : "Adding the company…"}
+            </Text>
+          ) : blockedReason ? (
+            <Text testID="prospect-blocked" style={styles.help}>
+              {blockedReason}
+            </Text>
+          ) : null}
             <Pressable
               testID="prospect-save"
               onPress={() => save.mutate()}
@@ -2260,37 +2345,27 @@ export default function ProspectScreen() {
                 <Text style={styles.primaryText}>Save log</Text>
               )}
             </Pressable>
-            {/* A disabled button with no explanation is the same defect as a dead one. */}
-            {runMatch.isPending || location.state.status === "locating" ? (
-              <Text testID="prospect-blocked" style={styles.help}>
-                {location.state.status === "locating" ? "Finding where you are…" : "Checking what's here…"}
-              </Text>
-            ) : createPropertyHere.isPending || createCompanyNamed.isPending ? (
-              /* Both writes disable Save, so both need a reason — a button that goes dead without
-                 explanation is the defect this line exists to prevent. */
-              <Text testID="prospect-blocked" style={styles.help}>
-                {createPropertyHere.isPending ? "Adding the building…" : "Adding the company…"}
-              </Text>
-            ) : blockedReason ? (
-              <Text testID="prospect-blocked" style={styles.help}>
-                {blockedReason}
-              </Text>
-            ) : null}
           </>
         )}
-
-        {saveError ? (
-          <Text testID="prospect-save-error" style={styles.error}>
-            {saveError}
-          </Text>
-        ) : null}
-      </ScrollView>
+      </View>
+      </KeyboardAvoidingView>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: theme.color.canvas },
+  /* Sits ON the canvas with a top rule rather than floating: the form scrolls underneath it, and the
+     line is what tells you the content continues rather than ends. */
+  actionBar: {
+    gap: theme.space.sm,
+    paddingHorizontal: theme.space.lg,
+    paddingTop: theme.space.md,
+    paddingBottom: theme.space.md,
+    borderTopWidth: 1,
+    borderTopColor: theme.color.border,
+    backgroundColor: theme.color.canvas,
+  },
   header: {
     flexDirection: "row",
     alignItems: "center",

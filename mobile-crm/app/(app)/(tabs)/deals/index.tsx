@@ -24,6 +24,8 @@ import { RetryNotice } from "../../../../src/components/RetryNotice";
 import { resolveListState } from "../../../../src/list-state";
 import { buildStageIndex, stageLabelFor } from "../../../../src/stage-label";
 import { qk } from "../../../../src/query/keys";
+import { useDebouncedSearch } from "../../../../src/lib/use-debounced-search";
+import { MIN_SEARCH_LENGTH, searchIsTooShort } from "../../../../src/search-query";
 import { theme } from "../../../../src/theme/theme";
 
 const SCOPES: Array<{ key: DealScope; label: string }> = [
@@ -39,7 +41,6 @@ const PAGE_SIZE = 50;
  * character returns the UNFILTERED first page, which looks exactly like "that one letter matched 400
  * unrelated deals" — so the client holds it back and says why.
  */
-const MIN_SEARCH_LENGTH = 2;
 
 export default function DealsListScreen() {
   const router = useRouter();
@@ -51,9 +52,11 @@ export default function DealsListScreen() {
 
   // Only the SUBMITTED search is part of the query key. Keying on every keystroke would fire a request
   // per character against a rate-limited API (300/min/user) and thrash the cache.
-  const [submittedSearch, setSubmittedSearch] = useState("");
+  /* Debounced, not submitted. See src/search-query.ts — the two-character floor stays, the
+     press-return ceremony goes. */
+  const submittedSearch = useDebouncedSearch(search);
 
-  const tooShort = search.trim().length > 0 && search.trim().length < MIN_SEARCH_LENGTH;
+  const tooShort = searchIsTooShort(search);
 
   const params = useMemo(
     () => ({ scope, search: submittedSearch || undefined, limit: PAGE_SIZE }),
@@ -115,11 +118,6 @@ export default function DealsListScreen() {
   );
   const total = query.data?.pages[0]?.pagination.total;
 
-  function submitSearch() {
-    const trimmed = search.trim();
-    if (trimmed.length > 0 && trimmed.length < MIN_SEARCH_LENGTH) return;
-    setSubmittedSearch(trimmed);
-  }
 
   const offline = query.error instanceof ApiError && query.error.status === 0;
 
@@ -195,7 +193,6 @@ export default function DealsListScreen() {
         testID="deals-search"
         value={search}
         onChangeText={setSearch}
-        onSubmitEditing={submitSearch}
         returnKeyType="search"
         placeholder="Search deals"
         placeholderTextColor={theme.color.textMuted}
