@@ -213,6 +213,29 @@ function hasMeaningfulLabel(el: ts.JsxOpeningElement | ts.JsxSelfClosingElement)
     if (ts.isConditionalExpression(n)) return empty(n.whenTrue) || empty(n.whenFalse);
     if (ts.isParenthesizedExpression(n)) return empty(n.expression);
     if (ts.isTemplateExpression(n)) return false;
+    /**
+     * The logical operators are ternaries in disguise, and `&&` is the dangerous one.
+     *
+     * `accessibilityLabel={name && "Company"}` yields `""` whenever `name` is `""` — a falsy left
+     * operand is RETURNED, not skipped — so the label is empty exactly when the data is missing, which
+     * is when it was most needed. Treated as potentially empty unless the left side is a literal that
+     * cannot be falsy.
+     *
+     * `||` only returns its left when truthy, so a `""` there is unreachable: empty only if the right
+     * is. `??` returns its left unless null/undefined, so either side can be the answer.
+     */
+    if (ts.isBinaryExpression(n)) {
+      const k = n.operatorToken.kind;
+      if (k === ts.SyntaxKind.AmpersandAmpersandToken) {
+        const leftAlwaysTruthy = ts.isStringLiteralLike(n.left) && n.left.text.trim().length > 0;
+        return !leftAlwaysTruthy || empty(n.right);
+      }
+      if (k === ts.SyntaxKind.BarBarToken) return empty(n.right);
+      if (k === ts.SyntaxKind.QuestionQuestionToken) return empty(n.left) || empty(n.right);
+      // `a + b` and friends: a concatenation is empty only if it cannot contribute anything, which a
+      // static walk cannot decide. Accepted, like any other unresolvable expression.
+      return false;
+    }
     return false;
   };
   if (ts.isStringLiteralLike(init)) return !empty(init);
@@ -418,6 +441,23 @@ describe("uppercase Text carries an explicit accessibilityLabel", () => {
       expect(
         check(`${SHEET} const A = () => <Text accessibilityLabel={on ? n : ""} style={styles.cap}>x</Text>;`),
       ).toBe(1);
+    });
+
+    it("rejects a logical expression that can resolve empty", () => {
+      // `name && "Company"` is "" whenever name is "" — a falsy left operand is returned, not skipped.
+      expect(
+        check(`${SHEET} const A = () => <Text accessibilityLabel={name && "Company"} style={styles.cap}>x</Text>;`),
+      ).toBe(1);
+      expect(
+        check(`${SHEET} const A = () => <Text accessibilityLabel={name ?? ""} style={styles.cap}>x</Text>;`),
+      ).toBe(1);
+    });
+
+    it("accepts a logical expression whose every reachable value is a name", () => {
+      // `||` returns its left only when truthy, so "" there is unreachable; the right is a real name.
+      expect(
+        check(`${SHEET} const A = () => <Text accessibilityLabel={name || "Untitled"} style={styles.cap}>x</Text>;`),
+      ).toBe(0);
     });
 
     it("rejects an empty label on the GROUPING ancestor too", () => {

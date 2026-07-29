@@ -159,25 +159,37 @@ function sharedFloorKeys(): Map<string, number> {
  * Semantics mirrored from RN:
  *   - an ARRAY flattens last-wins, so fold left to right and let a later entry replace an earlier one;
  *   - `a ? b : c` is either branch;
- *   - `cond && style` is that style OR nothing;
- *   - anything this cannot read (a block-bodied callback, a call, a spread) yields `null`, which fails.
- *     Conservative on purpose: the failure is visible and fixed by writing the number down.
+ *   - `cond && style` is that style OR nothing.
+ *
+ * `null` and UNKNOWN are DIFFERENT and conflating them was a hole. `null` means "this entry declares no
+ * height", so the previous value in the array stands — correct for `{ padding: 8 }`. UNKNOWN means "this
+ * entry could not be read", and it must POISON the result, because an unreadable trailing entry may be
+ * the last-wins override: `[styles.big, compactStyle()]` passed on `big`'s 44 while the call could
+ * return `{ minHeight: 32 }`. Anything this cannot resolve — a call, a bare identifier, a spread, a
+ * block-bodied callback, a style from a module it does not parse — is UNKNOWN and fails.
  */
-function possibleFloors(node: ts.Node, heights: Map<string, number>): Set<number | null> {
-  const one = (v: number | null): Set<number | null> => new Set([v]);
+/** "Could not be read" — distinct from "declares no height", which is `null`. */
+const UNKNOWN = Symbol("unknown-style");
+type Contribution = number | null | typeof UNKNOWN;
+function possibleFloors(
+  node: ts.Node,
+  heights: Map<string, number>,
+  owners: Set<string>,
+): Set<Contribution> {
+  const one = (v: Contribution): Set<Contribution> => new Set([v]);
 
   // `style={...}` arrives as the JSX expression container, not the expression. The previous walker
   // descended the whole subtree so it never had to know; a structural evaluator does.
   if (ts.isJsxExpression(node)) {
-    return node.expression ? possibleFloors(node.expression, heights) : one(null);
+    return node.expression ? possibleFloors(node.expression, heights, owners) : one(null);
   }
-  if (ts.isParenthesizedExpression(node)) return possibleFloors(node.expression, heights);
+  if (ts.isParenthesizedExpression(node)) return possibleFloors(node.expression, heights, owners);
 
   if (ts.isArrayLiteralExpression(node)) {
-    let acc: Set<number | null> = one(null);
+    let acc: Set<Contribution> = one(null);
     for (const el of node.elements) {
-      const contribs = possibleFloors(el, heights);
-      const next = new Set<number | null>();
+      const contribs = possibleFloors(el, heights, owners);
+      const next = new Set<Contribution>();
       for (const prev of acc) {
         for (const c of contribs) {
           // A contribution of null is "this entry declares nothing", so the previous value stands.
@@ -191,8 +203,8 @@ function possibleFloors(node: ts.Node, heights: Map<string, number>): Set<number
 
   if (ts.isConditionalExpression(node)) {
     return new Set([
-      ...possibleFloors(node.whenTrue, heights),
-      ...possibleFloors(node.whenFalse, heights),
+      ...possibleFloors(node.whenTrue, heights, owners),
+      ...possibleFloors(node.whenFalse, heights, owners),
     ]);
   }
 
@@ -200,24 +212,30 @@ function possibleFloors(node: ts.Node, heights: Map<string, number>): Set<number
     const k = node.operatorToken.kind;
     // `cond && style` — the style applies, or nothing does.
     if (k === ts.SyntaxKind.AmpersandAmpersandToken) {
-      return new Set([null, ...possibleFloors(node.right, heights)]);
+      return new Set([null, ...possibleFloors(node.right, heights, owners)]);
     }
     if (k === ts.SyntaxKind.BarBarToken || k === ts.SyntaxKind.QuestionQuestionToken) {
       return new Set([
-        ...possibleFloors(node.left, heights),
-        ...possibleFloors(node.right, heights),
+        ...possibleFloors(node.left, heights, owners),
+        ...possibleFloors(node.right, heights, owners),
       ]);
     }
-    return one(null);
+    return one(UNKNOWN);
   }
 
   if (ts.isArrowFunction(node) || ts.isFunctionExpression(node)) {
     // `({ pressed }) => [...]` is read; a block body is not — see the note above.
-    return ts.isBlock(node.body) ? one(null) : possibleFloors(node.body, heights);
+    return ts.isBlock(node.body) ? one(UNKNOWN) : possibleFloors(node.body, heights, owners);
   }
 
   if (ts.isPropertyAccessExpression(node) && ts.isIdentifier(node.expression)) {
-    return one(heights.get(`${node.expression.text}.${node.name.text}`) ?? null);
+    const owner = node.expression.text;
+    const key = `${owner}.${node.name.text}`;
+    const declared = heights.get(key);
+    if (declared !== undefined) return one(declared);
+    // A style object this file DEFINES and whose entry declares no height contributes nothing. One it
+    // has never seen could declare anything, including a smaller override.
+    return one(owners.has(owner) ? null : UNKNOWN);
   }
 
   if (ts.isObjectLiteralExpression(node)) {
@@ -232,17 +250,34 @@ function possibleFloors(node: ts.Node, heights: Map<string, number>): Set<number
     return one(declared);
   }
 
-  return one(null);
+  // Everything else — a call, a bare identifier, a spread, an await. Unreadable, so unsafe.
+  return one(UNKNOWN);
 }
 
 /** Compliant only when EVERY path it can take declares at least the floor. */
-function declaresFloor(node: ts.Node, heights: Map<string, number>): boolean {
-  const outcomes = possibleFloors(node, heights);
+function declaresFloor(node: ts.Node, heights: Map<string, number>, owners: Set<string>): boolean {
+  const outcomes = possibleFloors(node, heights, owners);
   if (outcomes.size === 0) return false;
   for (const o of outcomes) {
-    if (o === null || o < FLOOR) return false;
+    if (o === UNKNOWN || o === null || o < FLOOR) return false;
   }
   return true;
+}
+
+/** Variable names this file binds to a StyleSheet or a plain style object. */
+function styleOwners(sf: ts.SourceFile): Set<string> {
+  const owners = new Set<string>(["formStyles"]);
+  const visit = (n: ts.Node): void => {
+    if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.initializer) {
+      const init = n.initializer;
+      const isSheet =
+        ts.isCallExpression(init) && init.expression.getText().endsWith("StyleSheet.create");
+      if (isSheet || ts.isObjectLiteralExpression(init)) owners.add(n.name.text);
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(sf);
+  return owners;
 }
 
 function findings(file: string): string[] {
@@ -263,7 +298,7 @@ function findings(file: string): string[] {
         : undefined;
     if (open && CONTROL_TAGS.has(open.tagName.getText())) {
       const style = attr(open, "style");
-      const ok = style?.initializer ? declaresFloor(style.initializer, floorKeys) : false;
+      const ok = style?.initializer ? declaresFloor(style.initializer, floorKeys, styleOwners(sf)) : false;
       if (!ok) {
         const { line } = sf.getLineAndCharacterOfPosition(open.getStart(sf));
         hits.push(`${path.relative(ROOT, file)}:${line + 1}`);
@@ -299,7 +334,7 @@ describe("interactive controls declare a 44pt floor", () => {
             : undefined;
         if (open && CONTROL_TAGS.has(open.tagName.getText())) {
           const style = attr(open, "style");
-          if (!(style?.initializer && declaresFloor(style.initializer, floorKeys))) hits.push("hit");
+          if (!(style?.initializer && declaresFloor(style.initializer, floorKeys, styleOwners(sf)))) hits.push("hit");
         }
         ts.forEachChild(node, visit);
       };
@@ -402,6 +437,20 @@ describe("interactive controls declare a 44pt floor", () => {
         "const styles = StyleSheet.create({ active: { minHeight: 44 }, inactive: { minHeight: 30 } });";
       expect(check(`${MIXED} const A = () => <Pressable style={on ? styles.active : styles.inactive} />;`)).toBe(1);
       expect(check(`${MIXED} const A = () => <Pressable style={on ? styles.inactive : styles.active} />;`)).toBe(1);
+    });
+
+    it("fails an UNREADABLE trailing entry rather than trusting the one before it", () => {
+      // [big, compactStyle()] passed on big's 44 while the call could return { minHeight: 32 } and win
+      // by last-wins. "declares nothing" and "cannot be read" had been the same value.
+      expect(check(`${SHEET} const A = () => <Pressable style={[styles.big, compactStyle()]} />;`)).toBe(1);
+      expect(check(`${SHEET} const A = () => <Pressable style={[styles.big, whatever]} />;`)).toBe(1);
+      expect(check(`${SHEET} const A = () => <Pressable style={[styles.big, ...rest]} />;`)).toBe(1);
+    });
+
+    it("still treats a KNOWN style with no height as declaring nothing", () => {
+      // The distinction that makes the rule above safe: styles.small is defined here and simply has no
+      // height, so it does not cancel the floor in front of it.
+      expect(check(`${SHEET} const A = () => <Pressable style={[styles.big, styles.small]} />;`)).toBe(0);
     });
 
     it("scans TextInput too — a credential field is a touch target", () => {

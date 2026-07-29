@@ -208,9 +208,36 @@ export default function ProspectScreen() {
   const ready = canSubmit({ target, type, body, outcome });
 
   /** Find where the rep is, then ask the server which property that is. */
+  /**
+   * The fix this screen has already looked up, so one fix starts one match.
+   *
+   * Declared ABOVE `findProperty`, which clears it. A callback body runs on press rather than during
+   * render, so a later `const` would not actually throw — but this file has already shipped one TDZ
+   * crash of exactly this shape (`effectiveAddress` reading `coarse` from 500 lines further down, in a
+   * useMemo, where it DID run during render). Neither tsc nor 500 unit tests caught that one. Keeping
+   * the declaration above its first use is cheaper than knowing which hook bodies are safe.
+   */
+  const matchedFor = useRef<string | null>(null);
+
   const findProperty = useCallback(async () => {
     setMatchError(null);
     setMatches(null);
+    /**
+     * Starting a lookup means going back to MATCHING, so undo the two things abandoning one left set.
+     *
+     * Both became reachable when the escape hatch started resetting the location: `reset()` returns the
+     * hook to `idle`, which re-renders "Find this property", so a rep can abandon and then retry.
+     *
+     *   - `rejectedMatches` stayed true, and the company fallback is gated on it — so a retry that
+     *     found candidates rendered the match list AND an empty company picker at once, while
+     *     `onSuccess` had just cleared the company that picker existed to show.
+     *   - `matchedFor` still held the abandoned attempt's coordinate key, and the effect below skips a
+     *     fix it has already matched. A stationary rep gets the SAME coordinates back — the common
+     *     case, not the edge one — so the retry silently went to `ready` with no candidates and no
+     *     error, which reads as the lookup finding nothing.
+     */
+    setRejectedMatches(false);
+    matchedFor.current = null;
     await location.locate();
   }, [location]);
 
@@ -295,7 +322,6 @@ export default function ProspectScreen() {
    */
   const fix = location.state.status === "ready" ? location.state : null;
   const fixKey = fix ? `${fix.lat},${fix.lng}` : null;
-  const matchedFor = useRef<string | null>(null);
   /**
    * Which lookup attempt is still the LIVE one.
    *
