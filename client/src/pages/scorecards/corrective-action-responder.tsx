@@ -448,24 +448,73 @@ function ItemCard({
       )}
 
       {isResolved ? (
-        <div className="mt-3 border-l-2 border-slate-200 pl-3">
-          <p className="text-xs text-slate-500">
-            {item.responderName ?? item.responderEmail ?? "Responder"}
-            {item.respondedAt ? ` · ${new Date(item.respondedAt).toLocaleDateString()}` : ""}
-          </p>
-          {item.responseComment && <p className="mt-1 text-sm text-slate-900">{item.responseComment}</p>}
-          {item.photos.length > 0 && (
-            <div className="mt-2 grid grid-cols-3 gap-2 sm:grid-cols-4">
-              {item.photos.map((p) =>
-                p.url ? (
-                  <a key={p.id} href={p.url} target="_blank" rel="noopener noreferrer">
-                    <img
-                      src={p.url}
-                      alt="Corrective action"
-                      className="aspect-square w-full rounded-md object-cover ring-1 ring-slate-200"
-                    />
-                  </a>
-                ) : null,
+        /* The THREAD, per attempt. Pairing the latest responseComment with item.photos — the aggregate of
+           every photo ever linked — showed the rejected attempt's evidence as if it belonged to the newest
+           response, while the earlier comment and the approver's verdict vanished. The API already returns
+           per-attempt sets; use them. Falls back to the stored columns for a card the 0202 seed did not
+           reach, which has no thread to render. */
+        <div className="mt-3 space-y-3">
+          {(item.events?.length ?? 0) > 0 ? (
+            item.events!.map((event) => (
+              <div key={event.id} className="border-l-2 border-slate-200 pl-3">
+                <p className="text-xs text-slate-500">
+                  <span
+                    className={
+                      event.eventType === "approved"
+                        ? "font-semibold text-emerald-700"
+                        : event.eventType === "rejected"
+                          ? "font-semibold text-red-700"
+                          : "font-semibold text-slate-700"
+                    }
+                  >
+                    {event.eventType === "approved"
+                      ? "Approved"
+                      : event.eventType === "rejected"
+                        ? "Sent back"
+                        : "Submitted"}
+                  </span>
+                  {` · ${event.actorName ?? event.actorEmail ?? "Unknown"}`}
+                  {event.createdAt ? ` · ${new Date(event.createdAt).toLocaleDateString()}` : ""}
+                </p>
+                {event.comment && <p className="mt-1 text-sm text-slate-900">{event.comment}</p>}
+                {event.photos.length > 0 && (
+                  <div className="mt-2 grid grid-cols-3 gap-2 sm:grid-cols-4">
+                    {event.photos.map((p) =>
+                      p.url ? (
+                        <a key={p.id} href={p.url} target="_blank" rel="noopener noreferrer">
+                          <img
+                            src={p.url}
+                            alt="Corrective action"
+                            className="aspect-square w-full rounded-md object-cover ring-1 ring-slate-200"
+                          />
+                        </a>
+                      ) : null,
+                    )}
+                  </div>
+                )}
+              </div>
+            ))
+          ) : (
+            <div className="border-l-2 border-slate-200 pl-3">
+              <p className="text-xs text-slate-500">
+                {item.responderName ?? item.responderEmail ?? "Responder"}
+                {item.respondedAt ? ` · ${new Date(item.respondedAt).toLocaleDateString()}` : ""}
+              </p>
+              {item.responseComment && <p className="mt-1 text-sm text-slate-900">{item.responseComment}</p>}
+              {item.photos.length > 0 && (
+                <div className="mt-2 grid grid-cols-3 gap-2 sm:grid-cols-4">
+                  {item.photos.map((p) =>
+                    p.url ? (
+                      <a key={p.id} href={p.url} target="_blank" rel="noopener noreferrer">
+                        <img
+                          src={p.url}
+                          alt="Corrective action"
+                          className="aspect-square w-full rounded-md object-cover ring-1 ring-slate-200"
+                        />
+                      </a>
+                    ) : null,
+                  )}
+                </div>
               )}
             </div>
           )}

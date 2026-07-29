@@ -32,6 +32,7 @@ import {
   getCorrectiveActionEventsByItem,
   getDetachedCorrectiveActionEvents,
 } from "../field/corrective-action-events.js";
+import { isOriginalEvidencePhoto } from "../field/scorecard-evidence-predicate.js";
 
 // Tenant-scoped (web CRM) reads of the Field Scorecards a rep submitted from T-Rock Cam. The DEAL ROUTE
 // already gates access (assertDealCollaboratorAccess) before these run, so — unlike the field module's
@@ -121,7 +122,7 @@ export async function getDealScorecardDetail(
         // under correctiveActions[] below; excluding it here keeps it from double-rendering in the Evidence
         // grid AND avoids emitting a sectionKey: null row (a DTO violation — response photos have no section),
         // matching the PDF/edit evidence reads.
-        isNull(fieldScorecardPhotos.correctiveActionId),
+        isOriginalEvidencePhoto(),
       ),
     );
 
@@ -143,16 +144,55 @@ export async function getDealScorecardDetail(
   // Thread entries whose flagged item a later edit removed. Loaded UNCONDITIONALLY: the case that matters is
   // the one where every item was removed, which is precisely when a per-item read returns nothing and the
   // history would silently disappear from the CRM.
-  const removedItemEvents = (await getDetachedCorrectiveActionEvents(tenantDb, scorecardId)).map((event) => ({
-    id: event.id,
-    eventType: event.eventType,
-    itemLabel: event.itemLabel,
-    actorName: event.actorName ?? event.actorEmail ?? null,
-    actorEmail: event.actorEmail,
-    comment: event.comment,
-    createdAt: event.createdAt,
-    photos: [],
-  }));
+  const detached = await getDetachedCorrectiveActionEvents(tenantDb, scorecardId);
+  // Their photos SURVIVE the item now (0202 sets the item link null rather than cascading), so hard-coding
+  // an empty set would discard the very evidence the detachment was designed to keep.
+  const detachedPhotoRows = detached.length
+    ? await tenantDb
+        .select({
+          id: fieldScorecardPhotos.id,
+          correctiveActionEventId: fieldScorecardPhotos.correctiveActionEventId,
+          fileId: fieldScorecardPhotos.fileId,
+          caption: files.description,
+        })
+        .from(fieldScorecardPhotos)
+        .innerJoin(
+          files,
+          and(eq(files.id, fieldScorecardPhotos.fileId), eq(files.isActive, true), isNull(files.deletedAt)),
+        )
+        .where(
+          inArray(
+            fieldScorecardPhotos.correctiveActionEventId,
+            detached.map((e) => e.id),
+          ),
+        )
+    : [];
+  const detachedByEvent = new Map<string, typeof detachedPhotoRows>();
+  for (const row of detachedPhotoRows) {
+    if (!row.correctiveActionEventId) continue;
+    const list = detachedByEvent.get(row.correctiveActionEventId) ?? [];
+    list.push(row);
+    detachedByEvent.set(row.correctiveActionEventId, list);
+  }
+  const removedItemEvents = await Promise.all(
+    detached.map(async (event) => ({
+      id: event.id,
+      eventType: event.eventType,
+      itemLabel: event.itemLabel,
+      actorName: event.actorName ?? event.actorEmail ?? null,
+      actorEmail: event.actorEmail,
+      comment: event.comment,
+      createdAt: event.createdAt,
+      photos: await Promise.all(
+        (detachedByEvent.get(event.id) ?? []).map(async (p) => ({
+          id: p.id,
+          fileId: p.fileId,
+          url: opts?.resolvePhotoUrl ? await opts.resolvePhotoUrl(p.fileId) : null,
+          caption: p.caption ?? null,
+        })),
+      ),
+    })),
+  );
 
   return {
     ...toSummary(card),

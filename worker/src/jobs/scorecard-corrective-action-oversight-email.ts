@@ -392,7 +392,10 @@ export async function handleScorecardCorrectiveActionOversightEmail(
             -- submission time>", i.e. as though the responder approved their own work. The verdict lives on
             -- the thread. Ordered by seq, not created_at: events written in one transaction share a
             -- timestamp and the uuid PK is random.
-            (SELECT e.actor_name FROM ${tenantSchema}.scorecard_corrective_action_events e
+            -- name OR email, same rule the responder attribution uses: an approver with no display name
+            -- must still be identifiable, or the audit notice says an approval happened and not by whom.
+            (SELECT COALESCE(e.actor_name, e.actor_email)
+               FROM ${tenantSchema}.scorecard_corrective_action_events e
               WHERE e.corrective_action_id = ca.id AND e.event_type = 'approved'
               ORDER BY e.seq DESC LIMIT 1) AS approved_by,
             (SELECT e.created_at FROM ${tenantSchema}.scorecard_corrective_action_events e

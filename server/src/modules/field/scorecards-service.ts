@@ -36,6 +36,7 @@ import {
   getDetachedCorrectiveActionEvents,
   type CorrectiveActionEventRow,
 } from "./corrective-action-events.js";
+import { isOriginalEvidencePhoto } from "./scorecard-evidence-predicate.js";
 import {
   FIELD_SCORECARD_LEADERSHIP_SECTION_KEYS,
   FIELD_SCORECARD_LEADERSHIP_SUMMARY_SECTION_KEY,
@@ -592,7 +593,7 @@ export async function updateFieldScorecard(
         eq(fieldScorecardPhotos.scorecardId, card.id),
         // The edit-replacement contract covers only the submitter's ORIGINAL evidence. Corrective-action
         // response photos are a separate surface and must never be clobbered by a scorecard edit.
-        isNull(fieldScorecardPhotos.correctiveActionId),
+        isOriginalEvidencePhoto(),
       ),
     );
   const visibleCurrentPhotos = currentPhotos.filter((photo) => photo.isActive && photo.deletedAt === null);
@@ -697,7 +698,7 @@ export async function updateFieldScorecard(
       .where(
         and(
           eq(fieldScorecardPhotos.scorecardId, card.id),
-          isNull(fieldScorecardPhotos.correctiveActionId),
+          isOriginalEvidencePhoto(),
         ),
       );
   } else {
@@ -706,7 +707,7 @@ export async function updateFieldScorecard(
       .where(
         and(
           eq(fieldScorecardPhotos.scorecardId, card.id),
-          isNull(fieldScorecardPhotos.correctiveActionId),
+          isOriginalEvidencePhoto(),
           notInArray(fieldScorecardPhotos.id, retainedLinkIds),
         ),
       );
@@ -1002,7 +1003,7 @@ export async function getFieldScorecardDetail(
     .where(
       and(
         eq(fieldScorecardPhotos.scorecardId, id),
-        isNull(fieldScorecardPhotos.correctiveActionId),
+        isOriginalEvidencePhoto(),
       ),
     );
 
@@ -1103,7 +1104,7 @@ export async function renderAndStoreFieldScorecardArtifacts(
         and(
           eq(fieldScorecardPhotos.scorecardId, scorecardId),
           // Exclude corrective-action response photos — the scorecard PDF embeds only the original evidence.
-          isNull(fieldScorecardPhotos.correctiveActionId),
+          isOriginalEvidencePhoto(),
         ),
       )
       // Deterministic order (link time, then PK tie-breaker) so the downstream MAX_EVIDENCE_PHOTOS cap
@@ -1415,7 +1416,7 @@ export async function renderAndStoreFieldScorecardArtifacts(
           // corrective-action RESPONSE photo (corrective_action_id set) is excluded here too. Without this,
           // once any response photo exists the recheck fingerprint includes it while the initial fingerprint
           // did not, so they never match → a spurious SCORECARD_EVIDENCE_CHANGED on every regeneration.
-          isNull(fieldScorecardPhotos.correctiveActionId),
+          isOriginalEvidencePhoto(),
         ),
       )
       .for("share", { of: files });

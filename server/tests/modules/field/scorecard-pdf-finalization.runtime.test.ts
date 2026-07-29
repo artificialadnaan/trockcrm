@@ -539,6 +539,43 @@ describe("finalizeFieldScorecardArtifacts", () => {
     // And the item is labelled APPROVED, not merely answered.
     expect(text).toContain("APPROVED");
   });
+
+  it("REGRESSION: a DETACHED response photo does not leak into original evidence", async () => {
+    // Migration 0202 made the photo→item FK ON DELETE SET NULL so an edit removing a flagged item cannot
+    // erase its evidence. That broke the readers which identified original evidence as
+    // `corrective_action_id IS NULL` — a detached RESPONSE photo now matches, so it would surface in the
+    // evidence pages, the CRM grid, and the evidence FINGERPRINT. The last is the worst: #973 established
+    // the initial read and the publication recheck must agree exactly, or every regeneration raises a
+    // spurious SCORECARD_EVIDENCE_CHANGED.
+    const DETACHED_CARD = "55555555-5555-5555-5555-000000000012";
+    await seedScorecard(DETACHED_CARD);
+    const [event] = await db
+      .insert(scorecardCorrectiveActionEvents)
+      .values({
+        correctiveActionId: null,
+        scorecardId: DETACHED_CARD,
+        eventType: "submitted",
+        actorName: "Pat Manager",
+        comment: "Answered before the edit removed the item.",
+      })
+      .returning({ id: scorecardCorrectiveActionEvents.id });
+    // A response photo whose item is gone: item id null, event id intact.
+    await db.insert(fieldScorecardPhotos).values({
+      scorecardId: DETACHED_CARD,
+      sectionKey: null,
+      deficiencyKey: null,
+      fileId: RESPONSE_FILE,
+      correctiveActionId: null,
+      correctiveActionEventId: event.id,
+    });
+
+    r2Mocks.getObjectBuffer.mockClear();
+    await finalizeFieldScorecardArtifacts({ id: "office-1", slug: "dallas" }, USER, DETACHED_CARD);
+
+    const fetched = r2Mocks.getObjectBuffer.mock.calls.map((c) => c[0] as string);
+    expect(fetched).toContain("thumbs/photo.jpg");
+    expect(fetched.filter((k) => k === "thumbs/response.jpg")).toHaveLength(0);
+  });
 });
 
 /**

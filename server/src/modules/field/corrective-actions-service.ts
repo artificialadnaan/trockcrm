@@ -649,6 +649,10 @@ export async function reconcileScorecardCorrectiveActions(
   // awaiting review, which is neither open nor closed.
   const awaitingApprovalCount = surviving.filter((row) => row.status === "submitted").length;
   const anyItems = existing.length - staleIds.length + toInsert.length > 0;
+  // Did an APPROVER actually accept everything that remains? A card can also derive `closed` because an edit
+  // DELETED its last unapproved item, and that is not an approval — see the enqueue guard below.
+  const everySurvivingItemApproved =
+    anyItems && toInsert.length === 0 && surviving.every((row) => row.status === "approved");
 
   // Three derived states, mirroring recomputeCardStatus in corrective-action-approval.ts — the two must
   // agree or an edit and an approval could compute different statuses for the same item set.
@@ -661,12 +665,13 @@ export async function reconcileScorecardCorrectiveActions(
     // Every surviving item is APPROVED — the only route to a closed card.
     nextStatus = CORRECTIVE_ACTION_CARD_CLOSED;
   }
-  if (input.currentStatus !== nextStatus) {
-    await tx
-      .update(fieldScorecards)
-      .set({ status: nextStatus, updatedAt: nextGeneration() })
-      .where(eq(fieldScorecards.id, input.scorecardId));
-  }
+  // ALWAYS write. An edit can add, remove or relabel items without moving the CARD status — and updated_at
+  // is the PDF's content generation, compared by equality, so skipping the write leaves the stored artifact
+  // classified as current while the record it shows has changed. Same defect the approval path had.
+  await tx
+    .update(fieldScorecards)
+    .set({ status: nextStatus, updatedAt: nextGeneration() })
+    .where(eq(fieldScorecards.id, input.scorecardId));
 
   // An EDIT can close the card too, not just a responder answering the last item: deleting the text of the
   // only still-open flag leaves `anyItems` true with `openCount === 0`, so this reconcile flips the card to
@@ -695,7 +700,12 @@ export async function reconcileScorecardCorrectiveActions(
     });
   } else if (
     nextStatus === CORRECTIVE_ACTION_CARD_CLOSED &&
-    input.currentStatus !== CORRECTIVE_ACTION_CARD_CLOSED
+    input.currentStatus !== CORRECTIVE_ACTION_CARD_CLOSED &&
+    // ...but ONLY when every surviving item was genuinely approved. An edit that DELETES the last
+    // unapproved item also derives a closed card, and announcing "Corrective Action Approved" for a
+    // response nobody accepted — because it was removed — tells oversight something that did not happen.
+    // Under the gate only an approver can approve; reconcile can only observe that they already did.
+    everySurvivingItemApproved
   ) {
     await enqueueCorrectiveActionOversightClosed(tx, {
       office: input.office,
