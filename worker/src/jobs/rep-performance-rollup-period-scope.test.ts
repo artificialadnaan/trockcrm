@@ -69,42 +69,57 @@ describe("rep performance rollup period scoping", () => {
     await runRepPerformanceRollup(new Date("2026-05-07T12:00:00.000Z"));
 
     const insertSql = queries.find((query) => query.includes("INSERT INTO public.rep_performance_snapshots"));
-    // Pin the FILTER semantics, not the shape of the value expression. The old matcher inlined the
-    // awarded-amount CASE, so when pipeline_value moved to a composed `periodAwarePipelineValueSql`
-    // (the effective-value/auto-park work) it silently matched NOTHING and the assertions below became
-    // vacuous — the failure only surfaced once these files were actually wired into a runner.
-    const pipelineValueSql = (() => {
+    // The aggregate contains TWO independent period CASEs — one selecting the VALUE expression, one inside
+    // FILTER selecting the row predicate. Slice them apart first: searching the whole aggregate let the
+    // value CASE satisfy assertions meant for the filter (so a filter selector regressed to `WHEN false`
+    // still passed), and let the auto-park guard satisfy "present" from either arm (Codex P2 x2).
+    const pipelineAggregate = (() => {
       const marker = ")::numeric AS pipeline_value";
       const end = (insertSql ?? "").indexOf(marker);
       if (end < 0) return undefined;
       const start = (insertSql ?? "").lastIndexOf("COALESCE(SUM(", end);
       return start < 0 ? undefined : (insertSql ?? "").slice(start, end);
     })();
+    expect(pipelineAggregate).toBeDefined();
+
+    const filterAt = pipelineAggregate!.indexOf("FILTER (");
+    expect(filterAt).toBeGreaterThan(-1);
+    const valueExpression = pipelineAggregate!.slice(0, filterAt);
+    const filterClause = pipelineAggregate!.slice(filterAt);
+
+    // --- the VALUE expression: which arm gets the auto-park guard --------------------------------
+    // Nested chains use `CASE WHEN x > 0 THEN x END` with no ELSE, so the first ELSE after the period
+    // THEN is the period CASE's own ELSE.
+    const periodSelector = "CASE WHEN $1::text IN ('last_month', 'last_quarter', 'last_year') THEN";
+    const valueThenAt = valueExpression.indexOf(periodSelector);
+    expect(valueThenAt).toBeGreaterThan(-1);
+    const afterThen = valueExpression.slice(valueThenAt + periodSelector.length);
+    const elseAt = afterThen.indexOf("ELSE");
+    expect(elseAt).toBeGreaterThan(-1);
+    const historicalValueArm = afterThen.slice(0, elseAt);
+    const currentValueArm = afterThen.slice(elseAt);
+
+    // Both arms sum the real deal-value chain, never a constant or closed_value's awarded-first chain.
+    for (const arm of [historicalValueArm, currentValueArm]) {
+      expect(arm).toContain("d.bid_board_total_sales");
+      expect(arm).toContain("d.bid_estimate");
+      expect(arm).toContain("d.dd_estimate");
+    }
+    // THE INVARIANT: the auto-park guard belongs to the CURRENT arm ONLY. If it ever appears in the
+    // historical arm, a closed snapshot would be recalculated against today's 90-day horizon — a deal won
+    // early with a stale far-future target would silently drop out of a period that already reported it.
+    expect(historicalValueArm).not.toContain("bid_board_stage_slug");
+    expect(historicalValueArm).not.toContain("90 days");
+    expect(currentValueArm).toContain("bid_board_stage_slug");
+    expect(currentValueArm).toContain("90 days");
+
+    // --- the FILTER: which rows each period counts ------------------------------------------------
+    // Extracted from filterClause ONLY, so a regressed filter selector cannot be satisfied by the value
+    // CASE above.
     const historicalPipelineValueBranch =
       /WHEN \$1::text IN \('last_month', 'last_quarter', 'last_year'\) THEN([\s\S]*?)ELSE d\.is_active = true AND NOT psc\.is_terminal AND psc\.is_active_pipeline/.exec(
-        pipelineValueSql ?? ""
+        filterClause
       )?.[1];
-
-    // Guard the VALUE expression too, not just the FILTER. The extracted slice contains both; asserting
-    // only the filter would let a regression that summed a constant (or the wrong value chain) pass, and
-    // the later precedence assertions cannot cover it because the same expressions also appear in
-    // closed_value's awardedFirstDealValueSql (Codex P2).
-    expect(pipelineValueSql).toBeDefined();
-    // pipeline_value is period-aware: HISTORICAL periods sum the RAW current value, so a closed snapshot
-    // is never re-zeroed by today's 90-day auto-park horizon; current periods sum the effective value.
-    expect(pipelineValueSql).toMatch(
-      /CASE WHEN \$1::text IN \('last_month', 'last_quarter', 'last_year'\) THEN[\s\S]*?ELSE[\s\S]*?END/
-    );
-    const valueExpression = pipelineValueSql?.slice(0, pipelineValueSql.indexOf("FILTER ("));
-    // The real deal-value chain is summed, not a constant or the awarded-first chain used by closed_value.
-    expect(valueExpression).toContain("d.bid_board_total_sales");
-    expect(valueExpression).toContain("d.bid_estimate");
-    expect(valueExpression).toContain("d.dd_estimate");
-    // ...and the CURRENT-period leg carries the auto-park guard (Bid Board mirror + the 90-day horizon),
-    // which is precisely what historical periods must NOT apply.
-    expect(valueExpression).toContain("bid_board_stage_slug");
-    expect(valueExpression).toContain("90 days");
-
     expect(historicalPipelineValueBranch).toBeDefined();
     expect(historicalPipelineValueBranch).toContain("d.created_at::date <= $3::date");
     expect(historicalPipelineValueBranch).toContain(
