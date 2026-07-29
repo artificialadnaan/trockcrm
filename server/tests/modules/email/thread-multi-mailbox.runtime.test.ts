@@ -162,6 +162,16 @@ describe("multi-mailbox conversations", () => {
     expect(ids.sort()).toEqual([MBX_A, MBX_B].sort());
   });
 
+  it("propagates a non-409 mailbox-lookup error instead of silently dropping the mailbox", async () => {
+    // The only INTENTIONAL swallow is the "Connect mailbox first" 409 for a participant with no
+    // mailbox. Anything else — a DB outage, a transport failure — must not be swallowed: doing so
+    // would drop a mailbox from the result and let the rebind proceed over the surviving subset,
+    // silently reproducing the exact stranded-binding bug this module exists to fix. Dropping the
+    // table simulates that kind of failure (a non-AppError thrown from the lookup).
+    await tdb.execute(sql`DROP TABLE user_graph_tokens`);
+    await expect(resolveMailboxAccountIdsForConversation(tdb, CONV)).rejects.toThrow();
+  });
+
   it("rebinds EVERY mailbox, stranding none", async () => {
     await bindConversationToDealAcrossMailboxes(tdb, {
       providerConversationId: CONV, dealId: DEAL_NEW, actingUserId: USER_A,

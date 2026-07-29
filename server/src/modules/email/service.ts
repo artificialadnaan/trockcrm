@@ -725,10 +725,14 @@ export async function resolveMailboxAccountIdsForConversation(
     rows.map(async (row: { userId: string }) => {
       try {
         return await resolveMailboxAccountIdForCrmUser(tenantDb, row.userId);
-      } catch {
-        // A participant with no connected mailbox can't strand anything of their own — skip them
-        // rather than failing the whole rebind/detach.
-        return null;
+      } catch (err) {
+        // A participant with no connected mailbox (the "Connect mailbox first" 409) can't strand
+        // anything of their own — skip them rather than failing the whole rebind/detach. Any other
+        // error (DB outage, transport failure, etc.) must propagate: swallowing it here would silently
+        // drop a mailbox from the result and let the rebind proceed over the surviving subset — the
+        // exact stranded-binding bug this function exists to fix.
+        if (err instanceof AppError && err.statusCode === 409) return null;
+        throw err;
       }
     })
   );
@@ -783,10 +787,14 @@ export async function previewThreadReassignmentImpact(
 ) {
   // Counted across EVERY mailbox holding the conversation — the reassign moves all of them, so a
   // per-mailbox count would understate the blast radius shown to the user.
+  // Ordered oldest-first (sent_at, then id to break ties) so currentDealId below is deterministic — now
+  // that the row set spans every mailbox, an unordered pick could land on any of the mailboxes' deals,
+  // and this value feeds the audit entry a later task writes.
   const messageRows = await tenantDb
     .select({ id: emails.id, dealId: emails.dealId })
     .from(emails)
-    .where(eq(emails.graphConversationId, input.providerConversationId));
+    .where(eq(emails.graphConversationId, input.providerConversationId))
+    .orderBy(sql`${emails.sentAt} ASC`, sql`${emails.id} ASC`);
 
   return {
     affectedMessageCount: messageRows.length,
