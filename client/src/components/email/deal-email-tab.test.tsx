@@ -42,10 +42,23 @@ vi.mock("./graph-auth-banner", () => ({
   GraphAuthBanner: () => null,
 }));
 
-// EmailThreadView renders for real in the thread-view test below, and its assignment dialog calls
-// useDeals unconditionally (the hook runs whether or not the dialog is open).
+// EmailThreadView renders for real in the thread-view tests below, and its assignment dialog calls
+// useDeals unconditionally (the hook runs whether or not the dialog is open). One row, so the reassign
+// test has a deal to pick that is NOT the one the thread is already bound to — picking the current deal
+// would leave the dialog's confirm button enabled but the move a no-op.
 vi.mock("@/hooks/use-deals", () => ({
-  useDeals: () => ({ deals: [], loading: false }),
+  useDeals: () => ({
+    deals: [
+      {
+        id: "deal-2",
+        name: "Beta Roof",
+        dealNumber: "TR-2026-0002",
+        projectNumber: null,
+        propertyAddress: "500 Elm St",
+      },
+    ],
+    loading: false,
+  }),
 }));
 
 vi.mock("./email-compose-dialog", () => ({
@@ -133,6 +146,36 @@ function makeThread(
   };
 }
 
+// What useEmailThread answers with for a conversation already filed under this deal. EmailThreadView
+// renders its Reassign/Detach card only when binding.dealId is set, so the thread-view tests below
+// cannot reach either button without it.
+function boundThreadState() {
+  return {
+    thread: makeThread(4, "conv-1", {
+      id: "binding-1",
+      mailboxAccountId: "mbx-1",
+      contactId: null,
+      contactName: null,
+      companyId: null,
+      companyName: null,
+      propertyId: null,
+      propertyName: null,
+      leadId: null,
+      leadName: null,
+      dealId: "deal-1",
+      dealName: "Old Deal",
+      projectId: null,
+      projectName: null,
+      confidence: "high" as const,
+      assignmentReason: "manual_thread_assignment",
+    }),
+    loading: false,
+    error: null,
+    refetch: vi.fn(),
+    setThread: vi.fn(),
+  };
+}
+
 let root: Root | null = null;
 let container: HTMLElement | null = null;
 // What useDealEmails currently answers with. A `let` rather than a fixed mockReturnValue so a test can
@@ -180,6 +223,16 @@ function findMenuItem(label: RegExp) {
   return (
     Array.from(document.body.querySelectorAll<HTMLElement>('[role="menuitem"]')).find((item) =>
       label.test(item.textContent ?? "")
+    ) ?? null
+  );
+}
+
+// Exact trimmed text, for the cases where a substring match would be ambiguous — "Reassign" (the card
+// button) vs "Reassign Thread" (the dialog's confirm) are both on screen at different moments.
+function findButtonExact(text: string) {
+  return (
+    Array.from(document.body.querySelectorAll<HTMLButtonElement>("button")).find(
+      (button) => button.textContent?.trim() === text
     ) ?? null
   );
 }
@@ -366,28 +419,7 @@ describe("DealEmailTab reassignment wiring", () => {
     // still listed under the deal the instant the user pressed Back — the same stale list the row
     // action's refetch prevents, on the button people are far more likely to reach for.
     mocks.useEmailThreadMock.mockReturnValue({
-      thread: makeThread(4, "conv-1", {
-        id: "binding-1",
-        mailboxAccountId: "mbx-1",
-        contactId: null,
-        contactName: null,
-        companyId: null,
-        companyName: null,
-        propertyId: null,
-        propertyName: null,
-        leadId: null,
-        leadName: null,
-        dealId: "deal-1",
-        dealName: "Old Deal",
-        projectId: null,
-        projectName: null,
-        confidence: "high",
-        assignmentReason: "manual_thread_assignment",
-      }),
-      loading: false,
-      error: null,
-      refetch: vi.fn(),
-      setThread: vi.fn(),
+      ...boundThreadState(),
     });
     // Model the refetch actually landing: the conversation has left this deal, so the next read of the
     // deal's emails returns nothing.
@@ -421,31 +453,52 @@ describe("DealEmailTab reassignment wiring", () => {
     expect(container!.textContent).toContain("No emails linked to this deal yet.");
   });
 
+  it("refetches the deal list after a REASSIGN made from the thread view", async () => {
+    // The same hole as the detach path, on the same shared callback. Untested is how the original
+    // server-side no-op survived six rounds of review, so this asserts the outcome rather than trusting
+    // that one wiring covers both handlers.
+    mocks.useEmailThreadMock.mockReturnValue(boundThreadState());
+    mocks.refetchMock.mockImplementation(() => {
+      dealEmails = [];
+    });
+
+    mount();
+    act(() => container!.querySelector<HTMLElement>(".cursor-pointer")!.click());
+
+    // Open the thread-level reassign dialog from the binding card.
+    const reassignButton = findButtonExact("Reassign");
+    expect(reassignButton).not.toBeNull();
+    act(() => reassignButton!.click());
+
+    // Pick a deal that is NOT the one it is bound to — the dialog pre-selects the current deal.
+    const dealOption = Array.from(document.body.querySelectorAll<HTMLButtonElement>("button")).find(
+      (button) => /Beta Roof/.test(button.textContent ?? "")
+    );
+    expect(dealOption).not.toBeNull();
+    act(() => dealOption!.click());
+
+    const confirmButton = findButtonExact("Reassign Thread");
+    expect(confirmButton).not.toBeNull();
+    await act(async () => {
+      confirmButton!.click();
+    });
+
+    expect(mocks.reassignEmailThreadMock).toHaveBeenCalledWith("conv-1", "deal-2");
+    expect(mocks.refetchMock).toHaveBeenCalled();
+
+    // …and the list behind the thread view is genuinely empty on the way back.
+    rerender();
+    const backButton = findButton(/back/i);
+    expect(backButton).not.toBeNull();
+    act(() => backButton!.click());
+
+    expect(container!.textContent).toContain("No emails linked to this deal yet.");
+  });
+
   it("does not refetch when a thread-view detach is declined at the confirmation", async () => {
     vi.mocked(window.confirm).mockReturnValue(false);
     mocks.useEmailThreadMock.mockReturnValue({
-      thread: makeThread(4, "conv-1", {
-        id: "binding-1",
-        mailboxAccountId: "mbx-1",
-        contactId: null,
-        contactName: null,
-        companyId: null,
-        companyName: null,
-        propertyId: null,
-        propertyName: null,
-        leadId: null,
-        leadName: null,
-        dealId: "deal-1",
-        dealName: "Old Deal",
-        projectId: null,
-        projectName: null,
-        confidence: "high",
-        assignmentReason: "manual_thread_assignment",
-      }),
-      loading: false,
-      error: null,
-      refetch: vi.fn(),
-      setThread: vi.fn(),
+      ...boundThreadState(),
     });
     mount();
 
