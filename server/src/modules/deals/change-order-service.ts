@@ -411,7 +411,7 @@ export function normalizeChangeOrderAmount(input: unknown): string {
     );
   }
   const negative = raw.startsWith("-");
-  const [intPart, fraction = ""] = raw.replace("-", "").split(".");
+  const [intPart, fraction = ""] = raw.replace(/^-/, "").split(".");
   return `${negative ? "-" : ""}${intPart}.${fraction.padEnd(2, "0")}`;
 }
 
@@ -540,15 +540,25 @@ export async function getDealChangeOrderById(
   return legacy ? legacyRowToChangeOrderRecord(legacy as Record<string, unknown>) : null;
 }
 
-// Add two non-negative money strings ("<int>.<2dp>" or integer) as integer cents via BigInt — exact at
-// ANY magnitude (no IEEE-754 rounding even for a pathological multi-CO total beyond 2^53 cents).
+// Add two SIGNED money strings ("-<int>.<2dp>" | "<int>.<2dp>" or integer) as integer cents via BigInt —
+// exact at ANY magnitude (no IEEE-754 rounding even for a pathological multi-CO total beyond 2^53 cents).
+// Sign-aware by construction: the naive `BigInt(intPart) * 100n + BigInt(frac)` is WRONG for a negative
+// intPart (it adds the fraction's magnitude with the wrong sign — "-500.25" would toCents to -499.75, not
+// -500.25 — and BigInt("-0") collapses to 0n, so a magnitude under $1 loses its sign entirely). Instead the
+// sign is stripped once up front, the magnitude computed unsigned, and the sign re-applied once — never
+// split across the two terms — and the same unsigned-then-resign shape is used on the way back out.
 function addMoneyStrings(a: string, b: string): string {
   const toCents = (s: string): bigint => {
-    const [intPart, frac = ""] = s.split(".");
-    return BigInt(intPart || "0") * 100n + BigInt((frac + "00").slice(0, 2) || "0");
+    const negative = s.startsWith("-");
+    const unsigned = negative ? s.slice(1) : s;
+    const [intPart, frac = ""] = unsigned.split(".");
+    const magnitude = BigInt(intPart || "0") * 100n + BigInt((frac + "00").slice(0, 2) || "0");
+    return negative ? -magnitude : magnitude;
   };
   const cents = toCents(a) + toCents(b);
-  return `${cents / 100n}.${(cents % 100n).toString().padStart(2, "0")}`;
+  const negative = cents < 0n;
+  const absCents = negative ? -cents : cents;
+  return `${negative ? "-" : ""}${absCents / 100n}.${(absCents % 100n).toString().padStart(2, "0")}`;
 }
 
 /** Sum of a deal's change-order value (child deals + un-migrated legacy rows), counted exactly once. */
@@ -687,7 +697,25 @@ export async function updateDealChangeOrder(
     updatedAt: new Date(),
     updatedBy: input.updatedBy ?? null,
   };
-  if (input.amount !== undefined) legacyUpdates.amount = normalizeChangeOrderAmount(input.amount);
+  if (input.amount !== undefined) {
+    const normalizedAmount = normalizeChangeOrderAmount(input.amount);
+    // The legacy table's amount column still carries DB CHECK (amount > 0) (migration 0153) — it predates
+    // deductive change orders and is NOT being altered (in practice unreachable: 0 rows in every office,
+    // and every new CO is created as a child deal, never a legacy row — see normalizeChangeOrderAmount's
+    // docblock). But this branch does not get to ASSUME that emptiness: listDealChangeOrders /
+    // getDealChangeOrderById still read this table on every request, and a surviving row could be edited
+    // here. Without this guard, a negative amount would sail through normalizeChangeOrderAmount (which now
+    // permits it) and only fail at the DB as a raw CHECK violation — a bare 500, not a clean 400. Reject it
+    // here instead, fail-closed.
+    if (Number(normalizedAmount) < 0) {
+      throw new AppError(
+        400,
+        "Change order amount must be positive (legacy change orders cannot be deductive).",
+        "CHANGE_ORDER_AMOUNT_INVALID"
+      );
+    }
+    legacyUpdates.amount = normalizedAmount;
+  }
   if (input.signedDate !== undefined) legacyUpdates.signedDate = normalizeSignedDate(input.signedDate);
   if (input.description !== undefined) legacyUpdates.description = normalizeDescription(input.description);
   const [legacy] = await tenantDb

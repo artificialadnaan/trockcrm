@@ -113,6 +113,9 @@ describe("normalizeChangeOrderAmount — deductive change orders", () => {
       expect.objectContaining({ statusCode: 400, code: "CHANGE_ORDER_AMOUNT_INVALID" })
     );
     expect(() => normalizeChangeOrderAmount("-0.00")).toThrow(/cannot be 0/i);
+    // Pin the numeric -0 case too: String(-0) is "0" (a subtle JS fact — -0 does NOT stringify to
+    // "-0"), so this rejects for the same reason as the plain 0 case above, not via the sign path.
+    expect(() => normalizeChangeOrderAmount(-0)).toThrow(/cannot be 0/i);
   });
 
   it("still rejects sub-cent precision and over-ceiling magnitude", () => {
