@@ -1,6 +1,6 @@
-// Executes migration 0202 FROM DISK against 0062-shaped DDL on a real Postgres (PGlite).
+// Executes Migration 0204 FROM DISK against 0062-shaped DDL on a real Postgres (PGlite).
 //
-// 0202 drops deal_signed_commissions' amount / source_value_amount non-negative CHECKs so a DEDUCTIVE
+// 0204 drops deal_signed_commissions' amount / source_value_amount non-negative CHECKs so a DEDUCTIVE
 // change order can mint its NEGATIVE owner commission row (the claw-back). Before it, that INSERT raised
 // SQLSTATE 23514 inside the deal-signing transaction, which ABORTED the transaction — so the whole change
 // order rolled back even though addDealChangeOrder caught the JS error.
@@ -19,7 +19,7 @@ import { PGlite } from "@electric-sql/pglite";
 
 const MIGRATION_PATH = join(
   __dirname,
-  "../../../migrations/0202_dsc_drop_non_negative_checks.sql",
+  "../../../migrations/0204_dsc_drop_non_negative_checks.sql",
 );
 const MIGRATION_SQL = readFileSync(MIGRATION_PATH, "utf-8");
 
@@ -95,7 +95,7 @@ afterEach(async () => {
   await pg?.close();
 });
 
-describe("migration 0202 — deal_signed_commissions non-negative CHECKs", () => {
+describe("Migration 0204 — deal_signed_commissions non-negative CHECKs", () => {
   it("carries BOTH required blocks: the office_% DO-loop AND the TENANT_SCHEMA provisioner section", () => {
     expect(MIGRATION_SQL).toContain("DO $tenant$");
     expect(MIGRATION_SQL).toContain(`nspname LIKE 'office\\_%' ESCAPE '\\'`);
@@ -107,7 +107,7 @@ describe("migration 0202 — deal_signed_commissions non-negative CHECKs", () =>
     expect(block).toContain("deal_signed_commissions_source_value_non_negative_chk");
   });
 
-  it("REPRODUCES the blocker on the pre-0202 schema: the claw-back row raises 23514", async () => {
+  it("REPRODUCES the blocker on the pre-0204 schema: the claw-back row raises 23514", async () => {
     await seed0062Schema(pg, "office_dallas");
     await expect(insertClawBack(pg, "office_dallas")).rejects.toThrow(
       /deal_signed_commissions_amount_non_negative_chk/,

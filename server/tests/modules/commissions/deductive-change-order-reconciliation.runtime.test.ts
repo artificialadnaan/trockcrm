@@ -86,7 +86,7 @@ beforeAll(async () => {
   // deal_signed_commissions from the REAL Drizzle table, so the negative rows seeded below are proved
   // LEGAL against prod's actual constraint set rather than against a permissive hand-rolled island. The
   // hand-rolled version this replaces modelled none of migration 0062's CHECKs, so it could not have
-  // shown that `amount >= 0` was rejecting the very claw-back row this suite reconciles (dropped in 0202).
+  // shown that `amount >= 0` was rejecting the very claw-back row this suite reconciles (dropped in 0204).
   await pg.exec(tenantSchemaSql("public", [dealSignedCommissions]));
   await pg.exec(`
     INSERT INTO pipeline_stage_config (id, slug) VALUES ('${ST_OPEN}', 'opportunity');

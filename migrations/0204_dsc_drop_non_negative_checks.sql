@@ -1,4 +1,4 @@
--- Migration 0202: drop deal_signed_commissions' amount / source_value_amount non-negative CHECKs.
+-- Migration 0204: drop deal_signed_commissions' amount / source_value_amount non-negative CHECKs.
 --
 -- WHY (do not restore these): a DEDUCTIVE change order carries a NEGATIVE amount, and the locked product
 -- decision is that COMMISSION CLAWS BACK — the CO child mints its own owner commission row at the

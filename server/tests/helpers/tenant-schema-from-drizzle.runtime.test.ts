@@ -177,7 +177,7 @@ describe("CHECK constraints are reproduced (the deductive-CO 23514 bug class)", 
     );
   });
 
-  it("PERMITS the claw-back row: negative amount + negative source value (0062's CHECKs dropped in 0202)", async () => {
+  it("PERMITS the claw-back row: negative amount + negative source value (0062's CHECKs dropped in 0204)", async () => {
     await insert("awarded_amount", "-50000", "0.10", "-5000");
     const { rows } = await cdb.query<{ amount: string; source_value_amount: string }>(
       `SELECT amount, source_value_amount FROM office_dallas.deal_signed_commissions WHERE deal_id = '${DEAL}'`,
