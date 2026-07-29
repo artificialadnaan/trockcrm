@@ -41,6 +41,7 @@ import {
   refreshEmailStatsForEmailRecord,
   refreshEmailStatsForTargets,
 } from "./stats-service.js";
+import { assertDealCollaboratorAccess } from "../../lib/collaboration-access.js";
 import crypto from "crypto";
 
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -695,15 +696,50 @@ export async function getEmailThreadForMutation(
   };
 }
 
+/**
+ * May this user mutate this email thread's deal linkage?
+ *
+ * TWO accepted paths, checked in this order:
+ *   1. MAILBOX OWNER — the thread is in the caller's own mailbox. Always allowed; a user can always
+ *      fix the filing of their own email.
+ *   2. DEAL WRITE ACCESS — the caller may write the deal the thread is currently bound to.
+ *
+ * Path 2 is the point of this helper. The deal Emails tab is NOT mailbox-scoped (getEmails is called
+ * with no user filter), so a user routinely sees email from other mailboxes on a deal they own. In
+ * office_dallas, 5 of the 36 deals with email carry more than one mailbox — the misfiled email someone
+ * notices is frequently not their own, and owner-only would 403 exactly the person who spotted it.
+ *
+ * An UNBOUND thread has no deal to authorize against, so only path 1 can admit it.
+ *
+ * This is the whole security surface of the reassignment feature. Keep it as ONE helper with ONE set of
+ * tests — do not inline the check into the routes.
+ */
 export async function assertCanMutateEmailThread(
   tenantDb: TenantDb,
   thread: EmailThreadMutationContext,
-  user: { id: string; role: string }
+  user: { id: string; role: string; officeId?: string | null; activeOfficeId?: string | null },
+  context: { dealId: string | null }
 ) {
-  const mailboxAccountId = await resolveMailboxAccountIdForCrmUser(tenantDb, user.id);
-  if (thread.mailboxAccountId !== mailboxAccountId) {
+  // A caller with no mailbox of their own simply MISSES path 1 — that is not an error here.
+  // resolveMailboxAccountIdForCrmUser signals it with AppError(409, "Connect mailbox first"); letting
+  // that escape would 409 a user who holds perfectly good deal write access before path 2 ever ran, so
+  // swallow exactly the 409 and fall through. Every other failure still propagates.
+  let mailboxAccountId: string | null = null;
+  try {
+    mailboxAccountId = await resolveMailboxAccountIdForCrmUser(tenantDb, user.id);
+  } catch (err) {
+    if (!(err instanceof AppError) || err.statusCode !== 409) throw err;
+  }
+  // The null check is load-bearing: without it an unresolved mailbox would match a (theoretically) null
+  // thread.mailboxAccountId and fall open.
+  if (mailboxAccountId !== null && thread.mailboxAccountId === mailboxAccountId) return;
+
+  if (!context.dealId) {
     throw new AppError(403, "You can only modify your own email threads");
   }
+
+  // Throws 403/404 itself when the caller cannot reach the deal.
+  await assertDealCollaboratorAccess(tenantDb, context.dealId, user);
 }
 
 /**

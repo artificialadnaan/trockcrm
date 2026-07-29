@@ -1054,7 +1054,10 @@ describe("email service inbound association", () => {
     ).rejects.toThrow("You can only modify your own emails");
   });
 
-  it("blocks thread mutations when the mailbox belongs to another user, even for directors", async () => {
+  // An UNBOUND thread carries no deal to authorize against, so the deal-write path (see
+  // thread-mutation-permission.runtime.test.ts) cannot admit anyone here — mailbox ownership is the only
+  // way in, director or not.
+  it("blocks unbound-thread mutations when the mailbox belongs to another user, even for directors", async () => {
     const tenantDb = {
       select: vi.fn(() => {
         const callIndex = (tenantDb.select as any).mock.calls.length;
@@ -1078,7 +1081,8 @@ describe("email service inbound association", () => {
       assertCanMutateEmailThread(
         tenantDb as any,
         { mailboxAccountId: "mailbox-2", binding: null, emails: [] },
-        { id: "director-1", role: "director" }
+        { id: "director-1", role: "director" },
+        { dealId: null }
       )
     ).rejects.toThrow("You can only modify your own email threads");
   });
