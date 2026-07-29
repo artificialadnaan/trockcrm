@@ -20,13 +20,16 @@ import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   estimateDocumentParseRuns,
+  estimateExtractions,
   estimateSourceDocuments,
   files,
 } from "@trock-crm/shared/schema";
+import type { WalkthroughScopeRow } from "@trock-crm/shared/types";
 import { tenantSchemaSql } from "../../../tests/helpers/tenant-schema-from-drizzle.js";
 import {
   createWalkthroughContactSheetFile,
   createWalkthroughSourceDocument,
+  insertWalkthroughExtractions,
 } from "./walkthrough-ingress-service.js";
 
 const U = (s: string) => `00000000-0000-4000-8000-${s.padStart(12, "0")}`;
@@ -45,7 +48,12 @@ beforeAll(async () => {
   pg = new PGlite();
   // "public" (not office_*) so the unqualified Drizzle tables resolve on the default search_path.
   await pg.exec(
-    tenantSchemaSql("public", [files, estimateSourceDocuments, estimateDocumentParseRuns])
+    tenantSchemaSql("public", [
+      files,
+      estimateSourceDocuments,
+      estimateDocumentParseRuns,
+      estimateExtractions,
+    ])
   );
   tenantDb = drizzle(pg);
 }, 60_000);
@@ -168,5 +176,241 @@ describe("createWalkthroughSourceDocument", () => {
     expect(run.parseProvider).toBe("trock-scope");
     expect(run.parseProfile).toBe("walkthrough");
     expect(run.parseMeasurementsEnabled).toBe(false);
+  });
+});
+
+/** Build the document chain a set of extractions has to hang off. */
+async function seedChain(walkthroughId: string) {
+  const fileId = await createWalkthroughContactSheetFile({
+    tenantDb,
+    input: {
+      dealId: DEAL,
+      walkthroughId,
+      siteLabel: "Unit 12B",
+      r2Key: `walkthroughs/${walkthroughId}/contact-sheet.jpg`,
+      r2Bucket: "trock-scope",
+      bytes: 184320,
+      mimeType: "image/jpeg",
+      userId: USER,
+    },
+  });
+
+  return createWalkthroughSourceDocument({
+    tenantDb,
+    input: {
+      dealId: DEAL,
+      projectId: PROJECT,
+      fileId,
+      walkthroughId,
+      siteLabel: "Unit 12B",
+      capturedAt: "2026-07-29T14:05:00Z",
+      mimeType: "image/jpeg",
+      storageKey: `walkthroughs/${walkthroughId}/contact-sheet.jpg`,
+      bytes: 184320,
+      userId: USER,
+    },
+  });
+}
+
+const CARPENTRY_ROW: WalkthroughScopeRow = {
+  sourceScopeItemId: "scope-item-9001",
+  rawLabel: "Replace rotted carpentry at eave",
+  trade: "carpentry",
+  divisionHint: "carpentry",
+  quantity: 12.5,
+  unit: "LF",
+  confidence: 0.87,
+  evidenceText: "so this whole eave here is rotted, we're replacing about twelve and a half feet",
+  evidence: {
+    clipId: "clip-a",
+    timelineMs: 184_000,
+    frameKey: "frames/clip-a/00184000.jpg",
+  },
+  locationLabel: "North elevation, eave",
+};
+
+describe("insertWalkthroughExtractions", () => {
+  it("returns [] without touching the table when there are no rows", async () => {
+    const { documentId, parseRunId } = await seedChain(U("22223"));
+
+    const ids = await insertWalkthroughExtractions({
+      tenantDb,
+      input: {
+        dealId: DEAL,
+        projectId: PROJECT,
+        documentId,
+        parseRunId,
+        walkthroughId: U("22223"),
+        rows: [],
+      },
+    });
+
+    expect(ids).toEqual([]);
+
+    const written = await tenantDb
+      .select()
+      .from(estimateExtractions)
+      .where(eq(estimateExtractions.documentId, documentId));
+
+    expect(written).toHaveLength(0);
+  });
+
+  it("writes a row that clears all four visibility gates", async () => {
+    const walkthroughId = U("22224");
+    const { documentId, parseRunId } = await seedChain(walkthroughId);
+
+    const ids = await insertWalkthroughExtractions({
+      tenantDb,
+      input: {
+        dealId: DEAL,
+        projectId: PROJECT,
+        documentId,
+        parseRunId,
+        walkthroughId,
+        rows: [CARPENTRY_ROW],
+      },
+    });
+
+    expect(ids).toHaveLength(1);
+
+    const [row] = await tenantDb
+      .select()
+      .from(estimateExtractions)
+      .where(eq(estimateExtractions.id, ids[0]));
+
+    expect(row).toBeDefined();
+
+    // GATE 1 — estimate-generation.ts:256-261 only considers rows whose status is 'pending' (or whose
+    // extractionType is 'measurement_candidate', which a scope utterance is not). Any other status and
+    // the walkthrough's rows are simply never fed to generation.
+    expect(row.status).toBe("pending");
+
+    // GATE 2 — estimate-generation.ts:262 compares with `->>`, which yields TEXT. A JSON boolean true
+    // stringifies to "true" and would coincidentally match, but writing the STRING is what the
+    // comparison is actually specified against; a JSON `true` is one refactor away from breaking.
+    expect(row.metadataJson.activeArtifact).toBe("true");
+    expect(typeof row.metadataJson.activeArtifact).toBe("string");
+
+    // GATE 3 — workbench-service.ts:153-172 hides any row whose metadata sourceParseRunId is not
+    // strictly equal to its document's activeParseRunId.
+    expect(row.metadataJson.sourceParseRunId).toBe(parseRunId);
+    const [doc] = await tenantDb
+      .select()
+      .from(estimateSourceDocuments)
+      .where(eq(estimateSourceDocuments.id, documentId));
+    expect(row.metadataJson.sourceParseRunId).toBe(doc.activeParseRunId);
+
+    // GATE 4 — pricing needs a scope type/key; resolvePricingScopeFromExtraction is the same resolver
+    // extraction-service.ts uses, so walkthrough rows price on the identical basis as parsed ones.
+    // NOTE: with a non-null divisionHint the resolver returns "division", NOT "trade" — the trade
+    // branch (pricing-service.ts:224-229) is guarded by `!input.divisionHint`. Verified against the
+    // real function, not assumed.
+    expect(row.metadataJson.pricingScopeType).toBe("division");
+    expect(row.metadataJson.pricingScopeKey).toBe("carpentry");
+
+    // All four gates again, this time through the ACTUAL SQL the worker runs, so a change to how the
+    // metadata is encoded fails here rather than silently emptying the candidate set in prod.
+    const candidates = await pg.query<{ id: string }>(
+      `SELECT e.id
+         FROM public.estimate_extractions e
+         JOIN public.estimate_source_documents d ON d.id = e.document_id
+        WHERE e.deal_id = $1
+          AND (e.status = 'pending' OR e.extraction_type = 'measurement_candidate')
+          AND e.metadata_json->>'activeArtifact' = 'true'
+          AND e.metadata_json->>'sourceParseRunId' = d.active_parse_run_id::text
+          AND e.document_id = $2`,
+      [DEAL, documentId]
+    );
+    expect(candidates.rows.map((r) => r.id)).toEqual(ids);
+
+    // Temporal evidence occupies evidenceBboxJson wholesale — there is no bbox for a spoken utterance.
+    expect(row.evidenceBboxJson).toEqual({
+      clipId: "clip-a",
+      timelineMs: 184_000,
+      frameKey: "frames/clip-a/00184000.jpg",
+    });
+
+    expect(row.extractionType).toBe("scope_utterance");
+    expect(row.rawLabel).toBe(CARPENTRY_ROW.rawLabel);
+    expect(row.normalizedLabel).toBe(CARPENTRY_ROW.rawLabel.toLowerCase());
+    expect(row.evidenceText).toBe(CARPENTRY_ROW.evidenceText);
+    expect(row.unit).toBe("LF");
+    expect(row.divisionHint).toBe("carpentry");
+    expect(row.dealId).toBe(DEAL);
+    expect(row.projectId).toBe(PROJECT);
+    expect(row.documentId).toBe(documentId);
+    expect(row.pageId).toBeNull();
+    // numeric(5,2) round-trips as a string, so 0.87 has to survive as "0.87" not 0.87 or "0.9".
+    expect(row.confidence).toBe("0.87");
+    expect(Number(row.confidence)).toBe(0.87);
+    expect(Number(row.quantity)).toBe(12.5);
+
+    // Provenance back to trock-scope: the scope item id is what makes re-export idempotent.
+    expect(row.metadataJson.sourceScopeItemId).toBe("scope-item-9001");
+    expect(row.metadataJson.locationLabel).toBe("North elevation, eave");
+    expect(row.metadataJson.sourceWalkthroughId).toBe(walkthroughId);
+    expect(row.metadataJson.extractionProvider).toBe("trock-scope");
+    expect(row.metadataJson.extractionMethod).toBe("walkthrough_grounding");
+  });
+
+  it("resolves a trade scope when the row carries no divisionHint", async () => {
+    const walkthroughId = U("22225");
+    const { documentId, parseRunId } = await seedChain(walkthroughId);
+
+    const ids = await insertWalkthroughExtractions({
+      tenantDb,
+      input: {
+        dealId: DEAL,
+        projectId: PROJECT,
+        documentId,
+        parseRunId,
+        walkthroughId,
+        rows: [{ ...CARPENTRY_ROW, divisionHint: null }],
+      },
+    });
+
+    const [row] = await tenantDb
+      .select()
+      .from(estimateExtractions)
+      .where(eq(estimateExtractions.id, ids[0]));
+
+    // Same resolver, other branch: with no divisionHint it infers the trade from the label text.
+    expect(row.metadataJson.pricingScopeType).toBe("trade");
+    expect(row.metadataJson.pricingScopeKey).toBe("carpentry");
+    expect(row.divisionHint).toBeNull();
+  });
+
+  it("writes SQL NULL for a row whose quantity was never spoken", async () => {
+    const walkthroughId = U("22226");
+    const { documentId, parseRunId } = await seedChain(walkthroughId);
+
+    const ids = await insertWalkthroughExtractions({
+      tenantDb,
+      input: {
+        dealId: DEAL,
+        projectId: PROJECT,
+        documentId,
+        parseRunId,
+        walkthroughId,
+        rows: [{ ...CARPENTRY_ROW, quantity: null, unit: null }],
+      },
+    });
+
+    const [row] = await tenantDb
+      .select()
+      .from(estimateExtractions)
+      .where(eq(estimateExtractions.id, ids[0]));
+
+    expect(row.quantity).toBeNull();
+
+    // Asserted at the SQL level too: a stringified null ("null"), a 0, or a "1" would all be non-null
+    // here, and only a real IS NULL keeps "no quantity was spoken" distinguishable from "zero of it".
+    const probe = await pg.query<{ is_null: boolean; raw: string | null }>(
+      `SELECT quantity IS NULL AS is_null, quantity::text AS raw
+         FROM public.estimate_extractions WHERE id = $1`,
+      [ids[0]]
+    );
+    expect(probe.rows[0].is_null).toBe(true);
+    expect(probe.rows[0].raw).toBeNull();
   });
 });
