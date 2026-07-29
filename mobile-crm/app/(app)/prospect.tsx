@@ -233,6 +233,9 @@ export default function ProspectScreen() {
       return { geocoded, found };
     },
     onSuccess: ({ geocoded, found }) => {
+      // Abandoned mid-flight: the rep is already on the company path, and applying this now would
+      // clear the target they chose and replace it with candidates they had stopped waiting for.
+      if (matchAbandoned.current) return;
       setAddress(
         geocoded
           ? {
@@ -266,6 +269,7 @@ export default function ProspectScreen() {
       setMatches(found);
     },
     onError: (err) => {
+      if (matchAbandoned.current) return;
       // RETRYABLE. The ref is cleared so a later fix — or the same one, re-requested — starts a fresh
       // lookup; leaving it set meant a transient failure locked the screen out of matching for good
       // while the location stayed "ready".
@@ -291,10 +295,21 @@ export default function ProspectScreen() {
   const fix = location.state.status === "ready" ? location.state : null;
   const fixKey = fix ? `${fix.lat},${fix.lng}` : null;
   const matchedFor = useRef<string | null>(null);
+  /**
+   * The rep took the company fallback while a lookup was still running — so its result is DEAD.
+   *
+   * `runMatch.onSuccess` clears the selected company and contact whenever it finds candidates, which is
+   * right when a lookup the rep is waiting on returns, and wrong when they have already given up on it
+   * and chosen something else. Cancelling the request is not available (the fetch is in flight and the
+   * server answers regardless), so the result is discarded on arrival — the same generation-stamp shape
+   * `use-current-location` uses for the fix itself.
+   */
+  const matchAbandoned = useRef(false);
   useEffect(() => {
     if (!fixKey || !fix) return;
     if (matchedFor.current === fixKey) return;
     matchedFor.current = fixKey;
+    matchAbandoned.current = false;
     runMatch.mutate({ lat: fix.lat, lng: fix.lng });
     // runMatch identity is stable for the mutation's lifetime; keying on the fix is the real trigger.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1222,7 +1237,11 @@ export default function ProspectScreen() {
               <Pressable
                 testID="prospect-skip-location"
                 onPress={() => {
+                  // BOTH in-flight operations, not just the fix. `reset()` abandons the location
+                  // attempt; without the second line a lookup already running would still return and
+                  // wipe the company about to be chosen.
                   location.reset();
+                  matchAbandoned.current = true;
                   setRejectedMatches(true);
                 }}
                 accessibilityRole="button"
@@ -1254,6 +1273,7 @@ export default function ProspectScreen() {
                     onPress={() => {
                       setMatchError(null);
                       matchedFor.current = null;
+                      matchAbandoned.current = false;
                       runMatch.mutate({ lat: fix.lat, lng: fix.lng });
                     }}
                     accessibilityRole="button"

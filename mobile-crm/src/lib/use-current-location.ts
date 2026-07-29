@@ -130,8 +130,21 @@ export function useCurrentLocation() {
     }
   }, []);
 
-  /** Back to idle, so the screen can offer the manual path without the stale failure still on show. */
-  const reset = useCallback(() => setState({ status: "idle" }), []);
+  /**
+   * Back to idle — and the attempt in flight is ABANDONED, not merely hidden.
+   *
+   * Bumping the generation is the load-bearing half. Without it `reset()` only repainted: a `locate()`
+   * still running passed every `superseded()` check and, seconds later, set `ready` or `unavailable`
+   * over the top. On the capture screen that is not cosmetic — a late `ready` starts the match lookup,
+   * which blocks Save and clears the company the rep just chose instead.
+   *
+   * This was harmless while the only caller was "Change property", which runs when no fix is in flight.
+   * The moment the escape hatch became reachable DURING `locating`, the race became reachable with it.
+   */
+  const reset = useCallback(() => {
+    locateGeneration.current++;
+    setState({ status: "idle" });
+  }, []);
 
   return { state, locate, reset };
 }
