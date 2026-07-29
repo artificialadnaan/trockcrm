@@ -16,6 +16,7 @@ import {
   approveAndNotify,
   rejectAndRestart,
 } from "../../../src/modules/field/corrective-action-approval.js";
+import { getCorrectiveActionEventsByItem } from "../../../src/modules/field/corrective-action-events.js";
 
 // A rejection sends the item back to the super/PM — but their response tokens were DELETED when they
 // submitted. A rejection notice carrying no live token is an email the recipient cannot act on: they click,
@@ -305,5 +306,67 @@ describe("rejectAndRestart", () => {
       SELECT count(*)::int AS n FROM job_queue WHERE job_type = 'scorecard_corrective_action_oversight_email'
     `);
     expect((jobs.rows[0] as { n: number }).n).toBe(1);
+  });
+
+});
+
+describe("the whole loop, end to end", () => {
+  it("submit → awaiting → reject → rework → approve → closed, with the right notice at each hop", async () => {
+    // Every other test in this feature covers ONE hop. That is how the integration gaps survived review: the
+    // approve route not notifying, the CRM thread being empty, the rejection email losing its reason — each
+    // piece passed its own test while the chain between them was broken. This walks the chain.
+    const [itemId] = await seedAwaitingApproval();
+
+    // 1. The card is with the approver, and they were asked.
+    expect((await cardState()).status).toBe("corrective_action_submitted");
+
+    // 2. Rejected — back to the responders, with a fresh cycle so their link works.
+    const rejected = await rejectAndRestart(tdb, {
+      office: OFFICE,
+      scorecardId: CARD,
+      itemId,
+      comment: "Torque values were not documented.",
+      actor: APPROVER,
+    });
+    expect(rejected.reopened).toBe(true);
+    expect((await cardState()).status).toBe("corrective_action_open");
+    expect(await tokenCount()).toBe(0);
+    expect(await responderJobs()).toBe(1);
+
+    // 3. The responder reworks it. `rejected` is outstanding, so the response is accepted.
+    await tdb.execute(sql`
+      UPDATE scorecard_corrective_actions
+         SET status = 'submitted', response_comment = 'Re-torqued, values logged.'
+       WHERE id = ${itemId}
+    `);
+    await tdb.execute(sql`
+      UPDATE field_scorecards SET status = 'corrective_action_submitted' WHERE id = ${CARD}
+    `);
+
+    // 4. Approved — the card closes and oversight is told exactly once.
+    const approved = await approveAndNotify(tdb, {
+      office: OFFICE,
+      scorecardId: CARD,
+      itemIds: [itemId],
+      actor: APPROVER,
+    });
+    expect(approved.closed).toBe(true);
+    expect((await cardState()).status).toBe("corrective_action_closed");
+
+    const closedJobs = await tdb.execute(sql`
+      SELECT payload FROM job_queue WHERE job_type = 'scorecard_corrective_action_oversight_email'
+    `);
+    const closed = (closedJobs.rows as Array<{ payload: { phase: string } }>).filter(
+      (r) => r.payload.phase === "closed",
+    );
+    expect(closed).toHaveLength(1);
+
+    // 5. And the THREAD tells the whole story — which is the feature's actual promise.
+    const events = (await getCorrectiveActionEventsByItem(tdb, CARD)).get(itemId) ?? [];
+    expect(events.map((e) => e.eventType)).toEqual(["rejected", "approved"]);
+    expect(events[0].comment).toBe("Torque values were not documented.");
+    expect(events[0].actorName).toBe("James Helms");
+    // Identity is snapshotted, so this survives the item being removed by a later edit.
+    expect(events[0].itemLabel).toBe("Item 0");
   });
 });
