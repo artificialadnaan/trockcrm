@@ -21,6 +21,8 @@ import { LeadCard } from "../../../../src/components/LeadCard";
 import { RetryNotice } from "../../../../src/components/RetryNotice";
 import { resolveListState } from "../../../../src/list-state";
 import { qk } from "../../../../src/query/keys";
+import { useDebouncedSearch } from "../../../../src/lib/use-debounced-search";
+import { MIN_SEARCH_LENGTH, searchIsTooShort } from "../../../../src/search-query";
 import { theme } from "../../../../src/theme/theme";
 
 /**
@@ -50,7 +52,6 @@ const LIFECYCLES: Array<{ key: "true" | "false"; label: string }> = [
 ];
 
 /** Matches the deals list: the server only applies its search predicate at 2+ trimmed characters. */
-const MIN_SEARCH_LENGTH = 2;
 
 export default function LeadsListScreen() {
   const router = useRouter();
@@ -59,9 +60,11 @@ export default function LeadsListScreen() {
   const [scope, setScope] = useState<leadsApi.LeadScope>("mine");
   const [lifecycle, setLifecycle] = useState<"true" | "false">("true");
   const [search, setSearch] = useState("");
-  const [submittedSearch, setSubmittedSearch] = useState("");
+  /* Debounced, not submitted. See src/search-query.ts — the two-character floor stays, the
+     press-return ceremony goes. */
+  const submittedSearch = useDebouncedSearch(search);
 
-  const tooShort = search.trim().length > 0 && search.trim().length < MIN_SEARCH_LENGTH;
+  const tooShort = searchIsTooShort(search);
 
   const params = useMemo(
     () => ({ scope, search: submittedSearch || undefined, isActive: lifecycle }),
@@ -136,11 +139,6 @@ export default function LeadsListScreen() {
   const offline = query.error instanceof ApiError && query.error.status === 0;
   const refreshFailed = listState.kind === "loaded" && listState.refreshFailed;
 
-  function submitSearch() {
-    const trimmed = search.trim();
-    if (trimmed.length > 0 && trimmed.length < MIN_SEARCH_LENGTH) return;
-    setSubmittedSearch(trimmed);
-  }
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
@@ -192,7 +190,6 @@ export default function LeadsListScreen() {
         testID="leads-search"
         value={search}
         onChangeText={setSearch}
-        onSubmitEditing={submitSearch}
         returnKeyType="search"
         placeholder="Search leads"
         placeholderTextColor={theme.color.textMuted}

@@ -24,6 +24,8 @@ import { telUrl } from "../../../../src/contact-links";
 import { resolveListState } from "../../../../src/list-state";
 import { openLink } from "../../../../src/lib/open-link";
 import { qk } from "../../../../src/query/keys";
+import { useDebouncedSearch } from "../../../../src/lib/use-debounced-search";
+import { MIN_SEARCH_LENGTH, searchIsTooShort } from "../../../../src/search-query";
 import { theme } from "../../../../src/theme/theme";
 
 const PAGE_SIZE = 50;
@@ -32,7 +34,6 @@ const PAGE_SIZE = 50;
  * contacts/service.ts:469 applies its search predicate only for trimmed terms of 2+ characters. A single
  * character comes back as the UNFILTERED first page, which reads as "that letter matched everyone".
  */
-const MIN_SEARCH_LENGTH = 2;
 
 export default function ContactsListScreen() {
   const router = useRouter();
@@ -40,9 +41,11 @@ export default function ContactsListScreen() {
   const cacheScope = useQueryScope();
   const { activeOfficeName, refetch: refetchOffices } = useOffices();
   const [search, setSearch] = useState("");
-  const [submitted, setSubmitted] = useState("");
+  /* Debounced, not submitted. See src/search-query.ts — the two-character floor stays, the
+     press-return ceremony goes. */
+  const submitted = useDebouncedSearch(search);
 
-  const tooShort = search.trim().length > 0 && search.trim().length < MIN_SEARCH_LENGTH;
+  const tooShort = searchIsTooShort(search);
 
   const params = useMemo(() => ({ search: submitted || undefined, limit: PAGE_SIZE }), [submitted]);
 
@@ -62,11 +65,6 @@ export default function ContactsListScreen() {
   const contacts = useMemo(() => (query.data?.pages ?? []).flatMap((p) => p.contacts), [query.data]);
   const total = query.data?.pages[0]?.pagination?.total;
 
-  function submitSearch() {
-    const trimmed = search.trim();
-    if (trimmed.length > 0 && trimmed.length < MIN_SEARCH_LENGTH) return;
-    setSubmitted(trimmed);
-  }
 
   const offline = query.error instanceof ApiError && query.error.status === 0;
 
@@ -102,7 +100,6 @@ export default function ContactsListScreen() {
         testID="contacts-search"
         value={search}
         onChangeText={setSearch}
-        onSubmitEditing={submitSearch}
         returnKeyType="search"
         placeholder="Search name, company or email"
         placeholderTextColor={theme.color.textMuted}
