@@ -489,6 +489,24 @@ export function validateWalkthroughIngressPayload(input: unknown): WalkthroughIn
     throw new AppError(400, "capturedAt must be a parseable timestamp");
   }
 
+  const rows = rowsValue.map(validateScopeRow);
+
+  // `sourceScopeItemId` is the export's own idempotency key, and `ingestWalkthrough` replays a retry's
+  // ids by matching stored rows back to it. Two rows sharing one id make that mapping ambiguous — the
+  // retry would get one id twice and the other row's id appended as an orphan — so a duplicate is a
+  // bug upstream, refused here rather than papered over with a "last one wins".
+  const seenScopeItemIds = new Set<string>();
+  for (const row of rows) {
+    if (seenScopeItemIds.has(row.sourceScopeItemId)) {
+      throw new AppError(
+        400,
+        `rows contains more than one row with sourceScopeItemId "${row.sourceScopeItemId}"; ` +
+          `scope item ids identify a row across retries and must be unique within a walkthrough`
+      );
+    }
+    seenScopeItemIds.add(row.sourceScopeItemId);
+  }
+
   return {
     walkthroughId: requireNonEmptyString(raw.walkthroughId, "walkthroughId"),
     dealId: requireNonEmptyString(raw.dealId, "dealId"),
@@ -501,7 +519,7 @@ export function validateWalkthroughIngressPayload(input: unknown): WalkthroughIn
     siteLabel: requireNonEmptyString(raw.siteLabel, "siteLabel"),
     capturedAt,
     userId: requireNonEmptyString(raw.userId, "userId"),
-    rows: rowsValue.map(validateScopeRow),
+    rows,
   };
 }
 

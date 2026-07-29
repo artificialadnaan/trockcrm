@@ -790,6 +790,27 @@ describe("ingestWalkthrough", () => {
     expect(await tableCounts()).toEqual(before);
   });
 
+  // The scope item id is what a retry is matched back on (see the idempotency test below), so two rows
+  // claiming the same one would make the replay ambiguous — one id returned twice, the other row's id
+  // appended as an orphan.
+  it("refuses two rows claiming the same sourceScopeItemId", async () => {
+    const before = await tableCounts();
+
+    await expect(
+      ingestWalkthrough({
+        tenantDb,
+        payload: walkthroughPayload(U("33011"), {
+          rows: [CARPENTRY_ROW, { ...CARPENTRY_ROW, rawLabel: "A different utterance entirely" }],
+        }),
+      })
+    ).rejects.toMatchObject({
+      statusCode: 400,
+      message: expect.stringContaining(CARPENTRY_ROW.sourceScopeItemId),
+    });
+
+    expect(await tableCounts()).toEqual(before);
+  });
+
   it("refuses more scope rows than one walkthrough can plausibly carry", async () => {
     const before = await tableCounts();
 
