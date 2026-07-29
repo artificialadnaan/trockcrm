@@ -17,6 +17,7 @@ import * as dealsApi from "../../../src/api/endpoints/deals";
 import * as pipelineApi from "../../../src/api/endpoints/pipeline";
 import { useAuth } from "../../../src/auth/AuthContext";
 import { useQueryScope } from "../../../src/auth/useOfficeId";
+import { BackLink } from "../../../src/components/BackLink";
 import { displayAmount, showsAtRisk } from "../../../src/components/DealCard";
 import { Badge } from "../../../src/components/Badge";
 import { RetryNotice } from "../../../src/components/RetryNotice";
@@ -103,6 +104,10 @@ export default function DealDetailScreen() {
       await queryClient.invalidateQueries({ queryKey: qk.dealActivities(scope, dealId) });
     },
   });
+
+  // Derived once, above the JSX: the press guard and the greyed style ask the same question, and two
+  // spellings of it is two chances for the button to look dead while still taking a press.
+  const noteBlocked = note.trim().length === 0 || logNote.isPending;
 
   const watch = useMutation({
     mutationFn: (next: boolean) =>
@@ -194,9 +199,7 @@ export default function DealDetailScreen() {
       {/* Without "handled", the first tap on Save only dismisses the keyboard and never reaches the
           button — so the rep's opening tap on the app's primary action silently does nothing. */}
       <ScrollView contentContainerStyle={styles.body} keyboardShouldPersistTaps="handled">
-        <Pressable onPress={() => goBack()} accessibilityRole="button" accessibilityLabel="Back">
-          <Text style={styles.back}>‹ Deals</Text>
-        </Pressable>
+        <BackLink label="Deals" onPress={() => goBack()} />
 
         {refreshFailed ? (
           <Pressable
@@ -224,7 +227,10 @@ export default function DealDetailScreen() {
           onPress={() => watch.mutate(!deal.isWatching)}
           disabled={watch.isPending}
           accessibilityRole="button"
-          accessibilityState={{ selected: deal.isWatching }}
+          /* `busy`, not `disabled`. RN merges the `disabled` PROP into the accessibility state and it
+             takes precedence (Pressable.js:228), so writing it here would be a no-op — but `busy` is
+             not derived from anything, and mid-toggle is exactly when it is worth saying. */
+          accessibilityState={{ selected: deal.isWatching, busy: watch.isPending }}
           style={styles.watchBtn}
         >
           <Text style={styles.watchText}>{deal.isWatching ? "★ Watching" : "☆ Watch"}</Text>
@@ -319,16 +325,16 @@ export default function DealDetailScreen() {
                 : "Couldn't save that note."}
             </Text>
           ) : null}
+          {/* One predicate, two consumers. It was already written twice — the press guard and the
+              greyed style — which is two chances for the button to look dead while still pressable. */}
           <Pressable
             testID="save-note"
             onPress={() => logNote.mutate(note.trim())}
-            disabled={note.trim().length === 0 || logNote.isPending}
+            disabled={noteBlocked}
             accessibilityRole="button"
             accessibilityLabel="Save note"
-            style={[
-              styles.saveNote,
-              (note.trim().length === 0 || logNote.isPending) && styles.saveNoteDisabled,
-            ]}
+            accessibilityState={{ busy: logNote.isPending }}
+            style={[styles.saveNote, noteBlocked && styles.saveNoteDisabled]}
           >
             {logNote.isPending ? (
               <ActivityIndicator color={theme.color.textInverse} />
@@ -403,6 +409,7 @@ export default function DealDetailScreen() {
               }}
               disabled={activitiesQuery.isFetchingNextPage}
               accessibilityRole="button"
+              accessibilityState={{ busy: activitiesQuery.isFetchingNextPage }}
               style={styles.retry}
             >
               {activitiesQuery.isFetchingNextPage ? (
@@ -435,7 +442,11 @@ export default function DealDetailScreen() {
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <View style={styles.section}>
-      <Text style={styles.sectionTitle}>{title}</Text>
+      {/* `header` so the rotor can jump between sections, and an explicit label because
+          `sectionTitle` uppercases by transform — which on iOS becomes the accessible name itself. */}
+      <Text accessibilityRole="header" accessibilityLabel={title} style={styles.sectionTitle}>
+        {title}
+      </Text>
       <View style={styles.sectionBody}>{children}</View>
     </View>
   );
@@ -473,7 +484,6 @@ const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: theme.color.canvas },
   body: { padding: theme.space.lg, gap: theme.space.sm, paddingBottom: theme.space.xxl },
   center: { flex: 1, alignItems: "center", justifyContent: "center", gap: theme.space.md },
-  back: { fontFamily: theme.font.semibold, fontSize: 15, color: theme.color.redText },
   name: { fontFamily: theme.font.bold, fontSize: 24, color: theme.color.inkNavy, marginTop: theme.space.sm },
   company: { fontFamily: theme.font.semibold, fontSize: 15, color: theme.color.textSecondary },
   badgeRow: { flexDirection: "row", alignItems: "center", gap: theme.space.sm, marginTop: theme.space.xs },
@@ -482,6 +492,8 @@ const styles = StyleSheet.create({
   badgeTextAmber: { color: theme.color.amberText },
   badgeTextRed: { color: theme.color.redText },
   moveBtn: {
+    minHeight: 44,
+    justifyContent: "center",
     marginTop: theme.space.sm,
     borderWidth: 1,
     borderColor: theme.color.brandRed,
@@ -491,6 +503,8 @@ const styles = StyleSheet.create({
   },
   moveText: { fontFamily: theme.font.bold, fontSize: 15, color: theme.color.redText },
   watchBtn: {
+    minHeight: 44,
+    justifyContent: "center",
     alignSelf: "flex-start",
     borderWidth: 1,
     borderColor: theme.color.border,
@@ -518,6 +532,7 @@ const styles = StyleSheet.create({
     gap: theme.space.sm,
   },
   contactRow: {
+    minHeight: 44,
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
@@ -546,6 +561,8 @@ const styles = StyleSheet.create({
     color: theme.color.redText,
   },
   staleBanner: {
+    minHeight: 44,
+    justifyContent: "center",
     marginTop: theme.space.sm,
     borderRadius: theme.radius.md,
     backgroundColor: theme.color.amberSurface,
@@ -554,6 +571,8 @@ const styles = StyleSheet.create({
   },
   staleText: { fontFamily: theme.font.semibold, fontSize: 13, color: theme.color.amberText },
   saveNote: {
+    minHeight: 44,
+    justifyContent: "center",
     backgroundColor: theme.color.brandRed,
     borderRadius: theme.radius.md,
     paddingVertical: theme.space.md,
@@ -562,6 +581,8 @@ const styles = StyleSheet.create({
   saveNoteDisabled: { opacity: 0.5 },
   saveNoteText: { fontFamily: theme.font.bold, fontSize: 15, color: theme.color.textInverse },
   retry: {
+    minHeight: 44,
+    justifyContent: "center",
     borderWidth: 1,
     borderColor: theme.color.border,
     borderRadius: theme.radius.md,
@@ -578,6 +599,8 @@ const styles = StyleSheet.create({
   activityNotes: { fontFamily: theme.font.regular, fontSize: 14, color: theme.color.textSecondary },
   errorTitle: { fontFamily: theme.font.bold, fontSize: 17, color: theme.color.inkNavy },
   backBtn: {
+    minHeight: 44,
+    justifyContent: "center",
     borderWidth: 1,
     borderColor: theme.color.border,
     borderRadius: theme.radius.md,

@@ -19,6 +19,7 @@ import * as dealsApi from "../../../src/api/endpoints/deals";
 import * as pipelineApi from "../../../src/api/endpoints/pipeline";
 import { useAuth } from "../../../src/auth/AuthContext";
 import { useQueryScope } from "../../../src/auth/useOfficeId";
+import { BackLink } from "../../../src/components/BackLink";
 import { RetryBlock } from "../../../src/components/RetryBlock";
 import { RetryNotice } from "../../../src/components/RetryNotice";
 import { qk } from "../../../src/query/keys";
@@ -315,9 +316,7 @@ export default function MoveStageScreen() {
     <SafeAreaView style={styles.safe} edges={["top"]}>
       <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === "ios" ? "padding" : undefined}>
         <ScrollView contentContainerStyle={styles.body} keyboardShouldPersistTaps="handled">
-          <Pressable onPress={() => goBack()} accessibilityRole="button">
-            <Text style={styles.back}>‹ Cancel</Text>
-          </Pressable>
+          <BackLink label="Cancel" accessibleName="Cancel" onPress={() => goBack()} />
 
           <Text style={styles.title}>Move stage</Text>
           <Text style={styles.subtitle} numberOfLines={2}>
@@ -347,7 +346,7 @@ export default function MoveStageScreen() {
             </View>
           ) : null}
 
-          <Text style={styles.label}>Move to</Text>
+          <FieldLabel>Move to</FieldLabel>
           {stagesQuery.isLoading ? (
             <ActivityIndicator color={theme.color.brandRed} />
           ) : stagesQuery.isError && stagesQuery.data === undefined ? (
@@ -456,7 +455,7 @@ export default function MoveStageScreen() {
 
           {isOwner && needsCloseDate ? (
             <>
-              <Text style={styles.label}>Expected close date</Text>
+              <FieldLabel>Expected close date</FieldLabel>
               <Text style={styles.help}>
                 This is the only thing holding the move up. Set it here and the deal advances in one step.
               </Text>
@@ -508,7 +507,7 @@ export default function MoveStageScreen() {
 
           {isOwner && needsOverride && !closeDateResolvesGate ? (
             <>
-              <Text style={styles.label}>Reason for the override</Text>
+              <FieldLabel>Reason for the override</FieldLabel>
               <Text style={styles.help}>
                 This move skips a requirement, so the reason is recorded on the deal&apos;s history.
               </Text>
@@ -526,7 +525,7 @@ export default function MoveStageScreen() {
 
           {isOwner && isLostMove ? (
             <>
-              <Text style={styles.label}>Why was it lost?</Text>
+              <FieldLabel>Why was it lost?</FieldLabel>
               {lostReasons.isLoading ? (
                 <ActivityIndicator color={theme.color.brandRed} />
               ) : lostReasons.isError && lostReasons.data === undefined ? (
@@ -571,7 +570,7 @@ export default function MoveStageScreen() {
                   ))}
                 </View>
               )}
-              <Text style={styles.label}>What happened?</Text>
+              <FieldLabel>What happened?</FieldLabel>
               <Text style={styles.help}>Required — the server rejects a Lost move with blank notes.</Text>
               <TextInput
                 testID="lost-notes"
@@ -656,6 +655,26 @@ function fieldLabel(key: string): string {
   return spaced.charAt(0).toUpperCase() + spaced.slice(1).toLowerCase();
 }
 
+/**
+ * A form label, drawn in caps and spoken in words.
+ *
+ * `styles.label` uppercases by transform, and on iOS RN 0.81.5 the transform is applied before the
+ * attributed string is built — so the transformed text becomes the accessible name unless a label
+ * overrides it, and "Why was it lost?" is announced letter by letter.
+ *
+ * A component rather than an `accessibilityLabel` repeated at each of the five call sites: the same
+ * string written twice per label is five places for the pair to drift, and the sixth label added later
+ * would simply have arrived without one. Guarded tree-wide by
+ * `src/__tests__/uppercase-text-has-accessible-label.test.ts`.
+ */
+function FieldLabel({ children }: { children: string }) {
+  return (
+    <Text accessibilityLabel={children} style={styles.label}>
+      {children}
+    </Text>
+  );
+}
+
 /** What the gate is still waiting on, if anything. */
 function MissingList({ verdict }: { verdict: pipelineApi.StagePreflight }) {
   const missing = verdict.missingRequirements;
@@ -681,7 +700,6 @@ const styles = StyleSheet.create({
   flex: { flex: 1 },
   body: { padding: theme.space.lg, gap: theme.space.sm, paddingBottom: theme.space.xxl },
   center: { flex: 1, alignItems: "center", justifyContent: "center", gap: theme.space.md },
-  back: { fontFamily: theme.font.semibold, fontSize: 15, color: theme.color.redText },
   title: { fontFamily: theme.font.bold, fontSize: 26, color: theme.color.inkNavy },
   subtitle: { fontFamily: theme.font.semibold, fontSize: 15, color: theme.color.textSecondary },
   label: {
@@ -695,6 +713,8 @@ const styles = StyleSheet.create({
   help: { fontFamily: theme.font.regular, fontSize: 13, color: theme.color.textMuted },
   stageGrid: { flexDirection: "row", flexWrap: "wrap", gap: theme.space.sm, marginTop: theme.space.sm },
   stageOption: {
+    minHeight: 44,
+    justifyContent: "center",
     borderRadius: theme.radius.pill,
     borderWidth: 1,
     borderColor: theme.color.border,
@@ -745,6 +765,8 @@ const styles = StyleSheet.create({
   },
   error: { marginTop: theme.space.md, fontFamily: theme.font.regular, fontSize: 13, color: theme.color.redText },
   primary: {
+    minHeight: 44,
+    justifyContent: "center",
     marginTop: theme.space.xl,
     backgroundColor: theme.color.brandRed,
     borderRadius: theme.radius.md,
@@ -754,6 +776,8 @@ const styles = StyleSheet.create({
   primaryDisabled: { opacity: 0.5 },
   primaryText: { fontFamily: theme.font.bold, fontSize: 15, color: theme.color.textInverse },
   secondary: {
+    minHeight: 44,
+    justifyContent: "center",
     borderWidth: 1,
     borderColor: theme.color.border,
     borderRadius: theme.radius.md,

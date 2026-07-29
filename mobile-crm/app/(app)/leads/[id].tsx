@@ -8,6 +8,7 @@ import { ApiError } from "../../../src/api/client";
 import * as leadsApi from "../../../src/api/endpoints/leads";
 import { useAuth } from "../../../src/auth/AuthContext";
 import { useQueryScope } from "../../../src/auth/useOfficeId";
+import { BackLink } from "../../../src/components/BackLink";
 import { Badge } from "../../../src/components/Badge";
 import { Row } from "../../../src/components/Row";
 import { formatDate, formatLocation } from "../../../src/format";
@@ -273,9 +274,7 @@ export default function LeadDetailScreen() {
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
       <ScrollView contentContainerStyle={styles.body}>
-        <Pressable onPress={() => goBack()} accessibilityRole="button" hitSlop={8}>
-          <Text style={styles.back}>‹ Leads</Text>
-        </Pressable>
+        <BackLink label="Leads" onPress={() => goBack()} />
 
         <Text style={styles.title}>{lead.name ?? "Untitled lead"}</Text>
         <View style={styles.badges}>
@@ -466,7 +465,11 @@ export default function LeadDetailScreen() {
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <View style={styles.section}>
-      <Text style={styles.sectionTitle}>{title}</Text>
+      {/* `header` so the rotor can jump between sections, and an explicit label because
+          `sectionTitle` uppercases by transform — which on iOS becomes the accessible name itself. */}
+      <Text accessibilityRole="header" accessibilityLabel={title} style={styles.sectionTitle}>
+        {title}
+      </Text>
       <View style={styles.sectionBody}>{children}</View>
     </View>
   );
@@ -475,7 +478,6 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: theme.color.canvas },
   body: { padding: theme.space.lg, gap: theme.space.md, paddingBottom: theme.space.xxl },
-  back: { fontFamily: theme.font.semibold, fontSize: 15, color: theme.color.redText },
   title: { fontFamily: theme.font.bold, fontSize: 24, color: theme.color.inkNavy },
   badges: { flexDirection: "row", alignItems: "center", gap: theme.space.sm, flexWrap: "wrap" },
   stage: { fontFamily: theme.font.semibold, fontSize: 13, color: theme.color.textSecondary },

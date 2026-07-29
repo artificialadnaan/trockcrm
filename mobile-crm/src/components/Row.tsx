@@ -12,7 +12,12 @@ import { theme } from "../theme/theme";
 export function Row({ label, value }: { label: string; value: string }) {
   return (
     <View style={styles.row}>
-      <Text style={styles.label}>{label}</Text>
+      {/* Labelled explicitly: `styles.label` uppercases by transform, and on iOS that transformed
+          string IS the accessible name unless a label overrides it. This row is the detail-list
+          primitive, so one missing label here silences a field name on every screen that uses it. */}
+      <Text accessibilityLabel={label} style={styles.label}>
+        {label}
+      </Text>
       <Text style={styles.value}>{value}</Text>
     </View>
   );

@@ -111,7 +111,26 @@ function DealCardComponent({
       testID={`deal-card-${deal.id}`}
       onPress={() => onPress(deal)}
       accessibilityRole="button"
-      accessibilityLabel={deal.name ?? "Untitled deal"}
+      /* EVERYTHING the card shows, in the order it shows it.
+         An explicit label REPLACES the text assembled from the children, so the name alone did not
+         merely under-announce this card — it made the company, the amount, the location, the stage and
+         both status badges UNREACHABLE. Two deals for the same company at the same stage were
+         indistinguishable by ear, which is the failure BoardCard.tsx and LeadCard.tsx each already warn
+         about in the same words; this was the third copy of the pattern and the one that missed.
+         Built from the SAME values the JSX renders, so a line hidden because it is empty is absent
+         here too. */
+      accessibilityLabel={[
+        deal.name ?? "Untitled deal",
+        deal.companyName,
+        displayAmount(deal),
+        location,
+        stageName,
+        (deal.effectiveOnHold ?? deal.onHold) ? "On hold" : null,
+        showsAtRisk(deal) ? "At risk" : null,
+        deal.expectedCloseDate ? `Close ${formatDate(deal.expectedCloseDate)}` : null,
+      ]
+        .filter(Boolean)
+        .join(", ")}
       style={styles.card}
     >
       <View style={styles.headerRow}>
@@ -157,6 +176,8 @@ function DealCardComponent({
 
 const styles = StyleSheet.create({
   card: {
+    minHeight: 44,
+    justifyContent: "center",
     backgroundColor: theme.color.surface,
     borderRadius: theme.radius.lg,
     borderWidth: 1,

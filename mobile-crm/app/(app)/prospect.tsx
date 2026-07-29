@@ -1,7 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  AccessibilityInfo,
   ActivityIndicator,
   AppState,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -27,6 +29,7 @@ import {
   planContact,
   describeMatch,
   isPositionTooCoarse,
+  saveAnnouncement,
   submitBlockedReason,
   type CapturedAddress,
 } from "../../src/prospect-state";
@@ -886,6 +889,16 @@ export default function ProspectScreen() {
    * text. "Log another here" then wiped the edit without it ever having been sent.
    */
   const locked = save.isPending || saved;
+  /**
+   * Any non-idempotent write is in flight — the visit, a new property, or a new company.
+   *
+   * Named because two things ask it: the back button (which locks while writing but releases once
+   * "Logged" is on screen) and `targetsLocked` (which stays locked after, because the target is no
+   * longer editable). Spelled out inline it was already written twice with two different spellings,
+   * which is how two guards over one condition end up disagreeing.
+   */
+  const writeInFlight =
+    save.isPending || createPropertyHere.isPending || createCompanyNamed.isPending;
   /** Save is unavailable while the building is still being written, too — see the button below. */
   const saveBlocked =
     !ready ||
@@ -917,7 +930,7 @@ export default function ProspectScreen() {
    * the company mid-flight got a building filed under the company they had just left. Every control
    * that can change what the visit is ABOUT uses this instead.
    */
-  const targetsLocked = locked || createPropertyHere.isPending || createCompanyNamed.isPending;
+  const targetsLocked = writeInFlight || saved;
 
   /** Person details the save will discard, because a contact needs BOTH names to be created. */
   /**
@@ -975,6 +988,39 @@ export default function ProspectScreen() {
   const [flagForLead, setFlagForLead] = useState(false);
 
   /**
+   * SPEAK the two outcomes that change what the rep must do next.
+   *
+   * Both mount straight into the scroll and neither changes anything above them, so a VoiceOver rep taps
+   * Save and the app appears inert — twice over, and the second time is the dangerous one: the duplicate
+   * halt means NOTHING WAS WRITTEN and the visit is waiting on an answer. Silence there reads exactly
+   * like success.
+   *
+   * `announceForAccessibility`, not `accessibilityLiveRegion` and not `accessibilityRole="alert"`.
+   * change-password.tsx:78-95 already worked this out for a password hint: the live region is
+   * ANDROID-ONLY, and this app has an EAS build profile for iOS alone. Marking the box as an alert
+   * likewise does not make VoiceOver read it — nothing moves focus there. The announcement is the only
+   * mechanism that actually speaks on this platform.
+   *
+   * Keyed on the message TEXT so it fires once per distinct message rather than on every render, and
+   * stays silent when there is nothing to say — announcing "" interrupts whatever VoiceOver is
+   * mid-sentence on. Built from the SAME values the JSX renders, so a caveat that is on screen is also
+   * spoken, and one that is hidden is absent from both.
+   */
+  const announcement = saveAnnouncement({
+    saved,
+    flagForLead,
+    contactFailed,
+    contactIndeterminate,
+    duplicateCount: duplicateContacts?.length ?? 0,
+  });
+
+  useEffect(() => {
+    if (Platform.OS === "ios" && announcement.length > 0) {
+      AccessibilityInfo.announceForAccessibility(announcement);
+    }
+  }, [announcement]);
+
+  /**
    * Re-check permission when the app comes back to the foreground.
    *
    * The denied state sends a rep to Settings and then never looks again, so granting it there returned
@@ -1012,7 +1058,8 @@ export default function ProspectScreen() {
              property or a company is equally uncancellable by navigation, and leaving mid-write left a
              new record behind with no visit attached and no outcome shown. Locked WHILE writing only —
              once everything has settled, leaving is fine. */
-          disabled={save.isPending || createPropertyHere.isPending || createCompanyNamed.isPending}
+          disabled={writeInFlight}
+          accessibilityState={{ busy: writeInFlight }}
           onPress={() => goBack()}
           accessibilityRole="button"
           accessibilityLabel="Back"
@@ -1046,7 +1093,11 @@ export default function ProspectScreen() {
               {[property.address, property.city].filter(Boolean).join(", ") || "No address on file"}
             </Text>
             {property.companyName ? (
-              <Text style={styles.chosenCompany}>{property.companyName}</Text>
+              /* Labelled, because `chosenCompany` uppercases by transform and on iOS the transformed
+                 string becomes the accessible name — a company would be spelled out letter by letter. */
+              <Text accessibilityLabel={property.companyName} style={styles.chosenCompany}>
+                {property.companyName}
+              </Text>
             ) : null}
             {/* FROZEN once the activity is saved.
                 Left active, a rep could save the visit against this property, change to another, and
@@ -1218,8 +1269,7 @@ export default function ProspectScreen() {
                        `editable` but not this line, so during a company or property write a screen
                        reader announced the row as actionable while taps did nothing — the announcement
                        and the behaviour disagreeing is the accessibility defect, not the lock. */
-                    accessibilityState={{ disabled: targetsLocked }}
-                    accessibilityLabel={`${m.name}${m.companyName ? `, ${m.companyName}` : ""}, ${describeMatch(m, effectiveAddress ?? address)}`}
+                      accessibilityLabel={`${m.name}${m.companyName ? `, ${m.companyName}` : ""}, ${describeMatch(m, effectiveAddress ?? address)}`}
                     style={[styles.matchRow, targetsLocked && styles.chipLocked]}
                   >
                     <View style={styles.matchBody}>
@@ -1375,7 +1425,7 @@ export default function ProspectScreen() {
                            company result was still tappable — the screen would then show a company the
                            committed activity never carried, and "Log another" kept it. */
                         disabled={targetsLocked}
-                        accessibilityRole="button"
+                              accessibilityRole="button"
                         accessibilityLabel={`Attach this visit to ${c.name}`}
                         style={styles.matchRow}
                       >
@@ -1446,7 +1496,7 @@ export default function ProspectScreen() {
                                    POST still committed — so the callback discarded a mismatched result
                                    and an unwanted company was created anyway. */
                                 disabled={targetsLocked}
-                                onPress={() => {
+                                              onPress={() => {
                                   setCompany({ id: s.id, name: s.name ?? "Existing company" });
                                   setDuplicateCompanies(null);
                                   setCompanyResults(null);
@@ -1579,7 +1629,7 @@ export default function ProspectScreen() {
                             key={c.id}
                             testID={`prospect-contact-${c.id}`}
                             disabled={targetsLocked}
-                            onPress={() => {
+                                      onPress={() => {
                               setContact(c);
                               setContactResults(null);
                               setContactQuery("");
@@ -1682,7 +1732,7 @@ export default function ProspectScreen() {
                             setManualZip("");
                           }}
                           disabled={targetsLocked}
-                          accessibilityRole="button"
+                                  accessibilityRole="button"
                           accessibilityLabel="Use the detected address instead"
                           style={styles.linkBtn}
                         >
@@ -1717,7 +1767,7 @@ export default function ProspectScreen() {
                         setManualZip(address?.zip ?? "");
                       }}
                       disabled={targetsLocked}
-                      accessibilityRole="button"
+                          accessibilityRole="button"
                       accessibilityLabel="Correct this address"
                       style={styles.linkBtn}
                     >
@@ -1948,6 +1998,7 @@ export default function ProspectScreen() {
                     save.mutate();
                   }}
                   disabled={save.isPending}
+                  accessibilityState={{ busy: save.isPending }}
                   accessibilityRole="button"
                   accessibilityLabel={`Log this visit with ${name || "this contact"}`}
                   style={styles.matchRow}
@@ -1979,6 +2030,7 @@ export default function ProspectScreen() {
                 save.mutate();
               }}
               disabled={save.isPending}
+              accessibilityState={{ busy: save.isPending }}
               accessibilityRole="button"
               accessibilityLabel="None of these — add this person as new"
               style={styles.linkBtn}
@@ -1995,6 +2047,7 @@ export default function ProspectScreen() {
                 save.mutate();
               }}
               disabled={save.isPending}
+              accessibilityState={{ busy: save.isPending }}
               accessibilityRole="button"
               accessibilityLabel="Log this visit without a person"
               style={styles.linkBtn}

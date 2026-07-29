@@ -24,10 +24,18 @@ export function Badge({ label, tone }: { label: string; tone: BadgeTone }) {
   return (
     <View style={[styles.pill, t.pill]}>
       <View style={[styles.bar, t.bar]} />
-      {/* Uppercased by STYLE, not by rewriting the string. VoiceOver and TalkBack read short all-caps
-          strings as initialisms — "O-N H-O-L-D" — so the transform stays presentational and the
-          accessible name keeps its natural case. */}
-      <Text style={[styles.text, t.text]}>{label}</Text>
+      {/* Uppercased by STYLE, and labelled explicitly, because the style alone is NOT enough.
+          VoiceOver reads a short all-caps string as an initialism — "O-N H-O-L-D" — and on iOS RN
+          0.81.5 `RCTAttributedTextUtils.mm` applies the transform BEFORE building the attributed
+          string, so `RCTParagraphComponentView.accessibilityLabel` falls back to the TRANSFORMED text.
+          An earlier version of this comment claimed the transform "stays presentational and the
+          accessible name keeps its natural case"; it does not, and that sentence is why twelve
+          uppercase labels across this app shipped unreadable. The explicit label is what overrides the
+          fallback — caps drawn, words spoken. Guarded by
+          `src/__tests__/uppercase-text-has-accessible-label.test.ts`. */}
+      <Text accessibilityLabel={label} style={[styles.text, t.text]}>
+        {label}
+      </Text>
     </View>
   );
 }

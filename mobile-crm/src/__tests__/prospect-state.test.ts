@@ -8,6 +8,7 @@ import {
   isPositionTooCoarse,
   personDetailsWillBeDiscarded,
   planContact,
+  saveAnnouncement,
   submitBlockedReason,
 } from "../prospect-state";
 import type { PropertyMatch } from "../api/endpoints/prospecting";
@@ -415,5 +416,56 @@ describe("selectable vs advisory matches", () => {
     expect(
       isSelectable(match({ addressMatch: null, distanceMeters: 40, city: null, state: null, zip: null })),
     ).toBe(true);
+  });
+});
+
+describe("what VoiceOver is told when the capture reaches an outcome", () => {
+  const base = {
+    saved: false,
+    flagForLead: false,
+    contactFailed: false,
+    contactIndeterminate: false,
+    duplicateCount: 0,
+  };
+
+  it("says nothing while the capture is still in progress", () => {
+    // An announcement of "" would cut off whatever VoiceOver is mid-sentence on, so "no outcome" has to
+    // be expressible. The caller checks length before speaking.
+    expect(saveAnnouncement(base)).toBe("");
+  });
+
+  it("confirms the save", () => {
+    expect(saveAnnouncement({ ...base, saved: true })).toBe("Logged.");
+  });
+
+  it("states outright that a duplicate halt saved NOTHING", () => {
+    // The dangerous silence. Without "Nothing saved yet" the halt is indistinguishable from success,
+    // and the visit is sitting unwritten waiting on an answer the rep does not know is being asked.
+    expect(saveAnnouncement({ ...base, duplicateCount: 1 })).toBe(
+      "Nothing saved yet. Someone with this name is already in the CRM. Is this them?",
+    );
+    expect(saveAnnouncement({ ...base, duplicateCount: 3 })).toContain("Nothing saved yet.");
+    expect(saveAnnouncement({ ...base, duplicateCount: 3 })).toContain("3 people");
+  });
+
+  it("speaks every caveat that is on screen, in the order it is rendered", () => {
+    expect(
+      saveAnnouncement({ ...base, saved: true, flagForLead: true, contactFailed: true }),
+    ).toBe(
+      "Logged. Marked as worth a lead. Follow up with the office. That person couldn't be saved — add them on the web.",
+    );
+  });
+
+  it("keeps an indeterminate contact write indeterminate", () => {
+    // The app cannot know, and saying either "saved" or "not saved" would be a guess the rep acts on.
+    expect(
+      saveAnnouncement({ ...base, saved: true, contactFailed: true, contactIndeterminate: true }),
+    ).toContain("may or may not have been saved");
+  });
+
+  it("prefers the save over a stale duplicate count", () => {
+    // Answering the halt sets saved and clears the list, but the two are separate pieces of state; if
+    // they are ever both set, "Logged" is the one that is true.
+    expect(saveAnnouncement({ ...base, saved: true, duplicateCount: 2 })).toBe("Logged.");
   });
 });

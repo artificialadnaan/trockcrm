@@ -265,6 +265,12 @@ export default function ChangePasswordScreen() {
             disabled={!canSubmit}
             accessibilityRole="button"
             accessibilityLabel="Update password"
+            /* `busy` only. RN already merges the `disabled` PROP into the accessibility state, and it
+               takes precedence over anything written here (Pressable.js:228) — so the disabled half is
+               announced whether or not a screen spells it out. What is NOT derived is `busy`, and login
+               said it while this screen did not: the same shared formStyles control, drifted again on
+               the half nobody can see. That is the half worth writing down. */
+            accessibilityState={{ busy }}
             style={[formStyles.button, !canSubmit && formStyles.buttonDisabled]}
           >
             {busy ? (
@@ -299,6 +305,8 @@ export default function ChangePasswordScreen() {
 
 
 const styles = StyleSheet.create({
-  signOut: { marginTop: theme.space.lg, alignItems: "center", paddingVertical: theme.space.md },
+  signOut: {
+    minHeight: 44,
+    justifyContent: "center", marginTop: theme.space.lg, alignItems: "center", paddingVertical: theme.space.md },
   signOutText: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.textSecondary },
 });
