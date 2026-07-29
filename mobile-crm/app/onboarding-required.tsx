@@ -188,6 +188,8 @@ const styles = StyleSheet.create({
   title: { ...theme.type.h1, color: theme.color.textPrimary },
   copy: { ...theme.type.body, lineHeight: 22, color: theme.color.textSecondary },
   button: {
+    minHeight: 44,
+    justifyContent: "center",
     marginTop: theme.space.md,
     backgroundColor: theme.color.brandRed,
     borderRadius: theme.radius.md,
@@ -196,6 +198,8 @@ const styles = StyleSheet.create({
   },
   buttonText: { ...theme.type.body, color: theme.color.textInverse },
   secondary: {
+    minHeight: 44,
+    justifyContent: "center",
     borderWidth: 1,
     borderColor: theme.color.brandRed,
     borderRadius: theme.radius.md,
@@ -204,6 +208,8 @@ const styles = StyleSheet.create({
   },
   secondaryText: { ...theme.type.body, color: theme.color.redText },
   note: { ...theme.type.label, color: theme.color.textMuted, textAlign: "center" },
-  signOut: { marginTop: theme.space.sm, alignItems: "center", paddingVertical: theme.space.md },
+  signOut: {
+    minHeight: 44,
+    justifyContent: "center", marginTop: theme.space.sm, alignItems: "center", paddingVertical: theme.space.md },
   signOutText: { ...theme.type.body, color: theme.color.textSecondary },
 });

@@ -27,6 +27,9 @@ export const formStyles = StyleSheet.create({
     marginTop: theme.space.md,
   },
   input: {
+    // 44pt floor, declared: padding alone put this at about 43. See
+    // src/__tests__/touch-targets-declare-a-floor.test.ts.
+    minHeight: 44,
     borderWidth: 1,
     // borderControl, not border: this hairline IS the credential field. See the token's note.
     borderColor: theme.color.borderControl,
@@ -45,6 +48,8 @@ export const formStyles = StyleSheet.create({
     marginTop: theme.space.xs,
   },
   button: {
+    minHeight: 44,
+    justifyContent: "center",
     marginTop: theme.space.xl,
     backgroundColor: theme.color.brandRed,
     borderRadius: theme.radius.md,

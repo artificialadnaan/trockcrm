@@ -19,6 +19,7 @@ import * as dealsApi from "../../../src/api/endpoints/deals";
 import * as pipelineApi from "../../../src/api/endpoints/pipeline";
 import { useAuth } from "../../../src/auth/AuthContext";
 import { useQueryScope } from "../../../src/auth/useOfficeId";
+import { BackLink } from "../../../src/components/BackLink";
 import { RetryBlock } from "../../../src/components/RetryBlock";
 import { RetryNotice } from "../../../src/components/RetryNotice";
 import { qk } from "../../../src/query/keys";
@@ -315,9 +316,7 @@ export default function MoveStageScreen() {
     <SafeAreaView style={styles.safe} edges={["top"]}>
       <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === "ios" ? "padding" : undefined}>
         <ScrollView contentContainerStyle={styles.body} keyboardShouldPersistTaps="handled">
-          <Pressable onPress={() => goBack()} accessibilityRole="button" accessibilityLabel="Back">
-            <Text style={styles.back}>‹ Cancel</Text>
-          </Pressable>
+          <BackLink label="Cancel" accessibleName="Cancel" onPress={() => goBack()} />
 
           <Text style={styles.title}>Move stage</Text>
           <Text style={styles.subtitle} numberOfLines={2}>
@@ -701,7 +700,6 @@ const styles = StyleSheet.create({
   flex: { flex: 1 },
   body: { padding: theme.space.lg, gap: theme.space.sm, paddingBottom: theme.space.xxl },
   center: { flex: 1, alignItems: "center", justifyContent: "center", gap: theme.space.md },
-  back: { fontFamily: theme.font.semibold, fontSize: 15, color: theme.color.redText },
   title: { fontFamily: theme.font.bold, fontSize: 26, color: theme.color.inkNavy },
   subtitle: { fontFamily: theme.font.semibold, fontSize: 15, color: theme.color.textSecondary },
   label: {
@@ -715,6 +713,8 @@ const styles = StyleSheet.create({
   help: { fontFamily: theme.font.regular, fontSize: 13, color: theme.color.textMuted },
   stageGrid: { flexDirection: "row", flexWrap: "wrap", gap: theme.space.sm, marginTop: theme.space.sm },
   stageOption: {
+    minHeight: 44,
+    justifyContent: "center",
     borderRadius: theme.radius.pill,
     borderWidth: 1,
     borderColor: theme.color.border,
@@ -765,6 +765,8 @@ const styles = StyleSheet.create({
   },
   error: { marginTop: theme.space.md, fontFamily: theme.font.regular, fontSize: 13, color: theme.color.redText },
   primary: {
+    minHeight: 44,
+    justifyContent: "center",
     marginTop: theme.space.xl,
     backgroundColor: theme.color.brandRed,
     borderRadius: theme.radius.md,
@@ -774,6 +776,8 @@ const styles = StyleSheet.create({
   primaryDisabled: { opacity: 0.5 },
   primaryText: { fontFamily: theme.font.bold, fontSize: 15, color: theme.color.textInverse },
   secondary: {
+    minHeight: 44,
+    justifyContent: "center",
     borderWidth: 1,
     borderColor: theme.color.border,
     borderRadius: theme.radius.md,

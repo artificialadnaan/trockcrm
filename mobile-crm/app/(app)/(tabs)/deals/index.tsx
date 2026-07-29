@@ -330,6 +330,8 @@ const styles = StyleSheet.create({
   title: { ...theme.type.h1, color: theme.color.textPrimary },
   count: { ...theme.type.label, color: theme.color.textMuted },
   boardLink: {
+    minHeight: 44,
+    justifyContent: "center",
     marginHorizontal: theme.space.lg,
     marginTop: theme.space.sm,
     alignItems: "center",
@@ -342,6 +344,8 @@ const styles = StyleSheet.create({
   boardLinkText: { ...theme.type.body, color: theme.color.redText },
   scopeRow: { flexDirection: "row", gap: theme.space.sm, paddingHorizontal: theme.space.lg, paddingTop: theme.space.md },
   scopePill: {
+    minHeight: 44,
+    justifyContent: "center",
     borderRadius: theme.radius.pill,
     borderWidth: 1,
     borderColor: theme.color.border,
@@ -356,6 +360,7 @@ const styles = StyleSheet.create({
   scopeText: { ...theme.type.label, color: theme.color.textSecondary },
   scopeTextActive: { color: theme.color.textPrimary },
   search: {
+    minHeight: 44,
     margin: theme.space.lg,
     marginBottom: theme.space.sm,
     borderWidth: 1,
@@ -380,6 +385,8 @@ const styles = StyleSheet.create({
   errorTitle: { ...theme.type.h2, color: theme.color.textPrimary },
   errorBody: { ...theme.type.body, color: theme.color.textSecondary, textAlign: "center" },
   retryBtn: {
+    minHeight: 44,
+    justifyContent: "center",
     marginTop: theme.space.sm,
     borderWidth: 1,
     borderColor: theme.color.brandRed,

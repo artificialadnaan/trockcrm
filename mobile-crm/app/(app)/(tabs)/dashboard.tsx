@@ -223,6 +223,8 @@ const styles = StyleSheet.create({
   body: { padding: theme.space.lg, gap: theme.space.md, paddingBottom: theme.space.xxl },
   email: { fontFamily: theme.font.regular, fontSize: 13, color: theme.color.textSecondary },
   statCard: {
+    minHeight: 44,
+    justifyContent: "center",
     backgroundColor: theme.color.surface,
     borderRadius: theme.radius.lg,
     borderWidth: 1,
@@ -245,6 +247,8 @@ const styles = StyleSheet.create({
      instead. */
   grid: { flexDirection: "row", flexWrap: "wrap", gap: theme.space.md },
   navCard: {
+    minHeight: 44,
+    justifyContent: "center",
     flex: 1,
     minWidth: 140,
     backgroundColor: theme.color.surface,
@@ -264,6 +268,8 @@ const styles = StyleSheet.create({
     lineHeight: 18,
     color: theme.color.textSecondary,
   },
-  signOut: { marginTop: theme.space.lg, alignItems: "center", paddingVertical: theme.space.md },
+  signOut: {
+    minHeight: 44,
+    justifyContent: "center", marginTop: theme.space.lg, alignItems: "center", paddingVertical: theme.space.md },
   signOutText: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.textSecondary },
 });
