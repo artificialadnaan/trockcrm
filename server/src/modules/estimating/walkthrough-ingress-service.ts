@@ -6,6 +6,7 @@
 // frames: a real artifact a human can open, and `image/*` is one of only two mime families the
 // estimating path accepts. This module builds that chain link by link: the `files` row, then the
 // already-parsed source document and its activated parse run.
+import { createHash } from "node:crypto";
 import { and, eq, isNull, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
@@ -21,7 +22,11 @@ import type {
   WalkthroughScopeRow,
 } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
-import { resolvePricingScopeFromExtraction } from "./pricing-service.js";
+import {
+  canonicalizeTradeScopeKey,
+  isKnownTradeScopeKey,
+  resolvePricingScopeFromExtraction,
+} from "./pricing-service.js";
 
 /** Same alias document-service.ts:6 uses. */
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -98,6 +103,68 @@ export const MAX_WALKTHROUGH_QUANTITY = 99999999999.999;
 export const MIN_WALKTHROUGH_QUANTITY = 0.001;
 
 /**
+ * The longest `rawLabel` that can survive all the way to a promoted estimate.
+ *
+ * `estimate_extractions.raw_label` is unbounded `text`, so ingress alone would accept any length — but
+ * promotion copies it into `estimate_line_items.description`, which is `varchar(500) NOT NULL`
+ * (estimate-line-items.ts:21, verified rather than assumed). The path is
+ * `promoteEstimatePricingRecommendations` → the select at draft-estimate-service.ts:91
+ * (`description: estimateExtractions.rawLabel`) → the insert at :345.
+ *
+ * So an over-long label is accepted at ingress, survives generation and matching, gets APPROVED by an
+ * estimator, and only then fails promotion with a 22001 — at the single worst moment, after a human has
+ * signed off on the row. Bounded here instead.
+ *
+ * REFUSED rather than truncated: silently shortening a scope description is its own hazard (the part
+ * that gets cut is exactly the qualifying detail — "…except the north elevation" — and the estimator
+ * would never know it was dropped). A sender that produced a 600-character utterance label has a
+ * segmentation problem worth hearing about.
+ */
+export const MAX_WALKTHROUGH_RAW_LABEL_CHARS = 500;
+
+/**
+ * A fingerprint of one scope row's SEMANTIC content, stored on the extraction and re-checked on replay.
+ *
+ * WHY. Idempotency matches a retry's rows to stored extractions on `sourceScopeItemId`. That is the
+ * right key, but on its own it only proves a row with that id EXISTS — not that it says the same thing.
+ * A retry that keeps the id and corrects the quantity from 12.5 to 125 was therefore treated as a
+ * successful replay: the caller got a 200 and the ORIGINAL row was kept, so the estimator went on
+ * pricing 12.5 while trock-scope believed the correction had landed. Drift that introduces a NEW id
+ * already 409s; this is the same disagreement, one level down, and it was silent.
+ *
+ * WHY A 409 AND NOT AN UPDATE. A genuine retry is byte-identical — that is what makes it a retry.
+ * Changed content is a different submission wearing a retry's clothes, and applying it would let a
+ * replay silently mutate rows an estimator may already have reviewed, matched and approved.
+ * Propagating post-export corrections is a real requirement, but it needs the export ledger to say
+ * which version is authoritative and what happens to downstream pricing; it does not belong in a
+ * retry path. Refused loudly here, so the correction is a conversation instead of a surprise.
+ *
+ * WHAT IS IN IT. Everything a human would call "what this row says": the id, the label, the quantity
+ * and unit, the division hint, the trade, the location, and the evidence triple. Deliberately NOT
+ * `confidence` — a re-scored confidence on identical content is the model changing its mind about the
+ * same utterance, not the utterance changing, and failing a retry over it would be noise.
+ *
+ * Canonical by construction: a fixed field ORDER (not object key order) and `JSON.stringify` on
+ * primitives only, so the same row always produces the same string. `trade` is already canonicalized
+ * by the validator, which means a casing-only change is correctly NOT drift.
+ */
+export function fingerprintWalkthroughScopeRow(row: WalkthroughScopeRow): string {
+  const canonical = JSON.stringify([
+    row.sourceScopeItemId,
+    row.rawLabel,
+    row.quantity,
+    row.unit,
+    row.divisionHint,
+    row.trade,
+    row.locationLabel,
+    row.evidence.clipId,
+    row.evidence.timelineMs,
+    row.evidence.frameKey,
+  ]);
+  return createHash("sha256").update(canonical).digest("hex");
+}
+
+/**
  * A ceiling on one walkthrough's scope rows. Not a storage limit — a runaway-export limit: a real
  * walkthrough is a human talking through a building, and an export claiming thousands of spoken scope
  * items is a bug upstream, not a big job. Rows are also inserted in chunks (see
@@ -165,6 +232,7 @@ const EXTENSION_BY_MIME: Record<ContactSheetMimeType, string> = {
  */
 export function deriveWalkthroughContactSheetR2Key(
   dealId: string,
+  projectId: string | null,
   walkthroughId: string,
   mimeType: ContactSheetMimeType
 ): string {
@@ -173,9 +241,26 @@ export function deriveWalkthroughContactSheetR2Key(
   // walkthroughId alone would make the second deal collide with a 23505. It costs nothing
   // security-wise: dealId comes from the authorized URL, never the body, so it still cannot be used
   // to name another deal's object.
+  //
+  // `projectId` is here for exactly the same reason, one level down, and its absence was a BUG: the
+  // idempotency lookup keys on (dealId, projectId, contentHash, documentType), so the same walkthrough
+  // ingested onto two different projects WITHIN one deal is deliberately two documents — but with the
+  // project missing from the path both wanted the same r2_key, so the second one passed the lookup and
+  // then died on the unique index with a 23505. The derived key has to agree with the lookup key or
+  // "these are two legitimate documents" and "these are one object" contradict each other.
+  //
+  // The null case gets an explicit sentinel rather than an empty segment, so a deal-level walkthrough
+  // ("no project") and a project-level one can never collapse onto the same path. `_none` is safe as a
+  // sentinel because `projectId` is validated as a UUID (see requireUuid in the validator) and `_none`
+  // is not a syntactically valid UUID — no real project id can ever spell it.
+  //
   // EXTENSION_BY_MIME carries its own leading dot, so this yields ".../contact-sheet.jpg".
-  return `walkthroughs/${dealId}/${walkthroughId}/contact-sheet${EXTENSION_BY_MIME[mimeType]}`;
+  return `walkthroughs/${dealId}/${projectId ?? WALKTHROUGH_NO_PROJECT_KEY_SEGMENT}/${walkthroughId}/contact-sheet${EXTENSION_BY_MIME[mimeType]}`;
 }
+
+/** Path segment standing in for "no project". Not a valid UUID, so it cannot collide with a real
+ *  `projectId` — see `deriveWalkthroughContactSheetR2Key`. */
+export const WALKTHROUGH_NO_PROJECT_KEY_SEGMENT = "_none";
 
 export async function createWalkthroughContactSheetFile({
   tenantDb,
@@ -365,21 +450,38 @@ export async function insertWalkthroughExtractions({
       sourceParseRunId: input.parseRunId,
       sourceWalkthroughId: input.walkthroughId,
       sourceScopeItemId: row.sourceScopeItemId,
+      // What this row SAID, so a retry that keeps the id but changes the content is detectable rather
+      // than silently replayed against the original — see fingerprintWalkthroughScopeRow.
+      contentFingerprint: fingerprintWalkthroughScopeRow(row),
       locationLabel: row.locationLabel,
       // Kept for provenance: the trade the walkthrough classified this row as, independent of
       // whatever the resolver below turns it into.
       trade: row.trade,
       extractionProvider: "trock-scope",
       extractionMethod: "walkthrough_grounding",
+      // Whether the authoritative trade was usable as a pricing key at all — see below. Recorded so an
+      // unrecognized trade is visible on the row instead of being an invisible fallback.
+      tradeHintApplied: isKnownTradeScopeKey(row.trade),
       // The walkthrough already KNOWS the trade, so it is handed over as `tradeHint` rather than
       // left to be re-guessed. Without it the resolver falls through to text inference
       // (pricing-service.ts:222), which scans rawLabel against a 19-member hardcoded set — and a
       // roofing row reading "Replace rotted carpentry at eave" would price as carpentry.
       // Precedence note: the tradeHint branch (pricing-service.ts:212-220) returns BEFORE the
       // divisionHint branch (:231-236), so the authoritative trade wins over divisionHint.
+      //
+      // The hint is passed ONLY when the canonical trade is one the pricing path can match a rule on.
+      // A trade outside that 19-member set would otherwise become a scope key matching no rule, which
+      // `market-rate-service.ts:84` resolves by falling back to the general adjustment — the row would
+      // look trade-priced while being priced generally. Omitting the hint instead lets the resolver take
+      // its ordinary inference path, which is what every non-walkthrough producer already does, and the
+      // trade is still stored above for provenance.
+      //
+      // DELIBERATELY NOT a 400: an unrecognized trade is not a malformed payload, and refusing one would
+      // couple this ingress to a hardcoded set living in a service it does not own — trock-scope would
+      // start failing whenever that set was edited. It is surfaced as `tradeHintApplied: false` instead.
       ...resolvePricingScopeFromExtraction({
         divisionHint: row.divisionHint,
-        metadataJson: { tradeHint: row.trade },
+        metadataJson: isKnownTradeScopeKey(row.trade) ? { tradeHint: row.trade } : {},
         normalizedIntent: row.rawLabel,
         rawLabel: row.rawLabel,
       }),
@@ -435,6 +537,39 @@ function optionalString(value: unknown, field: string): string | null {
 function optionalNonEmptyString(value: unknown, field: string): string | null {
   if (value === undefined || value === null) return null;
   return requireNonEmptyString(value, field);
+}
+
+/**
+ * The 8-4-4-4-12 hex shape Postgres's `uuid` input parser accepts (canonical, unbraced form — which is
+ * the only form anything in this codebase emits).
+ */
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Optional, and a real UUID if present.
+ *
+ * `projectId` lands on `estimate_source_documents.project_id`, a `uuid` column, and it is read there by
+ * the idempotency lookup BEFORE anything is written. A non-empty non-UUID string ("proj-1", a slug, a
+ * name) therefore reached Postgres as a uuid comparison and raised 22P02 — a 500 out of the middle of
+ * the transaction, in a validator whose whole contract is a 400 before the first write. Checked here
+ * for the same reason the quantity bounds are.
+ *
+ * NOTE on `dealId`: deliberately NOT validated this way. It comes from the authorized URL rather than
+ * the body, and the route resolves the deal through `getDealById` before the ingress is called, so an
+ * unparseable one is already refused upstream — whereas `projectId` arrives only in the payload and
+ * nothing else looks at it first.
+ */
+function optionalUuid(value: unknown, field: string): string | null {
+  if (value === undefined || value === null) return null;
+  const str = requireNonEmptyString(value, field);
+  if (!UUID_PATTERN.test(str)) {
+    throw new AppError(
+      400,
+      `${field} must be a UUID (received "${str}"). It is compared against a uuid column, where a ` +
+        `non-UUID string is a 22P02 rather than a miss.`
+    );
+  }
+  return str;
 }
 
 function requireFiniteNumber(value: unknown, field: string): number {
@@ -510,10 +645,32 @@ function validateScopeRow(value: unknown, index: number): WalkthroughScopeRow {
     throw new AppError(400, `${at}.evidence.timelineMs must not be negative`);
   }
 
+  // Bounded to what promotion's varchar(500) can hold — see MAX_WALKTHROUGH_RAW_LABEL_CHARS. Refused
+  // here so the failure lands on the sender now, rather than as a 22001 after an estimator has approved
+  // the row.
+  const rawLabel = requireNonEmptyString(row.rawLabel, `${at}.rawLabel`);
+  if (rawLabel.length > MAX_WALKTHROUGH_RAW_LABEL_CHARS) {
+    throw new AppError(
+      400,
+      `${at}.rawLabel is ${rawLabel.length} characters, over the ${MAX_WALKTHROUGH_RAW_LABEL_CHARS}-` +
+        `character limit. Promotion copies rawLabel into estimate_line_items.description, which is ` +
+        `varchar(${MAX_WALKTHROUGH_RAW_LABEL_CHARS}) — a longer label would be accepted here, approved ` +
+        `by an estimator, and only then fail promotion. Split the utterance instead; it is not ` +
+        `truncated, because the clause that would be cut is usually the qualifying one.`
+    );
+  }
+
+  // NORMALIZED to the pricing path's canonical spelling, because it is handed over as the authoritative
+  // `tradeHint` and market-rule lookup compares scope keys with `===`
+  // (market-rate-service.ts:84). "Roofing" would match no roofing rule and fall back to the general
+  // adjustment — silent pricing divergence, and precisely what passing the trade was meant to prevent.
+  // Canonicalized once, here, so the stored provenance value and the pricing key cannot disagree.
+  const trade = canonicalizeTradeScopeKey(requireNonEmptyString(row.trade, `${at}.trade`));
+
   return {
     sourceScopeItemId: scopeItemId,
-    rawLabel: requireNonEmptyString(row.rawLabel, `${at}.rawLabel`),
-    trade: requireNonEmptyString(row.trade, `${at}.trade`),
+    rawLabel,
+    trade,
     divisionHint: optionalString(row.divisionHint, `${at}.divisionHint`),
     quantity,
     unit: optionalString(row.unit, `${at}.unit`),
@@ -613,8 +770,9 @@ export function validateWalkthroughIngressPayload(input: unknown): WalkthroughIn
   return {
     walkthroughId: requireNonEmptyString(raw.walkthroughId, "walkthroughId"),
     dealId: requireNonEmptyString(raw.dealId, "dealId"),
-    // Optional, but never blank: it lands on a uuid column, where "" is a 22P02 and not a null.
-    projectId: optionalNonEmptyString(raw.projectId, "projectId"),
+    // Optional, never blank, and a real UUID: it lands on (and is compared against) a uuid column,
+    // where "" and "proj-1" are both a 22P02 rather than a null or a miss.
+    projectId: optionalUuid(raw.projectId, "projectId"),
     // NO contactSheetR2Key. Whatever the body carried under that name is dropped on the floor here —
     // the key is derived from `walkthroughId` in `ingestWalkthrough`. See
     // `deriveWalkthroughContactSheetR2Key` for why accepting one is a read primitive rather than a
@@ -777,10 +935,20 @@ export async function ingestWalkthrough({
       // Returned in the payload's own row order rather than in whatever order the SELECT came back in:
       // the ids a retry gets back line up with the rows it sent, exactly as on the first call.
       const idByScopeItemId = new Map<string, string>();
+      const fingerprintByScopeItemId = new Map<string, string | null>();
       for (const row of existingRows) {
-        const scopeItemId = (row.metadataJson as { sourceScopeItemId?: unknown } | null)
-          ?.sourceScopeItemId;
-        if (typeof scopeItemId === "string") idByScopeItemId.set(scopeItemId, row.id);
+        const metadata = row.metadataJson as {
+          sourceScopeItemId?: unknown;
+          contentFingerprint?: unknown;
+        } | null;
+        const scopeItemId = metadata?.sourceScopeItemId;
+        if (typeof scopeItemId === "string") {
+          idByScopeItemId.set(scopeItemId, row.id);
+          fingerprintByScopeItemId.set(
+            scopeItemId,
+            typeof metadata?.contentFingerprint === "string" ? metadata.contentFingerprint : null
+          );
+        }
       }
       // A payload row with no stored extraction is a REAL disagreement, so it is raised rather than
       // dropped. The previous `.filter(id => id !== undefined)` silently discarded those, which made
@@ -792,10 +960,25 @@ export async function ingestWalkthrough({
       // retry replays it), or the stored extractions were deleted underneath us. Both need a human.
       const orderedIds: string[] = [];
       const unmatchedScopeItemIds: string[] = [];
+      const driftedScopeItemIds: string[] = [];
       for (const row of payload.rows) {
         const id = idByScopeItemId.get(row.sourceScopeItemId);
-        if (id === undefined) unmatchedScopeItemIds.push(row.sourceScopeItemId);
-        else orderedIds.push(id);
+        if (id === undefined) {
+          unmatchedScopeItemIds.push(row.sourceScopeItemId);
+          continue;
+        }
+        orderedIds.push(id);
+        // Matching on the id proves a row with that id exists; it does not prove it still SAYS the same
+        // thing. Compare the content too, or a retry that corrected a quantity gets a 200 while the
+        // estimator keeps working from the original number.
+        const storedFingerprint = fingerprintByScopeItemId.get(row.sourceScopeItemId) ?? null;
+        // A stored row with NO fingerprint predates this check and cannot be compared, so it is left
+        // alone rather than reported as drift. That is safe rather than a hole: this route has never
+        // shipped, so no such row can exist in production — only in a database written by an earlier
+        // commit on this branch, where failing every replay would be pure noise.
+        if (storedFingerprint !== null && storedFingerprint !== fingerprintWalkthroughScopeRow(row)) {
+          driftedScopeItemIds.push(row.sourceScopeItemId);
+        }
       }
 
       if (unmatchedScopeItemIds.length > 0) {
@@ -820,6 +1003,27 @@ export async function ingestWalkthrough({
         );
       }
 
+      if (driftedScopeItemIds.length > 0) {
+        const shown = driftedScopeItemIds.slice(0, 10);
+        const suffix =
+          driftedScopeItemIds.length > shown.length
+            ? ` (and ${driftedScopeItemIds.length - shown.length} more)`
+            : "";
+        // 409 for the same reason as above, and explicitly NOT an update: applying the new content here
+        // would let a retry silently rewrite rows an estimator may already have matched, priced and
+        // approved. See fingerprintWalkthroughScopeRow for why corrections belong to the export ledger.
+        throw new AppError(
+          409,
+          `Walkthrough ${payload.walkthroughId} was already ingested on this deal as document ` +
+            `${existing.id}, and ${driftedScopeItemIds.length} of the ${payload.rows.length} rows ` +
+            `posted have the same sourceScopeItemId but different content: ${shown.join(", ")}` +
+            `${suffix}. A retry replays what was stored and never rewrites it, so this submission is ` +
+            `not a retry — it is a correction, and applying it here would silently change rows an ` +
+            `estimator may already have reviewed. Re-export under a new walkthrough id, or land the ` +
+            `correction through the export ledger.`
+        );
+      }
+
       const claimed = new Set(orderedIds);
       // Anything the stored document has that this payload did not name (a retry whose rows drifted)
       // still belongs to the walkthrough, so the result stays a complete picture of what exists.
@@ -838,6 +1042,7 @@ export async function ingestWalkthrough({
     // trock-scope uploads the contact sheet to exactly this key before posting.
     const contactSheetR2Key = deriveWalkthroughContactSheetR2Key(
       payload.dealId,
+      payload.projectId,
       payload.walkthroughId,
       payload.contactSheetMimeType
     );

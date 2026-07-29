@@ -135,6 +135,30 @@ const tradeScopeHints = new Set([
   "hvac",
 ]);
 
+/**
+ * The canonical form of a trade scope key: what `tradeScopeHints` above is spelled in, and what
+ * `market-rate-service.ts:84` compares a rule's `scopeKey` against with `===`.
+ *
+ * Exported because a PRODUCER of `metadataJson.tradeHint` has to be able to reach this spelling before
+ * it writes the row. `normalizeScopeKey` (used by the tradeHint branch of
+ * `resolvePricingScopeFromExtraction`) only trims, so a hint of "Roofing" becomes the scope key
+ * "Roofing", which matches no roofing rule and silently falls back to the general adjustment.
+ */
+export function canonicalizeTradeScopeKey(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+/**
+ * Whether a canonical trade key is one the pricing path can actually match a rule on.
+ *
+ * Exported rather than exposing the set itself, and exported rather than copied, so a caller that
+ * validates a trade before handing it over as a `tradeHint` cannot drift from the 19 members above.
+ * Callers are expected to pass `canonicalizeTradeScopeKey(...)` output.
+ */
+export function isKnownTradeScopeKey(value: string): boolean {
+  return tradeScopeHints.has(value);
+}
+
 function inferTradeScopeKeyFromText(value: unknown) {
   if (typeof value !== "string") return null;
 

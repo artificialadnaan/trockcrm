@@ -38,6 +38,7 @@ import {
 import type { WalkthroughIngressPayload, WalkthroughScopeRow } from "@trock-crm/shared/types";
 import { tenantSchemaSql } from "../../../tests/helpers/tenant-schema-from-drizzle.js";
 import { reprocessEstimateSourceDocument } from "./document-service.js";
+import { canonicalizeTradeScopeKey, isKnownTradeScopeKey } from "./pricing-service.js";
 import { buildEstimatingWorkbenchState } from "./workbench-service.js";
 import {
   createWalkthroughContactSheetFile,
@@ -46,8 +47,10 @@ import {
   ingestWalkthrough,
   insertWalkthroughExtractions,
   MAX_WALKTHROUGH_QUANTITY,
+  MAX_WALKTHROUGH_RAW_LABEL_CHARS,
   MAX_WALKTHROUGH_SCOPE_ROWS,
   MIN_WALKTHROUGH_QUANTITY,
+  WALKTHROUGH_NO_PROJECT_KEY_SEGMENT,
   walkthroughIngressLockKey,
 } from "./walkthrough-ingress-service.js";
 
@@ -555,6 +558,85 @@ describe("insertWalkthroughExtractions", () => {
     expect(row.metadataJson.trade).toBe("roofing");
   });
 
+  // R11. The trade is handed over as the authoritative `tradeHint`, and market-rule lookup compares
+  // scope keys with `===` (market-rate-service.ts:84). `normalizeScopeKey` in the resolver's tradeHint
+  // branch only TRIMS, so a trade of "Roofing" became the scope key "Roofing", matched no roofing rule,
+  // and fell back to the general adjustment — priced generally while looking trade-priced. Exactly the
+  // divergence passing the trade was supposed to prevent.
+  it("canonicalizes the trade so the pricing key matches a market rule exactly", async () => {
+    const walkthroughId = U("22240");
+    const { documentId, parseRunId } = await seedChain(walkthroughId);
+
+    const ids = await insertWalkthroughExtractions({
+      tenantDb,
+      input: {
+        dealId: DEAL,
+        projectId: PROJECT,
+        documentId,
+        parseRunId,
+        walkthroughId,
+        // As a sender would plausibly spell it, and as the CRM would not.
+        rows: [{ ...CARPENTRY_ROW, trade: canonicalizeTradeScopeKey("  Roofing  ") }],
+      },
+    });
+
+    const [row] = await tenantDb
+      .select()
+      .from(estimateExtractions)
+      .where(eq(estimateExtractions.id, ids[0]));
+
+    expect(row.metadataJson.pricingScopeKey).toBe("roofing");
+    expect(row.metadataJson.trade).toBe("roofing");
+    expect(row.metadataJson.tradeHintApplied).toBe(true);
+
+    // Asserted against the REAL comparison the market path performs, not against a lowercase string:
+    // this is the predicate that decides whether the roofing rule is found at all.
+    expect(isKnownTradeScopeKey(String(row.metadataJson.pricingScopeKey))).toBe(true);
+  });
+
+  // A trade outside the pricing path's 19-member set must NOT be passed as a hint: it would become a
+  // scope key matching no rule, which resolves to the general adjustment while the row looks
+  // trade-priced. The hint is dropped so the resolver takes its ordinary inference path (what every
+  // non-walkthrough producer already does), the trade is still stored for provenance, and the fact that
+  // the hint was unusable is recorded rather than invisible. Deliberately not a 400 — see the service.
+  it("withholds the trade hint for a trade the pricing path cannot match, and says so on the row", async () => {
+    const walkthroughId = U("22241");
+    const { documentId, parseRunId } = await seedChain(walkthroughId);
+
+    const ids = await insertWalkthroughExtractions({
+      tenantDb,
+      input: {
+        dealId: DEAL,
+        projectId: PROJECT,
+        documentId,
+        parseRunId,
+        walkthroughId,
+        rows: [
+          {
+            ...CARPENTRY_ROW,
+            trade: "scaffolding",
+            divisionHint: null,
+            rawLabel: "Erect scaffolding at the north face",
+          },
+        ],
+      },
+    });
+
+    const [row] = await tenantDb
+      .select()
+      .from(estimateExtractions)
+      .where(eq(estimateExtractions.id, ids[0]));
+
+    // Recorded, so an unrecognized trade is visible instead of being a silent fallback.
+    expect(row.metadataJson.tradeHintApplied).toBe(false);
+    // Provenance is kept regardless — the walkthrough's own classification is not thrown away.
+    expect(row.metadataJson.trade).toBe("scaffolding");
+    // And the pricing key is NOT the unmatched trade: passing it would have produced
+    // pricingScopeKey "scaffolding", which no rule matches.
+    expect(row.metadataJson.pricingScopeKey).not.toBe("scaffolding");
+    expect(isKnownTradeScopeKey("scaffolding")).toBe(false);
+  });
+
   it("writes SQL NULL for a row whose quantity was never spoken", async () => {
     const walkthroughId = U("22226");
     const { documentId, parseRunId } = await seedChain(walkthroughId);
@@ -647,9 +729,12 @@ describe("ingestWalkthrough", () => {
     const [file] = await tenantDb.select().from(files).where(eq(files.id, result.fileId));
     // The wire contract's contactSheet* fields landed on the storage-shaped columns — this mapping is
     // the only thing that connects WalkthroughIngressPayload to the three narrow helper inputs.
-    // DERIVED server-side from (dealId, walkthroughId) — never accepted from the wire. dealId is in
-    // the path because files.r2_key is UNIQUE and one walkthrough may be ingested onto two deals.
-    expect(file.r2Key).toBe(`walkthroughs/${DEAL}/${walkthroughId}/contact-sheet.jpg`);
+    // DERIVED server-side from (dealId, projectId, walkthroughId) — never accepted from the wire.
+    // dealId AND projectId are both in the path because files.r2_key is UNIQUE and the idempotency
+    // lookup treats (deal, project, walkthrough) as the identity: the same walkthrough may legitimately
+    // be ingested onto two deals, or onto two projects within one deal, and each of those is a separate
+    // document that therefore needs a separate object key.
+    expect(file.r2Key).toBe(`walkthroughs/${DEAL}/${PROJECT}/${walkthroughId}/contact-sheet.jpg`);
     expect(file.r2Bucket).toBe(CRM_BUCKET);
     expect(file.fileSizeBytes).toBe(184320);
     expect(file.mimeType).toBe("image/jpeg");
@@ -662,7 +747,7 @@ describe("ingestWalkthrough", () => {
     // LINK 1 — the document points at the file the first helper made.
     expect(doc.fileId).toBe(result.fileId);
     expect(doc.rootFileId).toBe(result.fileId);
-    expect(doc.storageKey).toBe(`walkthroughs/${DEAL}/${walkthroughId}/contact-sheet.jpg`);
+    expect(doc.storageKey).toBe(`walkthroughs/${DEAL}/${PROJECT}/${walkthroughId}/contact-sheet.jpg`);
     // LINK 2 — the document's ACTIVE run is the run this call created. A null here is the exact
     // failure the transaction exists to prevent (workbench-service.ts:157 reads it as "never show
     // any of this document's rows"), and it is a separate UPDATE from the document INSERT.
@@ -1047,7 +1132,7 @@ describe("ingestWalkthrough", () => {
     });
 
     const [file] = await tenantDb.select().from(files).where(eq(files.id, result.fileId));
-    expect(file.r2Key).toBe(`walkthroughs/${DEAL}/${walkthroughId}/contact-sheet.jpg`);
+    expect(file.r2Key).toBe(`walkthroughs/${DEAL}/${PROJECT}/${walkthroughId}/contact-sheet.jpg`);
     expect(file.r2Key).not.toContain("private-bid");
     expect(file.r2Key).not.toContain("099999");
 
@@ -1057,7 +1142,7 @@ describe("ingestWalkthrough", () => {
       .select()
       .from(estimateSourceDocuments)
       .where(eq(estimateSourceDocuments.id, result.documentId));
-    expect(doc.storageKey).toBe(`walkthroughs/${DEAL}/${walkthroughId}/contact-sheet.jpg`);
+    expect(doc.storageKey).toBe(`walkthroughs/${DEAL}/${PROJECT}/${walkthroughId}/contact-sheet.jpg`);
   });
 
   // ── CONCURRENT IDEMPOTENCY (the advisory lock) ────────────────────────────────────────────────────
@@ -1349,6 +1434,255 @@ describe("ingestWalkthrough", () => {
     // The named row comes first (payload order), the unnamed one is appended.
     expect(second.extractionIds[0]).toBe(first.extractionIds[0]);
     expect([...second.extractionIds].sort()).toEqual([...first.extractionIds].sort());
+  });
+
+  // R7. Matching a retry's rows on `sourceScopeItemId` proves a row with that id EXISTS; it does not
+  // prove it still says the same thing. A retry that kept the id and corrected the quantity used to be
+  // treated as a clean replay — 200, original row kept — so trock-scope believed the correction had
+  // landed while the estimator went on pricing the old number. Same disagreement as an unmatched id,
+  // one level down, and it was completely silent.
+  it("refuses a replay whose row contents changed under an unchanged sourceScopeItemId", async () => {
+    const walkthroughId = U("33070");
+
+    const first = await ingestWalkthrough({
+      tenantDb,
+      payload: walkthroughPayload(walkthroughId, { rows: [CARPENTRY_ROW] }),
+    });
+
+    // The dangerous retry: same id, a quantity corrected by a factor of ten.
+    await expect(
+      ingestWalkthrough({
+        tenantDb,
+        payload: walkthroughPayload(walkthroughId, {
+          rows: [{ ...CARPENTRY_ROW, quantity: 125 }],
+        }),
+      })
+    ).rejects.toMatchObject({
+      statusCode: 409,
+      message: expect.stringContaining(CARPENTRY_ROW.sourceScopeItemId),
+    });
+
+    // READ BACK FROM THE DATABASE, not from what the rejected call returned. The failure mode being
+    // guarded is "the original row was silently kept", so the only assertion that can detect it is one
+    // that looks at the stored row. Asserting on a return value would pass either way.
+    const [stored] = await tenantDb
+      .select()
+      .from(estimateExtractions)
+      .where(eq(estimateExtractions.id, first.extractionIds[0]));
+    expect(Number(stored.quantity)).toBe(12.5);
+    // ...and no second row was written for the corrected content either.
+    const all = await tenantDb
+      .select({ id: estimateExtractions.id })
+      .from(estimateExtractions)
+      .where(eq(estimateExtractions.documentId, first.documentId));
+    expect(all).toHaveLength(1);
+  });
+
+  // Each case gets its OWN walkthrough id, spelled out rather than derived from the label: two derived
+  // ids collided in the first draft of this test, which made one case's "first ingest" a replay of
+  // another case's document instead of a fresh one. It still passed, for the wrong reason.
+  it.each<[string, string, Partial<WalkthroughScopeRow>]>([
+    ["rawLabel", U("33080"), { rawLabel: "Replace rotted carpentry at the eave" }],
+    ["unit", U("33081"), { unit: "SF" }],
+    ["divisionHint", U("33082"), { divisionHint: "roofing" }],
+    ["trade", U("33083"), { trade: "roofing" }],
+    ["locationLabel", U("33084"), { locationLabel: "South elevation, eave" }],
+    ["the evidence timeline offset", U("33085"), { evidence: { ...CARPENTRY_ROW.evidence, timelineMs: 999_000 } }],
+    ["the evidence clip", U("33086"), { evidence: { ...CARPENTRY_ROW.evidence, clipId: "clip-z" } }],
+    ["the evidence frame", U("33087"), { evidence: { ...CARPENTRY_ROW.evidence, frameKey: "frames/clip-a/00999000.jpg" } }],
+  ])("treats a changed %s as drift rather than a replay", async (_label, walkthroughId, override) => {
+    const first = await ingestWalkthrough({
+      tenantDb,
+      payload: walkthroughPayload(walkthroughId, { rows: [CARPENTRY_ROW] }),
+    });
+    // Proof this case really did create its own document rather than replaying another's.
+    expect(first.extractionIds).toHaveLength(1);
+
+    await expect(
+      ingestWalkthrough({
+        tenantDb,
+        payload: walkthroughPayload(walkthroughId, {
+          rows: [{ ...CARPENTRY_ROW, ...override }],
+        }),
+      })
+    ).rejects.toMatchObject({ statusCode: 409 });
+  });
+
+  // The other half of the contract: a TRUE retry must still be free. If the fingerprint were unstable
+  // (key order, number formatting, a timestamp folded in) every retry would 409 and the seam would be
+  // worse than before this check existed.
+  it("still replays a byte-identical retry, and ignores a re-scored confidence", async () => {
+    const walkthroughId = U("33090");
+    const rows = [
+      CARPENTRY_ROW,
+      { ...CARPENTRY_ROW, sourceScopeItemId: "scope-item-9701", rawLabel: "Reflash the parapet" },
+    ];
+
+    const first = await ingestWalkthrough({
+      tenantDb,
+      payload: walkthroughPayload(walkthroughId, { rows }),
+    });
+    const second = await ingestWalkthrough({
+      tenantDb,
+      payload: walkthroughPayload(walkthroughId, { rows }),
+    });
+    expect(second).toEqual(first);
+
+    // Confidence is deliberately OUTSIDE the fingerprint: a re-scored confidence on identical content is
+    // the model changing its mind about the same utterance, not the utterance changing. Failing a retry
+    // over it would be noise, so this must still replay.
+    const third = await ingestWalkthrough({
+      tenantDb,
+      payload: walkthroughPayload(walkthroughId, {
+        rows: rows.map((row) => ({ ...row, confidence: 0.42 })),
+      }),
+    });
+    expect(third).toEqual(first);
+  });
+
+  // Casing is not semantic drift, because the validator canonicalizes `trade` before it is fingerprinted
+  // or stored. Worth pinning: if canonicalization moved after the fingerprint, every sender that changed
+  // its capitalization would start getting 409s.
+  it("does not treat a trade's capitalization as drift", async () => {
+    const walkthroughId = U("33091");
+
+    const first = await ingestWalkthrough({
+      tenantDb,
+      payload: walkthroughPayload(walkthroughId, { rows: [CARPENTRY_ROW] }),
+    });
+    const second = await ingestWalkthrough({
+      tenantDb,
+      payload: walkthroughPayload(walkthroughId, {
+        rows: [{ ...CARPENTRY_ROW, trade: "  CARPENTRY  " }],
+      }),
+    });
+
+    expect(second).toEqual(first);
+  });
+
+  // R8. The lookup keys on (dealId, projectId, contentHash, documentType), so the same walkthrough on
+  // two projects within ONE deal is deliberately two documents — but the derived object key omitted the
+  // project, so both wanted the same `files.r2_key` and the second died on the unique index with a
+  // 23505 after passing the lookup. The derived key and the lookup key have to describe the same
+  // identity.
+  it("ingests the same walkthrough onto two projects of one deal, with distinct object keys", async () => {
+    const walkthroughId = U("33100");
+    const otherProject = U("44445");
+
+    const first = await ingestWalkthrough({
+      tenantDb,
+      payload: walkthroughPayload(walkthroughId, { projectId: PROJECT }),
+    });
+    // This is the call that used to fail with a 23505.
+    const second = await ingestWalkthrough({
+      tenantDb,
+      payload: walkthroughPayload(walkthroughId, { projectId: otherProject }),
+    });
+
+    expect(second.documentId).not.toBe(first.documentId);
+    expect(second.fileId).not.toBe(first.fileId);
+
+    const [firstFile] = await tenantDb.select().from(files).where(eq(files.id, first.fileId));
+    const [secondFile] = await tenantDb.select().from(files).where(eq(files.id, second.fileId));
+    expect(firstFile.r2Key).toBe(`walkthroughs/${DEAL}/${PROJECT}/${walkthroughId}/contact-sheet.jpg`);
+    expect(secondFile.r2Key).toBe(
+      `walkthroughs/${DEAL}/${otherProject}/${walkthroughId}/contact-sheet.jpg`
+    );
+    expect(firstFile.r2Key).not.toBe(secondFile.r2Key);
+  });
+
+  // The null-project sentinel. A deal-level walkthrough and a project-level one must not collapse onto
+  // one path, and `_none` cannot be mistaken for a project id because projectId is validated as a UUID.
+  it("keeps a deal-level walkthrough on a distinct key from a project-level one", async () => {
+    const walkthroughId = U("33101");
+
+    const dealLevel = await ingestWalkthrough({
+      tenantDb,
+      payload: walkthroughPayload(walkthroughId, { projectId: null }),
+    });
+    const projectLevel = await ingestWalkthrough({
+      tenantDb,
+      payload: walkthroughPayload(walkthroughId, { projectId: PROJECT }),
+    });
+
+    expect(dealLevel.documentId).not.toBe(projectLevel.documentId);
+    const [dealFile] = await tenantDb.select().from(files).where(eq(files.id, dealLevel.fileId));
+    expect(dealFile.r2Key).toBe(
+      `walkthroughs/${DEAL}/${WALKTHROUGH_NO_PROJECT_KEY_SEGMENT}/${walkthroughId}/contact-sheet.jpg`
+    );
+    // The sentinel is not a UUID, so no real projectId can ever produce this same path.
+    expect(WALKTHROUGH_NO_PROJECT_KEY_SEGMENT).not.toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+    );
+  });
+
+  // R9. `projectId` is compared against a uuid column by the idempotency lookup, so a non-UUID string
+  // was a 22P02 from inside the transaction — a 500 out of a validator whose contract is a 400 before
+  // the first write.
+  it.each([["a slug", "proj-1"], ["a name", "Building B"], ["a truncated uuid", "00000000-0000-4000"]])(
+    "refuses a projectId that is %s, without writing anything",
+    async (_label, projectId) => {
+      const before = await tableCounts();
+
+      await expect(
+        ingestWalkthrough({
+          tenantDb,
+          payload: walkthroughPayload(U("33110"), { projectId }),
+        })
+      ).rejects.toMatchObject({
+        statusCode: 400,
+        message: expect.stringContaining("projectId"),
+      });
+
+      expect(await tableCounts()).toEqual(before);
+    }
+  );
+
+  // R10. rawLabel is unbounded `text` here but promotion copies it into
+  // estimate_line_items.description, a varchar(500) — so an over-long label is accepted, generated,
+  // APPROVED by an estimator, and only then fails promotion with a 22001.
+  it("refuses a rawLabel longer than the promotable description column, naming the row", async () => {
+    const before = await tableCounts();
+
+    await expect(
+      ingestWalkthrough({
+        tenantDb,
+        payload: walkthroughPayload(U("33120"), {
+          rows: [
+            {
+              ...CARPENTRY_ROW,
+              sourceScopeItemId: "scope-item-verbose",
+              rawLabel: "x".repeat(MAX_WALKTHROUGH_RAW_LABEL_CHARS + 1),
+            },
+          ],
+        }),
+      })
+    ).rejects.toMatchObject({
+      statusCode: 400,
+      message: expect.stringContaining("scope-item-verbose"),
+    });
+
+    expect(await tableCounts()).toEqual(before);
+  });
+
+  // The boundary is inclusive, and the label reaches the column intact — so a future "tidy up" that
+  // truncated instead of refusing, or that tightened the bound, fails here.
+  it("accepts a rawLabel of exactly the limit and stores it whole", async () => {
+    const label = "y".repeat(MAX_WALKTHROUGH_RAW_LABEL_CHARS);
+
+    const result = await ingestWalkthrough({
+      tenantDb,
+      payload: walkthroughPayload(U("33121"), { rows: [{ ...CARPENTRY_ROW, rawLabel: label }] }),
+    });
+
+    const [row] = await tenantDb
+      .select()
+      .from(estimateExtractions)
+      .where(eq(estimateExtractions.id, result.extractionIds[0]));
+    expect(row.rawLabel).toBe(label);
+    expect(row.rawLabel).toHaveLength(MAX_WALKTHROUGH_RAW_LABEL_CHARS);
+    // The value that has to survive promotion is the one that actually landed in the column.
+    expect(row.rawLabel.length).toBeLessThanOrEqual(500);
   });
 
   it("scopes the retry check to the deal, so the same walkthrough on another deal still ingests", async () => {
