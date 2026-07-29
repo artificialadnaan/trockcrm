@@ -57,6 +57,8 @@ beforeEach(() => {
         projectNumber: "DFW-101",
         regionName: "Dallas",
         superintendentName: "Adam Shaw",
+        // The PM field is optional on the form, so a null must render as an em-dash rather than "null".
+        pmName: null,
         kind: "leadership",
         totalScore: 85,
         formVersion: 2,
@@ -75,6 +77,7 @@ beforeEach(() => {
         projectNumber: "DFW-102",
         regionName: "Dallas",
         superintendentName: "Sam Reyes",
+        pmName: "Nick Cheatam",
         kind: "project",
         totalScore: 86,
         formVersion: 1,
@@ -90,6 +93,7 @@ beforeEach(() => {
     ],
     regions: ["Dallas"],
     superintendents: ["Adam Shaw", "Sam Reyes"],
+    projectManagers: ["Nick Cheatam"],
     truncated: false,
     loading: false,
     error: null,
@@ -160,6 +164,47 @@ describe("QcReportsPage", () => {
       "Awaiting Approval",
       "Approved",
     ]);
+  });
+
+  it("renders a Project Manager column and filter alongside Superintendent", async () => {
+    await act(async () => {
+      root.render(
+        <MemoryRouter initialEntries={["/projects/qc-reports?officeId=office-dallas"]}>
+          <QcReportsPage />
+        </MemoryRouter>,
+      );
+    });
+
+    const headers = Array.from(container.querySelectorAll("thead th")).map((th) => th.textContent);
+    expect(headers).toContain("Superintendent");
+    expect(headers).toContain("Project Manager");
+
+    // The PM cell sits immediately after the superintendent cell on the row it belongs to. Asserting the
+    // position (not just the presence of the name somewhere in the table) is what catches the column being
+    // added to the header but not the body — the two are separate `!compact &&` guards that can drift.
+    const projectRow = Array.from(container.querySelectorAll("tbody tr")).find((tr) =>
+      (tr.textContent ?? "").includes("Project Job"),
+    );
+    expect(projectRow).toBeTruthy();
+    const cells = Array.from(projectRow!.querySelectorAll("td")).map((td) => td.textContent);
+    const supIndex = cells.findIndex((c) => c === "Sam Reyes");
+    expect(supIndex).toBeGreaterThan(-1);
+    expect(cells[supIndex + 1]).toBe("Nick Cheatam");
+
+    // A null PM renders the em-dash placeholder, never an empty cell or the string "null".
+    const leadershipRow = Array.from(container.querySelectorAll("tbody tr")).find((tr) =>
+      (tr.textContent ?? "").includes("Leadership Job"),
+    );
+    const leadershipCells = Array.from(leadershipRow!.querySelectorAll("td")).map((td) => td.textContent);
+    const leadSupIndex = leadershipCells.findIndex((c) => c === "Adam Shaw");
+    expect(leadershipCells[leadSupIndex + 1]).toBe("—");
+
+    // Its own dropdown, populated from the window-wide projectManagers option list.
+    const pmFilter = Array.from(container.querySelectorAll("select")).find((select) =>
+      Array.from(select.options).some((option) => option.textContent === "Nick Cheatam"),
+    );
+    expect(pmFilter).toBeTruthy();
+    expect(Array.from(pmFilter!.options).map((o) => o.textContent)).toEqual(["Anyone", "Nick Cheatam"]);
   });
 
   it.each([
