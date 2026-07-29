@@ -99,6 +99,11 @@ function changeOrderAwareSql(isChangeOrderSql: SQL, awardedSql: unknown, chainSq
   return sql`CASE WHEN ${isChangeOrderSql} THEN COALESCE(${awardedSql}, 0) ELSE ${chainSql} END`;
 }
 
+// The `table.isChangeOrder === undefined` escape hatch (plain chain, no CO branch) only ever fires for a
+// caller passing a narrowed literal, e.g. this file's own unit tests. The sole production COLUMN-form
+// consumer, dealPipelineValueSql (server/src/modules/deals/service.ts), passes the real Drizzle `deals`
+// table, whose `isChangeOrder` IS defined — so the column and aliased forms never diverge on any production
+// surface; the escape hatch exists purely so a hand-built test table without the field keeps compiling.
 function dealValueChainSql(table: DealValueTable, columns: readonly DealValueColumn[]): SQL {
   const chain = sql`COALESCE(${sql.join(
     columns.map((column) => positiveDealValueCandidateSql(tableColumnSql(table, column))),
@@ -239,7 +244,10 @@ export function aliasedOpenPipelineForecastFirstDealValueSql(alias: string): SQL
 // in any tenant schema is Bid Board-terminal while its CRM stage is open), so this only closes the
 // inconsistency — it does not move today's dollars.
 //
-// REQUIRED COLUMNS at `alias`: on_hold, bid_board_stage_slug, stage_id, bid_due_date, expected_close_date.
+// REQUIRED COLUMNS at `alias`: on_hold, bid_board_stage_slug, stage_id, bid_due_date, expected_close_date,
+// is_change_order (the default rawValueSql, aliasedDealBestEstimateSql, resolves through
+// aliasedDealValueChainSql, which unconditionally references `alias.is_change_order` — see
+// changeOrderAwareSql above dealValueChainSql).
 export function aliasedEffectiveDealValueSql(
   alias: string,
   rawValueSql: SQL = aliasedDealBestEstimateSql(alias)
