@@ -1178,10 +1178,22 @@ describe("ingestWalkthrough", () => {
     // `hashtext` for an older server, this assertion is the one that should be edited deliberately.
     expect(log[0].sql).toContain("hashtextextended");
 
-    // Keyed on THIS walkthrough on THIS deal, asserted against the exported key builder rather than a
-    // transcription of it — a lock on a constant would serialize every walkthrough in the CRM, and a
-    // lock keyed on the wrong thing would serialize the wrong pairs.
-    expect(log[0].params).toContain(walkthroughIngressLockKey(DEAL, walkthroughId));
+    // Keyed on THIS walkthrough on THIS deal. A lock on a constant would serialize every walkthrough
+    // in the CRM into a single queue; a lock keyed on the wrong values would serialize the wrong pairs.
+    //
+    // Asserted on the key's CONTENT, deliberately not by calling `walkthroughIngressLockKey` to build
+    // the expected value. That version of this assertion was a TAUTOLOGY and was caught by mutation:
+    // replacing the builder's body with a constant moved both sides of the comparison together and the
+    // test stayed green. The two `toContain`s below are the load-bearing ones — they name the identity
+    // the lock must be derived from, and no mutation of the builder can satisfy them without actually
+    // including those values.
+    const lockKey = String(log[0].params[0]);
+    expect(lockKey).toContain(DEAL);
+    expect(lockKey).toContain(walkthroughId);
+    // Namespaced, because the single-argument advisory-lock key space is global to the database.
+    expect(lockKey).toContain("walkthrough-ingress");
+    // And the exported builder is what produced it, so callers and tests agree on one spelling.
+    expect(lockKey).toBe(walkthroughIngressLockKey(DEAL, walkthroughId));
 
     // The lock is really HELD inside the transaction — the statement acquired something, rather than
     // merely being valid SQL.
