@@ -272,6 +272,35 @@ export function leadFlagNextStep(input: { flagged: boolean; nextStep: string }):
 }
 
 /**
+ * Is the "not at a property — attach to a company" escape offered right now?
+ *
+ * It has to be offered WHILE the fix is being acquired, and that is exactly where it was missing. The
+ * link lived inside the screen's `idle` branch, so for the twelve seconds of the location deadline the
+ * spinner replaced the whole card: the retry belongs to `unavailable`, the company fallback further
+ * down is gated on conditions none of which hold mid-lookup, and Save is blocked on `locating` as well.
+ * The only way out was to leave the screen and lose the capture — in the one scene this feature exists
+ * for, a door with one bar and GPS confused by a metal roof.
+ *
+ * NOT offered once candidates are on screen: the match list carries its own "None of these", and two
+ * links a line apart saying the same thing is its own defect. `denied` states the Settings path in its
+ * own copy and `unavailable` falls through to the company block, so both are already covered.
+ *
+ * A function rather than a condition in JSX because it is four terms about three pieces of state, and
+ * every other decision of that shape in this file is here — `planContact`, `haltsForDuplicates` and
+ * `personDetailsWillBeDiscarded` are all here because deciding them inline shipped a defect first.
+ */
+export function offersCompanyFallback(input: {
+  rejectedMatches: boolean;
+  locationStatus: "idle" | "locating" | "ready" | "denied" | "unavailable";
+  matchPending: boolean;
+}): boolean {
+  if (input.rejectedMatches) return false;
+  return (
+    input.locationStatus === "idle" || input.locationStatus === "locating" || input.matchPending
+  );
+}
+
+/**
  * What VoiceOver should say when the capture reaches an outcome — "" when there is nothing to say.
  *
  * Both outcomes mount into the middle of a scroll and change nothing above them, so on iOS a rep who
