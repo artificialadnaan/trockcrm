@@ -1244,8 +1244,12 @@ function allocateDealCommissions(
   // CONSTRUCTION for any sign — directEarnedCommission is the unfiltered SUM(dsc.amount) over the same
   // predicate (getDirectCommissionMetrics). Dropping a negative adjustment row — or early-returning [] when
   // the NET is zero/negative — would silently break Σ(deals) === directEarnedCommission and hide the very
-  // adjustment rows that make the total negative. (In practice dsc.amount = source × rate ≥ 0, so this is a
-  // no-op on real data; it makes the owner+estimator split provably reconcile, which the drill-down asserts.)
+  // adjustment rows that make the total negative. This is NOT hypothetical: a DEDUCTIVE change order is a
+  // real child deal with a negative awarded amount, and it mints an owner row at a negative
+  // source_value_amount (hence negative dsc.amount) so the rep's commission claws back to rate × CURRENT
+  // contract value. Sign-transparency here is what makes the owner+estimator split provably reconcile,
+  // which the drill-down asserts — and what keeps this engine in step with the rep's own page (Engine A,
+  // getRepCommissionDashboard), whose row filter is `deal_value <> 0` for the same reason.
   const earningRows = rollups.filter((rollup) => rollup.earnedCommission !== 0);
   if (!gateMet) {
     // Below floor: keep the SAME rows visible but zero each per-deal earned commission. The breakdown

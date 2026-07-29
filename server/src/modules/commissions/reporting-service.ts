@@ -458,7 +458,21 @@ export async function getRepCommissionDashboard(
     )
     SELECT *
     FROM commission_rows
-    WHERE deal_value > 0
+    -- Display hygiene, NOT a sign gate: drop rows that carry no value at all. That covers the pipeline
+    -- branch's NULL deal_value (a deal with no estimate of any kind — NULL <> 0 is NULL, so it still
+    -- filters out) and genuinely $0 rows, which would otherwise pad the page with empty lines.
+    --
+    -- It must NOT be "> 0". A DEDUCTIVE change order is a real child deal with a NEGATIVE awarded amount,
+    -- and it mints an ordinary owner commission row at a negative source_value_amount (the claw-back the
+    -- product decision calls for: earned commission always equals rate × CURRENT contract value). "> 0"
+    -- dropped that row entirely, so this page kept showing the pre-CO commission while the dashboard
+    -- (Engine B, getDirectCommissionMetrics) showed the reduced one — a split with no edge case required.
+    --
+    -- "<> 0" makes the earned total reconcile with Engine B's unfiltered SUM(dsc.amount) BY CONSTRUCTION:
+    -- the only earned rows this drops carry source_value_amount = 0, and amount = source × rate on BOTH
+    -- write paths (insertCommissionRowForRep and recalculateCommissionForDeal), so every dropped row
+    -- contributes exactly 0 to Engine B's sum as well.
+    WHERE deal_value <> 0
     ORDER BY
       CASE
         WHEN is_earned THEN 1
