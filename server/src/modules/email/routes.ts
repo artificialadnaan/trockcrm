@@ -18,11 +18,10 @@ import {
   bindConversationToDealAcrossMailboxes,
   detachConversationAcrossMailboxes,
   previewThreadReassignmentImpact,
-  resolveActiveBindingDealIdForConversation,
+  resolveActiveBindingDealIdsForConversation,
   assertCanMutateEmailThread,
   conversationHasAnyMessage,
 } from "./service.js";
-import type { EmailThreadMutationContext } from "./service.js";
 import { writeAuditLog } from "../../lib/audit-log.js";
 import { getDealById } from "../deals/service.js";
 import { getLeadById } from "../leads/service.js";
@@ -423,20 +422,26 @@ router.get("/contact/:contactId", async (req, res, next) => {
 
 // The ONE place any /thread/:conversationId route decides who may reach the thread.
 //
-// Returns the thread context AND the boundDealId the gate authorized against, so a caller never has to
-// derive the latter itself — which is the point. boundDealId is SERVER-DERIVED, from the conversation's
-// own binding, and there is deliberately no way for a route to supply one: a caller-supplied value would
-// let anyone name a deal they happen to reach and walk straight through. On the reassign/assign routes
-// `dealId` (the DESTINATION) is in scope two lines away, so keeping the derivation out of the route body
-// is what stops it being handed over by accident.
+// Returns the thread context AND the deals the gate authorized against, so a caller never has to derive
+// them itself — which is the point. They are SERVER-DERIVED, from the conversation's own bindings, and
+// there is deliberately no way for a route to supply one: a caller-supplied value would let anyone name
+// a deal they happen to reach and walk straight through. On the reassign/assign routes `dealId` (the
+// DESTINATION) is in scope two lines away, so keeping the derivation out of the route body is what stops
+// it being handed over by accident.
+//
+// The gate authorizes against a LIST, because a binding is per-mailbox: one conversation can be filed
+// on two deals at once while reassign/detach rewrite all of it, so every one of them has to clear. What
+// comes back is only its FIRST member, for the two places that can carry a single id — the impact
+// preview's currentDealId and the audit row's recordId — and it is always one of the deals the gate
+// just cleared, never a deal nobody checked.
 async function gateEmailThreadAccess(req: any) {
   const thread = await getEmailThreadForMutation(req.tenantDb!, req.params.conversationId);
-  const boundDealId = await resolveActiveBindingDealIdForConversation(
+  const boundDealIds = await resolveActiveBindingDealIdsForConversation(
     req.tenantDb!,
     req.params.conversationId
   );
-  await assertCanMutateEmailThread(req.tenantDb!, thread, req.user!, { boundDealId });
-  return { thread, boundDealId };
+  await assertCanMutateEmailThread(req.tenantDb!, thread, req.user!, { boundDealIds });
+  return { thread, boundDealId: boundDealIds[0] ?? null };
 }
 
 // The thread payload, read for a caller who has already cleared gateEmailThreadAccess.
@@ -461,12 +466,12 @@ async function gateEmailThreadAccess(req: any) {
 // starred/archived state). Moving that id up into the userId slot would turn it back into a filter and
 // reinstate exactly the 403 this function exists to avoid.
 //
-// `threadContext` is the mutation context gateEmailThreadAccess has ALREADY resolved, handed over so
-// getEmailThread does not resolve it a second time — two more unindexed passes over `emails` on a read
-// that already makes several. Pass it ONLY when nothing has mutated since the gate ran: the
-// assign/reassign/detach routes re-read AFTER changing the binding, so they must omit it and let
-// getEmailThread resolve a fresh one, or the payload would report the deal the thread just left.
-function readThreadForGatedCaller(req: any, threadContext?: EmailThreadMutationContext) {
+// There is deliberately NO way to hand getEmailThread a pre-resolved binding. It used to take the
+// gate's mutation context so the read did not resolve one twice — but that context is ONE mailbox's
+// binding, which is exactly what made a still-bound thread render as unassigned, and a post-mutation
+// refresh handed a pre-mutation context would report the deal the thread had just left. getEmailThread
+// now reads the conversation-wide binding itself, on every call, so neither trap exists to fall into.
+function readThreadForGatedCaller(req: any) {
   return getEmailThread(
     req.tenantDb!,
     req.params.conversationId,
@@ -475,7 +480,7 @@ function readThreadForGatedCaller(req: any, threadContext?: EmailThreadMutationC
     // NOTE: getEmailThread currently ignores both this and userRole. This closure is NOT what makes the
     // unscoped read safe — gateEmailThreadAccess is. Kept only so the signature stays uniform.
     (candidateDealId) => canUserViewDeal(req, candidateDealId),
-    { viewerUserId: req.user!.id, threadContext }
+    { viewerUserId: req.user!.id }
   );
 }
 
@@ -504,11 +509,9 @@ router.get("/thread/:conversationId", async (req, res, next) => {
       return;
     }
 
-    // Nothing mutates on this route, so the context the gate just resolved is still current — hand it
-    // straight to the read instead of resolving it again.
-    const { thread: gatedThreadContext } = await gateEmailThreadAccess(req);
+    await gateEmailThreadAccess(req);
 
-    const thread = await readThreadForGatedCaller(req, gatedThreadContext);
+    const thread = await readThreadForGatedCaller(req);
     await req.commitTransaction!();
     res.json(thread);
   } catch (err) {

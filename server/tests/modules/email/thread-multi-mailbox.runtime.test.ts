@@ -129,6 +129,46 @@ describe("multi-mailbox conversations", () => {
     expect(Number(dealRow.email_count)).toBe(3);
   });
 
+  it("keeps a participant whose token is expired, so a reassign cannot strand their copy", async () => {
+    // The message-side resolver used to inner-join on status = 'active', which is a DIFFERENT question
+    // from the one bind actually asks. Everything downstream of the id resolves it through
+    // resolveMailboxUserId, which looks up by id with NO status filter, so an expired/revoked/
+    // reauth_needed token is perfectly handleable — only a MISSING row is not. This is the same
+    // asymmetry the binding-side resolver already documents, now applied consistently to both.
+    //
+    // MBX_B's binding is detached as well as its token expired, because a still-active binding would
+    // rescue the mailbox through the union in bindConversationToDealAcrossMailboxes and the bug would
+    // not show. This is the real shape: a participant whose refresh failed, whose copy was never bound.
+    await tdb.execute(sql`UPDATE user_graph_tokens SET status = 'expired' WHERE id = ${MBX_B}`);
+    await tdb.execute(sql`
+      UPDATE email_thread_bindings SET detached_at = now() WHERE mailbox_account_id = ${MBX_B}
+    `);
+
+    expect((await resolveMailboxAccountIdsForConversation(tdb, CONV)).sort()).toEqual(
+      [MBX_A, MBX_B].sort()
+    );
+
+    await bindConversationToDealAcrossMailboxes(tdb, {
+      providerConversationId: CONV, dealId: DEAL_NEW, actingUserId: USER_A,
+    });
+
+    // The user-visible symptom: m3 is USER_B's copy, and it must MOVE. Leaving it behind strands the
+    // conversation on the old deal for that mailbox while the impact preview — which counts every
+    // message in the conversation regardless of token — reports it as moved.
+    const emailRows = await tdb.execute(sql`
+      SELECT deal_id FROM emails WHERE graph_conversation_id = ${CONV}
+    `);
+    const dealIds = (Array.isArray(emailRows) ? emailRows : emailRows.rows).map(
+      (r: { deal_id: string }) => r.deal_id
+    );
+    expect(dealIds).toHaveLength(3);
+    expect(dealIds.every((id: string) => id === DEAL_NEW)).toBe(true);
+
+    const rows = await activeBindings();
+    expect(rows).toHaveLength(2);
+    expect(rows.every((r: { deal_id: string }) => r.deal_id === DEAL_NEW)).toBe(true);
+  });
+
   it("rebinds a mailbox that has an active binding but no surviving emails rows too", async () => {
     // A binding can outlive every message it once covered (purge, or a resync that never re-landed the
     // messages). The mailbox set for bind must be the UNION of (mailboxes with messages) and (mailboxes

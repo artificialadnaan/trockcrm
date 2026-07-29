@@ -159,10 +159,15 @@ function createTenantDbMock(options: {
   };
 }
 
+// The SELECTs getEmailThread makes, in order:
+//   1. the thread's rows (mailbox-scoped when a userId was passed)
+//   2. resolveActiveBindingsForConversation — every ACTIVE binding on the CONVERSATION, left-joined to
+//      user_graph_tokens so orphans sort last. Deliberately not the one arbitrary mailbox's binding the
+//      mutation context carries: that one can be detached while another mailbox still files the thread.
+//   3. the bound deal's name, and only when that binding actually names a deal
 function createEmailThreadDb(options: {
   thread: any[];
   binding?: any | null;
-  mailboxAccountId?: string;
   dealRows?: Record<string, { id: string; name: string }>;
   currentUserId?: string;
 }) {
@@ -172,13 +177,11 @@ function createEmailThreadDb(options: {
       selectCalls += 1;
       let rows: any[] = [];
 
-      if (selectCalls === 1 || selectCalls === 2) {
+      if (selectCalls === 1) {
         rows = options.currentUserId
           ? options.thread.filter((row) => row.userId === options.currentUserId)
           : options.thread;
-      } else if (selectCalls === 3) {
-        rows = [{ id: options.mailboxAccountId ?? "mailbox-1" }];
-      } else if (selectCalls === 4) {
+      } else if (selectCalls === 2) {
         rows = options.binding ? [options.binding] : [];
       } else if (selection && "id" in selection && "name" in selection && options.binding?.dealId) {
         rows = options.dealRows?.[options.binding.dealId]
@@ -188,6 +191,7 @@ function createEmailThreadDb(options: {
 
       const chain: any = {
         from: vi.fn(() => chain),
+        leftJoin: vi.fn(() => chain),
         where: vi.fn(() => chain),
         orderBy: vi.fn(() => chain),
         limit: vi.fn(() => chain),
@@ -1082,7 +1086,7 @@ describe("email service inbound association", () => {
         tenantDb as any,
         { mailboxAccountId: "mailbox-2", binding: null, emails: [] },
         { id: "director-1", role: "director" },
-        { boundDealId: null }
+        { boundDealIds: [] }
       )
     ).rejects.toThrow("You can only modify your own email threads");
   });

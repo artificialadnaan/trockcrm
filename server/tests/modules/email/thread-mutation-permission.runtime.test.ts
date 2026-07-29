@@ -151,13 +151,13 @@ describe("assertCanMutateEmailThread — deal write access", () => {
     // now the whole conversation, and comparing thread.mailboxAccountId would admit only whoever sent
     // first. Do not "simplify" this fixture by dropping USER_OWNER's message; it is what the case tests.
     await expect(
-      assertCanMutateEmailThread(tdb, thread, ownerUser, { boundDealId: DEAL_OLD })
+      assertCanMutateEmailThread(tdb, thread, ownerUser, { boundDealIds: [DEAL_OLD] })
     ).resolves.not.toThrow();
   });
 
   it("allows a non-owner who can write the deal", async () => {
     await expect(
-      assertCanMutateEmailThread(tdb, thread, collaboratorUser, { boundDealId: DEAL_OLD })
+      assertCanMutateEmailThread(tdb, thread, collaboratorUser, { boundDealIds: [DEAL_OLD] })
     ).resolves.not.toThrow();
   });
 
@@ -166,7 +166,7 @@ describe("assertCanMutateEmailThread — deal write access", () => {
     // path-1 MISS, not a failure — it must not escape before path 2 gets its turn, or the widening does
     // nothing for anyone who hasn't linked Outlook.
     await expect(
-      assertCanMutateEmailThread(tdb, thread, noMailboxUser, { boundDealId: DEAL_OLD })
+      assertCanMutateEmailThread(tdb, thread, noMailboxUser, { boundDealIds: [DEAL_OLD] })
     ).resolves.not.toThrow();
   });
 
@@ -177,7 +177,7 @@ describe("assertCanMutateEmailThread — deal write access", () => {
     // wiring reaches assertDealCollaboratorAccess and that its denial propagates; the REAL reachable
     // denial is the cross-schema 404 in the last case below.
     const err = await rejection(
-      assertCanMutateEmailThread(tdb, thread, outsiderUser, { boundDealId: DEAL_OLD })
+      assertCanMutateEmailThread(tdb, thread, outsiderUser, { boundDealIds: [DEAL_OLD] })
     );
     expect(err.statusCode).toBe(403);
     expect(err.message).toMatch(/Access denied/i);
@@ -187,17 +187,17 @@ describe("assertCanMutateEmailThread — deal write access", () => {
     // No deal means nothing to authorize against, so path 2 cannot run at all — the only admissible
     // caller on an unbound thread is its mailbox owner.
     const err = await rejection(
-      assertCanMutateEmailThread(tdb, unboundThread, outsiderUser, { boundDealId: null })
+      assertCanMutateEmailThread(tdb, unboundThread, outsiderUser, { boundDealIds: [] })
     );
     expect(err.statusCode).toBe(403);
     expect(err.message).toMatch(/own email threads/i);
   });
 
   it("rejects a caller who can write the deal when there is no deal in context", async () => {
-    // Same as above but for a user who WOULD pass path 2 on DEAL_OLD. context.boundDealId is the sole
-    // source of the deal to authorize against; a null there must close the gate rather than fall open.
+    // Same as above but for a user who WOULD pass path 2 on DEAL_OLD. context.boundDealIds is the sole
+    // source of the deals to authorize against; an empty list must close the gate rather than fall open.
     const err = await rejection(
-      assertCanMutateEmailThread(tdb, unboundThread, collaboratorUser, { boundDealId: null })
+      assertCanMutateEmailThread(tdb, unboundThread, collaboratorUser, { boundDealIds: [] })
     );
     expect(err.statusCode).toBe(403);
     expect(err.message).toMatch(/own email threads/i);
@@ -207,10 +207,25 @@ describe("assertCanMutateEmailThread — deal write access", () => {
     // The 409-swallow must not turn into a fall-open: with mailboxAccountId unresolved AND no deal, the
     // caller has satisfied nothing.
     const err = await rejection(
-      assertCanMutateEmailThread(tdb, unboundThread, noMailboxUser, { boundDealId: null })
+      assertCanMutateEmailThread(tdb, unboundThread, noMailboxUser, { boundDealIds: [] })
     );
     expect(err.statusCode).toBe(403);
     expect(err.message).toMatch(/own email threads/i);
+  });
+
+  it("rejects a non-owner when ONE of several bound deals is out of reach", async () => {
+    // A binding is keyed per mailbox, so a conversation that reached two mailboxes can be filed on two
+    // DIFFERENT deals — and reassign/detach rewrite the whole conversation, both bindings included.
+    // Authorizing against only the first id would let this caller's access to DEAL_OLD move DEAL_ATLANTA's
+    // email. DEAL_OLD is listed FIRST on purpose: with the unreachable id first the old code already
+    // refused, so only this order demonstrates the escalation.
+    const err = await rejection(
+      assertCanMutateEmailThread(tdb, thread, collaboratorUser, {
+        boundDealIds: [DEAL_OLD, DEAL_ATLANTA],
+      })
+    );
+    expect(err.statusCode).toBe(404);
+    expect(err.message).toMatch(/Deal not found/i);
   });
 
   it("rejects a thread whose bound deal lives in another office's schema", async () => {
@@ -221,7 +236,7 @@ describe("assertCanMutateEmailThread — deal write access", () => {
     // and the call 404s. Asserted here so a future change that starts resolving deals cross-schema
     // cannot quietly widen path 2 into a cross-office write.
     const err = await rejection(
-      assertCanMutateEmailThread(tdb, thread, collaboratorUser, { boundDealId: DEAL_ATLANTA })
+      assertCanMutateEmailThread(tdb, thread, collaboratorUser, { boundDealIds: [DEAL_ATLANTA] })
     );
     expect(err.statusCode).toBe(404);
     expect(err.message).toMatch(/Deal not found/i);

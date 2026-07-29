@@ -15,7 +15,7 @@ const emailServiceMocks = vi.hoisted(() => ({
   bindConversationToDealAcrossMailboxes: vi.fn(),
   detachConversationAcrossMailboxes: vi.fn(),
   previewThreadReassignmentImpact: vi.fn(),
-  resolveActiveBindingDealIdForConversation: vi.fn(),
+  resolveActiveBindingDealIdsForConversation: vi.fn(),
   assertCanMutateEmailThread: vi.fn(),
   conversationHasAnyMessage: vi.fn(),
 }));
@@ -71,7 +71,7 @@ vi.mock("../../../src/modules/email/service.js", async () => {
     bindConversationToDealAcrossMailboxes: emailServiceMocks.bindConversationToDealAcrossMailboxes,
     detachConversationAcrossMailboxes: emailServiceMocks.detachConversationAcrossMailboxes,
     previewThreadReassignmentImpact: emailServiceMocks.previewThreadReassignmentImpact,
-    resolveActiveBindingDealIdForConversation: emailServiceMocks.resolveActiveBindingDealIdForConversation,
+    resolveActiveBindingDealIdsForConversation: emailServiceMocks.resolveActiveBindingDealIdsForConversation,
     assertCanMutateEmailThread: emailServiceMocks.assertCanMutateEmailThread,
     conversationHasAnyMessage: emailServiceMocks.conversationHasAnyMessage,
   };
@@ -326,7 +326,7 @@ describe("email routes", () => {
       binding: null,
       emails: [],
     });
-    emailServiceMocks.resolveActiveBindingDealIdForConversation.mockResolvedValue(null);
+    emailServiceMocks.resolveActiveBindingDealIdsForConversation.mockResolvedValue([]);
     // detachConversationAcrossMailboxes REPORTS what it unfiled, and the route audits off that — a
     // conversation filed message-by-message from the assignment queue has real deal ids on the messages
     // and no binding at all. Defaulting to "nothing was filed" keeps the no-op case the no-op case; the
@@ -1416,7 +1416,7 @@ describe("email routes", () => {
       binding: { id: "binding-1", dealId: "deal-1" },
       emails: [{ id: "email-1", userId: "someone-else" }],
     });
-    emailServiceMocks.resolveActiveBindingDealIdForConversation.mockResolvedValue("deal-1");
+    emailServiceMocks.resolveActiveBindingDealIdsForConversation.mockResolvedValue(["deal-1"]);
     emailServiceMocks.getEmailThread.mockResolvedValue({
       binding: { id: "binding-1", dealId: "deal-1", dealName: "Deal One", confidence: "high", assignmentReason: "manual_thread_assignment" },
       preview: null,
@@ -1429,14 +1429,14 @@ describe("email routes", () => {
       user: makeDirectorUser(),
     });
 
-    // The READ is gated too, with the same server-derived boundDealId as the mutations: the
+    // The READ is gated too, with the same server-derived bound deals as the mutations: the
     // Reassign/Unassign controls are rendered from this payload, so an owner-only read would 403 the
     // deal collaborator into an error banner before they ever saw a button.
     expect(emailServiceMocks.assertCanMutateEmailThread).toHaveBeenCalledWith(
       expect.any(Object),
       expect.any(Object),
       expect.objectContaining({ id: "director-1" }),
-      { boundDealId: "deal-1" }
+      { boundDealIds: ["deal-1"] }
     );
     // ...and then read WITHOUT a userId, for the same reason. The caller's id rides in the LAST slot
     // instead: presentation only, so the per-mailbox copies of one message collapse to the caller's own
@@ -1447,8 +1447,7 @@ describe("email routes", () => {
       undefined,
       "director",
       expect.any(Function),
-      // The gate's own context, handed over rather than resolved a second time.
-      { viewerUserId: "director-1", threadContext: expect.objectContaining({ mailboxAccountId: "mailbox-1" }) }
+      { viewerUserId: "director-1" }
     );
     expect(res.body).toEqual({
       binding: { id: "binding-1", dealId: "deal-1", dealName: "Deal One", confidence: "high", assignmentReason: "manual_thread_assignment" },
@@ -1463,7 +1462,7 @@ describe("email routes", () => {
       binding: null,
       emails: [{ id: "email-1", userId: "someone-else" }],
     });
-    emailServiceMocks.resolveActiveBindingDealIdForConversation.mockResolvedValue(null);
+    emailServiceMocks.resolveActiveBindingDealIdsForConversation.mockResolvedValue([]);
     emailServiceMocks.assertCanMutateEmailThread.mockRejectedValue(
       Object.assign(new Error("You can only modify your own email threads"), { statusCode: 403 })
     );
@@ -1526,7 +1525,7 @@ describe("email routes", () => {
       emails: [{ id: "email-1", userId: "director-1" }],
     });
     dealServiceMocks.getDealById.mockResolvedValue({ id: "deal-1" });
-    emailServiceMocks.resolveActiveBindingDealIdForConversation.mockResolvedValue(null);
+    emailServiceMocks.resolveActiveBindingDealIdsForConversation.mockResolvedValue([]);
     emailServiceMocks.getEmailThread.mockResolvedValue({ binding: { id: "binding-1", dealId: "deal-1" }, preview: null, emails: [] });
 
     const { req, res } = await invokeRoute({
@@ -1552,25 +1551,27 @@ describe("email routes", () => {
       expect.any(Object),
       "conversation-1"
     );
-    // The mutation gate is fed a SERVER-DERIVED bound deal — from the conversation's binding, never
-    // from the request body (which names the DESTINATION deal).
+    // The mutation gate is fed the SERVER-DERIVED set of bound deals — from the conversation's own
+    // bindings (per-mailbox, so there can be several), never from the request body (which names the
+    // DESTINATION deal).
     expect(emailServiceMocks.assertCanMutateEmailThread).toHaveBeenCalledWith(
       expect.any(Object),
       expect.any(Object),
       expect.objectContaining({ id: "director-1" }),
-      { boundDealId: null }
+      { boundDealIds: [] }
     );
     // Refreshed WITHOUT a userId: re-applying the reader's own-mailbox filter would 403 on the way out
     // for a deal collaborator who owns none of the thread's messages.
-    // No threadContext: this refresh runs AFTER the binding changed, so it must resolve a fresh one or
-    // the payload would report the deal the thread has just left.
+    // No pre-resolved binding is passed, on ANY of these calls: getEmailThread reads the
+    // conversation-wide binding itself, so a post-mutation refresh cannot report the deal the thread
+    // has just left.
     expect(emailServiceMocks.getEmailThread).toHaveBeenLastCalledWith(
       expect.any(Object),
       "conversation-1",
       undefined,
       "director",
       expect.any(Function),
-      { viewerUserId: "director-1", threadContext: undefined }
+      { viewerUserId: "director-1" }
     );
   });
 
@@ -1583,7 +1584,7 @@ describe("email routes", () => {
       binding: null,
       emails: [{ id: "email-1", userId: "someone-else" }],
     });
-    emailServiceMocks.resolveActiveBindingDealIdForConversation.mockResolvedValue(null);
+    emailServiceMocks.resolveActiveBindingDealIdsForConversation.mockResolvedValue([]);
     emailServiceMocks.assertCanMutateEmailThread.mockRejectedValue(
       Object.assign(new Error("You can only modify your own email threads"), { statusCode: 403 })
     );
@@ -1609,7 +1610,7 @@ describe("email routes", () => {
       emails: [{ id: "email-1", userId: "director-1" }],
     });
     dealServiceMocks.getDealById.mockResolvedValue({ id: "deal-2" });
-    emailServiceMocks.resolveActiveBindingDealIdForConversation.mockResolvedValue("deal-1");
+    emailServiceMocks.resolveActiveBindingDealIdsForConversation.mockResolvedValue(["deal-1"]);
     emailServiceMocks.previewThreadReassignmentImpact.mockResolvedValue({
       affectedMessageCount: 2,
       affectedMessageIds: ["email-1", "email-2"],
@@ -1641,7 +1642,7 @@ describe("email routes", () => {
       expect.any(Object),
       expect.any(Object),
       expect.objectContaining({ id: "director-1" }),
-      { boundDealId: "deal-1" }
+      { boundDealIds: ["deal-1"] }
     );
     expect(auditMocks.writeAuditLog).toHaveBeenCalledWith(expect.any(Object), {
       tableName: "email_thread_bindings",
@@ -1657,15 +1658,16 @@ describe("email routes", () => {
       },
     });
     expect(res.body.preview.affectedMessageIds).toEqual(["email-1", "email-2"]);
-    // No threadContext: this refresh runs AFTER the binding changed, so it must resolve a fresh one or
-    // the payload would report the deal the thread has just left.
+    // No pre-resolved binding is passed, on ANY of these calls: getEmailThread reads the
+    // conversation-wide binding itself, so a post-mutation refresh cannot report the deal the thread
+    // has just left.
     expect(emailServiceMocks.getEmailThread).toHaveBeenLastCalledWith(
       expect.any(Object),
       "conversation-1",
       undefined,
       "director",
       expect.any(Function),
-      { viewerUserId: "director-1", threadContext: undefined }
+      { viewerUserId: "director-1" }
     );
   });
 
@@ -1675,7 +1677,7 @@ describe("email routes", () => {
       binding: { id: "binding-1", dealId: "deal-1" },
       emails: [{ id: "email-1", userId: "director-1" }, { id: "email-2", userId: "rep-9" }],
     });
-    emailServiceMocks.resolveActiveBindingDealIdForConversation.mockResolvedValue("deal-1");
+    emailServiceMocks.resolveActiveBindingDealIdsForConversation.mockResolvedValue(["deal-1"]);
     emailServiceMocks.getEmailThread.mockResolvedValue({ binding: null, preview: null, emails: [] });
     // What the real service reports back: the messages were on deal-1 too, and both were unfiled.
     emailServiceMocks.detachConversationAcrossMailboxes.mockResolvedValue({
@@ -1707,12 +1709,12 @@ describe("email routes", () => {
       expect.any(Object),
       "conversation-1"
     );
-    // ...and the gate is fed a SERVER-DERIVED bound deal, from the conversation's own binding.
+    // ...and the gate is fed the SERVER-DERIVED set of bound deals, from the conversation's own bindings.
     expect(emailServiceMocks.assertCanMutateEmailThread).toHaveBeenCalledWith(
       expect.any(Object),
       expect.any(Object),
       expect.objectContaining({ id: "director-1" }),
-      { boundDealId: "deal-1" }
+      { boundDealIds: ["deal-1"] }
     );
     expect(auditMocks.writeAuditLog).toHaveBeenCalledWith(expect.any(Object), {
       tableName: "email_thread_bindings",
@@ -1729,15 +1731,16 @@ describe("email routes", () => {
         affectedMessageCount: 2,
       },
     });
-    // No threadContext: this refresh runs AFTER the binding changed, so it must resolve a fresh one or
-    // the payload would report the deal the thread has just left.
+    // No pre-resolved binding is passed, on ANY of these calls: getEmailThread reads the
+    // conversation-wide binding itself, so a post-mutation refresh cannot report the deal the thread
+    // has just left.
     expect(emailServiceMocks.getEmailThread).toHaveBeenLastCalledWith(
       expect.any(Object),
       "conversation-1",
       undefined,
       "director",
       expect.any(Function),
-      { viewerUserId: "director-1", threadContext: undefined }
+      { viewerUserId: "director-1" }
     );
   });
 
@@ -1749,7 +1752,7 @@ describe("email routes", () => {
       binding: null,
       emails: [{ id: "email-1", userId: "director-1" }],
     });
-    emailServiceMocks.resolveActiveBindingDealIdForConversation.mockResolvedValue(null);
+    emailServiceMocks.resolveActiveBindingDealIdsForConversation.mockResolvedValue([]);
     emailServiceMocks.getEmailThread.mockResolvedValue({ binding: null, preview: null, emails: [] });
 
     await invokeRoute({

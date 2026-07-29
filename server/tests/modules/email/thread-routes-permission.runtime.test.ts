@@ -36,6 +36,11 @@ const USER_REP = U("a05");
 const MBX_OWNER = U("e01"), MBX_SECOND = U("e02"), MBX_COLLAB = U("e03"), MBX_OUTSIDER = U("e04");
 const OFFICE_DALLAS = U("0f1");
 const DEAL_OLD = U("d01"), DEAL_NEW = U("d02");
+// A deal this tenantDb cannot see at all — deliberately NEVER inserted into `deals`. The real
+// office boundary in this codebase is the tenant search_path, so "a deal the caller cannot reach"
+// is modelled as a deal whose row is not in this schema; assertDealCollaboratorAccess 404s on it.
+// This is the same shape the existing "body-supplied dealId" case uses.
+const DEAL_FOREIGN = U("d09");
 const CONV = "conv-thread-routes-1";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -370,6 +375,51 @@ describe("thread mutation routes — deal-collaborator access", () => {
     expect(res.body.emails.map((e: { graphMessageId: string }) => e.graphMessageId)).toEqual(["m1", "m3"]);
   });
 
+  it("GET: keeps a SECOND same-mailbox message that shares an id with another mailbox's copy", async () => {
+    // The same-mailbox rule above has to survive more than one prior occurrence. With ONE global slot
+    // per internet_message_id, m2 collapsed into m1 (a legitimate cross-mailbox copy) and m3 was then
+    // compared against m1 as well — a different mailbox, so it collapsed too, and a real message
+    // vanished even though the two rows sharing the id live in the SAME mailbox.
+    //
+    // Occurrences are therefore tracked per (message id, mailbox): the k-th row bearing an id inside a
+    // mailbox is the copy of the k-th row bearing it in every other mailbox, and m3 is USER_SECOND's
+    // SECOND occurrence, which nothing in USER_OWNER's mailbox stands for. Ordered so m3 is last, which
+    // is the case that used to lose it.
+    await tdb.execute(sql`
+      UPDATE emails SET internet_message_id = '<shared@example.com>' WHERE graph_conversation_id = ${CONV}
+    `);
+    await tdb.execute(sql`
+      INSERT INTO emails
+        (graph_message_id, graph_conversation_id, internet_message_id, subject, direction, from_address, to_addresses, deal_id, assignment_status, user_id, sent_at)
+      VALUES
+        ('m3', ${CONV}, '<shared@example.com>', 'Roof scope', 'inbound', 'sender@example.com', '{}', ${DEAL_OLD}, 'assigned', ${USER_SECOND}, '2026-07-03T00:00:00Z')
+    `);
+
+    // The viewer owns NEITHER mailbox, which is the losing case: preferring their own copy would have
+    // rewritten the slot and masked the bug.
+    const { res } = await getThreadRoute(collaboratorUser);
+
+    expect(res.body.emails.map((e: { graphMessageId: string }) => e.graphMessageId)).toEqual(["m1", "m3"]);
+  });
+
+  it("GET: still collapses a message held in THREE mailboxes down to one row", async () => {
+    // The converse of the case above: per-mailbox occurrence tracking must not turn every extra mailbox
+    // into an extra row. Three mailboxes, one occurrence each, one message.
+    await tdb.execute(sql`
+      UPDATE emails SET internet_message_id = '<shared@example.com>' WHERE graph_conversation_id = ${CONV}
+    `);
+    await tdb.execute(sql`
+      INSERT INTO emails
+        (graph_message_id, graph_conversation_id, internet_message_id, subject, direction, from_address, to_addresses, deal_id, assignment_status, user_id, sent_at)
+      VALUES
+        ('m3', ${CONV}, '<shared@example.com>', 'Roof scope', 'inbound', 'sender@example.com', '{}', ${DEAL_OLD}, 'assigned', ${USER_OUTSIDER}, '2026-07-03T00:00:00Z')
+    `);
+
+    const { res } = await getThreadRoute(collaboratorUser);
+
+    expect(res.body.emails.map((e: { graphMessageId: string }) => e.graphMessageId)).toEqual(["m1"]);
+  });
+
   it("GET: never collapses rows that carry NO internet_message_id", async () => {
     // internet_message_id is nullable, and a NULL is the ABSENCE of an identity, not an identity shared
     // with every other NULL. Keying on it would collapse a whole conversation of un-idd messages into
@@ -537,6 +587,39 @@ describe("thread mutation routes — deal-collaborator access", () => {
     expect(res.statusCode).toBe(200);
   });
 
+  it("GET: REPORTS that binding too, instead of rendering the thread as unassigned", async () => {
+    // The other half of the case above, and the one the user actually sees. The gate is
+    // conversation-wide, but the payload's `binding` used to be built from the mutation context — one
+    // arbitrary mailbox's binding (the oldest connected participant's). Detach only THAT mailbox and
+    // the gate still admits the caller while the payload says binding: null, so EmailThreadView
+    // (client/src/components/email/email-thread-view.tsx) renders the thread as UNASSIGNED and hides
+    // the Reassign/Unassign controls — on a thread that is very much filed on a deal, and that this
+    // caller is authorized to move.
+    await tdb.execute(sql`
+      UPDATE email_thread_bindings SET detached_at = now() WHERE mailbox_account_id = ${MBX_OWNER}
+    `);
+
+    const { res } = await getThreadRoute(collaboratorUser);
+
+    expect(res.body.binding).not.toBeNull();
+    expect(res.body.binding.dealId).toBe(DEAL_OLD);
+    expect(res.body.binding.dealName).toBe("Old Deal");
+    // ...and it names the mailbox the surviving binding actually belongs to, not the detached one.
+    expect(res.body.binding.mailboxAccountId).toBe(MBX_SECOND);
+  });
+
+  it("GET: still reports NO binding once every mailbox is detached", async () => {
+    // The converse, so "read the conversation-wide binding" cannot quietly become "always report
+    // something". A fully detached conversation IS unassigned, and the controls should say so.
+    await tdb.execute(sql`UPDATE email_thread_bindings SET detached_at = now()`);
+
+    // Nothing is bound any more, so only path 1 can admit — use a participant.
+    const { res } = await getThreadRoute(laterMessageOwnerUser);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.binding).toBeNull();
+  });
+
   // ---------------------------------------------------------------------------------------------
   // 3b. ORPHANED bindings — a binding whose mailbox_account_id no longer exists in user_graph_tokens.
   //     Every disconnect→reconnect makes one: revokeGraphTokens hard-DELETEs the row while
@@ -585,6 +668,113 @@ describe("thread mutation routes — deal-collaborator access", () => {
 
     expect(res.body.preview.currentDealId).toBe(DEAL_OLD);
     expect(res.body.preview.currentDealId).not.toBe(DEAL_STALE);
+  });
+
+  // ---------------------------------------------------------------------------------------------
+  // 3c. PRIVILEGE ESCALATION. A binding is keyed per (mailbox, conversation) and nothing forces two
+  //     mailboxes' bindings for one conversation to name the SAME deal — a message can be filed from
+  //     each mailbox independently. Reassign and detach are conversation-WIDE: they move every binding
+  //     and every message. So "the deal this thread is on" is a SET, and authorizing against one member
+  //     of it lets access to that member buy a mutation on the others.
+  //
+  //     The gate must therefore require access to EVERY distinct active source deal, not just whichever
+  //     one the resolver's ORDER BY happens to return first. These cases put the REACHABLE deal first
+  //     on purpose: with the unreachable one sorting first the old code already refused, so only this
+  //     arrangement demonstrates the escalation.
+  // ---------------------------------------------------------------------------------------------
+  async function crossFileSecondMailboxToAForeignDeal() {
+    await tdb.execute(sql`
+      UPDATE email_thread_bindings SET deal_id = ${DEAL_FOREIGN}
+      WHERE mailbox_account_id = ${MBX_SECOND}
+    `);
+  }
+
+  it("reassign: refuses when a second mailbox's binding names a deal the caller cannot reach", async () => {
+    // collaboratorUser can reach DEAL_OLD (MBX_OWNER's binding, which sorts first) and cannot reach
+    // DEAL_FOREIGN (MBX_SECOND's). Authorizing off the first binding alone would let their access to
+    // DEAL_OLD move DEAL_FOREIGN's email too.
+    await crossFileSecondMailboxToAForeignDeal();
+
+    const err = await rejection(postThreadRoute("reassign", collaboratorUser, { dealId: DEAL_NEW }));
+    expect(err.statusCode).toBe(404);
+    expect(err.message).toMatch(/Deal not found/i);
+
+    // Refused, and nothing moved — not the binding they COULD reach, not the one they could not, and
+    // not the messages. A gate that ran after a partial mutation would be no gate at all.
+    const byMailbox = Object.fromEntries(
+      (await activeBindings()).map((r) => [r.mailbox_account_id, r.deal_id])
+    );
+    expect(byMailbox[MBX_OWNER]).toBe(DEAL_OLD);
+    expect(byMailbox[MBX_SECOND]).toBe(DEAL_FOREIGN);
+    expect((await messageDealIds()).every((id) => id === DEAL_OLD)).toBe(true);
+    expect(commits).toBe(0);
+  });
+
+  it("detach: refuses when a second mailbox's binding names a deal the caller cannot reach", async () => {
+    // Detach is the sharper half: it clears EVERY active binding and every message association in one
+    // statement, so an unauthorized detach silently unfiles the other deal's email entirely.
+    await crossFileSecondMailboxToAForeignDeal();
+
+    const err = await rejection(postThreadRoute("detach", collaboratorUser));
+    expect(err.statusCode).toBe(404);
+    expect(err.message).toMatch(/Deal not found/i);
+
+    expect(await activeBindings()).toHaveLength(2);
+    expect((await messageDealIds()).every((id) => id === DEAL_OLD)).toBe(true);
+    expect(await auditRows()).toHaveLength(0);
+    expect(commits).toBe(0);
+  });
+
+  it("assign: refuses when a second mailbox's binding names a deal the caller cannot reach", async () => {
+    // Per-route on purpose: the derivation is shared, but the realistic regression on this branch has
+    // repeatedly been "landed on two routes, forgotten on the third".
+    await crossFileSecondMailboxToAForeignDeal();
+
+    const err = await rejection(postThreadRoute("assign", collaboratorUser, { dealId: DEAL_NEW }));
+    expect(err.statusCode).toBe(404);
+    expect((await activeBindings()).map((r) => r.deal_id).sort()).toEqual(
+      [DEAL_OLD, DEAL_FOREIGN].sort()
+    );
+    expect(commits).toBe(0);
+  });
+
+  it("GET: refuses a collaborator when a second mailbox's binding names a deal they cannot reach", async () => {
+    // A DELIBERATE consequence of gating the read with the same helper as the mutations. The
+    // Reassign/Unassign controls are rendered from this payload, so leaving the read permissive while
+    // the mutations tightened would hand this caller two buttons that always fail. Denying the read is
+    // the honest answer: they may not act on this thread, so they are not shown it.
+    //
+    // It costs them nothing they can otherwise reach — the deal Emails LIST for DEAL_OLD still shows the
+    // message — and it only bites a caller who owns NONE of the conversation's messages (path 1 admits
+    // any participant regardless).
+    await crossFileSecondMailboxToAForeignDeal();
+
+    const err = await rejection(getThreadRoute(collaboratorUser));
+    expect(err.statusCode).toBe(404);
+    expect(err.message).toMatch(/Deal not found/i);
+  });
+
+  it("a mailbox owner may still act on a conversation cross-filed to a deal they cannot reach", async () => {
+    // THE DECISION on path 1 (mailbox ownership), pinned rather than left to drift. Owning a message in
+    // the conversation still admits the caller on its own, even though the conversation-wide detach then
+    // clears a binding belonging to a deal they have no access to.
+    //
+    // WHY it stays: path 1 is about the caller's OWN mail, which they can already read and re-file in
+    // Outlook itself, so it is not a confidentiality boundary. Narrowing it to "owner AND deal access"
+    // would 403 exactly the person best placed to fix a misfiling — a misfiled thread is BY DEFINITION
+    // on the wrong deal, frequently one the owner cannot reach, which is the whole reason this feature
+    // exists. The escalation closed above is a path-2 one: it let a caller who owns NONE of the mail
+    // convert access to one deal into a mutation on another.
+    //
+    // The residue is accepted and audited: a participant can unfile a conversation from a deal they
+    // cannot see. laterMessageOwnerUser carries a NULL office, so path 2 can never rescue them — passing
+    // here proves mailbox ownership alone did it.
+    await crossFileSecondMailboxToAForeignDeal();
+
+    const { res } = await postThreadRoute("detach", laterMessageOwnerUser);
+
+    expect(res.statusCode).toBe(200);
+    expect(await activeBindings()).toHaveLength(0);
   });
 
   // ---------------------------------------------------------------------------------------------

@@ -48,10 +48,12 @@ export const emailThreadBindings = pgTable(
       .where(sql`${table.detachedAt} IS NULL AND ${table.providerConversationId} IS NULL`),
     // The mailbox-LESS conversation lookup. uq_email_thread_bindings_active_conversation above covers
     // the same predicate but is LED BY mailbox_account_id, so it cannot serve the queries that ask
-    // about the conversation as a whole — resolveActiveBindingDealIdForConversation,
+    // about the conversation as a whole — resolveActiveBindingsForConversation (which the thread
+    // payload and the mutation gate's deal set are both built from),
     // resolveMailboxAccountIdsWithActiveBindingForConversation and the detach's blanket binding UPDATE
     // all filter on (provider, provider_conversation_id, detached_at IS NULL) with no mailbox. NOT
-    // unique on purpose: several mailboxes may each hold an active binding for one conversation.
+    // unique on purpose: several mailboxes may each hold an active binding for one conversation, and
+    // nothing makes them agree on a deal — which is why the gate authorizes against ALL of them.
     // Source-of-truth marker; migration 0205 builds it per-office with the same partial predicate as
     // the unique index (detached_at IS NULL AND provider_conversation_id IS NOT NULL).
     index("email_thread_bindings_active_conversation_idx")
