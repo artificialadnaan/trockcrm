@@ -21,6 +21,9 @@ const { emailRoutes } = await import("../../../src/modules/email/routes.js");
 const { getEmails, getEmailAssignmentQueue, DETACHED_ASSIGNMENT_AMBIGUITY_REASON } = await import(
   "../../../src/modules/email/service.js"
 );
+// The deal's ACTIVITY tab, for the same reason: it is a SECOND view of the same mail, reading a
+// different table, and the two disagreeing is what the user actually sees.
+const { getActivities } = await import("../../../src/modules/activities/service.js");
 
 const U = (s: string) => `00000000-0000-0000-0000-${s.padStart(12, "0")}`;
 
@@ -113,6 +116,33 @@ async function dealTabEmailIds(): Promise<string[]> {
 async function assignmentQueueMessageIds(): Promise<string[]> {
   const result = await getEmailAssignmentQueue(tdb, {});
   return result.items.map((item: { email: { graphMessageId: string } }) => item.email.graphMessageId).sort();
+}
+
+/**
+ * The activity rows backAssociateStoredMessagesForBinding writes for a bound conversation — one per
+ * message, carrying the deal AND everything the deal implies (its company, property and source lead).
+ * Written by hand here rather than by running a bind first, so the detach cases start from exactly the
+ * state a real bind leaves and nothing else.
+ */
+async function seedDealActivitiesForConversation() {
+  await tdb.execute(sql`
+    INSERT INTO activities
+      (type, responsible_user_id, performed_by_user_id, source_entity_type, source_entity_id,
+       company_id, lead_id, deal_id, email_id, subject, occurred_at)
+    SELECT 'email', e.user_id, e.user_id, 'deal', ${DEAL_OLD},
+           d.company_id, d.source_lead_id, ${DEAL_OLD}, e.id, e.subject, e.sent_at
+    FROM emails e CROSS JOIN deals d
+    WHERE e.graph_conversation_id = ${CONV} AND d.id = ${DEAL_OLD}
+  `);
+}
+
+/** What GET /api/activities?dealId=… returns, i.e. what the deal's Activity tab shows. */
+async function dealActivityEmailIds(): Promise<string[]> {
+  const result = await getActivities(tdb, { dealId: DEAL_OLD, page: 1, limit: 50 });
+  return result.activities
+    .map((row: { emailId: string | null }) => row.emailId)
+    .filter((emailId: string | null): emailId is string => emailId !== null)
+    .sort();
 }
 
 async function messageAssignmentRows(): Promise<
@@ -363,6 +393,50 @@ describe("thread detach — the message side", () => {
     expect(await assignmentQueueMessageIds()).toEqual(["m1", "m2"]);
   });
 
+  // -----------------------------------------------------------------------------------------------
+  // ARCHIVED / DELETED COPIES. The detach's message-side clear writes exactly the three columns the
+  // assignment queue selects on — assignment_status = 'unassigned' plus a non-null ambiguity reason —
+  // and bumps synced_at, which both queues order by. The queue query filtered NEITHER archived_at NOR
+  // deleted_at, so a participant who had tidied their copy away got it back, at the TOP of their
+  // parking lot, because somebody else unfiled the thread.
+  //
+  // Fixed in the QUEUE, not in the detach: the detach must still clear the association on those rows
+  // (they are on the deal until it does, archived or not), and "is this row listable" is the queue's
+  // question about every row it returns, not a fact about how one of them got there. The same gap
+  // showed for a message archived after any other unassignment, which a detach-side fix would have
+  // left open.
+  // -----------------------------------------------------------------------------------------------
+  it("keeps an ARCHIVED copy out of the queue while still taking it off the deal", async () => {
+    await tdb.execute(sql`UPDATE emails SET archived_at = now() WHERE graph_message_id = 'm2'`);
+
+    await postDetach(collaboratorUser);
+
+    expect(await assignmentQueueMessageIds()).toEqual(["m1"]);
+    expect(await dealTabEmailIds()).toEqual([]);
+    const rows = await messageAssignmentRows();
+    expect(rows.every((row) => row.deal_id === null && row.assigned_entity_id === null)).toBe(true);
+  });
+
+  it("keeps a DELETED copy out of the queue while still taking it off the deal", async () => {
+    await tdb.execute(sql`UPDATE emails SET deleted_at = now() WHERE graph_message_id = 'm2'`);
+
+    await postDetach(collaboratorUser);
+
+    expect(await assignmentQueueMessageIds()).toEqual(["m1"]);
+    expect(await dealTabEmailIds()).toEqual([]);
+  });
+
+  it("does not COUNT an archived copy in the queue's pagination either", async () => {
+    // The count runs its own query over the same predicate, so a filter added to the row read alone
+    // would answer "1 of 2" and paginate against a total nothing can reach.
+    await tdb.execute(sql`UPDATE emails SET archived_at = now() WHERE graph_message_id = 'm2'`);
+
+    await postDetach(collaboratorUser);
+
+    const result = await getEmailAssignmentQueue(tdb, {});
+    expect(result.pagination.total).toBe(1);
+  });
+
   it("clears a sibling filed to a COMPANY, and reports no deal to audit for it", async () => {
     // The other documented consequence: assigned_entity_type is not deal-only, so a conversation-scoped
     // unfile takes company/lead/property associations with it. The audit fallback only recovers DEAL
@@ -380,6 +454,66 @@ describe("thread detach — the message side", () => {
     const rows = await messageAssignmentRows();
     expect(rows.every((row) => row.assigned_entity_type === null && row.assigned_entity_id === null)).toBe(true);
     expect(await auditRows()).toHaveLength(0);
+  });
+
+  // -----------------------------------------------------------------------------------------------
+  // THE OTHER VIEW OF THE SAME MAIL. A deal shows its email twice — the Emails tab (getEmails, over
+  // `emails`) and the Activity tab (getActivities, over `activities`) — and the bind writes both. A
+  // detach that cleared only the message rows left the conversation on the Activity tab, so Unassign
+  // appeared to work on one tab and to have done nothing on the other.
+  // -----------------------------------------------------------------------------------------------
+  it("takes the conversation off the deal's ACTIVITY tab, not just its Emails tab", async () => {
+    await seedDealActivitiesForConversation();
+    expect(await dealActivityEmailIds()).toHaveLength(2);
+
+    await postDetach(collaboratorUser);
+
+    expect(await dealTabEmailIds()).toEqual([]);
+    expect(await dealActivityEmailIds()).toEqual([]);
+  });
+
+  it("clears the activity's LEAD link too, so a deal with a source lead keeps no back door", async () => {
+    // getActivities does not filter on deal_id alone: when the deal has a source_lead_id it ORs in
+    // `lead_id = <that lead>` (modules/activities/service.ts), because a deal's tab shows the history
+    // of the lead it came from. The bind copies that lead onto the activity row, so nulling deal_id and
+    // stopping there leaves the mail on the tab through the lead — the identical bug, one column over.
+    const LEAD_SOURCE = U("c01");
+    await tdb.execute(sql`INSERT INTO leads (id) VALUES (${LEAD_SOURCE})`);
+    await tdb.execute(sql`UPDATE deals SET source_lead_id = ${LEAD_SOURCE} WHERE id = ${DEAL_OLD}`);
+    await seedDealActivitiesForConversation();
+    expect(await dealActivityEmailIds()).toHaveLength(2);
+
+    await postDetach(collaboratorUser);
+
+    expect(await dealActivityEmailIds()).toEqual([]);
+  });
+
+  it("leaves an activity belonging to a DIFFERENT conversation alone", async () => {
+    // The re-point is keyed on the detached messages' ids, not on the deal — an UPDATE that swept the
+    // deal would unfile every other email activity on it.
+    await seedDealActivitiesForConversation();
+    await tdb.execute(sql`
+      INSERT INTO emails
+        (graph_message_id, graph_conversation_id, subject, direction, from_address, to_addresses,
+         deal_id, assigned_entity_type, assigned_entity_id, assignment_status, user_id, sent_at)
+      VALUES ('other-1', 'conv-unrelated', 'Other', 'inbound', 'someone@example.com', '{}',
+              ${DEAL_OLD}, 'deal', ${DEAL_OLD}, 'assigned', ${USER_OWNER}, '2026-07-05T00:00:00Z')
+    `);
+    await tdb.execute(sql`
+      INSERT INTO activities
+        (type, responsible_user_id, performed_by_user_id, source_entity_type, source_entity_id, deal_id, email_id, subject, occurred_at)
+      SELECT 'email', e.user_id, e.user_id, 'deal', ${DEAL_OLD}, ${DEAL_OLD}, e.id, e.subject, e.sent_at
+      FROM emails e WHERE e.graph_message_id = 'other-1'
+    `);
+
+    await postDetach(collaboratorUser);
+
+    const survivors = await tdb.execute(sql`
+      SELECT e.graph_message_id FROM activities a JOIN emails e ON e.id = a.email_id
+      WHERE a.deal_id = ${DEAL_OLD}
+    `);
+    const rows = Array.isArray(survivors) ? survivors : survivors.rows;
+    expect(rows.map((r: { graph_message_id: string }) => r.graph_message_id)).toEqual(["other-1"]);
   });
 
   it("writes no audit row when there was genuinely nothing filed", async () => {

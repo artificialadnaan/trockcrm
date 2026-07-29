@@ -64,6 +64,13 @@ const collaboratorUser: Viewer = {
 const laterMessageOwnerUser: Viewer = {
   id: USER_SECOND, role: "rep", officeId: null, activeOfficeId: null,
 };
+// The SAME participant, but carrying a real office so the deal-write path admits them too. The pair
+// (this and laterMessageOwnerUser) is how the read-scope cases below tell "admitted by mailbox
+// ownership ONLY" apart from "admitted by the bound deal" without changing which messages the viewer
+// owns.
+const participantWithDealAccessUser: Viewer = {
+  id: USER_SECOND, role: "rep", officeId: OFFICE_DALLAS, activeOfficeId: OFFICE_DALLAS,
+};
 // Neither mailbox nor deal access. CAVEAT, same as thread-mutation-permission.runtime.test.ts: the
 // no-office viewer is how a "no deal access" user is modelled, because assertDealCollaboratorAccess's
 // office check only asks whether the viewer has an office at all — the production-reachable denial is
@@ -278,9 +285,12 @@ describe("thread mutation routes — deal-collaborator access", () => {
   });
 
   it("GET: admits the owner of a LATER message, not just the oldest one", async () => {
+    // ADMISSION is what this pins. The PAYLOAD is scoped to their own copy, because this viewer carries
+    // a null office and so was admitted by mailbox ownership alone — see section 8 for that rule and
+    // for the case where a participant WITH deal access gets the whole conversation.
     const { res } = await getThreadRoute(laterMessageOwnerUser);
     expect(res.statusCode).toBe(200);
-    expect(res.body.emails).toHaveLength(2);
+    expect(res.body.emails.map((e: { graphMessageId: string }) => e.graphMessageId)).toEqual(["m2"]);
   });
 
   it("GET: returns an empty payload for a conversation with no messages", async () => {
@@ -570,10 +580,18 @@ describe("thread mutation routes — deal-collaborator access", () => {
     expect(commits).toBe(0);
   });
 
-  it("assign: a non-participant collaborator cannot touch a thread bound to NO deal", async () => {
-    // An unbound thread has no deal to authorize against, so path 2 cannot run at all. Pinned so a
+  it("assign: a non-participant collaborator cannot touch a thread filed under NO deal", async () => {
+    // A thread filed nowhere has no deal to authorize against, so path 2 cannot run at all. Pinned so a
     // future "just let anyone file an unassigned thread" change is a deliberate one.
+    //
+    // "Filed nowhere" means BOTH sides: detaching the bindings is not enough now that the source-deal
+    // set also reads the messages' own associations (section 9), and those messages are still on
+    // DEAL_OLD until they are cleared too.
     await tdb.execute(sql`UPDATE email_thread_bindings SET detached_at = now()`);
+    await tdb.execute(sql`
+      UPDATE emails SET deal_id = NULL, assigned_entity_type = NULL, assigned_entity_id = NULL
+      WHERE graph_conversation_id = ${CONV}
+    `);
 
     const err = await rejection(postThreadRoute("assign", collaboratorUser, { dealId: DEAL_NEW }));
     expect(err.statusCode).toBe(403);
@@ -1029,5 +1047,217 @@ describe("thread mutation routes — deal-collaborator access", () => {
     expect(err.statusCode).toBe(404);
     expect(err.message).toMatch(/Deal not found/i);
     expect((await activeBindings()).every((r) => r.deal_id === DEAL_OLD)).toBe(true);
+  });
+
+  // ---------------------------------------------------------------------------------------------
+  // 8. READ SCOPE — how the caller got in decides how WIDE the payload is.
+  //
+  //    The thread read is unscoped, which is what lets a deal collaborator who owns none of the
+  //    conversation see it at all. But path 1 (mailbox ownership) needs only ONE stored row: on an
+  //    UNBOUND conversation, anyone who received a single early message passed the gate and then read
+  //    every tenant user's copy of the whole conversation — including replies and forwards they were
+  //    never on. Being a participant in a conversation is not being a recipient of every later message
+  //    in it.
+  //
+  //    So the widening has to follow the DEAL, not the mailbox: a caller admitted by deal write access
+  //    already sees every mailbox's copy on that deal's Emails tab, and a caller admitted by mailbox
+  //    ownership alone sees their own mail — which is what they had in Outlook anyway.
+  // ---------------------------------------------------------------------------------------------
+  /** Filed nowhere at all: no active binding, and no message-side association either. */
+  async function unfileTheConversationCompletely() {
+    await tdb.execute(sql`UPDATE email_thread_bindings SET detached_at = now()`);
+    await tdb.execute(sql`
+      UPDATE emails SET deal_id = NULL, assigned_entity_type = NULL, assigned_entity_id = NULL
+      WHERE graph_conversation_id = ${CONV}
+    `);
+  }
+
+  /** A body only USER_OWNER's copy carries, so a leak is visible as content and not merely as a count. */
+  async function putASecretInTheOldestMessage() {
+    await tdb.execute(sql`
+      UPDATE emails SET body_html = '<p>OWNER ONLY SECRET</p>', body_preview = 'OWNER ONLY SECRET'
+      WHERE graph_message_id = 'm1'
+    `);
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  function bodiesOf(payloadEmails: any[]): string {
+    return payloadEmails
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      .map((email: any) => `${email.bodyHtml ?? ""} ${email.bodyPreview ?? ""} ${email.subject ?? ""}`)
+      .join(" | ");
+  }
+
+  it("GET: does not hand a participant another mailbox's message on an UNBOUND conversation", async () => {
+    // THE DISCLOSURE, asserted as content rather than as a filter argument. USER_SECOND owns m2 and
+    // nothing else; m1 is USER_OWNER's copy and there is no deal in the picture to justify widening.
+    await unfileTheConversationCompletely();
+    await putASecretInTheOldestMessage();
+
+    const { res } = await getThreadRoute(laterMessageOwnerUser);
+
+    expect(res.statusCode).toBe(200);
+    expect(bodiesOf(res.body.emails)).not.toContain("OWNER ONLY SECRET");
+    expect(res.body.emails.map((e: { graphMessageId: string }) => e.graphMessageId)).toEqual(["m2"]);
+  });
+
+  it("GET: still hands every participant's copy to a caller admitted by the BOUND DEAL", async () => {
+    // The other side, and the reason the scoping cannot simply be reinstated for everyone: the deal
+    // Emails LIST already shows this caller both copies, so a narrower thread read would be a strictly
+    // gappier view of mail they can plainly see.
+    await putASecretInTheOldestMessage();
+
+    const { res } = await getThreadRoute(collaboratorUser);
+
+    expect(res.body.emails.map((e: { graphMessageId: string }) => e.graphMessageId)).toEqual(["m1", "m2"]);
+    expect(bodiesOf(res.body.emails)).toContain("OWNER ONLY SECRET");
+  });
+
+  it("GET: widens for a PARTICIPANT who also has deal access, not only for a non-participant", async () => {
+    // "Mailbox ownership ONLY" is the narrowing condition, not "mailbox ownership at all". This viewer
+    // owns m2 AND can write the deal the conversation is filed under; scoping them would make the thread
+    // view narrower than the deal tab they came from, for no security gain.
+    await putASecretInTheOldestMessage();
+
+    const { res } = await getThreadRoute(participantWithDealAccessUser);
+
+    expect(res.body.emails.map((e: { graphMessageId: string }) => e.graphMessageId)).toEqual(["m1", "m2"]);
+    expect(bodiesOf(res.body.emails)).toContain("OWNER ONLY SECRET");
+  });
+
+  it("reassign: hands a mailbox owner back a refreshed thread scoped to their own copies", async () => {
+    // The refresh at the end of a mutation goes through the same reader, so the scope has to follow the
+    // same rule there — otherwise the leak simply moves from GET to the POST response.
+    //
+    // The conversation is filed on a deal this schema cannot see, so ONLY mailbox ownership can admit
+    // the caller; the DESTINATION deal stays reachable, so the move itself still runs. (The viewer has
+    // to hold an office — the reassign route checks the destination on its own — which is why the
+    // source deal, not the viewer, is what makes path 2 miss here.)
+    await putASecretInTheOldestMessage();
+    await tdb.execute(sql`UPDATE email_thread_bindings SET deal_id = ${DEAL_FOREIGN}`);
+    await tdb.execute(sql`
+      UPDATE emails SET deal_id = ${DEAL_FOREIGN}, assigned_entity_id = ${DEAL_FOREIGN}, assigned_entity_type = 'deal'
+      WHERE graph_conversation_id = ${CONV}
+    `);
+
+    const { res } = await postThreadRoute("reassign", participantWithDealAccessUser, { dealId: DEAL_NEW });
+
+    expect(res.statusCode).toBe(200);
+    expect(bodiesOf(res.body.thread.emails)).not.toContain("OWNER ONLY SECRET");
+    expect(res.body.thread.emails.map((e: { graphMessageId: string }) => e.graphMessageId)).toEqual(["m2"]);
+  });
+
+  // ---------------------------------------------------------------------------------------------
+  // 9. MESSAGE-SIDE associations are a source deal too.
+  //
+  //    associateEmailToEntity — the assignment queue's one-message-at-a-time file — writes
+  //    emails.deal_id and creates NO binding. Such a conversation shows on the deal's Emails tab while
+  //    the binding side has nothing to report, so a gate sourced from bindings alone handed the deal
+  //    set an empty list and 403'd every collaborator who does not own a mailbox copy: the thread would
+  //    not open, and neither action would run.
+  //
+  //    Adding those deals ADDS to the set the caller must clear in full. It can never subtract from it.
+  // ---------------------------------------------------------------------------------------------
+  it("GET: admits a deal collaborator on a queue-filed conversation with no binding", async () => {
+    await tdb.execute(sql`DELETE FROM email_thread_bindings`);
+
+    const { res } = await getThreadRoute(collaboratorUser);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.emails).toHaveLength(2);
+  });
+
+  it("reassign: admits a deal collaborator on a queue-filed conversation with no binding", async () => {
+    await tdb.execute(sql`DELETE FROM email_thread_bindings`);
+
+    const { res } = await postThreadRoute("reassign", collaboratorUser, { dealId: DEAL_NEW });
+
+    expect(res.statusCode).toBe(200);
+    expect((await messageDealIds()).every((id) => id === DEAL_NEW)).toBe(true);
+  });
+
+  it("detach: admits a deal collaborator on a queue-filed conversation with no binding", async () => {
+    await tdb.execute(sql`DELETE FROM email_thread_bindings`);
+
+    const { res } = await postThreadRoute("detach", collaboratorUser);
+
+    expect(res.statusCode).toBe(200);
+    expect((await messageDealIds()).every((id) => id === null)).toBe(true);
+  });
+
+  it("reassign: refuses when a MESSAGE names a deal the caller cannot reach, though no binding does", async () => {
+    // THE ESCALATION the widened set must not open. Every binding names DEAL_OLD, which this caller can
+    // reach — but m2 was filed message-side onto a deal in another schema. A reassign rewrites EVERY
+    // message in the conversation, so admitting on the bindings alone converts access to DEAL_OLD into
+    // a move of DEAL_FOREIGN's mail. The message-side deals are authorized against, not merely used to
+    // open the door.
+    await tdb.execute(sql`
+      UPDATE emails SET deal_id = ${DEAL_FOREIGN}, assigned_entity_id = ${DEAL_FOREIGN}, assigned_entity_type = 'deal'
+      WHERE graph_message_id = 'm2'
+    `);
+
+    const err = await rejection(postThreadRoute("reassign", collaboratorUser, { dealId: DEAL_NEW }));
+    expect(err.statusCode).toBe(404);
+    expect(err.message).toMatch(/Deal not found/i);
+
+    expect((await activeBindings()).every((r) => r.deal_id === DEAL_OLD)).toBe(true);
+    expect(await messageDealIds()).toEqual([DEAL_OLD, DEAL_FOREIGN]);
+    expect(commits).toBe(0);
+  });
+
+  it("detach: refuses when a MESSAGE names a deal the caller cannot reach, though no binding does", async () => {
+    // Detach is the sharper half again: it clears every message association in one statement, so an
+    // unauthorized detach unfiles the other deal's mail outright.
+    await tdb.execute(sql`
+      UPDATE emails SET deal_id = ${DEAL_FOREIGN}, assigned_entity_id = ${DEAL_FOREIGN}, assigned_entity_type = 'deal'
+      WHERE graph_message_id = 'm2'
+    `);
+
+    const err = await rejection(postThreadRoute("detach", collaboratorUser));
+    expect(err.statusCode).toBe(404);
+    expect(await activeBindings()).toHaveLength(2);
+    expect(await messageDealIds()).toEqual([DEAL_OLD, DEAL_FOREIGN]);
+    expect(await auditRows()).toHaveLength(0);
+    expect(commits).toBe(0);
+  });
+
+  // ---------------------------------------------------------------------------------------------
+  // 10. REUSING a binding is not the same as having nothing to do.
+  //
+  //     The per-EMAIL Reassign (POST /api/email/:id/associate) moves ONE message and never touches the
+  //     thread binding, so a conversation can be bound to DEAL_OLD with one of its messages sitting on
+  //     DEAL_NEW. Reassigning the whole conversation BACK to DEAL_OLD then finds every binding already
+  //     naming the target — and the per-mailbox bind returned early on exactly that condition, skipping
+  //     the back-association. The route still answered 200 and still wrote an audit row saying the
+  //     conversation had moved, while the stray message stayed on the wrong deal.
+  // ---------------------------------------------------------------------------------------------
+  it("reassign: repairs a stray message even when every binding already names the target deal", async () => {
+    await tdb.execute(sql`
+      UPDATE emails SET deal_id = ${DEAL_NEW}, assigned_entity_type = 'deal', assigned_entity_id = ${DEAL_NEW}
+      WHERE graph_message_id = 'm2'
+    `);
+    // The activity row the per-email move left behind, which the deal's ACTIVITY tab reads.
+    await tdb.execute(sql`
+      INSERT INTO activities
+        (type, responsible_user_id, performed_by_user_id, source_entity_type, source_entity_id, deal_id, email_id, subject, occurred_at)
+      SELECT 'email', e.user_id, e.user_id, 'deal', ${DEAL_NEW}, ${DEAL_NEW}, e.id, e.subject, e.sent_at
+      FROM emails e WHERE e.graph_message_id = 'm2'
+    `);
+
+    const { res } = await postThreadRoute("reassign", collaboratorUser, { dealId: DEAL_OLD });
+
+    expect(res.statusCode).toBe(200);
+    expect(await messageDealIds()).toEqual([DEAL_OLD, DEAL_OLD]);
+
+    // Through the read the user actually looks at, not the column: getEmails ORs deal_id with the
+    // assigned_entity pair, so a repair that moved only one of them would leave m2 on BOTH tabs.
+    const oldTab = await getEmails(tdb, { dealId: DEAL_OLD }, undefined, "director");
+    const newTab = await getEmails(tdb, { dealId: DEAL_NEW }, undefined, "director");
+    expect(oldTab.emails.map((e: { graphMessageId: string }) => e.graphMessageId).sort()).toEqual(["m1", "m2"]);
+    expect(newTab.emails).toHaveLength(0);
+
+    const activityRows = await tdb.execute(sql`SELECT deal_id FROM activities`);
+    const rows = Array.isArray(activityRows) ? activityRows : activityRows.rows;
+    expect(rows.every((r: { deal_id: string | null }) => r.deal_id === DEAL_OLD)).toBe(true);
   });
 });

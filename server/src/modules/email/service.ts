@@ -793,12 +793,34 @@ export async function getEmailThreadForMutation(
 }
 
 /**
+ * WHICH of the gate's two paths admitted a caller — and the reason the gate RETURNS a value at all
+ * rather than merely not throwing.
+ *
+ * The thread READ is unscoped (see readThreadForGatedCaller in routes.ts), which is what lets a deal
+ * collaborator who owns none of the conversation see it. Widening it is justified by the DEAL, not by
+ * the mailbox: a caller with write access to every deal the conversation is filed under already sees
+ * every mailbox's copy on that deal's Emails tab. A caller admitted by mailbox ownership alone has no
+ * such justification — being a participant in a conversation is not being a recipient of every later
+ * reply or forward in it — so their read stays scoped to their own rows.
+ *
+ * Derived HERE and handed out, never re-derived at the call site. A route that re-asked "does this user
+ * own a message" would be a second copy of the gate's own rule, free to drift from it.
+ */
+export type EmailThreadAccessGrant = { via: "mailbox_owner" | "bound_deal" };
+
+/**
  * May this user reach this email thread's deal linkage — to read it, or to change it?
  *
- * TWO accepted paths, checked in this order:
+ * TWO accepted paths:
  *   1. MAILBOX OWNER — the thread is in the caller's own mailbox. Always allowed; a user can always
  *      fix the filing of their own email.
- *   2. DEAL WRITE ACCESS — the caller may write EVERY deal the thread is currently bound to.
+ *   2. DEAL WRITE ACCESS — the caller may write EVERY deal the thread is currently filed under.
+ *
+ * PATH 2 IS TRIED FIRST, and that ordering is about the RETURN VALUE, not about who gets in: a caller
+ * who satisfies both is admitted either way, but only "bound_deal" widens their read. Checking path 1
+ * first would report mailbox ownership for a deal collaborator who happens to hold a copy, and scope
+ * them out of mail their own deal tab already shows them. A path-2 denial is therefore SWALLOWED when
+ * path 1 can admit — and rethrown, with its own status and message, when it cannot.
  *
  * Used by the thread READ route as well as the three mutation routes, and deliberately so: the
  * Reassign/Unassign controls are rendered from the read payload, so a stricter read gate makes the
@@ -811,18 +833,20 @@ export async function getEmailThreadForMutation(
  * misfiled email someone notices is frequently not their own, and owner-only would 403 exactly the
  * person who spotted it.
  *
- * An UNBOUND thread has no deal to authorize against, so only path 1 can admit it.
+ * A thread filed under NO deal has nothing to authorize against, so only path 1 can admit it.
  *
- * `context.boundDealIds` MUST be EVERY deal the thread is CURRENTLY BOUND TO — the full set from
- * resolveActiveBindingDealIdsForConversation — never the deal it is being moved to. Two halves of that,
- * and both are load-bearing:
+ * `context.boundDealIds` MUST be EVERY deal the thread is CURRENTLY FILED UNDER — the full set from
+ * resolveSourceDealIdsForConversation — never the deal it is being moved to. Two halves of that, and
+ * both are load-bearing:
  *
  *   - EVERY. A binding is keyed per mailbox, so one conversation can be filed on two deals at once,
  *     while reassign and detach rewrite the WHOLE conversation. Checking only the first id let access to
  *     deal A move or unfile deal B's email — a privilege escalation, not a rounding error. Path 2
- *     therefore requires access to all of them, and a single denial refuses the whole mutation.
- *   - CURRENTLY BOUND TO. Authorizing against the target would turn this into "anyone who can write the
- *     destination", which is not a gate on the thread at all.
+ *     therefore requires access to all of them, and a single denial refuses the whole mutation. That is
+ *     also why the set spans BOTH the bindings and the messages' own associations: a source the gate
+ *     cannot see is a deal whose mail these routes would move without ever checking it.
+ *   - CURRENTLY FILED UNDER. Authorizing against the target would turn this into "anyone who can write
+ *     the destination", which is not a gate on the thread at all.
  *
  * PATH 1 IS DELIBERATELY NOT NARROWED BY THE ABOVE. A participant may still act on a conversation that
  * is cross-filed to a deal they cannot reach. Path 1 is about the caller's OWN mail, which they can
@@ -841,33 +865,44 @@ export async function assertCanMutateEmailThread(
   thread: EmailThreadMutationContext,
   user: { id: string; role: string; officeId?: string | null; activeOfficeId?: string | null },
   context: { boundDealIds: string[] }
-) {
-  // PATH 1 — mailbox owner: does the caller own a MESSAGE in this thread? emails.userId IS the mailbox
-  // owner, and the routes hand this helper the WHOLE conversation, so this is the honest reading of
-  // "the thread is in the caller's own mailbox".
+): Promise<EmailThreadAccessGrant> {
+  // PATH 1's test, evaluated up front but not ACTED on until path 2 has had its turn: does the caller
+  // own a MESSAGE in this thread? emails.userId IS the mailbox owner, and the routes hand this helper
+  // the WHOLE conversation, so this is the honest reading of "the thread is in the caller's own
+  // mailbox".
   //
   // This deliberately replaces the old `thread.mailboxAccountId === resolveMailboxAccountIdForCrmUser(
   // user.id)` comparison rather than sitting alongside it. That comparison is not merely redundant now,
   // it is UNREACHABLE: thread.mailboxAccountId is always some conversation participant's own token id
   // (both branches of getEmailThreadForMutation derive it from a message owner), so it can only equal
-  // the caller's token id when the caller owns a message — i.e. when the line above already returned.
-  // It was also strictly NARROWER, admitting only whoever sent first on a thread that reached two
+  // the caller's token id when the caller owns a message — i.e. when the check below already admitted
+  // them. It was also strictly NARROWER, admitting only whoever sent first on a thread that reached two
   // mailboxes. Removing it drops a per-gate SELECT and a 409-swallow that no longer guards anything: a
   // caller with no connected mailbox now simply misses path 1 by owning no message, with no query and
   // no exception involved.
-  if (thread.emails.some((email) => email.userId === user.id)) return;
+  const ownsAMessageInThread = thread.emails.some((email) => email.userId === user.id);
 
   // PATH 2 — deal write access, to EVERY deal the conversation is filed under.
-  if (context.boundDealIds.length === 0) {
-    throw new AppError(403, "You can only modify your own email threads");
+  if (context.boundDealIds.length > 0) {
+    try {
+      // Sequential, and it has to be: each call throws 403/404 itself when the caller cannot reach that
+      // deal, and the FIRST denial must be the one that surfaces. A Promise.all would race the errors
+      // and report whichever rejected first, which is not the same question.
+      for (const boundDealId of context.boundDealIds) {
+        await assertDealCollaboratorAccess(tenantDb, boundDealId, user);
+      }
+      return { via: "bound_deal" };
+    } catch (err) {
+      // Swallowed ONLY for a participant, who path 1 is about to admit anyway — the cross-filed case
+      // this gate deliberately still allows. For anyone else the denial IS the answer, and it carries
+      // the status and message the routes surface (403 out of office, 404 for a deal in another
+      // schema), so it is rethrown untouched rather than flattened into the generic 403 below.
+      if (!ownsAMessageInThread) throw err;
+    }
   }
 
-  // Sequential, and it has to be: each call throws 403/404 itself when the caller cannot reach that
-  // deal, and the FIRST denial must be the one that surfaces. A Promise.all would race the errors and
-  // report whichever rejected first, which is not the same question.
-  for (const boundDealId of context.boundDealIds) {
-    await assertDealCollaboratorAccess(tenantDb, boundDealId, user);
-  }
+  if (ownsAMessageInThread) return { via: "mailbox_owner" };
+  throw new AppError(403, "You can only modify your own email threads");
 }
 
 /**
@@ -1017,12 +1052,35 @@ export async function bindConversationToDealAcrossMailboxes(
   // bindThreadToDeal does a real per-mailbox read (getActiveThreadBinding) then write, so each mailbox
   // has to go sequentially rather than fan out in a Promise.all.
   for (const mailboxAccountId of mailboxAccountIds) {
-    await bindThreadToDeal(tenantDb, {
+    const { binding, reusedExistingBinding } = await bindThreadToDeal(tenantDb, {
       mailboxAccountId,
       providerConversationId: input.providerConversationId,
       dealId: input.dealId,
       actingUserId: input.actingUserId,
     });
+
+    // REUSING A BINDING IS NOT THE SAME AS HAVING NOTHING TO DO, and the difference is reachable.
+    //
+    // A binding is per (mailbox, conversation); a message's own association is per MESSAGE. The
+    // per-email Reassign (POST /api/email/:id/associate → associateEmailToEntity) moves one message and
+    // leaves the binding alone, so a conversation can be bound to deal A with one of its messages
+    // sitting on deal B. Moving the whole conversation to A then finds every binding already naming A
+    // and bindThreadToDeal skips its back-association — while the route answers 200, writes an audit row
+    // saying the conversation moved, and the stray message stays on B.
+    //
+    // So the conversation-wide operation reconciles even where the per-mailbox one had nothing to
+    // change. backAssociateStoredMessagesForBinding is idempotent (it rewrites this mailbox's rows to
+    // the state they should already be in) and re-points their `activities` rows too, which is the half
+    // the deal's ACTIVITY tab reads.
+    if (reusedExistingBinding) {
+      await backAssociateStoredMessagesForBinding(tenantDb, {
+        mailboxAccountId,
+        providerConversationId: input.providerConversationId,
+        bindingId: binding.id,
+        dealId: input.dealId,
+        actingUserId: input.actingUserId,
+      });
+    }
   }
 
   // Runs SECOND on purpose: everything above may create or re-point rows, and this pass is defined as
@@ -1201,22 +1259,17 @@ async function rebindDisconnectedMailboxRowsForConversation(
  *     conversation is being deliberately put back for someone to file, and leaving one copy ignored
  *     would hide it from the very surface this detach is sending it to.
  *
- * KNOWN RESIDUE, deliberately not fixed here: the `activities` row backAssociate wrote for each message
- * still points at the deal, so the deal's ACTIVITY tab keeps showing the email even though its Emails
- * tab no longer does. The fix would be cheap — that tab filters on activities.deal_id (or lead_id when
- * the deal has a source_lead_id; see modules/activities/service.ts), both nullable, and
- * touchpoint_trigger is AFTER INSERT only (migrations/0001_initial.sql) so an UPDATE cannot corrupt
- * touchpoint counts. It is deferred because nulling deal_id leaves source_entity_type='deal' and
- * source_entity_id=<deal> asserting the opposite, and those two ARE NOT NULL: reconciling that needs a
- * real representation of an unfiled activity, which belongs to the activities module and not to a
- * detach improvising one.
+ * THE ACTIVITY TAB IS CLEARED TOO, and has to be: it is a second view of the same mail over a
+ * different table, and the two disagreeing is what a user sees as "Unassign only half worked". See the
+ * comment on the `activities` update below for which columns move, which cannot, and why the triggers
+ * on that table are unaffected by an UPDATE.
  *
- * NOT atomic by construction any more. It used to be a single UPDATE; it is now four statements
- * (read stat targets, clear bindings, clear messages, recompute rollups), so a throw part-way through
- * MUST roll the earlier ones back. It does: every caller today is the detach route, which runs inside
- * the per-request tenant transaction (middleware/tenant.ts) that only commits at the end. A caller
- * outside that context — a worker, a script — must open its own transaction or it can leave the
- * bindings cleared with the messages still on the deal.
+ * NOT atomic by construction any more. It used to be a single UPDATE; it is now five statements (read
+ * stat targets, clear bindings, clear messages, clear the activity links, recompute rollups), so a
+ * throw part-way through MUST roll the earlier ones back. It does: every caller today is the detach
+ * route, which runs inside the per-request tenant transaction (middleware/tenant.ts) that only commits
+ * at the end. A caller outside that context — a worker, a script — must open its own transaction or it
+ * can leave the bindings cleared with the messages still on the deal.
  */
 export async function detachConversationAcrossMailboxes(
   tenantDb: TenantDb,
@@ -1230,6 +1283,9 @@ export async function detachConversationAcrossMailboxes(
   // reason to drag body_html across for every message in the thread.
   const messageRows = await tenantDb
     .select({
+      // `id` is not for the stat targets — it is what the `activities` re-point below keys on, so the
+      // two are guaranteed to cover the same rows.
+      id: emails.id,
       assignedEntityType: emails.assignedEntityType,
       assignedEntityId: emails.assignedEntityId,
       dealId: emails.dealId,
@@ -1279,6 +1335,38 @@ export async function detachConversationAcrossMailboxes(
     })
     .where(eq(emails.graphConversationId, providerConversationId));
 
+  // THE OTHER VIEW OF THE SAME MAIL. A deal shows its email twice: the Emails tab reads `emails`, the
+  // Activity tab reads `activities` (modules/activities/service.ts), and the bind writes BOTH — see
+  // linkEmailActivitiesToDeal, which the mailbox and disconnected-mailbox rebinds share. Clearing only
+  // the message rows left the conversation on the Activity tab, so Unassign looked like it had worked
+  // on one tab and done nothing on the other.
+  //
+  // TWO columns, because the tab's predicate is two columns: `activities.deal_id`, and — when the deal
+  // has a source_lead_id — `activities.lead_id = <that lead>`, ORed in so a deal's tab carries the
+  // history of the lead it came from. The bind copies that lead across, so nulling deal_id alone leaves
+  // the mail on the tab through the lead. Both are NULLABLE; nothing here needs a schema change.
+  //
+  // Keyed on the detached messages' ids, never on the deal: an UPDATE swept by deal_id would unfile
+  // every other email activity on it.
+  //
+  // SAFE AGAINST THE TRIGGERS. touchpoint_trigger is AFTER INSERT only (migrations/0001_initial.sql),
+  // so an UPDATE cannot move a touchpoint count; redesign_last_activity_refresh fires on UPDATE OF
+  // company_id, property_id, occurred_at (migrations/0090) and none of those is touched here.
+  //
+  // KNOWN RESIDUE, deliberately left: source_entity_type / source_entity_id still say deal/<old deal>,
+  // and company_id / property_id still carry what the deal implied. Those two are NOT NULL, so an
+  // "unfiled" activity has no representation to move them to — that is a decision for the activities
+  // module, not for a detach improvising one — and company_id/property_id are left with them rather
+  // than half-reversing a row the rest of which still names the deal. Neither is in the deal Activity
+  // tab's predicate, so neither can keep the mail on the tab this clears it from.
+  const detachedMessageIds = messageRows.map((row) => row.id);
+  if (detachedMessageIds.length > 0) {
+    await tenantDb
+      .update(activities)
+      .set({ dealId: null, leadId: null })
+      .where(inArray(activities.emailId, detachedMessageIds));
+  }
+
   // deals.email_count / last_email_at (and the company rollup) are denormalised, so the deal the mail
   // just left keeps a stale count until this runs — the same treatment the bind path gives it.
   await refreshEmailStatsForTargets(tenantDb, previousStatTargets);
@@ -1289,14 +1377,9 @@ export async function detachConversationAcrossMailboxes(
   // shape where the binding side has nothing to report but this call still moved real associations.
   return {
     clearedMessageCount: messageRows.length,
-    previousMessageDealIds: Array.from(
-      new Set(
-        messageRows.flatMap((row) => [
-          row.dealId,
-          row.assignedEntityType === "deal" ? row.assignedEntityId : null,
-        ])
-      )
-    ).filter((dealId): dealId is string => dealId !== null),
+    // The SAME derivation the gate's source-deal set uses (dealIdsFromMessageAssociations), so the
+    // deals this reports as unfiled are exactly the deals the caller was authorized against.
+    previousMessageDealIds: dealIdsFromMessageAssociations(messageRows),
   };
 }
 
@@ -1400,6 +1483,93 @@ export async function resolveActiveBindingDealIdsForConversation(
   return Array.from(
     new Set(bindings.map((binding) => binding.dealId).filter((dealId): dealId is string => dealId !== null))
   );
+}
+
+/**
+ * The deal ids a set of message rows is filed under, deduped, in the order the rows were given.
+ *
+ * The message side of "what deal is this on" is TWO columns, not one: the legacy `deal_id` and the
+ * `assigned_entity_type = 'deal'` pair, which is exactly the OR the deal Emails tab reads (getEmails).
+ * A row can carry either or both, so both are collected — shared between the gate's source-deal set and
+ * detach's audit fallback so the two can never disagree about which deals a conversation touched.
+ */
+function dealIdsFromMessageAssociations(
+  messageRows: Array<{
+    dealId: string | null;
+    assignedEntityType: string | null;
+    assignedEntityId: string | null;
+  }>
+): string[] {
+  return Array.from(
+    new Set(
+      messageRows.flatMap((row) => [
+        row.dealId,
+        row.assignedEntityType === "deal" ? row.assignedEntityId : null,
+      ])
+    )
+  ).filter((dealId): dealId is string => dealId !== null);
+}
+
+/**
+ * Every deal this conversation's MESSAGES are filed under, oldest message first.
+ *
+ * NOT redundant with the binding-side resolver, and not a fallback for it either — the two answer for
+ * different halves of the same question. associateEmailToEntity (the assignment queue's
+ * one-message-at-a-time file, and the per-email Reassign) writes emails.deal_id and creates NO binding,
+ * so a conversation can sit on a deal's Emails tab with nothing at all on the binding side. Sourcing
+ * the gate from bindings alone therefore handed it an EMPTY deal set for such a thread and 403'd every
+ * collaborator who does not happen to own a mailbox copy: the thread would not open, and neither
+ * Reassign nor Unassign would run.
+ *
+ * Ordered (sent_at, id) to match previewThreadReassignmentImpact and detach's own read, so the FIRST
+ * id — the one that becomes an audit row's recordId — cannot depend on what the planner returned first.
+ */
+export async function resolveMessageSideDealIdsForConversation(
+  tenantDb: TenantDb,
+  providerConversationId: string
+): Promise<string[]> {
+  const rows = await tenantDb
+    .select({
+      dealId: emails.dealId,
+      assignedEntityType: emails.assignedEntityType,
+      assignedEntityId: emails.assignedEntityId,
+    })
+    .from(emails)
+    .where(eq(emails.graphConversationId, providerConversationId))
+    .orderBy(sql`${emails.sentAt} ASC`, sql`${emails.id} ASC`);
+
+  return dealIdsFromMessageAssociations(rows);
+}
+
+/**
+ * EVERY deal this conversation is filed under, by ANY route — the set assertCanMutateEmailThread
+ * authorizes against, and the ONE place that question is answered.
+ *
+ * Bindings FIRST so a bound conversation still reports the binding's deal as its primary one (the audit
+ * recordId and the impact preview's currentDealId are both `[0]`), then the message-side deals for
+ * everything the binding side cannot see.
+ *
+ * This UNION only ever ADDS to the set. The gate requires access to every member, so a wider set is a
+ * strictly stricter check — a caller who could reach every binding's deal but not a deal one of the
+ * MESSAGES names is now refused, where before their access to the binding's deal moved the other deal's
+ * mail. The one behaviour it relaxes is the empty-set case, and only there: a conversation filed
+ * message-side with no binding used to authorize against nothing and fall through to "mailbox owner
+ * only". It now authorizes against the deals it is actually on, which is the same rule the binding case
+ * has always applied.
+ */
+export async function resolveSourceDealIdsForConversation(
+  tenantDb: TenantDb,
+  providerConversationId: string
+): Promise<string[]> {
+  const bindingDealIds = await resolveActiveBindingDealIdsForConversation(
+    tenantDb,
+    providerConversationId
+  );
+  const messageDealIds = await resolveMessageSideDealIdsForConversation(
+    tenantDb,
+    providerConversationId
+  );
+  return Array.from(new Set([...bindingDealIds, ...messageDealIds]));
 }
 
 /**
@@ -1601,11 +1771,27 @@ export async function bindThreadToDeal(
     dealId: string;
     actingUserId: string;
   }
-): Promise<{ binding: ThreadBindingRecord; previousBindingId: string | null }> {
+): Promise<{
+  binding: ThreadBindingRecord;
+  previousBindingId: string | null;
+  /**
+   * TRUE when the binding already named the target and was left exactly as it was — so NOTHING was
+   * written, back-association included. Reported rather than inferred: `previousBindingId` is null both
+   * here and for a first-ever bind, so a caller cannot tell the two apart from the outside.
+   *
+   * It matters because a binding naming the right deal does NOT mean the messages under it do. The
+   * per-EMAIL Reassign moves one message and never touches the binding, so a reused binding can sit over
+   * a message filed somewhere else entirely — see bindConversationToDealAcrossMailboxes, which repairs
+   * that. The single-mailbox callers (seedOutboundThreadBinding, on the send path) deliberately do not:
+   * re-filing every stored message in a mailbox as a side effect of sending a reply is not what they
+   * asked for.
+   */
+  reusedExistingBinding: boolean;
+}> {
   const existing = await getActiveThreadBinding(tenantDb, input.mailboxAccountId, input.providerConversationId);
 
   if (existing?.dealId === input.dealId) {
-    return { binding: existing, previousBindingId: null };
+    return { binding: existing, previousBindingId: null, reusedExistingBinding: true };
   }
 
   if (existing) {
@@ -1642,7 +1828,7 @@ export async function bindThreadToDeal(
     actingUserId: input.actingUserId,
   });
 
-  return { binding, previousBindingId: existing?.id ?? null };
+  return { binding, previousBindingId: existing?.id ?? null, reusedExistingBinding: false };
 }
 
 export async function seedOutboundThreadBinding(
@@ -1708,6 +1894,21 @@ export async function getEmailAssignmentQueue(
   const conditions: any[] = [
     inArray(emails.direction, ASSIGNABLE_DIRECTIONS),
     eq(emails.assignmentStatus, filters.status ?? "unassigned"),
+    // ARCHIVED AND DELETED COPIES ARE NOT QUEUE ITEMS. archive and soft-delete are personal inbox
+    // actions (updateEmailInboxAction, mailbox-owner-scoped) that every other listing already honours
+    // via activeEmailConditions — this query was the one that did not, so a row the owner had tidied
+    // away could still be listed for them to file.
+    //
+    // It bit hardest on detachConversationAcrossMailboxes, which writes precisely the three columns
+    // this predicate selects on and bumps synced_at, which the ORDER BY ranks on: a participant who had
+    // archived or deleted their copy got it back at the TOP of their parking lot because somebody else
+    // unfiled the thread. Fixed HERE rather than in the detach, for two reasons. The detach must still
+    // clear those rows' deal association — archived or not, they are on the deal until it does, and the
+    // owner un-archiving one later must not find it still filed. And "is this row listable" is this
+    // query's question about EVERY row it returns, not a fact about how one of them got here: anything
+    // else that leaves an archived row unassigned (ignoreEmailAssignment being undone, a resync) hits
+    // the same gap, and a detach-side fix would have left all of them open.
+    ...activeEmailConditions(),
   ];
 
   if ((filters.status ?? "unassigned") === "unassigned") {

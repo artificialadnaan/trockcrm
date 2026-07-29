@@ -628,12 +628,21 @@ describe("DealEmailTab reassignment wiring", () => {
   });
 
   // -----------------------------------------------------------------------------------------------
-  // Reassigning to the deal the conversation is ALREADY on.
+  // Reassigning to the deal THE ROW says it is on.
   // -----------------------------------------------------------------------------------------------
-  it("does nothing when the picked deal is the one the conversation is already filed under", async () => {
-    // The picker lists every deal, this one included, and the server would happily answer 200 for a
-    // move to the same place — so the tab used to fire a request and toast "Conversation reassigned"
-    // for an operation that changed nothing. A no-op has to look like a no-op.
+  it("still asks the server to consolidate when the picked deal matches the ROW's own deal", async () => {
+    // The tab used to treat this as a no-op and close the picker without a request, comparing the
+    // picked deal against the clicked ROW's `dealId`. That is the wrong scope. A reassign moves the
+    // whole CONVERSATION, and a conversation is filed per-mailbox and per-message: a row on deal A does
+    // not prove the other mailboxes' bindings, or its own sibling messages, are on A too. Cross-filed
+    // across A and B, or left split by a per-EMAIL reassign, picking A is exactly the CONSOLIDATION the
+    // user is asking for — and the tab answered it by closing silently and doing nothing.
+    //
+    // The check is deliberately not re-derived from the thread payload either. "Is the whole
+    // conversation already on A" needs every binding AND every message, and the payload carries one
+    // binding; only the server can answer it. The reassign mutation is idempotent and repairs exactly
+    // this split, so the honest client behaviour is to ask. It costs one request in the genuinely
+    // redundant case.
     mount([makeEmail({ dealId: "deal-2" })]);
     openRowAction(/reassign/i);
 
@@ -641,19 +650,16 @@ describe("DealEmailTab reassignment wiring", () => {
       findButton(/pick deal/i)!.click();
     });
 
-    expect(mocks.reassignEmailThreadMock).not.toHaveBeenCalled();
+    expect(mocks.reassignEmailThreadMock).toHaveBeenCalledWith("conv-1", "deal-2");
     expect(mocks.associateEmailToEntityMock).not.toHaveBeenCalled();
-    expect(mocks.toastSuccessMock).not.toHaveBeenCalled();
-    expect(mocks.toastErrorMock).not.toHaveBeenCalled();
-    expect(mocks.refetchMock).not.toHaveBeenCalled();
-    // It still RESOLVES, so the picker closes rather than sitting open with no explanation.
+    expect(mocks.toastSuccessMock).toHaveBeenCalled();
+    expect(mocks.refetchMock).toHaveBeenCalled();
     expect(document.body.querySelector('[data-testid="assignment-dialog"]')).toBeNull();
   });
 
-  it("still refuses a non-deal target whose id matches the conversation's current deal", async () => {
-    // The same-deal short-circuit has to sit BEHIND the entity-type check, not in front of it. A picker
-    // widened past deals could hand over a CONTACT whose id happens to equal the deal's — comparing ids
-    // first would wave it through as "no change" instead of refusing it, and the refusal is what stops a
+  it("still refuses a non-deal target whose id matches the row's current deal", async () => {
+    // The entity-type check is the one thing that must stay in front: a picker widened past deals could
+    // hand over a CONTACT whose id happens to equal the deal's, and it is the refusal here that stops a
     // non-deal id reaching a deal-keyed route.
     pickedTarget = {
       assignedEntityType: "contact",
@@ -675,7 +681,7 @@ describe("DealEmailTab reassignment wiring", () => {
   });
 
   it("still moves a conversation whose current deal is not the picked one", async () => {
-    // The other side of the short-circuit: a real move must not be mistaken for a no-op.
+    // The ordinary move, unchanged.
     mount([makeEmail({ dealId: "deal-1" })]);
     openRowAction(/reassign/i);
 

@@ -151,18 +151,22 @@ export function DealEmailTab({ dealId, primaryContactEmail }: DealEmailTabProps)
           throw new Error("A conversation can only be reassigned to a deal.");
         }
         const nextDealId = target.assignedDealId ?? target.assignedEntityId;
-        // Picking the deal the conversation is ALREADY on is a no-op, and has to look like one. The
-        // picker lists every deal including this one, and the server answers 200 for a move to the same
-        // place, so firing the request produced a "Conversation reassigned" toast and a refetch for
-        // something that changed nothing. Resolving (rather than throwing) closes the picker, which is
-        // the right outcome for "you asked for the state it is already in".
+        // NO CLIENT-SIDE SAME-DEAL SHORT-CIRCUIT, and its absence is the decision.
         //
-        // Placed AFTER the entity-type check on purpose: a picker widened past deals could hand over a
-        // non-deal id that happens to match, and comparing ids first would wave it through instead of
-        // refusing it.
-        if (nextDealId === reassignEmail.dealId) {
-          return;
-        }
+        // There used to be one, comparing nextDealId against `reassignEmail.dealId` — the deal on the
+        // ROW the user clicked. That is the wrong scope for a conversation-wide operation. A binding is
+        // per (mailbox, conversation) and an association is per MESSAGE, so a row filed on deal A proves
+        // nothing about the other mailboxes' bindings or its own sibling messages: cross-filed across A
+        // and B, or left split by a per-EMAIL reassign, picking A is a real CONSOLIDATION — and the
+        // short-circuit answered it by closing the dialog with no request at all.
+        //
+        // Recomputing the condition from the thread payload was the other option and was rejected:
+        // "is the whole conversation already on A" needs every binding and every message, and the
+        // payload carries ONE binding, so the check would go on being a narrower question wearing the
+        // answer to a wider one. The server mutation is idempotent and repairs exactly this split
+        // (bindConversationToDealAcrossMailboxes reconciles even where it reuses a binding), so letting
+        // it decide is both correct and incapable of drifting. It costs one request in the genuinely
+        // redundant case, which is the cheap half of the trade.
         await reassignEmailThread(reassignEmail.graphConversationId, nextDealId);
         toast.success("Conversation reassigned");
       } else {

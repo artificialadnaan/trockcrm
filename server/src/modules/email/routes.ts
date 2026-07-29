@@ -18,9 +18,10 @@ import {
   bindConversationToDealAcrossMailboxes,
   detachConversationAcrossMailboxes,
   previewThreadReassignmentImpact,
-  resolveActiveBindingDealIdsForConversation,
+  resolveSourceDealIdsForConversation,
   assertCanMutateEmailThread,
   conversationHasAnyMessage,
+  type EmailThreadAccessGrant,
 } from "./service.js";
 import { writeAuditLog } from "../../lib/audit-log.js";
 import { getDealById } from "../deals/service.js";
@@ -422,31 +423,34 @@ router.get("/contact/:contactId", async (req, res, next) => {
 
 // The ONE place any /thread/:conversationId route decides who may reach the thread.
 //
-// Returns the thread context AND the deals the gate authorized against, so a caller never has to derive
-// them itself — which is the point. They are SERVER-DERIVED, from the conversation's own bindings, and
-// there is deliberately no way for a route to supply one: a caller-supplied value would let anyone name
-// a deal they happen to reach and walk straight through. On the reassign/assign routes `dealId` (the
-// DESTINATION) is in scope two lines away, so keeping the derivation out of the route body is what stops
-// it being handed over by accident.
+// Returns the thread context, the deals the gate authorized against, AND which path admitted the caller,
+// so a caller never has to derive any of it itself — which is the point. They are SERVER-DERIVED, from
+// the conversation's own bindings and its messages' own associations, and there is deliberately no way
+// for a route to supply one: a caller-supplied value would let anyone name a deal they happen to reach
+// and walk straight through. On the reassign/assign routes `dealId` (the DESTINATION) is in scope two
+// lines away, so keeping the derivation out of the route body is what stops it being handed over by
+// accident.
 //
-// The gate authorizes against a LIST, because a binding is per-mailbox: one conversation can be filed
-// on two deals at once while reassign/detach rewrite all of it, so every one of them has to clear. What
-// comes back is only its FIRST member, for the two places that can carry a single id — the impact
-// preview's currentDealId and the audit row's recordId — and it is always one of the deals the gate
-// just cleared, never a deal nobody checked.
+// The gate authorizes against a LIST, because a conversation can be filed on more than one deal at once
+// — a binding is per-mailbox, and messages carry their own association — while reassign/detach rewrite
+// all of it, so every one of them has to clear. What comes back is only its FIRST member, for the two
+// places that can carry a single id — the impact preview's currentDealId and the audit row's recordId —
+// and it is always one of the deals the gate just cleared, never a deal nobody checked.
 async function gateEmailThreadAccess(req: any) {
   const thread = await getEmailThreadForMutation(req.tenantDb!, req.params.conversationId);
-  const boundDealIds = await resolveActiveBindingDealIdsForConversation(
+  const boundDealIds = await resolveSourceDealIdsForConversation(
     req.tenantDb!,
     req.params.conversationId
   );
-  await assertCanMutateEmailThread(req.tenantDb!, thread, req.user!, { boundDealIds });
-  return { thread, boundDealId: boundDealIds[0] ?? null };
+  const grant = await assertCanMutateEmailThread(req.tenantDb!, thread, req.user!, { boundDealIds });
+  return { thread, boundDealId: boundDealIds[0] ?? null, grant };
 }
 
-// The thread payload, read for a caller who has already cleared gateEmailThreadAccess.
+// The thread payload, read for a caller who has already cleared gateEmailThreadAccess — as WIDE as the
+// reason they were admitted, and no wider.
 //
-// Deliberately NOT mailbox-scoped (no userId). Two things follow from that, and both are intended:
+// A caller admitted by DEAL WRITE ACCESS gets the unscoped read. Two things follow from that, and both
+// are intended:
 //
 //   1. It is what makes the feature reachable. Scoped, this read throws 403 for any caller who owns none
 //      of the thread's messages — on the way out of a mutation (rolling it back) and, worse, on the way
@@ -460,22 +464,35 @@ async function gateEmailThreadAccess(req: any) {
 //      versions of the same conversation. Pinned by a test — do not "fix" it silently in either
 //      direction.
 //
-// The caller's id goes in the OPTIONS object, not the userId slot. It is presentation only: the sync
-// stores one row per MAILBOX, so an unscoped read sees every real message once per participant, and
+// A caller admitted by MAILBOX OWNERSHIP ALONE stays scoped to their own rows, and that is the whole
+// point of the gate returning a grant. Path 1 needs exactly ONE stored row to pass, so on a conversation
+// filed under no deal at all anyone who received a single early message could read every tenant user's
+// copy of the entire conversation — later replies and forwards they were never on included. Nothing
+// justified the widening there: the justification is the DEAL (a collaborator already sees every
+// mailbox's copy on its Emails tab), and there was no deal. Scoped, they see their own mail, which is
+// what Outlook shows them anyway.
+//
+// It cannot 403 them: path 1 admitted them BECAUSE they own a message, so the scoped read always
+// matches at least that row and never reaches getEmailThread's empty-result branch.
+//
+// The caller's id ALSO goes in the OPTIONS object, and that slot is presentation only: the sync stores
+// one row per MAILBOX, so an unscoped read sees every real message once per participant, and
 // getEmailThread collapses those copies preferring the caller's own row (which carries their own
-// starred/archived state). Moving that id up into the userId slot would turn it back into a filter and
-// reinstate exactly the 403 this function exists to avoid.
+// starred/archived state). The two uses are independent — one decides which rows are legible, the other
+// which copy represents a message — so both are passed rather than one standing in for the other.
 //
 // There is deliberately NO way to hand getEmailThread a pre-resolved binding. It used to take the
 // gate's mutation context so the read did not resolve one twice — but that context is ONE mailbox's
 // binding, which is exactly what made a still-bound thread render as unassigned, and a post-mutation
 // refresh handed a pre-mutation context would report the deal the thread had just left. getEmailThread
 // now reads the conversation-wide binding itself, on every call, so neither trap exists to fall into.
-function readThreadForGatedCaller(req: any) {
+// The `binding` it reports is conversation-wide either way, so a scoped read still renders the
+// Reassign/Unassign controls.
+function readThreadForGatedCaller(req: any, grant: EmailThreadAccessGrant) {
   return getEmailThread(
     req.tenantDb!,
     req.params.conversationId,
-    undefined,
+    grant.via === "mailbox_owner" ? req.user!.id : undefined,
     req.user!.role,
     // NOTE: getEmailThread currently ignores both this and userRole. This closure is NOT what makes the
     // unscoped read safe — gateEmailThreadAccess is. Kept only so the signature stays uniform.
@@ -509,9 +526,9 @@ router.get("/thread/:conversationId", async (req, res, next) => {
       return;
     }
 
-    await gateEmailThreadAccess(req);
+    const { grant } = await gateEmailThreadAccess(req);
 
-    const thread = await readThreadForGatedCaller(req);
+    const thread = await readThreadForGatedCaller(req, grant);
     await req.commitTransaction!();
     res.json(thread);
   } catch (err) {
@@ -524,7 +541,7 @@ router.post("/thread/:conversationId/assign", async (req, res, next) => {
     const dealId = req.body.dealId as string | undefined;
     if (!dealId) throw new AppError(400, "dealId is required");
 
-    await gateEmailThreadAccess(req);
+    const { grant } = await gateEmailThreadAccess(req);
 
     await assertDealCollaboratorAccess(req.tenantDb!, dealId, req.user!);
 
@@ -538,7 +555,7 @@ router.post("/thread/:conversationId/assign", async (req, res, next) => {
       actingUserId: req.user!.id,
     });
 
-    const refreshedThread = await readThreadForGatedCaller(req);
+    const refreshedThread = await readThreadForGatedCaller(req, grant);
     await req.commitTransaction!();
     res.json({ success: true, thread: refreshedThread });
   } catch (err) {
@@ -551,7 +568,7 @@ router.post("/thread/:conversationId/reassign", async (req, res, next) => {
     const dealId = req.body.dealId as string | undefined;
     if (!dealId) throw new AppError(400, "dealId is required");
 
-    const { boundDealId } = await gateEmailThreadAccess(req);
+    const { boundDealId, grant } = await gateEmailThreadAccess(req);
 
     await assertDealCollaboratorAccess(req.tenantDb!, dealId, req.user!);
 
@@ -602,7 +619,7 @@ router.post("/thread/:conversationId/reassign", async (req, res, next) => {
       },
     });
 
-    const refreshedThread = await readThreadForGatedCaller(req);
+    const refreshedThread = await readThreadForGatedCaller(req, grant);
     await req.commitTransaction!();
     res.json({ success: true, preview, thread: refreshedThread });
   } catch (err) {
@@ -612,7 +629,7 @@ router.post("/thread/:conversationId/reassign", async (req, res, next) => {
 
 router.post("/thread/:conversationId/detach", async (req, res, next) => {
   try {
-    const { thread, boundDealId } = await gateEmailThreadAccess(req);
+    const { thread, boundDealId, grant } = await gateEmailThreadAccess(req);
 
     const detached = await detachConversationAcrossMailboxes(
       req.tenantDb!,
@@ -652,7 +669,7 @@ router.post("/thread/:conversationId/detach", async (req, res, next) => {
       });
     }
 
-    const refreshedThread = await readThreadForGatedCaller(req);
+    const refreshedThread = await readThreadForGatedCaller(req, grant);
     await req.commitTransaction!();
     res.json({ success: true, thread: refreshedThread });
   } catch (err) {

@@ -15,7 +15,7 @@ const emailServiceMocks = vi.hoisted(() => ({
   bindConversationToDealAcrossMailboxes: vi.fn(),
   detachConversationAcrossMailboxes: vi.fn(),
   previewThreadReassignmentImpact: vi.fn(),
-  resolveActiveBindingDealIdsForConversation: vi.fn(),
+  resolveSourceDealIdsForConversation: vi.fn(),
   assertCanMutateEmailThread: vi.fn(),
   conversationHasAnyMessage: vi.fn(),
 }));
@@ -71,7 +71,7 @@ vi.mock("../../../src/modules/email/service.js", async () => {
     bindConversationToDealAcrossMailboxes: emailServiceMocks.bindConversationToDealAcrossMailboxes,
     detachConversationAcrossMailboxes: emailServiceMocks.detachConversationAcrossMailboxes,
     previewThreadReassignmentImpact: emailServiceMocks.previewThreadReassignmentImpact,
-    resolveActiveBindingDealIdsForConversation: emailServiceMocks.resolveActiveBindingDealIdsForConversation,
+    resolveSourceDealIdsForConversation: emailServiceMocks.resolveSourceDealIdsForConversation,
     assertCanMutateEmailThread: emailServiceMocks.assertCanMutateEmailThread,
     conversationHasAnyMessage: emailServiceMocks.conversationHasAnyMessage,
   };
@@ -326,7 +326,7 @@ describe("email routes", () => {
       binding: null,
       emails: [],
     });
-    emailServiceMocks.resolveActiveBindingDealIdsForConversation.mockResolvedValue([]);
+    emailServiceMocks.resolveSourceDealIdsForConversation.mockResolvedValue([]);
     // detachConversationAcrossMailboxes REPORTS what it unfiled, and the route audits off that — a
     // conversation filed message-by-message from the assignment queue has real deal ids on the messages
     // and no binding at all. Defaulting to "nothing was filed" keeps the no-op case the no-op case; the
@@ -335,7 +335,10 @@ describe("email routes", () => {
       clearedMessageCount: 0,
       previousMessageDealIds: [],
     });
-    emailServiceMocks.assertCanMutateEmailThread.mockResolvedValue(undefined);
+    // The gate REPORTS which path admitted the caller, and the thread read widens on that answer.
+    // "bound_deal" is the default here because it is what every case below is about; the
+    // mailbox-owner branch (a SCOPED read) has its own case.
+    emailServiceMocks.assertCanMutateEmailThread.mockResolvedValue({ via: "bound_deal" });
     emailServiceMocks.conversationHasAnyMessage.mockResolvedValue(true);
     accessMocks.assertDealCollaboratorAccess.mockResolvedValue({ id: "deal-1", assignedRepId: "rep-1", sourceLeadId: null });
     accessMocks.assertLeadCollaboratorAccess.mockResolvedValue({ id: "lead-1", assignedRepId: "rep-1" });
@@ -1416,7 +1419,7 @@ describe("email routes", () => {
       binding: { id: "binding-1", dealId: "deal-1" },
       emails: [{ id: "email-1", userId: "someone-else" }],
     });
-    emailServiceMocks.resolveActiveBindingDealIdsForConversation.mockResolvedValue(["deal-1"]);
+    emailServiceMocks.resolveSourceDealIdsForConversation.mockResolvedValue(["deal-1"]);
     emailServiceMocks.getEmailThread.mockResolvedValue({
       binding: { id: "binding-1", dealId: "deal-1", dealName: "Deal One", confidence: "high", assignmentReason: "manual_thread_assignment" },
       preview: null,
@@ -1456,13 +1459,43 @@ describe("email routes", () => {
     });
   });
 
+  it("scopes the thread read to the caller when the gate admitted them by MAILBOX alone", async () => {
+    // The wiring half of the read-scope rule; the disclosure itself is asserted against real rows in
+    // thread-routes-permission.runtime.test.ts. What is pinned here is that the route takes the answer
+    // FROM the gate rather than re-deriving it — a second copy of "does this user own a message" in the
+    // route body would be free to drift from the one the gate actually admitted on.
+    emailServiceMocks.getEmailThreadForMutation.mockResolvedValue({
+      mailboxAccountId: "mailbox-1",
+      binding: null,
+      emails: [{ id: "email-1", userId: "director-1" }],
+    });
+    emailServiceMocks.resolveSourceDealIdsForConversation.mockResolvedValue([]);
+    emailServiceMocks.assertCanMutateEmailThread.mockResolvedValue({ via: "mailbox_owner" });
+    emailServiceMocks.getEmailThread.mockResolvedValue({ binding: null, preview: null, emails: [] });
+
+    await invokeRoute({
+      method: "get",
+      url: "/thread/conversation-1",
+      user: makeDirectorUser(),
+    });
+
+    expect(emailServiceMocks.getEmailThread).toHaveBeenCalledWith(
+      expect.any(Object),
+      "conversation-1",
+      "director-1",
+      "director",
+      expect.any(Function),
+      { viewerUserId: "director-1" }
+    );
+  });
+
   it("returns 403 when the gate rejects a user opening another user's email thread", async () => {
     emailServiceMocks.getEmailThreadForMutation.mockResolvedValue({
       mailboxAccountId: "mailbox-9",
       binding: null,
       emails: [{ id: "email-1", userId: "someone-else" }],
     });
-    emailServiceMocks.resolveActiveBindingDealIdsForConversation.mockResolvedValue([]);
+    emailServiceMocks.resolveSourceDealIdsForConversation.mockResolvedValue([]);
     emailServiceMocks.assertCanMutateEmailThread.mockRejectedValue(
       Object.assign(new Error("You can only modify your own email threads"), { statusCode: 403 })
     );
@@ -1525,7 +1558,7 @@ describe("email routes", () => {
       emails: [{ id: "email-1", userId: "director-1" }],
     });
     dealServiceMocks.getDealById.mockResolvedValue({ id: "deal-1" });
-    emailServiceMocks.resolveActiveBindingDealIdsForConversation.mockResolvedValue([]);
+    emailServiceMocks.resolveSourceDealIdsForConversation.mockResolvedValue([]);
     emailServiceMocks.getEmailThread.mockResolvedValue({ binding: { id: "binding-1", dealId: "deal-1" }, preview: null, emails: [] });
 
     const { req, res } = await invokeRoute({
@@ -1584,7 +1617,7 @@ describe("email routes", () => {
       binding: null,
       emails: [{ id: "email-1", userId: "someone-else" }],
     });
-    emailServiceMocks.resolveActiveBindingDealIdsForConversation.mockResolvedValue([]);
+    emailServiceMocks.resolveSourceDealIdsForConversation.mockResolvedValue([]);
     emailServiceMocks.assertCanMutateEmailThread.mockRejectedValue(
       Object.assign(new Error("You can only modify your own email threads"), { statusCode: 403 })
     );
@@ -1610,7 +1643,7 @@ describe("email routes", () => {
       emails: [{ id: "email-1", userId: "director-1" }],
     });
     dealServiceMocks.getDealById.mockResolvedValue({ id: "deal-2" });
-    emailServiceMocks.resolveActiveBindingDealIdsForConversation.mockResolvedValue(["deal-1"]);
+    emailServiceMocks.resolveSourceDealIdsForConversation.mockResolvedValue(["deal-1"]);
     emailServiceMocks.previewThreadReassignmentImpact.mockResolvedValue({
       affectedMessageCount: 2,
       affectedMessageIds: ["email-1", "email-2"],
@@ -1679,7 +1712,7 @@ describe("email routes", () => {
       binding: { id: "binding-1", dealId: "deal-1" },
       emails: [{ id: "email-1", userId: "director-1" }, { id: "email-2", userId: "rep-9" }],
     });
-    emailServiceMocks.resolveActiveBindingDealIdsForConversation.mockResolvedValue(["deal-1"]);
+    emailServiceMocks.resolveSourceDealIdsForConversation.mockResolvedValue(["deal-1"]);
     emailServiceMocks.getEmailThread.mockResolvedValue({ binding: null, preview: null, emails: [] });
     // What the real service reports back: the messages were on deal-1 too, and both were unfiled.
     emailServiceMocks.detachConversationAcrossMailboxes.mockResolvedValue({
@@ -1756,7 +1789,7 @@ describe("email routes", () => {
       binding: null,
       emails: [{ id: "email-1", userId: "director-1" }],
     });
-    emailServiceMocks.resolveActiveBindingDealIdsForConversation.mockResolvedValue([]);
+    emailServiceMocks.resolveSourceDealIdsForConversation.mockResolvedValue([]);
     emailServiceMocks.getEmailThread.mockResolvedValue({ binding: null, preview: null, emails: [] });
 
     await invokeRoute({
