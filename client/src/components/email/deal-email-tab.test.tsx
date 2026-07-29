@@ -72,6 +72,10 @@ const PICKED_TARGET: EmailAssociationTarget = {
   displayLabel: "TR-2026-0002 · Beta Roof",
 };
 
+// What the stub picker hands back. A `let` so one case can model a picker widened past deals without
+// every other case having to care; reset to PICKED_TARGET in beforeEach.
+let pickedTarget: EmailAssociationTarget = PICKED_TARGET;
+
 // Stands in for the real picker, and deliberately reproduces its ONE behavioural contract: close on a
 // resolved onAssign, stay open (surfacing the error inline) when it rejects. Tests that assert the
 // error path would otherwise pass against a tab that swallowed failures.
@@ -98,7 +102,7 @@ vi.mock("./email-manual-assignment-dialog", () => ({
         <button
           type="button"
           onClick={() => {
-            onAssign(PICKED_TARGET).then(
+            onAssign(pickedTarget).then(
               () => onOpenChange(false),
               () => undefined
             );
@@ -181,16 +185,39 @@ let container: HTMLElement | null = null;
 // What useDealEmails currently answers with. A `let` rather than a fixed mockReturnValue so a test can
 // model a refetch LANDING (the rows change) and not merely that refetch was called.
 let dealEmails: Email[] = [];
+// How many pages the fake server currently holds. Defaults to 1, which makes the mock behave exactly as
+// the old fixed mockReturnValue did for every test that does not care about paging. A test that lowers
+// it mid-run models the real thing: the collection shrank, and the page the tab is sitting on no longer
+// exists — the server answers it with an EMPTY list and a lower totalPages.
+let serverPageCount = 1;
+// Every page useDealEmails was asked for, in order. The tab's page state is internal, so this is how a
+// test sees which page it settled on.
+let requestedPages: number[] = [];
+
+/** The page the tab has settled on. (Array.prototype.at is above this workspace's TS lib target.) */
+function lastRequestedPage() {
+  return requestedPages[requestedPages.length - 1];
+}
 
 function mount(emails: Email[] = [makeEmail()]) {
   dealEmails = emails;
-  mocks.useDealEmailsMock.mockImplementation(() => ({
-    emails: dealEmails,
-    pagination: { page: 1, limit: 20, total: dealEmails.length, totalPages: 1 },
-    loading: false,
-    error: null,
-    refetch: mocks.refetchMock,
-  }));
+  mocks.useDealEmailsMock.mockImplementation((_dealId: string, filters: { page?: number } = {}) => {
+    const requestedPage = filters.page ?? 1;
+    requestedPages.push(requestedPage);
+    const outOfRange = requestedPage > serverPageCount;
+    return {
+      emails: outOfRange ? [] : dealEmails,
+      pagination: {
+        page: requestedPage,
+        limit: 20,
+        total: dealEmails.length * serverPageCount,
+        totalPages: serverPageCount,
+      },
+      loading: false,
+      error: null,
+      refetch: mocks.refetchMock,
+    };
+  });
 
   container = document.createElement("div");
   document.body.appendChild(container);
@@ -267,6 +294,9 @@ function dialogDescription() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  serverPageCount = 1;
+  requestedPages = [];
+  pickedTarget = PICKED_TARGET;
   mocks.reassignEmailThreadMock.mockResolvedValue({ success: true });
   mocks.detachEmailThreadMock.mockResolvedValue({ success: true });
   mocks.associateEmailToEntityMock.mockResolvedValue({ success: true });
@@ -522,5 +552,138 @@ describe("DealEmailTab reassignment wiring", () => {
 
     expect(mocks.toastErrorMock).toHaveBeenCalledWith("You can only modify your own email threads");
     expect(mocks.refetchMock).not.toHaveBeenCalled();
+  });
+
+  // -----------------------------------------------------------------------------------------------
+  // Paging. Moving a conversation off this deal SHRINKS the collection, so the page the user is
+  // standing on can stop existing. Refetching it unchanged asks the server for a page past the end; it
+  // answers with an empty list and a lower totalPages, and EmailList takes its emails.length === 0
+  // early return BEFORE it renders the pager — leaving no control on screen to get back to page 1.
+  // -----------------------------------------------------------------------------------------------
+  async function goToLastPageOfThree() {
+    serverPageCount = 3;
+    mount();
+    act(() => findButton(/next/i)!.click());
+    act(() => findButton(/next/i)!.click());
+    expect(lastRequestedPage()).toBe(3);
+  }
+
+  it("clamps back into range when unassigning empties the last page", async () => {
+    await goToLastPageOfThree();
+    // The refetch LANDS: the conversation left this deal, so the server now holds two pages.
+    mocks.refetchMock.mockImplementation(() => {
+      serverPageCount = 2;
+    });
+
+    openRowAction(/unassign/i);
+    await flushAsync();
+    rerender();
+    await flushAsync();
+
+    expect(mocks.detachEmailThreadMock).toHaveBeenCalledWith("conv-1");
+    expect(lastRequestedPage()).toBe(2);
+    // The outcome, not the mechanism: the user is looking at a page with rows on it, not the dead-end
+    // empty state with no way back.
+    expect(container!.textContent).not.toContain("No emails linked to this deal yet.");
+    expect(container!.textContent).toContain("Page 2 of 2");
+  });
+
+  it("clamps back into range when REASSIGNING empties the last page", async () => {
+    // Same hole, same shrink, the other handler. Asserted separately because "fixed on one path,
+    // forgotten on the other" is the recurring shape of the bugs on this branch.
+    await goToLastPageOfThree();
+    mocks.refetchMock.mockImplementation(() => {
+      serverPageCount = 2;
+    });
+
+    openRowAction(/reassign/i);
+    await act(async () => {
+      findButton(/pick deal/i)!.click();
+    });
+    rerender();
+    await flushAsync();
+
+    expect(mocks.reassignEmailThreadMock).toHaveBeenCalledWith("conv-1", "deal-2");
+    expect(lastRequestedPage()).toBe(2);
+    expect(container!.textContent).not.toContain("No emails linked to this deal yet.");
+  });
+
+  it("leaves the page alone when the one being viewed is still in range", async () => {
+    // The reason this is a CLAMP and not a reset-to-1. Moving a conversation from page 1 is the common
+    // case by far, and an unconditional setPage(1) would remount the list and jump the scroll position
+    // every single time for no benefit. Sitting on page 2 of a still-three-page collection must not
+    // move the user either.
+    serverPageCount = 3;
+    mount();
+    act(() => findButton(/next/i)!.click());
+    expect(lastRequestedPage()).toBe(2);
+
+    openRowAction(/unassign/i);
+    await flushAsync();
+    rerender();
+    await flushAsync();
+
+    expect(lastRequestedPage()).toBe(2);
+    expect(container!.textContent).toContain("Page 2 of 3");
+  });
+
+  // -----------------------------------------------------------------------------------------------
+  // Reassigning to the deal the conversation is ALREADY on.
+  // -----------------------------------------------------------------------------------------------
+  it("does nothing when the picked deal is the one the conversation is already filed under", async () => {
+    // The picker lists every deal, this one included, and the server would happily answer 200 for a
+    // move to the same place — so the tab used to fire a request and toast "Conversation reassigned"
+    // for an operation that changed nothing. A no-op has to look like a no-op.
+    mount([makeEmail({ dealId: "deal-2" })]);
+    openRowAction(/reassign/i);
+
+    await act(async () => {
+      findButton(/pick deal/i)!.click();
+    });
+
+    expect(mocks.reassignEmailThreadMock).not.toHaveBeenCalled();
+    expect(mocks.associateEmailToEntityMock).not.toHaveBeenCalled();
+    expect(mocks.toastSuccessMock).not.toHaveBeenCalled();
+    expect(mocks.toastErrorMock).not.toHaveBeenCalled();
+    expect(mocks.refetchMock).not.toHaveBeenCalled();
+    // It still RESOLVES, so the picker closes rather than sitting open with no explanation.
+    expect(document.body.querySelector('[data-testid="assignment-dialog"]')).toBeNull();
+  });
+
+  it("still refuses a non-deal target whose id matches the conversation's current deal", async () => {
+    // The same-deal short-circuit has to sit BEHIND the entity-type check, not in front of it. A picker
+    // widened past deals could hand over a CONTACT whose id happens to equal the deal's — comparing ids
+    // first would wave it through as "no change" instead of refusing it, and the refusal is what stops a
+    // non-deal id reaching a deal-keyed route.
+    pickedTarget = {
+      assignedEntityType: "contact",
+      assignedEntityId: "deal-2",
+      assignedDealId: null,
+      displayLabel: "A contact, not a deal",
+    };
+    mount([makeEmail({ dealId: "deal-2" })]);
+    openRowAction(/reassign/i);
+
+    await act(async () => {
+      findButton(/pick deal/i)!.click();
+    });
+
+    expect(mocks.reassignEmailThreadMock).not.toHaveBeenCalled();
+    expect(mocks.toastErrorMock).toHaveBeenCalledWith("A conversation can only be reassigned to a deal.");
+    // Rejected, so the picker stays open with the reason rather than closing on a silent no-op.
+    expect(document.body.querySelector('[data-testid="assignment-dialog"]')).not.toBeNull();
+  });
+
+  it("still moves a conversation whose current deal is not the picked one", async () => {
+    // The other side of the short-circuit: a real move must not be mistaken for a no-op.
+    mount([makeEmail({ dealId: "deal-1" })]);
+    openRowAction(/reassign/i);
+
+    await act(async () => {
+      findButton(/pick deal/i)!.click();
+    });
+
+    expect(mocks.reassignEmailThreadMock).toHaveBeenCalledWith("conv-1", "deal-2");
+    expect(mocks.toastSuccessMock).toHaveBeenCalled();
   });
 });

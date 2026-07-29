@@ -78,6 +78,26 @@ export function DealEmailTab({ dealId, primaryContactEmail }: DealEmailTabProps)
     limit: 20,
   });
 
+  // CLAMP the page back into range whenever the collection shrinks under it.
+  //
+  // Reassigning or unassigning the last conversation on the last page takes a page off the end, and a
+  // refetch of the SAME page then asks the server for one that no longer exists: it answers an empty
+  // list and a lower totalPages, and EmailList takes its `emails.length === 0` early return before it
+  // renders the pager — so the user is left on a blank tab with no control to get back. The clamp turns
+  // that into a normal page.
+  //
+  // Deliberately a clamp and NOT setPage(1) on every move. Moving a conversation from page 1 is the
+  // common case by far, and resetting there would remount the list and jump the scroll position every
+  // time for no benefit. This fires only when the page currently being viewed is genuinely out of range.
+  //
+  // Keyed off `pagination`, not off the two handlers, so it covers both of them and anything else that
+  // shrinks the list — nothing has to remember to call it. `totalPages` is 0 before the first response
+  // lands, hence the floor of 1: page 1 is always legal.
+  useEffect(() => {
+    const lastPage = Math.max(1, pagination.totalPages);
+    if (page > lastPage) setPage(lastPage);
+  }, [page, pagination.totalPages]);
+
   // The thread of whatever row the picker is currently open for, read ONLY to tell the user how much
   // moves. `graphConversationId` is nullable and the thread routes are keyed on it, so a null one
   // means "no thread to size" and the hook is deliberately handed undefined rather than a fabricated
@@ -130,10 +150,20 @@ export function DealEmailTab({ dealId, primaryContactEmail }: DealEmailTabProps)
         if (target.assignedEntityType !== "deal") {
           throw new Error("A conversation can only be reassigned to a deal.");
         }
-        await reassignEmailThread(
-          reassignEmail.graphConversationId,
-          target.assignedDealId ?? target.assignedEntityId
-        );
+        const nextDealId = target.assignedDealId ?? target.assignedEntityId;
+        // Picking the deal the conversation is ALREADY on is a no-op, and has to look like one. The
+        // picker lists every deal including this one, and the server answers 200 for a move to the same
+        // place, so firing the request produced a "Conversation reassigned" toast and a refetch for
+        // something that changed nothing. Resolving (rather than throwing) closes the picker, which is
+        // the right outcome for "you asked for the state it is already in".
+        //
+        // Placed AFTER the entity-type check on purpose: a picker widened past deals could hand over a
+        // non-deal id that happens to match, and comparing ids first would wave it through instead of
+        // refusing it.
+        if (nextDealId === reassignEmail.dealId) {
+          return;
+        }
+        await reassignEmailThread(reassignEmail.graphConversationId, nextDealId);
         toast.success("Conversation reassigned");
       } else {
         await associateEmailToEntity(reassignEmail.id, target);
