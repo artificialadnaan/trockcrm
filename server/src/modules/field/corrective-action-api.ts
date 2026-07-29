@@ -1,4 +1,4 @@
-import { and, eq, inArray, isNull, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
 import {
@@ -6,6 +6,7 @@ import {
   fieldScorecards,
   files,
   scorecardCorrectiveActions,
+  scorecardCorrectiveActionEvents,
 } from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
 import { isCorrectiveActionOutstanding } from "@trock-crm/shared/types";
@@ -297,11 +298,32 @@ export async function submitCorrectiveActionResponse(
       // a DIFFERENT responder is a race loser and must get the conflict, not a phantom success.
       if (sameResponder) return { resolved: false };
     } else if (sameResponder) {
-      // The response-photo file_ids ALREADY linked to THIS item (corrective_action_id = item.id).
+      // The photos of the LATEST ATTEMPT, not every photo ever linked to this item.
+      //
+      // Once a rejected item can be resubmitted, an item accumulates one photo set per round. Comparing the
+      // aggregate against a retry's current-attempt ids can never match — the sizes differ by the earlier
+      // rounds — so a genuine idempotent retry of a successful rework would 409 and the client would discard
+      // uploads that did commit. Scope by the attempt's own event.
+      const latestSubmission = await db
+        .select({ id: scorecardCorrectiveActionEvents.id })
+        .from(scorecardCorrectiveActionEvents)
+        .where(
+          and(
+            eq(scorecardCorrectiveActionEvents.correctiveActionId, item.id),
+            eq(scorecardCorrectiveActionEvents.eventType, "submitted"),
+          ),
+        )
+        .orderBy(desc(scorecardCorrectiveActionEvents.seq))
+        .limit(1);
       const linked = await db
         .select({ fileId: fieldScorecardPhotos.fileId })
         .from(fieldScorecardPhotos)
-        .where(eq(fieldScorecardPhotos.correctiveActionId, item.id));
+        .where(
+          latestSubmission.length > 0
+            ? eq(fieldScorecardPhotos.correctiveActionEventId, latestSubmission[0].id)
+            // Pre-0202 rows carry no event id; the aggregate IS the single attempt for them.
+            : eq(fieldScorecardPhotos.correctiveActionId, item.id),
+        );
       const linkedIds = new Set(linked.map((r) => r.fileId));
       const suppliedIds = new Set(photoFileIds);
       const sameFileSet =

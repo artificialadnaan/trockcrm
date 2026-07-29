@@ -922,4 +922,53 @@ describe("submitCorrectiveActionResponse", () => {
     expect(submissions[1].photos.map((p) => p.caption)).toEqual(["attempt two"]);
   });
 
+
+  it("REGRESSION: an idempotent retry of a REWORK response succeeds instead of 409ing", async () => {
+    // The replay check compared the retry's photo ids against every photo ever linked to the item. Once a
+    // rejected item can be resubmitted, an item accumulates one set per round, so the sizes can never match
+    // and a genuine retry of a committed rework 409s — telling the client to discard uploads that DID land.
+    const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
+    const [item] = await getCorrectiveActionItems(tdb, scorecard.id);
+    const first = "dddddddd-0000-0000-0000-000000000001";
+    const second = "dddddddd-0000-0000-0000-000000000002";
+    await tdb.execute(sql`
+      INSERT INTO files (id, deal_id, client_upload_id, uploaded_by, description, is_active) VALUES
+        (${first}, ${DEAL}, 'up-d1', ${USER}, 'attempt one', true),
+        (${second}, ${DEAL}, 'up-d2', ${USER}, 'attempt two', true)
+    `);
+    await seedUploadLedger(scorecard.id, [first, second]);
+    const responder = { userId: USER, name: "Pat Manager", email: "pat@trockgc.com" };
+
+    await submitCorrectiveActionResponse(tdb, {
+      scorecardId: scorecard.id,
+      itemId: item.id,
+      comment: "First try.",
+      respondedBy: responder,
+      photoFileIds: [first],
+      office: TEST_OFFICE,
+    });
+
+    // Approver sends it back; the responder answers again with NEW evidence.
+    await tdb.execute(sql`UPDATE scorecard_corrective_actions SET status = 'rejected' WHERE id = ${item.id}`);
+    await submitCorrectiveActionResponse(tdb, {
+      scorecardId: scorecard.id,
+      itemId: item.id,
+      comment: "Second try.",
+      respondedBy: responder,
+      photoFileIds: [second],
+      office: TEST_OFFICE,
+    });
+
+    // The client never saw the response and retries the SAME rework submission.
+    await expect(
+      submitCorrectiveActionResponse(tdb, {
+        scorecardId: scorecard.id,
+        itemId: item.id,
+        comment: "Second try.",
+        respondedBy: responder,
+        photoFileIds: [second],
+        office: TEST_OFFICE,
+      }),
+    ).resolves.toMatchObject({ resolved: false });
+  });
 });
