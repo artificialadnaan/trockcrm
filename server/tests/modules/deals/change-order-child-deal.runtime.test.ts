@@ -352,20 +352,26 @@ describe("CO CRUD on the child-deal model (counted exactly once across child + l
     expect(Number(await sumDealChangeOrders(tdb, p))).toBeCloseTo(1999999999999.98, 2);
   });
 
-  it("a deductive (negative) CO subtracts cent-exactly — regression for addMoneyStrings' cross-source sign bug", async () => {
-    // Deliberately NON-.00 amounts: addMoneyStrings' old toCents added the fraction's magnitude with the
-    // WRONG sign for a negative intPart (e.g. "-300.25" toCents'd to -299.75, not -300.25), and BigInt("-0")
-    // collapsed to 0n so any negative total under $1 lost its sign entirely — both bugs are invisible on a
-    // whole-dollar (.00) amount, which is all the pre-existing sum tests used.
+  // Regression for addMoneyStrings' cross-source sign bug, split into three independently-observable cases
+  // (a single it() would let case 3 hide behind case 2's failure, and case 1 doesn't discriminate at all —
+  // see its own comment below). Deliberately NON-.00 amounts throughout: the old toCents added the
+  // fraction's magnitude with the WRONG sign for a negative intPart, and BigInt("-0") collapsed to 0n so
+  // any negative total under $1 lost its sign — both invisible on the whole-dollar (.00) amounts every
+  // pre-existing sum test used.
+  it("a deductive CO nets against an additive one on the SAME parent (does not discriminate the bug — Postgres nets same-source rows before addMoneyStrings ever sees them)", async () => {
     const p = U("e1030");
     await seedWonParent(p, "DFW-9-20030-aa", 300000);
     await createChangeOrderChildDeal(tdb, { parentDealId: p, signedDate: "2026-02-01", amount: "1000.50", createdBy: REP });
     await createChangeOrderChildDeal(tdb, { parentDealId: p, signedDate: "2026-03-01", amount: "-300.25", createdBy: REP });
     const sum = await sumDealChangeOrders(tdb, p);
-    expect(sum).toBe("700.25"); // exact string — a malformed "-499.-75"-style result wouldn't even parse
+    expect(sum).toBe("700.25");
     expect(Number(sum)).toBeCloseTo(700.25, 2);
+  });
 
-    // A net-negative total, and one under $1 in magnitude (the exact case where BigInt("-0") swallows sign).
+  it("a net-negative total under $1 in magnitude round-trips through sumDealChangeOrders — the '-0' sign-collapse case", async () => {
+    // BigInt("-0") is 0n: the old toCents("-0.50") silently dropped the sign. Both COs are children of the
+    // same parent, so Postgres nets them to -0.50 (a single, negative childSum) BEFORE addMoneyStrings
+    // combines it with the (zero) legacySum — that combine step is where the old code lost the sign.
     const p2 = U("e1031");
     await seedWonParent(p2, "DFW-9-20031-aa", 300000);
     await createChangeOrderChildDeal(tdb, { parentDealId: p2, signedDate: "2026-02-01", amount: "200.00", createdBy: REP });
@@ -373,11 +379,13 @@ describe("CO CRUD on the child-deal model (counted exactly once across child + l
     const sum2 = await sumDealChangeOrders(tdb, p2);
     expect(sum2).toBe("-0.50");
     expect(Number(sum2)).toBeCloseTo(-0.5, 2);
+  });
 
-    // Cross-source combination (child sum + legacy sum) where the CHILD side alone is a magnitude-≥-$1
-    // negative with a nonzero fraction — the exact shape that trips the "wrong magnitude" defect
-    // independently of the "-0" sign-collapse one above: old toCents("-300.25") computed -299.75, not
-    // -300.25 (it added the fraction's magnitude with the wrong sign for a negative intPart).
+  it("a cross-source combination with a magnitude-≥-$1 negative operand round-trips — the wrong-magnitude case", async () => {
+    // Cross-source (child sum + legacy sum) where the CHILD side alone is a magnitude-≥-$1 negative with a
+    // nonzero fraction — the shape that trips the "wrong magnitude" defect independently of the "-0"
+    // sign-collapse case above: old toCents("-300.25") computed -299.75, not -300.25 (it added the
+    // fraction's magnitude with the wrong sign for a negative intPart).
     const p3 = U("e1033");
     await seedWonParent(p3, "DFW-9-20033-aa", 300000);
     await createChangeOrderChildDeal(tdb, { parentDealId: p3, signedDate: "2026-02-01", amount: "-300.25", createdBy: REP });
