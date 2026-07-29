@@ -1028,8 +1028,12 @@ function buildDealListOrder(
   // sets — so it must be TERMINAL-aware WITHOUT a stage-id round-trip. It reads the JOINED
   // pipeline_stage_config.slug (the row query left-joins it) plus the Bid Board mirror: a realized won/lost
   // deal keeps its preserved value and is NOT sunk as $0/on-hold even when its forecast date is far out,
-  // while an OPEN row still auto-parks a far-out close target (Codex P2). Tier is a binary >0 check, so the
-  // simpler best-estimate chain matches the stage-aware value's positivity for every classification.
+  // while an OPEN row still auto-parks a far-out close target (Codex P2). Tier is a binary non-zero check
+  // — and the two chains are non-zero on exactly the same rows (same four columns, same `> 0` candidate
+  // gating, same change-order branch; only the candidate ORDER differs) — so the simpler best-estimate
+  // chain tiers identically to the stage-aware value for every classification. A DEDUCTIVE change order
+  // is non-zero, so it stays in the top tier and is ordered by the column the user actually asked for;
+  // see the SIGN note on aliasedActiveNonZeroDealSortTierSql.
   const tier = aliasedActiveNonZeroDealSortTierSql(
     "deals",
     aliasedTerminalAwareEffectiveDealValueSql(
@@ -1092,10 +1096,16 @@ function buildPipelineStageCardsOrder(
   options: { prioritizeBillingAttention?: boolean } = {}
 ) {
   // Two-tier order: active, non-zero cards on top; on-hold / $0 cards sink to the
-  // bottom of the column. This is sort-only — every card still loads (the preview
-  // limit is the board's effective-all 1000), nothing is hidden. The tier uses the
-  // SAME column EFFECTIVE value the header sums (terminal-aware, far-future-zeroed for
-  // open stages), so an auto-held $0 card sinks exactly as it shows $0.
+  // bottom of the column. Sort-only in the sense that the WHERE set is unchanged — but NOT
+  // "nothing is hidden", as this comment used to claim on the strength of the 1000-card cap: 1000 is
+  // only the DRILL-DOWN mount's window. The ordinary board asks for 8 cards per column (useDealBoard's
+  // default previewLimit) and mobile-crm for 15, while the column header's count and total cover the
+  // whole column. So this tier decides what a user can actually SEE against an aggregate that counts
+  // everything. The tier uses the SAME column EFFECTIVE value the header sums (terminal-aware,
+  // far-future-zeroed for open stages), so an auto-held $0 card sinks exactly as it shows $0 — and a
+  // DEDUCTIVE change-order card is NON-zero, so it stays in the top tier and keeps its place in the
+  // created_at order instead of being pushed off the preview behind every held/$0 row, which would
+  // leave a header total the visible cards cannot account for.
   const tier = aliasedActiveNonZeroDealSortTierSql("deals", effectiveValueSql);
   // Sort before preview limiting so each column shows the actual newest cards,
   // not an arbitrary subset from a tied timestamp group.

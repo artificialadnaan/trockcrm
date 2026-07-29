@@ -231,3 +231,117 @@ describe("RepCommissionsPage", () => {
     await unmount(root);
   });
 });
+
+// A deductive change order books a NEGATIVE commission row (a claw-back). The server stopped dropping
+// it (reporting-service's UNION filter went `> 0` -> `<> 0`), so it now reaches this page — but the
+// summary above the list sized itself on the NET stage total and skipped any stage whose commission was
+// `<= 0`. For a period whose only activity is a claw-back that produced a flat contradiction: the deal
+// list showed the claw-back while the visualization above it said there had been no activity at all.
+describe("RepCommissionsPage — deductive change-order claw-back", () => {
+  function clawBackDashboard(over: Partial<typeof dashboard> = {}) {
+    return {
+      ...dashboard,
+      summary: { ...dashboard.summary, earned: -2000, inPipeline: 0, totalPotential: -2000, openDealCount: 0 },
+      // Only the Won stage carries activity, and it is negative. `percentOfTotal` is 0 on every row
+      // because the server divides by totalPotential and guards `> 0` — the page must not depend on it.
+      stageTotals: [
+        { stageKey: "won", stageName: "Won", commission: -2000, dealValue: -20000, dealCount: 1, percentOfTotal: 0 },
+        { stageKey: "contract", stageName: "Contract", commission: 0, dealValue: 0, dealCount: 0, percentOfTotal: 0 },
+        { stageKey: "estimate_sent", stageName: "Estimate Sent", commission: 0, dealValue: 0, dealCount: 0, percentOfTotal: 0 },
+        { stageKey: "estimating", stageName: "Estimating", commission: 0, dealValue: 0, dealCount: 0, percentOfTotal: 0 },
+        { stageKey: "opportunity", stageName: "Opportunity", commission: 0, dealValue: 0, dealCount: 0, percentOfTotal: 0 },
+      ],
+      deals: [
+        {
+          ...dashboard.deals[0]!,
+          dealId: "deal-deductive-co",
+          dealName: "Allen Sports Complex — CO #2",
+          dealValue: -20000,
+          commissionRate: 0.1,
+          commission: -2000,
+          deltaCommission: null,
+        },
+      ],
+      ...over,
+    };
+  }
+
+  const segments = (container: HTMLElement) =>
+    Array.from(container.querySelectorAll<HTMLElement>('[data-testid="commission-stage-segment"]'));
+
+  beforeEach(() => {
+    document.body.innerHTML = "";
+    mocks.apiMock.mockReset();
+    mocks.downloadTextFile.mockReset();
+  });
+
+  it("does NOT claim 'no commission activity' when the only activity is a claw-back", async () => {
+    mocks.apiMock.mockResolvedValue({ data: clawBackDashboard() });
+    const { container, root } = await renderPage();
+
+    expect(container.textContent).not.toContain("No commission activity yet");
+    // The list plainly shows the claw-back, so the summary above it must too.
+    expect(container.textContent).toContain("Allen Sports Complex — CO #2");
+    expect(container.textContent).toContain("-$2,000.00");
+    await unmount(root);
+  });
+
+  it("renders the claw-back as a signed segment — magnitude by width, sign by flag and label", async () => {
+    mocks.apiMock.mockResolvedValue({ data: clawBackDashboard() });
+    const { container, root } = await renderPage();
+
+    const bars = segments(container);
+    expect(bars).toHaveLength(1);
+    expect(bars[0]!.dataset.stage).toBe("won");
+    // Length can only encode magnitude: it is the ONLY non-zero stage, so it fills the bar...
+    expect(bars[0]!.style.width).toBe("100%");
+    // ...and the sign rides on the claw-back flag + the signed label, never on the width.
+    expect(bars[0]!.dataset.clawBack).toBe("true");
+    expect(bars[0]!.textContent).toContain("-$2.0K");
+    expect(bars[0]!.title).toBe("Won: -$2,000.00 (claw-back)");
+    await unmount(root);
+  });
+
+  it("sizes a mixed +/- period on MAGNITUDE so the claw-back is visible at its true size", async () => {
+    mocks.apiMock.mockResolvedValue({
+      data: clawBackDashboard({
+        summary: { ...dashboard.summary, earned: -2000, inPipeline: 8000, totalPotential: 6000, openDealCount: 1 },
+        stageTotals: [
+          { stageKey: "won", stageName: "Won", commission: -2000, dealValue: -20000, dealCount: 1, percentOfTotal: -33.3 },
+          { stageKey: "contract", stageName: "Contract", commission: 8000, dealValue: 533333, dealCount: 1, percentOfTotal: 133.3 },
+          { stageKey: "estimate_sent", stageName: "Estimate Sent", commission: 0, dealValue: 0, dealCount: 0, percentOfTotal: 0 },
+          { stageKey: "estimating", stageName: "Estimating", commission: 0, dealValue: 0, dealCount: 0, percentOfTotal: 0 },
+          { stageKey: "opportunity", stageName: "Opportunity", commission: 0, dealValue: 0, dealCount: 0, percentOfTotal: 0 },
+        ],
+      }),
+    });
+    const { container, root } = await renderPage();
+
+    const bars = segments(container);
+    expect(bars.map((bar) => bar.dataset.stage)).toEqual(["won", "contract"]);
+    // |−2000| / (2000 + 8000) = 20%, |8000| / 10000 = 80% — widths still fill the bar.
+    expect(bars[0]!.style.width).toBe("20%");
+    expect(bars[1]!.style.width).toBe("80%");
+    expect(bars[0]!.dataset.clawBack).toBe("true");
+    expect(bars[1]!.dataset.clawBack).toBeUndefined();
+    // The legend percentages come off the SAME magnitude basis, so bar and legend can't disagree.
+    expect(container.textContent).toContain("20% of total");
+    expect(container.textContent).toContain("80% of total");
+    await unmount(root);
+  });
+
+  it("keeps the empty state for a period with genuinely nothing in it", async () => {
+    mocks.apiMock.mockResolvedValue({
+      data: clawBackDashboard({
+        summary: { ...dashboard.summary, earned: 0, inPipeline: 0, totalPotential: 0, openDealCount: 0 },
+        stageTotals: dashboard.stageTotals.map((stage) => ({ ...stage, commission: 0, dealValue: 0, dealCount: 0, percentOfTotal: 0 })),
+        deals: [],
+      }),
+    });
+    const { container, root } = await renderPage();
+
+    expect(container.textContent).toContain("No commission activity yet");
+    expect(segments(container)).toHaveLength(0);
+    await unmount(root);
+  });
+});

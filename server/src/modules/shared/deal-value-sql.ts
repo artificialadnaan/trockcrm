@@ -476,9 +476,38 @@ export function aliasedActiveDealCountFilterSql(alias: string): SQL {
  * be the SAME value expression the surface displays/counts so the tier matches what
  * users see. (Effective-value chains already zero on-hold, but the explicit
  * reportable guard keeps the intent clear and also covers raw value chains.)
+ *
+ * SIGN — `<> 0`, not `> 0` (2026-07-29). This tier is a LIVENESS partition, not a value ranking: the
+ * population it exists to demote is DEAD rows — parked (on_hold) deals and deals carrying no value at
+ * all. It is deliberately the leading key so those stay out of the way under EVERY sort. A DEDUCTIVE
+ * change order (a live Won child deal whose awarded_amount is negative — see withChangeOrderBranch) is
+ * not in that population: it is a live deal with a real, non-zero value that the count and the total on
+ * the same screen both include. So the correct test is "has a value at all", and the original `> 0` was
+ * never a sign policy — it was shorthand for non-zero, correct only while every value in the system was
+ * non-negative, which is exactly the assumption the deductive-CO branch removes.
+ *
+ * PROVABLY INERT outside that one population. For any row that is NOT a change order, this file's value
+ * chains are `COALESCE(<candidates, each gated `> 0`>, 0)` wrapped in a hold-zeroing CASE, so they can
+ * never evaluate below zero; `<> 0` and `> 0` therefore select IDENTICALLY on every non-CO row. The only
+ * rows this operator can move are change-order children with a negative awarded_amount. (Pinned in
+ * tests/modules/shared/deal-sort-tier-sign.runtime.test.ts, which computes both operators side by side.)
+ *
+ * WHY NOT a sort-aware tier. The reviewed alternative was to keep `> 0` while the surface sorts by value
+ * and use `<> 0` otherwise, so a deduction could never top a money ranking. It was rejected on three
+ * counts. (1) A negative is the SMALLEST number, so a descending value sort already places it at the
+ * bottom of the live tier without any help — the intent is satisfied by the sort itself. (2) It is
+ * actively wrong for an ASCENDING value sort, where a deduction genuinely belongs first and the tier
+ * would force it last. (3) VISIBILITY: the board ships a tiny per-column preview (8 cards on web,
+ * 15 on mobile-crm) and the deals list paginates, while the column header count and total include every
+ * row — so filing a live deduction behind every on-hold and $0 row can push it off the visible page
+ * entirely, leaving a total the visible cards cannot account for. That is a card/aggregate
+ * reconciliation break, not an ordering preference. Keeping the tier a pure function of the row also
+ * keeps it in lockstep with its client twin, compareDrilldownDeals in
+ * client/src/pages/deals/deal-list-page.tsx, whose `tierOf` makes the same non-zero test. The two are a
+ * twin pair; change them together.
  */
 export function aliasedActiveNonZeroDealSortTierSql(alias: string, valueSql: SQL): SQL {
-  return sql`CASE WHEN ${aliasedReportableDealFilterSql(alias)} AND ${valueSql} > 0 THEN 0 ELSE 1 END`;
+  return sql`CASE WHEN ${aliasedReportableDealFilterSql(alias)} AND ${valueSql} <> 0 THEN 0 ELSE 1 END`;
 }
 
 /**

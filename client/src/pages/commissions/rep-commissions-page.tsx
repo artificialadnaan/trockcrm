@@ -226,29 +226,56 @@ function StageBadge({ stage }: { stage: CommissionStage }) {
   );
 }
 
+// A claw-back segment keeps its stage colour — the legend dot below still has to identify it — and
+// carries the sign as a white diagonal hatch over that colour. Sign cannot ride on LENGTH (length is
+// magnitude) and it cannot ride on HUE either: the page's deduction colour is brand-red, which is
+// already the Contract stage's fill, so a red segment would read as a stage rather than as a sign.
+// Texture is the free channel. The signed amount in the label, the `title`, and the signed money in the
+// legend below carry the same fact in text, so nothing depends on seeing the hatch.
+const CLAW_BACK_HATCH = "repeating-linear-gradient(45deg, rgba(255,255,255,0.55) 0px, rgba(255,255,255,0.55) 3px, transparent 3px, transparent 7px)";
+
 function PipelineBar({ stageTotals }: { stageTotals: StageTotal[] }) {
-  const total = stageTotals.reduce((sum, stage) => sum + stage.commission, 0);
-  if (total <= 0) {
+  const commissionOf = (stage: StageTotal) => (Number.isFinite(stage.commission) ? stage.commission : 0);
+  // MAGNITUDE, not the net sum. A deductive change order books a NEGATIVE stage commission, so a period
+  // can hold real activity whose NET is zero or below; sizing on the net both hid this bar behind "no
+  // activity yet" while the deal list below plainly showed the claw-back, and dropped every negative
+  // segment on the way. Identical to the old basis whenever every stage is positive — the server's
+  // totalPotential is exactly the sum of the stage commissions.
+  const magnitudeTotal = stageTotals.reduce((sum, stage) => sum + Math.abs(commissionOf(stage)), 0);
+  if (magnitudeTotal <= 0) {
     return <div className="flex h-14 items-center justify-center rounded-md bg-slate-100 text-xs text-slate-500">No commission activity yet</div>;
   }
+
+  const stageAt = (stageKey: CommissionStage, index: number) =>
+    stageTotals.find((item) => item.stageKey === stageKey) ?? EMPTY_DASHBOARD.stageTotals[index]!;
+  // Share-of-total is derived HERE off the same magnitude basis rather than read from the server's
+  // `percentOfTotal`, which divides by totalPotential behind a `> 0` guard and so reports 0% for every
+  // stage of a net-negative period — the bar would then say 100% beside a legend saying 0%. Same number
+  // as the server's for an all-positive period.
+  const sharePct = (stage: StageTotal) => (Math.abs(commissionOf(stage)) / magnitudeTotal) * 100;
 
   return (
     <div className="space-y-4">
       <div className="flex h-14 w-full overflow-hidden rounded-md ring-1 ring-slate-200">
         {STAGE_ORDER.map((stageKey, index) => {
-          const stage = stageTotals.find((item) => item.stageKey === stageKey) ?? EMPTY_DASHBOARD.stageTotals[index]!;
-          if (stage.commission <= 0) return null;
-          const widthPct = (stage.commission / total) * 100;
+          const stage = stageAt(stageKey, index);
+          const commission = commissionOf(stage);
+          if (commission === 0) return null;
+          const isClawBack = commission < 0;
+          const widthPct = sharePct(stage);
           return (
             <div
               key={stageKey}
-              style={{ width: `${widthPct}%` }}
+              data-testid="commission-stage-segment"
+              data-stage={stageKey}
+              {...(isClawBack ? { "data-claw-back": "true" } : {})}
+              style={{ width: `${widthPct}%`, ...(isClawBack ? { backgroundImage: CLAW_BACK_HATCH } : {}) }}
               className={`flex min-w-0 flex-col items-center justify-center ${STAGE_META[stageKey].bar} ${index > 0 ? "border-l border-white/40" : ""}`}
-              title={`${STAGE_META[stageKey].label}: ${money(stage.commission)}`}
+              title={`${STAGE_META[stageKey].label}: ${money(commission)}${isClawBack ? " (claw-back)" : ""}`}
             >
               {widthPct > 8 ? (
                 <>
-                  <p className="text-xs font-black text-white drop-shadow-sm">{money(stage.commission, "compact")}</p>
+                  <p className="text-xs font-black text-white drop-shadow-sm">{money(commission, "compact")}</p>
                   <p className="text-[9px] font-bold uppercase tracking-wide text-white/90">{widthPct.toFixed(0)}%</p>
                 </>
               ) : null}
@@ -258,15 +285,16 @@ function PipelineBar({ stageTotals }: { stageTotals: StageTotal[] }) {
       </div>
       <div className="grid grid-cols-2 gap-x-6 gap-y-3 sm:grid-cols-3 lg:grid-cols-5">
         {STAGE_ORDER.map((stageKey, index) => {
-          const stage = stageTotals.find((item) => item.stageKey === stageKey) ?? EMPTY_DASHBOARD.stageTotals[index]!;
+          const stage = stageAt(stageKey, index);
+          const commission = commissionOf(stage);
           return (
             <div key={stageKey} className="space-y-1">
               <div className="flex items-center gap-2">
                 <span className={`h-2.5 w-2.5 rounded-sm ${STAGE_META[stageKey].dot}`} />
                 <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-slate-500">{STAGE_META[stageKey].label}</p>
               </div>
-              <p className="text-lg font-black tabular-nums text-slate-950">{money(stage.commission)}</p>
-              <p className="text-[10px] font-semibold tabular-nums text-slate-500">{stage.percentOfTotal.toFixed(0)}% of total</p>
+              <p className={`text-lg font-black tabular-nums ${commission < 0 ? "text-brand-red" : "text-slate-950"}`}>{money(commission)}</p>
+              <p className="text-[10px] font-semibold tabular-nums text-slate-500">{sharePct(stage).toFixed(0)}% of total</p>
             </div>
           );
         })}
