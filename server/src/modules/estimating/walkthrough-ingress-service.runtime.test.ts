@@ -24,11 +24,12 @@ import {
   estimateSourceDocuments,
   files,
 } from "@trock-crm/shared/schema";
-import type { WalkthroughScopeRow } from "@trock-crm/shared/types";
+import type { WalkthroughIngressPayload, WalkthroughScopeRow } from "@trock-crm/shared/types";
 import { tenantSchemaSql } from "../../../tests/helpers/tenant-schema-from-drizzle.js";
 import {
   createWalkthroughContactSheetFile,
   createWalkthroughSourceDocument,
+  ingestWalkthrough,
   insertWalkthroughExtractions,
 } from "./walkthrough-ingress-service.js";
 
@@ -463,5 +464,137 @@ describe("insertWalkthroughExtractions", () => {
     );
     expect(probe.rows[0].is_null).toBe(true);
     expect(probe.rows[0].raw).toBeNull();
+  });
+});
+
+/** A wire-shaped payload, i.e. what trock-scope actually posts. Note the field names: contactSheet*
+ *  rather than the helpers' r2Key/bytes/mimeType — mapping between the two is `ingestWalkthrough`'s
+ *  job, and the only place the wire contract touches storage-shaped inputs. */
+function walkthroughPayload(
+  walkthroughId: string,
+  overrides: Partial<WalkthroughIngressPayload> = {}
+): WalkthroughIngressPayload {
+  return {
+    walkthroughId,
+    dealId: DEAL,
+    projectId: PROJECT,
+    contactSheetR2Key: `walkthroughs/${walkthroughId}/contact-sheet.jpg`,
+    contactSheetBucket: "trock-scope",
+    contactSheetBytes: 184320,
+    contactSheetMimeType: "image/jpeg",
+    siteLabel: "Unit 12B",
+    capturedAt: "2026-07-29T14:05:00Z",
+    userId: USER,
+    rows: [CARPENTRY_ROW],
+    ...overrides,
+  };
+}
+
+/** Whole-table row counts. The suite shares one PGlite instance, so "wrote nothing" can only be
+ *  asserted as "the counts did not move" — a per-deal filter would miss a row written under some
+ *  other deal id. */
+async function tableCounts() {
+  const result = await pg.query<{
+    files: string;
+    documents: string;
+    runs: string;
+    extractions: string;
+  }>(
+    `SELECT (SELECT count(*) FROM public.files) AS files,
+            (SELECT count(*) FROM public.estimate_source_documents) AS documents,
+            (SELECT count(*) FROM public.estimate_document_parse_runs) AS runs,
+            (SELECT count(*) FROM public.estimate_extractions) AS extractions`
+  );
+  return result.rows[0];
+}
+
+describe("ingestWalkthrough", () => {
+  it("builds the whole chain and links every link to the next", async () => {
+    const walkthroughId = U("33001");
+
+    const result = await ingestWalkthrough({
+      tenantDb,
+      payload: walkthroughPayload(walkthroughId),
+    });
+
+    expect(result.fileId).toEqual(expect.any(String));
+    expect(result.documentId).toEqual(expect.any(String));
+    expect(result.parseRunId).toEqual(expect.any(String));
+    expect(result.extractionIds).toHaveLength(1);
+
+    const [file] = await tenantDb.select().from(files).where(eq(files.id, result.fileId));
+    // The wire contract's contactSheet* fields landed on the storage-shaped columns — this mapping is
+    // the only thing that connects WalkthroughIngressPayload to the three narrow helper inputs.
+    expect(file.r2Key).toBe(`walkthroughs/${walkthroughId}/contact-sheet.jpg`);
+    expect(file.r2Bucket).toBe("trock-scope");
+    expect(file.fileSizeBytes).toBe(184320);
+    expect(file.mimeType).toBe("image/jpeg");
+
+    const [doc] = await tenantDb
+      .select()
+      .from(estimateSourceDocuments)
+      .where(eq(estimateSourceDocuments.id, result.documentId));
+
+    // LINK 1 — the document points at the file the first helper made.
+    expect(doc.fileId).toBe(result.fileId);
+    expect(doc.rootFileId).toBe(result.fileId);
+    expect(doc.storageKey).toBe(`walkthroughs/${walkthroughId}/contact-sheet.jpg`);
+    // LINK 2 — the document's ACTIVE run is the run this call created. A null here is the exact
+    // failure the transaction exists to prevent (workbench-service.ts:157 reads it as "never show
+    // any of this document's rows"), and it is a separate UPDATE from the document INSERT.
+    expect(doc.activeParseRunId).toBe(result.parseRunId);
+
+    const [run] = await tenantDb
+      .select()
+      .from(estimateDocumentParseRuns)
+      .where(eq(estimateDocumentParseRuns.id, result.parseRunId));
+    expect(run.documentId).toBe(result.documentId);
+
+    const [extraction] = await tenantDb
+      .select()
+      .from(estimateExtractions)
+      .where(eq(estimateExtractions.id, result.extractionIds[0]));
+
+    // LINK 3 — the extraction hangs off that document, and its metadata names that same run, which
+    // is what makes it visible (workbench-service.ts:153-172 compares the two).
+    expect(extraction.documentId).toBe(result.documentId);
+    expect(extraction.metadataJson.sourceParseRunId).toBe(result.parseRunId);
+    expect(extraction.rawLabel).toBe(CARPENTRY_ROW.rawLabel);
+    expect(extraction.metadataJson.sourceWalkthroughId).toBe(walkthroughId);
+  });
+
+  it("refuses an empty walkthrough without writing anything", async () => {
+    const before = await tableCounts();
+
+    await expect(
+      ingestWalkthrough({
+        tenantDb,
+        payload: walkthroughPayload(U("33002"), { rows: [] }),
+      })
+    ).rejects.toThrow("Walkthrough ingress requires at least one scope row");
+
+    // A document with no scope rows is a contact sheet nobody will ever look at plus a parse run
+    // nothing points to — so the guard fires BEFORE the first insert, not after.
+    expect(await tableCounts()).toEqual(before);
+  });
+
+  it("rolls the whole chain back when the last link fails", async () => {
+    const before = await tableCounts();
+
+    // confidence is numeric(5,2) (estimate-extractions.ts:40), so 12345 overflows at INSERT with a
+    // 22003 — a real SQL failure in the THIRD write, after the file, the document, the parse run and
+    // the activation UPDATE have all already succeeded.
+    await expect(
+      ingestWalkthrough({
+        tenantDb,
+        payload: walkthroughPayload(U("33003"), {
+          rows: [{ ...CARPENTRY_ROW, confidence: 12345 }],
+        }),
+      })
+    ).rejects.toThrow();
+
+    // Without the transaction this leaves an orphan file + a document whose extractions never
+    // arrived — permanently visible in the workbench documents list with nothing under it.
+    expect(await tableCounts()).toEqual(before);
   });
 });

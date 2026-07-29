@@ -15,7 +15,11 @@ import {
   estimateSourceDocuments,
   files,
 } from "@trock-crm/shared/schema";
-import type { WalkthroughScopeRow } from "@trock-crm/shared/types";
+import type {
+  WalkthroughIngressPayload,
+  WalkthroughIngressResult,
+  WalkthroughScopeRow,
+} from "@trock-crm/shared/types";
 import { resolvePricingScopeFromExtraction } from "./pricing-service.js";
 
 /** Same alias document-service.ts:6 uses. */
@@ -249,4 +253,81 @@ export async function insertWalkthroughExtractions({
     .returning({ id: estimateExtractions.id });
 
   return inserted.map((r) => r.id);
+}
+
+/**
+ * Compose the three links into one ingress, atomically.
+ *
+ * This is the only place `WalkthroughIngressPayload` — the wire contract trock-scope posts — meets the
+ * helpers' narrow, storage-shaped inputs. The rename is the point: `contactSheetR2Key`/`Bucket`/
+ * `Bytes`/`MimeType` become `r2Key`/`r2Bucket`/`bytes`/`mimeType`, so the helpers stay ignorant of
+ * where their bytes came from and the mapping is checked by the compiler rather than by convention.
+ *
+ * WHY A TRANSACTION (this module had none, and the rest of the module still has none): the chain is
+ * three writes deep and its middle link is itself two statements — INSERT the run, then UPDATE the
+ * document to point at it. Interrupt it anywhere and the deal is left with a `completed` document
+ * whose `activeParseRunId` is null, which workbench-service.ts:157 reads as "hide every row of this
+ * document, forever". Nothing sweeps that up; the document just sits in the documents list with
+ * nothing under it. Atomic is the only state worth having: the whole walkthrough, or none of it.
+ */
+export async function ingestWalkthrough({
+  tenantDb,
+  payload,
+}: {
+  tenantDb: TenantDb;
+  payload: WalkthroughIngressPayload;
+}): Promise<WalkthroughIngressResult> {
+  // Checked BEFORE the transaction opens, not inside it: a walkthrough with no scope rows would
+  // otherwise buy a contact-sheet file and a parse run to hold nothing, and the caller would get a
+  // success back for an ingress that delivered no estimating work.
+  if (payload.rows.length === 0) {
+    throw new Error("Walkthrough ingress requires at least one scope row");
+  }
+
+  return tenantDb.transaction(async (tx) => {
+    const fileId = await createWalkthroughContactSheetFile({
+      tenantDb: tx,
+      input: {
+        dealId: payload.dealId,
+        walkthroughId: payload.walkthroughId,
+        siteLabel: payload.siteLabel,
+        r2Key: payload.contactSheetR2Key,
+        r2Bucket: payload.contactSheetBucket,
+        bytes: payload.contactSheetBytes,
+        mimeType: payload.contactSheetMimeType,
+        userId: payload.userId,
+      },
+    });
+
+    const { documentId, parseRunId } = await createWalkthroughSourceDocument({
+      tenantDb: tx,
+      input: {
+        dealId: payload.dealId,
+        projectId: payload.projectId,
+        fileId,
+        walkthroughId: payload.walkthroughId,
+        siteLabel: payload.siteLabel,
+        capturedAt: payload.capturedAt,
+        mimeType: payload.contactSheetMimeType,
+        // The contact sheet's R2 key is the document's storage key: the document IS the file.
+        storageKey: payload.contactSheetR2Key,
+        bytes: payload.contactSheetBytes,
+        userId: payload.userId,
+      },
+    });
+
+    const extractionIds = await insertWalkthroughExtractions({
+      tenantDb: tx,
+      input: {
+        dealId: payload.dealId,
+        projectId: payload.projectId,
+        documentId,
+        parseRunId,
+        walkthroughId: payload.walkthroughId,
+        rows: payload.rows,
+      },
+    });
+
+    return { documentId, parseRunId, fileId, extractionIds };
+  });
 }
