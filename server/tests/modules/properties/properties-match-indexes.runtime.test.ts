@@ -53,7 +53,13 @@ beforeAll(async () => {
   // half-provisioned office must not break every other office's migration.
   await pg.exec(`CREATE SCHEMA office_empty;`);
   await pg.exec(MIGRATION);
-});
+  /**
+   * 60s, because this hook spins up PGlite, seeds three schemas and applies the real migration —
+   * about 9.7 seconds on its own, against vitest's 10-second default. Under normal parallel CI load it
+   * crossed the line and vitest aborted all seven tests before any of them ran, which surfaces as a
+   * whole suite failing for no visible reason. It is the setup that is slow, not the assertions.
+   */
+}, 60_000);
 
 afterAll(async () => {
   await pg?.close?.();

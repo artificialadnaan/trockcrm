@@ -419,7 +419,16 @@ export default function ProspectScreen() {
     // While correcting, the rep's typing WINS — otherwise the override control would open fields whose
     // contents are then ignored in favour of the address they are correcting.
     if (!correctingAddress && address?.address && address.city && address.state && address.zip) {
-      return address;
+      /**
+       * Even a COMPLETE geocode carries coordinates derived from the fix.
+       *
+       * This early return skipped the coarse check below entirely — the third route by which a
+       * position already judged too inaccurate reached the stored property. `usableFix` refused the raw
+       * fix and `geocodeFallback` refused Mapbox's echo of it, and then this path handed them over
+       * anyway because the ADDRESS happened to be complete. Completeness of the text says nothing about
+       * the accuracy of the point.
+       */
+      return coarse ? { ...address, lat: null, lng: null } : address;
     }
     const typed = {
       address: manualAddress.trim(),
