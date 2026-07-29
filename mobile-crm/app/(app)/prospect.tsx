@@ -29,6 +29,7 @@ import {
   planContact,
   describeMatch,
   isPositionTooCoarse,
+  offersCompanyFallback,
   saveAnnouncement,
   submitBlockedReason,
   type CapturedAddress,
@@ -1162,25 +1163,14 @@ export default function ProspectScreen() {
                 >
                   <Text style={styles.primaryText}>Find this property</Text>
                 </Pressable>
-                {/* GPS IS NOT ALWAYS THE POINT.
-                    Half the types here — call, voicemail, meeting — happen nowhere near the building,
-                    and routing them through a location lookup makes a rep in a truck wait on a fix
-                    they do not need and cannot use. The company path is offered from the start rather
-                    than only after a failed or rejected match. */}
-                <Pressable
-                  testID="prospect-skip-location"
-                  onPress={() => setRejectedMatches(true)}
-                  accessibilityRole="button"
-                  style={styles.linkBtn}
-                >
-                  <Text style={styles.linkText}>Not at a property — attach to a company</Text>
-                </Pressable>
               </>
             ) : location.state.status === "locating" || runMatch.isPending ? (
-              <View style={styles.centerRow}>
-                <ActivityIndicator color={theme.color.brandRed} />
-                <Text style={styles.help}>Finding where you are…</Text>
-              </View>
+              <>
+                <View style={styles.centerRow}>
+                  <ActivityIndicator color={theme.color.brandRed} />
+                  <Text style={styles.help}>Finding where you are…</Text>
+                </View>
+              </>
             ) : location.state.status === "denied" ? (
               /* Denied is NOT retryable in-app — a retry button here does nothing, which reads as
                  broken. Say where the switch actually is, and keep the manual path open. */
@@ -1202,6 +1192,44 @@ export default function ProspectScreen() {
                   <Text style={styles.secondaryText}>Try again</Text>
                 </Pressable>
               </>
+            ) : null}
+
+            {/* GPS IS NOT ALWAYS THE POINT — and that has to hold WHILE the fix is being acquired.
+                Half the types here — call, voicemail, meeting — happen nowhere near the building, and
+                routing them through a location lookup makes a rep in a truck wait on a fix they do not
+                need and cannot use. The argument was already written above; the layout contradicted it.
+
+                This lived INSIDE the `idle` branch, so the one moment it was unreachable was the
+                twelve-second `locating` window: the spinner replaced the whole card, the retry belongs
+                to `unavailable`, and the company fallback further down is gated on conditions none of
+                which are true while a fix is in flight. For twelve seconds the only way out was to
+                leave the screen and lose the capture — in the exact scene this feature exists for: a
+                door, one bar, GPS confused by a metal roof.
+
+                It RESETS the location as well as choosing the fallback. Setting `rejectedMatches`
+                alone opened the company path but left `status === "locating"`, which is a term in
+                `saveBlocked` — so the rep could pick a company and still not save until the deadline
+                expired. Abandoning the fix and moving on is one intention, so it is one control.
+
+                Not shown once candidates are on screen: the match list carries its own "None of these
+                — attach to a company", and two links a line apart saying the same thing is its own
+                defect. */}
+            {offersCompanyFallback({
+              rejectedMatches,
+              locationStatus: location.state.status,
+              matchPending: runMatch.isPending,
+            }) ? (
+              <Pressable
+                testID="prospect-skip-location"
+                onPress={() => {
+                  location.reset();
+                  setRejectedMatches(true);
+                }}
+                accessibilityRole="button"
+                style={styles.linkBtn}
+              >
+                <Text style={styles.linkText}>Not at a property — attach to a company</Text>
+              </Pressable>
             ) : null}
 
             {coarse ? (
