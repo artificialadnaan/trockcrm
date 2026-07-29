@@ -25,6 +25,15 @@ interface EmailListProps {
    */
   onReassign?: (email: Email) => void;
   onUnassign?: (email: Email) => void;
+  /**
+   * Fired when the thread view opened from this list moves a conversation off, or onto, a deal.
+   *
+   * This list swaps ITSELF for EmailThreadView rather than routing to it, so the component that owns
+   * the email query never unmounts and its data goes stale behind the thread view. A consumer whose
+   * list is scoped to one deal must pass its refetch here or a move made in the thread view is
+   * invisible until the tab is left and re-entered.
+   */
+  onThreadChanged?: () => void;
 }
 
 export function EmailList({
@@ -36,6 +45,7 @@ export function EmailList({
   emptyMessage = "No emails yet",
   onReassign,
   onUnassign,
+  onThreadChanged,
 }: EmailListProps) {
   const [selectedEmail, setSelectedEmail] = useState<Email | null>(null);
   const [manualDialogOpen, setManualDialogOpen] = useState(false);
@@ -69,6 +79,7 @@ export function EmailList({
       <EmailThreadView
         conversationId={selectedEmail.graphConversationId}
         onBack={() => setSelectedEmail(null)}
+        onThreadChanged={onThreadChanged}
       />
     );
   }

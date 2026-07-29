@@ -30,6 +30,16 @@ import { UNASSIGN_CONFIRMATION, UNASSIGN_SUCCESS } from "./email-unassign-copy";
 interface EmailThreadViewProps {
   conversationId: string;
   onBack: () => void;
+  /**
+   * Fired after this view moves the conversation to another deal or off one entirely.
+   *
+   * Needed because this view is rendered IN PLACE of the list that opened it (email-list.tsx) rather
+   * than on its own route, so the list's owner — DealEmailTab and its useDealEmails — never unmounts
+   * and never refetches. Without this, detaching here left the conversation still listed under the
+   * deal the moment the user pressed Back: the same stale-list symptom the row action's refetch
+   * exists to prevent, produced on the more prominent of the two buttons.
+   */
+  onThreadChanged?: () => void;
 }
 
 type AssignmentMode = "assign" | "reassign";
@@ -231,7 +241,7 @@ function ThreadAssignmentCard({
   );
 }
 
-export function EmailThreadView({ conversationId, onBack }: EmailThreadViewProps) {
+export function EmailThreadView({ conversationId, onBack, onThreadChanged }: EmailThreadViewProps) {
   const { thread, loading, error, setThread, refetch } = useEmailThread(conversationId);
   const [dialogMode, setDialogMode] = useState<AssignmentMode | null>(null);
   const [manualReassignEmailId, setManualReassignEmailId] = useState<string | null>(null);
@@ -251,6 +261,8 @@ export function EmailThreadView({ conversationId, onBack }: EmailThreadViewProps
       setThread(result.thread);
       setDialogMode(null);
       toast.success(dialogMode === "reassign" ? "Thread reassigned" : "Thread assigned to deal");
+      // The conversation has moved deals, so the list behind this view is now wrong in both directions.
+      onThreadChanged?.();
     } catch (err: unknown) {
       toast.error(err instanceof Error ? err.message : "Failed to save thread assignment");
     } finally {
@@ -271,6 +283,7 @@ export function EmailThreadView({ conversationId, onBack }: EmailThreadViewProps
       const result = await detachEmailThread(conversationId);
       setThread(result.thread);
       toast.success(UNASSIGN_SUCCESS);
+      onThreadChanged?.();
     } catch (err: unknown) {
       toast.error(err instanceof Error ? err.message : "Failed to detach thread");
     } finally {

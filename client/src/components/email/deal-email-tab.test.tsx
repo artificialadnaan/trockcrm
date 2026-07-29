@@ -42,6 +42,12 @@ vi.mock("./graph-auth-banner", () => ({
   GraphAuthBanner: () => null,
 }));
 
+// EmailThreadView renders for real in the thread-view test below, and its assignment dialog calls
+// useDeals unconditionally (the hook runs whether or not the dialog is open).
+vi.mock("@/hooks/use-deals", () => ({
+  useDeals: () => ({ deals: [], loading: false }),
+}));
+
 vi.mock("./email-compose-dialog", () => ({
   EmailComposeDialog: () => null,
 }));
@@ -113,9 +119,13 @@ function makeEmail(overrides: Partial<Email> = {}): Email {
   };
 }
 
-function makeThread(messageCount: number, conversationId: string | null = "conv-1"): EmailThread {
+function makeThread(
+  messageCount: number,
+  conversationId: string | null = "conv-1",
+  binding: EmailThread["binding"] = null
+): EmailThread {
   return {
-    binding: null,
+    binding,
     preview: null,
     emails: Array.from({ length: messageCount }).map((_, index) =>
       makeEmail({ id: `thread-${index}`, graphConversationId: conversationId })
@@ -125,15 +135,19 @@ function makeThread(messageCount: number, conversationId: string | null = "conv-
 
 let root: Root | null = null;
 let container: HTMLElement | null = null;
+// What useDealEmails currently answers with. A `let` rather than a fixed mockReturnValue so a test can
+// model a refetch LANDING (the rows change) and not merely that refetch was called.
+let dealEmails: Email[] = [];
 
 function mount(emails: Email[] = [makeEmail()]) {
-  mocks.useDealEmailsMock.mockReturnValue({
-    emails,
-    pagination: { page: 1, limit: 20, total: emails.length, totalPages: 1 },
+  dealEmails = emails;
+  mocks.useDealEmailsMock.mockImplementation(() => ({
+    emails: dealEmails,
+    pagination: { page: 1, limit: 20, total: dealEmails.length, totalPages: 1 },
     loading: false,
     error: null,
     refetch: mocks.refetchMock,
-  });
+  }));
 
   container = document.createElement("div");
   document.body.appendChild(container);
@@ -142,6 +156,14 @@ function mount(emails: Email[] = [makeEmail()]) {
     root!.render(<DealEmailTab dealId="deal-1" />);
   });
   return container;
+}
+
+// Re-runs DealEmailTab so it re-reads the hook. Stands in for the state update the real useDealEmails
+// performs when its refetch resolves — EmailList's own selectedEmail survives it, exactly as in the app.
+function rerender() {
+  act(() => {
+    root!.render(<DealEmailTab dealId="deal-1" />);
+  });
 }
 
 // Matched on the aria-label rather than an exact string so a wording tweak in EmailRow (which this
@@ -202,6 +224,7 @@ beforeEach(() => {
     refetch: vi.fn(),
     setThread: vi.fn(),
   });
+  mocks.refetchMock.mockImplementation(() => {});
   vi.spyOn(window, "confirm").mockReturnValue(true);
 });
 
@@ -299,7 +322,7 @@ describe("DealEmailTab reassignment wiring", () => {
     expect(dialogDescription()).not.toMatch(/Moves \d+/);
     // The associate route this falls back to is mailbox-owner-only, unlike the thread routes, so the
     // copy must not promise a collaborator a move the server will refuse.
-    expect(dialogDescription()).toContain("only be moved by the mailbox that received them");
+    expect(dialogDescription()).toContain("only be moved by the mailbox they belong to");
 
     await act(async () => {
       findButton(/pick deal/i)!.click();
@@ -335,6 +358,104 @@ describe("DealEmailTab reassignment wiring", () => {
     expect(mocks.toastErrorMock).toHaveBeenCalledWith("You can only modify your own email threads");
     expect(mocks.refetchMock).not.toHaveBeenCalled();
     expect(document.body.querySelector('[data-testid="assignment-dialog"]')).not.toBeNull();
+  });
+
+  it("refetches the deal list after a detach made from the THREAD VIEW, not just the row action", async () => {
+    // EmailList swaps ITSELF for EmailThreadView, so DealEmailTab never unmounts and useDealEmails
+    // never refetches on its own. Before onThreadChanged existed, detaching here left the conversation
+    // still listed under the deal the instant the user pressed Back — the same stale list the row
+    // action's refetch prevents, on the button people are far more likely to reach for.
+    mocks.useEmailThreadMock.mockReturnValue({
+      thread: makeThread(4, "conv-1", {
+        id: "binding-1",
+        mailboxAccountId: "mbx-1",
+        contactId: null,
+        contactName: null,
+        companyId: null,
+        companyName: null,
+        propertyId: null,
+        propertyName: null,
+        leadId: null,
+        leadName: null,
+        dealId: "deal-1",
+        dealName: "Old Deal",
+        projectId: null,
+        projectName: null,
+        confidence: "high",
+        assignmentReason: "manual_thread_assignment",
+      }),
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      setThread: vi.fn(),
+    });
+    // Model the refetch actually landing: the conversation has left this deal, so the next read of the
+    // deal's emails returns nothing.
+    mocks.refetchMock.mockImplementation(() => {
+      dealEmails = [];
+    });
+
+    mount();
+
+    // Click the row itself (not its overflow menu) to open the thread view in place.
+    const row = container!.querySelector<HTMLElement>(".cursor-pointer");
+    expect(row).not.toBeNull();
+    act(() => row!.click());
+
+    const detachButton = findButton(/detach/i);
+    expect(detachButton).not.toBeNull();
+    await act(async () => {
+      detachButton!.click();
+    });
+
+    expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining("assignment queue"));
+    expect(mocks.detachEmailThreadMock).toHaveBeenCalledWith("conv-1");
+    expect(mocks.refetchMock).toHaveBeenCalled();
+
+    // …and the list the user comes back to is genuinely empty, which is the thing that was broken.
+    rerender();
+    const backButton = findButton(/back/i);
+    expect(backButton).not.toBeNull();
+    act(() => backButton!.click());
+
+    expect(container!.textContent).toContain("No emails linked to this deal yet.");
+  });
+
+  it("does not refetch when a thread-view detach is declined at the confirmation", async () => {
+    vi.mocked(window.confirm).mockReturnValue(false);
+    mocks.useEmailThreadMock.mockReturnValue({
+      thread: makeThread(4, "conv-1", {
+        id: "binding-1",
+        mailboxAccountId: "mbx-1",
+        contactId: null,
+        contactName: null,
+        companyId: null,
+        companyName: null,
+        propertyId: null,
+        propertyName: null,
+        leadId: null,
+        leadName: null,
+        dealId: "deal-1",
+        dealName: "Old Deal",
+        projectId: null,
+        projectName: null,
+        confidence: "high",
+        assignmentReason: "manual_thread_assignment",
+      }),
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      setThread: vi.fn(),
+    });
+    mount();
+
+    act(() => container!.querySelector<HTMLElement>(".cursor-pointer")!.click());
+    await act(async () => {
+      findButton(/detach/i)!.click();
+    });
+
+    expect(mocks.detachEmailThreadMock).not.toHaveBeenCalled();
+    expect(mocks.refetchMock).not.toHaveBeenCalled();
   });
 
   it("surfaces a server permission denial on unassign as a readable toast", async () => {

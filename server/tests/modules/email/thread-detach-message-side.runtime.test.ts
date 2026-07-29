@@ -30,7 +30,8 @@ const USER_COLLAB = U("a03");
 const USER_REP = U("a05");
 const MBX_OWNER = U("e01"), MBX_SECOND = U("e02"), MBX_COLLAB = U("e03");
 const OFFICE_DALLAS = U("0f1");
-const DEAL_OLD = U("d01");
+const DEAL_OLD = U("d01"), DEAL_NEW = U("d02");
+const COMPANY_ACME = U("b01");
 const CONV = "conv-detach-message-side";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -188,6 +189,25 @@ beforeEach(async () => {
     )
   `);
 
+  // Third and fourth hand-rolled islands: a sibling message filed to a COMPANY makes the rollup refresh
+  // that table, and the company rollup's own predicate reaches into leads.
+  await tdb.execute(sql`
+    CREATE TABLE companies (
+      id uuid PRIMARY KEY,
+      name text,
+      email_count integer NOT NULL DEFAULT 0,
+      last_email_at timestamptz
+    )
+  `);
+  await tdb.execute(sql`
+    CREATE TABLE leads (
+      id uuid PRIMARY KEY,
+      company_id uuid,
+      email_count integer NOT NULL DEFAULT 0,
+      last_email_at timestamptz
+    )
+  `);
+
   await tdb.execute(sql`
     INSERT INTO users (id, email, display_name, role, office_id) VALUES
       (${USER_OWNER},  'owner@example.com',  'Owner',        'rep', ${OFFICE_DALLAS}),
@@ -203,8 +223,10 @@ beforeEach(async () => {
   `);
   await tdb.execute(sql`
     INSERT INTO deals (id, name, assigned_rep_id, office_code, email_count, last_email_at)
-    VALUES (${DEAL_OLD}, 'Old Deal', ${USER_REP}, 'DAL', 2, '2026-07-02T00:00:00Z')
+    VALUES (${DEAL_OLD}, 'Old Deal', ${USER_REP}, 'DAL', 2, '2026-07-02T00:00:00Z'),
+           (${DEAL_NEW}, 'New Deal', ${USER_REP}, 'DAL', 0, NULL)
   `);
+  await tdb.execute(sql`INSERT INTO companies (id, name) VALUES (${COMPANY_ACME}, 'Acme')`);
   // One conversation in TWO mailboxes, filed on the deal the way bindThreadToDeal leaves it: both the
   // legacy deal_id column AND the assigned_entity_* pair, since the deal-tab predicate is an OR over
   // the two and clearing only one of them would leave the mail on the tab.
@@ -311,6 +333,53 @@ describe("thread detach — the message side", () => {
       nextDealId: null,
       detached: true,
     });
+  });
+
+  it("picks a DETERMINISTIC deal for the audit recordId when the conversation spans two", async () => {
+    // record_id is the key this audit row is looked up BY, so it cannot depend on which row the planner
+    // happened to return first. Ordered by sent_at then id, matching previewThreadReassignmentImpact,
+    // so the OLDEST message's deal wins every time.
+    await tdb.execute(sql`DELETE FROM email_thread_bindings`);
+    await tdb.execute(sql`
+      UPDATE emails SET deal_id = ${DEAL_NEW}, assigned_entity_id = ${DEAL_NEW}
+      WHERE graph_message_id = 'm2'
+    `);
+
+    await postDetach(mailboxOwnerUser);
+
+    const rows = await auditRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].record_id).toBe(DEAL_OLD);
+    expect(rows[0].full_row).toMatchObject({ previousMessageDealIds: [DEAL_OLD, DEAL_NEW] });
+  });
+
+  it("returns an IGNORED copy to the queue rather than leaving it hidden", async () => {
+    // Documented consequence of the blanket clear. Leaving one copy 'ignored' would hide it from the
+    // very surface the detach is sending the conversation to.
+    await tdb.execute(sql`UPDATE emails SET assignment_status = 'ignored' WHERE graph_message_id = 'm2'`);
+
+    await postDetach(collaboratorUser);
+
+    expect(await assignmentQueueMessageIds()).toEqual(["m1", "m2"]);
+  });
+
+  it("clears a sibling filed to a COMPANY, and reports no deal to audit for it", async () => {
+    // The other documented consequence: assigned_entity_type is not deal-only, so a conversation-scoped
+    // unfile takes company/lead/property associations with it. The audit fallback only recovers DEAL
+    // ids, so a conversation filed solely to a company is cleared with no app-level audit row — pinned
+    // here so that gap is a known one rather than a surprise.
+    await tdb.execute(sql`DELETE FROM email_thread_bindings`);
+    await tdb.execute(sql`
+      UPDATE emails
+      SET deal_id = NULL, assigned_entity_type = 'company', assigned_entity_id = ${COMPANY_ACME}
+      WHERE graph_conversation_id = ${CONV}
+    `);
+
+    await postDetach(mailboxOwnerUser);
+
+    const rows = await messageAssignmentRows();
+    expect(rows.every((row) => row.assigned_entity_type === null && row.assigned_entity_id === null)).toBe(true);
+    expect(await auditRows()).toHaveLength(0);
   });
 
   it("writes no audit row when there was genuinely nothing filed", async () => {

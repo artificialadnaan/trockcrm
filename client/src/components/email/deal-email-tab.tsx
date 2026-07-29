@@ -55,7 +55,7 @@ function describeReassignImpact(email: Email | null, messageCount: number | null
   if (!email.graphConversationId) {
     return (
       "This message isn't part of a tracked conversation — only it will move, not a whole thread. " +
-      "Single messages can only be moved by the mailbox that received them."
+      "Single messages can only be moved by the mailbox they belong to."
     );
   }
   if (messageCount === null) {
@@ -170,6 +170,10 @@ export function DealEmailTab({ dealId, primaryContactEmail }: DealEmailTabProps)
         emptyMessage="No emails linked to this deal yet."
         onReassign={(email) => setReassignEmail(email)}
         onUnassign={(email) => void handleUnassign(email)}
+        // The thread view renders in place of this list, so a move made in there has to invalidate the
+        // same query the row actions invalidate — otherwise pressing Back shows the conversation still
+        // filed under this deal.
+        onThreadChanged={refetch}
       />
 
       <EmailManualAssignmentDialog

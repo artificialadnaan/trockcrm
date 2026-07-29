@@ -942,12 +942,26 @@ export async function bindConversationToDealAcrossMailboxes(
  *     association is independent and drives the contact's own Emails tab. It is also not in the
  *     deal-tab predicate, so leaving it cannot keep a message on the deal.
  *
- * KNOWN RESIDUE, deliberately not fixed here: the `activities` row backAssociate wrote for each
- * message still carries source_entity_type='deal' / source_entity_id=<deal>, so the deal's ACTIVITY
- * tab keeps showing the email even though its Emails tab no longer does. Both columns are NOT NULL
- * (shared/src/schema/tenant/activities.ts), so there is no "unfiled" value to write — representing
- * this needs either a nullable source or deleting history, which is a schema decision for the
- * activities module rather than something to improvise inside a detach.
+ * THE CLEAR IS BLANKET, and two consequences of that are deliberate rather than incidental:
+ *   - A sibling message in this conversation filed to a COMPANY, LEAD or PROPERTY (assigned_entity_type
+ *     is not deal-only) loses that association too. Right for a conversation-scoped unfile — the user
+ *     asked for the thread to stop being filed, not for it to stop being filed under one deal while
+ *     staying under a company — but it is a wider blast radius than "unassign from this deal" sounds.
+ *     Note the audit fallback below only recovers DEAL ids, so a conversation filed solely to a company
+ *     or lead is cleared with no app-level audit row.
+ *   - An 'ignored' message flips back to 'unassigned' and so reappears in the queue. Also right: the
+ *     conversation is being deliberately put back for someone to file, and leaving one copy ignored
+ *     would hide it from the very surface this detach is sending it to.
+ *
+ * KNOWN RESIDUE, deliberately not fixed here: the `activities` row backAssociate wrote for each message
+ * still points at the deal, so the deal's ACTIVITY tab keeps showing the email even though its Emails
+ * tab no longer does. The fix would be cheap — that tab filters on activities.deal_id (or lead_id when
+ * the deal has a source_lead_id; see modules/activities/service.ts), both nullable, and
+ * touchpoint_trigger is AFTER INSERT only (migrations/0001_initial.sql) so an UPDATE cannot corrupt
+ * touchpoint counts. It is deferred because nulling deal_id leaves source_entity_type='deal' and
+ * source_entity_id=<deal> asserting the opposite, and those two ARE NOT NULL: reconciling that needs a
+ * real representation of an unfiled activity, which belongs to the activities module and not to a
+ * detach improvising one.
  *
  * NOT atomic by construction any more. It used to be a single UPDATE; it is now four statements
  * (read stat targets, clear bindings, clear messages, recompute rollups), so a throw part-way through
@@ -974,7 +988,11 @@ export async function detachConversationAcrossMailboxes(
       contactId: emails.contactId,
     })
     .from(emails)
-    .where(eq(emails.graphConversationId, providerConversationId));
+    .where(eq(emails.graphConversationId, providerConversationId))
+    // Ordered for the same reason previewThreadReassignmentImpact is: previousMessageDealIds[0] becomes
+    // the audit row's recordId — the key that row is looked up BY — and a thread spanning two deals with
+    // no binding would otherwise pick whichever the planner returned first.
+    .orderBy(sql`${emails.sentAt} ASC`, sql`${emails.id} ASC`);
 
   const previousStatTargets = [];
   for (const email of messageRows) {
