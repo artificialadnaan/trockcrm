@@ -707,75 +707,111 @@ export async function assertCanMutateEmailThread(
 }
 
 /**
- * Every mailbox account holding a copy of this conversation. A binding is keyed on
- * (mailbox_account_id, provider, provider_conversation_id), so a conversation that reached two
- * mailboxes has TWO bindings. Rebinding or detaching only the first message's mailbox would strand the
- * other on the old deal — the user would move the thread and still see it on the deal they moved it from.
+ * Every mailbox account holding a MESSAGE from this conversation, restricted to mailboxes with an
+ * active connection. The inner join to user_graph_tokens does that filtering inherently — a
+ * participant with no connected mailbox simply has no row to join to, rather than needing a
+ * per-user try/catch keyed off an HTTP status code. A binding is keyed on (mailbox_account_id,
+ * provider, provider_conversation_id), so a conversation that reached two mailboxes has TWO
+ * bindings — see bindConversationToDealAcrossMailboxes / detachConversationAcrossMailboxes below.
  */
 export async function resolveMailboxAccountIdsForConversation(
   tenantDb: TenantDb,
   providerConversationId: string
 ): Promise<string[]> {
   const rows = await tenantDb
-    .selectDistinct({ userId: emails.userId })
+    .selectDistinct({ id: userGraphTokens.id })
     .from(emails)
+    .innerJoin(
+      userGraphTokens,
+      and(eq(userGraphTokens.userId, emails.userId), eq(userGraphTokens.status, "active"))
+    )
     .where(eq(emails.graphConversationId, providerConversationId));
 
-  const ids = await Promise.all(
-    rows.map(async (row: { userId: string }) => {
-      try {
-        return await resolveMailboxAccountIdForCrmUser(tenantDb, row.userId);
-      } catch (err) {
-        // A participant with no connected mailbox (the "Connect mailbox first" 409) can't strand
-        // anything of their own — skip them rather than failing the whole rebind/detach. Any other
-        // error (DB outage, transport failure, etc.) must propagate: swallowing it here would silently
-        // drop a mailbox from the result and let the rebind proceed over the surviving subset — the
-        // exact stranded-binding bug this function exists to fix.
-        if (err instanceof AppError && err.statusCode === 409) return null;
-        throw err;
-      }
-    })
-  );
-  return Array.from(new Set(ids.filter((id): id is string => Boolean(id))));
+  return rows.map((row) => row.id);
 }
 
-/** Rebind the conversation to `dealId` in EVERY mailbox that holds it. */
+/**
+ * Every mailbox account with a currently-ACTIVE binding for this conversation. A binding can outlive
+ * every message it once covered (e.g. the messages were purged or never fully synced), so this is
+ * NOT redundant with resolveMailboxAccountIdsForConversation above — bind and detach both need the
+ * union of the two sets, or they'd disagree about what "every mailbox holding it" means.
+ */
+async function resolveMailboxAccountIdsWithActiveBindingForConversation(
+  tenantDb: TenantDb,
+  providerConversationId: string
+): Promise<string[]> {
+  const rows = await tenantDb
+    .selectDistinct({ mailboxAccountId: emailThreadBindings.mailboxAccountId })
+    .from(emailThreadBindings)
+    .where(
+      and(
+        eq(emailThreadBindings.provider, "microsoft_graph"),
+        eq(emailThreadBindings.providerConversationId, providerConversationId),
+        sql`${emailThreadBindings.detachedAt} IS NULL`
+      )
+    );
+  return rows.map((row) => row.mailboxAccountId);
+}
+
+/**
+ * Rebind the conversation to `dealId` in every mailbox that holds it (by message or by an existing
+ * active binding). Partial-failure safety across the sequential per-mailbox binds below comes from
+ * the per-request tenant transaction (middleware/tenant.ts) wrapping the whole request — a caller
+ * outside that context (a worker, a script) must open its own transaction.
+ */
 export async function bindConversationToDealAcrossMailboxes(
   tenantDb: TenantDb,
   input: { providerConversationId: string; dealId: string; actingUserId: string }
-) {
-  const mailboxAccountIds = await resolveMailboxAccountIdsForConversation(
+): Promise<void> {
+  const messageMailboxIds = await resolveMailboxAccountIdsForConversation(
     tenantDb,
     input.providerConversationId
   );
-  const results = [];
+  const boundMailboxIds = await resolveMailboxAccountIdsWithActiveBindingForConversation(
+    tenantDb,
+    input.providerConversationId
+  );
+  const mailboxAccountIds = Array.from(new Set([...messageMailboxIds, ...boundMailboxIds]));
+
+  // bindThreadToDeal does a real per-mailbox read (getActiveThreadBinding) then write, so each mailbox
+  // has to go sequentially rather than fan out in a Promise.all.
   for (const mailboxAccountId of mailboxAccountIds) {
-    results.push(
-      await bindThreadToDeal(tenantDb, {
-        mailboxAccountId,
-        providerConversationId: input.providerConversationId,
-        dealId: input.dealId,
-        actingUserId: input.actingUserId,
-      })
-    );
+    await bindThreadToDeal(tenantDb, {
+      mailboxAccountId,
+      providerConversationId: input.providerConversationId,
+      dealId: input.dealId,
+      actingUserId: input.actingUserId,
+    });
   }
-  return { mailboxAccountIds, results };
 }
 
-/** Detach the conversation in EVERY mailbox that holds it. */
+/**
+ * Detach every active binding for this conversation in one statement — deliberately NOT scoped to a
+ * mailbox derived from `emails`, so a binding whose mailbox has no surviving message rows is still
+ * caught. Atomic by construction (a single UPDATE), so partial-failure safety here doesn't depend on
+ * the caller's transaction the way the sequential binds above do; it still inherits the per-request
+ * tenant transaction (middleware/tenant.ts) for its place in the wider request, and a caller outside
+ * that context (a worker, a script) must open its own transaction.
+ */
 export async function detachConversationAcrossMailboxes(
   tenantDb: TenantDb,
   providerConversationId: string,
   actingUserId: string
-) {
-  const mailboxAccountIds = await resolveMailboxAccountIdsForConversation(
-    tenantDb,
-    providerConversationId
-  );
-  for (const mailboxAccountId of mailboxAccountIds) {
-    await detachThreadByConversation(tenantDb, mailboxAccountId, providerConversationId, actingUserId);
-  }
-  return { mailboxAccountIds };
+): Promise<void> {
+  await tenantDb
+    .update(emailThreadBindings)
+    .set({
+      detachedAt: new Date(),
+      updatedBy: actingUserId,
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(emailThreadBindings.provider, "microsoft_graph"),
+        eq(emailThreadBindings.providerConversationId, providerConversationId),
+        sql`${emailThreadBindings.detachedAt} IS NULL`
+      )
+    );
 }
 
 export async function previewThreadReassignmentImpact(
@@ -786,20 +822,37 @@ export async function previewThreadReassignmentImpact(
   }
 ) {
   // Counted across EVERY mailbox holding the conversation — the reassign moves all of them, so a
-  // per-mailbox count would understate the blast radius shown to the user.
-  // Ordered oldest-first (sent_at, then id to break ties) so currentDealId below is deterministic — now
-  // that the row set spans every mailbox, an unordered pick could land on any of the mailboxes' deals,
-  // and this value feeds the audit entry a later task writes.
+  // per-mailbox count would understate the blast radius shown to the user. Ordered oldest-first
+  // (sent_at, then id to break ties) for stable affectedMessageIds across repeated calls.
   const messageRows = await tenantDb
     .select({ id: emails.id, dealId: emails.dealId })
     .from(emails)
     .where(eq(emails.graphConversationId, input.providerConversationId))
     .orderBy(sql`${emails.sentAt} ASC`, sql`${emails.id} ASC`);
 
+  // currentDealId comes from the BINDING, not a message row: backAssociateStoredMessagesForBinding
+  // writes emails.deal_id scoped to ONE mailbox's messages at a time (eq(emails.userId, mailboxUserId)),
+  // so a mailbox that was never bound can sit at deal_id = NULL even while another mailbox is actively
+  // bound. Reading the oldest message's deal_id would then report null instead of the real current deal
+  // whenever that older copy happens to be the unbound one. Ordered by mailbox_account_id so two
+  // disagreeing bindings still answer stably.
+  const [currentBinding] = await tenantDb
+    .select({ dealId: emailThreadBindings.dealId })
+    .from(emailThreadBindings)
+    .where(
+      and(
+        eq(emailThreadBindings.provider, "microsoft_graph"),
+        eq(emailThreadBindings.providerConversationId, input.providerConversationId),
+        sql`${emailThreadBindings.detachedAt} IS NULL`
+      )
+    )
+    .orderBy(emailThreadBindings.mailboxAccountId)
+    .limit(1);
+
   return {
     affectedMessageCount: messageRows.length,
     affectedMessageIds: messageRows.map((row) => row.id),
-    currentDealId: messageRows[0]?.dealId ?? null,
+    currentDealId: currentBinding?.dealId ?? null,
     nextDealId: input.nextDealId,
   };
 }

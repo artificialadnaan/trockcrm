@@ -2,6 +2,8 @@ import { beforeEach, afterEach, describe, expect, it } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
 import { sql } from "drizzle-orm";
+import { emails, emailThreadBindings, activities, userGraphTokens } from "@trock-crm/shared/schema";
+import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
 import {
   resolveMailboxAccountIdsForConversation,
   bindConversationToDealAcrossMailboxes,
@@ -11,15 +13,12 @@ import {
 
 const U = (s: string) => `00000000-0000-0000-0000-${s.padStart(12, "0")}`;
 // USER_C is a third participant on the conversation with NO user_graph_tokens row (no connected
-// mailbox) — used to pin the swallow half of the catch in resolveMailboxAccountIdsForConversation.
+// mailbox) — used to pin the join's inherent skip of a mailbox-less participant.
 const USER_A = U("a01"), USER_B = U("b01"), USER_C = U("c01");
 // "m" is not a valid hex digit, so U("m0a")/U("m0b") would not be valid UUID literals — use hex-safe
 // suffixes instead.
 const MBX_A = U("e0a"), MBX_B = U("e0b");
 const DEAL_OLD = U("d001"), DEAL_NEW = U("d002");
-// The oldest seeded message lives on a THIRD deal, distinct from DEAL_OLD, so the oldest-first
-// ordering in previewThreadReassignmentImpact is actually exercised rather than being unverified.
-const DEAL_OLDEST = U("d000");
 const CONV = "conv-multi-mailbox-1";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -29,68 +28,13 @@ let pg: PGlite;
 beforeEach(async () => {
   pg = new PGlite();
   tdb = drizzle(pg);
-  await tdb.execute(sql`
-    CREATE TABLE emails (
-      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-      graph_message_id varchar(500) NOT NULL,
-      graph_conversation_id varchar(500),
-      direction varchar(20) NOT NULL DEFAULT 'inbound',
-      from_address varchar(255) NOT NULL DEFAULT 'a@example.com',
-      to_addresses text[] NOT NULL DEFAULT '{}',
-      cc_addresses text[],
-      subject varchar(1000),
-      body_preview varchar(500),
-      body_html text,
-      has_attachments boolean NOT NULL DEFAULT false,
-      is_starred boolean NOT NULL DEFAULT false,
-      archived_at timestamptz,
-      deleted_at timestamptz,
-      contact_id uuid,
-      deal_id uuid,
-      assigned_entity_type varchar(20),
-      assigned_entity_id uuid,
-      assignment_status varchar(20) NOT NULL DEFAULT 'assigned',
-      assignment_confidence varchar(20),
-      assignment_ambiguity_reason varchar(255),
-      ai_suggestions jsonb,
-      thread_binding_id uuid,
-      internet_message_id varchar(1000),
-      user_id uuid NOT NULL,
-      sent_at timestamptz NOT NULL DEFAULT now(),
-      synced_at timestamptz NOT NULL DEFAULT now()
-    )
-  `);
-  await tdb.execute(sql`
-    CREATE TABLE email_thread_bindings (
-      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-      mailbox_account_id uuid NOT NULL,
-      provider varchar(50) NOT NULL,
-      provider_conversation_id varchar(500),
-      normalized_subject varchar(500),
-      participant_fingerprint varchar(500),
-      deal_id uuid,
-      project_id uuid,
-      binding_source varchar(32) NOT NULL DEFAULT 'manual',
-      confidence varchar(16) NOT NULL DEFAULT 'high',
-      assignment_reason varchar(64),
-      provisional_until timestamptz,
-      created_by uuid, updated_by uuid,
-      created_at timestamptz NOT NULL DEFAULT now(),
-      updated_at timestamptz NOT NULL DEFAULT now(),
-      detached_at timestamptz
-    )
-  `);
-  // resolveMailboxAccountIdForCrmUser / resolveMailboxUserId both read public.user_graph_tokens:
-  // (user_id, status='active') -> id is the mailbox account id, and the reverse lookup by id -> user_id.
-  await tdb.execute(sql`
-    CREATE TABLE user_graph_tokens (
-      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-      user_id uuid NOT NULL,
-      status varchar(20) NOT NULL DEFAULT 'active'
-    )
-  `);
-  // bindThreadToDeal -> backAssociateStoredMessagesForBinding looks up the deal and writes
-  // email-stat columns back onto it.
+
+  // emails / email_thread_bindings / activities / user_graph_tokens come straight from the real Drizzle
+  // definitions (#677 helper) rather than hand-rolled DDL, so column types/enums/NOT NULL/defaults can't
+  // silently drift from prod. deals stays a hand-rolled island — same pattern as
+  // tests/modules/tasks/task-sort.runtime.test.ts — since we only need a handful of columns off it and
+  // don't want to stand up the full company/property/lead graph.
+  await pg.exec(tenantSchemaSql("public", [emails, emailThreadBindings, activities, userGraphTokens]));
   await tdb.execute(sql`
     CREATE TABLE deals (
       id uuid PRIMARY KEY,
@@ -101,56 +45,32 @@ beforeEach(async () => {
       last_email_at timestamptz
     )
   `);
-  // backAssociateStoredMessagesForBinding upserts one activity per reassigned message.
-  await tdb.execute(sql`
-    CREATE TABLE activities (
-      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-      type varchar(50) NOT NULL,
-      responsible_user_id uuid NOT NULL,
-      performed_by_user_id uuid,
-      source_entity_type varchar(20) NOT NULL,
-      source_entity_id uuid NOT NULL,
-      company_id uuid,
-      property_id uuid,
-      lead_id uuid,
-      deal_id uuid,
-      contact_id uuid,
-      email_id uuid,
-      subject varchar(500),
-      body text,
-      outcome varchar(100),
-      next_step text,
-      next_step_due_at timestamptz,
-      duration_minutes integer,
-      occurred_at timestamptz NOT NULL DEFAULT now(),
-      created_at timestamptz NOT NULL DEFAULT now()
-    )
-  `);
 
   await tdb.execute(sql`
-    INSERT INTO user_graph_tokens (id, user_id, status) VALUES
-      (${MBX_A}, ${USER_A}, 'active'),
-      (${MBX_B}, ${USER_B}, 'active')
+    INSERT INTO user_graph_tokens (id, user_id, access_token, refresh_token, token_expires_at, scopes) VALUES
+      (${MBX_A}, ${USER_A}, 'x', 'x', now(), '{}'),
+      (${MBX_B}, ${USER_B}, 'x', 'x', now(), '{}')
   `);
   await tdb.execute(sql`
-    INSERT INTO deals (id) VALUES (${DEAL_OLD}), (${DEAL_NEW}), (${DEAL_OLDEST})
+    INSERT INTO deals (id) VALUES (${DEAL_OLD}), (${DEAL_NEW})
   `);
   // The same conversation landed in BOTH mailboxes, bound to the wrong deal in each. Distinct sent_at
-  // values (oldest first: m1, m2, m3) with the oldest message on its own deal exercise the
-  // oldest-first ordering in previewThreadReassignmentImpact instead of leaving it to random uuid tie-
-  // breaking.
+  // values (oldest first: m1, m2, m3) keep affectedMessageIds ordering deterministic.
   await tdb.execute(sql`
-    INSERT INTO emails (graph_message_id, graph_conversation_id, deal_id, user_id, sent_at) VALUES
-      ('m1', ${CONV}, ${DEAL_OLDEST}, ${USER_A}, '2026-07-01T00:00:00Z'),
-      ('m2', ${CONV}, ${DEAL_OLD}, ${USER_A}, '2026-07-02T00:00:00Z'),
-      ('m3', ${CONV}, ${DEAL_OLD}, ${USER_B}, '2026-07-03T00:00:00Z')
+    INSERT INTO emails
+      (graph_message_id, graph_conversation_id, direction, from_address, to_addresses, deal_id, assignment_status, user_id, sent_at)
+    VALUES
+      ('m1', ${CONV}, 'inbound', 'sender@example.com', '{}', ${DEAL_OLD}, 'assigned', ${USER_A}, '2026-07-01T00:00:00Z'),
+      ('m2', ${CONV}, 'inbound', 'sender@example.com', '{}', ${DEAL_OLD}, 'assigned', ${USER_A}, '2026-07-02T00:00:00Z'),
+      ('m3', ${CONV}, 'inbound', 'sender@example.com', '{}', ${DEAL_OLD}, 'assigned', ${USER_B}, '2026-07-03T00:00:00Z')
   `);
   await tdb.execute(sql`
-    INSERT INTO email_thread_bindings (mailbox_account_id, provider, provider_conversation_id, deal_id)
-    VALUES (${MBX_A}, 'microsoft_graph', ${CONV}, ${DEAL_OLD}),
-           (${MBX_B}, 'microsoft_graph', ${CONV}, ${DEAL_OLD})
+    INSERT INTO email_thread_bindings
+      (mailbox_account_id, provider, provider_conversation_id, deal_id, binding_source, confidence)
+    VALUES (${MBX_A}, 'microsoft_graph', ${CONV}, ${DEAL_OLD}, 'manual', 'high'),
+           (${MBX_B}, 'microsoft_graph', ${CONV}, ${DEAL_OLD}, 'manual', 'high')
   `);
-});
+}, 30000); // PGlite cold-start can exceed the default 10s under parallel runtime suites
 
 afterEach(async () => {
   await pg.close();
@@ -171,25 +91,17 @@ describe("multi-mailbox conversations", () => {
   });
 
   it("skips a participant with no connected mailbox, keeping the rest", async () => {
-    // A third participant on the SAME conversation with no user_graph_tokens row at all — the exact
-    // case the try/catch's 409 swallow exists for. This must not break the whole rebind; it should
-    // just be left out of the result, leaving MBX_A/MBX_B intact.
+    // A third participant on the SAME conversation with no user_graph_tokens row at all — the join has
+    // no row to match, so this must not break the whole rebind; it should just be left out of the
+    // result, leaving MBX_A/MBX_B intact.
     await tdb.execute(sql`
-      INSERT INTO emails (graph_message_id, graph_conversation_id, deal_id, user_id, sent_at) VALUES
-        ('m4', ${CONV}, ${DEAL_OLD}, ${USER_C}, '2026-07-04T00:00:00Z')
+      INSERT INTO emails
+        (graph_message_id, graph_conversation_id, direction, from_address, to_addresses, deal_id, assignment_status, user_id, sent_at)
+      VALUES
+        ('m4', ${CONV}, 'inbound', 'sender@example.com', '{}', ${DEAL_OLD}, 'assigned', ${USER_C}, '2026-07-04T00:00:00Z')
     `);
     const ids = await resolveMailboxAccountIdsForConversation(tdb, CONV);
     expect(ids.sort()).toEqual([MBX_A, MBX_B].sort());
-  });
-
-  it("propagates a non-409 mailbox-lookup error instead of silently dropping the mailbox", async () => {
-    // The only INTENTIONAL swallow is the "Connect mailbox first" 409 for a participant with no
-    // mailbox. Anything else — a DB outage, a transport failure — must not be swallowed: doing so
-    // would drop a mailbox from the result and let the rebind proceed over the surviving subset,
-    // silently reproducing the exact stranded-binding bug this module exists to fix. Dropping the
-    // table simulates that kind of failure (a non-AppError thrown from the lookup).
-    await tdb.execute(sql`DROP TABLE user_graph_tokens`);
-    await expect(resolveMailboxAccountIdsForConversation(tdb, CONV)).rejects.toThrow();
   });
 
   it("rebinds EVERY mailbox, stranding none", async () => {
@@ -199,10 +111,68 @@ describe("multi-mailbox conversations", () => {
     const rows = await activeBindings();
     expect(rows).toHaveLength(2);
     expect(rows.every((r: { deal_id: string }) => r.deal_id === DEAL_NEW)).toBe(true);
+
+    // The binding row isn't the user-visible symptom — a regression that moved both bindings but
+    // back-associated only one mailbox's messages would still pass the assertions above. Assert the
+    // MESSAGES actually moved and the deal's denormalized email stats reflect it.
+    const emailRows = await tdb.execute(sql`
+      SELECT deal_id FROM emails WHERE graph_conversation_id = ${CONV}
+    `);
+    const dealIds = (Array.isArray(emailRows) ? emailRows : emailRows.rows).map(
+      (r: { deal_id: string }) => r.deal_id
+    );
+    expect(dealIds).toHaveLength(3);
+    expect(dealIds.every((id: string) => id === DEAL_NEW)).toBe(true);
+
+    const dealRows = await tdb.execute(sql`SELECT email_count FROM deals WHERE id = ${DEAL_NEW}`);
+    const dealRow = (Array.isArray(dealRows) ? dealRows : dealRows.rows)[0];
+    expect(Number(dealRow.email_count)).toBe(3);
+  });
+
+  it("rebinds a mailbox that has an active binding but no surviving emails rows too", async () => {
+    // A binding can outlive every message it once covered (purge, or a resync that never re-landed the
+    // messages). The mailbox set for bind must be the UNION of (mailboxes with messages) and (mailboxes
+    // with an active binding) — sourcing it from emails alone would silently leave this mailbox on the
+    // old deal even though it's holding the conversation just as much as MBX_A/MBX_B are.
+    const USER_ORPHAN = U("d9a");
+    const MBX_ORPHAN = U("f0b");
+    await tdb.execute(sql`
+      INSERT INTO user_graph_tokens (id, user_id, access_token, refresh_token, token_expires_at, scopes) VALUES
+        (${MBX_ORPHAN}, ${USER_ORPHAN}, 'x', 'x', now(), '{}')
+    `);
+    await tdb.execute(sql`
+      INSERT INTO email_thread_bindings
+        (mailbox_account_id, provider, provider_conversation_id, deal_id, binding_source, confidence)
+      VALUES (${MBX_ORPHAN}, 'microsoft_graph', ${CONV}, ${DEAL_OLD}, 'manual', 'high')
+    `);
+
+    await bindConversationToDealAcrossMailboxes(tdb, {
+      providerConversationId: CONV, dealId: DEAL_NEW, actingUserId: USER_A,
+    });
+
+    const rows = await activeBindings();
+    expect(rows).toHaveLength(3);
+    const orphanRow = rows.find((r: { mailbox_account_id: string }) => r.mailbox_account_id === MBX_ORPHAN);
+    expect(orphanRow?.deal_id).toBe(DEAL_NEW);
   });
 
   it("detaches EVERY mailbox", async () => {
     await detachConversationAcrossMailboxes(tdb, CONV, USER_A);
+    expect(await activeBindings()).toHaveLength(0);
+  });
+
+  it("detaches a binding whose mailbox has no surviving emails rows", async () => {
+    // Sourcing the mailbox list from `emails` (as the old implementation did) would never discover this
+    // binding at all — the same stranded-binding class this whole change exists to close.
+    const MBX_ORPHAN = U("f0c");
+    await tdb.execute(sql`
+      INSERT INTO email_thread_bindings
+        (mailbox_account_id, provider, provider_conversation_id, deal_id, binding_source, confidence)
+      VALUES (${MBX_ORPHAN}, 'microsoft_graph', ${CONV}, ${DEAL_OLD}, 'manual', 'high')
+    `);
+
+    await detachConversationAcrossMailboxes(tdb, CONV, USER_A);
+
     expect(await activeBindings()).toHaveLength(0);
   });
 
@@ -213,13 +183,23 @@ describe("multi-mailbox conversations", () => {
     expect(preview.affectedMessageCount).toBe(3);
   });
 
-  it("currentDealId is the OLDEST message's deal, not an arbitrary one", async () => {
-    // m1 is the oldest (2026-07-01) and sits on DEAL_OLDEST, while m2/m3 (later) sit on DEAL_OLD —
-    // if the ordering added to previewThreadReassignmentImpact regressed to unordered, this would be
-    // flaky/arbitrary instead of deterministically DEAL_OLDEST.
+  it("currentDealId comes from the ACTIVE BINDING, not an unbound older message", async () => {
+    // Simulates the real asymmetry backAssociateStoredMessagesForBinding produces: it writes
+    // emails.deal_id scoped to ONE mailbox's messages at a time, so a mailbox that was never
+    // (successfully) bound keeps deal_id = NULL even while the OTHER mailbox is actively bound. Mailbox
+    // A holds the OLDER messages (m1, m2) and has no active binding here; only mailbox B (the newer m3)
+    // does. If currentDealId were still derived from the oldest message, this would read null instead
+    // of the real current deal.
+    await tdb.execute(sql`UPDATE emails SET deal_id = NULL WHERE user_id = ${USER_A}`);
+    await tdb.execute(sql`
+      UPDATE email_thread_bindings SET detached_at = now()
+      WHERE mailbox_account_id = ${MBX_A} AND detached_at IS NULL
+    `);
+
     const preview = await previewThreadReassignmentImpact(tdb, {
       providerConversationId: CONV, nextDealId: DEAL_NEW,
     });
-    expect(preview.currentDealId).toBe(DEAL_OLDEST);
+    expect(preview.currentDealId).toBe(DEAL_OLD);
+    expect(preview.currentDealId).not.toBeNull();
   });
 });
