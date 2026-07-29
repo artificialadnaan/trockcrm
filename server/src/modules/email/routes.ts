@@ -440,7 +440,7 @@ router.post("/thread/:conversationId/assign", async (req, res, next) => {
     if (!dealId) throw new AppError(400, "dealId is required");
 
     const thread = await getEmailThreadForMutation(req.tenantDb!, req.params.conversationId, req.user!.id);
-    await assertCanMutateEmailThread(req.tenantDb!, thread, req.user!, { dealId: thread.binding?.dealId ?? null });
+    await assertCanMutateEmailThread(req.tenantDb!, thread, req.user!, { boundDealId: thread.binding?.dealId ?? null });
 
     await assertDealCollaboratorAccess(req.tenantDb!, dealId, req.user!);
 
@@ -471,7 +471,7 @@ router.post("/thread/:conversationId/reassign", async (req, res, next) => {
     if (!dealId) throw new AppError(400, "dealId is required");
 
     const thread = await getEmailThreadForMutation(req.tenantDb!, req.params.conversationId, req.user!.id);
-    await assertCanMutateEmailThread(req.tenantDb!, thread, req.user!, { dealId: thread.binding?.dealId ?? null });
+    await assertCanMutateEmailThread(req.tenantDb!, thread, req.user!, { boundDealId: thread.binding?.dealId ?? null });
 
     await assertDealCollaboratorAccess(req.tenantDb!, dealId, req.user!);
 
@@ -504,7 +504,7 @@ router.post("/thread/:conversationId/reassign", async (req, res, next) => {
 router.post("/thread/:conversationId/detach", async (req, res, next) => {
   try {
     const thread = await getEmailThreadForMutation(req.tenantDb!, req.params.conversationId, req.user!.id);
-    await assertCanMutateEmailThread(req.tenantDb!, thread, req.user!, { dealId: thread.binding?.dealId ?? null });
+    await assertCanMutateEmailThread(req.tenantDb!, thread, req.user!, { boundDealId: thread.binding?.dealId ?? null });
 
     await detachThreadByConversation(req.tenantDb!, thread.mailboxAccountId, req.params.conversationId, req.user!.id);
     const refreshedThread = await getEmailThread(

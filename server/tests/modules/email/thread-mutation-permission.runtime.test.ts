@@ -12,13 +12,18 @@ import { AppError } from "../../../src/middleware/error-handler.js";
 
 const U = (s: string) => `00000000-0000-0000-0000-${s.padStart(12, "0")}`;
 
-// USER_OWNER holds the thread's mailbox but has NO office, so path 2 can never admit them — anything
-// they are allowed to do here came from path 1 (mailbox ownership) and nothing else.
+// USER_OWNER holds the thread's mailbox. Their VIEWER object (ownerUser, below) carries a null office
+// so path 2 can never admit them — anything they are allowed to do here came from path 1 (mailbox
+// ownership) and nothing else. NOTE their users ROW still has a real office_id, because that column is
+// .notNull() (shared/src/schema/public/users.ts): the null lives on the viewer, and only on the viewer.
+// Do NOT "fix" the viewer to match the row — that would make the first case pass via path 2 and stop it
+// proving anything.
 const USER_OWNER = U("a01");
 // USER_COLLAB is a different human with their own, DIFFERENT mailbox and an office — path 1 misses,
 // path 2 must admit.
 const USER_COLLAB = U("a02");
-// USER_OUTSIDER also has their own mailbox, but no office at all — both paths must miss.
+// USER_OUTSIDER also has their own mailbox, but their viewer object carries no office — both paths must
+// miss. Same row-vs-viewer split as USER_OWNER above.
 const USER_OUTSIDER = U("a03");
 // USER_NO_MAILBOX has an office but no user_graph_tokens row at all: resolveMailboxAccountIdForCrmUser
 // throws 409 "Connect mailbox first" for them, which must NOT escape ahead of path 2.
@@ -47,12 +52,15 @@ const outsiderUser = { id: USER_OUTSIDER, role: "rep", officeId: null, activeOff
 const noMailboxUser = { id: USER_NO_MAILBOX, role: "rep", officeId: OFFICE_DALLAS, activeOfficeId: OFFICE_DALLAS };
 
 /** Await a rejection and hand back the AppError, so a case can assert BOTH status code and message
- *  rather than a loose message regex — and so a call that wrongly RESOLVES fails loudly. */
+ *  rather than a loose message regex — and so a call that wrongly RESOLVES fails loudly. Anything that
+ *  is not an AppError (a PGlite failure, say) is re-thrown rather than cast, so it surfaces as itself
+ *  instead of as "expected undefined to be 403". */
 async function rejection(promise: Promise<unknown>): Promise<AppError> {
   try {
     await promise;
   } catch (err) {
-    return err as AppError;
+    if (!(err instanceof AppError)) throw err;
+    return err;
   }
   throw new Error("expected assertCanMutateEmailThread to reject, but it resolved");
 }
@@ -139,13 +147,13 @@ describe("assertCanMutateEmailThread — deal write access", () => {
     // ownerUser has no office, so assertDealCollaboratorAccess would 403 them. Path 1 has to stand on
     // its own: a user can always fix the filing of their own email.
     await expect(
-      assertCanMutateEmailThread(tdb, thread, ownerUser, { dealId: DEAL_OLD })
+      assertCanMutateEmailThread(tdb, thread, ownerUser, { boundDealId: DEAL_OLD })
     ).resolves.not.toThrow();
   });
 
   it("allows a non-owner who can write the deal", async () => {
     await expect(
-      assertCanMutateEmailThread(tdb, thread, collaboratorUser, { dealId: DEAL_OLD })
+      assertCanMutateEmailThread(tdb, thread, collaboratorUser, { boundDealId: DEAL_OLD })
     ).resolves.not.toThrow();
   });
 
@@ -154,13 +162,18 @@ describe("assertCanMutateEmailThread — deal write access", () => {
     // path-1 MISS, not a failure — it must not escape before path 2 gets its turn, or the widening does
     // nothing for anyone who hasn't linked Outlook.
     await expect(
-      assertCanMutateEmailThread(tdb, thread, noMailboxUser, { dealId: DEAL_OLD })
+      assertCanMutateEmailThread(tdb, thread, noMailboxUser, { boundDealId: DEAL_OLD })
     ).resolves.not.toThrow();
   });
 
   it("rejects a non-owner with no deal access", async () => {
+    // CAVEAT, deliberate: this 403 arm is not production-reachable. It fires only when the viewer has no
+    // office at all, and auth.ts copies officeId off a NOT NULL column with activeOfficeId defaulting to
+    // it, so getViewerOfficeId can never return null for an authenticated user. This case proves the
+    // wiring reaches assertDealCollaboratorAccess and that its denial propagates; the REAL reachable
+    // denial is the cross-schema 404 in the last case below.
     const err = await rejection(
-      assertCanMutateEmailThread(tdb, thread, outsiderUser, { dealId: DEAL_OLD })
+      assertCanMutateEmailThread(tdb, thread, outsiderUser, { boundDealId: DEAL_OLD })
     );
     expect(err.statusCode).toBe(403);
     expect(err.message).toMatch(/Access denied/i);
@@ -170,17 +183,17 @@ describe("assertCanMutateEmailThread — deal write access", () => {
     // No deal means nothing to authorize against, so path 2 cannot run at all — the only admissible
     // caller on an unbound thread is its mailbox owner.
     const err = await rejection(
-      assertCanMutateEmailThread(tdb, unboundThread, outsiderUser, { dealId: null })
+      assertCanMutateEmailThread(tdb, unboundThread, outsiderUser, { boundDealId: null })
     );
     expect(err.statusCode).toBe(403);
     expect(err.message).toMatch(/own email threads/i);
   });
 
   it("rejects a caller who can write the deal when there is no deal in context", async () => {
-    // Same as above but for a user who WOULD pass path 2 on DEAL_OLD. context.dealId is the sole source
-    // of the deal to authorize against; a null there must close the gate rather than fall open.
+    // Same as above but for a user who WOULD pass path 2 on DEAL_OLD. context.boundDealId is the sole
+    // source of the deal to authorize against; a null there must close the gate rather than fall open.
     const err = await rejection(
-      assertCanMutateEmailThread(tdb, unboundThread, collaboratorUser, { dealId: null })
+      assertCanMutateEmailThread(tdb, unboundThread, collaboratorUser, { boundDealId: null })
     );
     expect(err.statusCode).toBe(403);
     expect(err.message).toMatch(/own email threads/i);
@@ -190,20 +203,21 @@ describe("assertCanMutateEmailThread — deal write access", () => {
     // The 409-swallow must not turn into a fall-open: with mailboxAccountId unresolved AND no deal, the
     // caller has satisfied nothing.
     const err = await rejection(
-      assertCanMutateEmailThread(tdb, unboundThread, noMailboxUser, { dealId: null })
+      assertCanMutateEmailThread(tdb, unboundThread, noMailboxUser, { boundDealId: null })
     );
     expect(err.statusCode).toBe(403);
     expect(err.message).toMatch(/own email threads/i);
   });
 
-  it("rejects a deal that lives in another office's schema", async () => {
+  it("rejects a thread whose bound deal lives in another office's schema", async () => {
     // The office boundary in this codebase is the tenant search_path, NOT a column comparison —
     // assertDealCollaboratorAccess's own office check only asks whether the viewer has an office at all
-    // (see collaboration-access.ts). A deal in office_atlanta is simply not visible to this tenantDb, so
-    // the lookup misses and the call 404s. Asserted here so a future change that starts resolving deals
-    // cross-schema cannot quietly widen path 2 into a cross-office write.
+    // (see collaboration-access.ts), which is why THIS is the production-reachable denial and the 403
+    // above is not. A deal in office_atlanta is simply not visible to this tenantDb, so the lookup misses
+    // and the call 404s. Asserted here so a future change that starts resolving deals cross-schema
+    // cannot quietly widen path 2 into a cross-office write.
     const err = await rejection(
-      assertCanMutateEmailThread(tdb, thread, collaboratorUser, { dealId: DEAL_ATLANTA })
+      assertCanMutateEmailThread(tdb, thread, collaboratorUser, { boundDealId: DEAL_ATLANTA })
     );
     expect(err.statusCode).toBe(404);
     expect(err.message).toMatch(/Deal not found/i);

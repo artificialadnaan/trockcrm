@@ -1082,7 +1082,7 @@ describe("email service inbound association", () => {
         tenantDb as any,
         { mailboxAccountId: "mailbox-2", binding: null, emails: [] },
         { id: "director-1", role: "director" },
-        { dealId: null }
+        { boundDealId: null }
       )
     ).rejects.toThrow("You can only modify your own email threads");
   });

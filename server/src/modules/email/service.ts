@@ -705,20 +705,25 @@ export async function getEmailThreadForMutation(
  *   2. DEAL WRITE ACCESS — the caller may write the deal the thread is currently bound to.
  *
  * Path 2 is the point of this helper. The deal Emails tab is NOT mailbox-scoped (getEmails is called
- * with no user filter), so a user routinely sees email from other mailboxes on a deal they own. In
- * office_dallas, 5 of the 36 deals with email carry more than one mailbox — the misfiled email someone
- * notices is frequently not their own, and owner-only would 403 exactly the person who spotted it.
+ * with no user filter), so a user routinely sees email from other mailboxes on a deal they own — the
+ * misfiled email someone notices is frequently not their own, and owner-only would 403 exactly the
+ * person who spotted it.
  *
  * An UNBOUND thread has no deal to authorize against, so only path 1 can admit it.
  *
- * This is the whole security surface of the reassignment feature. Keep it as ONE helper with ONE set of
- * tests — do not inline the check into the routes.
+ * `context.boundDealId` MUST be the deal the thread is CURRENTLY BOUND TO, never the deal it is being
+ * moved to. Authorizing against the target would turn this into "anyone who can write the destination",
+ * which is not a gate on the thread at all.
+ *
+ * This is the whole gate on the SOURCE thread — keep it as ONE helper with ONE set of tests, and do not
+ * inline it into the routes. The TARGET deal is gated separately, by the routes' own
+ * assertDealCollaboratorAccess call; that one is NOT redundant with this.
  */
 export async function assertCanMutateEmailThread(
   tenantDb: TenantDb,
   thread: EmailThreadMutationContext,
   user: { id: string; role: string; officeId?: string | null; activeOfficeId?: string | null },
-  context: { dealId: string | null }
+  context: { boundDealId: string | null }
 ) {
   // A caller with no mailbox of their own simply MISSES path 1 — that is not an error here.
   // resolveMailboxAccountIdForCrmUser signals it with AppError(409, "Connect mailbox first"); letting
@@ -734,12 +739,12 @@ export async function assertCanMutateEmailThread(
   // thread.mailboxAccountId and fall open.
   if (mailboxAccountId !== null && thread.mailboxAccountId === mailboxAccountId) return;
 
-  if (!context.dealId) {
+  if (!context.boundDealId) {
     throw new AppError(403, "You can only modify your own email threads");
   }
 
   // Throws 403/404 itself when the caller cannot reach the deal.
-  await assertDealCollaboratorAccess(tenantDb, context.dealId, user);
+  await assertDealCollaboratorAccess(tenantDb, context.boundDealId, user);
 }
 
 /**
