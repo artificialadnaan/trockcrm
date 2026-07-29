@@ -10,8 +10,10 @@ type DealValueTable = {
   ddEstimate: unknown;
   forecastRevenue?: unknown;
   // A change-order child deal (0156) carries its value ONLY in awarded_amount, and a DEDUCTIVE CO carries
-  // it NEGATIVE. Optional so a caller with a narrowed column set keeps compiling; absent = "never a CO".
-  isChangeOrder?: unknown;
+  // it NEGATIVE. REQUIRED, not optional: the sole production constructor is the real Drizzle `deals` table,
+  // which always carries this column, so requiring it here means a hand-built table missing the field fails
+  // to COMPILE — instead of silently falling back to the pre-CO chain the way an optional field would.
+  isChangeOrder: unknown;
 };
 
 type DealValueColumn =
@@ -95,40 +97,56 @@ function tableColumnSql(table: DealValueTable, column: DealValueColumn): unknown
 // else), and a DEDUCTIVE CO is negative, which every `> 0` candidate drops — silently reporting the
 // deduction as $0 on every Won surface. Provably inert for a POSITIVE CO, which is what the reconciliation
 // test in deal-value-change-order.runtime.test.ts pins.
-function changeOrderAwareSql(isChangeOrderSql: SQL, awardedSql: unknown, chainSql: SQL): SQL {
-  return sql`CASE WHEN ${isChangeOrderSql} THEN COALESCE(${awardedSql}, 0) ELSE ${chainSql} END`;
+function changeOrderBranchSql(isChangeOrderSql: unknown, awardedSql: unknown, chainSql: SQL): SQL {
+  return sql`CASE WHEN COALESCE(${isChangeOrderSql}, false) THEN COALESCE(${awardedSql}, 0) ELSE ${chainSql} END`;
 }
 
-// The `table.isChangeOrder === undefined` escape hatch (plain chain, no CO branch) only ever fires for a
-// caller passing a narrowed literal, e.g. this file's own unit tests. The sole production COLUMN-form
-// consumer, dealPipelineValueSql (server/src/modules/deals/service.ts), passes the real Drizzle `deals`
-// table, whose `isChangeOrder` IS defined — so the column and aliased forms never diverge on any production
-// surface; the escape hatch exists purely so a hand-built test table without the field keeps compiling.
+// Derives BOTH the is_change_order predicate and the awarded_amount fallback from the SAME table object, so
+// the two can never be hand-paired wrong at a call site (previously every call site built
+// `COALESCE(<src>.is_change_order, false)` and `<src>.awarded_amount` separately and passed them as two
+// same-typed SQL args that would swap with no compile error). Callers pass only the already-built chain.
+function withChangeOrderBranch(table: DealValueTable, chainSql: SQL): SQL {
+  return changeOrderBranchSql(table.isChangeOrder, table.awardedAmount, chainSql);
+}
+
+// Aliased twin of withChangeOrderBranch — derives both operands from the SAME alias string.
+function withAliasedChangeOrderBranch(alias: string, chainSql: SQL): SQL {
+  return changeOrderBranchSql(sql.raw(`${alias}.is_change_order`), sql.raw(`${alias}.awarded_amount`), chainSql);
+}
+
 function dealValueChainSql(table: DealValueTable, columns: readonly DealValueColumn[]): SQL {
   const chain = sql`COALESCE(${sql.join(
     columns.map((column) => positiveDealValueCandidateSql(tableColumnSql(table, column))),
     sql`, `
   )}, 0)`;
-  if (table.isChangeOrder === undefined) return chain;
-  return changeOrderAwareSql(
-    sql`COALESCE(${table.isChangeOrder}, false)`,
-    table.awardedAmount,
-    chain
-  );
+  return withChangeOrderBranch(table, chain);
 }
 
+// REQUIRED COLUMN at `alias` (in addition to whichever `columns` are passed in): is_change_order. Every
+// aliased builder that resolves through this chain inherits the requirement — a narrowed CTE that projects
+// an explicit column list (e.g. sales-tier1-service.ts's `open_deals`, which selects only id, name, stage_id,
+// on_hold, value) will fail at RUNTIME, not compile time, if pointed at one of them; pass `deals`/`d`/`SELECT
+// d.*`.
 function aliasedDealValueChainSql(alias: string, columns: readonly DealValueColumn[]): SQL {
   const chain = sql.raw(
     `COALESCE(${columns
       .map((column) => aliasedPositiveDealValueCandidateSql(alias, column))
       .join(", ")}, 0)`
   );
-  return changeOrderAwareSql(
-    sql.raw(`COALESCE(${alias}.is_change_order, false)`),
-    sql.raw(`${alias}.awarded_amount`),
-    chain
-  );
+  return withAliasedChangeOrderBranch(alias, chain);
 }
+
+// SCOPE — partial rollout as of this commit (Task 1 of the deductive-change-order branch): only the
+// canonical chain in THIS file is change-order aware. Five hand-copied/hand-rolled twins of this chain still
+// use the pre-CO `> 0`-gated logic, so each still reports a deductive CO as $0 on its own surface:
+//   - server/src/modules/daily-summary/service.ts:208-214 (claims to mirror aliasedEffectiveWonDealValueSql
+//     "so the email's '$X won' ties to Showcase/Region")
+//   - client/src/lib/deal-utils.ts:111 ("mirrors server deal-value-sql.ts + shared getRawDealValue")
+//   - shared/src/types/deal-hold.ts:81 ("mirrors server deal-value-sql.ts")
+//   - worker/src/jobs/rep-performance-rollup.ts:21-27
+//   - server/src/modules/admin/routes.ts:1096-1099
+// All five are made CO-aware by later tasks on this same branch and land in the same PR as this file — this
+// is not an accidental gap. If this branch is ever split, treat these five as the outstanding work.
 
 export function dealBestEstimateSql(table: DealValueTable): SQL {
   return dealValueChainSql(table, DEAL_VALUE_PRIORITY_CHAIN);
@@ -141,12 +159,7 @@ export function dealEstimatingValueSql(table: DealValueTable): SQL {
 
 export function dealAwardedAmountSql(table: DealValueTable): SQL {
   const positiveOnly = sql`COALESCE(${positiveDealValueCandidateSql(table.awardedAmount)}, 0)`;
-  if (table.isChangeOrder === undefined) return positiveOnly;
-  return changeOrderAwareSql(
-    sql`COALESCE(${table.isChangeOrder}, false)`,
-    table.awardedAmount,
-    positiveOnly
-  );
+  return withChangeOrderBranch(table, positiveOnly);
 }
 
 export function dealAwardedFirstWithFallbackSql(table: DealValueTable): SQL {
@@ -207,9 +220,8 @@ export function aliasedDealEstimatingValueSql(alias: string): SQL {
 }
 
 export function aliasedDealAwardedAmountSql(alias: string): SQL {
-  return changeOrderAwareSql(
-    sql.raw(`COALESCE(${alias}.is_change_order, false)`),
-    sql.raw(`${alias}.awarded_amount`),
+  return withAliasedChangeOrderBranch(
+    alias,
     sql.raw(`COALESCE(${aliasedPositiveDealValueCandidateSql(alias, "awarded_amount")}, 0)`)
   );
 }
@@ -245,9 +257,8 @@ export function aliasedOpenPipelineForecastFirstDealValueSql(alias: string): SQL
 // inconsistency — it does not move today's dollars.
 //
 // REQUIRED COLUMNS at `alias`: on_hold, bid_board_stage_slug, stage_id, bid_due_date, expected_close_date,
-// is_change_order (the default rawValueSql, aliasedDealBestEstimateSql, resolves through
-// aliasedDealValueChainSql, which unconditionally references `alias.is_change_order` — see
-// changeOrderAwareSql above dealValueChainSql).
+// plus is_change_order via the default rawValueSql (aliasedDealBestEstimateSql — see the REQUIRED COLUMN
+// note on aliasedDealValueChainSql, which every aliased builder in this family resolves through).
 export function aliasedEffectiveDealValueSql(
   alias: string,
   rawValueSql: SQL = aliasedDealBestEstimateSql(alias)

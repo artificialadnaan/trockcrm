@@ -5,7 +5,7 @@ import { sql } from "drizzle-orm";
 import { aliasedDealAwardedFirstWithFallbackSql } from "../../../src/modules/shared/deal-value-sql.js";
 
 const U = (s: string) => `00000000-0000-0000-0000-${s.padStart(12, "0")}`;
-const D = { normal: U("d001"), coPos: U("d002"), coNeg: U("d003"), coZeroish: U("d004") };
+const D = { normal: U("d001"), coPos: U("d002"), coNeg: U("d003"), coZero: U("d004") };
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let tdb: any;
@@ -35,7 +35,7 @@ beforeAll(async () => {
     INSERT INTO deals (id, is_change_order, awarded_amount) VALUES
       (${D.coPos}, true, 25000.00),
       (${D.coNeg}, true, -50000.00),
-      (${D.coZeroish}, true, 0.00)
+      (${D.coZero}, true, 0.00)
   `);
 });
 
@@ -43,7 +43,10 @@ afterAll(async () => {
   await pg.close();
 });
 
-// The chain EXACTLY as it existed before this change — the reconciliation baseline.
+// The chain EXACTLY as it existed before this change — the reconciliation baseline. ROT GUARD: this is a
+// hardcoded mirror of DEAL_VALUE_PRIORITY_CHAIN in deal-value-sql.ts, not derived from it. If that priority
+// order (or the columns in it) ever changes, this baseline must be updated in lockstep, or the INERT
+// assertions below silently compare the new chain against a stale one instead of the real legacy behavior.
 const LEGACY_CHAIN = `COALESCE(
   CASE WHEN d.awarded_amount > 0 THEN d.awarded_amount END,
   CASE WHEN d.bid_board_total_sales > 0 THEN d.bid_board_total_sales END,
@@ -82,7 +85,7 @@ describe("change-order-aware deal value chain", () => {
   });
 
   it("returns 0 for a zero-amount change order", async () => {
-    const { next } = await valueFor(D.coZeroish);
+    const { next } = await valueFor(D.coZero);
     expect(next).toBe(0);
   });
 });

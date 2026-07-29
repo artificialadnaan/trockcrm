@@ -306,6 +306,7 @@ describe("estimating bid-due hold — the deliberate NON-changes", () => {
       bidBoardTotalSales: sql.raw("d.bid_board_total_sales"),
       bidEstimate: sql.raw("d.bid_estimate"),
       ddEstimate: sql.raw("d.dd_estimate"),
+      isChangeOrder: sql.raw("d.is_change_order"),
     } as unknown as Parameters<typeof effectiveDealValueSql>[0];
     const emitted = dialect.sqlToQuery(effectiveDealValueSql(table)).sql.toLowerCase();
     expect(emitted).toContain("d.on_hold");
