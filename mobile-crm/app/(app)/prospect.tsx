@@ -925,12 +925,19 @@ export default function ProspectScreen() {
    * tap target was the dangerous part.
    */
   const selectableMatches = useMemo(
-    () => (matches ?? []).filter((m) => isMatchSelectable(m, address)),
-    [matches, address],
+    /**
+     * Judged against the address actually IN PLAY, not the geocode alone.
+     *
+     * With a failed geocode `address` is null, so this classified every address hit as advisory — while
+     * the rematch, which corroborates against the TYPED address, vetoed creation for the same row. The
+     * rep could then neither select it nor add the building: a deadlock with no way out of the screen.
+     */
+    () => (matches ?? []).filter((m) => isMatchSelectable(m, effectiveAddress ?? address)),
+    [matches, address, effectiveAddress],
   );
   const advisoryMatches = useMemo(
-    () => (matches ?? []).filter((m) => !isMatchSelectable(m, address)),
-    [matches, address],
+    () => (matches ?? []).filter((m) => !isMatchSelectable(m, effectiveAddress ?? address)),
+    [matches, address, effectiveAddress],
   );
 
   const personPartial = personDetailsWillBeDiscarded({
@@ -1203,7 +1210,7 @@ export default function ProspectScreen() {
                        reader announced the row as actionable while taps did nothing — the announcement
                        and the behaviour disagreeing is the accessibility defect, not the lock. */
                     accessibilityState={{ disabled: targetsLocked }}
-                    accessibilityLabel={`${m.name}${m.companyName ? `, ${m.companyName}` : ""}, ${describeMatch(m, address)}`}
+                    accessibilityLabel={`${m.name}${m.companyName ? `, ${m.companyName}` : ""}, ${describeMatch(m, effectiveAddress ?? address)}`}
                     style={[styles.matchRow, targetsLocked && styles.chipLocked]}
                   >
                     <View style={styles.matchBody}>
@@ -1220,7 +1227,7 @@ export default function ProspectScreen() {
                     </View>
                     {/* WHY it is being offered. "Same address" and "40 m away" are different claims, and
                         an unexplained suggestion is how the wrong property gets confirmed. */}
-                    <Text style={styles.matchReason}>{describeMatch(m, address)}</Text>
+                    <Text style={styles.matchReason}>{describeMatch(m, effectiveAddress ?? address)}</Text>
                   </Pressable>
                 ))}
                 {/* The escape hatch. With candidates on screen the company fallback was hidden, so a
