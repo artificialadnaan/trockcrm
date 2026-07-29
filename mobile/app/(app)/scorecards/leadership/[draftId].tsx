@@ -277,7 +277,14 @@ function LeadershipForm(props: {
   // `isCorrectiveActionBand(rating) && enumerateFlaggedItems(...).length > 0`, and a leadership card carries
   // no critical deficiencies, so action items are the only thing that can satisfy the second half. Mirrors
   // the server's trim-then-filter so a whitespace-only item doesn't read as flagged here and empty there.
+  //
+  // Gated on every category being scored. scorecardDraftAverage divides by ALL four categories, so an
+  // unscored one counts as zero and a blank draft averages 0 — which reads as `corrective_action`. Without
+  // this guard the red banner fired the instant the form opened, announcing a below-standard result that
+  // does not exist yet on a card that cannot even be submitted.
+  const allCategoriesScored = validation.missingSections.length === 0;
   const belowBandWithNoActionItems =
+    allCategoriesScored &&
     scorecardDraftRating(draft) === "corrective_action" &&
     draft.actionItems.every((item) => item.trim().length === 0);
 

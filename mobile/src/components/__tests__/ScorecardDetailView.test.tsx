@@ -78,6 +78,46 @@ describe("ScorecardDetailView", () => {
     expect(screen.getByText("Schedule re-inspection")).toBeTruthy();
   });
 
+  // LeadershipBody rendered categories, summary and evidence but never read scorecard.actionItems, so the
+  // follow-up work an evaluator had just captured vanished from this view the moment the card saved — which
+  // reads as the save having dropped it. They are also a leadership card's only flagged items, so this list is
+  // what its corrective-action cycle is built from.
+  it("renders a LEADERSHIP card's action items too, not just a project card's", () => {
+    const leadership: FieldScorecardDetail = {
+      ...detail,
+      kind: "leadership",
+      criticalDeficiencies: [],
+      criticalDeficiencyCount: 0,
+      items: [
+        { sectionKey: "quality_control", points: 6, note: null },
+        { sectionKey: "safety", points: 6, note: null },
+        { sectionKey: "schedule_adherence", points: 6, note: null },
+        { sectionKey: "site_staff_feedback", points: 6, note: null },
+      ],
+      actionItems: ["Rebuild the look-ahead", "Close the safety observations"],
+      summary: "Below standard this week.",
+    };
+    const screen = render(
+      <ScorecardDetailView scorecard={leadership} onDownloadPdf={jest.fn()} downloadingPdf={false} />,
+    );
+    expect(screen.getByText("Rebuild the look-ahead")).toBeTruthy();
+    expect(screen.getByText("Close the safety observations")).toBeTruthy();
+  });
+
+  it("omits the leadership Action items block when the card has none", () => {
+    const leadership: FieldScorecardDetail = {
+      ...detail,
+      kind: "leadership",
+      criticalDeficiencies: [],
+      criticalDeficiencyCount: 0,
+      actionItems: [],
+    };
+    const screen = render(
+      <ScorecardDetailView scorecard={leadership} onDownloadPdf={jest.fn()} downloadingPdf={false} />,
+    );
+    expect(screen.queryByText("Action items")).toBeNull();
+  });
+
   it("renders handwritten data-URL signatures as images and legacy typed signatures as text", () => {
     const handwritten = "data:image/png;base64,AAAA";
     const screen = render(
