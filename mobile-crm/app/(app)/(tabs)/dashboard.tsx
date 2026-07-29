@@ -152,6 +152,14 @@ export default function DashboardScreen() {
               onPress={() => router.push("/(app)/contacts")}
             />
           ) : null}
+          {canAccessSurface(user.role, "reports") ? (
+            <NavCard
+              testID="open-reports"
+              icon="bar-chart-outline"
+              label="Reports"
+              onPress={() => router.push("/(app)/reports")}
+            />
+          ) : null}
         </View>
 
         {canSwitchOffice ? (

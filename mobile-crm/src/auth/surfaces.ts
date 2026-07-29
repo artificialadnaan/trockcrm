@@ -14,7 +14,7 @@
  * Kept as DATA rather than scattered `role === "rep"` checks so the policy is one table to compare
  * against the sidebar, and so granting a surface later is a one-line change in a single place.
  */
-export type CrmSurface = "deals" | "leads" | "contacts" | "companies";
+export type CrmSurface = "deals" | "leads" | "contacts" | "companies" | "reports";
 
 const SURFACE_ROLES: Record<CrmSurface, readonly string[]> = {
   deals: ["admin", "director", "rep"],
@@ -22,6 +22,10 @@ const SURFACE_ROLES: Record<CrmSurface, readonly string[]> = {
   leads: ["admin", "director", "rep"],
   contacts: ["admin", "director", "rep"],
   companies: ["admin", "director", "rep"],
+  // sidebar.tsx:82 — Reports is open to all three CRM roles on the web. The server agrees for the one
+  // report this app shows: /reports/monday-showcase is `requireAnyRole`, unlike most of that module,
+  // which is requireDirector. Widening beyond this table means checking the ROUTE, not assuming.
+  reports: ["admin", "director", "rep"],
 };
 
 export const CRM_SURFACES = Object.keys(SURFACE_ROLES) as CrmSurface[];
