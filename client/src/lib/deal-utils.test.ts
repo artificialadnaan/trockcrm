@@ -340,3 +340,23 @@ describe("resolveDealValueKind / isLostBidDeal", () => {
     expect(resolveDealValueKind({ stageSlug: "estimating", bidBoardStageSlug: "closed_won" })).toBe("won");
   });
 });
+
+describe("resolveBestEstimate — change-order children", () => {
+  it("returns the negative amount for a deductive change order", () => {
+    expect(
+      resolveBestEstimate({ isChangeOrder: true, awardedAmount: "-50000.00", stageSlug: "won" })
+    ).toEqual({ value: -50000, source: "awarded" });
+  });
+
+  it("is inert for a positive change order", () => {
+    expect(
+      resolveBestEstimate({ isChangeOrder: true, awardedAmount: "25000.00", stageSlug: "won" })
+    ).toEqual({ value: 25000, source: "awarded" });
+  });
+
+  it("does not change a normal deal's fallback behaviour", () => {
+    expect(
+      resolveBestEstimate({ awardedAmount: null, bidEstimate: "7500.00", ddEstimate: "9000.00" })
+    ).toEqual({ value: 7500, source: "bid" });
+  });
+});

@@ -139,18 +139,28 @@ function aliasedDealValueChainSql(alias: string, columns: readonly DealValueColu
 }
 
 // SCOPE — partial rollout as of this commit (Task 2 of the deductive-change-order branch made the shared TS
-// twin below CO-aware; the canonical SQL chain in THIS file was already done by Task 1). Four remaining
-// hand-copied/hand-rolled twins of this chain still use the pre-CO `> 0`-gated logic, so each still reports
-// a deductive CO as $0 on its own surface:
+// twin CO-aware; Task 3 made client/src/lib/deal-utils.ts's resolveBestEstimate CO-aware; the canonical SQL
+// chain in THIS file was already done by Task 1). Three remaining hand-copied/hand-rolled twins of this
+// chain still use the pre-CO `> 0`-gated logic, so each still reports a deductive CO as $0 on its own
+// surface:
 //   - server/src/modules/daily-summary/service.ts:208-214 (claims to mirror aliasedEffectiveWonDealValueSql
 //     "so the email's '$X won' ties to Showcase/Region")
-//   - client/src/lib/deal-utils.ts:111 ("mirrors server deal-value-sql.ts + shared getRawDealValue")
 //   - worker/src/jobs/rep-performance-rollup.ts:21-27
 //   - server/src/modules/admin/routes.ts:1096-1099
-// shared/src/types/deal-hold.ts (getRawDealValue / getRawAwardedDealValue) is now CO-aware (Task 2) and is
-// struck from this list. All four remaining are made CO-aware by later tasks on this same branch and land in
-// the same PR as this file — this is not an accidental gap. If this branch is ever split, treat these four as
-// the outstanding work.
+// shared/src/types/deal-hold.ts (getRawDealValue / getRawAwardedDealValue) and client/src/lib/deal-utils.ts
+// (resolveBestEstimate) are now CO-aware (Tasks 2-3) and are struck from this list. All three remaining are
+// made CO-aware by later tasks on this same branch and land in the same PR as this file — this is not an
+// accidental gap. If this branch is ever split, treat these three as the outstanding work.
+//
+// This list is NOT exhaustive of every mirror outside this module — it only tracks in-monorepo twins that
+// share the shared-module boundary (server/worker/client, all able to import @trock-crm/shared). A fifth
+// twin sits OUTSIDE that boundary entirely: mobile-crm/src/components/DealCard.tsx:61-80's
+// resolveDealValue is a hand-copied `> 0`-gated chain in mobile-crm, a standalone Expo app deliberately NOT
+// an npm workspace member, so it cannot import shared/ and cannot be pointed at getRawDealValue directly —
+// it also has its own display gate at DealCard.tsx:83-86 (`value > 0 ? formatMoney(value) : "—"`) that
+// discards a correct negative even if resolveDealValue itself is fixed. It is covered by a later task on
+// this same branch, same as the three above, but tracked separately here because the fix shape differs
+// (a hand-maintained mirror, not an import-and-branch).
 
 export function dealBestEstimateSql(table: DealValueTable): SQL {
   return dealValueChainSql(table, DEAL_VALUE_PRIORITY_CHAIN);

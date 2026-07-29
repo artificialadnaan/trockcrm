@@ -107,7 +107,21 @@ export function resolveBestEstimate(deal: {
   stageSlug?: string | null;
   bidBoardStageSlug?: string | null;
   workflowRoute?: string | null;
+  // A change-order child deal (0156) carries its value ONLY in awardedAmount, possibly NEGATIVE for a
+  // deductive CO — read by resolveBestEstimate below, which takes it verbatim ahead of the `> 0` fallback
+  // chain (mirrors server deal-value-sql.ts's withChangeOrderBranch and shared getRawDealValue /
+  // getRawAwardedDealValue; all three MUST NOT drift). A caller whose payload omits it falls through to
+  // the plain chain, silently pricing a deductive CO at $0 while every CO-aware surface reads the
+  // negative — the exact bug this feature exists to fix; any surface that sums Won deals must supply it.
+  isChangeOrder?: boolean | null;
 }): { value: number; source: DealEstimateSource } {
+  // A change-order child's value is awardedAmount VERBATIM — never the `> 0` fallback chain. A deductive
+  // CO is negative and every `> 0` candidate would drop it to 0. Mirrors server deal-value-sql.ts
+  // withChangeOrderBranch and shared getRawDealValue — all three MUST NOT drift.
+  if (deal.isChangeOrder) {
+    return { value: parseFloat(deal.awardedAmount ?? "0") || 0, source: "awarded" };
+  }
+
   // Awarded-first value priority (mirrors server deal-value-sql.ts + shared getRawDealValue), each gated
   // > 0. STAGE-AWARE override for the single 'estimating' stage (2026-06-18): DD outranks the in-progress
   // bid — awarded > dd > bid_board > bid. Bid is NOT skipped, just outranked when DD exists. Excludes
