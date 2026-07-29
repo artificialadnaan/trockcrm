@@ -1415,6 +1415,15 @@ export async function getRepCommissionSummary(
   // Below floor → earned commission is $0: the rep's direct earned AND the manager override they collect
   // on their reports (getOverrideEarnedCommission gates each report through the same helper, so a report
   // below their own floor contributes $0 to this manager's override).
+  //
+  // $0, not negative, when direct.directEarnedCommission is itself negative. A deductive change order
+  // mints a negative owner dsc row (the claw-back), so a rep whose deductive COs outweigh their signings
+  // in the period can reach a genuinely negative raw sum here — not just "a positive number that falls
+  // short of the floor". This ternary zeroes that too, and it is deliberate, not an accident of the
+  // arithmetic: the floor is a GATE, not a deductible, so below floor the rep earns nothing rather than
+  // owing anything back — the gate has no sign case, it is the same `!floorGate.met` branch either way.
+  // Confirmed as an explicit product decision (Adnaan), pinned by REP_BOOK_NEGATIVE in
+  // deductive-change-order-reconciliation.runtime.test.ts.
   const directEarnedCommission = floorGate.met ? direct.directEarnedCommission : 0;
   const overrideEarnedCommission = includeManagerOverride
     ? await getOverrideEarnedCommission(tenantDb, repId, config.overrideRate, fromDate, toDate, officeId)

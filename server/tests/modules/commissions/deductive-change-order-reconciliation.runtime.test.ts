@@ -26,6 +26,7 @@ import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
 import { dealSignedCommissions } from "@trock-crm/shared/schema";
 import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
+import { computeRepEarnedFloorGate } from "../../../src/modules/commissions/floor-gate.js";
 import { getRepCommissionDashboard } from "../../../src/modules/commissions/reporting-service.js";
 import { getRepCommissionSummary } from "../../../src/modules/dashboard/service.js";
 
@@ -45,6 +46,23 @@ const RANGE = { from: "2026-01-01", to: "2026-12-31" };
 const CONTRACT_VALUE_AFTER_CO = 100000 - 20000; // 80000
 const RATE = 0.1;
 const EXPECTED_EARNED = CONTRACT_VALUE_AFTER_CO * RATE; // 8000
+
+// REP_BOOK_NEGATIVE: a SECOND rep whose deductive CO doesn't just dip under the floor — it outweighs
+// their positive signing for the period, so their OWNED BOOK (qualifyingRevenue) and their raw earned
+// commission (SUM(dsc.amount), pre-gate) are BOTH negative. floor 30000, rate .10.
+const REP_BOOK_NEGATIVE = U("d02");
+const D2 = {
+  parentSmall: U("f03"), // awarded 40000 -> owner dsc +4000
+  deductiveCoBig: U("f04"), // awarded -70000 (deductive CO exceeds the signing) -> owner dsc -7000
+};
+const FLOOR_NEGATIVE_REP = 30000;
+// Owned book: 40000 + (-70000) = -30000, which is < the 30000 floor -> gate NOT met.
+const QUALIFYING_REVENUE_NEGATIVE_REP = 40000 - 70000; // -30000
+// Raw (pre-gate) commission: 4000 + (-7000) = -3000 — genuinely negative, not merely "a small positive
+// number that's still under the floor" (that case is already covered by REP_BELOW in
+// floor-gate.runtime.test.ts). This fixture exists to prove the SIGN itself gets gated to $0, not just
+// the magnitude.
+const RAW_EARNED_NEGATIVE_REP = 4000 - 7000; // -3000
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let tdb: any;
@@ -107,6 +125,24 @@ beforeAll(async () => {
       ('${D.deductiveCo}', 'DCO-1-CO1', 'Deductive change order', '${REP}', '${ST_OPEN}', true, '2026-03-20T00:00:00Z', -20000, '2026-03-20T00:00:00Z');
     INSERT INTO deal_signed_commissions (deal_id, rep_user_id, source_value_kind, source_value_amount, applied_rate, amount, attribution_role, contract_signed_date_at_signing) VALUES
       ('${D.deductiveCo}', '${REP}', 'awarded_amount', -20000, ${RATE}, -2000, 'owner', '2026-03-20');
+
+    -- REP_BOOK_NEGATIVE: floor ${FLOOR_NEGATIVE_REP}. Owns a small signed deal (40000) and a LARGER
+    -- deductive CO (-70000) in the same window, so the owned book nets to ${QUALIFYING_REVENUE_NEGATIVE_REP}
+    -- (below the floor) and the raw owner commission nets to ${RAW_EARNED_NEGATIVE_REP} (genuinely
+    -- negative). Both rows carry the real claw-back shape: negative money at a POSITIVE rate.
+    INSERT INTO users (id, display_name, role) VALUES ('${REP_BOOK_NEGATIVE}', 'Book Negative Rep', 'rep');
+    INSERT INTO user_commission_settings (user_id, commission_rate, rolling_floor, override_rate) VALUES
+      ('${REP_BOOK_NEGATIVE}', ${RATE}, ${FLOOR_NEGATIVE_REP}, 0);
+
+    INSERT INTO deals (id, deal_number, name, assigned_rep_id, stage_id, is_change_order, contract_signed_at, awarded_amount, created_at) VALUES
+      ('${D2.parentSmall}', 'DCO-2', 'Small parent contract', '${REP_BOOK_NEGATIVE}', '${ST_OPEN}', false, '2026-04-15T00:00:00Z', 40000, '2026-01-10T00:00:00Z');
+    INSERT INTO deal_signed_commissions (deal_id, rep_user_id, source_value_kind, source_value_amount, applied_rate, amount, attribution_role, contract_signed_date_at_signing) VALUES
+      ('${D2.parentSmall}', '${REP_BOOK_NEGATIVE}', 'awarded_amount', 40000, ${RATE}, 4000, 'owner', '2026-04-15');
+
+    INSERT INTO deals (id, deal_number, name, assigned_rep_id, stage_id, is_change_order, contract_signed_at, awarded_amount, created_at) VALUES
+      ('${D2.deductiveCoBig}', 'DCO-2-CO1', 'Deductive CO exceeding the signing', '${REP_BOOK_NEGATIVE}', '${ST_OPEN}', true, '2026-04-20T00:00:00Z', -70000, '2026-04-20T00:00:00Z');
+    INSERT INTO deal_signed_commissions (deal_id, rep_user_id, source_value_kind, source_value_amount, applied_rate, amount, attribution_role, contract_signed_date_at_signing) VALUES
+      ('${D2.deductiveCoBig}', '${REP_BOOK_NEGATIVE}', 'awarded_amount', -70000, ${RATE}, -7000, 'owner', '2026-04-20');
   `);
   tdb = drizzle(pg);
 });
@@ -151,5 +187,43 @@ describe("deductive change order: the two earned-commission engines reconcile", 
     expect(clawback!.earnedCommission).toBeCloseTo(-2000, 2);
     const listed = deals.reduce((sum, d) => sum + d.earnedCommission, 0);
     expect(listed).toBeCloseTo(summary.directEarnedCommission, 2);
+  });
+});
+
+// What this section pins vs. what it deliberately does NOT: a fixture that reaches a net-negative
+// COMMISSION by way of a net-negative BOOK exercises the SAME below-floor gate as any other under-floor
+// rep (REP_BELOW in floor-gate.runtime.test.ts already proves "below floor -> $0" for a book that stays
+// positive). What is NEW here is the SIGN: REP_BOOK_NEGATIVE's raw, pre-gate commission is itself
+// negative (RAW_EARNED_NEGATIVE_REP = -3000), not merely a positive number that falls short of the
+// floor. The product decision under test is that the floor gate zeroes that negative number rather than
+// letting it pass through — "a rep whose net commission book goes negative earns $0, not a negative
+// amount" — and it does so via the ORDINARY gate (qualifyingRevenue < floor), because a deductive CO that
+// outweighs a rep's signings drags their owned book negative right alongside their commission.
+describe("deductive CO outweighs the signing: the rep's BOOK (not just the commission) goes net negative", () => {
+  it("computeRepEarnedFloorGate: qualifying book AND the raw commission sum are both negative -> not met", async () => {
+    const gate = await computeRepEarnedFloorGate(tdb, REP_BOOK_NEGATIVE, RANGE);
+    expect(gate.qualifyingRevenue).toBeCloseTo(QUALIFYING_REVENUE_NEGATIVE_REP, 2); // -30000
+    expect(gate.earnedCommission).toBeCloseTo(RAW_EARNED_NEGATIVE_REP, 2); // -3000, genuinely negative
+    expect(gate.floor).toBeCloseTo(FLOOR_NEGATIVE_REP, 2);
+    expect(gate.met).toBe(false);
+  });
+
+  it("Engine B (getRepCommissionSummary): directEarnedCommission is $0, NOT -3000", async () => {
+    const { summary } = await getRepCommissionSummary(tdb, REP_BOOK_NEGATIVE, RANGE.from, RANGE.to);
+    // This is the exact ternary being pinned: `floorGate.met ? direct.directEarnedCommission : 0` in
+    // dashboard/service.ts. Left un-gated, direct.directEarnedCommission would itself equal
+    // RAW_EARNED_NEGATIVE_REP (-3000) — asserting against that constant (rather than a bare "0") is what
+    // makes this test fail meaningfully if the gate is ever bypassed or reversed.
+    expect(summary.directEarnedCommission).not.toBeCloseTo(RAW_EARNED_NEGATIVE_REP, 2);
+    expect(summary.directEarnedCommission).toBeCloseTo(0, 2);
+    expect(summary.totalEarnedCommission).toBeCloseTo(0, 2);
+    // The gross (negative) raw commission is still visible via heldEarnedCommission — "withheld", not lost.
+    expect(summary.heldEarnedCommission).toBeCloseTo(RAW_EARNED_NEGATIVE_REP, 2);
+  });
+
+  it("Engine A (getRepCommissionDashboard): page total is also $0 — the gate holds everywhere, not just Engine B", async () => {
+    const dash = await getRepCommissionDashboard(tdb, { role: "rep", userId: REP_BOOK_NEGATIVE, ...RANGE });
+    expect(dash.summary.earned).toBeCloseTo(0, 2);
+    expect(dash.summary.earned).not.toBeCloseTo(RAW_EARNED_NEGATIVE_REP, 2);
   });
 });
