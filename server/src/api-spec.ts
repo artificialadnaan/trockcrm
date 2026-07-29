@@ -119,7 +119,10 @@ export const apiSpec = {
           dealId: { type: "string", format: "uuid" },
           fromStageId: { type: "string", format: "uuid", nullable: true },
           toStageId: { type: "string", format: "uuid" },
-          changedBy: { type: "string", format: "uuid" },
+          // Nullable since migration 0207: a stage write with no session actor (script, sync, raw SQL)
+          // records the transition without naming anyone, rather than stamping the deal's assigned rep.
+          // Stays in `required` — the property is always present on the wire, it is its VALUE that is null.
+          changedBy: { type: "string", format: "uuid", nullable: true },
           overrideReason: { type: "string", nullable: true },
           createdAt: { type: "string", format: "date-time" },
         },

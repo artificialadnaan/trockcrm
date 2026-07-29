@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 
 // The REAL 0143 (which created the backstop and its assigned-rep fallback) applied verbatim, then the REAL
@@ -21,14 +21,23 @@ const REAL_ACTOR = "33333333-3333-3333-3333-333333333333";
 const EARLY = "aaaaaaaa-0000-0000-0000-000000000001";
 const LATE = "aaaaaaaa-0000-0000-0000-000000000002";
 
-let pg: PGlite | null = null;
+// ONE PGlite instance for the whole file, booted in beforeAll.
+//
+// Each test used to build its own and apply both migrations — five boots, and each is a full in-memory
+// Postgres. Under the server suite's four workers and 15s testTimeout that setup cost lands INSIDE the
+// first test's budget and fails on contention while passing when the file runs alone. Tests are isolated
+// by deal id instead, which is cheaper and does not depend on how busy the runner is.
+let pg: PGlite;
 
-afterEach(async () => {
+beforeAll(async () => {
+  pg = await buildDb();
+}, 60_000);
+
+afterAll(async () => {
   await pg?.close();
-  pg = null;
 });
 
-async function setup(): Promise<PGlite> {
+async function buildDb(): Promise<PGlite> {
   const db = new PGlite();
   await db.exec(`
     CREATE SCHEMA ${SCHEMA};
@@ -60,7 +69,6 @@ async function setup(): Promise<PGlite> {
   `);
   await db.exec(PRIOR_MIGRATION_SQL);
   await db.exec(MIGRATION_SQL);
-  pg = db;
   return db;
 }
 
@@ -71,7 +79,9 @@ async function seedDeal(db: PGlite, opts: { rep?: string | null; creator?: strin
      VALUES ($1, $2, $3) RETURNING id`,
     [LATE, opts.rep === undefined ? REP : opts.rep, opts.creator === undefined ? CREATOR : opts.creator],
   );
-  await db.exec(`DELETE FROM ${SCHEMA}.deal_stage_history`); // ignore the creation row; the moves are the subject
+  // Drop THIS deal's creation row only — the moves are the subject. A global DELETE was fine when every
+  // test owned its own database; with one shared instance it would erase a sibling test's evidence.
+  await db.query(`DELETE FROM ${SCHEMA}.deal_stage_history WHERE deal_id = $1`, [rows[0].id]);
   return rows[0].id;
 }
 
@@ -89,7 +99,7 @@ describe("migration 0207 — stage-history actor attribution", () => {
     // actor as the deal's own assigned rep — so a batch job presented as that rep moving their deal by
     // hand. It misdirected two investigations, and usage-rollup counts DISTINCT changed_by as evidence the
     // user was ACTIVE that day, so it also marked reps active on days they may never have signed in.
-    const db = await setup();
+    const db = pg;
     const dealId = await seedDeal(db);
 
     await db.query(`UPDATE ${SCHEMA}.deals SET stage_id = $1 WHERE id = $2`, [EARLY, dealId]);
@@ -105,7 +115,7 @@ describe("migration 0207 — stage-history actor attribution", () => {
 
   it("still records the REAL actor when the session supplies one", async () => {
     // The app path sets app.current_user_id. Dropping the fallback must not drop genuine attribution.
-    const db = await setup();
+    const db = pg;
     const dealId = await seedDeal(db);
 
     await db.exec("BEGIN");
@@ -122,7 +132,7 @@ describe("migration 0207 — stage-history actor attribution", () => {
     // 0143 skipped the insert entirely when no actor resolved, so a stage change on a deal with neither an
     // assigned rep nor a creator left NO trace — losing precisely the machine-made transitions that are
     // hardest to reconstruct afterwards. Recording it with a null actor is strictly more truthful.
-    const db = await setup();
+    const db = pg;
     const dealId = await seedDeal(db, { rep: null, creator: null });
 
     await db.query(`UPDATE ${SCHEMA}.deals SET stage_id = $1 WHERE id = $2`, [EARLY, dealId]);
@@ -135,7 +145,7 @@ describe("migration 0207 — stage-history actor attribution", () => {
   it("keeps honouring the app's skip flag, so the explicit insert is never doubled", async () => {
     // changeDealStage writes its own rich row and sets this flag. If the backstop stopped respecting it the
     // History tab would show every transition twice.
-    const db = await setup();
+    const db = pg;
     const dealId = await seedDeal(db);
 
     await db.exec("BEGIN");
@@ -146,10 +156,14 @@ describe("migration 0207 — stage-history actor attribution", () => {
     expect(await history(db, dealId)).toHaveLength(0);
   });
 
+  // The ONE test that legitimately needs its own database — it asserts across TWO office schemas, which the
+  // shared fixture deliberately does not have. Explicit budget because it pays a second PGlite boot on a
+  // runner that may already be busy; `pg` is left alone so afterAll still closes the shared instance.
   it("drops NOT NULL in every office schema, not just the one the TENANT block names", async () => {
     // The tenant block hard-codes office_dallas for provisioning to replay; the DO-loop is what covers the
     // offices that already exist. Shipping only one of the two is how a tenant change lands half-applied.
     const db = new PGlite();
+    try {
     await db.exec(`
       CREATE SCHEMA ${SCHEMA};
       CREATE SCHEMA office_atlanta;
@@ -171,7 +185,6 @@ describe("migration 0207 — stage-history actor attribution", () => {
     }
     await db.exec(PRIOR_MIGRATION_SQL);
     await db.exec(MIGRATION_SQL);
-    pg = db;
 
     const { rows } = await db.query<{ table_schema: string; is_nullable: string }>(
       `SELECT table_schema, is_nullable FROM information_schema.columns
@@ -182,5 +195,8 @@ describe("migration 0207 — stage-history actor attribution", () => {
       ["office_atlanta", "YES"],
       ["office_dallas", "YES"],
     ]);
-  });
+    } finally {
+      await db.close();
+    }
+  }, 60_000);
 });
