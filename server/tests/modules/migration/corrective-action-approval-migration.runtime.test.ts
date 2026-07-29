@@ -9,6 +9,15 @@ const MIGRATION_SQL = readFileSync(
   "utf8",
 );
 
+// The migration that CREATED this table, applied verbatim. The hand-written fixture below models 0192's
+// shape, but a model is only as good as whoever wrote it — and the constraint that would have failed this
+// deploy was missing from my first version of it. Running the real prior migration is the only way to prove
+// 0202 applies to what 0192 actually produces.
+const PRIOR_MIGRATION_SQL = readFileSync(
+  new URL("../../../../migrations/0192_scorecard_corrective_actions.sql", import.meta.url),
+  "utf8",
+);
+
 const SCHEMA = "office_dallas";
 const CLOSED_CARD = "00000000-0000-0000-0000-00000000000c";
 const OPEN_CARD = "00000000-0000-0000-0000-00000000000o".replace("o", "1");
@@ -220,5 +229,44 @@ describe("migration 0202 — corrective-action approval (runtime, PGlite)", () =
     );
     expect(rows.rows).toHaveLength(1);
     expect(rows.rows[0].item_label).toBe("Historic fix");
+  });
+
+  it("REGRESSION: applies cleanly on top of the REAL 0192, not just a hand-written model of it", async () => {
+    // The deploy sequence, verbatim. My fixture omitted 0192's status CHECK and the migration would have
+    // failed in production on the first office with an answered item — the fixture proved the SQL was
+    // self-consistent, not that it fit the schema it lands on.
+    const db = new PGlite();
+    pg = db;
+    await db.exec(`
+      CREATE SCHEMA ${SCHEMA};
+      CREATE TABLE ${SCHEMA}.field_scorecards (
+        id uuid PRIMARY KEY,
+        status varchar(30),
+        rating text
+      );
+      CREATE TABLE ${SCHEMA}.field_scorecard_photos (id uuid PRIMARY KEY DEFAULT gen_random_uuid());
+    `);
+    await db.exec(PRIOR_MIGRATION_SQL);
+
+    // A card finished under the OLD model: answering closed it outright.
+    await db.query(
+      `INSERT INTO ${SCHEMA}.field_scorecards (id, status) VALUES ($1, 'corrective_action_closed')`,
+      [CLOSED_CARD],
+    );
+    await db.query(
+      `INSERT INTO ${SCHEMA}.scorecard_corrective_actions
+         (scorecard_id, item_type, item_ref, item_label, status)
+       VALUES ($1, 'action_item', '0', 'Historic fix', 'resolved')`,
+      [CLOSED_CARD],
+    );
+
+    // This is the statement that would have aborted the real deploy.
+    await expect(db.exec(MIGRATION_SQL)).resolves.toBeDefined();
+
+    const rows = await db.query<{ status: string }>(
+      `SELECT status FROM ${SCHEMA}.scorecard_corrective_actions WHERE scorecard_id = $1`,
+      [CLOSED_CARD],
+    );
+    expect(rows.rows[0].status).toBe("approved");
   });
 });
