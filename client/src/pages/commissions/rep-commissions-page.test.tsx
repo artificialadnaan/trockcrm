@@ -330,6 +330,78 @@ describe("RepCommissionsPage — deductive change-order claw-back", () => {
     await unmount(root);
   });
 
+  // The case a magnitude-AFTER-aggregation fix cannot reach. A deductive CO child is created Won, so its
+  // claw-back shares the `won` stageKey with the commission it reduces, and the SERVER nets the two into
+  // one stage commission (reporting-service.ts stageTotals) before the client sees anything. An equal pair
+  // nets to 0, and `Math.abs(0)` is still 0 — the bar claimed "no activity" over a list showing $10,000 of
+  // it. The per-deal rows the server aggregated FROM ride along in the same payload, so the components are
+  // recoverable; they just have to be read before the netting, not after.
+  it("splits one stage's commission and equal claw-back into two segments instead of netting them away", async () => {
+    mocks.apiMock.mockResolvedValue({
+      // Built inline rather than through clawBackDashboard's `over`: the whole point of this fixture is
+      // its `deals`, and `Partial<typeof dashboard>` narrows that array to the base fixture's exact
+      // literal shapes.
+      data: {
+        ...dashboard,
+        summary: { ...dashboard.summary, earned: 0, inPipeline: 0, totalPotential: 0, openDealCount: 0 },
+        // The server nets the pair into ONE stage commission of 0 and, dividing by a totalPotential of 0
+        // behind its `> 0` guard, reports 0% everywhere. Both halves of the activity are invisible here.
+        stageTotals: dashboard.stageTotals.map((stage) => ({
+          ...stage,
+          commission: 0,
+          dealValue: 0,
+          dealCount: stage.stageKey === "won" ? 2 : 0,
+          percentOfTotal: 0,
+        })),
+        deals: [
+          {
+            ...dashboard.deals[0]!,
+            dealId: "deal-parent",
+            dealName: "Allen Sports Complex",
+            dealValue: 50000,
+            commissionRate: 0.1,
+            commission: 5000,
+            deltaCommission: null,
+          },
+          {
+            ...dashboard.deals[0]!,
+            dealId: "deal-deductive-co",
+            dealName: "Allen Sports Complex — CO #2",
+            dealValue: -50000,
+            commissionRate: 0.1,
+            commission: -5000,
+            deltaCommission: null,
+          },
+        ],
+      },
+    });
+    const { container, root } = await renderPage();
+
+    expect(container.textContent).not.toContain("No commission activity yet");
+
+    const bars = segments(container);
+    expect(bars).toHaveLength(2);
+    expect(bars.map((bar) => bar.dataset.stage)).toEqual(["won", "won"]);
+    // Each segment is one real, single-signed quantity at its true magnitude — $5,000 of commission and
+    // $5,000 clawed back, half the period's movement each. Neither a zero-width segment (which shows
+    // nothing) nor one $10,000 segment (which nobody earned) would be true.
+    expect(bars[0]!.style.width).toBe("50%");
+    expect(bars[1]!.style.width).toBe("50%");
+    expect(bars[0]!.dataset.clawBack).toBeUndefined();
+    expect(bars[1]!.dataset.clawBack).toBe("true");
+    expect(bars[0]!.title).toBe("Won: $5,000.00");
+    expect(bars[1]!.title).toBe("Won: -$5,000.00 (claw-back)");
+    expect(bars[0]!.textContent).toContain("$5.0K");
+    expect(bars[1]!.textContent).toContain("-$5.0K");
+
+    // The legend keeps the stage NET ($0.00) — that is what the rep takes home — but its share comes off
+    // the same magnitude basis as the widths (50% + 50%), and it names the claw-back so the two same-stage
+    // segments are explained rather than mysterious.
+    expect(container.textContent).toContain("100% of total");
+    expect(container.textContent).toContain("incl. -$5,000.00 clawed back");
+    await unmount(root);
+  });
+
   it("keeps the empty state for a period with genuinely nothing in it", async () => {
     mocks.apiMock.mockResolvedValue({
       data: clawBackDashboard({

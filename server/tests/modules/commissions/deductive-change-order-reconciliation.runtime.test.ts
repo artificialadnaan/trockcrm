@@ -179,6 +179,31 @@ describe("deductive change order: the two earned-commission engines reconcile", 
     expect(listed).toBeCloseTo(dash.summary.earned, 2);
   });
 
+  // WHERE THE NETTING HAPPENS, pinned so the client can rely on it. Both of this rep's rows are earned,
+  // so stageKeyFromSlug collapses them onto the SAME stage ('won') and getRepCommissionDashboard's
+  // stageTotals reduces them to one plain sum. That sum is all a stage-total consumer ever sees: for an
+  // EQUAL pair it is 0, and no absolute value taken afterwards can recover the two magnitudes from it —
+  // which is why the rep's page sizes its stage bar off `deals` (pre-aggregation) rather than off
+  // stageTotals. The second half of this test is the payload invariant that makes that legal.
+  it("stage totals arrive NETTED, and `deals` still carries the components they were netted from", async () => {
+    const dash = await getRepCommissionDashboard(tdb, { role: "rep", userId: REP, ...RANGE });
+
+    const won = dash.stageTotals.find((stage) => stage.stageKey === "won");
+    expect(won).toBeDefined();
+    expect(won!.dealCount).toBe(2);
+    expect(won!.commission).toBeCloseTo(EXPECTED_EARNED, 2); // 10000 + (-2000), already collapsed to 8000
+
+    // Same rows, same stage, unpaginated and un-post-filtered: re-splitting `deals` by sign reproduces
+    // the stage total exactly. If this ever stops holding, the bar silently degrades to the netted total.
+    const wonDeals = dash.deals.filter((deal) => deal.stageKey === "won");
+    expect(wonDeals).toHaveLength(won!.dealCount);
+    const positive = wonDeals.filter((deal) => deal.commission > 0).reduce((sum, deal) => sum + deal.commission, 0);
+    const clawBack = wonDeals.filter((deal) => deal.commission < 0).reduce((sum, deal) => sum + deal.commission, 0);
+    expect(positive).toBeCloseTo(10000, 2);
+    expect(clawBack).toBeCloseTo(-2000, 2);
+    expect(positive + clawBack).toBeCloseTo(won!.commission, 2);
+  });
+
   it("Engine B's per-deal breakdown carries the claw-back too, so both engines list the same rows", async () => {
     const { summary, deals } = await getRepCommissionSummary(tdb, REP, RANGE.from, RANGE.to);
     expect(deals).toHaveLength(2);
