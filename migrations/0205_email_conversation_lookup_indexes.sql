@@ -1,4 +1,4 @@
--- Migration 0203: index the two conversation-id lookups the email thread reassign/unassign feature
+-- Migration 0205: index the two conversation-id lookups the email thread reassign/unassign feature
 -- hammers. Neither predicate had an index that can SEEK on it — the emails side had no index at all
 -- (Seq Scan every time), the bindings side only one whose leading column these queries never supply.
 --

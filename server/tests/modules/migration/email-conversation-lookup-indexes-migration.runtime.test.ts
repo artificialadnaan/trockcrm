@@ -6,7 +6,7 @@ import { emails, emailThreadBindings } from "@trock-crm/shared/schema";
 import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
 
 /**
- * Migration 0203 indexes the two conversation-id predicates the email thread reassign/unassign feature
+ * Migration 0205 indexes the two conversation-id predicates the email thread reassign/unassign feature
  * drives: `emails.graph_conversation_id` (previously UNINDEXED — 4 SELECTs to open a thread, 6 SELECTs
  * + 1 UPDATE to detach one) and the mailbox-LESS `email_thread_bindings` lookup that
  * uq_email_thread_bindings_active_conversation cannot seek on because it is led by mailbox_account_id.
@@ -24,7 +24,7 @@ import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
  */
 const migrationPath = resolve(
   import.meta.dirname,
-  "../../../../migrations/0203_email_conversation_lookup_indexes.sql"
+  "../../../../migrations/0205_email_conversation_lookup_indexes.sql"
 );
 
 const EMAILS_IDX = "emails_graph_conversation_sent_at_idx";
@@ -60,7 +60,7 @@ async function indexNamesIn(pg: PGlite, schemaName: string): Promise<string[]> {
   return rows.map((row) => row.indexname);
 }
 
-describe("migration 0203 — email conversation lookup indexes (file shape)", () => {
+describe("migration 0205 — email conversation lookup indexes (file shape)", () => {
   it("carries BOTH the per-office DO loop and the TENANT_SCHEMA block", () => {
     // Existing offices.
     expect(sql).toContain("DO $tenant$");
@@ -107,7 +107,7 @@ describe("migration 0203 — email conversation lookup indexes (file shape)", ()
   });
 });
 
-describe("migration 0203 — email conversation lookup indexes (applied to a real database)", () => {
+describe("migration 0205 — email conversation lookup indexes (applied to a real database)", () => {
   it("is idempotent, and skips tenants without email_thread_bindings instead of failing", async () => {
     const pg = new PGlite();
     try {
