@@ -231,4 +231,43 @@ describe("multi-mailbox conversations", () => {
     expect(preview.currentDealId).toBe(DEAL_OLD);
     expect(preview.currentDealId).not.toBeNull();
   });
+
+  it("currentDealId ignores an ORPHANED binding whose mailbox has no user_graph_tokens row", async () => {
+    // A disconnect (POST /api/auth/graph/disconnect) hard-DELETEs the token row and leaves the binding
+    // behind, so a binding can point at a mailbox id that no longer exists anywhere. currentDealId is
+    // picked with ORDER BY mailbox_account_id LIMIT 1, and this orphan's id sorts FIRST — without the
+    // join to user_graph_tokens it would win and report DEAL_STALE, i.e. the preview (and the mutation
+    // gate that shares this query) would name a deal the thread has not been on for however long.
+    const MBX_ORPHAN_LOW = U("00a"); // sorts ahead of MBX_A/MBX_B
+    const DEAL_STALE = U("d003");
+    await tdb.execute(sql`INSERT INTO deals (id) VALUES (${DEAL_STALE})`);
+    await tdb.execute(sql`
+      INSERT INTO email_thread_bindings
+        (mailbox_account_id, provider, provider_conversation_id, deal_id, binding_source, confidence)
+      VALUES (${MBX_ORPHAN_LOW}, 'microsoft_graph', ${CONV}, ${DEAL_STALE}, 'manual', 'high')
+    `);
+    // Deliberately NO user_graph_tokens row for MBX_ORPHAN_LOW — that is the point of the test.
+
+    const preview = await previewThreadReassignmentImpact(tdb, {
+      providerConversationId: CONV, nextDealId: DEAL_NEW,
+    });
+    expect(preview.currentDealId).toBe(DEAL_OLD);
+    expect(preview.currentDealId).not.toBe(DEAL_STALE);
+  });
+
+  it("currentDealId still reads a binding whose token is merely revoked, not deleted", async () => {
+    // The join deliberately carries NO status filter: a revoked/error token row still resolves through
+    // resolveMailboxUserId (which looks up by id, unfiltered), so that binding is live as far as every
+    // rebind is concerned and must not vanish from the preview. Only a MISSING row is unhandleable.
+    // Pinned so "tighten the join with status = 'active'" cannot land unnoticed.
+    await tdb.execute(sql`
+      UPDATE email_thread_bindings SET detached_at = now() WHERE mailbox_account_id = ${MBX_B}
+    `);
+    await tdb.execute(sql`UPDATE user_graph_tokens SET status = 'revoked' WHERE id = ${MBX_A}`);
+
+    const preview = await previewThreadReassignmentImpact(tdb, {
+      providerConversationId: CONV, nextDealId: DEAL_NEW,
+    });
+    expect(preview.currentDealId).toBe(DEAL_OLD);
+  });
 });

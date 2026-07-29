@@ -15,11 +15,13 @@ import {
   ignoreEmailAssignment,
   updateEmailInboxAction,
   unignoreEmailAssignment,
-  bindThreadToDeal,
-  detachThreadByConversation,
+  bindConversationToDealAcrossMailboxes,
+  detachConversationAcrossMailboxes,
   previewThreadReassignmentImpact,
+  resolveActiveBindingDealIdForConversation,
   assertCanMutateEmailThread,
 } from "./service.js";
+import { writeAuditLog } from "../../lib/audit-log.js";
 import { getDealById } from "../deals/service.js";
 import { getLeadById } from "../leads/service.js";
 import { getCompanyById } from "../companies/service.js";
@@ -434,32 +436,52 @@ router.get("/thread/:conversationId", async (req, res, next) => {
   }
 });
 
+// The refreshed thread these three routes hand back, read AFTER the mutation.
+//
+// Deliberately not mailbox-scoped (no userId): the caller has just cleared assertCanMutateEmailThread
+// for this conversation, and re-applying the reader's own-mailbox filter here would throw 403 on the
+// way OUT for exactly the deal collaborator the gate just admitted — the mutation would roll back and
+// the feature would be unreachable for its whole audience. This matches the deal Emails tab, which is
+// already not mailbox-scoped (getEmails is called with no user filter).
+function refreshThreadAfterMutation(req: any) {
+  return getEmailThread(
+    req.tenantDb!,
+    req.params.conversationId,
+    undefined,
+    req.user!.role,
+    (candidateDealId) => canUserViewDeal(req, candidateDealId)
+  );
+}
+
 router.post("/thread/:conversationId/assign", async (req, res, next) => {
   try {
     const dealId = req.body.dealId as string | undefined;
     if (!dealId) throw new AppError(400, "dealId is required");
 
-    const thread = await getEmailThreadForMutation(req.tenantDb!, req.params.conversationId, req.user!.id);
-    await assertCanMutateEmailThread(req.tenantDb!, thread, req.user!, { boundDealId: thread.binding?.dealId ?? null });
+    const thread = await getEmailThreadForMutation(req.tenantDb!, req.params.conversationId);
+    // SERVER-DERIVED, from the conversation's own binding. Never from req.body: a caller-supplied value
+    // would let anyone name a deal they happen to have access to and walk straight through the gate.
+    const boundDealId = await resolveActiveBindingDealIdForConversation(
+      req.tenantDb!,
+      req.params.conversationId
+    );
+    await assertCanMutateEmailThread(req.tenantDb!, thread, req.user!, { boundDealId });
 
     await assertDealCollaboratorAccess(req.tenantDb!, dealId, req.user!);
 
-    const result = await bindThreadToDeal(req.tenantDb!, {
-      mailboxAccountId: thread.mailboxAccountId,
+    // Every mailbox holding the conversation, not just one. Dropping the caller-id filter above made
+    // thread.mailboxAccountId "whichever participant sent first" rather than "the caller's mailbox", so
+    // the old single-mailbox bind would have filed an arbitrary participant's copy and stranded the
+    // rest — the exact split-brain the reassign path was fixed for.
+    await bindConversationToDealAcrossMailboxes(req.tenantDb!, {
       providerConversationId: req.params.conversationId,
       dealId,
       actingUserId: req.user!.id,
     });
 
-    const refreshedThread = await getEmailThread(
-      req.tenantDb!,
-      req.params.conversationId,
-      req.user!.id,
-      req.user!.role,
-      (candidateDealId) => canUserViewDeal(req, candidateDealId)
-    );
+    const refreshedThread = await refreshThreadAfterMutation(req);
     await req.commitTransaction!();
-    res.json({ ...result, thread: refreshedThread });
+    res.json({ success: true, thread: refreshedThread });
   } catch (err) {
     next(err);
   }
@@ -470,8 +492,12 @@ router.post("/thread/:conversationId/reassign", async (req, res, next) => {
     const dealId = req.body.dealId as string | undefined;
     if (!dealId) throw new AppError(400, "dealId is required");
 
-    const thread = await getEmailThreadForMutation(req.tenantDb!, req.params.conversationId, req.user!.id);
-    await assertCanMutateEmailThread(req.tenantDb!, thread, req.user!, { boundDealId: thread.binding?.dealId ?? null });
+    const thread = await getEmailThreadForMutation(req.tenantDb!, req.params.conversationId);
+    const boundDealId = await resolveActiveBindingDealIdForConversation(
+      req.tenantDb!,
+      req.params.conversationId
+    );
+    await assertCanMutateEmailThread(req.tenantDb!, thread, req.user!, { boundDealId });
 
     await assertDealCollaboratorAccess(req.tenantDb!, dealId, req.user!);
 
@@ -480,22 +506,34 @@ router.post("/thread/:conversationId/reassign", async (req, res, next) => {
       nextDealId: dealId,
     });
 
-    const result = await bindThreadToDeal(req.tenantDb!, {
-      mailboxAccountId: thread.mailboxAccountId,
+    await bindConversationToDealAcrossMailboxes(req.tenantDb!, {
       providerConversationId: req.params.conversationId,
       dealId,
       actingUserId: req.user!.id,
     });
 
-    const refreshedThread = await getEmailThread(
-      req.tenantDb!,
-      req.params.conversationId,
-      req.user!.id,
-      req.user!.role,
-      (candidateDealId) => canUserViewDeal(req, candidateDealId)
-    );
+    // recordId is uuid NOT NULL (shared/src/schema/tenant/audit-log.ts), and a Graph conversation id is
+    // not a uuid — putting it there is a 22P02 that takes the whole transaction down. Filed under the
+    // deal instead: the one the thread moved OFF, so the surprising event ("this deal's email vanished")
+    // is discoverable from the deal it happened to, falling back to the destination when the thread was
+    // previously unbound. The conversation id and both deal ids live in fullRow either way.
+    await writeAuditLog(req.tenantDb!, {
+      tableName: "email_thread_bindings",
+      recordId: preview.currentDealId ?? dealId,
+      action: "update",
+      changedBy: req.user!.id,
+      entityType: "email_thread",
+      fullRow: {
+        providerConversationId: req.params.conversationId,
+        previousDealId: preview.currentDealId,
+        nextDealId: dealId,
+        affectedMessageCount: preview.affectedMessageCount,
+      },
+    });
+
+    const refreshedThread = await refreshThreadAfterMutation(req);
     await req.commitTransaction!();
-    res.json({ ...result, preview, thread: refreshedThread });
+    res.json({ success: true, preview, thread: refreshedThread });
   } catch (err) {
     next(err);
   }
@@ -503,17 +541,41 @@ router.post("/thread/:conversationId/reassign", async (req, res, next) => {
 
 router.post("/thread/:conversationId/detach", async (req, res, next) => {
   try {
-    const thread = await getEmailThreadForMutation(req.tenantDb!, req.params.conversationId, req.user!.id);
-    await assertCanMutateEmailThread(req.tenantDb!, thread, req.user!, { boundDealId: thread.binding?.dealId ?? null });
+    const thread = await getEmailThreadForMutation(req.tenantDb!, req.params.conversationId);
+    const boundDealId = await resolveActiveBindingDealIdForConversation(
+      req.tenantDb!,
+      req.params.conversationId
+    );
+    await assertCanMutateEmailThread(req.tenantDb!, thread, req.user!, { boundDealId });
 
-    await detachThreadByConversation(req.tenantDb!, thread.mailboxAccountId, req.params.conversationId, req.user!.id);
-    const refreshedThread = await getEmailThread(
+    await detachConversationAcrossMailboxes(
       req.tenantDb!,
       req.params.conversationId,
-      req.user!.id,
-      req.user!.role,
-      (candidateDealId) => canUserViewDeal(req, candidateDealId)
+      req.user!.id
     );
+
+    // Same recordId reasoning as reassign. No active binding means the detach matched no rows, so there
+    // is nothing to record — and no deal to file it under.
+    if (boundDealId) {
+      await writeAuditLog(req.tenantDb!, {
+        tableName: "email_thread_bindings",
+        recordId: boundDealId,
+        action: "update",
+        changedBy: req.user!.id,
+        entityType: "email_thread",
+        fullRow: {
+          providerConversationId: req.params.conversationId,
+          previousDealId: boundDealId,
+          nextDealId: null,
+          detached: true,
+          // thread.emails is the WHOLE conversation now that the caller-id filter is gone — the same
+          // row set previewThreadReassignmentImpact counts, so this count means what reassign's does.
+          affectedMessageCount: thread.emails.length,
+        },
+      });
+    }
+
+    const refreshedThread = await refreshThreadAfterMutation(req);
     await req.commitTransaction!();
     res.json({ success: true, thread: refreshedThread });
   } catch (err) {

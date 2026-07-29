@@ -12,10 +12,15 @@ const emailServiceMocks = vi.hoisted(() => ({
   ignoreEmailAssignment: vi.fn(),
   unignoreEmailAssignment: vi.fn(),
   updateEmailInboxAction: vi.fn(),
-  bindThreadToDeal: vi.fn(),
-  detachThreadByConversation: vi.fn(),
+  bindConversationToDealAcrossMailboxes: vi.fn(),
+  detachConversationAcrossMailboxes: vi.fn(),
   previewThreadReassignmentImpact: vi.fn(),
+  resolveActiveBindingDealIdForConversation: vi.fn(),
   assertCanMutateEmailThread: vi.fn(),
+}));
+
+const auditMocks = vi.hoisted(() => ({
+  writeAuditLog: vi.fn(),
 }));
 
 const dealServiceMocks = vi.hoisted(() => ({
@@ -62,12 +67,17 @@ vi.mock("../../../src/modules/email/service.js", async () => {
     ignoreEmailAssignment: emailServiceMocks.ignoreEmailAssignment,
     unignoreEmailAssignment: emailServiceMocks.unignoreEmailAssignment,
     updateEmailInboxAction: emailServiceMocks.updateEmailInboxAction,
-    bindThreadToDeal: emailServiceMocks.bindThreadToDeal,
-    detachThreadByConversation: emailServiceMocks.detachThreadByConversation,
+    bindConversationToDealAcrossMailboxes: emailServiceMocks.bindConversationToDealAcrossMailboxes,
+    detachConversationAcrossMailboxes: emailServiceMocks.detachConversationAcrossMailboxes,
     previewThreadReassignmentImpact: emailServiceMocks.previewThreadReassignmentImpact,
+    resolveActiveBindingDealIdForConversation: emailServiceMocks.resolveActiveBindingDealIdForConversation,
     assertCanMutateEmailThread: emailServiceMocks.assertCanMutateEmailThread,
   };
 });
+
+vi.mock("../../../src/lib/audit-log.js", () => ({
+  writeAuditLog: auditMocks.writeAuditLog,
+}));
 
 vi.mock("../../../src/modules/deals/service.js", async () => {
   const actual = await vi.importActual<typeof import("../../../src/modules/deals/service.js")>(
@@ -1441,17 +1451,14 @@ describe("email routes", () => {
     ).rejects.toThrow("Missing");
   });
 
-  it("assigns an unbound thread to a deal", async () => {
+  it("assigns an unbound thread to a deal across every mailbox holding it", async () => {
     emailServiceMocks.getEmailThreadForMutation.mockResolvedValue({
       mailboxAccountId: "mailbox-1",
       binding: null,
       emails: [{ id: "email-1", userId: "director-1" }],
     });
     dealServiceMocks.getDealById.mockResolvedValue({ id: "deal-1" });
-    emailServiceMocks.bindThreadToDeal.mockResolvedValue({
-      binding: { id: "binding-1", dealId: "deal-1" },
-      previousBindingId: null,
-    });
+    emailServiceMocks.resolveActiveBindingDealIdForConversation.mockResolvedValue(null);
     emailServiceMocks.getEmailThread.mockResolvedValue({ binding: { id: "binding-1", dealId: "deal-1" }, preview: null, emails: [] });
 
     const { req, res } = await invokeRoute({
@@ -1461,26 +1468,47 @@ describe("email routes", () => {
       body: { dealId: "deal-1" },
     });
 
-    expect(emailServiceMocks.bindThreadToDeal).toHaveBeenCalledWith(expect.any(Object), {
-      mailboxAccountId: "mailbox-1",
+    // No mailboxAccountId: the bind spans every mailbox holding the conversation. The route no longer
+    // pre-filters the thread to the caller, so thread.mailboxAccountId is one arbitrary participant's
+    // mailbox and binding only that one would strand the rest.
+    expect(emailServiceMocks.bindConversationToDealAcrossMailboxes).toHaveBeenCalledWith(expect.any(Object), {
       providerConversationId: "conversation-1",
       dealId: "deal-1",
       actingUserId: "director-1",
     });
     expect(req.commitTransaction).toHaveBeenCalled();
-    expect(res.body.binding).toEqual({ id: "binding-1", dealId: "deal-1" });
+    expect(res.body.success).toBe(true);
+    // The mutation gate is fed a SERVER-DERIVED bound deal — from the conversation's binding, never
+    // from the request body (which names the DESTINATION deal).
+    expect(emailServiceMocks.assertCanMutateEmailThread).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.any(Object),
+      expect.objectContaining({ id: "director-1" }),
+      { boundDealId: null }
+    );
+    // Refreshed WITHOUT a userId: re-applying the reader's own-mailbox filter would 403 on the way out
+    // for a deal collaborator who owns none of the thread's messages.
     expect(emailServiceMocks.getEmailThread).toHaveBeenLastCalledWith(
       expect.any(Object),
       "conversation-1",
-      "director-1",
+      undefined,
       "director",
       expect.any(Function)
     );
   });
 
-  it("returns 403 when a user tries to assign another user's thread", async () => {
-    emailServiceMocks.getEmailThreadForMutation.mockRejectedValue(
-      Object.assign(new Error("You can only view and modify your own email threads"), { statusCode: 403 })
+  it("returns 403 when the mutation gate rejects an assign", async () => {
+    // The owner-only 403 used to come out of getEmailThreadForMutation's caller-id pre-filter. That
+    // pre-filter is gone (it 403'd deal collaborators before the gate could admit them), so the denial
+    // is now assertCanMutateEmailThread's — and it must still reach the client as a 403.
+    emailServiceMocks.getEmailThreadForMutation.mockResolvedValue({
+      mailboxAccountId: "mailbox-9",
+      binding: null,
+      emails: [{ id: "email-1", userId: "someone-else" }],
+    });
+    emailServiceMocks.resolveActiveBindingDealIdForConversation.mockResolvedValue(null);
+    emailServiceMocks.assertCanMutateEmailThread.mockRejectedValue(
+      Object.assign(new Error("You can only modify your own email threads"), { statusCode: 403 })
     );
 
     await expect(
@@ -1491,27 +1519,25 @@ describe("email routes", () => {
         body: { dealId: "deal-1" },
       })
     ).rejects.toMatchObject({
-      message: "You can only view and modify your own email threads",
+      message: "You can only modify your own email threads",
       statusCode: 403,
     });
+    expect(emailServiceMocks.bindConversationToDealAcrossMailboxes).not.toHaveBeenCalled();
   });
 
-  it("reassigns a thread and returns a preview", async () => {
+  it("reassigns a thread across every mailbox, returns a preview, and audits the move", async () => {
     emailServiceMocks.getEmailThreadForMutation.mockResolvedValue({
       mailboxAccountId: "mailbox-1",
       binding: { id: "binding-1", dealId: "deal-1" },
       emails: [{ id: "email-1", userId: "director-1" }],
     });
     dealServiceMocks.getDealById.mockResolvedValue({ id: "deal-2" });
+    emailServiceMocks.resolveActiveBindingDealIdForConversation.mockResolvedValue("deal-1");
     emailServiceMocks.previewThreadReassignmentImpact.mockResolvedValue({
       affectedMessageCount: 2,
       affectedMessageIds: ["email-1", "email-2"],
       currentDealId: "deal-1",
       nextDealId: "deal-2",
-    });
-    emailServiceMocks.bindThreadToDeal.mockResolvedValue({
-      binding: { id: "binding-2", dealId: "deal-2" },
-      previousBindingId: "binding-1",
     });
     emailServiceMocks.getEmailThread.mockResolvedValue({ binding: { id: "binding-2", dealId: "deal-2" }, preview: null, emails: [] });
 
@@ -1526,22 +1552,47 @@ describe("email routes", () => {
       providerConversationId: "conversation-1",
       nextDealId: "deal-2",
     });
+    expect(emailServiceMocks.bindConversationToDealAcrossMailboxes).toHaveBeenCalledWith(expect.any(Object), {
+      providerConversationId: "conversation-1",
+      dealId: "deal-2",
+      actingUserId: "director-1",
+    });
+    expect(emailServiceMocks.assertCanMutateEmailThread).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.any(Object),
+      expect.objectContaining({ id: "director-1" }),
+      { boundDealId: "deal-1" }
+    );
+    expect(auditMocks.writeAuditLog).toHaveBeenCalledWith(expect.any(Object), {
+      tableName: "email_thread_bindings",
+      recordId: "deal-1",
+      action: "update",
+      changedBy: "director-1",
+      entityType: "email_thread",
+      fullRow: {
+        providerConversationId: "conversation-1",
+        previousDealId: "deal-1",
+        nextDealId: "deal-2",
+        affectedMessageCount: 2,
+      },
+    });
     expect(res.body.preview.affectedMessageIds).toEqual(["email-1", "email-2"]);
     expect(emailServiceMocks.getEmailThread).toHaveBeenLastCalledWith(
       expect.any(Object),
       "conversation-1",
-      "director-1",
+      undefined,
       "director",
       expect.any(Function)
     );
   });
 
-  it("detaches a thread using the thread mailbox account id", async () => {
+  it("detaches a thread across every mailbox and audits the detach", async () => {
     emailServiceMocks.getEmailThreadForMutation.mockResolvedValue({
       mailboxAccountId: "mailbox-2",
       binding: { id: "binding-1", dealId: "deal-1" },
-      emails: [{ id: "email-1", userId: "director-1" }],
+      emails: [{ id: "email-1", userId: "director-1" }, { id: "email-2", userId: "rep-9" }],
     });
+    emailServiceMocks.resolveActiveBindingDealIdForConversation.mockResolvedValue("deal-1");
     emailServiceMocks.getEmailThread.mockResolvedValue({ binding: null, preview: null, emails: [] });
 
     await invokeRoute({
@@ -1551,18 +1602,55 @@ describe("email routes", () => {
       body: {},
     });
 
-    expect(emailServiceMocks.detachThreadByConversation).toHaveBeenCalledWith(
+    // No mailbox account id: a single UPDATE clears every active binding on the conversation, including
+    // one whose mailbox has no surviving message rows.
+    expect(emailServiceMocks.detachConversationAcrossMailboxes).toHaveBeenCalledWith(
       expect.any(Object),
-      "mailbox-2",
       "conversation-1",
       "director-1"
     );
+    expect(auditMocks.writeAuditLog).toHaveBeenCalledWith(expect.any(Object), {
+      tableName: "email_thread_bindings",
+      recordId: "deal-1",
+      action: "update",
+      changedBy: "director-1",
+      entityType: "email_thread",
+      fullRow: {
+        providerConversationId: "conversation-1",
+        previousDealId: "deal-1",
+        nextDealId: null,
+        detached: true,
+        affectedMessageCount: 2,
+      },
+    });
     expect(emailServiceMocks.getEmailThread).toHaveBeenLastCalledWith(
       expect.any(Object),
       "conversation-1",
-      "director-1",
+      undefined,
       "director",
       expect.any(Function)
     );
+  });
+
+  it("skips the detach audit row when the conversation was not bound to anything", async () => {
+    // Nothing was filed, so the detach matched no rows and there is no deal to file the record under —
+    // audit_log.record_id is uuid NOT NULL, so a row here would have nothing legal to put in it.
+    emailServiceMocks.getEmailThreadForMutation.mockResolvedValue({
+      mailboxAccountId: "mailbox-2",
+      binding: null,
+      emails: [{ id: "email-1", userId: "director-1" }],
+    });
+    emailServiceMocks.resolveActiveBindingDealIdForConversation.mockResolvedValue(null);
+    emailServiceMocks.getEmailThread.mockResolvedValue({ binding: null, preview: null, emails: [] });
+
+    await invokeRoute({
+      method: "post",
+      url: "/thread/conversation-1/detach",
+      user: makeDirectorUser(),
+      body: {},
+    });
+
+    expect(emailServiceMocks.detachConversationAcrossMailboxes).toHaveBeenCalled();
+    expect(auditMocks.writeAuditLog).not.toHaveBeenCalled();
   });
 });

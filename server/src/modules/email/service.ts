@@ -661,6 +661,20 @@ async function findAnyEmailInConversation(
   return email ?? null;
 }
 
+/**
+ * The thread a mutation is about to act on.
+ *
+ * `userId` scopes the thread to ONE mailbox's copy of the conversation. The deal-linkage mutation
+ * routes deliberately pass NOTHING: scoping there would 403 a deal collaborator who owns none of the
+ * messages before assertCanMutateEmailThread's deal-write path ever ran, which is the whole point of
+ * that path. getEmailThread still passes it, because the thread READER is mailbox-scoped.
+ *
+ * Consequence to hold onto: unscoped, `mailboxAccountId` is ONE participant's mailbox out of however
+ * many hold the conversation, and `binding` is that one mailbox's binding. Neither is a statement
+ * about the conversation as a whole — for "what deal is this thread on", use
+ * resolveActiveBindingDealIdForConversation, and for "which mailboxes hold it", use the
+ * resolve*ForConversation helpers.
+ */
 export async function getEmailThreadForMutation(
   tenantDb: TenantDb,
   providerConversationId: string,
@@ -686,7 +700,34 @@ export async function getEmailThreadForMutation(
     throw new AppError(404, "Email thread not found");
   }
 
-  const mailboxAccountId = await resolveMailboxAccountIdForCrmUser(tenantDb, threadEmails[0].userId);
+  // The mailbox this thread is described BY.
+  //
+  // Scoped to a caller, every row already belongs to them, so the oldest message's owner IS the caller
+  // and the direct lookup is exactly right — unchanged, 409 and all.
+  //
+  // UNSCOPED (the deal-linkage mutation routes), threadEmails[0] is whichever PARTICIPANT sent first,
+  // and resolveMailboxAccountIdForCrmUser throws 409 "Connect mailbox first" for a user whose token row
+  // was deleted (disconnect) or left non-active (a failed refresh). Handing it that user blind would
+  // 409 the entire reassign/detach — for everyone — over some other participant's disconnected Outlook.
+  // So take the oldest message whose owner is actually CONNECTED, falling back to the direct lookup
+  // (and its 409) only when no participant is.
+  let mailboxAccountId: string;
+  if (userId) {
+    mailboxAccountId = await resolveMailboxAccountIdForCrmUser(tenantDb, threadEmails[0].userId);
+  } else {
+    const [connectedMailbox] = await tenantDb
+      .select({ id: userGraphTokens.id })
+      .from(emails)
+      .innerJoin(
+        userGraphTokens,
+        and(eq(userGraphTokens.userId, emails.userId), eq(userGraphTokens.status, "active"))
+      )
+      .where(eq(emails.graphConversationId, providerConversationId))
+      .orderBy(sql`${emails.sentAt} ASC`, sql`${emails.id} ASC`)
+      .limit(1);
+    mailboxAccountId =
+      connectedMailbox?.id ?? (await resolveMailboxAccountIdForCrmUser(tenantDb, threadEmails[0].userId));
+  }
   const binding = await getActiveThreadBinding(tenantDb, mailboxAccountId, providerConversationId);
 
   return {
@@ -725,6 +766,15 @@ export async function assertCanMutateEmailThread(
   user: { id: string; role: string; officeId?: string | null; activeOfficeId?: string | null },
   context: { boundDealId: string | null }
 ) {
+  // Path 1, the cheap half: does the caller own a MESSAGE in this thread? emails.userId IS the mailbox
+  // owner, and the mutation routes hand this helper the WHOLE conversation, so this is the honest
+  // reading of "the thread is in the caller's own mailbox". The mailbox-id comparison below cannot
+  // stand in for it: thread.mailboxAccountId describes ONE participant's mailbox (the oldest message's),
+  // so on a thread that reached two mailboxes it would admit only the participant who happened to send
+  // first — narrower than the mailbox-scoped routes this helper replaced, which let anyone holding a
+  // copy of the thread refile it.
+  if (thread.emails.some((email) => email.userId === user.id)) return;
+
   // A caller with no mailbox of their own simply MISSES path 1 — that is not an error here.
   // resolveMailboxAccountIdForCrmUser signals it with AppError(409, "Connect mailbox first"); letting
   // that escape would 409 a user who holds perfectly good deal write access before path 2 ever ran, so
@@ -866,6 +916,47 @@ export async function detachConversationAcrossMailboxes(
     );
 }
 
+/**
+ * The deal this CONVERSATION is currently filed under, from any active binding on it.
+ *
+ * The one place to ask "what deal is this thread on". It is deliberately NOT sourced from a message
+ * row: backAssociateStoredMessagesForBinding writes emails.deal_id scoped to ONE mailbox's messages at
+ * a time (eq(emails.userId, mailboxUserId)), so a mailbox that was never bound can sit at
+ * deal_id = NULL even while another mailbox is actively bound. Ordered by mailbox_account_id so two
+ * disagreeing bindings still answer stably.
+ *
+ * It is equally NOT sourced from getEmailThreadForMutation's `binding`, which is one arbitrary
+ * mailbox's binding: on a thread that reached two mailboxes, that binding can be detached while the
+ * conversation is still very much filed under a deal via the other one. Feeding THAT to
+ * assertCanMutateEmailThread hands it a null boundDealId and 403s exactly the deal collaborator the
+ * deal-write path exists to admit.
+ *
+ * Joined to user_graph_tokens by id, same as resolveMailboxAccountIdsWithActiveBindingForConversation
+ * and for the same reason: a disconnect hard-deletes the token row but leaves the binding in place, so
+ * without this join an orphaned binding with a low UUID could win the ORDER BY and report a stale deal.
+ * No status filter, for the same reason as there — a merely revoked/error token still resolves.
+ */
+export async function resolveActiveBindingDealIdForConversation(
+  tenantDb: TenantDb,
+  providerConversationId: string
+): Promise<string | null> {
+  const [currentBinding] = await tenantDb
+    .select({ dealId: emailThreadBindings.dealId })
+    .from(emailThreadBindings)
+    .innerJoin(userGraphTokens, eq(userGraphTokens.id, emailThreadBindings.mailboxAccountId))
+    .where(
+      and(
+        eq(emailThreadBindings.provider, "microsoft_graph"),
+        eq(emailThreadBindings.providerConversationId, providerConversationId),
+        sql`${emailThreadBindings.detachedAt} IS NULL`
+      )
+    )
+    .orderBy(emailThreadBindings.mailboxAccountId)
+    .limit(1);
+
+  return currentBinding?.dealId ?? null;
+}
+
 export async function previewThreadReassignmentImpact(
   tenantDb: TenantDb,
   input: {
@@ -882,61 +973,27 @@ export async function previewThreadReassignmentImpact(
     .where(eq(emails.graphConversationId, input.providerConversationId))
     .orderBy(sql`${emails.sentAt} ASC`, sql`${emails.id} ASC`);
 
-  // currentDealId comes from the BINDING, not a message row: backAssociateStoredMessagesForBinding
-  // writes emails.deal_id scoped to ONE mailbox's messages at a time (eq(emails.userId, mailboxUserId)),
-  // so a mailbox that was never bound can sit at deal_id = NULL even while another mailbox is actively
-  // bound. Reading the oldest message's deal_id would then report null instead of the real current deal
-  // whenever that older copy happens to be the unbound one. Ordered by mailbox_account_id so two
-  // disagreeing bindings still answer stably.
-  //
-  // Joined to user_graph_tokens by id, same as resolveMailboxAccountIdsWithActiveBindingForConversation
-  // and for the same reason: a disconnect hard-deletes the token row but leaves the binding in place, so
-  // without this join an orphaned binding with a low UUID could win the ORDER BY and report a stale
-  // deal. No status filter, for the same reason as there — a merely revoked/error token still resolves.
-  const [currentBinding] = await tenantDb
-    .select({ dealId: emailThreadBindings.dealId })
-    .from(emailThreadBindings)
-    .innerJoin(userGraphTokens, eq(userGraphTokens.id, emailThreadBindings.mailboxAccountId))
-    .where(
-      and(
-        eq(emailThreadBindings.provider, "microsoft_graph"),
-        eq(emailThreadBindings.providerConversationId, input.providerConversationId),
-        sql`${emailThreadBindings.detachedAt} IS NULL`
-      )
-    )
-    .orderBy(emailThreadBindings.mailboxAccountId)
-    .limit(1);
+  // currentDealId comes from the BINDING, not a message row — see
+  // resolveActiveBindingDealIdForConversation, which is the same question the mutation routes ask to
+  // build the gate's boundDealId, so the preview and the gate can never disagree about what deal the
+  // thread is on.
+  const currentDealId = await resolveActiveBindingDealIdForConversation(
+    tenantDb,
+    input.providerConversationId
+  );
 
   return {
     affectedMessageCount: messageRows.length,
     affectedMessageIds: messageRows.map((row) => row.id),
-    currentDealId: currentBinding?.dealId ?? null,
+    currentDealId,
     nextDealId: input.nextDealId,
   };
 }
 
-export async function detachThreadByConversation(
-  tenantDb: TenantDb,
-  mailboxAccountId: string,
-  providerConversationId: string,
-  actingUserId: string
-) {
-  await tenantDb
-    .update(emailThreadBindings)
-    .set({
-      detachedAt: new Date(),
-      updatedBy: actingUserId,
-      updatedAt: new Date(),
-    })
-    .where(
-      and(
-        eq(emailThreadBindings.mailboxAccountId, mailboxAccountId),
-        eq(emailThreadBindings.provider, "microsoft_graph"),
-        eq(emailThreadBindings.providerConversationId, providerConversationId),
-        sql`${emailThreadBindings.detachedAt} IS NULL`
-      )
-    );
-}
+// detachThreadByConversation (the mailbox-SCOPED detach) is deliberately gone: its only caller was the
+// detach route, which now uses detachConversationAcrossMailboxes. Detaching one mailbox at a time is the
+// stranded-binding bug this change exists to close, so leaving the old helper exported would just be an
+// invitation to reintroduce it.
 
 async function backAssociateStoredMessagesForBinding(
   tenantDb: TenantDb,
