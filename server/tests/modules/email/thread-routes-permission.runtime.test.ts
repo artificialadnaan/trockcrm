@@ -279,19 +279,109 @@ describe("thread mutation routes — deal-collaborator access", () => {
     expect(res.body).toEqual({ binding: null, preview: null, emails: [] });
   });
 
-  it("GET: hands a collaborator the other mailbox's archived and ignored messages", async () => {
+  it("GET: hands a collaborator the other mailbox's archived, deleted and ignored messages", async () => {
     // DELIBERATE, and wider than the deal Emails LIST, which drops archived/deleted/ignored rows
     // (activeEmailConditions + assignmentStatus <> 'ignored'). The thread endpoint has never filtered
     // them for anyone, and archive/delete/ignore are personal INBOX actions — filtering a deal's thread
     // by whose inbox has been tidied would hand two people on the same deal different, gappy versions of
     // the same conversation. Pinned so a change in either direction is a decision, not a drift.
+    //
+    // deleted_at is the sharpest of the three — a rep's DELETED mail surfacing to a colleague — so it is
+    // asserted here rather than merely named in a comment.
     await tdb.execute(sql`UPDATE emails SET archived_at = now() WHERE graph_message_id = 'm1'`);
+    await tdb.execute(sql`UPDATE emails SET deleted_at = now() WHERE graph_message_id = 'm1'`);
     await tdb.execute(sql`UPDATE emails SET assignment_status = 'ignored' WHERE graph_message_id = 'm2'`);
 
     const { res } = await getThreadRoute(collaboratorUser);
 
     expect(res.body.emails).toHaveLength(2);
     expect(res.body.emails.map((e: { graphMessageId: string }) => e.graphMessageId).sort()).toEqual(["m1", "m2"]);
+  });
+
+  it("GET: a 404 from the deal gate reaches the client instead of reading as an empty thread", async () => {
+    // THE CARVE-OUT TRAP. The GET answers 200-with-nothing for a conversation that holds no messages,
+    // which used to be implemented by swallowing any 404 out of the gate. TWO things throw 404 in there:
+    // getEmailThreadForMutation's "Email thread not found" AND assertDealCollaboratorAccess's "Deal not
+    // found" — and swallowing the second turns a real authorization denial into a 200 that says the
+    // thread is empty. The conversation here very much has messages; only the bound deal is gone.
+    await tdb.execute(sql`UPDATE emails SET deal_id = NULL WHERE graph_conversation_id = ${CONV}`);
+    await tdb.execute(sql`DELETE FROM deals WHERE id = ${DEAL_OLD}`);
+
+    const err = await rejection(getThreadRoute(collaboratorUser));
+    expect(err.statusCode).toBe(404);
+    expect(err.message).toMatch(/Deal not found/i);
+  });
+
+  // ---------------------------------------------------------------------------------------------
+  // 0b. The worker stores ONE emails row PER MAILBOX (graph_message_id is unique per mailbox, and the
+  //     internet_message_id dedup is deliberately scoped to the mailbox's own outbound rows — see
+  //     worker/src/jobs/email-sync.ts). Unscoped, this read therefore returns every real message once
+  //     per participant. Collapsing those copies is PRESENTATION only: it changes which ROW represents
+  //     a message, never which messages the caller may see.
+  // ---------------------------------------------------------------------------------------------
+  it("GET: collapses a message stored once per mailbox into a single row", async () => {
+    // Distinct sent_at values on purpose, so "the oldest copy" is unambiguous — real copies of one
+    // message usually share a timestamp, and which of those two wins is not what this pins.
+    await tdb.execute(sql`
+      UPDATE emails SET internet_message_id = '<shared@example.com>' WHERE graph_conversation_id = ${CONV}
+    `);
+
+    const { res } = await getThreadRoute(collaboratorUser);
+
+    expect(res.body.emails).toHaveLength(1);
+    // The caller owns neither copy, so the oldest one represents the message.
+    expect(res.body.emails[0].graphMessageId).toBe("m1");
+  });
+
+  it("GET: represents a collapsed message by the CALLER'S OWN copy when they hold one", async () => {
+    // Starred/archived/read state lives on the per-mailbox ROW. Handing a participant someone else's
+    // copy would show them their own mail with someone else's state on it.
+    await tdb.execute(sql`
+      UPDATE emails SET internet_message_id = '<shared@example.com>' WHERE graph_conversation_id = ${CONV}
+    `);
+    await tdb.execute(sql`UPDATE emails SET is_starred = true WHERE graph_message_id = 'm2'`);
+
+    const { res } = await getThreadRoute(laterMessageOwnerUser);
+
+    expect(res.body.emails).toHaveLength(1);
+    expect(res.body.emails[0].graphMessageId).toBe("m2");
+    expect(res.body.emails[0].isStarred).toBe(true);
+  });
+
+  it("GET: never collapses rows that carry NO internet_message_id", async () => {
+    // internet_message_id is nullable, and a NULL is the ABSENCE of an identity, not an identity shared
+    // with every other NULL. Keying on it would collapse a whole conversation of un-idd messages into
+    // one — losing real messages, which is far worse than the doubling being fixed here. m1/m2 collapse
+    // (shared id); m3/m4 are two DIFFERENT messages with no id at all and must both survive.
+    await tdb.execute(sql`
+      UPDATE emails SET internet_message_id = '<shared@example.com>' WHERE graph_conversation_id = ${CONV}
+    `);
+    await tdb.execute(sql`
+      INSERT INTO emails
+        (graph_message_id, graph_conversation_id, subject, direction, from_address, to_addresses, deal_id, assignment_status, user_id, sent_at)
+      VALUES
+        ('m3', ${CONV}, 'Roof scope', 'inbound', 'sender@example.com', '{}', ${DEAL_OLD}, 'assigned', ${USER_OWNER},  '2026-07-03T00:00:00Z'),
+        ('m4', ${CONV}, 'Roof scope', 'inbound', 'sender@example.com', '{}', ${DEAL_OLD}, 'assigned', ${USER_SECOND}, '2026-07-04T00:00:00Z')
+    `);
+
+    const { res } = await getThreadRoute(collaboratorUser);
+
+    expect(res.body.emails.map((e: { graphMessageId: string }) => e.graphMessageId)).toEqual(["m1", "m3", "m4"]);
+  });
+
+  it("reassign: hands back a refreshed thread that is collapsed too", async () => {
+    // The mutation routes re-read through the same helper, so a doubled payload would come straight back
+    // out of a successful reassign and the count in the header would jump on save.
+    await tdb.execute(sql`
+      UPDATE emails SET internet_message_id = '<shared@example.com>' WHERE graph_conversation_id = ${CONV}
+    `);
+
+    const { res } = await postThreadRoute("reassign", collaboratorUser, { dealId: DEAL_NEW });
+
+    expect(res.body.thread.emails).toHaveLength(1);
+    // The impact preview counts ROWS the mutation moves, not messages the reader sees — both copies
+    // really did move, so it stays at 2. Pinned so the dedup is not "fixed" into the mutation side.
+    expect(res.body.preview.affectedMessageCount).toBe(2);
   });
 
   // ---------------------------------------------------------------------------------------------

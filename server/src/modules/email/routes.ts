@@ -20,6 +20,7 @@ import {
   previewThreadReassignmentImpact,
   resolveActiveBindingDealIdForConversation,
   assertCanMutateEmailThread,
+  conversationHasAnyMessage,
 } from "./service.js";
 import { writeAuditLog } from "../../lib/audit-log.js";
 import { getDealById } from "../deals/service.js";
@@ -452,6 +453,12 @@ async function gateEmailThreadAccess(req: any) {
 //      thread by whose inbox has been tidied would give two people on the same deal different, gappy
 //      versions of the same conversation. Pinned by a test — do not "fix" it silently in either
 //      direction.
+//
+// The caller's id goes in the LAST slot, not the userId one. It is presentation only: the sync stores
+// one row per MAILBOX, so an unscoped read sees every real message once per participant, and
+// getEmailThread collapses those copies preferring the caller's own row (which carries their own
+// starred/archived state). Moving that id up into the userId slot would turn it back into a filter and
+// reinstate exactly the 403 this function exists to avoid.
 function readThreadForGatedCaller(req: any) {
   return getEmailThread(
     req.tenantDb!,
@@ -460,7 +467,8 @@ function readThreadForGatedCaller(req: any) {
     req.user!.role,
     // NOTE: getEmailThread currently ignores both this and userRole. This closure is NOT what makes the
     // unscoped read safe — gateEmailThreadAccess is. Kept only so the signature stays uniform.
-    (candidateDealId) => canUserViewDeal(req, candidateDealId)
+    (candidateDealId) => canUserViewDeal(req, candidateDealId),
+    req.user!.id
   );
 }
 
@@ -474,17 +482,22 @@ router.get("/thread/:conversationId", async (req, res, next) => {
     //
     // A conversation with no messages at all is not a thread to authorize — 404ing it here would turn
     // today's empty payload into an error for the client, so let that one case through unchanged.
-    let gated: Awaited<ReturnType<typeof gateEmailThreadAccess>> | null = null;
-    try {
-      gated = await gateEmailThreadAccess(req);
-    } catch (err) {
-      if (!(err instanceof AppError) || err.statusCode !== 404) throw err;
-    }
-    if (!gated) {
+    //
+    // Asked as a QUESTION, ahead of the gate, rather than caught as a 404 out of it. TWO unrelated
+    // things throw 404 in there: getEmailThreadForMutation's "Email thread not found" AND, down path 2,
+    // assertDealCollaboratorAccess's "Deal not found" (server/src/lib/collaboration-access.ts). A
+    // status-keyed carve-out cannot tell them apart, so it would answer a real authorization denial
+    // with a 200 saying the thread is empty. That the second arm is hard to reach today rests entirely
+    // on email_thread_bindings.deal_id's FK and on nothing hard-deleting a deal — far too thin a
+    // guarantee to hang an authorization decision on. Costs one extra LIMIT 1 lookup per read, which is
+    // cheap next to answering a live authorization denial with a 200.
+    if (!(await conversationHasAnyMessage(req.tenantDb!, req.params.conversationId))) {
       await req.commitTransaction!();
       res.json({ binding: null, preview: null, emails: [] });
       return;
     }
+
+    await gateEmailThreadAccess(req);
 
     const thread = await readThreadForGatedCaller(req);
     await req.commitTransaction!();

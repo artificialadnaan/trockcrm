@@ -662,6 +662,22 @@ async function findAnyEmailInConversation(
 }
 
 /**
+ * Does this conversation hold ANY message, in any mailbox?
+ *
+ * Exists so the thread READ route can tell "there is nothing here" apart from "you may not have it"
+ * by ASKING, instead of by catching a 404 and guessing at its cause. Two unrelated things throw 404
+ * behind that gate — getEmailThreadForMutation's "Email thread not found" and
+ * assertDealCollaboratorAccess's "Deal not found" — so a status-keyed carve-out silently downgrades a
+ * real authorization denial to a 200 that claims the thread is empty.
+ */
+export async function conversationHasAnyMessage(
+  tenantDb: TenantDb,
+  providerConversationId: string
+): Promise<boolean> {
+  return (await findAnyEmailInConversation(tenantDb, providerConversationId)) !== null;
+}
+
+/**
  * The thread a mutation is about to act on.
  *
  * `userId` scopes the thread to ONE mailbox's copy of the conversation. The deal-linkage mutation
@@ -1743,14 +1759,78 @@ export async function getEmailById(tenantDb: TenantDb, emailId: string) {
 }
 
 /**
+ * One row per real MESSAGE, out of the one-row-per-MAILBOX storage the sync deliberately keeps.
+ *
+ * The worker stores a separate emails row for every mailbox a message reached: graph_message_id is
+ * unique per mailbox, and the internet_message_id dedup there is scoped `AND user_id = $2 AND
+ * direction = 'outbound'` precisely so an internal A→B email keeps BOTH A's Sent copy and B's Inbox
+ * copy (worker/src/jobs/email-sync.ts). That storage model is correct and is not what changes here —
+ * the thread read is simply no longer mailbox-scoped, so it now sees every copy and would render the
+ * conversation once per participant.
+ *
+ * PRESENTATION ONLY. This decides which ROW represents a message, never WHICH messages the caller may
+ * see: every row handed in has already cleared the gate, and no row is dropped that does not have a
+ * surviving sibling standing for the same message.
+ *
+ * Two rules:
+ *   - Prefer the CALLER'S OWN copy. Starred/archived/deleted state lives on the per-mailbox row, so
+ *     handing a participant somebody else's copy would show them their own mail with a stranger's
+ *     state on it.
+ *   - Otherwise keep the first copy in the thread's order, and keep it IN that position, so collapsing
+ *     never reorders the conversation.
+ *
+ * A NULL internet_message_id is left uncollapsed, deliberately. It is the ABSENCE of an identity, not
+ * an identity shared with every other NULL: keying on it would fold a whole conversation of un-idd
+ * messages into one and lose real messages — far worse than the doubling this exists to fix. The
+ * column is nullable (shared/src/schema/tenant/emails.ts) and Graph does omit it, so this is a live
+ * case, not a theoretical one.
+ */
+function collapseThreadMessageCopies<T extends { internetMessageId: string | null; userId: string }>(
+  threadEmails: T[],
+  viewerUserId?: string
+): T[] {
+  const slotByMessageId = new Map<string, number>();
+  const collapsed: T[] = [];
+
+  for (const email of threadEmails) {
+    if (!email.internetMessageId) {
+      collapsed.push(email);
+      continue;
+    }
+
+    const slot = slotByMessageId.get(email.internetMessageId);
+    if (slot === undefined) {
+      slotByMessageId.set(email.internetMessageId, collapsed.length);
+      collapsed.push(email);
+      continue;
+    }
+
+    const kept = collapsed[slot];
+    if (viewerUserId && email.userId === viewerUserId && kept.userId !== viewerUserId) {
+      collapsed[slot] = email;
+    }
+  }
+
+  return collapsed;
+}
+
+/**
  * Get all emails in a thread (grouped by graph_conversation_id).
+ *
+ * `userId` FILTERS the thread to one mailbox's copy of it. The routes deliberately pass nothing —
+ * scoping the read 403s any deal collaborator who owns none of the messages, and the payload is what
+ * renders the Reassign/Unassign controls. `viewerUserId` is the opposite kind of argument: it names
+ * who is LOOKING, and only so collapseThreadMessageCopies can prefer their copy of a message held in
+ * several mailboxes. It must never become a filter — passing it changes which row represents a
+ * message, never which messages come back.
  */
 export async function getEmailThread(
   tenantDb: TenantDb,
   conversationId: string,
   userId?: string,
   userRole?: string,
-  canViewDeal?: (dealId: string) => Promise<boolean>
+  canViewDeal?: (dealId: string) => Promise<boolean>,
+  viewerUserId?: string
 ) : Promise<EmailThreadResponse> {
   if (!conversationId) return { binding: null, preview: null, emails: [] };
 
@@ -1759,12 +1839,15 @@ export async function getEmailThread(
     conditions.push(eq(emails.userId, userId));
   }
 
-  // Thread view: chronological order (oldest first) for natural reading context
+  // Thread view: chronological order (oldest first) for natural reading context. The id tiebreak
+  // matches getEmailThreadForMutation's, so copies of one message that share a sent_at — the normal
+  // case, since every mailbox's copy carries the sender's timestamp — always order the same way and
+  // "the first copy" means something stable to the collapse below.
   const thread = await tenantDb
     .select()
     .from(emails)
     .where(and(...conditions))
-    .orderBy(sql`${emails.sentAt} ASC`);
+    .orderBy(sql`${emails.sentAt} ASC`, sql`${emails.id} ASC`);
 
   if (thread.length === 0) {
     if (userId) {
@@ -1777,7 +1860,7 @@ export async function getEmailThread(
   }
 
   const mutationContext = await getEmailThreadForMutation(tenantDb, conversationId, userId);
-  const visibleThread = thread;
+  const visibleThread = collapseThreadMessageCopies(thread, viewerUserId ?? userId);
 
   let bindingPayload: EmailThreadResponse["binding"] = null;
   if (mutationContext.binding) {
