@@ -1523,7 +1523,6 @@ describe("email routes", () => {
     });
 
     expect(emailServiceMocks.previewThreadReassignmentImpact).toHaveBeenCalledWith(expect.any(Object), {
-      mailboxAccountId: "mailbox-1",
       providerConversationId: "conversation-1",
       nextDealId: "deal-2",
     });

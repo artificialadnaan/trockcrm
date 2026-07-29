@@ -476,7 +476,6 @@ router.post("/thread/:conversationId/reassign", async (req, res, next) => {
     await assertDealCollaboratorAccess(req.tenantDb!, dealId, req.user!);
 
     const preview = await previewThreadReassignmentImpact(req.tenantDb!, {
-      mailboxAccountId: thread.mailboxAccountId,
       providerConversationId: req.params.conversationId,
       nextDealId: dealId,
     });

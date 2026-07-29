@@ -706,24 +706,87 @@ export async function assertCanMutateEmailThread(
   }
 }
 
+/**
+ * Every mailbox account holding a copy of this conversation. A binding is keyed on
+ * (mailbox_account_id, provider, provider_conversation_id), so a conversation that reached two
+ * mailboxes has TWO bindings. Rebinding or detaching only the first message's mailbox would strand the
+ * other on the old deal — the user would move the thread and still see it on the deal they moved it from.
+ */
+export async function resolveMailboxAccountIdsForConversation(
+  tenantDb: TenantDb,
+  providerConversationId: string
+): Promise<string[]> {
+  const rows = await tenantDb
+    .selectDistinct({ userId: emails.userId })
+    .from(emails)
+    .where(eq(emails.graphConversationId, providerConversationId));
+
+  const ids = await Promise.all(
+    rows.map(async (row: { userId: string }) => {
+      try {
+        return await resolveMailboxAccountIdForCrmUser(tenantDb, row.userId);
+      } catch {
+        // A participant with no connected mailbox can't strand anything of their own — skip them
+        // rather than failing the whole rebind/detach.
+        return null;
+      }
+    })
+  );
+  return Array.from(new Set(ids.filter((id): id is string => Boolean(id))));
+}
+
+/** Rebind the conversation to `dealId` in EVERY mailbox that holds it. */
+export async function bindConversationToDealAcrossMailboxes(
+  tenantDb: TenantDb,
+  input: { providerConversationId: string; dealId: string; actingUserId: string }
+) {
+  const mailboxAccountIds = await resolveMailboxAccountIdsForConversation(
+    tenantDb,
+    input.providerConversationId
+  );
+  const results = [];
+  for (const mailboxAccountId of mailboxAccountIds) {
+    results.push(
+      await bindThreadToDeal(tenantDb, {
+        mailboxAccountId,
+        providerConversationId: input.providerConversationId,
+        dealId: input.dealId,
+        actingUserId: input.actingUserId,
+      })
+    );
+  }
+  return { mailboxAccountIds, results };
+}
+
+/** Detach the conversation in EVERY mailbox that holds it. */
+export async function detachConversationAcrossMailboxes(
+  tenantDb: TenantDb,
+  providerConversationId: string,
+  actingUserId: string
+) {
+  const mailboxAccountIds = await resolveMailboxAccountIdsForConversation(
+    tenantDb,
+    providerConversationId
+  );
+  for (const mailboxAccountId of mailboxAccountIds) {
+    await detachThreadByConversation(tenantDb, mailboxAccountId, providerConversationId, actingUserId);
+  }
+  return { mailboxAccountIds };
+}
+
 export async function previewThreadReassignmentImpact(
   tenantDb: TenantDb,
   input: {
-    mailboxAccountId: string;
     providerConversationId: string;
     nextDealId: string;
   }
 ) {
-  const mailboxUserId = await resolveMailboxUserId(tenantDb, input.mailboxAccountId);
+  // Counted across EVERY mailbox holding the conversation — the reassign moves all of them, so a
+  // per-mailbox count would understate the blast radius shown to the user.
   const messageRows = await tenantDb
     .select({ id: emails.id, dealId: emails.dealId })
     .from(emails)
-    .where(
-      and(
-        eq(emails.userId, mailboxUserId),
-        eq(emails.graphConversationId, input.providerConversationId)
-      )
-    );
+    .where(eq(emails.graphConversationId, input.providerConversationId));
 
   return {
     affectedMessageCount: messageRows.length,
