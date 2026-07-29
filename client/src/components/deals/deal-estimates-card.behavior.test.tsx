@@ -481,6 +481,63 @@ describe("DealEstimatesCard — deductive change orders", () => {
     confirmSpy.mockRestore();
   });
 
+  it("clears a stale validation error before the below-zero confirm, so declining leaves no wrong message", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    const container = render({
+      deal: { id: "deal-1", ddEstimate: "0", bidEstimate: "0", awardedAmount: "1000", changeOrderTotal: "0" } as any,
+      changeOrders: [],
+      changeOrderTotal: "0",
+      canManage: true,
+      onChanged: mocks.onChanged,
+    });
+
+    await submitNewChangeOrder(container, "0"); // rejected — error on screen
+    expect(container.textContent).toContain("Change order amount cannot be 0.");
+
+    // Correct it to a valid (but below-zero) amount and decline the warning.
+    act(() => {
+      setValue(container.querySelector<HTMLInputElement>("#co-amount")!, "-5000");
+    });
+    await act(async () => {
+      container.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+
+    expect(confirmSpy).toHaveBeenCalled();
+    expect(mocks.addDealChangeOrder).not.toHaveBeenCalled();
+    // The amount is now valid, so the old rejection must be gone.
+    expect(container.textContent).not.toContain("Change order amount cannot be 0.");
+    confirmSpy.mockRestore();
+  });
+
+  it("does not paint an exactly break-even Current Contract Value red (float noise)", () => {
+    // 2.90 + 0.70 - 3.60 === -4.44e-16 — `< 0` on the raw sum, but the contract value is $0.
+    const container = render({
+      deal: { id: "deal-1", ddEstimate: "0", bidEstimate: "0", awardedAmount: "2.90", changeOrderTotal: "0.70" } as any,
+      changeOrders: [makeCo({ amount: "-3.60" })] as any,
+      changeOrderTotal: "-3.60",
+    });
+
+    const ccv = container.querySelector('[data-testid="current-contract-value"]');
+    expect(ccv?.getAttribute("class")).not.toContain("text-red-600");
+    expect(ccv?.getAttribute("class")).toContain("text-green-600");
+    // ...and no phantom minus sign on the zero either.
+    expect(ccv?.textContent).toBe("$0");
+  });
+
+  it("does not paint an exactly break-even combined change-order total red (float noise)", () => {
+    // Procore +2.90 against CRM COs of +0.70 and -3.60. With no server total the card sums the rows
+    // itself (0.70 + -3.60 === -2.9000000000000004), so the combined total is -4.44e-16: $0, not a
+    // deduction.
+    const container = render({
+      deal: { id: "deal-1", ddEstimate: "0", bidEstimate: "0", awardedAmount: "1000", changeOrderTotal: "2.90" } as any,
+      changeOrders: [makeCo({ id: "co-a", amount: "0.70" }), makeCo({ id: "co-b", amount: "-3.60" })] as any,
+    });
+
+    const total = container.querySelector('[data-testid="change-order-total"]');
+    expect(total?.getAttribute("class")).not.toContain("text-red-600");
+    expect(total?.textContent).toBe("$0");
+  });
+
   it("tells the user a negative amount records a deductive change order", () => {
     const container = render({ deal: baseDeal, changeOrders: [], changeOrderTotal: "0", canManage: true, onChanged: mocks.onChanged });
     clickButtonByText(container, "Add Change Order");

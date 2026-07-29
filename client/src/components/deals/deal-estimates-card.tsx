@@ -23,6 +23,25 @@ import {
   type DealChangeOrder,
 } from "@/hooks/use-deals";
 
+/**
+ * Snap a float sum of 2-decimal money strings back onto a cent boundary.
+ *
+ * currentContractValue / combinedChangeOrderTotal are plain parseFloat additions, so a deductive CO
+ * that exactly cancels the contract value lands a hair off zero (2.9 + 0.7 - 3.6 === -4.4e-16). That
+ * is `< 0`, which would paint a break-even contract value red and read "-$0". Every sign test on this
+ * card goes through here. Exact at the NUMERIC(14,2) ceiling: 999,999,999,999.99 * 100 is still a
+ * safe integer, and 2-decimal inputs can never produce the half-cent tie that Math.round breaks
+ * toward +∞.
+ *
+ * The `=== 0` branch collapses -0 onto 0: rounding a tiny negative gives -0, which Intl renders as
+ * "-$0" — a minus sign on a break-even value, which is the same misreading in text that the colour
+ * fix removes.
+ */
+const cents = (n: number) => {
+  const rounded = Math.round(n * 100) / 100;
+  return rounded === 0 ? 0 : rounded;
+};
+
 interface DealEstimatesCardProps {
   deal: Deal;
   /** CRM-native change orders for this deal (from the deal detail's dealChangeOrders). */
@@ -53,8 +72,8 @@ export function DealEstimatesCard({
   const crmTotal =
     changeOrderTotal ??
     String(changeOrders.reduce((sum, co) => sum + (parseFloat(co.amount) || 0), 0));
-  const combinedCo = combinedChangeOrderTotal(deal.changeOrderTotal, crmTotal);
-  const ccv = currentContractValue(deal, crmTotal);
+  const combinedCo = cents(combinedChangeOrderTotal(deal.changeOrderTotal, crmTotal));
+  const ccv = cents(currentContractValue(deal, crmTotal));
 
   const openAdd = () => {
     setEditing(null);
@@ -263,12 +282,14 @@ function ChangeOrderDialog({ dealId, open, onOpenChange, existing, baselineContr
       setError("Change order amount cannot be 0.");
       return;
     }
+    // The amount is valid from here on, so clear any stale validation error BEFORE the confirm gate —
+    // declining the warning returns to a dialog that would otherwise still show the old message next
+    // to a now-valid amount.
+    setError(null);
     // Advisory only (product decision): a deductive CO may legitimately exceed the contract value, and
     // there is NO server-side rejection — scripts and the API can still write one. Confirm, then save.
-    // Round to cents first: these are float sums of 2-decimal money strings, and a CO that exactly
-    // zeroes the contract value can land a hair below it (2.9 + 0.7 - 3.6 === -4.4e-16), which would
-    // pop a "below $0" warning on a break-even change order.
-    const projectedContractValue = Math.round((baselineContractValue + Number(trimmedAmount)) * 100) / 100;
+    // cents() first, or a CO that exactly zeroes the contract value trips the warning on float noise.
+    const projectedContractValue = cents(baselineContractValue + Number(trimmedAmount));
     if (projectedContractValue < 0) {
       const proceed = window.confirm(
         `This change order takes the Current Contract Value to ${formatCurrency(projectedContractValue)}, below $0. Save it anyway?`
@@ -276,7 +297,6 @@ function ChangeOrderDialog({ dealId, open, onOpenChange, existing, baselineContr
       if (!proceed) return;
     }
     setSubmitting(true);
-    setError(null);
     try {
       const payload = {
         signedDate,
