@@ -29,7 +29,8 @@ import * as ts from "typescript";
  *
  * WHAT IT ALLOWS: an element genuinely hidden from the accessibility tree, and a Text nested inside an
  * element that supplies the accessible name itself. Both are checked by VALUE — see
- * `hiddenFromAccessibility`, which an earlier version got backwards.
+ * `hidesSelf` / `hidesSubtree` / `groupsSubtree`, each of which reads the prop's VALUE — earlier
+ * versions read only its presence, and got all three backwards in the permissive direction.
  *
  * KNOWN LIMIT: single-file and syntactic, like its sibling. A style object imported from another module
  * (`formStyles`) is not resolved, so a transform declared there and consumed here is invisible. Neither
@@ -134,43 +135,82 @@ const GROUPS_BY_DEFAULT = new Set([
  * text, which is the transformed string again.
  */
 /**
- * Is this element hidden from the accessibility tree — by VALUE, not by the prop merely being present?
+ * Does this element hide ITSELF from the accessibility tree — by VALUE, not by prop presence?
  *
  * `accessibilityElementsHidden={false}` and `importantForAccessibility="yes"` say the opposite of what
- * their names suggest at a glance, and an earlier version of this guard exempted both because `attr()`
- * returns a node either way. That is the worst possible direction for an accessibility check: the
- * element is visible to VoiceOver, and the guard waves through exactly the missing label it exists to
- * catch. A bare prop (`accessibilityElementsHidden`) is JSX shorthand for `={true}`, so that still
- * counts; anything unresolvable is treated as NOT hidden, because a false negative here is silent.
+ * a glance suggests, and an earlier version exempted both because `attr()` returns a node either way.
+ * That is the worst direction for an accessibility check to fail in: the element is visible to
+ * VoiceOver, and the guard waves through exactly the missing label it exists to catch. A bare prop is
+ * JSX shorthand for `={true}`; anything unresolvable counts as NOT hidden, because a false negative
+ * here is silent.
  */
-function hiddenFromAccessibility(el: ts.JsxOpeningElement | ts.JsxSelfClosingElement): boolean {
+function hidesSelf(el: ts.JsxOpeningElement | ts.JsxSelfClosingElement): boolean {
+  if (elementsHiddenTrue(el)) return true;
+  const mode = importantForAccessibilityValue(el);
+  // "no" excludes the view itself — enough to silence this Text, not enough to silence a child.
+  return mode === "no" || mode === "no-hide-descendants";
+}
+
+/**
+ * Does it hide its whole SUBTREE?
+ *
+ * Strictly narrower than `hidesSelf`, and the distinction is the finding: RN documents "no" as "the
+ * view is not important for accessibility" while "no-hide-descendants" adds "nor are any of its
+ * descendant views" (ViewAccessibility.d.ts:263-266). Treating an ancestor's "no" as covering the
+ * subtree let an unlabelled uppercase descendant through — it is still announced, just not its parent.
+ */
+function hidesSubtree(el: ts.JsxOpeningElement | ts.JsxSelfClosingElement): boolean {
+  return elementsHiddenTrue(el) || importantForAccessibilityValue(el) === "no-hide-descendants";
+}
+
+function elementsHiddenTrue(el: ts.JsxOpeningElement | ts.JsxSelfClosingElement): boolean {
   const hidden = attr(el, "accessibilityElementsHidden");
-  if (hidden) {
-    // No initializer at all is `={true}`.
-    if (!hidden.initializer) return true;
-    if (ts.isJsxExpression(hidden.initializer)) {
-      const e = hidden.initializer.expression;
-      if (e && e.kind === ts.SyntaxKind.TrueKeyword) return true;
-    }
-  }
-  const important = attr(el, "importantForAccessibility");
-  if (important?.initializer) {
-    // "no" hides the element; "no-hide-descendants" hides it and everything under it. "yes" and
-    // "auto" do not hide anything.
-    const text = ts.isStringLiteralLike(important.initializer)
-      ? important.initializer.text
-      : ts.isJsxExpression(important.initializer) &&
-          important.initializer.expression &&
-          ts.isStringLiteralLike(important.initializer.expression)
-        ? important.initializer.expression.text
-        : null;
-    if (text === "no" || text === "no-hide-descendants") return true;
+  if (!hidden) return false;
+  if (!hidden.initializer) return true; // bare prop === {true}
+  if (ts.isJsxExpression(hidden.initializer)) {
+    const e = hidden.initializer.expression;
+    return Boolean(e && e.kind === ts.SyntaxKind.TrueKeyword);
   }
   return false;
 }
 
+function importantForAccessibilityValue(
+  el: ts.JsxOpeningElement | ts.JsxSelfClosingElement,
+): string | null {
+  const a = attr(el, "importantForAccessibility");
+  if (!a?.initializer) return null;
+  if (ts.isStringLiteralLike(a.initializer)) return a.initializer.text;
+  if (ts.isJsxExpression(a.initializer) && a.initializer.expression) {
+    const e = a.initializer.expression;
+    if (ts.isStringLiteralLike(e)) return e.text;
+  }
+  return null;
+}
+
+/**
+ * Does this element group its subtree into ONE accessibility element?
+ *
+ * `Pressable` and the `Touchable*` family pass `accessible={true}` themselves — but only as a DEFAULT:
+ * `accessible: accessible !== false` (Pressable.js:245). An explicit `accessible={false}` therefore
+ * turns grouping off, the children become their own elements again, and an unlabelled uppercase child
+ * is spoken as the transformed string. So the value has to be read, not just the prop's presence.
+ */
+function groupsSubtree(el: ts.JsxOpeningElement | ts.JsxSelfClosingElement): boolean {
+  const a = attr(el, "accessible");
+  if (a) {
+    if (!a.initializer) return true; // bare prop === {true}
+    if (ts.isJsxExpression(a.initializer)) {
+      const e = a.initializer.expression;
+      if (e && e.kind === ts.SyntaxKind.FalseKeyword) return false;
+      if (e && e.kind === ts.SyntaxKind.TrueKeyword) return true;
+    }
+    // An expression we cannot resolve: fall through to the tag's own default.
+  }
+  return GROUPS_BY_DEFAULT.has(el.tagName.getText());
+}
+
 function coveredByAncestor(el: ts.JsxOpeningElement | ts.JsxSelfClosingElement): boolean {
-  if (hiddenFromAccessibility(el)) return true;
+  if (hidesSelf(el)) return true;
   for (let cur: ts.Node | undefined = el.parent; cur; cur = cur.parent) {
     const open = ts.isJsxElement(cur)
       ? cur.openingElement
@@ -178,9 +218,9 @@ function coveredByAncestor(el: ts.JsxOpeningElement | ts.JsxSelfClosingElement):
         ? cur
         : undefined;
     if (!open) continue;
-    if (hiddenFromAccessibility(open)) return true;
-    const groups = attr(open, "accessible") || GROUPS_BY_DEFAULT.has(open.tagName.getText());
-    if (groups && attr(open, "accessibilityLabel")) return true;
+    // SUBTREE, not self: an ancestor's own "no" leaves this Text announced.
+    if (hidesSubtree(open)) return true;
+    if (groupsSubtree(open) && attr(open, "accessibilityLabel")) return true;
   }
   return false;
 }
@@ -334,6 +374,31 @@ describe("uppercase Text carries an explicit accessibilityLabel", () => {
       expect(
         check(`${SHEET} const A = () => <Text importantForAccessibility="no-hide-descendants" style={styles.cap}>x</Text>;`),
       ).toBe(0);
+    });
+
+    it("distinguishes an ancestor's \"no\" from \"no-hide-descendants\"", () => {
+      // RN: "no" excludes the view itself; only "no-hide-descendants" adds "nor any of its
+      // descendants" (ViewAccessibility.d.ts:263-266). The child is still announced under "no".
+      expect(
+        check(
+          `${SHEET} const A = () => <View importantForAccessibility="no"><Text style={styles.cap}>x</Text></View>;`,
+        ),
+      ).toBe(1);
+      expect(
+        check(
+          `${SHEET} const A = () => <View importantForAccessibility="no-hide-descendants"><Text style={styles.cap}>x</Text></View>;`,
+        ),
+      ).toBe(0);
+    });
+
+    it("honours accessible={false}, which turns a Pressable's grouping OFF", () => {
+      // Pressable.js:245 — `accessible: accessible !== false`. The default is only a default, and with
+      // grouping off the children are their own elements again.
+      expect(
+        check(
+          `${SHEET} const A = () => <Pressable accessible={false} accessibilityLabel="Acme"><Text style={styles.cap}>On hold</Text></Pressable>;`,
+        ),
+      ).toBe(1);
     });
 
     it("reads the hiding props by VALUE — `={false}` and \"yes\" hide nothing", () => {
