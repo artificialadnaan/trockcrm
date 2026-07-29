@@ -96,7 +96,15 @@ export default function DealsListScreen() {
 
   const renderDeal = useCallback(
     ({ item }: { item: DealListItem }) => (
-      <DealCard deal={item} stageName={stageLabelFor(item, stageIndex)} onPress={handleDealPress} />
+      <DealCard
+        deal={item}
+        variant="list"
+        stageName={stageLabelFor(item, stageIndex)}
+        // The list is not stage-scoped, so it has no cheap way to know whose deal this is and does not
+        // claim to: "Yours" is a board affordance, where the next tap is a stage move.
+        canMove={false}
+        onPress={handleDealPress}
+      />
     ),
     [stageIndex, handleDealPress],
   );

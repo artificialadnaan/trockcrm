@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useCallback } from "react";
 import { ActivityIndicator, FlatList, Pressable, RefreshControl, StyleSheet, Text, View } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { useGoBack } from "../../../../src/lib/go-back";
@@ -9,7 +9,8 @@ import * as pipelineApi from "../../../../src/api/endpoints/pipeline";
 import { useAuth } from "../../../../src/auth/AuthContext";
 import { useQueryScope } from "../../../../src/auth/useOfficeId";
 import { BackLink } from "../../../../src/components/BackLink";
-import { BoardCard } from "../../../../src/components/BoardCard";
+import type { DealListItem } from "../../../../src/api/types";
+import { DealCard } from "../../../../src/components/DealCard";
 import { RetryNotice } from "../../../../src/components/RetryNotice";
 import { resolveListState } from "../../../../src/list-state";
 import { theme } from "../../../../src/theme/theme";
@@ -36,6 +37,14 @@ export default function StageDealsScreen() {
     params.scope === "all" || params.scope === "watched" ? params.scope : "mine";
 
   const router = useRouter();
+
+  // ONE stable handler for every card on screen. Inline, each card got a fresh closure per render,
+  // which is precisely what defeats DealCard's React.memo — the memo compares props, and a new function
+  // never equals the last one.
+  const openDeal = useCallback(
+    (deal: DealListItem) => router.push(`/(app)/deals/${deal.id}`),
+    [router],
+  );
 
   // Carries the SCOPE. Without it, a deep-linked "all" stage list fell back to a board defaulted to
   // "mine" — a different population under the same heading, which is precisely what passing scope into
@@ -149,11 +158,11 @@ export default function StageDealsScreen() {
             ) : null
           }
           renderItem={({ item }) => (
-            <BoardCard
+            <DealCard
               deal={item}
               testIDPrefix="stage-card"
               canMove={pipelineApi.canMoveStage(item, session?.user.id)}
-              onPress={() => router.push(`/(app)/deals/${item.id}`)}
+              onPress={openDeal}
             />
           )}
         />

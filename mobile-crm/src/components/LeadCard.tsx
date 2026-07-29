@@ -99,10 +99,10 @@ const styles = StyleSheet.create({
   name: { flex: 1, ...theme.type.title, color: theme.color.textPrimary },
   stage: { ...theme.type.caption, color: theme.color.textSecondary },
   company: { ...theme.type.caption, color: theme.color.textMuted, textTransform: "uppercase" },
-  /* textSecondary, NOT textMuted — the same call the tab bar already documents. On the white card,
-     #8A95A3 is about 3.0:1 and this line is 13pt, under the 4.5:1 floor for normal text; #4B5563 is
-     7.6:1 and still reads as secondary against the 15pt name above it. This is the whole content of
-     the card besides the name: project type, location and the assigned rep. */
+  /* textSecondary (8.3:1 on surface), NOT textMuted (4.99:1) — the same call the tab bar documents.
+     This is the whole content of the card besides the name: project type, location and the assigned
+     rep. Ratios are against the DARK surface; the figures here used to be "on the white card", which
+     described a theme this app no longer ships. */
   meta: { ...theme.type.label, color: theme.color.textSecondary },
   badges: {
     flexDirection: "row",
