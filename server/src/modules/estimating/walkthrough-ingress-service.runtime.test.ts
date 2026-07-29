@@ -16,8 +16,8 @@
 // still pass here and fail in prod with a 23514. Do not assume this suite covers that.
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
-import { eq } from "drizzle-orm";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { eq, sql } from "drizzle-orm";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   deals,
   estimateDealMarketOverrides,
@@ -37,6 +37,7 @@ import {
 } from "@trock-crm/shared/schema";
 import type { WalkthroughIngressPayload, WalkthroughScopeRow } from "@trock-crm/shared/types";
 import { tenantSchemaSql } from "../../../tests/helpers/tenant-schema-from-drizzle.js";
+import { reprocessEstimateSourceDocument } from "./document-service.js";
 import { buildEstimatingWorkbenchState } from "./workbench-service.js";
 import {
   createWalkthroughContactSheetFile,
@@ -44,7 +45,10 @@ import {
   getCrmFileBucket,
   ingestWalkthrough,
   insertWalkthroughExtractions,
+  MAX_WALKTHROUGH_QUANTITY,
   MAX_WALKTHROUGH_SCOPE_ROWS,
+  MIN_WALKTHROUGH_QUANTITY,
+  walkthroughIngressLockKey,
 } from "./walkthrough-ingress-service.js";
 
 const U = (s: string) => `00000000-0000-4000-8000-${s.padStart(12, "0")}`;
@@ -56,6 +60,10 @@ const PROJECT = U("44444");
  *  are exact counts rather than containment checks against every row the rest of the suite wrote. */
 const WORKBENCH_DEAL = U("55551");
 const WORKBENCH_NEGATIVE_DEAL = U("55552");
+/** The reprocess-guard suite gets its own deal for the same reason: it renders the workbench to prove
+ *  the scope survived, and the two deals above assert EXACT row counts that a second walkthrough on
+ *  them would break. */
+const REPROCESS_DEAL = U("55553");
 const DEFAULT_MARKET = U("66661");
 /** The bucket the CRM presigns every download against. A `files` row recorded against any other
  *  bucket yields a download URL for an object that is not there (r2-client.ts:168-186 signs the key
@@ -121,6 +129,12 @@ beforeAll(async () => {
       id: WORKBENCH_NEGATIVE_DEAL,
       dealNumber: "WB-0002",
       name: "Walkthrough workbench negative deal",
+      stageId: U("77771"),
+    },
+    {
+      id: REPROCESS_DEAL,
+      dealNumber: "WB-0003",
+      name: "Walkthrough reprocess-guard deal",
       stageId: U("77771"),
     },
   ]);
@@ -812,6 +826,109 @@ describe("ingestWalkthrough", () => {
     expect(await tableCounts()).toEqual(before);
   });
 
+  // ── R6: the quantity band numeric(14,3) can actually represent ───────────────────────────────────
+  //
+  // The column is numeric(14,3): 11 integer digits, 3 decimals. Validation used to check only "finite
+  // and > 0", which left BOTH ends of the column unguarded — and the two ends fail differently.
+  it.each<[string, number]>([
+    // Overflows the 11 integer digits. Postgres raises 22003 from inside the transaction: a 500, in a
+    // validator whose entire contract is a 400 before the first write. This PR's own rollback test
+    // uses 1e12 deliberately to force that error, so the path was known-reachable and unguarded.
+    ["overflows the column's 11 integer digits", 1e11],
+    ["overflows after rounding up at the ceiling", 99999999999.9996],
+    // Rounds to exactly 0.000 — see the characterization below. Worse than the overflow because it
+    // SUCCEEDS: a zero quantity, which `quantity <= 0` explicitly refuses, arrived silently.
+    ["rounds away to zero at scale 3", 0.0001],
+    ["rounds away to zero at scale 3 (upper edge)", 0.0004],
+  ])("refuses a quantity that %s, naming the row, without writing anything", async (_label, quantity) => {
+    const before = await tableCounts();
+
+    await expect(
+      ingestWalkthrough({
+        tenantDb,
+        payload: walkthroughPayload(U("33060"), {
+          rows: [{ ...CARPENTRY_ROW, sourceScopeItemId: "scope-item-unrepresentable", quantity }],
+        }),
+      })
+    ).rejects.toMatchObject({
+      statusCode: 400,
+      message: expect.stringContaining("scope-item-unrepresentable"),
+    });
+
+    expect(await tableCounts()).toEqual(before);
+  });
+
+  // THE HAZARD ITSELF, read back out of the database rather than asserted about the input.
+  //
+  // `insertWalkthroughExtractions` is exported and performs no validation, so it reaches the column
+  // directly — which is what makes this a characterization of POSTGRES, not of the validator. If this
+  // ever stops storing 0, the min-bound guard is arguing against a behaviour that no longer exists and
+  // should be revisited. (Same result on real PostgreSQL 16.14: 0.0001 and 0.0004 both store 0.000,
+  // 0.0005 rounds up to 0.001.)
+  it("characterizes WHY the minimum exists: numeric(14,3) silently rounds 0.0001 to exactly zero", async () => {
+    const walkthroughId = U("33061");
+    const { documentId, parseRunId } = await seedChain(walkthroughId);
+
+    const ids = await insertWalkthroughExtractions({
+      tenantDb,
+      input: {
+        dealId: DEAL,
+        projectId: PROJECT,
+        documentId,
+        parseRunId,
+        walkthroughId,
+        rows: [{ ...CARPENTRY_ROW, quantity: 0.0001 }],
+      },
+    });
+
+    // READ BACK from Postgres. Asserting on the input would pass no matter what the column did, which
+    // is the vacuous-test trap this PR has already been bitten by twice.
+    const probe = await pg.query<{ stored: string; is_zero: boolean }>(
+      `SELECT quantity::text AS stored, (quantity = 0) AS is_zero
+         FROM public.estimate_extractions WHERE id = $1`,
+      [ids[0]]
+    );
+    expect(probe.rows[0].stored).toBe("0.000");
+    // Not "small" — exactly the zero the contract forbids, stored without any error being raised.
+    expect(probe.rows[0].is_zero).toBe(true);
+
+    // And the guard refuses that same value at the door, so the ingress cannot reach this state.
+    await expect(
+      ingestWalkthrough({
+        tenantDb,
+        payload: walkthroughPayload(U("33062"), {
+          rows: [{ ...CARPENTRY_ROW, quantity: 0.0001 }],
+        }),
+      })
+    ).rejects.toMatchObject({ statusCode: 400 });
+  });
+
+  // The boundaries are INCLUSIVE, and stored intact. Without this, tightening the bounds to something
+  // convenient (say ">= 1") would silently start refusing legitimate fractional quantities, and no test
+  // would notice.
+  it("accepts the exact minimum and maximum the column can represent, and stores them unchanged", async () => {
+    const walkthroughId = U("33063");
+
+    const result = await ingestWalkthrough({
+      tenantDb,
+      payload: walkthroughPayload(walkthroughId, {
+        rows: [
+          { ...CARPENTRY_ROW, sourceScopeItemId: "scope-min", quantity: MIN_WALKTHROUGH_QUANTITY },
+          { ...CARPENTRY_ROW, sourceScopeItemId: "scope-max", quantity: MAX_WALKTHROUGH_QUANTITY },
+        ],
+      }),
+    });
+
+    const stored = await pg.query<{ stored: string }>(
+      `SELECT quantity::text AS stored FROM public.estimate_extractions
+        WHERE id = ANY($1::uuid[]) ORDER BY metadata_json->>'sourceScopeItemId'`,
+      [result.extractionIds]
+    );
+    // scope-max sorts before scope-min. Both round-trip exactly — the min is not zero and the max did
+    // not overflow.
+    expect(stored.rows.map((r) => r.stored)).toEqual(["99999999999.999", "0.001"]);
+  });
+
   it("refuses more scope rows than one walkthrough can plausibly carry", async () => {
     const before = await tableCounts();
 
@@ -943,6 +1060,278 @@ describe("ingestWalkthrough", () => {
     expect(doc.storageKey).toBe(`walkthroughs/${DEAL}/${walkthroughId}/contact-sheet.jpg`);
   });
 
+  // ── CONCURRENT IDEMPOTENCY (the advisory lock) ────────────────────────────────────────────────────
+  //
+  // READ THIS BEFORE TRUSTING THE TEST BELOW IT. PGlite is a single-connection, in-process Postgres,
+  // and drizzle's pglite driver implements `transaction()` on top of PGlite's own `transaction()`,
+  // which holds an internal mutex. Two concurrent `ingestWalkthrough` calls against it therefore do
+  // NOT overlap — the second BEGIN waits for the first COMMIT. So the outcome test below CANNOT
+  // distinguish "the advisory lock serialized these" from "PGlite serialized these"; it is a
+  // regression guard on the OUTCOME (one document, identical ids) and nothing more. Deleting the lock
+  // leaves it green — verified, not assumed.
+  //
+  // The lock is therefore proved in two other ways instead:
+  //   • "takes the advisory lock as its first statement" (below) proves the real service really
+  //     executes a real `pg_advisory_xact_lock`, keyed on this walkthrough, BEFORE the lookup — the
+  //     one ordering that makes it protective. That test fails if the lock is removed or moved.
+  //   • Genuine two-connection concurrency was verified out-of-band against real PostgreSQL 16.14:
+  //     two transactions held open past each other's lookup both insert WITHOUT the lock (2 documents)
+  //     and exactly one inserts WITH it (1 document). That experiment cannot be expressed here because
+  //     PGlite has one connection; it is recorded in the PR discussion.
+  it("returns one document and one set of extractions for two overlapping ingress calls", async () => {
+    const walkthroughId = U("33030");
+    const rows = [
+      CARPENTRY_ROW,
+      { ...CARPENTRY_ROW, sourceScopeItemId: "scope-item-9301", rawLabel: "Reseal the coping joints" },
+    ];
+
+    const [first, second] = await Promise.all([
+      ingestWalkthrough({ tenantDb, payload: walkthroughPayload(walkthroughId, { rows }) }),
+      ingestWalkthrough({ tenantDb, payload: walkthroughPayload(walkthroughId, { rows }) }),
+    ]);
+
+    // Both callers get the SAME ids — neither can tell it lost, which is what idempotency owes them.
+    expect(second).toEqual(first);
+
+    // Exactly ONE document for this walkthrough, not two.
+    const documents = await tenantDb
+      .select({ id: estimateSourceDocuments.id })
+      .from(estimateSourceDocuments)
+      .where(eq(estimateSourceDocuments.contentHash, walkthroughId));
+    expect(documents).toHaveLength(1);
+
+    // ...and exactly one set of extractions under it, not the doubled scope an estimator would
+    // otherwise have to de-duplicate by hand.
+    const extractions = await tenantDb
+      .select({ id: estimateExtractions.id })
+      .from(estimateExtractions)
+      .where(eq(estimateExtractions.documentId, first.documentId));
+    expect(extractions).toHaveLength(2);
+  });
+
+  // THE MECHANISM, as opposed to the outcome. Records the statements the real service issues inside its
+  // real transaction, so three things are checked that the outcome test cannot see: the lock statement
+  // is issued at all, it is issued FIRST (a lock taken after the lookup guards nothing — both racers
+  // would already have read "no document"), and it is keyed on THIS walkthrough rather than on some
+  // constant that would serialize every ingress in the system.
+  it("takes the advisory lock as its first statement, before the idempotency lookup", async () => {
+    const walkthroughId = U("33031");
+    const log: Array<{ kind: string; sql: string; params: unknown[] }> = [];
+
+    // `ingestWalkthrough` touches `tenantDb` only to open a transaction, so a stub with just
+    // `transaction` is a complete stand-in. The tx handed to the body is proxied to record what runs.
+    const recordingDb = {
+      transaction: (body: (tx: unknown) => unknown) =>
+        tenantDb.transaction((tx: any) =>
+          body(
+            new Proxy(tx, {
+              get(target, prop) {
+                const value = Reflect.get(target, prop);
+                if (prop === "execute" && typeof value === "function") {
+                  return async (query: unknown) => {
+                    const compiled = tenantDb.dialect.sqlToQuery(query);
+                    log.push({ kind: "execute", sql: compiled.sql, params: compiled.params });
+                    const result = await value.call(target, query);
+                    // Observe the REAL lock the REAL statement just took, on the same transaction.
+                    // A statement that parses but locks nothing would leave this at 0.
+                    if (compiled.sql.includes("pg_advisory_xact_lock")) {
+                      const held: any = await value.call(
+                        target,
+                        sql`select count(*)::int as n from pg_locks where locktype = 'advisory'`
+                      );
+                      const rows = held?.rows ?? held;
+                      log.push({
+                        kind: "advisory-locks-held",
+                        sql: String(rows[0].n),
+                        params: [],
+                      });
+                    }
+                    return result;
+                  };
+                }
+                if (
+                  (prop === "select" || prop === "insert" || prop === "update") &&
+                  typeof value === "function"
+                ) {
+                  return (...args: unknown[]) => {
+                    log.push({ kind: prop, sql: "", params: [] });
+                    return value.apply(target, args);
+                  };
+                }
+                return typeof value === "function" ? value.bind(target) : value;
+              },
+            })
+          )
+        ),
+    };
+
+    await ingestWalkthrough({
+      tenantDb: recordingDb as never,
+      payload: walkthroughPayload(walkthroughId),
+    });
+
+    // FIRST statement in the transaction, full stop. Not "somewhere before the select" — first, so
+    // there is no window at all between BEGIN and the lock.
+    expect(log[0].kind).toBe("execute");
+    expect(log[0].sql).toContain("pg_advisory_xact_lock");
+    // The bigint mapping actually used. `hashtextextended` is Postgres 11+; if it ever has to become
+    // `hashtext` for an older server, this assertion is the one that should be edited deliberately.
+    expect(log[0].sql).toContain("hashtextextended");
+
+    // Keyed on THIS walkthrough on THIS deal, asserted against the exported key builder rather than a
+    // transcription of it — a lock on a constant would serialize every walkthrough in the CRM, and a
+    // lock keyed on the wrong thing would serialize the wrong pairs.
+    expect(log[0].params).toContain(walkthroughIngressLockKey(DEAL, walkthroughId));
+
+    // The lock is really HELD inside the transaction — the statement acquired something, rather than
+    // merely being valid SQL.
+    expect(log[1]).toMatchObject({ kind: "advisory-locks-held", sql: "1" });
+
+    // ...and the idempotency lookup is the next thing to happen, i.e. it runs UNDER the lock.
+    expect(log[2].kind).toBe("select");
+
+    // Transaction-scoped: gone once the transaction ended, without an explicit unlock, so a failed or
+    // crashed ingress cannot wedge this walkthrough forever.
+    const after = await pg.query<{ n: number }>(
+      `select count(*)::int as n from pg_locks where locktype = 'advisory'`
+    );
+    expect(after.rows[0].n).toBe(0);
+  });
+
+  // R4. `contentHash` is a shared column with UNRELATED meanings per producer: an ordinary upload puts
+  // the file's R2 KEY there (routes.ts hands createEstimateSourceDocument `contentHash:
+  // uploadedFile.r2Key`), a walkthrough puts the walkthrough id. Nothing keeps those namespaces apart,
+  // so the idempotency lookup has to say WHICH KIND of document it is willing to recognize. Without
+  // that predicate the collision below makes the ingress "recognize" a plan set as this walkthrough's
+  // prior ingest and replay it: trock-scope gets a 200 and a foreign document's ids, and the
+  // walkthrough's scope is never written by anyone.
+  it("does not mistake a foreign document type sharing the contentHash for a prior ingest", async () => {
+    const walkthroughId = U("33040");
+
+    // A NON-walkthrough document on the same (deal, project) whose contentHash collides exactly.
+    const foreignFileId = await createWalkthroughContactSheetFile({
+      tenantDb,
+      input: {
+        dealId: DEAL,
+        walkthroughId: U("33041"),
+        siteLabel: "A plan set",
+        r2Key: `plans/${walkthroughId}/plan-set.pdf`,
+        r2Bucket: CRM_BUCKET,
+        bytes: 4096,
+        mimeType: "application/pdf",
+        capturedAt: "2026-07-29T14:05:00Z",
+        userId: USER,
+      },
+    });
+    const [foreign] = await tenantDb
+      .insert(estimateSourceDocuments)
+      .values({
+        dealId: DEAL,
+        projectId: PROJECT,
+        fileId: foreignFileId,
+        rootFileId: foreignFileId,
+        documentType: "plan",
+        filename: "Level 2 plan set.pdf",
+        mimeType: "application/pdf",
+        // THE COLLISION: a plan set whose content hash happens to equal this walkthrough's id.
+        contentHash: walkthroughId,
+        parseStatus: "completed",
+        ocrStatus: "completed",
+        uploadedByUserId: USER,
+      })
+      .returning({ id: estimateSourceDocuments.id });
+
+    const result = await ingestWalkthrough({
+      tenantDb,
+      payload: walkthroughPayload(walkthroughId),
+    });
+
+    // The walkthrough got its OWN document, not the plan set's id.
+    expect(result.documentId).not.toBe(foreign.id);
+    const [ingested] = await tenantDb
+      .select({ documentType: estimateSourceDocuments.documentType })
+      .from(estimateSourceDocuments)
+      .where(eq(estimateSourceDocuments.id, result.documentId));
+    expect(ingested.documentType).toBe("walkthrough");
+
+    // And its scope rows exist, under its own document — the thing a replay would have skipped.
+    const extractions = await tenantDb
+      .select({ id: estimateExtractions.id })
+      .from(estimateExtractions)
+      .where(eq(estimateExtractions.documentId, result.documentId));
+    expect(extractions).toHaveLength(1);
+    expect(result.extractionIds).toEqual(extractions.map((row: { id: string }) => row.id));
+  });
+
+  // R5. The replay used to `.filter()` unmatched rows away, so a retry whose rows had drifted got back
+  // FEWER ids than it posted, with a 200 — the sender then recorded utterances as landed that nothing
+  // had ever stored. A retry cannot add rows to an already-ingested walkthrough (the document exists,
+  // so every future attempt replays it), which is exactly why silence here is unrecoverable: there is
+  // no later attempt that fixes it.
+  it("refuses a retry whose rows drifted, naming the scope items it cannot account for", async () => {
+    const walkthroughId = U("33050");
+    const rows = [CARPENTRY_ROW];
+
+    const first = await ingestWalkthrough({
+      tenantDb,
+      payload: walkthroughPayload(walkthroughId, { rows }),
+    });
+    const afterFirst = await tableCounts();
+
+    await expect(
+      ingestWalkthrough({
+        tenantDb,
+        payload: walkthroughPayload(walkthroughId, {
+          rows: [
+            CARPENTRY_ROW,
+            { ...CARPENTRY_ROW, sourceScopeItemId: "scope-item-drifted", rawLabel: "A new utterance" },
+          ],
+        }),
+      })
+    ).rejects.toMatchObject({
+      statusCode: 409,
+      // NAMED. "some rows are missing" is not something the sender can act on.
+      message: expect.stringContaining("scope-item-drifted"),
+    });
+
+    // The refusal writes nothing — it is not a partial ingest of the new row.
+    expect(await tableCounts()).toEqual(afterFirst);
+    const extractions = await tenantDb
+      .select({ id: estimateExtractions.id })
+      .from(estimateExtractions)
+      .where(eq(estimateExtractions.documentId, first.documentId));
+    expect(extractions).toHaveLength(1);
+  });
+
+  // The OTHER direction, unchanged on purpose: rows the stored document has that this payload did not
+  // name are still that walkthrough's rows, so they are appended rather than treated as an error. Only
+  // a payload row with no STORED counterpart is a conflict.
+  it("still replays stored rows the retry's payload does not mention", async () => {
+    const walkthroughId = U("33051");
+    const rows = [
+      CARPENTRY_ROW,
+      { ...CARPENTRY_ROW, sourceScopeItemId: "scope-item-9501", rawLabel: "Reflash the parapet" },
+    ];
+
+    const first = await ingestWalkthrough({
+      tenantDb,
+      payload: walkthroughPayload(walkthroughId, { rows }),
+    });
+
+    // A retry naming only the FIRST row. Nothing is unaccounted for — every row it posted is stored —
+    // so it succeeds, and the answer still describes the whole walkthrough.
+    const second = await ingestWalkthrough({
+      tenantDb,
+      payload: walkthroughPayload(walkthroughId, { rows: [CARPENTRY_ROW] }),
+    });
+
+    expect(second.documentId).toBe(first.documentId);
+    expect(second.extractionIds).toHaveLength(2);
+    // The named row comes first (payload order), the unnamed one is appended.
+    expect(second.extractionIds[0]).toBe(first.extractionIds[0]);
+    expect([...second.extractionIds].sort()).toEqual([...first.extractionIds].sort());
+  });
+
   it("scopes the retry check to the deal, so the same walkthrough on another deal still ingests", async () => {
     const walkthroughId = U("33010");
 
@@ -960,6 +1349,151 @@ describe("ingestWalkthrough", () => {
     // Dedupe is on (dealId, projectId, contentHash) — the same triple document-service.ts:104-130
     // uses — so it cannot swallow a legitimate second ingress onto a different deal.
     expect(other.documentId).not.toBe(first.documentId);
+  });
+});
+
+// R3 — THE DATA-LOSS PATH THROUGH AN ALREADY-SHIPPED ENDPOINT.
+//
+// `POST /:id/estimating/documents/:documentId/reprocess` means "throw the parse away and derive it
+// again from the file". That is coherent for a plan set and destructive for a walkthrough, whose rows
+// were never parsed from its file in the first place — they were spoken on site and ingested from TROCK
+// Scope, and the "file" is only a contact sheet of evidence frames.
+//
+// Left unguarded, reprocessing a walkthrough clears `active_parse_run_id` and queues the generic OCR
+// worker; the worker parses the CONTACT-SHEET IMAGE, and `activateCompletedParseRun`
+// (document-parse-orchestrator.ts:173-182) then sets every extraction's `activeArtifact` to
+// `sourceParseRunId = <the new run>`. The real walkthrough rows do not match it, so all of them flip
+// inactive and disappear from the workbench, replaced by priced stubs derived from an image filename.
+//
+// These tests do not run the worker. They pin the two facts that make the hazard real and the guard
+// necessary: reprocess DOES null the active parse run (proved on the ordinary document, where that is
+// correct), and the walkthrough's rows are hidden the moment their run pointer stops matching (already
+// proved by "drops the row when ONLY its sourceParseRunId stops matching", below). The guard is what
+// keeps those two facts from meeting.
+describe("reprocessEstimateSourceDocument on a walkthrough document", () => {
+  it("refuses, leaves the parse run intact, and never queues the OCR worker", async () => {
+    const walkthroughId = U("55001");
+    const enqueue = vi.fn(async () => {});
+
+    const ingested = await ingestWalkthrough({
+      tenantDb,
+      payload: walkthroughPayload(walkthroughId, { dealId: REPROCESS_DEAL, projectId: null }),
+    });
+
+    await expect(
+      reprocessEstimateSourceDocument({
+        tenantDb,
+        enqueueEstimateDocumentOcr: enqueue,
+        input: {
+          dealId: REPROCESS_DEAL,
+          documentId: ingested.documentId,
+          userId: USER,
+          officeId: null,
+        },
+      })
+    ).rejects.toMatchObject({
+      statusCode: 400,
+      // The message has to tell an operator what to do INSTEAD, or they will just try again.
+      message: expect.stringContaining("Re-ingest the walkthrough from TROCK Scope"),
+    });
+
+    // Nothing was queued — a walkthrough must never reach the generic OCR worker.
+    expect(enqueue).not.toHaveBeenCalled();
+
+    // The document is untouched: the active run still points at the ingested run, so the rows are still
+    // live. A refusal that had already written the UPDATE would have destroyed the scope anyway.
+    const [doc] = await tenantDb
+      .select()
+      .from(estimateSourceDocuments)
+      .where(eq(estimateSourceDocuments.id, ingested.documentId));
+    expect(doc.activeParseRunId).toBe(ingested.parseRunId);
+    expect(doc.parseStatus).toBe("completed");
+    expect(doc.ocrStatus).toBe("completed");
+    expect(doc.parsedAt).not.toBeNull();
+
+    // And the estimator still sees the scope — the actual thing being protected, asserted through the
+    // real workbench service rather than inferred from the columns above.
+    const state = await buildEstimatingWorkbenchState(tenantDb, REPROCESS_DEAL);
+    expect(state.extractionRows.map((row: { id: string }) => row.id)).toEqual(ingested.extractionIds);
+  });
+
+  it("still reprocesses an ordinary parsed document, clearing its active run and queueing the worker", async () => {
+    const enqueue = vi.fn(async () => {});
+    const fileId = await createWalkthroughContactSheetFile({
+      tenantDb,
+      input: {
+        dealId: DEAL,
+        walkthroughId: U("55002"),
+        siteLabel: "Level 2 plans",
+        r2Key: "plans/55002/level-2.pdf",
+        r2Bucket: CRM_BUCKET,
+        bytes: 8192,
+        mimeType: "application/pdf",
+        capturedAt: "2026-07-29T14:05:00Z",
+        userId: USER,
+      },
+    });
+
+    // An ordinary parsed plan set, complete with an active parse run, so the ONLY difference from the
+    // walkthrough above is `documentType`. That is what makes this the control: if the guard were
+    // keyed on anything else (parse provider, filename, storage key), this test would fail too.
+    const [doc] = await tenantDb
+      .insert(estimateSourceDocuments)
+      .values({
+        dealId: DEAL,
+        fileId,
+        rootFileId: fileId,
+        documentType: "plan",
+        filename: "Level 2 plans.pdf",
+        mimeType: "application/pdf",
+        parseStatus: "completed",
+        ocrStatus: "completed",
+        parsedAt: new Date(),
+        uploadedByUserId: USER,
+      })
+      .returning({ id: estimateSourceDocuments.id });
+    const [run] = await tenantDb
+      .insert(estimateDocumentParseRuns)
+      .values({ documentId: doc.id, status: "completed", completedAt: new Date() })
+      .returning({ id: estimateDocumentParseRuns.id });
+    await tenantDb
+      .update(estimateSourceDocuments)
+      .set({ activeParseRunId: run.id })
+      .where(eq(estimateSourceDocuments.id, doc.id));
+
+    const result = await reprocessEstimateSourceDocument({
+      tenantDb,
+      enqueueEstimateDocumentOcr: enqueue,
+      input: { dealId: DEAL, documentId: doc.id, userId: USER, officeId: null },
+    });
+
+    expect(result).not.toBeNull();
+    expect(enqueue).toHaveBeenCalledTimes(1);
+
+    // ...and this is the destructive step itself, proved on the document where it is CORRECT: the
+    // active run is cleared and the document goes back to queued. On a walkthrough, that null is what
+    // orphans the ingested rows.
+    const [after] = await tenantDb
+      .select()
+      .from(estimateSourceDocuments)
+      .where(eq(estimateSourceDocuments.id, doc.id));
+    expect(after.activeParseRunId).toBeNull();
+    expect(after.parseStatus).toBe("queued");
+    expect(after.ocrStatus).toBe("queued");
+    expect(after.parsedAt).toBeNull();
+  });
+
+  it("still reports a document that does not exist as not-found rather than refusing it", async () => {
+    const enqueue = vi.fn(async () => {});
+    // The guard must not turn the 404 path into a 400 — the route relies on a null return here.
+    const result = await reprocessEstimateSourceDocument({
+      tenantDb,
+      enqueueEstimateDocumentOcr: enqueue,
+      input: { dealId: DEAL, documentId: U("55009"), userId: USER, officeId: null },
+    });
+
+    expect(result).toBeNull();
+    expect(enqueue).not.toHaveBeenCalled();
   });
 });
 

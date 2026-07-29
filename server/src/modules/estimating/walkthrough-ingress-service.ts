@@ -47,6 +47,53 @@ export function getCrmFileBucket(): string {
 export const WALKTHROUGH_CONTACT_SHEET_MIME_TYPES = ["image/jpeg", "application/pdf"] as const;
 
 /**
+ * The advisory-lock key one walkthrough ingress serializes on.
+ *
+ * NAMESPACED, matching `lockPromotionCandidates` (draft-estimate-service.ts:136) — the single-argument
+ * `pg_advisory_xact_lock(bigint)` key space is GLOBAL to the database, shared with every other feature
+ * that takes one, so an un-prefixed "<uuid>:<uuid>" would be a key another module could in principle
+ * mint too. (The `pg_advisory_lock(int4, int4)` two-argument form bid-board-sync uses is a SEPARATE
+ * space and cannot collide with this one.)
+ *
+ * Deliberately COARSER than the idempotency lookup, which keys on (dealId, projectId, contentHash):
+ * `projectId` is left out. That is the safe direction — every pair of transactions that could collide
+ * on the lookup necessarily collides on this lock, so the lock can never under-serialize. The cost is
+ * that the same walkthrough arriving on one deal under two different projects serializes when it did
+ * not strictly have to, which is a wait, not a wrong answer.
+ *
+ * Exported so the test can assert the real key rather than a copy of it.
+ */
+export function walkthroughIngressLockKey(dealId: string, walkthroughId: string): string {
+  return `walkthrough-ingress:${dealId}:${walkthroughId}`;
+}
+
+/**
+ * The quantity band `estimate_extractions.quantity` can actually represent.
+ *
+ * The column is `numeric(14,3)` (estimate-extractions.ts:37) — 14 digits of precision, scale 3, so 11
+ * integer digits and exactly three decimal places. Both ends of that band are enforced in validation
+ * rather than discovered at INSERT, and each end fails a DIFFERENT way if it is not:
+ *
+ *   MAX — Postgres refuses a value that rounds to an absolute value >= 10^11 with a `numeric field
+ *   overflow` (22003). That is a 500 out of the middle of the transaction, contradicting the
+ *   400-before-any-write contract the rest of this validator establishes. Verified against real
+ *   Postgres 16.14: 1e11 and 99999999999.9996 both raise 22003; 99999999999.999 and
+ *   99999999999.9994 (which rounds DOWN) are accepted. The bound below is therefore very slightly
+ *   conservative — it also refuses the sliver between 99999999999.999 and the true rounding
+ *   threshold — which is the harmless direction, and no walkthrough reaches eleven digits anyway.
+ *
+ *   MIN — and this is the dangerous one, because it SUCCEEDS. Scale 3 makes Postgres ROUND, not
+ *   reject: verified on the same server, 0.0001 and 0.0004 both store as exactly 0.000. So a payload
+ *   this module explicitly refuses at `quantity <= 0` can walk straight back in as 0.0001 and land in
+ *   the table as a zero — the very value the guard above exists to keep out, arrived at silently.
+ *   (0.0005 rounds UP to 0.001 and would survive; the bound is set at the column's smallest
+ *   representable value, 0.001, rather than at the exact collapse threshold, because "the column
+ *   stores three decimals" is a rule a sender can act on and "below 0.0005 you become zero" is not.)
+ */
+export const MAX_WALKTHROUGH_QUANTITY = 99999999999.999;
+export const MIN_WALKTHROUGH_QUANTITY = 0.001;
+
+/**
  * A ceiling on one walkthrough's scope rows. Not a storage limit — a runaway-export limit: a real
  * walkthrough is a human talking through a building, and an export claiming thousands of spoken scope
  * items is a bug upstream, not a big job. Rows are also inserted in chunks (see
@@ -425,6 +472,26 @@ function validateScopeRow(value: unknown, index: number): WalkthroughScopeRow {
   if (quantity <= 0) {
     throw new AppError(400, `${at}.quantity must be greater than zero`);
   }
+  // Both ends of numeric(14,3) — see MAX_WALKTHROUGH_QUANTITY / MIN_WALKTHROUGH_QUANTITY. Checked here
+  // so an unrepresentable quantity is a 400 naming the row, not a 22003 from inside the transaction
+  // (the max) or a silent zero in the table (the min).
+  if (quantity > MAX_WALKTHROUGH_QUANTITY) {
+    throw new AppError(
+      400,
+      `${at}.quantity ${quantity} exceeds the largest quantity this column can hold ` +
+        `(${MAX_WALKTHROUGH_QUANTITY}). estimate_extractions.quantity is numeric(14,3), so a value ` +
+        `rounding to 10^11 or more is a numeric overflow at INSERT — refused here instead.`
+    );
+  }
+  if (quantity < MIN_WALKTHROUGH_QUANTITY) {
+    throw new AppError(
+      400,
+      `${at}.quantity ${quantity} is smaller than the smallest quantity this column can represent ` +
+        `(${MIN_WALKTHROUGH_QUANTITY}). estimate_extractions.quantity is numeric(14,3) — three ` +
+        `decimal places — so Postgres would ROUND this and store it as 0.000, turning a quantity ` +
+        `this contract requires to be greater than zero into exactly the zero it forbids.`
+    );
+  }
 
   const confidence = requireFiniteNumber(row.confidence, `${at}.confidence`);
   // Passed to `.toFixed(2)` against a numeric(5,2) column: outside 0-1 it is either a 22003 overflow
@@ -606,6 +673,50 @@ export async function ingestWalkthrough({
   const payload = validateWalkthroughIngressPayload(rawPayload);
 
   return tenantDb.transaction(async (tx) => {
+    // CONCURRENT IDEMPOTENCY, and it has to be the FIRST statement in the transaction — before the
+    // lookup below, or it protects nothing.
+    //
+    // The lookup handles a SEQUENTIAL retry: the first call committed, so the second sees its document
+    // and replays it. It does nothing for two OVERLAPPING attempts. This transaction runs at READ
+    // COMMITTED (Postgres's default; nothing in this codebase sets an isolation level), so two ingress
+    // transactions that open together both take their snapshot before either has inserted, both find no
+    // existing document, and both build a full chain — one walkthrough, two documents, two sets of
+    // extractions, and an estimator looking at every scope row twice. trock-scope retrying a timed-out
+    // request while the original is still in flight is exactly how that happens.
+    //
+    // WHY A LOCK RATHER THAN A UNIQUE INDEX. The honest fix is a partial unique index on
+    // (deal_id, project_id, content_hash) where document_type = 'walkthrough', which would make the
+    // second insert a 23505 no matter how the two callers interleave. That is a PRODUCTION MIGRATION
+    // against a large existing table, and this PR deliberately ships no schema change — so it would
+    // arrive later, leaving the race open in the meantime. An advisory lock closes it now, touches no
+    // schema, and is the same instrument `lockPromotionCandidates` (draft-estimate-service.ts:136)
+    // already uses a few files away. It is not a strictly equal substitute and should not be sold as
+    // one: it binds only callers that take it, so a future writer of walkthrough documents that skips
+    // this lock re-opens the window, where an index would have bound everyone. The index remains the
+    // right eventual fix; this is what makes the seam safe without one.
+    //
+    // WHY IT WORKS AT READ COMMITTED SPECIFICALLY: the loser blocks here until the winner COMMITS, and
+    // because each statement at READ COMMITTED takes a fresh snapshot, the loser's lookup then SEES the
+    // winner's committed document and replays it. Verified on real Postgres 16.14 with two genuinely
+    // concurrent connections: without the lock both insert (2 documents); with it, exactly one inserts
+    // and the other replays (1 document). Under REPEATABLE READ the same experiment yields 2 documents
+    // even WITH the lock — the loser's snapshot predates the insert, so it still sees nothing. If this
+    // transaction is ever given a stronger isolation level, this lock stops being sufficient and the
+    // unique index becomes mandatory.
+    //
+    // The lock is transaction-scoped: released on COMMIT or ROLLBACK, including a crash, so a failed
+    // ingress cannot wedge a walkthrough. `hashtextextended(text, int8)` maps the key onto the bigint
+    // the single-argument lock takes (64-bit, chosen over the neighbour's 32-bit `hashtext` because
+    // this key space is database-global and a wider hash makes an unrelated collision less likely; a
+    // collision would only ever cause a needless wait, never a wrong result). Postgres 11+, and it runs
+    // on PGlite 17.5, which is what the runtime suite exercises it on.
+    await tx.execute(
+      sql`SELECT pg_advisory_xact_lock(hashtextextended(${walkthroughIngressLockKey(
+        payload.dealId,
+        payload.walkthroughId
+      )}, 0))`
+    );
+
     // IDEMPOTENCY. A lost response is indistinguishable from a lost request, so trock-scope retries —
     // and a retry must not double the deal's estimating rows. `contentHash` carries the walkthrough
     // id, so (dealId, projectId, contentHash) identifies THIS walkthrough on THIS deal: the same
@@ -626,7 +737,17 @@ export async function ingestWalkthrough({
           payload.projectId === null
             ? isNull(estimateSourceDocuments.projectId)
             : eq(estimateSourceDocuments.projectId, payload.projectId),
-          eq(estimateSourceDocuments.contentHash, payload.walkthroughId)
+          eq(estimateSourceDocuments.contentHash, payload.walkthroughId),
+          // DOCUMENT TYPE, not just the hash. `contentHash` means different things to different
+          // producers: an ordinary upload stores the file's R2 KEY there (routes.ts, the
+          // createEstimateSourceDocument call passes `contentHash: uploadedFile.r2Key`), while a
+          // walkthrough stores the walkthrough id. Nothing makes those two namespaces disjoint, so
+          // without this predicate a walkthrough id that happens to equal some existing document's
+          // content hash on the same deal would make this lookup "find" that FOREIGN document and
+          // replay it — handing trock-scope a 200, a plan set's document id, and whatever extraction
+          // ids that document owns, while the walkthrough's own scope was never written at all. The
+          // guard is cheap and it keeps idempotency keyed on this producer's own records only.
+          eq(estimateSourceDocuments.documentType, "walkthrough")
         )
       )
       .limit(1);
@@ -657,9 +778,44 @@ export async function ingestWalkthrough({
           ?.sourceScopeItemId;
         if (typeof scopeItemId === "string") idByScopeItemId.set(scopeItemId, row.id);
       }
-      const orderedIds = payload.rows
-        .map((row) => idByScopeItemId.get(row.sourceScopeItemId))
-        .filter((id): id is string => id !== undefined);
+      // A payload row with no stored extraction is a REAL disagreement, so it is raised rather than
+      // dropped. The previous `.filter(id => id !== undefined)` silently discarded those, which made
+      // the worst case invisible: a retry whose rows drifted got back FEWER ids than it sent, with a
+      // 200 and no indication which rows were missing, so the sender recorded every utterance as
+      // landed while some were never written by anybody. Two ways to get here, and neither is
+      // survivable by guessing: the sender changed the walkthrough's rows between attempts (so these
+      // rows were never ingested and never will be, because the document now exists and every future
+      // retry replays it), or the stored extractions were deleted underneath us. Both need a human.
+      const orderedIds: string[] = [];
+      const unmatchedScopeItemIds: string[] = [];
+      for (const row of payload.rows) {
+        const id = idByScopeItemId.get(row.sourceScopeItemId);
+        if (id === undefined) unmatchedScopeItemIds.push(row.sourceScopeItemId);
+        else orderedIds.push(id);
+      }
+
+      if (unmatchedScopeItemIds.length > 0) {
+        // NAMED, and capped: a 1000-row walkthrough that drifted wholesale must not put a thousand ids
+        // in an error message, but the sender does need enough of them to find the drift.
+        const shown = unmatchedScopeItemIds.slice(0, 10);
+        const suffix =
+          unmatchedScopeItemIds.length > shown.length
+            ? ` (and ${unmatchedScopeItemIds.length - shown.length} more)`
+            : "";
+        // 409, not 500: the request conflicts with an already-ingested walkthrough's stored state.
+        // Retrying it unchanged will never succeed, which is what distinguishes this from a transient
+        // failure the sender should back off and repeat.
+        throw new AppError(
+          409,
+          `Walkthrough ${payload.walkthroughId} was already ingested on this deal as document ` +
+            `${existing.id}, but ${unmatchedScopeItemIds.length} of the ${payload.rows.length} rows ` +
+            `posted have no stored extraction: ${shown.join(", ")}${suffix}. A retry replays the ` +
+            `first call's rows and cannot add new ones, so these utterances are not stored and will ` +
+            `not become stored by retrying. Either the payload changed between attempts or the ` +
+            `extractions were deleted — investigate rather than re-post.`
+        );
+      }
+
       const claimed = new Set(orderedIds);
       // Anything the stored document has that this payload did not name (a retry whose rows drifted)
       // still belongs to the walkthrough, so the result stays a complete picture of what exists.

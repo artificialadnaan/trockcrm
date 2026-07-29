@@ -2,6 +2,7 @@ import { and, eq, isNull, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
 import { estimateSourceDocuments } from "@trock-crm/shared/schema";
+import { AppError } from "../../middleware/error-handler.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -182,6 +183,7 @@ export async function reprocessEstimateSourceDocument({
 }: ReprocessEstimateSourceDocumentArgs) {
   const [currentDocument] = await tenantDb
     .select({
+      documentType: estimateSourceDocuments.documentType,
       parseProvider: estimateSourceDocuments.parseProvider,
       parseProfile: estimateSourceDocuments.parseProfile,
       parseMeasurementsEnabled: estimateSourceDocuments.parseMeasurementsEnabled,
@@ -197,6 +199,33 @@ export async function reprocessEstimateSourceDocument({
 
   if (!currentDocument) {
     return null;
+  }
+
+  // DATA LOSS, refused. Reprocessing means "throw the parse away and derive it again from the file",
+  // which is coherent for a plan set and destructive for a walkthrough.
+  //
+  // A walkthrough document's extractions were not parsed out of its file — they were ingested from
+  // TROCK Scope, where a human spoke them (walkthrough-ingress-service.ts). Its "file" is only a
+  // contact-sheet image of the evidence frames. Run this function on one and: the UPDATE below clears
+  // `active_parse_run_id` and queues the generic OCR worker; the worker parses the CONTACT SHEET,
+  // produces filename-derived stubs, and `activateCompletedParseRun`
+  // (document-parse-orchestrator.ts:173-182) then rewrites every extraction's `activeArtifact` to
+  // `metadata_json->>'sourceParseRunId' = <new run>`. The real walkthrough rows do not match the new
+  // run, so all of them flip to inactive and vanish from the workbench
+  // (workbench-service.ts:153-172), replaced by priced stubs invented from an image filename. The
+  // scope an estimator collected on site is silently gone, and nothing sweeps it back.
+  //
+  // Refused rather than made safe: the correct way to rebuild these rows is to re-ingest the
+  // walkthrough from TROCK Scope, which is idempotent on (deal, walkthrough) and rewrites them from
+  // the source of truth. There is nothing for a re-parse to recover here.
+  if (currentDocument.documentType === "walkthrough") {
+    throw new AppError(
+      400,
+      `Document ${input.documentId} is a TROCK Scope walkthrough and cannot be reprocessed. Its ` +
+        `scope rows were ingested from the walkthrough, not parsed out of its contact-sheet image, so ` +
+        `re-parsing would replace them with stubs derived from the image filename and hide the real ` +
+        `rows. Re-ingest the walkthrough from TROCK Scope to rebuild them.`
+    );
   }
 
   const nextParseProvider =
