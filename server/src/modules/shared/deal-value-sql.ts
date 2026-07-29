@@ -156,20 +156,37 @@ function aliasedDealValueChainSql(alias: string, columns: readonly DealValueColu
 // client/src/components/pipeline/pipeline-record-card.tsx's formatValue (same change; its value already
 // resolved through the CO-aware shared getEffectiveDealValue, so only the gate was wrong — and the null
 // it returned did not merely blank the amount, it let the card print the workflow route in the money's
-// place). The other mobile-crm value surfaces carry no gate of their own: BoardCard.tsx and
-// app/(app)/deals/[id].tsx both call displayAmount.
+// place). The other mobile-crm value surfaces carry no gate of their own — BoardCard.tsx and
+// app/(app)/deals/[id].tsx both call displayAmount — so fixing those two functions reaches every render
+// site in the table below.
 //
-// CHECKED, because a branch on a field the payload never sends would be inert: is_change_order does reach
-// the phone as `isChangeOrder` on all three endpoints mobile-crm reads. GET /api/deals (deals/routes.ts
-// :866) and GET /api/deals/pipeline (:1001) both select `...getTableColumns(deals)`, and /deals/:id/detail
-// resolves through getDealById, which does the same; redactDealResponse strips only hubspotDealId and the
-// private commission fields, and mobile-crm/src/api/types.ts already declared the field. Because the flag
-// is on the row, the server-computed `effectiveValue` those cards PREFER is CO-aware too — the local
-// chain above is the mixed-version fallback.
+// CHECKED, because a branch on a field the payload never sends would be inert. The surface that matters is
+// not "every deals endpoint" but every screen that reaches this chain, and that set is enumerable rather
+// than asserted: grep mobile-crm for `<DealCard`, `<BoardCard` and `displayAmount` outside the two
+// component files themselves. That yields four render sites, each fed by one endpoint, and is_change_order
+// reaches all four as `isChangeOrder`:
+//   (tabs)/deals/index.tsx    <- GET /api/deals              (deals/routes.ts:866)  `...getTableColumns(deals)`
+//   deals/board.tsx           <- GET /api/deals/pipeline     (routes.ts:1001)       `...getTableColumns(deals)`
+//   deals/stage/[stageId].tsx <- GET /api/deals/stages/:id   (routes.ts:1064)       hand-written SELECT that
+//     projects d.is_change_order (service.ts:3995) and maps it in mapDealStageWorkspaceRow (service.ts:1730)
+//   deals/[id].tsx            <- GET /api/deals/:id/detail   -> getDealById, `...getTableColumns(deals)`
+// Redaction cannot drop it on any of them: redactDealResponse strips only hubspotDealId,
+// stripPrivateDealFieldsForViewer only the six commission fields, and the stage-page route redacts nothing
+// (its SELECT never includes hubspot_deal_id). mobile-crm/src/api/types.ts already declared the field. All
+// four rows also end in attachAtRiskResult, so the server-computed `effectiveValue` these cards PREFER is
+// CO-aware too — the local chain above is the mixed-version fallback. Two further endpoints DO return deal
+// rows to this app and are deliberately absent: POST /deals/:id/stage's `{ deal }` and the associations
+// from /contacts/:id/deals. Neither is passed to displayAmount, so neither touches this chain.
 //
-// That is the whole of this paragraph's claim: those edits, and that endpoint check. It is NOT a fresh
-// completeness sweep — it rests on Task 4's sweep, whose edges are stated next. The plpgsql chain in
-// migration 0184 remains outstanding separately, described at the end of this comment.
+// The first draft of this paragraph said "all three endpoints mobile-crm reads" and missed the stage page.
+// Nothing was broken by the omission — that route was already CO-aware — but the count was an
+// exhaustiveness claim nobody had checked, which is the fourth time this ledger has done that. Hence
+// anchoring to render sites and naming the grep: the claim above is one a reader can re-run in one command
+// rather than one they have to take on faith.
+//
+// That is the whole of what is claimed above: those edits, and that render-site trace. It is NOT a fresh
+// completeness sweep of the repo — it rests on Task 4's sweep, whose edges are stated next. The plpgsql
+// chain in migration 0184 remains outstanding separately, described at the end of this comment.
 //
 // What Task 4 actually swept, so the next reader knows the edges of this claim: `awarded_amount > 0` and
 // the equivalent TS candidate-chain shapes across server/src, worker/src, client/src, shared/src (tests
