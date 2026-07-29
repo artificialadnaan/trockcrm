@@ -735,6 +735,16 @@ export async function resolveMailboxAccountIdsForConversation(
  * every message it once covered (e.g. the messages were purged or never fully synced), so this is
  * NOT redundant with resolveMailboxAccountIdsForConversation above — bind and detach both need the
  * union of the two sets, or they'd disagree about what "every mailbox holding it" means.
+ *
+ * The join to user_graph_tokens is here for a different reason than the message-side query's: a
+ * disconnect (POST /api/auth/graph/disconnect, graph-token-service.ts) hard-DELETEs the token row but
+ * leaves email_thread_bindings untouched (mailbox_account_id carries no FK, and nothing else cleans
+ * bindings up), so a binding can point at a mailbox whose token row is simply GONE. Handing that id to
+ * bindThreadToDeal throws "Mailbox not found" and aborts the whole rebind — every mailbox, not just the
+ * orphan. The join filters that dead-token case out. It deliberately does NOT filter on status, unlike
+ * the message-side query: a token that's merely revoked/error still resolves fine through
+ * resolveMailboxUserId (which looks up by id with no status filter), and that binding SHOULD still be
+ * rebound or it strands — only a missing row is unhandleable.
  */
 async function resolveMailboxAccountIdsWithActiveBindingForConversation(
   tenantDb: TenantDb,
@@ -743,6 +753,7 @@ async function resolveMailboxAccountIdsWithActiveBindingForConversation(
   const rows = await tenantDb
     .selectDistinct({ mailboxAccountId: emailThreadBindings.mailboxAccountId })
     .from(emailThreadBindings)
+    .innerJoin(userGraphTokens, eq(userGraphTokens.id, emailThreadBindings.mailboxAccountId))
     .where(
       and(
         eq(emailThreadBindings.provider, "microsoft_graph"),
@@ -836,9 +847,15 @@ export async function previewThreadReassignmentImpact(
   // bound. Reading the oldest message's deal_id would then report null instead of the real current deal
   // whenever that older copy happens to be the unbound one. Ordered by mailbox_account_id so two
   // disagreeing bindings still answer stably.
+  //
+  // Joined to user_graph_tokens by id, same as resolveMailboxAccountIdsWithActiveBindingForConversation
+  // and for the same reason: a disconnect hard-deletes the token row but leaves the binding in place, so
+  // without this join an orphaned binding with a low UUID could win the ORDER BY and report a stale
+  // deal. No status filter, for the same reason as there — a merely revoked/error token still resolves.
   const [currentBinding] = await tenantDb
     .select({ dealId: emailThreadBindings.dealId })
     .from(emailThreadBindings)
+    .innerJoin(userGraphTokens, eq(userGraphTokens.id, emailThreadBindings.mailboxAccountId))
     .where(
       and(
         eq(emailThreadBindings.provider, "microsoft_graph"),

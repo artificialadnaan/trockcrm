@@ -156,6 +156,35 @@ describe("multi-mailbox conversations", () => {
     expect(orphanRow?.deal_id).toBe(DEAL_NEW);
   });
 
+  it("does not abort the whole rebind when a binding's mailbox has no user_graph_tokens row at all", async () => {
+    // A user-initiated disconnect (POST /api/auth/graph/disconnect, graph-token-service.ts) hard-DELETEs
+    // the token row but leaves the binding in place — mailbox_account_id carries no FK, and nothing else
+    // cleans bindings up. Handing that dead id to bindThreadToDeal throws "Mailbox not found" and would
+    // abort the ENTIRE rebind, not just the orphan's — the union must filter it out before it gets there.
+    const MBX_DISCONNECTED = U("f0d");
+    await tdb.execute(sql`
+      INSERT INTO email_thread_bindings
+        (mailbox_account_id, provider, provider_conversation_id, deal_id, binding_source, confidence)
+      VALUES (${MBX_DISCONNECTED}, 'microsoft_graph', ${CONV}, ${DEAL_OLD}, 'manual', 'high')
+    `);
+    // Deliberately NO user_graph_tokens row for MBX_DISCONNECTED — this is the point of the test.
+
+    await bindConversationToDealAcrossMailboxes(tdb, {
+      providerConversationId: CONV, dealId: DEAL_NEW, actingUserId: USER_A,
+    });
+
+    const rows = await activeBindings();
+    expect(rows).toHaveLength(3);
+    const byMailbox: Record<string, string> = Object.fromEntries(
+      rows.map((r: { mailbox_account_id: string; deal_id: string }) => [r.mailbox_account_id, r.deal_id])
+    );
+    // The resolvable mailboxes still moved...
+    expect(byMailbox[MBX_A]).toBe(DEAL_NEW);
+    expect(byMailbox[MBX_B]).toBe(DEAL_NEW);
+    // ...and the orphan was left alone rather than crashing the whole call.
+    expect(byMailbox[MBX_DISCONNECTED]).toBe(DEAL_OLD);
+  });
+
   it("detaches EVERY mailbox", async () => {
     await detachConversationAcrossMailboxes(tdb, CONV, USER_A);
     expect(await activeBindings()).toHaveLength(0);
