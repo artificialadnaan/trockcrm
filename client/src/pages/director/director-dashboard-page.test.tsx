@@ -798,6 +798,101 @@ describe("DirectorDashboardPage", () => {
     expect(html).toContain("$50,000");
   });
 
+  it("keeps a NEGATIVE Unassigned residual signed so the Sales Force table still sums to the Closed card", async () => {
+    // Deductive change orders let a Won aggregate move DOWN: an unassigned parent closed in an
+    // EARLIER period while its deduction (a Won child deal with a negative awarded_amount) lands in
+    // THIS one, so the canonical null-rep group is genuinely NEGATIVE. Closed card
+    // (scopeSummary.won) $330,000 / 7 vs per-rep cards $360,000 / 6 -> residual -$30,000 / 1 win.
+    // Clamping the VALUE at 0 silently dropped the $30,000 and broke the stated
+    // table-sums-to-the-Closed-KPI invariant; only the COUNT keeps its clamp (a negative headcount
+    // is meaningless, and the count residual cannot go negative anyway -- the per-rep groups are a
+    // subset of the same canonical query).
+    mocks.useDirectorDashboardMock.mockReturnValue({
+      ...mocks.useDirectorDashboardMock(),
+      data: {
+        ...mocks.useDirectorDashboardMock().data,
+        scopeSummary: {
+          ...mocks.useDirectorDashboardMock().data.scopeSummary,
+          won: { count: 7, totalValue: 330000 },
+        },
+      },
+    });
+
+    const { container, cleanup } = await renderPageDom();
+
+    try {
+      const unassignedRow = container.querySelector("[data-testid='rep-row-unassigned']");
+      expect(unassignedRow).not.toBeNull();
+      // The negative residual is rendered honestly rather than swallowed. Every other cell on the
+      // row is already a literal "--", so no percentage, bar width or sort consumes this number.
+      expect(unassignedRow?.textContent).toContain("$-30,000");
+      expect(unassignedRow?.textContent).toContain("1 won");
+
+      // The invariant itself: the rendered Closed column sums to the Closed KPI.
+      const closedCells = Array.from(
+        container.querySelectorAll("[data-testid='director-leaderboard'] tbody tr")
+      ).map((row) => row.querySelectorAll("td")[1]?.querySelector("p")?.textContent ?? "");
+      const closedSum = closedCells.reduce((sum, cell) => sum + Number(cell.replace(/[$,]/g, "")), 0);
+      expect(closedSum).toBe(330000);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("exports a NEGATIVE Unassigned residual so the CSV also sums to the Closed card", async () => {
+    // Same fixture as the table test above -- the CSV reads the SAME derived residual, so this pins
+    // that the export cannot drift from the table or from the Closed KPI.
+    mocks.useDirectorDashboardMock.mockReturnValue({
+      ...mocks.useDirectorDashboardMock(),
+      data: {
+        ...mocks.useDirectorDashboardMock().data,
+        scopeSummary: {
+          ...mocks.useDirectorDashboardMock().data.scopeSummary,
+          won: { count: 7, totalValue: 330000 },
+        },
+      },
+    });
+
+    const originalCreateObjectUrl = URL.createObjectURL;
+    const originalRevokeObjectUrl = URL.revokeObjectURL;
+    const createObjectURLMock = vi.fn((value: Blob | MediaSource) => {
+      void value;
+      return "blob:director-csv";
+    });
+    Object.defineProperty(URL, "createObjectURL", { value: createObjectURLMock, configurable: true });
+    Object.defineProperty(URL, "revokeObjectURL", { value: vi.fn(), configurable: true });
+    const originalCreateElement = document.createElement.bind(document);
+    vi.spyOn(document, "createElement").mockImplementation((tagName: string) => {
+      const element = originalCreateElement(tagName);
+      if (tagName.toLowerCase() === "a") {
+        vi.spyOn(element, "click").mockImplementation(vi.fn());
+      }
+      return element;
+    });
+
+    const { container, cleanup } = await renderPageDom();
+
+    try {
+      await act(async () => {
+        container.querySelector<HTMLButtonElement>("[data-testid='export-sales-force-csv']")?.click();
+      });
+
+      const csvBlob = createObjectURLMock.mock.calls[0]?.[0] as Blob;
+      const csv = await csvBlob.text();
+      expect(csv).toContain("Unassigned,,-30000,1,0,0,,0,");
+
+      const dataRows = csv.split("\n").slice(1);
+      const closedValueSum = dataRows.reduce((sum, row) => sum + Number(row.split(",")[2]), 0);
+      const closedDealsSum = dataRows.reduce((sum, row) => sum + Number(row.split(",")[3]), 0);
+      expect(closedValueSum).toBe(330000);
+      expect(closedDealsSum).toBe(7);
+    } finally {
+      await cleanup();
+      Object.defineProperty(URL, "createObjectURL", { value: originalCreateObjectUrl, configurable: true });
+      Object.defineProperty(URL, "revokeObjectURL", { value: originalRevokeObjectUrl, configurable: true });
+    }
+  });
+
   it("renders sales force performance table with spec columns and rep links", () => {
     const html = renderPageHtml();
 

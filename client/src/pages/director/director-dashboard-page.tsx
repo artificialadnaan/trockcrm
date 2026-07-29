@@ -582,9 +582,16 @@ export function DirectorDashboardPage() {
   // Live data currently has 0 such deals, so the row is hidden in practice.
   const repCardsClosedTotal = data.repCards.reduce((sum, rep) => sum + (rep.closedValue ?? 0), 0);
   const repCardsWinsTotal = data.repCards.reduce((sum, rep) => sum + (rep.winsCount ?? 0), 0);
-  const unassignedClosedValue = Math.max(0, (closedValue ?? 0) - repCardsClosedTotal);
+  // SIGN (deductive change orders): the VALUE residual is deliberately NOT clamped. A deductive CO is
+  // a Won child deal with a NEGATIVE value, so an unassigned/non-roster one makes the canonical
+  // null-rep group genuinely negative -- e.g. the parent closed in an earlier period while its
+  // deduction lands in this one. Clamping the value at 0 dropped those dollars on the floor and the
+  // table/CSV stopped summing to the Closed KPI, which is the whole point of this row. The COUNT keeps
+  // its clamp: a negative headcount is meaningless (and it cannot go negative anyway -- the per-rep
+  // groups are a subset of the same canonical getCanonicalRepWonSummary query behind the card).
+  const unassignedClosedValue = (closedValue ?? 0) - repCardsClosedTotal;
   const unassignedWins = Math.max(0, (closedCount ?? 0) - repCardsWinsTotal);
-  const hasUnassignedWon = unassignedClosedValue > 0 || unassignedWins > 0;
+  const hasUnassignedWon = unassignedClosedValue !== 0 || unassignedWins > 0;
   // Wave 1 (P1-6): the forecast reads the director payload's live forecastVsGoal (active-
   // pipeline total), NOT the stale rep_performance_snapshots forecast.
   const forecastVsGoal = data.forecastVsGoal ?? null;
