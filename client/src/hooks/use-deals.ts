@@ -275,7 +275,8 @@ export interface DealDetail extends Deal {
     dealId: string;
     fromStageId: string | null;
     toStageId: string;
-    changedBy: string;
+    /** Null when no session actor was identified — a script, sync or raw-SQL write (migration 0207). */
+    changedBy: string | null;
     isBackwardMove: boolean;
     isDirectorOverride: boolean;
     overrideReason: string | null;
