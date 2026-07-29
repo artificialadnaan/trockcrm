@@ -43,7 +43,13 @@ function normalize(sqlValue: unknown): string {
 }
 
 function expectColumnOrder(sqlText: string, columns: readonly string[]) {
-  const positions = columns.map((column) => sqlText.indexOf(`d.${column}`));
+  // lastIndexOf, not indexOf: the aliased builders now prefix a change-order branch
+  // (`CASE WHEN d.is_change_order THEN COALESCE(d.awarded_amount, 0) ELSE <chain> END`) ahead of the
+  // priority chain, which repeats d.awarded_amount BEFORE the chain proper. The chain's real candidate
+  // order lives in that trailing ELSE clause, so the last occurrence of each column is the one that
+  // reflects chain order (a column referenced only once, as every non-awarded_amount candidate is, has
+  // an identical first/last occurrence, so this is a no-op for them).
+  const positions = columns.map((column) => sqlText.lastIndexOf(`d.${column}`));
   for (const [index, position] of positions.entries()) {
     expect(position, `${columns[index]} should be present`).toBeGreaterThanOrEqual(0);
     if (index > 0) {

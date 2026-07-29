@@ -32,7 +32,7 @@ beforeAll(async () => {
     CREATE TABLE deals (
       id uuid PRIMARY KEY, assigned_rep_id uuid, estimator_user_id uuid, sales_source_user_id uuid, stage_id uuid NOT NULL,
       is_active boolean NOT NULL DEFAULT true, is_test_data boolean NOT NULL DEFAULT false,
-      on_hold boolean NOT NULL DEFAULT false, contract_signed_at timestamptz, contract_signed_date date,
+      is_change_order boolean NOT NULL DEFAULT false, on_hold boolean NOT NULL DEFAULT false, contract_signed_at timestamptz, contract_signed_date date,
       awarded_amount numeric, bid_board_total_sales numeric, bid_estimate numeric, dd_estimate numeric,
       change_order_total numeric
     );

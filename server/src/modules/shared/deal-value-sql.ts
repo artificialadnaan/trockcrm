@@ -9,6 +9,9 @@ type DealValueTable = {
   bidEstimate: unknown;
   ddEstimate: unknown;
   forecastRevenue?: unknown;
+  // A change-order child deal (0156) carries its value ONLY in awarded_amount, and a DEDUCTIVE CO carries
+  // it NEGATIVE. Optional so a caller with a narrowed column set keeps compiling; absent = "never a CO".
+  isChangeOrder?: unknown;
 };
 
 type DealValueColumn =
@@ -87,18 +90,38 @@ function tableColumnSql(table: DealValueTable, column: DealValueColumn): unknown
   }
 }
 
+// A change-order child deal's value is awarded_amount VERBATIM — never the `> 0` fallback chain. A CO child
+// has no other value column to fall back to (verified in prod: all 30 carry awarded_amount and nothing
+// else), and a DEDUCTIVE CO is negative, which every `> 0` candidate drops — silently reporting the
+// deduction as $0 on every Won surface. Provably inert for a POSITIVE CO, which is what the reconciliation
+// test in deal-value-change-order.runtime.test.ts pins.
+function changeOrderAwareSql(isChangeOrderSql: SQL, awardedSql: unknown, chainSql: SQL): SQL {
+  return sql`CASE WHEN ${isChangeOrderSql} THEN COALESCE(${awardedSql}, 0) ELSE ${chainSql} END`;
+}
+
 function dealValueChainSql(table: DealValueTable, columns: readonly DealValueColumn[]): SQL {
-  return sql`COALESCE(${sql.join(
+  const chain = sql`COALESCE(${sql.join(
     columns.map((column) => positiveDealValueCandidateSql(tableColumnSql(table, column))),
     sql`, `
   )}, 0)`;
+  if (table.isChangeOrder === undefined) return chain;
+  return changeOrderAwareSql(
+    sql`COALESCE(${table.isChangeOrder}, false)`,
+    table.awardedAmount,
+    chain
+  );
 }
 
 function aliasedDealValueChainSql(alias: string, columns: readonly DealValueColumn[]): SQL {
-  return sql.raw(
+  const chain = sql.raw(
     `COALESCE(${columns
       .map((column) => aliasedPositiveDealValueCandidateSql(alias, column))
       .join(", ")}, 0)`
+  );
+  return changeOrderAwareSql(
+    sql.raw(`COALESCE(${alias}.is_change_order, false)`),
+    sql.raw(`${alias}.awarded_amount`),
+    chain
   );
 }
 
@@ -112,7 +135,13 @@ export function dealEstimatingValueSql(table: DealValueTable): SQL {
 }
 
 export function dealAwardedAmountSql(table: DealValueTable): SQL {
-  return sql`COALESCE(${positiveDealValueCandidateSql(table.awardedAmount)}, 0)`;
+  const positiveOnly = sql`COALESCE(${positiveDealValueCandidateSql(table.awardedAmount)}, 0)`;
+  if (table.isChangeOrder === undefined) return positiveOnly;
+  return changeOrderAwareSql(
+    sql`COALESCE(${table.isChangeOrder}, false)`,
+    table.awardedAmount,
+    positiveOnly
+  );
 }
 
 export function dealAwardedFirstWithFallbackSql(table: DealValueTable): SQL {
@@ -173,7 +202,11 @@ export function aliasedDealEstimatingValueSql(alias: string): SQL {
 }
 
 export function aliasedDealAwardedAmountSql(alias: string): SQL {
-  return sql.raw(`COALESCE(${aliasedPositiveDealValueCandidateSql(alias, "awarded_amount")}, 0)`);
+  return changeOrderAwareSql(
+    sql.raw(`COALESCE(${alias}.is_change_order, false)`),
+    sql.raw(`${alias}.awarded_amount`),
+    sql.raw(`COALESCE(${aliasedPositiveDealValueCandidateSql(alias, "awarded_amount")}, 0)`)
+  );
 }
 
 export function aliasedDealAwardedFirstWithFallbackSql(alias: string): SQL {

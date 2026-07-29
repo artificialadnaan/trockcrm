@@ -92,7 +92,7 @@ beforeAll(async () => {
       id text PRIMARY KEY, sales_source_user_id uuid,
       stage_id text NOT NULL,
       bid_board_stage_slug text,
-      on_hold boolean NOT NULL DEFAULT false,
+      is_change_order boolean NOT NULL DEFAULT false, on_hold boolean NOT NULL DEFAULT false,
       expected_close_date date, bid_due_date timestamptz,
       bid_board_total_sales numeric,
       bid_estimate numeric,

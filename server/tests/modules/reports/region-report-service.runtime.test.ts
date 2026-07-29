@@ -42,7 +42,7 @@ beforeAll(async () => {
     );
     CREATE TABLE deals (
       id uuid PRIMARY KEY, sales_source_user_id uuid, deal_number text, name text NOT NULL, stage_id uuid NOT NULL,
-      assigned_rep_id uuid, region_id uuid, on_hold boolean NOT NULL DEFAULT false,
+      assigned_rep_id uuid, region_id uuid, is_change_order boolean NOT NULL DEFAULT false, on_hold boolean NOT NULL DEFAULT false,
       is_active boolean NOT NULL DEFAULT true, is_test_data boolean NOT NULL DEFAULT false,
       won_closed_date date, lost_at timestamptz, actual_close_date date, stage_entered_at timestamptz,
       expected_close_date date, bid_due_date timestamptz, bid_board_stage_slug text, created_at timestamptz NOT NULL DEFAULT now(),
@@ -214,7 +214,7 @@ describe("getRegionReport — exclusions & edge cases", () => {
       CREATE TABLE pipeline_stage_config (id uuid PRIMARY KEY, name text NOT NULL, slug text UNIQUE NOT NULL, display_order int NOT NULL DEFAULT 0, workflow_family text NOT NULL DEFAULT 'standard_deal', is_terminal boolean NOT NULL DEFAULT false);
       CREATE TABLE deals (
         id uuid PRIMARY KEY, deal_number text, name text NOT NULL, stage_id uuid NOT NULL,
-        assigned_rep_id uuid, region_id uuid, on_hold boolean NOT NULL DEFAULT false,
+        assigned_rep_id uuid, region_id uuid, is_change_order boolean NOT NULL DEFAULT false, on_hold boolean NOT NULL DEFAULT false,
         is_active boolean NOT NULL DEFAULT true, is_test_data boolean NOT NULL DEFAULT false,
         won_closed_date date, lost_at timestamptz, actual_close_date date, stage_entered_at timestamptz,
         expected_close_date date, bid_due_date timestamptz, bid_board_stage_slug text, created_at timestamptz NOT NULL DEFAULT now(),
