@@ -1,6 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
+import { dealSignedCommissions } from "@trock-crm/shared/schema";
+import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
 import { getRepCommissionDashboard } from "../../../src/modules/commissions/reporting-service.js";
 import {
   getRepCommissionSummary,
@@ -90,12 +92,14 @@ beforeAll(async () => {
       created_at timestamptz, awarded_amount numeric, bid_board_total_sales numeric, bid_estimate numeric,
       dd_estimate numeric, change_order_total numeric
     );
-    CREATE TABLE deal_signed_commissions (
-      id uuid PRIMARY KEY DEFAULT gen_random_uuid(), deal_id uuid, rep_user_id uuid,
-      source_value_kind text, source_value_amount numeric, applied_rate numeric, amount numeric,
-      attribution_role text NOT NULL DEFAULT 'owner', contract_signed_date_at_signing date
-    );
-
+  `);
+  // deal_signed_commissions from the REAL Drizzle table. The hand-rolled version this replaces modelled
+  // none of the table's CHECKs, which is how the negative-adjustment fixtures below came to carry
+  // applied_rate = -0.10 — a state prod's deal_signed_commissions_rate_bounds_chk (applied_rate BETWEEN
+  // 0 AND 1) forbids, and that no write path can produce (resolveAppliedRateForRole returns a rate ONLY
+  // when it is > 0). The real claw-back has the opposite shape: NEGATIVE money at a POSITIVE rate.
+  await pg.exec(tenantSchemaSql("public", [dealSignedCommissions]));
+  await pg.exec(`
     INSERT INTO pipeline_stage_config (id, slug) VALUES
       ('${ST_OPEN}', 'opportunity'), ('${ST_LOST}', 'lost'), ('${ST_WON}', '${WON_STAGE_SLUGS[0]}');
 
@@ -117,15 +121,15 @@ beforeAll(async () => {
     -- REP_MIX owns mixOwn (owner cut 5000). signed in window.
     INSERT INTO deals (id, deal_number, name, assigned_rep_id, stage_id, contract_signed_at, awarded_amount, created_at) VALUES
       ('${D.mixOwn}', 'MIX-1', 'Mix owned', '${REP_MIX}', '${ST_OPEN}', '2026-03-15T00:00:00Z', 50000, '2026-01-10T00:00:00Z');
-    INSERT INTO deal_signed_commissions (deal_id, rep_user_id, source_value_amount, applied_rate, amount, attribution_role, contract_signed_date_at_signing) VALUES
-      ('${D.mixOwn}', '${REP_MIX}', 50000, 0.10, 5000, 'owner', '2026-03-15');
+    INSERT INTO deal_signed_commissions (deal_id, rep_user_id, source_value_kind, source_value_amount, applied_rate, amount, attribution_role, contract_signed_date_at_signing) VALUES
+      ('${D.mixOwn}', '${REP_MIX}', 'awarded_amount', 50000, 0.10, 5000, 'owner', '2026-03-15');
 
     -- mixEst owned by REP_OTHER; REP_MIX is the estimator (estimator cut 1000), REP_OTHER owner cut 3000.
     INSERT INTO deals (id, deal_number, name, assigned_rep_id, estimator_user_id, stage_id, contract_signed_at, awarded_amount, created_at) VALUES
       ('${D.mixEst}', 'MIX-2', 'Mix estimated', '${REP_OTHER}', '${REP_MIX}', '${ST_OPEN}', '2026-03-16T00:00:00Z', 30000, '2026-01-11T00:00:00Z');
-    INSERT INTO deal_signed_commissions (deal_id, rep_user_id, source_value_amount, applied_rate, amount, attribution_role, contract_signed_date_at_signing) VALUES
-      ('${D.mixEst}', '${REP_OTHER}', 30000, 0.10, 3000, 'owner', '2026-03-16'),
-      ('${D.mixEst}', '${REP_MIX}', 30000, 0.0333, 1000, 'estimator', '2026-03-16');
+    INSERT INTO deal_signed_commissions (deal_id, rep_user_id, source_value_kind, source_value_amount, applied_rate, amount, attribution_role, contract_signed_date_at_signing) VALUES
+      ('${D.mixEst}', '${REP_OTHER}', 'awarded_amount', 30000, 0.10, 3000, 'owner', '2026-03-16'),
+      ('${D.mixEst}', '${REP_MIX}', 'awarded_amount', 30000, 0.0333, 1000, 'estimator', '2026-03-16');
 
     -- REP_WL worklist fixtures.
     INSERT INTO deals (id, deal_number, name, assigned_rep_id, stage_id, is_test_data, contract_signed_at, contract_signed_date, won_closed_date, awarded_amount, created_at) VALUES
@@ -148,21 +152,33 @@ beforeAll(async () => {
 
     -- REP_NEG: owner +5000 and a -1000 adjustment (clawback) -> direct = 4000. Proves the breakdown sum
     -- reconciles with directEarnedCommission even with a NEGATIVE row (which a >0 filter would drop).
-    INSERT INTO deals (id, deal_number, name, assigned_rep_id, stage_id, contract_signed_at, awarded_amount, created_at) VALUES
-      ('${D.negOwn}', 'NEG-1', 'Neg owned', '${REP_NEG}', '${ST_OPEN}', '2026-03-15T00:00:00Z', 50000, '2026-01-10T00:00:00Z'),
-      ('${D.negAdj}', 'NEG-2', 'Neg adjustment', '${REP_NEG}', '${ST_OPEN}', '2026-03-16T00:00:00Z', 10000, '2026-01-11T00:00:00Z');
-    INSERT INTO deal_signed_commissions (deal_id, rep_user_id, source_value_amount, applied_rate, amount, attribution_role, contract_signed_date_at_signing) VALUES
-      ('${D.negOwn}', '${REP_NEG}', 50000, 0.10, 5000, 'owner', '2026-03-15'),
-      ('${D.negAdj}', '${REP_NEG}', 10000, -0.10, -1000, 'owner', '2026-03-16');
+    -- The adjustment is shaped like the ONLY thing that produces a negative row in production — a
+    -- deductive change order: negative source value (a -10000 CO) at the rep's ordinary POSITIVE rate.
+    INSERT INTO deals (id, deal_number, name, assigned_rep_id, stage_id, is_change_order, contract_signed_at, awarded_amount, created_at) VALUES
+      ('${D.negOwn}', 'NEG-1', 'Neg owned', '${REP_NEG}', '${ST_OPEN}', false, '2026-03-15T00:00:00Z', 50000, '2026-01-10T00:00:00Z'),
+      ('${D.negAdj}', 'NEG-2', 'Neg deductive CO', '${REP_NEG}', '${ST_OPEN}', true, '2026-03-16T00:00:00Z', -10000, '2026-01-11T00:00:00Z');
+    INSERT INTO deal_signed_commissions (deal_id, rep_user_id, source_value_kind, source_value_amount, applied_rate, amount, attribution_role, contract_signed_date_at_signing) VALUES
+      ('${D.negOwn}', '${REP_NEG}', 'awarded_amount', 50000, 0.10, 5000, 'owner', '2026-03-15'),
+      ('${D.negAdj}', '${REP_NEG}', 'awarded_amount', -10000, 0.10, -1000, 'owner', '2026-03-16');
 
     -- REP_NETNEG: +1000 and -3000 -> NET direct -2000. The breakdown must STILL show both rows (not [])
     -- so Σ(rows) === directEarnedCommission == -2000 (the directEarnedCommission<=0 early-return is gone).
-    INSERT INTO deals (id, deal_number, name, assigned_rep_id, stage_id, contract_signed_at, awarded_amount, created_at) VALUES
-      ('${D.netNegOwn}', 'NN-1', 'NetNeg owned', '${REP_NETNEG}', '${ST_OPEN}', '2026-03-15T00:00:00Z', 10000, '2026-01-10T00:00:00Z'),
-      ('${D.netNegAdj}', 'NN-2', 'NetNeg adjustment', '${REP_NETNEG}', '${ST_OPEN}', '2026-03-16T00:00:00Z', 30000, '2026-01-11T00:00:00Z');
-    INSERT INTO deal_signed_commissions (deal_id, rep_user_id, source_value_amount, applied_rate, amount, attribution_role, contract_signed_date_at_signing) VALUES
-      ('${D.netNegOwn}', '${REP_NETNEG}', 10000, 0.10, 1000, 'owner', '2026-03-15'),
-      ('${D.netNegAdj}', '${REP_NETNEG}', 30000, -0.10, -3000, 'owner', '2026-03-16');
+    --
+    -- Shape note (both constraints must hold at once, so this fixture is deliberate, not arbitrary):
+    --   • applied_rate must stay within [0,1] — deal_signed_commissions_rate_bounds_chk, and no write path
+    --     can produce a negative rate. So the deduction is a -10000 deductive CO at a POSITIVE rate.
+    --   • the rep's BOOK must stay at/above the rolling floor (0), or the floor gate zeroes
+    --     directEarnedCommission outright and this test would be pinning the gate, not the early return.
+    --     10000 + (-10000) = 0 -> floor met.
+    -- Net direct then reaches -2000 the only way it can in production: the rate CHANGED between the two
+    -- signings (0.10 on the parent, 0.30 when the CO was signed), and each dsc row snapshots the rate in
+    -- force at ITS signing.
+    INSERT INTO deals (id, deal_number, name, assigned_rep_id, stage_id, is_change_order, contract_signed_at, awarded_amount, created_at) VALUES
+      ('${D.netNegOwn}', 'NN-1', 'NetNeg owned', '${REP_NETNEG}', '${ST_OPEN}', false, '2026-03-15T00:00:00Z', 10000, '2026-01-10T00:00:00Z'),
+      ('${D.netNegAdj}', 'NN-2', 'NetNeg deductive CO', '${REP_NETNEG}', '${ST_OPEN}', true, '2026-03-16T00:00:00Z', -10000, '2026-01-11T00:00:00Z');
+    INSERT INTO deal_signed_commissions (deal_id, rep_user_id, source_value_kind, source_value_amount, applied_rate, amount, attribution_role, contract_signed_date_at_signing) VALUES
+      ('${D.netNegOwn}', '${REP_NETNEG}', 'awarded_amount', 10000, 0.10, 1000, 'owner', '2026-03-15'),
+      ('${D.netNegAdj}', '${REP_NETNEG}', 'awarded_amount', -10000, 0.30, -3000, 'owner', '2026-03-16');
   `);
   tdb = drizzle(pg);
 });

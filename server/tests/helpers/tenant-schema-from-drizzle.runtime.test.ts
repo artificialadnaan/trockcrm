@@ -5,7 +5,7 @@
 import { PGlite } from "@electric-sql/pglite";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ACTIVITY_TYPES, AUDIT_ACTIONS, NOTIFICATION_TYPES } from "@trock-crm/shared/types";
-import { activities, auditLog, files, leads, notifications, pipelineStageConfig, usageDaily } from "@trock-crm/shared/schema";
+import { activities, auditLog, dealSignedCommissions, files, leads, notifications, pipelineStageConfig, usageDaily } from "@trock-crm/shared/schema";
 import { tenantSchemaSql } from "./tenant-schema-from-drizzle.js";
 
 const U = (s: string) => `00000000-0000-4000-8000-${s.padStart(12, "0")}`;
@@ -141,6 +141,50 @@ describe("tenantSchemaSql — schema fidelity from Drizzle", () => {
         `INSERT INTO office_dallas.usage_daily (user_id, date, breakdown) VALUES ('${REP}', '2026-06-01', ${breakdown})`,
       ),
     ).rejects.toThrow(/duplicate key|unique/i);
+  });
+});
+
+describe("CHECK constraints are reproduced (the deductive-CO 23514 bug class)", () => {
+  // The claw-back blocker: deal_signed_commissions' 0062 CHECKs were never modelled in Drizzle NOR in any
+  // hand-rolled fixture, so a write prod rejects with SQLSTATE 23514 passed 6,405 tests. Emitting CHECKs
+  // here is what makes that class visible; these tests pin BOTH directions on the very table that broke.
+  let cdb: PGlite;
+  const DEAL = U("0c01");
+  const RP = U("0c02");
+  const insert = (kind: string, srcValue: string, rate: string, amount: string) =>
+    cdb.exec(
+      `INSERT INTO office_dallas.deal_signed_commissions
+         (deal_id, rep_user_id, source_value_kind, source_value_amount, applied_rate, amount, contract_signed_date_at_signing)
+       VALUES ('${DEAL}', '${RP}', '${kind}', ${srcValue}, ${rate}, ${amount}, '2027-01-01')`,
+    );
+
+  beforeAll(async () => {
+    cdb = new PGlite();
+    await cdb.exec(tenantSchemaSql("office_dallas", [dealSignedCommissions]));
+  }, 60_000);
+  afterAll(async () => {
+    await cdb?.close();
+  });
+
+  it("ENFORCES a CHECK the hand-rolled fixture omitted (applied_rate must be within [0,1])", async () => {
+    // The rate is the one side of a commission row whose sign is NOT opened up by the deductive CO — a
+    // claw-back is negative MONEY at a POSITIVE rate. Fixtures elsewhere modelled it the other way round.
+    await expect(insert("awarded_amount", "10000", "-0.10", "-1000")).rejects.toThrow(
+      /deal_signed_commissions_rate_bounds_chk/,
+    );
+    await expect(insert("not_a_real_kind", "10000", "0.10", "1000")).rejects.toThrow(
+      /deal_signed_commissions_source_value_kind_chk/,
+    );
+  });
+
+  it("PERMITS the claw-back row: negative amount + negative source value (0062's CHECKs dropped in 0202)", async () => {
+    await insert("awarded_amount", "-50000", "0.10", "-5000");
+    const { rows } = await cdb.query<{ amount: string; source_value_amount: string }>(
+      `SELECT amount, source_value_amount FROM office_dallas.deal_signed_commissions WHERE deal_id = '${DEAL}'`,
+    );
+    expect(rows).toHaveLength(1);
+    expect(Number(rows[0].amount)).toBeCloseTo(-5000, 2);
+    expect(Number(rows[0].source_value_amount)).toBeCloseTo(-50000, 2);
   });
 });
 

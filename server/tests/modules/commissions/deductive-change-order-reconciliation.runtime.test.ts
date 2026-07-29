@@ -24,6 +24,8 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
+import { dealSignedCommissions } from "@trock-crm/shared/schema";
+import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
 import { getRepCommissionDashboard } from "../../../src/modules/commissions/reporting-service.js";
 import { getRepCommissionSummary } from "../../../src/modules/dashboard/service.js";
 
@@ -80,12 +82,13 @@ beforeAll(async () => {
       created_at timestamptz, awarded_amount numeric, bid_board_total_sales numeric, bid_estimate numeric,
       dd_estimate numeric, change_order_total numeric
     );
-    CREATE TABLE deal_signed_commissions (
-      id uuid PRIMARY KEY DEFAULT gen_random_uuid(), deal_id uuid, rep_user_id uuid,
-      source_value_kind text, source_value_amount numeric, applied_rate numeric, amount numeric,
-      attribution_role text NOT NULL DEFAULT 'owner', contract_signed_date_at_signing date
-    );
-
+  `);
+  // deal_signed_commissions from the REAL Drizzle table, so the negative rows seeded below are proved
+  // LEGAL against prod's actual constraint set rather than against a permissive hand-rolled island. The
+  // hand-rolled version this replaces modelled none of migration 0062's CHECKs, so it could not have
+  // shown that `amount >= 0` was rejecting the very claw-back row this suite reconciles (dropped in 0202).
+  await pg.exec(tenantSchemaSql("public", [dealSignedCommissions]));
+  await pg.exec(`
     INSERT INTO pipeline_stage_config (id, slug) VALUES ('${ST_OPEN}', 'opportunity');
 
     INSERT INTO users (id, display_name, role) VALUES ('${REP}', 'Deductive Rep', 'rep');

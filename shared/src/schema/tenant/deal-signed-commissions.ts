@@ -7,7 +7,9 @@ import {
   text,
   index,
   unique,
+  check,
 } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 import { deals } from "./deals.js";
 
 export const dealSignedCommissions = pgTable(
@@ -36,5 +38,22 @@ export const dealSignedCommissions = pgTable(
     unique("deal_signed_commissions_dedup").on(table.dealId, table.repUserId),
     index("deal_signed_commissions_rep_calc_idx").on(table.repUserId, table.calculatedAt),
     index("deal_signed_commissions_deal_idx").on(table.dealId),
+    // The DB CHECKs from migration 0062, minus the two migration 0202 drops. Modelled here so fixtures
+    // derived from this table (server/tests/helpers/tenant-schema-from-drizzle.ts) reject exactly the rows
+    // prod rejects — the omission is what let the deductive change order's claw-back pass every test and
+    // then raise 23514 in prod.
+    //
+    // amount and source_value_amount are DELIBERATELY UNBOUNDED IN SIGN (0202): a deductive change order
+    // mints a NEGATIVE owner row so a rep's earned commission tracks the CURRENT contract value. Do not
+    // reintroduce a `>= 0` CHECK on either — it cannot be scoped to non-change-order rows (a CHECK cannot
+    // join, and this table has no is_change_order column) and it aborts the enclosing signing transaction.
+    check(
+      "deal_signed_commissions_rate_bounds_chk",
+      sql`${table.appliedRate} >= 0 AND ${table.appliedRate} <= 1`
+    ),
+    check(
+      "deal_signed_commissions_source_value_kind_chk",
+      sql`${table.sourceValueKind} IN ('awarded_amount', 'bid_estimate', 'dd_estimate')`
+    ),
   ]
 );

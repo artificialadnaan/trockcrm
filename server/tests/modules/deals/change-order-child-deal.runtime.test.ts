@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
 import { sql } from "drizzle-orm";
-import { users } from "@trock-crm/shared/schema";
+import { dealSignedCommissions, users } from "@trock-crm/shared/schema";
 import { isGenuineWonDealStageSlug } from "@trock-crm/shared/types";
 import {
   addDealChangeOrder,
@@ -90,14 +90,8 @@ beforeAll(async () => {
       commission_structure text NOT NULL DEFAULT 'solo', capx_rate_solo numeric(7,6) NOT NULL DEFAULT 0,
       capx_rate_mixed numeric(7,6) NOT NULL DEFAULT 0, service_source_rate numeric(7,6) NOT NULL DEFAULT 0
     );
-    CREATE TABLE deal_signed_commissions (
-      id uuid PRIMARY KEY DEFAULT gen_random_uuid(), deal_id uuid NOT NULL REFERENCES deals(id) ON DELETE CASCADE,
-      rep_user_id uuid NOT NULL, attribution_role text NOT NULL DEFAULT 'owner', source_value_kind text NOT NULL,
-      source_value_amount numeric(14,2) NOT NULL, applied_rate numeric(7,6) NOT NULL, amount numeric(14,2) NOT NULL,
-      contract_signed_date_at_signing date NOT NULL, calculated_at timestamptz NOT NULL DEFAULT now(),
-      created_by uuid, created_at timestamptz NOT NULL DEFAULT now(),
-      CONSTRAINT deal_signed_commissions_dedup UNIQUE (deal_id, rep_user_id)
-    );
+    -- deal_signed_commissions is created from the REAL Drizzle table below (NOT hand-rolled), because the
+    -- claw-back this suite proves is a DB-CONSTRAINT question, not just an application one.
     -- Prod-faithful stage-history backstop: migration 0143 attaches an AFTER INSERT trigger on deals that
     -- writes a deal_stage_history row, and that FK to deals(id) has NO ON DELETE CASCADE. So an app-created
     -- CO child always has a dependent history row → a hard row-delete would FK-violate. This reproduces the
@@ -127,6 +121,18 @@ beforeAll(async () => {
     INSERT INTO deals (id, deal_number, name, stage_id, assigned_rep_id, company_id, property_id, awarded_amount, won_closed_date, project_number, office_code, project_type, workflow_route, is_bid_board_owned) VALUES
       ('${PARENT}','DFW-9-10001-aa','Acme Tower Reroof','${ST.won}','${REP}','${CO_NS}','${PROP}', 500000, '2025-06-01', 'DFW-9-10001-aa', 'DFW', 'Roofing', 'normal', false),
       ('${BBO_PARENT}','DFW-9-10002-aa','Globex (Bid Board)','${ST.open}','${REP}','${CO_NS}','${PROP}', 250000, NULL, 'DFW-9-10002-aa', 'DFW', 'Roofing', 'normal', true);
+  `);
+  // deal_signed_commissions from the REAL Drizzle table, so its DB CHECK constraints are present. The
+  // hand-rolled version this replaces carried the columns but NONE of migration 0062's CHECKs, which is
+  // why "a deductive CO mints a negative owner row" passed here while the same write raised 23514 in prod
+  // (amount >= 0) and poisoned the enclosing transaction, rolling the whole change order back. Created
+  // after `deals` so the FK below resolves; tenantSchemaSql omits FKs and UNIQUEs (graph concerns), so
+  // both are re-added by hand — the dedup UNIQUE is what ON CONFLICT DO NOTHING targets.
+  await pg.exec(tenantSchemaSql("public", [dealSignedCommissions]));
+  await pg.exec(`
+    ALTER TABLE deal_signed_commissions ADD CONSTRAINT deal_signed_commissions_dedup UNIQUE (deal_id, rep_user_id);
+    ALTER TABLE deal_signed_commissions ADD CONSTRAINT deal_signed_commissions_deal_id_fkey
+      FOREIGN KEY (deal_id) REFERENCES deals(id) ON DELETE CASCADE;
   `);
   tdb = drizzle(pg);
 });
@@ -736,6 +742,43 @@ describe("deductive change orders (negative amount) — child deal, totals, comm
     // bid/dd estimates → skipped_no_value → NO row at all, and the rep keeps commission on scope that was
     // removed. These two assertions are what would catch that "tidy-up".
     expect(rows[0].source_value_kind).toBe("awarded_amount");
+    expect(Number(rows[0].source_value_amount)).toBeCloseTo(-50000, 2);
+  });
+
+  it("commits the whole change order INSIDE a transaction — the claw-back must not poison the tx", async () => {
+    // The production blocker this branch shipped with, reproduced at the layer that actually broke.
+    //
+    // POST /api/deals/:id/change-orders runs addDealChangeOrder and THEN req.commitTransaction(). The
+    // commission mint runs inside that same transaction, and addDealChangeOrder catches its errors
+    // ("a commission-config gap must never block creating the CO"). But a DB CHECK violation is not a
+    // catchable-and-continue error: SQLSTATE 23514 ABORTS the Postgres transaction, so every later
+    // statement fails with 25P02 and the COMMIT rolls back. Catching the JS error therefore saved
+    // nothing — the child deal, its stage-history row and the audit rows all vanished, and the user got
+    // an error with the change order not created.
+    //
+    // Calling addDealChangeOrder on a bare connection (as the tests above do) CANNOT see this: the mint
+    // fails, the error is swallowed, and the already-committed child row survives. Only an enclosing
+    // transaction that must still commit afterwards discriminates it.
+    const p = U("d0d06");
+    await seedWonParent(p, "DFW-9-50006-aa", 500000);
+    let coId = "";
+    await tdb.transaction(async (tx: typeof tdb) => {
+      const co = await addDealChangeOrder(tx, {
+        dealId: p,
+        signedDate: "2027-07-01",
+        amount: "-50000",
+        createdBy: REP,
+      });
+      coId = co.id;
+      // A post-mint read inside the SAME transaction: on a poisoned tx this alone raises 25P02
+      // ("current transaction is aborted"), exactly as the route's writeAuditLog + commit did.
+      await tx.execute(sql`SELECT 1`);
+    });
+    // Durable AFTER commit — the whole point. A rolled-back tx leaves neither row behind.
+    expect(await fetchDeal(coId)).toBeDefined();
+    const rows = await commissionRows(coId);
+    expect(rows.length).toBe(1);
+    expect(Number(rows[0].amount)).toBeCloseTo(-5000, 2);
     expect(Number(rows[0].source_value_amount)).toBeCloseTo(-50000, 2);
   });
 
