@@ -905,8 +905,16 @@ describe("ingestWalkthrough", () => {
   // row's DEAL association rather than on the key. So a caller-supplied key is a confused-deputy read
   // primitive: an authenticated user who knows any key in the bucket could alias it onto a deal they
   // legitimately access and download an object they were never entitled to. The key is therefore
-  // DERIVED, and the wire cannot influence it. Validation would not close this — a hostile key is a
-  // perfectly well-formed key — so this asserts the derivation, not a rejection.
+  // DERIVED, and the wire cannot influence it.
+  //
+  // TWO layers close this, and this test covers the end-to-end property rather than either one alone:
+  // `validateWalkthroughIngressPayload` rebuilds the payload from known fields, so an unknown
+  // `contactSheetR2Key` never reaches the transaction; and the key is derived rather than read even if
+  // it did. Verified by mutation: honouring a wire key from the RAW body (the pre-fix behaviour)
+  // makes this fail with `deals/…/private-bid.pdf`. Note that mutating only the derivation site does
+  // NOT fail it — validation has already stripped the field by then — so a future refactor that drops
+  // the validator would still be caught here, and one that drops the derivation would be caught by a
+  // caller who bypasses validation.
   it("ignores a hostile contact-sheet key smuggled in the payload", async () => {
     const walkthroughId = U("33020");
     const hostile = "deals/00000000-0000-4000-8000-000000099999/private-bid.pdf";
