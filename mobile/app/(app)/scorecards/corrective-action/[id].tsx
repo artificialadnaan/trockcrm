@@ -597,7 +597,27 @@ function ResolvedItemCard({ item }: { item: CorrectiveActionItem }) {
         <Badge {...settledPresentation(item.status)} />
       </View>
       <Text style={styles.itemLabel}>{item.itemLabel}</Text>
-      {item.responseComment ? <Text style={styles.resolvedComment}>{item.responseComment}</Text> : null}
+      {/* The THREAD, per attempt. Pairing the latest responseComment with item.photos — the aggregate of
+          every photo ever linked — showed the rejected attempt's evidence as the newest response and hid the
+          rejection and approval entirely. The API returns per-attempt sets; the aggregate is the fallback for
+          a card with no thread. */}
+      {(item.events?.length ?? 0) > 0 ? (
+        item.events!.map((event) => (
+          <View key={event.id} style={styles.attemptBlock}>
+            <Text style={styles.attemptHeading}>
+              {event.eventType === "approved"
+                ? "Approved"
+                : event.eventType === "rejected"
+                  ? "Sent back"
+                  : "Submitted"}
+              {event.actorName ? ` · ${event.actorName}` : ""}
+            </Text>
+            {event.comment ? <Text style={styles.resolvedComment}>{event.comment}</Text> : null}
+          </View>
+        ))
+      ) : item.responseComment ? (
+        <Text style={styles.resolvedComment}>{item.responseComment}</Text>
+      ) : null}
       {photosWithUrl.length > 0 ? (
         <View style={styles.photoRow}>
           {photosWithUrl.map((photo) => (
@@ -647,6 +667,8 @@ const styles = StyleSheet.create({
   },
   itemCardResolved: { opacity: 0.92 },
   itemHeader: { flexDirection: "row", gap: theme.space.sm, alignItems: "center" },
+  attemptBlock: { marginTop: theme.space.xs, gap: 2 },
+  attemptHeading: { fontSize: 12, fontWeight: "700", color: theme.color.textMuted },
   rejectionNote: {
     marginTop: theme.space.xs,
     padding: theme.space.sm,

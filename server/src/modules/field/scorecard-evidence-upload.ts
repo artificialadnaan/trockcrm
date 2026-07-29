@@ -8,14 +8,20 @@ import {
 import { AppError } from "../../middleware/error-handler.js";
 import type { FieldTenantDb } from "./cross-office.js";
 
-// The current-form editable lifecycle — `submitted` plus the two corrective-action states. This MUST match
-// the accepted statuses in updateFieldScorecard's edit guard AND the `canEdit` gate in scorecards-service.ts
-// (which re-exports this): the mobile editor opens on any of these statuses, so evidence presign must be
-// allowed on the same set — else an open/closed corrective card opens for edit but adding a photo 422s here.
+// The current-form editable lifecycle. This MUST match the accepted statuses in updateFieldScorecard's edit
+// guard AND the `canEdit` gate in scorecards-service.ts (which re-exports this): the mobile editor opens on
+// any of these statuses, so evidence presign must be allowed on the same set — else a card opens for edit but
+// adding a photo 422s here.
+//
+// `corrective_action_closed` is DELIBERATELY ABSENT since the approval gate. That status now means an
+// approver ACCEPTED this card, and an approval attests to what they actually saw. Allowing edits afterwards
+// republishes the PDF — new scores, notes, signatures, evidence — under the existing Approved verdict and
+// approval event, so the audit record would show a sign-off over content nobody reviewed. Locking is the
+// simplest guarantee that cannot be got subtly wrong; a genuine correction goes through an admin or a new
+// scorecard, which is the rarer path.
 export const EDITABLE_SCORECARD_STATUSES = new Set([
   "submitted",
   "corrective_action_open",
-  "corrective_action_closed",
   // Awaiting approval is another corrective-action stage; evidence stays editable there.
   "corrective_action_submitted",
 ]);

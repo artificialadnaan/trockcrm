@@ -689,9 +689,17 @@ export async function reconcileScorecardCorrectiveActions(
   // the new one. The stamp is cleared alongside, so this enqueue is not deduped against the earlier round.
   if (nextStatus === CORRECTIVE_ACTION_CARD_AWAITING_APPROVAL) {
     if (input.currentStatus === CORRECTIVE_ACTION_CARD_AWAITING_APPROVAL) {
+      // Clearing the stamp is not enough: the enqueue below copies the card's CURRENT cycle nonce into the
+      // job, and that nonce is the provider idempotency dimension. Reusing it means Resend answers
+      // invalid_idempotent_request for the re-ask, system-email reads that as delivered, the worker stamps —
+      // and the approver never sees the edited card they are supposed to be judging. Mint a fresh cycle so
+      // the new request is a genuinely new message.
       await tx
         .update(fieldScorecards)
-        .set({ correctiveActionApprovalRequestedAt: null })
+        .set({
+          correctiveActionApprovalRequestedAt: null,
+          correctiveActionCycleNonce: randomUUID(),
+        })
         .where(eq(fieldScorecards.id, input.scorecardId));
     }
     await enqueueCorrectiveActionApprovalRequested(tx, {

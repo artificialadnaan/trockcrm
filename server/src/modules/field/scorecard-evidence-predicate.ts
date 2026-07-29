@@ -1,4 +1,4 @@
-import { and, isNull } from "drizzle-orm";
+import { and, isNotNull, isNull, or } from "drizzle-orm";
 import { fieldScorecardPhotos } from "@trock-crm/shared/schema";
 
 /**
@@ -19,5 +19,20 @@ export function isOriginalEvidencePhoto() {
   return and(
     isNull(fieldScorecardPhotos.correctiveActionId),
     isNull(fieldScorecardPhotos.correctiveActionEventId),
+  );
+}
+
+/**
+ * The exact inverse: "this photo documents a corrective-action RESPONSE."
+ *
+ * Kept beside isOriginalEvidencePhoto deliberately — they partition the same table, and the pair drifting is
+ * how a photo ends up in both sets or neither. `corrective_action_id IS NOT NULL` alone misses a DETACHED
+ * response photo (its item was removed by an edit; 0202 nulls the link rather than cascading so the evidence
+ * survives), which would then be dropped from the record the detachment exists to preserve.
+ */
+export function isResponsePhoto() {
+  return or(
+    isNotNull(fieldScorecardPhotos.correctiveActionId),
+    isNotNull(fieldScorecardPhotos.correctiveActionEventId),
   );
 }

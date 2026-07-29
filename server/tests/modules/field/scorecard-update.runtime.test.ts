@@ -439,7 +439,7 @@ describe("updateFieldScorecard authorization and visibility", () => {
     expect((await listRecentFieldScorecards(tdb, { viewerUserId: OTHER_USER })).scorecards[0]?.canEdit).toBe(false);
   });
 
-  it("advertises canEdit for the submitter on open AND closed corrective-action cards (finding 3)", async () => {
+  it("advertises canEdit on open/awaiting corrective-action cards, but NOT once APPROVED", async () => {
     // A below-band card opens in corrective_action_open. canEdit must be true for the submitter so the mobile
     // edit action (gated on canEdit) can reach the edit/reconciliation path — the edit guard accepts this status.
     const { scorecard } = await createFieldScorecard(tdb, projectSubmission({
@@ -454,11 +454,19 @@ describe("updateFieldScorecard authorization and visibility", () => {
     // A different user still can't edit it.
     expect((await getFieldScorecardDetail(tdb, scorecard.id, OTHER_ACCESS)).canEdit).toBe(false);
 
-    // Drive the card to corrective_action_closed and confirm canEdit stays true for the submitter (re-open path).
+    // Awaiting the approver: still editable — the card is live and nobody has ruled on it yet.
+    await tdb.execute(
+      sql`UPDATE field_scorecards SET status = 'corrective_action_submitted' WHERE id = ${scorecard.id}`,
+    );
+    expect((await getFieldScorecardDetail(tdb, scorecard.id, OWNER_ACCESS)).canEdit).toBe(true);
+
+    // APPROVED: locked, even for the submitter. corrective_action_closed now means an approver accepted this
+    // card, and an approval attests to what they actually saw — allowing an edit afterwards republishes the
+    // PDF under the existing verdict, so the record would show a sign-off over content nobody reviewed.
     await tdb.execute(
       sql`UPDATE field_scorecards SET status = 'corrective_action_closed' WHERE id = ${scorecard.id}`,
     );
-    expect((await getFieldScorecardDetail(tdb, scorecard.id, OWNER_ACCESS)).canEdit).toBe(true);
+    expect((await getFieldScorecardDetail(tdb, scorecard.id, OWNER_ACCESS)).canEdit).toBe(false);
     expect((await getFieldScorecardDetail(tdb, scorecard.id, OTHER_ACCESS)).canEdit).toBe(false);
   });
 

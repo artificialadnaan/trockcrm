@@ -493,9 +493,18 @@ export function ScorecardDetailView({
     : undefined;
   const approveAll = dealId
     ? async () => {
-        // No itemIds — the server approves everything currently awaiting approval, in one transaction, so a
-        // sibling answered between render and click cannot be silently skipped or wrongly included.
-        await approveCorrectiveActions(dealId, detail.id);
+        // The IDs THE APPROVER IS LOOKING AT, not "everything awaiting approval at execution time".
+        //
+        // My first version omitted itemIds with a comment claiming it avoided skipping a sibling. It does the
+        // opposite: a responder can submit another item between this page rendering and the click, and the
+        // server would approve that unseen response too — potentially closing the card and sending the
+        // approved notice for work nobody reviewed. Approving something the approver never saw is a far worse
+        // failure than leaving a late arrival for the next pass, which is all this now does.
+        const reviewed = (correctiveActions ?? [])
+          .filter((i) => i.status === "submitted")
+          .map((i) => i.id);
+        if (reviewed.length === 0) return;
+        await approveCorrectiveActions(dealId, detail.id, reviewed);
         onApprovalChange?.();
       }
     : undefined;

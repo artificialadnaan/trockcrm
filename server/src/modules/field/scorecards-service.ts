@@ -36,7 +36,7 @@ import {
   getDetachedCorrectiveActionEvents,
   type CorrectiveActionEventRow,
 } from "./corrective-action-events.js";
-import { isOriginalEvidencePhoto } from "./scorecard-evidence-predicate.js";
+import { isOriginalEvidencePhoto, isResponsePhoto } from "./scorecard-evidence-predicate.js";
 import {
   FIELD_SCORECARD_LEADERSHIP_SECTION_KEYS,
   FIELD_SCORECARD_LEADERSHIP_SUMMARY_SECTION_KEY,
@@ -1153,7 +1153,7 @@ export async function renderAndStoreFieldScorecardArtifacts(
       .where(
         and(
           eq(fieldScorecardPhotos.scorecardId, scorecardId),
-          isNotNull(fieldScorecardPhotos.correctiveActionId),
+          isResponsePhoto(),
           eq(files.isActive, true),
           isNull(files.deletedAt),
         ),
@@ -1317,7 +1317,12 @@ export async function renderAndStoreFieldScorecardArtifacts(
       actorName: event.actorName ?? event.actorEmail ?? null,
       createdAt: event.createdAt,
       comment: event.comment,
-      photos: [],
+      // Their evidence SURVIVES the item now (0202 detaches rather than cascades), so an empty set here
+      // would drop it from the PDF and from the email attachments that carry the PDF — losing exactly what
+      // the detachment preserves. Resolved with the response photos, which are already loaded and capped.
+      photos: correctiveActionPhotos
+        .filter((photo) => photo.correctiveActionEventId === event.id)
+        .map((photo) => ({ caption: photo.caption, image: photo.resolution.image })),
     })),
     correctiveActions: correctiveActionRows.map((row) => {
       const itemPhotos = correctiveActionPhotos.filter((photo) => photo.correctiveActionId === row.id);
