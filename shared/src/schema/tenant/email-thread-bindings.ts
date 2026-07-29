@@ -52,7 +52,7 @@ export const emailThreadBindings = pgTable(
     // resolveMailboxAccountIdsWithActiveBindingForConversation and the detach's blanket binding UPDATE
     // all filter on (provider, provider_conversation_id, detached_at IS NULL) with no mailbox. NOT
     // unique on purpose: several mailboxes may each hold an active binding for one conversation.
-    // Source-of-truth marker; migration 0202 builds it per-office with the same partial predicate as
+    // Source-of-truth marker; migration 0203 builds it per-office with the same partial predicate as
     // the unique index (detached_at IS NULL AND provider_conversation_id IS NOT NULL).
     index("email_thread_bindings_active_conversation_idx")
       .on(table.provider, table.providerConversationId)

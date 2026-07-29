@@ -52,7 +52,7 @@ export const emails = pgTable("emails", {
   // hit that predicate hard: 4 SELECTs to open a thread, 6 SELECTs + 1 UPDATE to detach one. sent_at
   // and id are in the key because most of those passes carry `ORDER BY sent_at ASC, id ASC`, and
   // sent_at ties are normal here (one row per mailbox, all carrying the sender's timestamp), so
-  // without id the ordering still needs a sort. Source-of-truth marker; migration 0202 builds it
+  // without id the ordering still needs a sort. Source-of-truth marker; migration 0203 builds it
   // per-office as PARTIAL (WHERE graph_conversation_id IS NOT NULL).
   index("emails_graph_conversation_sent_at_idx").on(
     table.graphConversationId,
