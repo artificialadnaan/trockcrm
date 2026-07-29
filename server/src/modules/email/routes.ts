@@ -598,25 +598,34 @@ router.post("/thread/:conversationId/detach", async (req, res, next) => {
   try {
     const { thread, boundDealId } = await gateEmailThreadAccess(req);
 
-    await detachConversationAcrossMailboxes(
+    const detached = await detachConversationAcrossMailboxes(
       req.tenantDb!,
       req.params.conversationId,
       req.user!.id
     );
 
-    // Same recordId reasoning as reassign. boundDealId is null only when the conversation had NO active
-    // binding at all — including no orphaned one, since resolveActiveBindingDealIdForConversation sees
-    // exactly the set this UPDATE clears — so the detach matched no rows and there is nothing to record.
-    if (boundDealId) {
+    // Same recordId reasoning as reassign: recordId is uuid NOT NULL, so it has to be a deal id.
+    //
+    // It used to be enough to ask whether boundDealId was set, on the reasoning that a null one meant
+    // the detach had matched no rows and there was nothing to record. That stopped being true when
+    // detach grew its message-side clear: a conversation filed message-by-message from the assignment
+    // queue has real emails.deal_id values and NO binding, so boundDealId is null while the detach
+    // still unfiles genuine associations. Falling back to a deal the MESSAGES named keeps that case
+    // audited instead of silently wiping it.
+    const auditDealId = boundDealId ?? detached.previousMessageDealIds[0] ?? null;
+    if (auditDealId) {
       await writeAuditLog(req.tenantDb!, {
         tableName: "email_thread_bindings",
-        recordId: boundDealId,
+        recordId: auditDealId,
         action: "update",
         changedBy: req.user!.id,
         entityType: "email_thread",
         fullRow: {
           providerConversationId: req.params.conversationId,
-          previousDealId: boundDealId,
+          previousDealId: auditDealId,
+          // Every deal the messages were on, so a thread split across two deals is not reduced to the
+          // one that happened to sort first.
+          previousMessageDealIds: detached.previousMessageDealIds,
           nextDealId: null,
           detached: true,
           // thread.emails is the WHOLE conversation now that the caller-id filter is gone — the same

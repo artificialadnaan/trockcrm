@@ -107,6 +107,17 @@ export interface EmailAssignmentQueueItem {
 // inbound-only so Sent mail never shows as "unread".
 const ASSIGNABLE_DIRECTIONS = ["inbound", "outbound"] as const;
 
+/**
+ * Why a manually-detached message is sitting in the assignment queue.
+ *
+ * Not decoration: BOTH queue sites require assignment_ambiguity_reason to be non-null
+ * (getEmailAssignmentQueue's SQL and isEmailAssignmentQueueCandidate's JS filter), so a detach that
+ * left it null would clear the message off its deal and drop it into a hole no surface lists. The
+ * value is rendered raw by the queue UI (email-assignment-queue-view.tsx), hence the same snake_case
+ * shape as the resolver's own reasons (multiple_deal_candidates, company_only_fallback, …).
+ */
+export const DETACHED_ASSIGNMENT_AMBIGUITY_REASON = "manually_detached_from_deal";
+
 export function isEmailAssignmentQueueCandidate(emailRow: {
   direction: "inbound" | "outbound";
   assignmentAmbiguityReason: string | null;
@@ -909,18 +920,67 @@ export async function bindConversationToDealAcrossMailboxes(
 }
 
 /**
- * Detach every active binding for this conversation in one statement — deliberately NOT scoped to a
- * mailbox derived from `emails`, so a binding whose mailbox has no surviving message rows is still
- * caught. Atomic by construction (a single UPDATE), so partial-failure safety here doesn't depend on
- * the caller's transaction the way the sequential binds above do; it still inherits the per-request
- * tenant transaction (middleware/tenant.ts) for its place in the wider request, and a caller outside
- * that context (a worker, a script) must open its own transaction.
+ * Unfile this conversation completely: clear every active BINDING and every MESSAGE's deal
+ * association, and put the messages back in the assignment queue.
+ *
+ * BOTH HALVES ARE LOAD-BEARING, and for a long time only the first existed. Every surface that shows
+ * a deal's mail reads the MESSAGE columns, not the binding: GET /api/email/deal/:dealId (getEmails)
+ * filters on `emails.deal_id` / `assigned_entity_type='deal' AND assigned_entity_id`, and the
+ * assignment queue requires `assignment_status='unassigned' AND assignment_ambiguity_reason IS NOT
+ * NULL`. Clearing the binding alone therefore detached NOTHING a user could see — every message
+ * stayed on the deal tab and none arrived in the queue — while the API answered 200. Nothing else
+ * repairs it either: there is no trigger on email_thread_bindings, and the sync job reads the binding
+ * only to file NEW messages.
+ *
+ * This is the mirror of backAssociateStoredMessagesForBinding, with two deliberate differences:
+ *   - It is scoped to the CONVERSATION, not to one mailbox. backAssociate runs per-mailbox because
+ *     bindThreadToDeal calls it per-mailbox; detach clears every mailbox in one statement, and a
+ *     message-side clear that missed a mailbox would strand exactly the copies this branch exists to
+ *     move. Keying on graph_conversation_id covers mailboxes with no active binding and mailboxes
+ *     whose token row is gone, since messages survive both.
+ *   - It does NOT touch contact_id. "Unassign from this deal" is about the DEAL; the contact
+ *     association is independent and drives the contact's own Emails tab. It is also not in the
+ *     deal-tab predicate, so leaving it cannot keep a message on the deal.
+ *
+ * KNOWN RESIDUE, deliberately not fixed here: the `activities` row backAssociate wrote for each
+ * message still carries source_entity_type='deal' / source_entity_id=<deal>, so the deal's ACTIVITY
+ * tab keeps showing the email even though its Emails tab no longer does. Both columns are NOT NULL
+ * (shared/src/schema/tenant/activities.ts), so there is no "unfiled" value to write — representing
+ * this needs either a nullable source or deleting history, which is a schema decision for the
+ * activities module rather than something to improvise inside a detach.
+ *
+ * NOT atomic by construction any more. It used to be a single UPDATE; it is now four statements
+ * (read stat targets, clear bindings, clear messages, recompute rollups), so a throw part-way through
+ * MUST roll the earlier ones back. It does: every caller today is the detach route, which runs inside
+ * the per-request tenant transaction (middleware/tenant.ts) that only commits at the end. A caller
+ * outside that context — a worker, a script — must open its own transaction or it can leave the
+ * bindings cleared with the messages still on the deal.
  */
 export async function detachConversationAcrossMailboxes(
   tenantDb: TenantDb,
   providerConversationId: string,
   actingUserId: string
-): Promise<void> {
+): Promise<{ clearedMessageCount: number; previousMessageDealIds: string[] }> {
+  // Read BEFORE the clear: refreshEntityEmailStats recomputes a deal's email_count/last_email_at from
+  // the emails table, so the entities that need recomputing are the ones these messages are about to
+  // stop pointing at. Afterwards they are unreachable. Narrow projection on purpose — this only feeds
+  // collectEmailStatTargetsForEmail, which reads these four columns and nothing else, so there is no
+  // reason to drag body_html across for every message in the thread.
+  const messageRows = await tenantDb
+    .select({
+      assignedEntityType: emails.assignedEntityType,
+      assignedEntityId: emails.assignedEntityId,
+      dealId: emails.dealId,
+      contactId: emails.contactId,
+    })
+    .from(emails)
+    .where(eq(emails.graphConversationId, providerConversationId));
+
+  const previousStatTargets = [];
+  for (const email of messageRows) {
+    previousStatTargets.push(...await collectEmailStatTargetsForEmail(tenantDb, email));
+  }
+
   await tenantDb
     .update(emailThreadBindings)
     .set({
@@ -935,6 +995,46 @@ export async function detachConversationAcrossMailboxes(
         sql`${emailThreadBindings.detachedAt} IS NULL`
       )
     );
+
+  await tenantDb
+    .update(emails)
+    .set({
+      dealId: null,
+      assignedEntityType: null,
+      assignedEntityId: null,
+      // The three fields the assignment queue actually selects on. assignment_status must go back to
+      // 'unassigned' and the ambiguity reason must be non-null, or the thread lands nowhere.
+      assignmentStatus: "unassigned",
+      assignmentConfidence: "low",
+      assignmentAmbiguityReason: DETACHED_ASSIGNMENT_AMBIGUITY_REASON,
+      // The binding this pointed at is the one just detached; leaving the pointer would have messages
+      // claiming a binding no reader treats as live.
+      threadBindingId: null,
+      // Both queues order by GREATEST(sent_at, synced_at), so touching this floats the conversation to
+      // the top of the queue it has just re-entered — which is where a just-unfiled thread belongs.
+      syncedAt: new Date(),
+    })
+    .where(eq(emails.graphConversationId, providerConversationId));
+
+  // deals.email_count / last_email_at (and the company rollup) are denormalised, so the deal the mail
+  // just left keeps a stale count until this runs — the same treatment the bind path gives it.
+  await refreshEmailStatsForTargets(tenantDb, previousStatTargets);
+
+  // Handed back so the caller can audit what was actually unfiled. The deal ids come from the MESSAGES,
+  // which is the only place they survive when a conversation was filed message-by-message from the
+  // assignment queue (associateEmailToEntity writes emails.deal_id and creates no binding) — the one
+  // shape where the binding side has nothing to report but this call still moved real associations.
+  return {
+    clearedMessageCount: messageRows.length,
+    previousMessageDealIds: Array.from(
+      new Set(
+        messageRows.flatMap((row) => [
+          row.dealId,
+          row.assignedEntityType === "deal" ? row.assignedEntityId : null,
+        ])
+      )
+    ).filter((dealId): dealId is string => dealId !== null),
+  };
 }
 
 /**

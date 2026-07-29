@@ -327,6 +327,14 @@ describe("email routes", () => {
       emails: [],
     });
     emailServiceMocks.resolveActiveBindingDealIdForConversation.mockResolvedValue(null);
+    // detachConversationAcrossMailboxes REPORTS what it unfiled, and the route audits off that — a
+    // conversation filed message-by-message from the assignment queue has real deal ids on the messages
+    // and no binding at all. Defaulting to "nothing was filed" keeps the no-op case the no-op case; the
+    // tests that care set their own value.
+    emailServiceMocks.detachConversationAcrossMailboxes.mockResolvedValue({
+      clearedMessageCount: 0,
+      previousMessageDealIds: [],
+    });
     emailServiceMocks.assertCanMutateEmailThread.mockResolvedValue(undefined);
     emailServiceMocks.conversationHasAnyMessage.mockResolvedValue(true);
     accessMocks.assertDealCollaboratorAccess.mockResolvedValue({ id: "deal-1", assignedRepId: "rep-1", sourceLeadId: null });
@@ -1669,6 +1677,11 @@ describe("email routes", () => {
     });
     emailServiceMocks.resolveActiveBindingDealIdForConversation.mockResolvedValue("deal-1");
     emailServiceMocks.getEmailThread.mockResolvedValue({ binding: null, preview: null, emails: [] });
+    // What the real service reports back: the messages were on deal-1 too, and both were unfiled.
+    emailServiceMocks.detachConversationAcrossMailboxes.mockResolvedValue({
+      clearedMessageCount: 2,
+      previousMessageDealIds: ["deal-1"],
+    });
 
     await invokeRoute({
       method: "post",
@@ -1710,6 +1723,7 @@ describe("email routes", () => {
       fullRow: {
         providerConversationId: "conversation-1",
         previousDealId: "deal-1",
+        previousMessageDealIds: ["deal-1"],
         nextDealId: null,
         detached: true,
         affectedMessageCount: 2,

@@ -7,6 +7,11 @@ import { EmailComposeDialog } from "./email-compose-dialog";
 import { EmailManualAssignmentDialog } from "./email-manual-assignment-dialog";
 import { GraphAuthBanner } from "./graph-auth-banner";
 import {
+  UNASSIGN_CONFIRMATION,
+  UNASSIGN_SUCCESS,
+  UNASSIGN_UNAVAILABLE_NO_CONVERSATION,
+} from "./email-unassign-copy";
+import {
   associateEmailToEntity,
   detachEmailThread,
   reassignEmailThread,
@@ -36,11 +41,22 @@ const REASSIGN_SEARCH_TYPES: EmailAssociationTarget["assignedEntityType"][] = ["
  * The no-conversation case says so instead of moving silently. 31 of ~10k production messages carry a
  * null graphConversationId, and those move ALONE via the single-message associate route — the opposite
  * blast radius from every other row in the list, which is exactly why it has to be stated.
+ *
+ * It also carries a PERMISSIONS warning the thread case does not need. This whole feature exists so a
+ * deal collaborator can fix a misfiled email, and the thread routes were widened to allow exactly that
+ * — but POST /api/email/:id/associate, the route the no-conversation fallback uses, still hard-gates on
+ * `email.userId !== req.user.id` in both its route and its service. So the identical-looking menu item
+ * is mailbox-owner-only for these 31 messages. It fails readably (a 403 the handler toasts), but a
+ * dialog that promised the move without mentioning who can make it would be promising something the
+ * server will refuse. Widening that gate is a separate decision; describing it honestly is not.
  */
 function describeReassignImpact(email: Email | null, messageCount: number | null): string {
   if (!email) return "";
   if (!email.graphConversationId) {
-    return "This message isn't part of a tracked conversation — only it will move, not a whole thread.";
+    return (
+      "This message isn't part of a tracked conversation — only it will move, not a whole thread. " +
+      "Single messages can only be moved by the mailbox that received them."
+    );
   }
   if (messageCount === null) {
     return "Moves this whole conversation to the deal you pick, so future replies land there too.";
@@ -82,24 +98,18 @@ export function DealEmailTab({ dealId, primaryContactEmail }: DealEmailTabProps)
   const reassignDescription = describeReassignImpact(reassignEmail, threadMessageCount);
 
   async function handleUnassign(email: Email) {
-    // No single-message equivalent of detach exists — the route is keyed on the conversation — so say
-    // that plainly rather than firing a request that 404s on an encoded "null".
     if (!email.graphConversationId) {
-      toast.error("This message isn't part of a tracked conversation, so it can't be unassigned from here.");
+      toast.error(UNASSIGN_UNAVAILABLE_NO_CONVERSATION);
       return;
     }
 
-    if (
-      !window.confirm(
-        "Unassign this conversation from the deal? It returns to the assignment queue until someone files it again."
-      )
-    ) {
+    if (!window.confirm(UNASSIGN_CONFIRMATION)) {
       return;
     }
 
     try {
       await detachEmailThread(email.graphConversationId);
-      toast.success("Conversation unassigned");
+      toast.success(UNASSIGN_SUCCESS);
       refetch();
     } catch (err: unknown) {
       // Includes the server's 403 for a caller who may not touch this thread; its message is written to
@@ -113,7 +123,17 @@ export function DealEmailTab({ dealId, primaryContactEmail }: DealEmailTabProps)
 
     try {
       if (reassignEmail.graphConversationId) {
-        await reassignEmailThread(reassignEmail.graphConversationId, target.assignedEntityId);
+        // reassignEmailThread's second argument is a DEAL id. That is true of every target this picker
+        // can produce only because REASSIGN_SEARCH_TYPES scopes it to deals, eighty lines away — so
+        // check it here, where the call is, rather than let widening the picker quietly post a contact
+        // id to a deal-keyed route. Throwing (not returning) keeps the picker open with the reason.
+        if (target.assignedEntityType !== "deal") {
+          throw new Error("A conversation can only be reassigned to a deal.");
+        }
+        await reassignEmailThread(
+          reassignEmail.graphConversationId,
+          target.assignedDealId ?? target.assignedEntityId
+        );
         toast.success("Conversation reassigned");
       } else {
         await associateEmailToEntity(reassignEmail.id, target);

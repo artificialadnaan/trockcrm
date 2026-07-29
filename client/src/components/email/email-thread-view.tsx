@@ -25,6 +25,7 @@ import {
   type EmailThread,
 } from "@/hooks/use-emails";
 import { EmailManualAssignmentDialog } from "./email-manual-assignment-dialog";
+import { UNASSIGN_CONFIRMATION, UNASSIGN_SUCCESS } from "./email-unassign-copy";
 
 interface EmailThreadViewProps {
   conversationId: string;
@@ -258,11 +259,18 @@ export function EmailThreadView({ conversationId, onBack }: EmailThreadViewProps
   };
 
   const handleDetach = async () => {
+    // The SAME confirmation and success wording as the deal Emails tab's row action, from the same
+    // module. The two entry points are one click apart — the row action is on the list, this is on the
+    // view that same row opens — and both post to /thread/:id/detach. Detaching moves every message in
+    // the conversation off the deal, so having the guard on only one of the two was a real gap, not a
+    // cosmetic one.
+    if (!window.confirm(UNASSIGN_CONFIRMATION)) return;
+
     setSaving(true);
     try {
       const result = await detachEmailThread(conversationId);
       setThread(result.thread);
-      toast.success("Thread detached");
+      toast.success(UNASSIGN_SUCCESS);
     } catch (err: unknown) {
       toast.error(err instanceof Error ? err.message : "Failed to detach thread");
     } finally {

@@ -242,6 +242,24 @@ describe("DealEmailTab reassignment wiring", () => {
     expect(dialogDescription()).toContain("4 messages");
   });
 
+  it("degrades to conversation-wide wording rather than quoting another thread's count", () => {
+    // useEmailThread keeps its last payload when the conversation id changes, so the count is trusted
+    // only while the loaded thread demonstrably belongs to the selected row. Without this the picker
+    // would briefly quote the PREVIOUS thread's size — a wrong number about an irreversible move.
+    mocks.useEmailThreadMock.mockReturnValue({
+      thread: makeThread(9, "some-other-conversation"),
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      setThread: vi.fn(),
+    });
+    mount();
+    openRowAction(/reassign/i);
+
+    expect(dialogDescription()).not.toContain("9");
+    expect(dialogDescription()).toContain("this whole conversation");
+  });
+
   it("unassigns the conversation after a confirmation that names the assignment queue", async () => {
     mount();
 
@@ -278,7 +296,10 @@ describe("DealEmailTab reassignment wiring", () => {
     openRowAction(/reassign/i);
 
     expect(dialogDescription()).toContain("only it will move");
-    expect(dialogDescription()).not.toContain("messages");
+    expect(dialogDescription()).not.toMatch(/Moves \d+/);
+    // The associate route this falls back to is mailbox-owner-only, unlike the thread routes, so the
+    // copy must not promise a collaborator a move the server will refuse.
+    expect(dialogDescription()).toContain("only be moved by the mailbox that received them");
 
     await act(async () => {
       findButton(/pick deal/i)!.click();

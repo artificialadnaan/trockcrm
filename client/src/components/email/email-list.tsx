@@ -18,7 +18,8 @@ interface EmailListProps {
   /**
    * Per-row reassign/unassign, forwarded straight to EmailRow. Both are OPTIONAL and there is no
    * client-side permission check behind them: EmailRow renders its overflow menu only when at least
-   * one is supplied, so a consumer that passes neither (the inbox, company, lead and contact tabs)
+   * one is supplied, so a consumer that passes neither (the company, lead and contact tabs — the deal
+   * tab is the only one that passes them, and the inbox uses a different list component entirely)
    * gets exactly the row it got before. Whether the acting user may actually move the thread is the
    * server's call — a denial comes back as a 403 the handler surfaces as a toast.
    */
