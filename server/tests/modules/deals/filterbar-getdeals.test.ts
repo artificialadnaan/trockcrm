@@ -287,4 +287,47 @@ describe("getDeals — FilterBar wiring", () => {
     expect(orderText).toContain("lost_at"); // Lost rows by the lost date
     expect(orderText).toContain("stage_entered_at"); // open rows by the entered-stage date
   });
+
+  // The leading sort tier decides where a DEDUCTIVE change order (negative awarded_amount) lands, and
+  // because it LEADS it decides that under every sort. Wiring only — that the list's tier is the
+  // sign-aware one on every sort key including the value sort; the tier's own ordering behaviour is
+  // proven against real SQL in tests/modules/shared/deal-sort-tier-sign.runtime.test.ts.
+  //
+  // The tier is ORDER BY key 0 (`asc(tier)`), so it is rendered alone rather than from the joined
+  // order text — the value chain the tier wraps is itself full of `> 0` candidate gates, which the
+  // joined text could not tell apart from the tier's own sign test.
+  const leadingTierText = (capturedOrderBys: unknown[][]) =>
+    renderText(capturedOrderBys[capturedOrderBys.length - 1]![0]);
+
+  it.each([
+    "awarded_amount",
+    "name",
+    "created_at",
+    "display_date",
+    "updated_at",
+    "stage_entered_at",
+    "expected_close_date",
+    "contract_signed_date",
+  ] as const)(
+    "sortBy=%s leads with the NON-ZERO tier, so a deductive CO is ordered by the column the user asked for",
+    async (sortBy) => {
+      const { db, capturedOrderBys } = createTenantDbCapturingWhere();
+      const { getDeals } = await import("../../../src/modules/deals/service.js");
+
+      await getDeals(db, { sortBy, scope: "all" }, "director", "director-1");
+
+      const tierText = leadingTierText(capturedOrderBys);
+      expect(tierText).toContain("<> 0");
+      expect(tierText).toContain("then 0 else 1");
+    }
+  );
+
+  it("the DEFAULT (no sortBy) list leads with the same non-zero tier", async () => {
+    const { db, capturedOrderBys } = createTenantDbCapturingWhere();
+    const { getDeals } = await import("../../../src/modules/deals/service.js");
+
+    await getDeals(db, { scope: "all" }, "director", "director-1");
+
+    expect(leadingTierText(capturedOrderBys)).toContain("<> 0");
+  });
 });

@@ -621,7 +621,13 @@ export function compareDrilldownDeals(left: DrilldownListRow, right: DrilldownLi
   // Primary tier: active, non-zero deals on top; on-hold and $0 deals sink to the
   // bottom regardless of the active sort. (on-hold already reads as $0 via
   // getEffectiveDealValue/moneyValue, but the explicit guard keeps the intent clear.)
-  const tierOf = (deal: DrilldownListRow) => (!deal.onHold && moneyValue(deal) > 0 ? 0 : 1);
+  //
+  // `!== 0`, not `> 0` — the exact twin of the server tier, aliasedActiveNonZeroDealSortTierSql in
+  // server/src/modules/shared/deal-value-sql.ts, which carries the full rationale. In short: the tier
+  // demotes DEAD rows (parked or valueless), and a DEDUCTIVE change order is a live deal at a NEGATIVE
+  // value, so it belongs in the top tier and sorts by whatever column the user asked for — including by
+  // value, where being the smallest number already places it correctly in both directions.
+  const tierOf = (deal: DrilldownListRow) => (!deal.onHold && moneyValue(deal) !== 0 ? 0 : 1);
   const tierDelta = tierOf(left) - tierOf(right);
   if (tierDelta !== 0) return tierDelta;
 

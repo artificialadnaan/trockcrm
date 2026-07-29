@@ -47,7 +47,7 @@ beforeAll(async () => {
     CREATE TABLE public.project_type_config (id uuid PRIMARY KEY, name text);
     CREATE TABLE deals (
       id uuid PRIMARY KEY, sales_source_user_id uuid, deal_number text, name text, stage_id uuid NOT NULL, assigned_rep_id uuid,
-      is_active boolean NOT NULL DEFAULT true, is_test_data boolean NOT NULL DEFAULT false, on_hold boolean NOT NULL DEFAULT false,
+      is_active boolean NOT NULL DEFAULT true, is_test_data boolean NOT NULL DEFAULT false, is_change_order boolean NOT NULL DEFAULT false, on_hold boolean NOT NULL DEFAULT false,
       won_closed_date date, lost_at timestamptz, contract_signed_at timestamptz, contract_signed_date date, actual_close_date date,
       expected_close_date date, bid_due_date timestamptz, bid_board_stage_slug text, updated_at timestamptz, stage_entered_at timestamptz,
       company_id uuid, region_id uuid, project_type_id uuid, project_type text, office_code text,

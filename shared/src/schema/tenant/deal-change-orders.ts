@@ -31,7 +31,11 @@ export const dealChangeOrders = pgTable(
       .references(() => deals.id, { onDelete: "cascade" }),
     // The date the change order was signed — the reporting period-attribution axis.
     signedDate: date("signed_date").notNull(),
-    // Positive dollar amount (DB CHECK amount > 0 in migration 0152; also validated in the API).
+    // Positive dollar amount (DB CHECK amount > 0 in migration 0153). Legacy rows only — this table
+    // predates deductive (negative) change orders and is not gaining them; the API's shared
+    // normalizeChangeOrderAmount now permits negative for the child-deal model, so the legacy update
+    // path in change-order-service.ts rejects a negative here explicitly (fail-closed) rather than
+    // relying on this CHECK to surface it as a 500.
     amount: numeric("amount", { precision: 14, scale: 2 }).notNull(),
     description: text("description"),
     createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),

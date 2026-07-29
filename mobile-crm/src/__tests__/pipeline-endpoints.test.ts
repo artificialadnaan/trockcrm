@@ -192,6 +192,71 @@ describe("stageMoveLock", () => {
   });
 });
 
+/**
+ * The board's column total — the aggregate the cards below it are supposed to add up to.
+ *
+ * The web counterpart (client/src/components/pipeline/pipeline-board-column.tsx:73) formats
+ * `column.totalValue ?? 0` with no sign test at all, so a stage whose net goes negative reads
+ * "-$30,000" there. The `<= 0` gate here drew "—" for the same column: the same office, the same
+ * stage, two different answers depending on which screen the rep happened to be looking at.
+ *
+ * A deductive change order is how the number gets there. A CO child is a Won deal, active, never
+ * on-hold, so it is inside the SUM the Won column reports; on the `watched` scope — deal_subscriptions
+ * in ISOLATION — a rep watching the child and not its parent gets a Won column that is exactly one
+ * deduction. The board sends won_all_time=true, so the column is not a period window that could be
+ * expected to net out.
+ *
+ * WHY ZERO IS TREATED DIFFERENTLY HERE THAN ON A CARD: DealCard.displayAmount keeps the em dash for 0
+ * because resolveDealValue collapses "absent" and "explicitly $0" into the same number on the way out
+ * of it — the card genuinely cannot tell them apart. A column can. `totalValue` is the raw payload
+ * field, so an ABSENT total is still undefined when it reaches this gate, and `activeCount` is an
+ * independent server fact that says whether anything entered the SUM. It is activeCount specifically,
+ * not totalCount: the server computes the value as SUM(...) FILTER (WHERE COALESCE(on_hold,false) =
+ * false) and activeCount as COUNT(*) with that SAME filter, while totalCount is an unfiltered count(*)
+ * that includes held cards contributing nothing (deals/service.ts:3682-3684). So "no deals entered the
+ * sum" and "the deals that did sum to zero" are distinguishable, and only the first is "no value".
+ */
+describe("formatColumnTotal — the aggregate must not disagree with the web board", () => {
+  it("renders a NEGATIVE column total instead of an em dash", () => {
+    expect(pipeline.formatColumnTotal({ totalValue: -30000, activeCount: 1 })).toBe("-$30,000");
+  });
+
+  it("renders a column that nets to zero WITH cards in it", () => {
+    // Deals were summed and came to nothing — e.g. a deduction that exactly cancels its parent. That is
+    // a computed $0, which is what the web shows, not an absence.
+    expect(pipeline.formatColumnTotal({ totalValue: 0, activeCount: 2 })).toBe("$0");
+  });
+
+  it("keeps the em dash for a column with nothing to sum", () => {
+    // activeCount 0: no row passed the FILTER behind the SUM, so the 0 is "no value", not a total.
+    expect(pipeline.formatColumnTotal({ totalValue: 0, activeCount: 0 })).toBe("—");
+  });
+
+  it("keeps the em dash when the payload carries no total at all", () => {
+    // The distinction the card cannot make: absent arrives as undefined here, not as 0.
+    expect(pipeline.formatColumnTotal({ activeCount: 3 })).toBe("—");
+    expect(pipeline.formatColumnTotal({ totalValue: null, activeCount: 3 })).toBe("—");
+    expect(pipeline.formatColumnTotal({ totalValue: Number.NaN, activeCount: 3 })).toBe("—");
+  });
+
+  it("is inert for an ordinary positive column", () => {
+    expect(pipeline.formatColumnTotal({ totalValue: 1250000, activeCount: 4 })).toBe("$1,250,000");
+  });
+
+  it("reads a whole column object, so the total and its count cannot be paired wrong", () => {
+    // What the screen actually passes: the column straight off the payload.
+    const column = {
+      stage: { id: "s-won", name: "Won", slug: "won" },
+      deals: [],
+      totalValue: -30000,
+      activeCount: 1,
+      totalCount: 1,
+      count: 1,
+    };
+    expect(pipeline.formatColumnTotal(column)).toBe("-$30,000");
+  });
+});
+
 describe("getStagePage wire contract", () => {
   /**
    * Every name here was wrong on the first attempt, and the drill-down rendered "Nothing here" beside a

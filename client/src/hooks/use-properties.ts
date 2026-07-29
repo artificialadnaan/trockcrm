@@ -124,6 +124,14 @@ export interface PropertyDeal {
   // must never be auto-parked. The API already ships it (the row spreads every deals column); declaring it
   // keeps the exemption type-visible so a narrowed payload can't silently drop it.
   bidBoardStageSlug: string | null;
+  // A change-order child (0156), read by getEffectiveDealValue to take awardedAmount verbatim — including
+  // NEGATIVE for a deductive CO — ahead of the `> 0` fallback chain. The API already ships it (the row
+  // spreads every deals column via getTableColumns(deals)); declaring it REQUIRED (not optional) keeps it
+  // type-visible so a narrowed payload can't silently drop it, the way stageSlug once did (server
+  // properties/service.ts:719-725). property-detail-page.tsx sums this array as "Active Pipeline Value" — a
+  // dropped flag would silently price a deductive CO at $0 there while every other CO-aware surface reads
+  // the negative.
+  isChangeOrder: boolean | null;
   actualCloseDate: string | null;
   lastActivityAt: string | null;
   stageEnteredAt: string;

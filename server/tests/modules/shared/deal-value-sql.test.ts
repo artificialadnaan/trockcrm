@@ -15,6 +15,7 @@ import {
   aliasedEffectiveEstimatingDealValueSql,
   aliasedForecastFirstDealValueSql,
   aliasedOpenPipelineForecastFirstDealValueSql,
+  dealAwardedAmountSql,
   dealAwardedFirstWithFallbackSql,
   dealBestEstimateSql,
   dealBestEstimateWithForecastSql,
@@ -43,7 +44,13 @@ function normalize(sqlValue: unknown): string {
 }
 
 function expectColumnOrder(sqlText: string, columns: readonly string[]) {
-  const positions = columns.map((column) => sqlText.indexOf(`d.${column}`));
+  // lastIndexOf, not indexOf: the aliased AND column-form builders now prefix a change-order branch
+  // (`CASE WHEN COALESCE(d.is_change_order, false) THEN COALESCE(d.awarded_amount, 0) ELSE <chain> END`)
+  // ahead of the priority chain. Under indexOf, d.awarded_amount's FIRST hit is that CO-branch prefix,
+  // which precedes d.forecast_revenue — so the forecast-first ordering assertion below would fail outright
+  // (awarded_amount appearing to come before forecast_revenue) even though the chain itself is unchanged.
+  // lastIndexOf reads the chain's real, trailing occurrence of each column instead.
+  const positions = columns.map((column) => sqlText.lastIndexOf(`d.${column}`));
   for (const [index, position] of positions.entries()) {
     expect(position, `${columns[index]} should be present`).toBeGreaterThanOrEqual(0);
     if (index > 0) {
@@ -63,6 +70,7 @@ describe("deal-value-sql", () => {
     bidEstimate: sql.raw("d.bid_estimate"),
     ddEstimate: sql.raw("d.dd_estimate"),
     awardedAmount: sql.raw("d.awarded_amount"),
+    isChangeOrder: sql.raw("d.is_change_order"),
   };
 
   it("wraps aliased best-estimate value in an on-hold zeroing case expression", () => {
@@ -161,6 +169,34 @@ describe("deal-value-sql", () => {
       expect(normalized).toContain("CASE WHEN d.bid_board_total_sales > 0 THEN d.bid_board_total_sales END");
       expect(normalized).toContain("CASE WHEN d.awarded_amount > 0 THEN d.awarded_amount END");
       expect(normalized).not.toContain("NULLIF");
+    }
+  });
+
+  // The CO branch (2026-07-28): a change-order child deal's value is awarded_amount VERBATIM, gated on
+  // is_change_order, ahead of (never inside) the `> 0` fallback chain — see
+  // deal-value-change-order.runtime.test.ts for the real-SQL reconciliation proof against a live PGlite
+  // table. This asserts the STRUCTURE that runtime test exercises: the COLUMN form (table.isChangeOrder is
+  // now a REQUIRED field, not an optional escape hatch a caller could omit) and the ALIASED form both emit
+  // the identical branch shape, since both now derive it from the same two helpers
+  // (withChangeOrderBranch / withAliasedChangeOrderBranch).
+  it("wraps every value chain in a change-order branch — COLUMN form is no longer an escape-hatch no-op", () => {
+    for (const normalized of [
+      normalize(dealBestEstimateSql(table)),
+      normalize(dealAwardedFirstWithFallbackSql(table)),
+      normalize(aliasedDealBestEstimateSql("d")),
+      normalize(aliasedDealAwardedFirstWithFallbackSql("d")),
+    ]) {
+      expect(normalized).toContain(
+        "CASE WHEN COALESCE(d.is_change_order, false) THEN COALESCE(d.awarded_amount, 0) ELSE"
+      );
+    }
+  });
+
+  it("wraps the awarded-only helpers (COLUMN and ALIASED) in the same change-order branch", () => {
+    for (const normalized of [normalize(dealAwardedAmountSql(table)), normalize(aliasedDealAwardedAmountSql("d"))]) {
+      expect(normalized).toContain(
+        "CASE WHEN COALESCE(d.is_change_order, false) THEN COALESCE(d.awarded_amount, 0) ELSE"
+      );
     }
   });
 

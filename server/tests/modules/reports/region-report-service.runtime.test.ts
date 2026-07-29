@@ -42,7 +42,7 @@ beforeAll(async () => {
     );
     CREATE TABLE deals (
       id uuid PRIMARY KEY, sales_source_user_id uuid, deal_number text, name text NOT NULL, stage_id uuid NOT NULL,
-      assigned_rep_id uuid, region_id uuid, on_hold boolean NOT NULL DEFAULT false,
+      assigned_rep_id uuid, region_id uuid, is_change_order boolean NOT NULL DEFAULT false, on_hold boolean NOT NULL DEFAULT false,
       is_active boolean NOT NULL DEFAULT true, is_test_data boolean NOT NULL DEFAULT false,
       won_closed_date date, lost_at timestamptz, actual_close_date date, stage_entered_at timestamptz,
       expected_close_date date, bid_due_date timestamptz, bid_board_stage_slug text, created_at timestamptz NOT NULL DEFAULT now(),
@@ -214,7 +214,7 @@ describe("getRegionReport — exclusions & edge cases", () => {
       CREATE TABLE pipeline_stage_config (id uuid PRIMARY KEY, name text NOT NULL, slug text UNIQUE NOT NULL, display_order int NOT NULL DEFAULT 0, workflow_family text NOT NULL DEFAULT 'standard_deal', is_terminal boolean NOT NULL DEFAULT false);
       CREATE TABLE deals (
         id uuid PRIMARY KEY, deal_number text, name text NOT NULL, stage_id uuid NOT NULL,
-        assigned_rep_id uuid, region_id uuid, on_hold boolean NOT NULL DEFAULT false,
+        assigned_rep_id uuid, region_id uuid, is_change_order boolean NOT NULL DEFAULT false, on_hold boolean NOT NULL DEFAULT false,
         is_active boolean NOT NULL DEFAULT true, is_test_data boolean NOT NULL DEFAULT false,
         won_closed_date date, lost_at timestamptz, actual_close_date date, stage_entered_at timestamptz,
         expected_close_date date, bid_due_date timestamptz, bid_board_stage_slug text, created_at timestamptz NOT NULL DEFAULT now(),
@@ -285,5 +285,95 @@ describe("getRegionReport — exclusions & edge cases", () => {
     const r = await getRegionReport(edb, { from: "2026-05-24", to: "2026-05-27", now: NOW });
     const west = r.regions.find((x) => x.region === "West Coast")!;
     expect(west.pipeline).toEqual({ value: 60000, count: 1 }); // open onhold (30k) excluded
+  });
+});
+
+/**
+ * DEDUCTIVE CHANGE ORDERS × the "biggest ___" trophies.
+ *
+ * A deductive CO is a real Won CHILD deal whose awarded_amount is NEGATIVE, and the canonical value chain
+ * takes a CO child's awarded_amount VERBATIM (no `> 0` gate), so it flows into every aggregate here — which
+ * is correct and deliberate. topMoverDeal, though, is the shared selector behind THREE positive
+ * superlatives ("Biggest new deal" / "Biggest win" / "Biggest loss"): it orders DESC and takes the first
+ * row with no floor, so in a week whose only contribution is a deduction the trophy card renders the
+ * deduction — a Trophy icon captioned "Biggest win" over -$50,000. The superlatives require a POSITIVE
+ * contribution; when there is none the card falls to its existing "—" empty state. The MONEY is untouched:
+ * the same deduction still lands in the region/office Won totals below.
+ */
+describe("getRegionReport — deductive change orders never win a 'biggest ___' trophy", () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let ddb: any;
+  let dpg: PGlite;
+  const D = { won: U("db09"), lost: U("db0a"), opp: U("db01") };
+  const DR = { west: U("dc01") };
+  // Deduction-only week: now = Wed 2026-05-27 → wtd 2026-05-24..27.
+  const NOW_DEDUCTIVE_WEEK = new Date("2026-05-27T18:00:00Z");
+  // Mixed week: now = Wed 2026-05-13 → wtd 2026-05-10..13 (a positive win AND a bigger deduction).
+  const NOW_MIXED_WEEK = new Date("2026-05-13T18:00:00Z");
+
+  beforeAll(async () => {
+    dpg = new PGlite();
+    await dpg.exec(`SET TimeZone='UTC';`);
+    await dpg.exec(`
+      CREATE TABLE users (id uuid PRIMARY KEY, display_name text NOT NULL);
+      CREATE TABLE region_config (id uuid PRIMARY KEY, name text NOT NULL, display_order int NOT NULL, is_active boolean NOT NULL DEFAULT true);
+      CREATE TABLE pipeline_stage_config (id uuid PRIMARY KEY, name text NOT NULL, slug text UNIQUE NOT NULL, display_order int NOT NULL DEFAULT 0, workflow_family text NOT NULL DEFAULT 'standard_deal', is_terminal boolean NOT NULL DEFAULT false);
+      CREATE TABLE deals (
+        id uuid PRIMARY KEY, deal_number text, name text NOT NULL, stage_id uuid NOT NULL,
+        assigned_rep_id uuid, region_id uuid, is_change_order boolean NOT NULL DEFAULT false, on_hold boolean NOT NULL DEFAULT false,
+        is_active boolean NOT NULL DEFAULT true, is_test_data boolean NOT NULL DEFAULT false,
+        won_closed_date date, lost_at timestamptz, actual_close_date date, stage_entered_at timestamptz,
+        expected_close_date date, bid_due_date timestamptz, bid_board_stage_slug text, created_at timestamptz NOT NULL DEFAULT now(),
+        awarded_amount numeric, bid_estimate numeric, dd_estimate numeric, bid_board_total_sales numeric
+      );
+      INSERT INTO region_config (id, name, display_order, is_active) VALUES ('${DR.west}','West Coast',1,true);
+      INSERT INTO pipeline_stage_config (id, name, slug, display_order, is_terminal) VALUES
+        ('${D.opp}','Opportunity','opportunity',2,false),('${D.won}','Won','won',7,true),('${D.lost}','Lost','lost',8,true);
+
+      -- Week 2026-05-24..27: the ONLY Won contribution is a deductive CO child (-50,000).
+      INSERT INTO deals (id, deal_number, name, stage_id, region_id, is_change_order, won_closed_date, awarded_amount) VALUES
+        ('${U("dw1")}','CO-1','Roof scope reduction (deductive CO)','${D.won}','${DR.west}',true,'2026-05-25',-50000);
+      -- ...and the only deal CREATED that week / the only deal LOST that week are deductive CO children too,
+      -- so the other two superlatives fed by the SAME selector are exercised on the same fixture.
+      INSERT INTO deals (id, deal_number, name, stage_id, region_id, is_change_order, created_at, expected_close_date, awarded_amount) VALUES
+        ('${U("dn1")}','CO-2','Deck scope reduction (open deductive CO)','${D.opp}','${DR.west}',true,'2026-05-25T10:00:00Z','2026-06-05',-12000);
+      INSERT INTO deals (id, deal_number, name, stage_id, region_id, is_change_order, lost_at, awarded_amount) VALUES
+        ('${U("dl1")}','CO-3','Flashing scope reduction (lost deductive CO)','${D.lost}','${DR.west}',true,'2026-05-25T12:00:00Z',-8000);
+
+      -- Week 2026-05-10..13: a SMALL positive win alongside a MUCH larger deduction.
+      INSERT INTO deals (id, deal_number, name, stage_id, region_id, is_change_order, won_closed_date, awarded_amount) VALUES
+        ('${U("pw1")}','W9','Small real win','${D.won}','${DR.west}',false,'2026-05-11',10000),
+        ('${U("dw2")}','CO-9','Big scope reduction (deductive CO)','${D.won}','${DR.west}',true,'2026-05-12',-80000);
+    `);
+    ddb = drizzle(dpg);
+  }, 30000); // PGlite cold-start can exceed the default 10s hook timeout under parallel runtime suites
+  afterAll(async () => {
+    await dpg?.close?.();
+  });
+
+  it("leaves 'Biggest win' EMPTY in a week whose only Won contribution is a deduction", async () => {
+    const r = await getRegionReport(ddb, { from: "2026-05-24", to: "2026-05-27", now: NOW_DEDUCTIVE_WEEK });
+    // The trophy is a POSITIVE superlative: with no positive win this week it shows its "—" empty state
+    // rather than presenting a -$50,000 deduction as the biggest win of the week.
+    expect(r.movers.biggestWin).toBeNull();
+    // ...while the deduction is still fully counted in the money. Guard against "fixing" the card by
+    // dropping deductive COs from the aggregate, which would silently overstate Won.
+    expect(r.summary.totalWon).toEqual({ value: -50000, count: 1 });
+    expect(r.regions.find((x) => x.region === "West Coast")!.won).toEqual({ value: -50000, count: 1 });
+  });
+
+  it("applies the same floor to the other two superlatives off the shared selector", async () => {
+    const r = await getRegionReport(ddb, { from: "2026-05-24", to: "2026-05-27", now: NOW_DEDUCTIVE_WEEK });
+    // "Biggest new deal" (open basis) and "Biggest loss" (open basis) come from the SAME topMoverDeal
+    // helper. Guarding only the win would leave two cards contradicting the third on the same strip.
+    expect(r.movers.biggestNewDeal).toBeNull();
+    expect(r.movers.biggestLoss).toBeNull();
+  });
+
+  it("still awards 'Biggest win' to a small POSITIVE win in a week that also carries a bigger deduction", async () => {
+    const r = await getRegionReport(ddb, { from: "2026-05-10", to: "2026-05-13", now: NOW_MIXED_WEEK });
+    expect(r.movers.biggestWin).toMatchObject({ name: "Small real win", value: 10000, region: "West Coast" });
+    // The deduction still nets out of the week's Won total: 10,000 + (-80,000).
+    expect(r.summary.totalWon).toEqual({ value: -70000, count: 2 });
   });
 });

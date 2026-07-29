@@ -133,7 +133,7 @@ beforeAll(async () => {
       id text PRIMARY KEY,
       stage_id text NOT NULL,
       bid_board_stage_slug text,
-      on_hold boolean NOT NULL DEFAULT false,
+      is_change_order boolean NOT NULL DEFAULT false, on_hold boolean NOT NULL DEFAULT false,
       expected_close_date date,
       bid_due_date timestamptz,
       forecast_revenue numeric,
@@ -306,6 +306,7 @@ describe("estimating bid-due hold — the deliberate NON-changes", () => {
       bidBoardTotalSales: sql.raw("d.bid_board_total_sales"),
       bidEstimate: sql.raw("d.bid_estimate"),
       ddEstimate: sql.raw("d.dd_estimate"),
+      isChangeOrder: sql.raw("d.is_change_order"),
     } as unknown as Parameters<typeof effectiveDealValueSql>[0];
     const emitted = dialect.sqlToQuery(effectiveDealValueSql(table)).sql.toLowerCase();
     expect(emitted).toContain("d.on_hold");

@@ -2,6 +2,8 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
 import { sql } from "drizzle-orm";
+import { dealSignedCommissions, users } from "@trock-crm/shared/schema";
+import { isGenuineWonDealStageSlug } from "@trock-crm/shared/types";
 import {
   addDealChangeOrder,
   createChangeOrderChildDeal,
@@ -13,7 +15,9 @@ import {
   updateDealChangeOrder,
 } from "../../../src/modules/deals/change-order-service.js";
 import { migrateLegacyChangeOrders } from "../../../src/modules/deals/change-order-migration.js";
+import { getWonCloseSummary } from "../../../src/modules/dashboard/service.js";
 import { WON_STAGE_SLUGS } from "../../../src/modules/shared/pipeline-terminal-stages.js";
+import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
 
 /**
  * REAL-SQL (PGlite) proof for Change Orders → real CHILD deals (PR1).
@@ -27,6 +31,7 @@ import { WON_STAGE_SLUGS } from "../../../src/modules/shared/pipeline-terminal-s
 const U = (s: string) => `00000000-0000-0000-0000-${s.padStart(12, "0")}`;
 const WON_SLUG = WON_STAGE_SLUGS[0];
 const ST = { won: U("57001"), open: U("57002") };
+const OFFICE = U("0f1");
 const REP = U("a01");
 const CO_NS = U("c0a"); // company
 const PROP = U("d00f"); // property
@@ -40,17 +45,22 @@ let pg: PGlite;
 beforeAll(async () => {
   pg = new PGlite();
   await pg.exec(`SET TimeZone='UTC';`);
+  // `users` is generated from the REAL Drizzle table (tenant-schema-from-drizzle) rather than hand-rolled:
+  // the commission mint paths read users.role (a pgEnum) and users.is_active to decide whether an estimator
+  // / sales-source cut is payable, and a hand-rolled `role text` is exactly the enum drift that helper
+  // exists to prevent (#674/#677). `deals` stays the deliberate hand-rolled island this suite is built on.
+  await pg.exec(tenantSchemaSql("public", [users]));
   await pg.exec(`
     CREATE TABLE pipeline_stage_config (
       id uuid PRIMARY KEY, name text NOT NULL, slug text UNIQUE NOT NULL, display_order int NOT NULL,
       workflow_family text NOT NULL DEFAULT 'standard_deal', is_active_pipeline boolean NOT NULL DEFAULT true,
       is_terminal boolean NOT NULL DEFAULT false
     );
-    CREATE TABLE users (id uuid PRIMARY KEY, display_name text);
     CREATE TABLE deals (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), deal_number varchar(50) UNIQUE NOT NULL, name varchar(500) NOT NULL,
       stage_id uuid NOT NULL, assigned_rep_id uuid, company_id uuid, property_id uuid, source_lead_id uuid,
-      awarded_amount numeric(14,2), bid_estimate numeric(14,2), dd_estimate numeric(14,2), won_closed_date date, contract_signed_date date,
+      awarded_amount numeric(14,2), bid_estimate numeric(14,2), dd_estimate numeric(14,2), bid_board_total_sales numeric(14,2),
+      won_closed_date date, contract_signed_date date, contract_signed_at timestamptz,
       project_number text, office_code text, project_type text, project_type_id uuid, region_id uuid,
       pipeline_type_snapshot text NOT NULL DEFAULT 'normal', estimator_user_id uuid, sales_source_user_id uuid,
       source varchar(100), workflow_route text NOT NULL DEFAULT 'normal', created_by_user_id uuid,
@@ -80,14 +90,8 @@ beforeAll(async () => {
       commission_structure text NOT NULL DEFAULT 'solo', capx_rate_solo numeric(7,6) NOT NULL DEFAULT 0,
       capx_rate_mixed numeric(7,6) NOT NULL DEFAULT 0, service_source_rate numeric(7,6) NOT NULL DEFAULT 0
     );
-    CREATE TABLE deal_signed_commissions (
-      id uuid PRIMARY KEY DEFAULT gen_random_uuid(), deal_id uuid NOT NULL REFERENCES deals(id) ON DELETE CASCADE,
-      rep_user_id uuid NOT NULL, attribution_role text NOT NULL DEFAULT 'owner', source_value_kind text NOT NULL,
-      source_value_amount numeric(14,2) NOT NULL, applied_rate numeric(7,6) NOT NULL, amount numeric(14,2) NOT NULL,
-      contract_signed_date_at_signing date NOT NULL, calculated_at timestamptz NOT NULL DEFAULT now(),
-      created_by uuid, created_at timestamptz NOT NULL DEFAULT now(),
-      CONSTRAINT deal_signed_commissions_dedup UNIQUE (deal_id, rep_user_id)
-    );
+    -- deal_signed_commissions is created from the REAL Drizzle table below (NOT hand-rolled), because the
+    -- claw-back this suite proves is a DB-CONSTRAINT question, not just an application one.
     -- Prod-faithful stage-history backstop: migration 0143 attaches an AFTER INSERT trigger on deals that
     -- writes a deal_stage_history row, and that FK to deals(id) has NO ON DELETE CASCADE. So an app-created
     -- CO child always has a dependent history row → a hard row-delete would FK-violate. This reproduces the
@@ -113,10 +117,22 @@ beforeAll(async () => {
     );
     INSERT INTO pipeline_stage_config (id, name, slug, display_order, is_terminal) VALUES
       ('${ST.won}','Won','${WON_SLUG}', 90, true), ('${ST.open}','Opportunity','opportunity', 30, false);
-    INSERT INTO users (id, display_name) VALUES ('${REP}','Alice');
+    INSERT INTO users (id, email, display_name, role, office_id) VALUES ('${REP}','alice@t.test','Alice','rep','${OFFICE}');
     INSERT INTO deals (id, deal_number, name, stage_id, assigned_rep_id, company_id, property_id, awarded_amount, won_closed_date, project_number, office_code, project_type, workflow_route, is_bid_board_owned) VALUES
       ('${PARENT}','DFW-9-10001-aa','Acme Tower Reroof','${ST.won}','${REP}','${CO_NS}','${PROP}', 500000, '2025-06-01', 'DFW-9-10001-aa', 'DFW', 'Roofing', 'normal', false),
       ('${BBO_PARENT}','DFW-9-10002-aa','Globex (Bid Board)','${ST.open}','${REP}','${CO_NS}','${PROP}', 250000, NULL, 'DFW-9-10002-aa', 'DFW', 'Roofing', 'normal', true);
+  `);
+  // deal_signed_commissions from the REAL Drizzle table, so its DB CHECK constraints are present. The
+  // hand-rolled version this replaces carried the columns but NONE of migration 0062's CHECKs, which is
+  // why "a deductive CO mints a negative owner row" passed here while the same write raised 23514 in prod
+  // (amount >= 0) and poisoned the enclosing transaction, rolling the whole change order back. Created
+  // after `deals` so the FK below resolves; tenantSchemaSql omits FKs and UNIQUEs (graph concerns), so
+  // both are re-added by hand — the dedup UNIQUE is what ON CONFLICT DO NOTHING targets.
+  await pg.exec(tenantSchemaSql("public", [dealSignedCommissions]));
+  await pg.exec(`
+    ALTER TABLE deal_signed_commissions ADD CONSTRAINT deal_signed_commissions_dedup UNIQUE (deal_id, rep_user_id);
+    ALTER TABLE deal_signed_commissions ADD CONSTRAINT deal_signed_commissions_deal_id_fkey
+      FOREIGN KEY (deal_id) REFERENCES deals(id) ON DELETE CASCADE;
   `);
   tdb = drizzle(pg);
 });
@@ -198,7 +214,9 @@ describe("createChangeOrderChildDeal — a change order is its own Won child dea
     // workflow_route)) misclassifies the CO and estimator-filtered reports omit its revenue.
     const sp = U("e2001");
     const est = U("a02");
-    await pg.exec(`INSERT INTO users (id, display_name) VALUES ('${est}','Estimator Eve')`);
+    await pg.exec(
+      `INSERT INTO users (id, email, display_name, role, office_id) VALUES ('${est}','eve@t.test','Estimator Eve','rep','${OFFICE}')`
+    );
     await pg.exec(
       `INSERT INTO deals (id, deal_number, name, stage_id, assigned_rep_id, company_id, property_id, awarded_amount, won_closed_date, project_number, office_code, project_type, workflow_route, is_bid_board_owned, pipeline_type_snapshot, estimator_user_id) VALUES ` +
         `('${sp}','DFW-9-30001-aa','Service Parent','${ST.won}','${REP}','${CO_NS}','${PROP}', 100000, '2025-07-01','DFW-9-30001-aa','DFW','Roofing','service', false, 'service', '${est}')`
@@ -338,6 +356,66 @@ describe("CO CRUD on the child-deal model (counted exactly once across child + l
     await createChangeOrderChildDeal(tdb, { parentDealId: p, signedDate: "2026-01-01", amount: "999999999999.99", createdBy: REP });
     await createChangeOrderChildDeal(tdb, { parentDealId: p, signedDate: "2026-02-01", amount: "999999999999.99", createdBy: REP });
     expect(Number(await sumDealChangeOrders(tdb, p))).toBeCloseTo(1999999999999.98, 2);
+  });
+
+  // Regression for addMoneyStrings' cross-source sign bug, split into three independently-observable cases
+  // (a single it() would let case 3 hide behind case 2's failure, and case 1 doesn't discriminate at all —
+  // see its own comment below). Deliberately NON-.00 amounts throughout: the old toCents added the
+  // fraction's magnitude with the WRONG sign for a negative intPart, and BigInt("-0") collapsed to 0n so
+  // any negative total under $1 lost its sign — both invisible on the whole-dollar (.00) amounts every
+  // pre-existing sum test used.
+  it("a deductive CO nets against an additive one on the SAME parent (does not discriminate the bug — Postgres nets same-source rows before addMoneyStrings ever sees them)", async () => {
+    const p = U("e1030");
+    await seedWonParent(p, "DFW-9-20030-aa", 300000);
+    await createChangeOrderChildDeal(tdb, { parentDealId: p, signedDate: "2026-02-01", amount: "1000.50", createdBy: REP });
+    await createChangeOrderChildDeal(tdb, { parentDealId: p, signedDate: "2026-03-01", amount: "-300.25", createdBy: REP });
+    const sum = await sumDealChangeOrders(tdb, p);
+    expect(sum).toBe("700.25");
+    expect(Number(sum)).toBeCloseTo(700.25, 2);
+  });
+
+  it("a net-negative total under $1 in magnitude round-trips through sumDealChangeOrders — the '-0' sign-collapse case", async () => {
+    // BigInt("-0") is 0n: the old toCents("-0.50") silently dropped the sign. Both COs are children of the
+    // same parent, so Postgres nets them to -0.50 (a single, negative childSum) BEFORE addMoneyStrings
+    // combines it with the (zero) legacySum — that combine step is where the old code lost the sign.
+    const p2 = U("e1031");
+    await seedWonParent(p2, "DFW-9-20031-aa", 300000);
+    await createChangeOrderChildDeal(tdb, { parentDealId: p2, signedDate: "2026-02-01", amount: "200.00", createdBy: REP });
+    await createChangeOrderChildDeal(tdb, { parentDealId: p2, signedDate: "2026-03-01", amount: "-200.50", createdBy: REP });
+    const sum2 = await sumDealChangeOrders(tdb, p2);
+    expect(sum2).toBe("-0.50");
+    expect(Number(sum2)).toBeCloseTo(-0.5, 2);
+  });
+
+  it("a cross-source combination with a magnitude-≥-$1 negative operand round-trips — the wrong-magnitude case", async () => {
+    // Cross-source (child sum + legacy sum) where the CHILD side alone is a magnitude-≥-$1 negative with a
+    // nonzero fraction — the shape that trips the "wrong magnitude" defect independently of the "-0"
+    // sign-collapse case above: old toCents("-300.25") computed -299.75, not -300.25 (it added the
+    // fraction's magnitude with the wrong sign for a negative intPart).
+    const p3 = U("e1033");
+    await seedWonParent(p3, "DFW-9-20033-aa", 300000);
+    await createChangeOrderChildDeal(tdb, { parentDealId: p3, signedDate: "2026-02-01", amount: "-300.25", createdBy: REP });
+    await pg.exec(`INSERT INTO deal_change_orders (id, deal_id, signed_date, amount) VALUES ('${U("e1c31")}','${p3}','2026-03-01', 2500.00)`);
+    const sum3 = await sumDealChangeOrders(tdb, p3);
+    expect(sum3).toBe("2199.75"); // -300.25 + 2500.00; buggy code yields 2200.25 (off by exactly $0.50)
+    expect(Number(sum3)).toBeCloseTo(2199.75, 2);
+  });
+
+  it("the legacy update branch rejects a negative amount fail-closed (400, not a raw DB CHECK 500)", async () => {
+    // The legacy deal_change_orders.amount column still carries DB CHECK (amount > 0) (migration 0153) — it
+    // is not gaining deductive support. normalizeChangeOrderAmount now permits negative for the child-deal
+    // model, so this branch must reject it itself rather than let a surviving legacy row's CHECK violation
+    // surface as a bare 500.
+    const p = U("e1032");
+    await seedWonParent(p, "DFW-9-20032-aa", 100000);
+    await pg.exec(`INSERT INTO deal_change_orders (id, deal_id, signed_date, amount) VALUES ('${U("e1c30")}','${p}','2026-03-01', 700)`);
+    await expect(
+      updateDealChangeOrder(tdb, { id: U("e1c30"), dealId: p, amount: "-100" })
+    ).rejects.toMatchObject({ statusCode: 400, code: "CHANGE_ORDER_AMOUNT_INVALID" });
+    // Untouched by the rejected edit.
+    const rows = (await tdb.execute(sql`SELECT amount FROM deal_change_orders WHERE id = ${U("e1c30")}`)) as any;
+    const [row] = (Array.isArray(rows) ? rows : rows.rows) as Array<{ amount: string }>;
+    expect(Number(row.amount)).toBeCloseTo(700, 2);
   });
 
   it("rejects nesting: a change order cannot be added to another change order (one level only)", async () => {
@@ -542,5 +620,205 @@ describe("migrateLegacyChangeOrders — fix-forward (legacy rows → child deals
     const sumRows = (await tdb.execute(sql`SELECT COALESCE(SUM(awarded_amount),0)::numeric AS s FROM deals WHERE parent_deal_id = ${pa} AND is_change_order = true`)) as any;
     expect(Number((Array.isArray(sumRows) ? sumRows : sumRows.rows)[0].s)).toBeCloseTo(3500, 2);
     expect(await countN(sql`SELECT count(*)::int AS n FROM deal_signed_commissions WHERE deal_id IN (SELECT id FROM deals WHERE parent_deal_id = ${pa})`)).toBe(0); // historical COs don't earn commission
+  });
+});
+
+/**
+ * DEDUCTIVE change orders, end to end — the behaviours the whole deductive-CO branch exists to produce.
+ *
+ * A deductive CO is a change order with a NEGATIVE amount: it REDUCES the parent's contract value instead
+ * of adding to it. The write path accepts it (only 0 is meaningless), and every read path was made
+ * sign-aware before that write path was opened. The two repo-owner decisions pinned here:
+ *
+ *   • COMMISSION CLAWS BACK. A deductive CO mints a NEGATIVE owner commission row, so a rep's earned
+ *     commission always equals their rate applied to the CURRENT contract value and the drilldowns still
+ *     reconcile. This needs NO change to the commissions module — resolveSourceValue picks the first
+ *     NON-NULL candidate (awarded → bid → dd), not the first POSITIVE one, so a negative awarded_amount
+ *     flows through as the source value. That is load-bearing, not incidental: "tidying" it into a `> 0`
+ *     check would silently drop the claw-back (skipped_no_value, no row at all).
+ *   • DEAL COUNTS ARE UNCHANGED. A deductive CO is +1 Won deal exactly as an additive one is, so the count
+ *     predicates stay sign-agnostic while the VALUE aggregates are sign-aware.
+ *
+ * Dates here live in 2027 so the canonical Won window in the counting test can't pick up any CO seeded by
+ * the suites above (all 2025/2026).
+ */
+const DED_EST = U("a03"); // estimator on the CO parent — distinct from the owner
+const DED_SRC = U("a04"); // sales source on the CO parent — distinct from the owner AND the estimator
+
+describe("deductive change orders (negative amount) — child deal, totals, commission, counts", () => {
+  const DED_RATE = "0.100000"; // owner rate, so a −$50,000 CO claws back exactly −$5,000
+
+  beforeAll(async () => {
+    await pg.exec(
+      `INSERT INTO users (id, email, display_name, role, office_id) VALUES ` +
+        `('${DED_EST}','ded-est@t.test','Deductive Estimator','rep','${OFFICE}'),` +
+        `('${DED_SRC}','ded-src@t.test','Deductive Source','director','${OFFICE}')`
+    );
+    // Every actor is RATED and payable, so "no estimator/sales-source row on a CO" below is provably the
+    // change-order rule firing — not a missing rate quietly producing the same empty result.
+    await pg.exec(
+      `INSERT INTO user_commission_settings (user_id, commission_rate, is_active, commission_structure, capx_rate_solo, capx_rate_mixed, service_source_rate) VALUES ` +
+        `('${REP}', ${DED_RATE}, true, 'solo', ${DED_RATE}, 0, 0),` +
+        `('${DED_EST}', 0.050000, true, 'solo', 0.050000, 0, 0),` +
+        `('${DED_SRC}', 0.020000, true, 'mixed', 0, 0.020000, 0.030000) ` +
+        `ON CONFLICT (user_id) DO UPDATE SET commission_rate = EXCLUDED.commission_rate, is_active = true, ` +
+        `commission_structure = EXCLUDED.commission_structure, capx_rate_solo = EXCLUDED.capx_rate_solo, ` +
+        `capx_rate_mixed = EXCLUDED.capx_rate_mixed, service_source_rate = EXCLUDED.service_source_rate`
+    );
+  });
+
+  const commissionRows = async (dealId: string) => {
+    const r = (await tdb.execute(
+      sql`SELECT rep_user_id, attribution_role, amount, source_value_amount, source_value_kind
+          FROM deal_signed_commissions WHERE deal_id = ${dealId} ORDER BY attribution_role`
+    )) as any;
+    return (Array.isArray(r) ? r : r.rows) as Array<{
+      rep_user_id: string;
+      attribution_role: string;
+      amount: string;
+      source_value_amount: string;
+      source_value_kind: string;
+    }>;
+  };
+
+  it("creates a Won child deal carrying the NEGATIVE amount (the silent-vanish guard holds for a deduction)", async () => {
+    const p = U("d0d01");
+    await seedWonParent(p, "DFW-9-50001-aa", 500000);
+    const co = await createChangeOrderChildDeal(tdb, {
+      parentDealId: p,
+      signedDate: "2027-03-15",
+      amount: "-50000",
+      description: "Removed scope",
+      createdBy: REP,
+    });
+    const row = await fetchDeal(co.id);
+    // The exact property set the SILENT-VANISH GUARD protects — a deduction must be a first-class Won
+    // child, not a special case parked outside the Won population where its dollars would never land.
+    expect(row.is_change_order).toBe(true);
+    expect(row.parent_deal_id).toBe(p);
+    expect(Number(row.awarded_amount)).toBeCloseTo(-50000, 2); // the deduction is stored SIGNED, not absolute
+    expect(row.won_closed_date).toBe("2027-03-15"); // the CO's own date drives period attribution
+    expect(row.on_hold).toBe(false); // not parked → its (negative) value is counted, never zeroed
+    expect(row.is_test_data).toBe(false);
+    expect(row.is_active).toBe(true);
+    // A GENUINE Won stage, resolved through the same predicate the platform's Won population uses — not
+    // merely "whatever stage the parent happened to sit in".
+    const stageRows = (await tdb.execute(
+      sql`SELECT slug FROM pipeline_stage_config WHERE id = ${row.stage_id}`
+    )) as any;
+    const slug = String((Array.isArray(stageRows) ? stageRows : stageRows.rows)[0].slug);
+    expect(isGenuineWonDealStageSlug(slug, row.workflow_route)).toBe(true);
+    // And the API record mirrors the stored sign (the Billing/Estimates cards read this shape).
+    expect(Number(co.amount)).toBeCloseTo(-50000, 2);
+  });
+
+  it("nets out of the parent's change-order total: +20,000 and −50,000 sum to −30,000", async () => {
+    const p = U("d0d02");
+    await seedWonParent(p, "DFW-9-50002-aa", 500000);
+    await createChangeOrderChildDeal(tdb, { parentDealId: p, signedDate: "2027-04-01", amount: "20000", createdBy: REP });
+    await createChangeOrderChildDeal(tdb, { parentDealId: p, signedDate: "2027-04-02", amount: "-50000", createdBy: REP });
+    // The deduction must SUBTRACT, not be dropped by a `> 0` candidate gate (which would report +20,000)
+    // and not be absolutised (which would report +70,000).
+    expect(Number(await sumDealChangeOrders(tdb, p))).toBeCloseTo(-30000, 2);
+    // CCV = base + Σ COs, so the parent's contract value falls to 470,000 while its awarded base is untouched.
+    expect(Number((await fetchDeal(p)).awarded_amount)).toBeCloseTo(500000, 2);
+    // The list agrees with the sum by construction — both carry the sign.
+    const list = await listDealChangeOrders(tdb, p);
+    expect(list.length).toBe(2);
+    expect(list.reduce((s, r) => s + Number(r.amount), 0)).toBeCloseTo(-30000, 2);
+  });
+
+  it("claws commission back: a deductive CO mints a NEGATIVE owner commission row (first NON-NULL source value)", async () => {
+    const p = U("d0d03");
+    await seedWonParent(p, "DFW-9-50003-aa", 500000);
+    const co = await addDealChangeOrder(tdb, { dealId: p, signedDate: "2027-05-01", amount: "-50000", createdBy: REP });
+    const rows = await commissionRows(co.id);
+    expect(rows.length).toBe(1); // exactly one row — the owner's
+    expect(rows[0].rep_user_id).toBe(REP); // the PARENT's assigned rep, inherited by the child
+    expect(rows[0].attribution_role).toBe("owner");
+    expect(Number(rows[0].amount)).toBeCloseTo(-5000, 2); // −$50,000 × 10% — the claw-back
+    // THE LOAD-BEARING DETAIL: resolveSourceValue took awarded_amount because it is NON-NULL, not because
+    // it is positive. Re-tightening that to "first POSITIVE candidate" makes it fall through to the (null)
+    // bid/dd estimates → skipped_no_value → NO row at all, and the rep keeps commission on scope that was
+    // removed. These two assertions are what would catch that "tidy-up".
+    expect(rows[0].source_value_kind).toBe("awarded_amount");
+    expect(Number(rows[0].source_value_amount)).toBeCloseTo(-50000, 2);
+  });
+
+  it("commits the whole change order INSIDE a transaction — the claw-back must not poison the tx", async () => {
+    // The production blocker this branch shipped with, reproduced at the layer that actually broke.
+    //
+    // POST /api/deals/:id/change-orders runs addDealChangeOrder and THEN req.commitTransaction(). The
+    // commission mint runs inside that same transaction, and addDealChangeOrder catches its errors
+    // ("a commission-config gap must never block creating the CO"). But a DB CHECK violation is not a
+    // catchable-and-continue error: SQLSTATE 23514 ABORTS the Postgres transaction, so every later
+    // statement fails with 25P02 and the COMMIT rolls back. Catching the JS error therefore saved
+    // nothing — the child deal, its stage-history row and the audit rows all vanished, and the user got
+    // an error with the change order not created.
+    //
+    // Calling addDealChangeOrder on a bare connection (as the tests above do) CANNOT see this: the mint
+    // fails, the error is swallowed, and the already-committed child row survives. Only an enclosing
+    // transaction that must still commit afterwards discriminates it.
+    const p = U("d0d06");
+    await seedWonParent(p, "DFW-9-50006-aa", 500000);
+    let coId = "";
+    await tdb.transaction(async (tx: typeof tdb) => {
+      const co = await addDealChangeOrder(tx, {
+        dealId: p,
+        signedDate: "2027-07-01",
+        amount: "-50000",
+        createdBy: REP,
+      });
+      coId = co.id;
+      // A post-mint read inside the SAME transaction: on a poisoned tx this alone raises 25P02
+      // ("current transaction is aborted"), exactly as the route's writeAuditLog + commit did.
+      await tx.execute(sql`SELECT 1`);
+    });
+    // Durable AFTER commit — the whole point. A rolled-back tx leaves neither row behind.
+    expect(await fetchDeal(coId)).toBeDefined();
+    const rows = await commissionRows(coId);
+    expect(rows.length).toBe(1);
+    expect(Number(rows[0].amount)).toBeCloseTo(-5000, 2);
+    expect(Number(rows[0].source_value_amount)).toBeCloseTo(-50000, 2);
+  });
+
+  it("mints the OWNER cut only — never an estimator or sales-source row, even when both are set and rated", async () => {
+    // A SERVICE parent carrying BOTH an estimator and a sales source, each distinct from the owner and each
+    // holding an active, payable rate: on a normal signed deal this shape mints three rows. A change order
+    // is base-deal-only (skipped_change_order), so it must mint exactly ONE.
+    const p = U("d0d04");
+    await pg.exec(
+      `INSERT INTO deals (id, deal_number, name, stage_id, assigned_rep_id, company_id, property_id, awarded_amount, won_closed_date, contract_signed_date, project_number, office_code, project_type, workflow_route, pipeline_type_snapshot, is_bid_board_owned, estimator_user_id, sales_source_user_id) VALUES ` +
+        `('${p}','DFW-9-50004-aa','Service Parent w/ Estimator + Source','${ST.won}','${REP}','${CO_NS}','${PROP}', 500000,'2025-07-01','2025-07-01','DFW-9-50004-aa','DFW','Roofing','service','service', false, '${DED_EST}','${DED_SRC}')`
+    );
+    const co = await addDealChangeOrder(tdb, { dealId: p, signedDate: "2027-06-01", amount: "-50000", createdBy: REP });
+    // The child INHERITED both attributions, so the absent rows are the change-order rule firing — not the
+    // estimator/source simply being missing from the row the mint paths read.
+    const child = await fetchDeal(co.id);
+    expect(child.estimator_user_id).toBe(DED_EST);
+    expect(child.sales_source_user_id).toBe(DED_SRC);
+    expect(child.workflow_route).toBe("service"); // the sales-source branch's own gate is satisfied too
+    const rows = await commissionRows(co.id);
+    expect(rows.length).toBe(1);
+    expect(rows[0].rep_user_id).toBe(REP);
+    expect(rows[0].attribution_role).toBe("owner");
+    expect(rows.some((r) => r.rep_user_id === DED_EST)).toBe(false); // no estimator cut on a CO
+    expect(rows.some((r) => r.rep_user_id === DED_SRC)).toBe(false); // no sales-source cut on a CO
+    expect(rows.some((r) => r.attribution_role !== "owner")).toBe(false);
+  });
+
+  it("counts sign-agnostically: a deductive CO is +1 Won deal exactly like an additive one", async () => {
+    // Counted through getWonCloseSummary — the CANONICAL Won count/value pair (won_closed_date basis,
+    // reportable + is_active + non-test guards) that the dashboard Won card and the leaderboard read.
+    // Its window is what isolates this assertion from every CO the suites above seeded.
+    const p = U("d0d05");
+    await seedWonParent(p, "DFW-9-50005-aa", 500000); // parent won 2025-07-01 → OUTSIDE the window below
+    await createChangeOrderChildDeal(tdb, { parentDealId: p, signedDate: "2027-09-10", amount: "20000", createdBy: REP });
+    await createChangeOrderChildDeal(tdb, { parentDealId: p, signedDate: "2027-09-20", amount: "-50000", createdBy: REP });
+    const summary = await getWonCloseSummary(tdb, { from: "2027-09-01", to: "2027-09-30" });
+    // COUNT is sign-agnostic — the deduction is a real signed change order, so it is a Won deal like any
+    // other. VALUE is sign-aware. The two together are the decision: counts unchanged, dollars net out.
+    expect(summary.count).toBe(2);
+    expect(summary.totalValue).toBeCloseTo(-30000, 2);
   });
 });

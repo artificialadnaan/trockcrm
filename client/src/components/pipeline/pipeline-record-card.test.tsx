@@ -124,6 +124,41 @@ describe("PipelineRecordCard", () => {
     expect(html).not.toContain('data-on-hold="true"');
   });
 
+  it("renders a DEDUCTIVE change order's negative value instead of dropping it", () => {
+    // getEffectiveDealValue is already change-order aware and returns -50000 for this record. The card's
+    // own `> 0` display gate discarded that correct answer and rendered NO value at all — the deduction
+    // simply vanished from the board.
+    const html = render(
+      makeRecord({ isChangeOrder: true, awardedAmount: "-50000", bidEstimate: null })
+    );
+
+    expect(html).toContain("-$50.0K");
+  });
+
+  it("does not print the workflow route in the value slot for a deductive change order", () => {
+    // The empty-value slot falls back to the workflow route, so a swallowed deduction did not merely go
+    // blank — it read "normal" where the money belongs.
+    const html = render(
+      makeRecord({ isChangeOrder: true, awardedAmount: "-50000", bidEstimate: null })
+    );
+
+    expect(html).not.toContain("normal");
+  });
+
+  it("is inert for a POSITIVE change order", () => {
+    expect(
+      render(makeRecord({ isChangeOrder: true, awardedAmount: "50000", bidEstimate: null }))
+    ).toContain("$50.0K");
+  });
+
+  it("still shows no value — and the route fallback — for a genuinely valueless deal", () => {
+    // A $0/absent value keeps the pre-existing contract: no amount, and the route label in its place.
+    const html = render(makeRecord({ bidEstimate: null }));
+
+    expect(html).not.toContain("$");
+    expect(html).toContain("normal");
+  });
+
   it("uses the engine effective stage age for the record age label when supplied", () => {
     const html = render(
       makeRecord({

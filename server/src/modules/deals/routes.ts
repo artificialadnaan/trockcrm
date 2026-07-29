@@ -2567,8 +2567,8 @@ router.patch(
 
 // ===== CRM change orders (dated value records added to Won / Bid-Board-Owned deals) =====
 // Distinct from the Procore-synced `change_orders` table; never synced out. Mutations are
-// admin-only; the amount is positive-only and the parent deal must be Won / Bid-Board-Owned
-// (both enforced in change-order-service).
+// admin-only; the amount is non-zero (negative = deductive, reduces the parent's contract value)
+// and the parent deal must be Won / Bid-Board-Owned (both enforced in change-order-service).
 
 // GET /api/deals/:id/scorecards — list the Field Scorecards submitted for this deal (T-Rock Cam)
 router.get("/:id/scorecards", async (req, res, next) => {

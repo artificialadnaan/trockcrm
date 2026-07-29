@@ -38,6 +38,13 @@ type DealValueLike = {
   bidBoardTotalSales?: string | number | null;
   bidEstimate?: string | number | null;
   ddEstimate?: string | number | null;
+  // A change-order child deal (0156) carries its value ONLY in awardedAmount, possibly NEGATIVE for a
+  // deductive CO — read by getRawDealValue / getRawAwardedDealValue below, which take it verbatim ahead of
+  // the `> 0` fallback chain (mirrors server deal-value-sql.ts's withChangeOrderBranch; the two MUST NOT
+  // drift). A caller whose payload omits it falls through to that plain chain, silently pricing a deductive
+  // CO at $0 while every CO-aware SQL surface reads the negative — the exact bug this feature exists to fix;
+  // any surface that sums Won deals must supply it.
+  isChangeOrder?: boolean | null;
   // stageSlug / stage.slug ARE read by getRawDealValue for the 'estimating' DD-over-bid branch (2026-06-18).
   // bidBoardStageSlug / workflowRoute remain accepted for caller convenience but are not read here.
   stageSlug?: string | null;
@@ -78,6 +85,11 @@ function toDate(value: string | Date | null | undefined): Date | null {
 }
 
 function getRawDealValue(deal: DealValueLike): number {
+  // A change-order child's value is awardedAmount VERBATIM — never the `> 0` fallback chain. It has no
+  // other value column, and a deductive CO is negative, which every `> 0` candidate would drop to 0.
+  // Mirrors server deal-value-sql.ts withChangeOrderBranch.
+  if (deal.isChangeOrder) return toNumber(deal.awardedAmount);
+
   // Awarded-first value priority (mirrors server deal-value-sql.ts), each candidate gated > 0 (0 AND NULL
   // both fall through). STAGE-AWARE override for the single 'estimating' stage (2026-06-18): there the
   // in-progress bid is outranked by DD — awarded > dd > bid_board > bid. Bid is NOT skipped, just outranked
@@ -99,6 +111,8 @@ function getRawDealValue(deal: DealValueLike): number {
 }
 
 function getRawAwardedDealValue(deal: DealValueLike): number {
+  // Same change-order verbatim rule as getRawDealValue above.
+  if (deal.isChangeOrder) return toNumber(deal.awardedAmount);
   const awarded = toNumber(deal.awardedAmount);
   return awarded > 0 ? awarded : 0;
 }

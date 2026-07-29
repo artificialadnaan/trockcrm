@@ -1080,6 +1080,12 @@ router.get(
           // so concurrent requests on other connections are not affected.
           await client.query("BEGIN");
           await client.query("SELECT set_config('search_path', $1, true)", [`${schemaName},public`]);
+          // Both value aggregates branch on is_change_order first: a change-order child (0156) carries its
+          // value ONLY in awarded_amount and a DEDUCTIVE CO carries it NEGATIVE (mirrors the canonical
+          // withChangeOrderBranch in modules/shared/deal-value-sql.ts). In total_awarded_value the
+          // `awarded_amount > 0` test is a ROW FILTER rather than a fallback candidate, so the CO arm is
+          // added to that filter — otherwise a deduction is dropped from the sum entirely instead of
+          // lowering it. The is_active / on_hold guards are unchanged and still exclude those rows.
           const row = await client.query<{
             total_deals: string;
             active_deals: string;
@@ -1089,14 +1095,14 @@ router.get(
             `SELECT
                COUNT(*) AS total_deals,
                COUNT(*) FILTER (WHERE is_active = true) AS active_deals,
-               COALESCE(SUM(CASE WHEN is_active = true AND COALESCE(on_hold, false) = false AND COALESCE(psc.is_terminal, false) = false THEN COALESCE(
+               COALESCE(SUM(CASE WHEN is_active = true AND COALESCE(on_hold, false) = false AND COALESCE(psc.is_terminal, false) = false THEN CASE WHEN COALESCE(is_change_order, false) THEN COALESCE(awarded_amount, 0) ELSE COALESCE(
                  CASE WHEN bid_board_total_sales > 0 THEN bid_board_total_sales END,
                  CASE WHEN bid_estimate > 0 THEN bid_estimate END,
                  CASE WHEN dd_estimate > 0 THEN dd_estimate END,
                  CASE WHEN awarded_amount > 0 THEN awarded_amount END,
                  0
-               ) ELSE 0 END), 0) AS total_pipeline_value,
-               COALESCE(SUM(CASE WHEN is_active = true AND COALESCE(on_hold, false) = false AND awarded_amount > 0 THEN awarded_amount ELSE 0 END), 0) AS total_awarded_value
+               ) END ELSE 0 END), 0) AS total_pipeline_value,
+               COALESCE(SUM(CASE WHEN is_active = true AND COALESCE(on_hold, false) = false AND (awarded_amount > 0 OR COALESCE(is_change_order, false)) THEN COALESCE(awarded_amount, 0) ELSE 0 END), 0) AS total_awarded_value
              FROM deals
              LEFT JOIN public.pipeline_stage_config psc ON psc.id = deals.stage_id`
           );

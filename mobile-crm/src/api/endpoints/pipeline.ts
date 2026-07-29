@@ -1,5 +1,6 @@
 import type { DealListItem, PipelineStage } from "../types";
 import type { Fetcher } from "./auth";
+import { formatMoney } from "../../format";
 
 /**
  * The kanban board and the stage-move flow.
@@ -326,4 +327,46 @@ export function canMoveStage(
   currentUserId: string | undefined,
 ): boolean {
   return Boolean(currentUserId && deal.assignedRepId === currentUserId);
+}
+
+/**
+ * The column's money, as it appears above the card list. Column totals arrive already summed
+ * server-side with the canonical hold rule applied; this only decides whether there is a number.
+ *
+ * This gate used to be `<= 0`, which made the phone contradict the web for the same stage: the web
+ * column header (client/src/components/pipeline/pipeline-board-column.tsx:73) formats
+ * `column.totalValue ?? 0` with no sign test, so a stage whose net goes negative reads "-$30,000"
+ * there and read "—" here. A deductive change order is how a column gets there — a CO child is a Won
+ * deal, active and never on-hold, so it is inside the Won column's SUM, and the `watched` scope is
+ * deal_subscriptions in ISOLATION, so watching a child without its parent gives a Won column that is
+ * exactly one deduction. The board asks for won_all_time, so that column is not a window that could be
+ * expected to net back out on its own.
+ *
+ * ZERO IS NOT TREATED AS THE CARD TREATS IT, and the difference is real rather than a preference.
+ * DealCard.displayAmount keeps the em dash for 0 because resolveDealValue collapses "absent" and
+ * "explicitly $0" into one number on the way out — that card cannot tell them apart. A column can, from
+ * two facts the card has no equivalent of:
+ *
+ *   • `totalValue` is the raw payload field, so an ABSENT total is still undefined at this gate rather
+ *     than having already become 0.
+ *   • `activeCount` says whether anything entered the SUM. It is activeCount and NOT totalCount: the
+ *     server computes the value as SUM(...) FILTER (WHERE COALESCE(on_hold, false) = false) and
+ *     activeCount as COUNT(*) under that SAME filter, while totalCount is an unfiltered count(*) that
+ *     also counts held cards — which contribute nothing (deals/service.ts:3682-3684).
+ *
+ * So an empty column keeps its dash, and every column that actually summed something shows what it
+ * summed, sign and all. A payload with no activeCount at all falls to the number: rendering "$0" for
+ * an empty column is cosmetic, hiding a -$30,000 is not.
+ *
+ * Takes the WHOLE column rather than the two numbers, because they have to be read together and two
+ * positional numbers are the kind of pairing that silently swaps.
+ */
+export function formatColumnTotal(column: {
+  totalValue?: number | null;
+  activeCount?: number | null;
+}): string {
+  const total = column.totalValue;
+  if (typeof total !== "number" || !Number.isFinite(total)) return "—";
+  if (total === 0 && column.activeCount === 0) return "—";
+  return formatMoney(total);
 }

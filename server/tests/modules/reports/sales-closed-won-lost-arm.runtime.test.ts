@@ -36,7 +36,7 @@ beforeAll(async () => {
     CREATE TABLE offices (id uuid PRIMARY KEY, name text, slug text);
     CREATE TABLE deals (
       id uuid PRIMARY KEY, sales_source_user_id uuid, name text, stage_id uuid NOT NULL, assigned_rep_id uuid,
-      is_active boolean NOT NULL DEFAULT true, is_test_data boolean NOT NULL DEFAULT false, on_hold boolean NOT NULL DEFAULT false,
+      is_active boolean NOT NULL DEFAULT true, is_test_data boolean NOT NULL DEFAULT false, is_change_order boolean NOT NULL DEFAULT false, on_hold boolean NOT NULL DEFAULT false,
       won_closed_date date, actual_close_date date, lost_at timestamptz, stage_entered_at timestamptz,
       contract_signed_at timestamptz, updated_at timestamptz,
       region_classification text, property_city text, property_state text, office_code text, workflow_route text,

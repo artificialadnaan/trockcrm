@@ -8,23 +8,20 @@ import {
 } from "@trock-crm/shared/types";
 import { pool } from "../db.js";
 import {
+  workerAwardedFirstDealValueSql,
   workerCurrentDealValueSql,
   workerEffectiveCurrentDealValueSql,
 } from "./deal-value-sql.js";
 
 export const STALE_ACCOUNT_THRESHOLD_DAYS = 30;
 const REPORTABLE_DEAL_SQL = reportableDealSqlPredicate("d");
-// The RAW and auto-parked value expressions come from the shared worker leaf module (deal-value-sql.ts),
-// which weekly-digest also uses and the cross-surface reconciliation test executes directly — so the two
-// jobs and the test can no longer hold three hand-copied versions of the same rule.
+// The RAW, auto-parked and closed/awarded-first value expressions all come from the shared worker leaf
+// module (deal-value-sql.ts), which weekly-digest and the large-loss alert also use and the cross-surface
+// reconciliation test executes directly — so the jobs and the tests can no longer hold hand-copied
+// versions of the same rule. (The open chain is bid-board-first and the closed one awarded-first; that
+// divergence is deliberate and documented at the top of the leaf module.)
 const currentDealValueSql = workerCurrentDealValueSql("d");
-const awardedFirstDealValueSql = `COALESCE(
-  CASE WHEN d.awarded_amount > 0 THEN d.awarded_amount END,
-  CASE WHEN d.bid_board_total_sales > 0 THEN d.bid_board_total_sales END,
-  CASE WHEN d.bid_estimate > 0 THEN d.bid_estimate END,
-  CASE WHEN d.dd_estimate > 0 THEN d.dd_estimate END,
-  0
-)`;
+const awardedFirstDealValueSql = workerAwardedFirstDealValueSql("d");
 const wonStageSqlList = WON_DEAL_STAGE_SLUGS.map((slug) => `'${slug}'`).join(", ");
 const lostStageSqlList = LOST_DEAL_STAGE_SLUGS.map((slug) => `'${slug}'`).join(", ");
 const terminalStageSqlList = [...WON_DEAL_STAGE_SLUGS, ...LOST_DEAL_STAGE_SLUGS]

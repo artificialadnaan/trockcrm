@@ -51,7 +51,7 @@ beforeAll(async () => {
       project_type_id text,
       workflow_route text NOT NULL DEFAULT 'normal',
       is_active boolean NOT NULL DEFAULT true,
-      on_hold boolean NOT NULL DEFAULT false, expected_close_date date, bid_due_date timestamptz,
+      is_change_order boolean NOT NULL DEFAULT false, on_hold boolean NOT NULL DEFAULT false, expected_close_date date, bid_due_date timestamptz,
       won_closed_date date,
       lost_at timestamptz,
       stage_entered_at timestamptz,

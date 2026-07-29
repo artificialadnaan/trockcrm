@@ -1,6 +1,6 @@
 import * as deals from "../api/endpoints/deals";
 import type { Fetcher } from "../api/endpoints/auth";
-import { displayAmount, showsAtRisk } from "../components/DealCard";
+import { displayAmount, resolveDealValue, showsAtRisk } from "../components/DealCard";
 import type { AtRiskResult } from "../api/types";
 
 function recording(result: unknown = {}) {
@@ -178,6 +178,7 @@ describe("displayAmount — the canonical value priority", () => {
     bidBoardTotalSales: null,
     stageSlug: null,
     workflowRoute: null,
+    isChangeOrder: null,
   };
 
   it("prefers an awarded amount once one exists", () => {
@@ -285,6 +286,7 @@ describe("displayAmount — the server's effective value wins", () => {
     bidBoardTotalSales: null,
     stageSlug: null,
     workflowRoute: null,
+    isChangeOrder: null,
   };
 
   it("shows the server's effectiveValue in preference to the raw columns", () => {
@@ -334,6 +336,7 @@ describe("the compatibility fallback honours a stored hold", () => {
     bidBoardTotalSales: null,
     stageSlug: null,
     workflowRoute: null,
+    isChangeOrder: null,
   };
 
   it("zeroes on the stored onHold flag, not only the effective one", () => {
@@ -350,5 +353,75 @@ describe("the compatibility fallback honours a stored hold", () => {
   it("prefers the server's effectiveValue over the stored flag when both are present", () => {
     // effectiveValue already has the canonical rule applied, including its own hold handling.
     expect(displayAmount({ ...legacy, onHold: false, effectiveValue: 180000 })).toBe("$180,000");
+  });
+});
+
+describe("a DEDUCTIVE change order — the negative must survive to the screen", () => {
+  const empty = {
+    effectiveValue: null,
+    effectiveOnHold: null,
+    onHold: null,
+    awardedAmount: null,
+    bidEstimate: null,
+    ddEstimate: null,
+    bidBoardTotalSales: null,
+    stageSlug: null,
+    workflowRoute: null,
+    isChangeOrder: null,
+  };
+
+  it("renders the server's NEGATIVE effectiveValue instead of an em dash", () => {
+    // The server's change-order-aware chain already sends -50000 here. A `> 0` display gate threw that
+    // correct answer away and drew "—", so the one card that exists to show a deduction showed nothing.
+    expect(
+      displayAmount({
+        ...empty,
+        isChangeOrder: true,
+        effectiveValue: -50000,
+        awardedAmount: "-50000.00",
+      }),
+    ).toBe("-$50,000");
+  });
+
+  it("takes a change-order child's awardedAmount VERBATIM on the local fallback chain", () => {
+    // A CO child has no other value column, and every `> 0` candidate drops a negative to 0. Mirrors
+    // server withChangeOrderBranch / shared getRawDealValue / client resolveBestEstimate.
+    expect(
+      resolveDealValue({
+        ...empty,
+        isChangeOrder: true,
+        awardedAmount: "-50000.00",
+        bidEstimate: "250000.00",
+      }),
+    ).toBe(-50000);
+  });
+
+  it("is inert for a POSITIVE change order — the branch changes no existing number", () => {
+    expect(resolveDealValue({ ...empty, isChangeOrder: true, awardedAmount: "50000.00" })).toBe(50000);
+  });
+
+  it("does NOT take a negative awardedAmount verbatim on a non-change-order deal", () => {
+    // The branch is gated on the flag, not on the sign: an ordinary deal with a nonsense negative
+    // awarded amount still falls through the `> 0` chain exactly as it always did.
+    expect(
+      resolveDealValue({ ...empty, awardedAmount: "-50000.00", bidEstimate: "250000.00" }),
+    ).toBe(250000);
+  });
+
+  it("still zeroes a HELD change order — hold outranks the CO branch, as it does in SQL", () => {
+    // storedOnHoldDealValueSql wraps the chain, so on_hold wins over the change-order branch there too.
+    expect(
+      resolveDealValue({ ...empty, isChangeOrder: true, onHold: true, awardedAmount: "-50000.00" }),
+    ).toBe(0);
+  });
+
+  it("shows an em dash for a change order with no awarded amount, never '-$0'", () => {
+    expect(displayAmount({ ...empty, isChangeOrder: true })).toBe("—");
+  });
+
+  it("keeps the em dash for a genuinely zero server value", () => {
+    // 0 stays a dash: resolveDealValue collapses "absent" and "explicitly zero" to the same 0, so the
+    // display cannot tell them apart and keeps the pre-existing contract for both.
+    expect(displayAmount({ ...empty, effectiveValue: 0, isChangeOrder: true })).toBe("—");
   });
 });

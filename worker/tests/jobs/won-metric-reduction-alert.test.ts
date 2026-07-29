@@ -371,6 +371,46 @@ describe("buildWonMetricReductionEmail — value/summary edge cases", () => {
     expect(email.text).toContain("Amount: $0.00"); // R2-4: populated all-zero snapshot -> $0
     expect(email.text).toContain("was lowered from $100,000.00 to $0.00");
   });
+
+  // 0184 installs no INSERT trigger, so CREATING a deductive CO fires no alert — but it does install
+  // AFTER UPDATE OF (… awarded_amount …), so EDITING a CO's amount downward does, and this email reports
+  // the value. A change-order child carries its value ONLY in awarded_amount, so the positive-gated chain
+  // used to drop a negative and report the deduction as $0 (or as a stale fallback estimate).
+  it("reports a deductive change order's NEGATIVE amount from awarded_amount verbatim", () => {
+    const email = build({
+      ...REASSIGN_EVENT,
+      reasonCode: "won_value_reduced",
+      actionLabel: "Won value changed",
+      changedFields: { awarded_amount: { from: -10000, to: -25000 } },
+      newSnapshot: { isChangeOrder: true, awardedAmount: -25000 },
+      oldSnapshot: { isChangeOrder: true, awardedAmount: -10000 },
+    });
+    expect(email.text).toContain("Amount: -$25,000.00");
+    expect(email.text).not.toContain("Amount: $0.00");
+  });
+
+  it("still ignores a change order's other value columns rather than falling through to them", () => {
+    // A CO row should never carry a bid/DD estimate, but if one is present it must NOT outrank the
+    // deduction — the CO branch is verbatim, not a re-ordered chain.
+    const email = build({
+      ...REASSIGN_EVENT,
+      reasonCode: "won_value_reduced",
+      actionLabel: "Won value changed",
+      newSnapshot: { isChangeOrder: true, awardedAmount: -25000, bidEstimate: 80000 },
+      oldSnapshot: { isChangeOrder: true, awardedAmount: -10000, bidEstimate: 80000 },
+    });
+    expect(email.text).toContain("Amount: -$25,000.00");
+    expect(email.text).not.toContain("Amount: $80,000.00");
+  });
+
+  it("is INERT for a positive change order", () => {
+    const email = build({
+      ...REASSIGN_EVENT,
+      newSnapshot: { isChangeOrder: true, awardedAmount: 50000 },
+      oldSnapshot: { isChangeOrder: true, awardedAmount: 50000 },
+    });
+    expect(email.text).toContain("Amount: $50,000.00");
+  });
 });
 
 describe("enableWonMetricReductionAlertDelivery", () => {

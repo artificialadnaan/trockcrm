@@ -39,12 +39,14 @@ const GENUINELY_WON_PREDICATE = `(sc.slug IN (${WON_SLUG_LIST}) AND lower(btrim(
 const REAL_WON_DATE_EXPR = `COALESCE(d.contract_signed_at::date, d.contract_signed_date, d.stage_entered_at::date)`;
 
 // Won-revenue value, matching aliasedEffectiveWonDealValueSql (awarded -> bid_board_total_sales ->
-// bid_estimate -> dd_estimate, zeroed when on hold).
-const WON_VALUE_EXPR = `(CASE WHEN COALESCE(d.on_hold, false) THEN 0 ELSE COALESCE(
+// bid_estimate -> dd_estimate, zeroed when on hold), including its change-order branch: a CO child (0156)
+// carries its value ONLY in awarded_amount and a DEDUCTIVE CO carries it NEGATIVE, so it is taken verbatim
+// ahead of the `> 0` candidates — otherwise this reconcile's net-$ impact would price a deduction at $0.
+const WON_VALUE_EXPR = `(CASE WHEN COALESCE(d.on_hold, false) THEN 0 ELSE CASE WHEN COALESCE(d.is_change_order, false) THEN COALESCE(d.awarded_amount, 0) ELSE COALESCE(
   CASE WHEN d.awarded_amount > 0 THEN d.awarded_amount END,
   CASE WHEN d.bid_board_total_sales > 0 THEN d.bid_board_total_sales END,
   CASE WHEN d.bid_estimate > 0 THEN d.bid_estimate END,
-  CASE WHEN d.dd_estimate > 0 THEN d.dd_estimate END, 0) END)`;
+  CASE WHEN d.dd_estimate > 0 THEN d.dd_estimate END, 0) END END)`;
 
 export interface ReconcileDeal {
   dealNumber: string | null;

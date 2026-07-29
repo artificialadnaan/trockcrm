@@ -9,6 +9,13 @@ type DealValueTable = {
   bidEstimate: unknown;
   ddEstimate: unknown;
   forecastRevenue?: unknown;
+  // A change-order child deal (0156) carries its value ONLY in awarded_amount, and a DEDUCTIVE CO carries
+  // it NEGATIVE. REQUIRED, not optional: the sole production constructor is the real Drizzle `deals` table,
+  // which always carries this column, so requiring it here means a hand-built table missing the field fails
+  // to COMPILE in `server/src` — instead of silently falling back to the pre-CO chain the way an optional
+  // field would. `server/tests` is not typechecked (server/tsconfig.json includes only src/**/*), so a test
+  // literal missing the field is backstopped instead by the assertions in deal-value-sql.test.ts.
+  isChangeOrder: unknown;
 };
 
 type DealValueColumn =
@@ -87,20 +94,145 @@ function tableColumnSql(table: DealValueTable, column: DealValueColumn): unknown
   }
 }
 
+// A change-order child deal's value is awarded_amount VERBATIM — never the `> 0` fallback chain. A CO child
+// has no other value column to fall back to (verified in prod: all 30 carry awarded_amount and nothing
+// else), and a DEDUCTIVE CO is negative, which every `> 0` candidate drops — silently reporting the
+// deduction as $0 on every Won surface. Provably inert for a POSITIVE CO, which is what the reconciliation
+// test in deal-value-change-order.runtime.test.ts pins.
+function changeOrderBranchSql(isChangeOrderSql: unknown, awardedSql: unknown, chainSql: SQL): SQL {
+  return sql`CASE WHEN COALESCE(${isChangeOrderSql}, false) THEN COALESCE(${awardedSql}, 0) ELSE ${chainSql} END`;
+}
+
+// Derives BOTH the is_change_order predicate and the awarded_amount fallback from the SAME table object, so
+// the two can never be hand-paired wrong at a call site (previously every call site built
+// `COALESCE(<src>.is_change_order, false)` and `<src>.awarded_amount` separately and passed them as two
+// same-typed SQL args that would swap with no compile error). Callers pass only the already-built chain.
+function withChangeOrderBranch(table: DealValueTable, chainSql: SQL): SQL {
+  return changeOrderBranchSql(table.isChangeOrder, table.awardedAmount, chainSql);
+}
+
+// Aliased twin of withChangeOrderBranch — derives both operands from the SAME alias string.
+function withAliasedChangeOrderBranch(alias: string, chainSql: SQL): SQL {
+  return changeOrderBranchSql(sql.raw(`${alias}.is_change_order`), sql.raw(`${alias}.awarded_amount`), chainSql);
+}
+
 function dealValueChainSql(table: DealValueTable, columns: readonly DealValueColumn[]): SQL {
-  return sql`COALESCE(${sql.join(
+  const chain = sql`COALESCE(${sql.join(
     columns.map((column) => positiveDealValueCandidateSql(tableColumnSql(table, column))),
     sql`, `
   )}, 0)`;
+  return withChangeOrderBranch(table, chain);
 }
 
+// REQUIRED COLUMN at `alias` (in addition to whichever `columns` are passed in): is_change_order. Every
+// aliased builder that resolves through this chain inherits the requirement — a narrowed CTE that projects
+// an explicit column list (e.g. sales-tier1-service.ts's `open_deals`, which selects only id, name, stage_id,
+// on_hold, value) will fail at RUNTIME, not compile time, if pointed at one of them; pass `deals`/`d`/`SELECT
+// d.*`.
 function aliasedDealValueChainSql(alias: string, columns: readonly DealValueColumn[]): SQL {
-  return sql.raw(
+  const chain = sql.raw(
     `COALESCE(${columns
       .map((column) => aliasedPositiveDealValueCandidateSql(alias, column))
       .join(", ")}, 0)`
   );
+  return withAliasedChangeOrderBranch(alias, chain);
 }
+
+// SCOPE — the ledger of hand-copied/hand-rolled twins of this chain that the deductive-change-order branch
+// identified and retired. Every twin previously listed here is now CO-aware and struck: shared/src/types/
+// deal-hold.ts (getRawDealValue / getRawAwardedDealValue, Task 2), client/src/lib/deal-utils.ts
+// (resolveBestEstimate, Task 3), and — Task 4 — server/src/modules/daily-summary/service.ts,
+// server/src/modules/admin/routes.ts (both cross-office aggregates), server/src/modules/search/service.ts,
+// worker/src/jobs/deal-value-sql.ts, worker/src/jobs/rep-performance-rollup.ts, worker/src/jobs/index.ts
+// and worker/src/jobs/won-metric-reduction-alert.ts.
+//
+// That last TypeScript twin — mobile-crm/src/components/DealCard.tsx's resolveDealValue — is now CO-aware
+// as well: it takes a change-order child's awardedAmount VERBATIM, placed BELOW its hold check so a held
+// deal is still worth 0 (matching storedOnHoldDealValueSql, which wraps this chain rather than being
+// wrapped by it). It stays a hand-copied twin rather than a call into getRawDealValue because mobile-crm
+// is a standalone Expo app, deliberately NOT an npm workspace member, so Metro cannot resolve shared/.
+// Two `> 0` DISPLAY gates that discarded the corrected negative went with it: DealCard.tsx's
+// displayAmount (now `!== 0`, so a non-zero value renders and only zero shows the em dash) and
+// client/src/components/pipeline/pipeline-record-card.tsx's formatValue (same change; its value already
+// resolved through the CO-aware shared getEffectiveDealValue, so only the gate was wrong — and the null
+// it returned did not merely blank the amount, it let the card print the workflow route in the money's
+// place). The other mobile-crm value surfaces carry no gate of their own — BoardCard.tsx and
+// app/(app)/deals/[id].tsx both call displayAmount — so fixing those two functions reaches every render
+// site in the table below.
+//
+// CHECKED, because a branch on a field the payload never sends would be inert. The surface that matters is
+// not "every deals endpoint" but every screen that reaches this chain, and that set is enumerable rather
+// than asserted: grep mobile-crm for `<DealCard`, `<BoardCard` and `displayAmount` outside the two
+// component files themselves. That yields four render sites, each fed by one endpoint, and is_change_order
+// reaches all four as `isChangeOrder`:
+//   (tabs)/deals/index.tsx    <- GET /api/deals              (deals/routes.ts:866)  `...getTableColumns(deals)`
+//   deals/board.tsx           <- GET /api/deals/pipeline     (routes.ts:1001)       `...getTableColumns(deals)`
+//   deals/stage/[stageId].tsx <- GET /api/deals/stages/:id   (routes.ts:1064)       hand-written SELECT that
+//     projects d.is_change_order (service.ts:3995) and maps it in mapDealStageWorkspaceRow (service.ts:1730)
+//   deals/[id].tsx            <- GET /api/deals/:id/detail   -> getDealById, `...getTableColumns(deals)`
+// Redaction cannot drop it on any of them: redactDealResponse strips only hubspotDealId,
+// stripPrivateDealFieldsForViewer only the six commission fields, and the stage-page route redacts nothing
+// (its SELECT never includes hubspot_deal_id). mobile-crm/src/api/types.ts already declared the field. All
+// four rows also end in attachAtRiskResult, so the server-computed `effectiveValue` these cards PREFER is
+// CO-aware too — the local chain above is the mixed-version fallback. Two further endpoints DO return deal
+// rows to this app and are deliberately absent: POST /deals/:id/stage's `{ deal }` and the associations
+// from /contacts/:id/deals. Neither is passed to displayAmount, so neither touches this chain.
+//
+// The first draft of this paragraph said "all three endpoints mobile-crm reads" and missed the stage page.
+// Nothing was broken by the omission — that route was already CO-aware — but the count was an
+// exhaustiveness claim nobody had checked, which is the fourth time this ledger has done that. Hence
+// anchoring to render sites and naming the grep: the claim above is one a reader can re-run in one command
+// rather than one they have to take on faith.
+//
+// That is the whole of what is claimed above: those edits, and that render-site trace. It is NOT a fresh
+// completeness sweep of the repo — it rests on Task 4's sweep, whose edges are stated next. The plpgsql
+// chain in migration 0184 remains outstanding separately, described at the end of this comment.
+//
+// ONE LEVEL UP from those per-deal display gates sat two AGGREGATE gates. Each broke the card/drill/
+// aggregate rule rather than a single number, and both are now fixed:
+//
+//   • the mobile-crm board's COLUMN TOTAL. `<= 0` drew "—" for a column whose net went negative, while
+//     the web header for the same stage (client/src/components/pipeline/pipeline-board-column.tsx:73)
+//     formats `column.totalValue ?? 0` ungated and shows "-$30,000" — one office, two answers, depending
+//     on which screen the rep is holding. Reachable through a CO child: it is Won, active and never
+//     on-hold, so it is inside the Won column's SUM, and the `watched` scope is deal_subscriptions in
+//     ISOLATION — watch the child without its parent and that column IS one deduction (the board asks
+//     for won_all_time, so it is not a window that nets back out). Now formatColumnTotal in
+//     mobile-crm/src/api/endpoints/pipeline.ts, moved off the screen so it is testable without a
+//     renderer (the same split go-back.ts makes), rendering every column that summed anything. Zero is
+//     treated differently here than on a CARD, deliberately: a column carries `activeCount`, computed
+//     under the SAME on_hold FILTER as its SUM (deals/service.ts:3682-3684), so "nothing entered the
+//     sum" and "the deals that did, summing to zero" are distinguishable — the ambiguity displayAmount
+//     is stuck with simply does not exist one level up.
+//
+//   • client/src/pages/properties/property-list-page.tsx's hasLinkedPipeline, the membership test behind
+//     the "Linked pipeline" card's drill. `> 0` dropped a property whose linked value nets negative out
+//     of the drilled list while its money stayed inside the card's total, so the list could not be made
+//     to add up and the site responsible for the gap was not on screen to be found — a vanished row is
+//     worse than a wrong number. propertyLinkedDealValueSql SUMs signed, CO-aware values over a
+//     property's active deals and a CO child inherits its parent's property_id, so a property nets
+//     negative whenever its deductions outweigh what else still counts there (a soft-deleted parent is
+//     out of that SUM entirely — it filters is_active — and a held one contributes 0, while the child
+//     inherits neither flag). Now `!== 0`: "contributes to the number", which is the invariant the card
+//     and its drill actually share. $0 properties stay excluded — they move the sum by nothing.
+//
+// What Task 4 actually swept, so the next reader knows the edges of this claim: `awarded_amount > 0` and
+// the equivalent TS candidate-chain shapes across server/src, worker/src, client/src, shared/src (tests
+// excluded), plus scripts/ and migrations/. That sweep also turned up two twins OUTSIDE the app source —
+// scripts/verify-won-closed-date-parity.ts and scripts/lib/bid-board-won-date-reconcile.ts, both of which
+// claimed in comments to mirror aliasedEffectiveWonDealValueSql — and both were fixed with the eight.
+// It did NOT sweep client-field/, mobile/ or any non-TS/SQL surface, and it makes no claim about them.
+//
+// STILL OUTSTANDING and NOT fixed here (its own follow-up PR): the plpgsql Won-value chain inside
+// migrations/0184_won_metric_reduction_alerts.sql (won_metric_reduction_impacts, old_value/new_value) is a
+// `> 0`-gated twin, and the canonical impacts call passes p_exclude_change_orders = false, so change
+// orders ARE in scope for it. The effect is worse than a wrong number: for a pure deductive-amount edit
+// (say -10,000 -> -25,000) both old_value and new_value compute to 0 and both counts stay 1, so v_impacts
+// is '{}' and the trigger returns without creating an event AT ALL. Sign flips and deletions still move
+// the computed value, so they do fire and DO reach the worker's snapshotBestValue fix above. Until 0184 is
+// fixed, such an email can read "Amount: -$25,000.00" beside an impacts line computed as "$50,000 ->
+// $0.00" — internally inconsistent, though still strictly better than the old "Amount: $0.00". Fixing it
+// needs a NEW migration rather than an edit here.
 
 export function dealBestEstimateSql(table: DealValueTable): SQL {
   return dealValueChainSql(table, DEAL_VALUE_PRIORITY_CHAIN);
@@ -112,7 +244,8 @@ export function dealEstimatingValueSql(table: DealValueTable): SQL {
 }
 
 export function dealAwardedAmountSql(table: DealValueTable): SQL {
-  return sql`COALESCE(${positiveDealValueCandidateSql(table.awardedAmount)}, 0)`;
+  const positiveOnly = sql`COALESCE(${positiveDealValueCandidateSql(table.awardedAmount)}, 0)`;
+  return withChangeOrderBranch(table, positiveOnly);
 }
 
 export function dealAwardedFirstWithFallbackSql(table: DealValueTable): SQL {
@@ -173,7 +306,10 @@ export function aliasedDealEstimatingValueSql(alias: string): SQL {
 }
 
 export function aliasedDealAwardedAmountSql(alias: string): SQL {
-  return sql.raw(`COALESCE(${aliasedPositiveDealValueCandidateSql(alias, "awarded_amount")}, 0)`);
+  return withAliasedChangeOrderBranch(
+    alias,
+    sql.raw(`COALESCE(${aliasedPositiveDealValueCandidateSql(alias, "awarded_amount")}, 0)`)
+  );
 }
 
 export function aliasedDealAwardedFirstWithFallbackSql(alias: string): SQL {
@@ -206,7 +342,9 @@ export function aliasedOpenPipelineForecastFirstDealValueSql(alias: string): SQL
 // in any tenant schema is Bid Board-terminal while its CRM stage is open), so this only closes the
 // inconsistency — it does not move today's dollars.
 //
-// REQUIRED COLUMNS at `alias`: on_hold, bid_board_stage_slug, stage_id, bid_due_date, expected_close_date.
+// REQUIRED COLUMNS at `alias`: on_hold, bid_board_stage_slug, stage_id, bid_due_date, expected_close_date,
+// plus is_change_order via the default rawValueSql (aliasedDealBestEstimateSql — see the REQUIRED COLUMN
+// note on aliasedDealValueChainSql, which every aliased builder in this family resolves through).
 export function aliasedEffectiveDealValueSql(
   alias: string,
   rawValueSql: SQL = aliasedDealBestEstimateSql(alias)
@@ -338,9 +476,38 @@ export function aliasedActiveDealCountFilterSql(alias: string): SQL {
  * be the SAME value expression the surface displays/counts so the tier matches what
  * users see. (Effective-value chains already zero on-hold, but the explicit
  * reportable guard keeps the intent clear and also covers raw value chains.)
+ *
+ * SIGN — `<> 0`, not `> 0` (2026-07-29). This tier is a LIVENESS partition, not a value ranking: the
+ * population it exists to demote is DEAD rows — parked (on_hold) deals and deals carrying no value at
+ * all. It is deliberately the leading key so those stay out of the way under EVERY sort. A DEDUCTIVE
+ * change order (a live Won child deal whose awarded_amount is negative — see withChangeOrderBranch) is
+ * not in that population: it is a live deal with a real, non-zero value that the count and the total on
+ * the same screen both include. So the correct test is "has a value at all", and the original `> 0` was
+ * never a sign policy — it was shorthand for non-zero, correct only while every value in the system was
+ * non-negative, which is exactly the assumption the deductive-CO branch removes.
+ *
+ * PROVABLY INERT outside that one population. For any row that is NOT a change order, this file's value
+ * chains are `COALESCE(<candidates, each gated `> 0`>, 0)` wrapped in a hold-zeroing CASE, so they can
+ * never evaluate below zero; `<> 0` and `> 0` therefore select IDENTICALLY on every non-CO row. The only
+ * rows this operator can move are change-order children with a negative awarded_amount. (Pinned in
+ * tests/modules/shared/deal-sort-tier-sign.runtime.test.ts, which computes both operators side by side.)
+ *
+ * WHY NOT a sort-aware tier. The reviewed alternative was to keep `> 0` while the surface sorts by value
+ * and use `<> 0` otherwise, so a deduction could never top a money ranking. It was rejected on three
+ * counts. (1) A negative is the SMALLEST number, so a descending value sort already places it at the
+ * bottom of the live tier without any help — the intent is satisfied by the sort itself. (2) It is
+ * actively wrong for an ASCENDING value sort, where a deduction genuinely belongs first and the tier
+ * would force it last. (3) VISIBILITY: the board ships a tiny per-column preview (8 cards on web,
+ * 15 on mobile-crm) and the deals list paginates, while the column header count and total include every
+ * row — so filing a live deduction behind every on-hold and $0 row can push it off the visible page
+ * entirely, leaving a total the visible cards cannot account for. That is a card/aggregate
+ * reconciliation break, not an ordering preference. Keeping the tier a pure function of the row also
+ * keeps it in lockstep with its client twin, compareDrilldownDeals in
+ * client/src/pages/deals/deal-list-page.tsx, whose `tierOf` makes the same non-zero test. The two are a
+ * twin pair; change them together.
  */
 export function aliasedActiveNonZeroDealSortTierSql(alias: string, valueSql: SQL): SQL {
-  return sql`CASE WHEN ${aliasedReportableDealFilterSql(alias)} AND ${valueSql} > 0 THEN 0 ELSE 1 END`;
+  return sql`CASE WHEN ${aliasedReportableDealFilterSql(alias)} AND ${valueSql} <> 0 THEN 0 ELSE 1 END`;
 }
 
 /**

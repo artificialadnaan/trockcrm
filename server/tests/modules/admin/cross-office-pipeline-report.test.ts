@@ -14,10 +14,12 @@ describe("cross-office pipeline report SQL", () => {
 
     expect(source).toContain("count(*) filter (where is_active = true) as active_deals");
     expect(source).toContain(
-      "case when is_active = true and coalesce(on_hold, false) = false and coalesce(psc.is_terminal, false) = false then coalesce"
+      "case when is_active = true and coalesce(on_hold, false) = false and coalesce(psc.is_terminal, false) = false then case when"
     );
+    // The awarded sum's row filter now ALSO admits a change-order child (whose amount may be negative),
+    // but the is_active / on_hold guards in front of it are unchanged.
     expect(source).toContain(
-      "case when is_active = true and coalesce(on_hold, false) = false and awarded_amount > 0 then awarded_amount else 0 end"
+      "case when is_active = true and coalesce(on_hold, false) = false and (awarded_amount > 0 or coalesce(is_change_order, false)) then coalesce(awarded_amount, 0) else 0 end"
     );
   });
 
@@ -29,12 +31,12 @@ describe("cross-office pipeline report SQL", () => {
     expect(source).toContain(
       "from deals left join public.pipeline_stage_config psc on psc.id = deals.stage_id"
     );
-    expect(source).toContain("and coalesce(psc.is_terminal, false) = false then coalesce");
+    expect(source).toContain("and coalesce(psc.is_terminal, false) = false then case when");
 
     // Scope guard: total_awarded_value is intentionally NOT terminal-filtered here
     // (awarded contract value is a won-deal concept); only the pipeline value changed.
     expect(source).toContain(
-      "coalesce(on_hold, false) = false and awarded_amount > 0 then awarded_amount else 0 end"
+      "coalesce(on_hold, false) = false and (awarded_amount > 0 or coalesce(is_change_order, false)) then coalesce(awarded_amount, 0) else 0 end"
     );
   });
 });

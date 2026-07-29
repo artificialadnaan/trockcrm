@@ -248,10 +248,13 @@ export interface CreateChangeOrderChildInput {
  * never synced to Bid Board/Procore, and geocode + assignment-task side-effects are intentionally NOT
  * fired for a child. Commission is wired by the caller (addDealChangeOrder), per the comp decision.
  *
- * SILENT-VANISH GUARD (hard): every child is created with a Won stage + a usable won date + a positive
+ * SILENT-VANISH GUARD (hard): every child is created with a Won stage + a usable won date + a non-zero
  * awarded amount + not on-hold + not test-data — the exact set every Won total requires. We control all
  * of these and assert the load-bearing ones before insert, so a child can never be born in a state that
- * drops it out of the Won reports/counts.
+ * drops it out of the Won reports/counts. A NEGATIVE awarded amount is legitimate here (a deductive change
+ * order, reducing the parent's contract value) — it is not a silent-vanish risk because every value chain,
+ * report, rollup, and search surface was already made change-order-sign-aware before this write path was
+ * opened up; only a ZERO amount is still meaningless and rejected.
  */
 export async function createChangeOrderChildDeal(
   tenantDb: TenantDb,
@@ -271,10 +274,10 @@ export async function createChangeOrderChildDeal(
       "CHANGE_ORDER_CHILD_NOT_WON"
     );
   }
-  if (!signedDate || !(Number(amount) > 0)) {
+  if (!signedDate || Number(amount) === 0) {
     throw new AppError(
       500,
-      "Refusing to create a change-order child without a won date and positive amount.",
+      "Refusing to create a change-order child without a won date and a non-zero amount.",
       "CHANGE_ORDER_CHILD_INVALID"
     );
   }
@@ -361,18 +364,28 @@ export async function createChangeOrderChildDeal(
   };
 }
 
-// Positive money string: 1-12 integer digits + up to 2 decimals. This bounds the value to the
-// deal_change_orders.amount NUMERIC(14,2) ceiling (999,999,999,999.99) by construction.
-const CHANGE_ORDER_AMOUNT_PATTERN = /^\d{1,12}(\.\d{1,2})?$/;
+// Signed money string: an optional leading '-', then 1-12 integer digits + up to 2 decimals. This bounds
+// the magnitude to the NUMERIC(14,2) ceiling (999,999,999,999.99) by construction. A NEGATIVE amount is a
+// DEDUCTIVE change order (it reduces the parent's contract value); zero is still meaningless and rejected.
+const CHANGE_ORDER_AMOUNT_PATTERN = /^-?\d{1,12}(\.\d{1,2})?$/;
 
 /**
- * Validate + normalize a change-order amount to a positive 2-decimal numeric string.
+ * Validate + normalize a change-order amount to a signed 2-decimal numeric string.
  *
- * Decimal-safe by construction: it validates the string form (at most 2 decimals, at most 12 integer
- * digits) and formats via string padding — never via Number.toFixed rounding. So sub-cent inputs
- * (would round to 0.00 and trip the DB CHECK > 0), extra-precision inputs (would silently round the
- * stored value), and over-ceiling inputs (would overflow NUMERIC(14,2)) are all rejected as a clean
- * 400 rather than surfacing later as a DB 500.
+ * A negative amount is a DEDUCTIVE change order — it reduces the parent deal's awarded_amount (and so the
+ * parent's contract value) rather than adding to it. That is legitimate, not an error: every value chain,
+ * report, rollup, and search surface was made change-order-sign-aware before this write path was opened up,
+ * so a negative amount now flows correctly everywhere it is read. Zero carries no meaning either way (it
+ * neither adds nor deducts) and is still rejected.
+ *
+ * Decimal-safe by construction: it validates the string form (an optional sign, at most 2 decimals, at
+ * most 12 integer digits) and formats via string padding — never via Number.toFixed rounding. So sub-cent
+ * inputs (would round to 0.00), extra-precision inputs (would silently round the stored value), and
+ * over-ceiling inputs (would overflow the child deal's awarded_amount NUMERIC(14,2)) are all rejected as a
+ * clean 400 rather than surfacing later as a DB 500. (The legacy deal_change_orders.amount CHECK (amount >
+ * 0) is unreachable in practice — that table has 0 rows in all three offices, and every new change order is
+ * created as a child deal, never a legacy row — so the ceiling here is about the child deal's column, not
+ * that constraint.)
  */
 export function normalizeChangeOrderAmount(input: unknown): string {
   const raw =
@@ -386,19 +399,20 @@ export function normalizeChangeOrderAmount(input: unknown): string {
   if (!CHANGE_ORDER_AMOUNT_PATTERN.test(raw)) {
     throw new AppError(
       400,
-      "Change order amount must be a positive number with at most 2 decimals (max 999,999,999,999.99).",
+      "Change order amount must be a number with at most 2 decimals (max 999,999,999,999.99).",
       "CHANGE_ORDER_AMOUNT_INVALID"
     );
   }
-  if (Number(raw) <= 0) {
+  if (Number(raw) === 0) {
     throw new AppError(
       400,
-      "Change order amount must be greater than 0.",
+      "Change order amount cannot be 0.",
       "CHANGE_ORDER_AMOUNT_INVALID"
     );
   }
-  const [intPart, fraction = ""] = raw.split(".");
-  return `${intPart}.${fraction.padEnd(2, "0")}`;
+  const negative = raw.startsWith("-");
+  const [intPart, fraction = ""] = raw.replace(/^-/, "").split(".");
+  return `${negative ? "-" : ""}${intPart}.${fraction.padEnd(2, "0")}`;
 }
 
 function normalizeSignedDate(input: unknown): string {
@@ -526,15 +540,25 @@ export async function getDealChangeOrderById(
   return legacy ? legacyRowToChangeOrderRecord(legacy as Record<string, unknown>) : null;
 }
 
-// Add two non-negative money strings ("<int>.<2dp>" or integer) as integer cents via BigInt — exact at
-// ANY magnitude (no IEEE-754 rounding even for a pathological multi-CO total beyond 2^53 cents).
+// Add two SIGNED money strings ("-<int>.<2dp>" | "<int>.<2dp>" or integer) as integer cents via BigInt —
+// exact at ANY magnitude (no IEEE-754 rounding even for a pathological multi-CO total beyond 2^53 cents).
+// Sign-aware by construction: the naive `BigInt(intPart) * 100n + BigInt(frac)` is WRONG for a negative
+// intPart (it adds the fraction's magnitude with the wrong sign — "-500.25" would toCents to -499.75, not
+// -500.25 — and BigInt("-0") collapses to 0n, so a magnitude under $1 loses its sign entirely). Instead the
+// sign is stripped once up front, the magnitude computed unsigned, and the sign re-applied once — never
+// split across the two terms — and the same unsigned-then-resign shape is used on the way back out.
 function addMoneyStrings(a: string, b: string): string {
   const toCents = (s: string): bigint => {
-    const [intPart, frac = ""] = s.split(".");
-    return BigInt(intPart || "0") * 100n + BigInt((frac + "00").slice(0, 2) || "0");
+    const negative = s.startsWith("-");
+    const unsigned = negative ? s.slice(1) : s;
+    const [intPart, frac = ""] = unsigned.split(".");
+    const magnitude = BigInt(intPart || "0") * 100n + BigInt((frac + "00").slice(0, 2) || "0");
+    return negative ? -magnitude : magnitude;
   };
   const cents = toCents(a) + toCents(b);
-  return `${cents / 100n}.${(cents % 100n).toString().padStart(2, "0")}`;
+  const negative = cents < 0n;
+  const absCents = negative ? -cents : cents;
+  return `${negative ? "-" : ""}${absCents / 100n}.${(absCents % 100n).toString().padStart(2, "0")}`;
 }
 
 /** Sum of a deal's change-order value (child deals + un-migrated legacy rows), counted exactly once. */
@@ -673,7 +697,25 @@ export async function updateDealChangeOrder(
     updatedAt: new Date(),
     updatedBy: input.updatedBy ?? null,
   };
-  if (input.amount !== undefined) legacyUpdates.amount = normalizeChangeOrderAmount(input.amount);
+  if (input.amount !== undefined) {
+    const normalizedAmount = normalizeChangeOrderAmount(input.amount);
+    // The legacy table's amount column still carries DB CHECK (amount > 0) (migration 0153) — it predates
+    // deductive change orders and is NOT being altered (in practice unreachable: 0 rows in every office,
+    // and every new CO is created as a child deal, never a legacy row — see normalizeChangeOrderAmount's
+    // docblock). But this branch does not get to ASSUME that emptiness: listDealChangeOrders /
+    // getDealChangeOrderById still read this table on every request, and a surviving row could be edited
+    // here. Without this guard, a negative amount would sail through normalizeChangeOrderAmount (which now
+    // permits it) and only fail at the DB as a raw CHECK violation — a bare 500, not a clean 400. Reject it
+    // here instead, fail-closed.
+    if (Number(normalizedAmount) < 0) {
+      throw new AppError(
+        400,
+        "Change order amount must be positive (legacy change orders cannot be deductive).",
+        "CHANGE_ORDER_AMOUNT_INVALID"
+      );
+    }
+    legacyUpdates.amount = normalizedAmount;
+  }
   if (input.signedDate !== undefined) legacyUpdates.signedDate = normalizeSignedDate(input.signedDate);
   if (input.description !== undefined) legacyUpdates.description = normalizeDescription(input.description);
   const [legacy] = await tenantDb
