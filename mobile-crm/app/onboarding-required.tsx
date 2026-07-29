@@ -103,7 +103,11 @@ export default function OnboardingRequiredScreen() {
   return (
     <SafeAreaView style={styles.safe}>
       <View style={styles.body}>
-        <Text style={styles.kicker}>Onboarding required</Text>
+        {/* Labelled, because `kicker` uppercases by transform and on iOS that transformed string is
+            what VoiceOver reads. This is the first line of a screen a locked-out user cannot leave. */}
+        <Text accessibilityLabel="Onboarding required" style={styles.kicker}>
+          Onboarding required
+        </Text>
         <Text style={styles.title}>Finish cleanup before using the CRM</Text>
         <Text style={styles.copy}>
           {pendingKnown
@@ -134,6 +138,10 @@ export default function OnboardingRequiredScreen() {
           onPress={() => void checkAgain()}
           disabled={checking || gate === "checking"}
           accessibilityRole="button"
+          accessibilityState={{
+            disabled: checking || gate === "checking",
+            busy: checking || gate === "checking",
+          }}
           style={styles.secondary}
         >
           {checking ? (

@@ -315,7 +315,7 @@ export default function MoveStageScreen() {
     <SafeAreaView style={styles.safe} edges={["top"]}>
       <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === "ios" ? "padding" : undefined}>
         <ScrollView contentContainerStyle={styles.body} keyboardShouldPersistTaps="handled">
-          <Pressable onPress={() => goBack()} accessibilityRole="button">
+          <Pressable onPress={() => goBack()} accessibilityRole="button" accessibilityLabel="Back">
             <Text style={styles.back}>‹ Cancel</Text>
           </Pressable>
 
@@ -347,7 +347,7 @@ export default function MoveStageScreen() {
             </View>
           ) : null}
 
-          <Text style={styles.label}>Move to</Text>
+          <FieldLabel>Move to</FieldLabel>
           {stagesQuery.isLoading ? (
             <ActivityIndicator color={theme.color.brandRed} />
           ) : stagesQuery.isError && stagesQuery.data === undefined ? (
@@ -456,7 +456,7 @@ export default function MoveStageScreen() {
 
           {isOwner && needsCloseDate ? (
             <>
-              <Text style={styles.label}>Expected close date</Text>
+              <FieldLabel>Expected close date</FieldLabel>
               <Text style={styles.help}>
                 This is the only thing holding the move up. Set it here and the deal advances in one step.
               </Text>
@@ -508,7 +508,7 @@ export default function MoveStageScreen() {
 
           {isOwner && needsOverride && !closeDateResolvesGate ? (
             <>
-              <Text style={styles.label}>Reason for the override</Text>
+              <FieldLabel>Reason for the override</FieldLabel>
               <Text style={styles.help}>
                 This move skips a requirement, so the reason is recorded on the deal&apos;s history.
               </Text>
@@ -526,7 +526,7 @@ export default function MoveStageScreen() {
 
           {isOwner && isLostMove ? (
             <>
-              <Text style={styles.label}>Why was it lost?</Text>
+              <FieldLabel>Why was it lost?</FieldLabel>
               {lostReasons.isLoading ? (
                 <ActivityIndicator color={theme.color.brandRed} />
               ) : lostReasons.isError && lostReasons.data === undefined ? (
@@ -571,7 +571,7 @@ export default function MoveStageScreen() {
                   ))}
                 </View>
               )}
-              <Text style={styles.label}>What happened?</Text>
+              <FieldLabel>What happened?</FieldLabel>
               <Text style={styles.help}>Required — the server rejects a Lost move with blank notes.</Text>
               <TextInput
                 testID="lost-notes"
@@ -654,6 +654,26 @@ function fieldLabel(key: string): string {
   // camelCase / snake_case → "Sentence case", so an unmapped key still reads as English.
   const spaced = key.replace(/_/g, " ").replace(/([a-z0-9])([A-Z])/g, "$1 $2").trim();
   return spaced.charAt(0).toUpperCase() + spaced.slice(1).toLowerCase();
+}
+
+/**
+ * A form label, drawn in caps and spoken in words.
+ *
+ * `styles.label` uppercases by transform, and on iOS RN 0.81.5 the transform is applied before the
+ * attributed string is built — so the transformed text becomes the accessible name unless a label
+ * overrides it, and "Why was it lost?" is announced letter by letter.
+ *
+ * A component rather than an `accessibilityLabel` repeated at each of the five call sites: the same
+ * string written twice per label is five places for the pair to drift, and the sixth label added later
+ * would simply have arrived without one. Guarded tree-wide by
+ * `src/__tests__/uppercase-text-has-accessible-label.test.ts`.
+ */
+function FieldLabel({ children }: { children: string }) {
+  return (
+    <Text accessibilityLabel={children} style={styles.label}>
+      {children}
+    </Text>
+  );
 }
 
 /** What the gate is still waiting on, if anything. */

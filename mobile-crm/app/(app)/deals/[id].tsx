@@ -104,6 +104,11 @@ export default function DealDetailScreen() {
     },
   });
 
+  // Derived once, above the JSX: the press guard, the greyed style and the announcement all ask this
+  // same question, and three copies of it is three chances for the button to be pressable while looking
+  // dead, or to read as available while refusing the press.
+  const noteBlocked = note.trim().length === 0 || logNote.isPending;
+
   const watch = useMutation({
     mutationFn: (next: boolean) =>
       next ? dealsApi.watchDeal(fetcher, dealId) : dealsApi.unwatchDeal(fetcher, dealId),
@@ -224,7 +229,13 @@ export default function DealDetailScreen() {
           onPress={() => watch.mutate(!deal.isWatching)}
           disabled={watch.isPending}
           accessibilityRole="button"
-          accessibilityState={{ selected: deal.isWatching }}
+          /* `selected` alone read as an available control while the toggle was in flight — the state
+             object existed, which is exactly why nobody noticed the half that was missing. */
+          accessibilityState={{
+            selected: deal.isWatching,
+            disabled: watch.isPending,
+            busy: watch.isPending,
+          }}
           style={styles.watchBtn}
         >
           <Text style={styles.watchText}>{deal.isWatching ? "★ Watching" : "☆ Watch"}</Text>
@@ -319,16 +330,17 @@ export default function DealDetailScreen() {
                 : "Couldn't save that note."}
             </Text>
           ) : null}
+          {/* One predicate, three consumers. It was already written twice — the press guard and the
+              greyed style — and announcing it would have made a third copy of an expression that must
+              agree everywhere or the button lies to somebody. */}
           <Pressable
             testID="save-note"
             onPress={() => logNote.mutate(note.trim())}
-            disabled={note.trim().length === 0 || logNote.isPending}
+            disabled={noteBlocked}
             accessibilityRole="button"
             accessibilityLabel="Save note"
-            style={[
-              styles.saveNote,
-              (note.trim().length === 0 || logNote.isPending) && styles.saveNoteDisabled,
-            ]}
+            accessibilityState={{ disabled: noteBlocked, busy: logNote.isPending }}
+            style={[styles.saveNote, noteBlocked && styles.saveNoteDisabled]}
           >
             {logNote.isPending ? (
               <ActivityIndicator color={theme.color.textInverse} />
@@ -403,6 +415,10 @@ export default function DealDetailScreen() {
               }}
               disabled={activitiesQuery.isFetchingNextPage}
               accessibilityRole="button"
+              accessibilityState={{
+                disabled: activitiesQuery.isFetchingNextPage,
+                busy: activitiesQuery.isFetchingNextPage,
+              }}
               style={styles.retry}
             >
               {activitiesQuery.isFetchingNextPage ? (
@@ -435,7 +451,11 @@ export default function DealDetailScreen() {
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <View style={styles.section}>
-      <Text style={styles.sectionTitle}>{title}</Text>
+      {/* `header` so the rotor can jump between sections, and an explicit label because
+          `sectionTitle` uppercases by transform — which on iOS becomes the accessible name itself. */}
+      <Text accessibilityRole="header" accessibilityLabel={title} style={styles.sectionTitle}>
+        {title}
+      </Text>
       <View style={styles.sectionBody}>{children}</View>
     </View>
   );

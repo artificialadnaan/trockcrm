@@ -270,3 +270,49 @@ export function leadFlagNextStep(input: { flagged: boolean; nextStep: string }):
   if (!input.flagged) return typed || undefined;
   return typed ? `${LEAD_FLAG} — ${typed}` : LEAD_FLAG;
 }
+
+/**
+ * What VoiceOver should say when the capture reaches an outcome — "" when there is nothing to say.
+ *
+ * Both outcomes mount into the middle of a scroll and change nothing above them, so on iOS a rep who
+ * cannot see the screen taps Save and the app appears inert. The HALT is the dangerous one: nothing was
+ * written and the visit is waiting on an answer, which is indistinguishable from success if it is
+ * silent. So the halt states that outright — "Nothing saved yet" — before the question.
+ *
+ * Here rather than inline in the component for the reason this module exists: `planContact`,
+ * `haltsForDuplicates` and `personDetailsWillBeDiscarded` are all here because deciding them inline
+ * shipped a defect first. A message assembled in JSX is a message nothing can test, and the failure mode
+ * is silence — the one outcome no reviewer notices.
+ *
+ * Composed from the SAME flags the JSX renders, so a caveat that is on screen is also spoken and one
+ * that is hidden is absent from both. Empty when there is no outcome: announcing "" would interrupt
+ * whatever VoiceOver is mid-sentence on, so the caller checks length before speaking.
+ */
+export function saveAnnouncement(input: {
+  saved: boolean;
+  flagForLead: boolean;
+  contactFailed: boolean;
+  contactIndeterminate: boolean;
+  duplicateCount: number;
+}): string {
+  if (input.saved) {
+    return [
+      "Logged.",
+      input.flagForLead ? "Marked as worth a lead. Follow up with the office." : null,
+      input.contactFailed
+        ? input.contactIndeterminate
+          ? "That person may or may not have been saved — check before adding them again."
+          : "That person couldn't be saved — add them on the web."
+        : null,
+    ]
+      .filter(Boolean)
+      .join(" ");
+  }
+  if (input.duplicateCount === 1) {
+    return "Nothing saved yet. Someone with this name is already in the CRM. Is this them?";
+  }
+  if (input.duplicateCount > 1) {
+    return `Nothing saved yet. ${input.duplicateCount} people with this name are already in the CRM. Which one did you meet?`;
+  }
+  return "";
+}

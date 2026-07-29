@@ -76,7 +76,12 @@ export default function StageDealsScreen() {
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
       <View style={styles.header}>
-        <Pressable onPress={() => goBack()} accessibilityRole="button" hitSlop={8}>
+        <Pressable
+          onPress={() => goBack()}
+          accessibilityRole="button"
+          accessibilityLabel="Back"
+          hitSlop={8}
+        >
           <Text style={styles.back}>‹ Board</Text>
         </Pressable>
         <Text style={styles.title} numberOfLines={1}>

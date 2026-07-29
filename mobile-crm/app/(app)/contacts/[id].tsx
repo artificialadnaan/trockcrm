@@ -257,6 +257,9 @@ export default function ContactDetailScreen() {
                 testID={`contact-deal-${assoc.deal.id}`}
                 onPress={() => router.push(`/(app)/deals/${assoc.deal.id}`)}
                 accessibilityRole="button"
+                /* Without this the composed name ends in the decorative chevron below — "Acme reroof,
+                   ›" — because an unlabelled group announces its children's text, punctuation and all. */
+                accessibilityLabel={assoc.deal.name ?? "Untitled deal"}
                 style={styles.dealRow}
               >
                 <Text style={styles.dealName} numberOfLines={1}>
@@ -303,7 +306,11 @@ function Action({
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <View style={styles.section}>
-      <Text style={styles.sectionTitle}>{title}</Text>
+      {/* `header` so the rotor can jump between sections, and an explicit label because
+          `sectionTitle` uppercases by transform — which on iOS becomes the accessible name itself. */}
+      <Text accessibilityRole="header" accessibilityLabel={title} style={styles.sectionTitle}>
+        {title}
+      </Text>
       <View style={styles.sectionBody}>{children}</View>
     </View>
   );

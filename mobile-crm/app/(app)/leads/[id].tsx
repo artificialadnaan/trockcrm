@@ -273,7 +273,12 @@ export default function LeadDetailScreen() {
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
       <ScrollView contentContainerStyle={styles.body}>
-        <Pressable onPress={() => goBack()} accessibilityRole="button" hitSlop={8}>
+        <Pressable
+          onPress={() => goBack()}
+          accessibilityRole="button"
+          accessibilityLabel="Back"
+          hitSlop={8}
+        >
           <Text style={styles.back}>‹ Leads</Text>
         </Pressable>
 
@@ -466,7 +471,11 @@ export default function LeadDetailScreen() {
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <View style={styles.section}>
-      <Text style={styles.sectionTitle}>{title}</Text>
+      {/* `header` so the rotor can jump between sections, and an explicit label because
+          `sectionTitle` uppercases by transform — which on iOS becomes the accessible name itself. */}
+      <Text accessibilityRole="header" accessibilityLabel={title} style={styles.sectionTitle}>
+        {title}
+      </Text>
       <View style={styles.sectionBody}>{children}</View>
     </View>
   );

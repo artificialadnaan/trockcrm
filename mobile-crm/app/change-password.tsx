@@ -265,6 +265,12 @@ export default function ChangePasswordScreen() {
             disabled={!canSubmit}
             accessibilityRole="button"
             accessibilityLabel="Update password"
+            /* Matches login.tsx, which is the point: this is the SAME shared formStyles control, and the
+               two screens had already drifted once — that is why formStyles exists. Extracting the
+               styles did not stop them drifting again on the half nobody can see, so the pairing is now
+               held by src/__tests__/disabled-controls-announce-disabled.test.ts rather than by care.
+               Without it the only disabled signal here is buttonDisabled's opacity: 0.5. */
+            accessibilityState={{ disabled: !canSubmit, busy }}
             style={[formStyles.button, !canSubmit && formStyles.buttonDisabled]}
           >
             {busy ? (
@@ -287,6 +293,7 @@ export default function ChangePasswordScreen() {
             disabled={busy}
             accessibilityRole="button"
             accessibilityLabel="Sign out"
+            accessibilityState={{ disabled: busy }}
             style={styles.signOut}
           >
             <Text style={styles.signOutText}>Sign out</Text>
