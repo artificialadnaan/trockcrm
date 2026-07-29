@@ -663,11 +663,11 @@ describe("leadership scorecardDraftToSubmission", () => {
     ]);
     expect(payload.items.find((i) => i.sectionKey === "safety")?.note).toBe("strong PPE");
     expect(payload.items.every((i) => i.points === 9)).toBe(true);
-    // No signatures / deficiencies / action items for leadership.
+    // No signatures / deficiencies for leadership. Action items, however, ARE sent — see below.
     expect(payload.superintendentSignature).toBeNull();
     expect(payload.pmSignature).toBeNull();
     expect(payload.criticalDeficiencies).toEqual([]);
-    expect(payload.actionItems).toEqual([]);
+    expect(payload.actionItems).toEqual([]); // none were added to this draft
     expect(payload.photos).toEqual([
       { sectionKey: "project_summary", deficiencyKey: null, clientUploadId: "cu-1" },
       { sectionKey: "safety", deficiencyKey: null, clientUploadId: "cu-2" },
@@ -678,5 +678,24 @@ describe("leadership scorecardDraftToSubmission", () => {
     let d = fullyScoredLeadership(8);
     d = scorecardDraftReducer(d, { type: "setSummary", value: "   " });
     expect(scorecardDraftToSubmission(d).summary).toBeNull();
+  });
+
+  // The CREATE path. This was hardcoded to `[]` while the form collected action items, so a brand-new
+  // below-band leadership card reached the server with nothing flagged: it stayed `submitted` and opened no
+  // corrective-action cycle, moments after the form's own banner told the evaluator that adding an item would
+  // start one. The edit/PUT builder was fixed without this one, and no test covered it.
+  it("SENDS the draft's action items, trimmed and blank-filtered", () => {
+    let d = fullyScoredLeadership(6); // below band
+    d = scorecardDraftReducer(d, { type: "addActionItem" });
+    d = scorecardDraftReducer(d, { type: "setActionItem", index: 0, value: "  Rebuild the look-ahead  " });
+    d = scorecardDraftReducer(d, { type: "addActionItem" });
+    d = scorecardDraftReducer(d, { type: "setActionItem", index: 1, value: "   " });
+    d = scorecardDraftReducer(d, { type: "addActionItem" });
+    d = scorecardDraftReducer(d, { type: "setActionItem", index: 2, value: "Close the safety observations" });
+
+    expect(scorecardDraftToSubmission(d).actionItems).toEqual([
+      "Rebuild the look-ahead",
+      "Close the safety observations",
+    ]);
   });
 });

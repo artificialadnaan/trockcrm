@@ -283,6 +283,22 @@ function LeadershipBody({
         <Text style={styles.bulletText}>{scorecard.summary?.trim() || "No summary provided."}</Text>
       </View>
 
+      {/* Action items — free text, render raw. Mirrors ProjectBody: without this the follow-up work the
+          evaluator just captured vanishes from the submitted-card view the moment it saves, which reads as
+          the save having dropped it. They are also a leadership card's only flagged items, so this is the
+          list its corrective-action cycle is built from. */}
+      {scorecard.actionItems.length > 0 ? (
+        <View style={{ gap: theme.space.sm }}>
+          <SectionLabel>Action items</SectionLabel>
+          {scorecard.actionItems.map((item, i) => (
+            <View key={`${i}-${item}`} style={styles.bulletRow}>
+              <Text style={styles.bulletDot}>•</Text>
+              <Text style={styles.bulletText}>{item}</Text>
+            </View>
+          ))}
+        </View>
+      ) : null}
+
       {/* Category and Project Summary evidence photos. A null url → placeholder tile (no broken Image). */}
       {photoSections.length > 0 ? (
         <View style={{ gap: theme.space.md }}>

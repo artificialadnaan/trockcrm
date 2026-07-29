@@ -765,8 +765,8 @@ export function scorecardDraftToSubmission(draft: ScorecardDraft): ScorecardSubm
 
 /**
  * Leadership payload: `kind: "leadership"`, the 4 leadership items in canonical order (with dictated
- * comment notes), the free-text summary, and category/Project Summary photos. No
- * signatures / deficiencies / action items — leadership cards don't collect them. weekOf is sent but the
+ * comment notes), the free-text summary, action items, and category/Project Summary photos. No
+ * signatures / deficiencies — leadership cards don't collect those. weekOf is sent but the
  * server stamps the real completion date (like project V2), so a device value can't file under a stale week.
  */
 function leadershipDraftToSubmission(draft: ScorecardDraft): ScorecardSubmissionPayload {
@@ -786,7 +786,12 @@ function leadershipDraftToSubmission(draft: ScorecardDraft): ScorecardSubmission
     })),
     criticalDeficiencies: [],
     criticalDeficiencyNotes: {},
-    actionItems: [],
+    // The CREATE path, and the one that matters most: this is where a brand-new below-band leadership card
+    // gets its flagged items. Hardcoding `[]` here while the form collected them meant the server saw nothing
+    // flagged, the card stayed `submitted`, and no corrective-action cycle opened — with the form's own banner
+    // having just told the evaluator that adding an item would start one. Same trim-then-filter as the PUT
+    // builder and the server.
+    actionItems: draft.actionItems.map((item) => item.trim()).filter(Boolean),
     photos: draft.photos
       .filter(isNewScorecardDraftPhoto)
       .filter((p) => p.sectionKey === FIELD_SCORECARD_LEADERSHIP_SUMMARY_SECTION_KEY || FIELD_SCORECARD_LEADERSHIP_SECTION_KEYS.includes(p.sectionKey as ScorecardLeadershipSectionKey))
