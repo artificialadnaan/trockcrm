@@ -29,6 +29,7 @@ import {
   planContact,
   describeMatch,
   isPositionTooCoarse,
+  offersCompanyFallback,
   saveAnnouncement,
   submitBlockedReason,
   type CapturedAddress,
@@ -232,6 +233,9 @@ export default function ProspectScreen() {
       return { geocoded, found };
     },
     onSuccess: ({ geocoded, found }) => {
+      // Abandoned mid-flight: the rep is already on the company path, and applying this now would
+      // clear the target they chose and replace it with candidates they had stopped waiting for.
+      if (matchAbandoned.current) return;
       setAddress(
         geocoded
           ? {
@@ -265,6 +269,7 @@ export default function ProspectScreen() {
       setMatches(found);
     },
     onError: (err) => {
+      if (matchAbandoned.current) return;
       // RETRYABLE. The ref is cleared so a later fix — or the same one, re-requested — starts a fresh
       // lookup; leaving it set meant a transient failure locked the screen out of matching for good
       // while the location stayed "ready".
@@ -290,10 +295,21 @@ export default function ProspectScreen() {
   const fix = location.state.status === "ready" ? location.state : null;
   const fixKey = fix ? `${fix.lat},${fix.lng}` : null;
   const matchedFor = useRef<string | null>(null);
+  /**
+   * The rep took the company fallback while a lookup was still running — so its result is DEAD.
+   *
+   * `runMatch.onSuccess` clears the selected company and contact whenever it finds candidates, which is
+   * right when a lookup the rep is waiting on returns, and wrong when they have already given up on it
+   * and chosen something else. Cancelling the request is not available (the fetch is in flight and the
+   * server answers regardless), so the result is discarded on arrival — the same generation-stamp shape
+   * `use-current-location` uses for the fix itself.
+   */
+  const matchAbandoned = useRef(false);
   useEffect(() => {
     if (!fixKey || !fix) return;
     if (matchedFor.current === fixKey) return;
     matchedFor.current = fixKey;
+    matchAbandoned.current = false;
     runMatch.mutate({ lat: fix.lat, lng: fix.lng });
     // runMatch identity is stable for the mutation's lifetime; keying on the fix is the real trigger.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1162,25 +1178,14 @@ export default function ProspectScreen() {
                 >
                   <Text style={styles.primaryText}>Find this property</Text>
                 </Pressable>
-                {/* GPS IS NOT ALWAYS THE POINT.
-                    Half the types here — call, voicemail, meeting — happen nowhere near the building,
-                    and routing them through a location lookup makes a rep in a truck wait on a fix
-                    they do not need and cannot use. The company path is offered from the start rather
-                    than only after a failed or rejected match. */}
-                <Pressable
-                  testID="prospect-skip-location"
-                  onPress={() => setRejectedMatches(true)}
-                  accessibilityRole="button"
-                  style={styles.linkBtn}
-                >
-                  <Text style={styles.linkText}>Not at a property — attach to a company</Text>
-                </Pressable>
               </>
             ) : location.state.status === "locating" || runMatch.isPending ? (
-              <View style={styles.centerRow}>
-                <ActivityIndicator color={theme.color.brandRed} />
-                <Text style={styles.help}>Finding where you are…</Text>
-              </View>
+              <>
+                <View style={styles.centerRow}>
+                  <ActivityIndicator color={theme.color.brandRed} />
+                  <Text style={styles.help}>Finding where you are…</Text>
+                </View>
+              </>
             ) : location.state.status === "denied" ? (
               /* Denied is NOT retryable in-app — a retry button here does nothing, which reads as
                  broken. Say where the switch actually is, and keep the manual path open. */
@@ -1202,6 +1207,60 @@ export default function ProspectScreen() {
                   <Text style={styles.secondaryText}>Try again</Text>
                 </Pressable>
               </>
+            ) : null}
+
+            {/* GPS IS NOT ALWAYS THE POINT — and that has to hold WHILE the fix is being acquired.
+                Half the types here — call, voicemail, meeting — happen nowhere near the building, and
+                routing them through a location lookup makes a rep in a truck wait on a fix they do not
+                need and cannot use. The argument was already written above; the layout contradicted it.
+
+                This lived INSIDE the `idle` branch, so the one moment it was unreachable was the
+                twelve-second `locating` window: the spinner replaced the whole card, the retry belongs
+                to `unavailable`, and the company fallback further down is gated on conditions none of
+                which are true while a fix is in flight. For twelve seconds the only way out was to
+                leave the screen and lose the capture — in the exact scene this feature exists for: a
+                door, one bar, GPS confused by a metal roof.
+
+                It RESETS the location as well as choosing the fallback. Setting `rejectedMatches`
+                alone opened the company path but left `status === "locating"`, which is a term in
+                `saveBlocked` — so the rep could pick a company and still not save until the deadline
+                expired. Abandoning the fix and moving on is one intention, so it is one control.
+
+                Not shown once candidates are on screen: the match list carries its own "None of these
+                — attach to a company", and two links a line apart saying the same thing is its own
+                defect. */}
+            {offersCompanyFallback({
+              rejectedMatches,
+              locationStatus: location.state.status,
+              matchPending: runMatch.isPending,
+            }) ? (
+              <Pressable
+                testID="prospect-skip-location"
+                onPress={() => {
+                  /**
+                   * Abandon BOTH in-flight operations, and abandon them in the two senses that matter.
+                   *
+                   * `location.reset()` stops the fix from landing late. `matchAbandoned` discards a
+                   * lookup result that arrives anyway — the request cannot be cancelled, the server
+                   * answers regardless.
+                   *
+                   * `runMatch.reset()` is the third line and the one that makes this usable rather than
+                   * merely correct. `isPending` is read by three things: `saveBlocked`, the spinner,
+                   * and `offersCompanyFallback`. Left pending, the rep took the escape hatch, picked a
+                   * company — and then waited out the request's 30-second timeout before Save came
+                   * back, staring at "Finding where you are…" the whole time. On the slow connection
+                   * this hatch exists for, that is the entire problem it was supposed to solve.
+                   */
+                  location.reset();
+                  matchAbandoned.current = true;
+                  runMatch.reset();
+                  setRejectedMatches(true);
+                }}
+                accessibilityRole="button"
+                style={styles.linkBtn}
+              >
+                <Text style={styles.linkText}>Not at a property — attach to a company</Text>
+              </Pressable>
             ) : null}
 
             {coarse ? (
@@ -1226,6 +1285,7 @@ export default function ProspectScreen() {
                     onPress={() => {
                       setMatchError(null);
                       matchedFor.current = null;
+                      matchAbandoned.current = false;
                       runMatch.mutate({ lat: fix.lat, lng: fix.lng });
                     }}
                     accessibilityRole="button"
