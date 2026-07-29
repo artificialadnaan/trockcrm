@@ -196,11 +196,15 @@ describe("multi-mailbox conversations", () => {
     expect(orphanRow?.deal_id).toBe(DEAL_NEW);
   });
 
-  it("does not abort the whole rebind when a binding's mailbox has no user_graph_tokens row at all", async () => {
+  it("moves a binding whose mailbox has no user_graph_tokens row instead of skipping it", async () => {
     // A user-initiated disconnect (POST /api/auth/graph/disconnect, graph-token-service.ts) hard-DELETEs
     // the token row but leaves the binding in place — mailbox_account_id carries no FK, and nothing else
     // cleans bindings up. Handing that dead id to bindThreadToDeal throws "Mailbox not found" and would
-    // abort the ENTIRE rebind, not just the orphan's — the union must filter it out before it gets there.
+    // abort the ENTIRE rebind, so the union filters it out before it gets there — but filtering alone
+    // downgraded the crash into a SILENT SKIP: the orphan kept pointing at the old deal while the route
+    // answered 200 with a preview that said the whole conversation had moved. A binding row needs no
+    // Graph connection to be re-pointed; it is a local write, and detachConversationAcrossMailboxes
+    // already treats orphans as first-class for exactly this reason.
     const MBX_DISCONNECTED = U("f0d");
     await tdb.execute(sql`
       INSERT INTO email_thread_bindings
@@ -218,11 +222,76 @@ describe("multi-mailbox conversations", () => {
     const byMailbox: Record<string, string> = Object.fromEntries(
       rows.map((r: { mailbox_account_id: string; deal_id: string }) => [r.mailbox_account_id, r.deal_id])
     );
-    // The resolvable mailboxes still moved...
+    // The resolvable mailboxes moved (it did not crash)...
     expect(byMailbox[MBX_A]).toBe(DEAL_NEW);
     expect(byMailbox[MBX_B]).toBe(DEAL_NEW);
-    // ...and the orphan was left alone rather than crashing the whole call.
-    expect(byMailbox[MBX_DISCONNECTED]).toBe(DEAL_OLD);
+    // ...and so did the orphan, so nothing is still filed under the deal the thread has left.
+    expect(byMailbox[MBX_DISCONNECTED]).toBe(DEAL_NEW);
+  });
+
+  it("moves a disconnected participant's MESSAGES, which no mailbox path can reach", async () => {
+    // The message-side half of the same disconnect. USER_C has no user_graph_tokens row, so no mailbox
+    // id resolves for them and backAssociateStoredMessagesForBinding — which scopes its UPDATE to one
+    // mailbox's user at a time — can never touch their copy. previewThreadReassignmentImpact counts it
+    // regardless, so leaving it behind is the preview reporting a move that did not happen.
+    await tdb.execute(sql`
+      INSERT INTO emails
+        (graph_message_id, graph_conversation_id, direction, from_address, to_addresses, deal_id, assignment_status, user_id, sent_at)
+      VALUES ('m4', ${CONV}, 'inbound', 'sender@example.com', '{}', ${DEAL_OLD}, 'assigned', ${USER_C}, '2026-07-04T00:00:00Z')
+    `);
+
+    const preview = await previewThreadReassignmentImpact(tdb, {
+      providerConversationId: CONV, nextDealId: DEAL_NEW,
+    });
+    await bindConversationToDealAcrossMailboxes(tdb, {
+      providerConversationId: CONV, dealId: DEAL_NEW, actingUserId: USER_A,
+    });
+
+    const emailRows = await tdb.execute(sql`
+      SELECT deal_id, assigned_entity_type, assigned_entity_id, assignment_status
+      FROM emails WHERE graph_conversation_id = ${CONV}
+    `);
+    const rows = Array.isArray(emailRows) ? emailRows : emailRows.rows;
+    expect(rows).toHaveLength(preview.affectedMessageCount);
+    expect(
+      rows.every(
+        (r: { deal_id: string; assigned_entity_type: string; assigned_entity_id: string; assignment_status: string }) =>
+          r.deal_id === DEAL_NEW &&
+          r.assigned_entity_type === "deal" &&
+          r.assigned_entity_id === DEAL_NEW &&
+          r.assignment_status === "assigned"
+      )
+    ).toBe(true);
+
+    // The denormalised rollup the deal card reads has to agree with the four messages that moved.
+    const dealRows = await tdb.execute(sql`SELECT email_count FROM deals WHERE id = ${DEAL_NEW}`);
+    expect(Number((Array.isArray(dealRows) ? dealRows : dealRows.rows)[0].email_count)).toBe(4);
+  });
+
+  it("writes the disconnected participant's activity row onto the new deal too", async () => {
+    // backAssociateStoredMessagesForBinding re-points (or creates) the `activities` row for every
+    // message it moves, so the deal's Activity tab follows its Emails tab. A message-only sweep that
+    // skipped that would leave the disconnected participant's email showing on the OLD deal's activity
+    // feed forever — the same split-brain in a different table.
+    await tdb.execute(sql`
+      INSERT INTO emails
+        (graph_message_id, graph_conversation_id, direction, from_address, to_addresses, deal_id, assignment_status, user_id, sent_at)
+      VALUES ('m4', ${CONV}, 'inbound', 'sender@example.com', '{}', ${DEAL_OLD}, 'assigned', ${USER_C}, '2026-07-04T00:00:00Z')
+    `);
+
+    await bindConversationToDealAcrossMailboxes(tdb, {
+      providerConversationId: CONV, dealId: DEAL_NEW, actingUserId: USER_A,
+    });
+
+    const res = await tdb.execute(sql`
+      SELECT a.deal_id, a.source_entity_id
+      FROM activities a JOIN emails e ON e.id = a.email_id
+      WHERE e.graph_message_id = 'm4'
+    `);
+    const rows = Array.isArray(res) ? res : res.rows;
+    expect(rows).toHaveLength(1);
+    expect(rows[0].deal_id).toBe(DEAL_NEW);
+    expect(rows[0].source_entity_id).toBe(DEAL_NEW);
   });
 
   it("detaches EVERY mailbox", async () => {

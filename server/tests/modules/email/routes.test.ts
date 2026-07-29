@@ -1645,7 +1645,9 @@ describe("email routes", () => {
       { boundDealIds: ["deal-1"] }
     );
     expect(auditMocks.writeAuditLog).toHaveBeenCalledWith(expect.any(Object), {
-      tableName: "email_thread_bindings",
+      // (table_name, record_id) is the pair audit consumers index and resolve by, so a deal id in
+      // recordId means the table name has to be `deals` — see the runtime suite for the reasoning.
+      tableName: "deals",
       recordId: "deal-1",
       action: "update",
       changedBy: "director-1",
@@ -1717,7 +1719,9 @@ describe("email routes", () => {
       { boundDealIds: ["deal-1"] }
     );
     expect(auditMocks.writeAuditLog).toHaveBeenCalledWith(expect.any(Object), {
-      tableName: "email_thread_bindings",
+      // (table_name, record_id) is the pair audit consumers index and resolve by, so a deal id in
+      // recordId means the table name has to be `deals` — see the runtime suite for the reasoning.
+      tableName: "deals",
       recordId: "deal-1",
       action: "update",
       changedBy: "director-1",

@@ -16,6 +16,10 @@ import { AppError } from "../../../src/middleware/error-handler.js";
 // The REAL router, over a REAL (PGlite) tenant db and the REAL services — the point of this suite is the
 // wiring between the two, which a service-mocked route test cannot see.
 const { emailRoutes } = await import("../../../src/modules/email/routes.js");
+// The read the deal Emails tab actually performs. A move asserted only on emails.deal_id can leave
+// assigned_entity_id pointing at the old deal, which keeps the message listed under BOTH tabs — so the
+// "did it really move" cases below go through the same query the user's screen does.
+const { getEmails } = await import("../../../src/modules/email/service.js");
 
 const U = (s: string) => `00000000-0000-0000-0000-${s.padStart(12, "0")}`;
 
@@ -282,6 +286,62 @@ describe("thread mutation routes — deal-collaborator access", () => {
   it("GET: returns an empty payload for a conversation with no messages", async () => {
     const { res } = await getThreadRoute(collaboratorUser, "conv-does-not-exist");
     expect(res.body).toEqual({ binding: null, preview: null, emails: [] });
+  });
+
+  // ---------------------------------------------------------------------------------------------
+  // 0b. AUTHORIZATION IS NOT A GRAPH CONCERN. The gate resolved a "the mailbox this thread is described
+  //     by" id before it did anything else, and every lookup that could produce one filtered on
+  //     status = 'active'. So a conversation none of whose participants currently has a WORKING Outlook
+  //     connection 409'd "Connect mailbox first" — for a caller who could see the thread on the deal in
+  //     front of them, and on the detach route, which touches nothing but local rows.
+  //
+  //     Non-active tokens are ordinary: an expired/revoked/reauth_needed row is what a failed refresh
+  //     leaves behind, and a disconnect deletes the row outright. Neither says anything about whether
+  //     THIS caller may read or re-file the thread.
+  // ---------------------------------------------------------------------------------------------
+  it("GET: admits a collaborator when no participant's token is ACTIVE any more", async () => {
+    await tdb.execute(sql`UPDATE user_graph_tokens SET status = 'expired'`);
+
+    const { res } = await getThreadRoute(collaboratorUser);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.emails).toHaveLength(2);
+    expect(res.body.binding?.dealId).toBe(DEAL_OLD);
+  });
+
+  it("GET: admits a collaborator when every participant has DISCONNECTED Outlook", async () => {
+    // The harder half: revokeGraphTokens hard-DELETEs the row, so there is no mailbox to name at all.
+    await tdb.execute(sql`DELETE FROM user_graph_tokens`);
+
+    const { res } = await getThreadRoute(collaboratorUser);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.emails).toHaveLength(2);
+    expect(res.body.binding?.dealId).toBe(DEAL_OLD);
+  });
+
+  it("detach: unfiles a thread whose participants have all disconnected Outlook", async () => {
+    // Detach needs no Graph connection whatsoever — it is a local UPDATE of bindings and message rows.
+    // Refusing it for want of a connected mailbox left a misfiled conversation permanently stuck on the
+    // wrong deal once its participants disconnected.
+    await tdb.execute(sql`DELETE FROM user_graph_tokens`);
+
+    const { res } = await postThreadRoute("detach", collaboratorUser);
+
+    expect(res.statusCode).toBe(200);
+    expect(await activeBindings()).toHaveLength(0);
+    expect((await messageDealIds()).every((id) => id === null)).toBe(true);
+  });
+
+  it("reassign: still 403s an outsider on a thread with no connected mailbox anywhere", async () => {
+    // The relaxation must not become a fall-open. With no mailbox to resolve, path 1 is decided purely
+    // by message ownership and path 2 by deal access — an outsider satisfies neither, and the denial has
+    // to stay a 403 rather than turning into the old 409 (or a 200).
+    await tdb.execute(sql`DELETE FROM user_graph_tokens`);
+
+    const err = await rejection(postThreadRoute("reassign", outsiderUser, { dealId: DEAL_NEW }));
+    expect(err.statusCode).toBe(403);
+    expect((await activeBindings()).every((r) => r.deal_id === DEAL_OLD)).toBe(true);
   });
 
   it("GET: hands a collaborator the other mailbox's archived, deleted and ignored messages", async () => {
@@ -647,6 +707,7 @@ describe("thread mutation routes — deal-collaborator access", () => {
 
     const rows = await auditRows();
     expect(rows).toHaveLength(1);
+    expect(rows[0].table_name).toBe("deals");
     expect(rows[0].record_id).toBe(DEAL_OLD);
     expect(rows[0].changed_by).toBe(USER_COLLAB);
     expect(rows[0].full_row).toMatchObject({ previousDealId: DEAL_OLD, detached: true });
@@ -797,32 +858,79 @@ describe("thread mutation routes — deal-collaborator access", () => {
     expect(res.body.preview.nextDealId).toBe(DEAL_NEW);
   });
 
-  it("reassign: counts a disconnected participant's copy it cannot actually move", async () => {
-    // KNOWN, NARROW GAP — pinned so closing it is a deliberate change rather than a surprise.
-    // bindConversationToDealAcrossMailboxes can only act on mailboxes that HAVE a mailbox account, so a
-    // participant whose Outlook was disconnected keeps their copy of the thread filed on the OLD deal,
-    // while previewThreadReassignmentImpact counts every message in the conversation regardless. The
-    // preview therefore overstates by exactly the disconnected participants' messages. Closing it means
-    // teaching the rebind to move orphaned message rows with no binding to hang them off — a change to
-    // the bind contract, not to this route.
+  it("reassign: moves a disconnected participant's copy too, so the preview is not a lie", async () => {
+    // THE USER-VISIBLE CLAIM, not a claim about bindings: the route answers 200 with a preview that
+    // counts every message in the conversation, so every message has to have moved. It used to not.
+    // bindConversationToDealAcrossMailboxes reaches mailboxes through user_graph_tokens, and a
+    // participant who used the Graph disconnect endpoint has that row hard-DELETED — so their copy of
+    // the thread was silently skipped and stayed on the OLD deal while the response told the user the
+    // whole conversation had moved. The disconnected copy needs no Graph call to move: it is a local
+    // UPDATE, exactly like the one detach already does conversation-wide.
     const USER_GONE = U("a08");
     await tdb.execute(sql`
       INSERT INTO users (id, email, display_name, role, office_id)
       VALUES (${USER_GONE}, 'gone@example.com', 'Disconnected', 'rep', ${OFFICE_DALLAS})
     `);
-    // Deliberately NO user_graph_tokens row for USER_GONE.
+    // Deliberately NO user_graph_tokens row for USER_GONE, and an ORPHANED binding for the mailbox id
+    // their disconnect left behind — the two halves of the same disconnect, and both were skipped.
+    const MBX_GONE = U("f0e");
     await tdb.execute(sql`
       INSERT INTO emails
         (graph_message_id, graph_conversation_id, direction, from_address, to_addresses, deal_id, assignment_status, user_id, sent_at)
       VALUES ('m3', ${CONV}, 'inbound', 'sender@example.com', '{}', ${DEAL_OLD}, 'assigned', ${USER_GONE}, '2026-07-03T00:00:00Z')
     `);
+    await tdb.execute(sql`
+      INSERT INTO email_thread_bindings
+        (mailbox_account_id, provider, provider_conversation_id, deal_id, binding_source, confidence)
+      VALUES (${MBX_GONE}, 'microsoft_graph', ${CONV}, ${DEAL_OLD}, 'manual', 'high')
+    `);
 
     const { res } = await postThreadRoute("reassign", collaboratorUser, { dealId: DEAL_NEW });
 
+    // Every message the preview counted is a message that actually moved.
     expect(res.body.preview.affectedMessageCount).toBe(3);
     const dealIds = await messageDealIds();
-    expect(dealIds.filter((id) => id === DEAL_NEW)).toHaveLength(2);
-    expect(dealIds.filter((id) => id === DEAL_OLD)).toHaveLength(1);
+    expect(dealIds).toHaveLength(3);
+    expect(dealIds.filter((id) => id === DEAL_NEW)).toHaveLength(3);
+    expect(dealIds.filter((id) => id === DEAL_OLD)).toHaveLength(0);
+
+    // ...and nothing is still filed under the deal the thread has left, orphaned binding included.
+    const rows = await activeBindings();
+    expect(rows.every((r) => r.deal_id === DEAL_NEW)).toBe(true);
+    expect(rows.map((r) => r.mailbox_account_id).sort()).toEqual(
+      [MBX_OWNER, MBX_SECOND, MBX_GONE].sort()
+    );
+  });
+
+  it("reassign: the disconnected copy leaves the OLD deal's Emails tab and lands on the new one", async () => {
+    // The reason the assertion above is not enough on its own: emails.deal_id is only half of what the
+    // deal Emails tab reads. getEmails filters on `deal_id OR (assigned_entity_type = 'deal' AND
+    // assigned_entity_id = …)`, so a move that set deal_id and left assigned_entity_id pointing at the
+    // old deal would keep the message listed under BOTH — and the tab, not the column, is what the user
+    // sees. Asserting through getEmails is how the original detach no-op would have been caught.
+    const USER_GONE = U("a08");
+    await tdb.execute(sql`
+      INSERT INTO users (id, email, display_name, role, office_id)
+      VALUES (${USER_GONE}, 'gone@example.com', 'Disconnected', 'rep', ${OFFICE_DALLAS})
+    `);
+    await tdb.execute(sql`
+      INSERT INTO emails
+        (graph_message_id, graph_conversation_id, subject, direction, from_address, to_addresses,
+         deal_id, assigned_entity_type, assigned_entity_id, assignment_status, user_id, sent_at)
+      VALUES ('m3', ${CONV}, 'Roof scope', 'inbound', 'sender@example.com', '{}',
+              ${DEAL_OLD}, 'deal', ${DEAL_OLD}, 'assigned', ${USER_GONE}, '2026-07-03T00:00:00Z')
+    `);
+
+    await postThreadRoute("reassign", collaboratorUser, { dealId: DEAL_NEW });
+
+    const oldTab = await getEmails(tdb, { dealId: DEAL_OLD }, undefined, "director");
+    const newTab = await getEmails(tdb, { dealId: DEAL_NEW }, undefined, "director");
+    expect(oldTab.emails).toHaveLength(0);
+    expect(newTab.emails.map((email: { graphMessageId: string }) => email.graphMessageId).sort()).toEqual([
+      "m1",
+      "m2",
+      "m3",
+    ]);
   });
 
   it("reassign: writes one audit row naming the actor, both deals, and the message count", async () => {
@@ -830,8 +938,17 @@ describe("thread mutation routes — deal-collaborator access", () => {
 
     const rows = await auditRows();
     expect(rows).toHaveLength(1);
-    expect(rows[0].table_name).toBe("email_thread_bindings");
+    // (table_name, record_id) is the PAIR audit consumers index and resolve by — the feed renders
+    // `table_name || ':' || record_id` as the entity name and dedupes on the pair
+    // (modules/admin/audit-service.ts). record_id has to be a deal id (audit_log.record_id is uuid NOT
+    // NULL and a Graph conversation id is not a uuid), so the table name has to say `deals` or the row
+    // names a binding that does not exist and is discoverable from nothing at all.
+    expect(rows[0].table_name).toBe("deals");
+    expect(rows[0].record_id).toBe(DEAL_OLD);
     expect(rows[0].action).toBe("update");
+    // entity_type still says what KIND of event this was: the feed reads
+    // COALESCE(entity_type, table_name), so the pair can point at the deal while the event stays
+    // filterable as an email_thread move.
     expect(rows[0].entity_type).toBe("email_thread");
     expect(rows[0].changed_by).toBe(USER_COLLAB);
     expect(rows[0].full_row).toMatchObject({
@@ -852,7 +969,10 @@ describe("thread mutation routes — deal-collaborator access", () => {
 
     const rows = await auditRows();
     expect(rows).toHaveLength(1);
-    expect(rows[0].table_name).toBe("email_thread_bindings");
+    // Same pairing as reassign, and it has to be the same: an audit row filed under a table name whose
+    // record_id is a deal id matches neither a binding nor the deal.
+    expect(rows[0].table_name).toBe("deals");
+    expect(rows[0].record_id).toBe(DEAL_OLD);
     expect(rows[0].action).toBe("update");
     expect(rows[0].entity_type).toBe("email_thread");
     expect(rows[0].changed_by).toBe(USER_COLLAB);

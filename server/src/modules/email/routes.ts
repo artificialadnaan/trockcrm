@@ -570,13 +570,26 @@ router.post("/thread/:conversationId/reassign", async (req, res, next) => {
       actingUserId: req.user!.id,
     });
 
-    // recordId is uuid NOT NULL (shared/src/schema/tenant/audit-log.ts), and a Graph conversation id is
-    // not a uuid — putting it there is a 22P02 that takes the whole transaction down. Filed under the
-    // deal instead: the one the thread moved OFF, so the surprising event ("this deal's email vanished")
-    // is discoverable from the deal it happened to, falling back to the destination when the thread was
-    // previously unbound. The conversation id and both deal ids live in fullRow either way.
+    // FILED UNDER THE DEAL, and tableName says so. recordId is uuid NOT NULL
+    // (shared/src/schema/tenant/audit-log.ts) and a Graph conversation id is not a uuid, so the id here
+    // has to be a deal's: the one the thread moved OFF, so the surprising event ("this deal's email
+    // vanished") is discoverable from the deal it happened to, falling back to the destination when the
+    // thread was previously unbound.
+    //
+    // (tableName, recordId) is a PAIR, and audit consumers resolve and index by it as one — the feed
+    // renders `table_name || ':' || record_id` as the entity name and dedupes on the pair (see
+    // modules/admin/audit-service.ts). Naming email_thread_bindings while storing a deal id therefore
+    // matched NEITHER a binding nor the deal: the row was discoverable from nothing.
+    //
+    // The alternative — keeping the binding table name and storing a binding id — was rejected because
+    // a reassign moves N bindings (one per mailbox holding the conversation), so no single one is "the"
+    // record the event happened to. A deal id is the one identifier the whole operation is about.
+    //
+    // entityType keeps saying what KIND of event this is: the feed reads COALESCE(entity_type,
+    // table_name), so this still filters as an email_thread move rather than a generic deal edit. The
+    // conversation id and both deal ids live in fullRow either way.
     await writeAuditLog(req.tenantDb!, {
-      tableName: "email_thread_bindings",
+      tableName: "deals",
       recordId: preview.currentDealId ?? dealId,
       action: "update",
       changedBy: req.user!.id,
@@ -607,7 +620,8 @@ router.post("/thread/:conversationId/detach", async (req, res, next) => {
       req.user!.id
     );
 
-    // Same recordId reasoning as reassign: recordId is uuid NOT NULL, so it has to be a deal id.
+    // Same (tableName, recordId) reasoning as reassign: recordId is uuid NOT NULL so it has to be a deal
+    // id, and the pair is what audit consumers index and resolve by — so the table name says `deals`.
     //
     // It used to be enough to ask whether boundDealId was set, on the reasoning that a null one meant
     // the detach had matched no rows and there was nothing to record. That stopped being true when
@@ -618,7 +632,7 @@ router.post("/thread/:conversationId/detach", async (req, res, next) => {
     const auditDealId = boundDealId ?? detached.previousMessageDealIds[0] ?? null;
     if (auditDealId) {
       await writeAuditLog(req.tenantDb!, {
-        tableName: "email_thread_bindings",
+        tableName: "deals",
         recordId: auditDealId,
         action: "update",
         changedBy: req.user!.id,

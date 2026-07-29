@@ -40,6 +40,8 @@ import {
   collectEmailStatTargetsForEmail,
   refreshEmailStatsForEmailRecord,
   refreshEmailStatsForTargets,
+  type EmailStatEmailRecord,
+  type EmailStatTarget,
 } from "./stats-service.js";
 import { assertDealCollaboratorAccess } from "../../lib/collaboration-access.js";
 import crypto from "crypto";
@@ -190,7 +192,13 @@ export interface EmailThreadResponse {
 }
 
 export interface EmailThreadMutationContext {
-  mailboxAccountId: string;
+  /**
+   * WHICH mailbox this thread is described by, or null when no participant has a user_graph_tokens row
+   * left to name one. NULLABLE on purpose: every consumer of this context authorizes off `emails` and
+   * off the conversation's bindings, none of them calls Graph as this mailbox, and demanding a
+   * connected one here 409'd a deal collaborator out of a thread they could plainly see.
+   */
+  mailboxAccountId: string | null;
   binding: ThreadBindingRecord | null;
   emails: Array<typeof emails.$inferSelect>;
 }
@@ -733,39 +741,49 @@ export async function getEmailThreadForMutation(
     throw new AppError(404, "Email thread not found");
   }
 
-  // The mailbox this thread is described BY.
+  // WHICH mailbox this thread is described by — NOT whether anyone can currently call Graph as its
+  // owner. Two different questions, and conflating them made an authorization gate fail on a Graph
+  // concern.
   //
   // Scoped to a caller, every row already belongs to them, so the oldest message's owner IS the caller
-  // and the direct lookup is exactly right — unchanged, 409 and all.
+  // and the direct lookup is exactly right — unchanged, 409 and all. That branch answers "which mailbox
+  // do I act as", which genuinely does need a working connection.
   //
-  // UNSCOPED (the deal-linkage mutation routes), threadEmails[0] is whichever PARTICIPANT sent first,
-  // and resolveMailboxAccountIdForCrmUser throws 409 "Connect mailbox first" for a user whose token row
-  // was deleted (disconnect) or left non-active (a failed refresh). Handing it that user blind would
-  // 409 the entire reassign/detach — for everyone — over some other participant's disconnected Outlook.
-  // So take the oldest message whose owner is actually CONNECTED, falling back to the direct lookup
-  // (and its 409) only when no participant is.
+  // UNSCOPED (the deal-linkage routes), threadEmails[0] is whichever PARTICIPANT sent first, and this
+  // id is not used to call anything: assertCanMutateEmailThread decides path 1 from message ownership
+  // (thread.emails), the routes derive the deals to authorize against from the conversation's bindings,
+  // and reassign/detach act across EVERY mailbox rather than this one. So the only honest answer is a
+  // descriptive one, and NO answer is a legitimate answer.
   //
-  // The status = 'active' predicate below is therefore NOT the one dropped from
-  // resolveMailboxAccountIdsForConversation: this query exists to mirror the 409 that
-  // resolveMailboxAccountIdForCrmUser would throw, and that lookup does filter on status. Keep it.
-  let mailboxAccountId: string;
+  // What that fixes: a token row that is merely expired/revoked/reauth_needed (a failed refresh) or
+  // absent entirely (a disconnect — revokeGraphTokens hard-DELETEs it) used to satisfy neither the
+  // status-filtered join here nor resolveMailboxAccountIdForCrmUser's fallback, so a conversation whose
+  // participants had all lapsed threw 409 "Connect mailbox first" at a deal collaborator looking at the
+  // thread on their own deal — and at DETACH, which touches nothing but local rows. There is nothing to
+  // connect and nothing that needed connecting.
+  //
+  // No status filter, matching resolveMailboxAccountIdsForConversation and resolveMailboxUserId: a
+  // non-active token still NAMES a mailbox perfectly well. Only a missing row leaves nothing to name,
+  // and that is what null means here.
+  let mailboxAccountId: string | null;
   if (userId) {
     mailboxAccountId = await resolveMailboxAccountIdForCrmUser(tenantDb, threadEmails[0].userId);
   } else {
-    const [connectedMailbox] = await tenantDb
+    const [participantMailbox] = await tenantDb
       .select({ id: userGraphTokens.id })
       .from(emails)
-      .innerJoin(
-        userGraphTokens,
-        and(eq(userGraphTokens.userId, emails.userId), eq(userGraphTokens.status, "active"))
-      )
+      .innerJoin(userGraphTokens, eq(userGraphTokens.userId, emails.userId))
       .where(eq(emails.graphConversationId, providerConversationId))
       .orderBy(sql`${emails.sentAt} ASC`, sql`${emails.id} ASC`)
       .limit(1);
-    mailboxAccountId =
-      connectedMailbox?.id ?? (await resolveMailboxAccountIdForCrmUser(tenantDb, threadEmails[0].userId));
+    mailboxAccountId = participantMailbox?.id ?? null;
   }
-  const binding = await getActiveThreadBinding(tenantDb, mailboxAccountId, providerConversationId);
+  // getActiveThreadBinding is keyed on a mailbox, so with no mailbox there is no per-mailbox binding to
+  // report. Nothing downstream misses it: the routes read the CONVERSATION's bindings
+  // (resolveActiveBindingsForConversation), which see orphans and need no token at all.
+  const binding = mailboxAccountId
+    ? await getActiveThreadBinding(tenantDb, mailboxAccountId, providerConversationId)
+    : null;
 
   return {
     mailboxAccountId,
@@ -870,6 +888,12 @@ export async function assertCanMutateEmailThread(
  * unhandleable (bindThreadToDeal throws "Mailbox not found" and aborts the whole rebind), and the inner
  * join is what removes that case.
  *
+ * WHAT THE INNER JOIN DOES NOT DO IS EXCUSE THE SKIP. Filtering the dead-token case out here turned a
+ * crash into a SILENT one — the disconnected participant's copy stayed on the old deal while the route
+ * reported a complete move. This resolver is only "which mailboxes can bindThreadToDeal be handed";
+ * rebindDisconnectedMailboxRowsForConversation moves the rest, with no mailbox involved. Do not widen
+ * this query to try to cover them: everything downstream of an id here dereferences it as a live token.
+ *
  * user_graph_tokens.user_id is UNIQUE (shared/src/schema/public/user-graph-tokens.ts), so dropping the
  * status predicate cannot make one participant contribute two mailbox ids.
  */
@@ -903,6 +927,11 @@ export async function resolveMailboxAccountIdsForConversation(
  * rebound or it strands. Both halves of the union therefore mean "the token row exists"; there is no
  * longer an asymmetry between them, and reintroducing one would strand exactly the copies the union
  * exists to move.
+ *
+ * The ORPHANS this drops are NOT abandoned — they are simply not bindThreadToDeal's to move. They are
+ * re-pointed directly by rebindDisconnectedMailboxRowsForConversation, which needs no mailbox at all,
+ * and cleared by detachConversationAcrossMailboxes, which never filtered them in the first place. This
+ * query answering "not mine" is only correct because that one answers "mine".
  */
 async function resolveMailboxAccountIdsWithActiveBindingForConversation(
   tenantDb: TenantDb,
@@ -923,10 +952,53 @@ async function resolveMailboxAccountIdsWithActiveBindingForConversation(
 }
 
 /**
+ * The stat targets to recompute for a set of message rows, derived ONCE per DISTINCT association.
+ *
+ * collectEmailStatTargetsForEmail reads exactly four columns off a row — assigned_entity_type,
+ * assigned_entity_id, deal_id, contact_id — and issues up to three lookups for each row it is handed
+ * (the source-lead's deals, the deal's company, the contact's company). The messages of one thread
+ * almost always share a single association, so calling it per row made a 40-message conversation pay
+ * ~120 queries inside the request transaction to compute a handful of distinct answers.
+ *
+ * The dedup key IS that function's entire input, so collapsing rows that share it cannot change what
+ * comes back; and refreshEmailStatsForTargets dedupes again by (entityType, entityId) before doing any
+ * work, which is what makes the shorter array equivalent to the longer one rather than merely cheaper.
+ */
+async function collectEmailStatTargetsForMessages(
+  tenantDb: TenantDb,
+  messageRows: EmailStatEmailRecord[]
+): Promise<EmailStatTarget[]> {
+  const targets: EmailStatTarget[] = [];
+  const seenAssociations = new Set<string>();
+  for (const email of messageRows) {
+    // JSON rather than a joined string: these are free-form ids and a separator could otherwise be
+    // ambiguous between "a|b, null" and "a, b|null".
+    const associationKey = JSON.stringify([
+      email.assignedEntityType ?? null,
+      email.assignedEntityId ?? null,
+      email.dealId ?? null,
+      email.contactId ?? null,
+    ]);
+    if (seenAssociations.has(associationKey)) continue;
+    seenAssociations.add(associationKey);
+    targets.push(...(await collectEmailStatTargetsForEmail(tenantDb, email)));
+  }
+  return targets;
+}
+
+/**
  * Rebind the conversation to `dealId` in every mailbox that holds it (by message or by an existing
  * active binding). Partial-failure safety across the sequential per-mailbox binds below comes from
  * the per-request tenant transaction (middleware/tenant.ts) wrapping the whole request — a caller
  * outside that context (a worker, a script) must open its own transaction.
+ *
+ * TWO PASSES, and the second one is not an afterthought. The mailbox pass can only reach rows whose
+ * mailbox still has a user_graph_tokens row, because bindThreadToDeal turns a mailbox id back into a
+ * user (resolveMailboxUserId) to scope its message-side write. A participant who used the Graph
+ * disconnect endpoint has that row hard-DELETED, so BOTH their binding and their messages are
+ * invisible to it — while previewThreadReassignmentImpact counts every message in the conversation and
+ * the route answers 200 saying the whole thing moved. The disconnected pass closes that: see
+ * rebindDisconnectedMailboxRowsForConversation.
  */
 export async function bindConversationToDealAcrossMailboxes(
   tenantDb: TenantDb,
@@ -952,6 +1024,147 @@ export async function bindConversationToDealAcrossMailboxes(
       actingUserId: input.actingUserId,
     });
   }
+
+  // Runs SECOND on purpose: everything above may create or re-point rows, and this pass is defined as
+  // "whatever the mailbox pass structurally cannot reach". Its own queries key on the absence of a
+  // token row, which the pass above never changes, so the order is about intent rather than
+  // correctness — but reversing it would still leave the disconnected rows describing a stale state
+  // for the duration of the transaction.
+  await rebindDisconnectedMailboxRowsForConversation(tenantDb, input);
+}
+
+/**
+ * The rows a mailbox-keyed rebind CANNOT reach: those whose mailbox has no user_graph_tokens row.
+ *
+ * WHY THEY EXIST, and why this is not an exotic case. revokeGraphTokens (POST
+ * /api/auth/graph/disconnect, graph-token-service.ts) hard-DELETEs the token row while upsertGraphTokens
+ * only ever updates in place, so every disconnect — and every disconnect→reconnect, which mints a NEW
+ * token id — permanently strands that user's existing bindings and leaves their stored messages owned
+ * by a user no mailbox id resolves for. Nothing cleans either up: mailbox_account_id carries no FK.
+ *
+ * WHY MOVE THEM RATHER THAN REFUSE. The alternative on the table was to refuse the whole reassign when
+ * a disconnected participant is involved, which is at least honest. It was rejected because the case is
+ * common (above) and because refusing punishes exactly the person trying to fix a misfiling they did not
+ * cause — while the work needed is a purely LOCAL write. Nothing here calls Graph: a binding row and an
+ * emails row are moved by an UPDATE, and detachConversationAcrossMailboxes has always cleared both for
+ * these same rows without a mailbox. Rebind was the asymmetric half, and this restores the symmetry.
+ *
+ * Two independent halves, because the disconnect breaks the link between them:
+ *
+ *   1. ORPHANED BINDINGS. Re-pointed at the target rather than merely detached, so the invariant
+ *      "every mailbox that holds this conversation has a binding naming the deal it is filed under"
+ *      survives, and so a later detach still finds and clears them. Detach-then-insert mirrors
+ *      bindThreadToDeal exactly (the binding history is the record of who moved it and when) rather
+ *      than mutating deal_id in place.
+ *   2. STRANDED MESSAGES. Selected by their OWNER having no token row, which is precisely the
+ *      complement of what backAssociateStoredMessagesForBinding covered — so no row is written twice
+ *      and none is missed. They get the same association write and the same `activities` re-point the
+ *      mailbox path performs, because the deal's Activity tab reads that table and would otherwise keep
+ *      showing the mail on the deal it has left.
+ *
+ * The two halves cannot be joined up: mailbox_account_id → user_id lived only in the deleted token row,
+ * so a stranded message cannot be attributed to an orphaned binding except through the pointer the
+ * message itself already carries. thread_binding_id is therefore carried across when it named one of
+ * the orphans just re-pointed, and nulled otherwise — never left pointing at a binding this call has
+ * just detached, which is the same rule detachConversationAcrossMailboxes applies.
+ */
+async function rebindDisconnectedMailboxRowsForConversation(
+  tenantDb: TenantDb,
+  input: { providerConversationId: string; dealId: string; actingUserId: string }
+): Promise<void> {
+  const orphanBindings = await tenantDb
+    .select(getTableColumns(emailThreadBindings))
+    .from(emailThreadBindings)
+    .leftJoin(userGraphTokens, eq(userGraphTokens.id, emailThreadBindings.mailboxAccountId))
+    .where(
+      and(
+        eq(emailThreadBindings.provider, "microsoft_graph"),
+        eq(emailThreadBindings.providerConversationId, input.providerConversationId),
+        sql`${emailThreadBindings.detachedAt} IS NULL`,
+        isNull(userGraphTokens.id)
+      )
+    );
+
+  // old binding id -> the binding that replaced it (or itself, when it already named the target).
+  const replacementBindingIds = new Map<string, string>();
+  for (const orphan of orphanBindings) {
+    if (orphan.dealId === input.dealId) {
+      replacementBindingIds.set(orphan.id, orphan.id);
+      continue;
+    }
+    await tenantDb
+      .update(emailThreadBindings)
+      .set({ detachedAt: new Date(), updatedBy: input.actingUserId, updatedAt: new Date() })
+      .where(eq(emailThreadBindings.id, orphan.id));
+    const [replacement] = await tenantDb
+      .insert(emailThreadBindings)
+      .values({
+        mailboxAccountId: orphan.mailboxAccountId,
+        provider: "microsoft_graph",
+        providerConversationId: input.providerConversationId,
+        dealId: input.dealId,
+        bindingSource: "manual",
+        confidence: "high",
+        assignmentReason: "manual_thread_assignment",
+        createdBy: input.actingUserId,
+        updatedBy: input.actingUserId,
+      })
+      .returning();
+    replacementBindingIds.set(orphan.id, replacement.id);
+  }
+
+  const strandedMessages = await tenantDb
+    .select(getTableColumns(emails))
+    .from(emails)
+    .leftJoin(userGraphTokens, eq(userGraphTokens.userId, emails.userId))
+    .where(
+      and(eq(emails.graphConversationId, input.providerConversationId), isNull(userGraphTokens.id))
+    );
+
+  if (strandedMessages.length === 0) return;
+
+  const deal = await loadDealForEmailAssociation(tenantDb, input.dealId);
+  const previousStatTargets = await collectEmailStatTargetsForMessages(tenantDb, strandedMessages);
+
+  // Grouped by the binding pointer each row ends up with — at most a handful of groups in practice
+  // (one per orphaned mailbox, plus the null group), so this is a couple of statements, not one per row.
+  const messageIdsByBindingId = new Map<string | null, string[]>();
+  for (const message of strandedMessages) {
+    const nextBindingId = message.threadBindingId
+      ? replacementBindingIds.get(message.threadBindingId) ?? null
+      : null;
+    const group = messageIdsByBindingId.get(nextBindingId);
+    if (group) group.push(message.id);
+    else messageIdsByBindingId.set(nextBindingId, [message.id]);
+  }
+
+  for (const [threadBindingId, messageIds] of messageIdsByBindingId) {
+    await tenantDb
+      .update(emails)
+      .set({
+        dealId: input.dealId,
+        assignedEntityType: "deal",
+        assignedEntityId: input.dealId,
+        assignmentStatus: "assigned",
+        assignmentConfidence: "high",
+        assignmentAmbiguityReason: null,
+        threadBindingId,
+        syncedAt: new Date(),
+      })
+      .where(inArray(emails.id, messageIds));
+  }
+
+  await linkEmailActivitiesToDeal(tenantDb, {
+    messageRows: strandedMessages,
+    deal,
+    actingUserId: input.actingUserId,
+  });
+
+  await refreshEmailStatsForTargets(tenantDb, [
+    ...previousStatTargets,
+    { entityType: "deal", entityId: input.dealId },
+    ...(deal.companyId ? [{ entityType: "company" as const, entityId: deal.companyId }] : []),
+  ]);
 }
 
 /**
@@ -1029,10 +1242,7 @@ export async function detachConversationAcrossMailboxes(
     // no binding would otherwise pick whichever the planner returned first.
     .orderBy(sql`${emails.sentAt} ASC`, sql`${emails.id} ASC`);
 
-  const previousStatTargets = [];
-  for (const email of messageRows) {
-    previousStatTargets.push(...await collectEmailStatTargetsForEmail(tenantDb, email));
-  }
+  const previousStatTargets = await collectEmailStatTargetsForMessages(tenantDb, messageRows);
 
   await tenantDb
     .update(emailThreadBindings)
@@ -1247,6 +1457,85 @@ export async function previewThreadReassignmentImpact(
 // stranded-binding bug this change exists to close, so leaving the old helper exported would just be an
 // invitation to reintroduce it.
 
+/** The four deal columns every email→deal association copies onto the message's activity row. */
+type EmailAssociationDeal = {
+  id: string;
+  companyId: string | null;
+  propertyId: string | null;
+  sourceLeadId: string | null;
+};
+
+async function loadDealForEmailAssociation(
+  tenantDb: TenantDb,
+  dealId: string
+): Promise<EmailAssociationDeal> {
+  const [deal] = await tenantDb
+    .select({
+      id: deals.id,
+      companyId: deals.companyId,
+      propertyId: deals.propertyId,
+      sourceLeadId: deals.sourceLeadId,
+    })
+    .from(deals)
+    .where(eq(deals.id, dealId))
+    .limit(1);
+  if (!deal) {
+    throw new AppError(404, "Deal not found");
+  }
+  return deal;
+}
+
+/**
+ * Point each message's `activities` row at the deal it has just been filed under, creating one when
+ * the message has none.
+ *
+ * Shared by both halves of the rebind (the per-mailbox back-association and the disconnected-mailbox
+ * sweep) because the deal's ACTIVITY tab reads this table, not emails: a move that updated only the
+ * message rows would take the mail off the old deal's Emails tab and leave it on its activity feed.
+ */
+async function linkEmailActivitiesToDeal(
+  tenantDb: TenantDb,
+  input: {
+    messageRows: Array<typeof emails.$inferSelect>;
+    deal: EmailAssociationDeal;
+    actingUserId: string;
+  }
+) {
+  for (const email of input.messageRows) {
+    const updatedActivities = await tenantDb
+      .update(activities)
+      .set({
+        sourceEntityType: "deal",
+        sourceEntityId: input.deal.id,
+        companyId: input.deal.companyId ?? null,
+        propertyId: input.deal.propertyId ?? null,
+        leadId: input.deal.sourceLeadId ?? null,
+        dealId: input.deal.id,
+      })
+      .where(eq(activities.emailId, email.id))
+      .returning({ id: activities.id });
+
+    if (updatedActivities.length === 0) {
+      await tenantDb.insert(activities).values({
+        type: "email",
+        responsibleUserId: email.userId,
+        performedByUserId: input.actingUserId,
+        sourceEntityType: "deal",
+        sourceEntityId: input.deal.id,
+        companyId: input.deal.companyId ?? null,
+        propertyId: input.deal.propertyId ?? null,
+        leadId: input.deal.sourceLeadId ?? null,
+        dealId: input.deal.id,
+        contactId: email.contactId ?? null,
+        emailId: email.id,
+        subject: email.subject ?? null,
+        body: email.bodyPreview ?? (email.bodyHtml ? stripHtml(email.bodyHtml).substring(0, 1000) : null),
+        occurredAt: email.sentAt,
+      });
+    }
+  }
+}
+
 async function backAssociateStoredMessagesForBinding(
   tenantDb: TenantDb,
   input: {
@@ -1258,19 +1547,7 @@ async function backAssociateStoredMessagesForBinding(
   }
 ) {
   const mailboxUserId = await resolveMailboxUserId(tenantDb, input.mailboxAccountId);
-  const [deal] = await tenantDb
-    .select({
-      id: deals.id,
-      companyId: deals.companyId,
-      propertyId: deals.propertyId,
-      sourceLeadId: deals.sourceLeadId,
-    })
-    .from(deals)
-    .where(eq(deals.id, input.dealId))
-    .limit(1);
-  if (!deal) {
-    throw new AppError(404, "Deal not found");
-  }
+  const deal = await loadDealForEmailAssociation(tenantDb, input.dealId);
 
   const messageRows = await tenantDb
     .select()
@@ -1282,10 +1559,7 @@ async function backAssociateStoredMessagesForBinding(
       )
     );
 
-  const previousStatTargets = [];
-  for (const email of messageRows) {
-    previousStatTargets.push(...await collectEmailStatTargetsForEmail(tenantDb, email));
-  }
+  const previousStatTargets = await collectEmailStatTargetsForMessages(tenantDb, messageRows);
 
   await tenantDb
     .update(emails)
@@ -1306,39 +1580,11 @@ async function backAssociateStoredMessagesForBinding(
       )
     );
 
-  for (const email of messageRows) {
-    const updatedActivities = await tenantDb
-      .update(activities)
-      .set({
-        sourceEntityType: "deal",
-        sourceEntityId: input.dealId,
-        companyId: deal.companyId ?? null,
-        propertyId: deal.propertyId ?? null,
-        leadId: deal.sourceLeadId ?? null,
-        dealId: input.dealId,
-      })
-      .where(eq(activities.emailId, email.id))
-      .returning({ id: activities.id });
-
-    if (updatedActivities.length === 0) {
-      await tenantDb.insert(activities).values({
-        type: "email",
-        responsibleUserId: email.userId,
-        performedByUserId: input.actingUserId,
-        sourceEntityType: "deal",
-        sourceEntityId: input.dealId,
-        companyId: deal.companyId ?? null,
-        propertyId: deal.propertyId ?? null,
-        leadId: deal.sourceLeadId ?? null,
-        dealId: input.dealId,
-        contactId: email.contactId ?? null,
-        emailId: email.id,
-        subject: email.subject ?? null,
-        body: email.bodyPreview ?? (email.bodyHtml ? stripHtml(email.bodyHtml).substring(0, 1000) : null),
-        occurredAt: email.sentAt,
-      });
-    }
-  }
+  await linkEmailActivitiesToDeal(tenantDb, {
+    messageRows,
+    deal,
+    actingUserId: input.actingUserId,
+  });
 
   await refreshEmailStatsForTargets(tenantDb, [
     ...previousStatTargets,
