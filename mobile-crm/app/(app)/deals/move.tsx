@@ -316,7 +316,7 @@ export default function MoveStageScreen() {
     <SafeAreaView style={styles.safe} edges={["top"]}>
       <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === "ios" ? "padding" : undefined}>
         <ScrollView contentContainerStyle={styles.body} keyboardShouldPersistTaps="handled">
-          <BackLink label="Cancel" onPress={() => goBack()} />
+          <BackLink label="Cancel" accessibleName="Cancel" onPress={() => goBack()} />
 
           <Text style={styles.title}>Move stage</Text>
           <Text style={styles.subtitle} numberOfLines={2}>

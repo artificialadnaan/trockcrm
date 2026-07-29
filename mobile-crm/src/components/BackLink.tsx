@@ -16,20 +16,33 @@ import { theme } from "../theme/theme";
  *   - WEIGHT. `stage/[stageId].tsx` used `theme.type.body` (regular) where the other four used semibold
  *     at the same size and colour — the one-file divergence nobody could see next to the other four.
  *
- * The destination LABEL stays a prop because it is real information ("‹ Deals" vs "‹ Cancel" tells the
- * rep where they land, which matters on a screen reachable by deep link). The accessible name is just
- * "Back": the chevron is decoration, and the destination is announced by the screen that receives it.
+ * THE ACCESSIBLE NAME CONTAINS THE VISIBLE TEXT. It was a flat "Back", which is WCAG 2.5.3 Label in
+ * Name backwards: a Voice Control user says "Tap Cancel" because the control reads "‹ Cancel", and a
+ * name of "Back" does not match, so the command does nothing. It also threw away the one piece of
+ * information the label carries — on a screen reachable by deep link, where the destination is not
+ * obvious, "Cancel" and "Deals" are different promises. Default is `Back to {label}`, which contains
+ * the visible word; `accessibleName` overrides it where that reads wrong ("Back to Cancel" does not
+ * mean anything). Only the decorative chevron is omitted.
  *
  * `alignSelf: "flex-start"` keeps the target the width of its text. Without it the Pressable stretches
  * to the full column, and a 44pt-tall full-width band across the top of the screen is a large invisible
  * control sitting over the title — bigger is not automatically better when the extra area is unmarked.
  */
-export function BackLink({ label, onPress }: { label: string; onPress: () => void }) {
+export function BackLink({
+  label,
+  onPress,
+  accessibleName,
+}: {
+  label: string;
+  onPress: () => void;
+  /** Overrides the default `Back to {label}`. Must still CONTAIN `label` — see the note above. */
+  accessibleName?: string;
+}) {
   return (
     <Pressable
       onPress={onPress}
       accessibilityRole="button"
-      accessibilityLabel="Back"
+      accessibilityLabel={accessibleName ?? `Back to ${label}`}
       // Stacks with the floor rather than substituting for it: the drawn control is 44pt, and the
       // forgiving margin around it is extra.
       hitSlop={8}

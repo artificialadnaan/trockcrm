@@ -93,28 +93,26 @@ const CONTROL_TAGS = new Set([
  * silently accepted, and two local objects could shadow each other the same way. The owner is the
  * variable the StyleSheet (or plain object) is assigned to, which is exactly what the JSX writes.
  */
-function keysMeetingFloor(sf: ts.SourceFile): Set<string> {
-  const keys = new Set<string>();
+function keysMeetingFloor(sf: ts.SourceFile): Map<string, number> {
+  const heights = new Map<string, number>();
   const visit = (node: ts.Node): void => {
     if (ts.isPropertyAssignment(node)) {
       const name = ts.isIdentifier(node.name) ? node.name.text : node.name.getText();
-      if (
-        (name === "minHeight" || name === "height") &&
-        ts.isNumericLiteral(node.initializer) &&
-        Number(node.initializer.text) >= FLOOR
-      ) {
+      if ((name === "minHeight" || name === "height") && ts.isNumericLiteral(node.initializer)) {
         const entry = node.parent?.parent;
         if (entry && ts.isPropertyAssignment(entry)) {
           const key = ts.isIdentifier(entry.name) ? entry.name.text : entry.name.getText();
           const owner = owningVariable(entry);
-          if (owner) keys.add(`${owner}.${key}`);
+          // The VALUE, including values under the floor: last-wins flattening means a later
+          // under-floor entry cancels an earlier good one, so the small ones have to be visible here.
+          if (owner) heights.set(`${owner}.${key}`, Number(node.initializer.text));
         }
       }
     }
     ts.forEachChild(node, visit);
   };
   visit(sf);
-  return keys;
+  return heights;
 }
 
 /** The variable a style entry ultimately belongs to — `const styles = StyleSheet.create({ ... })`. */
@@ -131,11 +129,11 @@ function owningVariable(entry: ts.Node): string | null {
  * Read once and memoised. A missing file yields an empty set rather than throwing: the guard then
  * reports the two form buttons, which is a loud, correct failure — quietly passing them would not be.
  */
-let sharedCache: Set<string> | null = null;
-function sharedFloorKeys(): Set<string> {
+let sharedCache: Map<string, number> | null = null;
+function sharedFloorKeys(): Map<string, number> {
   if (sharedCache) return sharedCache;
   const file = path.join(ROOT, "src", "theme", "formStyles.ts");
-  if (!fs.existsSync(file)) return (sharedCache = new Set());
+  if (!fs.existsSync(file)) return (sharedCache = new Map());
   const sf = ts.createSourceFile(
     file,
     fs.readFileSync(file, "utf8"),
@@ -158,6 +156,10 @@ function isUnconditional(node: ts.Node, root: ts.Node): boolean {
   for (let cur: ts.Node | undefined = node; cur && cur !== root; cur = cur.parent) {
     const p: ts.Node | undefined = cur.parent;
     if (!p) break;
+    // Statement-level branches too. `style={({pressed}) => { if (pressed) return styles.big; return
+    // styles.small; }}` is the same defect wearing a block body, and only expression forms were caught.
+    if (ts.isIfStatement(p) && (p.thenStatement === cur || p.elseStatement === cur)) return false;
+    if (ts.isCaseClause(p) || ts.isDefaultClause(p)) return false;
     if (ts.isConditionalExpression(p) && (p.whenTrue === cur || p.whenFalse === cur)) return false;
     if (ts.isBinaryExpression(p)) {
       const k = p.operatorToken.kind;
@@ -173,34 +175,51 @@ function isUnconditional(node: ts.Node, root: ts.Node): boolean {
   return true;
 }
 
-/** Does this style expression reach the floor unconditionally — via a named style, or inline? */
-function declaresFloor(node: ts.Node, floorKeys: Set<string>): boolean {
-  let ok = false;
+/**
+ * The height this style expression actually resolves to, or null when nothing declares one.
+ *
+ * RN flattens a style array LAST-WINS, so `[styles.big, styles.compact]` is 32 when `compact` says 32,
+ * however large `big` is. An earlier version returned true on the first floor it met and never looked
+ * further, which reported that pair as compliant. Declarations are therefore collected in SOURCE ORDER
+ * and the last one decides.
+ *
+ * A CONDITIONAL declaration cannot raise the floor — it is absent when its condition is false — but it
+ * can lower it, because when the condition holds it wins like any other. So a conditional entry counts
+ * only when it is under the floor. That asymmetry is deliberate: both directions err toward reporting.
+ */
+function resolvedFloor(node: ts.Node, heights: Map<string, number>): number | null {
+  const found: { value: number; conditional: boolean }[] = [];
   const visit = (n: ts.Node): void => {
-    if (ok) return;
-    if (
-      ts.isPropertyAccessExpression(n) &&
-      ts.isIdentifier(n.expression) &&
-      floorKeys.has(`${n.expression.text}.${n.name.text}`) &&
-      isUnconditional(n, node)
-    ) {
-      ok = true;
+    if (ts.isPropertyAccessExpression(n) && ts.isIdentifier(n.expression)) {
+      const value = heights.get(`${n.expression.text}.${n.name.text}`);
+      if (value !== undefined) found.push({ value, conditional: !isUnconditional(n, node) });
     }
     if (ts.isPropertyAssignment(n)) {
       const name = ts.isIdentifier(n.name) ? n.name.text : n.name.getText();
-      if (
-        (name === "minHeight" || name === "height") &&
-        ts.isNumericLiteral(n.initializer) &&
-        Number(n.initializer.text) >= FLOOR &&
-        isUnconditional(n, node)
-      ) {
-        ok = true;
+      if ((name === "minHeight" || name === "height") && ts.isNumericLiteral(n.initializer)) {
+        found.push({
+          value: Number(n.initializer.text),
+          conditional: !isUnconditional(n, node),
+        });
       }
     }
     ts.forEachChild(n, visit);
   };
   visit(node);
-  return ok;
+  if (found.length === 0) return null;
+
+  let floor: number | null = null;
+  for (const d of found) {
+    if (!d.conditional) floor = d.value;
+    // A conditional entry can only make things worse; when it applies, it is the last word.
+    else if (d.value < FLOOR) floor = d.value;
+  }
+  return floor;
+}
+
+function declaresFloor(node: ts.Node, heights: Map<string, number>): boolean {
+  const floor = resolvedFloor(node, heights);
+  return floor !== null && floor >= FLOOR;
 }
 
 function findings(file: string): string[] {
@@ -211,7 +230,7 @@ function findings(file: string): string[] {
     return [`${path.relative(ROOT, file)}: could not be parsed (${syntactic.length} syntax errors)`];
   }
 
-  const floorKeys = new Set([...keysMeetingFloor(sf), ...sharedFloorKeys()]);
+  const floorKeys = new Map([...keysMeetingFloor(sf), ...sharedFloorKeys()]);
   const hits: string[] = [];
   const visit = (node: ts.Node): void => {
     const open = ts.isJsxElement(node)
@@ -314,6 +333,34 @@ describe("interactive controls declare a 44pt floor", () => {
           "const formStyles = StyleSheet.create({ button: { minHeight: 44 } });" +
             " const styles = StyleSheet.create({ button: { paddingVertical: 8 } });" +
             " const A = () => <Pressable style={styles.button} />;",
+        ),
+      ).toBe(1);
+    });
+
+    it("respects last-wins flattening — a later entry can cancel the floor", () => {
+      // RN flattens a style array last-wins, so [big, compact] is 32 when compact says 32, however
+      // large big is. Returning true on the first floor met reported that pair as compliant.
+      const SHEET2 =
+        "const styles = StyleSheet.create({ big: { minHeight: 44 }, compact: { minHeight: 32 } });";
+      expect(check(`${SHEET2} const A = () => <Pressable style={[styles.big, styles.compact]} />;`)).toBe(1);
+      expect(check(`${SHEET2} const A = () => <Pressable style={[styles.compact, styles.big]} />;`)).toBe(0);
+    });
+
+    it("treats a CONDITIONAL under-floor override as applying", () => {
+      // A conditional entry cannot raise the floor, but it can lower it — when its condition holds it
+      // wins like any other. Both directions err toward reporting.
+      const SHEET2 =
+        "const styles = StyleSheet.create({ big: { minHeight: 44 }, compact: { minHeight: 32 } });";
+      expect(
+        check(`${SHEET2} const A = () => <Pressable style={[styles.big, dense && styles.compact]} />;`),
+      ).toBe(1);
+    });
+
+    it("catches a floor that only appears in one branch of a STATEMENT body", () => {
+      // The block-bodied twin of the ternary case. Only expression forms were recognised.
+      expect(
+        check(
+          `${SHEET} const A = () => <Pressable style={({ pressed }) => { if (pressed) return styles.big; return styles.small; }} />;`,
         ),
       ).toBe(1);
     });
