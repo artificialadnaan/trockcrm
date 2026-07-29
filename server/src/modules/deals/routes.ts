@@ -103,6 +103,7 @@ import {
   toCanonicalDealStageSlug,
   type DealOpportunityEnteredEventPayload,
   type RfpRequestDeliveryPayload,
+  type WalkthroughIngressPayload,
 } from "@trock-crm/shared/types";
 import {
   assertDealScopingWriteAllowed,
@@ -155,6 +156,7 @@ import {
 import {
   updateEstimatePricingRecommendationReviewState,
 } from "../estimating/workbench-service.js";
+import { ingestWalkthrough } from "../estimating/walkthrough-ingress-service.js";
 
 function buildRouteAuditContext(req: { user?: any; headers: Record<string, unknown>; ip?: string | undefined }) {
   const actor = buildAuditActorFromUser({
@@ -3418,6 +3420,51 @@ router.post("/:id/estimating/manual-rows/:recommendationId/promote-local-catalog
 
     await req.commitTransaction!();
     res.status(200).json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * The ONLY inbound way to create estimate extractions.
+ *
+ * Every other estimating route above edits, approves, or rejects rows that a parse run already
+ * produced — none of them can bring a row into existence. A TROCK Scope walkthrough arrives with its
+ * scope ALREADY extracted, so it has nothing to hand an OCR pipeline; it needs a door of its own.
+ * `ingestWalkthrough` synthesizes the whole file -> document -> parse-run -> extractions chain in one
+ * transaction (walkthrough-ingress-service.ts).
+ *
+ * Conventions here are lifted wholesale from the manual-rows handler directly above: tenant db off
+ * `req.tenantDb!`, actor off `req.user!.id`, the `getDealById` 404 guard, `req.commitTransaction!()`
+ * before the response, and every error to `next`. 201 rather than 200 because, unlike manual-rows,
+ * this call brings new resources into being.
+ */
+router.post("/:id/estimating/walkthrough-extractions", async (req, res, next) => {
+  try {
+    // Validated BEFORE the deal lookup, so a walkthrough with nothing to estimate costs no query at
+    // all. `ingestWalkthrough` guards the empty case too, but only after the request has already paid
+    // for a round trip — and a 500 from deep in the service is a worse answer than a 400 from here.
+    const rows = (req.body as { rows?: unknown } | undefined)?.rows;
+    if (!Array.isArray(rows) || rows.length === 0) {
+      throw new AppError(400, "rows must be a non-empty array of walkthrough scope rows");
+    }
+
+    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    if (!deal) throw new AppError(404, "Deal not found");
+
+    const result = await ingestWalkthrough({
+      tenantDb: req.tenantDb! as any,
+      payload: {
+        ...(req.body as Omit<WalkthroughIngressPayload, "dealId" | "userId">),
+        // Taken from the URL and the session, never from the body: otherwise a caller could aim a
+        // walkthrough at a deal it cannot see, or forge the uploader stamped on the contact-sheet file.
+        dealId: req.params.id,
+        userId: req.user!.id,
+      },
+    });
+
+    await req.commitTransaction!();
+    res.status(201).json(result);
   } catch (err) {
     next(err);
   }
