@@ -279,20 +279,26 @@ function CorrectiveActionItemCard({
   //
   // Resetting only submittedOk (which is all this did) fixed the photo-dir leak and left the form dead.
   //
-  // Safe to key on status: a successful submit moves the item OUT of the outstanding set, so this cannot
-  // fire mid-cycle and wipe a response being typed.
+  // Keyed on the BOOLEAN, not on `item.status` and not on `item`.
+  //
+  // `[item]` — which is what an exhaustive-deps autofix would produce, since the body reads it — re-fires on
+  // every refetch identity change and would wipe a response mid-typing. `[item.status]` is nearly right but
+  // still fires on any status change within the outstanding set. The boolean fires exactly when the item
+  // BECOMES the responder's again, which is the whole intent, and it leaves the body reading nothing the
+  // deps array does not name — so there is no lint to suppress and nothing for a future autofix to "correct".
+  const outstanding = isOpen(item);
   useEffect(() => {
-    if (!isOpen(item)) return;
+    if (!outstanding) return;
     cleanupGuardRef.current.submittedOk = false;
     setSubmitting(false);
     dispatch({ type: "reset" });
     setNotice(null);
-  }, [item.status]);
+  }, [outstanding]);
 
   // Use the SAME predicate the parent counts with. This gate was independently hard-coded to `open`, so a
   // rejected item counted as outstanding at the top of the screen while the card itself rendered read-only —
   // the responder was told they had work to do and given no controls to do it with.
-  if (!isOpen(item)) {
+  if (!outstanding) {
     return <ResolvedItemCard item={item} />;
   }
 

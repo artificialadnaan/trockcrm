@@ -27,10 +27,13 @@ describe("mobile corrective-action screen: reopened-cycle reset", () => {
     const source = readFileSync(SCREEN, "utf8");
     // The effect that fires on a status change. Anchored on its dependency list so this finds the reset
     // effect specifically rather than any effect in the file.
-    const marker = source.indexOf("if (!isOpen(item)) return;");
+    const marker = source.indexOf("if (!outstanding) return;");
     expect(marker, "the reopened-cycle reset effect is gone or was renamed").toBeGreaterThan(-1);
-    const end = source.indexOf("}, [item.status]);", marker);
-    expect(end, "the reset effect no longer keys on item.status").toBeGreaterThan(marker);
+    // Keyed on the BOOLEAN. `[item]` — what an exhaustive-deps autofix produces, since the old body read
+    // `item` — re-fires on every refetch identity change and would wipe a response mid-typing; `[item.status]`
+    // still fires on changes WITHIN the outstanding set. Pinned so neither can creep back.
+    const end = source.indexOf("}, [outstanding]);", marker);
+    expect(end, "the reset effect no longer keys on the outstanding boolean").toBeGreaterThan(marker);
     const body = source.slice(marker, end);
 
     // The photo-dir guard — resetting this ALONE was the original bug, and it is still required.
