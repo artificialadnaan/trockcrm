@@ -20,6 +20,7 @@ import type { PropertyMatch } from "../../src/api/endpoints/prospecting";
 import { useAuth } from "../../src/auth/AuthContext";
 import { useGoBack } from "../../src/lib/go-back";
 import { activityTypeLabel } from "../../src/activity-label";
+import { hapticFailure, hapticNeedsAnswer, hapticSuccess } from "../../src/lib/haptics";
 import { COARSE_ACCURACY_METERS, useCurrentLocation } from "../../src/lib/use-current-location";
 import {
   canSubmit,
@@ -982,6 +983,8 @@ export default function ProspectScreen() {
        * identical activity, and /activities has no idempotency key to collapse them. Saying the
        * outcome is unknown is the honest version, and it puts the check before the retry.
        */
+      // Distinct from the success buzz: this is the one where the rep has to go and check something.
+      hapticFailure();
       setSaveError(
         err instanceof ApiError && (err.status === 0 || err.status === 408)
           ? "No signal — this may or may not have saved. Check the property's activity before logging it again."
@@ -1138,6 +1141,15 @@ export default function ProspectScreen() {
   useEffect(() => {
     if (announcement.length === 0) return;
     if (Platform.OS === "ios") AccessibilityInfo.announceForAccessibility(announcement);
+    /**
+     * ...and make it felt.
+     *
+     * Same event, third channel. SUCCESS when the visit landed; WARNING when a duplicate halted it,
+     * because nothing went wrong and nothing was lost — the app is asking a question, which should not
+     * feel like a failure. A rep with the phone at their side learns the difference without looking.
+     */
+    if (saved) hapticSuccess();
+    else hapticNeedsAnswer();
     /**
      * ...and scroll it into view for everyone else.
      *
