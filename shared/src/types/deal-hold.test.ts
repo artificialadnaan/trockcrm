@@ -670,4 +670,17 @@ describe("getEffectiveDealValue — change-order children", () => {
       })
     ).toBe(7500);
   });
+
+  // getRawAwardedDealValue has no production caller today (parity insurance with dealAwardedAmountSql,
+  // added so the two branches can't drift within this same commit) — locked in directly so a future reader
+  // doesn't have to hunt for the surface it affects.
+  it("getEffectiveAwardedDealValue also takes the negative amount verbatim", () => {
+    expect(
+      getEffectiveAwardedDealValue({
+        isChangeOrder: true,
+        awardedAmount: "-50000.00",
+        stageSlug: "won",
+      })
+    ).toBe(-50000);
+  });
 });

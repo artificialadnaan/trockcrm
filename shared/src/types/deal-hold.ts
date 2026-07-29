@@ -39,7 +39,11 @@ type DealValueLike = {
   bidEstimate?: string | number | null;
   ddEstimate?: string | number | null;
   // A change-order child deal (0156) carries its value ONLY in awardedAmount, possibly NEGATIVE for a
-  // deductive CO. Mirrors the server deal-value-sql.ts change-order branch — the two MUST NOT drift.
+  // deductive CO — read by getRawDealValue / getRawAwardedDealValue below, which take it verbatim ahead of
+  // the `> 0` fallback chain (mirrors server deal-value-sql.ts's withChangeOrderBranch; the two MUST NOT
+  // drift). A caller whose payload omits it falls through to that plain chain, silently pricing a deductive
+  // CO at $0 while every CO-aware SQL surface reads the negative — the exact bug this feature exists to fix;
+  // any surface that sums Won deals must supply it.
   isChangeOrder?: boolean | null;
   // stageSlug / stage.slug ARE read by getRawDealValue for the 'estimating' DD-over-bid branch (2026-06-18).
   // bidBoardStageSlug / workflowRoute remain accepted for caller convenience but are not read here.
