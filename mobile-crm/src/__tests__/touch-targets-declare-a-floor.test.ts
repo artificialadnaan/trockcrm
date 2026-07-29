@@ -35,6 +35,14 @@ import * as ts from "typescript";
  * WHAT IT ALLOWS: any of the element's styles reaching the floor — array forms, `({ pressed }) => [...]`
  * callbacks, and inline objects are all searched, because a control only has to be big once.
  *
+ * KNOWN LIMIT, stated because the fix above makes it conspicuous: `keysMeetingFloor` reads a
+ * StyleSheet ENTRY by looking for an explicit numeric `minHeight`/`height`, and does not follow a
+ * spread inside that entry. `{ minHeight: 44, ...someTokenWithAHeight }` would therefore be recorded
+ * as 44. Inline style objects in JSX are fully evaluated (see `possibleFloors`); definitions are not.
+ * The only spread-after-height in the tree today is `...theme.elevation.card` in `DealCard.shadow`,
+ * which is a shadow token carrying no height — checked by hand, not by this guard. Closing it properly
+ * means resolving `theme.*` paths across files, which is the same cross-file work `formStyles` needed.
+ *
  * SHARED STYLES: `src/theme/formStyles.ts` is read too, because it is the one module that hands finished
  * controls to other files — `formStyles.button` IS the login and change-password submit. Treating it as
  * unresolvable would have forced a duplicate `minHeight` into both screens, which is the duplication
@@ -239,15 +247,37 @@ function possibleFloors(
   }
 
   if (ts.isObjectLiteralExpression(node)) {
-    let declared: number | null = null;
+    /**
+     * IN ORDER, and a spread counts.
+     *
+     * Skipping `SpreadAssignment` read `{ minHeight: 44, ...styles.compact }` as 44 when it is whatever
+     * `compact` says — and the walker this replaced followed that property access and rejected it, so
+     * the rewrite had quietly weakened the gate it was meant to tighten. Later keys win in JS exactly
+     * as later array entries do, so the same fold applies: a resolvable spread contributes its own
+     * height, an unresolvable one contributes UNKNOWN, and an explicit assignment after either of them
+     * overrides it.
+     */
+    let acc: Set<Contribution> = one(null);
+    const fold = (contribs: Set<Contribution>): void => {
+      const next = new Set<Contribution>();
+      for (const prev of acc) for (const c of contribs) next.add(c === null ? prev : c);
+      acc = next;
+    };
     for (const prop of node.properties) {
-      if (!ts.isPropertyAssignment(prop)) continue;
-      const name = ts.isIdentifier(prop.name) ? prop.name.text : prop.name.getText();
-      if ((name === "minHeight" || name === "height") && ts.isNumericLiteral(prop.initializer)) {
-        declared = Number(prop.initializer.text);
+      if (ts.isSpreadAssignment(prop)) {
+        fold(possibleFloors(prop.expression, heights, owners));
+        continue;
       }
+      if (!ts.isPropertyAssignment(prop)) {
+        // A shorthand or a computed key could be `minHeight` for all this can tell.
+        fold(one(UNKNOWN));
+        continue;
+      }
+      const name = ts.isIdentifier(prop.name) ? prop.name.text : prop.name.getText();
+      if (name !== "minHeight" && name !== "height") continue;
+      fold(one(ts.isNumericLiteral(prop.initializer) ? Number(prop.initializer.text) : UNKNOWN));
     }
-    return one(declared);
+    return acc;
   }
 
   // Everything else — a call, a bare identifier, a spread, an await. Unreadable, so unsafe.
@@ -451,6 +481,25 @@ describe("interactive controls declare a 44pt floor", () => {
       // The distinction that makes the rule above safe: styles.small is defined here and simply has no
       // height, so it does not cancel the floor in front of it.
       expect(check(`${SHEET} const A = () => <Pressable style={[styles.big, styles.small]} />;`)).toBe(0);
+    });
+
+    it("follows a spread into a style it can resolve", () => {
+      // The regression this rewrite introduced: the walker it replaced followed the property access
+      // and rejected the control; skipping SpreadAssignment read the explicit 44 and passed it.
+      const SHEET2 =
+        "const styles = StyleSheet.create({ big: { minHeight: 44 }, compact: { minHeight: 30 } });";
+      expect(check(`${SHEET2} const A = () => <Pressable style={[styles.big, { ...styles.compact }]} />;`)).toBe(1);
+      expect(check(`${SHEET2} const A = () => <Pressable style={{ minHeight: 44, ...{ minHeight: 32 } }} />;`)).toBe(1);
+    });
+
+    it("lets an explicit height after a spread win, as JS does", () => {
+      const SHEET2 =
+        "const styles = StyleSheet.create({ big: { minHeight: 44 }, compact: { minHeight: 30 } });";
+      expect(check(`${SHEET2} const A = () => <Pressable style={{ ...styles.compact, minHeight: 44 }} />;`)).toBe(0);
+    });
+
+    it("poisons an UNRESOLVABLE spread", () => {
+      expect(check(`${SHEET} const A = () => <Pressable style={{ minHeight: 44, ...extra }} />;`)).toBe(1);
     });
 
     it("scans TextInput too — a credential field is a touch target", () => {
