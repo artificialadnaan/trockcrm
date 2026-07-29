@@ -22,6 +22,18 @@ export default mergeConfig(
     test: {
       include: ["tests/**/*.test.ts", "src/**/*.test.ts"],
       exclude: [...configDefaults.exclude, ...QUARANTINE],
+      // The worker's PGlite runtime suites each boot their own in-memory Postgres, so they are bound by
+      // memory/CPU rather than by test logic. Inheriting the base `maxWorkers: 4` and 15s timeouts, a
+      // 2-vCPU runner produced 35 timeout failures across email-sent-sync, first-outreach-dismiss and the
+      // RFP suites — while running any one of them single-worker passed. That is contention, not a
+      // product assertion, and it would make the gate fail on runner size rather than on code.
+      //
+      // The gate therefore trades wall-clock for determinism: fewer PGlite instances alive at once, and
+      // headroom for a cold start on a shared box. Local `npm test` keeps the faster base settings.
+      maxWorkers: 2,
+      minWorkers: 1,
+      testTimeout: 45_000,
+      hookTimeout: 45_000,
     },
   }),
 );

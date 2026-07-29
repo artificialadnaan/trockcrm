@@ -85,6 +85,26 @@ describe("rep performance rollup period scoping", () => {
         pipelineValueSql ?? ""
       )?.[1];
 
+    // Guard the VALUE expression too, not just the FILTER. The extracted slice contains both; asserting
+    // only the filter would let a regression that summed a constant (or the wrong value chain) pass, and
+    // the later precedence assertions cannot cover it because the same expressions also appear in
+    // closed_value's awardedFirstDealValueSql (Codex P2).
+    expect(pipelineValueSql).toBeDefined();
+    // pipeline_value is period-aware: HISTORICAL periods sum the RAW current value, so a closed snapshot
+    // is never re-zeroed by today's 90-day auto-park horizon; current periods sum the effective value.
+    expect(pipelineValueSql).toMatch(
+      /CASE WHEN \$1::text IN \('last_month', 'last_quarter', 'last_year'\) THEN[\s\S]*?ELSE[\s\S]*?END/
+    );
+    const valueExpression = pipelineValueSql?.slice(0, pipelineValueSql.indexOf("FILTER ("));
+    // The real deal-value chain is summed, not a constant or the awarded-first chain used by closed_value.
+    expect(valueExpression).toContain("d.bid_board_total_sales");
+    expect(valueExpression).toContain("d.bid_estimate");
+    expect(valueExpression).toContain("d.dd_estimate");
+    // ...and the CURRENT-period leg carries the auto-park guard (Bid Board mirror + the 90-day horizon),
+    // which is precisely what historical periods must NOT apply.
+    expect(valueExpression).toContain("bid_board_stage_slug");
+    expect(valueExpression).toContain("90 days");
+
     expect(historicalPipelineValueBranch).toBeDefined();
     expect(historicalPipelineValueBranch).toContain("d.created_at::date <= $3::date");
     expect(historicalPipelineValueBranch).toContain(
