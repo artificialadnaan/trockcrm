@@ -8,6 +8,7 @@ import { ApiError } from "../../../../src/api/client";
 import * as pipelineApi from "../../../../src/api/endpoints/pipeline";
 import { useAuth } from "../../../../src/auth/AuthContext";
 import { useQueryScope } from "../../../../src/auth/useOfficeId";
+import { BackLink } from "../../../../src/components/BackLink";
 import { BoardCard } from "../../../../src/components/BoardCard";
 import { RetryNotice } from "../../../../src/components/RetryNotice";
 import { resolveListState } from "../../../../src/list-state";
@@ -76,14 +77,7 @@ export default function StageDealsScreen() {
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
       <View style={styles.header}>
-        <Pressable
-          onPress={() => goBack()}
-          accessibilityRole="button"
-          accessibilityLabel="Back"
-          hitSlop={8}
-        >
-          <Text style={styles.back}>‹ Board</Text>
-        </Pressable>
+        <BackLink label="Board" onPress={() => goBack()} />
         <Text style={styles.title} numberOfLines={1}>
           {stageName}
         </Text>
@@ -171,7 +165,6 @@ export default function StageDealsScreen() {
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: theme.color.canvas },
   header: { paddingHorizontal: theme.space.lg, paddingTop: theme.space.sm, gap: theme.space.xs },
-  back: { ...theme.type.body, color: theme.color.redText },
   title: { ...theme.type.h1, color: theme.color.textPrimary },
   subtitle: { ...theme.type.label, color: theme.color.textMuted },
   list: { padding: theme.space.lg, gap: theme.space.md },
@@ -187,6 +180,8 @@ const styles = StyleSheet.create({
   errorTitle: { ...theme.type.h2, color: theme.color.textPrimary },
   errorBody: { ...theme.type.body, color: theme.color.textSecondary, textAlign: "center" },
   retryBtn: {
+    minHeight: 44,
+    justifyContent: "center",
     marginTop: theme.space.sm,
     borderWidth: 1,
     borderColor: theme.color.brandRed,

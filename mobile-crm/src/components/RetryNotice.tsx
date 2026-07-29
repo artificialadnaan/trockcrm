@@ -58,6 +58,8 @@ export function accessibilityLabelFor(message: string): string {
 
 const styles = StyleSheet.create({
   notice: {
+    minHeight: 44,
+    justifyContent: "center",
     borderRadius: theme.radius.md,
     backgroundColor: theme.color.amberSurface,
     paddingHorizontal: theme.space.md,

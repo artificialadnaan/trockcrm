@@ -281,6 +281,8 @@ const styles = StyleSheet.create({
   },
   footer: { paddingVertical: theme.space.lg },
   retryBtn: {
+    minHeight: 44,
+    justifyContent: "center",
     marginTop: theme.space.sm,
     borderWidth: 1,
     borderColor: theme.color.brandRed,
@@ -313,11 +315,15 @@ const styles = StyleSheet.create({
     padding: theme.space.lg,
     gap: theme.space.md,
   },
-  cardMain: { flex: 1, gap: 2 },
+  cardMain: {
+    minHeight: 44,
+    justifyContent: "center", flex: 1, gap: 2 },
   name: { ...theme.type.title, color: theme.color.textPrimary },
   meta: { ...theme.type.label, color: theme.color.textMuted },
   company: { ...theme.type.body, color: theme.color.textSecondary },
   callBtn: {
+    minHeight: 44,
+    justifyContent: "center",
     borderRadius: theme.radius.pill,
     borderWidth: 1,
     borderColor: theme.color.brandRed,

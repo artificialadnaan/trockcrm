@@ -45,6 +45,8 @@ export const formStyles = StyleSheet.create({
     marginTop: theme.space.xs,
   },
   button: {
+    minHeight: 44,
+    justifyContent: "center",
     marginTop: theme.space.xl,
     backgroundColor: theme.color.brandRed,
     borderRadius: theme.radius.md,

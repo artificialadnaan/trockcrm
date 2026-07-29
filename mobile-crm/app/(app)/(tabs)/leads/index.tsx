@@ -278,6 +278,8 @@ const styles = StyleSheet.create({
     paddingTop: theme.space.sm,
   },
   scopePill: {
+    minHeight: 44,
+    justifyContent: "center",
     borderRadius: theme.radius.pill,
     borderWidth: 1,
     borderColor: theme.color.border,
@@ -320,6 +322,8 @@ const styles = StyleSheet.create({
   errorTitle: { ...theme.type.h2, color: theme.color.textPrimary },
   errorBody: { ...theme.type.body, color: theme.color.textSecondary, textAlign: "center" },
   retryBtn: {
+    minHeight: 44,
+    justifyContent: "center",
     marginTop: theme.space.sm,
     borderWidth: 1,
     borderColor: theme.color.brandRed,
