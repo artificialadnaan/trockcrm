@@ -5,7 +5,9 @@ export interface WalkthroughScopeRow {
   rawLabel: string;
   trade: string;
   divisionHint: string | null;
-  /** Only ever set when the quantity was spoken and human-confirmed. */
+  /** Only ever set when the quantity was spoken and human-confirmed. Nullable because that is what
+   *  the EXPORTER's rows look like — but a null one is REFUSED at ingress
+   *  (validateWalkthroughIngressPayload), because downstream a null quantity is priced as one unit. */
   quantity: number | null;
   unit: string | null;
   /** 0-1 scale, matching extraction-service.ts:62. */

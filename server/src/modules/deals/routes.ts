@@ -103,7 +103,6 @@ import {
   toCanonicalDealStageSlug,
   type DealOpportunityEnteredEventPayload,
   type RfpRequestDeliveryPayload,
-  type WalkthroughIngressPayload,
 } from "@trock-crm/shared/types";
 import {
   assertDealScopingWriteAllowed,
@@ -156,7 +155,10 @@ import {
 import {
   updateEstimatePricingRecommendationReviewState,
 } from "../estimating/workbench-service.js";
-import { ingestWalkthrough } from "../estimating/walkthrough-ingress-service.js";
+import {
+  ingestWalkthrough,
+  validateWalkthroughIngressPayload,
+} from "../estimating/walkthrough-ingress-service.js";
 
 function buildRouteAuditContext(req: { user?: any; headers: Record<string, unknown>; ip?: string | undefined }) {
   const actor = buildAuditActorFromUser({
@@ -3438,30 +3440,30 @@ router.post("/:id/estimating/manual-rows/:recommendationId/promote-local-catalog
  * `req.tenantDb!`, actor off `req.user!.id`, the `getDealById` 404 guard, `req.commitTransaction!()`
  * before the response, and every error to `next`. 201 rather than 200 because, unlike manual-rows,
  * this call brings new resources into being.
+ *
+ * The request is IDEMPOTENT on `walkthroughId`: a retry after a lost response replays the ids of the
+ * chain the first call committed instead of building a second one (walkthrough-ingress-service.ts).
  */
 router.post("/:id/estimating/walkthrough-extractions", async (req, res, next) => {
   try {
-    // Validated BEFORE the deal lookup, so a walkthrough with nothing to estimate costs no query at
-    // all. `ingestWalkthrough` guards the empty case too, but only after the request has already paid
-    // for a round trip — and a 500 from deep in the service is a worse answer than a 400 from here.
-    const rows = (req.body as { rows?: unknown } | undefined)?.rows;
-    if (!Array.isArray(rows) || rows.length === 0) {
-      throw new AppError(400, "rows must be a non-empty array of walkthrough scope rows");
-    }
+    // The WHOLE body is validated BEFORE the deal lookup, so a malformed export costs no query at all
+    // and can never reach a write. `validateWalkthroughIngressPayload` throws AppError(400, …) naming
+    // the offending field — a 400 the sender can act on, rather than a 500 from a NOT NULL violation
+    // or a `.toFixed` on a string deep inside the transaction. `ingestWalkthrough` runs the same
+    // validation again on its own input: the receiver does not trust the sender, and this route is not
+    // the only possible caller.
+    const payload = validateWalkthroughIngressPayload({
+      ...(req.body as Record<string, unknown> | undefined),
+      // Taken from the URL and the session, never from the body: otherwise a caller could aim a
+      // walkthrough at a deal it cannot see, or forge the uploader stamped on the contact-sheet file.
+      dealId: req.params.id,
+      userId: req.user!.id,
+    });
 
     const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
     if (!deal) throw new AppError(404, "Deal not found");
 
-    const result = await ingestWalkthrough({
-      tenantDb: req.tenantDb! as any,
-      payload: {
-        ...(req.body as Omit<WalkthroughIngressPayload, "dealId" | "userId">),
-        // Taken from the URL and the session, never from the body: otherwise a caller could aim a
-        // walkthrough at a deal it cannot see, or forge the uploader stamped on the contact-sheet file.
-        dealId: req.params.id,
-        userId: req.user!.id,
-      },
-    });
+    const result = await ingestWalkthrough({ tenantDb: req.tenantDb! as any, payload });
 
     await req.commitTransaction!();
     res.status(201).json(result);
