@@ -61,7 +61,11 @@ export const WALKTHROUGH_CONTACT_SHEET_MIME_TYPES = ["image/jpeg", "application/
  * that the same walkthrough arriving on one deal under two different projects serializes when it did
  * not strictly have to, which is a wait, not a wrong answer.
  *
- * Exported so the test can assert the real key rather than a copy of it.
+ * Exported so callers and tests agree on one spelling of the key. NOTE for anyone adding a test here:
+ * asserting a recorded lock parameter EQUALS this function's output is a tautology — mutating the body
+ * moves both sides together and the assertion cannot fail. The runtime suite therefore asserts the
+ * key's CONTENT (that it contains the deal id, the walkthrough id and this namespace) and treats the
+ * equality check as documentation only.
  */
 export function walkthroughIngressLockKey(dealId: string, walkthroughId: string): string {
   return `walkthrough-ingress:${dealId}:${walkthroughId}`;

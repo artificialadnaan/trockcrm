@@ -1204,6 +1204,13 @@ describe("ingestWalkthrough", () => {
 
     // Transaction-scoped: gone once the transaction ended, without an explicit unlock, so a failed or
     // crashed ingress cannot wedge this walkthrough forever.
+    //
+    // HONEST LIMIT of this last assertion: it characterizes `pg_advisory_xact_lock`'s own contract and
+    // cannot fail while the statement above IS an xact lock, so it is not independently
+    // mutation-verifiable (swapping in the session-scoped `pg_advisory_lock` is caught by the sql
+    // assertion above, which fires first). It earns its place by catching the careless version of that
+    // change — one where the sql assertion is "fixed" to match a session lock — which would leak a lock
+    // per ingress until the connection was returned to the pool.
     const after = await pg.query<{ n: number }>(
       `select count(*)::int as n from pg_locks where locktype = 'advisory'`
     );
