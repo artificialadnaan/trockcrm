@@ -1,13 +1,22 @@
-import { ArrowDownLeft, ArrowUpRight, Paperclip } from "lucide-react";
+import { ArrowDownLeft, ArrowUpRight, MoreHorizontal, Paperclip, RefreshCw, Unlink2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import type { Email } from "@/hooks/use-emails";
 
 interface EmailRowProps {
   email: Email;
   onClick?: (email: Email) => void;
+  onReassign?: (email: Email) => void;
+  onUnassign?: (email: Email) => void;
 }
 
-export function EmailRow({ email, onClick }: EmailRowProps) {
+export function EmailRow({ email, onClick, onReassign, onUnassign }: EmailRowProps) {
   const isInbound = email.direction === "inbound";
   const date = new Date(email.sentAt);
   const isToday = new Date().toDateString() === date.toDateString();
@@ -18,6 +27,8 @@ export function EmailRow({ email, onClick }: EmailRowProps) {
   const displayAddress = isInbound
     ? email.fromAddress
     : email.toAddresses[0] ?? "Unknown";
+
+  const showActions = Boolean(onReassign || onUnassign);
 
   return (
     <div
@@ -60,6 +71,38 @@ export function EmailRow({ email, onClick }: EmailRowProps) {
           {isInbound ? "In" : "Out"}
         </Badge>
       </div>
+
+      {showActions && (
+        <DropdownMenu>
+          <DropdownMenuTrigger
+            render={
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7 flex-shrink-0"
+                aria-label="More email actions"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <MoreHorizontal className="h-4 w-4" />
+              </Button>
+            }
+          />
+          <DropdownMenuContent align="end" onClick={(e) => e.stopPropagation()}>
+            {onReassign && (
+              <DropdownMenuItem onClick={() => onReassign(email)}>
+                <RefreshCw className="h-4 w-4 mr-2" />
+                Reassign…
+              </DropdownMenuItem>
+            )}
+            {onUnassign && (
+              <DropdownMenuItem onClick={() => onUnassign(email)}>
+                <Unlink2 className="h-4 w-4 mr-2" />
+                Unassign
+              </DropdownMenuItem>
+            )}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      )}
     </div>
   );
 }

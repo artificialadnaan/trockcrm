@@ -403,7 +403,7 @@ export async function updateEmailAction(
 }
 
 export async function assignEmailThread(conversationId: string, dealId: string) {
-  return api<{ success: boolean; bindingId: string; thread: EmailThread }>(
+  return api<{ success: boolean; thread: EmailThread }>(
     `/email/thread/${encodeURIComponent(conversationId)}/assign`,
     {
       method: "POST",
@@ -413,7 +413,7 @@ export async function assignEmailThread(conversationId: string, dealId: string) 
 }
 
 export async function reassignEmailThread(conversationId: string, dealId: string) {
-  return api<{ success: boolean; bindingId: string; preview: EmailThreadPreview | null; thread: EmailThread }>(
+  return api<{ success: boolean; preview: EmailThreadPreview | null; thread: EmailThread }>(
     `/email/thread/${encodeURIComponent(conversationId)}/reassign`,
     {
       method: "POST",
