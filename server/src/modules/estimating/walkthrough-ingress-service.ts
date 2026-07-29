@@ -6,7 +6,7 @@
 // frames: a real artifact a human can open, and `image/*` is one of only two mime families the
 // estimating path accepts. This module builds that chain link by link: the `files` row, then the
 // already-parsed source document and its activated parse run.
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq, isNull, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
 import {
@@ -64,7 +64,8 @@ export const MAX_WALKTHROUGH_SCOPE_ROWS = 1000;
 const EXTRACTION_INSERT_CHUNK_ROWS = 200;
 
 /** Narrow, storage-shaped input for ONE link of the chain; `WalkthroughIngressPayload`'s wire names
- *  (contactSheetR2Key/…) are mapped onto it in `ingestWalkthrough`. */
+ *  (contactSheetBucket/…) are mapped onto it in `ingestWalkthrough`, and its `r2Key` is DERIVED there
+ *  rather than carried on the wire — see `deriveWalkthroughContactSheetR2Key`. */
 export interface CreateWalkthroughContactSheetFileArgs {
   tenantDb: TenantDb;
   input: {
@@ -93,6 +94,37 @@ const EXTENSION_BY_MIME: Record<ContactSheetMimeType, string> = {
   "image/jpeg": ".jpg",
   "application/pdf": ".pdf",
 };
+
+/**
+ * The contact sheet's R2 key, DERIVED — never accepted from the caller.
+ *
+ * SECURITY, and the reason this function exists at all. `files.r2_key` is what
+ * `buildFileDownloadUrlFromRecord` (files/service.ts:1513) hands to `generateDownloadUrl` for
+ * presigning, and the only authorization in front of it is the row's DEAL association — the key itself
+ * is never checked against anything. So a wire field that lands in `files.r2_key` is a confused-deputy
+ * READ primitive: an authenticated caller who knows any key in the bucket (another deal's contract, a
+ * scorecard, a photo report) could post it as their walkthrough's contact sheet, have it associated
+ * with a deal they legitimately access, and then download it through the ordinary files endpoint.
+ *
+ * No amount of validation closes that hole, because a hostile key is a perfectly well-formed key.
+ * Deriving it does: `walkthroughId` is the same value that becomes the document's `contentHash`, so
+ * the key is bound to walkthrough identity and there is no input from which a caller could name
+ * another deal's object. The path is the CONTRACT with trock-scope — the exporter uploads the contact
+ * sheet to exactly this key before it posts — so both sides compute it rather than exchange it.
+ */
+export function deriveWalkthroughContactSheetR2Key(
+  dealId: string,
+  walkthroughId: string,
+  mimeType: ContactSheetMimeType
+): string {
+  // `dealId` is in the path because `files.r2_key` is UNIQUE and one walkthrough may legitimately be
+  // ingested onto more than one deal (a re-bid, or scope split across two deals). Keying on
+  // walkthroughId alone would make the second deal collide with a 23505. It costs nothing
+  // security-wise: dealId comes from the authorized URL, never the body, so it still cannot be used
+  // to name another deal's object.
+  // EXTENSION_BY_MIME carries its own leading dot, so this yields ".../contact-sheet.jpg".
+  return `walkthroughs/${dealId}/${walkthroughId}/contact-sheet${EXTENSION_BY_MIME[mimeType]}`;
+}
 
 export async function createWalkthroughContactSheetFile({
   tenantDb,
@@ -512,7 +544,11 @@ export function validateWalkthroughIngressPayload(input: unknown): WalkthroughIn
     dealId: requireNonEmptyString(raw.dealId, "dealId"),
     // Optional, but never blank: it lands on a uuid column, where "" is a 22P02 and not a null.
     projectId: optionalNonEmptyString(raw.projectId, "projectId"),
-    contactSheetR2Key: requireNonEmptyString(raw.contactSheetR2Key, "contactSheetR2Key"),
+    // NO contactSheetR2Key. Whatever the body carried under that name is dropped on the floor here —
+    // the key is derived from `walkthroughId` in `ingestWalkthrough`. See
+    // `deriveWalkthroughContactSheetR2Key` for why accepting one is a read primitive rather than a
+    // convenience. Returning the canonical shape (rather than spreading `raw`) is what makes that
+    // dropping structural: an unknown wire field cannot reach a column by accident.
     contactSheetBucket,
     contactSheetBytes,
     contactSheetMimeType: contactSheetMimeType as ContactSheetMimeType,
@@ -527,9 +563,11 @@ export function validateWalkthroughIngressPayload(input: unknown): WalkthroughIn
  * Compose the three links into one ingress, atomically.
  *
  * This is the only place `WalkthroughIngressPayload` — the wire contract trock-scope posts — meets the
- * helpers' narrow, storage-shaped inputs. The rename is the point: `contactSheetR2Key`/`Bucket`/
- * `Bytes`/`MimeType` become `r2Key`/`r2Bucket`/`bytes`/`mimeType`, so the helpers stay ignorant of
- * where their bytes came from and the mapping is checked by the compiler rather than by convention.
+ * helpers' narrow, storage-shaped inputs. The rename is the point: `contactSheetBucket`/`Bytes`/
+ * `MimeType` become `r2Bucket`/`bytes`/`mimeType`, so the helpers stay ignorant of where their bytes
+ * came from and the mapping is checked by the compiler rather than by convention. `r2Key` has NO wire
+ * counterpart — it is derived here (`deriveWalkthroughContactSheetR2Key`), because a caller-supplied
+ * key would let an authenticated user alias any object in the bucket onto a deal they can read.
  *
  * WHY A TRANSACTION (this module had none, and the rest of the module still has none): the chain is
  * three writes deep and its middle link is itself two statements — INSERT the run, then UPDATE the
@@ -635,13 +673,22 @@ export async function ingestWalkthrough({
       };
     }
 
+    // DERIVED, never accepted. This is the whole security property: the key is a pure function of
+    // walkthrough identity, so no wire input can name another deal's object. Both sides compute it —
+    // trock-scope uploads the contact sheet to exactly this key before posting.
+    const contactSheetR2Key = deriveWalkthroughContactSheetR2Key(
+      payload.dealId,
+      payload.walkthroughId,
+      payload.contactSheetMimeType
+    );
+
     const fileId = await createWalkthroughContactSheetFile({
       tenantDb: tx,
       input: {
         dealId: payload.dealId,
         walkthroughId: payload.walkthroughId,
         siteLabel: payload.siteLabel,
-        r2Key: payload.contactSheetR2Key,
+        r2Key: contactSheetR2Key,
         // Equal to getCrmFileBucket() by validation above — the file is recorded against the bucket
         // its download will actually be presigned against.
         r2Bucket: payload.contactSheetBucket,
@@ -663,7 +710,7 @@ export async function ingestWalkthrough({
         capturedAt: payload.capturedAt,
         mimeType: payload.contactSheetMimeType,
         // The contact sheet's R2 key is the document's storage key: the document IS the file.
-        storageKey: payload.contactSheetR2Key,
+        storageKey: contactSheetR2Key,
         bytes: payload.contactSheetBytes,
         userId: payload.userId,
       },

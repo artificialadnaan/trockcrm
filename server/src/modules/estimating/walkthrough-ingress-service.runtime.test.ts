@@ -587,7 +587,6 @@ function walkthroughPayload(
     walkthroughId,
     dealId: DEAL,
     projectId: PROJECT,
-    contactSheetR2Key: `walkthroughs/${walkthroughId}/contact-sheet.jpg`,
     contactSheetBucket: CRM_BUCKET,
     contactSheetBytes: 184320,
     contactSheetMimeType: "image/jpeg",
@@ -634,7 +633,9 @@ describe("ingestWalkthrough", () => {
     const [file] = await tenantDb.select().from(files).where(eq(files.id, result.fileId));
     // The wire contract's contactSheet* fields landed on the storage-shaped columns — this mapping is
     // the only thing that connects WalkthroughIngressPayload to the three narrow helper inputs.
-    expect(file.r2Key).toBe(`walkthroughs/${walkthroughId}/contact-sheet.jpg`);
+    // DERIVED server-side from (dealId, walkthroughId) — never accepted from the wire. dealId is in
+    // the path because files.r2_key is UNIQUE and one walkthrough may be ingested onto two deals.
+    expect(file.r2Key).toBe(`walkthroughs/${DEAL}/${walkthroughId}/contact-sheet.jpg`);
     expect(file.r2Bucket).toBe(CRM_BUCKET);
     expect(file.fileSizeBytes).toBe(184320);
     expect(file.mimeType).toBe("image/jpeg");
@@ -647,7 +648,7 @@ describe("ingestWalkthrough", () => {
     // LINK 1 — the document points at the file the first helper made.
     expect(doc.fileId).toBe(result.fileId);
     expect(doc.rootFileId).toBe(result.fileId);
-    expect(doc.storageKey).toBe(`walkthroughs/${walkthroughId}/contact-sheet.jpg`);
+    expect(doc.storageKey).toBe(`walkthroughs/${DEAL}/${walkthroughId}/contact-sheet.jpg`);
     // LINK 2 — the document's ACTIVE run is the run this call created. A null here is the exact
     // failure the transaction exists to prevent (workbench-service.ts:157 reads it as "never show
     // any of this document's rows"), and it is a separate UPDATE from the document INSERT.
@@ -900,6 +901,40 @@ describe("ingestWalkthrough", () => {
     expect(extractions).toHaveLength(2);
   });
 
+  // SECURITY. `files.r2_key` is what buildFileDownloadUrlFromRecord presigns, and it authorizes on the
+  // row's DEAL association rather than on the key. So a caller-supplied key is a confused-deputy read
+  // primitive: an authenticated user who knows any key in the bucket could alias it onto a deal they
+  // legitimately access and download an object they were never entitled to. The key is therefore
+  // DERIVED, and the wire cannot influence it. Validation would not close this — a hostile key is a
+  // perfectly well-formed key — so this asserts the derivation, not a rejection.
+  it("ignores a hostile contact-sheet key smuggled in the payload", async () => {
+    const walkthroughId = U("33020");
+    const hostile = "deals/00000000-0000-4000-8000-000000099999/private-bid.pdf";
+
+    const result = await ingestWalkthrough({
+      tenantDb,
+      payload: {
+        ...walkthroughPayload(walkthroughId),
+        // Not on WalkthroughIngressPayload any more — cast past the compiler to simulate a hostile
+        // body reaching the service with the field the type no longer admits.
+        contactSheetR2Key: hostile,
+      } as WalkthroughIngressPayload,
+    });
+
+    const [file] = await tenantDb.select().from(files).where(eq(files.id, result.fileId));
+    expect(file.r2Key).toBe(`walkthroughs/${DEAL}/${walkthroughId}/contact-sheet.jpg`);
+    expect(file.r2Key).not.toContain("private-bid");
+    expect(file.r2Key).not.toContain("099999");
+
+    // The document's storage key is the same derived value — the aliasing surface is closed on both
+    // the file row and the document that points at it.
+    const [doc] = await tenantDb
+      .select()
+      .from(estimateSourceDocuments)
+      .where(eq(estimateSourceDocuments.id, result.documentId));
+    expect(doc.storageKey).toBe(`walkthroughs/${DEAL}/${walkthroughId}/contact-sheet.jpg`);
+  });
+
   it("scopes the retry check to the deal, so the same walkthrough on another deal still ingests", async () => {
     const walkthroughId = U("33010");
 
@@ -911,8 +946,6 @@ describe("ingestWalkthrough", () => {
       tenantDb,
       payload: walkthroughPayload(walkthroughId, {
         dealId: U("11112"),
-        // A retry reuses its key; a genuinely different ingress has its own object.
-        contactSheetR2Key: `walkthroughs/${walkthroughId}/contact-sheet-b.jpg`,
       }),
     });
 

@@ -96,7 +96,6 @@ const PAYLOAD: WalkthroughIngressPayload = {
   walkthroughId: WALKTHROUGH,
   dealId: DEAL,
   projectId: null,
-  contactSheetR2Key: "walkthroughs/c2222/contact-sheet.jpg",
   contactSheetBucket: getCrmFileBucket(),
   contactSheetBytes: 92_160,
   contactSheetMimeType: "image/jpeg",

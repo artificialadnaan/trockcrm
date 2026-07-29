@@ -145,7 +145,6 @@ const SECOND_SCOPE_ROW: WalkthroughScopeRow = {
 const BODY: Omit<WalkthroughIngressPayload, "dealId" | "userId"> = {
   walkthroughId: "walkthrough-1",
   projectId: null,
-  contactSheetR2Key: "walkthroughs/walkthrough-1/contact-sheet.jpg",
   contactSheetBucket: getCrmFileBucket(),
   contactSheetBytes: 92_160,
   contactSheetMimeType: "image/jpeg",

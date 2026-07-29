@@ -23,13 +23,22 @@ export interface WalkthroughScopeRow {
   locationLabel: string | null;
 }
 
-/** Everything needed to build the synthetic document chain plus its rows. */
+/**
+ * Everything needed to build the synthetic document chain plus its rows.
+ *
+ * NOTE — there is deliberately NO contact-sheet R2 KEY here, and there must never be one. The key the
+ * `files` row is stamped with is what `buildFileDownloadUrlFromRecord` presigns, and it authorizes on
+ * the row's DEAL association rather than on the key itself. A caller-supplied key is therefore a
+ * confused-deputy read primitive: an authenticated user who knows any key in the bucket could alias it
+ * onto a deal they legitimately access and download an object they were never entitled to. Validation
+ * cannot close that — an attacker supplies a perfectly well-formed key — so the key is DERIVED from
+ * `walkthroughId` server-side (`deriveWalkthroughContactSheetR2Key`, walkthrough-ingress-service.ts).
+ * The bucket, byte count and mime type stay on the wire: none of them can address a foreign object.
+ */
 export interface WalkthroughIngressPayload {
   walkthroughId: string;
   dealId: string;
   projectId: string | null;
-  /** R2 key of the contact-sheet image standing in as the source document. */
-  contactSheetR2Key: string;
   contactSheetBucket: string;
   contactSheetBytes: number;
   /** image/jpeg or application/pdf — the only families the estimating path accepts. */
