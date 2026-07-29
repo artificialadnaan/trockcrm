@@ -118,6 +118,28 @@ export type { ApprovalOutcome };
 export { approveCorrectiveActionItems, rejectCorrectiveActionItem };
 
 /**
+ * The card generation the reviewer had on screen — sent by BOTH verbs.
+ *
+ * A scorecard stays editable while it awaits approval (approval has no timeout, so locking it there would
+ * strand the card), and an edit to scores, notes, signatures or the ORIGINAL evidence touches no
+ * corrective-action event at all. The attempt guard cannot see those, so the verdict also carries the card's
+ * content generation.
+ */
+export function parseReviewedGeneration(body: unknown): string | undefined {
+  const raw = (body as { reviewedGeneration?: unknown } | null | undefined)?.reviewedGeneration;
+  if (raw == null) return undefined;
+  if (typeof raw !== "string") {
+    throw new AppError(400, "reviewedGeneration must be the card generation you reviewed.");
+  }
+  const trimmed = raw.trim();
+  if (!trimmed) return undefined;
+  if (Number.isNaN(new Date(trimmed).getTime())) {
+    throw new AppError(400, "reviewedGeneration must be an ISO timestamp.");
+  }
+  return trimmed;
+}
+
+/**
  * The single submission event a REJECT was filed against — the one-item form of `parseReviewedAttempts`.
  *
  * Reject takes its item from the URL, so the map shape would carry one always-redundant key; the guard it

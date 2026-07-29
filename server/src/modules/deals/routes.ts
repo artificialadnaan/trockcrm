@@ -124,6 +124,7 @@ import {
   parseApproveItemIds,
   parseReviewedAttempts,
   parseReviewedAttempt,
+  parseReviewedGeneration,
   parseRejectionComment,
 } from "../field/corrective-action-approval-routes.js";
 import { approveAndNotify, rejectAndRestart } from "../field/corrective-action-approval.js";
@@ -2616,6 +2617,9 @@ router.post("/:id/scorecards/:scorecardId/corrective-actions/approve", async (re
     // Which ATTEMPT the approver reviewed, so a response filed after they opened the page cannot be approved
     // under their name. Absent from older clients, which keep the previous status-only behaviour.
     const reviewedAttempts = parseReviewedAttempts(req.body);
+    // ...and which VERSION OF THE CARD they were looking at. An edit while it awaits approval moves no
+    // corrective-action event, so the attempt guard alone would let a stale click approve unseen content.
+    const reviewedGeneration = parseReviewedGeneration(req.body);
     await assertScorecardBelongsToDeal(req.tenantDb!, req.params.id, req.params.scorecardId);
 
     if (!req.officeSlug) throw new AppError(500, "Office context not available");
@@ -2628,6 +2632,7 @@ router.post("/:id/scorecards/:scorecardId/corrective-actions/approve", async (re
       itemIds,
       actor,
       reviewedAttempts,
+      reviewedGeneration,
     });
     await req.commitTransaction!();
     // Refresh the artifact AFTER the commit, mirroring the responder route. An approval advances the card's
@@ -2658,6 +2663,7 @@ router.post("/:id/scorecards/:scorecardId/corrective-actions/:itemId/reject", as
     const actor = assertCorrectiveActionApprover(req);
     const comment = parseRejectionComment(req.body);
     const reviewedAttempt = parseReviewedAttempt(req.body);
+    const reviewedGeneration = parseReviewedGeneration(req.body);
     await assertScorecardBelongsToDeal(req.tenantDb!, req.params.id, req.params.scorecardId);
 
     if (!req.officeSlug) throw new AppError(500, "Office context not available");
@@ -2671,6 +2677,7 @@ router.post("/:id/scorecards/:scorecardId/corrective-actions/:itemId/reject", as
       comment,
       actor,
       reviewedAttempt,
+      reviewedGeneration,
     });
     await req.commitTransaction!();
     // Refresh the artifact AFTER the commit, mirroring the responder route. A rejection advances the card's

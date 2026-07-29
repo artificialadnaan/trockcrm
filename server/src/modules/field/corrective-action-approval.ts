@@ -58,6 +58,14 @@ export interface ApprovalOutcome {
   closed: boolean;
   /** True when this call returned the card to the responders — the caller fires the rejection notice. */
   reopened: boolean;
+  /**
+   * The card's generation AFTER this call.
+   *
+   * Returned so a reviewer acting on several items from one page load can carry it into the next verdict
+   * without waiting for a refetch — every verdict advances the generation, so without this the second click
+   * would 409 against the generation its own first click created.
+   */
+  generation: string | null;
 }
 
 /**
@@ -137,7 +145,7 @@ async function recomputeCardStatus(
   items: Array<{ status: string }>,
   currentStatus: string,
   itemsChanged: boolean,
-): Promise<{ cardStatus: string; changed: boolean }> {
+): Promise<{ cardStatus: string; changed: boolean; generation: Date | null }> {
   const outstanding = items.filter((item) =>
     (CORRECTIVE_ACTION_OUTSTANDING_STATUSES as readonly string[]).includes(item.status),
   ).length;
@@ -153,7 +161,7 @@ async function recomputeCardStatus(
   // Nothing changed at ALL — a duplicate approve, or approve-all with nothing left awaiting. Writing here
   // would advance the generation and invalidate a perfectly current PDF, forcing a pointless re-render on
   // every double-click of an operation documented as idempotent.
-  if (!itemsChanged && cardStatus === currentStatus) return { cardStatus, changed: false };
+  if (!itemsChanged && cardStatus === currentStatus) return { cardStatus, changed: false, generation: null };
 
   // Otherwise ALWAYS write, even when the card's own status does not move.
   //
@@ -164,21 +172,56 @@ async function recomputeCardStatus(
   // had another open.
   //
   // `changed` still reports whether the STATUS moved, which is what the notification callers switch on.
-  await tx
+  const [written] = await tx
     .update(fieldScorecards)
     .set({ status: cardStatus, updatedAt: nextGeneration() })
-    .where(eq(fieldScorecards.id, scorecardId));
-  return { cardStatus, changed: cardStatus !== currentStatus };
+    .where(eq(fieldScorecards.id, scorecardId))
+    .returning({ generation: fieldScorecards.updatedAt });
+  return { cardStatus, changed: cardStatus !== currentStatus, generation: written?.generation ?? null };
 }
 
 async function readCardStatus(tx: TenantDb, scorecardId: string): Promise<string> {
+  return (await readCard(tx, scorecardId)).status;
+}
+
+async function readCard(
+  tx: TenantDb,
+  scorecardId: string,
+): Promise<{ status: string; generation: Date | null }> {
   const [card] = await tx
-    .select({ status: fieldScorecards.status })
+    .select({ status: fieldScorecards.status, generation: fieldScorecards.updatedAt })
     .from(fieldScorecards)
     .where(eq(fieldScorecards.id, scorecardId))
     .limit(1);
   if (!card) throw new AppError(404, "Scorecard not found");
-  return card.status;
+  return { status: card.status, generation: card.generation ?? null };
+}
+
+/**
+ * Refuse a verdict filed against a version of the scorecard that has since changed.
+ *
+ * The attempt guard binds a verdict to the corrective-action RESPONSE the reviewer read. It cannot see the
+ * rest of the card: a scorecard stays editable while it awaits approval (deliberately — approval has no
+ * timeout, so locking it there would strand the card), and the submitter can change scores, notes, signatures
+ * or the ORIGINAL evidence without touching a single corrective-action event. The reviewed submission ids are
+ * then still latest, the stale click passes, and the approval is recorded over content nobody reviewed.
+ *
+ * `updated_at` is the card's content generation — the same token the PDF currency check uses — so comparing
+ * it catches every such edit. Absent from older clients, which keep the previous behaviour.
+ */
+async function assertReviewedGenerationIsCurrent(
+  tx: TenantDb,
+  scorecardId: string,
+  reviewedGeneration: string | undefined,
+  current: Date | null,
+): Promise<void> {
+  if (!reviewedGeneration || !current) return;
+  if (new Date(reviewedGeneration).getTime() === current.getTime()) return;
+  throw new AppError(
+    409,
+    "This scorecard changed after you opened it. Refresh to review the current version.",
+    "CORRECTIVE_ACTION_CARD_SUPERSEDED",
+  );
 }
 
 /**
@@ -195,11 +238,15 @@ export async function approveCorrectiveActionItems(
     actor: ApprovalActor;
     /** itemId → the submission event id the approver reviewed. Omitted by older clients. */
     reviewedAttempts?: ReviewedAttempts;
+    /** The card generation on screen, so an edit made since cannot be approved unseen. */
+    reviewedGeneration?: string;
   },
 ): Promise<ApprovalOutcome> {
   const items = await lockAndReadItems(tx, input.scorecardId);
   if (items.length === 0) throw new AppError(404, "This scorecard has no corrective actions.");
-  const currentStatus = await readCardStatus(tx, input.scorecardId);
+  const card = await readCard(tx, input.scorecardId);
+  const currentStatus = card.status;
+  await assertReviewedGenerationIsCurrent(tx, input.scorecardId, input.reviewedGeneration, card.generation);
 
   const targetIds = input.itemIds?.length
     ? input.itemIds
@@ -249,7 +296,7 @@ export async function approveCorrectiveActionItems(
   const after = items.map((item) =>
     changedItemIds.includes(item.id) ? { ...item, status: "approved" } : item,
   );
-  const { cardStatus } = await recomputeCardStatus(
+  const { cardStatus, generation } = await recomputeCardStatus(
     tx,
     input.scorecardId,
     after,
@@ -263,6 +310,7 @@ export async function approveCorrectiveActionItems(
     // Only the call that actually moved the card reports `closed`, so the completion notice fires once.
     closed: cardStatus === CORRECTIVE_ACTION_CARD_CLOSED && currentStatus !== CORRECTIVE_ACTION_CARD_CLOSED,
     reopened: false,
+    generation: (generation ?? card.generation)?.toISOString() ?? null,
   };
 }
 
@@ -282,6 +330,8 @@ export async function rejectCorrectiveActionItem(
     actor: ApprovalActor;
     /** The submission event the rejecter reviewed. Omitted by older clients. */
     reviewedAttempt?: string;
+    /** The card generation on screen, so an edit made since cannot be rejected unseen either. */
+    reviewedGeneration?: string;
   },
 ): Promise<ApprovalOutcome> {
   const comment = input.comment?.trim();
@@ -292,8 +342,10 @@ export async function rejectCorrectiveActionItem(
   const items = await lockAndReadItems(tx, input.scorecardId);
   const target = items.find((item) => item.id === input.itemId);
   if (!target) throw new AppError(404, "Corrective-action item not found on this scorecard.");
-  const currentStatus = await readCardStatus(tx, input.scorecardId);
+  const card = await readCard(tx, input.scorecardId);
+  const currentStatus = card.status;
   assertCardNotFinished(currentStatus);
+  await assertReviewedGenerationIsCurrent(tx, input.scorecardId, input.reviewedGeneration, card.generation);
   await assertReviewedAttemptsAreLatest(
     tx,
     [input.itemId],
@@ -315,7 +367,13 @@ export async function rejectCorrectiveActionItem(
   if (updated.length === 0) {
     // Already rejected, already approved, or resubmitted since the approver loaded the page. Idempotent
     // no-op rather than an error: the approver's intent is already reflected or superseded.
-    return { changedItemIds: [], cardStatus: currentStatus, closed: false, reopened: false };
+    return {
+      changedItemIds: [],
+      cardStatus: currentStatus,
+      closed: false,
+      reopened: false,
+      generation: card.generation?.toISOString() ?? null,
+    };
   }
 
   await recordCorrectiveActionEvent(tx, {
@@ -334,7 +392,13 @@ export async function rejectCorrectiveActionItem(
   const after = items.map((item) =>
     item.id === input.itemId ? { ...item, status: "rejected" } : item,
   );
-  const { cardStatus } = await recomputeCardStatus(tx, input.scorecardId, after, currentStatus, true);
+  const { cardStatus, generation } = await recomputeCardStatus(
+    tx,
+    input.scorecardId,
+    after,
+    currentStatus,
+    true,
+  );
 
   return {
     changedItemIds: [input.itemId],
@@ -344,6 +408,7 @@ export async function rejectCorrectiveActionItem(
     // MUST restart their notification cycle, since their response tokens were revoked when they submitted.
     reopened:
       cardStatus === CORRECTIVE_ACTION_CARD_OPEN && currentStatus !== CORRECTIVE_ACTION_CARD_OPEN,
+    generation: (generation ?? card.generation)?.toISOString() ?? null,
   };
 }
 
@@ -401,6 +466,7 @@ export async function rejectAndRestart(
     comment: string;
     actor: ApprovalActor;
     reviewedAttempt?: string;
+    reviewedGeneration?: string;
   },
 ): Promise<ApprovalOutcome> {
   const outcome = await rejectCorrectiveActionItem(tx, {
@@ -409,6 +475,7 @@ export async function rejectAndRestart(
     comment: input.comment,
     actor: input.actor,
     reviewedAttempt: input.reviewedAttempt,
+    reviewedGeneration: input.reviewedGeneration,
   });
 
   // Restart whenever an item ACTUALLY moved to `rejected` — not only when the CARD transitioned back to
@@ -456,6 +523,7 @@ export async function approveAndNotify(
     itemIds?: string[];
     actor: ApprovalActor;
     reviewedAttempts?: ReviewedAttempts;
+    reviewedGeneration?: string;
   },
 ): Promise<ApprovalOutcome> {
   const outcome = await approveCorrectiveActionItems(tx, {
@@ -463,6 +531,7 @@ export async function approveAndNotify(
     itemIds: input.itemIds,
     actor: input.actor,
     reviewedAttempts: input.reviewedAttempts,
+    reviewedGeneration: input.reviewedGeneration,
   });
   if (outcome.closed) {
     await enqueueCorrectiveActionOversightClosed(tx, {

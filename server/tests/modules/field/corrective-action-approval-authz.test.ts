@@ -7,6 +7,7 @@ import {
   parseRejectionComment,
   parseReviewedAttempt,
   parseReviewedAttempts,
+  parseReviewedGeneration,
   MAX_REJECTION_COMMENT_LENGTH,
 } from "../../../src/modules/field/corrective-action-approval-routes.js";
 
@@ -120,6 +121,20 @@ describe("request parsing", () => {
     expect(parseReviewedAttempts({ reviewedAttempts: {} })).toBeUndefined();
     expect(parseReviewedAttempts({})).toBeUndefined();
     expect(() => parseReviewedAttempts({ reviewedAttempts: ["ev-1"] })).toThrow(/reviewedAttempts/i);
+  });
+
+  it("parses the reviewed card generation and refuses a non-timestamp", () => {
+    // It reaches a comparison against a Date. An unparseable string would produce NaN, which is equal to
+    // nothing — so every verdict from that client would 409 with a message telling the reviewer to refresh a
+    // page that is already current. Fail at the edge with a 400 that says what is wrong instead.
+    expect(parseReviewedGeneration({ reviewedGeneration: " 2026-07-27T13:00:00.000Z " })).toBe(
+      "2026-07-27T13:00:00.000Z",
+    );
+    for (const absent of [undefined, null, "", "   "]) {
+      expect(parseReviewedGeneration({ reviewedGeneration: absent })).toBeUndefined();
+    }
+    expect(() => parseReviewedGeneration({ reviewedGeneration: 42 })).toThrow(/reviewedGeneration/i);
+    expect(() => parseReviewedGeneration({ reviewedGeneration: "not a timestamp" })).toThrow(/ISO/i);
   });
 
   it("NEVER discloses the allowlist itself — only the boolean", () => {

@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ClipboardCheck, Download, ChevronDown, ChevronRight, AlertTriangle, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -490,9 +490,23 @@ export function ScorecardDetailView({
 }) {
   // The server decides; this only chooses whether to RENDER the controls.
   const canApprove = detail.canApproveCorrectiveActions === true;
+  // The card generation the reviewer is acting on. Starts as the one this render came from; each verdict
+  // returns the generation it produced, because every verdict advances it — without carrying that forward,
+  // approving a second item before the refetch settles would 409 against the reviewer's OWN first click.
+  const reviewedGeneration = useRef<string | null | undefined>(detail.updatedAt);
+  useEffect(() => {
+    reviewedGeneration.current = detail.updatedAt;
+  }, [detail.updatedAt]);
   const approve = dealId
     ? async (itemId: string) => {
-        await approveCorrectiveActions(dealId, detail.id, [itemId], reviewedAttemptsOf(correctiveActions));
+        const outcome = await approveCorrectiveActions(
+          dealId,
+          detail.id,
+          [itemId],
+          reviewedAttemptsOf(correctiveActions),
+          reviewedGeneration.current,
+        );
+        reviewedGeneration.current = outcome.generation ?? reviewedGeneration.current;
         onApprovalChange?.();
       }
     : undefined;
@@ -501,13 +515,15 @@ export function ScorecardDetailView({
         // Same binding as approve: the reason has to land on the attempt that earned it. Without this a
         // rejecter looking at a stale page sends back work they never read, and restarts the responder's
         // cycle for a fault the responder may already have corrected.
-        await rejectCorrectiveAction(
+        const outcome = await rejectCorrectiveAction(
           dealId,
           detail.id,
           itemId,
           comment,
           reviewedAttemptsOf(correctiveActions)[itemId],
+          reviewedGeneration.current,
         );
+        reviewedGeneration.current = outcome.generation ?? reviewedGeneration.current;
         onApprovalChange?.();
       }
     : undefined;
@@ -524,7 +540,14 @@ export function ScorecardDetailView({
           .filter((i) => i.status === "submitted")
           .map((i) => i.id);
         if (reviewed.length === 0) return;
-        await approveCorrectiveActions(dealId, detail.id, reviewed, reviewedAttemptsOf(correctiveActions));
+        const outcome = await approveCorrectiveActions(
+          dealId,
+          detail.id,
+          reviewed,
+          reviewedAttemptsOf(correctiveActions),
+          reviewedGeneration.current,
+        );
+        reviewedGeneration.current = outcome.generation ?? reviewedGeneration.current;
         onApprovalChange?.();
       }
     : undefined;

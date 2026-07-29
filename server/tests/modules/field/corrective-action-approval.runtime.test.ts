@@ -449,6 +449,71 @@ describe("the event thread", () => {
     expect(outcome.changedItemIds).toEqual([itemId]);
   });
 
+  it("refuses a verdict filed against a card that has been EDITED since — both verbs", async () => {
+    // The attempt guard binds a verdict to the corrective-action RESPONSE the reviewer read. It cannot see
+    // the rest of the card, and a scorecard stays editable while it awaits approval (deliberately: approval
+    // has no timeout, so locking it there would strand the card). The submitter can therefore change scores,
+    // notes, signatures or the ORIGINAL evidence without touching a single corrective-action event — the
+    // reviewed submission ids stay latest, the stale click sails through, and the approval is recorded over
+    // content nobody reviewed.
+    const [itemId] = await seedAwaitingApproval(1);
+    const [{ generation: loaded }] = await tdb
+      .select({ generation: fieldScorecards.updatedAt })
+      .from(fieldScorecards)
+      .where(eq(fieldScorecards.id, CARD));
+    const stale = new Date(loaded!.getTime() - 60_000).toISOString();
+
+    await expect(
+      approveCorrectiveActionItems(tdb, {
+        scorecardId: CARD,
+        itemIds: [itemId],
+        actor: APPROVER,
+        reviewedGeneration: stale,
+      }),
+    ).rejects.toMatchObject({ statusCode: 409, code: "CORRECTIVE_ACTION_CARD_SUPERSEDED" });
+    await expect(
+      rejectCorrectiveActionItem(tdb, {
+        scorecardId: CARD,
+        itemId,
+        comment: "Not what I asked for.",
+        actor: APPROVER,
+        reviewedGeneration: stale,
+      }),
+    ).rejects.toMatchObject({ statusCode: 409, code: "CORRECTIVE_ACTION_CARD_SUPERSEDED" });
+    expect(await itemStatuses()).toEqual(["submitted"]);
+  });
+
+  it("returns the generation it produced, so a second verdict from one page load is not a 409", async () => {
+    // Every verdict advances the generation. If the client could only ever send the one its render came
+    // from, approving item 2 right after item 1 would be refused by the guard on the strength of the
+    // reviewer's OWN first click — a self-inflicted conflict, and exactly the kind of "safety" that gets
+    // switched off. The outcome carries the new generation forward instead.
+    const [first, second] = await seedAwaitingApproval(2);
+    const [{ generation: loaded }] = await tdb
+      .select({ generation: fieldScorecards.updatedAt })
+      .from(fieldScorecards)
+      .where(eq(fieldScorecards.id, CARD));
+
+    const one = await approveCorrectiveActionItems(tdb, {
+      scorecardId: CARD,
+      itemIds: [first],
+      actor: APPROVER,
+      reviewedGeneration: loaded!.toISOString(),
+    });
+    expect(one.changedItemIds).toEqual([first]);
+    expect(one.generation).toBeTruthy();
+    expect(one.generation).not.toBe(loaded!.toISOString());
+
+    // The generation the first call reported is accepted by the second.
+    const two = await approveCorrectiveActionItems(tdb, {
+      scorecardId: CARD,
+      itemIds: [second],
+      actor: APPROVER,
+      reviewedGeneration: one.generation!,
+    });
+    expect(two.changedItemIds).toEqual([second]);
+  });
+
   it("REJECT is bound to the reviewed attempt too, not just approve", async () => {
     // I bound approve and left reject on a status-only guard, which is the same defect wearing the other
     // verb: with two approvers, one can hold attempt A open while the other rejects it and the responder

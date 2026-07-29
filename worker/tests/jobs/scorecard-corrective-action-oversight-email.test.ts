@@ -8,6 +8,8 @@ const SCORECARD = "11111111-1111-1111-1111-111111111111";
 const DEAL = "22222222-2222-2222-2222-222222222222";
 const CYCLE = "99999999-9999-9999-9999-999999999999";
 const OVERSIGHT_CYCLE = "88888888-8888-8888-8888-888888888888";
+/** The REVIEW round — rotated by a rejection, unlike OVERSIGHT_CYCLE, which a rejection leaves alone. */
+const REVIEW_CYCLE = "77777777-7777-7777-7777-777777777777";
 const GENERATION = new Date("2026-07-27T14:00:00.000Z");
 
 const env = {
@@ -1563,6 +1565,59 @@ describe("handleScorecardCorrectiveActionOversightEmail", () => {
 
     expect(sendEmail).not.toHaveBeenCalled();
     expect(stampUpdates).toHaveLength(0);
+  });
+
+  it("REGRESSION: the approval-request STAMP is scoped to the review cycle, not only the marker", async () => {
+    // Scoping the SEND and leaving the STAMP on the marker narrows the window; it does not close it. The
+    // check above passes at read time, then the provider call runs — and a rejection plus fast resubmit
+    // during it rotates the review nonce while deliberately leaving the oversight marker alone. Without this
+    // clause the cycle-A worker's UPDATE still matches, stamping cycle B's approval_requested_at; cycle B's
+    // own job then sees a non-null stamp and skips, and the approver never learns the rework is ready.
+    // Nothing clears that stamp again, so the loss is permanent.
+    const { query, stampUpdates } = makeQuery({
+      status: "corrective_action_submitted",
+      storedNonce: REVIEW_CYCLE,
+    });
+    const sendEmail = makeSend();
+
+    await handleScorecardCorrectiveActionOversightEmail(
+      payload({ phase: "awaiting_approval", cycleNonce: REVIEW_CYCLE }),
+      null,
+      {
+        query: query as never,
+        sendEmail: sendEmail as never,
+        env: { ...env, QC_APPROVER_EMAILS: "james@trockgc.com" } as unknown as NodeJS.ProcessEnv,
+        logger: makeLogger(),
+      },
+    );
+
+    expect(sendEmail).toHaveBeenCalledOnce();
+    expect(stampUpdates).toHaveLength(1);
+    // BOTH scopes: the marker still guards a real reopen, the review nonce guards a rework round.
+    expect(stampUpdates[0].sql).toContain("corrective_action_oversight_cycle = $2::uuid");
+    expect(stampUpdates[0].sql).toContain("corrective_action_cycle_nonce = $3::uuid");
+    expect(stampUpdates[0].params).toEqual([SCORECARD, OVERSIGHT_CYCLE, REVIEW_CYCLE]);
+  });
+
+  it("a nonce-less approval request asserts the round is STILL nonce-less before stamping", async () => {
+    // Pre-0197 cards carried no nonce. Omitting the clause entirely would let such a job stamp on id alone
+    // after a rework minted one — the same permanent loss, reached from the legacy side.
+    const { query, stampUpdates } = makeQuery({ status: "corrective_action_submitted" });
+    const sendEmail = makeSend();
+
+    await handleScorecardCorrectiveActionOversightEmail(
+      payload({ phase: "awaiting_approval", cycleNonce: undefined }),
+      null,
+      {
+        query: query as never,
+        sendEmail: sendEmail as never,
+        env: { ...env, QC_APPROVER_EMAILS: "james@trockgc.com" } as unknown as NodeJS.ProcessEnv,
+        logger: makeLogger(),
+      },
+    );
+
+    expect(stampUpdates).toHaveLength(1);
+    expect(stampUpdates[0].sql).toContain("corrective_action_cycle_nonce IS NULL");
   });
 
   it("still sends an approval request whose review cycle is current", async () => {

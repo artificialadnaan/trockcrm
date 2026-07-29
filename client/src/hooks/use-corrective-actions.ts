@@ -273,6 +273,12 @@ export interface ApprovalOutcomeView {
   cardStatus: string;
   closed: boolean;
   reopened: boolean;
+  /**
+   * The card generation AFTER the verdict. Every verdict advances it, so a reviewer acting on several items
+   * from one page load carries this into the next call rather than 409ing against the generation their own
+   * previous click created.
+   */
+  generation?: string | null;
 }
 
 /** Approve specific items, or every item awaiting approval when `itemIds` is omitted (approve-all). */
@@ -282,6 +288,8 @@ export async function approveCorrectiveActions(
   itemIds?: string[],
   /** itemId → the submission event id on screen, so a response filed since cannot be approved unseen. */
   reviewedAttempts?: Record<string, string>,
+  /** The card generation on screen — an edit while it awaits approval moves no corrective-action event. */
+  reviewedGeneration?: string | null,
 ): Promise<ApprovalOutcomeView> {
   const res = await api<{ outcome: ApprovalOutcomeView }>(
     `/deals/${dealId}/scorecards/${scorecardId}/corrective-actions/approve`,
@@ -290,6 +298,7 @@ export async function approveCorrectiveActions(
       json: {
         ...(itemIds ? { itemIds } : {}),
         ...(reviewedAttempts && Object.keys(reviewedAttempts).length > 0 ? { reviewedAttempts } : {}),
+        ...(reviewedGeneration ? { reviewedGeneration } : {}),
       },
     },
   );
@@ -304,10 +313,18 @@ export async function rejectCorrectiveAction(
   comment: string,
   /** The submission event on screen — a reject is as attempt-bound as an approve. */
   reviewedAttempt?: string,
+  reviewedGeneration?: string | null,
 ): Promise<ApprovalOutcomeView> {
   const res = await api<{ outcome: ApprovalOutcomeView }>(
     `/deals/${dealId}/scorecards/${scorecardId}/corrective-actions/${itemId}/reject`,
-    { method: "POST", json: { comment, ...(reviewedAttempt ? { reviewedAttempt } : {}) } },
+    {
+      method: "POST",
+      json: {
+        comment,
+        ...(reviewedAttempt ? { reviewedAttempt } : {}),
+        ...(reviewedGeneration ? { reviewedGeneration } : {}),
+      },
+    },
   );
   return res.outcome;
 }

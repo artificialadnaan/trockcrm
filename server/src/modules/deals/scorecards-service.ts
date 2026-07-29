@@ -393,6 +393,7 @@ interface ScorecardRow {
   pdfR2Key: string | null;
   pdfGeneratedAt: unknown;
   status?: string | null;
+  updatedAt?: unknown;
 }
 
 /** The rating-band label for the card's kind/version — leadership + V2 reuse the 1-10 bands. */
@@ -427,6 +428,11 @@ function toSummary(row: ScorecardRow): FieldScorecardSummary {
     // Lifecycle status: `submitted` | `corrective_action_open` | `corrective_action_closed`. Drives the deal
     // tab's open/closed badge + the QC dashboard status column. Older rows default to `submitted`.
     status: row.status ?? "submitted",
+    // The content generation, which the shared type already documents as the optimistic-concurrency token.
+    // An approver sends it back with their verdict: the attempt guard binds to the corrective-action
+    // RESPONSE, and a card stays editable while it awaits approval, so scores/notes/signatures/original
+    // evidence can change under a reviewer without touching any event this thread contains.
+    updatedAt: row.updatedAt == null ? undefined : toIso(row.updatedAt),
   };
 }
 

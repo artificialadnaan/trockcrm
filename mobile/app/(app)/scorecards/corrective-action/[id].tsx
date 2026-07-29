@@ -22,7 +22,7 @@ import {
   type CorrectiveResponsePhoto,
 } from "../../../../src/scorecards/corrective-action";
 import { formatShortDate } from "../../../../src/scorecards/detail-view";
-import type { CorrectiveActionItem } from "../../../../src/api/types";
+import type { CorrectiveActionItem, CorrectiveActionResponsePhoto } from "../../../../src/api/types";
 import { Badge, Button, EmptyState, LoadingState, SectionLabel, TextInput } from "../../../../src/components/ui";
 import { Banner } from "../../../../src/components/Banner";
 import { ScreenHeader } from "../../../../src/components/ScreenHeader";
@@ -635,23 +635,13 @@ function ResolvedItemCard({ item }: { item: CorrectiveActionItem }) {
             </Text>
             {event.comment ? <Text style={styles.resolvedComment}>{event.comment}</Text> : null}
             {/* This attempt's OWN evidence. The aggregate gallery below is the no-thread fallback; showing
-                both would put the rejected round's photos under the replacement response. */}
-            {event.photos.filter((p) => p.url).length > 0 ? (
-              <View style={styles.photoRow}>
-                {event.photos
-                  .filter((p) => p.url)
-                  .map((photo) => (
-                    <Pressable
-                      key={photo.id}
-                      onPress={() => photo.url && void Linking.openURL(photo.url).catch(() => undefined)}
-                      accessibilityRole="imagebutton"
-                      accessibilityLabel={photo.caption ?? "Response photo"}
-                    >
-                      <ExpoImage source={{ uri: photo.url! }} style={styles.thumb} contentFit="cover" />
-                    </Pressable>
-                  ))}
-              </View>
-            ) : null}
+                both would put the rejected round's photos under the replacement response.
+
+                The url-less COUNT has to move here with the thumbnails. Moving the photos per-attempt while
+                leaving the count on the aggregate (which a threaded card forces to zero) made a failed
+                presign render as no evidence at all — silently, which is the one thing the count exists to
+                prevent: the responder cannot tell "nothing was attached" from "the link did not come back". */}
+            <AttemptPhotos photos={event.photos} />
           </View>
         ))
       ) : item.responseComment ? (
@@ -687,6 +677,35 @@ function ResolvedItemCard({ item }: { item: CorrectiveActionItem }) {
         {item.respondedAt ? ` · ${formatShortDate(item.respondedAt)}` : ""}
       </Text>
     </View>
+  );
+}
+
+/** One attempt's evidence: the thumbnails that presigned, plus a count for any that did not. */
+function AttemptPhotos({ photos }: { photos: CorrectiveActionResponsePhoto[] }) {
+  const withUrl = photos.filter((p) => Boolean(p.url));
+  const withoutUrl = photos.length - withUrl.length;
+  return (
+    <>
+      {withUrl.length > 0 ? (
+        <View style={styles.photoRow}>
+          {withUrl.map((photo) => (
+            <Pressable
+              key={photo.id}
+              onPress={() => photo.url && void Linking.openURL(photo.url).catch(() => undefined)}
+              accessibilityRole="imagebutton"
+              accessibilityLabel={photo.caption ?? "Response photo"}
+            >
+              <ExpoImage source={{ uri: photo.url! }} style={styles.thumb} contentFit="cover" />
+            </Pressable>
+          ))}
+        </View>
+      ) : null}
+      {withoutUrl > 0 ? (
+        <Text style={styles.metaSmall}>
+          {withoutUrl} response photo{withoutUrl === 1 ? "" : "s"} attached
+        </Text>
+      ) : null}
+    </>
   );
 }
 

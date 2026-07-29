@@ -609,12 +609,38 @@ export async function handleScorecardCorrectiveActionOversightEmail(
   const markerClause = payloadOversightCycle
     ? " AND (corrective_action_oversight_cycle IS NULL OR corrective_action_oversight_cycle = $2::uuid)"
     : " AND corrective_action_oversight_cycle IS NULL";
+  const params: unknown[] = payloadOversightCycle ? [scorecardId, payloadOversightCycle] : [scorecardId];
+
+  // ...and for the APPROVAL REQUEST, the review cycle too — the same scope its send decision used.
+  //
+  // The marker clause alone cannot carry this phase. A rejection rotates corrective_action_cycle_nonce and
+  // deliberately leaves the oversight marker unchanged, so the marker comparison still passes for a cycle-A
+  // worker that entered the provider call before the reject-and-resubmit. It would then stamp cycle B's
+  // corrective_action_approval_requested_at, and cycle B's own job — seeing a non-null stamp — skips. The
+  // approver is never told about the rework, permanently: nothing clears that stamp again.
+  //
+  // I scoped the SEND to the review cycle last round and left the STAMP on the marker, which is the same
+  // defect one statement further down: a supersession check that does not also scope the write it guards is
+  // only narrowing the window, not closing it.
+  let reviewClause = "";
+  if (phase === "awaiting_approval") {
+    const payloadReviewCycle = normalizeText(payload.cycleNonce);
+    if (payloadReviewCycle) {
+      params.push(payloadReviewCycle);
+      reviewClause = ` AND (corrective_action_cycle_nonce IS NULL OR corrective_action_cycle_nonce = $${params.length}::uuid)`;
+    } else {
+      // No payload nonce means the card had none when this job was minted (pre-0197). It must still assert
+      // the round has not moved, exactly as the marker clause does for the same case.
+      reviewClause = " AND corrective_action_cycle_nonce IS NULL";
+    }
+  }
+
   const stamped = await query(
     `UPDATE ${tenantSchema}.field_scorecards
         SET ${column} = NOW()
       WHERE id = $1::uuid
-        AND ${column} IS NULL${markerClause}`,
-    payloadOversightCycle ? [scorecardId, payloadOversightCycle] : [scorecardId],
+        AND ${column} IS NULL${markerClause}${reviewClause}`,
+    params,
   );
   if (!stamped.rowCount) {
     // Superseded mid-send. The email went out describing the older cycle, which is accurate for what it
