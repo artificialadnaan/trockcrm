@@ -356,7 +356,12 @@ describe("resolveBestEstimate — change-order children", () => {
 
   it("does not change a normal deal's fallback behaviour", () => {
     expect(
-      resolveBestEstimate({ awardedAmount: null, bidEstimate: "7500.00", ddEstimate: "9000.00" })
+      resolveBestEstimate({
+        isChangeOrder: false,
+        awardedAmount: null,
+        bidEstimate: "7500.00",
+        ddEstimate: "9000.00",
+      })
     ).toEqual({ value: 7500, source: "bid" });
   });
 });
