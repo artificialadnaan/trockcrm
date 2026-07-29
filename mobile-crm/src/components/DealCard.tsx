@@ -176,6 +176,8 @@ function DealCardComponent({
 
 const styles = StyleSheet.create({
   card: {
+    minHeight: 44,
+    justifyContent: "center",
     backgroundColor: theme.color.surface,
     borderRadius: theme.radius.lg,
     borderWidth: 1,

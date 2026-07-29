@@ -139,7 +139,9 @@ const styles = StyleSheet.create({
    * borderRadius is repeated here so the shadow is cast in the card's actual silhouette rather than as
    * a rectangle behind a rounded card.
    */
-  shadow: { borderRadius: theme.radius.lg, ...theme.elevation.card },
+  shadow: {
+    minHeight: 44,
+    justifyContent: "center", borderRadius: theme.radius.lg, ...theme.elevation.card },
   card: {
     flexDirection: "row",
     backgroundColor: theme.color.surface,

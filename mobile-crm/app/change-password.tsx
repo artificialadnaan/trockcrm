@@ -305,6 +305,8 @@ export default function ChangePasswordScreen() {
 
 
 const styles = StyleSheet.create({
-  signOut: { marginTop: theme.space.lg, alignItems: "center", paddingVertical: theme.space.md },
+  signOut: {
+    minHeight: 44,
+    justifyContent: "center", marginTop: theme.space.lg, alignItems: "center", paddingVertical: theme.space.md },
   signOutText: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.textSecondary },
 });

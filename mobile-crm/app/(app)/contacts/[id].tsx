@@ -8,6 +8,7 @@ import { ApiError } from "../../../src/api/client";
 import * as contactsApi from "../../../src/api/endpoints/contacts";
 import { useAuth } from "../../../src/auth/AuthContext";
 import { useQueryScope } from "../../../src/auth/useOfficeId";
+import { BackLink } from "../../../src/components/BackLink";
 import { RetryNotice } from "../../../src/components/RetryNotice";
 import { Row } from "../../../src/components/Row";
 import { resolveListState } from "../../../src/list-state";
@@ -129,9 +130,7 @@ export default function ContactDetailScreen() {
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
       <ScrollView contentContainerStyle={styles.body}>
-        <Pressable onPress={() => goBack()} accessibilityRole="button" accessibilityLabel="Back">
-          <Text style={styles.back}>‹ Contacts</Text>
-        </Pressable>
+        <BackLink label="Contacts" onPress={() => goBack()} />
 
         {refreshFailed ? (
           <Pressable
@@ -321,12 +320,13 @@ const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: theme.color.canvas },
   body: { padding: theme.space.lg, paddingBottom: theme.space.xxl },
   center: { flex: 1, alignItems: "center", justifyContent: "center", gap: theme.space.md },
-  back: { fontFamily: theme.font.semibold, fontSize: 15, color: theme.color.redText },
   name: { fontFamily: theme.font.bold, fontSize: 24, color: theme.color.inkNavy, marginTop: theme.space.sm },
   jobTitle: { fontFamily: theme.font.regular, fontSize: 14, color: theme.color.textMuted },
   company: { fontFamily: theme.font.semibold, fontSize: 15, color: theme.color.textSecondary },
   actionRow: { flexDirection: "row", gap: theme.space.sm, marginTop: theme.space.lg },
   action: {
+    minHeight: 44,
+    justifyContent: "center",
     flex: 1,
     backgroundColor: theme.color.brandRed,
     borderRadius: theme.radius.md,
@@ -353,8 +353,12 @@ const styles = StyleSheet.create({
   notes: { fontFamily: theme.font.regular, fontSize: 14, color: theme.color.textSecondary },
   emptyBody: { fontFamily: theme.font.regular, fontSize: 14, color: theme.color.textMuted },
   linkError: { fontFamily: theme.font.regular, fontSize: 13, color: theme.color.redText },
-  retry: { paddingVertical: theme.space.sm },
+  retry: {
+    minHeight: 44,
+    justifyContent: "center", paddingVertical: theme.space.sm },
   staleBanner: {
+    minHeight: 44,
+    justifyContent: "center",
     marginTop: theme.space.sm,
     borderRadius: theme.radius.md,
     backgroundColor: theme.color.amberSurface,
@@ -363,11 +367,14 @@ const styles = StyleSheet.create({
   },
   staleText: { fontFamily: theme.font.semibold, fontSize: 13, color: theme.color.amberText },
   retryText: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.redText },
-  dealRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingVertical: theme.space.sm },
+  dealRow: {
+    minHeight: 44, flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingVertical: theme.space.sm },
   dealName: { flex: 1, fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.textPrimary },
   dealChevron: { fontFamily: theme.font.bold, fontSize: 18, color: theme.color.textMuted },
   errorTitle: { fontFamily: theme.font.bold, fontSize: 17, color: theme.color.inkNavy },
   backBtn: {
+    minHeight: 44,
+    justifyContent: "center",
     borderWidth: 1,
     borderColor: theme.color.border,
     borderRadius: theme.radius.md,
