@@ -1439,7 +1439,8 @@ describe("email routes", () => {
       undefined,
       "director",
       expect.any(Function),
-      "director-1"
+      // The gate's own context, handed over rather than resolved a second time.
+      { viewerUserId: "director-1", threadContext: expect.objectContaining({ mailboxAccountId: "mailbox-1" }) }
     );
     expect(res.body).toEqual({
       binding: { id: "binding-1", dealId: "deal-1", dealName: "Deal One", confidence: "high", assignmentReason: "manual_thread_assignment" },
@@ -1553,13 +1554,15 @@ describe("email routes", () => {
     );
     // Refreshed WITHOUT a userId: re-applying the reader's own-mailbox filter would 403 on the way out
     // for a deal collaborator who owns none of the thread's messages.
+    // No threadContext: this refresh runs AFTER the binding changed, so it must resolve a fresh one or
+    // the payload would report the deal the thread has just left.
     expect(emailServiceMocks.getEmailThread).toHaveBeenLastCalledWith(
       expect.any(Object),
       "conversation-1",
       undefined,
       "director",
       expect.any(Function),
-      "director-1"
+      { viewerUserId: "director-1", threadContext: undefined }
     );
   });
 
@@ -1646,13 +1649,15 @@ describe("email routes", () => {
       },
     });
     expect(res.body.preview.affectedMessageIds).toEqual(["email-1", "email-2"]);
+    // No threadContext: this refresh runs AFTER the binding changed, so it must resolve a fresh one or
+    // the payload would report the deal the thread has just left.
     expect(emailServiceMocks.getEmailThread).toHaveBeenLastCalledWith(
       expect.any(Object),
       "conversation-1",
       undefined,
       "director",
       expect.any(Function),
-      "director-1"
+      { viewerUserId: "director-1", threadContext: undefined }
     );
   });
 
@@ -1710,13 +1715,15 @@ describe("email routes", () => {
         affectedMessageCount: 2,
       },
     });
+    // No threadContext: this refresh runs AFTER the binding changed, so it must resolve a fresh one or
+    // the payload would report the deal the thread has just left.
     expect(emailServiceMocks.getEmailThread).toHaveBeenLastCalledWith(
       expect.any(Object),
       "conversation-1",
       undefined,
       "director",
       expect.any(Function),
-      "director-1"
+      { viewerUserId: "director-1", threadContext: undefined }
     );
   });
 

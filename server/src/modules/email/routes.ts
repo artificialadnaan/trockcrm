@@ -22,6 +22,7 @@ import {
   assertCanMutateEmailThread,
   conversationHasAnyMessage,
 } from "./service.js";
+import type { EmailThreadMutationContext } from "./service.js";
 import { writeAuditLog } from "../../lib/audit-log.js";
 import { getDealById } from "../deals/service.js";
 import { getLeadById } from "../leads/service.js";
@@ -454,12 +455,18 @@ async function gateEmailThreadAccess(req: any) {
 //      versions of the same conversation. Pinned by a test — do not "fix" it silently in either
 //      direction.
 //
-// The caller's id goes in the LAST slot, not the userId one. It is presentation only: the sync stores
-// one row per MAILBOX, so an unscoped read sees every real message once per participant, and
+// The caller's id goes in the OPTIONS object, not the userId slot. It is presentation only: the sync
+// stores one row per MAILBOX, so an unscoped read sees every real message once per participant, and
 // getEmailThread collapses those copies preferring the caller's own row (which carries their own
 // starred/archived state). Moving that id up into the userId slot would turn it back into a filter and
 // reinstate exactly the 403 this function exists to avoid.
-function readThreadForGatedCaller(req: any) {
+//
+// `threadContext` is the mutation context gateEmailThreadAccess has ALREADY resolved, handed over so
+// getEmailThread does not resolve it a second time — two more unindexed passes over `emails` on a read
+// that already makes several. Pass it ONLY when nothing has mutated since the gate ran: the
+// assign/reassign/detach routes re-read AFTER changing the binding, so they must omit it and let
+// getEmailThread resolve a fresh one, or the payload would report the deal the thread just left.
+function readThreadForGatedCaller(req: any, threadContext?: EmailThreadMutationContext) {
   return getEmailThread(
     req.tenantDb!,
     req.params.conversationId,
@@ -468,7 +475,7 @@ function readThreadForGatedCaller(req: any) {
     // NOTE: getEmailThread currently ignores both this and userRole. This closure is NOT what makes the
     // unscoped read safe — gateEmailThreadAccess is. Kept only so the signature stays uniform.
     (candidateDealId) => canUserViewDeal(req, candidateDealId),
-    req.user!.id
+    { viewerUserId: req.user!.id, threadContext }
   );
 }
 
@@ -497,9 +504,11 @@ router.get("/thread/:conversationId", async (req, res, next) => {
       return;
     }
 
-    await gateEmailThreadAccess(req);
+    // Nothing mutates on this route, so the context the gate just resolved is still current — hand it
+    // straight to the read instead of resolving it again.
+    const { thread: gatedThreadContext } = await gateEmailThreadAccess(req);
 
-    const thread = await readThreadForGatedCaller(req);
+    const thread = await readThreadForGatedCaller(req, gatedThreadContext);
     await req.commitTransaction!();
     res.json(thread);
   } catch (err) {

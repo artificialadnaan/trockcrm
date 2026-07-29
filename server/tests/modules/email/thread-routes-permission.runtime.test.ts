@@ -348,6 +348,28 @@ describe("thread mutation routes — deal-collaborator access", () => {
     expect(res.body.emails[0].isStarred).toBe(true);
   });
 
+  it("GET: never collapses two rows sharing an id inside ONE mailbox", async () => {
+    // internet_message_id is a SENDER-SUPPLIED RFC822 header. A repeated or spoofed one would, keyed on
+    // the id alone, silently hide a real message from the thread view while the deal Emails LIST — which
+    // does not collapse — went on showing it, leaving two surfaces disagreeing about the conversation.
+    // Two copies of one message live in two DIFFERENT mailboxes by definition, so requiring a differing
+    // user_id removes the class outright. m1/m2 are the legitimate cross-mailbox pair and DO collapse;
+    // m3 repeats the id inside USER_OWNER's own mailbox and must survive.
+    await tdb.execute(sql`
+      UPDATE emails SET internet_message_id = '<shared@example.com>' WHERE graph_conversation_id = ${CONV}
+    `);
+    await tdb.execute(sql`
+      INSERT INTO emails
+        (graph_message_id, graph_conversation_id, internet_message_id, subject, direction, from_address, to_addresses, deal_id, assignment_status, user_id, sent_at)
+      VALUES
+        ('m3', ${CONV}, '<shared@example.com>', 'Roof scope', 'inbound', 'sender@example.com', '{}', ${DEAL_OLD}, 'assigned', ${USER_OWNER}, '2026-07-03T00:00:00Z')
+    `);
+
+    const { res } = await getThreadRoute(collaboratorUser);
+
+    expect(res.body.emails.map((e: { graphMessageId: string }) => e.graphMessageId)).toEqual(["m1", "m3"]);
+  });
+
   it("GET: never collapses rows that carry NO internet_message_id", async () => {
     // internet_message_id is nullable, and a NULL is the ABSENCE of an identity, not an identity shared
     // with every other NULL. Keying on it would collapse a whole conversation of un-idd messages into

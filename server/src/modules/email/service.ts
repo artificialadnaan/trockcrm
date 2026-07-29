@@ -1772,12 +1772,26 @@ export async function getEmailById(tenantDb: TenantDb, emailId: string) {
  * see: every row handed in has already cleared the gate, and no row is dropped that does not have a
  * surviving sibling standing for the same message.
  *
+ * THE INVARIANT: a collapsed list must NEVER reach assertCanMutateEmailThread. Its path 1 is
+ * `thread.emails.some((e) => e.userId === user.id)`, so a participant whose only copy lost the
+ * collapse would be 403'd off their own thread. That is structurally true today — this function is
+ * module-private with one call site, inside getEmailThread and AFTER getEmailThreadForMutation has
+ * produced the mutation context, while gateEmailThreadAccess calls getEmailThreadForMutation directly
+ * and never getEmailThread — and it must stay true. The gate reads the RAW per-mailbox rows.
+ *
  * Two rules:
  *   - Prefer the CALLER'S OWN copy. Starred/archived/deleted state lives on the per-mailbox row, so
  *     handing a participant somebody else's copy would show them their own mail with a stranger's
  *     state on it.
  *   - Otherwise keep the first copy in the thread's order, and keep it IN that position, so collapsing
  *     never reorders the conversation.
+ *
+ * Only ever collapses rows in DIFFERENT mailboxes. internet_message_id is a sender-supplied RFC822
+ * header, so a repeated or spoofed one inside a single conversation would otherwise silently hide a
+ * real message here while the deal Emails list — which does not collapse — still showed it, leaving
+ * two surfaces disagreeing about what the thread contains. Two copies of ONE message live in two
+ * DIFFERENT mailboxes by definition, so a repeat within a single mailbox is never a copy and never a
+ * legitimate collapse.
  *
  * A NULL internet_message_id is left uncollapsed, deliberately. It is the ABSENCE of an identity, not
  * an identity shared with every other NULL: keying on it would fold a whole conversation of un-idd
@@ -1806,7 +1820,15 @@ function collapseThreadMessageCopies<T extends { internetMessageId: string | nul
     }
 
     const kept = collapsed[slot];
-    if (viewerUserId && email.userId === viewerUserId && kept.userId !== viewerUserId) {
+    // Same mailbox: not a copy, whatever the header claims. Keep both rows.
+    if (kept.userId === email.userId) {
+      collapsed.push(email);
+      continue;
+    }
+
+    // Reaching here means kept.userId !== email.userId, so "this row is the viewer's" already implies
+    // "the kept one is not" — no second comparison needed.
+    if (viewerUserId && email.userId === viewerUserId) {
       collapsed[slot] = email;
     }
   }
@@ -1819,10 +1841,19 @@ function collapseThreadMessageCopies<T extends { internetMessageId: string | nul
  *
  * `userId` FILTERS the thread to one mailbox's copy of it. The routes deliberately pass nothing —
  * scoping the read 403s any deal collaborator who owns none of the messages, and the payload is what
- * renders the Reassign/Unassign controls. `viewerUserId` is the opposite kind of argument: it names
- * who is LOOKING, and only so collapseThreadMessageCopies can prefer their copy of a message held in
- * several mailboxes. It must never become a filter — passing it changes which row represents a
- * message, never which messages come back.
+ * renders the Reassign/Unassign controls.
+ *
+ * `options.viewerUserId` is the opposite kind of argument: it names who is LOOKING, and only so
+ * collapseThreadMessageCopies can prefer their copy of a message held in several mailboxes. It must
+ * never become a filter — passing it changes which row represents a message, never which messages come
+ * back. It lives in an options object rather than a sixth positional string precisely so it cannot be
+ * swapped with `userId` by accident; the two mean opposite things and TypeScript would not notice.
+ *
+ * `options.threadContext` lets a caller that has ALREADY resolved the mutation context hand it over
+ * instead of paying for it twice — getEmailThreadForMutation is two more unindexed passes over
+ * `emails`, and the thread GET's gate has just run it. Supply it ONLY when nothing has mutated since
+ * it was resolved: a post-mutation refresh handed a pre-mutation context would report the binding the
+ * thread has just moved OFF, so the reassign/detach routes deliberately pass nothing here.
  */
 export async function getEmailThread(
   tenantDb: TenantDb,
@@ -1830,7 +1861,7 @@ export async function getEmailThread(
   userId?: string,
   userRole?: string,
   canViewDeal?: (dealId: string) => Promise<boolean>,
-  viewerUserId?: string
+  options?: { viewerUserId?: string; threadContext?: EmailThreadMutationContext }
 ) : Promise<EmailThreadResponse> {
   if (!conversationId) return { binding: null, preview: null, emails: [] };
 
@@ -1859,8 +1890,9 @@ export async function getEmailThread(
     return { binding: null, preview: null, emails: [] };
   }
 
-  const mutationContext = await getEmailThreadForMutation(tenantDb, conversationId, userId);
-  const visibleThread = collapseThreadMessageCopies(thread, viewerUserId ?? userId);
+  const mutationContext =
+    options?.threadContext ?? (await getEmailThreadForMutation(tenantDb, conversationId, userId));
+  const visibleThread = collapseThreadMessageCopies(thread, options?.viewerUserId ?? userId);
 
   let bindingPayload: EmailThreadResponse["binding"] = null;
   if (mutationContext.binding) {
