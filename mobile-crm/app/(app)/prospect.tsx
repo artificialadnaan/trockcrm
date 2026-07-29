@@ -390,6 +390,15 @@ export default function ProspectScreen() {
    * still the current one. Same shape `use-current-location` uses for the fix itself.
    */
   const matchGeneration = useRef(0);
+  /**
+   * The scroll, so an OUTCOME can be brought to the rep rather than waiting to be found.
+   *
+   * This did not matter while Save sat at the bottom of the form: reaching it meant scrolling past
+   * everything, so whatever mounted there was already in view. Pinning the action bar removed that
+   * accident — Save is now reachable from anywhere, so a rep can commit from halfway up and the
+   * confirmation, its caveats, or a duplicate prompt mount somewhere they are not looking.
+   */
+  const scrollRef = useRef<ScrollView | null>(null);
   useEffect(() => {
     if (!fixKey || !fix) return;
     if (matchedFor.current === fixKey) return;
@@ -1014,6 +1023,15 @@ export default function ProspectScreen() {
      */
     runMatch.isPending ||
     /**
+     * ...and while a DUPLICATE is unanswered.
+     *
+     * `haltsForDuplicates` makes the mutation return without writing, so tapping Save again just
+     * re-runs the dedup check and halts again. That was invisible while the button sat below the
+     * prompt; pinned, it re-enables in the rep's hand with the picker off-screen, and a sighted rep
+     * can sit there re-tapping a control that has already decided not to save.
+     */
+    Boolean(duplicateContacts?.length) ||
+    /**
      * ...and while the FIX is still being acquired.
      *
      * `locating` precedes runMatch by up to the 12-second location deadline, and with a fallback
@@ -1115,9 +1133,17 @@ export default function ProspectScreen() {
   });
 
   useEffect(() => {
-    if (Platform.OS === "ios" && announcement.length > 0) {
-      AccessibilityInfo.announceForAccessibility(announcement);
-    }
+    if (announcement.length === 0) return;
+    if (Platform.OS === "ios") AccessibilityInfo.announceForAccessibility(announcement);
+    /**
+     * ...and scroll it into view for everyone else.
+     *
+     * `announcement` is non-empty exactly when the capture has reached an outcome — saved, or halted on
+     * a duplicate — and both of those render as the LAST thing in the scroll, so end-scrolling reaches
+     * either. One effect for one event: the sighted rep and the VoiceOver rep are told the same thing
+     * at the same moment, which is the only way those two stay in agreement.
+     */
+    scrollRef.current?.scrollToEnd({ animated: true });
   }, [announcement]);
 
   /**
@@ -1172,7 +1198,11 @@ export default function ProspectScreen() {
         <View style={styles.headerSpacer} />
       </View>
 
-      <ScrollView contentContainerStyle={styles.body} keyboardShouldPersistTaps="handled">
+      <ScrollView
+        ref={scrollRef}
+        contentContainerStyle={styles.body}
+        keyboardShouldPersistTaps="handled"
+      >
         {/* ---- 1. WHERE. The only mandatory part, because the server requires a target. ---- */}
         <Text style={styles.stepLabel}>WHERE</Text>
 

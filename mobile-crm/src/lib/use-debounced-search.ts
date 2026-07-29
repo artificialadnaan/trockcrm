@@ -14,10 +14,14 @@ import { MIN_SEARCH_LENGTH, SEARCH_DEBOUNCE_MS, effectiveSearchQuery } from "../
  * and this app has already shipped one timer that outlived its screen (see the contact-search cleanup
  * in prospect.tsx).
  *
- * A query that lands back on its current value applies IMMEDIATELY rather than after another delay.
- * Clearing the box is the case that matters: a rep who wipes the field expects the full list back at
- * once, and making them wait 300ms for a state they can already see is the lag the debounce exists to
- * avoid. It also means the first render never waits.
+ * CLEARING APPLIES IMMEDIATELY. The debounce exists to stop a request per keystroke while a term is
+ * being typed; an empty target sends no term at all, so there is nothing to protect. Waiting 300ms to
+ * drop a filter meant a rep who wiped the field kept reading results for a query the box no longer
+ * showed — the stale-filter behaviour this hook's own comment claims it prevents, arriving late instead
+ * of never. Shortening "bishop" to "b" is the same case: the effective target is "" and the list should
+ * stop pretending to be filtered while the hint explains why.
+ *
+ * The first render never waits either, since `settled` starts at the target.
  */
 export function useDebouncedSearch(
   raw: string,
@@ -28,6 +32,11 @@ export function useDebouncedSearch(
 
   useEffect(() => {
     if (target === settled) return;
+    // Dropping a filter is not a request and does not need protecting from one.
+    if (target === "") {
+      setSettled("");
+      return;
+    }
     const timer = setTimeout(() => setSettled(target), delayMs);
     return () => clearTimeout(timer);
   }, [target, settled, delayMs]);
