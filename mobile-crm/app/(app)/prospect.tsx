@@ -1237,11 +1237,23 @@ export default function ProspectScreen() {
               <Pressable
                 testID="prospect-skip-location"
                 onPress={() => {
-                  // BOTH in-flight operations, not just the fix. `reset()` abandons the location
-                  // attempt; without the second line a lookup already running would still return and
-                  // wipe the company about to be chosen.
+                  /**
+                   * Abandon BOTH in-flight operations, and abandon them in the two senses that matter.
+                   *
+                   * `location.reset()` stops the fix from landing late. `matchAbandoned` discards a
+                   * lookup result that arrives anyway — the request cannot be cancelled, the server
+                   * answers regardless.
+                   *
+                   * `runMatch.reset()` is the third line and the one that makes this usable rather than
+                   * merely correct. `isPending` is read by three things: `saveBlocked`, the spinner,
+                   * and `offersCompanyFallback`. Left pending, the rep took the escape hatch, picked a
+                   * company — and then waited out the request's 30-second timeout before Save came
+                   * back, staring at "Finding where you are…" the whole time. On the slow connection
+                   * this hatch exists for, that is the entire problem it was supposed to solve.
+                   */
                   location.reset();
                   matchAbandoned.current = true;
+                  runMatch.reset();
                   setRejectedMatches(true);
                 }}
                 accessibilityRole="button"
