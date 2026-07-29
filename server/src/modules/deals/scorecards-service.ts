@@ -28,7 +28,10 @@ import {
   needsScorecardPdfRegeneration,
   type ScorecardPdfArtifactState,
 } from "../field/scorecard-pdf-artifact.js";
-import { getCorrectiveActionEventsByItem } from "../field/corrective-action-events.js";
+import {
+  getCorrectiveActionEventsByItem,
+  getDetachedCorrectiveActionEvents,
+} from "../field/corrective-action-events.js";
 
 // Tenant-scoped (web CRM) reads of the Field Scorecards a rep submitted from T-Rock Cam. The DEAL ROUTE
 // already gates access (assertDealCollaboratorAccess) before these run, so — unlike the field module's
@@ -137,6 +140,18 @@ export async function getDealScorecardDetail(
   // responses so the tab can thread each response under its original item (spec §9). A passing card has no
   // rows → correctiveActions is []. Response photos resolve their URL through the same presigner as evidence.
   const correctiveActions = await getScorecardCorrectiveActionThread(tenantDb, scorecardId, opts?.resolvePhotoUrl);
+  // Thread entries whose flagged item a later edit removed. Loaded UNCONDITIONALLY: the case that matters is
+  // the one where every item was removed, which is precisely when a per-item read returns nothing and the
+  // history would silently disappear from the CRM.
+  const removedItemEvents = (await getDetachedCorrectiveActionEvents(tenantDb, scorecardId)).map((event) => ({
+    id: event.id,
+    eventType: event.eventType,
+    actorName: event.actorName ?? event.actorEmail ?? null,
+    actorEmail: event.actorEmail,
+    comment: event.comment,
+    createdAt: event.createdAt,
+    photos: [],
+  }));
 
   return {
     ...toSummary(card),
@@ -150,6 +165,7 @@ export async function getDealScorecardDetail(
     // Leadership Project Summary free text; null for project cards.
     summary: card.summary ?? null,
     correctiveActions,
+    removedItemEvents,
   };
 }
 

@@ -754,6 +754,12 @@ export async function reconcileScorecardCorrectiveActions(
           ? {
               correctiveActionOversightOpenedAt: null,
               correctiveActionOversightClosedAt: null,
+              // The APPROVAL-request stamp clears here too. An edit can walk a card from `submitted` or
+              // `closed` back to open by adding or replacing a flagged item; when that new work is answered
+              // the card returns to the approver, and a stamp left over from the PREVIOUS request makes the
+              // worker skip it as already notified. The card then sits in the approver's queue with nobody
+              // told. Clearing it only on the rejection restart path covered one of the two ways back.
+              correctiveActionApprovalRequestedAt: null,
               // Rotate the INDEPENDENT oversight marker. Unlike the shared cycle nonce (which the responder
               // worker's self-repair also rotates), this moves ONLY here, so the oversight handler can gate
               // its SEND on it without conflating supersession with self-repair. Retiring queued jobs below

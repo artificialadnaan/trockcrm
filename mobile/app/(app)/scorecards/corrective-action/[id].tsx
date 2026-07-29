@@ -555,6 +555,19 @@ function ResponsePhotoThumb({
   );
 }
 
+/**
+ * The read-only card for an item that is no longer the responder's to answer.
+ *
+ * Its badge is derived, not hard-coded: `submitted` and `approved` both land here, and labelling both
+ * "Resolved" in terminal-success green told the responder their work was accepted while it was still sitting
+ * with an approver who could send it back — directly contradicting the awaiting-approval banner above it.
+ */
+function settledPresentation(status: string): { label: string; color: string; textColor: string } {
+  return status === "approved"
+    ? { label: "Approved", color: "#DCFCE7", textColor: "#166534" }
+    : { label: "Awaiting approval", color: "#FEF3C7", textColor: "#92400E" };
+}
+
 function ResolvedItemCard({ item }: { item: CorrectiveActionItem }) {
   // The read endpoint resolves a presigned `url` per response photo — render them as tappable thumbnails so
   // the documented evidence is inspectable in TRock Cam (mirrors the scorecard detail evidence grid: tap →
@@ -566,7 +579,7 @@ function ResolvedItemCard({ item }: { item: CorrectiveActionItem }) {
     <View style={[styles.itemCard, styles.itemCardResolved]}>
       <View style={styles.itemHeader}>
         <Badge label={item.itemType === "critical_deficiency" ? "Critical deficiency" : "Action item"} />
-        <Badge label="Resolved" color="#DCFCE7" textColor="#166534" />
+        <Badge {...settledPresentation(item.status)} />
       </View>
       <Text style={styles.itemLabel}>{item.itemLabel}</Text>
       {item.responseComment ? <Text style={styles.resolvedComment}>{item.responseComment}</Text> : null}

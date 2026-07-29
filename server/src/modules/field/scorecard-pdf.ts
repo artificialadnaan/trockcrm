@@ -100,6 +100,12 @@ export interface ScorecardPdfInput {
   /** Response photos already dropped upstream (capped before download) — added to the render-side cap's
    *  omitted count so the "available in the CRM" note reflects the true total. Mirrors omittedEvidenceCount. */
   omittedCorrectiveActionPhotoCount?: number;
+  /**
+   * Thread entries whose flagged item a later edit removed. They have no item to sit under, but a rejection
+   * and the answer to it are things that happened — dropping them would make the "append-only" record a
+   * record of only the items that survived editing.
+   */
+  removedItemEvents?: ScorecardPdfCorrectiveActionEvent[];
 }
 
 export interface ScorecardPdfPhoto {
@@ -198,6 +204,8 @@ export interface ScorecardPdfData {
   correctiveActionSummary: string | null;
   /** Response photos dropped by MAX_CORRECTIVE_ACTION_PHOTOS. */
   omittedCorrectiveActionPhotoCount: number;
+  /** Thread entries whose item an edit removed, rendered under their own heading after the per-item record. */
+  removedItemEvents: ScorecardPdfCorrectiveActionEvent[];
 }
 
 /**
@@ -334,6 +342,7 @@ export function buildScorecardPdfData(input: ScorecardPdfInput): ScorecardPdfDat
     correctiveActions: cappedCorrectiveActions,
     correctiveActionSummary,
     omittedCorrectiveActionPhotoCount,
+    removedItemEvents: input.removedItemEvents ?? [],
   };
 }
 
@@ -524,6 +533,7 @@ export async function renderFieldScorecardPdf(data: ScorecardPdfData): Promise<B
         { width: CONTENT_WIDTH },
       );
     }
+    drawRemovedItemEvents(doc, data.removedItemEvents);
   }
 
   const evidenceGroups: EvidenceGroup[] = isLeadership
@@ -721,6 +731,49 @@ export function signatureDataUrlToBuffer(signature: string | null): Buffer | nul
  */
 export function typedSignatureFallback(signature: string | null): string | null {
   return sharedTypedSignatureFallback(signature);
+}
+
+/**
+ * The back-and-forth on items a later edit REMOVED.
+ *
+ * They have no item left to sit under, so they get their own heading rather than being dropped. An edit that
+ * deletes a flagged item does not unhappen the rejection that was written against it, and a record that
+ * silently omits them is a record of the items that survived editing — not of what occurred.
+ */
+function drawRemovedItemEvents(
+  doc: PDFKit.PDFDocument,
+  events: ScorecardPdfCorrectiveActionEvent[],
+): void {
+  if (events.length === 0) return;
+  ensureRoom(doc, CORRECTIVE_ACTION_HEADING_ORPHAN_GUARD);
+  doc.moveDown(0.6);
+  doc.font("Helvetica-Bold").fontSize(10).fillColor(BRAND_MUTED).text(
+    "Removed by a later edit",
+    PAGE.margin,
+    doc.y,
+    { width: CONTENT_WIDTH },
+  );
+  doc.font("Helvetica-Oblique").fontSize(9).fillColor(BRAND_MUTED).text(
+    "These flagged items were removed when the scorecard was edited. Their history is kept here.",
+    PAGE.margin,
+    doc.y + 2,
+    { width: CONTENT_WIDTH },
+  );
+  for (const event of events) {
+    const heading = correctiveActionEventHeading(event);
+    doc.font("Helvetica-Bold").fontSize(9).fillColor(heading.color).text(heading.text, PAGE.margin, doc.y + 6, {
+      width: CONTENT_WIDTH,
+    });
+    const comment = event.comment?.trim();
+    if (comment) {
+      ensureRoom(doc, CORRECTIVE_ACTION_COMMENT_MAX_HEIGHT + 2);
+      doc.font("Helvetica").fontSize(10).fillColor(BRAND_BLACK).text(comment, PAGE.margin, doc.y + 2, {
+        width: CONTENT_WIDTH,
+        height: CORRECTIVE_ACTION_COMMENT_MAX_HEIGHT,
+        ellipsis: true,
+      });
+    }
+  }
 }
 
 /** How each item state is labelled and coloured in the record. */

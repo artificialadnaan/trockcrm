@@ -429,7 +429,12 @@ export async function handleScorecardCorrectiveActionOversightEmail(
   // first embedded the corrective-action record. Best-effort: a missing or oversized object degrades to a
   // no-attachment send rather than blocking the notification.
   let attachments: SendSystemEmailAttachment[] | undefined;
-  if (phase === "closed") {
+  // BOTH review-facing notices carry the artifact. The approver is being asked to judge documented work, so
+  // sending them a link and no record forces them into the CRM to see the very thing the email is about —
+  // and the enqueue path already delays specifically so the refreshed PDF exists by the time this runs.
+  // The currency and version checks inside loadPdfAttachment still apply: a stale or pre-v4 artifact is
+  // dropped in favour of the link rather than sent as if it were the record.
+  if (phase === "closed" || phase === "awaiting_approval") {
     attachments = await loadPdfAttachment(scorecard, scorecardId, tenantSchema, query, deps, logger);
   }
 

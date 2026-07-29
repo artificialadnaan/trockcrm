@@ -33,6 +33,7 @@ import { prioritizeAndCapEvidencePhotos, resolveScorecardEvidenceImage } from ".
 import { orderCorrectiveActions } from "@trock-crm/shared/lib/correctiveActionOrder";
 import {
   getCorrectiveActionEventsByItem,
+  getDetachedCorrectiveActionEvents,
   type CorrectiveActionEventRow,
 } from "./corrective-action-events.js";
 import {
@@ -1165,6 +1166,11 @@ export async function renderAndStoreFieldScorecardArtifacts(
       correctiveActionRows.length === 0
         ? new Map<string, CorrectiveActionEventRow[]>()
         : await getCorrectiveActionEventsByItem(db, scorecardId);
+    // Events whose item a later edit removed. Loaded UNCONDITIONALLY — the case that matters most is the one
+    // where the last item was removed, which is exactly when the early return above would skip the query and
+    // the record would show nothing at all. SET NULL preserved these rows; a reader that never asks for them
+    // preserves nothing.
+    const detachedCorrectiveActionEvents = await getDetachedCorrectiveActionEvents(db, scorecardId);
 
     const [deal] = await db
       .select({ name: deals.name, dealNumber: deals.dealNumber })
@@ -1178,6 +1184,7 @@ export async function renderAndStoreFieldScorecardArtifacts(
       correctiveActionRows,
       correctiveActionPhotoRows,
       correctiveActionEventsByItem,
+      detachedCorrectiveActionEvents,
       deal: deal ?? null,
     };
   });
@@ -1189,6 +1196,7 @@ export async function renderAndStoreFieldScorecardArtifacts(
     correctiveActionRows,
     correctiveActionPhotoRows,
     correctiveActionEventsByItem,
+    detachedCorrectiveActionEvents,
     deal,
   } = loaded;
   const evidenceFingerprint = scorecardEvidenceFingerprint(photoRows);
@@ -1300,6 +1308,15 @@ export async function renderAndStoreFieldScorecardArtifacts(
     })),
     omittedEvidenceCount,
     omittedCorrectiveActionPhotoCount,
+    // Rendered after the per-item record, under their own heading: the items are gone, but a rejection and
+    // the answer to it are things that happened and belong in the audit trail.
+    removedItemEvents: detachedCorrectiveActionEvents.map((event) => ({
+      eventType: event.eventType,
+      actorName: event.actorName ?? event.actorEmail ?? null,
+      createdAt: event.createdAt,
+      comment: event.comment,
+      photos: [],
+    })),
     correctiveActions: correctiveActionRows.map((row) => {
       const itemPhotos = correctiveActionPhotos.filter((photo) => photo.correctiveActionId === row.id);
       const events = correctiveActionEventsByItem.get(row.id) ?? [];

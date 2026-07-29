@@ -112,11 +112,15 @@ export default function CorrectiveActionResponderPage() {
         <p className="text-xs font-semibold uppercase tracking-wide text-brand-red">T Rock · Corrective Action</p>
         <h1 className="mt-1 text-2xl font-semibold">Document the corrective actions</h1>
         <p className="mt-1 text-sm text-slate-600">
-          Add a photo and a short note for each flagged item below. Once every item has a response, this
-          scorecard is automatically marked resolved.
+          Add a photo and a short note for each flagged item below. Once every item has a response it goes to
+          an approver, who either accepts it or sends it back with a note saying what still needs doing.
         </p>
+        {/* Counts what is ANSWERED, and says so — the old copy promised the scorecard would be "automatically
+            marked resolved", which stopped being true the moment an approver could send work back, and
+            directly contradicted the awaiting-approval banner immediately below it. */}
         <p className="mt-2 text-sm font-medium text-slate-700">
-          {items.length - openCount} of {items.length} resolved
+          {items.filter((i) => i.status === "approved").length} of {items.length} approved
+          {openCount > 0 ? ` · ${openCount} still needing a response` : ""}
         </p>
       </header>
 

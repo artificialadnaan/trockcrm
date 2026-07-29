@@ -620,6 +620,12 @@ export interface FieldScorecardDetail extends FieldScorecardSummary {
    * reads that do not carry a session (the field app).
    */
   canApproveCorrectiveActions?: boolean;
+  /**
+   * Thread entries whose flagged item a later edit removed. They have no item to thread under, but a
+   * rejection and the answer to it are things that happened — omitting them would make the record one of the
+   * items that survived editing rather than of what occurred.
+   */
+  removedItemEvents?: CorrectiveActionEventView[];
   items: FieldScorecardItemView[];
   criticalDeficiencies: string[];
   criticalDeficiencyNotes?: Record<string, string>;

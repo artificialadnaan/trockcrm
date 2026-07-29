@@ -81,7 +81,7 @@ describe("CorrectiveActionResponderPage", () => {
     expect(mocks.useCorrectiveActions).toHaveBeenCalledWith("sc-1", "tok-xyz");
     const text = container.textContent ?? "";
     expect(text).toContain("Re-inspect slab 2");
-    expect(text).toContain("0 of 1 resolved");
+    expect(text).toContain("0 of 1 approved");
     expect(text).toContain("Submit response");
   });
 

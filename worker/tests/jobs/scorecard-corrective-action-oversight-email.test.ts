@@ -1513,4 +1513,28 @@ describe("handleScorecardCorrectiveActionOversightEmail", () => {
     // The approval line carries the VERDICT time, not the submission time.
     expect(html).toMatch(/Jul 29, 2026/);
   });
+
+  it("REGRESSION: attaches the PDF to the awaiting-approval notice, not only the completion one", async () => {
+    // The approver is being asked to JUDGE documented work. A link with no record forces them into the CRM to
+    // see the very thing the email is about — and the enqueue path already delays specifically so the
+    // refreshed artifact exists by the time this job runs.
+    const { query } = makeQuery({ status: "corrective_action_submitted" });
+    const sendEmail = makeSend();
+
+    await handleScorecardCorrectiveActionOversightEmail(payload({ phase: "awaiting_approval" }), null, {
+      query: query as never,
+      sendEmail: sendEmail as never,
+      getPdf: (async () => Buffer.from("%PDF-1.4")) as never,
+      env: { ...env, QC_APPROVER_EMAILS: "james@trockgc.com" } as unknown as NodeJS.ProcessEnv,
+      logger: makeLogger(),
+    });
+
+    const [, , , options] = sendEmail.mock.calls[0] as unknown as [
+      string[],
+      string,
+      string,
+      { attachments?: unknown[] },
+    ];
+    expect(options.attachments).toHaveLength(1);
+  });
 });
