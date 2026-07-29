@@ -188,6 +188,39 @@ function importantForAccessibilityValue(
 }
 
 /**
+ * Is there a label that could actually SAY something?
+ *
+ * `accessibilityLabel=""` and `accessibilityLabel={undefined}` are attribute nodes like any other, so a
+ * presence check counted them as labelled — and an empty label does not merely fail to help, it is
+ * worse than none: RN stops falling back to the rendered text, so the element announces nothing at all.
+ * A conditional that can resolve empty (`x ? name : ""`) is the same hazard on one branch.
+ *
+ * Anything unresolvable is accepted, because a static walk cannot evaluate an expression and refusing
+ * what it cannot read would make the guard unfixable rather than informative. This is the FOURTH
+ * finding on this function of exactly one shape: reading a prop's presence when its value was the whole
+ * question. The pattern is the lesson.
+ */
+function hasMeaningfulLabel(el: ts.JsxOpeningElement | ts.JsxSelfClosingElement): boolean {
+  const a = attr(el, "accessibilityLabel");
+  if (!a) return false;
+  const init = a.initializer;
+  if (!init) return false; // bare `accessibilityLabel` is `={true}` — a boolean, not a name
+  const empty = (n: ts.Node): boolean => {
+    if (ts.isStringLiteralLike(n)) return n.text.trim().length === 0;
+    if (n.kind === ts.SyntaxKind.NullKeyword || n.kind === ts.SyntaxKind.FalseKeyword) return true;
+    if (ts.isIdentifier(n) && n.text === "undefined") return true;
+    // Either branch resolving empty leaves that path unnamed.
+    if (ts.isConditionalExpression(n)) return empty(n.whenTrue) || empty(n.whenFalse);
+    if (ts.isParenthesizedExpression(n)) return empty(n.expression);
+    if (ts.isTemplateExpression(n)) return false;
+    return false;
+  };
+  if (ts.isStringLiteralLike(init)) return !empty(init);
+  if (ts.isJsxExpression(init)) return init.expression ? !empty(init.expression) : false;
+  return true;
+}
+
+/**
  * Does this element group its subtree into ONE accessibility element?
  *
  * `Pressable` and the `Touchable*` family pass `accessible={true}` themselves — but only as a DEFAULT:
@@ -220,7 +253,7 @@ function coveredByAncestor(el: ts.JsxOpeningElement | ts.JsxSelfClosingElement):
     if (!open) continue;
     // SUBTREE, not self: an ancestor's own "no" leaves this Text announced.
     if (hidesSubtree(open)) return true;
-    if (groupsSubtree(open) && attr(open, "accessibilityLabel")) return true;
+    if (groupsSubtree(open) && hasMeaningfulLabel(open)) return true;
   }
   return false;
 }
@@ -249,7 +282,7 @@ function findings(file: string): string[] {
     if (open && open.tagName.getText() === "Text") {
       const style = attr(open, "style");
       const used = style?.initializer ? referencedStyleNames(style.initializer) : [];
-      if (used.some((n) => upper.has(n)) && !attr(open, "accessibilityLabel") && !coveredByAncestor(open)) {
+      if (used.some((n) => upper.has(n)) && !hasMeaningfulLabel(open) && !coveredByAncestor(open)) {
         const { line } = sf.getLineAndCharacterOfPosition(open.getStart(sf));
         hits.push(`${path.relative(ROOT, file)}:${line + 1}`);
       }
@@ -287,7 +320,7 @@ describe("uppercase Text carries an explicit accessibilityLabel", () => {
           const used = style?.initializer ? referencedStyleNames(style.initializer) : [];
           if (
             used.some((n) => upper.has(n)) &&
-            !attr(open, "accessibilityLabel") &&
+            !hasMeaningfulLabel(open) &&
             !coveredByAncestor(open)
           ) {
             hits.push("hit");
@@ -374,6 +407,25 @@ describe("uppercase Text carries an explicit accessibilityLabel", () => {
       expect(
         check(`${SHEET} const A = () => <Text importantForAccessibility="no-hide-descendants" style={styles.cap}>x</Text>;`),
       ).toBe(0);
+    });
+
+    it("rejects an EMPTY label, which is worse than none", () => {
+      // RN stops falling back to the rendered text once a label is set, so "" announces nothing at all.
+      expect(check(`${SHEET} const A = () => <Text accessibilityLabel="" style={styles.cap}>x</Text>;`)).toBe(1);
+      expect(
+        check(`${SHEET} const A = () => <Text accessibilityLabel={undefined} style={styles.cap}>x</Text>;`),
+      ).toBe(1);
+      expect(
+        check(`${SHEET} const A = () => <Text accessibilityLabel={on ? n : ""} style={styles.cap}>x</Text>;`),
+      ).toBe(1);
+    });
+
+    it("rejects an empty label on the GROUPING ancestor too", () => {
+      expect(
+        check(
+          `${SHEET} const A = () => <Pressable accessibilityLabel=""><Text style={styles.cap}>x</Text></Pressable>;`,
+        ),
+      ).toBe(1);
     });
 
     it("distinguishes an ancestor's \"no\" from \"no-hide-descendants\"", () => {

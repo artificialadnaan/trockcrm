@@ -145,81 +145,104 @@ function sharedFloorKeys(): Map<string, number> {
 }
 
 /**
- * Is this reference in a position that ALWAYS applies?
+ * Every height this style expression can resolve to at runtime.
  *
- * `style={[styles.small, selected && styles.big]}` used to pass because the walk found a floor
- * somewhere in the expression — but the floor only arrives when `selected` is true, so the ordinary
- * unselected control stayed undersized. The scope-pill and active-state arrays all over these screens
- * are exactly that shape. A floor that depends on state is not a floor.
+ * The previous version flattened the expression to a list of "declarations" plus a conditional flag,
+ * which could not express the ordinary case of choosing between two COMPLIANT styles:
+ * `style={on ? styles.active : styles.inactive}` with 44 on both marked each one conditional, found
+ * nothing unconditional, and failed a control that is 44pt on every path. A guard that rejects correct
+ * code gets deleted, so the model has to match how RN actually resolves a style.
+ *
+ * `null` in the returned set means "this path declares no height at all" — which fails, since the whole
+ * rule is that the floor must be DECLARED. The caller requires every outcome to be a number >= 44.
+ *
+ * Semantics mirrored from RN:
+ *   - an ARRAY flattens last-wins, so fold left to right and let a later entry replace an earlier one;
+ *   - `a ? b : c` is either branch;
+ *   - `cond && style` is that style OR nothing;
+ *   - anything this cannot read (a block-bodied callback, a call, a spread) yields `null`, which fails.
+ *     Conservative on purpose: the failure is visible and fixed by writing the number down.
  */
-function isUnconditional(node: ts.Node, root: ts.Node): boolean {
-  for (let cur: ts.Node | undefined = node; cur && cur !== root; cur = cur.parent) {
-    const p: ts.Node | undefined = cur.parent;
-    if (!p) break;
-    // Statement-level branches too. `style={({pressed}) => { if (pressed) return styles.big; return
-    // styles.small; }}` is the same defect wearing a block body, and only expression forms were caught.
-    if (ts.isIfStatement(p) && (p.thenStatement === cur || p.elseStatement === cur)) return false;
-    if (ts.isCaseClause(p) || ts.isDefaultClause(p)) return false;
-    if (ts.isConditionalExpression(p) && (p.whenTrue === cur || p.whenFalse === cur)) return false;
-    if (ts.isBinaryExpression(p)) {
-      const k = p.operatorToken.kind;
-      if (
-        k === ts.SyntaxKind.AmpersandAmpersandToken ||
-        k === ts.SyntaxKind.BarBarToken ||
-        k === ts.SyntaxKind.QuestionQuestionToken
-      ) {
-        return false;
+function possibleFloors(node: ts.Node, heights: Map<string, number>): Set<number | null> {
+  const one = (v: number | null): Set<number | null> => new Set([v]);
+
+  // `style={...}` arrives as the JSX expression container, not the expression. The previous walker
+  // descended the whole subtree so it never had to know; a structural evaluator does.
+  if (ts.isJsxExpression(node)) {
+    return node.expression ? possibleFloors(node.expression, heights) : one(null);
+  }
+  if (ts.isParenthesizedExpression(node)) return possibleFloors(node.expression, heights);
+
+  if (ts.isArrayLiteralExpression(node)) {
+    let acc: Set<number | null> = one(null);
+    for (const el of node.elements) {
+      const contribs = possibleFloors(el, heights);
+      const next = new Set<number | null>();
+      for (const prev of acc) {
+        for (const c of contribs) {
+          // A contribution of null is "this entry declares nothing", so the previous value stands.
+          next.add(c === null ? prev : c);
+        }
+      }
+      acc = next;
+    }
+    return acc;
+  }
+
+  if (ts.isConditionalExpression(node)) {
+    return new Set([
+      ...possibleFloors(node.whenTrue, heights),
+      ...possibleFloors(node.whenFalse, heights),
+    ]);
+  }
+
+  if (ts.isBinaryExpression(node)) {
+    const k = node.operatorToken.kind;
+    // `cond && style` — the style applies, or nothing does.
+    if (k === ts.SyntaxKind.AmpersandAmpersandToken) {
+      return new Set([null, ...possibleFloors(node.right, heights)]);
+    }
+    if (k === ts.SyntaxKind.BarBarToken || k === ts.SyntaxKind.QuestionQuestionToken) {
+      return new Set([
+        ...possibleFloors(node.left, heights),
+        ...possibleFloors(node.right, heights),
+      ]);
+    }
+    return one(null);
+  }
+
+  if (ts.isArrowFunction(node) || ts.isFunctionExpression(node)) {
+    // `({ pressed }) => [...]` is read; a block body is not — see the note above.
+    return ts.isBlock(node.body) ? one(null) : possibleFloors(node.body, heights);
+  }
+
+  if (ts.isPropertyAccessExpression(node) && ts.isIdentifier(node.expression)) {
+    return one(heights.get(`${node.expression.text}.${node.name.text}`) ?? null);
+  }
+
+  if (ts.isObjectLiteralExpression(node)) {
+    let declared: number | null = null;
+    for (const prop of node.properties) {
+      if (!ts.isPropertyAssignment(prop)) continue;
+      const name = ts.isIdentifier(prop.name) ? prop.name.text : prop.name.getText();
+      if ((name === "minHeight" || name === "height") && ts.isNumericLiteral(prop.initializer)) {
+        declared = Number(prop.initializer.text);
       }
     }
+    return one(declared);
+  }
+
+  return one(null);
+}
+
+/** Compliant only when EVERY path it can take declares at least the floor. */
+function declaresFloor(node: ts.Node, heights: Map<string, number>): boolean {
+  const outcomes = possibleFloors(node, heights);
+  if (outcomes.size === 0) return false;
+  for (const o of outcomes) {
+    if (o === null || o < FLOOR) return false;
   }
   return true;
-}
-
-/**
- * The height this style expression actually resolves to, or null when nothing declares one.
- *
- * RN flattens a style array LAST-WINS, so `[styles.big, styles.compact]` is 32 when `compact` says 32,
- * however large `big` is. An earlier version returned true on the first floor it met and never looked
- * further, which reported that pair as compliant. Declarations are therefore collected in SOURCE ORDER
- * and the last one decides.
- *
- * A CONDITIONAL declaration cannot raise the floor — it is absent when its condition is false — but it
- * can lower it, because when the condition holds it wins like any other. So a conditional entry counts
- * only when it is under the floor. That asymmetry is deliberate: both directions err toward reporting.
- */
-function resolvedFloor(node: ts.Node, heights: Map<string, number>): number | null {
-  const found: { value: number; conditional: boolean }[] = [];
-  const visit = (n: ts.Node): void => {
-    if (ts.isPropertyAccessExpression(n) && ts.isIdentifier(n.expression)) {
-      const value = heights.get(`${n.expression.text}.${n.name.text}`);
-      if (value !== undefined) found.push({ value, conditional: !isUnconditional(n, node) });
-    }
-    if (ts.isPropertyAssignment(n)) {
-      const name = ts.isIdentifier(n.name) ? n.name.text : n.name.getText();
-      if ((name === "minHeight" || name === "height") && ts.isNumericLiteral(n.initializer)) {
-        found.push({
-          value: Number(n.initializer.text),
-          conditional: !isUnconditional(n, node),
-        });
-      }
-    }
-    ts.forEachChild(n, visit);
-  };
-  visit(node);
-  if (found.length === 0) return null;
-
-  let floor: number | null = null;
-  for (const d of found) {
-    if (!d.conditional) floor = d.value;
-    // A conditional entry can only make things worse; when it applies, it is the last word.
-    else if (d.value < FLOOR) floor = d.value;
-  }
-  return floor;
-}
-
-function declaresFloor(node: ts.Node, heights: Map<string, number>): boolean {
-  const floor = resolvedFloor(node, heights);
-  return floor !== null && floor >= FLOOR;
 }
 
 function findings(file: string): string[] {
@@ -363,6 +386,22 @@ describe("interactive controls declare a 44pt floor", () => {
           `${SHEET} const A = () => <Pressable style={({ pressed }) => { if (pressed) return styles.big; return styles.small; }} />;`,
         ),
       ).toBe(1);
+    });
+
+    it("accepts a choice between two COMPLIANT styles", () => {
+      // The false positive that forced this rewrite: both branches are 44, the control is 44pt on every
+      // path, and the old flat scan rejected it because neither declaration was unconditional. A guard
+      // that fails correct code gets deleted.
+      const BOTH =
+        "const styles = StyleSheet.create({ active: { minHeight: 44 }, inactive: { minHeight: 44 } });";
+      expect(check(`${BOTH} const A = () => <Pressable style={on ? styles.active : styles.inactive} />;`)).toBe(0);
+    });
+
+    it("still rejects a choice where only ONE branch is compliant", () => {
+      const MIXED =
+        "const styles = StyleSheet.create({ active: { minHeight: 44 }, inactive: { minHeight: 30 } });";
+      expect(check(`${MIXED} const A = () => <Pressable style={on ? styles.active : styles.inactive} />;`)).toBe(1);
+      expect(check(`${MIXED} const A = () => <Pressable style={on ? styles.inactive : styles.active} />;`)).toBe(1);
     });
 
     it("scans TextInput too — a credential field is a touch target", () => {

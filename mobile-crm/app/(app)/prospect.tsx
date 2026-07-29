@@ -215,7 +215,7 @@ export default function ProspectScreen() {
   }, [location]);
 
   const runMatch = useMutation({
-    mutationFn: async (point: { lat: number; lng: number }) => {
+    mutationFn: async (point: { lat: number; lng: number; generation: number }) => {
       // Reverse geocode FIRST: its canonical address is both the strongest match signal and what gets
       // stored if the rep ends up creating the property. Its failure is not fatal — matching by
       // coordinates alone still works, it is just weaker.
@@ -232,10 +232,11 @@ export default function ProspectScreen() {
       });
       return { geocoded, found };
     },
-    onSuccess: ({ geocoded, found }) => {
-      // Abandoned mid-flight: the rep is already on the company path, and applying this now would
-      // clear the target they chose and replace it with candidates they had stopped waiting for.
-      if (matchAbandoned.current) return;
+    onSuccess: ({ geocoded, found }, variables) => {
+      // SUPERSEDED — abandoned for the company path, or overtaken by a newer lookup. Applying it now
+      // would clear a target the rep chose and replace it with candidates from a question they have
+      // already moved past.
+      if (variables.generation !== matchGeneration.current) return;
       setAddress(
         geocoded
           ? {
@@ -268,8 +269,8 @@ export default function ProspectScreen() {
       }
       setMatches(found);
     },
-    onError: (err) => {
-      if (matchAbandoned.current) return;
+    onError: (err, variables) => {
+      if (variables.generation !== matchGeneration.current) return;
       // RETRYABLE. The ref is cleared so a later fix — or the same one, re-requested — starts a fresh
       // lookup; leaving it set meant a transient failure locked the screen out of matching for good
       // while the location stayed "ready".
@@ -296,21 +297,27 @@ export default function ProspectScreen() {
   const fixKey = fix ? `${fix.lat},${fix.lng}` : null;
   const matchedFor = useRef<string | null>(null);
   /**
-   * The rep took the company fallback while a lookup was still running — so its result is DEAD.
+   * Which lookup attempt is still the LIVE one.
    *
-   * `runMatch.onSuccess` clears the selected company and contact whenever it finds candidates, which is
-   * right when a lookup the rep is waiting on returns, and wrong when they have already given up on it
-   * and chosen something else. Cancelling the request is not available (the fetch is in flight and the
-   * server answers regardless), so the result is discarded on arrival — the same generation-stamp shape
-   * `use-current-location` uses for the fix itself.
+   * `runMatch.onSuccess` clears the selected company and contact whenever it finds candidates — right
+   * when a rep is waiting on that lookup, wrong when they have given up and chosen something else. The
+   * request cannot be cancelled (it is in flight; the server answers regardless), so a stale result is
+   * discarded on arrival instead.
+   *
+   * A COUNTER, not a boolean, and the difference is reachable: abandoning a lookup calls
+   * `location.reset()`, which returns the hook to `idle` and re-renders "Find this property". A rep who
+   * takes the fallback and then starts a second lookup would, with one shared flag, have cleared the
+   * guard protecting the FIRST — so attempt A's late success would be accepted and would overwrite
+   * attempt B's address and matches, or reattach the visit to a target the rep had left behind. The
+   * stamp travels with each attempt's own variables, so a result is only applied when its attempt is
+   * still the current one. Same shape `use-current-location` uses for the fix itself.
    */
-  const matchAbandoned = useRef(false);
+  const matchGeneration = useRef(0);
   useEffect(() => {
     if (!fixKey || !fix) return;
     if (matchedFor.current === fixKey) return;
     matchedFor.current = fixKey;
-    matchAbandoned.current = false;
-    runMatch.mutate({ lat: fix.lat, lng: fix.lng });
+    runMatch.mutate({ lat: fix.lat, lng: fix.lng, generation: ++matchGeneration.current });
     // runMatch identity is stable for the mutation's lifetime; keying on the fix is the real trigger.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fixKey]);
@@ -1240,9 +1247,9 @@ export default function ProspectScreen() {
                   /**
                    * Abandon BOTH in-flight operations, and abandon them in the two senses that matter.
                    *
-                   * `location.reset()` stops the fix from landing late. `matchAbandoned` discards a
-                   * lookup result that arrives anyway — the request cannot be cancelled, the server
-                   * answers regardless.
+                   * `location.reset()` stops the fix from landing late. Bumping `matchGeneration`
+                   * retires the lookup: its result arrives anyway — the request cannot be cancelled,
+                   * the server answers regardless — and is discarded because its stamp is stale.
                    *
                    * `runMatch.reset()` is the third line and the one that makes this usable rather than
                    * merely correct. `isPending` is read by three things: `saveBlocked`, the spinner,
@@ -1252,7 +1259,8 @@ export default function ProspectScreen() {
                    * this hatch exists for, that is the entire problem it was supposed to solve.
                    */
                   location.reset();
-                  matchAbandoned.current = true;
+                  // Retires the in-flight attempt: nothing stamped with an older generation applies.
+                  matchGeneration.current++;
                   runMatch.reset();
                   setRejectedMatches(true);
                 }}
@@ -1285,8 +1293,11 @@ export default function ProspectScreen() {
                     onPress={() => {
                       setMatchError(null);
                       matchedFor.current = null;
-                      matchAbandoned.current = false;
-                      runMatch.mutate({ lat: fix.lat, lng: fix.lng });
+                      runMatch.mutate({
+                        lat: fix.lat,
+                        lng: fix.lng,
+                        generation: ++matchGeneration.current,
+                      });
                     }}
                     accessibilityRole="button"
                     style={styles.secondaryBtn}

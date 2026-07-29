@@ -327,7 +327,15 @@ export function saveAnnouncement(input: {
   if (input.saved) {
     return [
       "Logged.",
-      input.flagForLead ? "Marked as worth a lead. Follow up with the office." : null,
+      // The CAVEAT travels with the flag, because it is the load-bearing half. The screen says
+      // "Follow up with the office — this doesn't reach them on its own yet", and an announcement that
+      // stopped at "Follow up with the office" told a nonvisual rep the office had been notified. The
+      // marker is written to a text column nothing queries yet; a sighted rep can read that and a
+      // blind one could not. This function's own docblock claims it is composed from the same values
+      // the JSX renders — it was not, on the one line where the difference misleads.
+      input.flagForLead
+        ? "Marked as worth a lead. Follow up with the office — this doesn't reach them on its own yet."
+        : null,
       input.contactFailed
         ? input.contactIndeterminate
           ? "That person may or may not have been saved — check before adding them again."

@@ -453,7 +453,17 @@ describe("what VoiceOver is told when the capture reaches an outcome", () => {
     expect(
       saveAnnouncement({ ...base, saved: true, flagForLead: true, contactFailed: true }),
     ).toBe(
-      "Logged. Marked as worth a lead. Follow up with the office. That person couldn't be saved — add them on the web.",
+      "Logged. Marked as worth a lead. Follow up with the office — this doesn't reach them on its own yet. " +
+        "That person couldn't be saved — add them on the web.",
+    );
+  });
+
+  it("carries the lead flag's CAVEAT, not just the instruction", () => {
+    // "Follow up with the office" alone reads as "the office has been told". Nothing queries the
+    // marker yet, the screen says so, and the announcement has to say so too — otherwise the one
+    // person who cannot read the screen is the one person misled about it.
+    expect(saveAnnouncement({ ...base, saved: true, flagForLead: true })).toContain(
+      "this doesn't reach them on its own yet",
     );
   });
 
