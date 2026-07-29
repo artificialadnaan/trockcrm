@@ -684,12 +684,18 @@ export async function getEmailThreadForMutation(
   if (userId) {
     conditions.push(eq(emails.userId, userId));
   }
+  // sent_at then id, matching the connected-mailbox lookup below so the two can never disagree about
+  // which message is "oldest" when two share a timestamp.
   const threadEmails = await tenantDb
     .select()
     .from(emails)
     .where(and(...conditions))
-    .orderBy(sql`${emails.sentAt} ASC`);
+    .orderBy(sql`${emails.sentAt} ASC`, sql`${emails.id} ASC`);
 
+  // KNOWN GAP: a conversation whose messages have all been purged but whose binding survives 404s here,
+  // before any gate runs, so it cannot be detached through these routes. Closing it means letting
+  // mailboxAccountId be null and threading that through every consumer; the orphaned binding is
+  // otherwise harmless (invisible in the UI, skipped by every rebind).
   if (threadEmails.length === 0) {
     if (userId) {
       const existingThreadEmail = await findAnyEmailInConversation(tenantDb, providerConversationId);
@@ -738,14 +744,20 @@ export async function getEmailThreadForMutation(
 }
 
 /**
- * May this user mutate this email thread's deal linkage?
+ * May this user reach this email thread's deal linkage — to read it, or to change it?
  *
  * TWO accepted paths, checked in this order:
  *   1. MAILBOX OWNER — the thread is in the caller's own mailbox. Always allowed; a user can always
  *      fix the filing of their own email.
  *   2. DEAL WRITE ACCESS — the caller may write the deal the thread is currently bound to.
  *
- * Path 2 is the point of this helper. The deal Emails tab is NOT mailbox-scoped (getEmails is called
+ * Used by the thread READ route as well as the three mutation routes, and deliberately so: the
+ * Reassign/Unassign controls are rendered from the read payload, so a stricter read gate makes the
+ * mutations unreachable no matter how permissive they are. Path 2 resolves to
+ * assertDealCollaboratorAccess, the same office-level predicate the deal Emails tab already uses to
+ * decide what a user may see, so admitting a reader here grants nothing that tab does not.
+ *
+ * Path 2 is the point of this helper. The deal Emails LIST is NOT mailbox-scoped (getEmails is called
  * with no user filter), so a user routinely sees email from other mailboxes on a deal they own — the
  * misfiled email someone notices is frequently not their own, and owner-only would 403 exactly the
  * person who spotted it.
@@ -766,29 +778,22 @@ export async function assertCanMutateEmailThread(
   user: { id: string; role: string; officeId?: string | null; activeOfficeId?: string | null },
   context: { boundDealId: string | null }
 ) {
-  // Path 1, the cheap half: does the caller own a MESSAGE in this thread? emails.userId IS the mailbox
-  // owner, and the mutation routes hand this helper the WHOLE conversation, so this is the honest
-  // reading of "the thread is in the caller's own mailbox". The mailbox-id comparison below cannot
-  // stand in for it: thread.mailboxAccountId describes ONE participant's mailbox (the oldest message's),
-  // so on a thread that reached two mailboxes it would admit only the participant who happened to send
-  // first — narrower than the mailbox-scoped routes this helper replaced, which let anyone holding a
-  // copy of the thread refile it.
+  // PATH 1 — mailbox owner: does the caller own a MESSAGE in this thread? emails.userId IS the mailbox
+  // owner, and the routes hand this helper the WHOLE conversation, so this is the honest reading of
+  // "the thread is in the caller's own mailbox".
+  //
+  // This deliberately replaces the old `thread.mailboxAccountId === resolveMailboxAccountIdForCrmUser(
+  // user.id)` comparison rather than sitting alongside it. That comparison is not merely redundant now,
+  // it is UNREACHABLE: thread.mailboxAccountId is always some conversation participant's own token id
+  // (both branches of getEmailThreadForMutation derive it from a message owner), so it can only equal
+  // the caller's token id when the caller owns a message — i.e. when the line above already returned.
+  // It was also strictly NARROWER, admitting only whoever sent first on a thread that reached two
+  // mailboxes. Removing it drops a per-gate SELECT and a 409-swallow that no longer guards anything: a
+  // caller with no connected mailbox now simply misses path 1 by owning no message, with no query and
+  // no exception involved.
   if (thread.emails.some((email) => email.userId === user.id)) return;
 
-  // A caller with no mailbox of their own simply MISSES path 1 — that is not an error here.
-  // resolveMailboxAccountIdForCrmUser signals it with AppError(409, "Connect mailbox first"); letting
-  // that escape would 409 a user who holds perfectly good deal write access before path 2 ever ran, so
-  // swallow exactly the 409 and fall through. Every other failure still propagates.
-  let mailboxAccountId: string | null = null;
-  try {
-    mailboxAccountId = await resolveMailboxAccountIdForCrmUser(tenantDb, user.id);
-  } catch (err) {
-    if (!(err instanceof AppError) || err.statusCode !== 409) throw err;
-  }
-  // The null check is load-bearing: without it an unresolved mailbox would match a (theoretically) null
-  // thread.mailboxAccountId and fall open.
-  if (mailboxAccountId !== null && thread.mailboxAccountId === mailboxAccountId) return;
-
+  // PATH 2 — deal write access.
   if (!context.boundDealId) {
     throw new AppError(403, "You can only modify your own email threads");
   }
@@ -931,10 +936,25 @@ export async function detachConversationAcrossMailboxes(
  * assertCanMutateEmailThread hands it a null boundDealId and 403s exactly the deal collaborator the
  * deal-write path exists to admit.
  *
- * Joined to user_graph_tokens by id, same as resolveMailboxAccountIdsWithActiveBindingForConversation
- * and for the same reason: a disconnect hard-deletes the token row but leaves the binding in place, so
- * without this join an orphaned binding with a low UUID could win the ORDER BY and report a stale deal.
- * No status filter, for the same reason as there — a merely revoked/error token still resolves.
+ * ORPHANS — a binding whose mailbox_account_id no longer exists in user_graph_tokens. Common, not
+ * exotic: revokeGraphTokens hard-DELETEs the row (graph-token-service.ts) while upsertGraphTokens only
+ * updates in place, so every disconnect→reconnect mints a new token id and permanently orphans that
+ * user's existing bindings. This is a LEFT join with orphans sorted LAST, not an inner join, because
+ * the two available answers are wrong in different directions:
+ *
+ *   - Filtering orphans OUT (an inner join) disagrees with detachConversationAcrossMailboxes, which
+ *     clears every active binding regardless of token — so a conversation held only by orphans would
+ *     report boundDealId = null, 403 the collaborator whose deal it is actually filed under, and (when
+ *     a mailbox owner detached it) wipe the filing with no audit row, because there was no deal id to
+ *     file the record under.
+ *   - Letting an orphan WIN would report a stale deal: bindConversationToDealAcrossMailboxes cannot
+ *     rebind an orphan (bindThreadToDeal needs a live mailbox), so after a reassign the orphan still
+ *     points at the deal the thread has left.
+ *
+ * Sorting live bindings first gives the live answer whenever one exists — identical to the inner join
+ * in that case — and falls back to the orphan only when that is all there is, which is exactly the set
+ * detach will clear. No status filter: a merely revoked/error token still resolves through
+ * resolveMailboxUserId, so that binding is live as far as every rebind is concerned.
  */
 export async function resolveActiveBindingDealIdForConversation(
   tenantDb: TenantDb,
@@ -943,7 +963,7 @@ export async function resolveActiveBindingDealIdForConversation(
   const [currentBinding] = await tenantDb
     .select({ dealId: emailThreadBindings.dealId })
     .from(emailThreadBindings)
-    .innerJoin(userGraphTokens, eq(userGraphTokens.id, emailThreadBindings.mailboxAccountId))
+    .leftJoin(userGraphTokens, eq(userGraphTokens.id, emailThreadBindings.mailboxAccountId))
     .where(
       and(
         eq(emailThreadBindings.provider, "microsoft_graph"),
@@ -951,7 +971,7 @@ export async function resolveActiveBindingDealIdForConversation(
         sql`${emailThreadBindings.detachedAt} IS NULL`
       )
     )
-    .orderBy(emailThreadBindings.mailboxAccountId)
+    .orderBy(sql`${userGraphTokens.id} IS NULL`, emailThreadBindings.mailboxAccountId)
     .limit(1);
 
   return currentBinding?.dealId ?? null;
@@ -962,6 +982,10 @@ export async function previewThreadReassignmentImpact(
   input: {
     providerConversationId: string;
     nextDealId: string;
+    /** Optional: the already-resolved current deal, so a caller that has just built the mutation gate's
+     *  boundDealId does not run resolveActiveBindingDealIdForConversation a second time. It MUST be that
+     *  same server-derived value — pass nothing rather than anything caller-supplied. */
+    currentDealId?: string | null;
   }
 ) {
   // Counted across EVERY mailbox holding the conversation — the reassign moves all of them, so a
@@ -977,10 +1001,10 @@ export async function previewThreadReassignmentImpact(
   // resolveActiveBindingDealIdForConversation, which is the same question the mutation routes ask to
   // build the gate's boundDealId, so the preview and the gate can never disagree about what deal the
   // thread is on.
-  const currentDealId = await resolveActiveBindingDealIdForConversation(
-    tenantDb,
-    input.providerConversationId
-  );
+  const currentDealId =
+    input.currentDealId !== undefined
+      ? input.currentDealId
+      : await resolveActiveBindingDealIdForConversation(tenantDb, input.providerConversationId);
 
   return {
     affectedMessageCount: messageRows.length,

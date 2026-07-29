@@ -146,6 +146,10 @@ describe("assertCanMutateEmailThread — deal write access", () => {
   it("allows the mailbox owner even without deal access", async () => {
     // ownerUser has no office, so assertDealCollaboratorAccess would 403 them. Path 1 has to stand on
     // its own: a user can always fix the filing of their own email.
+    // MECHANISM (since the routes stopped pre-filtering the thread to the caller): path 1 is satisfied
+    // by USER_OWNER owning a MESSAGE in thread.emails, not by a mailbox-id comparison — thread.emails is
+    // now the whole conversation, and comparing thread.mailboxAccountId would admit only whoever sent
+    // first. Do not "simplify" this fixture by dropping USER_OWNER's message; it is what the case tests.
     await expect(
       assertCanMutateEmailThread(tdb, thread, ownerUser, { boundDealId: DEAL_OLD })
     ).resolves.not.toThrow();

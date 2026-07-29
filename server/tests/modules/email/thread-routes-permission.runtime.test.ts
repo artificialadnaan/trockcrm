@@ -63,18 +63,22 @@ const outsiderUser: Viewer = {
   id: USER_OUTSIDER, role: "rep", officeId: null, activeOfficeId: null,
 };
 
-function findRouteHandler(routePath: string) {
+function findRouteHandler(method: "get" | "post", routePath: string) {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const layer = (emailRoutes as any).stack.find(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (entry: any) => entry.route?.path === routePath && entry.route?.methods?.post
+    (entry: any) => entry.route?.path === routePath && entry.route?.methods?.[method]
   );
-  if (!layer) throw new Error(`Route not found: POST ${routePath}`);
+  if (!layer) throw new Error(`Route not found: ${method.toUpperCase()} ${routePath}`);
   return layer.route.stack[0].handle as (
     req: unknown,
     res: unknown,
     next: (err?: unknown) => void
   ) => unknown;
+}
+
+async function getThreadRoute(user: Viewer, conversationId: string = CONV) {
+  return invokeThreadHandler(findRouteHandler("get", "/thread/:conversationId"), "GET", user, {}, conversationId);
 }
 
 async function postThreadRoute(
@@ -83,7 +87,22 @@ async function postThreadRoute(
   body: Record<string, unknown> = {},
   conversationId: string = CONV
 ) {
-  const handler = findRouteHandler(`/thread/:conversationId/${action}`);
+  return invokeThreadHandler(
+    findRouteHandler("post", `/thread/:conversationId/${action}`),
+    "POST",
+    user,
+    body,
+    conversationId
+  );
+}
+
+async function invokeThreadHandler(
+  handler: (req: unknown, res: unknown, next: (err?: unknown) => void) => unknown,
+  method: "GET" | "POST",
+  user: Viewer,
+  body: Record<string, unknown>,
+  conversationId: string
+) {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const res: Record<string, any> & { _resolve?: () => void } = {
     statusCode: 200,
@@ -100,7 +119,7 @@ async function postThreadRoute(
     },
   };
   const req = {
-    method: "POST",
+    method,
     params: { conversationId },
     query: {},
     body,
@@ -232,6 +251,50 @@ afterEach(async () => {
 
 describe("thread mutation routes — deal-collaborator access", () => {
   // ---------------------------------------------------------------------------------------------
+  // 0. THE WAY IN. The Reassign/Unassign controls are rendered from the GET payload
+  //    (email-thread-view.tsx), so an owner-only read makes every gate below unreachable no matter how
+  //    permissive it is: the collaborator lands on the component's error branch and never sees a button.
+  // ---------------------------------------------------------------------------------------------
+  it("GET: admits a deal collaborator who owns no mailbox on the thread", async () => {
+    const { res } = await getThreadRoute(collaboratorUser);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.emails).toHaveLength(2);
+    expect(res.body.binding?.dealId).toBe(DEAL_OLD);
+  });
+
+  it("GET: rejects a caller with neither mailbox nor deal access", async () => {
+    const err = await rejection(getThreadRoute(outsiderUser));
+    expect(err.statusCode).toBe(403);
+  });
+
+  it("GET: admits the owner of a LATER message, not just the oldest one", async () => {
+    const { res } = await getThreadRoute(laterMessageOwnerUser);
+    expect(res.statusCode).toBe(200);
+    expect(res.body.emails).toHaveLength(2);
+  });
+
+  it("GET: returns an empty payload for a conversation with no messages", async () => {
+    const { res } = await getThreadRoute(collaboratorUser, "conv-does-not-exist");
+    expect(res.body).toEqual({ binding: null, preview: null, emails: [] });
+  });
+
+  it("GET: hands a collaborator the other mailbox's archived and ignored messages", async () => {
+    // DELIBERATE, and wider than the deal Emails LIST, which drops archived/deleted/ignored rows
+    // (activeEmailConditions + assignmentStatus <> 'ignored'). The thread endpoint has never filtered
+    // them for anyone, and archive/delete/ignore are personal INBOX actions — filtering a deal's thread
+    // by whose inbox has been tidied would hand two people on the same deal different, gappy versions of
+    // the same conversation. Pinned so a change in either direction is a decision, not a drift.
+    await tdb.execute(sql`UPDATE emails SET archived_at = now() WHERE graph_message_id = 'm1'`);
+    await tdb.execute(sql`UPDATE emails SET assignment_status = 'ignored' WHERE graph_message_id = 'm2'`);
+
+    const { res } = await getThreadRoute(collaboratorUser);
+
+    expect(res.body.emails).toHaveLength(2);
+    expect(res.body.emails.map((e: { graphMessageId: string }) => e.graphMessageId).sort()).toEqual(["m1", "m2"]);
+  });
+
+  // ---------------------------------------------------------------------------------------------
   // 1. Each route, independently, admits a deal collaborator who owns none of the thread's mailboxes.
   //    Tested route-by-route on purpose: the realistic regression is the gate (and the widened
   //    getEmailThreadForMutation call) landing on two routes and being forgotten on the third.
@@ -338,6 +401,78 @@ describe("thread mutation routes — deal-collaborator access", () => {
 
     expect(res.statusCode).toBe(200);
     expect(await activeBindings()).toHaveLength(0);
+  });
+
+  it("assign: authorizes off ANY active binding when the OLDEST message's mailbox is detached", async () => {
+    // Same trap, on the third route. The derivation is shared, but per-route coverage is what stops a
+    // future revert landing on one route and going unnoticed.
+    await tdb.execute(sql`
+      UPDATE email_thread_bindings SET detached_at = now() WHERE mailbox_account_id = ${MBX_OWNER}
+    `);
+
+    const { res } = await postThreadRoute("assign", collaboratorUser, { dealId: DEAL_NEW });
+
+    expect(res.statusCode).toBe(200);
+    expect((await activeBindings()).every((r) => r.deal_id === DEAL_NEW)).toBe(true);
+  });
+
+  it("GET: authorizes off ANY active binding when the OLDEST message's mailbox is detached", async () => {
+    await tdb.execute(sql`
+      UPDATE email_thread_bindings SET detached_at = now() WHERE mailbox_account_id = ${MBX_OWNER}
+    `);
+
+    const { res } = await getThreadRoute(collaboratorUser);
+    expect(res.statusCode).toBe(200);
+  });
+
+  // ---------------------------------------------------------------------------------------------
+  // 3b. ORPHANED bindings — a binding whose mailbox_account_id no longer exists in user_graph_tokens.
+  //     Every disconnect→reconnect makes one: revokeGraphTokens hard-DELETEs the row while
+  //     upsertGraphTokens only updates in place, so reconnecting mints a NEW id and strands the old
+  //     bindings. detachConversationAcrossMailboxes clears them regardless of token, so the deal
+  //     resolver has to see the same set or the two disagree.
+  // ---------------------------------------------------------------------------------------------
+  it("detach: a conversation held only by an ORPHANED binding is still authorized, and still audited", async () => {
+    // Filtering orphans out of the resolver would report boundDealId = null here: the collaborator whose
+    // deal it is actually filed under gets a 403, and if a mailbox owner detaches it the filing is wiped
+    // with NO audit row at all — the deal's email silently disappears with no record of who did it.
+    await tdb.execute(sql`UPDATE email_thread_bindings SET detached_at = now()`);
+    const MBX_DISCONNECTED = U("00d"); // sorts FIRST, so it also proves the ordering is not the filter
+    await tdb.execute(sql`
+      INSERT INTO email_thread_bindings
+        (mailbox_account_id, provider, provider_conversation_id, deal_id, binding_source, confidence)
+      VALUES (${MBX_DISCONNECTED}, 'microsoft_graph', ${CONV}, ${DEAL_OLD}, 'manual', 'high')
+    `);
+    // Deliberately NO user_graph_tokens row for MBX_DISCONNECTED.
+
+    const { res } = await postThreadRoute("detach", collaboratorUser);
+
+    expect(res.statusCode).toBe(200);
+    expect(await activeBindings()).toHaveLength(0);
+
+    const rows = await auditRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].record_id).toBe(DEAL_OLD);
+    expect(rows[0].changed_by).toBe(USER_COLLAB);
+    expect(rows[0].full_row).toMatchObject({ previousDealId: DEAL_OLD, detached: true });
+  });
+
+  it("a LIVE binding still wins over an orphan with a lower mailbox id", async () => {
+    // The other half of the same decision: orphans must be visible, but they must never outrank a live
+    // binding, or a reassign would report the deal the thread has already left (the rebind cannot move
+    // an orphan, so it keeps pointing at the old deal forever).
+    const MBX_DISCONNECTED = U("00d"), DEAL_STALE = U("d03");
+    await tdb.execute(sql`INSERT INTO deals (id, name) VALUES (${DEAL_STALE}, 'Stale Deal')`);
+    await tdb.execute(sql`
+      INSERT INTO email_thread_bindings
+        (mailbox_account_id, provider, provider_conversation_id, deal_id, binding_source, confidence)
+      VALUES (${MBX_DISCONNECTED}, 'microsoft_graph', ${CONV}, ${DEAL_STALE}, 'manual', 'high')
+    `);
+
+    const { res } = await postThreadRoute("reassign", collaboratorUser, { dealId: DEAL_NEW });
+
+    expect(res.body.preview.currentDealId).toBe(DEAL_OLD);
+    expect(res.body.preview.currentDealId).not.toBe(DEAL_STALE);
   });
 
   // ---------------------------------------------------------------------------------------------
