@@ -15,6 +15,7 @@ export interface QcScorecardsFilters {
   region?: string | null; // region NAME (matches region_config.name)
   kind?: ScorecardKind | null;
   superintendent?: string | null;
+  projectManager?: string | null;
   rating?: string | null;
   flaggedOnly?: boolean;
   search?: string | null;
@@ -33,6 +34,7 @@ export interface QcScorecardRow {
   projectNumber: string | null;
   regionName: string | null;
   superintendentName: string | null;
+  pmName: string | null;
   kind: ScorecardKind;
   formVersion: 1 | 2;
   averageScore: number | null;
@@ -62,7 +64,13 @@ const MAX_ROWS = 1000;
 export async function getQcScorecardsReport(
   tenantDb: TenantDb,
   filters: QcScorecardsFilters,
-): Promise<{ scorecards: QcScorecardRow[]; truncated: boolean; regions: string[]; superintendents: string[] }> {
+): Promise<{
+  scorecards: QcScorecardRow[];
+  truncated: boolean;
+  regions: string[];
+  superintendents: string[];
+  projectManagers: string[];
+}> {
   // Live/won projects only — mirror the field list's activeProjectWhere off the same WON/LOST slug source of
   // truth: active deal, not terminal (or a Won-family stage), never Lost. Keeps archived/Lost projects out.
   const stageSlug = sql`COALESCE(psc.slug, d.bid_board_stage_slug, '')`;
@@ -110,19 +118,23 @@ export async function getQcScorecardsReport(
   // Exact match, not a contains-ILIKE: the dropdown options are verbatim names from this same column, so a
   // substring predicate would over-match (selecting "Ann" would also return "Joann", "Sam Reyes" → "…Jr").
   if (filters.superintendent) rowConditions.push(sql`sc.superintendent_name = ${filters.superintendent}`);
+  // Same exact-match reasoning as the superintendent filter above.
+  if (filters.projectManager) rowConditions.push(sql`sc.pm_name = ${filters.projectManager}`);
   if (filters.search) {
     const term = `%${filters.search}%`;
     rowConditions.push(
-      sql`(d.name ILIKE ${term} OR sc.project_number ILIKE ${term} OR sc.superintendent_name ILIKE ${term})`,
+      sql`(d.name ILIKE ${term} OR sc.project_number ILIKE ${term} OR sc.superintendent_name ILIKE ${term}
+           OR sc.pm_name ILIKE ${term})`,
     );
   }
 
-  // Distinct region + superintendent options across the WHOLE window (independent of the interactive
-  // filters), so selecting one filter never empties the other dropdown.
+  // Distinct region + superintendent + PM options across the WHOLE window (independent of the interactive
+  // filters), so selecting one filter never empties the other dropdowns.
   const optResult = await tenantDb.execute(sql`
     SELECT
       COALESCE(array_agg(DISTINCT rc.name) FILTER (WHERE rc.name IS NOT NULL), '{}') AS "regions",
-      COALESCE(array_agg(DISTINCT sc.superintendent_name) FILTER (WHERE sc.superintendent_name IS NOT NULL), '{}') AS "superintendents"
+      COALESCE(array_agg(DISTINCT sc.superintendent_name) FILTER (WHERE sc.superintendent_name IS NOT NULL), '{}') AS "superintendents",
+      COALESCE(array_agg(DISTINCT sc.pm_name) FILTER (WHERE sc.pm_name IS NOT NULL), '{}') AS "projectManagers"
     ${FROM}
     WHERE ${sql.join(windowConditions, sql` AND `)}
   `);
@@ -136,6 +148,7 @@ export async function getQcScorecardsReport(
       sc.project_number AS "projectNumber",
       rc.name AS "regionName",
       sc.superintendent_name AS "superintendentName",
+      sc.pm_name AS "pmName",
       COALESCE(sc.kind, 'project') AS "kind",
       sc.form_version AS "formVersion",
       sc.average_score AS "averageScore",
@@ -162,6 +175,7 @@ export async function getQcScorecardsReport(
     truncated,
     regions: (optRow.regions ?? []).slice().sort(),
     superintendents: (optRow.superintendents ?? []).slice().sort(),
+    projectManagers: (optRow.projectManagers ?? []).slice().sort(),
     scorecards: rows.map((r) => ({
       scorecardId: String(r.scorecardId),
       dealId: String(r.dealId),
@@ -169,6 +183,7 @@ export async function getQcScorecardsReport(
       projectNumber: r.projectNumber ?? null,
       regionName: r.regionName ?? null,
       superintendentName: r.superintendentName ?? null,
+      pmName: r.pmName ?? null,
       kind: r.kind === "leadership" ? "leadership" : "project",
       formVersion: Number(r.formVersion) === 2 ? 2 : 1,
       averageScore: r.averageScore == null ? null : Number(r.averageScore),

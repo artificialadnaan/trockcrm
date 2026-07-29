@@ -365,8 +365,8 @@ router.get("/region", async (req, res, next) => {
 });
 
 // GET /api/reports/qc-scorecards — office-scoped Field Scorecards for the QC dashboard, filtered by week
-// range + region/superintendent/rating/flagged/search. The dashboard derives its stat strip + card
-// drill-downs from this list client-side.
+// range + region/superintendent/projectManager/rating/flagged/search. The dashboard derives its stat strip +
+// card drill-downs from this list client-side.
 router.get("/qc-scorecards", requireAnyRole, async (req, res, next) => {
   try {
     const rawFrom = readOptionalIsoDate(req.query.from, "from");
@@ -411,6 +411,7 @@ router.get("/qc-scorecards", requireAnyRole, async (req, res, next) => {
       region: readQueryString(req.query.region),
       kind,
       superintendent: readQueryString(req.query.superintendent),
+      projectManager: readQueryString(req.query.projectManager),
       rating: readQueryString(req.query.rating),
       flaggedOnly: req.query.flaggedOnly === "true",
       search: readQueryString(req.query.search),

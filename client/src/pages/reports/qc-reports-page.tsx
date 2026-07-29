@@ -97,6 +97,7 @@ export default function QcReportsPage() {
   const [region, setRegion] = useState("");
   const [kind, setKind] = useState<"" | ScorecardKind>("");
   const [superintendent, setSuperintendent] = useState("");
+  const [projectManager, setProjectManager] = useState("");
   const [rating, setRating] = useState("");
   const [flaggedOnly, setFlaggedOnly] = useState(false);
   const [correctiveActionStatus, setCorrectiveActionStatus] = useState<"" | "open" | "awaiting_approval" | "closed">("");
@@ -109,10 +110,11 @@ export default function QcReportsPage() {
     return () => clearTimeout(t);
   }, [search]);
 
-  // ALL filters are applied server-side (before the row cap); `regions`/`superintendents` are the
-  // window-wide option lists so the dropdowns never empty each other.
-  const { scorecards, regions, superintendents, truncated, loading, error, refetch } = useQcScorecards({
-    from, to, region, kind: kind || undefined, superintendent, rating, flaggedOnly, search: debouncedSearch,
+  // ALL filters are applied server-side (before the row cap); `regions`/`superintendents`/`projectManagers`
+  // are the window-wide option lists so the dropdowns never empty each other.
+  const { scorecards, regions, superintendents, projectManagers, truncated, loading, error, refetch } = useQcScorecards({
+    from, to, region, kind: kind || undefined, superintendent, projectManager, rating, flaggedOnly,
+    search: debouncedSearch,
     correctiveActionStatus: correctiveActionStatus || undefined,
   });
   const rows = scorecards;
@@ -199,6 +201,7 @@ export default function QcReportsPage() {
           allLabel="All scorecards"
         />
         <FilterSelect label="Superintendent" value={superintendent} onChange={setSuperintendent} options={superintendents} allLabel="Anyone" />
+        <FilterSelect label="Project Manager" value={projectManager} onChange={setProjectManager} options={projectManagers} allLabel="Anyone" />
         <FilterSelect
           label="Rating"
           value={rating}
@@ -235,7 +238,7 @@ export default function QcReportsPage() {
           <input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search project, number, superintendent…"
+            placeholder="Search project, number, superintendent, PM…"
             className="w-full rounded-lg border border-slate-200 bg-slate-50 py-2 pl-9 pr-3 text-[13px] font-medium"
           />
         </div>
@@ -351,6 +354,7 @@ function QcTable({ rows, onRowClick, compact }: { rows: QcScorecardRow[]; onRowC
           <Th>Project</Th>
           {!compact && <Th>Date</Th>}
           {!compact && <Th>Superintendent</Th>}
+          {!compact && <Th>Project Manager</Th>}
           <Th className="text-right">Score</Th>
           <Th className="text-center">Rating</Th>
           <Th className="text-center">Flags</Th>
@@ -396,6 +400,7 @@ function QcTable({ rows, onRowClick, compact }: { rows: QcScorecardRow[]; onRowC
             </td>
             {!compact && <td className="px-3.5 py-3 text-[13px] text-slate-500">{fmtWeek(r.weekOf)}</td>}
             {!compact && <td className="px-3.5 py-3 text-[13.5px]">{r.superintendentName ?? "—"}</td>}
+            {!compact && <td className="px-3.5 py-3 text-[13.5px]">{r.pmName ?? "—"}</td>}
             <td className={`px-3.5 py-3 text-right text-[19px] font-black tabular-nums ${SCORE_COLOR[r.rating] ?? "text-slate-800"}`}>
               {scoreOutOfTen(r).toFixed(1)}
               <span className="text-[11px] font-semibold text-slate-300">/10</span>
@@ -490,7 +495,13 @@ function QcDetailSheet({ row, onClose }: { row: QcScorecardRow | null; onClose: 
             <SheetHeader className="shrink-0 border-b border-slate-100 px-6 py-5">
               <SheetTitle className="pr-8 leading-snug">{row.projectName}</SheetTitle>
               <div className="text-[12.5px] text-slate-500">
-                {[kindLabel(row.kind), row.projectNumber, fmtWeek(row.weekOf), row.superintendentName ? `Supt. ${row.superintendentName}` : null].filter(Boolean).join(" · ")}
+                {[
+                  kindLabel(row.kind),
+                  row.projectNumber,
+                  fmtWeek(row.weekOf),
+                  row.superintendentName ? `Supt. ${row.superintendentName}` : null,
+                  row.pmName ? `PM ${row.pmName}` : null,
+                ].filter(Boolean).join(" · ")}
               </div>
             </SheetHeader>
 

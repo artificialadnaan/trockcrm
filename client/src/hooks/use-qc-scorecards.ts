@@ -10,6 +10,8 @@ export interface QcScorecardRow {
   projectNumber: string | null;
   regionName: string | null;
   superintendentName: string | null;
+  /** Optional so a client deployed ahead of the API that adds it doesn't fail the row parse. */
+  pmName?: string | null;
   kind: ScorecardKind;
   totalScore: number;
   formVersion: 1 | 2;
@@ -31,6 +33,7 @@ export interface QcScorecardFilters {
   region?: string;
   kind?: ScorecardKind;
   superintendent?: string;
+  projectManager?: string;
   rating?: string;
   flaggedOnly?: boolean;
   search?: string;
@@ -43,12 +46,13 @@ interface QcScorecardsResponse {
   truncated?: boolean;
   regions?: string[];
   superintendents?: string[];
+  projectManagers?: string[];
 }
 
 /**
  * Office-scoped QC dashboard feed. ALL filters are applied server-side (before the row cap), so a match
- * older than the cap window is never dropped. `regions`/`superintendents` are the window-wide option lists
- * (independent of the active filters) so the dropdowns never empty each other.
+ * older than the cap window is never dropped. `regions`/`superintendents`/`projectManagers` are the
+ * window-wide option lists (independent of the active filters) so the dropdowns never empty each other.
  */
 export function useQcScorecards(filters: QcScorecardFilters) {
   const [searchParams] = useSearchParams();
@@ -57,6 +61,7 @@ export function useQcScorecards(filters: QcScorecardFilters) {
   const [scorecards, setScorecards] = useState<QcScorecardRow[]>([]);
   const [regions, setRegions] = useState<string[]>([]);
   const [superintendents, setSuperintendents] = useState<string[]>([]);
+  const [projectManagers, setProjectManagers] = useState<string[]>([]);
   const [truncated, setTruncated] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -65,7 +70,8 @@ export function useQcScorecards(filters: QcScorecardFilters) {
   // flight. Only the newest request is allowed to commit its response — a slower older one is discarded.
   const requestIdRef = useRef(0);
 
-  const { from, to, region, kind, superintendent, rating, flaggedOnly, search, correctiveActionStatus } = filters;
+  const { from, to, region, kind, superintendent, projectManager, rating, flaggedOnly, search, correctiveActionStatus } =
+    filters;
 
   const refetch = useCallback(async () => {
     const requestId = ++requestIdRef.current;
@@ -78,6 +84,7 @@ export function useQcScorecards(filters: QcScorecardFilters) {
       if (region) qs.set("region", region);
       if (kind) qs.set("kind", kind);
       if (superintendent) qs.set("superintendent", superintendent);
+      if (projectManager) qs.set("projectManager", projectManager);
       if (rating) qs.set("rating", rating);
       if (flaggedOnly) qs.set("flaggedOnly", "true");
       if (search) qs.set("search", search);
@@ -88,6 +95,7 @@ export function useQcScorecards(filters: QcScorecardFilters) {
       setTruncated(res.data.truncated ?? false);
       setRegions(res.data.regions ?? []);
       setSuperintendents(res.data.superintendents ?? []);
+      setProjectManagers(res.data.projectManagers ?? []);
     } catch (e) {
       if (requestId !== requestIdRef.current) return;
       setError(e instanceof Error ? e.message : "Failed to load QC reports");
@@ -98,15 +106,28 @@ export function useQcScorecards(filters: QcScorecardFilters) {
       setScorecards([]);
       setRegions([]);
       setSuperintendents([]);
+      setProjectManagers([]);
       setTruncated(false);
     } finally {
       if (requestId === requestIdRef.current) setLoading(false);
     }
-  }, [from, to, region, kind, superintendent, rating, flaggedOnly, search, correctiveActionStatus, officeId]);
+  }, [
+    from,
+    to,
+    region,
+    kind,
+    superintendent,
+    projectManager,
+    rating,
+    flaggedOnly,
+    search,
+    correctiveActionStatus,
+    officeId,
+  ]);
 
   useEffect(() => {
     void refetch();
   }, [refetch]);
 
-  return { scorecards, regions, superintendents, truncated, loading, error, refetch };
+  return { scorecards, regions, superintendents, projectManagers, truncated, loading, error, refetch };
 }
