@@ -786,6 +786,9 @@ function drawRemovedItemEvents(
         ellipsis: true,
       });
     }
+    // Their evidence survives the item (0202 detaches rather than cascades) and the loader now resolves it —
+    // rendering the words while dropping the photos would preserve half the record.
+    drawCorrectiveActionPhotos(doc, event.photos, label ?? undefined);
   }
 }
 

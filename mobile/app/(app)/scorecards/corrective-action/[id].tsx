@@ -266,6 +266,17 @@ function CorrectiveActionItemCard({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // A REWORK cycle starts a fresh draft, so the previous cycle's success flag must not carry into it.
+  //
+  // This component instance survives the status transitions: submit sets submittedOk, the approver rejects,
+  // and the item comes back editable on the SAME instance with submittedOk still true. The unmount cleanup
+  // reads that flag to decide whether the draft dir was already consumed — so it would skip deleting the new
+  // cycle's dir and leak its photos. Reset whenever the item is the responder's again; that cannot fire
+  // during the current cycle, because a successful submit moves the status out of the outstanding set.
+  useEffect(() => {
+    if (isOpen(item)) cleanupGuardRef.current.submittedOk = false;
+  }, [item.status]);
+
   // Use the SAME predicate the parent counts with. This gate was independently hard-coded to `open`, so a
   // rejected item counted as outstanding at the top of the screen while the card itself rendered read-only —
   // the responder was told they had work to do and given no controls to do it with.
@@ -441,7 +452,13 @@ function CorrectiveActionItemCard({
     <View style={styles.itemCard}>
       <View style={styles.itemHeader}>
         <Badge label={item.itemType === "critical_deficiency" ? "Critical deficiency" : "Action item"} />
-        <Badge label="Open" color={theme.color.surfaceMuted} />
+        {/* Derived, not hard-coded: isOpen now admits `rejected`, so this branch renders items the approver
+            SENT BACK. Labelling those "Open" tells the responder nobody has looked at their work. */}
+        <Badge
+          label={item.status === "rejected" ? "Changes requested" : "Open"}
+          color={item.status === "rejected" ? "#FEE2E2" : theme.color.surfaceMuted}
+          textColor={item.status === "rejected" ? "#B91C1C" : undefined}
+        />
       </View>
       <Text style={styles.itemLabel}>{item.itemLabel}</Text>
       {latestRejection ? (
@@ -588,8 +605,12 @@ function ResolvedItemCard({ item }: { item: CorrectiveActionItem }) {
   // the documented evidence is inspectable in TRock Cam (mirrors the scorecard detail evidence grid: tap →
   // open the presigned url in the system browser). Fall back to the count only for photos without a url (an
   // older API deployment, or a failed presign).
-  const photosWithUrl = item.photos.filter((p) => Boolean(p.url));
-  const withoutUrl = item.photos.length - photosWithUrl.length;
+  // The aggregate is the NO-THREAD fallback only. With a thread present each attempt renders its own photos
+  // above; also showing the merged set would repeat them and reattach the rejected round's evidence to the
+  // replacement response — the exact confusion the per-attempt split exists to remove.
+  const hasThread = (item.events?.length ?? 0) > 0;
+  const photosWithUrl = hasThread ? [] : item.photos.filter((p) => Boolean(p.url));
+  const withoutUrl = hasThread ? 0 : item.photos.length - photosWithUrl.length;
   return (
     <View style={[styles.itemCard, styles.itemCardResolved]}>
       <View style={styles.itemHeader}>
@@ -613,6 +634,24 @@ function ResolvedItemCard({ item }: { item: CorrectiveActionItem }) {
               {event.actorName ? ` · ${event.actorName}` : ""}
             </Text>
             {event.comment ? <Text style={styles.resolvedComment}>{event.comment}</Text> : null}
+            {/* This attempt's OWN evidence. The aggregate gallery below is the no-thread fallback; showing
+                both would put the rejected round's photos under the replacement response. */}
+            {event.photos.filter((p) => p.url).length > 0 ? (
+              <View style={styles.photoRow}>
+                {event.photos
+                  .filter((p) => p.url)
+                  .map((photo) => (
+                    <Pressable
+                      key={photo.id}
+                      onPress={() => photo.url && void Linking.openURL(photo.url).catch(() => undefined)}
+                      accessibilityRole="imagebutton"
+                      accessibilityLabel={photo.caption ?? "Response photo"}
+                    >
+                      <ExpoImage source={{ uri: photo.url! }} style={styles.thumb} contentFit="cover" />
+                    </Pressable>
+                  ))}
+              </View>
+            ) : null}
           </View>
         ))
       ) : item.responseComment ? (

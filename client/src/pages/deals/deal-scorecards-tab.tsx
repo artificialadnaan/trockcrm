@@ -468,6 +468,17 @@ function ApproveAllButton({ onApproveAll }: { onApproveAll: () => Promise<void> 
   );
 }
 
+/** The submission each awaiting item is showing, so an approval refers to the work actually reviewed. */
+function reviewedAttemptsOf(items: CorrectiveActionItemView[] | undefined): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const item of items ?? []) {
+    if (item.status !== "submitted") continue;
+    const latest = [...(item.events ?? [])].reverse().find((e) => e.eventType === "submitted");
+    if (latest) out[item.id] = latest.id;
+  }
+  return out;
+}
+
 export function ScorecardDetailView({
   detail,
   dealId,
@@ -481,7 +492,7 @@ export function ScorecardDetailView({
   const canApprove = detail.canApproveCorrectiveActions === true;
   const approve = dealId
     ? async (itemId: string) => {
-        await approveCorrectiveActions(dealId, detail.id, [itemId]);
+        await approveCorrectiveActions(dealId, detail.id, [itemId], reviewedAttemptsOf(correctiveActions));
         onApprovalChange?.();
       }
     : undefined;
@@ -504,7 +515,7 @@ export function ScorecardDetailView({
           .filter((i) => i.status === "submitted")
           .map((i) => i.id);
         if (reviewed.length === 0) return;
-        await approveCorrectiveActions(dealId, detail.id, reviewed);
+        await approveCorrectiveActions(dealId, detail.id, reviewed, reviewedAttemptsOf(correctiveActions));
         onApprovalChange?.();
       }
     : undefined;
@@ -585,6 +596,9 @@ export function ScorecardDetailView({
                   {event.comment && (
                     <p className="mt-1 whitespace-pre-wrap text-sm text-gray-900">{event.comment}</p>
                   )}
+                  {/* Their evidence survives the item too — showing the words and hiding the photos would
+                      claim the history is preserved while withholding half of it. */}
+                  <CorrectiveActionPhotoGrid photos={event.photos} />
                 </li>
               );
             })}

@@ -184,12 +184,21 @@ BEGIN
         schema_name, constraint_name
       );
     END LOOP;
+    -- NOT VALID first, VALIDATE after: adding a FK normally scans every row while holding a lock that blocks
+    -- reads and writes on a table the field app writes to constantly. Split, the blocking step is O(1) and the
+    -- scan takes only a SHARE UPDATE EXCLUSIVE lock. Matches the status constraint above.
     EXECUTE format(
       'ALTER TABLE %I.field_scorecard_photos
          ADD CONSTRAINT field_scorecard_photos_corrective_action_fk
          FOREIGN KEY (corrective_action_id)
-         REFERENCES %I.scorecard_corrective_actions(id) ON DELETE SET NULL',
+         REFERENCES %I.scorecard_corrective_actions(id) ON DELETE SET NULL
+         NOT VALID',
       schema_name, schema_name
+    );
+    EXECUTE format(
+      'ALTER TABLE %I.field_scorecard_photos
+         VALIDATE CONSTRAINT field_scorecard_photos_corrective_action_fk',
+      schema_name
     );
 
     -- 4. Per-attempt photo attribution.
@@ -248,7 +257,9 @@ ALTER TABLE office_dallas.scorecard_corrective_actions
   DROP CONSTRAINT IF EXISTS scorecard_corrective_actions_status_check;
 ALTER TABLE office_dallas.scorecard_corrective_actions
   ADD CONSTRAINT scorecard_corrective_actions_status_check
-  CHECK (status IN ('open', 'submitted', 'approved', 'rejected'));
+  CHECK (status IN ('open', 'submitted', 'approved', 'rejected')) NOT VALID;
+ALTER TABLE office_dallas.scorecard_corrective_actions
+  VALIDATE CONSTRAINT scorecard_corrective_actions_status_check;
 UPDATE office_dallas.scorecard_corrective_actions ca
    SET status = CASE
                   WHEN sc.status = 'corrective_action_closed' THEN 'approved'
@@ -284,12 +295,22 @@ CREATE INDEX IF NOT EXISTS scorecard_corrective_action_events_scorecard_idx
   ON office_dallas.scorecard_corrective_action_events (scorecard_id, seq);
 CREATE INDEX IF NOT EXISTS scorecard_corrective_action_events_item_idx
   ON office_dallas.scorecard_corrective_action_events (corrective_action_id, seq);
+-- BOTH names. 0192 adds this FK inline via ADD COLUMN ... REFERENCES, so Postgres generates
+-- <table>_<column>_fkey for it. A new office provisioned by replaying the tenant blocks would otherwise keep
+-- 0192's ON DELETE CASCADE alongside the SET NULL one added below -- and CASCADE still wins, deleting the
+-- response evidence this migration exists to preserve. The production DO-loop finds it by definition; this
+-- block has to name it.
+ALTER TABLE office_dallas.field_scorecard_photos
+  DROP CONSTRAINT IF EXISTS field_scorecard_photos_corrective_action_id_fkey;
 ALTER TABLE office_dallas.field_scorecard_photos
   DROP CONSTRAINT IF EXISTS field_scorecard_photos_corrective_action_fk;
 ALTER TABLE office_dallas.field_scorecard_photos
   ADD CONSTRAINT field_scorecard_photos_corrective_action_fk
   FOREIGN KEY (corrective_action_id)
-  REFERENCES office_dallas.scorecard_corrective_actions(id) ON DELETE SET NULL;
+  REFERENCES office_dallas.scorecard_corrective_actions(id) ON DELETE SET NULL
+  NOT VALID;
+ALTER TABLE office_dallas.field_scorecard_photos
+  VALIDATE CONSTRAINT field_scorecard_photos_corrective_action_fk;
 ALTER TABLE office_dallas.field_scorecard_photos
   ADD COLUMN IF NOT EXISTS corrective_action_event_id uuid
   REFERENCES office_dallas.scorecard_corrective_action_events(id) ON DELETE SET NULL;

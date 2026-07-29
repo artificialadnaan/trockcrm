@@ -116,3 +116,23 @@ export function parseRejectionComment(body: unknown): string {
 
 export type { ApprovalOutcome };
 export { approveCorrectiveActionItems, rejectCorrectiveActionItem };
+
+/**
+ * itemId → the submission event id the approver had on screen.
+ *
+ * Optional: an older client sends nothing and the server falls back to status-only checking, which is the
+ * behaviour that shipped before. Shape-validated rather than trusted — it reaches a WHERE clause.
+ */
+export function parseReviewedAttempts(body: unknown): Record<string, string> | undefined {
+  const raw = (body as { reviewedAttempts?: unknown } | null | undefined)?.reviewedAttempts;
+  if (raw == null) return undefined;
+  if (typeof raw !== "object" || Array.isArray(raw)) {
+    throw new AppError(400, "reviewedAttempts must be an object of itemId to submission id.");
+  }
+  const out: Record<string, string> = {};
+  for (const [itemId, eventId] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof eventId !== "string" || !eventId.trim()) continue;
+    out[itemId] = eventId.trim();
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}

@@ -576,8 +576,8 @@ export async function reconcileScorecardCorrectiveActions(
     existingActionByLabel.set(row.itemLabel, bucket);
   }
   for (const bucket of existingActionByLabel.values()) {
-    // Settled rows first, so a shrinking duplicate set drops the OUTSTANDING ones last — the responder keeps
-    // whatever still needs answering rather than having it silently purged.
+    // Settled rows first, outstanding rows last — which is what the tail-first trim below relies on: a
+    // shrinking duplicate set therefore removes OUTSTANDING duplicates first and preserves settled history.
     bucket.sort(
       (a, b) =>
         (isCorrectiveActionOutstanding(a.status) ? 1 : 0) - (isCorrectiveActionOutstanding(b.status) ? 1 : 0),
@@ -651,8 +651,20 @@ export async function reconcileScorecardCorrectiveActions(
   const anyItems = existing.length - staleIds.length + toInsert.length > 0;
   // Did an APPROVER actually accept everything that remains? A card can also derive `closed` because an edit
   // DELETED its last unapproved item, and that is not an approval — see the enqueue guard below.
+  // Every surviving item approved AND nothing unapproved was removed to get there.
+  //
+  // Looking only at survivors is not enough: a card with one approved item and one still submitted can be
+  // edited to DELETE the unapproved one, after which the survivors are trivially all-approved and the card
+  // derives closed — announcing "Corrective Action Approved" for a response that was deleted rather than
+  // accepted. Deleting work is not a way to get it approved.
+  const removedUnapproved = existing.some(
+    (row) => staleIds.includes(row.id) && row.status !== "approved",
+  );
   const everySurvivingItemApproved =
-    anyItems && toInsert.length === 0 && surviving.every((row) => row.status === "approved");
+    anyItems &&
+    toInsert.length === 0 &&
+    !removedUnapproved &&
+    surviving.every((row) => row.status === "approved");
 
   // Three derived states, mirroring recomputeCardStatus in corrective-action-approval.ts — the two must
   // agree or an edit and an approval could compute different statuses for the same item set.
@@ -683,17 +695,25 @@ export async function reconcileScorecardCorrectiveActions(
   // An EDIT can move the card through the lifecycle too, not just a responder or an approver: removing the
   // last outstanding flag hands it to the approver, and removing the last unapproved one completes it.
   // Without these, a card could change stage with nobody told — and nothing would enqueue for it later.
-  // Gated on REACHING the state, not on transitioning into it. An edit can add a flagged item to a card
-  // already awaiting review and have it answered in the same pass: the status never moves, but what the
-  // approver is being asked to judge has changed, and the previous request's stamp would make the worker skip
-  // the new one. The stamp is cleared alongside, so this enqueue is not deduped against the earlier round.
-  if (nextStatus === CORRECTIVE_ACTION_CARD_AWAITING_APPROVAL) {
-    if (input.currentStatus === CORRECTIVE_ACTION_CARD_AWAITING_APPROVAL) {
-      // Clearing the stamp is not enough: the enqueue below copies the card's CURRENT cycle nonce into the
-      // job, and that nonce is the provider idempotency dimension. Reusing it means Resend answers
-      // invalid_idempotent_request for the re-ask, system-email reads that as delivered, the worker stamps —
-      // and the approver never sees the edited card they are supposed to be judging. Mint a fresh cycle so
-      // the new request is a genuinely new message.
+  // Gated on reaching the state AND on the item set actually having changed.
+  //
+  // Two failure modes, pulling opposite ways. Gating purely on the TRANSITION misses a real case: an edit can
+  // add a flagged item to a card already awaiting review and have it answered in the same pass, so the status
+  // never moves while what the approver must judge has changed. But gating purely on the STATE is worse in
+  // the common case: every reconcile that lands on awaiting-approval — including edits that touch nothing
+  // about the items — would clear the stamp, rotate the cycle and re-ask, turning any unrelated save into
+  // another email.
+  //
+  // `itemSetChanged` is the honest predicate: re-ask when the thing being judged moved, stay quiet otherwise.
+  const itemSetChanged = toInsert.length > 0 || staleIds.length > 0;
+  const enteringApproverQueue = input.currentStatus !== CORRECTIVE_ACTION_CARD_AWAITING_APPROVAL;
+  if (nextStatus === CORRECTIVE_ACTION_CARD_AWAITING_APPROVAL && (enteringApproverQueue || itemSetChanged)) {
+    if (!enteringApproverQueue) {
+      // Already in the queue, but WHAT is being judged has changed. Clearing the stamp alone is not enough:
+      // the enqueue below copies the card's CURRENT cycle nonce, and that nonce is the provider idempotency
+      // dimension — reusing it makes Resend answer invalid_idempotent_request, system-email read that as
+      // delivered, and the worker stamp, so the approver never sees the edited card. Mint a fresh cycle so
+      // the re-ask is genuinely a new message.
       await tx
         .update(fieldScorecards)
         .set({

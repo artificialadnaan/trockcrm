@@ -510,14 +510,19 @@ export async function updateFieldScorecard(
   // `corrective_action_submitted` — awaiting approval — belongs here too. It is simply another stage of the
   // corrective-action lifecycle, and omitting it would make a card uneditable for as long as it sits in the
   // approver's queue, which can be indefinite (there is no escalation or timeout on that state).
-  if (
-    (preEditStatus !== "submitted" &&
-      preEditStatus !== CORRECTIVE_ACTION_CARD_OPEN &&
-      preEditStatus !== CORRECTIVE_ACTION_CARD_AWAITING_APPROVAL &&
-      preEditStatus !== CORRECTIVE_ACTION_CARD_CLOSED) ||
-    card.formVersion !== 2
-  ) {
-    throw new AppError(422, "Only submitted current-form scorecards can be edited.", "SCORECARD_EDIT_UNSUPPORTED");
+  // THE set, not a second hand-written copy of it. This guard listed its statuses inline, so removing
+  // `corrective_action_closed` from EDITABLE_SCORECARD_STATUSES locked the UI and the evidence presign while
+  // the actual write path still accepted it — an older client or a direct API call could still edit an
+  // APPROVED card and republish it under the existing verdict. A single set is the only version of "these
+  // three places agree" that stays true.
+  if (!EDITABLE_SCORECARD_STATUSES.has(preEditStatus) || card.formVersion !== 2) {
+    throw new AppError(
+      422,
+      preEditStatus === CORRECTIVE_ACTION_CARD_CLOSED
+        ? "This scorecard's corrective action has been approved and can no longer be edited."
+        : "Only submitted current-form scorecards can be edited.",
+      "SCORECARD_EDIT_UNSUPPORTED",
+    );
   }
 
   const expectedDate = new Date(input.expectedUpdatedAt);

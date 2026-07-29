@@ -180,7 +180,11 @@ export interface SubmitCorrectiveActionResponseInput {
   /** Already-uploaded file ids to attach as response evidence (must belong to the scorecard's deal). */
   photoFileIds?: string[];
   respondedBy: { userId: string | null; name: string | null; email: string | null };
-  /** Office context for the oversight "completed" job enqueued when this response closes the scorecard. */
+  /**
+   * Office context for the "awaiting approval" notice enqueued when this response answers the last
+   * outstanding item. A response no longer CLOSES anything — only approveCorrectiveActionItems can reach
+   * corrective_action_closed — so this hands the card to the approver rather than completing it.
+   */
   office: { id: string; slug: string };
 }
 

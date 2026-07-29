@@ -1537,4 +1537,52 @@ describe("handleScorecardCorrectiveActionOversightEmail", () => {
     ];
     expect(options.attachments).toHaveLength(1);
   });
+
+  it("REGRESSION: an approval request superseded by a new REVIEW round does not send or stamp", async () => {
+    // A rejection rotates the review cycle but deliberately leaves the OVERSIGHT marker alone — the
+    // corrective action never reopened from oversight's point of view. So a retry of a crashed-before-stamp
+    // approval request passed every marker-scoped check, reused the delivered provider key, read Resend's
+    // idempotent answer as success, and stamped the NEW round — whose own job then skipped. The approver
+    // would never hear that the rework was ready.
+    const { query, stampUpdates } = makeQuery({
+      status: "corrective_action_submitted",
+      storedNonce: "11111111-1111-1111-1111-111111111111",
+    });
+    const sendEmail = makeSend();
+
+    await handleScorecardCorrectiveActionOversightEmail(
+      payload({ phase: "awaiting_approval", cycleNonce: "22222222-2222-2222-2222-222222222222" }),
+      null,
+      {
+        query: query as never,
+        sendEmail: sendEmail as never,
+        env: { ...env, QC_APPROVER_EMAILS: "james@trockgc.com" } as unknown as NodeJS.ProcessEnv,
+        logger: makeLogger(),
+      },
+    );
+
+    expect(sendEmail).not.toHaveBeenCalled();
+    expect(stampUpdates).toHaveLength(0);
+  });
+
+  it("still sends an approval request whose review cycle is current", async () => {
+    const { query } = makeQuery({
+      status: "corrective_action_submitted",
+      storedNonce: "22222222-2222-2222-2222-222222222222",
+    });
+    const sendEmail = makeSend();
+
+    await handleScorecardCorrectiveActionOversightEmail(
+      payload({ phase: "awaiting_approval", cycleNonce: "22222222-2222-2222-2222-222222222222" }),
+      null,
+      {
+        query: query as never,
+        sendEmail: sendEmail as never,
+        env: { ...env, QC_APPROVER_EMAILS: "james@trockgc.com" } as unknown as NodeJS.ProcessEnv,
+        logger: makeLogger(),
+      },
+    );
+
+    expect(sendEmail).toHaveBeenCalledTimes(1);
+  });
 });

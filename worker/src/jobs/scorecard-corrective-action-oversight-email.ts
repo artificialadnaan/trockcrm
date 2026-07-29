@@ -300,6 +300,26 @@ export async function handleScorecardCorrectiveActionOversightEmail(
   // in-flight job minted before this deploy keep the prior behaviour.
   const payloadOversightCycle = normalizeText(payload.oversightCycle);
   const storedOversightCycle = normalizeText(scorecard.corrective_action_oversight_cycle);
+
+  // The APPROVAL REQUEST supersedes on the REVIEW cycle, not the oversight marker.
+  //
+  // A rejection rotates corrective_action_cycle_nonce and deliberately leaves the oversight marker alone
+  // (the corrective action never re-opened from oversight's point of view). So an awaiting-approval job that
+  // sent but crashed before stamping would, on retry after a reject-and-resubmit, pass every marker-scoped
+  // check, reuse the already-delivered provider key, read Resend's idempotent response as success, and stamp
+  // the NEW round — whose own job then skips. The approver never hears about the rework.
+  if (phase === "awaiting_approval") {
+    const payloadReviewCycle = normalizeText(payload.cycleNonce);
+    const storedReviewCycle = normalizeText(scorecard.corrective_action_cycle_nonce);
+    if (payloadReviewCycle && storedReviewCycle && payloadReviewCycle !== storedReviewCycle) {
+      logger.log(
+        "[CorrectiveActionOversightEmail] Approval request superseded by a newer review round - skipping",
+        { scorecardId, payloadReviewCycle, storedReviewCycle },
+      );
+      return;
+    }
+  }
+
   if (payloadOversightCycle && storedOversightCycle && payloadOversightCycle !== storedOversightCycle) {
     logger.log(
       "[CorrectiveActionOversightEmail] Superseded by a newer corrective-action cycle - skipping (no send, no stamp)",

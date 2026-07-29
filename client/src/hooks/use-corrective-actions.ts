@@ -280,10 +280,18 @@ export async function approveCorrectiveActions(
   dealId: string,
   scorecardId: string,
   itemIds?: string[],
+  /** itemId → the submission event id on screen, so a response filed since cannot be approved unseen. */
+  reviewedAttempts?: Record<string, string>,
 ): Promise<ApprovalOutcomeView> {
   const res = await api<{ outcome: ApprovalOutcomeView }>(
     `/deals/${dealId}/scorecards/${scorecardId}/corrective-actions/approve`,
-    { method: "POST", json: itemIds ? { itemIds } : {} },
+    {
+      method: "POST",
+      json: {
+        ...(itemIds ? { itemIds } : {}),
+        ...(reviewedAttempts && Object.keys(reviewedAttempts).length > 0 ? { reviewedAttempts } : {}),
+      },
+    },
   );
   return res.outcome;
 }

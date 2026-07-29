@@ -122,6 +122,7 @@ import {
   canApproveCorrectiveActions,
   assertScorecardBelongsToDeal,
   parseApproveItemIds,
+  parseReviewedAttempts,
   parseRejectionComment,
 } from "../field/corrective-action-approval-routes.js";
 import { approveAndNotify, rejectAndRestart } from "../field/corrective-action-approval.js";
@@ -2611,6 +2612,9 @@ router.post("/:id/scorecards/:scorecardId/corrective-actions/approve", async (re
     await assertDealRouteAccess(req, req.params.id);
     const actor = assertCorrectiveActionApprover(req);
     const itemIds = parseApproveItemIds(req.body);
+    // Which ATTEMPT the approver reviewed, so a response filed after they opened the page cannot be approved
+    // under their name. Absent from older clients, which keep the previous status-only behaviour.
+    const reviewedAttempts = parseReviewedAttempts(req.body);
     await assertScorecardBelongsToDeal(req.tenantDb!, req.params.id, req.params.scorecardId);
 
     if (!req.officeSlug) throw new AppError(500, "Office context not available");
@@ -2622,6 +2626,7 @@ router.post("/:id/scorecards/:scorecardId/corrective-actions/approve", async (re
       scorecardId: req.params.scorecardId,
       itemIds,
       actor,
+      reviewedAttempts,
     });
     await req.commitTransaction!();
     // Refresh the artifact AFTER the commit, mirroring the responder route. An approval advances the card's
@@ -2665,11 +2670,11 @@ router.post("/:id/scorecards/:scorecardId/corrective-actions/:itemId/reject", as
       actor,
     });
     await req.commitTransaction!();
-    // Refresh the artifact AFTER the commit, mirroring the responder route. An approval advances the card's
-    // generation, so the stored PDF is stale by definition — and the oversight worker only attaches one whose
-    // generation matches, so without this the "Approved" email silently loses its attachment unless someone
-    // happens to download the card during the delay. Only on a real change: an idempotent re-approve moved
-    // nothing, and re-rendering would re-download every evidence image for an unchanged generation.
+    // Refresh the artifact AFTER the commit, mirroring the responder route. A rejection advances the card's
+    // generation and restarts the responders' cycle, so the stored PDF is stale by definition — and the
+    // responder notice that follows carries the record they are being asked to correct. Only on a real
+    // change: an idempotent re-reject moved nothing, and re-rendering would re-download every evidence image
+    // for an unchanged generation.
     if (outcome.changedItemIds.length > 0) {
       void finalizeFieldScorecardArtifacts(office, req.user!.id, req.params.scorecardId).catch((err) => {
         console.error("[CorrectiveActionApproval] Post-approval PDF refresh failed", {

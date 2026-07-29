@@ -1,7 +1,11 @@
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
-import { fieldScorecards, scorecardCorrectiveActions } from "@trock-crm/shared/schema";
+import {
+  fieldScorecards,
+  scorecardCorrectiveActions,
+  scorecardCorrectiveActionEvents,
+} from "@trock-crm/shared/schema";
 import {
   CORRECTIVE_ACTION_CARD_AWAITING_APPROVAL,
   CORRECTIVE_ACTION_CARD_CLOSED,
@@ -28,6 +32,16 @@ type TenantDb = NodePgDatabase<typeof schema>;
  * Only the REJECTED items reopen. An approved item keeps its verdict, so a responder redoes one thing rather
  * than everything — which is the point of approving per item at all.
  */
+
+/**
+ * The submission the approver was LOOKING AT, per item.
+ *
+ * Item ids alone bind the approval to the right items but not to the right ATTEMPT: with two approvers, one
+ * can load submission A, the other reject it, the responder submit B — and the first approver's click then
+ * approves B, which they never saw. The item id and status are identical across both. Carrying the
+ * submission event id makes the approval refer to a specific piece of work rather than to a slot.
+ */
+export type ReviewedAttempts = Record<string, string>;
 
 export interface ApprovalActor {
   userId: string;
@@ -175,7 +189,13 @@ async function readCardStatus(tx: TenantDb, scorecardId: string): Promise<string
  */
 export async function approveCorrectiveActionItems(
   tx: TenantDb,
-  input: { scorecardId: string; itemIds?: string[]; actor: ApprovalActor },
+  input: {
+    scorecardId: string;
+    itemIds?: string[];
+    actor: ApprovalActor;
+    /** itemId → the submission event id the approver reviewed. Omitted by older clients. */
+    reviewedAttempts?: ReviewedAttempts;
+  },
 ): Promise<ApprovalOutcome> {
   const items = await lockAndReadItems(tx, input.scorecardId);
   if (items.length === 0) throw new AppError(404, "This scorecard has no corrective actions.");
@@ -190,6 +210,27 @@ export async function approveCorrectiveActionItems(
     const known = new Set(items.map((item) => item.id));
     const stray = input.itemIds.filter((id) => !known.has(id));
     if (stray.length > 0) throw new AppError(404, "Corrective-action item not found on this scorecard.");
+  }
+
+  // Refuse any target whose latest submission is NOT the one the approver reviewed.
+  //
+  // Item ids bind the approval to the right ITEMS but not the right ATTEMPT: one approver can load submission
+  // A, another reject it, the responder submit B — and the first approver's click then approves B, which they
+  // never saw. The id and the status are identical across both, so only the submission event distinguishes
+  // them. Skipped entirely when the client sends nothing, so an older build keeps working.
+  if (input.reviewedAttempts && Object.keys(input.reviewedAttempts).length > 0) {
+    const latestByItem = await latestSubmissionByItem(tx, targetIds);
+    for (const itemId of targetIds) {
+      const reviewed = input.reviewedAttempts[itemId];
+      const latest = latestByItem.get(itemId);
+      if (reviewed && latest && latest !== reviewed) {
+        throw new AppError(
+          409,
+          "This item was answered again after you opened it. Refresh to review the new response.",
+          "CORRECTIVE_ACTION_ATTEMPT_SUPERSEDED",
+        );
+      }
+    }
   }
 
   const changedItemIds: string[] = [];
@@ -419,12 +460,14 @@ export async function approveAndNotify(
     scorecardId: string;
     itemIds?: string[];
     actor: ApprovalActor;
+    reviewedAttempts?: ReviewedAttempts;
   },
 ): Promise<ApprovalOutcome> {
   const outcome = await approveCorrectiveActionItems(tx, {
     scorecardId: input.scorecardId,
     itemIds: input.itemIds,
     actor: input.actor,
+    reviewedAttempts: input.reviewedAttempts,
   });
   if (outcome.closed) {
     await enqueueCorrectiveActionOversightClosed(tx, {
@@ -433,4 +476,33 @@ export async function approveAndNotify(
     });
   }
   return outcome;
+}
+
+/** The most recent `submitted` event per item — what an approval must be pinned to. */
+async function latestSubmissionByItem(
+  tx: TenantDb,
+  itemIds: string[],
+): Promise<Map<string, string>> {
+  if (itemIds.length === 0) return new Map();
+  const rows = await tx
+    .select({
+      id: scorecardCorrectiveActionEvents.id,
+      correctiveActionId: scorecardCorrectiveActionEvents.correctiveActionId,
+      seq: scorecardCorrectiveActionEvents.seq,
+    })
+    .from(scorecardCorrectiveActionEvents)
+    .where(
+      and(
+        inArray(scorecardCorrectiveActionEvents.correctiveActionId, itemIds),
+        eq(scorecardCorrectiveActionEvents.eventType, "submitted"),
+      ),
+    )
+    .orderBy(asc(scorecardCorrectiveActionEvents.seq));
+
+  // Ascending, so the last write per item wins — the latest attempt.
+  const latest = new Map<string, string>();
+  for (const row of rows) {
+    if (row.correctiveActionId) latest.set(row.correctiveActionId, row.id);
+  }
+  return latest;
 }

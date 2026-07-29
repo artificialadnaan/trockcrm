@@ -380,4 +380,72 @@ describe("the event thread", () => {
 
     expect(outcome.changedItemIds).toEqual([ids[0]]);
   });
+
+  it("REGRESSION: refuses to approve an attempt the approver did not review", async () => {
+    // Item ids bind an approval to the right ITEMS but not the right ATTEMPT. With two approvers: one loads
+    // submission A, the other rejects it, the responder submits B — and the first approver's click would
+    // approve B, which they never saw. The id and the status are identical across both.
+    const [itemId] = await seedAwaitingApproval(1);
+    const [reviewed] = await tdb
+      .insert(scorecardCorrectiveActionEvents)
+      .values({
+        correctiveActionId: itemId,
+        scorecardId: CARD,
+        eventType: "submitted",
+        actorName: "Pat Manager",
+        comment: "Attempt A.",
+      })
+      .returning({ id: scorecardCorrectiveActionEvents.id });
+    // ...a newer attempt lands before the approver clicks.
+    await tdb.insert(scorecardCorrectiveActionEvents).values({
+      correctiveActionId: itemId,
+      scorecardId: CARD,
+      eventType: "submitted",
+      actorName: "Pat Manager",
+      comment: "Attempt B.",
+    });
+
+    await expect(
+      approveCorrectiveActionItems(tdb, {
+        scorecardId: CARD,
+        itemIds: [itemId],
+        actor: APPROVER,
+        reviewedAttempts: { [itemId]: reviewed.id },
+      }),
+    ).rejects.toMatchObject({ statusCode: 409 });
+    expect(await itemStatuses()).toEqual(["submitted"]);
+  });
+
+  it("approves normally when the reviewed attempt is still the latest", async () => {
+    const [itemId] = await seedAwaitingApproval(1);
+    const [reviewed] = await tdb
+      .insert(scorecardCorrectiveActionEvents)
+      .values({
+        correctiveActionId: itemId,
+        scorecardId: CARD,
+        eventType: "submitted",
+        actorName: "Pat Manager",
+        comment: "The only attempt.",
+      })
+      .returning({ id: scorecardCorrectiveActionEvents.id });
+
+    const outcome = await approveCorrectiveActionItems(tdb, {
+      scorecardId: CARD,
+      itemIds: [itemId],
+      actor: APPROVER,
+      reviewedAttempts: { [itemId]: reviewed.id },
+    });
+    expect(outcome.changedItemIds).toEqual([itemId]);
+  });
+
+  it("falls back to status-only checking for a client that sends nothing", async () => {
+    // An older build must keep working rather than failing every approval.
+    const [itemId] = await seedAwaitingApproval(1);
+    const outcome = await approveCorrectiveActionItems(tdb, {
+      scorecardId: CARD,
+      itemIds: [itemId],
+      actor: APPROVER,
+    });
+    expect(outcome.changedItemIds).toEqual([itemId]);
+  });
 });

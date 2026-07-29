@@ -517,12 +517,9 @@ export async function handleScorecardCorrectiveActionEmail(
   // emailed body + the stamp's emitted-id array never carry an item resolved after this initial load. Declared
   // `let` so that fresh read can replace them.
   let flaggedRows = flaggedRes.rows as any[];
-  let flagged: FlaggedItem[] = flaggedRows.map((r) => ({
-    itemType: String(r.item_type),
-    itemLabel: String(r.item_label),
-    status: String(r.status ?? "open"),
-    latestRejection: r.latest_rejection == null ? null : String(r.latest_rejection),
-  }));
+  // toFlaggedItem, not an inline copy — the whole point of that helper is that the two reads cannot drift,
+  // and a duplicated mapping here is exactly the drift it was written to prevent.
+  let flagged: FlaggedItem[] = flaggedRows.map(toFlaggedItem);
 
   // Empty-open-set race (finding 5). We read `scorecard.status` at the TOP of this run, THEN queried the open
   // corrective-action rows above. If the LAST open item is resolved AFTER that status read but BEFORE this
