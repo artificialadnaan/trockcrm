@@ -9,7 +9,7 @@ interface DealTimelineTabProps {
     id: string;
     fromStageId: string | null;
     toStageId: string;
-    changedBy: string;
+    changedBy: string | null;
     isBackwardMove: boolean;
     isDirectorOverride: boolean;
     overrideReason: string | null;

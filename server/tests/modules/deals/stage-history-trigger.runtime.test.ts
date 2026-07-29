@@ -63,7 +63,11 @@ beforeAll(async () => {
     CREATE TABLE ${T}.deal_stage_history (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
       deal_id uuid NOT NULL, from_stage_id uuid, to_stage_id uuid NOT NULL,
-      changed_by uuid NOT NULL REFERENCES public.users(id),
+      -- Nullable since migration 0207. Modelled, not applied: 0207's ALTER targets office_* schemas and
+      -- this fixture is office_test, so it must mirror the post-0207 shape by hand. If it does not, the
+      -- trigger's NULL insert raises, the function's own exception guard swallows it, and history rows
+      -- vanish with no error anywhere — the failure this file caught when 0207 landed.
+      changed_by uuid REFERENCES public.users(id),
       is_backward_move boolean NOT NULL DEFAULT false,
       is_director_override boolean NOT NULL DEFAULT false,
       override_reason text, duration_in_previous_stage interval,
@@ -115,7 +119,10 @@ describe("record_stage_history trigger (runtime, PGlite, tenant schema)", () => 
     expect(added).toHaveLength(1);
     expect(added[0].from_stage_id).toBeNull();
     expect(added[0].to_stage_id).toBe(ST.opp);
-    expect(added[0].changed_by).toBe(REP);
+    // NULL, not REP. This INSERT sets no app.current_user_id, and before 0207 the backstop stamped the
+    // deal's own assigned rep — stating that a person performed a write they had no part in. See the
+    // migration for the two production consequences (misdirected investigations, inflated usage metrics).
+    expect(added[0].changed_by).toBeNull();
     expect(added[0].ts_match).toBe(true);
   });
 
@@ -161,11 +168,25 @@ describe("record_stage_history trigger (runtime, PGlite, tenant schema)", () => 
     expect(await newRows(id, before)).toHaveLength(2); // trigger row + explicit row
   });
 
-  it("never breaks a stage change when no actor resolves -- skips the row, update still applies", async () => {
-    const id = await makeDeal(ST.opp, { rep: null }); // no actor -> no creation row
+  it("RECORDS the row when no actor resolves (0207), and still never breaks the stage change", async () => {
+    // This asserted `toHaveLength(0)` before 0207 — "no actor resolved, so skip the row". That contract
+    // was the lesser half of a constraint workaround: changed_by was NOT NULL, so the trigger's only
+    // options were to name somebody or discard the transition. It usually named the assigned rep; when
+    // even that was absent it threw the history away, losing exactly the machine-made moves that are
+    // hardest to reconstruct afterwards.
+    //
+    // 0207 makes the column nullable, so the honest row can be written. What must NOT change is the
+    // second assertion: the backstop is best-effort and may never roll back the write that fired it.
+    const id = await makeDeal(ST.opp, { rep: null });
     const before = await histIds(id);
     await db.query(`UPDATE ${T}.deals SET stage_id=$1 WHERE id=$2`, [ST.est, id]);
-    expect(await newRows(id, before)).toHaveLength(0);
+
+    const added = await newRows(id, before);
+    expect(added).toHaveLength(1);
+    expect(added[0].changed_by).toBeNull();
+    expect(added[0].from_stage_id).toBe(ST.opp);
+    expect(added[0].to_stage_id).toBe(ST.est);
+
     const d = await db.query<{ stage_id: string }>(`SELECT stage_id FROM ${T}.deals WHERE id=$1`, [id]);
     expect(d.rows[0].stage_id).toBe(ST.est); // the stage change succeeded
   });
