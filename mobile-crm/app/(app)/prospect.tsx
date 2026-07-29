@@ -21,6 +21,7 @@ import {
   canSubmit,
   haltsForDuplicates,
   isCorroborated,
+  isMatchSelectable,
   leadFlagNextStep,
   personDetailsWillBeDiscarded,
   planContact,
@@ -453,7 +454,14 @@ export default function ProspectScreen() {
      * rejected — restoring it stores the new address at the old one's location, which is worse than
      * storing nothing and is exactly what the coarse-fix rule was added to prevent.
      */
-    const geocodeFallback = correctingAddress ? null : address;
+    /**
+     * Also dropped when the fix is COARSE.
+     *
+     * `usableFix` refuses a coarse fix, but these coordinates came back from Mapbox for that very
+     * point — a reverse geocode of a position good to hundreds of metres can resolve the building next
+     * door, so falling back to them reinstated exactly what the rule refuses, one line later.
+     */
+    const geocodeFallback = correctingAddress || coarse ? null : address;
     return {
       ...typed,
       lat: usableFix?.lat ?? geocodeFallback?.lat ?? null,
@@ -917,11 +925,11 @@ export default function ProspectScreen() {
    * tap target was the dangerous part.
    */
   const selectableMatches = useMemo(
-    () => (matches ?? []).filter((m) => m.addressMatch === null || isCorroborated(m, address)),
+    () => (matches ?? []).filter((m) => isMatchSelectable(m, address)),
     [matches, address],
   );
   const advisoryMatches = useMemo(
-    () => (matches ?? []).filter((m) => m.addressMatch !== null && !isCorroborated(m, address)),
+    () => (matches ?? []).filter((m) => !isMatchSelectable(m, address)),
     [matches, address],
   );
 
@@ -1643,6 +1651,28 @@ export default function ProspectScreen() {
                           style={[styles.input, styles.half]}
                         />
                       </View>
+                      {/* A WAY BACK. correctingAddress was only undone by changing the property or
+                          starting a fresh log, so one accidental tap trapped the rep in the typed
+                          branch — and because the geocode fallback is dropped while correcting, the
+                          building would then be created with no coordinates at all. */}
+                      {geocodeComplete ? (
+                        <Pressable
+                          testID="prospect-cancel-correction"
+                          onPress={() => {
+                            setCorrectingAddress(false);
+                            setManualAddress("");
+                            setManualCity("");
+                            setManualState("");
+                            setManualZip("");
+                          }}
+                          disabled={targetsLocked}
+                          accessibilityRole="button"
+                          accessibilityLabel="Use the detected address instead"
+                          style={styles.linkBtn}
+                        >
+                          <Text style={styles.linkText}>Use the detected address instead</Text>
+                        </Pressable>
+                      ) : null}
                       <TextInput
                         testID="prospect-manual-zip"
                         editable={!targetsLocked}

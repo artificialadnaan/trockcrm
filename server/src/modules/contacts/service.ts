@@ -685,17 +685,24 @@ export async function createContact(
      * available was dropped on the one path most likely to be re-entering a person: same-company
      * candidates were neither preferred by the predicate nor ordered ahead of the 50-row cap.
      */
-    const companyNameForDedup =
-      input.companyName?.trim() ||
-      (input.companyId
-        ? (
-            await tenantDb
-              .select({ name: companies.name })
-              .from(companies)
-              .where(eq(companies.id, input.companyId))
-              .limit(1)
-          )[0]?.name
-        : undefined);
+    /**
+     * The LINKED company wins whenever there is one.
+     *
+     * Resolving the id only as a fallback let a stale free-text `companyName` override a valid
+     * `companyId` — so the input side matched and ranked on one name while every candidate carried the
+     * joined one, and a genuine same-company duplicate could sit behind the 50-row cap. The id names a
+     * record; the text is whatever was typed once.
+     */
+    const linkedCompanyName = input.companyId
+      ? (
+          await tenantDb
+            .select({ name: companies.name })
+            .from(companies)
+            .where(eq(companies.id, input.companyId))
+            .limit(1)
+        )[0]?.name
+      : undefined;
+    const companyNameForDedup = linkedCompanyName ?? input.companyName?.trim();
 
     const dedupResult = await checkForDuplicates(tenantDb, {
       firstName: input.firstName,

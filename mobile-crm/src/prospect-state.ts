@@ -127,6 +127,20 @@ export function isCorroborated(
   return false;
 }
 
+/**
+ * May this row be a one-tap target?
+ *
+ * Exported so the screen and its tests share ONE predicate. The tests previously re-implemented it,
+ * which meant the screen's filter could change and they would still pass — the same duplication that
+ * motivated extracting `isCorroborated` in the first place.
+ */
+export function isMatchSelectable(
+  match: PropertyMatch,
+  query?: { city?: string | null; state?: string | null; zip?: string | null } | null,
+): boolean {
+  return match.addressMatch === null || isCorroborated(match, query);
+}
+
 export function describeMatch(
   match: PropertyMatch,
   query?: { city?: string | null; state?: string | null; zip?: string | null } | null,

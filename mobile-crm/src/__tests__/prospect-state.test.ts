@@ -3,6 +3,7 @@ import {
   describeMatch,
   haltsForDuplicates,
   isCorroborated,
+  isMatchSelectable,
   leadFlagNextStep,
   isPositionTooCoarse,
   personDetailsWillBeDiscarded,
@@ -393,7 +394,9 @@ describe("selectable vs advisory matches", () => {
   // The rule match-service.ts states and this enforces: when unsure, MISS. An address hit with no
   // locality and no coordinates is unsure — "100 Main St" is in every town — so it may be SHOWN but
   // must not be a one-tap target, because the tap attaches this visit and everything after it.
-  const isSelectable = (m: PropertyMatch) => m.addressMatch === null || isCorroborated(m, QUERY);
+  // The SHIPPED predicate, not a copy of it. This block used to re-implement the screen's inline
+  // filter, so the screen could change and these three would still pass.
+  const isSelectable = (m: PropertyMatch) => isMatchSelectable(m, QUERY);
 
   it("keeps an uncorroborated address hit OUT of the tappable list", () => {
     expect(
