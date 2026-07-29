@@ -146,13 +146,30 @@ function aliasedDealValueChainSql(alias: string, columns: readonly DealValueColu
 // worker/src/jobs/deal-value-sql.ts, worker/src/jobs/rep-performance-rollup.ts, worker/src/jobs/index.ts
 // and worker/src/jobs/won-metric-reduction-alert.ts.
 //
-// One TypeScript twin remains in app source; the plpgsql chain in migration 0184 is outstanding
-// separately, described at the end of this comment. The TS one is mobile-crm/src/components/DealCard.tsx:
-// 61-80 (resolveDealValue) — a hand-copied `> 0`-gated chain in mobile-crm, a standalone Expo app
-// deliberately NOT an npm workspace member, so it cannot import shared/ and cannot be pointed at
-// getRawDealValue directly; it also has its own display gate at DealCard.tsx:83-86 (`value > 0 ?
-// formatMoney(value) : "—"`) that discards a correct negative even if resolveDealValue itself is fixed.
-// It is tracked by its own task on this branch.
+// That last TypeScript twin — mobile-crm/src/components/DealCard.tsx's resolveDealValue — is now CO-aware
+// as well: it takes a change-order child's awardedAmount VERBATIM, placed BELOW its hold check so a held
+// deal is still worth 0 (matching storedOnHoldDealValueSql, which wraps this chain rather than being
+// wrapped by it). It stays a hand-copied twin rather than a call into getRawDealValue because mobile-crm
+// is a standalone Expo app, deliberately NOT an npm workspace member, so Metro cannot resolve shared/.
+// Two `> 0` DISPLAY gates that discarded the corrected negative went with it: DealCard.tsx's
+// displayAmount (now `!== 0`, so a non-zero value renders and only zero shows the em dash) and
+// client/src/components/pipeline/pipeline-record-card.tsx's formatValue (same change; its value already
+// resolved through the CO-aware shared getEffectiveDealValue, so only the gate was wrong — and the null
+// it returned did not merely blank the amount, it let the card print the workflow route in the money's
+// place). The other mobile-crm value surfaces carry no gate of their own: BoardCard.tsx and
+// app/(app)/deals/[id].tsx both call displayAmount.
+//
+// CHECKED, because a branch on a field the payload never sends would be inert: is_change_order does reach
+// the phone as `isChangeOrder` on all three endpoints mobile-crm reads. GET /api/deals (deals/routes.ts
+// :866) and GET /api/deals/pipeline (:1001) both select `...getTableColumns(deals)`, and /deals/:id/detail
+// resolves through getDealById, which does the same; redactDealResponse strips only hubspotDealId and the
+// private commission fields, and mobile-crm/src/api/types.ts already declared the field. Because the flag
+// is on the row, the server-computed `effectiveValue` those cards PREFER is CO-aware too — the local
+// chain above is the mixed-version fallback.
+//
+// That is the whole of this paragraph's claim: those edits, and that endpoint check. It is NOT a fresh
+// completeness sweep — it rests on Task 4's sweep, whose edges are stated next. The plpgsql chain in
+// migration 0184 remains outstanding separately, described at the end of this comment.
 //
 // What Task 4 actually swept, so the next reader knows the edges of this claim: `awarded_amount > 0` and
 // the equivalent TS candidate-chain shapes across server/src, worker/src, client/src, shared/src (tests

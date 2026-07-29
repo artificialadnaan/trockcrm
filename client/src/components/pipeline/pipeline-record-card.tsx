@@ -61,9 +61,21 @@ interface PipelineRecordCardProps {
   isDragging?: boolean;
 }
 
+/**
+ * The card's money, or null when there is none to show.
+ *
+ * Gated on NON-ZERO, not `> 0`. getEffectiveDealValue is change-order aware (shared getRawDealValue
+ * takes a CO child's awardedAmount verbatim), so a deductive change order arrives here as a correct
+ * negative — and a `> 0` gate discarded it, returning null. That did not merely blank the amount: the
+ * empty value slot below falls back to printing the workflow route, so the deduction read as "normal"
+ * where its dollars belong.
+ *
+ * Zero still returns null: getEffectiveDealValue collapses "absent" and "explicitly $0" into the same
+ * 0, so this cannot tell them apart, and both keep the pre-existing no-amount rendering.
+ */
 function formatValue(record: PipelineRecordCardData, now: Date) {
   const value = getEffectiveDealValue(record, now);
-  return value > 0 ? formatCurrencyCompact(value) : null;
+  return value !== 0 ? formatCurrencyCompact(value) : null;
 }
 
 export function PipelineRecordCard({

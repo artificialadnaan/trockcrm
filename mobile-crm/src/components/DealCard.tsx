@@ -20,6 +20,10 @@ type ValueFields = Pick<
   | "bidBoardTotalSales"
   | "stageSlug"
   | "workflowRoute"
+  // REQUIRED, not optional, because DealListItem declares it so. Every production caller passes a whole
+  // DealListItem/DealDetail, and requiring it means a hand-built object that forgets the flag fails to
+  // COMPILE rather than silently pricing a deductive change order at $0 on the fallback chain.
+  | "isChangeOrder"
 >;
 
 /**
@@ -68,6 +72,23 @@ export function resolveDealValue(deal: ValueFields): number {
   // mixed-version deployment produces if the fallback is narrower than the badge.
   if (deal.effectiveOnHold === true || deal.onHold === true) return 0;
 
+  /**
+   * A change-order child deal's value is `awardedAmount` VERBATIM — never the `> 0` fallback chain.
+   *
+   * A CO child has no other value column to fall back to, and a DEDUCTIVE CO is NEGATIVE, so every
+   * `> 0` candidate below would drop it to 0 and the phone would price a -$50,000 deduction at nothing.
+   * Mirrors server deal-value-sql.ts withChangeOrderBranch, shared getRawDealValue and client
+   * resolveBestEstimate — those three and this one MUST NOT drift. Gated on the FLAG, not on the sign:
+   * an ordinary deal with a negative awarded amount still falls through the chain exactly as before.
+   *
+   * BELOW the hold check on purpose, matching SQL: storedOnHoldDealValueSql wraps the CO branch, so a
+   * held deal is worth 0 whether or not it is a change order.
+   */
+  if (deal.isChangeOrder === true) {
+    const awarded = parseFloat(deal.awardedAmount ?? "0");
+    return Number.isFinite(awarded) ? awarded : 0;
+  }
+
   const isEstimating = isGenuineEstimatingStage(deal.stageSlug, deal.workflowRoute);
   const candidates = isEstimating
     ? [deal.awardedAmount, deal.ddEstimate, deal.bidBoardTotalSales, deal.bidEstimate]
@@ -80,9 +101,22 @@ export function resolveDealValue(deal: ValueFields): number {
   return 0;
 }
 
+/**
+ * The money as it appears on the card. Any NON-ZERO value renders; only zero shows the em dash.
+ *
+ * This gate used to be `> 0`, which threw away a correct answer: resolveDealValue already RECEIVES the
+ * server's change-order-aware `effectiveValue`, so a deductive CO arrived here as -50000 and was drawn
+ * as "—". The deduction was the one number that card existed to show.
+ *
+ * The dash still covers zero because resolveDealValue cannot tell "absent" from "explicitly $0" — both
+ * collapse to the number 0 on the way out of it (a null column parses to 0; a held deal is zeroed; the
+ * chain's own fallback is 0). Distinguishing them would mean changing that function's return type, and
+ * the two read identically to a rep anyway. So zero keeps the pre-existing contract, and the ONLY
+ * behaviour that changes is that a negative now renders as a negative.
+ */
 export function displayAmount(deal: ValueFields): string {
   const value = resolveDealValue(deal);
-  return value > 0 ? formatMoney(value) : "—";
+  return value !== 0 ? formatMoney(value) : "—";
 }
 
 /**
