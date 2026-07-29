@@ -439,7 +439,13 @@ export function LeadershipDetailView({ detail }: { detail: FieldScorecardDetail 
  * invisible: nothing was approved, the UI did not move, and the only signal was the absence of a change —
  * which reads as a slow request, not a failure.
  */
-function ApproveAllButton({ onApproveAll }: { onApproveAll: () => Promise<void> }) {
+function ApproveAllButton({
+  onApproveAll,
+  label = "Approve all",
+}: {
+  onApproveAll: () => Promise<void>;
+  label?: string;
+}) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -462,7 +468,7 @@ function ApproveAllButton({ onApproveAll }: { onApproveAll: () => Promise<void> 
         }}
         className="rounded-md bg-green-700 px-3 py-1 text-xs font-medium text-white disabled:opacity-50"
       >
-        {busy ? "Approving…" : "Approve all"}
+        {busy ? "Approving…" : label}
       </button>
     </div>
   );
@@ -567,12 +573,16 @@ export function ScorecardDetailView({
         const reviewed = (correctiveActions ?? [])
           .filter((i) => i.status === "submitted")
           .map((i) => i.id);
-        if (reviewed.length === 0) return;
+        // An empty list means the approver is accepting a card that reached "everything approved" by an
+        // edit deleting the unapproved item, not that there is nothing to do — returning early, as this did,
+        // left such a card with no way out. Send it as OMITTED rather than `[]`, which the route rejects:
+        // absent means "everything awaiting approval", which here is correctly nothing. The server approves
+        // no item, recomputes, and closes the card on the strength of the approver's acceptance.
         const outcome = await refreshOnSupersession(() =>
           approveCorrectiveActions(
             dealId,
             detail.id,
-            reviewed,
+            reviewed.length > 0 ? reviewed : undefined,
             reviewedAttemptsOf(correctiveActions),
             reviewedGeneration.current,
           ),
@@ -616,8 +626,8 @@ export function ScorecardDetailView({
         </div>
       </div>
 
-      {approveAll && shouldShowApproveAll(correctiveActions ?? [], canApprove) && (
-        <ApproveAllButton onApproveAll={approveAll} />
+      {approveAll && shouldShowApproveAll(correctiveActions ?? [], canApprove, detail.status) && (
+        <ApproveAllButton onApproveAll={approveAll} label={approveAllLabel(correctiveActions ?? [])} />
       )}
 
       {hasCorrectiveActions && totalCount > 0 && (
@@ -823,8 +833,25 @@ export function shouldShowApprovalControls(item: { status: string }, canApprove:
 }
 
 /** Approve-all earns its place only with more than one item waiting; otherwise it duplicates the per-item button. */
-export function shouldShowApproveAll(items: Array<{ status: string }>, canApprove: boolean): boolean {
-  return canApprove && items.filter((i) => i.status === "submitted").length > 1;
+export function shouldShowApproveAll(
+  items: Array<{ status: string }>,
+  canApprove: boolean,
+  cardStatus?: string,
+): boolean {
+  if (!canApprove) return false;
+  const awaiting = items.filter((i) => i.status === "submitted").length;
+  if (awaiting > 1) return true;
+  // A card can also sit in the approver's queue with NOTHING awaiting: an edit deleted its last unapproved
+  // item, so every survivor is approved but reaching that state was a deletion, not a verdict. The server
+  // refuses to call that closed, and per-item controls render on `submitted` items — of which there are none
+  // — so without this the card would sit in the queue with no control that acts on it, forever. This button
+  // is the approver accepting the card as it now stands, which is the only thing that can close it.
+  return awaiting === 0 && items.length > 0 && cardStatus === "corrective_action_submitted";
+}
+
+/** What the approve-all control is actually doing, which is not the same act in both cases. */
+export function approveAllLabel(items: Array<{ status: string }>): string {
+  return items.some((i) => i.status === "submitted") ? "Approve all" : "Accept edited card";
 }
 
 /** Telling the responder what to fix IS the rejection, so an empty comment is refused before the round trip. */

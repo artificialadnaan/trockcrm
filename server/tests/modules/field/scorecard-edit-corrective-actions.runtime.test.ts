@@ -9,6 +9,7 @@ import {
   type UpdateFieldScorecardInput,
 } from "../../../src/modules/field/scorecards-service.js";
 import { resolveCorrectiveActionItem } from "../../../src/modules/field/corrective-actions-service.js";
+import { approveCorrectiveActionItems } from "../../../src/modules/field/corrective-action-approval.js";
 import {
   contacts,
   dealTeamMembers,
@@ -324,6 +325,92 @@ describe("updateFieldScorecard corrective-action reconcile", () => {
     expect(after).toHaveLength(1);
     expect(after[0].status).toBe("submitted");
     expect(after[0].item_label).toBe("Resolve me");
+  });
+
+  it("an edit that DELETES the last unapproved item does not put the card in the APPROVED state", async () => {
+    // The submitter must not be able to close their own corrective action by deleting the flag.
+    //
+    // My first fix for this suppressed the "approved" email and left the TRANSITION alone, so the card still
+    // went to corrective_action_closed: the CRM badge, the QC report and the PDF all read "Approved", and
+    // since an approved card is LOCKED the record froze in a verdict nobody gave. Suppressing the
+    // announcement of a state while still entering it is not a guard; it just makes the lie quieter.
+    const { scorecard } = await createFieldScorecard(
+      tdb,
+      createInput({ items: v2Items(5), actionItems: ["Approved one", "Delete me"] }),
+    );
+    const items = await getItems(scorecard.id);
+    const approvedTarget = items.find((i) => i.item_label === "Approved one")!;
+    const doomed = items.find((i) => i.item_label === "Delete me")!;
+    // One item genuinely approved...
+    await resolveCorrectiveActionItem(tdb, {
+      scorecardId: scorecard.id,
+      itemId: approvedTarget.id,
+      responseComment: "done",
+      respondedBy: { userId: OWNER, name: "Sam", email: null },
+    });
+    await tdb.execute(
+      sql`UPDATE scorecard_corrective_actions SET status = 'approved' WHERE id = ${approvedTarget.id}`,
+    );
+    // ...and the other still unapproved when the edit removes it.
+    await resolveCorrectiveActionItem(tdb, {
+      scorecardId: scorecard.id,
+      itemId: doomed.id,
+      responseComment: "sort of done",
+      respondedBy: { userId: OWNER, name: "Sam", email: null },
+    });
+
+    const at = await currentUpdatedAt(scorecard.id);
+    const { scorecard: updated } = await updateFieldScorecard(
+      tdb,
+      updateInput(scorecard.id, at, { items: v2Items(5), actionItems: ["Approved one"] }),
+    );
+
+    // Every SURVIVOR is approved — and the card still is NOT closed, because a deletion got it there.
+    expect(updated.status).toBe("corrective_action_submitted");
+    expect(await getStatus(scorecard.id)).toBe("corrective_action_submitted");
+    const after = await getItems(scorecard.id);
+    expect(after.map((i) => i.status)).toEqual(["approved"]);
+  });
+
+  it("...and an approver can then accept the edited card, which is the only thing that closes it", async () => {
+    // The other half of the fix: refusing to auto-close must not strand the card. There are no `submitted`
+    // items left for per-item controls to attach to, so approve-all with no ids IS the affordance — the
+    // approver accepting the card as it now stands.
+    const { scorecard } = await createFieldScorecard(
+      tdb,
+      createInput({ items: v2Items(5), actionItems: ["Approved one", "Delete me"] }),
+    );
+    const items = await getItems(scorecard.id);
+    const approvedTarget = items.find((i) => i.item_label === "Approved one")!;
+    const doomed = items.find((i) => i.item_label === "Delete me")!;
+    await resolveCorrectiveActionItem(tdb, {
+      scorecardId: scorecard.id,
+      itemId: approvedTarget.id,
+      responseComment: "done",
+      respondedBy: { userId: OWNER, name: "Sam", email: null },
+    });
+    await tdb.execute(
+      sql`UPDATE scorecard_corrective_actions SET status = 'approved' WHERE id = ${approvedTarget.id}`,
+    );
+    await resolveCorrectiveActionItem(tdb, {
+      scorecardId: scorecard.id,
+      itemId: doomed.id,
+      responseComment: "sort of done",
+      respondedBy: { userId: OWNER, name: "Sam", email: null },
+    });
+    const at = await currentUpdatedAt(scorecard.id);
+    await updateFieldScorecard(
+      tdb,
+      updateInput(scorecard.id, at, { items: v2Items(5), actionItems: ["Approved one"] }),
+    );
+    expect(await getStatus(scorecard.id)).toBe("corrective_action_submitted");
+
+    const outcome = await approveCorrectiveActionItems(tdb, {
+      scorecardId: scorecard.id,
+      actor: { userId: OWNER, name: "James Helms", email: "james@trockgc.com" },
+    });
+    expect(outcome.closed).toBe(true);
+    expect(await getStatus(scorecard.id)).toBe("corrective_action_closed");
   });
 
   it("preserves a resolved item across an unrelated edit (history is never dropped)", async () => {

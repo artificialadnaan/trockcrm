@@ -1383,23 +1383,6 @@ describe("handleScorecardCorrectiveActionOversightEmail", () => {
     expect(stampUpdates).toHaveLength(0);
   });
 
-  it("logs and returns when QC_APPROVER_EMAILS is unset — nobody can approve, so nobody is asked", async () => {
-    // Matches the API, which 403s everyone when the list is empty. Not an error: a dead-letter here would be
-    // noise about a misconfiguration the API already reports the moment anyone tries to act.
-    const { query, stampUpdates } = makeQuery({ status: "corrective_action_submitted" });
-    const sendEmail = makeSend();
-
-    await handleScorecardCorrectiveActionOversightEmail(payload({ phase: "awaiting_approval" }), null, {
-      query: query as never,
-      sendEmail: sendEmail as never,
-      env: { ...env, QC_APPROVER_EMAILS: "" } as unknown as NodeJS.ProcessEnv,
-      logger: makeLogger(),
-    });
-
-    expect(sendEmail).not.toHaveBeenCalled();
-    expect(stampUpdates).toHaveLength(0);
-  });
-
   it("says APPROVED, not merely documented, on the completion notice", async () => {
     // Under the gate the card reaches this state only on the approver's acceptance. "Complete. Every flagged
     // item has been documented" describes the PRE-gate behaviour and tells oversight the wrong thing about
@@ -1618,6 +1601,56 @@ describe("handleScorecardCorrectiveActionOversightEmail", () => {
 
     expect(stampUpdates).toHaveLength(1);
     expect(stampUpdates[0].sql).toContain("corrective_action_cycle_nonce IS NULL");
+  });
+
+  it("RETRIES rather than completing when no approver is configured", async () => {
+    // This REPLACES an earlier expectation of mine — "logs and returns; nobody can approve, so nobody is
+    // asked" — whose reasoning (it matches the API, which 403s everyone when the list is empty) held for the
+    // API and not for a queued job. The API re-evaluates on the next request; a completed job never runs
+    // again.
+    //
+    // QC_APPROVER_EMAILS unset in production is the difference between this feature working and being
+    // silently inert — and the empty-recipient branch was written for SUPPLEMENTARY watcher notices, where
+    // completing quietly is right. Applied to the approval request it is not: this is the only thing that
+    // tells an approver work is waiting, the card sits in corrective_action_submitted until someone acts,
+    // and setting the variable later re-enqueues nothing. Every card submitted in the meantime would stay
+    // unannounced with no failed job to explain it.
+    const { query, stampUpdates } = makeQuery({ status: "corrective_action_submitted" });
+    const sendEmail = makeSend();
+
+    await expect(
+      handleScorecardCorrectiveActionOversightEmail(
+        payload({ phase: "awaiting_approval" }),
+        null,
+        {
+          query: query as never,
+          sendEmail: sendEmail as never,
+          env: { ...env, QC_APPROVER_EMAILS: "" } as unknown as NodeJS.ProcessEnv,
+          logger: makeLogger(),
+        },
+      ),
+    ).rejects.toThrow(/QC_APPROVER_EMAILS/);
+
+    expect(sendEmail).not.toHaveBeenCalled();
+    // Crucially NOT stamped: a stamp would make the retry skip, which is the failure this throw prevents.
+    expect(stampUpdates).toHaveLength(0);
+  });
+
+  it("...but the supplementary watcher notices still complete quietly with no recipients", async () => {
+    // The opened/closed notices are additional to the responders' own email. Failing them would retry
+    // forever on a config that is legitimately empty.
+    const { query } = makeQuery();
+    const sendEmail = makeSend();
+
+    await expect(
+      handleScorecardCorrectiveActionOversightEmail(payload(), null, {
+        query: query as never,
+        sendEmail: sendEmail as never,
+        env: { ...env, FIELD_SCORECARD_EMAIL_RECIPIENTS: "" } as unknown as NodeJS.ProcessEnv,
+        logger: makeLogger(),
+      }),
+    ).resolves.toBeUndefined();
+    expect(sendEmail).not.toHaveBeenCalled();
   });
 
   it("still sends an approval request whose review cycle is current", async () => {

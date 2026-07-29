@@ -452,6 +452,20 @@ export async function handleScorecardCorrectiveActionOversightEmail(
       : configured,
   );
   if (recipients.length === 0) {
+    // For `opened` and `closed` this is genuinely not an error: those are SUPPLEMENTARY notices to watchers,
+    // and the responders have their own job. Completing quietly is right.
+    //
+    // The approval request is not supplementary — it is the ONLY thing that tells an approver work is
+    // waiting, and the card sits in corrective_action_submitted until someone acts. QC_APPROVER_EMAILS
+    // unset in production would therefore have this job log, succeed, and never run again: setting the
+    // variable later re-enqueues nothing, so every card submitted in the meantime stays silently
+    // unannounced, and the queue shows no failure to explain it. Throw instead, so the job retries and the
+    // backlog drains the moment the allowlist is configured.
+    if (phase === "awaiting_approval") {
+      throw new Error(
+        `No corrective-action approvers configured (QC_APPROVER_EMAILS) — cannot notify anyone that scorecard ${scorecardId} is awaiting approval. Retrying.`,
+      );
+    }
     logger.warn(
       "[CorrectiveActionOversightEmail] No oversight recipients after excluding responders - skipping (not an error: the responders were notified by their own job)",
       { scorecardId, phase, configuredCount: configured.length },

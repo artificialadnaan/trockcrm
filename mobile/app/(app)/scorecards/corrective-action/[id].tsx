@@ -266,15 +266,27 @@ function CorrectiveActionItemCard({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // A REWORK cycle starts a fresh draft, so the previous cycle's success flag must not carry into it.
+  // A REWORK cycle starts a fresh draft, so NOTHING from the previous cycle may carry into it.
   //
-  // This component instance survives the status transitions: submit sets submittedOk, the approver rejects,
-  // and the item comes back editable on the SAME instance with submittedOk still true. The unmount cleanup
-  // reads that flag to decide whether the draft dir was already consumed — so it would skip deleting the new
-  // cycle's dir and leak its photos. Reset whenever the item is the responder's again; that cannot fire
-  // during the current cycle, because a successful submit moves the status out of the outstanding set.
+  // This component instance survives every status transition — the resolved view is an early return from this
+  // same component under a stable `key`, so the hooks below never unmount. A successful submit deliberately
+  // leaves `submitting` true (the screen is going away, and clearing it would flash an enabled form), sets
+  // submittedOk, and keeps the reducer's comment and photos. When the approver then rejects, the form comes
+  // BACK on that instance: every control renders disabled off the stale `submitting`, `onSubmit` returns at
+  // its own `if (submitting) return` guard, and the previous attempt's comment and photo list are sitting in
+  // the form. The responder cannot file the rework at all without backing out and reopening the screen —
+  // which is precisely the round trip the in-app rejection notice exists to save them.
+  //
+  // Resetting only submittedOk (which is all this did) fixed the photo-dir leak and left the form dead.
+  //
+  // Safe to key on status: a successful submit moves the item OUT of the outstanding set, so this cannot
+  // fire mid-cycle and wipe a response being typed.
   useEffect(() => {
-    if (isOpen(item)) cleanupGuardRef.current.submittedOk = false;
+    if (!isOpen(item)) return;
+    cleanupGuardRef.current.submittedOk = false;
+    setSubmitting(false);
+    dispatch({ type: "reset" });
+    setNotice(null);
   }, [item.status]);
 
   // Use the SAME predicate the parent counts with. This gate was independently hard-coded to `open`, so a

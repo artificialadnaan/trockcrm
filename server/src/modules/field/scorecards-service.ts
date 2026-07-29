@@ -1138,7 +1138,22 @@ export async function renderAndStoreFieldScorecardArtifacts(
     // (corrective_action_id IS NULL) — original evidence and the corrective-action record are separate
     // sets, and the publish-time recheck fingerprint applies the same exclusion. Widening either one alone
     // produces a spurious SCORECARD_EVIDENCE_CHANGED on every regeneration.
-    const correctiveActionPhotoRows = correctiveActionRows.length === 0 ? [] : await db
+    //
+    // The skip-when-empty condition has to consider DETACHED events too. Gating on items alone meant the
+    // all-items-removed card — the one case the detachment exists for — always resolved an empty photo set,
+    // so the regenerated PDF and its email attachment kept the removed item's words and dropped its
+    // evidence. `isResponsePhoto()` already matches a detached photo (its item id is null, its event id is
+    // not); the query was simply never run.
+    // Events whose item a later edit removed. Loaded UNCONDITIONALLY — the case that matters most is the one
+    // where the last item was removed, which is exactly when a rows-based early return would skip the query
+    // and the record would show nothing at all. SET NULL preserved these rows; a reader that never asks for
+    // them preserves nothing.
+    //
+    // Read BEFORE the photos because it is one of the two things that make a photo read worth doing.
+    const detachedCorrectiveActionEvents = await getDetachedCorrectiveActionEvents(db, scorecardId);
+
+    const correctiveActionPhotoRows =
+      correctiveActionRows.length === 0 && detachedCorrectiveActionEvents.length === 0 ? [] : await db
       .select({
         correctiveActionId: fieldScorecardPhotos.correctiveActionId,
         // Which ATTEMPT filed this photo. Null for every response that predates migration 0202 (and for the
@@ -1172,11 +1187,6 @@ export async function renderAndStoreFieldScorecardArtifacts(
       correctiveActionRows.length === 0
         ? new Map<string, CorrectiveActionEventRow[]>()
         : await getCorrectiveActionEventsByItem(db, scorecardId);
-    // Events whose item a later edit removed. Loaded UNCONDITIONALLY — the case that matters most is the one
-    // where the last item was removed, which is exactly when the early return above would skip the query and
-    // the record would show nothing at all. SET NULL preserved these rows; a reader that never asks for them
-    // preserves nothing.
-    const detachedCorrectiveActionEvents = await getDetachedCorrectiveActionEvents(db, scorecardId);
 
     const [deal] = await db
       .select({ name: deals.name, dealNumber: deals.dealNumber })

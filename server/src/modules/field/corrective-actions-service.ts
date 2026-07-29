@@ -660,12 +660,6 @@ export async function reconcileScorecardCorrectiveActions(
   const removedUnapproved = existing.some(
     (row) => staleIds.includes(row.id) && row.status !== "approved",
   );
-  const everySurvivingItemApproved =
-    anyItems &&
-    toInsert.length === 0 &&
-    !removedUnapproved &&
-    surviving.every((row) => row.status === "approved");
-
   // Three derived states, mirroring recomputeCardStatus in corrective-action-approval.ts — the two must
   // agree or an edit and an approval could compute different statuses for the same item set.
   let nextStatus: string;
@@ -673,10 +667,22 @@ export async function reconcileScorecardCorrectiveActions(
     nextStatus = CORRECTIVE_ACTION_CARD_OPEN;
   } else if (awaitingApprovalCount > 0) {
     nextStatus = CORRECTIVE_ACTION_CARD_AWAITING_APPROVAL;
+  } else if (removedUnapproved) {
+    // Every SURVIVING item is approved, but only because the unapproved one was deleted. Suppressing the
+    // "approved" email here was not enough — my first fix did exactly that and left the TRANSITION alone, so
+    // the card still went to corrective_action_closed: the CRM badge, the QC report and the PDF all read
+    // "Approved", and (since an approved card is locked) the record froze in a verdict nobody gave. That
+    // hands the submitter a way to close their own corrective action by deleting the flag, which is the one
+    // thing this gate exists to prevent. Back to the approver instead: the card CHANGED, and an approver
+    // accepting it as it now stands is the only thing that can close it.
+    nextStatus = CORRECTIVE_ACTION_CARD_AWAITING_APPROVAL;
   } else {
-    // Every surviving item is APPROVED — the only route to a closed card.
+    // Every surviving item is APPROVED, with none deleted to get there — the only route to a closed card.
     nextStatus = CORRECTIVE_ACTION_CARD_CLOSED;
   }
+  // Equivalent to the CLOSED branch by construction: nothing outstanding, nothing awaiting, items present,
+  // and nothing unapproved removed. Kept as a name because the enqueue below reads better for it.
+  const everySurvivingItemApproved = nextStatus === CORRECTIVE_ACTION_CARD_CLOSED;
   // ALWAYS write. An edit can add, remove or relabel items without moving the CARD status — and updated_at
   // is the PDF's content generation, compared by equality, so skipping the write leaves the stored artifact
   // classified as current while the record it shows has changed. Same defect the approval path had.

@@ -570,11 +570,27 @@ describe("finalizeFieldScorecardArtifacts", () => {
     });
 
     r2Mocks.getObjectBuffer.mockClear();
+    r2Mocks.putObject.mockClear();
     await finalizeFieldScorecardArtifacts({ id: "office-1", slug: "dallas" }, USER, DETACHED_CARD);
 
     const fetched = r2Mocks.getObjectBuffer.mock.calls.map((c) => c[0] as string);
     expect(fetched).toContain("thumbs/photo.jpg");
-    expect(fetched.filter((k) => k === "thumbs/response.jpg")).toHaveLength(0);
+
+    // It must not be counted as ORIGINAL EVIDENCE — the fingerprint is the sharp end, and a photo that
+    // drifts in or out of it makes every regeneration raise a spurious SCORECARD_EVIDENCE_CHANGED. A second
+    // finalize of an unchanged card is the direct test of that: it must converge, not thrash.
+    await expect(
+      finalizeFieldScorecardArtifacts({ id: "office-1", slug: "dallas" }, USER, DETACHED_CARD),
+    ).resolves.toBeTruthy();
+
+    // ...and it must still REACH the document, under the removed-item section. This assertion used to read
+    // `toHaveLength(0)` — the photo was never fetched at all, because the response-photo query short-circuited
+    // when no items survived, which is the exact case a detached photo exists in. The test passed while the
+    // PDF kept the removed item's words and dropped its evidence: "does not leak" was indistinguishable from
+    // "never loaded", and only one of those was intended.
+    expect(fetched).toContain("thumbs/response.jpg");
+    const written = r2Mocks.putObject.mock.calls.at(-1)?.[1] as Buffer;
+    expect(renderedText(written)).toContain("Answered before the edit removed the item.");
   });
 });
 
