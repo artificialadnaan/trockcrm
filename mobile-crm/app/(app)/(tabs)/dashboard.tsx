@@ -213,15 +213,15 @@ function NavCard({
 /**
  * NO textMuted on this screen.
  *
- * #8A95A3 is ~2.8:1 on surfaceMuted and ~3.0:1 on the stat card's white — under the 4.5:1 floor for
- * normal text, and every string here is 12-13px. It was fixed on the tab bar and the header first and
+ * textMuted is 4.99:1 on `surface` — it clears the floor, but only just, and every string on this
+ * screen is small supporting text read at arm's length outdoors. It was fixed on the tab bar first and
  * left behind on the screen with the most supporting text, which is the same half-applied sweep this
  * app keeps producing. textSecondary is 7.6:1 and still reads as secondary.
  */
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: theme.color.canvas },
   body: { padding: theme.space.lg, gap: theme.space.md, paddingBottom: theme.space.xxl },
-  email: { fontFamily: theme.font.regular, fontSize: 13, color: theme.color.textSecondary },
+  email: { ...theme.type.small, color: theme.color.textSecondary },
   statCard: {
     minHeight: 44,
     justifyContent: "center",
@@ -232,16 +232,20 @@ const styles = StyleSheet.create({
     padding: theme.space.lg,
     gap: theme.space.xs,
   },
+  // caption IS this: 11 semibold with 0.9 tracking, the token that exists so a dashboard eyebrow reads
+  // as a deliberate label rather than shrunken body text. Hand-rolled at 12/1.0 it was a near-miss of
+  // the thing it was imitating.
   statLabel: {
-    fontFamily: theme.font.semibold,
-    fontSize: 12,
-    letterSpacing: 1,
+    ...theme.type.caption,
     textTransform: "uppercase",
     color: theme.color.textSecondary,
   },
-  statValue: { fontFamily: theme.font.bold, fontSize: 34, color: theme.color.inkNavy },
+  // The Numbers Lead Rule, which the board already follows and the home screen did not: `display` is
+  // 34 EXTRABOLD with -0.8 tracking, reserved for exactly this — the one number a rep opens the app for.
+  // It was 34 bold, the right size at the wrong weight.
+  statValue: { ...theme.type.display, color: theme.color.inkNavy },
   statHintStale: { color: theme.color.amberText },
-  statHint: { fontFamily: theme.font.regular, fontSize: 13, color: theme.color.textSecondary },
+  statHint: { ...theme.type.small, color: theme.color.textSecondary },
   /* WRAPS. A role with all four surfaces put four flex:1 cards in one row, so at 320-360 dp "Log a
      visit" and "Contacts" squeezed to unreadable. minWidth forces the fourth onto a second line
      instead. */
@@ -259,17 +263,15 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: theme.space.sm,
   },
-  navLabel: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.textPrimary },
-  note: { fontFamily: theme.font.regular, fontSize: 13, color: theme.color.textSecondary },
+  navLabel: { ...theme.type.label, color: theme.color.textPrimary },
+  note: { ...theme.type.small, color: theme.color.textSecondary },
   scopeNote: {
     marginTop: theme.space.sm,
-    fontFamily: theme.font.regular,
-    fontSize: 12,
-    lineHeight: 18,
+    ...theme.type.small,
     color: theme.color.textSecondary,
   },
   signOut: {
     minHeight: 44,
     justifyContent: "center", marginTop: theme.space.lg, alignItems: "center", paddingVertical: theme.space.md },
-  signOutText: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.textSecondary },
+  signOutText: { ...theme.type.label, color: theme.color.textSecondary },
 });

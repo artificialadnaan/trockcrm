@@ -56,9 +56,10 @@ const styles = StyleSheet.create({
     marginLeft: theme.space.md,
     textAlign: "right",
     ...theme.type.caption,
-    // textSecondary, NOT textMuted — #8A95A3 is ~3:1 on white, under the 4.5:1 floor, and at 12px this
-    // is the ONLY thing on screen saying which office's numbers these are. Outdoors on a phone that is
-    // the first text to disappear. Same fix as the tab labels; this was the copy I missed.
+    // textSecondary (8.3:1 on surface), NOT textMuted (4.99:1) — this is the ONLY thing on screen
+    // saying which office's numbers these are, at 11px, and outdoors it is the first text to disappear.
+    // The ratios above are measured against the DARK surface; this comment used to cite ~3:1 "on white",
+    // which was true of the light theme and stopped being true when the app went dark.
     color: theme.color.textSecondary,
   },
   titleRow: {

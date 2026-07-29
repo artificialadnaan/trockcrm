@@ -7,6 +7,7 @@ import {
   leadFlagNextStep,
   isPositionTooCoarse,
   personDetailsWillBeDiscarded,
+  offersCompanyFallback,
   planContact,
   saveAnnouncement,
   submitBlockedReason,
@@ -452,7 +453,17 @@ describe("what VoiceOver is told when the capture reaches an outcome", () => {
     expect(
       saveAnnouncement({ ...base, saved: true, flagForLead: true, contactFailed: true }),
     ).toBe(
-      "Logged. Marked as worth a lead. Follow up with the office. That person couldn't be saved — add them on the web.",
+      "Logged. Marked as worth a lead. Follow up with the office — this doesn't reach them on its own yet. " +
+        "That person couldn't be saved — add them on the web.",
+    );
+  });
+
+  it("carries the lead flag's CAVEAT, not just the instruction", () => {
+    // "Follow up with the office" alone reads as "the office has been told". Nothing queries the
+    // marker yet, the screen says so, and the announcement has to say so too — otherwise the one
+    // person who cannot read the screen is the one person misled about it.
+    expect(saveAnnouncement({ ...base, saved: true, flagForLead: true })).toContain(
+      "this doesn't reach them on its own yet",
     );
   });
 
@@ -467,5 +478,40 @@ describe("what VoiceOver is told when the capture reaches an outcome", () => {
     // Answering the halt sets saved and clears the list, but the two are separate pieces of state; if
     // they are ever both set, "Logged" is the one that is true.
     expect(saveAnnouncement({ ...base, saved: true, duplicateCount: 2 })).toBe("Logged.");
+  });
+});
+
+describe("the company escape hatch, while a fix is being acquired", () => {
+  const base = { rejectedMatches: false, locationStatus: "idle" as const, matchPending: false };
+
+  it("is offered before the lookup starts", () => {
+    expect(offersCompanyFallback(base)).toBe(true);
+  });
+
+  it("STAYS offered while locating — the twelve seconds it used to disappear for", () => {
+    // The whole defect. The spinner replaced the card, the retry belongs to `unavailable`, and Save is
+    // blocked on `locating` too, so leaving the screen and losing the capture was the only way out.
+    expect(offersCompanyFallback({ ...base, locationStatus: "locating" })).toBe(true);
+  });
+
+  it("stays offered while the match lookup runs, which follows the fix without a gap", () => {
+    expect(offersCompanyFallback({ ...base, locationStatus: "ready", matchPending: true })).toBe(true);
+  });
+
+  it("withdraws once candidates are on screen", () => {
+    // The match list carries its own "None of these — attach to a company"; two links a line apart
+    // saying the same thing is its own defect.
+    expect(offersCompanyFallback({ ...base, locationStatus: "ready" })).toBe(false);
+  });
+
+  it("withdraws once the rep has already taken it", () => {
+    expect(offersCompanyFallback({ ...base, rejectedMatches: true })).toBe(false);
+    expect(offersCompanyFallback({ ...base, rejectedMatches: true, locationStatus: "locating" })).toBe(false);
+  });
+
+  it("leaves denied and unavailable to their own copy", () => {
+    // `denied` states the Settings path itself; `unavailable` falls through to the company block.
+    expect(offersCompanyFallback({ ...base, locationStatus: "denied" })).toBe(false);
+    expect(offersCompanyFallback({ ...base, locationStatus: "unavailable" })).toBe(false);
   });
 });

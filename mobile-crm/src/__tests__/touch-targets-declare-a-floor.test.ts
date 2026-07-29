@@ -35,6 +35,14 @@ import * as ts from "typescript";
  * WHAT IT ALLOWS: any of the element's styles reaching the floor — array forms, `({ pressed }) => [...]`
  * callbacks, and inline objects are all searched, because a control only has to be big once.
  *
+ * KNOWN LIMIT, stated because the fix above makes it conspicuous: `keysMeetingFloor` reads a
+ * StyleSheet ENTRY by looking for an explicit numeric `minHeight`/`height`, and does not follow a
+ * spread inside that entry. `{ minHeight: 44, ...someTokenWithAHeight }` would therefore be recorded
+ * as 44. Inline style objects in JSX are fully evaluated (see `possibleFloors`); definitions are not.
+ * The only spread-after-height in the tree today is `...theme.elevation.card` in `DealCard.shadow`,
+ * which is a shadow token carrying no height — checked by hand, not by this guard. Closing it properly
+ * means resolving `theme.*` paths across files, which is the same cross-file work `formStyles` needed.
+ *
  * SHARED STYLES: `src/theme/formStyles.ts` is read too, because it is the one module that hands finished
  * controls to other files — `formStyles.button` IS the login and change-password submit. Treating it as
  * unresolvable would have forced a duplicate `minHeight` into both screens, which is the duplication
@@ -145,81 +153,161 @@ function sharedFloorKeys(): Map<string, number> {
 }
 
 /**
- * Is this reference in a position that ALWAYS applies?
+ * Every height this style expression can resolve to at runtime.
  *
- * `style={[styles.small, selected && styles.big]}` used to pass because the walk found a floor
- * somewhere in the expression — but the floor only arrives when `selected` is true, so the ordinary
- * unselected control stayed undersized. The scope-pill and active-state arrays all over these screens
- * are exactly that shape. A floor that depends on state is not a floor.
+ * The previous version flattened the expression to a list of "declarations" plus a conditional flag,
+ * which could not express the ordinary case of choosing between two COMPLIANT styles:
+ * `style={on ? styles.active : styles.inactive}` with 44 on both marked each one conditional, found
+ * nothing unconditional, and failed a control that is 44pt on every path. A guard that rejects correct
+ * code gets deleted, so the model has to match how RN actually resolves a style.
+ *
+ * `null` in the returned set means "this path declares no height at all" — which fails, since the whole
+ * rule is that the floor must be DECLARED. The caller requires every outcome to be a number >= 44.
+ *
+ * Semantics mirrored from RN:
+ *   - an ARRAY flattens last-wins, so fold left to right and let a later entry replace an earlier one;
+ *   - `a ? b : c` is either branch;
+ *   - `cond && style` is that style OR nothing.
+ *
+ * `null` and UNKNOWN are DIFFERENT and conflating them was a hole. `null` means "this entry declares no
+ * height", so the previous value in the array stands — correct for `{ padding: 8 }`. UNKNOWN means "this
+ * entry could not be read", and it must POISON the result, because an unreadable trailing entry may be
+ * the last-wins override: `[styles.big, compactStyle()]` passed on `big`'s 44 while the call could
+ * return `{ minHeight: 32 }`. Anything this cannot resolve — a call, a bare identifier, a spread, a
+ * block-bodied callback, a style from a module it does not parse — is UNKNOWN and fails.
  */
-function isUnconditional(node: ts.Node, root: ts.Node): boolean {
-  for (let cur: ts.Node | undefined = node; cur && cur !== root; cur = cur.parent) {
-    const p: ts.Node | undefined = cur.parent;
-    if (!p) break;
-    // Statement-level branches too. `style={({pressed}) => { if (pressed) return styles.big; return
-    // styles.small; }}` is the same defect wearing a block body, and only expression forms were caught.
-    if (ts.isIfStatement(p) && (p.thenStatement === cur || p.elseStatement === cur)) return false;
-    if (ts.isCaseClause(p) || ts.isDefaultClause(p)) return false;
-    if (ts.isConditionalExpression(p) && (p.whenTrue === cur || p.whenFalse === cur)) return false;
-    if (ts.isBinaryExpression(p)) {
-      const k = p.operatorToken.kind;
-      if (
-        k === ts.SyntaxKind.AmpersandAmpersandToken ||
-        k === ts.SyntaxKind.BarBarToken ||
-        k === ts.SyntaxKind.QuestionQuestionToken
-      ) {
-        return false;
+/** "Could not be read" — distinct from "declares no height", which is `null`. */
+const UNKNOWN = Symbol("unknown-style");
+type Contribution = number | null | typeof UNKNOWN;
+function possibleFloors(
+  node: ts.Node,
+  heights: Map<string, number>,
+  owners: Set<string>,
+): Set<Contribution> {
+  const one = (v: Contribution): Set<Contribution> => new Set([v]);
+
+  // `style={...}` arrives as the JSX expression container, not the expression. The previous walker
+  // descended the whole subtree so it never had to know; a structural evaluator does.
+  if (ts.isJsxExpression(node)) {
+    return node.expression ? possibleFloors(node.expression, heights, owners) : one(null);
+  }
+  if (ts.isParenthesizedExpression(node)) return possibleFloors(node.expression, heights, owners);
+
+  if (ts.isArrayLiteralExpression(node)) {
+    let acc: Set<Contribution> = one(null);
+    for (const el of node.elements) {
+      const contribs = possibleFloors(el, heights, owners);
+      const next = new Set<Contribution>();
+      for (const prev of acc) {
+        for (const c of contribs) {
+          // A contribution of null is "this entry declares nothing", so the previous value stands.
+          next.add(c === null ? prev : c);
+        }
       }
+      acc = next;
     }
+    return acc;
+  }
+
+  if (ts.isConditionalExpression(node)) {
+    return new Set([
+      ...possibleFloors(node.whenTrue, heights, owners),
+      ...possibleFloors(node.whenFalse, heights, owners),
+    ]);
+  }
+
+  if (ts.isBinaryExpression(node)) {
+    const k = node.operatorToken.kind;
+    // `cond && style` — the style applies, or nothing does.
+    if (k === ts.SyntaxKind.AmpersandAmpersandToken) {
+      return new Set([null, ...possibleFloors(node.right, heights, owners)]);
+    }
+    if (k === ts.SyntaxKind.BarBarToken || k === ts.SyntaxKind.QuestionQuestionToken) {
+      return new Set([
+        ...possibleFloors(node.left, heights, owners),
+        ...possibleFloors(node.right, heights, owners),
+      ]);
+    }
+    return one(UNKNOWN);
+  }
+
+  if (ts.isArrowFunction(node) || ts.isFunctionExpression(node)) {
+    // `({ pressed }) => [...]` is read; a block body is not — see the note above.
+    return ts.isBlock(node.body) ? one(UNKNOWN) : possibleFloors(node.body, heights, owners);
+  }
+
+  if (ts.isPropertyAccessExpression(node) && ts.isIdentifier(node.expression)) {
+    const owner = node.expression.text;
+    const key = `${owner}.${node.name.text}`;
+    const declared = heights.get(key);
+    if (declared !== undefined) return one(declared);
+    // A style object this file DEFINES and whose entry declares no height contributes nothing. One it
+    // has never seen could declare anything, including a smaller override.
+    return one(owners.has(owner) ? null : UNKNOWN);
+  }
+
+  if (ts.isObjectLiteralExpression(node)) {
+    /**
+     * IN ORDER, and a spread counts.
+     *
+     * Skipping `SpreadAssignment` read `{ minHeight: 44, ...styles.compact }` as 44 when it is whatever
+     * `compact` says — and the walker this replaced followed that property access and rejected it, so
+     * the rewrite had quietly weakened the gate it was meant to tighten. Later keys win in JS exactly
+     * as later array entries do, so the same fold applies: a resolvable spread contributes its own
+     * height, an unresolvable one contributes UNKNOWN, and an explicit assignment after either of them
+     * overrides it.
+     */
+    let acc: Set<Contribution> = one(null);
+    const fold = (contribs: Set<Contribution>): void => {
+      const next = new Set<Contribution>();
+      for (const prev of acc) for (const c of contribs) next.add(c === null ? prev : c);
+      acc = next;
+    };
+    for (const prop of node.properties) {
+      if (ts.isSpreadAssignment(prop)) {
+        fold(possibleFloors(prop.expression, heights, owners));
+        continue;
+      }
+      if (!ts.isPropertyAssignment(prop)) {
+        // A shorthand or a computed key could be `minHeight` for all this can tell.
+        fold(one(UNKNOWN));
+        continue;
+      }
+      const name = ts.isIdentifier(prop.name) ? prop.name.text : prop.name.getText();
+      if (name !== "minHeight" && name !== "height") continue;
+      fold(one(ts.isNumericLiteral(prop.initializer) ? Number(prop.initializer.text) : UNKNOWN));
+    }
+    return acc;
+  }
+
+  // Everything else — a call, a bare identifier, a spread, an await. Unreadable, so unsafe.
+  return one(UNKNOWN);
+}
+
+/** Compliant only when EVERY path it can take declares at least the floor. */
+function declaresFloor(node: ts.Node, heights: Map<string, number>, owners: Set<string>): boolean {
+  const outcomes = possibleFloors(node, heights, owners);
+  if (outcomes.size === 0) return false;
+  for (const o of outcomes) {
+    if (o === UNKNOWN || o === null || o < FLOOR) return false;
   }
   return true;
 }
 
-/**
- * The height this style expression actually resolves to, or null when nothing declares one.
- *
- * RN flattens a style array LAST-WINS, so `[styles.big, styles.compact]` is 32 when `compact` says 32,
- * however large `big` is. An earlier version returned true on the first floor it met and never looked
- * further, which reported that pair as compliant. Declarations are therefore collected in SOURCE ORDER
- * and the last one decides.
- *
- * A CONDITIONAL declaration cannot raise the floor — it is absent when its condition is false — but it
- * can lower it, because when the condition holds it wins like any other. So a conditional entry counts
- * only when it is under the floor. That asymmetry is deliberate: both directions err toward reporting.
- */
-function resolvedFloor(node: ts.Node, heights: Map<string, number>): number | null {
-  const found: { value: number; conditional: boolean }[] = [];
+/** Variable names this file binds to a StyleSheet or a plain style object. */
+function styleOwners(sf: ts.SourceFile): Set<string> {
+  const owners = new Set<string>(["formStyles"]);
   const visit = (n: ts.Node): void => {
-    if (ts.isPropertyAccessExpression(n) && ts.isIdentifier(n.expression)) {
-      const value = heights.get(`${n.expression.text}.${n.name.text}`);
-      if (value !== undefined) found.push({ value, conditional: !isUnconditional(n, node) });
-    }
-    if (ts.isPropertyAssignment(n)) {
-      const name = ts.isIdentifier(n.name) ? n.name.text : n.name.getText();
-      if ((name === "minHeight" || name === "height") && ts.isNumericLiteral(n.initializer)) {
-        found.push({
-          value: Number(n.initializer.text),
-          conditional: !isUnconditional(n, node),
-        });
-      }
+    if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.initializer) {
+      const init = n.initializer;
+      const isSheet =
+        ts.isCallExpression(init) && init.expression.getText().endsWith("StyleSheet.create");
+      if (isSheet || ts.isObjectLiteralExpression(init)) owners.add(n.name.text);
     }
     ts.forEachChild(n, visit);
   };
-  visit(node);
-  if (found.length === 0) return null;
-
-  let floor: number | null = null;
-  for (const d of found) {
-    if (!d.conditional) floor = d.value;
-    // A conditional entry can only make things worse; when it applies, it is the last word.
-    else if (d.value < FLOOR) floor = d.value;
-  }
-  return floor;
-}
-
-function declaresFloor(node: ts.Node, heights: Map<string, number>): boolean {
-  const floor = resolvedFloor(node, heights);
-  return floor !== null && floor >= FLOOR;
+  visit(sf);
+  return owners;
 }
 
 function findings(file: string): string[] {
@@ -240,7 +328,7 @@ function findings(file: string): string[] {
         : undefined;
     if (open && CONTROL_TAGS.has(open.tagName.getText())) {
       const style = attr(open, "style");
-      const ok = style?.initializer ? declaresFloor(style.initializer, floorKeys) : false;
+      const ok = style?.initializer ? declaresFloor(style.initializer, floorKeys, styleOwners(sf)) : false;
       if (!ok) {
         const { line } = sf.getLineAndCharacterOfPosition(open.getStart(sf));
         hits.push(`${path.relative(ROOT, file)}:${line + 1}`);
@@ -276,7 +364,7 @@ describe("interactive controls declare a 44pt floor", () => {
             : undefined;
         if (open && CONTROL_TAGS.has(open.tagName.getText())) {
           const style = attr(open, "style");
-          if (!(style?.initializer && declaresFloor(style.initializer, floorKeys))) hits.push("hit");
+          if (!(style?.initializer && declaresFloor(style.initializer, floorKeys, styleOwners(sf)))) hits.push("hit");
         }
         ts.forEachChild(node, visit);
       };
@@ -363,6 +451,55 @@ describe("interactive controls declare a 44pt floor", () => {
           `${SHEET} const A = () => <Pressable style={({ pressed }) => { if (pressed) return styles.big; return styles.small; }} />;`,
         ),
       ).toBe(1);
+    });
+
+    it("accepts a choice between two COMPLIANT styles", () => {
+      // The false positive that forced this rewrite: both branches are 44, the control is 44pt on every
+      // path, and the old flat scan rejected it because neither declaration was unconditional. A guard
+      // that fails correct code gets deleted.
+      const BOTH =
+        "const styles = StyleSheet.create({ active: { minHeight: 44 }, inactive: { minHeight: 44 } });";
+      expect(check(`${BOTH} const A = () => <Pressable style={on ? styles.active : styles.inactive} />;`)).toBe(0);
+    });
+
+    it("still rejects a choice where only ONE branch is compliant", () => {
+      const MIXED =
+        "const styles = StyleSheet.create({ active: { minHeight: 44 }, inactive: { minHeight: 30 } });";
+      expect(check(`${MIXED} const A = () => <Pressable style={on ? styles.active : styles.inactive} />;`)).toBe(1);
+      expect(check(`${MIXED} const A = () => <Pressable style={on ? styles.inactive : styles.active} />;`)).toBe(1);
+    });
+
+    it("fails an UNREADABLE trailing entry rather than trusting the one before it", () => {
+      // [big, compactStyle()] passed on big's 44 while the call could return { minHeight: 32 } and win
+      // by last-wins. "declares nothing" and "cannot be read" had been the same value.
+      expect(check(`${SHEET} const A = () => <Pressable style={[styles.big, compactStyle()]} />;`)).toBe(1);
+      expect(check(`${SHEET} const A = () => <Pressable style={[styles.big, whatever]} />;`)).toBe(1);
+      expect(check(`${SHEET} const A = () => <Pressable style={[styles.big, ...rest]} />;`)).toBe(1);
+    });
+
+    it("still treats a KNOWN style with no height as declaring nothing", () => {
+      // The distinction that makes the rule above safe: styles.small is defined here and simply has no
+      // height, so it does not cancel the floor in front of it.
+      expect(check(`${SHEET} const A = () => <Pressable style={[styles.big, styles.small]} />;`)).toBe(0);
+    });
+
+    it("follows a spread into a style it can resolve", () => {
+      // The regression this rewrite introduced: the walker it replaced followed the property access
+      // and rejected the control; skipping SpreadAssignment read the explicit 44 and passed it.
+      const SHEET2 =
+        "const styles = StyleSheet.create({ big: { minHeight: 44 }, compact: { minHeight: 30 } });";
+      expect(check(`${SHEET2} const A = () => <Pressable style={[styles.big, { ...styles.compact }]} />;`)).toBe(1);
+      expect(check(`${SHEET2} const A = () => <Pressable style={{ minHeight: 44, ...{ minHeight: 32 } }} />;`)).toBe(1);
+    });
+
+    it("lets an explicit height after a spread win, as JS does", () => {
+      const SHEET2 =
+        "const styles = StyleSheet.create({ big: { minHeight: 44 }, compact: { minHeight: 30 } });";
+      expect(check(`${SHEET2} const A = () => <Pressable style={{ ...styles.compact, minHeight: 44 }} />;`)).toBe(0);
+    });
+
+    it("poisons an UNRESOLVABLE spread", () => {
+      expect(check(`${SHEET} const A = () => <Pressable style={{ minHeight: 44, ...extra }} />;`)).toBe(1);
     });
 
     it("scans TextInput too — a credential field is a touch target", () => {
