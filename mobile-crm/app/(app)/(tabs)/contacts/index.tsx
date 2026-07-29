@@ -292,6 +292,7 @@ const styles = StyleSheet.create({
   },
   retryText: { ...theme.type.body, color: theme.color.redText },
   search: {
+    minHeight: 44,
     margin: theme.space.lg,
     marginBottom: theme.space.sm,
     borderWidth: 1,

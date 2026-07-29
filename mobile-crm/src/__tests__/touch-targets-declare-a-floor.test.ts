@@ -23,7 +23,14 @@ import * as ts from "typescript";
  * rule two rules, one of which needs the font metrics this deliberately avoids. Keep the hitSlop where
  * it helps — it stacks — but declare the floor too.
  *
- * WHAT IT FLAGS: a Pressable/Touchable whose style declares no `minHeight`/`height` of at least 44.
+ * WHAT IT FLAGS: a control whose style declares no `minHeight`/`height` of at least 44.
+ *
+ * THE VERTICAL DIMENSION ONLY, and the name is a promise about that rather than about 44x44. Width is
+ * not checked because it is usually not declared: these controls are either full-width by `flex`, or
+ * content-width by `alignSelf`, and both are resolved by layout rather than by a style a static pass can
+ * read. Height is the dimension that was actually failing — an ~18pt back link is full-bleed wide — so
+ * this enforces the half that is both checkable and broken. A narrow icon-only control could still pass
+ * while under 44 across; there is none in this app today, and one would need `minWidth` written down.
  *
  * WHAT IT ALLOWS: any of the element's styles reaching the floor — array forms, `({ pressed }) => [...]`
  * callbacks, and inline objects are all searched, because a control only has to be big once.
@@ -63,14 +70,29 @@ function attr(el: ts.JsxOpeningElement | ts.JsxSelfClosingElement, name: string)
   return undefined;
 }
 
-const PRESSABLE_TAGS = new Set([
+/**
+ * Everything a finger is meant to land on.
+ *
+ * `TextInput` belongs here even though it takes no `onPress`: a credential field or a search box is a
+ * touch target like any other, and `formStyles.input` computed to about 43pt from padding alone — under
+ * the floor, and invisible to a guard that only looked at Pressables.
+ */
+const CONTROL_TAGS = new Set([
   "Pressable",
   "TouchableOpacity",
   "TouchableHighlight",
   "TouchableWithoutFeedback",
+  "TextInput",
 ]);
 
-/** Style keys in this file that declare a height floor of at least 44. */
+/**
+ * Style entries in this file that declare a height floor, QUALIFIED by the object that owns them.
+ *
+ * "styles.retryBtn", not "retryBtn". Matching on the bare key made every floor global: because
+ * `formStyles.button` contributes `button`, an unrelated local `styles.button` with no floor at all was
+ * silently accepted, and two local objects could shadow each other the same way. The owner is the
+ * variable the StyleSheet (or plain object) is assigned to, which is exactly what the JSX writes.
+ */
 function keysMeetingFloor(sf: ts.SourceFile): Set<string> {
   const keys = new Set<string>();
   const visit = (node: ts.Node): void => {
@@ -83,7 +105,9 @@ function keysMeetingFloor(sf: ts.SourceFile): Set<string> {
       ) {
         const entry = node.parent?.parent;
         if (entry && ts.isPropertyAssignment(entry)) {
-          keys.add(ts.isIdentifier(entry.name) ? entry.name.text : entry.name.getText());
+          const key = ts.isIdentifier(entry.name) ? entry.name.text : entry.name.getText();
+          const owner = owningVariable(entry);
+          if (owner) keys.add(`${owner}.${key}`);
         }
       }
     }
@@ -91,6 +115,14 @@ function keysMeetingFloor(sf: ts.SourceFile): Set<string> {
   };
   visit(sf);
   return keys;
+}
+
+/** The variable a style entry ultimately belongs to — `const styles = StyleSheet.create({ ... })`. */
+function owningVariable(entry: ts.Node): string | null {
+  for (let cur: ts.Node | undefined = entry.parent; cur; cur = cur.parent) {
+    if (ts.isVariableDeclaration(cur) && ts.isIdentifier(cur.name)) return cur.name.text;
+  }
+  return null;
 }
 
 /**
@@ -114,18 +146,53 @@ function sharedFloorKeys(): Set<string> {
   return (sharedCache = keysMeetingFloor(sf));
 }
 
-/** Does this style expression reach the floor — via a named style, or inline? */
+/**
+ * Is this reference in a position that ALWAYS applies?
+ *
+ * `style={[styles.small, selected && styles.big]}` used to pass because the walk found a floor
+ * somewhere in the expression — but the floor only arrives when `selected` is true, so the ordinary
+ * unselected control stayed undersized. The scope-pill and active-state arrays all over these screens
+ * are exactly that shape. A floor that depends on state is not a floor.
+ */
+function isUnconditional(node: ts.Node, root: ts.Node): boolean {
+  for (let cur: ts.Node | undefined = node; cur && cur !== root; cur = cur.parent) {
+    const p: ts.Node | undefined = cur.parent;
+    if (!p) break;
+    if (ts.isConditionalExpression(p) && (p.whenTrue === cur || p.whenFalse === cur)) return false;
+    if (ts.isBinaryExpression(p)) {
+      const k = p.operatorToken.kind;
+      if (
+        k === ts.SyntaxKind.AmpersandAmpersandToken ||
+        k === ts.SyntaxKind.BarBarToken ||
+        k === ts.SyntaxKind.QuestionQuestionToken
+      ) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+/** Does this style expression reach the floor unconditionally — via a named style, or inline? */
 function declaresFloor(node: ts.Node, floorKeys: Set<string>): boolean {
   let ok = false;
   const visit = (n: ts.Node): void => {
     if (ok) return;
-    if (ts.isPropertyAccessExpression(n) && floorKeys.has(n.name.text)) ok = true;
+    if (
+      ts.isPropertyAccessExpression(n) &&
+      ts.isIdentifier(n.expression) &&
+      floorKeys.has(`${n.expression.text}.${n.name.text}`) &&
+      isUnconditional(n, node)
+    ) {
+      ok = true;
+    }
     if (ts.isPropertyAssignment(n)) {
       const name = ts.isIdentifier(n.name) ? n.name.text : n.name.getText();
       if (
         (name === "minHeight" || name === "height") &&
         ts.isNumericLiteral(n.initializer) &&
-        Number(n.initializer.text) >= FLOOR
+        Number(n.initializer.text) >= FLOOR &&
+        isUnconditional(n, node)
       ) {
         ok = true;
       }
@@ -152,7 +219,7 @@ function findings(file: string): string[] {
       : ts.isJsxSelfClosingElement(node)
         ? node
         : undefined;
-    if (open && PRESSABLE_TAGS.has(open.tagName.getText())) {
+    if (open && CONTROL_TAGS.has(open.tagName.getText())) {
       const style = attr(open, "style");
       const ok = style?.initializer ? declaresFloor(style.initializer, floorKeys) : false;
       if (!ok) {
@@ -188,7 +255,7 @@ describe("interactive controls declare a 44pt floor", () => {
           : ts.isJsxSelfClosingElement(node)
             ? node
             : undefined;
-        if (open && PRESSABLE_TAGS.has(open.tagName.getText())) {
+        if (open && CONTROL_TAGS.has(open.tagName.getText())) {
           const style = attr(open, "style");
           if (!(style?.initializer && declaresFloor(style.initializer, floorKeys))) hits.push("hit");
         }
@@ -219,6 +286,41 @@ describe("interactive controls declare a 44pt floor", () => {
 
     it("finds the floor anywhere in an array — a control only has to be big once", () => {
       expect(check(`${SHEET} const A = () => <Pressable style={[styles.small, styles.big]} />;`)).toBe(0);
+    });
+
+    it("rejects a floor that only arrives in a CONDITIONAL branch", () => {
+      // `[styles.small, selected && styles.big]` used to pass, leaving the ordinary unselected control
+      // undersized — and active/inactive arrays are how every pill on these screens is written. A floor
+      // that depends on state is not a floor.
+      expect(
+        check(`${SHEET} const A = () => <Pressable style={[styles.small, on && styles.big]} />;`),
+      ).toBe(1);
+      expect(
+        check(`${SHEET} const A = () => <Pressable style={[styles.small, on ? styles.big : null]} />;`),
+      ).toBe(1);
+    });
+
+    it("still accepts a conditional style ALONGSIDE an unconditional floor", () => {
+      expect(
+        check(`${SHEET} const A = () => <Pressable style={[styles.big, on && styles.small]} />;`),
+      ).toBe(0);
+    });
+
+    it("does not let one object's floor vouch for another object's key", () => {
+      // `formStyles.button` contributes a floor; a local `styles.button` with none must still fail.
+      // Matching on the bare key made every floor global.
+      expect(
+        check(
+          "const formStyles = StyleSheet.create({ button: { minHeight: 44 } });" +
+            " const styles = StyleSheet.create({ button: { paddingVertical: 8 } });" +
+            " const A = () => <Pressable style={styles.button} />;",
+        ),
+      ).toBe(1);
+    });
+
+    it("scans TextInput too — a credential field is a touch target", () => {
+      expect(check(`${SHEET} const A = () => <TextInput style={styles.small} />;`)).toBe(1);
+      expect(check(`${SHEET} const A = () => <TextInput style={styles.big} />;`)).toBe(0);
     });
 
     it("looks inside a style CALLBACK, which is how the board cards are written", () => {

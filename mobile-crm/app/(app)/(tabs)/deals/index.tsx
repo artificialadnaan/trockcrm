@@ -360,6 +360,7 @@ const styles = StyleSheet.create({
   scopeText: { ...theme.type.label, color: theme.color.textSecondary },
   scopeTextActive: { color: theme.color.textPrimary },
   search: {
+    minHeight: 44,
     margin: theme.space.lg,
     marginBottom: theme.space.sm,
     borderWidth: 1,
