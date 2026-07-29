@@ -80,7 +80,7 @@ export function EmailRow({ email, onClick, onReassign, onUnassign }: EmailRowPro
                 variant="ghost"
                 size="icon"
                 className="h-7 w-7 flex-shrink-0"
-                aria-label="Email actions"
+                aria-label="More email actions"
                 onClick={(e) => e.stopPropagation()}
               >
                 <MoreHorizontal className="h-4 w-4" />

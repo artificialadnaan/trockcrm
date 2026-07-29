@@ -48,12 +48,17 @@ afterEach(() => {
 });
 
 function findButtonByLabel(label: RegExp) {
-  return Array.from(document.body.querySelectorAll<HTMLButtonElement>("button")).find((button) =>
+  // Scoped to the mounted container: the trigger button itself is not portaled (only
+  // DropdownMenuContent is), so this stays accurate without picking up a stray open menu
+  // left behind by another test.
+  return Array.from(container!.querySelectorAll<HTMLButtonElement>("button")).find((button) =>
     label.test(button.getAttribute("aria-label") ?? ""),
   ) ?? null;
 }
 
 function findMenuItem(label: RegExp) {
+  // Must stay scoped to `document` — DropdownMenuContent renders through a portal to
+  // document.body, so its menu items are never inside `container`.
   return Array.from(document.body.querySelectorAll<HTMLElement>('[role="menuitem"]')).find((item) =>
     label.test(item.textContent ?? ""),
   ) ?? null;
@@ -98,7 +103,7 @@ describe("EmailRow actions", () => {
     expect(onClick).not.toHaveBeenCalled();
   });
 
-  it("is keyboard-operable: Enter opens the item menu, Enter on a menu item activates it", () => {
+  it("Enter on a menu item activates it (trigger open is click-substituted — jsdom has no native button key→click default)", () => {
     const onReassign = vi.fn();
     const onClick = vi.fn();
     mount(<EmailRow email={email} onClick={onClick} onReassign={onReassign} onUnassign={vi.fn()} />);
