@@ -19,7 +19,14 @@ vi.mock("../../../server/src/modules/ai-copilot/intervention-manager-alerts-serv
   sendManagerAlertSummary: sendManagerAlertSummaryMock,
 }));
 
+// Bound to BOTH specifiers: the job resolves these dist-FIRST with a src fallback, and a mock
+// registered only against dist silently no-ops if the src branch is taken (the real module loads and
+// the spies see zero calls). See estimate-generation.test.ts for the full note.
 vi.mock("../../../server/dist/modules/ai-copilot/intervention-manager-alerts-service.js", () => ({
+  runManagerAlertPreview: runManagerAlertPreviewMock,
+  sendManagerAlertSummary: sendManagerAlertSummaryMock,
+}));
+vi.mock("../../../server/src/modules/ai-copilot/intervention-manager-alerts-service.js", () => ({
   runManagerAlertPreview: runManagerAlertPreviewMock,
   sendManagerAlertSummary: sendManagerAlertSummaryMock,
 }));
