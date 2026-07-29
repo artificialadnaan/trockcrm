@@ -197,6 +197,64 @@ interface ItemRow {
 }
 
 /**
+ * The oversight email's per-item read, exported so its SQL can be EXERCISED rather than string-matched.
+ *
+ * The worker's tests mock `query` by matching on substrings, which cannot tell a correct query from one that
+ * merely contains the right words — and this one carries the arithmetic the approver reads. Sharing the exact
+ * string with a runtime test that runs it on Postgres is what makes the counts verifiable; a test that
+ * re-typed the query would only prove the copy in the test file is right.
+ */
+export function correctiveActionItemsSql(tenantSchema: string): string {
+  return `SELECT ca.item_type, ca.item_ref, ca.item_label, ca.status, ca.responder_name,
+            -- A session responder with no first/last name stores a null responder_name but a non-null
+            -- email. Without this the notice reports WHEN a fix landed but not WHO filed it.
+            ca.responder_email, ca.responded_at,
+            ca.response_comment,
+            -- WHO signed this off, and when. The item row's responder columns describe the SUBMISSION; using
+            -- them for an approved item makes the audit notice read "Approved — <responder> · <their
+            -- submission time>", i.e. as though the responder approved their own work. The verdict lives on
+            -- the thread. Ordered by seq, not created_at: events written in one transaction share a
+            -- timestamp and the uuid PK is random.
+            -- name OR email, same rule the responder attribution uses: an approver with no display name
+            -- must still be identifiable, or the audit notice says an approval happened and not by whom.
+            (SELECT COALESCE(e.actor_name, e.actor_email)
+               FROM ${tenantSchema}.scorecard_corrective_action_events e
+              WHERE e.corrective_action_id = ca.id AND e.event_type = 'approved'
+              ORDER BY e.seq DESC LIMIT 1) AS approved_by,
+            (SELECT e.created_at FROM ${tenantSchema}.scorecard_corrective_action_events e
+              WHERE e.corrective_action_id = ca.id AND e.event_type = 'approved'
+              ORDER BY e.seq DESC LIMIT 1) AS approved_at,
+            -- Count only photos that are ACTUALLY renderable. Both other surfaces for this data apply the
+            -- same filter (the PDF loader and the CRM item read), so counting soft-deleted rows here would
+            -- have the email say "3 photos" while the attached PDF and the CRM both show 2.
+            --
+            -- ...and only the photos filed with the ATTEMPT this row describes. response_comment, responder
+            -- and responded_at all come from the latest submission, so an item-wide count put the newest
+            -- comment beside every photo the item ever collected: three from a rejected attempt plus one
+            -- rework photo read as "4 photos" attached to a one-photo response. The approver is deciding
+            -- whether the evidence supports the fix, so an inflated count argues for approval.
+            (SELECT COUNT(*)
+               FROM ${tenantSchema}.field_scorecard_photos p
+               JOIN ${tenantSchema}.files f ON f.id = p.file_id
+              WHERE p.corrective_action_id = ca.id
+                AND f.is_active = TRUE
+                AND f.deleted_at IS NULL
+                -- No thread (a pre-0202 card, or photos predating the event backfill) means the item-wide
+                -- set IS this attempt's set; with a thread, only what was filed WITH this attempt counts.
+                AND (latest_submission.id IS NULL
+                     OR p.corrective_action_event_id = latest_submission.id)) AS photo_count
+       FROM ${tenantSchema}.scorecard_corrective_actions ca
+       LEFT JOIN LATERAL (
+              SELECT e.id
+                FROM ${tenantSchema}.scorecard_corrective_action_events e
+               WHERE e.corrective_action_id = ca.id AND e.event_type = 'submitted'
+               ORDER BY e.seq DESC
+               LIMIT 1
+            ) latest_submission ON TRUE
+      WHERE ca.scorecard_id = $1::uuid`;
+}
+
+/**
  * Notify the oversight watchers that a corrective action opened or completed.
  *
  * Idempotency is the PHASE'S OWN STAMP (corrective_action_oversight_opened_at / _closed_at), never the cycle
@@ -401,39 +459,7 @@ export async function handleScorecardCorrectiveActionOversightEmail(
     return;
   }
 
-  const itemsResult = await query(
-    `SELECT ca.item_type, ca.item_ref, ca.item_label, ca.status, ca.responder_name,
-            -- A session responder with no first/last name stores a null responder_name but a non-null
-            -- email. Without this the notice reports WHEN a fix landed but not WHO filed it.
-            ca.responder_email, ca.responded_at,
-            ca.response_comment,
-            -- WHO signed this off, and when. The item row's responder columns describe the SUBMISSION; using
-            -- them for an approved item makes the audit notice read "Approved — <responder> · <their
-            -- submission time>", i.e. as though the responder approved their own work. The verdict lives on
-            -- the thread. Ordered by seq, not created_at: events written in one transaction share a
-            -- timestamp and the uuid PK is random.
-            -- name OR email, same rule the responder attribution uses: an approver with no display name
-            -- must still be identifiable, or the audit notice says an approval happened and not by whom.
-            (SELECT COALESCE(e.actor_name, e.actor_email)
-               FROM ${tenantSchema}.scorecard_corrective_action_events e
-              WHERE e.corrective_action_id = ca.id AND e.event_type = 'approved'
-              ORDER BY e.seq DESC LIMIT 1) AS approved_by,
-            (SELECT e.created_at FROM ${tenantSchema}.scorecard_corrective_action_events e
-              WHERE e.corrective_action_id = ca.id AND e.event_type = 'approved'
-              ORDER BY e.seq DESC LIMIT 1) AS approved_at,
-            -- Count only photos that are ACTUALLY renderable. Both other surfaces for this data apply the
-            -- same filter (the PDF loader and the CRM item read), so counting soft-deleted rows here would
-            -- have the email say "3 photos" while the attached PDF and the CRM both show 2.
-            (SELECT COUNT(*)
-               FROM ${tenantSchema}.field_scorecard_photos p
-               JOIN ${tenantSchema}.files f ON f.id = p.file_id
-              WHERE p.corrective_action_id = ca.id
-                AND f.is_active = TRUE
-                AND f.deleted_at IS NULL) AS photo_count
-       FROM ${tenantSchema}.scorecard_corrective_actions ca
-      WHERE ca.scorecard_id = $1::uuid`,
-    [scorecardId],
-  );
+  const itemsResult = await query(correctiveActionItemsSql(tenantSchema), [scorecardId]);
   // Ordered against the CURRENT action-item list, NOT item_ref. Reconciliation preserves an action item's
   // original ref across edits, so ref order is the OLD order after a reorder — and this email sits beside the
   // PDF it attaches and the deal thread it links to. All three rank through orderCorrectiveActions.

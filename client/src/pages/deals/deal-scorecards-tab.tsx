@@ -497,14 +497,40 @@ export function ScorecardDetailView({
   useEffect(() => {
     reviewedGeneration.current = detail.updatedAt;
   }, [detail.updatedAt]);
+  // A supersession 409 has to REFRESH, not just complain.
+  //
+  // The guards tell the reviewer to refresh, and there was nothing that did: collapsing and reopening the
+  // row re-fetches only when `detail` is null, so the reviewer stayed on the same stale generation and every
+  // retry returned the same 409 until they reloaded the page. A guard whose only escape hatch does not work
+  // is worse than no guard — it reads as the feature being broken. Refetching here puts them on the current
+  // version (and the effect above rebinds the generation), so the retry is the natural next click. The error
+  // still surfaces, because the reviewer must know their verdict did NOT land and must be re-formed against
+  // what they can now see.
+  const refreshOnSupersession = async <T,>(verdict: () => Promise<T>): Promise<T> => {
+    try {
+      return await verdict();
+    } catch (err) {
+      if (
+        isApiError(err) &&
+        err.status === 409 &&
+        (err.code === "CORRECTIVE_ACTION_CARD_SUPERSEDED" ||
+          err.code === "CORRECTIVE_ACTION_ATTEMPT_SUPERSEDED")
+      ) {
+        onApprovalChange?.();
+      }
+      throw err;
+    }
+  };
   const approve = dealId
     ? async (itemId: string) => {
-        const outcome = await approveCorrectiveActions(
+        const outcome = await refreshOnSupersession(() =>
+          approveCorrectiveActions(
           dealId,
           detail.id,
-          [itemId],
-          reviewedAttemptsOf(correctiveActions),
-          reviewedGeneration.current,
+            [itemId],
+            reviewedAttemptsOf(correctiveActions),
+            reviewedGeneration.current,
+          ),
         );
         reviewedGeneration.current = outcome.generation ?? reviewedGeneration.current;
         onApprovalChange?.();
@@ -515,13 +541,15 @@ export function ScorecardDetailView({
         // Same binding as approve: the reason has to land on the attempt that earned it. Without this a
         // rejecter looking at a stale page sends back work they never read, and restarts the responder's
         // cycle for a fault the responder may already have corrected.
-        const outcome = await rejectCorrectiveAction(
-          dealId,
-          detail.id,
-          itemId,
-          comment,
-          reviewedAttemptsOf(correctiveActions)[itemId],
-          reviewedGeneration.current,
+        const outcome = await refreshOnSupersession(() =>
+          rejectCorrectiveAction(
+            dealId,
+            detail.id,
+            itemId,
+            comment,
+            reviewedAttemptsOf(correctiveActions)[itemId],
+            reviewedGeneration.current,
+          ),
         );
         reviewedGeneration.current = outcome.generation ?? reviewedGeneration.current;
         onApprovalChange?.();
@@ -540,12 +568,14 @@ export function ScorecardDetailView({
           .filter((i) => i.status === "submitted")
           .map((i) => i.id);
         if (reviewed.length === 0) return;
-        const outcome = await approveCorrectiveActions(
-          dealId,
-          detail.id,
-          reviewed,
-          reviewedAttemptsOf(correctiveActions),
-          reviewedGeneration.current,
+        const outcome = await refreshOnSupersession(() =>
+          approveCorrectiveActions(
+            dealId,
+            detail.id,
+            reviewed,
+            reviewedAttemptsOf(correctiveActions),
+            reviewedGeneration.current,
+          ),
         );
         reviewedGeneration.current = outcome.generation ?? reviewedGeneration.current;
         onApprovalChange?.();

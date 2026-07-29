@@ -1,9 +1,17 @@
 // @vitest-environment jsdom
 import { act } from "react";
 import { createRoot } from "react-dom/client";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { CorrectiveActionItemView, FieldScorecardDetail } from "@trock-crm/shared/types";
 import { isRenderableSignatureDataUrl, typedSignatureFallback } from "@trock-crm/shared/types";
+const approveMock = vi.fn();
+const rejectMock = vi.fn();
+vi.mock("@/hooks/use-corrective-actions", () => ({
+  approveCorrectiveActions: (...args: unknown[]) => approveMock(...args),
+  rejectCorrectiveAction: (...args: unknown[]) => rejectMock(...args),
+}));
+
+import { ApiError } from "@/lib/api";
 import {
   buildCorrectiveActionLookup,
   correctiveActionStatusBadge,
@@ -363,5 +371,120 @@ describe("approval controls", () => {
     expect(isRejectionCommentValid("   ")).toBe(false);
     expect(isRejectionCommentValid("")).toBe(false);
     expect(isRejectionCommentValid("Re-torque and log the values.")).toBe(true);
+  });
+});
+
+describe("ScorecardDetailView supersession conflicts", () => {
+  it("REFETCHES the card when a verdict is refused as superseded, so the retry is not the same 409", async () => {
+    // The guards tell the reviewer to refresh and, until this, nothing did: collapsing and reopening the row
+    // re-fetches only when `detail` is null, so the reviewer stayed on the same stale generation and every
+    // retry produced the same 409 until they reloaded the page. A guard whose only escape hatch does not
+    // work reads as the feature being broken, which is how guards get removed.
+    approveMock.mockRejectedValueOnce(
+      new ApiError(409, {
+        message: "This scorecard changed after you opened it. Refresh to review the current version.",
+        code: "CORRECTIVE_ACTION_CARD_SUPERSEDED",
+      }),
+    );
+    const onApprovalChange = vi.fn();
+    const detail: FieldScorecardDetail = {
+      ...BASE_DETAIL,
+      status: "corrective_action_submitted",
+      updatedAt: "2026-06-30T12:00:00.000Z",
+      canApproveCorrectiveActions: true,
+      actionItems: ["Re-torque the anchors"],
+      correctiveActions: [
+        {
+          id: "ca-1",
+          itemType: "action_item",
+          itemRef: "0",
+          itemLabel: "Re-torque the anchors",
+          status: "submitted",
+          responseComment: "Done.",
+          respondedByUserId: null,
+          responderName: "Pat Manager",
+          responderEmail: null,
+          respondedAt: "2026-06-30T13:00:00.000Z",
+          photos: [],
+        } satisfies CorrectiveActionItemView,
+      ],
+    };
+
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <ScorecardDetailView detail={detail} dealId="deal-1" onApprovalChange={onApprovalChange} />,
+      );
+      await flush();
+    });
+
+    const approveButton = Array.from(container.querySelectorAll("button")).find(
+      (b) => b.textContent === "Approve",
+    );
+    expect(approveButton).toBeTruthy();
+    await act(async () => {
+      approveButton!.click();
+      await flush();
+    });
+
+    // The refresh fired...
+    expect(onApprovalChange).toHaveBeenCalled();
+    // ...AND the reviewer is told, because their verdict did not land and has to be re-formed against what
+    // they can now see. Silently refreshing would look like the click worked.
+    expect(container.innerHTML).toContain("Refresh to review the current version");
+
+    await act(async () => {
+      root.unmount();
+      await flush();
+    });
+  });
+
+  it("does NOT refetch on an unrelated failure — that would hide the error behind a reload", async () => {
+    approveMock.mockRejectedValueOnce(new ApiError(500, { message: "Something went wrong" }));
+    const onApprovalChange = vi.fn();
+    const detail: FieldScorecardDetail = {
+      ...BASE_DETAIL,
+      status: "corrective_action_submitted",
+      canApproveCorrectiveActions: true,
+      actionItems: ["Re-torque the anchors"],
+      correctiveActions: [
+        {
+          id: "ca-1",
+          itemType: "action_item",
+          itemRef: "0",
+          itemLabel: "Re-torque the anchors",
+          status: "submitted",
+          responseComment: "Done.",
+          respondedByUserId: null,
+          responderName: "Pat Manager",
+          responderEmail: null,
+          respondedAt: "2026-06-30T13:00:00.000Z",
+          photos: [],
+        } satisfies CorrectiveActionItemView,
+      ],
+    };
+
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <ScorecardDetailView detail={detail} dealId="deal-1" onApprovalChange={onApprovalChange} />,
+      );
+      await flush();
+    });
+    const approveButton = Array.from(container.querySelectorAll("button")).find(
+      (b) => b.textContent === "Approve",
+    );
+    await act(async () => {
+      approveButton!.click();
+      await flush();
+    });
+
+    expect(onApprovalChange).not.toHaveBeenCalled();
+    await act(async () => {
+      root.unmount();
+      await flush();
+    });
   });
 });
