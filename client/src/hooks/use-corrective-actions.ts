@@ -302,10 +302,12 @@ export async function rejectCorrectiveAction(
   scorecardId: string,
   itemId: string,
   comment: string,
+  /** The submission event on screen — a reject is as attempt-bound as an approve. */
+  reviewedAttempt?: string,
 ): Promise<ApprovalOutcomeView> {
   const res = await api<{ outcome: ApprovalOutcomeView }>(
     `/deals/${dealId}/scorecards/${scorecardId}/corrective-actions/${itemId}/reject`,
-    { method: "POST", json: { comment } },
+    { method: "POST", json: { comment, ...(reviewedAttempt ? { reviewedAttempt } : {}) } },
   );
   return res.outcome;
 }

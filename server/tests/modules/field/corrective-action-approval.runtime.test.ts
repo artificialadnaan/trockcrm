@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
-import { sql } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import {
   fieldScorecards,
   fieldScorecardItems,
@@ -447,5 +447,78 @@ describe("the event thread", () => {
       actor: APPROVER,
     });
     expect(outcome.changedItemIds).toEqual([itemId]);
+  });
+
+  it("REJECT is bound to the reviewed attempt too, not just approve", async () => {
+    // I bound approve and left reject on a status-only guard, which is the same defect wearing the other
+    // verb: with two approvers, one can hold attempt A open while the other rejects it and the responder
+    // files B. B is `submitted` as well, so a click on the stale page records A's reason against work nobody
+    // read AND restarts the responder's cycle for a fault they may already have fixed. A verdict binds to an
+    // ATTEMPT; which verdict it is does not change that.
+    const [itemId] = await seedAwaitingApproval(1);
+    const [reviewed] = await tdb
+      .insert(scorecardCorrectiveActionEvents)
+      .values({
+        correctiveActionId: itemId,
+        scorecardId: CARD,
+        eventType: "submitted",
+        actorName: "Pat Manager",
+        comment: "Attempt A.",
+      })
+      .returning({ id: scorecardCorrectiveActionEvents.id });
+    await tdb.insert(scorecardCorrectiveActionEvents).values({
+      correctiveActionId: itemId,
+      scorecardId: CARD,
+      eventType: "submitted",
+      actorName: "Pat Manager",
+      comment: "Attempt B.",
+    });
+
+    await expect(
+      rejectCorrectiveActionItem(tdb, {
+        scorecardId: CARD,
+        itemId,
+        comment: "Torque values still missing.",
+        actor: APPROVER,
+        reviewedAttempt: reviewed.id,
+      }),
+    ).rejects.toMatchObject({ statusCode: 409 });
+    // Nothing moved, and no reason was filed against B.
+    expect(await itemStatuses()).toEqual(["submitted"]);
+    const events = await tdb
+      .select({ eventType: scorecardCorrectiveActionEvents.eventType })
+      .from(scorecardCorrectiveActionEvents)
+      .where(eq(scorecardCorrectiveActionEvents.correctiveActionId, itemId));
+    expect(events.map((e) => e.eventType).filter((t) => t === "rejected")).toEqual([]);
+  });
+
+  it("rejects normally on the latest attempt, and for a client that sends nothing", async () => {
+    const [first, second] = await seedAwaitingApproval(2);
+    const [reviewed] = await tdb
+      .insert(scorecardCorrectiveActionEvents)
+      .values({
+        correctiveActionId: first,
+        scorecardId: CARD,
+        eventType: "submitted",
+        actorName: "Pat Manager",
+        comment: "The only attempt.",
+      })
+      .returning({ id: scorecardCorrectiveActionEvents.id });
+    const bound = await rejectCorrectiveActionItem(tdb, {
+      scorecardId: CARD,
+      itemId: first,
+      comment: "Log the values.",
+      actor: APPROVER,
+      reviewedAttempt: reviewed.id,
+    });
+    expect(bound.changedItemIds).toEqual([first]);
+
+    const older = await rejectCorrectiveActionItem(tdb, {
+      scorecardId: CARD,
+      itemId: second,
+      comment: "Log the values.",
+      actor: APPROVER,
+    });
+    expect(older.changedItemIds).toEqual([second]);
   });
 });

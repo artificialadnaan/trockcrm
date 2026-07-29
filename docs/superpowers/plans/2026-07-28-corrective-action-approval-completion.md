@@ -15,7 +15,7 @@
 ## Before you start
 
 ```bash
-cd /Users/adnaaniqbal/Developer/trockcrm/.claude/worktrees/corrective-action-approval
+cd "$(git rev-parse --show-toplevel)"   # run from this branch's worktree
 git fetch origin
 git rebase origin/main          # #973 merged as 60631ed2; expect conflicts in scorecard-pdf.ts
 npm run build --workspace=@trock-crm/shared
@@ -1045,7 +1045,8 @@ git commit -m "feat(scorecards): expose approval capability on the scorecard det
 export async function approveCorrectiveActions(dealId: string, scorecardId: string, itemIds?: string[]) {
   return api(`/deals/${dealId}/scorecards/${scorecardId}/corrective-actions/approve`, {
     method: "POST",
-    body: itemIds ? { itemIds } : {},
+    // `json`, not `body` — this codebase's api() serializes the former and passes the latter through raw.
+    json: itemIds ? { itemIds } : {},
   });
 }
 
@@ -1057,12 +1058,16 @@ export async function rejectCorrectiveAction(
 ) {
   return api(`/deals/${dealId}/scorecards/${scorecardId}/corrective-actions/${itemId}/reject`, {
     method: "POST",
-    body: { comment },
+    json: { comment },
   });
 }
 ```
 
 Omitting `itemIds` is approve-all — the server treats an absent list as "everything awaiting approval".
+
+As shipped this also carries `reviewedAttempts` (itemId → the submission event id on screen), so an item
+answered again between load and click 409s instead of being approved unseen. See Task 9's follow-up in the
+review thread; older clients that omit it keep the status-only behaviour.
 
 - [ ] **Step 2: Write the failing tests**
 
@@ -1071,10 +1076,10 @@ Omitting `itemIds` is approve-all — the server treats an absent list as "every
     // The control is UX; the 403 is the guarantee. But showing a button that always 403s trains people to
     // ignore errors, and showing it on an already-approved item invites a no-op that reads as a bug.
     const awaiting = { ...ITEM, status: "submitted" };
-    expect(shouldShowApprovalControls({ item: awaiting, canApprove: true })).toBe(true);
-    expect(shouldShowApprovalControls({ item: awaiting, canApprove: false })).toBe(false);
-    expect(shouldShowApprovalControls({ item: { ...ITEM, status: "approved" }, canApprove: true })).toBe(false);
-    expect(shouldShowApprovalControls({ item: { ...ITEM, status: "open" }, canApprove: true })).toBe(false);
+    expect(shouldShowApprovalControls(awaiting, true)).toBe(true);
+    expect(shouldShowApprovalControls(awaiting, false)).toBe(false);
+    expect(shouldShowApprovalControls({ ...ITEM, status: "approved" }, true)).toBe(false);
+    expect(shouldShowApprovalControls({ ...ITEM, status: "open" }, true)).toBe(false);
   });
 
   it("refuses an empty rejection comment before it reaches the server", () => {

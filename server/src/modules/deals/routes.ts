@@ -123,6 +123,7 @@ import {
   assertScorecardBelongsToDeal,
   parseApproveItemIds,
   parseReviewedAttempts,
+  parseReviewedAttempt,
   parseRejectionComment,
 } from "../field/corrective-action-approval-routes.js";
 import { approveAndNotify, rejectAndRestart } from "../field/corrective-action-approval.js";
@@ -2656,6 +2657,7 @@ router.post("/:id/scorecards/:scorecardId/corrective-actions/:itemId/reject", as
     await assertDealRouteAccess(req, req.params.id);
     const actor = assertCorrectiveActionApprover(req);
     const comment = parseRejectionComment(req.body);
+    const reviewedAttempt = parseReviewedAttempt(req.body);
     await assertScorecardBelongsToDeal(req.tenantDb!, req.params.id, req.params.scorecardId);
 
     if (!req.officeSlug) throw new AppError(500, "Office context not available");
@@ -2668,6 +2670,7 @@ router.post("/:id/scorecards/:scorecardId/corrective-actions/:itemId/reject", as
       itemId: req.params.itemId,
       comment,
       actor,
+      reviewedAttempt,
     });
     await req.commitTransaction!();
     // Refresh the artifact AFTER the commit, mirroring the responder route. A rejection advances the card's

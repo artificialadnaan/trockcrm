@@ -1031,6 +1031,21 @@ export function buildCorrectiveActionEmail(input: {
     ? `Changes requested: ${where} — corrective action returned`
     : `Corrective action required: ${where} — ${input.scoreText}`;
 
+  // Everything the reader actually sees has to agree with that subject. A returned card whose body still
+  // opens "came in below standard… please document the corrective action taken" reads as a duplicate of the
+  // first request, so the responder has no way to tell a re-send from a rework — and the one thing they need
+  // (what the approver asked for) looks like decoration next to it.
+  const heading = isReturn ? "Changes Requested" : "Corrective Action Required";
+  const leadIn = isReturn
+    ? `Your corrective action for <strong>${escapeHtml(input.dealName)}</strong>${input.projectNumber ? ` (${escapeHtml(input.projectNumber)})` : ""} was reviewed and sent back. Please address the comments below and resubmit:`
+    : `A field scorecard for <strong>${escapeHtml(input.dealName)}</strong>${input.projectNumber ? ` (${escapeHtml(input.projectNumber)})` : ""} came in below standard (${escapeHtml(input.scoreText)}${input.ratingLabel ? ` · ${escapeHtml(input.ratingLabel)}` : ""}). Please document the corrective action taken for each flagged item:`;
+  const textLeadIn = isReturn
+    ? `Your corrective action for ${input.dealName}${input.projectNumber ? ` (${input.projectNumber})` : ""} was reviewed and sent back. ` +
+      `Please address the comments below and resubmit:`
+    : `A field scorecard for ${input.dealName}${input.projectNumber ? ` (${input.projectNumber})` : ""} came in below standard ` +
+      `(${input.scoreText}${input.ratingLabel ? ` · ${input.ratingLabel}` : ""}). Please document the corrective action taken for each flagged item:`;
+  const cta = isReturn ? "Update Corrective Action" : "Document Corrective Action";
+
   // The reason is bounded for the same reason the oversight email bounds its comments: nothing caps an
   // approver's comment length, and a long one would push the CTA past where mail clients clip.
   const reason = (f: FlaggedItem) => {
@@ -1068,7 +1083,7 @@ export function buildCorrectiveActionEmail(input: {
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Corrective action required</title>
+  <title>${heading}</title>
 </head>
 <body style="margin:0;padding:0;background-color:#f4f4f5;">
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#f4f4f5;">
@@ -1083,19 +1098,19 @@ export function buildCorrectiveActionEmail(input: {
           </tr>
           <tr>
             <td align="center" style="padding:4px 24px 0 24px;">
-              <h1 style="margin:0;font-family:Arial,Helvetica,sans-serif;font-size:20px;line-height:26px;color:#111111;font-weight:bold;">Corrective Action Required</h1>
+              <h1 style="margin:0;font-family:Arial,Helvetica,sans-serif;font-size:20px;line-height:26px;color:#111111;font-weight:bold;">${heading}</h1>
             </td>
           </tr>
           <tr>
             <td style="padding:12px 28px 0 28px;">
               <p style="margin:0;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:20px;color:#111111;">Hi ${escapeHtml(input.recipientName)},</p>
-              <p style="margin:12px 0 0 0;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:20px;color:#111111;">A field scorecard for <strong>${escapeHtml(input.dealName)}</strong>${input.projectNumber ? ` (${escapeHtml(input.projectNumber)})` : ""} came in below standard (${escapeHtml(input.scoreText)}${input.ratingLabel ? ` · ${escapeHtml(input.ratingLabel)}` : ""}). Please document the corrective action taken for each flagged item:</p>
+              <p style="margin:12px 0 0 0;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:20px;color:#111111;">${leadIn}</p>
               ${htmlItems}
             </td>
           </tr>
           <tr>
             <td align="center" style="padding:24px;">
-              <a href="${safeLink}" style="display:inline-block;background-color:#CC0000;color:#ffffff;font-family:Arial,Helvetica,sans-serif;font-size:15px;font-weight:bold;line-height:44px;text-align:center;text-decoration:none;width:280px;border-radius:4px;">Document Corrective Action</a>
+              <a href="${safeLink}" style="display:inline-block;background-color:#CC0000;color:#ffffff;font-family:Arial,Helvetica,sans-serif;font-size:15px;font-weight:bold;line-height:44px;text-align:center;text-decoration:none;width:280px;border-radius:4px;">${cta}</a>
             </td>
           </tr>
           <tr>
@@ -1111,12 +1126,11 @@ export function buildCorrectiveActionEmail(input: {
 </html>`;
 
   const text =
-    `Corrective action required\n\n` +
+    `${heading}\n\n` +
     `Hi ${input.recipientName},\n\n` +
-    `A field scorecard for ${input.dealName}${input.projectNumber ? ` (${input.projectNumber})` : ""} came in below standard ` +
-    `(${input.scoreText}${input.ratingLabel ? ` · ${input.ratingLabel}` : ""}). Please document the corrective action taken for each flagged item:\n\n` +
+    `${textLeadIn}\n\n` +
     `${itemsList}\n\n` +
-    `Document the corrective action: ${input.link}`;
+    `${isReturn ? "Update the corrective action" : "Document the corrective action"}: ${input.link}`;
 
   return { subject, html, text };
 }

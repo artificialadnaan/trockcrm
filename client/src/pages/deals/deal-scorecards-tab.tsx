@@ -498,7 +498,16 @@ export function ScorecardDetailView({
     : undefined;
   const reject = dealId
     ? async (itemId: string, comment: string) => {
-        await rejectCorrectiveAction(dealId, detail.id, itemId, comment);
+        // Same binding as approve: the reason has to land on the attempt that earned it. Without this a
+        // rejecter looking at a stale page sends back work they never read, and restarts the responder's
+        // cycle for a fault the responder may already have corrected.
+        await rejectCorrectiveAction(
+          dealId,
+          detail.id,
+          itemId,
+          comment,
+          reviewedAttemptsOf(correctiveActions)[itemId],
+        );
         onApprovalChange?.();
       }
     : undefined;

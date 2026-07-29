@@ -693,14 +693,23 @@ describe("corrective-action page-break safety", () => {
       ],
     });
 
-    expect(data.correctiveActions[0].events?.map((e) => e.eventType)).toEqual([
-      "submitted",
-      "rejected",
-      "submitted",
-      "approved",
-    ]);
     const pdf = await renderFieldScorecardPdf(data);
-    expect(pdf.subarray(0, 5).toString("latin1")).toBe("%PDF-");
+    const text = renderedTextFromPdf(pdf);
+
+    // Assert against the DRAWN text, not the builder passthrough. Checking `data.events` proves only that
+    // the mapper copied its input, and `%PDF-` proves only that PDFKit produced a file — both stay green if
+    // the renderer never draws a single event. The whole claim of this test is that the reader of the
+    // finished document can see what was sent back, so the finished document is what it has to read.
+    expect(text).toContain("Rejected by James Helms");
+    expect(text).toContain("Torque values not documented.");
+    // ...and both attempts, in order, around it — the first is what the item row itself no longer holds.
+    expect(text).toContain("Tightened.");
+    expect(text).toContain("Re-torqued to spec, values logged.");
+    expect(text).toContain("Approved by James Helms");
+    expect(text.indexOf("Tightened.")).toBeLessThan(text.indexOf("Torque values not documented."));
+    expect(text.indexOf("Torque values not documented.")).toBeLessThan(
+      text.indexOf("Re-torqued to spec, values logged."),
+    );
   });
 
   it("spends the photo budget across THREAD entries, and never draws the aggregate twice", () => {

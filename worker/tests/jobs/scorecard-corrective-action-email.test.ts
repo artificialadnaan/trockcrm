@@ -2020,5 +2020,50 @@ describe("scorecard corrective-action notification email", () => {
     expect(sent.length).toBeGreaterThan(0);
     expect(sent[0].subject).toMatch(/changes requested/i);
     expect(sent[0].html).toContain("Torque values were not documented.");
+    // ...and the BODY has to agree with that subject — see the next test for why.
+    expect(sent[0].html).toContain("Changes Requested");
+    expect(sent[0].html).not.toContain("came in below standard");
+  });
+
+  it("a returned card's heading, lead-in and CTA read as a return, not as a fresh request", () => {
+    // The subject switched on isReturn while the <title>, <h1>, lead-in paragraph, CTA button and the whole
+    // text part stayed hardcoded to the first-request wording. So a rework arrived titled "Changes
+    // requested" over a body saying the scorecard "came in below standard… please document the corrective
+    // action taken" — indistinguishable from the original email, with the approver's actual instruction
+    // buried in a bullet. Subject-only branching is not a branch; it is a label on unchanged content.
+    const base = {
+      recipientName: "Pat Manager",
+      dealName: "Riverfront Tower",
+      projectNumber: "24-118",
+      scoreText: "23/50",
+      ratingLabel: "Corrective action",
+      link: "https://trockcrm.com/field/corrective-actions?token=x",
+    };
+    const returned = buildCorrectiveActionEmail({
+      ...base,
+      flagged: [
+        { itemType: "action_item", itemLabel: "Anchors", status: "rejected", latestRejection: "Missing torque values." },
+      ],
+    });
+    const first = buildCorrectiveActionEmail({
+      ...base,
+      flagged: [{ itemType: "action_item", itemLabel: "Anchors", status: "open", latestRejection: null }],
+    });
+
+    for (const part of [returned.html, returned.text]) {
+      expect(part).toContain("Changes Requested");
+      expect(part).toContain("was reviewed and sent back");
+      expect(part).not.toContain("came in below standard");
+      expect(part).not.toContain("Corrective Action Required");
+    }
+    expect(returned.html).toContain("Update Corrective Action");
+    expect(returned.text).toContain("Update the corrective action:");
+
+    // The first request is untouched by the branch.
+    for (const part of [first.html, first.text]) {
+      expect(part).toContain("came in below standard");
+      expect(part).not.toContain("was reviewed and sent back");
+    }
+    expect(first.html).toContain("Document Corrective Action");
   });
 });

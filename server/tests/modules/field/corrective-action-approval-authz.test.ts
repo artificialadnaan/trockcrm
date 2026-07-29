@@ -5,6 +5,8 @@ import {
   canApproveCorrectiveActions,
   parseApproveItemIds,
   parseRejectionComment,
+  parseReviewedAttempt,
+  parseReviewedAttempts,
   MAX_REJECTION_COMMENT_LENGTH,
 } from "../../../src/modules/field/corrective-action-approval-routes.js";
 
@@ -100,6 +102,24 @@ describe("request parsing", () => {
     expect(parseRejectionComment({ comment: "x".repeat(MAX_REJECTION_COMMENT_LENGTH) })).toHaveLength(
       MAX_REJECTION_COMMENT_LENGTH,
     );
+  });
+
+  it("parses the reviewed attempt both verbs send, and rejects a malformed one", () => {
+    // Approve sends a map (it can act on several items at once); reject sends one id (its item is in the
+    // URL). Both feed the same supersession guard, so both parsers have to agree on what "absent" means:
+    // undefined, which is the signal that turns the guard OFF for older clients. A blank string is absent,
+    // not a value — treating "" as a reviewed attempt would compare it against a real event id and 409 every
+    // rejection a slightly-off client sent.
+    expect(parseReviewedAttempt({ reviewedAttempt: "  ev-1  " })).toBe("ev-1");
+    for (const absent of [undefined, null, "", "   "]) {
+      expect(parseReviewedAttempt({ reviewedAttempt: absent })).toBeUndefined();
+    }
+    expect(() => parseReviewedAttempt({ reviewedAttempt: 42 })).toThrow(/reviewedAttempt/i);
+
+    expect(parseReviewedAttempts({ reviewedAttempts: { "item-1": " ev-1 " } })).toEqual({ "item-1": "ev-1" });
+    expect(parseReviewedAttempts({ reviewedAttempts: {} })).toBeUndefined();
+    expect(parseReviewedAttempts({})).toBeUndefined();
+    expect(() => parseReviewedAttempts({ reviewedAttempts: ["ev-1"] })).toThrow(/reviewedAttempts/i);
   });
 
   it("NEVER discloses the allowlist itself — only the boolean", () => {

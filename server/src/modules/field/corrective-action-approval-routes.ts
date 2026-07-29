@@ -123,6 +123,21 @@ export { approveCorrectiveActionItems, rejectCorrectiveActionItem };
  * Optional: an older client sends nothing and the server falls back to status-only checking, which is the
  * behaviour that shipped before. Shape-validated rather than trusted — it reaches a WHERE clause.
  */
+/**
+ * The single submission event a REJECT was filed against — the one-item form of `parseReviewedAttempts`.
+ *
+ * Reject takes its item from the URL, so the map shape would carry one always-redundant key; the guard it
+ * feeds is shared with approve either way.
+ */
+export function parseReviewedAttempt(body: unknown): string | undefined {
+  const raw = (body as { reviewedAttempt?: unknown } | null | undefined)?.reviewedAttempt;
+  if (raw == null) return undefined;
+  if (typeof raw !== "string") {
+    throw new AppError(400, "reviewedAttempt must be the submission event id you reviewed.");
+  }
+  return raw.trim() || undefined;
+}
+
 export function parseReviewedAttempts(body: unknown): Record<string, string> | undefined {
   const raw = (body as { reviewedAttempts?: unknown } | null | undefined)?.reviewedAttempts;
   if (raw == null) return undefined;

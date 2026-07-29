@@ -212,26 +212,7 @@ export async function approveCorrectiveActionItems(
     if (stray.length > 0) throw new AppError(404, "Corrective-action item not found on this scorecard.");
   }
 
-  // Refuse any target whose latest submission is NOT the one the approver reviewed.
-  //
-  // Item ids bind the approval to the right ITEMS but not the right ATTEMPT: one approver can load submission
-  // A, another reject it, the responder submit B — and the first approver's click then approves B, which they
-  // never saw. The id and the status are identical across both, so only the submission event distinguishes
-  // them. Skipped entirely when the client sends nothing, so an older build keeps working.
-  if (input.reviewedAttempts && Object.keys(input.reviewedAttempts).length > 0) {
-    const latestByItem = await latestSubmissionByItem(tx, targetIds);
-    for (const itemId of targetIds) {
-      const reviewed = input.reviewedAttempts[itemId];
-      const latest = latestByItem.get(itemId);
-      if (reviewed && latest && latest !== reviewed) {
-        throw new AppError(
-          409,
-          "This item was answered again after you opened it. Refresh to review the new response.",
-          "CORRECTIVE_ACTION_ATTEMPT_SUPERSEDED",
-        );
-      }
-    }
-  }
+  await assertReviewedAttemptsAreLatest(tx, targetIds, input.reviewedAttempts);
 
   const changedItemIds: string[] = [];
   for (const itemId of targetIds) {
@@ -294,7 +275,14 @@ export async function approveCorrectiveActionItems(
  */
 export async function rejectCorrectiveActionItem(
   tx: TenantDb,
-  input: { scorecardId: string; itemId: string; comment: string; actor: ApprovalActor },
+  input: {
+    scorecardId: string;
+    itemId: string;
+    comment: string;
+    actor: ApprovalActor;
+    /** The submission event the rejecter reviewed. Omitted by older clients. */
+    reviewedAttempt?: string;
+  },
 ): Promise<ApprovalOutcome> {
   const comment = input.comment?.trim();
   if (!comment) {
@@ -306,6 +294,11 @@ export async function rejectCorrectiveActionItem(
   if (!target) throw new AppError(404, "Corrective-action item not found on this scorecard.");
   const currentStatus = await readCardStatus(tx, input.scorecardId);
   assertCardNotFinished(currentStatus);
+  await assertReviewedAttemptsAreLatest(
+    tx,
+    [input.itemId],
+    input.reviewedAttempt ? { [input.itemId]: input.reviewedAttempt } : undefined,
+  );
 
   const updated = await tx
     .update(scorecardCorrectiveActions)
@@ -407,6 +400,7 @@ export async function rejectAndRestart(
     itemId: string;
     comment: string;
     actor: ApprovalActor;
+    reviewedAttempt?: string;
   },
 ): Promise<ApprovalOutcome> {
   const outcome = await rejectCorrectiveActionItem(tx, {
@@ -414,6 +408,7 @@ export async function rejectAndRestart(
     itemId: input.itemId,
     comment: input.comment,
     actor: input.actor,
+    reviewedAttempt: input.reviewedAttempt,
   });
 
   // Restart whenever an item ACTUALLY moved to `rejected` — not only when the CARD transitioned back to
@@ -479,6 +474,39 @@ export async function approveAndNotify(
 }
 
 /** The most recent `submitted` event per item — what an approval must be pinned to. */
+/**
+ * Refuse any target whose latest submission is NOT the one the reviewer had on screen.
+ *
+ * Item ids bind a verdict to the right ITEMS but not the right ATTEMPT: one approver can load submission A,
+ * another reject it, the responder submit B — and the first approver's click then lands on B, which they never
+ * saw. The id and the status are identical across both, so only the submission event distinguishes them. That
+ * is true of REJECT exactly as it is of approve — a stale reject records an outdated reason against unseen
+ * work and restarts the responder's cycle for a fault they may already have fixed — so both verbs go through
+ * here rather than one carrying the check and the other being remembered later.
+ *
+ * Skipped entirely when the client sends nothing, so an older build keeps working rather than failing every
+ * verdict.
+ */
+async function assertReviewedAttemptsAreLatest(
+  tx: TenantDb,
+  targetIds: string[],
+  reviewedAttempts: ReviewedAttempts | undefined,
+): Promise<void> {
+  if (!reviewedAttempts || Object.keys(reviewedAttempts).length === 0) return;
+  const latestByItem = await latestSubmissionByItem(tx, targetIds);
+  for (const itemId of targetIds) {
+    const reviewed = reviewedAttempts[itemId];
+    const latest = latestByItem.get(itemId);
+    if (reviewed && latest && latest !== reviewed) {
+      throw new AppError(
+        409,
+        "This item was answered again after you opened it. Refresh to review the new response.",
+        "CORRECTIVE_ACTION_ATTEMPT_SUPERSEDED",
+      );
+    }
+  }
+}
+
 async function latestSubmissionByItem(
   tx: TenantDb,
   itemIds: string[],
