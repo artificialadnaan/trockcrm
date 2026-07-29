@@ -14,7 +14,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Loader2, Pencil, Plus, Trash2 } from "lucide-react";
-import { formatCurrency, currentContractValue, combinedChangeOrderTotal } from "@/lib/deal-utils";
+import { formatCurrency, currentContractValue, combinedChangeOrderTotal, cents } from "@/lib/deal-utils";
 import {
   addDealChangeOrder,
   updateDealChangeOrder,
@@ -23,24 +23,10 @@ import {
   type DealChangeOrder,
 } from "@/hooks/use-deals";
 
-/**
- * Snap a float sum of 2-decimal money strings back onto a cent boundary.
- *
- * currentContractValue / combinedChangeOrderTotal are plain parseFloat additions, so a deductive CO
- * that exactly cancels the contract value lands a hair off zero (2.9 + 0.7 - 3.6 === -4.4e-16). That
- * is `< 0`, which would paint a break-even contract value red and read "-$0". Every sign test on this
- * card goes through here. Exact at the NUMERIC(14,2) ceiling: 999,999,999,999.99 * 100 is still a
- * safe integer, and 2-decimal inputs can never produce the half-cent tie that Math.round breaks
- * toward +∞.
- *
- * The `=== 0` branch collapses -0 onto 0: rounding a tiny negative gives -0, which Intl renders as
- * "-$0" — a minus sign on a break-even value, which is the same misreading in text that the colour
- * fix removes.
- */
-const cents = (n: number) => {
-  const rounded = Math.round(n * 100) / 100;
-  return rounded === 0 ? 0 : rounded;
-};
+// cents() lives in @/lib/deal-utils next to currentContractValue / combinedChangeOrderTotal — the very
+// helpers whose plain parseFloat additions it snaps back onto a cent boundary. Every sign test on this
+// card goes through it: a deductive CO that exactly cancels the contract value lands a hair off zero
+// (2.9 + 0.7 - 3.6 === -4.4e-16), which is `< 0` and would paint a break-even value red and read "-$0".
 
 interface DealEstimatesCardProps {
   deal: Deal;

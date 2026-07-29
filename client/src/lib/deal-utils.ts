@@ -26,6 +26,28 @@ export function sanitizeHubspotDealIdentifiers(
 }
 
 /**
+ * Snap a float sum/difference of 2-decimal money values back onto a cent boundary.
+ *
+ * Money reaches the client as 2-decimal strings/numbers and is then added with plain `+`, so any
+ * chain that mixes signs (a deductive change order, or a residual computed as the difference of two
+ * independently grouped sums) lands a hair off the true value: `2.9 + 0.7 - 3.6 === -4.4e-16`, and
+ * `360000.04 - (240000.01 + 120000.03) === -5.8e-11`. That noise is `< 0` and `!== 0`, so any sign
+ * test on the raw number lies -- painting a break-even contract value red, or inventing an
+ * "Unassigned" residual row for a fully attributed book. Put the value through here BEFORE any sign
+ * comparison or zero test.
+ *
+ * Exact at the NUMERIC(14,2) ceiling: 999,999,999,999.99 * 100 is still a safe integer, and
+ * 2-decimal inputs can never produce the half-cent tie that Math.round breaks toward +inf.
+ *
+ * The `=== 0` branch collapses -0 onto 0: rounding a tiny negative gives -0, which Intl renders as
+ * "-$0" -- a minus sign on a break-even value, the same misreading in text that the sign fix removes.
+ */
+export function cents(n: number): number {
+  const rounded = Math.round(n * 100) / 100;
+  return rounded === 0 ? 0 : rounded;
+}
+
+/**
  * Format a numeric string as currency (USD).
  */
 export function formatCurrency(value: string | number | null | undefined): string {

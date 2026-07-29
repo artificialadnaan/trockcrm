@@ -8,7 +8,7 @@ import {
 } from "@/hooks/use-director-dashboard";
 import { useRepPerformance, type RepPerformancePeriodKind, type RepPerformanceSnapshotRow } from "@/hooks/use-rep-performance";
 import { useKeepPreviousData } from "@/hooks/use-keep-previous-data";
-import { formatCurrencyCompact } from "@/lib/deal-utils";
+import { formatCurrencyCompact, cents } from "@/lib/deal-utils";
 import {
   Activity,
   AlertTriangle,
@@ -589,7 +589,13 @@ export function DirectorDashboardPage() {
   // table/CSV stopped summing to the Closed KPI, which is the whole point of this row. The COUNT keeps
   // its clamp: a negative headcount is meaningless (and it cannot go negative anyway -- the per-rep
   // groups are a subset of the same canonical getCanonicalRepWonSummary query behind the card).
-  const unassignedClosedValue = (closedValue ?? 0) - repCardsClosedTotal;
+  // FLOAT NOISE: the residual subtracts two INDEPENDENTLY grouped Number sums, so with fractional-dollar
+  // values they disagree in the last bits (360000.04 - (240000.01 + 120000.03) === -5.8e-11). An exact
+  // `!== 0` on that invents an Unassigned row for a fully attributed book and prints it through Intl as a
+  // signed "-$0". cents() snaps the residual onto a cent boundary (and collapses -0 onto 0) BEFORE the
+  // zero test, which kills the phantom row without clamping: a real one-cent residual still surfaces, and
+  // a real negative one keeps its sign.
+  const unassignedClosedValue = cents((closedValue ?? 0) - repCardsClosedTotal);
   const unassignedWins = Math.max(0, (closedCount ?? 0) - repCardsWinsTotal);
   const hasUnassignedWon = unassignedClosedValue !== 0 || unassignedWins > 0;
   // Wave 1 (P1-6): the forecast reads the director payload's live forecastVsGoal (active-

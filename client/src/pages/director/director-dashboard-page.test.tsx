@@ -893,6 +893,67 @@ describe("DirectorDashboardPage", () => {
     }
   });
 
+  it("does not invent a phantom Unassigned row out of float noise in the Closed residual", async () => {
+    // The residual is a subtraction of two INDEPENDENTLY grouped Number sums. With fractional-dollar
+    // values (deductive change orders put cents on the wire) the two can disagree in the last bits:
+    // 360000.04 - (240000.01 + 120000.03) === -5.820766091346741e-11, not 0. An exact `!== 0` test
+    // then invents an Unassigned row for a book where EVERY Won deal is assigned, and prints it via
+    // Intl as a signed "-$0". Snap the monetary residual to cents before deciding the row exists.
+    mocks.useDirectorDashboardMock.mockReturnValue({
+      ...mocks.useDirectorDashboardMock(),
+      data: {
+        ...mocks.useDirectorDashboardMock().data,
+        repCards: [
+          { ...mocks.useDirectorDashboardMock().data.repCards[0], closedValue: 240000.01 },
+          { ...mocks.useDirectorDashboardMock().data.repCards[1], closedValue: 120000.03 },
+        ],
+        scopeSummary: {
+          ...mocks.useDirectorDashboardMock().data.scopeSummary,
+          // Same 6 wins as the rep cards, and the SAME dollars -- only the float path differs.
+          won: { count: 6, totalValue: 360000.04 },
+        },
+      },
+    });
+    // Pin the premise: this fixture really does produce float noise, so the test cannot pass by
+    // accident on clean integers.
+    expect(360000.04 - (240000.01 + 120000.03)).not.toBe(0);
+
+    const { container, cleanup } = await renderPageDom();
+
+    try {
+      expect(container.querySelector("[data-testid='rep-row-unassigned']")).toBeNull();
+      expect(container.querySelector("[data-testid='rep-card-unassigned']")).toBeNull();
+      expect(container.textContent).not.toContain("Won without a rostered rep");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("still surfaces a genuine one-cent Unassigned residual (the cent snap must not swallow real dollars)", async () => {
+    // Guard the other side of the snap: rounding to cents must not clamp a REAL residual away. One
+    // cent of unattributed Won still breaks the table-sums-to-the-Closed-KPI invariant, so it shows.
+    mocks.useDirectorDashboardMock.mockReturnValue({
+      ...mocks.useDirectorDashboardMock(),
+      data: {
+        ...mocks.useDirectorDashboardMock().data,
+        scopeSummary: {
+          ...mocks.useDirectorDashboardMock().data.scopeSummary,
+          won: { count: 6, totalValue: 360000.01 },
+        },
+      },
+    });
+
+    const { container, cleanup } = await renderPageDom();
+
+    try {
+      const row = container.querySelector("[data-testid='rep-row-unassigned']");
+      expect(row).not.toBeNull();
+      expect(row?.textContent).toContain("$0.01");
+    } finally {
+      await cleanup();
+    }
+  });
+
   it("renders sales force performance table with spec columns and rep links", () => {
     const html = renderPageHtml();
 
