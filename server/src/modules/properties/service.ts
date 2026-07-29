@@ -51,6 +51,16 @@ function propertyOrderExpr(col: unknown, dir: "asc" | "desc") {
 }
 
 /**
+ * A coordinate as it arrives on the wire.
+ *
+ * ONE type for create and update, because `validateOptionalCoordinate` accepts a number OR a numeric
+ * string and JSON bodies routinely carry the latter. Create declared only `number | null`, so a caller
+ * sending the string the runtime happily accepts was a type error — narrower than the behaviour, and
+ * different from update for no reason anyone could act on.
+ */
+type OptionalCoordinate = number | string | null;
+
+/**
  * ORDER BY for the properties directory, applied over the FULL filtered set before LIMIT/OFFSET so the
  * sort is global, not just the visible page. Directly-orderable columns — Property name, Type, Owner
  * company, Sq ft (COALESCE(roof_area, unit_count)) — plus Linked value, which is folded into the main
@@ -108,6 +118,17 @@ export interface CreatePropertyInput {
   buildYear?: number | null;
   unitCount?: number | null;
   notes?: string | null;
+  /**
+   * Optional coordinates, normally from a Mapbox geocode.
+   *
+   * The columns have existed since the table was created and NOTHING on the write path has ever set
+   * them, so every property created through the API carries null lat/lng forever. That is not a
+   * cosmetic gap: it means "which property am I standing at?" cannot be answered by distance for any
+   * of them, so field capture would create a fresh duplicate at a building it had itself created the
+   * week before. Accepting them here is what lets the data heal as it is used.
+   */
+  lat?: OptionalCoordinate;
+  lng?: OptionalCoordinate;
 }
 
 export interface UpdatePropertyInput {
@@ -117,6 +138,15 @@ export interface UpdatePropertyInput {
   zip?: string | null;
   buildYear?: number | string | null;
   unitCount?: number | string | null;
+  /**
+   * Coordinates, so a cleared geocode can be RESTORED.
+   *
+   * An address edit wipes the pair below — a geocode of the old street line is worse than none. Without
+   * a write path here, creation was the only way to set them, leaving every edited or legacy property
+   * permanently address-only with no way back.
+   */
+  lat?: OptionalCoordinate;
+  lng?: OptionalCoordinate;
 }
 
 const US_STATE_PATTERN = /^[A-Z]{2}$/;
@@ -268,6 +298,23 @@ export function buildPropertyUpdatePatch(input: UpdatePropertyInput): Partial<ty
   }
   if (Object.prototype.hasOwnProperty.call(input, "unitCount")) {
     patch.unitCount = validateOptionalPropertyUnitCount(input.unitCount);
+  }
+  // Same validation as create: a blank or out-of-range value degrades to null rather than storing a
+  // coordinate the database accepts and no query will ever match.
+  /**
+   * A PAIR, always. Half a coordinate is not a position: writing lat alone leaves lng describing the
+   * OLD address, which places the property somewhere neither address describes and matches nothing
+   * near either. Mentioning one is treated as intent to set both.
+   */
+  if (
+    Object.prototype.hasOwnProperty.call(input, "lat") ||
+    Object.prototype.hasOwnProperty.call(input, "lng")
+  ) {
+    const lat = validateOptionalCoordinate(input.lat, 90);
+    const lng = validateOptionalCoordinate(input.lng, 180);
+    // Either half unusable and the pair is meaningless — store neither.
+    patch.lat = lat != null && lng != null ? lat : null;
+    patch.lng = lat != null && lng != null ? lng : null;
   }
 
   return patch;
@@ -585,6 +632,34 @@ export async function listProperties(
   };
 }
 
+/**
+ * A coordinate, or null — never a number the database will accept and no query will ever match.
+ *
+ * Returns a STRING because these are `numeric` columns. Rejecting silently (rather than throwing) is
+ * deliberate: a property with a bad coordinate is still a property worth creating, and a rep standing
+ * in front of the building should not lose the record because the device reported a junk fix.
+ */
+/** Both halves, or neither. Half a coordinate is not a position. */
+function coordinatePair(rawLat: unknown, rawLng: unknown): { lat: string | null; lng: string | null } {
+  const lat = validateOptionalCoordinate(rawLat, 90);
+  const lng = validateOptionalCoordinate(rawLng, 180);
+  return lat != null && lng != null ? { lat, lng } : { lat: null, lng: null };
+}
+
+function validateOptionalCoordinate(value: unknown, limit: number): string | null {
+  if (value == null) return null;
+  // A blank or whitespace string is ABSENT, not zero. Number("") is 0, which would store the property
+  // at the equator — a coordinate that is present, plausible to the database, and matches nothing.
+  if (typeof value === "string" && value.trim() === "") return null;
+  // TYPE first, then value. Number() happily accepts a boolean or a single-element array — Number(true)
+  // is 1 and Number([5]) is 5 — so a malformed body could store a plausible-looking coordinate that
+  // nobody typed. Only a number or a numeric string is a coordinate.
+  if (typeof value !== "number" && typeof value !== "string") return null;
+  const numeric = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(numeric) || Math.abs(numeric) > limit) return null;
+  return String(numeric);
+}
+
 export async function createProperty(tenantDb: TenantDb, input: CreatePropertyInput) {
   const address = validatePropertyAddressFields(input);
   const buildYear = validateOptionalPropertyBuildYear(input.buildYear);
@@ -612,6 +687,13 @@ export async function createProperty(tenantDb: TenantDb, input: CreatePropertyIn
       buildYear,
       unitCount,
       notes: input.notes ?? null,
+      // numeric(10,7) columns — Drizzle takes them as strings. Validated first so a NaN or an
+      // out-of-range value is stored as null rather than poisoning every later distance calculation
+      // with a coordinate that silently matches nothing.
+      // A PAIR or nothing — the same rule the edit path applies. Persisting a valid half beside a null
+      // makes the property permanently unmatchable by distance (matchProperties requires both), which
+      // is precisely the state this feature exists to stop creating.
+      ...coordinatePair(input.lat, input.lng),
       isActive: true,
     })
     .returning();
@@ -629,10 +711,67 @@ export async function updateProperty(tenantDb: TenantDb, propertyId: string, inp
     return existing ? redactPropertyImageKeys(existing) : null;
   }
 
+  /**
+   * An address edit INVALIDATES the stored coordinates.
+   *
+   * The pair is a geocode of a specific street line, and this route can change that line without
+   * touching them. Left in place, a corrected or relocated property keeps matching field captures at
+   * its OLD position forever — a rep standing at the new address is told they are somewhere else, and a
+   * rep at the old one is offered a building that has moved. Both are silent.
+   *
+   * Cleared rather than re-geocoded: geocoding belongs on the write path that has the canonical Mapbox
+   * result to hand, and a null coordinate degrades honestly to address matching, which is the signal
+   * most of this table relies on anyway. The next field visit repopulates it.
+   */
+  /**
+   * Only a REAL change invalidates the geocode.
+   *
+   * The web's property-repair flow submits all four address fields on every save, so "field present in
+   * the patch" meant every repair — including one that changed only the build year, or changed
+   * nothing — wiped a perfectly good coordinate pair. Compared against the stored row instead, so a
+   * no-op resubmit is a no-op.
+   */
+  const [current] = await tenantDb
+    .select({
+      address: properties.address,
+      city: properties.city,
+      state: properties.state,
+      zip: properties.zip,
+    })
+    .from(properties)
+    .where(eq(properties.id, propertyId))
+    .limit(1)
+    /**
+     * FOR UPDATE, because the address comparison and the write are separate statements.
+     *
+     * Without the lock two concurrent edits interleave: one reads the OLD address and concludes its
+     * resubmitted address is unchanged, the other commits a new address with its geocode, and the first
+     * then writes the old address back while leaving the second's coordinates in place — a property
+     * whose coordinates point at an address it no longer has, which then matches captures at the former
+     * location. Taking the lock makes the read-compare-write atomic.
+     */
+    .for("update");
+
+  const addressChanged = ADDRESS_FIELDS.some(
+    (field) =>
+      field in patch &&
+      (patch as Record<string, unknown>)[field] !==
+        ((current ?? {}) as Record<string, unknown>)[field],
+  );
+  // An EXPLICIT coordinate in the same request wins over the reset — that request is "here is the new
+  // address AND its geocode", which is exactly how a corrected property gets its position back. Only a
+  // bare address edit, with no replacement offered, clears the pair.
+  // BOTH, not either. A PATCH supplying only one half would suppress the reset and leave the other
+  // half pointing at the OLD address — a mismatched pair that places the property somewhere neither
+  // address describes, which is worse than no coordinates at all.
+  const suppliedCoordinates = "lat" in patch && "lng" in patch;
+  const coordinateReset = addressChanged && !suppliedCoordinates ? { lat: null, lng: null } : {};
+
   const [property] = await tenantDb
     .update(properties)
     .set({
       ...patch,
+      ...coordinateReset,
       updatedAt: new Date(),
     })
     .where(eq(properties.id, propertyId))
@@ -640,6 +779,9 @@ export async function updateProperty(tenantDb: TenantDb, propertyId: string, inp
 
   return property ? redactPropertyImageKeys(property) : null;
 }
+
+/** The fields whose change makes a stored geocode wrong. */
+const ADDRESS_FIELDS = ["address", "city", "state", "zip"] as const;
 
 export async function deleteProperty(tenantDb: TenantDb, propertyId: string) {
   const [existing] = await tenantDb

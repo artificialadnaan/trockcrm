@@ -116,6 +116,18 @@ export default function DashboardScreen() {
         ) : null}
 
         <View style={styles.grid}>
+          {/* LOG A VISIT leads the grid, because it is the only card here that CAPTURES rather than
+              browses — it is what a rep opens standing outside a building, and the one action that is
+              worthless if it takes a menu to find. Gated on leads, matching where a captured visit ends
+              up when it is promoted. */}
+          {canAccessSurface(user.role, "leads") ? (
+            <NavCard
+              testID="open-prospect"
+              icon="location-outline"
+              label="Log a visit"
+              onPress={() => router.push("/(app)/prospect")}
+            />
+          ) : null}
           {canAccessSurface(user.role, "deals") ? (
             <NavCard
               testID="open-deals"
@@ -228,9 +240,13 @@ const styles = StyleSheet.create({
   statValue: { fontFamily: theme.font.bold, fontSize: 34, color: theme.color.inkNavy },
   statHintStale: { color: theme.color.amberText },
   statHint: { fontFamily: theme.font.regular, fontSize: 13, color: theme.color.textSecondary },
-  grid: { flexDirection: "row", gap: theme.space.md },
+  /* WRAPS. A role with all four surfaces put four flex:1 cards in one row, so at 320-360 dp "Log a
+     visit" and "Contacts" squeezed to unreadable. minWidth forces the fourth onto a second line
+     instead. */
+  grid: { flexDirection: "row", flexWrap: "wrap", gap: theme.space.md },
   navCard: {
     flex: 1,
+    minWidth: 140,
     backgroundColor: theme.color.surface,
     borderRadius: theme.radius.lg,
     borderWidth: 1,
