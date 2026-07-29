@@ -16,6 +16,7 @@ import {
   buildCorrectiveActionLookup,
   correctiveActionStatusBadge,
   isRejectionCommentValid,
+  LeadershipDetailView,
   ScorecardDetailView,
   shouldShowApprovalControls,
   shouldShowApproveAll,
@@ -107,6 +108,21 @@ async function renderDetail(detail: FieldScorecardDetail) {
   const root = createRoot(container);
   await act(async () => {
     root.render(<ScorecardDetailView detail={detail} />);
+    await flush();
+  });
+  const html = container.innerHTML;
+  await act(async () => {
+    root.unmount();
+    await flush();
+  });
+  return html;
+}
+
+async function renderLeadershipDetail(detail: FieldScorecardDetail) {
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(<LeadershipDetailView detail={detail} />);
     await flush();
   });
   const html = container.innerHTML;
@@ -235,6 +251,98 @@ describe("ScorecardDetailView corrective-action threading", () => {
     expect(html.split("Fix rebar").length - 1).toBe(2);
     expect(html).toContain("First fix done");
     expect(html).toContain("Awaiting corrective-action response");
+  });
+});
+
+describe("LeadershipDetailView corrective-action threading", () => {
+  // A leadership card carries no critical deficiencies, so its action items are its ONLY flagged items —
+  // making this view the whole of a leadership card's corrective-action surface. It previously rendered no
+  // action items and had none of the verdict machinery, so a leadership thread was unreachable in the CRM.
+  const LEADERSHIP_DETAIL: FieldScorecardDetail = {
+    ...BASE_DETAIL,
+    kind: "leadership",
+    formVersion: 2,
+    averageScore: 6,
+    totalScore: 60,
+    actionItems: ["Rebuild the look-ahead", "Close the safety observations"],
+  };
+
+  it("renders the action items and threads each response beneath its own item", async () => {
+    const html = await renderLeadershipDetail({
+      ...LEADERSHIP_DETAIL,
+      correctiveActions: [
+        makeCA({
+          id: "a1",
+          itemType: "action_item",
+          itemRef: "0",
+          itemLabel: "Rebuild the look-ahead",
+          status: "approved",
+          responseComment: "Three-week look-ahead reissued",
+          responderName: "Sam Super",
+          respondedAt: "2026-07-03T12:00:00Z",
+        }),
+        makeCA({
+          id: "a2",
+          itemType: "action_item",
+          itemRef: "1",
+          itemLabel: "Close the safety observations",
+          status: "submitted",
+          responseComment: "All six closed out",
+          responderName: "Pat PM",
+          respondedAt: "2026-07-04T12:00:00Z",
+        }),
+      ],
+    });
+
+    expect(html).toContain("Action Items");
+    expect(html).toContain("Rebuild the look-ahead");
+    expect(html).toContain("Close the safety observations");
+    // The responses thread inline, under their own item.
+    expect(html).toContain("Three-week look-ahead reissued");
+    expect(html).toContain("All six closed out");
+    // APPROVED, not merely answered: one of the two is still awaiting the approver.
+    expect(html).toContain("1 / 2 approved");
+    // Each flagged label appears exactly once — no duplicated "Corrective Actions" list beneath the items.
+    expect(html.split("Rebuild the look-ahead").length - 1).toBe(1);
+  });
+
+  it("threads duplicate leadership action labels under distinct occurrences", async () => {
+    // The multiset behaviour matters here for the same reason it does on a project card: two identically
+    // worded action items are two separate pieces of work with two separate responses.
+    const html = await renderLeadershipDetail({
+      ...LEADERSHIP_DETAIL,
+      actionItems: ["Close the safety observations", "Close the safety observations"],
+      correctiveActions: [
+        makeCA({
+          id: "a1",
+          itemType: "action_item",
+          itemRef: "0",
+          itemLabel: "Close the safety observations",
+          status: "approved",
+          responseComment: "First batch closed",
+          responderName: "Sam Super",
+          respondedAt: "2026-07-03T12:00:00Z",
+        }),
+        makeCA({
+          id: "a2",
+          itemType: "action_item",
+          itemRef: "1",
+          itemLabel: "Close the safety observations",
+          status: "approved",
+          responseComment: "Second batch closed",
+          responderName: "Pat PM",
+          respondedAt: "2026-07-04T12:00:00Z",
+        }),
+      ],
+    });
+    expect(html.split("Close the safety observations").length - 1).toBe(2);
+    expect(html).toContain("First batch closed");
+    expect(html).toContain("Second batch closed");
+  });
+
+  it("omits the Action Items block entirely when the card has none", async () => {
+    const html = await renderLeadershipDetail({ ...LEADERSHIP_DETAIL, actionItems: [] });
+    expect(html).not.toContain("Action Items");
   });
 });
 

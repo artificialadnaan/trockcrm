@@ -301,7 +301,13 @@ export async function createFieldScorecard(
     ? resolveScorecardV2Rating(averageScore ?? 0)
     : resolveScorecardRating(total);
 
-  const actionItems = kind === "leadership" ? [] : input.actionItems.map((s) => s.trim()).filter((s) => s.length > 0);
+  // Action items apply to BOTH kinds. They used to be dropped for leadership, which made a below-band
+  // leadership card structurally incapable of opening a corrective action: leadership cards carry no critical
+  // deficiencies either, so enumerateFlaggedItems returned nothing and reconcile's `inBand` gate
+  // (isCorrectiveActionBand && flagged.length > 0) never fired. Three cards scored 3.5-6.5 in production and
+  // asked nothing of anyone. The `actionItemsRequired` gate below stays formVersion-1-only, so it can never
+  // apply to a leadership card (always V2).
+  const actionItems = input.actionItems.map((s) => s.trim()).filter((s) => s.length > 0);
   if (formVersion === 1 && actionItemsRequired({ total, deficiencyCount: deficiencies.length }) && actionItems.length === 0) {
     throw new AppError(
       422,
@@ -562,9 +568,10 @@ export async function updateFieldScorecard(
   const rating = kind === "leadership"
     ? resolveScorecardLeadershipRating(averageScore)
     : resolveScorecardV2Rating(averageScore);
-  const actionItems = kind === "leadership"
-    ? []
-    : input.actionItems.map((value) => value.trim()).filter((value) => value.length > 0);
+  // Kept in lockstep with the create path: a leadership edit must PRESERVE its action items. Stripping them
+  // here would have deleted the card's flagged items on every save, and reconcileScorecardCorrectiveActions
+  // runs in this same transaction — so it would have purged the tracked corrective actions with them.
+  const actionItems = input.actionItems.map((value) => value.trim()).filter((value) => value.length > 0);
   const summary = kind === "leadership"
     ? input.summary?.trim()
       ? input.summary.trim().slice(0, 8000)

@@ -259,7 +259,10 @@ export function buildScorecardPdfData(input: ScorecardPdfInput): ScorecardPdfDat
           })
           .filter((deficiency): deficiency is ScorecardPdfDeficiency => deficiency !== null);
       })();
-  const actionItems = kind === "leadership" ? [] : input.actionItems.map((s) => s.trim()).filter((s) => s.length > 0);
+  // Rendered for BOTH kinds. The "Action Items" block below is already kind-agnostic, so dropping the strip
+  // is all it takes — and it MUST be dropped in step with the service: an unrendered action item is one the
+  // corrective-action section beneath it references by label with nothing above to match it against.
+  const actionItems = input.actionItems.map((s) => s.trim()).filter((s) => s.length > 0);
 
   // Ranked against the CURRENT action-item list, not `item_ref` — see orderCorrectiveActions for why ref
   // order is the OLD order after an edit. The PDF loader's photo cap and the oversight email rank through

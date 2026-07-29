@@ -301,23 +301,29 @@ function ScorecardRow({
             <div className="flex items-center justify-center py-6 text-sm text-gray-500">
               <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Loading detail…
             </div>
-          ) : isLeadership ? (
-            <LeadershipDetailView detail={detail} />
           ) : (
-            <ScorecardDetailView
-              detail={detail}
-              dealId={dealId}
-              // Re-read after an approval so the badges, the thread and the card status all move together.
-              // The server is the source of truth for every one of them; optimistically patching the local
-              // copy would risk showing a state the server did not actually reach.
-              onApprovalChange={() => {
-                // BOTH: the expanded thread AND the row header's lifecycle badge, which renders from the
-                // list's summary. Refreshing only the detail left the row still reading "Awaiting Approval"
-                // beside a thread showing the item approved — the same card contradicting itself on screen.
-                void fetchDealScorecardDetail(dealId, summary.id).then(setDetail).catch(() => {});
-                onCardChanged?.();
-              }}
-            />
+            // Both kinds get the SAME approval props. The leadership branch used to pass only `detail`, so
+            // even once a leadership card could carry flagged items it would have rendered its thread with no
+            // approve/reject controls — dealId is what makes the verdict callbacks exist at all.
+            (() => {
+              const Detail = isLeadership ? LeadershipDetailView : ScorecardDetailView;
+              return (
+                <Detail
+                  detail={detail}
+                  dealId={dealId}
+                  // Re-read after an approval so the badges, the thread and the card status all move together.
+                  // The server is the source of truth for every one of them; optimistically patching the local
+                  // copy would risk showing a state the server did not actually reach.
+                  onApprovalChange={() => {
+                    // BOTH: the expanded thread AND the row header's lifecycle badge, which renders from the
+                    // list's summary. Refreshing only the detail left the row still reading "Awaiting Approval"
+                    // beside a thread showing the item approved — the same card contradicting itself on screen.
+                    void fetchDealScorecardDetail(dealId, summary.id).then(setDetail).catch(() => {});
+                    onCardChanged?.();
+                  }}
+                />
+              );
+            })()
           )}
         </div>
       )}
@@ -327,10 +333,283 @@ function ScorecardRow({
 
 // Full leadership detail — mirrors the mobile LeadershipBody / scorecardLeadershipRows shape: the 4 category
 // scores (each /10) + comment notes, the Project Summary free text, and category/summary evidence photos.
-// Plus a meta row (average/10, rating, week, evaluator=submittedByName). Leadership cards carry no critical
-// deficiencies, action items, or signatures, so those sections are omitted. Renders from the kind-aware
+// Plus a meta row (average/10, rating, week, evaluator=submittedByName), and — since a leadership card can
+// trip the corrective-action band too — its action items with their corrective-action thread. Leadership
+// cards carry no critical deficiencies or signatures, so those sections are omitted. Renders from the kind-aware
 // detail so the full card is viewable in the CRM even before the best-effort PDF lands.
-export function LeadershipDetailView({ detail }: { detail: FieldScorecardDetail }) {
+/**
+ * Everything needed to render and act on a card's corrective actions, shared by BOTH detail views.
+ *
+ * This lived inline in ScorecardDetailView while LeadershipDetailView had none of it — which is exactly why
+ * a leadership card could not thread a response under its flagged item. Copying ~110 lines of verdict,
+ * supersession and attempt-binding logic into the second view would have created the drift surface this
+ * codebase has already been bitten by (the CRM thread rendering empty because deal-detail used a different
+ * mapper than the responder API). One hook, two callers.
+ */
+function useCorrectiveActionVerdicts({
+  detail,
+  dealId,
+  onApprovalChange,
+}: {
+  detail: FieldScorecardDetail;
+  dealId?: string;
+  onApprovalChange?: () => void;
+}) {
+  // The server decides; this only chooses whether to RENDER the controls.
+  const canApprove = detail.canApproveCorrectiveActions === true;
+  // The card generation the reviewer is acting on. Starts as the one this render came from; each verdict
+  // returns the generation it produced, because every verdict advances it — without carrying that forward,
+  // approving a second item before the refetch settles would 409 against the reviewer's OWN first click.
+  const reviewedGeneration = useRef<string | null | undefined>(detail.updatedAt);
+  useEffect(() => {
+    reviewedGeneration.current = detail.updatedAt;
+  }, [detail.updatedAt]);
+  // The card tripped the corrective-action band iff the API returned a (possibly empty) list; build the
+  // key/label lookups once so each original deficiency / action item can thread its response inline.
+  const correctiveActions = detail.correctiveActions;
+  const hasCorrectiveActions = Array.isArray(correctiveActions);
+  const { deficiencyByKey, actionByLabel } = buildCorrectiveActionLookup(correctiveActions);
+  // A supersession 409 has to REFRESH, not just complain.
+  //
+  // The guards tell the reviewer to refresh, and there was nothing that did: collapsing and reopening the
+  // row re-fetches only when `detail` is null, so the reviewer stayed on the same stale generation and every
+  // retry returned the same 409 until they reloaded the page. A guard whose only escape hatch does not work
+  // is worse than no guard — it reads as the feature being broken. Refetching here puts them on the current
+  // version (and the effect above rebinds the generation), so the retry is the natural next click. The error
+  // still surfaces, because the reviewer must know their verdict did NOT land and must be re-formed against
+  // what they can now see.
+  const refreshOnSupersession = async <T,>(verdict: () => Promise<T>): Promise<T> => {
+    try {
+      return await verdict();
+    } catch (err) {
+      if (
+        isApiError(err) &&
+        err.status === 409 &&
+        (err.code === "CORRECTIVE_ACTION_CARD_SUPERSEDED" ||
+          err.code === "CORRECTIVE_ACTION_ATTEMPT_SUPERSEDED")
+      ) {
+        onApprovalChange?.();
+      }
+      throw err;
+    }
+  };
+  const approve = dealId
+    ? async (itemId: string) => {
+        const outcome = await refreshOnSupersession(() =>
+          approveCorrectiveActions(
+            dealId,
+            detail.id,
+            [itemId],
+            reviewedAttemptsOf(correctiveActions),
+            reviewedGeneration.current,
+          ),
+        );
+        reviewedGeneration.current = outcome.generation ?? reviewedGeneration.current;
+        onApprovalChange?.();
+      }
+    : undefined;
+  const reject = dealId
+    ? async (itemId: string, comment: string) => {
+        // Same binding as approve: the reason has to land on the attempt that earned it. Without this a
+        // rejecter looking at a stale page sends back work they never read, and restarts the responder's
+        // cycle for a fault the responder may already have corrected.
+        const outcome = await refreshOnSupersession(() =>
+          rejectCorrectiveAction(
+            dealId,
+            detail.id,
+            itemId,
+            comment,
+            reviewedAttemptsOf(correctiveActions)[itemId],
+            reviewedGeneration.current,
+          ),
+        );
+        reviewedGeneration.current = outcome.generation ?? reviewedGeneration.current;
+        onApprovalChange?.();
+      }
+    : undefined;
+  const approveAll = dealId
+    ? async () => {
+        // The IDs THE APPROVER IS LOOKING AT, not "everything awaiting approval at execution time".
+        //
+        // My first version omitted itemIds with a comment claiming it avoided skipping a sibling. It does the
+        // opposite: a responder can submit another item between this page rendering and the click, and the
+        // server would approve that unseen response too — potentially closing the card and sending the
+        // approved notice for work nobody reviewed. Approving something the approver never saw is a far worse
+        // failure than leaving a late arrival for the next pass, which is all this now does.
+        const reviewed = (correctiveActions ?? [])
+          .filter((i) => i.status === "submitted")
+          .map((i) => i.id);
+        // An empty list means the approver is accepting a card that reached "everything approved" by an
+        // edit deleting the unapproved item, not that there is nothing to do — returning early, as this did,
+        // left such a card with no way out. Send it as OMITTED rather than `[]`, which the route rejects:
+        // absent means "everything awaiting approval", which here is correctly nothing. The server approves
+        // no item, recomputes, and closes the card on the strength of the approver's acceptance.
+        const outcome = await refreshOnSupersession(() =>
+          approveCorrectiveActions(
+            dealId,
+            detail.id,
+            reviewed.length > 0 ? reviewed : undefined,
+            reviewedAttemptsOf(correctiveActions),
+            reviewedGeneration.current,
+          ),
+        );
+        reviewedGeneration.current = outcome.generation ?? reviewedGeneration.current;
+        onApprovalChange?.();
+      }
+    : undefined;
+  // APPROVED, not merely answered — and "resolved" is a value migration 0202 renamed away, so this counter
+  // read zero on every card until now.
+  const resolvedCount = (correctiveActions ?? []).filter((i) => i.status === "approved").length;
+  const totalCount = correctiveActions?.length ?? 0;
+  const allResolved =
+    detail.status === "corrective_action_closed" || (totalCount > 0 && resolvedCount === totalCount);
+  return {
+    canApprove,
+    approve,
+    reject,
+    approveAll,
+    correctiveActions,
+    hasCorrectiveActions,
+    deficiencyByKey,
+    actionByLabel,
+    resolvedCount,
+    totalCount,
+    allResolved,
+  };
+}
+
+type CorrectiveActionVerdicts = ReturnType<typeof useCorrectiveActionVerdicts>;
+
+/**
+ * The approve-all control, the approved counter, and the history of items a later edit removed — all
+ * kind-agnostic, so both detail views render them from one place.
+ */
+function CorrectiveActionOverview({
+  detail,
+  verdicts,
+}: {
+  detail: FieldScorecardDetail;
+  verdicts: CorrectiveActionVerdicts;
+}) {
+  const { approveAll, canApprove, correctiveActions, hasCorrectiveActions, resolvedCount, totalCount, allResolved } =
+    verdicts;
+  return (
+    <>
+      {approveAll && shouldShowApproveAll(correctiveActions ?? [], canApprove, detail.status) && (
+        <ApproveAllButton onApproveAll={approveAll} label={approveAllLabel(correctiveActions ?? [])} />
+      )}
+
+      {hasCorrectiveActions && totalCount > 0 && (
+        <div className="flex items-center justify-between">
+          <h4 className="text-xs font-semibold uppercase tracking-wide text-gray-500">Corrective Actions</h4>
+          <span className={`text-xs font-medium ${allResolved ? "text-green-700" : "text-red-600"}`}>
+            {resolvedCount} / {totalCount} approved
+          </span>
+        </div>
+      )}
+
+      {(detail.removedItemEvents?.length ?? 0) > 0 && (
+        <div>
+          <h4 className="mb-1 text-xs font-semibold uppercase tracking-wide text-gray-500">
+            Removed by a later edit
+          </h4>
+          <p className="mb-2 text-xs italic text-gray-500">
+            These flagged items were removed when the scorecard was edited. Their history is kept here.
+          </p>
+          <ol className="space-y-3 rounded-md border border-gray-200 bg-white p-2.5">
+            {detail.removedItemEvents!.map((event) => {
+              const presentation = EVENT_PRESENTATION[event.eventType] ?? EVENT_PRESENTATION.submitted;
+              return (
+                <li key={event.id} className="border-l-2 border-gray-200 pl-3">
+                  {/* The item's own label — these have no item block above them to sit under. */}
+                  {event.itemLabel && (
+                    <p className="text-sm font-semibold text-gray-900">{event.itemLabel}</p>
+                  )}
+                  <div className="flex flex-wrap items-center gap-x-2 text-xs text-gray-500">
+                    <span className={`font-semibold ${presentation.className}`}>{presentation.verb}</span>
+                    <span className="font-medium text-gray-700">
+                      {event.actorName ?? event.actorEmail ?? "Unknown"}
+                    </span>
+                    {formatRespondedAt(event.createdAt) && (
+                      <span>· {formatRespondedAt(event.createdAt)}</span>
+                    )}
+                  </div>
+                  {event.comment && (
+                    <p className="mt-1 whitespace-pre-wrap text-sm text-gray-900">{event.comment}</p>
+                  )}
+                  {/* Their evidence survives the item too — showing the words and hiding the photos would
+                      claim the history is preserved while withholding half of it. */}
+                  <CorrectiveActionPhotoGrid photos={event.photos} />
+                </li>
+              );
+            })}
+          </ol>
+        </div>
+      )}
+    </>
+  );
+}
+
+/**
+ * The card's action items, each threading its corrective-action response inline.
+ *
+ * Shared by both kinds: an action item is a leadership card's ONLY possible flagged item (it carries no
+ * critical deficiencies), so this is the whole of its corrective-action surface.
+ */
+function ActionItemsSection({
+  detail,
+  verdicts,
+}: {
+  detail: FieldScorecardDetail;
+  verdicts: CorrectiveActionVerdicts;
+}) {
+  const { actionByLabel, canApprove, approve, reject } = verdicts;
+  // Per-label occurrence counter so duplicate action labels each consume a distinct seeded row (multiset).
+  // Built per render, deliberately: it is consumed by the map below and must restart every time.
+  const actionLabelSeen = new Map<string, number>();
+  if (detail.actionItems.length === 0) return null;
+  return (
+    <div>
+      <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">Action Items</h4>
+      <ol className="list-inside list-decimal space-y-1 text-sm text-gray-900">
+        {detail.actionItems.map((a, i) => {
+          // Consume seeded occurrences in order so duplicate labels thread under distinct occurrences.
+          const bucket = actionByLabel.get(a);
+          let ca: CorrectiveActionItemView | undefined;
+          if (bucket) {
+            const seen = actionLabelSeen.get(a) ?? 0;
+            ca = bucket[seen];
+            actionLabelSeen.set(a, seen + 1);
+          }
+          return (
+            <li key={i}>
+              {a}
+              {ca && (
+                <CorrectiveActionResponse
+                  item={ca}
+                  canApprove={canApprove}
+                  onApprove={approve}
+                  onReject={reject}
+                />
+              )}
+            </li>
+          );
+        })}
+      </ol>
+    </div>
+  );
+}
+
+export function LeadershipDetailView({
+  detail,
+  dealId,
+  onApprovalChange,
+}: {
+  detail: FieldScorecardDetail;
+  dealId?: string;
+  onApprovalChange?: () => void;
+}) {
+  const verdicts = useCorrectiveActionVerdicts({ detail, dealId, onApprovalChange });
   const average = (detail.averageScore ?? detail.totalScore / 10).toFixed(1);
   // The 4 canonical leadership categories, in form order; an item absent from the detail shows 0/10.
   const itemByKey = new Map(detail.items.map((i) => [i.sectionKey, i]));
@@ -420,6 +699,11 @@ export function LeadershipDetailView({ detail }: { detail: FieldScorecardDetail 
         </div>
       )}
 
+      {/* A leadership card can trip the corrective-action band too, and its action items are the only thing
+          that can be flagged on it — so this is where its whole corrective-action thread lives. */}
+      <CorrectiveActionOverview detail={detail} verdicts={verdicts} />
+      <ActionItemsSection detail={detail} verdicts={verdicts} />
+
       <div className="divide-y divide-gray-200 rounded-md border border-gray-200 bg-white">
         {meta.map((row) => (
           <div key={row.label} className="flex items-center justify-between px-3 py-2">
@@ -494,119 +778,11 @@ export function ScorecardDetailView({
   dealId?: string;
   onApprovalChange?: () => void;
 }) {
-  // The server decides; this only chooses whether to RENDER the controls.
-  const canApprove = detail.canApproveCorrectiveActions === true;
-  // The card generation the reviewer is acting on. Starts as the one this render came from; each verdict
-  // returns the generation it produced, because every verdict advances it — without carrying that forward,
-  // approving a second item before the refetch settles would 409 against the reviewer's OWN first click.
-  const reviewedGeneration = useRef<string | null | undefined>(detail.updatedAt);
-  useEffect(() => {
-    reviewedGeneration.current = detail.updatedAt;
-  }, [detail.updatedAt]);
-  // A supersession 409 has to REFRESH, not just complain.
-  //
-  // The guards tell the reviewer to refresh, and there was nothing that did: collapsing and reopening the
-  // row re-fetches only when `detail` is null, so the reviewer stayed on the same stale generation and every
-  // retry returned the same 409 until they reloaded the page. A guard whose only escape hatch does not work
-  // is worse than no guard — it reads as the feature being broken. Refetching here puts them on the current
-  // version (and the effect above rebinds the generation), so the retry is the natural next click. The error
-  // still surfaces, because the reviewer must know their verdict did NOT land and must be re-formed against
-  // what they can now see.
-  const refreshOnSupersession = async <T,>(verdict: () => Promise<T>): Promise<T> => {
-    try {
-      return await verdict();
-    } catch (err) {
-      if (
-        isApiError(err) &&
-        err.status === 409 &&
-        (err.code === "CORRECTIVE_ACTION_CARD_SUPERSEDED" ||
-          err.code === "CORRECTIVE_ACTION_ATTEMPT_SUPERSEDED")
-      ) {
-        onApprovalChange?.();
-      }
-      throw err;
-    }
-  };
-  const approve = dealId
-    ? async (itemId: string) => {
-        const outcome = await refreshOnSupersession(() =>
-          approveCorrectiveActions(
-          dealId,
-          detail.id,
-            [itemId],
-            reviewedAttemptsOf(correctiveActions),
-            reviewedGeneration.current,
-          ),
-        );
-        reviewedGeneration.current = outcome.generation ?? reviewedGeneration.current;
-        onApprovalChange?.();
-      }
-    : undefined;
-  const reject = dealId
-    ? async (itemId: string, comment: string) => {
-        // Same binding as approve: the reason has to land on the attempt that earned it. Without this a
-        // rejecter looking at a stale page sends back work they never read, and restarts the responder's
-        // cycle for a fault the responder may already have corrected.
-        const outcome = await refreshOnSupersession(() =>
-          rejectCorrectiveAction(
-            dealId,
-            detail.id,
-            itemId,
-            comment,
-            reviewedAttemptsOf(correctiveActions)[itemId],
-            reviewedGeneration.current,
-          ),
-        );
-        reviewedGeneration.current = outcome.generation ?? reviewedGeneration.current;
-        onApprovalChange?.();
-      }
-    : undefined;
-  const approveAll = dealId
-    ? async () => {
-        // The IDs THE APPROVER IS LOOKING AT, not "everything awaiting approval at execution time".
-        //
-        // My first version omitted itemIds with a comment claiming it avoided skipping a sibling. It does the
-        // opposite: a responder can submit another item between this page rendering and the click, and the
-        // server would approve that unseen response too — potentially closing the card and sending the
-        // approved notice for work nobody reviewed. Approving something the approver never saw is a far worse
-        // failure than leaving a late arrival for the next pass, which is all this now does.
-        const reviewed = (correctiveActions ?? [])
-          .filter((i) => i.status === "submitted")
-          .map((i) => i.id);
-        // An empty list means the approver is accepting a card that reached "everything approved" by an
-        // edit deleting the unapproved item, not that there is nothing to do — returning early, as this did,
-        // left such a card with no way out. Send it as OMITTED rather than `[]`, which the route rejects:
-        // absent means "everything awaiting approval", which here is correctly nothing. The server approves
-        // no item, recomputes, and closes the card on the strength of the approver's acceptance.
-        const outcome = await refreshOnSupersession(() =>
-          approveCorrectiveActions(
-            dealId,
-            detail.id,
-            reviewed.length > 0 ? reviewed : undefined,
-            reviewedAttemptsOf(correctiveActions),
-            reviewedGeneration.current,
-          ),
-        );
-        reviewedGeneration.current = outcome.generation ?? reviewedGeneration.current;
-        onApprovalChange?.();
-      }
-    : undefined;
+  const verdicts = useCorrectiveActionVerdicts({ detail, dealId, onApprovalChange });
+  const { canApprove, approve, reject, deficiencyByKey } = verdicts;
   const isV2 = detail.formVersion === 2;
   const sectionTitle = isV2 ? V2_SECTION_TITLE : SECTION_TITLE;
   const deficiencyLabel = isV2 ? V2_DEFICIENCY_LABEL : DEFICIENCY_LABEL;
-  // The card tripped the corrective-action band iff the API returned a (possibly empty) list; build the
-  // key/label lookups once so each original deficiency / action item can thread its response inline.
-  const correctiveActions = detail.correctiveActions;
-  const hasCorrectiveActions = Array.isArray(correctiveActions);
-  const { deficiencyByKey, actionByLabel } = buildCorrectiveActionLookup(correctiveActions);
-  // Per-label occurrence counter so duplicate action labels each consume a distinct seeded row (multiset).
-  const actionLabelSeen = new Map<string, number>();
-  // APPROVED, not merely answered — and "resolved" is a value migration 0202 renamed away, so this counter
-  // read zero on every card until now.
-  const resolvedCount = (correctiveActions ?? []).filter((i) => i.status === "approved").length;
-  const totalCount = correctiveActions?.length ?? 0;
-  const allResolved =
-    detail.status === "corrective_action_closed" || (totalCount > 0 && resolvedCount === totalCount);
   return (
     <div className="space-y-4">
       <div>
@@ -626,57 +802,7 @@ export function ScorecardDetailView({
         </div>
       </div>
 
-      {approveAll && shouldShowApproveAll(correctiveActions ?? [], canApprove, detail.status) && (
-        <ApproveAllButton onApproveAll={approveAll} label={approveAllLabel(correctiveActions ?? [])} />
-      )}
-
-      {hasCorrectiveActions && totalCount > 0 && (
-        <div className="flex items-center justify-between">
-          <h4 className="text-xs font-semibold uppercase tracking-wide text-gray-500">Corrective Actions</h4>
-          <span className={`text-xs font-medium ${allResolved ? "text-green-700" : "text-red-600"}`}>
-            {resolvedCount} / {totalCount} approved
-          </span>
-        </div>
-      )}
-
-      {(detail.removedItemEvents?.length ?? 0) > 0 && (
-        <div>
-          <h4 className="mb-1 text-xs font-semibold uppercase tracking-wide text-gray-500">
-            Removed by a later edit
-          </h4>
-          <p className="mb-2 text-xs italic text-gray-500">
-            These flagged items were removed when the scorecard was edited. Their history is kept here.
-          </p>
-          <ol className="space-y-3 rounded-md border border-gray-200 bg-white p-2.5">
-            {detail.removedItemEvents!.map((event) => {
-              const presentation = EVENT_PRESENTATION[event.eventType] ?? EVENT_PRESENTATION.submitted;
-              return (
-                <li key={event.id} className="border-l-2 border-gray-200 pl-3">
-                  {/* The item's own label — these have no item block above them to sit under. */}
-                  {event.itemLabel && (
-                    <p className="text-sm font-semibold text-gray-900">{event.itemLabel}</p>
-                  )}
-                  <div className="flex flex-wrap items-center gap-x-2 text-xs text-gray-500">
-                    <span className={`font-semibold ${presentation.className}`}>{presentation.verb}</span>
-                    <span className="font-medium text-gray-700">
-                      {event.actorName ?? event.actorEmail ?? "Unknown"}
-                    </span>
-                    {formatRespondedAt(event.createdAt) && (
-                      <span>· {formatRespondedAt(event.createdAt)}</span>
-                    )}
-                  </div>
-                  {event.comment && (
-                    <p className="mt-1 whitespace-pre-wrap text-sm text-gray-900">{event.comment}</p>
-                  )}
-                  {/* Their evidence survives the item too — showing the words and hiding the photos would
-                      claim the history is preserved while withholding half of it. */}
-                  <CorrectiveActionPhotoGrid photos={event.photos} />
-                </li>
-              );
-            })}
-          </ol>
-        </div>
-      )}
+      <CorrectiveActionOverview detail={detail} verdicts={verdicts} />
 
       {detail.criticalDeficiencies.length > 0 && (
         <div>
@@ -703,36 +829,7 @@ export function ScorecardDetailView({
         </div>
       )}
 
-      {detail.actionItems.length > 0 && (
-        <div>
-          <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">Action Items</h4>
-          <ol className="list-inside list-decimal space-y-1 text-sm text-gray-900">
-            {detail.actionItems.map((a, i) => {
-              // Consume seeded occurrences in order so duplicate labels thread under distinct occurrences.
-              const bucket = actionByLabel.get(a);
-              let ca: CorrectiveActionItemView | undefined;
-              if (bucket) {
-                const seen = actionLabelSeen.get(a) ?? 0;
-                ca = bucket[seen];
-                actionLabelSeen.set(a, seen + 1);
-              }
-              return (
-                <li key={i}>
-                  {a}
-                  {ca && (
-                    <CorrectiveActionResponse
-                      item={ca}
-                      canApprove={canApprove}
-                      onApprove={approve}
-                      onReject={reject}
-                    />
-                  )}
-                </li>
-              );
-            })}
-          </ol>
-        </div>
-      )}
+      <ActionItemsSection detail={detail} verdicts={verdicts} />
 
       {isV2 && (
         <div>

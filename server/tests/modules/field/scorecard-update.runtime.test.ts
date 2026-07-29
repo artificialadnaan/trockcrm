@@ -870,7 +870,7 @@ describe("updateFieldScorecard replacement and concurrency", () => {
     expect(filesRemain.rows[0]?.count).toBe(3);
   });
 
-  it("updates leadership summary/scores without requiring or persisting project-only fields", async () => {
+  it("updates leadership summary/scores, PERSISTS action items, and still drops project-only signatures", async () => {
     const { scorecard } = await createFieldScorecard(tdb, projectSubmission({
       clientSubmissionId: csid(24),
       kind: "leadership",
@@ -881,7 +881,12 @@ describe("updateFieldScorecard replacement and concurrency", () => {
     }));
     const result = await updateFieldScorecard(tdb, updateInput(scorecard.id, scorecard.updatedAt!, {
       items: leadershipItems(10),
-      actionItems: ["must be discarded"],
+      // Action items are NO LONGER project-only. This assertion used to read `toEqual([])` with the input
+      // literally named "must be discarded" — it pinned the strip that made a below-band leadership card
+      // structurally unable to open a corrective action. Because PUT is a full replacement, discarding these
+      // ALSO deleted a leadership card's flagged items (and the corrective actions reconcile tracks against
+      // them) on any unrelated edit.
+      actionItems: ["Rebuild the two-week look-ahead", "  Close the open safety observations  "],
       superintendentSignature: null,
       pmSignature: null,
       summary: "  Updated leadership summary  ",
@@ -889,7 +894,12 @@ describe("updateFieldScorecard replacement and concurrency", () => {
     expect(result.scorecard).toMatchObject({ kind: "leadership", averageScore: 10, totalScore: 100 });
     const detail = await getFieldScorecardDetail(tdb, scorecard.id, OWNER_ACCESS);
     expect(detail.summary).toBe("Updated leadership summary");
-    expect(detail.actionItems).toEqual([]);
+    // Trimmed, in order, both retained.
+    expect(detail.actionItems).toEqual([
+      "Rebuild the two-week look-ahead",
+      "Close the open safety observations",
+    ]);
+    // Signatures ARE still project-only: the leadership form has no signature blocks to collect them.
     expect(detail.superintendentSignature).toBeNull();
     expect(detail.pmSignature).toBeNull();
   });
