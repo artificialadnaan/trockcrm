@@ -74,6 +74,16 @@ function previewPhoto(id: string, name: string) {
 
 const PHOTOS = [galleryPhoto("p1", "First"), galleryPhoto("p2", "Second"), galleryPhoto("p3", "Third")];
 
+/** The rendered order of the edit list, read off the position badges' sibling captions. */
+function renderedOrder(ui: ReturnType<typeof render>): string[] {
+  // Each row renders "<n>/<total>" — reading them in tree order proves the LIST re-rendered in the new
+  // order, not merely that the outgoing payload did.
+  return ui.getAllByLabelText(/^Move photo \d+ of \d+ earlier, /).map((node) => {
+    const label = node.props.accessibilityLabel as string;
+    return label.replace(/^Move photo \d+ of \d+ earlier, /, "");
+  });
+}
+
 /** Drive the builder from the select step through preview into the edit step. */
 async function openEditStep(ui: ReturnType<typeof render>) {
   await act(async () => {
@@ -117,10 +127,10 @@ describe("ReportBuilder photo reordering", () => {
 
     // Promote the third photo twice: p1,p2,p3 -> p1,p3,p2 -> p3,p1,p2
     await act(async () => {
-      fireEvent.press(ui.getByLabelText("Move Third earlier"));
+      fireEvent.press(ui.getByLabelText(/^Move photo \d+ of 3 earlier, Third$/));
     });
     await act(async () => {
-      fireEvent.press(ui.getByLabelText("Move Third earlier"));
+      fireEvent.press(ui.getByLabelText(/^Move photo \d+ of 3 earlier, Third$/));
     });
     await act(async () => {
       fireEvent.press(ui.getByText("Generate PDF"));
@@ -140,13 +150,33 @@ describe("ReportBuilder photo reordering", () => {
     await openEditStep(ui);
 
     await act(async () => {
-      fireEvent.press(ui.getByLabelText("Move First later"));
+      fireEvent.press(ui.getByLabelText(/^Move photo \d+ of 3 later, First$/));
     });
     await act(async () => {
       fireEvent.press(ui.getByText("Generate PDF"));
     });
 
     expect(mockGenerateReport.mock.calls[0][1].sections[0].photoIds).toEqual(["p2", "p1", "p3"]);
+  });
+
+  it("re-renders the edit list in the new order, not just the outgoing payload", async () => {
+    const ui = render(
+      <ReportBuilder visible onClose={jest.fn()} projectId="d1" photos={PHOTOS} onGenerated={jest.fn()} />,
+    );
+    await openEditStep(ui);
+    expect(renderedOrder(ui)).toEqual(["First", "Second", "Third"]);
+
+    await act(async () => {
+      fireEvent.press(ui.getByLabelText(/^Move photo \d+ of 3 earlier, Third$/));
+    });
+    await act(async () => {
+      fireEvent.press(ui.getByLabelText(/^Move photo \d+ of 3 earlier, Third$/));
+    });
+
+    // reorderPhoto is keyed by id, so the outgoing payload would come out right even if the list froze —
+    // the user would tap, watch nothing move, and receive a PDF in an order they were never shown. This
+    // asserts what they actually SEE. (Read before Generate, which closes the sheet and resets state.)
+    expect(renderedOrder(ui)).toEqual(["Third", "First", "Second"]);
   });
 
   it("keeps a caption attached to its photo across a reorder (descriptions are id-keyed)", async () => {
@@ -160,7 +190,7 @@ describe("ReportBuilder photo reordering", () => {
       fireEvent.changeText(captionInputs[0], "caption for the first photo");
     });
     await act(async () => {
-      fireEvent.press(ui.getByLabelText("Move First later"));
+      fireEvent.press(ui.getByLabelText(/^Move photo \d+ of 3 later, First$/));
     });
     await act(async () => {
       fireEvent.press(ui.getByText("Generate PDF"));
@@ -170,14 +200,48 @@ describe("ReportBuilder photo reordering", () => {
     expect(overrides.find((o: { id: string }) => o.id === "p1").description).toBe("caption for the first photo");
   });
 
+  it("keeps controls distinguishable when two photos share a name (IMG_0001 twice in one section)", async () => {
+    // displayName seeds from the uploader's filename and is freely editable, so duplicates are routine —
+    // a label built only from the name would be ambiguous to VoiceOver and would match two nodes here.
+    mockPreviewReport.mockResolvedValue({
+      cover: {
+        reportTitle: "Site Photo Report",
+        creatorName: "Sam Super",
+        companyName: "TRock",
+        reportDateLabel: "Jul 30, 2026",
+        projectName: "District at Boynton",
+        photoCount: 2,
+      },
+      sections: [
+        { id: "sec-1", title: "Section 1", photos: [previewPhoto("p1", "IMG_0001"), previewPhoto("p2", "IMG_0001")] },
+      ],
+    });
+    const ui = render(
+      <ReportBuilder visible onClose={jest.fn()} projectId="d1" photos={PHOTOS} onGenerated={jest.fn()} />,
+    );
+    await openEditStep(ui);
+
+    // Each control resolves to exactly one node because the position leads the label.
+    expect(ui.getByLabelText("Move photo 1 of 2 later, IMG_0001")).toBeTruthy();
+    expect(ui.getByLabelText("Move photo 2 of 2 earlier, IMG_0001")).toBeTruthy();
+
+    await act(async () => {
+      fireEvent.press(ui.getByLabelText("Move photo 2 of 2 earlier, IMG_0001"));
+    });
+    await act(async () => {
+      fireEvent.press(ui.getByText("Generate PDF"));
+    });
+    expect(mockGenerateReport.mock.calls[0][1].sections[0].photoIds).toEqual(["p2", "p1"]);
+  });
+
   it("disables the move controls at the ends so an order can't run off the section", async () => {
     const ui = render(
       <ReportBuilder visible onClose={jest.fn()} projectId="d1" photos={PHOTOS} onGenerated={jest.fn()} />,
     );
     await openEditStep(ui);
 
-    expect(ui.getByLabelText("Move First earlier").props.accessibilityState.disabled).toBe(true);
-    expect(ui.getByLabelText("Move Third later").props.accessibilityState.disabled).toBe(true);
-    expect(ui.getByLabelText("Move Second earlier").props.accessibilityState.disabled).toBeFalsy();
+    expect(ui.getByLabelText(/earlier, First$/).props.accessibilityState.disabled).toBe(true);
+    expect(ui.getByLabelText(/later, Third$/).props.accessibilityState.disabled).toBe(true);
+    expect(ui.getByLabelText(/earlier, Second$/).props.accessibilityState.disabled).toBeFalsy();
   });
 });

@@ -312,9 +312,12 @@ export function ReportBuilder({
                       <Pressable
                         onPress={() => reorderPhoto(section.id, photo.id, -1)}
                         disabled={photoIndex === 0}
-                        hitSlop={6}
+                        hitSlop={2}
                         accessibilityRole="button"
-                        accessibilityLabel={`Move ${photo.displayName} earlier`}
+                        // Leads with the POSITION because displayName is not unique — names seed from the
+                        // uploader's filename and are freely editable, so a section routinely holds two
+                        // photos called IMG_0001. Position first also matches what the control does.
+                        accessibilityLabel={`Move photo ${photoIndex + 1} of ${section.photos.length} earlier, ${photo.displayName}`}
                         style={({ pressed }) => [
                           styles.reorderButton,
                           photoIndex === 0 && styles.reorderButtonDisabled,
@@ -330,9 +333,9 @@ export function ReportBuilder({
                       <Pressable
                         onPress={() => reorderPhoto(section.id, photo.id, 1)}
                         disabled={photoIndex === section.photos.length - 1}
-                        hitSlop={6}
+                        hitSlop={2}
                         accessibilityRole="button"
-                        accessibilityLabel={`Move ${photo.displayName} later`}
+                        accessibilityLabel={`Move photo ${photoIndex + 1} of ${section.photos.length} later, ${photo.displayName}`}
                         style={({ pressed }) => [
                           styles.reorderButton,
                           photoIndex === section.photos.length - 1 && styles.reorderButtonDisabled,
@@ -394,11 +397,15 @@ const styles = StyleSheet.create({
   gridFooter: { marginTop: theme.space.lg, gap: theme.space.sm },
   groupRow: { flexDirection: "row", flexWrap: "wrap", gap: theme.space.sm },
   editPhoto: { flexDirection: "row", gap: theme.space.md, alignItems: "flex-start" },
-  reorderColumn: { alignItems: "center", gap: theme.space.xs, paddingTop: 2 },
+  // The gap must stay WIDER than twice the buttons' hitSlop, or the two slop rectangles overlap and the
+  // later sibling (down) claims the shared band — including part of the up button's own visible frame, so a
+  // tap aimed at the bottom of "up" would move the photo DOWN. gap 8 vs hitSlop 2 leaves 4pt of clearance.
+  reorderColumn: { alignItems: "center", gap: theme.space.sm, paddingTop: 2 },
   reorderPosition: { fontFamily: theme.font.semibold, fontSize: 11, color: theme.color.textMuted },
   reorderButton: {
-    width: 34,
-    height: 30,
+    // 44x40 + 2pt slop on each side = a 48x44 touch target, the iOS minimum. These get used in gloves.
+    width: 44,
+    height: 40,
     alignItems: "center",
     justifyContent: "center",
     borderRadius: theme.radius.sm,
