@@ -1290,9 +1290,14 @@ describe("closeness narrows before blocking, and the closest PART wins", () => {
     // `findIndex` pinned whichever unconsumed part came first, so a row spelling both "MacDonald" (distance
     // 2) and "McDonald" (distance 1) carried the worse number into arbitration and lost to a farther
     // spelling elsewhere — defeating the ranking added to prevent exactly that.
+    //
+    // Both rows carry an unspoken middle part ON PURPOSE, so completeness is held equal and the ONLY thing
+    // separating them is the distance this test is about. The earlier roster paired a 3-part row against a
+    // 2-part one, which meant the assertion also silently depended on an omitted name part being scored as a
+    // perfect spelling — the very conflation `unaccountedParts` exists to undo.
     const roster = [
       R("both", "John MacDonald McDonald", "project_manager"),
-      R("other", "John McDonell", "superintendent"),
+      R("other", "John Xavier McDonell", "superintendent"),
     ];
     expect(names(go("John McDonld", "superintendent", roster))).toEqual(["John MacDonald McDonald"]);
   });
@@ -1304,5 +1309,128 @@ describe("closeness narrows before blocking, and the closest PART wins", () => {
     const r = go("Brett Bell", "superintendent", roster);
     expect(names(r)).toEqual(["Brett Bell"]);
     expect(r.matches[0].confidence).toBe("exact");
+  });
+
+  it("does not let an unspoken name part outrank a spelt-out typo", () => {
+    // An omitted middle name and a one-letter typo are different KINDS of doubt, and neither is better
+    // evidence than the other. Scoring a partial match as distance 0 made the omission win outright: the
+    // cross-role "John Allen Smith" was auto-addressed and the in-role "John Smyth" never reached the
+    // tie-break at all. Now they tie on evidence and the field's own role settles it.
+    const roster = [R("s", "John Smyth", "superintendent"), R("p", "John Allen Smith", "project_manager")];
+    expect(names(go("John Smith", "superintendent", roster))).toEqual(["John Smyth"]);
+    expect(names(go("John Smith", "project_manager", roster))).toEqual(["John Allen Smith"]);
+  });
+
+  it("reports a cross-role tie as ambiguous rather than picking one", () => {
+    // Same incomparable evidence, but now nothing separates them — both hold the queried role, so there is
+    // no tie-break left and auto-addressing either one would be a guess.
+    const roster = [R("a", "John Smyth", "superintendent"), R("b", "John Allen Smith", "superintendent")];
+    const r = go("John Smith", "superintendent", roster);
+    expect(r.matches).toEqual([]);
+    expect(r.ambiguous[0].candidates.map((c) => c.name).sort()).toEqual(["John Allen Smith", "John Smyth"]);
+  });
+
+  it("still resolves a partial match nobody competes with", () => {
+    // The narrowing must only ever DROP a candidate a rival beats. Omitting a middle name is still an
+    // ordinary way to write someone's name when no rival spelling exists.
+    const roster = [R("p", "John Allen Smith", "project_manager")];
+    expect(names(go("John Smith", "superintendent", roster))).toEqual(["John Allen Smith"]);
+  });
+
+  it("prefers the better spelling when completeness is equal", () => {
+    // Domination still applies on the axis that IS comparable: same unspoken middle part, closer surname.
+    const roster = [
+      R("close", "John Allen Smith", "project_manager"),
+      R("far", "John Allen Smythe", "superintendent"),
+    ];
+    expect(names(go("John Smith", "superintendent", roster))).toEqual(["John Allen Smith"]);
+  });
+});
+
+describe("a bare name is bare however it was punctuated", () => {
+  const R = (id: string, name: string, role: string, isActive = true) => ({ id, name, role, isActive });
+  const go = (text: string, role: string, roster: ReturnType<typeof R>[]) =>
+    matchFieldResponders({ text, role, roster });
+  const names = (r: { matches: Array<{ responder: { name: string } }> }) =>
+    r.matches.map((m) => m.responder.name);
+
+  it("applies roster-wide uniqueness to a punctuation-collapsed single token", () => {
+    // "Mary-Jane" splits into two tokens but reads as ONE name. Arbitrating it as a full name let the
+    // hyphenated roster spelling win on the field's role while "MaryJane Jones" — who answers to exactly the
+    // same bare name — was passed over. A bare name cannot say WHICH person who answers to it was meant.
+    const roster = [
+      R("s", "Mary-Jane Smith", "superintendent"),
+      R("p", "MaryJane Jones", "project_manager"),
+    ];
+    const r = go("Mary-Jane", "superintendent", roster);
+    expect(r.matches).toEqual([]);
+    expect(r.ambiguous[0].candidates.map((c) => c.name).sort()).toEqual(["Mary-Jane Smith", "MaryJane Jones"]);
+  });
+
+  it("still resolves a collapsed bare name that is unique", () => {
+    const roster = [R("s", "Mary-Jane Smith", "superintendent"), R("p", "Robert Sampley", "project_manager")];
+    expect(names(go("Mary-Jane", "superintendent", roster))).toEqual(["Mary-Jane Smith"]);
+  });
+
+  it("fuzzes a punctuation-linked run the same in both directions", () => {
+    // One permitted typo must not decide which of two equivalent spellings the ROSTER happens to use. Only
+    // the input side could collapse, so "Mary-Jone Smith" reached roster "MaryJane Smith" while the mirrored
+    // "MaryJone Smith" could not reach "Mary-Jane Smith" — the same person, missed on spelling alone.
+    expect(names(go("MaryJone Smith", "superintendent", [R("1", "Mary-Jane Smith", "superintendent")])))
+      .toEqual(["Mary-Jane Smith"]);
+    expect(names(go("Mary-Jone Smith", "superintendent", [R("1", "MaryJane Smith", "superintendent")])))
+      .toEqual(["MaryJane Smith"]);
+  });
+
+  it("still refuses to join across a SPACE, fuzzily or not", () => {
+    // The run may only cross boundaries a hyphen made. A space is a real boundary between two names, and
+    // letting a token span one is the wrong-recipient bug that motivated `joinableWithNext` to begin with.
+    for (const typed of ["Annabell", "Annabel", "Annabelle"]) {
+      expect(go(typed, "superintendent", [R("1", "Ann Abell", "superintendent")]).matches).toEqual([]);
+    }
+    expect(go("MarySmith", "superintendent", [R("1", "Mary Smith", "superintendent")]).matches).toEqual([]);
+  });
+
+  it("leaves genuinely multi-token input on the full-name path", () => {
+    // The collapse must not swallow a real surname: "De-Angelo Smith" reads as two names either way.
+    const roster = [R("s", "DeAngelo Smith", "superintendent"), R("p", "DeAngelo Jones", "project_manager")];
+    expect(names(go("De-Angelo Smith", "superintendent", roster))).toEqual(["DeAngelo Smith"]);
+  });
+});
+
+describe("an explicit role annotation outranks the field it was typed into", () => {
+  const R = (id: string, name: string, role: string, isActive = true) => ({ id, name, role, isActive });
+  const go = (text: string, role: string, roster: ReturnType<typeof R>[]) =>
+    matchFieldResponders({ text, role, roster });
+
+  const SAME_NAME = [
+    R("s", "Alex Smith", "superintendent"),
+    R("p", "Alex Smith", "project_manager"),
+  ];
+
+  it("sends a superintendent-field '(PM)' to the project manager", () => {
+    // The slot is unreliable evidence; the annotation is a deliberate statement. Stripping it and then
+    // falling back to the slot handed the card to the one person the text explicitly said it did not mean.
+    const r = go("Alex Smith (PM)", "superintendent", SAME_NAME);
+    expect(r.matches.map((m) => m.responder.id)).toEqual(["p"]);
+    // Still reported against the QUERIED role, because that is what tells the caller which column to write.
+    expect(r.matches[0].roleMatchesQuery).toBe(false);
+  });
+
+  it("honours the trailing-dash form too", () => {
+    expect(go("Alex Smith - PM", "superintendent", SAME_NAME).matches.map((m) => m.responder.id)).toEqual(["p"]);
+  });
+
+  it("falls back to the field when no annotation was written", () => {
+    const r = go("Alex Smith", "superintendent", SAME_NAME);
+    expect(r.matches.map((m) => m.responder.id)).toEqual(["s"]);
+    expect(r.matches[0].roleMatchesQuery).toBe(true);
+  });
+
+  it("does not let an annotation reach a WEAKER identification", () => {
+    // Role only ever breaks a tie. An annotation is still role evidence, not identity evidence, so it must
+    // not pull in someone whose name matches less well.
+    const roster = [R("s", "Alex Smith", "superintendent"), R("p", "Alex Smithers", "project_manager")];
+    expect(go("Alex Smith (PM)", "superintendent", roster).matches.map((m) => m.responder.id)).toEqual(["s"]);
   });
 });

@@ -56,12 +56,17 @@ That rule decides whether a person *scores at all*. On top of it sit two arbitra
 implementation has an explicit **bare-token branch** for the first — earlier drafts of this document claimed
 there was none, and rebuilding from that claim would revive a wrong-recipient defect:
 
-> **Bare-token uniqueness.** A segment of ONE token resolves only if exactly one roster row scores —
+> **Bare-token uniqueness.** A segment that reads as ONE token resolves only if exactly one roster row scores —
 > across **every** confidence tier, **both** roles, and **active and inactive alike**. Confidence must not
 > arbitrate it (a PM mononym `Nick` scoring *exact* beat superintendent `Nick Reyes` scoring *high*, when
 > both people plainly answer to the token), role must not (the slot is unreliable), and neither may active
 > status (a bare `John` silently picked active `John Smyth` over inactive `John Smith`). With one token
 > there is no second token to arbitrate, so **any** contest is ambiguous.
+>
+> "Reads as one token" covers the **punctuation-collapsed** reading, not just the plain whitespace split.
+> `Mary-Jane` splits into two tokens but names one person, and routing it through full-name arbitration let
+> it resolve `Mary-Jane Smith` outright while `MaryJane Jones` — who answers to exactly the same bare name —
+> was passed over.
 
 > **Meaningful anchor.** A match needs at least one EXACT accounting on identity-bearing text — two or
 > more characters, and not a generational suffix. A one-character initial and a bare `Jr` each selected a
@@ -123,14 +128,32 @@ field, is Nick Cheatam, a **project manager**. Filtering candidates by role made
 card reached nobody.
 
 1. The whole active roster is searched, and candidates are narrowed in this order:
-   **confidence → closeness → role.** `high` is a COARSE tier, so within it a distance-1 spelling is
+   **confidence → best evidence → role.** `high` is a COARSE tier, so within it a distance-1 spelling is
    stronger evidence than a distance-2 one, and role — the signal this matcher documents as unreliable —
-   must not override that. Role only ever breaks a tie between candidates already equal on both.
-   Every match carries `roleMatchesQuery`.
+   must not override that. Role only ever breaks a tie between candidates already equal. Every match
+   carries `roleMatchesQuery`.
 
    Reimplementing this as "confidence, then role" recreates a wrong-recipient defect: a distance-2 in-role
    spelling beat a distance-1 cross-role one, sending the corrective action to the wrong person purely
    because the text sat in a particular field.
+
+   **"Best evidence" is TWO axes, not one number.** Spelling distance and *completeness* — how many parts of
+   the roster name the segment left unspoken — are different kinds of doubt, and a candidate is discarded
+   only when some rival is at least as good on **both** and better on one. Two candidates that each win an
+   axis are incomparable and both survive to the role tie-break, or are reported ambiguous.
+
+   Collapsing the two onto one number is a wrong-recipient defect: a partial match was scored distance 0, so
+   for input `John Smith` the cross-role `John Allen Smith` (nothing misspelled, one name unspoken) beat the
+   in-role `John Smyth` (whole name spoken, one letter out) and was auto-addressed — role and ambiguity never
+   got a look.
+1a. **An explicit role annotation outranks the field.** `"Alex Smith (PM)"` is a deliberate statement by the
+   person filling in the card; the *slot* is the thing this matcher documents as unreliable. So the
+   annotated role, not the queried one, is what breaks the tie at step 1. Stripping the annotation and
+   falling back to the slot sent a superintendent-field `"Alex Smith (PM)"` to the superintendent — the one
+   person the text explicitly said it did not mean.
+
+   `roleMatchesQuery` still reports the **queried** role, because that is what tells the caller which column
+   to write. The two must not be conflated.
 2. **`is_active = false` is never returned as a `match`** — but inactive rows are still *scored*, because a hit on
    a deactivated person is a positive identification that must block a weaker active alternative. With
    inactive `John Smith` and active `John Smyth`, filtering the inactive row out early turned an exact
