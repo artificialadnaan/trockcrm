@@ -481,22 +481,33 @@ function scoreSegmentAgainstName(
 
   if (unaccounted.length === 1) {
     const token = unaccounted[0];
-    const index = parts.findIndex(
-      (part, i) =>
-        // Length difference alone is a LOWER BOUND on edit distance, so checking it first turns a pasted
-        // blob into an O(1) rejection instead of an O(token x part) walk. The allowance is never above 2,
-        // so anything meaningfully longer than a real surname is refused before any distance work.
-        !consumed[i] &&
-        // Measured in code points for the same reason the anchor is: `.length` reads one astral character
-        // as two, which both inflates a token past the fuzzy floor and mis-states the length difference.
-        Math.abs(codePointLength(token) - codePointLength(part)) <=
-          maxEditDistance(codePointLength(token), codePointLength(part)) &&
-        nameEditDistance(token, part) <= maxEditDistance(codePointLength(token), codePointLength(part)),
-    );
+    // The CLOSEST eligible part, not the first one that clears the threshold.
+    //
+    // `findIndex` recorded whichever unconsumed part happened to come first, so the distance carried into
+    // arbitration could be larger than the real minimum — a roster row spelling "MacDonald McDonald" pinned
+    // the distance-2 "MacDonald" and never saw its own distance-1 "McDonald", which then tied a farther
+    // spelling elsewhere and let role pick the wrong person. That defeats the ranking added to stop exactly
+    // this, so the distance has to be the best one available, not the first one found.
+    let index = -1;
+    let bestDistance = Number.POSITIVE_INFINITY;
+    for (let i = 0; i < parts.length; i++) {
+      if (consumed[i]) continue;
+      // Length difference alone is a LOWER BOUND on edit distance, so checking it first turns a pasted blob
+      // into an O(1) rejection instead of an O(token x part) walk. Measured in code points for the same
+      // reason the anchor is: `.length` reads one astral character as two.
+      const allowance = maxEditDistance(codePointLength(token), codePointLength(parts[i]));
+      if (Math.abs(codePointLength(token) - codePointLength(parts[i])) > allowance) continue;
+      const distance = nameEditDistance(token, parts[i]);
+      if (distance <= allowance && distance < bestDistance) {
+        bestDistance = distance;
+        index = i;
+        if (distance === 0) break;
+      }
+    }
     if (index < 0) return null;
     consumed[index] = true;
     if (suffixUnspoken()) return null;
-    return { confidence: "high", fuzzDistance: nameEditDistance(token, parts[index]) };
+    return { confidence: "high", fuzzDistance: bestDistance };
   }
 
   // A generational suffix left unspoken rejects the match outright. It is not an optional middle name: it
@@ -624,7 +635,12 @@ export function matchFieldResponders<T extends ResponderRosterEntry>({
       // — was thrown away. Role cannot outrank evidence when the premise is that the field's role is
       // unreliable.
       const best = allScored.some((s) => s.confidence === "exact") ? "exact" : "high";
-      const atBest = allScored.filter((s) => s.confidence === best);
+      // Narrowed by CLOSENESS before anything else looks at this set. `high` is coarse, so an inactive
+      // person merely sharing the tier is not actually competing: active "John Cheatam" at distance 1 was
+      // being blocked by inactive "John Chattam" at distance 2, turning a clear answer into an ambiguity.
+      // Blocking is for candidates that remain genuinely tied.
+      const closestOverall = Math.min(...allScored.filter((s) => s.confidence === best).map((s) => s.fuzz));
+      const atBest = allScored.filter((s) => s.confidence === best && s.fuzz === closestOverall);
 
       // An inactive person at the BEST tier blocks the segment, whatever that tier is. Restricting this to
       // exact hits left the fuzzy tie open: "John Smath" scored inactive "John Smith" and active "John
@@ -644,13 +660,10 @@ export function matchFieldResponders<T extends ResponderRosterEntry>({
         continue;
       }
 
-      // Closeness before role. Within the `high` tier a distance-1 spelling is better evidence than a
-      // distance-2 one, and role — the unreliable signal — must not override that. Role still breaks a
-      // genuine tie, where the spellings are equally close.
-      const closest = Math.min(...atBest.map((s) => s.fuzz));
-      const atClosest = atBest.filter((s) => s.fuzz === closest);
-      const inRoleAtBest = atClosest.filter((s) => s.inRole);
-      const finalists = inRoleAtBest.length > 0 ? inRoleAtBest : atClosest;
+      // Role last. `atBest` is already narrowed to the best confidence AND the closest spelling, so role
+      // only ever breaks a genuine tie between equally-good candidates.
+      const inRoleAtBest = atBest.filter((s) => s.inRole);
+      const finalists = inRoleAtBest.length > 0 ? inRoleAtBest : atBest;
       if (finalists.length > 1) {
         result.ambiguous.push({ matchedText: segment.raw, candidates: finalists.map((s) => s.entry) });
         continue;

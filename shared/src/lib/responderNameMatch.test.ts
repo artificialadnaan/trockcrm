@@ -1259,3 +1259,50 @@ describe("closeness ranks before role", () => {
     expect(nameEditDistance("sanders", "sanchez")).toBe(4);
   });
 });
+
+describe("closeness narrows before blocking, and the closest PART wins", () => {
+  const R = (id: string, name: string, role: string, isActive = true) => ({ id, name, role, isActive });
+  const go = (text: string, role: string, roster: ReturnType<typeof R>[]) =>
+    matchFieldResponders({ text, role, roster });
+  const names = (r: { matches: Array<{ responder: { name: string } }> }) =>
+    r.matches.map((m) => m.responder.name);
+
+  it("does not let a FARTHER inactive namesake block a closer active one", () => {
+    // `high` is coarse, so an inactive person merely sharing the tier is not actually competing. Blocking
+    // before the distance narrowing turned a clear answer into an ambiguity.
+    const roster = [
+      R("active", "John Cheatam", "superintendent"),
+      R("gone", "John Chattam", "superintendent", false),
+    ];
+    expect(names(go("John Cheatham", "superintendent", roster))).toEqual(["John Cheatam"]);
+  });
+
+  it("still blocks when the inactive candidate is genuinely TIED", () => {
+    // The protection that matters is unchanged: equally-good evidence for a deactivated person and an
+    // active one means nobody, not the active one by default.
+    const exact = [R("gone", "John Smith", "superintendent", false), R("act", "John Smyth", "superintendent")];
+    expect(go("John Smith", "superintendent", exact).matches).toEqual([]);
+    const tied = [R("gone", "John Smith", "superintendent", false), R("act", "John Smath", "superintendent")];
+    expect(go("John Smyth", "superintendent", tied).matches).toEqual([]);
+  });
+
+  it("records the CLOSEST eligible name part, not the first within threshold", () => {
+    // `findIndex` pinned whichever unconsumed part came first, so a row spelling both "MacDonald" (distance
+    // 2) and "McDonald" (distance 1) carried the worse number into arbitration and lost to a farther
+    // spelling elsewhere — defeating the ranking added to prevent exactly that.
+    const roster = [
+      R("both", "John MacDonald McDonald", "project_manager"),
+      R("other", "John McDonell", "superintendent"),
+    ];
+    expect(names(go("John McDonld", "superintendent", roster))).toEqual(["John MacDonald McDonald"]);
+  });
+
+  it("keeps confidence ahead of closeness", () => {
+    // An EXACT match wins even when a fuzzy candidate is closer on its own tier — the order is
+    // confidence, then closeness, then role.
+    const roster = [R("x", "Brett Bell", "project_manager"), R("y", "Brett Bela", "superintendent")];
+    const r = go("Brett Bell", "superintendent", roster);
+    expect(names(r)).toEqual(["Brett Bell"]);
+    expect(r.matches[0].confidence).toBe("exact");
+  });
+});

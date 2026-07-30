@@ -122,8 +122,15 @@ evidence of the role they hold — Adnaan confirmed that `"Nick Cheaham"`, sitti
 field, is Nick Cheatam, a **project manager**. Filtering candidates by role made that unresolvable and the
 card reached nobody.
 
-1. The whole active roster is searched. Confidence is ranked **first**; role breaks only an
-   equal-confidence tie. Every match carries `roleMatchesQuery`.
+1. The whole active roster is searched, and candidates are narrowed in this order:
+   **confidence → closeness → role.** `high` is a COARSE tier, so within it a distance-1 spelling is
+   stronger evidence than a distance-2 one, and role — the signal this matcher documents as unreliable —
+   must not override that. Role only ever breaks a tie between candidates already equal on both.
+   Every match carries `roleMatchesQuery`.
+
+   Reimplementing this as "confidence, then role" recreates a wrong-recipient defect: a distance-2 in-role
+   spelling beat a distance-1 cross-role one, sending the corrective action to the wrong person purely
+   because the text sat in a particular field.
 2. **`is_active = false` is never returned as a `match`** — but inactive rows are still *scored*, because a hit on
    a deactivated person is a positive identification that must block a weaker active alternative. With
    inactive `John Smith` and active `John Smyth`, filtering the inactive row out early turned an exact
