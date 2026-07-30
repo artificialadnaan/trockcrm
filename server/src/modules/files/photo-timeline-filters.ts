@@ -25,7 +25,7 @@ export function describeDealPhotoTimelineFilters(filters: DealPhotoTimelineFilte
   const categories = normalizeList(filters.categories);
   const tags = normalizeList(filters.tags).map((tag) => tag.toLowerCase());
   const uploaderIds = normalizeList(filters.uploaderIds);
-  const keys = ["deal_scope", "file_category", "active_file", "latest_version"];
+  const keys = ["deal_scope", "file_category", "file_mime", "active_file", "latest_version"];
 
   if (!filters.includeDeleted) keys.push("deleted_at");
   if (categories.length > 0) keys.push("photo_category");
@@ -82,6 +82,13 @@ export async function buildDealPhotoTimelineConditions(
   const conditions: SQL[] = [
     await buildDealPhotoScopeCondition(tenantDb, dealId),
     eq(files.category, "photo"),
+    // category='photo' is a FILING choice, not a fact about the bytes — the CRM uploader will happily put a
+    // PDF in the Photos category. Such a row still gets a thumbnail (confirmUpload rasterizes page 1 to a
+    // JPEG when the image thumbnailer misses), so it renders a perfectly good tile in the grid while its
+    // full-size URL is a PDF no image view can decode: a black frame with no error, since the URL is not
+    // null. Same shape for any other non-image filed here. mime_type is NOT NULL, so this needs no null
+    // branch. Anything that isn't an image cannot render in a photo gallery, so it does not belong in one.
+    sql`${files.mimeType} ILIKE 'image/%'`,
     eq(files.isActive, true),
     latestActiveVersionCondition(),
   ];
