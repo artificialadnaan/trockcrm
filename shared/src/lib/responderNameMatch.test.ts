@@ -683,7 +683,8 @@ describe("review findings", () => {
     // Robert): two recipients, neither of them the person named, with nothing unmatched to signal it.
     // A comma now separates people only when a side carries more than one token.
     expect(sup("Bell, Robert").matches).toEqual([]);
-    expect(sup("Bell, Robert").unmatched).toEqual(["Bell Robert"]);
+    // Verbatim, comma included — the recombined "Bell Robert" is the form that gets SCORED, not reported.
+    expect(sup("Bell, Robert").unmatched).toEqual(["Bell, Robert"]);
     // The surname-first form for someone who IS on the roster still resolves, as one person.
     expect(names(sup("Sampley, Robert"))).toEqual(["Robert Sampley"]);
     // And a genuine two-person comma list is untouched.
@@ -790,7 +791,7 @@ describe("second review round", () => {
     ];
     const r = go("Bell, Robert, Adam Sherwood", "superintendent", roster);
     expect(names(r)).toEqual(["Adam Sherwood"]);
-    expect(r.unmatched).toEqual(["Bell Robert"]);
+    expect(r.unmatched).toEqual(["Bell, Robert"]);
   });
 
   it("lets an EXACT inactive hit block a weaker active alternative", () => {
@@ -800,9 +801,12 @@ describe("second review round", () => {
     const r = go("John Smith", "superintendent", roster);
     expect(r.matches).toEqual([]);
     expect(r.unmatched).toEqual(["John Smith"]);
-    // An equally exact ACTIVE match still wins — blocking is only about weaker alternatives.
+    // An equally exact ACTIVE namesake does not simply win either — that is a real doubt, not a weaker
+    // alternative, so it surfaces as AMBIGUOUS for a human rather than resolving silently.
     const both = [...roster, R("exact", "John Smith", "project_manager")];
-    expect(names(go("John Smith", "superintendent", both))).toEqual(["John Smith"]);
+    const tie = go("John Smith", "superintendent", both);
+    expect(tie.matches).toEqual([]);
+    expect(tie.ambiguous).toHaveLength(1);
   });
 
   it("reports matchedText and unmatched VERBATIM, annotations included", () => {
@@ -980,5 +984,48 @@ describe("fourth review round", () => {
     expect(go("Brett ".repeat(400), "superintendent", DALLAS).matches).toEqual([]);
     expect(names(go("Brett Bell/Robert Sampley", "superintendent", DALLAS)))
       .toEqual(["Brett Bell", "Robert Sampley"]);
+  });
+});
+
+// ── Fifth review round ─────────────────────────────────────────────────────────────────────────────────
+describe("fifth review round", () => {
+  const R = (id: string, name: string, role: string, isActive = true) => ({ id, name, role, isActive });
+  const go = (text: string, role: string, roster: ReturnType<typeof R>[]) =>
+    matchFieldResponders({ text, role, roster });
+  const names = (r: { matches: Array<{ responder: { name: string } }> }) =>
+    r.matches.map((m) => m.responder.name);
+
+  it("blocks an inactive person at the BEST tier, not only on an exact hit", () => {
+    // The exact-only rule left the fuzzy tie open: "John Smath" scored inactive "John Smith" and active
+    // "John Smyth" equally at high, and dropping the inactive one returned Smyth cleanly — a former
+    // employee's corrective action sent to a current colleague.
+    const roster = [R("old", "John Smith", "superintendent", false), R("new", "John Smyth", "superintendent")];
+    const fuzzyTie = go("John Smath", "superintendent", roster);
+    expect(fuzzyTie.matches).toEqual([]);
+    expect(fuzzyTie.ambiguous).toHaveLength(1);
+
+    // An ACTIVE exact still beats an INACTIVE high — then the inactive is not at the best tier at all.
+    const clear = [R("old", "Jon Smith", "superintendent", false), R("new", "John Smith", "superintendent")];
+    expect(names(go("John Smith", "superintendent", clear))).toEqual(["John Smith"]);
+  });
+
+  it("preserves a letter no transliteration map reached", () => {
+    // The map can only ever cover the letters someone thought of. Azerbaijani "Ə" (U+0259) was outside it,
+    // so the ASCII-only class deleted it and "Əli Smith" became "li smith": an EXACT match for an unrelated
+    // roster member named Li Smith. Keeping the letter makes the worst case a MISS, which is the safe side.
+    expect(go("Əli Smith", "superintendent", [R("li", "Li Smith", "superintendent")]).matches).toEqual([]);
+    // And the person themselves still resolves.
+    expect(names(go("Əli Smith", "superintendent", [R("e", "Əli Smith", "superintendent")]))).toEqual(["Əli Smith"]);
+    // A few more scripts, to prove nothing is being silently dropped.
+    for (const name of ["Ægir Olsen", "Đan Nguyen", "Łukasz Nowak", "Øyvind Berg"]) {
+      expect(names(go(name, "superintendent", [R("x", name, "superintendent")]))).toEqual([name]);
+    }
+  });
+
+  it("reports the ORIGINAL comma span, not the recombined scoring form", () => {
+    const D = [R("bbell", "Brett Bell", "superintendent"), R("rsampley", "Robert Sampley", "superintendent")];
+    // Scored as "Sampley Robert"; reported as typed.
+    expect(go("Sampley, Robert", "superintendent", D).matches[0].matchedText).toBe("Sampley, Robert");
+    expect(go("Bell, Robert", "superintendent", D).unmatched).toEqual(["Bell, Robert"]);
   });
 });
