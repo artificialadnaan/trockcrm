@@ -43,7 +43,6 @@ import { tenantSchemaSql } from "../../../tests/helpers/tenant-schema-from-drizz
 // The ceiling the ingress REUSES rather than re-declares — see the contactSheetBytes tests below.
 import { MAX_FILE_SIZE_BYTES } from "../files/file-constants.js";
 import { reprocessEstimateSourceDocument } from "./document-service.js";
-import { canonicalizeTradeScopeKey } from "./pricing-service.js";
 import { buildEstimatingWorkbenchState } from "./workbench-service.js";
 import {
   buildWalkthroughContactSheetDisplayName,
@@ -649,28 +648,30 @@ describe("insertWalkthroughExtractions", () => {
   // divergence passing the trade was supposed to prevent.
   it("canonicalizes the trade so the pricing key matches a market rule exactly", async () => {
     const walkthroughId = U("22240");
-    const { documentId, parseRunId } = await seedChain(walkthroughId);
 
-    const ids = await insertWalkthroughExtractions({
+    // Through `ingestWalkthrough`, with the trade spelled RAW — `"  Roofing  "`, as a sender
+    // plausibly would and as the CRM would not. Canonicalization lives in the validator, so an
+    // earlier version of this test that pre-canonicalized the value and called
+    // `insertWalkthroughExtractions` directly could not fail: it asserted that "roofing" is stored
+    // as "roofing", bypassing the only code that does the work. Deleting the canonicalization
+    // entirely left it green.
+    const result = await ingestWalkthrough({
       tenantDb,
-      input: {
-        dealId: DEAL,
-        projectId: PROJECT,
-        documentId,
-        parseRunId,
-        walkthroughId,
-        // As a sender would plausibly spell it, and as the CRM would not.
-        rows: [{ ...CARPENTRY_ROW, trade: canonicalizeTradeScopeKey("  Roofing  ") }],
-      },
+      payload: walkthroughPayload(walkthroughId, {
+        rows: [{ ...CARPENTRY_ROW, trade: "  Roofing  " }],
+      }),
     });
 
     const [row] = await tenantDb
       .select()
       .from(estimateExtractions)
-      .where(eq(estimateExtractions.id, ids[0]));
+      .where(eq(estimateExtractions.id, result.extractionIds[0]));
 
+    // The pricing key and the stored provenance must agree, or the row is priced under one trade
+    // while claiming another (`market-rate-service.ts` compares scope keys with `===`).
     expect(row.metadataJson.pricingScopeKey).toBe("roofing");
     expect(row.metadataJson.trade).toBe("roofing");
+    expect(row.metadataJson.pricingScopeType).toBe("trade");
   });
 
   // R16. The hint used to be FILTERED through `isKnownTradeScopeKey` — membership of the resolver's
@@ -817,6 +818,18 @@ async function recordIngressStatements(
   payload: WalkthroughIngressPayload
 ): Promise<Array<{ kind: string; sql: string; params: unknown[] }>> {
   const log: Array<{ kind: string; sql: string; params: unknown[] }> = [];
+
+  // This probe compiles each statement to inspect its SQL, which needs Drizzle's `dialect.sqlToQuery`.
+  // That is an INTERNAL api with no public equivalent, so it is asserted once, here, with a message
+  // naming the dependency — otherwise a Drizzle upgrade surfaces as a TypeError from inside a Proxy
+  // getter, which reads like a bug in the service rather than in the harness.
+  if (typeof (tenantDb as any)?.dialect?.sqlToQuery !== "function") {
+    throw new Error(
+      "recordIngressStatements depends on Drizzle's internal `dialect.sqlToQuery`, which is no longer " +
+        "available. Statement-order and advisory-lock observation cannot be verified without an " +
+        "equivalent SQL compilation path — fix the harness rather than deleting the assertions."
+    );
+  }
 
   const recordingDb = {
     transaction: (body: (tx: unknown) => unknown) =>
@@ -1599,6 +1612,9 @@ describe("ingestWalkthrough", () => {
       walkthroughPayload(U("33032"), { projectId: null })
     );
     const dealLevelFirstWriteAt = dealLevelLog.findIndex((entry) => entry.kind === "insert");
+    // Guarded like `firstWriteAt` above: without this, a run that recorded no insert at all gives
+    // findIndex -1, and `slice(0, -1)` quietly drops the last entry instead of failing.
+    expect(dealLevelFirstWriteAt).toBeGreaterThan(-1);
     expect(dealLevelLog.slice(0, dealLevelFirstWriteAt).map((entry) => entry.kind)).toEqual([
       "execute",
       "advisory-locks-held",
@@ -2083,8 +2099,11 @@ describe("ingestWalkthrough", () => {
   // The ceiling is IMPORTED, not restated, so the two move together.
   it.each<[string, number]>([
     ["one byte over the Files subsystem's ceiling", MAX_FILE_SIZE_BYTES + 1],
-    // Passes `Number.isInteger`, and is what actually produced the 500: beyond signed-bigint range.
-    ["a value past signed-bigint range", Number.MAX_SAFE_INTEGER],
+    // Also over the ceiling, and the largest integer JS represents exactly — so it passes
+    // `Number.isInteger` and reaches the bound rather than being rejected as non-integral first.
+    // (It is NOT past signed-bigint range: 2^53-1 is ~1000x below 2^63-1. Nothing here exercises
+    // a bigint overflow, and the ceiling makes that path unreachable by design.)
+    ["the largest exactly-representable integer", Number.MAX_SAFE_INTEGER],
   ])("refuses a contact sheet of %s, without writing anything", async (_label, contactSheetBytes) => {
     const before = await tableCounts();
 
