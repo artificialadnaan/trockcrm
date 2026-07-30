@@ -20,7 +20,9 @@ import UIKit
 @objc(WearablesBridge)
 final class WearablesBridge: RCTEventEmitter {
   private var session: DeviceSession?
-  private var stream: Stream?
+  // Fully qualified: bare `Stream` is ambiguous once Foundation is imported, because
+  // Foundation.Stream is the base class behind InputStream/OutputStream.
+  private var stream: MWDATCamera.Stream?
   private var photoToken: AnyListenerToken?
   private var frameToken: AnyListenerToken?
   private var hasListeners = false
@@ -149,7 +151,8 @@ final class WearablesBridge: RCTEventEmitter {
   func startStream(_ resolve: @escaping RCTPromiseResolveBlock,
                    rejecter reject: @escaping RCTPromiseRejectBlock) {
     do {
-      let created = try Wearables.shared.createSession(deviceSelector: AutoDeviceSelector())
+      let created = try Wearables.shared.createSession(
+        deviceSelector: AutoDeviceSelector(wearables: Wearables.shared))
       session = created
       try created.start()
 
@@ -165,7 +168,7 @@ final class WearablesBridge: RCTEventEmitter {
 
       // Record what the FIRST frame actually measures. The configuration says what we asked
       // for; only a delivered frame says what the glasses sent.
-      frameToken = newStream.videoFramePublisher.listen { [weak self] frame in
+      frameToken = newStream.videoFramePublisher.listen { [weak self] (frame: VideoFrame) in
         guard let self, self.firstFrameSize == nil else { return }
         if let image = frame.makeUIImage() {
           self.firstFrameSize = image.size
@@ -173,7 +176,7 @@ final class WearablesBridge: RCTEventEmitter {
         }
       }
 
-      photoToken = newStream.photoDataPublisher.listen { [weak self] photo in
+      photoToken = newStream.photoDataPublisher.listen { [weak self] (photo: PhotoData) in
         self?.deliverPhoto(photo)
       }
 
@@ -267,21 +270,18 @@ final class WearablesBridge: RCTEventEmitter {
                           resolver resolve: @escaping RCTPromiseResolveBlock,
                           rejecter reject: @escaping RCTPromiseRejectBlock) {
     let streamWasRunning = (stream != nil)
-    AVAudioApplication.requestRecordPermission { [weak self] granted in
+
+    let proceed: (Bool) -> Void = { granted in
       guard granted else {
         reject("wearables_mic_denied", "Microphone permission denied", nil)
         return
       }
-      guard let self else { return }
       do {
         let audioSession = AVAudioSession.sharedInstance()
         // .allowBluetoothHFP is what opens the glasses microphone; A2DP output options do
-        // not provide input at all.
-        if #available(iOS 26.0, *) {
-          try audioSession.setCategory(.playAndRecord, mode: .default, options: [.allowBluetoothHFP])
-        } else {
-          try audioSession.setCategory(.playAndRecord, mode: .default, options: [.allowBluetooth])
-        }
+        // not provide input at all. This is a rename of the old .allowBluetooth, not a new
+        // API, so it needs no availability guard.
+        try audioSession.setCategory(.playAndRecord, mode: .default, options: [.allowBluetoothHFP])
         try audioSession.setActive(true)
 
         let url = FileManager.default.temporaryDirectory
@@ -316,6 +316,14 @@ final class WearablesBridge: RCTEventEmitter {
       } catch {
         reject("wearables_audio_failed", "HFP capture failed: \(error)", error)
       }
+    }
+
+    // AVAudioApplication landed in iOS 17; this app deploys to 15.1, so the older
+    // AVAudioSession entry point is still required.
+    if #available(iOS 17.0, *) {
+      AVAudioApplication.requestRecordPermission(completionHandler: proceed)
+    } else {
+      AVAudioSession.sharedInstance().requestRecordPermission(proceed)
     }
   }
 }
