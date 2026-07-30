@@ -39,6 +39,10 @@ const runMocks = vi.hoisted(() => ({
   getAiReportRun: vi.fn(),
   getInFlightAiReportRun: vi.fn(),
   expireStaleAiReportRuns: vi.fn(async () => 0),
+  // Must mirror the REAL exports the route imports — a missing one is `undefined` at the call site and
+  // 500s every request (which is how the focus-prompt cap silently went untested the first time).
+  countInFlightAiReportRunsForUser: vi.fn(async () => 0),
+  MAX_IN_FLIGHT_RUNS_PER_USER: 3,
   // Real predicate, not a stub that always agrees — a mock that returned true for everything would make
   // the conflict path swallow unrelated database errors and the test would never notice.
   isInFlightRunConflict: (error: unknown) =>
@@ -281,6 +285,41 @@ describe("POST /field/reports/ai-generate", () => {
       .send({ projectId: PROJECT, photoIds: [PHOTO_A] });
 
     expect(res.status).toBe(500);
+  });
+
+  it("caps a user's concurrent runs across ALL projects, not just this one", async () => {
+    // The in-flight unique index is per (project, requester), and a field user can reach every active
+    // project — so without this one account could queue a paid 60-photo run for each of them in sequence.
+    runMocks.countInFlightAiReportRunsForUser.mockResolvedValueOnce(3 as never);
+    const res = await request(buildApp())
+      .post("/api/field/reports/ai-generate")
+      .send({ projectId: PROJECT, photoIds: [PHOTO_A] });
+
+    expect(res.status).toBe(429);
+    expect(res.body.error.message).toMatch(/already have 3 AI reports/i);
+    expect(runMocks.insertAiReportRunTx).not.toHaveBeenCalled();
+  });
+
+  it("treats a different report title as a different request", async () => {
+    const conflict = Object.assign(new Error("duplicate key"), {
+      code: "23505",
+      constraint: "field_ai_report_runs_inflight_uidx",
+    });
+    runMocks.insertAiReportRunTx.mockRejectedValueOnce(conflict as never);
+    runMocks.getInFlightAiReportRun.mockResolvedValue({
+      id: "run-existing",
+      status: "running",
+      photoIds: [PHOTO_A],
+      focusPrompt: null,
+      reportTitle: "Roof survey",
+    } as never);
+
+    const res = await request(buildApp())
+      .post("/api/field/reports/ai-generate")
+      .send({ projectId: PROJECT, photoIds: [PHOTO_A], reportTitle: "Structural survey" });
+
+    // Returning the first run would hand back a PDF titled something this caller never asked for.
+    expect(res.status).toBe(409);
   });
 
   it("rejects an empty selection", async () => {

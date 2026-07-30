@@ -169,6 +169,27 @@ export function isInFlightRunConflict(error: unknown): boolean {
 }
 
 /**
+ * How many AI reports one user may have in flight ACROSS ALL projects.
+ *
+ * The unique index bounds concurrency per (project, requester) only, and assertActiveFieldProject
+ * deliberately lets a field user reach any active project — so without this, one account could enqueue a
+ * 60-photo paid run for every project in the office back to back, and monopolise the serial AI-report
+ * poller while doing it. /api/field carries no apiLimiter, so this endpoint has to bound itself.
+ */
+export const MAX_IN_FLIGHT_RUNS_PER_USER = 3;
+
+/** In-flight runs for this user across every project. */
+export async function countInFlightAiReportRunsForUser(requestedBy: string): Promise<number> {
+  const result = await pool.query<{ count: string }>(
+    `SELECT count(*)::text AS count
+       FROM public.field_ai_report_runs
+      WHERE requested_by = $1::uuid AND status IN ('queued', 'running')`,
+    [requestedBy],
+  );
+  return Number(result.rows[0]?.count ?? 0);
+}
+
+/**
  * The run already in flight for this (project, requester), if any. Only called after the unique index has
  * rejected an insert, to hand the caller back the run that won rather than an error.
  */

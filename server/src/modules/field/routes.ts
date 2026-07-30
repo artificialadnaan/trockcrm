@@ -4,6 +4,8 @@ import { requireFieldContractor } from "../../middleware/field-auth.js";
 import { isAiReportConfigured, MAX_FOCUS_PROMPT_LENGTH } from "./ai-report-service.js";
 import {
   AI_REPORT_JOB_TYPE,
+  MAX_IN_FLIGHT_RUNS_PER_USER,
+  countInFlightAiReportRunsForUser,
   expireStaleAiReportRuns,
   getAiReportRun,
   getInFlightAiReportRun,
@@ -929,6 +931,16 @@ fieldRoutes.post("/reports/ai-generate", requireFieldContractor, async (req, res
       });
     }
 
+    // Bound this user's TOTAL concurrent spend, not just their spend on this project. The in-flight unique
+    // index is per (project, requester), and a field user can reach every active project.
+    const inFlight = await countInFlightAiReportRunsForUser(req.fieldUser!.id);
+    if (inFlight >= MAX_IN_FLIGHT_RUNS_PER_USER) {
+      throw new AppError(
+        429,
+        `You already have ${inFlight} AI reports being generated. Wait for one to finish before starting another.`,
+      );
+    }
+
     let run;
     try {
       run = await runFieldDealWrite(
@@ -970,9 +982,12 @@ fieldRoutes.post("/reports/ai-generate", requireFieldContractor, async (req, res
       // (deal, requester) alone, so a user who changes the focus or the photo selection and taps again also
       // lands here — and handing back the first run would open the earlier PDF as though it answered the new
       // question. Silently serving the wrong report is far worse than making them wait.
-      // focusPrompt is already "" when absent; the stored column is null in that case.
+      // focusPrompt/reportTitle are already "" when absent; the stored columns are null in that case.
+      // The TITLE counts too: two otherwise-identical requests with different titles are different requests,
+      // and returning the first would hand back a PDF titled something the caller never asked for.
       const sameRequest =
         (existing.focusPrompt ?? "") === focusPrompt &&
+        (existing.reportTitle ?? "") === reportTitle &&
         existing.photoIds.length === photoIds.length &&
         existing.photoIds.every((id, index) => id === photoIds[index]);
 

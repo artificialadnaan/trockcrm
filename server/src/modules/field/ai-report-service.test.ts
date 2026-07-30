@@ -320,10 +320,12 @@ describe("ai-report-service", () => {
   it("skips a photo it cannot decode instead of losing the whole report", async () => {
     // Originals over 40MB and formats sharp cannot decode legitimately exist (uploads accept 200MB and
     // thumbnailing is best-effort). One of them must not cost the user the other 59 photographs.
-    const load = vi.fn(async (p: AiReportPhotoInput) => {
-      if (p.id === "b") throw new Error("Input buffer contains unsupported image format");
-      return { buffer: TINY_JPEG, contentType: "image/jpeg" };
-    });
+    // Undecodable BYTES, not a throwing loader: that is what a truncated upload or mislabelled blob looks
+    // like, and it exercises the real sharp/heic decode path rather than a simulated one.
+    const load = vi.fn(async (p: AiReportPhotoInput) => ({
+      buffer: p.id === "b" ? Buffer.from("this is definitely not an image") : TINY_JPEG,
+      contentType: "image/jpeg",
+    }));
     const fetchFn = stubFetch([FINDINGS_OK, SUMMARY_OK]);
     const result = await generateAiPhotoAssessment(
       { projectName: "P", photos: [photo("a"), photo("b"), photo("c")] },
@@ -337,11 +339,94 @@ describe("ai-report-service", () => {
     expect(result.findings.map((f) => f.photoId)).not.toContain("b");
   });
 
+  it("does NOT silently drop photos when storage is failing", async () => {
+    // A transient R2 outage is not an unreadable photo. Swallowing it would quietly shrink the analysed set
+    // while the summary still told the owner the full set was examined — an incomplete assessment presented
+    // as a complete one.
+    const load = vi.fn(async (p: AiReportPhotoInput) => {
+      if (p.id === "b") throw new Error("connect ETIMEDOUT r2.cloudflarestorage.com");
+      return { buffer: TINY_JPEG, contentType: "image/jpeg" };
+    });
+    await expect(
+      generateAiPhotoAssessment(
+        { projectName: "P", photos: [photo("a"), photo("b")] },
+        { fetchFn: stubFetch([FINDINGS_OK, SUMMARY_OK]) as unknown as typeof fetch, loadPhotoBuffer: load },
+      ),
+    ).rejects.toThrow(/ETIMEDOUT/);
+  });
+
+  it("skips an oversized original without failing the run", async () => {
+    const { ObjectTooLargeError } = await import("../../lib/r2-client.js");
+    const load = vi.fn(async (p: AiReportPhotoInput) => {
+      if (p.id === "b") throw new ObjectTooLargeError("k", 40 * 1024 * 1024);
+      return { buffer: TINY_JPEG, contentType: "image/jpeg" };
+    });
+    const fetchFn = stubFetch([FINDINGS_OK, SUMMARY_OK]);
+    const result = await generateAiPhotoAssessment(
+      { projectName: "P", photos: [photo("a"), photo("b")] },
+      { fetchFn: fetchFn as unknown as typeof fetch, loadPhotoBuffer: load },
+    );
+    expect(result.executiveSummary).toBeTruthy();
+    const body = JSON.parse((fetchFn.mock.calls[0] as unknown as [string, { body: string }])[1].body);
+    expect(body.messages[0].content.filter((b: { type: string }) => b.type === "image")).toHaveLength(1);
+  });
+
+  it("does not demand key concerns when nothing was worth citing", async () => {
+    // Requiring "3 to 7 key concerns" over an empty digest pressures the model into inventing issues —
+    // exactly what the rest of the prompt exists to prevent.
+    const nothing = { name: "submit_findings", input: { findings: [{ photoIndex: 0, title: "", bullets: [] }] } };
+    const fetchFn = stubFetch([nothing, SUMMARY_OK]);
+    await generateAiPhotoAssessment(
+      { projectName: "P", photos: [photo("a")], focusPrompt: "roof drainage only" },
+      { fetchFn: fetchFn as unknown as typeof fetch, loadPhotoBuffer },
+    );
+    const summaryText = textBlocks(fetchFn, 1);
+    expect(summaryText).toContain("Do NOT add a");
+    expect(summaryText).not.toMatch(/3 to 7 lines/);
+  });
+
+  it("still asks for a concern list when there ARE findings", async () => {
+    const fetchFn = stubFetch([FINDINGS_OK, SUMMARY_OK]);
+    await generateAiPhotoAssessment(
+      { projectName: "P", photos: [photo("a"), photo("b")] },
+      { fetchFn: fetchFn as unknown as typeof fetch, loadPhotoBuffer },
+    );
+    expect(textBlocks(fetchFn, 1)).toContain("Key Concerns at a Glance:");
+  });
+
+  it("banks usage from a billed response it then rejects", async () => {
+    // A 200 that ends at max_tokens was paid for. Discarding its usage under-reports spend on the ledger
+    // this feature uses for cost attribution.
+    const fetchFn = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ content: [], usage: { input_tokens: 30_000, output_tokens: 4_000 }, stop_reason: "max_tokens" }),
+    }) as unknown as Response);
+    const error = await generateAiPhotoAssessment(
+      { projectName: "P", photos: [photo("a")] },
+      { fetchFn: fetchFn as unknown as typeof fetch, loadPhotoBuffer },
+    ).catch((e) => e);
+    expect(error.usage).toMatchObject({ inputTokens: 30_000, outputTokens: 4_000 });
+  });
+
+  it("stops retrying once the total deadline has passed", async () => {
+    // Checking the deadline only on entry let a late-starting call burn 3 attempts x the socket timeout,
+    // carrying the run past the stale threshold where a fresh enqueue reaps it and buys a second pass.
+    vi.stubEnv("AI_REPORT_TOTAL_DEADLINE_MS", "1");
+    const fetchFn = vi.fn(async () => ({ ok: false, status: 529, text: async () => "overloaded" }) as unknown as Response);
+    await expect(
+      generateAiPhotoAssessment(
+        { projectName: "P", photos: [photo("a")] },
+        { fetchFn: fetchFn as unknown as typeof fetch, loadPhotoBuffer },
+      ),
+    ).rejects.toThrow();
+    // Far fewer than MAX_ATTEMPTS x every batch — the deadline cut it short.
+    expect(fetchFn.mock.calls.length).toBeLessThanOrEqual(1);
+  });
+
   it("fails clearly when NOT ONE photo can be read", async () => {
     // Graceful for one bad photo; a report with no assessment in it at all is not a report.
-    const load = vi.fn(async () => {
-      throw new Error("unsupported image format");
-    });
+    const load = vi.fn(async () => ({ buffer: Buffer.from("not an image at all"), contentType: "image/jpeg" }));
     const fetchFn = stubFetch([FINDINGS_OK, SUMMARY_OK]);
     await expect(
       generateAiPhotoAssessment(

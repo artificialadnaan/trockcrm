@@ -235,6 +235,39 @@ describe("ReportBuilder AI report", () => {
     expect(props.onGenerated).not.toHaveBeenCalled();
   });
 
+  it("a stale poll loop cannot resurrect itself once a new run has started", async () => {
+    // With a shared boolean, a newly started report set the flag back to true while an OLD loop was still
+    // resolving — the stale loop then resumed as current and could open the previous PDF, or clear the new
+    // run's spinner in its own `finally`. A per-run token makes the old loop inert.
+    let releaseFirst: (v: unknown) => void = () => {};
+    mockGetAiReportStatus.mockImplementationOnce(
+      () => new Promise((resolve) => { releaseFirst = resolve; }),
+    );
+
+    const { ui, props } = renderBuilder();
+    await openFocusStep(ui);
+    await pressGenerate(ui);
+    await waitFor(() => expect(mockStartAiReport).toHaveBeenCalled());
+    await tickPoll(); // first loop's status request is now in flight and hanging
+
+    // Close the sheet, then start a SECOND report — this bumps the token.
+    await act(async () => { fireEvent.press(ui.getByText("Back")); });
+    await act(async () => { fireEvent.press(ui.getByText("Cancel")); });
+    mockGetAiReportStatus.mockResolvedValue({ runId: "run-2", status: "running" });
+    await openFocusStep(ui);
+    await pressGenerate(ui);
+    await waitFor(() => expect(mockStartAiReport).toHaveBeenCalledTimes(2));
+
+    // Now let the FIRST loop's request resolve as a success. It must be ignored entirely.
+    await act(async () => {
+      releaseFirst({ runId: "run-1", status: "succeeded", report: AI_REPORT });
+    });
+
+    expect(props.onGenerated).not.toHaveBeenCalled();
+    // ...and the live run is still shown as in progress, not silently cleared by the stale loop.
+    expect(ui.queryByText(/Reviewing 2 photos/)).not.toBeNull();
+  });
+
   it("surfaces a failed run instead of polling forever", async () => {
     mockGetAiReportStatus.mockResolvedValue({ runId: "run-1", status: "failed", error: "Claude request timed out." });
 

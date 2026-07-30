@@ -95,10 +95,10 @@ async function loadPhotosForAssessment(
   if (ordered.length !== photoIds.length) {
     throw new AiReportError("One or more selected photos are unavailable for this project.", false);
   }
-  const missingOriginal = ordered.find((row) => !row.r2Key);
-  if (missingOriginal) {
-    throw new AiReportError(`"${missingOriginal.displayName}" has no stored original to analyse.`, false);
-  }
+  // A photo with no stored original is an external-only import (CompanyCam and similar keep externalUrl /
+  // externalThumbnailUrl with no r2Key) — a supported, ordinary row. It is passed through and handled as
+  // unreadable by the vision pass, so it still prints with its own caption instead of failing the whole
+  // report the way an up-front rejection did.
   return ordered.map((row) => ({
     id: row.id,
     r2Key: row.r2Key,
@@ -202,7 +202,24 @@ export async function runFieldAiReportJob(
       }),
     );
 
-    await markAiReportRunSucceeded(runId, report.id, usage);
+    // From here the PDF EXISTS — it is committed to `files` and uploaded to R2, and it is already visible in
+    // the project's report list. A failure to write the terminal ledger row is a bookkeeping problem, not a
+    // generation failure, and must never be reported to the phone as "your report failed": the user would
+    // pay for a second identical run while a perfectly good one sits in the list. Recorded separately from
+    // the generation try/catch for exactly that reason.
+    try {
+      await markAiReportRunSucceeded(runId, report.id, usage);
+    } catch (ledgerError) {
+      // Swallowed on purpose. Re-throwing would land in the catch below and mark the run FAILED — telling
+      // the user their report failed while it sits, complete, in the project's report list, and inviting a
+      // second paid run. Left 'running' instead: the phone eventually times out (and says the report will
+      // appear when it finishes, which is true), the stale sweep tidies the row, and the PDF is unaffected.
+      console.error("[field-ai-report] report SUCCEEDED but the run row could not be updated", {
+        runId,
+        fileId: report.id,
+        error: ledgerError instanceof Error ? ledgerError.message : String(ledgerError),
+      });
+    }
     console.log("[field-ai-report] report generated", {
       runId,
       dealId: run.dealId,

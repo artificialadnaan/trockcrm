@@ -82,9 +82,13 @@ export function ReportBuilder({
   // spin the Preview button for an AI request that has nothing to do with it.
   const [aiBusy, setAiBusy] = useState(false);
   const [aiProgress, setAiProgress] = useState<string | null>(null);
-  // Polling kill-switch. A ref (not state) because the poll loop closes over it and must observe a cancel
-  // that happens mid-await — a state value captured at loop entry never would.
-  const aiPollingRef = useRef(false);
+  // Generation token, not a boolean. A ref because the poll loop closes over it and must observe a cancel
+  // that happens mid-await — a state value captured at loop entry never would. A monotonically increasing
+  // token rather than a flag because a shared boolean can be set back to true by a NEWLY started report
+  // while an older loop is still resolving a request: the stale loop would resume as if it were current and
+  // could open the previous PDF, close the new sheet, or clear the flag in its own `finally` and silently
+  // kill the live loop. Each run captures its own token and stops the moment it is no longer the current one.
+  const aiRunTokenRef = useRef(0);
   const [error, setError] = useState<string | null>(null);
 
   function reset() {
@@ -101,9 +105,9 @@ export function ReportBuilder({
     setDescriptions({});
     setError(null);
     setBusy(false);
-    // Stop any in-flight poll loop. The server-side job keeps running — the finished report still lands in
-    // the project's report list — but this sheet stops waiting on it.
-    aiPollingRef.current = false;
+    // Invalidate any in-flight poll loop. The server-side job keeps running — the finished report still
+    // lands in the project's report list — but this sheet stops waiting on it.
+    aiRunTokenRef.current += 1;
     setAiBusy(false);
     setAiProgress(null);
   }
@@ -166,7 +170,9 @@ export function ReportBuilder({
     setError(null);
     setAiBusy(true);
     setAiProgress("Starting the assessment…");
-    aiPollingRef.current = true;
+    // Claim a token; any earlier loop still resolving is now stale and will stop on its next check.
+    const runToken = ++aiRunTokenRef.current;
+    const isCurrent = () => aiRunTokenRef.current === runToken;
     const startedAt = Date.now();
     try {
       const { runId } = await startAiReport(fetcher, {
@@ -178,10 +184,11 @@ export function ReportBuilder({
         `Reviewing ${selected.size} photo${selected.size === 1 ? "" : "s"}… this usually takes about a minute.`,
       );
 
+      if (!isCurrent()) return; // the sheet was closed (or another run started) during the enqueue
       let consecutiveFailures = 0;
-      while (aiPollingRef.current) {
+      while (isCurrent()) {
         await new Promise((resolve) => setTimeout(resolve, AI_POLL_INTERVAL_MS));
-        if (!aiPollingRef.current) return; // cancelled (sheet closed) while waiting
+        if (!isCurrent()) return; // cancelled (sheet closed) while waiting
 
         let status;
         try {
@@ -198,7 +205,7 @@ export function ReportBuilder({
 
         // Re-check AFTER the await: the request can be in flight for seconds, and the user may have closed
         // the sheet in that window. Without this, cancelling still fires onGenerated and reopens the PDF.
-        if (!aiPollingRef.current) return;
+        if (!isCurrent()) return;
 
         if (status.status === "succeeded" && status.report) {
           onGenerated(status.report);
@@ -216,11 +223,16 @@ export function ReportBuilder({
         }
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not generate the AI report.");
+      // A stale loop must not report ITS failure over a run the user has since started, or paint an error
+      // onto a sheet that has already moved on.
+      if (isCurrent()) setError(e instanceof Error ? e.message : "Could not generate the AI report.");
     } finally {
-      aiPollingRef.current = false;
-      setAiBusy(false);
-      setAiProgress(null);
+      // Only the CURRENT run owns this UI state. A stale loop unwinding here would clear the live run's
+      // spinner and progress text, leaving a generation in flight with no indication it is running.
+      if (isCurrent()) {
+        setAiBusy(false);
+        setAiProgress(null);
+      }
     }
   }
 

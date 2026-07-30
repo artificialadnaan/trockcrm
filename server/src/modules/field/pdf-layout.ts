@@ -240,10 +240,20 @@ async function fetchExternalImageBuffer(url: string): Promise<Buffer | null> {
   }
 }
 
+/**
+ * Ceiling on an original read into memory to embed in the PDF.
+ *
+ * Uploads accept up to 200MB, and this ran uncapped — so a single oversized original could be buffered in
+ * full during rendering, and a report is a LOOP over photos. Matches the cap the AI vision pass already
+ * applies; past it the photo renders as the existing "Image unavailable" placeholder rather than risking
+ * the worker process (and every other job handler sharing it).
+ */
+const MAX_RENDER_SOURCE_BYTES = 40 * 1024 * 1024;
+
 async function loadPhotoBuffer(photo: ReportRenderablePhoto): Promise<Buffer | null> {
   if (photo.r2Key && isR2Configured()) {
     try {
-      const { buffer } = await getObjectBuffer(photo.r2Key);
+      const { buffer } = await getObjectBuffer(photo.r2Key, { maxBytes: MAX_RENDER_SOURCE_BYTES });
       return buffer;
     } catch {
       return null;
