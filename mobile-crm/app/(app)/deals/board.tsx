@@ -208,7 +208,11 @@ export default function PipelineBoardScreen() {
               gradient library, and it answers "which one am I on" at the same time. */}
           {selectedIndex >= 0 && columns.length > 1 ? (
             <Text style={styles.stagePosition}>
-              Stage {selectedIndex + 1} of {columns.length} — swipe for more
+              {/* The suffix depends on WHERE you are. "Stage 9 of 9 — swipe for more" promises
+                  something that does not exist, and a hint that is wrong at one end of the strip is a
+                  hint a rep stops reading at both. */}
+              Stage {selectedIndex + 1} of {columns.length}
+              {selectedIndex < columns.length - 1 ? " — swipe for more" : ""}
             </Text>
           ) : null}
           <ScrollView

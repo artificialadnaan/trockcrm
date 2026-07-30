@@ -59,7 +59,7 @@ export default function LeadsListScreen() {
   const router = useRouter();
   const { fetcher } = useAuth();
   const cacheScope = useQueryScope();
-  const { activeOfficeName } = useOffices();
+  const { activeOfficeName, refetch: refetchOffices } = useOffices();
   const [scope, setScope] = useState<leadsApi.LeadScope>("mine");
   const [lifecycle, setLifecycle] = useState<"true" | "false">("true");
   const [search, setSearch] = useState("");
@@ -233,7 +233,15 @@ export default function LeadsListScreen() {
           keyboardShouldPersistTaps="handled"
           contentContainerStyle={[styles.list, leads.length === 0 && styles.listEmpty]}
           refreshControl={
-            <RefreshControl refreshing={query.isRefetching} onRefresh={() => void query.refetch()} />
+            <RefreshControl
+              refreshing={query.isRefetching}
+              /* BOTH, as the other lists do. `useOffices` disables focus refetching and exposes
+                 `refetch` precisely for this: if the offices request exhausted its retries while this
+                 screen was mounted, the header stays blank after connectivity returns unless a pull
+                 asks for it again. Refreshing only the leads would leave the office name — the thing
+                 this header was just given — permanently empty. */
+              onRefresh={() => void Promise.all([query.refetch(), refetchOffices()])}
+            />
           }
           ListHeaderComponent={
             refreshFailed ? (
