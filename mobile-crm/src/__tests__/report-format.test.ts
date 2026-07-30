@@ -1,6 +1,8 @@
 import {
   compactMoney,
   heroBasisLines,
+  lastWeekIsInProgress,
+  sparklineSummary,
   deltaChip,
   departmentCountLabel,
   showsWowDelta,
@@ -42,15 +44,15 @@ describe("the delta chip", () => {
   const week = "to_date" as const;
 
   it("signs an increase and a decrease", () => {
-    expect(deltaChip({ deltaCountWoW: 3, deferred: false }, week)).toEqual({ label: "+3", tone: "up" });
+    expect(deltaChip({ deltaCountWoW: 3, deferred: false }, week)).toEqual({ label: "+3 WoW", tone: "up" });
     expect(deltaChip({ deltaCountWoW: -2, deferred: false }, week)).toEqual({
-      label: "-2",
+      label: "-2 WoW",
       tone: "down",
     });
   });
 
   it("shows an unsigned zero as flat, not as an increase", () => {
-    expect(deltaChip({ deltaCountWoW: 0, deferred: false }, week)).toEqual({ label: "0", tone: "flat" });
+    expect(deltaChip({ deltaCountWoW: 0, deferred: false }, week)).toEqual({ label: "0 WoW", tone: "flat" });
   });
 
   it("withholds it for three DIFFERENT reasons, none of which is falsiness", () => {
@@ -141,5 +143,46 @@ describe("which value basis belongs to which hero figure", () => {
   it("renders nothing rather than an empty caption when the server sends no basis", () => {
     expect(heroBasisLines([{ label: "Won", basisLabel: "" }])).toEqual([]);
     expect(heroBasisLines([])).toEqual([]);
+  });
+});
+
+describe("the last sparkline bucket is a week in progress", () => {
+  it("is partial in every mode but completed", () => {
+    // computeWeeklyTrend anchors the final bucket to the current Sunday and caps it at today, so on a
+    // Tuesday it holds two days against its neighbours' seven.
+    expect(lastWeekIsInProgress("to_date")).toBe(true);
+    expect(lastWeekIsInProgress("mtd")).toBe(true);
+    expect(lastWeekIsInProgress("ytd")).toBe(true);
+  });
+
+  it("is a whole week in completed, which returns the prior Sun-Sat", () => {
+    expect(lastWeekIsInProgress("completed")).toBe(false);
+  });
+});
+
+describe("the eight-week shape, for anyone who cannot see the bars", () => {
+  it("reads the direction off the COMPLETED weeks and reports the partial one separately", () => {
+    // Including the partial week in the comparison would report the same false decline the solid bar
+    // used to draw.
+    expect(sparklineSummary([2, 4, 6, 8, 1], { lastInProgress: true })).toBe(
+      "4-week trend: 2 to 8, rising. This week so far: 1",
+    );
+  });
+
+  it("uses every week when the last one is whole", () => {
+    expect(sparklineSummary([8, 6, 4, 2], { lastInProgress: false })).toBe(
+      "4-week trend: 8 to 2, falling",
+    );
+  });
+
+  it("says level rather than inventing a direction", () => {
+    expect(sparklineSummary([5, 9, 5], { lastInProgress: false })).toBe("3-week trend: 5 to 5, level");
+  });
+
+  it("returns null when there is nothing to describe", () => {
+    // A summary of one data point is not a trend, and an empty string would announce as a blank line.
+    expect(sparklineSummary([], { lastInProgress: false })).toBeNull();
+    expect(sparklineSummary([4], { lastInProgress: false })).toBeNull();
+    expect(sparklineSummary([4, 7], { lastInProgress: true })).toBeNull();
   });
 });

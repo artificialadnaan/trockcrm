@@ -26,6 +26,8 @@ import {
   deltaChip,
   departmentCountLabel,
   heroBasisLines,
+  lastWeekIsInProgress,
+  sparklineSummary,
   sparklineHeights,
 } from "../../src/report-format";
 import { theme } from "../../src/theme/theme";
@@ -204,6 +206,8 @@ function HeroCell({ label, metric }: { label: string; metric: reportsApi.ExecHer
 function DepartmentCard({ metric, mode }: { metric: DepartmentMetric; mode: WeekMode }) {
   const chip = deltaChip(metric, mode);
   const heights = sparklineHeights(metric.sparkline);
+  const lastInProgress = lastWeekIsInProgress(mode);
+  const trend = sparklineSummary(metric.sparkline, { lastInProgress });
 
   return (
     <View style={styles.card}>
@@ -230,20 +234,46 @@ function DepartmentCard({ metric, mode }: { metric: DepartmentMetric; mode: Week
       </View>
 
       {/**
-        * Eight weeks, drawn with plain Views.
+        * Eight weeks, drawn with plain Views — there is no svg or animation library here and eight
+        * bars do not justify adding one.
         *
-        * There is no svg or animation library in this app and eight bars do not justify adding one.
-        * Hidden from the accessibility tree: a bar chart with no labels is noise to a screen reader,
-        * and the count and delta above it already carry the same information in words.
+        * The BARS are hidden from the accessibility tree because unlabelled rectangles are noise, but
+        * the shape is described in words beside them. An earlier version hid the chart and claimed the
+        * count and delta already carried it; they do not — rising, falling and volatile histories can
+        * share both an endpoint and a one-week delta.
         */}
       {heights.length ? (
-        <View style={styles.spark} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
-          {heights.map((h, i) => (
-            <View key={i} style={styles.sparkSlot}>
-              <View style={[styles.sparkBar, { height: `${Math.round(h * 100)}%` }]} />
-            </View>
-          ))}
-        </View>
+        <>
+          <View
+            style={styles.spark}
+            accessibilityElementsHidden
+            importantForAccessibility="no-hide-descendants"
+          >
+            {heights.map((h, i) => {
+              // The final bucket runs Sunday → today in every mode but "completed", so on a Tuesday it
+              // is two days against seven. Drawn solid it reports a collapse that is really a week in
+              // progress; outlined, it reads as "not finished yet".
+              const partial = lastInProgress && i === heights.length - 1;
+              return (
+                <View key={i} style={styles.sparkSlot}>
+                  <View
+                    style={[
+                      styles.sparkBar,
+                      partial && styles.sparkBarPartial,
+                      { height: `${Math.round(h * 100)}%` },
+                    ]}
+                  />
+                </View>
+              );
+            })}
+          </View>
+          {trend ? (
+            <Text style={styles.trend}>
+              {trend}
+              {lastInProgress ? " (week in progress)" : ""}
+            </Text>
+          ) : null}
+        </>
       ) : null}
 
       {metric.deferred ? <Text style={styles.deferred}>Not measured yet.</Text> : null}
@@ -334,6 +364,13 @@ const styles = StyleSheet.create({
   // A floor of 2pt so an empty week is still a mark on the axis rather than a gap that reads as
   // missing data.
   sparkBar: { minHeight: 2, borderRadius: 1, backgroundColor: theme.color.borderStrong },
+  // Outlined rather than filled: an incomplete week should read as unfinished, not as a low one.
+  sparkBarPartial: {
+    backgroundColor: theme.color.surfaceMuted,
+    borderWidth: 1,
+    borderColor: theme.color.borderStrong,
+  },
+  trend: { ...theme.type.small, color: theme.color.textMuted },
 
   deferred: { ...theme.type.small, color: theme.color.textMuted },
   notes: { gap: theme.space.xs, marginTop: theme.space.sm },

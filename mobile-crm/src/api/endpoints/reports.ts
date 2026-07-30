@@ -65,6 +65,21 @@ export type MondayShowcase = {
   notes: string[];
 };
 
+/**
+ * A budget that covers the report's own execution envelope.
+ *
+ * The client's default deadline is 30s (api/client.ts:49), and `getMondayShowcaseData` fans its
+ * queries out SEQUENTIALLY with the pool allowing each one up to 30s (server/src/db.ts:23-39). On a
+ * large office the whole report can legitimately outlast the client's patience — and aborting it does
+ * not stop the server, so the automatic retry then starts a SECOND expensive report against a database
+ * still computing the first.
+ *
+ * Two minutes is not a guess at how long it takes; it is long enough that a timeout here means
+ * something is genuinely wrong rather than merely slow, which is the only useful thing a deadline can
+ * tell you about a known-heavy endpoint.
+ */
+const SHOWCASE_TIMEOUT_MS = 120_000;
+
 export async function getMondayShowcase(
   fetcher: Fetcher,
   mode: WeekMode,
@@ -73,6 +88,7 @@ export async function getMondayShowcase(
   // envelope shapes vary per endpoint, so the wrapper is read off the route rather than assumed.
   const res = await fetcher<{ data: MondayShowcase }>(
     `/reports/monday-showcase?mode=${encodeURIComponent(mode)}`,
+    { timeoutMs: SHOWCASE_TIMEOUT_MS },
   );
   return res.data;
 }

@@ -52,8 +52,11 @@ export function deltaChip(
   if (!showsWowDelta(mode)) return null;
   if (metric.deferred || metric.deltaCountWoW === null) return null;
   const d = metric.deltaCountWoW;
-  if (d === 0) return { label: "0", tone: "flat" };
-  return { label: d > 0 ? `+${d}` : String(d), tone: d > 0 ? "up" : "down" };
+  // "WoW" travels WITH the number, matching the web's shared DeltaChip (evidence-kit.tsx:42, whose
+  // suffix defaults to exactly this). A bare "+3" beside a count reads as a target variance, a
+  // remaining total, or another unlabelled figure — every reading except the one meant.
+  if (d === 0) return { label: "0 WoW", tone: "flat" };
+  return { label: `${d > 0 ? `+${d}` : d} WoW`, tone: d > 0 ? "up" : "down" };
 }
 
 /**
@@ -131,4 +134,45 @@ export function heroBasisLines(
   if (byBasis.size === 0) return [];
   if (byBasis.size === 1) return [...byBasis.keys()];
   return [...byBasis.entries()].map(([basis, labels]) => `${labels.join(" & ")}: ${basis}`);
+}
+
+/**
+ * Is the LAST sparkline bucket still in progress?
+ *
+ * `computeWeeklyTrend` anchors the final bucket to the current Sunday and caps it at today, so in every
+ * mode except "completed" it is a partial week. Drawn like the seven whole weeks beside it, a Tuesday
+ * renders as a cliff — the chart reports a collapse in activity that is really just the week being two
+ * days old. The web reaches the same conclusion from the same field (variants.tsx:94).
+ */
+export function lastWeekIsInProgress(mode: WeekMode): boolean {
+  return mode !== "completed";
+}
+
+/**
+ * The eight-week shape, in a sentence, for anyone who cannot see the bars.
+ *
+ * The chart is hidden from the accessibility tree because unlabelled bars are noise — but the claim
+ * that the count and the delta already carry it was wrong. Rising, falling and volatile histories can
+ * share an endpoint AND a one-week delta, and the trend is one of the things this screen exists to
+ * show. So it is described rather than dropped.
+ *
+ * Endpoints plus a direction, not eight numbers read aloud: the shape is the message. A partial final
+ * week is called out, since otherwise the summary would report the same false decline the bars did.
+ */
+export function sparklineSummary(
+  series: readonly number[],
+  options: { lastInProgress: boolean },
+): string | null {
+  const weeks = series.filter((v) => Number.isFinite(v));
+  if (weeks.length < 2) return null;
+  // The partial week cannot be compared with whole ones, so the DIRECTION is read off the completed
+  // history and the in-progress figure is reported separately.
+  const compared = options.lastInProgress ? weeks.slice(0, -1) : weeks;
+  if (compared.length < 2) return null;
+
+  const first = compared[0];
+  const last = compared[compared.length - 1];
+  const direction = last > first ? "rising" : last < first ? "falling" : "level";
+  const head = `${compared.length}-week trend: ${first} to ${last}, ${direction}`;
+  return options.lastInProgress ? `${head}. This week so far: ${weeks[weeks.length - 1]}` : head;
 }
