@@ -1,0 +1,344 @@
+import React, { useMemo, useState } from "react";
+import { ActivityIndicator, FlatList, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
+import { useQuery } from "@tanstack/react-query";
+import { useRouter } from "expo-router";
+import { ApiError } from "../../src/api/client";
+import * as searchApi from "../../src/api/endpoints/search";
+import type { DealLifecycle, SearchEntityType, SearchResult } from "../../src/api/endpoints/search";
+import { useAuth } from "../../src/auth/AuthContext";
+import { useQueryScope } from "../../src/auth/useOfficeId";
+import { useOffices } from "../../src/auth/useOffices";
+import { canAccessSurface } from "../../src/auth/surfaces";
+import { BackLink } from "../../src/components/BackLink";
+import { RetryBlock } from "../../src/components/RetryBlock";
+import { RetryNotice } from "../../src/components/RetryNotice";
+import { useGoBack } from "../../src/lib/go-back";
+import { useDebouncedSearch } from "../../src/lib/use-debounced-search";
+import { qk } from "../../src/query/keys";
+import {
+  MIN_SEARCH_LENGTH,
+  compareSearchHits,
+  partitionByOffice,
+  searchIsTooShort,
+} from "../../src/search-query";
+import { theme } from "../../src/theme/theme";
+
+/**
+ * One box for the whole CRM.
+ *
+ * Every list here searches its own tab, so finding a contact meant first guessing which tab they were
+ * in. On a phone, with no sidebar to scan, that guess is the whole cost of navigation.
+ *
+ * The server returns six typed buckets in ONE uniform row shape, so this renders a single ranked list
+ * with a type badge rather than six sections a rep has to scan in turn — the point is to stop making
+ * them choose a haystack before they can look.
+ */
+export default function SearchScreen() {
+  const router = useRouter();
+  const goBack = useGoBack("/(app)/dashboard");
+  const { fetcher, session } = useAuth();
+  const scope = useQueryScope();
+  const { activeOffice } = useOffices();
+  const activeOfficeSlug = activeOffice?.slug ?? null;
+  const [raw, setRaw] = useState("");
+  const q = useDebouncedSearch(raw);
+  const tooShort = searchIsTooShort(raw);
+  const role = session?.user.role;
+
+  const query = useQuery({
+    queryKey: qk.globalSearch(scope, q),
+    queryFn: () => searchApi.globalSearch(fetcher, q),
+    // Nothing is asked until the floor is cleared; the server would answer empty buckets anyway, and
+    // not asking is cheaper than being told nothing.
+    enabled: q.length >= MIN_SEARCH_LENGTH,
+  });
+
+  /**
+   * One ranked list, and only the types this app can actually open.
+   *
+   * `files` is dropped: there is no file surface here yet, so a row for one would be a result that
+   * cannot be tapped. A search that returns things you cannot reach teaches people not to search.
+   */
+  const { openable: results, elsewhere: otherOfficeHits } = useMemo(() => {
+    const data = query.data;
+    if (!data) return { openable: [] as SearchResult[], elsewhere: 0 };
+    const permitted: SearchResult[] = [
+      ...(canAccessSurface(role, "deals") ? data.deals : []),
+      ...(canAccessSurface(role, "leads") ? data.leads : []),
+      ...(canAccessSurface(role, "contacts") ? data.contacts : []),
+      ...(canAccessSurface(role, "companies") ? data.companies : []),
+      ...(canAccessSurface(role, "properties") ? data.properties : []),
+    ];
+    // Office BEFORE rank: a hit this app cannot open must not occupy a slot at the top of the list.
+    const split = partitionByOffice(permitted, activeOfficeSlug);
+    // `compareSearchHits`, not a bare rank sort — the server puts live work above closed work and only
+    // compares relevance inside a tier, and re-sorting on rank alone threw that contract away.
+    return { openable: split.openable.sort(compareSearchHits), elsewhere: split.elsewhere };
+  }, [query.data, role, activeOfficeSlug]);
+
+  const offline = query.error instanceof ApiError && query.error.status === 0;
+  /**
+   * Cached hits whose refresh FAILED.
+   *
+   * The error branch below is gated on having no data at all, and results are cached for 30 minutes —
+   * so re-running a query after losing signal re-rendered the previous hits silently. Search is the
+   * worst screen for that: its whole job is to answer "does this record exist, and what is it now", and
+   * a deleted or renamed record shown as current is only discovered after tapping it. Same notice the
+   * directories and the task list already use, for the same reason.
+   */
+  const refreshFailed = Boolean(query.data && query.isError);
+
+  return (
+    <SafeAreaView style={styles.safe} edges={["top", "bottom"]}>
+      <View style={styles.header}>
+        <BackLink label="Home" onPress={() => goBack()} />
+        <Text accessibilityRole="header" style={styles.title}>
+          Search
+        </Text>
+      </View>
+
+      <TextInput
+        testID="global-search"
+        value={raw}
+        onChangeText={setRaw}
+        returnKeyType="search"
+        placeholder="Deals, leads, contacts, companies, properties"
+        placeholderTextColor={theme.color.textMuted}
+        autoCapitalize="none"
+        autoCorrect={false}
+        autoFocus
+        style={styles.search}
+      />
+
+      {tooShort ? (
+        <Text style={styles.hint}>Type at least {MIN_SEARCH_LENGTH} characters to search.</Text>
+      ) : null}
+
+      {q.length < MIN_SEARCH_LENGTH ? (
+        <View style={styles.center}>
+          <Text style={styles.idle}>Everything in one place — start typing.</Text>
+        </View>
+      ) : query.isLoading ? (
+        <View style={styles.center}>
+          <ActivityIndicator color={theme.color.brandRed} />
+        </View>
+      ) : !query.data ? (
+        <View style={styles.center}>
+          <RetryBlock
+            testID="search-retry"
+            title={offline ? "No signal" : "Search failed"}
+            onRetry={() => void query.refetch()}
+            retrying={query.isFetching}
+          />
+        </View>
+      ) : (
+        <FlatList
+          data={results}
+          // Office in the key: ids are unique within a schema, not across them, so a cross-office
+          // result set can legitimately carry the same id twice.
+          keyExtractor={(r) => `${r.officeSlug ?? ""}:${r.entityType}:${r.id}`}
+          contentContainerStyle={styles.body}
+          keyboardShouldPersistTaps="handled"
+          ListHeaderComponent={
+            refreshFailed ? (
+              <RetryNotice
+                testID="search-refresh-failed"
+                placement="top"
+                message={
+                  offline
+                    ? "No signal — showing the last results."
+                    : "Showing the last results — the search failed to refresh."
+                }
+                onRetry={() => void query.refetch()}
+              />
+            ) : null
+          }
+          ListEmptyComponent={
+            /* "Nothing matches" is FALSE when the office filter is the reason the list is empty — the
+               screen was saying that and then footing a note that matches exist elsewhere. One state,
+               one sentence: when every hit was in another office, say that instead. */
+            otherOfficeHits > 0 ? null : (
+              <Text style={styles.idle}>
+                Nothing matches &ldquo;{q}&rdquo; in this office. Records in another office are only
+                reachable on the web — this app works in one office at a time.
+              </Text>
+            )
+          }
+          ListFooterComponent={
+            otherOfficeHits > 0 ? (
+              <Text testID="search-other-office" style={styles.otherOffice}>
+                {results.length === 0
+                  ? `Nothing matches “${q}” in this office. `
+                  : ""}
+                {otherOfficeHits} {otherOfficeHits === 1 ? "match is" : "matches are"} in another
+                office. Open them on the web — this app works in one office at a time.
+              </Text>
+            ) : null
+          }
+          renderItem={({ item }) => (
+            <Pressable
+              testID={`search-${item.entityType}-${item.id}`}
+              onPress={() => {
+                const path = routeFor(item.entityType, item.id);
+                if (path) router.push(path);
+              }}
+              accessibilityRole="button"
+              accessibilityLabel={[
+                STATUS_LABEL[item.status ?? "active"],
+                item.isChangeOrder ? "Change order" : null,
+                TYPE_LABEL[item.entityType],
+                item.primaryLabel,
+                item.secondaryLabel,
+                item.tertiaryLabel,
+              ]
+                .filter(Boolean)
+                .join(", ")}
+              style={styles.row}
+            >
+              <View style={styles.rowHead}>
+                <Text style={styles.rowName} numberOfLines={1}>
+                  {item.primaryLabel}
+                </Text>
+                {/* The lifecycle first, when there is one. The server keeps won, lost and on-hold
+                    deals findable by LABELLING them rather than hiding them, and a row that shows only
+                    "Deal" throws that labelling away — a deal lost last quarter then looks exactly like
+                    one closing this week. `accessibilityElementsHidden` on the two badges because the
+                    row's own label already speaks both, in order. */}
+                <View style={styles.badges} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
+                  {item.status && item.status !== "active" ? (
+                    <Text style={[styles.badge, STATUS_STYLE[item.status]]}>
+                      {STATUS_LABEL[item.status]}
+                    </Text>
+                  ) : null}
+                  {/* A change order is a real child deal with its own value and stage behaviour, and
+                      it shares its parent's name — so without this marker the two are the same row
+                      twice, and picking the wrong one is invisible until the numbers disagree. */}
+                  {item.isChangeOrder ? <Text style={[styles.badge, styles.badgeCo]}>CO</Text> : null}
+                  <Text style={styles.badge}>{TYPE_LABEL[item.entityType]}</Text>
+                </View>
+              </View>
+              {/* BOTH labels. `tertiaryLabel` is often WHY the row matched — a contact reached
+                  through its company's name keeps its email in `secondaryLabel` and the company in
+                  `tertiaryLabel`, so showing only the secondary returns a contact with no visible
+                  connection to what was typed. A result you cannot explain reads as a wrong result. */}
+              {item.secondaryLabel || item.tertiaryLabel ? (
+                <Text style={styles.rowMeta} numberOfLines={1}>
+                  {[item.secondaryLabel, item.tertiaryLabel].filter(Boolean).join(" · ")}
+                </Text>
+              ) : null}
+            </Pressable>
+          )}
+        />
+      )}
+    </SafeAreaView>
+  );
+}
+
+/** Empty for `active`, because the absence of a marker already says it. */
+const STATUS_LABEL: Record<DealLifecycle, string> = {
+  active: "",
+  on_hold: "On hold",
+  won: "Won",
+  lost: "Lost",
+};
+
+const TYPE_LABEL: Record<SearchEntityType, string> = {
+  deal: "Deal",
+  lead: "Lead",
+  contact: "Contact",
+  company: "Company",
+  property: "Property",
+  file: "File",
+};
+
+/**
+ * Where a result opens IN THIS APP.
+ *
+ * Deliberately not `result.deepLink`: that is a web path, and following it would route a rep at a
+ * screen this app does not have. Mapping the entity type is the honest translation, and a type with
+ * no mobile home returns null rather than a dead tap.
+ */
+function routeFor(entityType: SearchEntityType, id: string): string | null {
+  switch (entityType) {
+    case "deal":
+      return `/(app)/deals/${id}`;
+    case "lead":
+      return `/(app)/leads/${id}`;
+    case "contact":
+      return `/(app)/contacts/${id}`;
+    case "company":
+      return `/(app)/companies/${id}`;
+    case "property":
+      return `/(app)/properties/${id}`;
+    default:
+      return null;
+  }
+}
+
+const styles = StyleSheet.create({
+  safe: { flex: 1, backgroundColor: theme.color.canvas },
+  header: {
+    backgroundColor: theme.color.chrome,
+    paddingHorizontal: theme.space.lg,
+    paddingBottom: theme.space.md,
+    borderBottomWidth: 2,
+    borderBottomColor: theme.color.brandRed,
+  },
+  title: { ...theme.type.h1, color: theme.color.textPrimary, marginTop: theme.space.xs },
+  search: {
+    minHeight: 44,
+    margin: theme.space.lg,
+    marginBottom: theme.space.sm,
+    borderWidth: 1,
+    borderColor: theme.color.borderControl,
+    borderRadius: theme.radius.md,
+    paddingHorizontal: theme.space.md,
+    ...theme.type.body,
+    color: theme.color.textPrimary,
+  },
+  hint: { ...theme.type.small, color: theme.color.textMuted, paddingHorizontal: theme.space.lg },
+  center: { flex: 1, alignItems: "center", justifyContent: "center", padding: theme.space.lg },
+  idle: { ...theme.type.body, color: theme.color.textMuted, textAlign: "center" },
+  body: { padding: theme.space.lg, paddingTop: theme.space.sm, gap: theme.space.sm },
+  row: {
+    minHeight: 44,
+    backgroundColor: theme.color.surface,
+    borderRadius: theme.radius.lg,
+    borderWidth: 1,
+    borderColor: theme.color.border,
+    padding: theme.space.lg,
+    gap: 2,
+  },
+  rowHead: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: theme.space.md,
+  },
+  rowName: { flex: 1, ...theme.type.title, color: theme.color.textPrimary },
+  badges: { flexDirection: "row", gap: theme.space.xs, alignItems: "center" },
+  // Mirrors the web palette's lifecycle colours: paused is a warning, won and lost are terminal.
+  statusOnHold: { color: theme.color.amberText, backgroundColor: theme.color.amberSurface },
+  statusWon: { color: theme.color.greenText, backgroundColor: theme.color.greenSurface },
+  statusLost: { color: theme.color.redText, backgroundColor: theme.color.redSurface },
+  badgeCo: { color: theme.color.textPrimary, backgroundColor: theme.color.surfaceRaised },
+  badge: {
+    ...theme.type.caption,
+    textTransform: "uppercase",
+    color: theme.color.textMuted,
+    backgroundColor: theme.color.surfaceMuted,
+    borderRadius: theme.radius.sm,
+    paddingHorizontal: theme.space.sm,
+    paddingVertical: 2,
+    overflow: "hidden",
+  },
+  rowMeta: { ...theme.type.small, color: theme.color.textSecondary },
+  otherOffice: { ...theme.type.small, color: theme.color.textMuted, paddingVertical: theme.space.md },
+});
+
+const STATUS_STYLE: Record<Exclude<DealLifecycle, "active">, object> = {
+  on_hold: styles.statusOnHold,
+  won: styles.statusWon,
+  lost: styles.statusLost,
+};

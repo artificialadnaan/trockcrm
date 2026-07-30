@@ -1,5 +1,14 @@
 import { mailtoUrl, phoneParts, smsUrl, telUrl } from "../contact-links";
-import { daysSince, formatDate, formatLocation, formatPostalAddress, formatMoney } from "../format";
+import {
+  daysSince,
+  formatDate,
+  formatDateTime,
+  formatEnumLabel,
+  formatLocation,
+  formatMoney,
+  formatPostalAddress,
+  formatTimeOfDay,
+} from "../format";
 
 describe("formatMoney", () => {
   it("formats the STRING that Postgres numeric actually sends", () => {
@@ -224,5 +233,104 @@ describe("the one-line postal address", () => {
             const out = formatPostalAddress(a, c, st, z);
             expect(out).not.toMatch(/^,|,$|,,|\s\s|,\s*$/);
           }
+  });
+});
+
+describe("database enum tokens, as a person reads them", () => {
+  it("turns a snake_case token into words", () => {
+    // The bug: the uppercase card style rendered these as "PROPERTY_MANAGER", and because the label is
+    // also the accessible name, VoiceOver read the underscore out loud.
+    expect(formatEnumLabel("property_manager")).toBe("Property Manager");
+    expect(formatEnumLabel("general_contractor")).toBe("General Contractor");
+    expect(formatEnumLabel("mixed_use")).toBe("Mixed Use");
+    expect(formatEnumLabel("architecture_engineering")).toBe("Architecture Engineering");
+  });
+
+  it("handles hyphens the same way", () => {
+    expect(formatEnumLabel("insurance-restoration")).toBe("Insurance Restoration");
+  });
+
+  it("capitalises a single lowercase word", () => {
+    expect(formatEnumLabel("office")).toBe("Office");
+    expect(formatEnumLabel("retail")).toBe("Retail");
+  });
+
+  it("leaves an already-readable value alone", () => {
+    // Free-text categories exist alongside the enums; re-casing them would corrupt real names.
+    expect(formatEnumLabel("REIT")).toBe("REIT");
+    expect(formatEnumLabel("Acme Property Group")).toBe("Acme Property Group");
+  });
+
+  it("passes an unknown token through rather than dropping it", () => {
+    // A value the server adds tomorrow must render as itself. An empty label reads as "no category",
+    // which would be a lie about the data.
+    expect(formatEnumLabel("some_new_thing")).toBe("Some New Thing");
+    expect(formatEnumLabel("XYZ_9")).toBe("Xyz 9");
+  });
+
+  it("returns an empty string for nothing at all", () => {
+    expect(formatEnumLabel(null)).toBe("");
+    expect(formatEnumLabel(undefined)).toBe("");
+    expect(formatEnumLabel("   ")).toBe("");
+  });
+});
+
+describe("a timestamp with the time it actually carries", () => {
+  it("shows the hour for a timestamptz value", () => {
+    // `scheduled_for` is timestamptz and the web dialog lets someone pick the hour, so a task set for
+    // 9am and one set for 3pm are different commitments. Rendering both as "Aug 14" collapsed them.
+    const morning = formatDateTime("2026-08-14T14:00:00.000Z");
+    const afternoon = formatDateTime("2026-08-14T20:00:00.000Z");
+    expect(morning).not.toBe(afternoon);
+    expect(morning).toMatch(/Aug 14, 2026/);
+    expect(morning).toMatch(/\d{1,2}:\d{2}\s?(AM|PM)/);
+  });
+
+  it("does NOT invent a midnight for a date-only value", () => {
+    // `due_date` is a Postgres `date`. There is no time to show, and "12:00 AM" would be a claim the
+    // column never made — which is exactly the kind of plausible-looking wrong detail that gets
+    // believed.
+    expect(formatDateTime("2026-08-14")).toBe(formatDate("2026-08-14"));
+    expect(formatDateTime("2026-08-14")).not.toMatch(/AM|PM/);
+  });
+
+  it("returns a dash rather than a guess for junk", () => {
+    expect(formatDateTime(null)).toBe("—");
+    expect(formatDateTime(undefined)).toBe("—");
+    expect(formatDateTime("")).toBe("—");
+    expect(formatDateTime("not a date")).toBe("—");
+  });
+});
+
+describe("a time-of-day column, as a clock reading", () => {
+  it("reads a Postgres time value", () => {
+    expect(formatTimeOfDay("09:00:00")).toBe("9:00 AM");
+    expect(formatTimeOfDay("15:30:00")).toBe("3:30 PM");
+    expect(formatTimeOfDay("13:05")).toBe("1:05 PM");
+  });
+
+  it("gets the two midnight/noon edges right", () => {
+    // `hours % 12` is 0 for both, and printing "0:00" is the classic version of this bug.
+    expect(formatTimeOfDay("00:00:00")).toBe("12:00 AM");
+    expect(formatTimeOfDay("12:00:00")).toBe("12:00 PM");
+    expect(formatTimeOfDay("12:45:00")).toBe("12:45 PM");
+    expect(formatTimeOfDay("00:30:00")).toBe("12:30 AM");
+  });
+
+  it("does not shift with the device's timezone", () => {
+    // The reason this is arithmetic rather than `new Date(...)`: a bare time parsed as a Date picks up
+    // today's date AND the local offset, which is how a 9:00 task starts reading as 8:00 for half the
+    // year. The column has no zone, so neither does the output.
+    expect(formatTimeOfDay("09:00:00")).toBe("9:00 AM");
+  });
+
+  it("returns an empty string for anything it cannot read", () => {
+    // "" rather than a dash: the caller composes a metadata line and simply omits the piece.
+    expect(formatTimeOfDay(null)).toBe("");
+    expect(formatTimeOfDay(undefined)).toBe("");
+    expect(formatTimeOfDay("")).toBe("");
+    expect(formatTimeOfDay("not a time")).toBe("");
+    expect(formatTimeOfDay("25:00:00")).toBe("");
+    expect(formatTimeOfDay("09:75:00")).toBe("");
   });
 });

@@ -44,3 +44,31 @@ export function resolveDealDisplayNumber(deal: {
 
   return null;
 }
+
+/**
+ * The same identifiers, EMBEDDED IN PROSE rather than standing alone.
+ *
+ * `resolveDealDisplayNumber` protects the deal-number field. It does nothing for a task title, and the
+ * daily close-date rule builds those by interpolating `context.dealNumber` straight into a sentence:
+ * "Follow up: HS-323641734879 closes 2026-05-08". So the metadata line under a task correctly showed
+ * no number while the title above it published the raw HubSpot id — and the accessibility label read
+ * it out loud, digit by digit.
+ *
+ * Mirrors `client/src/lib/deal-utils.ts` because mobile-crm sits outside the npm workspace and cannot
+ * import `shared/`. The pattern is deliberately the same one, including the `\d{6,}` floor: anchoring
+ * on six digits is what keeps it from eating an ordinary "HS-2" that means something else, and the
+ * word boundaries are what keep it from cutting a longer token in half.
+ *
+ * "Project pending" rather than a deletion, so the sentence still parses and still says which deal is
+ * missing a number — the same replacement the web uses, so the two never read differently.
+ */
+const VISIBLE_HUBSPOT_DEAL_NUMBER_PATTERN = /\bHS[-_ ]?\d{6,}\b/gi;
+
+export function sanitizeHubspotDealIdentifiers(
+  value: string | null | undefined,
+  replacement = "Project pending"
+): string {
+  const trimmed = value?.trim();
+  if (!trimmed) return "";
+  return trimmed.replace(VISIBLE_HUBSPOT_DEAL_NUMBER_PATTERN, replacement);
+}

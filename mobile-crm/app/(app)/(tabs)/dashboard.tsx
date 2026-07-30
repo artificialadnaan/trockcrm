@@ -135,6 +135,20 @@ export default function DashboardScreen() {
         ) : null}
 
         <View style={styles.grid}>
+          {/* SEARCH FIRST. It is not one destination among several — it is the way to all of them, and
+              on a phone with no sidebar it replaces the guess about which tab a record lives in. */}
+          <NavCard
+            testID="open-search"
+            icon="search-outline"
+            label="Search"
+            onPress={() => router.push("/(app)/search")}
+          />
+          <NavCard
+            testID="open-tasks"
+            icon="checkbox-outline"
+            label="Tasks"
+            onPress={() => router.push("/(app)/tasks")}
+          />
           {/* LOG A VISIT leads the grid, because it is the only card here that CAPTURES rather than
               browses — it is what a rep opens standing outside a building, and the one action that is
               worthless if it takes a menu to find. Gated on leads, matching where a captured visit ends
@@ -204,9 +218,9 @@ export default function DashboardScreen() {
         ) : null}
 
         <Text style={styles.scopeNote}>
-          This release covers deals, leads, contacts, notes and the Monday showcase. Tasks, email and
-          the rest of the reports are still to come — if something is missing it is not built yet
-          rather than broken.
+          This release covers deals, leads, contacts, properties, companies, tasks, search, notes and
+          the Monday showcase. Email and the rest of the reports are still to come — if something is
+          missing it is not built yet rather than broken.
         </Text>
 
         <Pressable

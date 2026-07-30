@@ -128,6 +128,7 @@ export async function globalSearch(
   types: SearchType[] = DEFAULT_SEARCH_TYPES,
   userRole?: string,
   userId?: string,
+  options: { crossOffice?: boolean } = {},
 ): Promise<SearchResponse> {
   // Trim only -- the ILIKE builders escape LIKE metacharacters, so punctuation-bearing terms
   // (deal numbers like D-1001, emails, phones with +, names with & or #) must reach the query
@@ -137,8 +138,20 @@ export async function globalSearch(
     return emptyResponse(query);
   }
 
-  // For directors/admins, search across all accessible offices
-  if (userId && userRole && (userRole === "admin" || userRole === "director")) {
+  // For directors/admins, search across all accessible offices -- UNLESS the caller opts out.
+  //
+  // Cross-office is chosen by role alone, and its per-entity cap is applied AFTER the offices merge
+  // (mergeWithOfficeCap). A client that can only ACT in one office therefore receives a page whose
+  // slots were already spent on records it has no route to open, and filtering on the client cannot
+  // recover the rest -- they were never sent. With enough offices the active one can end up with no
+  // slots at all, so that client shows "nothing matches here" about records that exist and were
+  // truncated server-side.
+  //
+  // Only an explicit `false` opts out, so every existing caller keeps the role-driven behaviour and
+  // the web palette and search page are untouched. The mobile CRM sends it because it works in one
+  // office at a time and has no office switcher to follow a foreign hit with.
+  const crossOfficeAllowed = options.crossOffice !== false;
+  if (crossOfficeAllowed && userId && userRole && (userRole === "admin" || userRole === "director")) {
     return crossOfficeSearch(sanitized, types, userId);
   }
 
