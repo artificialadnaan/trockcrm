@@ -12,7 +12,7 @@ import { BackLink } from "../../src/components/BackLink";
 import { RetryBlock } from "../../src/components/RetryBlock";
 import { RetryNotice } from "../../src/components/RetryNotice";
 import { resolveDealDisplayNumber } from "../../src/deal-display-number";
-import { formatDate } from "../../src/format";
+import { formatDate, formatDateTime } from "../../src/format";
 import { useGoBack } from "../../src/lib/go-back";
 import { sanitizeHubspotDealIdentifiers } from "../../src/deal-display-number";
 import { taskEffectiveDate, taskPriorityLabel, taskStatusLabel } from "../../src/task-display";
@@ -195,6 +195,15 @@ export default function TasksScreen() {
              * Tuesday, which reads as a broken sort.
              */
             const when = taskEffectiveDate(item);
+            // Time only for `scheduled_for`, which is a timestamptz someone picked an hour on. A
+            // `due_date` is a Postgres `date`; showing "12:00 AM" on one would invent a precision the
+            // column does not have.
+            const whenText =
+              when.value == null
+                ? null
+                : when.source === "scheduledFor"
+                  ? formatDateTime(when.value)
+                  : formatDate(when.value);
             /**
              * Priority and lifecycle FIRST, because they change what a rep does with the row.
              *
@@ -210,7 +219,7 @@ export default function TasksScreen() {
               lifecycle,
               item.dealName,
               dealNumber,
-              when ? formatDate(when) : null,
+              whenText,
               item.assignedToName,
             ]
               .filter(Boolean)

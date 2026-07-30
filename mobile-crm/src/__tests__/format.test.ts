@@ -1,5 +1,13 @@
 import { mailtoUrl, phoneParts, smsUrl, telUrl } from "../contact-links";
-import { daysSince, formatDate, formatEnumLabel, formatLocation, formatMoney, formatPostalAddress } from "../format";
+import {
+  daysSince,
+  formatDate,
+  formatDateTime,
+  formatEnumLabel,
+  formatLocation,
+  formatMoney,
+  formatPostalAddress,
+} from "../format";
 
 describe("formatMoney", () => {
   it("formats the STRING that Postgres numeric actually sends", () => {
@@ -263,5 +271,32 @@ describe("database enum tokens, as a person reads them", () => {
     expect(formatEnumLabel(null)).toBe("");
     expect(formatEnumLabel(undefined)).toBe("");
     expect(formatEnumLabel("   ")).toBe("");
+  });
+});
+
+describe("a timestamp with the time it actually carries", () => {
+  it("shows the hour for a timestamptz value", () => {
+    // `scheduled_for` is timestamptz and the web dialog lets someone pick the hour, so a task set for
+    // 9am and one set for 3pm are different commitments. Rendering both as "Aug 14" collapsed them.
+    const morning = formatDateTime("2026-08-14T14:00:00.000Z");
+    const afternoon = formatDateTime("2026-08-14T20:00:00.000Z");
+    expect(morning).not.toBe(afternoon);
+    expect(morning).toMatch(/Aug 14, 2026/);
+    expect(morning).toMatch(/\d{1,2}:\d{2}\s?(AM|PM)/);
+  });
+
+  it("does NOT invent a midnight for a date-only value", () => {
+    // `due_date` is a Postgres `date`. There is no time to show, and "12:00 AM" would be a claim the
+    // column never made — which is exactly the kind of plausible-looking wrong detail that gets
+    // believed.
+    expect(formatDateTime("2026-08-14")).toBe(formatDate("2026-08-14"));
+    expect(formatDateTime("2026-08-14")).not.toMatch(/AM|PM/);
+  });
+
+  it("returns a dash rather than a guess for junk", () => {
+    expect(formatDateTime(null)).toBe("—");
+    expect(formatDateTime(undefined)).toBe("—");
+    expect(formatDateTime("")).toBe("—");
+    expect(formatDateTime("not a date")).toBe("—");
   });
 });

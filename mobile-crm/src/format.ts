@@ -43,6 +43,31 @@ export function formatDate(value: string | null | undefined): string {
   return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 }
 
+/**
+ * A timestamp with its TIME, for the one column that has one.
+ *
+ * `scheduled_for` is `timestamptz` and the web dialog lets someone pick the hour, so a task set for 9am
+ * and one set for 3pm are different commitments — rendering both as "Aug 14" collapsed them. `due_date`
+ * is a Postgres `date` and deliberately does NOT come through here: there is no time to show, and
+ * inventing "12:00 AM" would be a claim the data never made.
+ *
+ * Falls back to the date alone for a value with no time component, so a caller passing the wrong shape
+ * degrades to `formatDate`'s answer rather than to a fake midnight.
+ */
+export function formatDateTime(value: string | null | undefined): string {
+  if (!value) return "—";
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return formatDate(value);
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return "—";
+  return d.toLocaleString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
 /** Whole days since an ISO timestamp — for "N days in stage". Null when unknown, never a fake 0. */
 export function daysSince(iso: string | null | undefined, now: number = Date.now()): number | null {
   if (!iso) return null;

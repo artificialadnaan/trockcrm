@@ -12,6 +12,7 @@ import { useOffices } from "../../src/auth/useOffices";
 import { canAccessSurface } from "../../src/auth/surfaces";
 import { BackLink } from "../../src/components/BackLink";
 import { RetryBlock } from "../../src/components/RetryBlock";
+import { RetryNotice } from "../../src/components/RetryNotice";
 import { useGoBack } from "../../src/lib/go-back";
 import { useDebouncedSearch } from "../../src/lib/use-debounced-search";
 import { qk } from "../../src/query/keys";
@@ -77,6 +78,16 @@ export default function SearchScreen() {
   }, [query.data, role, activeOfficeSlug]);
 
   const offline = query.error instanceof ApiError && query.error.status === 0;
+  /**
+   * Cached hits whose refresh FAILED.
+   *
+   * The error branch below is gated on having no data at all, and results are cached for 30 minutes —
+   * so re-running a query after losing signal re-rendered the previous hits silently. Search is the
+   * worst screen for that: its whole job is to answer "does this record exist, and what is it now", and
+   * a deleted or renamed record shown as current is only discovered after tapping it. Same notice the
+   * directories and the task list already use, for the same reason.
+   */
+  const refreshFailed = Boolean(query.data && query.isError);
 
   return (
     <SafeAreaView style={styles.safe} edges={["top", "bottom"]}>
@@ -129,6 +140,20 @@ export default function SearchScreen() {
           keyExtractor={(r) => `${r.officeSlug ?? ""}:${r.entityType}:${r.id}`}
           contentContainerStyle={styles.body}
           keyboardShouldPersistTaps="handled"
+          ListHeaderComponent={
+            refreshFailed ? (
+              <RetryNotice
+                testID="search-refresh-failed"
+                placement="top"
+                message={
+                  offline
+                    ? "No signal — showing the last results."
+                    : "Showing the last results — the search failed to refresh."
+                }
+                onRetry={() => void query.refetch()}
+              />
+            ) : null
+          }
           ListEmptyComponent={
             /* "Nothing matches" is FALSE when the office filter is the reason the list is empty — the
                screen was saying that and then footing a note that matches exist elsewhere. One state,

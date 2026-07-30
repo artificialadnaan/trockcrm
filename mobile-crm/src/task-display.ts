@@ -41,8 +41,13 @@ export function taskPriorityLabel(priority: string | null | undefined): string |
  * is the difference between "do this" and "you cannot do this yet", which is not a detail.
  *
  * `pending` returns null on purpose: it is the ordinary state, and labelling it would put a word on
- * every row again. `scheduled` too — the Later section it lives in already says it, and repeating it on
- * every row in that section is noise rather than information.
+ * every row again.
+ *
+ * `scheduled` DOES get one, which I first got wrong by assuming the Later section already said it. It
+ * does not: `later` is built as far-future-or-undated open work UNION everything scheduled
+ * (tasks/service.ts:396-405), so the section mixes the two and a scheduled row was indistinguishable
+ * from an ordinary one sitting months out. "Section implies status" is only true if the section is
+ * status-pure, and this one is not.
  */
 export function taskStatusLabel(status: string | null | undefined): string | null {
   switch ((status ?? "").trim().toLowerCase()) {
@@ -52,6 +57,8 @@ export function taskStatusLabel(status: string | null | undefined): string | nul
       return "Waiting";
     case "blocked":
       return "Blocked";
+    case "scheduled":
+      return "Scheduled";
     default:
       return null;
   }
@@ -85,14 +92,25 @@ export function taskStatusLabel(status: string | null | undefined): string | nul
  *
  * Mirrored here rather than approximated because "the date the server sorted by" and "the date the row
  * shows" have to be the same value or the screen contradicts itself.
+ *
+ * Returns the SOURCE as well, because the two columns are different types. `due_date` is a Postgres
+ * `date` — no time exists to show. `scheduled_for` is `timestamptz`, and the web dialog lets someone
+ * pick the hour: rendering it date-only made 9am and 3pm the same row. Keying the format on the source
+ * rather than on the status is what makes an undated task that fell back to `scheduled_for` still show
+ * its time.
  */
 export function taskEffectiveDate(task: {
   status?: string | null;
   dueDate?: string | null;
   scheduledFor?: string | null;
-}): string | null {
+}): { value: string | null; source: "dueDate" | "scheduledFor" | null } {
   const scheduled = (task.status ?? "").trim().toLowerCase() === "scheduled";
-  const first = scheduled ? task.scheduledFor : task.dueDate;
-  const second = scheduled ? task.dueDate : task.scheduledFor;
-  return first ?? second ?? null;
+  const order: Array<"dueDate" | "scheduledFor"> = scheduled
+    ? ["scheduledFor", "dueDate"]
+    : ["dueDate", "scheduledFor"];
+  for (const source of order) {
+    const value = task[source];
+    if (value) return { value, source };
+  }
+  return { value: null, source: null };
 }

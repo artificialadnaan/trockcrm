@@ -21,11 +21,16 @@ describe("what a task row says beyond its title and date", () => {
     expect(taskStatusLabel("blocked")).toBe("Blocked");
   });
 
+  it("marks a scheduled task, because its section does NOT imply it", () => {
+    // The assumption I got wrong. `later` is far-future-or-undated open work UNION everything
+    // scheduled, so the section mixes the two — a scheduled row was indistinguishable from an ordinary
+    // one sitting months out. "Section implies status" only holds if the section is status-pure.
+    expect(taskStatusLabel("scheduled")).toBe("Scheduled");
+  });
+
   it("says nothing for the ordinary states", () => {
-    // `pending` is the default. `scheduled` lives only in Later, which already says it — repeating it
-    // on every row of that section is noise.
+    // `pending` is the default the server stamps on almost everything.
     expect(taskStatusLabel("pending")).toBeNull();
-    expect(taskStatusLabel("scheduled")).toBeNull();
     expect(taskStatusLabel("completed")).toBeNull();
   });
 
@@ -56,7 +61,7 @@ describe("which date a task actually happens on", () => {
   it("prefers scheduledFor for a scheduled task", () => {
     // The server clears dueDate on the move to scheduled, and the Later section is where these live.
     expect(taskEffectiveDate({ status: "scheduled", dueDate: null, scheduledFor: "2026-08-14" }))
-      .toBe("2026-08-14");
+      .toEqual({ value: "2026-08-14", source: "scheduledFor" });
   });
 
   it("prefers scheduledFor even when BOTH are set", () => {
@@ -65,30 +70,40 @@ describe("which date a task actually happens on", () => {
     // sorts by scheduled_for. Showing the due date put a row displaying one date in the position of
     // another, which reads as a broken sort rather than as a stale field.
     expect(taskEffectiveDate({ status: "scheduled", dueDate: "2026-08-01", scheduledFor: "2026-08-14" }))
-      .toBe("2026-08-14");
+      .toEqual({ value: "2026-08-14", source: "scheduledFor" });
   });
 
   it("prefers dueDate for everything that is not scheduled", () => {
     for (const status of ["pending", "in_progress", "waiting_on", "blocked", "completed"]) {
       expect(taskEffectiveDate({ status, dueDate: "2026-08-01", scheduledFor: "2026-08-14" }))
-        .toBe("2026-08-01");
+        .toEqual({ value: "2026-08-01", source: "dueDate" });
     }
   });
 
   it("falls back across the flip in both directions", () => {
     expect(taskEffectiveDate({ status: "scheduled", dueDate: "2026-08-01", scheduledFor: null }))
-      .toBe("2026-08-01");
+      .toEqual({ value: "2026-08-01", source: "dueDate" });
     expect(taskEffectiveDate({ status: "pending", dueDate: null, scheduledFor: "2026-08-14" }))
-      .toBe("2026-08-14");
+      .toEqual({ value: "2026-08-14", source: "scheduledFor" });
+  });
+
+  it("names the SOURCE, because the two columns are different types", () => {
+    // `due_date` is a Postgres `date` — no time exists. `scheduled_for` is timestamptz and the web
+    // dialog lets someone pick the hour, so the row has to format them differently. Keying on the
+    // source rather than on the status is what makes an UNDATED task that fell back to scheduled_for
+    // still show its time.
+    expect(taskEffectiveDate({ status: "pending", dueDate: null, scheduledFor: "2026-08-14T15:00:00Z" }))
+      .toEqual({ value: "2026-08-14T15:00:00Z", source: "scheduledFor" });
   });
 
   it("returns null rather than a fake date when the task has neither", () => {
-    expect(taskEffectiveDate({ status: "pending", dueDate: null, scheduledFor: null })).toBeNull();
-    expect(taskEffectiveDate({})).toBeNull();
+    expect(taskEffectiveDate({ status: "pending", dueDate: null, scheduledFor: null }))
+      .toEqual({ value: null, source: null });
+    expect(taskEffectiveDate({})).toEqual({ value: null, source: null });
   });
 
   it("reads the status whatever case it arrives in", () => {
     expect(taskEffectiveDate({ status: " Scheduled ", dueDate: "2026-08-01", scheduledFor: "2026-08-14" }))
-      .toBe("2026-08-14");
+      .toEqual({ value: "2026-08-14", source: "scheduledFor" });
   });
 });
