@@ -4,6 +4,7 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import { sql } from "drizzle-orm";
 import * as schema from "../shared/src/schema/index.js";
 import type { ScorecardRating } from "../shared/src/types/index.js";
+import { scorecardCriticalDeficiencyLabel } from "../shared/src/types/field-scorecard.js";
 import { reconcileScorecardCorrectiveActions } from "../server/src/modules/field/corrective-actions-service.js";
 import { matchFieldResponders } from "../shared/src/lib/responderNameMatch.js";
 import {
@@ -220,6 +221,7 @@ async function main() {
   // wrapper checking the exit code records a targeted production backfill as completed having examined
   // nothing at all.
   let scopedCardSeen = false;
+  const initializedSchemas: string[] = [];
   let planned = 0;
   let skipped = 0;
   let failed = 0;
@@ -236,8 +238,18 @@ async function main() {
     if (officeRow.rowCount === 0) continue;
     const office = { id: officeRow.rows[0].id, slug };
 
-    const exists = await pool.query(`SELECT to_regclass($1) IS NOT NULL AS ok`, [`${officeSchema}.field_scorecards`]);
+    // BOTH tables: the candidate scan reads field_scorecards, and the scoped-card diagnostic also counts
+    // scorecard_corrective_actions. Verifying only the first left the diagnostic able to reference a relation
+    // that does not exist.
+    const exists = await pool.query<{ ok: boolean }>(
+      `SELECT to_regclass($1) IS NOT NULL AND to_regclass($2) IS NOT NULL AS ok`,
+      [`${officeSchema}.field_scorecards`, `${officeSchema}.scorecard_corrective_actions`],
+    );
     if (!exists.rows[0]?.ok) continue;
+    // Remembered for the scoped-card diagnostic below, which unions across offices. Building that from the
+    // RAW namespace list threw on any partially-initialized office_* schema — so the one path whose whole
+    // job is to explain a mistyped --card was the path that could not run.
+    initializedSchemas.push(officeSchema);
 
     const { rows: candidates } = await pool.query<CandidateRow>(
       CANDIDATE_SQL.replace(/\{S\}/g, `"${officeSchema}"`),
@@ -345,9 +357,14 @@ async function main() {
         // possible — READ COMMITTED has no predicate lock to prevent it — but that window is now microseconds
         // inside one transaction rather than the whole office's run, and this script is operator-run, not
         // concurrent with roster administration.
-        const { rows: roster } = await client.query<RosterRow>(
-          `SELECT id, name, role, is_active AS "isActive", email FROM field_responders FOR SHARE`,
-        );
+        const rosterSql = `SELECT id, name, role, is_active AS "isActive", email FROM field_responders ORDER BY id`;
+        const { rows: roster } = await client.query<RosterRow>(`${rosterSql} FOR SHARE`);
+        // FOR SHARE holds the rows it READ — no existing responder can be renamed, re-roled, deactivated or
+        // deleted before this card commits. It cannot stop an INSERT: READ COMMITTED has no predicate lock,
+        // so a same-named person added mid-transaction is a phantom this scan never saw, and a name that was
+        // unique when matched would no longer be. This fingerprint is what detects that, and it is re-taken
+        // after the operator approves — see the check before COMMIT.
+        const rosterFingerprint = JSON.stringify(roster);
 
         const sup = matchFieldResponders({ text: row.superintendent_name, role: "superintendent", roster });
         const pm = matchFieldResponders({ text: row.pm_name, role: "project_manager", roster });
@@ -487,7 +504,13 @@ async function main() {
 
         console.log(`   FLAGGED ITEMS (${actionItems.length + deficiencies.length}):`);
         actionItems.forEach((a, i) => console.log(`     action_item[${i}]  ${a}`));
-        deficiencies.forEach((d) => console.log(`     deficiency[${d}]`));
+        // The LABEL, resolved through the same helper reconcile seeds the rows with, not just the stored key.
+        // Printing `deficiency[site_org_below]` showed the operator different text from the email they were
+        // authorizing — and the plan is only a safeguard if what it shows is what gets sent. The key stays
+        // alongside it, because that is what the corrective_actions row and the response flow are keyed on.
+        deficiencies.forEach((d) =>
+          console.log(`     deficiency[${d}]  ${scorecardCriticalDeficiencyLabel(d)}`),
+        );
 
         // Display name AND id together, and only for a slot this run is filling. The create/edit path does
         // this so a card cannot show one person while routing to another.
@@ -570,7 +593,16 @@ async function main() {
         // So an unset variable REFUSES TO COMMIT rather than previewing an empty list. There is no way for
         // this process to read the worker's environment, and quietly presenting its own as authoritative is
         // what turns "every recipient is printed before the commit" into a promise this script cannot keep.
-        const oversightConfigured = resolveFieldScorecardRecipients(process.env);
+        // Tested on the RAW variable, never on the resolver's output. resolveFieldScorecardRecipients
+        // fabricates a placeholder address under NODE_ENV=development|test so local runs work, which made
+        // the guard below see a non-empty list and rule the production watcher list "previewable" — the
+        // operator approved a plan naming a dev placeholder while the deployed worker went on to mail its
+        // real watchers. The question this guard has to ask is whether the AUTHORITATIVE value was supplied
+        // to this process, and only the variable itself answers that.
+        const oversightExplicitlyConfigured = (process.env.FIELD_SCORECARD_EMAIL_RECIPIENTS ?? "").trim().length > 0;
+        const oversightConfigured = oversightExplicitlyConfigured
+          ? resolveFieldScorecardRecipients(process.env)
+          : [];
         const watchers = [
           ...new Set(
             oversightConfigured
@@ -583,8 +615,8 @@ async function main() {
           console.log("     (nobody — every configured watcher is already a responder on this card)");
         }
         for (const email of watchers) console.log(`     watcher          <${email}>`);
-        if (oversightConfigured.length === 0) {
-          console.log("     (UNSET in this process — cannot preview who the worker will mail)");
+        if (!oversightExplicitlyConfigured) {
+          console.log("     (FIELD_SCORECARD_EMAIL_RECIPIENTS not set in this process — cannot preview who the worker will mail)");
           if (COMMIT && !ALLOW_UNPREVIEWABLE_OVERSIGHT) {
             throw new Error(
               "FIELD_SCORECARD_EMAIL_RECIPIENTS is unset in this process, so the oversight watchers the WORKER " +
@@ -671,6 +703,22 @@ async function main() {
             skipped += 1;
             continue;
           }
+
+          // The approval prompt turned the phantom-insert window from microseconds into however long the
+          // operator spends reading. A responder added in that time can make a name that matched uniquely
+          // ambiguous, and the matcher's whole contract is that an ambiguous name resolves to NOBODY — so
+          // committing the pick derived before the prompt would mail a person the evidence no longer
+          // identifies. Re-taken here rather than re-derived: any roster change at all invalidates the plan
+          // the operator actually approved, and re-running the match would be a second copy of the
+          // derivation free to drift from the first.
+          const { rows: rosterNow } = await client.query<RosterRow>(rosterSql);
+          if (JSON.stringify(rosterNow) !== rosterFingerprint) {
+            await client.query("ROLLBACK");
+            console.log("   ABORTED — the responder roster changed while this card was awaiting approval;");
+            console.log("   the plan you approved is no longer the evidence. Re-run to see the current one.\n");
+            failed += 1;
+            continue;
+          }
           await client.query("COMMIT");
           console.log("   *** COMMITTED ***\n");
         } else {
@@ -693,11 +741,14 @@ async function main() {
 
   // Say WHICH of the three it was, because the operator's next step differs in each case: a typo is retyped,
   // an already-processed card is left alone, and an ineligible one is a question about the card.
-  if (CARD_ARG && !scopedCardSeen) {
+  if (CARD_ARG && !scopedCardSeen && initializedSchemas.length === 0) {
+    console.error(`--card ${CARD_ARG}: no office schema has an initialized field_scorecards table. Nothing was examined.`);
+    process.exitCode = 1;
+  } else if (CARD_ARG && !scopedCardSeen) {
     const found = await pool.query<{ schema: string; status: string; rating: string; is_active: boolean; actions: string }>(
-      schemas
+      initializedSchemas
         .map(
-          ({ nspname }) => `SELECT '${nspname}' AS schema, sc.status, sc.rating::text AS rating, sc.is_active,
+          (nspname) => `SELECT '${nspname}' AS schema, sc.status, sc.rating::text AS rating, sc.is_active,
                      (SELECT count(*) FROM "${nspname}".scorecard_corrective_actions ca WHERE ca.scorecard_id = sc.id)::text AS actions
                 FROM "${nspname}".field_scorecards sc WHERE sc.id = $1`,
         )
