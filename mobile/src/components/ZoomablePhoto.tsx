@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Animated, StyleSheet } from "react-native";
 import { Image as ExpoImage } from "expo-image";
+import { photoCacheKey, thumbnailCacheKey } from "../photos/cache-keys";
 import {
   PanGestureHandler,
   PinchGestureHandler,
@@ -36,7 +37,11 @@ export function ZoomablePhoto({
   /** The already-cached grid thumbnail, shown as the placeholder while the full-res original decodes — and
    *  left on screen if it never does. Without it a slow or failed full-res load renders as pure black. */
   thumbnailUri?: string | null;
-  /** Stable identity for the image cache (the photo id) — see the source prop for why the uri won't do. */
+  /**
+   * The PHOTO ID, from which both cache keys are derived (see photos/cache-keys) — the original's and the
+   * thumbnail placeholder's. Not a key itself; passing a pre-built key here would put the placeholder on a
+   * different entry from the one the grid wrote. See the source prop for why the uri won't do.
+   */
   cacheKey?: string | null;
   width: number;
   height: number;
@@ -208,11 +213,19 @@ export function ZoomablePhoto({
                   // per tier would guarantee a miss and re-download the whole original on the first pinch,
                   // which on jobsite LTE is a multi-second stall and offline is an outright failure for
                   // bytes already sitting on disk.
-                  source={{ uri, cacheKey: cacheKey ?? undefined }}
+                  source={{ uri, cacheKey: cacheKey ? photoCacheKey(cacheKey) : undefined }}
                   // The grid thumbnail is already in expo-image's cache, so it paints immediately and stays
                   // put until the full-res original decodes over it. On a failed load it is what the user
                   // keeps seeing — a downscaled photo beats the black rectangle this used to render.
-                  placeholder={thumbnailUri ? { uri: thumbnailUri } : undefined}
+                  // It MUST carry the grid's cacheKey: without it expo-image looks the placeholder up by
+                  // URL, misses the entry the grid stored under the id, and goes to the network for a
+                  // thumbnail URL that is expired in exactly the situation the placeholder exists for —
+                  // so the fallback is absent precisely when it is needed and the pane is blank again.
+                  placeholder={
+                    thumbnailUri
+                      ? { uri: thumbnailUri, cacheKey: cacheKey ? thumbnailCacheKey(cacheKey) : undefined }
+                      : undefined
+                  }
                   placeholderContentFit="contain"
                   style={{ width, height }}
                   contentFit="contain"
