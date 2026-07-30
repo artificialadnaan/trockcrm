@@ -43,6 +43,12 @@ import { tenantSchemaSql } from "../../../tests/helpers/tenant-schema-from-drizz
 // The ceiling the ingress REUSES rather than re-declares — see the contactSheetBytes tests below.
 import { MAX_FILE_SIZE_BYTES } from "../files/file-constants.js";
 import { MAX_THUMBNAIL_SOURCE_BYTES } from "../../lib/image-thumbnail-constants.js";
+// R30. The Files subsystem's OWN thumbnail-key derivation, imported rather than restated: the collision
+// this seam had was between a walkthrough's ORIGINAL key and another walkthrough's THUMBNAIL key, and a
+// hand-written copy of the second would let the two drift apart and the test go quietly vacuous. Safe to
+// import here despite the ingress module's no-sharp rule — that module already imports
+// `isThumbnailableImage` from this same file, so it is on the suite's graph either way.
+import { deriveThumbnailKey } from "../../lib/image-thumbnail.js";
 
 /** The narrower of the two ceilings ingress must satisfy — see the R26 comment in the service. */
 const BINDING_CEILING = Math.min(MAX_FILE_SIZE_BYTES, MAX_THUMBNAIL_SOURCE_BYTES);
@@ -60,10 +66,12 @@ import {
   createWalkthroughContactSheetFile,
   createWalkthroughSourceDocument,
   deriveWalkthroughContactSheetR2Key,
+  encodeWalkthroughIdKeySegment,
   getCrmFileBucket,
   ingestWalkthrough as ingestWalkthroughService,
   insertWalkthroughExtractions,
   MAX_WALKTHROUGH_DIVISION_HINT_CHARS,
+  MAX_WALKTHROUGH_ENCODED_ID_CHARS,
   MAX_WALKTHROUGH_ID_CHARS,
   MAX_WALKTHROUGH_QUANTITY,
   MAX_WALKTHROUGH_RAW_LABEL_CHARS,
@@ -89,6 +97,13 @@ import {
  * (`isThumbnailableImage` / `isPdfThumbnailable`), because the implementation calls them as a fallback
  * CHAIN rather than branching on the mime type — a fake that answered for both types would make the
  * chain's order unobservable.
+ *
+ * They also return the key the REAL helpers return — `deriveThumbnailKey(r2Key)`, which both arms use
+ * (image-thumbnail.ts:62, pdf-thumbnail.ts:164) — rather than an invented `thumbnails/<key>` prefix.
+ * That is not cosmetic: `files.thumbnail_r2_key` is a varchar(1000) like `r2_key` and the derived
+ * thumbnail is SEVEN characters longer than its original, which makes it the column that actually binds
+ * `MAX_WALKTHROUGH_ENCODED_ID_CHARS`. A fake with different overhead would put the boundary test's
+ * limit in the wrong place — the environment failing to express the real failure.
  */
 function contactSheetStoreFor(
   payload: WalkthroughIngressPayload,
@@ -101,9 +116,9 @@ function contactSheetStoreFor(
       contentLength: payload.contactSheetBytes,
     }),
     generateImageThumbnail: async (r2Key, mimeType) =>
-      mimeType === "image/jpeg" ? `thumbnails/${r2Key}` : null,
+      mimeType === "image/jpeg" ? deriveThumbnailKey(r2Key) : null,
     generatePdfThumbnail: async (r2Key, mimeType) =>
-      mimeType === "application/pdf" ? `thumbnails/${r2Key}` : null,
+      mimeType === "application/pdf" ? deriveThumbnailKey(r2Key) : null,
     ...overrides,
   };
 }
@@ -1516,15 +1531,20 @@ describe("ingestWalkthrough", () => {
   // So the `dealId` half is pinned at the DERIVATION level by "canonicalizes the ids once…" below, which
   // asserts both derived keys agree under re-casing and — the load-bearing part — that they DISAGREE when
   // handed the raw spellings. Same division of labour the advisory lock itself already has in this suite.
+  // R15, RE-CONFIRMED UNDER R29 rather than deleted with it. R29 narrowed the canonicalization to the
+  // two UUIDs, so this test now re-cases ONLY the ids that are uuids — the `walkthroughId` below is
+  // byte-identical on both posts, because folding an opaque export id was the finding (see the test that
+  // follows). The deal half is still load-bearing and is what this proves.
   it("treats two hex-case spellings of one deal as one walkthrough, not two chains", async () => {
     // Hex-letter-dense so re-casing it is a real change — see CASE_DEAL for why `U()` cannot be used.
+    // BYTE-IDENTICAL on both calls: it is the opaque export id and its case is information now.
     const walkthroughId = "c3d4e5f6-a7b8-4c9d-8e0f-a1b2c3d4e5f6";
 
     // Sanity FIRST: the fixtures really do differ from their canonical spelling, and differ only in
     // case. Without these the whole test would pass on ids that were never re-cased at all — which is
     // exactly what happened on the first draft, built on the digit-only `U()` ids.
     expect(mixedCase(CASE_DEAL)).not.toBe(CASE_DEAL);
-    expect(mixedCase(walkthroughId)).not.toBe(walkthroughId);
+    expect(mixedCase(CASE_PROJECT)).not.toBe(CASE_PROJECT);
     expect(mixedCase(CASE_DEAL).toLowerCase()).toBe(CASE_DEAL);
     // Genuinely MIXED, not uniformly upper — so an implementation that happened to uppercase everything
     // would not satisfy this either.
@@ -1534,34 +1554,38 @@ describe("ingestWalkthrough", () => {
       tenantDb,
       payload: walkthroughPayload(walkthroughId, {
         dealId: CASE_DEAL,
-        projectId: null,
+        projectId: CASE_PROJECT,
         rows: [CARPENTRY_ROW],
       }),
     });
 
-    // The SAME walkthrough on the SAME deal, spelled in different hex case — which is what a retry from
-    // a sender that re-serialized its ids looks like.
+    // The SAME walkthrough on the SAME deal, its two UUIDs spelled in different hex case — which is what
+    // a retry from a sender that re-serialized its ids looks like.
+    //
+    // WHICH MUTATION REDDENS THIS, stated so the assertions below are not credited with work they do not
+    // do: drop `canonicalizeWalkthroughIngressId` from `requireUuid` and THIS CALL throws a 400 from the
+    // project-ownership check — `projects.source_deal_id` comes back out of Postgres lowercase and is
+    // compared with `===` against the payload's dealId, so a mixed-case spelling stops matching the deal
+    // that owns the project. (Verified: the 8-4-4-4-12 pattern carries the `i` flag, so an uncanonical
+    // id still passes validation and reaches that comparison.) The counting assertions below are the
+    // belt-and-braces half — the idempotency lookup compares `deal_id` as a `uuid` and so finds the
+    // stored document either way, which is exactly why the lock-key and r2-key halves of this finding
+    // need the pure-function test that follows rather than an outcome test.
     const second = await ingestWalkthrough({
       tenantDb,
-      payload: walkthroughPayload(mixedCase(walkthroughId), {
+      payload: walkthroughPayload(walkthroughId, {
         dealId: mixedCase(CASE_DEAL),
-        projectId: null,
+        projectId: mixedCase(CASE_PROJECT),
         rows: [CARPENTRY_ROW],
       }),
     });
 
-    // ONE document, counted in the database. Note the predicate covers BOTH spellings: a second chain
-    // would have stored `content_hash` in the mixed one and been invisible to a lookup for the canonical
-    // one, so counting only the canonical spelling would have reported "1" either way.
+    // ONE document, counted in the database.
     const documents = await tenantDb
       .select({ id: estimateSourceDocuments.id, contentHash: estimateSourceDocuments.contentHash })
       .from(estimateSourceDocuments)
-      .where(
-        sql`${estimateSourceDocuments.contentHash} IN (${walkthroughContentHash(walkthroughId)}, ${walkthroughContentHash(mixedCase(walkthroughId))})`
-      );
+      .where(eq(estimateSourceDocuments.contentHash, walkthroughContentHash(walkthroughId)));
     expect(documents).toHaveLength(1);
-    // Stored canonically (and namespaced — R22), so the column and every derivation agree.
-    expect(documents[0].contentHash).toBe(walkthroughContentHash(walkthroughId));
     expect(documents[0].id).toBe(first.documentId);
 
     // ONE set of extractions — the count that would be 2 if a second chain had landed, and the thing an
@@ -1573,48 +1597,118 @@ describe("ingestWalkthrough", () => {
     expect(extractions).toHaveLength(1);
     expect(extractions[0].id).toBe(first.extractionIds[0]);
 
-    // ONE contact-sheet object. This is the assertion that pins the r2-key half of the finding: with an
-    // uncanonicalized dealId there would be TWO `files` rows here, at
-    // `walkthroughs/a1b2…/…` and `walkthroughs/A1b2…/…`, and the UNIQUE index on r2_key would not have
-    // objected to either — which is why the counting predicate is on the walkthrough segment, matching
-    // both spellings of the deal.
+    // ONE contact-sheet object, on the CANONICAL key. With an uncanonicalized dealId the second post
+    // would want `walkthroughs/A1b2…/…` where the first stored `walkthroughs/a1b2…/…`, and the UNIQUE
+    // index on r2_key would not have objected to either — which is why the counting predicate matches
+    // any deal segment and pins the stored spelling separately.
     const chainFiles = await tenantDb
       .select({ id: files.id, r2Key: files.r2Key })
       .from(files)
-      .where(
-        sql`${files.r2Key} LIKE ${`%/${walkthroughId}/contact-sheet.jpg`} OR ${files.r2Key} LIKE ${`%/${mixedCase(walkthroughId)}/contact-sheet.jpg`}`
-      );
+      .where(sql`${files.r2Key} LIKE ${`%/${walkthroughId}/contact-sheet.jpg`}`);
     expect(chainFiles).toHaveLength(1);
     expect(chainFiles[0].r2Key).toBe(
-      `walkthroughs/${CASE_DEAL}/${WALKTHROUGH_NO_PROJECT_KEY_SEGMENT}/${walkthroughId}/contact-sheet.jpg`
+      `walkthroughs/${CASE_DEAL}/${CASE_PROJECT}/${walkthroughId}/contact-sheet.jpg`
     );
 
     // ...and only THEN the ids, which is what the sender sees: it cannot tell which call won.
     expect(second).toEqual(first);
   });
 
+  // ── R29: the walkthrough id is OPAQUE, so its case is information ────────────────────────────────────
+  //
+  // The fix above canonicalized all THREE ingress ids. That is right for `dealId` and `projectId`, which
+  // are uuids compared by value in Postgres and by bytes in JavaScript. It was wrong for `walkthroughId`:
+  // it is trock-scope's own export id, typed `string` with no format guarantee, so lowercasing collapsed
+  // two genuinely distinct walkthroughs onto ONE advisory lock, ONE `content_hash`, ONE row fingerprint
+  // and ONE r2 key. The second walkthrough could then never be ingested under its real identity — it
+  // replayed as the first where their rows agreed, and 409'd as a "correction" where they did not.
+  it("treats two case-differing walkthrough ids as two walkthroughs, not one", async () => {
+    // DELIBERATELY NOT UUID-SHAPED: an opaque trock-scope export id, so nothing here can be confused with
+    // the uuid canonicalization the test above depends on.
+    const upper = "Walkthrough-A";
+    const lower = "walkthrough-a";
+    // The fixtures differ ONLY in case — otherwise this test would prove that two different strings are
+    // two walkthroughs, which nothing ever disputed.
+    expect(upper).not.toBe(lower);
+    expect(upper.toLowerCase()).toBe(lower);
+
+    // The validator is where the folding lived, so this is the most direct statement of the fix.
+    expect(validateWalkthroughIngressPayload(walkthroughPayload(upper)).walkthroughId).toBe(upper);
+
+    const first = await ingestWalkthrough({ tenantDb, payload: walkthroughPayload(upper) });
+    const second = await ingestWalkthrough({ tenantDb, payload: walkthroughPayload(lower) });
+
+    // TWO documents. Under the fold this was one: the second post's `content_hash` lowercased onto the
+    // first's, the idempotency lookup found it, the envelope and the row fingerprints matched, and the
+    // second walkthrough was reported as a successful replay of the first.
+    expect(second.documentId).not.toBe(first.documentId);
+    const documents = await tenantDb
+      .select({ id: estimateSourceDocuments.id, contentHash: estimateSourceDocuments.contentHash })
+      .from(estimateSourceDocuments)
+      .where(
+        sql`${estimateSourceDocuments.contentHash} IN (${walkthroughContentHash(upper)}, ${walkthroughContentHash(lower)})`
+      );
+    expect(documents).toHaveLength(2);
+    expect(documents.map((row: { contentHash: string }) => row.contentHash).sort()).toEqual(
+      [walkthroughContentHash(upper), walkthroughContentHash(lower)].sort()
+    );
+
+    // TWO sets of rows, so the estimator sees each walkthrough's own scope rather than one of them twice.
+    expect(second.extractionIds).toHaveLength(1);
+    expect(second.extractionIds[0]).not.toBe(first.extractionIds[0]);
+
+    // TWO objects, on keys that differ in exactly the byte that distinguishes the two ids. This is the
+    // r2-key half: folded, both wanted `.../walkthrough-a/contact-sheet.jpg`.
+    const [firstFile] = await tenantDb.select().from(files).where(eq(files.id, first.fileId));
+    const [secondFile] = await tenantDb.select().from(files).where(eq(files.id, second.fileId));
+    expect(firstFile.r2Key).toBe(`walkthroughs/${DEAL}/${PROJECT}/${upper}/contact-sheet.jpg`);
+    expect(secondFile.r2Key).toBe(`walkthroughs/${DEAL}/${PROJECT}/${lower}/contact-sheet.jpg`);
+
+    // ...and the lock half. Driven THROUGH THE VALIDATOR on purpose: `walkthroughIngressLockKey` never
+    // folded case itself, so calling it with the two raw ids would compare two literals and pass no
+    // matter what the validator does (the tautology its own docblock warns about). Fed the validator's
+    // output, re-adding the fold makes both sides equal and this assertion fails.
+    expect(
+      walkthroughIngressLockKey(
+        DEAL,
+        validateWalkthroughIngressPayload(walkthroughPayload(upper)).walkthroughId
+      )
+    ).not.toBe(
+      walkthroughIngressLockKey(
+        DEAL,
+        validateWalkthroughIngressPayload(walkthroughPayload(lower)).walkthroughId
+      )
+    );
+  });
+
   // The mechanism the test above depends on, isolated: the two derivations that used to disagree are
   // driven from the validator's output, so they cannot see a raw wire spelling. Distinct from the
   // outcome test because it names WHICH values must be canonical rather than only that the outcome
   // collapsed to one — a fix that deduped some other way would pass that test and fail this one.
-  it("canonicalizes the ids once, so the lock key and the r2 key are derived from one spelling", () => {
-    const walkthroughId = "d4e5f6a7-b8c9-4d0e-8f1a-b2c3d4e5f6a7";
+  it("canonicalizes the two UUIDs once, and leaves the opaque walkthrough id alone", () => {
+    // Mixed-case ON PURPOSE, and it must survive: R29. Hex-shaped only so the two halves of this test sit
+    // side by side — the validator does not require the walkthrough id to be a uuid and must not treat it
+    // as one.
+    const walkthroughId = "D4e5F6a7-B8c9-4D0e-8F1a-B2c3D4e5F6a7";
 
     const payload = validateWalkthroughIngressPayload({
       ...walkthroughPayload(walkthroughId),
       dealId: mixedCase(CASE_DEAL),
       projectId: mixedCase(CASE_PROJECT),
-      walkthroughId: mixedCase(walkthroughId),
+      walkthroughId,
     });
 
-    // The validator is the single canonicalization point — everything downstream reads THESE values.
+    // The validator is the single canonicalization point for the two UUIDS — everything downstream reads
+    // THESE values.
     expect(payload.dealId).toBe(CASE_DEAL);
     expect(payload.projectId).toBe(CASE_PROJECT);
+    // ...and the opaque id comes through BYTE-EXACT, not folded with them.
     expect(payload.walkthroughId).toBe(walkthroughId);
+    expect(payload.walkthroughId).not.toBe(walkthroughId.toLowerCase());
 
-    // ...so the two derived keys, built from the validator's output, equal the ones built from the
-    // canonical ids. That equality IS the property: it is what makes two hex-case retries take the same
-    // advisory lock and want the same `files.r2_key`.
+    // ...so the two derived keys, built from the validator's output, equal the ones built from canonical
+    // UUIDs and the RAW walkthrough id. That equality IS the property: it is what makes two hex-case
+    // retries take the same advisory lock and want the same `files.r2_key`.
     expect(walkthroughIngressLockKey(payload.dealId, payload.walkthroughId)).toBe(
       walkthroughIngressLockKey(CASE_DEAL, walkthroughId)
     );
@@ -1628,16 +1722,17 @@ describe("ingestWalkthrough", () => {
     ).toBe(deriveWalkthroughContactSheetR2Key(CASE_DEAL, CASE_PROJECT, walkthroughId, "image/jpeg"));
 
     // The NEGATIVE half, and the one that makes the two above more than a tautology: fed the RAW wire
-    // spellings, the very same builders disagree. That is the finding, reproduced in two lines — string
-    // concatenation is case-sensitive where the `uuid` comparison behind the idempotency lookup is not.
-    expect(walkthroughIngressLockKey(mixedCase(CASE_DEAL), mixedCase(walkthroughId))).not.toBe(
+    // spellings of the UUIDs, the very same builders disagree. That is the finding, reproduced in two
+    // lines — string concatenation is case-sensitive where the `uuid` comparison behind the idempotency
+    // lookup is not.
+    expect(walkthroughIngressLockKey(mixedCase(CASE_DEAL), walkthroughId)).not.toBe(
       walkthroughIngressLockKey(CASE_DEAL, walkthroughId)
     );
     expect(
       deriveWalkthroughContactSheetR2Key(
         mixedCase(CASE_DEAL),
         mixedCase(CASE_PROJECT),
-        mixedCase(walkthroughId),
+        walkthroughId,
         "image/jpeg"
       )
     ).not.toBe(deriveWalkthroughContactSheetR2Key(CASE_DEAL, CASE_PROJECT, walkthroughId, "image/jpeg"));
@@ -1833,10 +1928,15 @@ describe("ingestWalkthrough", () => {
     expect(extractions).toHaveLength(1);
   });
 
-  // The OTHER direction, unchanged on purpose: rows the stored document has that this payload did not
-  // name are still that walkthrough's rows, so they are appended rather than treated as an error. Only
-  // a payload row with no STORED counterpart is a conflict.
-  it("still replays stored rows the retry's payload does not mention", async () => {
+  // R32. THE OTHER DIRECTION, and this test used to assert the opposite. A retry that OMITS a stored
+  // scope item — trock-scope correcting an export by removing an erroneous row — appended that row's
+  // extraction id to the response and returned success. The stale row stayed visible in the workbench and
+  // eligible for pricing while the sender recorded the corrected payload as accepted, so the one part of
+  // the correction that mattered was the one part that did not land.
+  //
+  // The asymmetry is the argument: adding a row 409s, changing a row's content under the same id 409s,
+  // and removing one was the only edit a replay quietly accepted.
+  it("refuses a replay that omits a stored scope row, naming it", async () => {
     const walkthroughId = U("33051");
     const rows = [
       CARPENTRY_ROW,
@@ -1847,19 +1947,74 @@ describe("ingestWalkthrough", () => {
       tenantDb,
       payload: walkthroughPayload(walkthroughId, { rows }),
     });
+    const afterFirst = await tableCounts();
 
-    // A retry naming only the FIRST row. Nothing is unaccounted for — every row it posted is stored —
-    // so it succeeds, and the answer still describes the whole walkthrough.
+    // A retry naming only the FIRST row — the parapet row withdrawn by leaving it out. Every row it POSTS
+    // is stored, so the unmatched check above cannot be what fires (species 3), and the rows it does post
+    // are byte-identical, so the fingerprint check cannot be either.
+    const failure = await ingestWalkthrough({
+      tenantDb,
+      payload: walkthroughPayload(walkthroughId, { rows: [CARPENTRY_ROW] }),
+    }).catch((error: Error) => error);
+
+    expect((failure as { statusCode?: number }).statusCode).toBe(409);
+    // NAMED BY SCOPE ITEM ID — the sender never saw the extraction ids until the response it is retrying.
+    expect((failure as Error).message).toContain("scope-item-9501");
+    // ...and ONLY the omitted one. An implementation that listed every stored row would satisfy the line
+    // above while telling the sender nothing about which row it dropped.
+    expect((failure as Error).message).not.toContain(CARPENTRY_ROW.sourceScopeItemId);
+
+    // The refusal is "we will not do this", not a partial application: nothing written, and — the harm
+    // being fixed — the omitted row is still THERE. The 409 does not delete it; it declines to pretend
+    // the omission landed.
+    expect(await tableCounts()).toEqual(afterFirst);
+    const stored = await tenantDb
+      .select({ id: estimateExtractions.id })
+      .from(estimateExtractions)
+      .where(eq(estimateExtractions.documentId, first.documentId));
+    expect(stored).toHaveLength(2);
+  });
+
+  // The surviving append branch, narrowed by R32 to rows this mapping cannot NAME. A stored extraction
+  // whose `metadataJson` carries no `sourceScopeItemId` has no counterpart the sender could have posted
+  // and cannot be reported to it by id, so it is neither drift nor an omission — it is appended, exactly
+  // as before, and the result stays a complete picture of the document.
+  //
+  // The row is written by hand because nothing in this module can produce one: `insertWalkthroughExtractions`
+  // always writes a `sourceScopeItemId`. That is the point — this branch guards against a row some other
+  // writer left under the document, and a fixture that could not reach the condition would prove nothing.
+  it("appends a stored row it cannot name, rather than reporting it as an omission", async () => {
+    const walkthroughId = U("33052");
+
+    const first = await ingestWalkthrough({
+      tenantDb,
+      payload: walkthroughPayload(walkthroughId, { rows: [CARPENTRY_ROW] }),
+    });
+
+    const [anonymous] = await tenantDb
+      .insert(estimateExtractions)
+      .values({
+        dealId: DEAL,
+        projectId: PROJECT,
+        documentId: first.documentId,
+        extractionType: "scope_utterance",
+        rawLabel: "A row with no scope item id",
+        // NOT NULL, like `rawLabel` — this is a raw insert, so nothing fills it in.
+        normalizedLabel: "a row with no scope item id",
+        status: "pending",
+        // No `sourceScopeItemId`, which is the whole fixture.
+        metadataJson: { activeArtifact: true },
+      })
+      .returning({ id: estimateExtractions.id });
+
     const second = await ingestWalkthrough({
       tenantDb,
       payload: walkthroughPayload(walkthroughId, { rows: [CARPENTRY_ROW] }),
     });
 
     expect(second.documentId).toBe(first.documentId);
-    expect(second.extractionIds).toHaveLength(2);
-    // The named row comes first (payload order), the unnamed one is appended.
-    expect(second.extractionIds[0]).toBe(first.extractionIds[0]);
-    expect([...second.extractionIds].sort()).toEqual([...first.extractionIds].sort());
+    // The posted row first, in payload order, then the unnameable one appended.
+    expect(second.extractionIds).toEqual([first.extractionIds[0], anonymous.id]);
   });
 
   // R7. Matching a retry's rows on `sourceScopeItemId` proves a row with that id EXISTS; it does not
@@ -2287,6 +2442,108 @@ describe("ingestWalkthrough", () => {
   // R10. rawLabel is unbounded `text` here but promotion copies it into
   // estimate_line_items.description, a varchar(500) — so an over-long label is accepted, generated,
   // APPROVED by an estimator, and only then fails promotion with a 22001.
+  // ── R34: an unpaired UTF-16 surrogate, the same class as the NUL guard ──────────────────────────────
+  //
+  // `JSON.parse` accepts `"\ud800"` and hands back that lone code unit, so a body can carry one in any
+  // field. It is embedded in `metadataJson`, and Postgres rejects the serialized JSONB with a 22P02 from
+  // inside the ingress transaction — a 500 out of a validator whose whole contract is a 400 before the
+  // first write. Both halves of the pattern are exercised (a high surrogate with no low one, and a low
+  // one with no high one), because a guard covering only the first would pass a one-case test.
+  it.each<[string, string]>([
+    ["a high surrogate with no low one", String.fromCharCode(0xd800)],
+    ["a low surrogate with no high one", String.fromCharCode(0xdc00)],
+  ])("refuses %s, without writing anything", async (_label, lone) => {
+    const before = await tableCounts();
+
+    await expect(
+      ingestWalkthrough({
+        tenantDb,
+        payload: walkthroughPayload(U("34080"), {
+          rows: [{ ...CARPENTRY_ROW, sourceScopeItemId: `scope-item-${lone}` }],
+        }),
+      })
+    ).rejects.toMatchObject({
+      statusCode: 400,
+      message: expect.stringContaining("unpaired UTF-16 surrogate"),
+    });
+
+    expect(await tableCounts()).toEqual(before);
+  });
+
+  // WHY THE GUARD EXISTS, against real SQL rather than as a claim. Driven through
+  // `insertWalkthroughExtractions` — the exported helper, which does NOT run the validator — so the value
+  // actually reaches Postgres and the SQLSTATE is observed rather than asserted from a docblock. Without
+  // this, the test above could be pinning a guard against a condition that never fails (species 5).
+  it("characterizes WHY: a lone surrogate in jsonb is a 22P02 from inside the transaction", async () => {
+    const walkthroughId = U("34081");
+    const { documentId, parseRunId } = await seedChain(walkthroughId);
+
+    const code = await sqlStateOfFailure(
+      insertWalkthroughExtractions({
+        tenantDb,
+        input: {
+          dealId: DEAL,
+          projectId: PROJECT,
+          documentId,
+          parseRunId,
+          walkthroughId,
+          rows: [
+            {
+              ...CARPENTRY_ROW,
+              sourceScopeItemId: `scope-item-${String.fromCharCode(0xd800)}`,
+            },
+          ],
+        },
+      })
+    );
+
+    expect(code).toBe("22P02");
+  });
+
+  // THE OVER-TIGHTNESS CONTROL, and it is as load-bearing as the rejections above: an ASCII-plus-lone-
+  // surrogate fixture cannot tell "rejects unpaired surrogates" apart from "rejects anything non-ASCII",
+  // and the second would be worse than the bug. A real emoji is a WELL-FORMED pair — its high surrogate is
+  // followed by its low one — so it must sail straight through, into both a varchar and a jsonb.
+  it("accepts real astral characters, so the guard is not a ban on non-ASCII text", async () => {
+    const walkthroughId = U("34082");
+    const emoji = "😀";
+    // The fixture really is a surrogate pair — otherwise this control tests nothing about the pattern.
+    expect(emoji.length).toBe(2);
+    expect(emoji.charCodeAt(0)).toBeGreaterThanOrEqual(0xd800);
+    expect(emoji.charCodeAt(0)).toBeLessThanOrEqual(0xdbff);
+    expect(emoji.charCodeAt(1)).toBeGreaterThanOrEqual(0xdc00);
+    expect(emoji.charCodeAt(1)).toBeLessThanOrEqual(0xdfff);
+
+    const result = await ingestWalkthrough({
+      tenantDb,
+      payload: walkthroughPayload(walkthroughId, {
+        siteLabel: `Unit 12B ${emoji}`,
+        rows: [
+          {
+            ...CARPENTRY_ROW,
+            sourceScopeItemId: `scope-item-${emoji}`,
+            rawLabel: `Replace rotted carpentry at eave ${emoji}`,
+          },
+        ],
+      }),
+    });
+
+    // varchar(500), composed by the display-name builder…
+    const [storedFile] = await tenantDb.select().from(files).where(eq(files.id, result.fileId));
+    expect(storedFile.displayName).toBe(
+      buildWalkthroughContactSheetDisplayName(`Unit 12B ${emoji}`)
+    );
+    // …and jsonb, which is the type that raises the 22P02 for the malformed case.
+    const [storedRow] = await tenantDb
+      .select()
+      .from(estimateExtractions)
+      .where(eq(estimateExtractions.id, result.extractionIds[0]));
+    expect(storedRow.rawLabel).toBe(`Replace rotted carpentry at eave ${emoji}`);
+    expect((storedRow.metadataJson as { sourceScopeItemId: string }).sourceScopeItemId).toBe(
+      `scope-item-${emoji}`
+    );
+  });
+
   it("refuses a rawLabel longer than the promotable description column, naming the row", async () => {
     const before = await tableCounts();
 
@@ -2655,6 +2912,137 @@ describe("ingestWalkthrough", () => {
     expect(stored.rows[0].key_len).toBeLessThanOrEqual(1000);
   });
 
+  // ── R30: the opaque id must occupy EXACTLY ONE r2-key path segment ──────────────────────────────────
+  //
+  // `walkthroughId` has no format guarantee and was interpolated raw into a slash-delimited key, so an id
+  // containing a slash escaped its intended prefix. The collision is between two ordinary ingests, not an
+  // abstract hazard — see the dedicated test below. Encoded now, so no input can introduce a separator.
+  it.each<[string, string, string]>([
+    ["a slash", "wt-a/thumbs", "wt-a%2Fthumbs"],
+    ["a parent-directory hop", "../../wt-a", "..%2F..%2Fwt-a"],
+    ["a percent sign", "wt-a%2Fthumbs", "wt-a%252Fthumbs"],
+  ])("keeps %s inside one r2-key path segment", (_label, walkthroughId, encoded) => {
+    const key = deriveWalkthroughContactSheetR2Key(DEAL, PROJECT, walkthroughId, "image/jpeg");
+
+    // FIVE segments, always: the prefix, the deal, the project, the id, the filename. This is the
+    // property — the count cannot depend on what the sender put in its id.
+    expect(key.split("/")).toHaveLength(5);
+    expect(key.split("/")[3]).toBe(encoded);
+    expect(key).toBe(`walkthroughs/${DEAL}/${PROJECT}/${encoded}/contact-sheet.jpg`);
+    // Reversible, which is half of why percent-encoding was chosen over a hash: a key in a bucket
+    // listing still names its walkthrough.
+    expect(decodeURIComponent(key.split("/")[3])).toBe(walkthroughId);
+  });
+
+  // THE HARM, rather than a segment count: an id containing a slash could address ANOTHER walkthrough's
+  // thumbnail prefix. `deriveThumbnailKey` (image-thumbnail.ts:62-69) inserts a `thumbs/` segment before
+  // the filename, so walkthrough `wt-9200`'s thumbnail lives at `.../wt-9200/thumbs/contact-sheet.jpg` —
+  // which is EXACTLY the original key walkthrough `wt-9200/thumbs` used to derive for itself. Whichever
+  // landed second won: either thumbnail generation overwrote the second walkthrough's committed evidence,
+  // or the second upload clobbered the first's tile. `files.r2_key`'s unique index cannot see it, because
+  // only one of the two keys is ever stored in the column.
+  it("cannot let one walkthrough's id address another walkthrough's thumbnail prefix", async () => {
+    const plainId = "wt-9200";
+    const colliderId = "wt-9200/thumbs";
+
+    const plainKey = deriveWalkthroughContactSheetR2Key(DEAL, PROJECT, plainId, "image/jpeg");
+    const colliderKey = deriveWalkthroughContactSheetR2Key(DEAL, PROJECT, colliderId, "image/jpeg");
+
+    // The Files subsystem's OWN derivation, not a string this test invented — so the collision is stated
+    // against the real thumbnail key rather than against a guess at it.
+    const plainThumbnailKey = deriveThumbnailKey(plainKey);
+    // Sanity: the fixture really does reach the condition it names. Without this, an unrelated change to
+    // `deriveThumbnailKey` would make the assertion below vacuously true.
+    expect(plainThumbnailKey).toBe(`walkthroughs/${DEAL}/${PROJECT}/${plainId}/thumbs/contact-sheet.jpg`);
+
+    // THE FINDING, reproduced: raw interpolation would have made these two the same object.
+    expect(`walkthroughs/${DEAL}/${PROJECT}/${colliderId}/contact-sheet.jpg`).toBe(plainThumbnailKey);
+    // ...and the fix: encoded, the collider cannot name it.
+    expect(colliderKey).not.toBe(plainThumbnailKey);
+
+    // Both ingest, end to end, onto distinct objects — through the real unique index on `files.r2_key`.
+    const plain = await ingestWalkthrough({ tenantDb, payload: walkthroughPayload(plainId) });
+    const collider = await ingestWalkthrough({ tenantDb, payload: walkthroughPayload(colliderId) });
+
+    const [plainFile] = await tenantDb.select().from(files).where(eq(files.id, plain.fileId));
+    const [colliderFile] = await tenantDb.select().from(files).where(eq(files.id, collider.fileId));
+    expect(plainFile.r2Key).toBe(plainKey);
+    expect(colliderFile.r2Key).toBe(colliderKey);
+    expect(colliderFile.r2Key.split("/")).toHaveLength(5);
+  });
+
+  // R30's second-order cost, and the reason `MAX_WALKTHROUGH_ID_CHARS` no longer covers both columns:
+  // `files.system_filename` composes the id RAW (484 characters fill its varchar(500)) while `files.r2_key`
+  // now composes it ENCODED, and encoding trebles a `/`-dense id. An id that clears the first bound can
+  // therefore still be a 22001 on the first write — the failure shape this validator exists to prevent.
+  it("refuses a walkthroughId whose percent-encoded form overflows the r2 key column", async () => {
+    const before = await tableCounts();
+    const walkthroughId = "/".repeat(400);
+
+    // SPECIES-3 GUARD: this id is comfortably inside the system_filename bound, so that check cannot be
+    // what fires — only the encoded one can.
+    expect(walkthroughId.length).toBeLessThanOrEqual(MAX_WALKTHROUGH_ID_CHARS);
+    expect(encodeWalkthroughIdKeySegment(walkthroughId).length).toBeGreaterThan(
+      MAX_WALKTHROUGH_ENCODED_ID_CHARS
+    );
+
+    await expect(
+      ingestWalkthrough({ tenantDb, payload: walkthroughPayload(walkthroughId) })
+    ).rejects.toMatchObject({
+      statusCode: 400,
+      message: expect.stringContaining("percent-encodes"),
+    });
+
+    expect(await tableCounts()).toEqual(before);
+  });
+
+  // The accepting side of the same bound, AT THE EXACT BOUNDARY, and it is the assertion that found the
+  // bound's first draft wrong. 296 slashes encode to exactly the limit; the r2 key lands on 993 and the
+  // THUMBNAIL key — `<dir>/thumbs/<stem>.jpg`, seven characters longer, and `files.thumbnail_r2_key` is
+  // a varchar(1000) too — lands on exactly 1000. So the thumbnail is the column that binds, which the
+  // first draft (measured against `r2_key` alone) missed and this test caught as a 22001.
+  //
+  // Measured against real SQL rather than against the constant the bound was computed from, so an
+  // off-by-one that made the limit one character too generous fails here as a database error instead of
+  // passing arithmetic.
+  it("accepts a walkthroughId whose encoding lands exactly inside the object-key columns", async () => {
+    const walkthroughId = "/".repeat(296);
+    expect(encodeWalkthroughIdKeySegment(walkthroughId).length).toBe(MAX_WALKTHROUGH_ENCODED_ID_CHARS);
+
+    const result = await ingestWalkthrough({
+      tenantDb,
+      payload: walkthroughPayload(walkthroughId),
+    });
+
+    const stored = await pg.query<{ key_len: number; thumb_len: number; key: string }>(
+      `SELECT length(r2_key)::int AS key_len, length(thumbnail_r2_key)::int AS thumb_len, r2_key AS key
+         FROM public.files WHERE id = $1`,
+      [result.fileId]
+    );
+    // BOTH columns, filled to their limit — the thumbnail exactly, which is what makes it the binding one.
+    expect(stored.rows[0].key_len).toBe(993);
+    expect(stored.rows[0].thumb_len).toBe(1000);
+    // Still ONE segment for the id, at 296 slashes — the encoding is what makes the length bound
+    // meaningful in the first place.
+    expect(stored.rows[0].key.split("/")).toHaveLength(5);
+  });
+
+  // The relationship the bound RESTS on, pinned against the real function rather than against the
+  // service's local `THUMBNAIL_KEY_OVERHEAD_CHARS` constant. The service cannot import
+  // `deriveThumbnailKey` (it would put sharp on a pure-database module's import path — see the R26 note),
+  // so this is where the seven characters are actually checked. If `deriveThumbnailKey` ever changes
+  // shape, this fails rather than `MAX_WALKTHROUGH_ENCODED_ID_CHARS` quietly becoming too generous.
+  it("derives a thumbnail key exactly seven characters longer than its original, for both mime types", () => {
+    for (const [mimeType, extension] of [
+      ["image/jpeg", ".jpg"],
+      ["application/pdf", ".pdf"],
+    ] as const) {
+      const key = deriveWalkthroughContactSheetR2Key(DEAL, PROJECT, "wt-9300", mimeType);
+      expect(key.endsWith(extension)).toBe(true);
+      expect(deriveThumbnailKey(key).length - key.length).toBe("thumbs/".length);
+    }
+  });
+
   it("scopes the retry check to the deal, so the same walkthrough on another deal still ingests", async () => {
     const walkthroughId = U("33010");
 
@@ -2993,6 +3381,202 @@ describe("ingestWalkthrough", () => {
     expect(seen).toEqual([`walkthroughs/${DEAL}/${PROJECT}/${walkthroughId}/contact-sheet.jpg`]);
   });
 
+  // ── R31: a replay's pre-upload silently overwrites committed evidence ───────────────────────────────
+  //
+  // The r2 key is DETERMINISTIC — that is what makes it safe, because no wire input can name another
+  // deal's object. It also means a retry's REQUIRED pre-upload targets THE SAME KEY as the committed
+  // contact sheet, and the contract is "upload, then post". So by the time the replay path looks at row
+  // or envelope drift, the artifact this deal's `files` row points at has ALREADY been replaced. A 409
+  // over the rows does not undo that write: the refusal is honest about the rows while the estimator is
+  // shown evidence nobody verified against the rows they reviewed. Nothing in any column changes, which
+  // is why it was silent.
+  //
+  // Each case leaves the PAYLOAD byte-identical to the first call's, so the envelope check cannot be what
+  // fires (species 3) — only the HEAD of the stored object differs.
+  it.each<[string, string, { contentType?: string; contentLength?: number }]>([
+    ["Content-Length", U("34060"), { contentType: "image/jpeg", contentLength: 999_999 }],
+    ["Content-Type", U("34061"), { contentType: "application/pdf", contentLength: 184320 }],
+  ])(
+    "refuses a replay whose committed contact sheet was overwritten (%s)",
+    async (header, walkthroughId, nowAtTheKey) => {
+      const first = await ingestWalkthrough({ tenantDb, payload: walkthroughPayload(walkthroughId) });
+      // Proof this case built its own chain rather than replaying another case's document.
+      expect(first.extractionIds).toHaveLength(1);
+      const afterFirst = await tableCounts();
+
+      const failure = await ingestWalkthrough({
+        tenantDb,
+        payload: walkthroughPayload(walkthroughId),
+        // The object at the derived key is no longer the one that was verified when this walkthrough was
+        // ingested — i.e. the retry re-uploaded before it posted.
+        contactSheetStore: { head: async () => nowAtTheKey },
+      }).catch((error: Error) => error);
+
+      expect((failure as { statusCode?: number }).statusCode).toBe(409);
+      // NAMES THE HEADER that disagreed, and the key, so the sender can tell this from a row conflict.
+      expect((failure as Error).message).toContain(header);
+      expect((failure as Error).message).toContain(
+        `walkthroughs/${DEAL}/${PROJECT}/${walkthroughId}/contact-sheet.jpg`
+      );
+      // ...and the MECHANISM, not just the symptom: this is what makes the message actionable.
+      expect((failure as Error).message).toContain("overwrote committed evidence");
+
+      // READ BACK FROM THE DATABASE. The failure being guarded is "reported as a successful replay", so
+      // the stored row is where the outcome is visible — and the refusal must not have rewritten it to
+      // match the new object either.
+      const [storedFile] = await tenantDb.select().from(files).where(eq(files.id, first.fileId));
+      expect(storedFile.mimeType).toBe("image/jpeg");
+      expect(storedFile.fileSizeBytes).toBe(184320);
+      expect(await tableCounts()).toEqual(afterFirst);
+    }
+  );
+
+  // The other half of the contract, and the guard against a check that 409s every retry: an UNCHANGED
+  // object must still replay. Also pins WHICH key is HEADed — the one stored on the `files` row, i.e. the
+  // object this document actually points at.
+  it("still replays when the object at the committed key is unchanged", async () => {
+    const walkthroughId = U("34062");
+    const storedKey = `walkthroughs/${DEAL}/${PROJECT}/${walkthroughId}/contact-sheet.jpg`;
+    const first = await ingestWalkthrough({ tenantDb, payload: walkthroughPayload(walkthroughId) });
+
+    const seen: string[] = [];
+    const second = await ingestWalkthrough({
+      tenantDb,
+      payload: walkthroughPayload(walkthroughId),
+      contactSheetStore: {
+        head: async (r2Key) => {
+          seen.push(r2Key);
+          return { contentType: "image/jpeg", contentLength: 184320 };
+        },
+      },
+    });
+
+    expect(second).toEqual(first);
+    expect(seen).toEqual([storedKey]);
+  });
+
+  // The header-absent case, the same tolerance the fresh-ingest verification extends and for the same
+  // reason: R2 may not report either header, and an absent header is not a change. Without this the two
+  // `!= null` guards in `detectWalkthroughContactSheetArtifactDrift` would be untested.
+  it("still replays when the object reports no Content-Type or Content-Length", async () => {
+    const walkthroughId = U("34063");
+    const first = await ingestWalkthrough({ tenantDb, payload: walkthroughPayload(walkthroughId) });
+
+    const second = await ingestWalkthrough({
+      tenantDb,
+      payload: walkthroughPayload(walkthroughId),
+      contactSheetStore: { head: async () => ({}) },
+    });
+
+    expect(second).toEqual(first);
+  });
+
+  // A DELIBERATE SCOPE LINE, asserted so it is a decision rather than an accident: an object that is GONE
+  // is not overwrite drift. The replay path reconciles a submission against stored state; it is not an
+  // audit of the bucket, and failing every retry after a lifecycle deletion would make the seam worse.
+  it("still replays when the committed object has since been deleted", async () => {
+    const walkthroughId = U("34064");
+    const first = await ingestWalkthrough({ tenantDb, payload: walkthroughPayload(walkthroughId) });
+
+    const second = await ingestWalkthrough({
+      tenantDb,
+      payload: walkthroughPayload(walkthroughId),
+      contactSheetStore: { head: async () => null },
+    });
+
+    expect(second).toEqual(first);
+  });
+
+  // The configured gate on the REPLAY path, mirroring the fresh one: with no object store the artifact
+  // check is skipped rather than failing every replay in local dev and CI.
+  it("does not consult object storage on a replay when none is configured", async () => {
+    const walkthroughId = U("34065");
+    const first = await ingestWalkthrough({ tenantDb, payload: walkthroughPayload(walkthroughId) });
+    // A store that would REFUSE if it were consulted — so a green here means it was not consulted.
+    const head = vi.fn(async () => ({ contentType: "application/pdf", contentLength: 1 }));
+
+    const second = await ingestWalkthrough({
+      tenantDb,
+      payload: walkthroughPayload(walkthroughId),
+      contactSheetStore: { isConfigured: () => false, head },
+    });
+
+    expect(second).toEqual(first);
+    expect(head).not.toHaveBeenCalled();
+  });
+
+  // ── R33: "we could not check" is not "your object is missing" ───────────────────────────────────────
+  //
+  // The production store wired `head` to `headObject`, whose own docblock calls itself "best-effort":
+  // `try { headObjectStrict } catch { return null }` (r2-client.ts:210-220). So a 403, a timeout, a DNS
+  // blip or R2 being down all arrived here as `null`, and ingress answered with the NON-RETRYABLE 400
+  // that means "your upload is not there, fix it and re-post" — an answer a correct integration acts on
+  // by abandoning a perfectly good upload. The port now promises null ONLY for a genuine not-found and a
+  // THROW for everything else; these two tests are the two arms of that promise.
+  it("refuses with a retryable 5xx when object storage cannot be reached at all", async () => {
+    const before = await tableCounts();
+
+    const failure = await ingestWalkthrough({
+      tenantDb,
+      payload: walkthroughPayload(U("34070")),
+      // What `headObjectStrict` does with a non-404: it rethrows. `headObject` would have swallowed this
+      // into a null — which is exactly the mutation this test exists to catch.
+      contactSheetStore: {
+        head: async () => {
+          throw Object.assign(new Error("connect ETIMEDOUT"), {
+            $metadata: { httpStatusCode: 500 },
+          });
+        },
+      },
+    }).catch((error: Error) => error);
+
+    // 5xx, so the sender's retry logic comes back rather than treating this as its own fault.
+    expect((failure as { statusCode?: number }).statusCode).toBe(503);
+    // ...and the message says so explicitly, because the two conditions are one word apart in effect.
+    expect((failure as Error).message).toContain("NOT a statement that the object is missing");
+    // Nothing was written: this still runs before the first write.
+    expect(await tableCounts()).toEqual(before);
+  });
+
+  // The OTHER arm, so the pair proves a DISTINCTION rather than one behaviour. Without this, "storage
+  // failures are 503" could be satisfied by making every HEAD miss a 503 — which would be a new bug.
+  it("still refuses a genuinely absent object with a non-retryable 400", async () => {
+    const before = await tableCounts();
+
+    const failure = await ingestWalkthrough({
+      tenantDb,
+      payload: walkthroughPayload(U("34071")),
+      // `headObjectStrict`'s null: a real 404 / NoSuchKey, and nothing else.
+      contactSheetStore: { head: async () => null },
+    }).catch((error: Error) => error);
+
+    expect((failure as { statusCode?: number }).statusCode).toBe(400);
+    expect((failure as Error).message).toContain("is not in object storage at its derived key");
+    expect(await tableCounts()).toEqual(before);
+  });
+
+  // The same distinction on the REPLAY path, where swallowing is worse than a wrong status code: a HEAD
+  // that failed would read as "the artifact is unchanged" and wave the submission through, which is the
+  // R33 conflation defeating the R31 check.
+  it("refuses a replay with a retryable 5xx when the artifact HEAD fails", async () => {
+    const walkthroughId = U("34072");
+    const first = await ingestWalkthrough({ tenantDb, payload: walkthroughPayload(walkthroughId) });
+    expect(first.extractionIds).toHaveLength(1);
+
+    const failure = await ingestWalkthrough({
+      tenantDb,
+      payload: walkthroughPayload(walkthroughId),
+      contactSheetStore: {
+        head: async () => {
+          throw new Error("connect ETIMEDOUT");
+        },
+      },
+    }).catch((error: Error) => error);
+
+    expect((failure as { statusCode?: number }).statusCode).toBe(503);
+    expect((failure as Error).message).toContain("NOT a statement that the object is missing");
+  });
+
   // ── R25: the file list must not present the original as its tile image ──────────────────────────────
   //
   // `resolveFileThumbnailUrl` (files/service.ts:1574-1580) presigns `thumbnailR2Key` when there is one and
@@ -3015,7 +3599,7 @@ describe("ingestWalkthrough", () => {
 
     // READ BACK FROM THE DATABASE: the column is what `resolveFileThumbnailUrl` reads.
     const [file] = await tenantDb.select().from(files).where(eq(files.id, result.fileId));
-    expect(file.thumbnailR2Key).toBe(`thumbnails/${derivedKey}`);
+    expect(file.thumbnailR2Key).toBe(deriveThumbnailKey(derivedKey));
     // Non-null is the property that actually matters — a null here is the fallback that serves the
     // original as the list image.
     expect(file.thumbnailR2Key).not.toBeNull();
@@ -3035,7 +3619,7 @@ describe("ingestWalkthrough", () => {
     // The default fakes self-gate exactly as the real helpers do, so reaching this key means the image arm
     // returned null and the chain continued — the composition confirmUpload uses.
     const [file] = await tenantDb.select().from(files).where(eq(files.id, result.fileId));
-    expect(file.thumbnailR2Key).toBe(`thumbnails/${derivedKey}`);
+    expect(file.thumbnailR2Key).toBe(deriveThumbnailKey(derivedKey));
   });
 
   it("still ingests when neither thumbnail arm can produce one", async () => {

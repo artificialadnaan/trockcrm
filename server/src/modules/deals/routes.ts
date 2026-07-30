@@ -3449,7 +3449,18 @@ router.post("/:id/estimating/manual-rows/:recommendationId/promote-local-catalog
  * (dealId, projectId, walkthroughId, contactSheetMimeType) — the body never carries a key. The ingress
  * HEADs that object and compares its Content-Type and Content-Length to the declared ones before its
  * first write, so a pre-upload that failed or is still in flight is a 400 naming the derived key rather
- * than a 201 for a chain whose evidence 404s.
+ * than a 201 for a chain whose evidence 404s. The key composes `walkthroughId` percent-encoded as ONE
+ * path segment (R30), so both sides of the contract must encode it the same way.
+ *
+ * …AND A RETRY MUST NOT RE-UPLOAD IT (R31). The key is derived from walkthrough identity, so every
+ * attempt targets the SAME object: a retry that uploads again overwrites evidence this deal has already
+ * committed, before any drift check can look at it. A true retry has nothing to upload — the object is
+ * already there, byte-identical, from the attempt whose response was lost. The ingress HEADs the stored
+ * key on the replay path and 409s if the object no longer matches what the `files` row recorded.
+ *
+ * STATUS CODES THE SENDER MUST DISTINGUISH: a 400 means "your upload is not at the key, fix it" and is
+ * NOT retryable; a 503 means "we could not reach object storage to check" and IS (R33). Conflating the
+ * two is how a valid upload gets abandoned.
  */
 router.post("/:id/estimating/walkthrough-extractions", async (req, res, next) => {
   try {

@@ -70,13 +70,22 @@ export const WALKTHROUGH_CONTACT_SHEET_MIME_TYPES = ["image/jpeg", "application/
  * that the same walkthrough arriving on one deal under two different projects serializes when it did
  * not strictly have to, which is a wait, not a wrong answer.
  *
- * REQUIRES CANONICAL IDS — `canonicalizeWalkthroughIngressId` output, which the validator applies
- * once. This is string concatenation, so it is CASE-SENSITIVE where the `uuid` columns these ids are
- * compared against are not; feed it a raw wire spelling and two retries naming the same deal in
+ * REQUIRES A CANONICAL `dealId` — `canonicalizeWalkthroughIngressId` output, which the validator
+ * applies once. This is string concatenation, so it is CASE-SENSITIVE where the `uuid` column that id
+ * is compared against is not; feed it a raw wire spelling and two retries naming the same deal in
  * different hex case take two different locks. See `canonicalizeWalkthroughIngressId` for why that was
  * a P1 rather than a cosmetic inconsistency. Deliberately does NOT canonicalize its own arguments:
  * one canonicalization point is the property being enforced, and a defensive `.toLowerCase()` here
  * would hide a use site that skipped the validator instead of exposing it.
+ *
+ * R29. `walkthroughId` IS TAKEN BYTE-EXACT and must never be folded — not here, not in the content
+ * hash, not in the r2 key. It is trock-scope's OWN opaque export id, typed `string` with no format
+ * guarantee (see `MAX_WALKTHROUGH_ID_CHARS`), so `Walkthrough-A` and `walkthrough-a` are two genuinely
+ * different walkthroughs. Lowercasing it collapsed both onto ONE lock, one `content_hash` and one r2
+ * key, which is strictly worse than the case bug it was copied from: the second walkthrough could never
+ * be ingested under its real identity at all — it was replayed as the first when their rows happened to
+ * agree, and 409'd as a correction when they did not. Case folding is sound for a uuid, whose case
+ * carries no information, and lossy for anything else.
  *
  * Exported so callers and tests agree on one spelling of the key. NOTE for anyone adding a test here:
  * asserting a recorded lock parameter EQUALS this function's output is a tautology — mutating the body
@@ -119,6 +128,10 @@ export const WALKTHROUGH_CONTENT_HASH_PREFIX = "walkthrough:";
  * `createWalkthroughSourceDocument` and the idempotency lookup in `ingestWalkthrough` — because the
  * stored form IS the idempotency key: one side unprefixed would make every retry miss and build a second
  * chain.
+ *
+ * R29. BYTE-EXACT in `walkthroughId`, and `text` is the right column for that: Postgres compares `text`
+ * case-SENSITIVELY, so two opaque export ids differing only in case are two rows here, which is what
+ * they are. Do not fold the id on its way in — see `walkthroughIngressLockKey`.
  */
 export function walkthroughContentHash(walkthroughId: string): string {
   return `${WALKTHROUGH_CONTENT_HASH_PREFIX}${walkthroughId}`;
@@ -385,6 +398,74 @@ export function detectWalkthroughEnvelopeDrift(
 }
 
 /**
+ * The ARTIFACT half of the replay drift check: has the object at the stored key been REPLACED since it
+ * was committed?
+ *
+ * R31, and it is the one hazard DETERMINISM creates. The r2 key is a pure function of
+ * (dealId, projectId, walkthroughId, mimeType), which is exactly what makes it safe — no wire input can
+ * name another deal's object (`deriveWalkthroughContactSheetR2Key`). But it also means a retry's
+ * REQUIRED pre-upload targets THE SAME KEY as the committed one. The contract says "upload the contact
+ * sheet, then post", so a sender re-running a failed export uploads first and posts second — and the
+ * upload has already overwritten the artifact this deal's `files` row points at BEFORE any of the
+ * checks below get to look at it. A 409 from the envelope or row check does not undo that write: the
+ * refusal is honest about the ROWS and the estimator is now being shown a contact sheet nobody verified
+ * against the rows they reviewed. Silent, and not visible in any column.
+ *
+ * WHY DETECT RATHER THAN PREVENT. Preventing it means putting a fingerprint of the BYTES into the key,
+ * so corrected bytes land somewhere new and committed evidence is never targeted. That is stronger, and
+ * it was weighed rather than dismissed — but the key is a CONTRACT trock-scope computes too, so it is a
+ * coordinated change to both services, it makes the key no longer derivable from identity alone (the
+ * property `deriveWalkthroughContactSheetR2Key` is built on), and it still would not stop a sender that
+ * computed the OLD fingerprint from writing over the old object. This check needs no contract change,
+ * reuses the machinery `detectWalkthroughEnvelopeDrift` already established, and catches the overwrite
+ * whoever made it.
+ *
+ * WHAT IT COSTS: it DETECTS, it does not prevent. The bytes are already replaced by the time this
+ * fires — the 409 tells a human that the evidence under document X no longer matches what was
+ * verified, which is the actionable half. And it is not exhaustive: a replacement of the SAME length
+ * and the SAME content type is invisible to a HEAD. THE CONTRACT IS THEREFORE THAT A TRUE RETRY DOES
+ * NOT RE-UPLOAD — the object is already there, byte-identical, from the attempt whose response was
+ * lost. Re-uploading corrected bytes is a correction, not a retry, and belongs to the export ledger
+ * exactly as a corrected row does.
+ *
+ * COMPARED AGAINST THE STORED `files` ROW, not against the payload, and the distinction is real even
+ * though the envelope check has already forced the two to agree by the time this runs: the file row is
+ * the record of what was VERIFIED at commit time (`confirmUpload`-parity HEAD, in the fresh-ingest
+ * path), and it stays the right authority if the envelope check is ever relaxed or reordered.
+ *
+ * A `null` head — the object is GONE — is deliberately NOT drift. `ingestWalkthrough` documents that a
+ * retry replays "without needing the object to still exist", because the replay path is about
+ * reconciling a submission with stored state, not about auditing the bucket; a deleted object is a
+ * different (and not replay-triggered) problem, and failing every retry after a lifecycle deletion
+ * would make the seam worse. Absent HEADERS are not drift either, for the reason `confirmUpload`'s own
+ * `!= null` guards exist: R2 may not report them, and an absent header is not a mismatch.
+ */
+export function detectWalkthroughContactSheetArtifactDrift(
+  stored: StoredWalkthroughContactSheet,
+  head: { contentType?: string; contentLength?: number } | null
+): string[] {
+  const drifted: string[] = [];
+  if (head === null) return drifted;
+
+  if (head.contentType != null && head.contentType !== stored.mimeType) {
+    drifted.push(
+      `Content-Type (this deal's files row recorded "${stored.mimeType}" when the walkthrough was ` +
+        `ingested; the object now at that key reports "${head.contentType}")`
+    );
+  }
+
+  const storedBytes = Number(stored.fileSizeBytes);
+  if (head.contentLength != null && head.contentLength !== storedBytes) {
+    drifted.push(
+      `Content-Length (this deal's files row recorded ${storedBytes} bytes when the walkthrough was ` +
+        `ingested; the object now at that key reports ${head.contentLength})`
+    );
+  }
+
+  return drifted;
+}
+
+/**
  * A ceiling on one walkthrough's scope rows. Not a storage limit — a runaway-export limit: a real
  * walkthrough is a human talking through a building, and an export claiming thousands of spoken scope
  * items is a bug upstream, not a big job. Rows are also inserted in chunks (see
@@ -440,12 +521,62 @@ export interface WalkthroughContactSheetStore {
    *  CI) the verification below is skipped rather than failing every ingress. Same posture as the rest of
    *  the CRM — deliberately not stricter here, so the seam behaves the way the Files subsystem does. */
   isConfigured: () => boolean;
-  /** `headObject(r2Key)` — the object's Content-Type/Content-Length, or null when it is absent. */
+  /**
+   * `headObjectStrict(r2Key)` — the object's Content-Type/Content-Length.
+   *
+   * R33. THE NULL AND THE THROW MEAN DIFFERENT THINGS, and an implementation that collapses them is a
+   * bug rather than a simplification:
+   *   • `null` — the object is GENUINELY ABSENT (a 404 / NoSuchKey). The sender's pre-upload did not
+   *     land, which is a 400 it must fix before re-posting.
+   *   • `throw` — WE COULD NOT CHECK (403, timeout, DNS, R2 down). Nothing is known about the object,
+   *     and the only honest answer is a retryable 5xx.
+   * The production wiring used `headObject`, whose own docblock calls itself "best-effort" and returns
+   * `null` for both, so a storage blip was reported to trock-scope as "your upload is not there" with a
+   * non-retryable status — an answer a correct integration acts on by abandoning a valid upload. See
+   * walkthrough-contact-sheet-store.ts.
+   */
   head: (r2Key: string) => Promise<{ contentType?: string; contentLength?: number } | null>;
   /** `generateAndStoreThumbnail(r2Key, mimeType)` — best-effort, returns the stored key or null. */
   generateImageThumbnail: (r2Key: string, mimeType: string) => Promise<string | null>;
   /** `generateAndStorePdfThumbnail(r2Key, mimeType)` — the PDF arm of the same fallback chain. */
   generatePdfThumbnail: (r2Key: string, mimeType: string) => Promise<string | null>;
+}
+
+/**
+ * HEAD the contact sheet, turning "we could not check" into a RETRYABLE answer.
+ *
+ * R33. The port's `head` resolves `null` only for a genuinely absent object and THROWS for everything
+ * else (see `WalkthroughContactSheetStore.head`). Both of this module's HEAD call sites go through here
+ * so the mapping is written once: an absent object is the caller's problem (400, naming the key), and a
+ * storage failure is OURS (503, and explicitly worth repeating).
+ *
+ * 503 rather than letting the raw error reach the error handler as a bare 500, because the status code is
+ * the only part of this the sender's retry logic reads: a 500 says "something broke, probably
+ * deterministically", a 503 says "come back". Nothing was written either way — this runs before the first
+ * write on the fresh path, and on the replay path nothing is ever written at all.
+ *
+ * The original error is kept as `cause` so the stack that names the actual R2 failure is not lost; the
+ * error handler logs any 5xx AppError with its stack (error-handler.ts:20-22).
+ */
+async function headContactSheet(
+  contactSheetStore: WalkthroughContactSheetStore,
+  r2Key: string,
+  walkthroughId: string
+): Promise<{ contentType?: string; contentLength?: number } | null> {
+  try {
+    return await contactSheetStore.head(r2Key);
+  } catch (error) {
+    throw Object.assign(
+      new AppError(
+        503,
+        `Object storage could not be reached to verify the contact sheet for walkthrough ` +
+          `${walkthroughId} at "${r2Key}". This is NOT a statement that the object is missing — a ` +
+          `missing object is a 400 naming the key — it means the HEAD itself failed (credentials, ` +
+          `timeout, or R2 being unavailable). Nothing was written; retry.`
+      ),
+      { cause: error }
+    );
+  }
 }
 
 /** Narrow, storage-shaped input for ONE link of the chain; `WalkthroughIngressPayload`'s wire names
@@ -543,23 +674,27 @@ export const MAX_WALKTHROUGH_SITE_LABEL_CHARS =
  *
  * Deliberately NOT validated as a UUID — it reaches `estimate_source_documents.content_hash` (prefixed,
  * via `walkthroughContentHash`), which is unbounded `text`, and the contract with trock-scope is an
- * opaque export id rather than a Postgres uuid. The prefix costs nothing against a `text` column, so
- * this bound is still governed by `files.system_filename` as derived below. It IS
- * still canonicalized (lowercased) by the validator, and that is a deliberate choice rather than a
- * consequence of the UUID one: `content_hash` being `text` means Postgres compares it case-SENSITIVELY,
- * so unlike `dealId` this id was already consistent across the lookup, the lock and the r2 key, and
- * there was no divergence to close. It is folded into `canonicalizeWalkthroughIngressId` anyway so the
- * ingress has exactly ONE canonical spelling per request — the alternative was a retry that re-cased
- * its own export id silently ingesting a SECOND complete chain, which is the same estimator-facing
- * outcome as the case bug in `dealId`, just arrived at legitimately. The cost is that two genuinely
- * distinct case-differing export ids (a base64-ish id, never a uuid) would now collide — and collide as
- * a LOUD 409 from the drift check, not as a silent merge.
+ * OPAQUE export id rather than a Postgres uuid. The prefix costs nothing against a `text` column, so
+ * this bound is governed by `files.system_filename` as derived below.
+ *
+ * R29. NOT CANONICALIZED, and an earlier revision of this module was wrong to fold it. `dealId` and
+ * `projectId` are uuids, whose hex case carries no information, so lowercasing them is a sound canonical
+ * form AND necessary (Postgres compares `uuid` by value while string concatenation compares bytes — see
+ * `canonicalizeWalkthroughIngressId`). This id has no format at all, so lowercasing is a LOSSY transform:
+ * it mapped `Walkthrough-A` and `walkthrough-a` — two genuinely distinct exports — onto one advisory
+ * lock, one `content_hash`, one row fingerprint and one r2 key. The second export could then never be
+ * ingested under its own identity: it replayed as the first where their rows agreed, and 409'd as a
+ * "correction" where they did not. The supposed benefit (one spelling per request) was never a real
+ * hazard here, because `content_hash` is `text` and Postgres already compared it case-sensitively — the
+ * lookup, the lock and the key all agreed on the raw spelling before anyone folded it.
  *
  * The id is COMPOSED into two bounded columns: `files.system_filename` `varchar(500)` and `files.r2_key`
- * `varchar(1000)` (files.ts:43, :48). `system_filename` is the tighter of the two by a wide margin —
- * the derived r2 key spends only 105 characters on its fixed segments and its two UUIDs, leaving ~895 —
- * so bounding to `system_filename` covers both. That relationship is asserted in the runtime suite
- * rather than trusted to this comment.
+ * `varchar(1000)` (files.ts:43, :48). `system_filename` is the tighter of the two for an id that
+ * percent-encodes to itself — the derived r2 key spends only 105 characters on its fixed segments and
+ * its two UUIDs, leaving 895 — but R30 made the r2 key carry the PERCENT-ENCODED id, and encoding can
+ * treble a character (sextuple an astral one). So `system_filename` no longer covers both, and the
+ * encoded length is bounded separately by `MAX_WALKTHROUGH_ENCODED_ID_CHARS`. Both relationships are
+ * asserted in the runtime suite rather than trusted to this comment.
  *
  * Measured against the LONGEST accepted extension, so the bound holds for every mime type rather than
  * for whichever one happened to be measured.
@@ -590,12 +725,14 @@ export const MAX_WALKTHROUGH_ID_CHARS =
  * another deal's object. The path is the CONTRACT with trock-scope — the exporter uploads the contact
  * sheet to exactly this key before it posts — so both sides compute it rather than exchange it.
  *
- * REQUIRES CANONICAL IDS, exactly as `walkthroughIngressLockKey` does and for the same reason: this is
+ * REQUIRES CANONICAL UUIDS, exactly as `walkthroughIngressLockKey` does and for the same reason: this is
  * string interpolation over values that Postgres compares case-insensitively, so an uncanonicalized
  * `dealId` derives a DIFFERENT key for the same deal — which is what made `files.r2_key`'s unique index
  * stop being a backstop. The validator canonicalizes once; this function does not re-do it, so a use
  * site that bypassed the validator shows up as a bug rather than being silently absorbed. Because both
- * sides of the contract compute this path, "canonical (lowercase) ids" is part of the contract too.
+ * sides of the contract compute this path, "canonical (lowercase) UUIDs" is part of the contract too.
+ * `walkthroughId` is NOT canonicalized — it is opaque, and folding its case merged distinct
+ * walkthroughs onto one key. See R29 on `MAX_WALKTHROUGH_ID_CHARS`.
  */
 export function deriveWalkthroughContactSheetR2Key(
   dealId: string,
@@ -621,13 +758,110 @@ export function deriveWalkthroughContactSheetR2Key(
   // sentinel because `projectId` is validated as a UUID (see requireUuid in the validator) and `_none`
   // is not a syntactically valid UUID — no real project id can ever spell it.
   //
+  // `walkthroughId` is ENCODED (R30) — it is the ONE segment here that is not a validated UUID or a
+  // fixed literal, so it is the only one that could carry a path separator. See
+  // `encodeWalkthroughIdKeySegment`.
+  //
   // EXTENSION_BY_MIME carries its own leading dot, so this yields ".../contact-sheet.jpg".
-  return `walkthroughs/${dealId}/${projectId ?? WALKTHROUGH_NO_PROJECT_KEY_SEGMENT}/${walkthroughId}/contact-sheet${EXTENSION_BY_MIME[mimeType]}`;
+  return `walkthroughs/${dealId}/${projectId ?? WALKTHROUGH_NO_PROJECT_KEY_SEGMENT}/${encodeWalkthroughIdKeySegment(walkthroughId)}/contact-sheet${EXTENSION_BY_MIME[mimeType]}`;
+}
+
+/**
+ * The opaque walkthrough id as EXACTLY ONE r2-key path segment.
+ *
+ * R30. THE BUG. `walkthroughId` is opaque — no format guarantee — and it was interpolated raw into a
+ * slash-delimited key, so an id containing a slash escaped its intended prefix. Concretely, and this is
+ * a collision between two ordinary ingests rather than an abstract hazard: walkthrough `foo` derives
+ * `walkthroughs/<deal>/<project>/foo/contact-sheet.jpg`, whose Files-subsystem thumbnail lands at
+ * `.../foo/thumbs/contact-sheet.jpg` (`deriveThumbnailKey`), and walkthrough `foo/thumbs` derives
+ * EXACTLY THAT as its ORIGINAL key. Whichever lands second wins: either thumbnail generation for `foo`
+ * overwrites `foo/thumbs`'s committed evidence, or `foo/thumbs`'s upload replaces `foo`'s tile. The
+ * `files.r2_key` unique index does not object — the two rows are written at different times and only
+ * one of the two keys is ever stored in the column at all.
+ *
+ * PERCENT-ENCODING (`encodeURIComponent`) RATHER THAN A HASH, and the choice matters because THE KEY IS
+ * A CONTRACT: trock-scope computes the same path and uploads to it before it posts, so whatever this
+ * does has to be reproducible by the sender.
+ *   • It is reproducible in one call on the sender's side — `encodeURIComponent` in JS, and
+ *     `urllib.parse.quote(id, safe="-_.!~*'()")` in Python (the default `safe="/"` is WRONG here, since
+ *     leaving `/` unescaped is the entire bug).
+ *   • It is INJECTIVE, so two distinct ids can never share a key. That is the same property R29 restored
+ *     for the lock and the content hash, and a truncated hash would have given it up.
+ *   • It is IDENTITY on every id that is already a uuid or a base64url-ish token, so every key this seam
+ *     has ever derived is byte-for-byte unchanged and no stored row needs migrating.
+ *   • It is REVERSIBLE, so a key in a bucket listing still names its walkthrough. A fixed-length hash is
+ *     the alternative and would also close the finding, but it makes every key opaque to a human
+ *     debugging a missing contact sheet and buys nothing this does not already have.
+ * `%2F` is what a slash becomes, so no input can introduce a separator; `%` itself becomes `%25`, so the
+ * encoding cannot be forged by an id that already contains a percent sign.
+ *
+ * NOT applied to `files.system_filename` (`buildWalkthroughContactSheetSystemFilename`): that is a
+ * varchar the download filename is built from, not a delimited path, and a slash in it addresses
+ * nothing.
+ */
+export function encodeWalkthroughIdKeySegment(walkthroughId: string): string {
+  return encodeURIComponent(walkthroughId);
 }
 
 /** Path segment standing in for "no project". Not a valid UUID, so it cannot collide with a real
  *  `projectId` — see `deriveWalkthroughContactSheetR2Key`. */
 export const WALKTHROUGH_NO_PROJECT_KEY_SEGMENT = "_none";
+
+/** `files.r2_key` and `files.thumbnail_r2_key` are BOTH `varchar(1000)` (files.ts:48, :52). */
+const FILES_R2_KEY_COLUMN_CHARS = 1000;
+
+/**
+ * What the Files subsystem's thumbnail derivation ADDS to a key — and the reason the column that binds
+ * the encoded id is `files.thumbnail_r2_key` rather than `files.r2_key`.
+ *
+ * `deriveThumbnailKey` (image-thumbnail.ts:62-69) rebuilds a key as `<dir>/thumbs/<stem>.jpg`, and BOTH
+ * thumbnail arms this seam calls go through it (`generateAndStoreThumbnail`, and
+ * `generateAndStorePdfThumbnail` at pdf-thumbnail.ts:164). So the stored thumbnail key is the original
+ * plus the literal `thumbs/` — the stem is unchanged and both accepted extensions are already four
+ * characters, so neither contributes. Both columns are varchar(1000), which makes the THUMBNAIL the
+ * longer of the two and therefore the one an over-long id overflows first. Same rule R26 established for
+ * byte sizes: bind to the narrowest constraint in the chain, not to the one that looks authoritative.
+ *
+ * Found the honest way — the first draft of `MAX_WALKTHROUGH_ENCODED_ID_CHARS` measured `r2_key` alone
+ * and the boundary test failed with a 22001 on `thumbnail_r2_key`.
+ *
+ * A CONSTANT rather than an import, for the reason stated at the top of this module: `image-thumbnail.ts`
+ * pulls sharp, heic-convert and the R2 client onto the import path of a pure-database module, and the R26
+ * note records that importing a value from it left the value `undefined` under vitest's hoisted mocks.
+ * The relationship is asserted against the REAL `deriveThumbnailKey` in the runtime suite instead of
+ * being trusted to this comment.
+ */
+const THUMBNAIL_KEY_OVERHEAD_CHARS = "thumbs/".length;
+
+/**
+ * The longest ENCODED walkthrough id the derived object keys can carry.
+ *
+ * A SECOND bound on one field, because R30 broke the relationship `MAX_WALKTHROUGH_ID_CHARS` used to
+ * cover both columns with. `system_filename` composes the id RAW, so 484 characters of it fill a
+ * varchar(500); the object keys now compose it PERCENT-ENCODED, and encoding multiplies — three
+ * characters per escaped byte, so up to 3x for a `/`-dense ascii id and 6x per JS character for an
+ * astral one. A 484-character id of slashes encodes to 1452 and blows through varchar(1000) as a 22001
+ * on the first write of the ingress transaction: exactly the failure shape this validator exists to
+ * turn into a 400.
+ *
+ * DERIVED by measuring the real builder with an empty id (and uuid-shaped placeholders, which are longer
+ * than the `_none` sentinel, so the measurement is the worst case) rather than by hand-counting — a
+ * change to the key format moves this bound with it.
+ */
+export const MAX_WALKTHROUGH_ENCODED_ID_CHARS =
+  FILES_R2_KEY_COLUMN_CHARS -
+  THUMBNAIL_KEY_OVERHEAD_CHARS -
+  Math.max(
+    ...WALKTHROUGH_CONTACT_SHEET_MIME_TYPES.map(
+      (mimeType) =>
+        deriveWalkthroughContactSheetR2Key(
+          "00000000-0000-4000-8000-000000000000",
+          "00000000-0000-4000-8000-000000000000",
+          "",
+          mimeType
+        ).length
+    )
+  );
 
 export async function createWalkthroughContactSheetFile({
   tenantDb,
@@ -928,6 +1162,30 @@ export async function insertWalkthroughExtractions({
 // so a malformed export is a 400 naming the offending field instead of a 500 from inside a
 // transaction (or, worse, a row that inserts and prices wrong).
 
+/**
+ * R34. A UTF-16 surrogate with no partner — a high surrogate NOT followed by a low one, or a low
+ * surrogate NOT preceded by a high one.
+ *
+ * WHY IT IS A GUARD AND NOT A CURIOSITY. `JSON.parse` accepts `"\ud800"` and hands back that lone code
+ * unit, so a body can carry one in any field. It is then embedded in `metadataJson`, and Postgres
+ * refuses the serialized JSONB with a 22P02 from inside the ingress transaction — a 500 out of a
+ * validator whose entire contract is a 400 before the first write. Same shape as the NUL guard, one
+ * character class over, which is why it lives in the same central place.
+ *
+ * WRITTEN OUT rather than `String.prototype.isWellFormed()`: that method exists on this Node, but the
+ * repo compiles against `"target": "ES2022"` (tsconfig.base.json:3) where it is not in the type library,
+ * so using it would mean a repo-wide lib bump to buy one guard.
+ *
+ * A WELL-FORMED PAIR MATCHES NEITHER ALTERNATIVE — in "😀" the high surrogate IS followed by its low one
+ * and the low one IS preceded by its high one — so legitimate astral text (emoji, CJK extension
+ * ideographs, historic scripts) passes untouched. That is the failure mode worth watching here: an
+ * over-tight guard rejecting real non-BMP characters would be worse than the bug it fixes, so the
+ * runtime suite pins a real emoji surviving ingress alongside the rejection case. An ASCII-only fixture
+ * cannot tell the two apart.
+ */
+const LONE_SURROGATE_PATTERN =
+  /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
 function requireString(value: unknown, field: string): string {
   if (typeof value !== "string") {
     throw new AppError(400, `${field} must be a string`);
@@ -938,6 +1196,20 @@ function requireString(value: unknown, field: string): string {
   // than per-field, because every string this module accepts ends up in one of those three types.
   if (value.includes("\u0000")) {
     throw new AppError(400, `${field} must not contain a NUL character (\\u0000); Postgres cannot store it`);
+  }
+  // R34. The SECOND character class Postgres refuses, alongside the NUL above and for the same reason:
+  // every string this module accepts ends up in `text`, `varchar` or `jsonb`, and all three reject both.
+  // Named separately from the NUL rather than merged into one "unstorable character" message, because
+  // the two are fixed by different things upstream — stripping a control character, versus repairing a
+  // string that was truncated or sliced through a surrogate pair.
+  if (LONE_SURROGATE_PATTERN.test(value)) {
+    throw new AppError(
+      400,
+      `${field} must not contain an unpaired UTF-16 surrogate (a \\uD800-\\uDBFF not followed by a ` +
+        `\\uDC00-\\uDFFF, or the reverse); Postgres rejects it with a 22P02 when the value is stored in ` +
+        `text or jsonb, from inside the ingress transaction. PAIRED surrogates are fine — this is a ` +
+        `truncated or mis-sliced string, not a non-ASCII one.`
+    );
   }
   return value;
 }
@@ -969,7 +1241,13 @@ function optionalNonEmptyString(value: unknown, field: string): string | null {
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
- * THE SINGLE CANONICALIZATION POINT for every identifier this module derives a key from.
+ * THE SINGLE CANONICALIZATION POINT for the two UUIDs this module derives a key from.
+ *
+ * SCOPE, first, because R29 was a finding about exactly this: `dealId` and `projectId` ONLY. Its only
+ * callers are `requireUuid`/`optionalUuid`, which check the 8-4-4-4-12 hex shape on the very next line,
+ * and `walkthroughId` is deliberately not among them. Lowercasing is a canonical form for hex and a
+ * LOSSY transform for an arbitrary string, so pairing it with the shape check is what MAKES it safe —
+ * applied to an opaque id it silently merges two distinct identities. See `MAX_WALKTHROUGH_ID_CHARS`.
  *
  * WHY IT HAS TO EXIST, and why it was a P1 rather than tidiness. Postgres compares `uuid` columns by
  * their 128-bit VALUE, so `A1B2…` and `a1b2…` are the SAME deal row. JavaScript string concatenation
@@ -977,8 +1255,8 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
  * built by concatenation from those ids:
  *
  *   • the advisory lock key (`walkthrough-ingress:${dealId}:${walkthroughId}`),
- *   • the derived R2 key (`walkthroughs/${dealId}/${projectId}/${walkthroughId}/…`), which is what
- *     `files.r2_key`'s UNIQUE index sees,
+ *   • the derived R2 key (`walkthroughs/${dealId}/${projectId}/${encoded walkthroughId}/…`), which is
+ *     what `files.r2_key`'s UNIQUE index sees,
  *   • …while the idempotency lookup compares `deal_id`/`project_id` as `uuid` and therefore does not
  *     care about case at all.
  *
@@ -988,12 +1266,17 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
  * protections this branch added, simultaneously, and neither would have logged anything: the estimator
  * simply sees every scope row twice.
  *
- * WHY HERE AND NOWHERE ELSE. Canonicalizing at each use site would be four `.toLowerCase()` calls that
- * are individually correct and collectively worthless — the property that matters is that every
- * derivation sees ONE form, and that is only checkable if there is one place it is established.
- * Everything downstream (lock key, r2 key, idempotency lookup, `content_hash`, the row fingerprint,
- * the project-ownership comparison) reads the validator's output, so canonical-in means canonical
- * everywhere by construction.
+ * STILL LOAD-BEARING, re-confirmed under R29 rather than assumed: the runtime suite's "treats two
+ * hex-case spellings of one deal as one walkthrough" test posts one walkthrough twice under two
+ * spellings of `CASE_DEAL` and counts ONE document, ONE extraction and ONE `files` row. Narrowing the
+ * canonicalization to the two uuids does not touch that property — the deal is still folded, and the
+ * `.toLowerCase()` here is exactly what makes those two posts take one lock and want one key.
+ *
+ * WHY HERE AND NOWHERE ELSE. Canonicalizing at each use site would be a scatter of `.toLowerCase()`
+ * calls that are individually correct and collectively worthless — the property that matters is that
+ * every derivation sees ONE form, and that is only checkable if there is one place it is established.
+ * Everything downstream (lock key, r2 key, idempotency lookup, the project-ownership comparison) reads
+ * the validator's output, so canonical-in means canonical everywhere by construction.
  *
  * LOWERCASE specifically, because that is the form Postgres itself emits for a `uuid` column — so a
  * value read BACK out of the database (e.g. `projects.source_deal_id` in the ownership check below)
@@ -1401,12 +1684,10 @@ export function validateWalkthroughIngressPayload(input: unknown): WalkthroughIn
   // first write of the ingress transaction — rather than merely stored in text. See
   // MAX_WALKTHROUGH_ID_CHARS / MAX_WALKTHROUGH_SITE_LABEL_CHARS, both derived from the builders that do
   // the composing.
-  // CANONICALIZED BEFORE IT IS MEASURED, in that order and not the other. `toLowerCase()` can
-  // LENGTHEN a string in Unicode (U+0130 lowercases to two code points), so a bound checked on the raw
-  // value would not be a bound on the value actually written into files.system_filename.
-  const walkthroughId = canonicalizeWalkthroughIngressId(
-    requireNonEmptyString(raw.walkthroughId, "walkthroughId")
-  );
+  // R29. TAKEN BYTE-EXACT — deliberately NOT canonicalized, unlike the two uuids below. It is
+  // trock-scope's own opaque export id, so its case is information, and folding it merged two distinct
+  // walkthroughs onto one lock key, one content hash and one r2 key. See `MAX_WALKTHROUGH_ID_CHARS`.
+  const walkthroughId = requireNonEmptyString(raw.walkthroughId, "walkthroughId");
   if (walkthroughId.length > MAX_WALKTHROUGH_ID_CHARS) {
     throw new AppError(
       400,
@@ -1414,6 +1695,25 @@ export function validateWalkthroughIngressPayload(input: unknown): WalkthroughIn
         `character limit. It is composed into files.system_filename, a varchar(` +
         `${FILES_NAME_COLUMN_CHARS}), so a longer id is a 22001 on the first write of the ingress ` +
         `transaction rather than the 400 naming the field that this endpoint promises.`
+    );
+  }
+  // R30. THE OTHER COLUMN, and it needs its own measurement because the r2 key composes the id
+  // PERCENT-ENCODED (`encodeWalkthroughIdKeySegment`) while system_filename composes it raw. Encoding
+  // multiplies — a `/`-dense id trebles, an astral one grows sixfold per JS character — so an id that
+  // clears the bound above can still overflow `files.r2_key`'s varchar(1000) on the first write.
+  // See MAX_WALKTHROUGH_ENCODED_ID_CHARS.
+  const encodedWalkthroughId = encodeWalkthroughIdKeySegment(walkthroughId);
+  if (encodedWalkthroughId.length > MAX_WALKTHROUGH_ENCODED_ID_CHARS) {
+    throw new AppError(
+      400,
+      `walkthroughId percent-encodes to ${encodedWalkthroughId.length} characters, over the ` +
+        `${MAX_WALKTHROUGH_ENCODED_ID_CHARS}-character limit its object-key segment has. The contact ` +
+        `sheet's key composes the id as a single ENCODED path segment (so an id containing "/" cannot ` +
+        `escape its prefix), and files.r2_key and files.thumbnail_r2_key are both ` +
+        `varchar(${FILES_R2_KEY_COLUMN_CHARS}) — the thumbnail key being the longer of the two, since ` +
+        `it inserts a "thumbs/" segment. So a longer encoding is a 22001 on the first write of the ` +
+        `ingress transaction rather than the 400 naming the field that this endpoint promises. Shorten ` +
+        `the export id, or stop putting characters that need escaping in it.`
     );
   }
 
@@ -1448,7 +1748,7 @@ export function validateWalkthroughIngressPayload(input: unknown): WalkthroughIn
   }
 
   return {
-    // Canonicalized above, before its length was measured.
+    // BYTE-EXACT (R29). Two export ids differing only in case are two walkthroughs.
     walkthroughId,
     // Canonical, and a real UUID. See `canonicalizeWalkthroughIngressId`: this value is interpolated
     // into the advisory-lock key and the derived r2 key (case-SENSITIVE string building) while also
@@ -1745,6 +2045,48 @@ export async function ingestWalkthrough({
               `Re-export under a new walkthrough id, or land the correction through the export ledger.`
           );
         }
+
+        // R31. THE ARTIFACT ITSELF, after the envelope agrees. The key is deterministic, so a retry's
+        // pre-upload lands on THE SAME KEY as the committed contact sheet — it has already overwritten
+        // this deal's evidence by the time we get here, and none of the checks above or below can see
+        // that, because every column still says what it said. HEAD it and compare with what the stored
+        // `files` row recorded. See `detectWalkthroughContactSheetArtifactDrift` for why this detects
+        // rather than prevents, and why that was the right trade.
+        //
+        // Second in the order because the envelope check is a pure in-memory comparison of what the
+        // sender CLAIMS against what is stored: a submission that already disagrees about the artifact
+        // gets its answer without paying for a round-trip, and a mime-type change means the stored key
+        // is not even the key that submission uploaded to.
+        //
+        // `isConfigured()` gated exactly as the fresh-ingest verification is: with no object store (local
+        // dev, CI) this is skipped rather than failing every replay.
+        //
+        // The STORED key, read out of the `files` row, rather than a re-derived one — this is asking
+        // about the object this document actually points at.
+        if (contactSheetStore.isConfigured()) {
+          // R33. A HEAD that FAILED is a 503 from `headContactSheet`, never a silent null — otherwise a
+          // storage blip during a replay would read as "the artifact is unchanged" and wave the
+          // submission through, which is the same conflation one refusal over.
+          const storedHead = await headContactSheet(
+            contactSheetStore,
+            storedSheet.r2Key,
+            payload.walkthroughId
+          );
+          const artifactDrift = detectWalkthroughContactSheetArtifactDrift(storedSheet, storedHead);
+          if (artifactDrift.length > 0) {
+            throw new AppError(
+              409,
+              `Walkthrough ${payload.walkthroughId} was already ingested on this deal as document ` +
+                `${existing.id}, and the contact sheet at its key "${storedSheet.r2Key}" is NO LONGER ` +
+                `the object that was verified when it was ingested: ${artifactDrift.join("; ")}. The ` +
+                `key is derived from walkthrough identity, so it is the same for every attempt — a ` +
+                `re-upload before this post overwrote committed evidence, and the file row now serves ` +
+                `bytes nobody checked against the rows an estimator reviewed. A true retry does not ` +
+                `re-upload: the object is already there from the attempt whose response was lost. ` +
+                `Re-export under a new walkthrough id, or land the correction through the export ledger.`
+            );
+          }
+        }
       }
 
       const existingRows = await tx
@@ -1823,6 +2165,47 @@ export async function ingestWalkthrough({
         );
       }
 
+      // R32. THE OTHER DIRECTION, and it used to be silent. A retry that OMITS a previously stored scope
+      // item — trock-scope correcting an export by removing an erroneous row — appended that row's
+      // extraction id to the response and returned success. The stale row stayed visible in the
+      // workbench and eligible for pricing while the sender recorded the corrected payload as accepted:
+      // the omission was the correction, and it was the one part of the correction that did not land.
+      //
+      // ASYMMETRY IS THE BUG. Adding a row 409s (`unmatchedScopeItemIds`, above). Changing a row's
+      // content under the same id 409s (`driftedScopeItemIds`, below). Removing one was the only edit a
+      // replay accepted, and there is no principle under which "the row set disagrees" is a conflict in
+      // two directions and a success in the third — a replay reconciles a submission with stored state
+      // or it does not.
+      //
+      // NAMED BY `sourceScopeItemId` rather than by extraction id, because the scope item is what the
+      // sender knows: it never saw the extraction ids until the response it is now retrying.
+      //
+      // Stored rows carrying NO `sourceScopeItemId` are not in this map at all and so cannot be reported
+      // here — they are appended below, unchanged. This module always writes one, so such a row can only
+      // have come from something that is not this ingress.
+      const postedScopeItemIds = new Set(payload.rows.map((row) => row.sourceScopeItemId));
+      const omittedScopeItemIds = [...idByScopeItemId.keys()]
+        .filter((scopeItemId) => !postedScopeItemIds.has(scopeItemId))
+        .sort();
+
+      if (omittedScopeItemIds.length > 0) {
+        const shown = omittedScopeItemIds.slice(0, 10);
+        const suffix =
+          omittedScopeItemIds.length > shown.length
+            ? ` (and ${omittedScopeItemIds.length - shown.length} more)`
+            : "";
+        throw new AppError(
+          409,
+          `Walkthrough ${payload.walkthroughId} was already ingested on this deal as document ` +
+            `${existing.id} with ${idByScopeItemId.size} scope rows, and this submission omits ` +
+            `${omittedScopeItemIds.length} of them: ${shown.join(", ")}${suffix}. A retry replays what ` +
+            `was stored and never deletes it, so dropping a row here is not a retry — it is a ` +
+            `correction, and returning success would leave the omitted rows visible to an estimator and ` +
+            `eligible for pricing while the sender recorded them as withdrawn. Re-export under a new ` +
+            `walkthrough id, or land the correction through the export ledger.`
+        );
+      }
+
       if (driftedScopeItemIds.length > 0) {
         const shown = driftedScopeItemIds.slice(0, 10);
         const suffix =
@@ -1845,8 +2228,13 @@ export async function ingestWalkthrough({
       }
 
       const claimed = new Set(orderedIds);
-      // Anything the stored document has that this payload did not name (a retry whose rows drifted)
-      // still belongs to the walkthrough, so the result stays a complete picture of what exists.
+      // R32 narrowed what can still be in here. Every stored row this mapping could NAME has now been
+      // reconciled — a payload row with no stored counterpart threw, a stored row with no payload
+      // counterpart threw, and a match with different content threw — so the only rows left unclaimed
+      // are ones the mapping could not name at all: an extraction whose `metadataJson` carries no string
+      // `sourceScopeItemId`, or a duplicate id that the map collapsed onto one entry. Neither can be
+      // reported to the sender by id, and both still belong to this document, so they are appended and
+      // the result stays a complete picture of what exists rather than silently shrinking.
       const unmatchedIds = existingRows.map((row) => row.id).filter((id) => !claimed.has(id)).sort();
 
       return {
@@ -1886,7 +2274,14 @@ export async function ingestWalkthrough({
     // the first write, so a failed verification writes nothing. Verifying before the transaction would
     // either re-verify on every retry or move the check to where the answer can go stale.
     if (contactSheetStore.isConfigured()) {
-      const head = await contactSheetStore.head(contactSheetR2Key);
+      // R33. `null` here means GENUINELY ABSENT and nothing else — a failed HEAD leaves this function as
+      // a 503 rather than arriving as a null. The 400 below tells the sender its upload did not land and
+      // that re-posting unchanged will not help, which is only true if we actually looked.
+      const head = await headContactSheet(
+        contactSheetStore,
+        contactSheetR2Key,
+        payload.walkthroughId
+      );
       if (!head) {
         throw new AppError(
           400,

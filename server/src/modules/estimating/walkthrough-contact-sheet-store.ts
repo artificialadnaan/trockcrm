@@ -13,7 +13,7 @@
 // reusing is a future divergence. See the parity audit on `WalkthroughContactSheetStore`.
 import { generateAndStoreThumbnail } from "../../lib/image-thumbnail.js";
 import { generateAndStorePdfThumbnail } from "../../lib/pdf-thumbnail.js";
-import { headObject, isR2Configured } from "../../lib/r2-client.js";
+import { headObjectStrict, isR2Configured } from "../../lib/r2-client.js";
 import type { WalkthroughContactSheetStore } from "./walkthrough-ingress-service.js";
 
 /**
@@ -24,7 +24,23 @@ import type { WalkthroughContactSheetStore } from "./walkthrough-ingress-service
 export function createWalkthroughContactSheetStore(): WalkthroughContactSheetStore {
   return {
     isConfigured: () => isR2Configured(),
-    head: (r2Key) => headObject(r2Key),
+    /**
+     * R33. `headObjectStrict`, NOT `headObject`, and the difference is a wrong answer to the sender.
+     *
+     * `headObject` (r2-client.ts:210-220) is `try { headObjectStrict } catch { return null }` — it says so
+     * itself, "backward-compatible best-effort". So EVERY failure became `null`: a 403 from a rotated
+     * credential, a socket timeout, a DNS blip, R2 being down. The ingress reads `null` as "the object is
+     * not there" and answers with a NON-RETRYABLE 400 that tells trock-scope its upload failed and it
+     * should not try again — when the truth is that we could not check. A correct integration acts on that
+     * by abandoning a perfectly good upload.
+     *
+     * `headObjectStrict` (r2-client.ts:231) returns null ONLY for a genuine not-found
+     * (`isR2ObjectNotFoundError`) and rethrows everything else, which is exactly the distinction the
+     * ingress needs: null becomes the 400 naming the derived key, a throw becomes a retryable 503. The
+     * port's contract is written down on `WalkthroughContactSheetStore.head` so a future implementation
+     * cannot quietly go back to swallowing.
+     */
+    head: (r2Key) => headObjectStrict(r2Key),
     generateImageThumbnail: (r2Key, mimeType) => generateAndStoreThumbnail(r2Key, mimeType),
     generatePdfThumbnail: (r2Key, mimeType) => generateAndStorePdfThumbnail(r2Key, mimeType),
   };
