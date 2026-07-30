@@ -855,8 +855,17 @@ const styles = StyleSheet.create({
     borderColor: theme.color.borderControl,
   },
   chooseDateText: { ...theme.type.label, color: theme.color.textPrimary },
-  pickerRow: { flexDirection: "row", alignItems: "center", gap: theme.space.md },
-  clearDate: { minHeight: 44, justifyContent: "center", paddingHorizontal: theme.space.sm },
+  /**
+   * A COLUMN, because the calendar is inline.
+   *
+   * This was a row, written when the picker was `compact` — a small field that left plenty beside it.
+   * Switching to `inline` to fix the accept-the-displayed-date gap made the child a ~320pt calendar,
+   * and 320 plus a 12pt gap plus Clear does not fit the 343pt a 375pt iPhone leaves after the screen's
+   * 16pt padding. Neither child shrinks or wraps, so one of them ran off-screen. Changing the display
+   * mode changed the layout's requirements and I did not revisit them.
+   */
+  pickerRow: { alignItems: "flex-start", gap: theme.space.sm },
+  clearDate: { minHeight: 44, justifyContent: "center", alignSelf: "flex-start" },
   clearDateText: { ...theme.type.label, color: theme.color.redText },
   input: {
     marginTop: theme.space.sm,
