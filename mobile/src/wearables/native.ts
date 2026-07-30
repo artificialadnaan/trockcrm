@@ -1,0 +1,107 @@
+/**
+ * Typed access to the native Meta Wearables bridge.
+ *
+ * The native side is registered through RCT_EXTERN_MODULE, so a missing method fails at the
+ * call site with an unhelpful "is not a function". `isAvailable` lets callers distinguish
+ * "this build has no bridge" from "the SDK rejected the call", which are very different
+ * problems and look identical otherwise.
+ */
+import { NativeEventEmitter, NativeModules, Platform } from "react-native";
+
+const native = NativeModules.WearablesBridge as WearablesNativeModule | undefined;
+
+export type ConfigureResult = { configured: boolean; alreadyConfigured: boolean };
+
+export type Capabilities = {
+  configured: boolean;
+  mockDeviceKitAvailable: boolean;
+  metaAppId: string;
+  developerMode: boolean;
+  appLinkURLScheme: string;
+};
+
+export type WearablesStatus = {
+  registrationState: string;
+  deviceCount: number;
+  devices: string[];
+};
+
+export type StreamInfo =
+  | { hasFrame: false }
+  | {
+      hasFrame: true;
+      width: number;
+      height: number;
+      megapixels: number;
+      firstFrameSeconds: number;
+    };
+
+/** The photo measurement that decides whether stills are worth capturing on their own. */
+export type PhotoMeasurement = {
+  bytes: number;
+  format: string;
+  width?: number;
+  height?: number;
+  megapixels?: number;
+  largerThanStreamCeiling?: boolean;
+  fileUri: string;
+};
+
+/** The audio measurement that decides whether HFP capture is good enough for transcription. */
+export type AudioMeasurement = {
+  fileUri: string;
+  bytes: number;
+  negotiatedSampleRate: number;
+  wideband: boolean;
+  inputPortName: string;
+  inputPortType: string;
+  isBluetoothInput: boolean;
+  streamWasRunningFirst: boolean;
+};
+
+type WearablesNativeModule = {
+  configure(): Promise<ConfigureResult>;
+  capabilities(): Promise<Capabilities>;
+  status(): Promise<WearablesStatus>;
+  startRegistration(): Promise<{ started: boolean }>;
+  handleUrl(url: string): Promise<{ handled: boolean }>;
+  requestCameraPermission(): Promise<{ status: string }>;
+  startStream(): Promise<{ started: boolean; config: string }>;
+  streamInfo(): Promise<StreamInfo>;
+  stopStream(): Promise<{ stopped: boolean }>;
+  capturePhoto(): Promise<{ requested: boolean }>;
+  recordGlassesAudio(seconds: number): Promise<AudioMeasurement>;
+};
+
+export const isAvailable = Platform.OS === "ios" && native != null;
+
+function require_(): WearablesNativeModule {
+  if (!native) {
+    throw new Error(
+      "WearablesBridge native module is missing. This build predates the DAT integration — rebuild the dev client."
+    );
+  }
+  return native;
+}
+
+export const Wearables = {
+  configure: () => require_().configure(),
+  capabilities: () => require_().capabilities(),
+  status: () => require_().status(),
+  startRegistration: () => require_().startRegistration(),
+  handleUrl: (url: string) => require_().handleUrl(url),
+  requestCameraPermission: () => require_().requestCameraPermission(),
+  startStream: () => require_().startStream(),
+  streamInfo: () => require_().streamInfo(),
+  stopStream: () => require_().stopStream(),
+  capturePhoto: () => require_().capturePhoto(),
+  recordGlassesAudio: (seconds: number) => require_().recordGlassesAudio(seconds),
+};
+
+/** Photos arrive asynchronously after capturePhoto() is accepted, never as its return value. */
+export function onPhoto(listener: (photo: PhotoMeasurement) => void): () => void {
+  if (!native) return () => {};
+  const emitter = new NativeEventEmitter(native as never);
+  const sub = emitter.addListener("wearables:photo", listener);
+  return () => sub.remove();
+}

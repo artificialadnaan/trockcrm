@@ -91,6 +91,17 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
       },
     ],
     "expo-audio",
+    [
+      // Meta Wearables Device Access Toolkit. MetaAppID "0" selects Developer Mode, which
+      // runs against MockDeviceKit with no registered app — set META_APP_ID and
+      // META_CLIENT_TOKEN from the Wearables Developer Center to talk to real glasses.
+      "./plugins/withWearablesDat",
+      {
+        scheme: "trockcam",
+        metaAppId: process.env.META_APP_ID ?? "0",
+        clientToken: process.env.META_CLIENT_TOKEN ?? null,
+      },
+    ],
   ],
   experiments: {
     typedRoutes: true,
