@@ -97,6 +97,9 @@ export interface MatchFieldRespondersInput<T extends ResponderRosterEntry> {
    * 'superintendent' | 'project_manager' — the field this text came from. A PREFERENCE, not a filter: the
    * whole active roster is searched and in-role candidates merely win ties, because the field someone was
    * typed into does not reliably indicate the role they hold. Check `roleMatchesQuery` on each match.
+   *
+   * A segment that ANNOTATES its own role ("Alex Smith (PM)") overrides this for tie-breaking purposes —
+   * the annotation is deliberate, the slot is not. `roleMatchesQuery` still reports against this value.
    */
   role: string;
   roster: readonly T[];
@@ -182,6 +185,16 @@ const SEGMENT_DELIMITERS = /\s+w\/+\s*|\s*[/&+;]\s*|\s*[\n\r]+\s*|\s+and\s+/gi;
 interface ResponderSegment {
   raw: string;
   stripped: string;
+  /**
+   * The role the segment ANNOTATES ("Alex Smith (PM)"), or null. Distinct from the field the text was typed
+   * into, which is documented as unreliable evidence; this one the author wrote down deliberately.
+   *
+   * It has to survive the strip. Discarding it made the two identifications indistinguishable when the
+   * annotation was the only thing separating them: with superintendent "Alex Smith" and PM "Alex Smith", a
+   * superintendent-field "Alex Smith (PM)" scored both EXACT and the field-slot preference then handed the
+   * card to the superintendent — the one person the text explicitly said it did not mean.
+   */
+  annotatedRole: string | null;
 }
 
 /**
@@ -199,13 +212,20 @@ interface ResponderSegment {
 // unparenthesised Jr rule below exists to prevent.
 const ROLE_WORD = String.raw`(?:pm|project\s*manager|super(?:intendent)?|supt|foreman)`;
 
-const IDENTITY_NEUTRAL_NOISE: RegExp[] = [
+// Kept SEPARATE from the honorific below because these two carry different information: a role annotation
+// names a role and so is evidence for arbitration, while an honorific names nobody. `annotatedRoleOf` reads
+// this list, and the stripper reads both — so neither can drift from the other's idea of an annotation.
+const ROLE_ANNOTATIONS: RegExp[] = [
   new RegExp(String.raw`\(\s*${ROLE_WORD}\s*\.?\s*\)`, "gi"), // "(PM)", "(super)" — role words ONLY
-  /^\s*(?:mr|mrs|ms|dr|mx)\.?\s+/i, // leading honorific
   // Trailing punctuation after the role word must not defeat the anchor. `\.?$` tolerated only a period, so
   // "Brett Bell - PM," kept "pm" as a token, failed the every-token rule and matched NOBODY. Found by
   // COMPOSING the annotation and trailing-comma metamorphic relations — neither triggers it alone.
   new RegExp(String.raw`\s+-\s*${ROLE_WORD}\s*[.,;]*\s*$`, "i"), // trailing " - PM", " - PM," ...
+];
+
+const IDENTITY_NEUTRAL_NOISE: RegExp[] = [
+  ...ROLE_ANNOTATIONS,
+  /^\s*(?:mr|mrs|ms|dr|mx)\.?\s+/i, // leading honorific
 ];
 
 /**
@@ -220,6 +240,25 @@ const IDENTITY_NEUTRAL_NOISE: RegExp[] = [
  */
 function stripIdentityNeutralNoise(segment: string): string {
   return IDENTITY_NEUTRAL_NOISE.reduce((text, pattern) => text.replace(pattern, " "), segment).trim();
+}
+
+/**
+ * Which roster role a stripped annotation named, or null when the segment carried none.
+ *
+ * Read off the SAME patterns that do the stripping, so the two can never disagree about what counts as an
+ * annotation. Only the role words are consulted; an honorific names nobody.
+ */
+function annotatedRoleOf(segment: string): string | null {
+  const annotation = ROLE_ANNOTATIONS
+    // A fresh RegExp per read: a `g`-flagged literal carries `lastIndex` between calls, so reusing the shared
+    // instance would make the result depend on how many segments had been scanned before this one.
+    .map((pattern) => segment.match(new RegExp(pattern.source, pattern.flags.replace("g", ""))))
+    .find((match): match is RegExpMatchArray => match !== null);
+  if (!annotation) return null;
+  const word = normalizeResponderName(annotation[0]).replace(/\s+/g, "");
+  if (/^(?:pm|projectmanager)$/.test(word)) return "project_manager";
+  if (/^(?:super|superintendent|supt|foreman)$/.test(word)) return "superintendent";
+  return null;
 }
 
 
@@ -300,7 +339,9 @@ interface RosterNameParts {
 
 // Not "v": a lone V is far likelier to be an initial than a fifth-generation suffix, and treating it as
 // identity-bearing would block ordinary names for no real gain.
-const GENERATIONAL_SUFFIXES = new Set(["jr", "jnr", "sr", "snr", "ii", "iii", "iv"]);
+const GENERATIONAL_SUFFIXES = new Set([
+  "jr", "jnr", "junior", "sr", "snr", "senior", "ii", "iii", "iv",
+]);
 
 function splitRosterNameParts(name: string): RosterNameParts {
   const parts: string[] = [];
@@ -337,16 +378,24 @@ function splitResponderSegmentPairs(text: string | null | undefined): ResponderS
   // the blob back is the same resource problem one layer up.
   const raw = text ?? "";
   if (raw.length > MAX_RESPONDER_TEXT_CHARS) {
-    return [{ raw: `${raw.slice(0, 120).trim()}… (${raw.length} characters — not parsed as names)`, stripped: "" }];
+    return [
+      { raw: `${raw.slice(0, 120).trim()}… (${raw.length} characters — not parsed as names)`, stripped: "", annotatedRole: null },
+    ];
   }
   const segments = raw
     .split(SEGMENT_DELIMITERS)
     // The WHOLE segment is the reported span, so a leading or trailing annotation ("(PM), Bell, Robert",
     // "Sampley, Robert, (PM)") stays visible to whoever triages it instead of being sliced away.
-    .map((segment) => ({ raw: segment.trim(), stripped: stripIdentityNeutralNoise(segment) }))
+    .map((segment) => ({
+      raw: segment.trim(),
+      stripped: stripIdentityNeutralNoise(segment),
+      annotatedRole: annotatedRoleOf(segment),
+    }))
     .filter((segment) => normalizeResponderName(segment.stripped).length > 0);
   if (segments.length > MAX_RESPONDER_SEGMENTS) {
-    return [{ raw: `${raw.slice(0, 120).trim()}… (${segments.length} segments — not parsed as names)`, stripped: "" }];
+    return [
+      { raw: `${raw.slice(0, 120).trim()}… (${segments.length} segments — not parsed as names)`, stripped: "", annotatedRole: null },
+    ];
   }
   return segments;
 }
@@ -356,7 +405,17 @@ function splitResponderSegmentPairs(text: string | null | undefined): ResponderS
  *
  * Shorter, not longer, so a stub cannot ride a long part's allowance — "bob" must not reach "robertson".
  */
+/** Characters, not UTF-16 code units — see the two call sites for what counting units let through. */
+function codePointLength(value: string): number {
+  let n = 0;
+  for (const _ of value) n += 1;
+  return n;
+}
+
 function maxEditDistance(tokenLength: number, partLength: number): number {
+  // Callers pass CODE POINT counts, not `.length`. The anchor rule was fixed to count code points and this
+  // ladder was not, so an astral surname of three characters measured as six and cleared the five-character
+  // fuzzy floor that exists to keep short strings exact-only.
   const length = Math.min(tokenLength, partLength);
   if (length < FUZZY_MIN_TOKEN_LENGTH) return 0;
   if (length < FUZZY_LONG_TOKEN_LENGTH) return FUZZY_MAX_DISTANCE_SHORT;
@@ -379,10 +438,55 @@ function maxEditDistance(tokenLength: number, partLength: number): number {
  * leaves "Bell" unspoken is "high", because the caller may reasonably want the full-name tier before
  * auto-sending.
  */
+interface SegmentScore {
+  confidence: ResponderMatchConfidence;
+  /**
+   * Edit distance of the single fuzzy accounting, or 0 when every token matched exactly.
+   *
+   * `high` is a COARSE tier: two candidates in it are not necessarily equally good. Discarding this let the
+   * role preference pick the WEAKER spelling — PM "John Cheatam" (distance 1) lost to superintendent "John
+   * Chattam" (distance 2) for input "John Cheatham", purely because the text sat in a superintendent field,
+   * which is the one thing this matcher treats as unreliable. Role is documented as breaking a TIE; without
+   * this number the code could not tell a tie from a difference.
+   */
+  fuzzDistance: number;
+  /**
+   * Roster name parts the segment never spoke — the middle name in "John Smith" against "John Allen Smith".
+   *
+   * A SECOND, independent axis, because incompleteness is not a spelling difference and collapsing the two
+   * onto one number let an omission outrank a typo: partial matches were scored `fuzzDistance: 0`, so for
+   * input "John Smith" the cross-role "John Allen Smith" (nothing misspelled, one name unspoken) beat the
+   * in-role "John Smyth" (whole name spoken, one letter out) and was auto-addressed — role and ambiguity
+   * never got a look. Neither reading is better evidence than the other, and `narrowToBestEvidence` keeps
+   * both so the tie is broken where ties belong.
+   */
+  unaccountedParts: number;
+}
+
+/**
+ * The candidates no rival strictly beats, on BOTH spelling distance and completeness.
+ *
+ * Strictly: a candidate is dropped only when some rival is at least as good on both axes and better on one.
+ * Two candidates that each win an axis are genuinely incomparable and both survive, to be settled by role or
+ * reported as ambiguous. A single scalar ordering here is what let an omitted name part masquerade as a
+ * perfect spelling; see `unaccountedParts`.
+ */
+function narrowToBestEvidence<T extends { fuzz: number; incomplete: number }>(scored: T[]): T[] {
+  return scored.filter(
+    (candidate) =>
+      !scored.some(
+        (rival) =>
+          rival.fuzz <= candidate.fuzz &&
+          rival.incomplete <= candidate.incomplete &&
+          (rival.fuzz < candidate.fuzz || rival.incomplete < candidate.incomplete),
+      ),
+  );
+}
+
 function scoreSegmentAgainstName(
   tokens: string[],
   { parts, joinableWithNext, identitySuffix }: RosterNameParts,
-): ResponderMatchConfidence | null {
+): SegmentScore | null {
   if (tokens.length === 0 || tokens.length > parts.length) return null;
 
   const consumed = parts.map(() => false);
@@ -421,7 +525,7 @@ function scoreSegmentAgainstName(
     // Measured in CODE POINTS, not `.length`. A UTF-16 code-unit count reads any astral-plane letter as two
     // characters, so a single styled or non-Latin glyph slipped past a guard whose whole point is "one
     // character is not enough" — while the visually identical ASCII letter was correctly refused.
-    if ([...text].length >= 2 && !indices.some((i) => identitySuffix[i])) hasMeaningfulAnchor = true;
+    if (codePointLength(text) >= 2 && !indices.some((i) => identitySuffix[i])) hasMeaningfulAnchor = true;
   };
 
   for (const token of tokens) {
@@ -452,22 +556,53 @@ function scoreSegmentAgainstName(
   // Checked BEFORE either return. Placing it only on the unfuzzed path meant one typo in the base name
   // bypassed it entirely — "John Smyth" resolved roster "John Smith Jr", suffix never examined.
   const suffixUnspoken = () => parts.some((_, i) => identitySuffix[i] && !consumed[i]);
+  const countUnaccounted = () => consumed.filter((taken) => !taken).length;
 
   if (unaccounted.length === 1) {
     const token = unaccounted[0];
-    const index = parts.findIndex(
-      (part, i) =>
-        // Length difference alone is a LOWER BOUND on edit distance, so checking it first turns a pasted
-        // blob into an O(1) rejection instead of an O(token x part) walk. The allowance is never above 2,
-        // so anything meaningfully longer than a real surname is refused before any distance work.
-        !consumed[i] &&
-        Math.abs(token.length - part.length) <= maxEditDistance(token.length, part.length) &&
-        nameEditDistance(token, part) <= maxEditDistance(token.length, part.length),
-    );
-    if (index < 0) return null;
-    consumed[index] = true;
+    // The CLOSEST eligible part, not the first one that clears the threshold.
+    //
+    // `findIndex` recorded whichever unconsumed part happened to come first, so the distance carried into
+    // arbitration could be larger than the real minimum — a roster row spelling "MacDonald McDonald" pinned
+    // the distance-2 "MacDonald" and never saw its own distance-1 "McDonald", which then tied a farther
+    // spelling elsewhere and let role pick the wrong person. That defeats the ranking added to stop exactly
+    // this, so the distance has to be the best one available, not the first one found.
+    //
+    // A punctuation-linked RUN is one such unit, exactly as it is on the exact path above. Considering only
+    // single parts made the fuzz asymmetric: roster "MaryJane Smith" accepted input "Mary-Jone Smith"
+    // (the input collapses), but the mirrored roster "Mary-Jane Smith" rejected "MaryJone Smith", because
+    // nothing could fuzzily account for a token spanning two hyphen-joined parts. One permitted typo must
+    // not decide which of two equivalent spellings the roster happens to use.
+    let bestIndices: number[] = [];
+    let bestDistance = Number.POSITIVE_INFINITY;
+    const consider = (indices: number[]) => {
+      const text = indices.map((i) => parts[i]).join("");
+      // Length difference alone is a LOWER BOUND on edit distance, so checking it first turns a pasted blob
+      // into an O(1) rejection instead of an O(token x part) walk. Measured in code points for the same
+      // reason the anchor is: `.length` reads one astral character as two.
+      const allowance = maxEditDistance(codePointLength(token), codePointLength(text));
+      if (Math.abs(codePointLength(token) - codePointLength(text)) > allowance) return;
+      const distance = nameEditDistance(token, text);
+      if (distance <= allowance && distance < bestDistance) {
+        bestDistance = distance;
+        bestIndices = indices;
+      }
+    };
+    for (let i = 0; i < parts.length && bestDistance > 0; i++) {
+      if (consumed[i]) continue;
+      consider([i]);
+      // Runs only ever cross boundaries a hyphen made. A space is a real boundary, which is what keeps bare
+      // "Annabell" from consuming both parts of "Ann Abell".
+      const run = [i];
+      for (let j = i; joinableWithNext[j] && j + 1 < parts.length && !consumed[j + 1]; j++) {
+        run.push(j + 1);
+        consider([...run]);
+      }
+    }
+    if (bestIndices.length === 0) return null;
+    bestIndices.forEach((i) => (consumed[i] = true));
     if (suffixUnspoken()) return null;
-    return "high";
+    return { confidence: "high", fuzzDistance: bestDistance, unaccountedParts: countUnaccounted() };
   }
 
   // A generational suffix left unspoken rejects the match outright. It is not an optional middle name: it
@@ -478,7 +613,11 @@ function scoreSegmentAgainstName(
   // Whole name accounted for, no fuzz. Counted by CONSUMED PARTS rather than `tokens.length === parts.length`,
   // because one token may consume a whole punctuation-linked run — "MaryJane Smith" against
   // ["mary","jane","smith"] is a complete, unfuzzy identification with 2 tokens and 3 parts.
-  return consumed.every(Boolean) ? "exact" : "high";
+  return {
+    confidence: consumed.every(Boolean) ? "exact" : "high",
+    fuzzDistance: 0,
+    unaccountedParts: countUnaccounted(),
+  };
 }
 
 /**
@@ -518,13 +657,18 @@ export function matchFieldResponders<T extends ResponderRosterEntry>({
     .map((entry) => ({
       entry,
       nameParts: splitRosterNameParts(entry.name),
-      inRole: entry.role.trim().toLowerCase() === wantedRole,
+      roleKey: entry.role.trim().toLowerCase(),
     }))
     .filter((candidate) => candidate.nameParts.parts.length > 0);
 
   const matchIndexById = new Map<string, number>();
 
   for (const segment of segments) {
+    // An explicit "(PM)" outranks the field the text sits in. The slot is documented as unreliable evidence —
+    // that is the whole reason role is a preference — whereas an annotation is a deliberate statement by the
+    // person filling the card in, and is the only thing that can separate two same-named people in different
+    // roles.
+    const effectiveRole = segment.annotatedRole ?? wantedRole;
     const tokens = normalizeResponderName(segment.stripped).split(" ");
     // Punctuation-insensitivity has to be SYMMETRIC. The roster side already lets one token cover two
     // hyphen-joined parts ("MaryJane" -> "Mary-Jane"); without the mirror, the reverse spelling failed —
@@ -546,18 +690,31 @@ export function matchFieldResponders<T extends ResponderRosterEntry>({
     const allScored = candidates
       .map((candidate) => ({
         entry: candidate.entry,
-        inRole: candidate.inRole,
+        // Measured against the role the segment ANNOTATED when it carried one, falling back to the field it
+        // was typed into. `roleMatchesQuery` below still reports the QUERIED role — that is what tells a
+        // caller which column to write — so the two must not be conflated.
+        inRole: candidate.roleKey === effectiveRole,
+        roleMatchesQuery: candidate.roleKey === wantedRole,
         // Best over the readings: the plain tokens, and the punctuation-collapsed variant.
-        confidence: tokenReadings.reduce<ResponderMatchConfidence | null>((best, reading) => {
+        score: tokenReadings.reduce<SegmentScore | null>((best, reading) => {
           const scored = scoreSegmentAgainstName(reading, candidate.nameParts);
-          if (scored === "exact" || best === "exact") return "exact";
-          return scored ?? best;
+          if (!scored) return best;
+          if (!best) return scored;
+          if (scored.confidence === "exact" && best.confidence !== "exact") return scored;
+          if (best.confidence === "exact" && scored.confidence !== "exact") return best;
+          return scored.fuzzDistance < best.fuzzDistance ? scored : best;
         }, null),
       }))
       .filter(
-        (scored): scored is { entry: T; inRole: boolean; confidence: ResponderMatchConfidence } =>
-          scored.confidence !== null,
-      );
+        (scored): scored is { entry: T; inRole: boolean; roleMatchesQuery: boolean; score: SegmentScore } =>
+          scored.score !== null,
+      )
+      .map((scored) => ({
+        ...scored,
+        confidence: scored.score.confidence,
+        fuzz: scored.score.fuzzDistance,
+        incomplete: scored.score.unaccountedParts,
+      }));
 
     if (allScored.length === 0) {
       result.unmatched.push(segment.raw);
@@ -567,7 +724,12 @@ export function matchFieldResponders<T extends ResponderRosterEntry>({
     // Two explicit branches, because a bare token and a full name are arbitrated on different evidence.
     let winner: (typeof allScored)[number];
 
-    if (tokens.length === 1) {
+    // A punctuation-collapsed reading can be bare even when the plain split is not: "Mary-Jane" splits to
+    // two tokens but reads as the single name "MaryJane", and routing that through full-name arbitration let
+    // it resolve superintendent "Mary-Jane Smith" outright while PM "MaryJane Jones" — who answers to exactly
+    // the same bare name — was passed over. If ANY successful reading is one token, the input can be a bare
+    // name, and bare names are settled by roster-wide uniqueness.
+    if (tokenReadings.some((reading) => reading.length === 1)) {
       // A BARE SINGLE TOKEN must identify exactly ONE person on the roster — active or not, and at ANY
       // confidence tier. Confidence cannot arbitrate here: with a PM mononym "Nick" (exact) beside
       // superintendent "Nick Reyes" (high), ranking picked the mononym outright when both people plainly
@@ -594,7 +756,12 @@ export function matchFieldResponders<T extends ResponderRosterEntry>({
       // — was thrown away. Role cannot outrank evidence when the premise is that the field's role is
       // unreliable.
       const best = allScored.some((s) => s.confidence === "exact") ? "exact" : "high";
-      const atBest = allScored.filter((s) => s.confidence === best);
+      // Narrowed to the BEST EVIDENCE before anything else looks at this set. `high` is coarse, so a person
+      // merely sharing the tier is not actually competing: active "John Cheatam" at distance 1 was being
+      // blocked by inactive "John Chattam" at distance 2, turning a clear answer into an ambiguity. Blocking
+      // is for candidates that remain genuinely tied — which now includes candidates tied ACROSS the two
+      // axes, where one spelled the name better and the other heard more of it.
+      const atBest = narrowToBestEvidence(allScored.filter((s) => s.confidence === best));
 
       // An inactive person at the BEST tier blocks the segment, whatever that tier is. Restricting this to
       // exact hits left the fuzzy tie open: "John Smath" scored inactive "John Smith" and active "John
@@ -614,6 +781,8 @@ export function matchFieldResponders<T extends ResponderRosterEntry>({
         continue;
       }
 
+      // Role last. `atBest` is already narrowed to the best confidence and to evidence no rival beats, so
+      // role only ever breaks a genuine tie between equally-good candidates.
       const inRoleAtBest = atBest.filter((s) => s.inRole);
       const finalists = inRoleAtBest.length > 0 ? inRoleAtBest : atBest;
       if (finalists.length > 1) {
@@ -640,7 +809,7 @@ export function matchFieldResponders<T extends ResponderRosterEntry>({
           ...current,
           confidence: "exact",
           matchedText: segment.raw,
-          roleMatchesQuery: winner.inRole,
+          roleMatchesQuery: winner.roleMatchesQuery,
         };
       }
       continue;
@@ -652,7 +821,7 @@ export function matchFieldResponders<T extends ResponderRosterEntry>({
       matchedText: segment.raw,
       // False means the name was typed into the OTHER role's field. The person is still right; the slot the
       // caller must write them into is the one for `responder.role`, not the one it queried.
-      roleMatchesQuery: winner.inRole,
+      roleMatchesQuery: winner.roleMatchesQuery,
     });
   }
 
