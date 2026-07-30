@@ -14,7 +14,7 @@ import { RetryNotice } from "../../../src/components/RetryNotice";
 import { ScreenHeader } from "../../../src/components/ScreenHeader";
 import { formatLocation } from "../../../src/format";
 import { useGoBack } from "../../../src/lib/go-back";
-import { shouldLoadNextPage } from "../../../src/paging";
+import { refreshFailed as pageRefreshFailed, shouldLoadNextPage } from "../../../src/paging";
 import { useDebouncedSearch } from "../../../src/lib/use-debounced-search";
 import { qk } from "../../../src/query/keys";
 import { MIN_SEARCH_LENGTH, searchIsTooShort } from "../../../src/search-query";
@@ -58,7 +58,9 @@ export default function PropertiesListScreen() {
 
   const properties = (query.data?.pages ?? []).flatMap((p) => p.properties);
   const blocking = !query.data;
-  const refreshFailed = Boolean(query.data && query.isError);
+  // NOT a bare `isError`: a failed page sets that too, and the header then claimed a refresh had
+  // failed while the footer correctly reported the real failure. One failure must produce one message.
+  const refreshFailed = pageRefreshFailed(query);
   const offline = query.error instanceof ApiError && query.error.status === 0;
 
   return (
