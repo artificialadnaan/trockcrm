@@ -3352,6 +3352,35 @@ export async function deleteDeal(
     return null;
   }
 
+  // A NON-ADMIN MAY NOT ARCHIVE A PARENT THAT STILL HAS ACTIVE CHANGE-ORDER CHILDREN.
+  //
+  // Removing the stage gate below opened an indirect route around an admin-only financial operation. The
+  // DELETE route rejects a non-admin whose TARGET is a change order, but a parent is not itself a CO, so it
+  // passed — and this function then calls softDeleteChangeOrderChildren, which voids every child AND removes
+  // each one's earned commission. A rep could therefore do, in one click on the parent, exactly what the
+  // admin-only change-order delete endpoint exists to reserve.
+  //
+  // It was unreachable before only by accident: CO children hang off Won/awarded parents, and the stage gate
+  // happened to refuse those. That is a coincidence, not a boundary, so the boundary is stated here — beside
+  // the cascade it protects, rather than in the route, so it cannot be bypassed by a future caller.
+  //
+  // REJECT rather than skip-the-cascade: archiving the parent while leaving live children pointed at it
+  // would strand COs under a deal that no longer exists.
+  if (opts.actorRole !== "admin") {
+    const [activeCoChild] = await tenantDb
+      .select({ id: deals.id })
+      .from(deals)
+      .where(and(eq(deals.parentDealId, dealId), eq(deals.isChangeOrder, true), eq(deals.isActive, true)))
+      .limit(1);
+    if (activeCoChild) {
+      throw new AppError(
+        403,
+        "This deal has active change orders. Only an admin can archive it, because doing so voids those change orders and removes their commission.",
+        "CHANGE_ORDER_ADMIN_ONLY",
+      );
+    }
+  }
+
   // NO STAGE GATE. An owner may archive their own deal at ANY stage.
   //
   // This deliberately replaces the earlier "opportunity stage only" rule for reps. That rule made the

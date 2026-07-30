@@ -43,6 +43,32 @@ describe("canArchiveDeal", () => {
     }
   });
 
+  it("a non-admin cannot archive a change-order CHILD, even one they own", () => {
+    // Deleting a CO removes its earned commission, which the server reserves for admins
+    // (CHANGE_ORDER_ADMIN_ONLY). Showing the item here would open a dialog that 403s on submit.
+    expect(canArchiveDeal({ assignedRepId: "r1", isChangeOrder: true }, { id: "r1", role: "rep" })).toBe(false);
+    expect(canArchiveDeal({ assignedRepId: "r1", isChangeOrder: true }, { id: "r2", role: "admin" })).toBe(true);
+  });
+
+  it("a non-admin cannot archive a PARENT that still has active change-order children", () => {
+    // Archiving the parent cascades: every child is voided and its commission removed — the same
+    // admin-only operation, reached indirectly. This is the hole that removing the stage gate opened.
+    expect(
+      canArchiveDeal({ assignedRepId: "r1", activeChangeOrderChildCount: 1 }, { id: "r1", role: "rep" }),
+    ).toBe(false);
+    expect(
+      canArchiveDeal({ assignedRepId: "r1", activeChangeOrderChildCount: 1 }, { id: "r2", role: "admin" }),
+    ).toBe(true);
+  });
+
+  it("a parent with NO active change-order children is still archivable by its owner", () => {
+    // The carve-out must not swallow the ordinary case; 0 and absent both mean "nothing cascades".
+    expect(
+      canArchiveDeal({ assignedRepId: "r1", activeChangeOrderChildCount: 0 }, { id: "r1", role: "rep" }),
+    ).toBe(true);
+    expect(canArchiveDeal({ assignedRepId: "r1" }, { id: "r1", role: "rep" })).toBe(true);
+  });
+
   it("an absent assignedRepId never matches an absent user id", () => {
     // Guards the nullish case: two undefined values must not read as "this viewer owns it".
     expect(canArchiveDeal(deal(null), { id: undefined, role: "rep" })).toBe(false);
