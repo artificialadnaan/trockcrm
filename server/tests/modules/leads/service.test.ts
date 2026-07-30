@@ -1811,6 +1811,22 @@ describe("lead service canonical progression", () => {
     ["budgetStatus", (_db: any, input: any) => { input.budgetStatus = null; }],
     ["projectTypeId", (_db: any, input: any) => { input.projectTypeId = null; }],
     ["bidDueDate", (_db: any, input: any) => { input.bidDueDate = ""; }],
+    // The Other scope (migration 0208) must carry its description. The browser form checks this too, but the
+    // form is not an invariant — any authenticated caller posting to /api/leads skips it, and the
+    // questionnaire's own is_required flag cannot help because the create snapshot returns every node with
+    // isRequired: false. Without this, `other_applies: true` alone satisfies "at least one scope" and files a
+    // lead recording that it resembles nothing we bid and nothing about what it is.
+    //
+    // BOTH answer routes, because createLead accepts either and reading only one leaves the other open.
+    ["other_scope_description", (_db: any, input: any) => {
+      input.leadQuestionAnswers = { other_applies: true };
+    }],
+    ["other_scope_description", (_db: any, input: any) => {
+      input.projectTypeQuestionPayload = {
+        projectTypeId: "project-type-commercial",
+        answers: { other_applies: true, other_scope_description: "   " },
+      };
+    }],
   ])("rejects missing lead create prerequisite %s before insert", async (fieldKey, mutate) => {
     const tenantDb = createFakeTenantDb({} as FakeLeadRow);
     tenantDb.state.leads = [];

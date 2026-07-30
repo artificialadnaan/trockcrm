@@ -11,19 +11,8 @@ export const CLEAR_SELECTION_VALUE = "__clear__";
 export const TYPE_OF_ACCESS_OPTIONS = ["Gated", "Not Gated", "Bobbed", "Other"] as const;
 export const TYPE_OF_ACCESS_OTHER_DETAIL_KEY = "site_access_other_detail";
 
-/**
- * The "Other" scope (migration 0208) — the escape hatch for a project that fits none of the ten seeded
- * scopes. `other_applies` is the card's toggle; `other_scope_description` is the free text that IS the scope.
- *
- * The description is seeded `is_required: true`, but that flag does nothing at CREATE time:
- * getQuestionnaireTemplateSnapshot returns every node with `isRequired: false`, so the form's
- * required-question sweep never sees it. True of every scope question, not just this one — elsewhere it only
- * costs detail, but an Other scope with no description records that the lead is unlike anything we bid and
- * nothing about what it actually is. So it gets an explicit create-time check, exactly as
- * site_access === "Other" does.
- */
-export const OTHER_SCOPE_APPLIES_KEY = "other_applies";
-export const OTHER_SCOPE_DESCRIPTION_KEY = "other_scope_description";
+// Re-exported from shared so the form and assertLeadCreateRequirements cannot disagree about the keys.
+export { OTHER_SCOPE_APPLIES_KEY, OTHER_SCOPE_DESCRIPTION_KEY } from "@trock-crm/shared/types";
 
 function isTypeOfAccessOption(value: string) {
   return TYPE_OF_ACCESS_OPTIONS.includes(value as (typeof TYPE_OF_ACCESS_OPTIONS)[number]);

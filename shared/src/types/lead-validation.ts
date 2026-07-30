@@ -1,3 +1,16 @@
+/**
+ * The "Other" scope (migration 0208) — the escape hatch for a project that fits none of the ten seeded scopes.
+ * `other_applies` is the card's toggle; `other_scope_description` is the free text that IS the scope.
+ *
+ * Here, in shared, because the rule is enforced in TWO places and a second copy of these keys would let them
+ * drift: the browser form blocks submit, and assertLeadCreateRequirements blocks every other caller. The form
+ * check alone is not an invariant — anyone posting to /api/leads bypasses it — and the questionnaire's own
+ * `is_required` flag cannot carry it either, because the create snapshot returns every node with
+ * `isRequired: false`.
+ */
+export const OTHER_SCOPE_APPLIES_KEY = "other_applies";
+export const OTHER_SCOPE_DESCRIPTION_KEY = "other_scope_description";
+
 export type LeadValidationQuestionSetKey = "service" | "normal";
 export type LeadValidationAnswerValue = string | boolean | number | null;
 

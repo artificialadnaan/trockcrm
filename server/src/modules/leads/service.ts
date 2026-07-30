@@ -19,6 +19,7 @@ import {
   users,
 } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
+import { OTHER_SCOPE_APPLIES_KEY, OTHER_SCOPE_DESCRIPTION_KEY } from "@trock-crm/shared/types";
 import {
   toCanonicalLeadStageSlug,
   resolveOfficeCodeFromOffice,
@@ -974,6 +975,28 @@ function assertLeadCreateRequirements(
   }
   if (!input.bidDueDate || !normalizeIsoDateString(input.bidDueDate)) {
     missing.push("bidDueDate");
+  }
+
+  // The "Other" scope must carry its description (migration 0208).
+  //
+  // Server-side because the browser form's check is not an invariant — any authenticated caller posting to
+  // /api/leads bypasses it, and the questionnaire's own `is_required` flag cannot help: the create snapshot
+  // returns every node with `isRequired: false`, so nothing downstream enforces it either. Selecting Other
+  // alone satisfies "at least one scope", so without this a lead can be filed recording that it resembles
+  // nothing we bid and nothing about what it actually is — the single case where an empty scope answer
+  // removes the entire point of the scope. Mirrors primaryContactRole === "other" above.
+  //
+  // Resolved with the SAME precedence createLead itself uses a few lines down
+  // (`leadQuestionAnswers ?? projectTypeQuestionPayload.answers`). Reading only one of the two fields would
+  // leave the other as a way past the guard, which is the whole reason this check exists server-side.
+  const questionAnswers = (input.leadQuestionAnswers ??
+    input.projectTypeQuestionPayload?.answers ??
+    {}) as Record<string, unknown>;
+  if (questionAnswers[OTHER_SCOPE_APPLIES_KEY] === true) {
+    const description = questionAnswers[OTHER_SCOPE_DESCRIPTION_KEY];
+    if (typeof description !== "string" || !description.trim()) {
+      missing.push(OTHER_SCOPE_DESCRIPTION_KEY);
+    }
   }
 
   if (missing.length > 0) {
