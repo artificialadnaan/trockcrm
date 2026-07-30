@@ -41,8 +41,13 @@ const runMocks = vi.hoisted(() => ({
   expireStaleAiReportRuns: vi.fn(async () => 0),
   // Must mirror the REAL exports the route imports — a missing one is `undefined` at the call site and
   // 500s every request (which is how the focus-prompt cap silently went untested the first time).
-  countInFlightAiReportRunsForUser: vi.fn(async () => 0),
-  MAX_IN_FLIGHT_RUNS_PER_USER: 3,
+  // A real class, so the route's `instanceof` check behaves as it does in production.
+  AiReportQuotaExceededError: class AiReportQuotaExceededError extends Error {
+    constructor(readonly limit: number) {
+      super(`Quota of ${limit} concurrent AI reports reached.`);
+      this.name = "AiReportQuotaExceededError";
+    }
+  },
   // Real predicate, not a stub that always agrees — a mock that returned true for everything would make
   // the conflict path swallow unrelated database errors and the test would never notice.
   isInFlightRunConflict: (error: unknown) =>
@@ -105,8 +110,20 @@ const PROJECT = "cccccccc-3333-3333-3333-333333333333";
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // mockReset, not just clearAllMocks: a `...Once` rejection queued by a test that did not consume it (or
+  // consumed it on a different path) survives clearAllMocks and fires in the NEXT test, which shows up as a
+  // baffling wrong-status failure several tests later.
+  runMocks.insertAiReportRunTx.mockReset();
+  runMocks.getInFlightAiReportRun.mockReset();
+  runMocks.expireStaleAiReportRuns.mockReset();
+  runMocks.getAiReportRun.mockReset();
+
   aiMocks.isAiReportConfigured.mockReturnValue(true);
+  runMocks.expireStaleAiReportRuns.mockResolvedValue(0 as any);
   runMocks.insertAiReportRunTx.mockResolvedValue({ id: "run-1", status: "queued" } as any);
+  // No identical run in flight by default — the route now checks this BEFORE the quota so a lost-202 retry
+  // can resume its original run instead of being rejected.
+  runMocks.getInFlightAiReportRun.mockResolvedValue(null as any);
   officeDb.execute.mockResolvedValue({ rows: [] } as any);
   projectMocks.assertActiveFieldProject.mockImplementation(async (_db: any, _access: any, id: string) => ({ id, name: "Tides at Park Lane", dealNumber: "D-1" }) as any);
 });
@@ -187,7 +204,9 @@ describe("POST /field/reports/ai-generate", () => {
       .post("/api/field/reports/ai-generate")
       .send({ projectId: PROJECT, photoIds: [PHOTO_A] });
 
-    expect(runMocks.expireStaleAiReportRuns).toHaveBeenCalledWith(PROJECT, "user-1");
+    // User-scoped, not project-scoped: abandoned runs on OTHER projects still occupy the per-user quota,
+    // and a project-scoped sweep could never clear them.
+    expect(runMocks.expireStaleAiReportRuns).toHaveBeenCalledWith("user-1");
     // ...and it runs BEFORE the insert, or it would be reaping a slot the insert already lost.
     const expireOrder = runMocks.expireStaleAiReportRuns.mock.invocationCallOrder[0];
     const insertOrder = runMocks.insertAiReportRunTx.mock.invocationCallOrder[0];
@@ -230,6 +249,7 @@ describe("POST /field/reports/ai-generate", () => {
       status: "running",
       photoIds: [PHOTO_A],
       focusPrompt: "roof drainage only",
+      reportTitle: null,
     } as never);
 
     const res = await request(buildApp())
@@ -268,8 +288,8 @@ describe("POST /field/reports/ai-generate", () => {
       .post("/api/field/reports/ai-generate")
       .send({ projectId: PROJECT, photoIds: [PHOTO_A] });
 
+    // The point is that it surfaces as a 500 rather than being mistaken for a duplicate and answered 202.
     expect(res.status).toBe(500);
-    expect(runMocks.getInFlightAiReportRun).not.toHaveBeenCalled();
   });
 
   it("surfaces the original conflict when the in-flight run finished in the gap", async () => {
@@ -290,13 +310,35 @@ describe("POST /field/reports/ai-generate", () => {
   it("caps a user's concurrent runs across ALL projects, not just this one", async () => {
     // The in-flight unique index is per (project, requester), and a field user can reach every active
     // project — so without this one account could queue a paid 60-photo run for each of them in sequence.
-    runMocks.countInFlightAiReportRunsForUser.mockResolvedValueOnce(3 as never);
+    // The quota is refused by the INSERT itself (atomic), not by a pre-check that a parallel burst walks past.
+    const quota = new runMocks.AiReportQuotaExceededError(3);
+    runMocks.insertAiReportRunTx.mockRejectedValueOnce(quota as never);
+
     const res = await request(buildApp())
       .post("/api/field/reports/ai-generate")
       .send({ projectId: PROJECT, photoIds: [PHOTO_A] });
 
     expect(res.status).toBe(429);
     expect(res.body.error.message).toMatch(/already have 3 AI reports/i);
+  });
+
+  it("lets an identical retry resume its run even when the user is at quota", async () => {
+    // A retry of the same request creates no new work. Rejecting it on quota would strip the client of the
+    // only run id it can poll, so the duplicate check runs BEFORE the quota.
+    runMocks.getInFlightAiReportRun.mockResolvedValue({
+      id: "run-existing",
+      status: "running",
+      photoIds: [PHOTO_A],
+      focusPrompt: null,
+      reportTitle: null,
+    } as never);
+
+    const res = await request(buildApp())
+      .post("/api/field/reports/ai-generate")
+      .send({ projectId: PROJECT, photoIds: [PHOTO_A] });
+
+    expect(res.status).toBe(202);
+    expect(res.body).toEqual({ runId: "run-existing", status: "running" });
     expect(runMocks.insertAiReportRunTx).not.toHaveBeenCalled();
   });
 

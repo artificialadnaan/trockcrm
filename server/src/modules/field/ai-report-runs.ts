@@ -94,10 +94,15 @@ export async function insertAiReportRunTx(db: FieldTenantDb, input: NewAiReportR
   // a value LIST — `($1, $2)::uuid[]` — which is not valid array syntax and fails EVERY insert with a
   // syntax error. sql.param binds the whole array as one parameter. Pinned by a real-SQL runtime test
   // (field-ai-report-runs.runtime.test.ts) rather than a mock, because a mocked insert cannot catch this.
+  // The per-user quota is enforced INSIDE this statement, not by a preceding SELECT. A count-then-insert is
+  // a pre-lock snapshot: concurrent POSTs for DIFFERENT projects each read "under the limit" before any of
+  // them commits, and the unique index only serialises the same (deal, requester) — so a parallel burst
+  // walks straight through a JS check and queues an unbounded number of paid 60-photo runs. Making the
+  // predicate part of the INSERT is what actually holds under concurrency.
   const result = await db.execute<RunRow>(sql`
     INSERT INTO public.field_ai_report_runs
       (deal_id, office_id, office_slug, requested_by, photo_ids, report_title, focus_prompt, status)
-    VALUES (
+    SELECT
       ${input.dealId}::uuid,
       ${input.officeId}::uuid,
       ${input.officeSlug},
@@ -106,11 +111,17 @@ export async function insertAiReportRunTx(db: FieldTenantDb, input: NewAiReportR
       ${input.reportTitle},
       ${input.focusPrompt},
       'queued'
-    )
+    WHERE (
+      SELECT count(*)
+        FROM public.field_ai_report_runs
+       WHERE requested_by = ${input.requestedBy}::uuid
+         AND status IN ('queued', 'running')
+    ) < ${MAX_IN_FLIGHT_RUNS_PER_USER}
     RETURNING *
   `);
   const row = (result as unknown as { rows: RunRow[] }).rows[0];
-  if (!row) throw new Error("Failed to create the AI report run.");
+  // No row means the WHERE predicate rejected it — the user is at their quota.
+  if (!row) throw new AiReportQuotaExceededError(MAX_IN_FLIGHT_RUNS_PER_USER);
   return toRun(row);
 }
 
@@ -125,22 +136,29 @@ export async function insertAiReportRunTx(db: FieldTenantDb, input: NewAiReportR
 const STALE_RUN_MINUTES = 20;
 
 /**
- * Fail any abandoned run holding this user's in-flight slot for this project, and report how many were
- * cleared. Called before enqueueing, so the lockout is self-healing on the user's next attempt rather than
- * needing an operator.
+ * Fail this user's abandoned runs ACROSS EVERY PROJECT, and report how many were cleared. Called before
+ * enqueueing, so a lockout is self-healing on the user's next attempt rather than needing an operator.
+ *
+ * User-scoped, not project-scoped: the per-user concurrency quota counts runs on every project, so three
+ * abandoned runs on OTHER projects would otherwise 429 the user forever — a project-scoped sweep can never
+ * clear them, and they would have to revisit each original project just to unstick themselves.
+ *
+ * Staleness is measured from COALESCE(started_at, created_at), not created_at. The AI-report poller is
+ * serial, so a run can legitimately sit queued for a long while and only start recently; measuring from
+ * creation would expire a run that is actively mid-model-call, free its slot, and let a replacement be
+ * queued while the original keeps spending.
  */
-export async function expireStaleAiReportRuns(dealId: string, requestedBy: string): Promise<number> {
+export async function expireStaleAiReportRuns(requestedBy: string): Promise<number> {
   const result = await pool.query(
     `UPDATE public.field_ai_report_runs
         SET status = 'failed',
             error = 'This report was abandoned before it finished. Please try again.',
             finished_at = now(),
             updated_at = now()
-      WHERE deal_id = $1::uuid
-        AND requested_by = $2::uuid
+      WHERE requested_by = $1::uuid
         AND status IN ('queued', 'running')
-        AND created_at < now() - ($3 || ' minutes')::interval`,
-    [dealId, requestedBy, String(STALE_RUN_MINUTES)],
+        AND COALESCE(started_at, created_at) < now() - ($2 || ' minutes')::interval`,
+    [requestedBy, String(STALE_RUN_MINUTES)],
   );
   return result.rowCount ?? 0;
 }
@@ -178,15 +196,12 @@ export function isInFlightRunConflict(error: unknown): boolean {
  */
 export const MAX_IN_FLIGHT_RUNS_PER_USER = 3;
 
-/** In-flight runs for this user across every project. */
-export async function countInFlightAiReportRunsForUser(requestedBy: string): Promise<number> {
-  const result = await pool.query<{ count: string }>(
-    `SELECT count(*)::text AS count
-       FROM public.field_ai_report_runs
-      WHERE requested_by = $1::uuid AND status IN ('queued', 'running')`,
-    [requestedBy],
-  );
-  return Number(result.rows[0]?.count ?? 0);
+/** Raised when the INSERT is refused because the user is already at their concurrent-run quota. */
+export class AiReportQuotaExceededError extends Error {
+  constructor(readonly limit: number) {
+    super(`Quota of ${limit} concurrent AI reports reached.`);
+    this.name = "AiReportQuotaExceededError";
+  }
 }
 
 /**

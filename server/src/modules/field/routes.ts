@@ -4,8 +4,7 @@ import { requireFieldContractor } from "../../middleware/field-auth.js";
 import { isAiReportConfigured, MAX_FOCUS_PROMPT_LENGTH } from "./ai-report-service.js";
 import {
   AI_REPORT_JOB_TYPE,
-  MAX_IN_FLIGHT_RUNS_PER_USER,
-  countInFlightAiReportRunsForUser,
+  AiReportQuotaExceededError,
   expireStaleAiReportRuns,
   getAiReportRun,
   getInFlightAiReportRun,
@@ -894,6 +893,25 @@ fieldRoutes.post("/reports/generate", requireFieldContractor, async (req, res, n
 /** Bounds the per-report model spend (each photo is ~1.6k input tokens plus its findings output). */
 const AI_REPORT_MAX_PHOTOS = 60;
 
+/**
+ * Is an in-flight run the SAME request as the one being made now?
+ *
+ * Only an exact match may be handed back. The in-flight unique index keys on (deal, requester) alone, so a
+ * user who changes the focus, the selection or the title and taps again also collides — and returning the
+ * earlier run would open a PDF that answers a different question.
+ */
+function matchesRequest(
+  run: { photoIds: string[]; focusPrompt: string | null; reportTitle: string | null },
+  request: { photoIds: string[]; focusPrompt: string; reportTitle: string },
+): boolean {
+  return (
+    (run.focusPrompt ?? "") === request.focusPrompt &&
+    (run.reportTitle ?? "") === request.reportTitle &&
+    run.photoIds.length === request.photoIds.length &&
+    run.photoIds.every((id, index) => id === request.photoIds[index])
+  );
+}
+
 fieldRoutes.post("/reports/ai-generate", requireFieldContractor, async (req, res, next) => {
   try {
     if (!isAiReportConfigured()) {
@@ -920,25 +938,23 @@ fieldRoutes.post("/reports/ai-generate", requireFieldContractor, async (req, res
     const focusPrompt =
       typeof req.body.focusPrompt === "string" ? req.body.focusPrompt.trim().slice(0, MAX_FOCUS_PROMPT_LENGTH) : "";
 
-    // Release the in-flight slot if a previous run was abandoned (worker died mid-flight). Without this the
-    // unique index below would lock this user out of AI reports on this project permanently.
-    const expired = await expireStaleAiReportRuns(projectId, req.fieldUser!.id);
+    // Release any slot held by an abandoned run (worker died mid-flight), across ALL of this user's
+    // projects. Without this the guards below would lock them out permanently.
+    const expired = await expireStaleAiReportRuns(req.fieldUser!.id);
     if (expired > 0) {
       console.warn("[field-ai-report] cleared abandoned run(s) before enqueue", {
-        dealId: projectId,
         userId: req.fieldUser!.id,
         expired,
       });
     }
 
-    // Bound this user's TOTAL concurrent spend, not just their spend on this project. The in-flight unique
-    // index is per (project, requester), and a field user can reach every active project.
-    const inFlight = await countInFlightAiReportRunsForUser(req.fieldUser!.id);
-    if (inFlight >= MAX_IN_FLIGHT_RUNS_PER_USER) {
-      throw new AppError(
-        429,
-        `You already have ${inFlight} AI reports being generated. Wait for one to finish before starting another.`,
-      );
+    // Resolve an identical in-flight request BEFORE any quota is applied. A retry of the same request (a
+    // lost 202, a flaky connection) creates no new work and should simply resume polling the original run —
+    // rejecting it on quota would strip the client of the one run id it needs.
+    const alreadyRunning = await getInFlightAiReportRun(projectId, req.fieldUser!.id);
+    if (alreadyRunning && matchesRequest(alreadyRunning, { photoIds, focusPrompt, reportTitle })) {
+      res.status(202).json({ runId: alreadyRunning.id, status: alreadyRunning.status });
+      return;
     }
 
     let run;
@@ -972,26 +988,19 @@ fieldRoutes.post("/reports/ai-generate", requireFieldContractor, async (req, res
         "Project not found",
       );
     } catch (err) {
-      // Lost the race on field_ai_report_runs_inflight_uidx — this user already has a run in flight for
-      // this project.
+      // The INSERT's own quota predicate refused it — atomic, so this is authoritative under concurrency.
+      if (err instanceof AiReportQuotaExceededError) {
+        throw new AppError(
+          429,
+          `You already have ${err.limit} AI reports being generated. Wait for one to finish before starting another.`,
+        );
+      }
+      // Lost the race on field_ai_report_runs_inflight_uidx — a concurrent request for this same project
+      // committed first (the identical-request case was already handled before the quota, above).
       if (!isInFlightRunConflict(err)) throw err;
       const existing = await getInFlightAiReportRun(projectId, req.fieldUser!.id);
       if (!existing) throw err; // it finished in the gap — let the original error surface
-
-      // Only treat it as a duplicate when it is genuinely the SAME request. The index keys on
-      // (deal, requester) alone, so a user who changes the focus or the photo selection and taps again also
-      // lands here — and handing back the first run would open the earlier PDF as though it answered the new
-      // question. Silently serving the wrong report is far worse than making them wait.
-      // focusPrompt/reportTitle are already "" when absent; the stored columns are null in that case.
-      // The TITLE counts too: two otherwise-identical requests with different titles are different requests,
-      // and returning the first would hand back a PDF titled something the caller never asked for.
-      const sameRequest =
-        (existing.focusPrompt ?? "") === focusPrompt &&
-        (existing.reportTitle ?? "") === reportTitle &&
-        existing.photoIds.length === photoIds.length &&
-        existing.photoIds.every((id, index) => id === photoIds[index]);
-
-      if (!sameRequest) {
+      if (!matchesRequest(existing, { photoIds, focusPrompt, reportTitle })) {
         throw new AppError(
           409,
           "A different AI report is still being generated for this project. Wait for it to finish, then try again.",

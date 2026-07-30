@@ -5,7 +5,11 @@ import { pool } from "../../db.js";
 import { buildDealPhotoTimelineConditions } from "../files/photo-timeline-filters.js";
 import { getFieldOfficeById, runInOfficeTransaction } from "./cross-office.js";
 import { assertActiveFieldProject } from "./projects-service.js";
-import { generateFieldPhotoReport } from "./photo-reports-service.js";
+import {
+  prepareFieldPhotoReport,
+  recordFieldPhotoReportFile,
+  renderAndStoreFieldPhotoReportPdf,
+} from "./photo-reports-service.js";
 import {
   generateAiPhotoAssessment,
   serializeFinding,
@@ -45,6 +49,12 @@ export { AI_REPORT_JOB_TYPE };
 export type AiReportJobPayload = { runId: string };
 
 const REPORT_SECTION_TITLE = "Photo Findings";
+
+/**
+ * How long to ask the queue to wait before redelivering a job whose run is held by a live attempt.
+ * Comfortably inside the run's own stale window, so the retry lands soon after the run becomes reclaimable.
+ */
+const RECLAIM_RETRY_SECONDS = 5 * 60;
 
 type Requester = { id: string; role: UserRole; displayName: string };
 
@@ -118,15 +128,23 @@ async function loadPhotosForAssessment(
 export async function runFieldAiReportJob(
   payload: AiReportJobPayload,
   deps: AiReportDeps = {},
-): Promise<{ claimed: boolean; fileId?: string }> {
+): Promise<{ claimed: boolean; fileId?: string; retryAfterSeconds?: number }> {
   const runId = String(payload?.runId ?? "").trim();
   if (!runId) throw new Error("ai_report_generation payload is missing runId");
 
   const run = await getAiReportRun(runId);
   if (!run) throw new Error(`ai_report_generation run ${runId} not found`);
   if (!(await markAiReportRunRunning(runId))) {
-    console.warn("[field-ai-report] run already claimed; skipping", { runId, status: run.status });
-    return { claimed: false };
+    // Not claimable. Two very different reasons, and conflating them strands runs:
+    //   * already terminal  → the work is done; let the queue complete this delivery.
+    //   * still 'running'   → another attempt holds it and is not yet stale. recoverStaleJobs requeues the
+    //     QUEUE row after 5 minutes while a run stays protected for 20, so simply returning here would let
+    //     processJob mark the redelivered job COMPLETED and no worker would ever come back — the run sits in
+    //     'running' until the sweep expires it and the user has to start over. Ask the queue to redeliver
+    //     later instead, so the run is picked up the moment it becomes reclaimable.
+    const terminal = run.status === "succeeded" || run.status === "failed";
+    console.warn("[field-ai-report] run not claimable", { runId, status: run.status, terminal });
+    return { claimed: false, retryAfterSeconds: terminal ? undefined : RECLAIM_RETRY_SECONDS };
   }
 
   let usage: AiReportUsage | null = null;
@@ -170,10 +188,9 @@ export async function runFieldAiReportJob(
 
     const findingById = new Map(assessment.findings.map((finding) => [finding.photoId, finding]));
 
-    // ── Phase C: short transaction — render + store ──────────────────────────────────────────────
-    const { report } = await runInOfficeTransaction(office, requester.id, (db) =>
-      generateFieldPhotoReport(db, access, {
-        officeSlug: office.slug,
+    // ── Phase C: short transaction — read what the renderer needs ────────────────────────────────
+    const prepared = await runInOfficeTransaction(office, requester.id, (db) =>
+      prepareFieldPhotoReport(db, access, {
         projectId: run.dealId,
         reportTitle: run.reportTitle?.trim() || `${projectName} Condition Assessment`,
         executiveSummary: assessment.executiveSummary,
@@ -200,6 +217,17 @@ export async function runFieldAiReportJob(
           },
         ],
       }),
+    );
+
+    // ── Phase D: NO transaction — render the PDF and upload it ───────────────────────────────────
+    // Same reasoning as Phase B. Rendering a 60-page report downloads and decodes every original and then
+    // uploads the result: minutes of work, and none of it touches the database. Doing it inside the
+    // transaction above would hold a pooled client idle-in-transaction for that whole time.
+    const stored = await renderAndStoreFieldPhotoReportPdf(prepared, office.slug);
+
+    // ── Phase E: short transaction — record the file row ─────────────────────────────────────────
+    const { report } = await runInOfficeTransaction(office, requester.id, (db) =>
+      recordFieldPhotoReportFile(db, access, prepared, stored),
     );
 
     // From here the PDF EXISTS — it is committed to `files` and uploaded to R2, and it is already visible in

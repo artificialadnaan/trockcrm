@@ -221,6 +221,8 @@ async function loadReportRenderPhotos(
       r2Key: files.r2Key,
       externalUrl: files.externalUrl,
       externalThumbnailUrl: files.externalThumbnailUrl,
+      // Drives the renderer's transcode decision — a HEIC original embeds as "Image unavailable" otherwise.
+      mimeType: files.mimeType,
     })
     .from(files)
     .leftJoin(users, eq(users.id, files.uploadedBy))
@@ -237,11 +239,14 @@ async function loadReportRenderPhotos(
   }]));
 }
 
-export async function generateFieldPhotoReport(
+/**
+ * Read the project and photo rows and assemble everything the renderer needs. DB-only — this is the part
+ * that must run inside the office transaction.
+ */
+export async function prepareFieldPhotoReport(
   tenantDb: TenantDb,
   access: FieldAccessContext,
   input: {
-    officeSlug: string;
     projectId: string;
     reportTitle: string;
     executiveSummary?: string | null;
@@ -310,20 +315,60 @@ export async function generateFieldPhotoReport(
   // Cap the free-form summary so a pathological payload can't balloon the PDF into hundreds of pages;
   // blank/whitespace collapses to null (renderer adds no page for it).
   const executiveSummary = input.executiveSummary?.trim() ? input.executiveSummary.trim().slice(0, 5000) : null;
+  return {
+    project,
+    title,
+    cover,
+    renderSections,
+    executiveSummary,
+    photoLayout: input.photoLayout,
+    fileDescription: input.fileDescription ?? null,
+    now,
+  };
+}
+
+export type PreparedFieldPhotoReport = Awaited<ReturnType<typeof prepareFieldPhotoReport>>;
+
+/**
+ * Render the PDF and put it in R2. Touches NO database — deliberately, so the caller can run this outside a
+ * transaction. Rendering a 60-page report downloads and decodes every original and then uploads the result,
+ * which is minutes of work; doing it while holding a pooled client leaves a connection idle-in-transaction
+ * for the duration, and a worker pool is small. Returns everything the file row needs.
+ */
+export async function renderAndStoreFieldPhotoReportPdf(prepared: PreparedFieldPhotoReport, officeSlug: string) {
+  const { project, title, cover, renderSections, executiveSummary, photoLayout, now } = prepared;
   const pdfBuffer = await renderFieldPhotoReportPdf({
     cover,
     sections: renderSections,
     executiveSummary,
-    photoLayout: input.photoLayout,
+    photoLayout,
   });
   const bucketName = process.env.R2_BUCKET_NAME || "trock-crm-files";
   const fileExtension = ".pdf";
   const systemFilename = `${slugify(title)}-${now.toISOString().slice(0, 10)}-${crypto.randomUUID().slice(0, 8)}${fileExtension}`;
   const yearMonth = now.toISOString().slice(0, 7);
-  const r2Key = `office_${input.officeSlug}/deals/${project.dealNumber}/documents/photo-reports/${yearMonth}/${systemFilename}`;
+  const r2Key = `office_${officeSlug}/deals/${project.dealNumber}/documents/photo-reports/${yearMonth}/${systemFilename}`;
   const expiresAt = new Date(now.getTime() + REPORT_RETENTION_MS).toISOString();
   const pdfUrl = await generateDownloadUrl(r2Key, REPORT_DOWNLOAD_EXPIRY_SECONDS, `${title}${fileExtension}`);
   await putObject(r2Key, pdfBuffer, "application/pdf");
+
+  return { r2Key, pdfUrl, expiresAt, systemFilename, yearMonth, bucketName, fileExtension, byteLength: pdfBuffer.byteLength };
+}
+
+export type StoredFieldPhotoReport = Awaited<ReturnType<typeof renderAndStoreFieldPhotoReportPdf>>;
+
+/**
+ * Record the uploaded PDF as a `files` row. The only step here that needs a transaction — kept short on
+ * purpose. On failure the R2 object is deleted so a failed insert cannot leave an orphaned upload.
+ */
+export async function recordFieldPhotoReportFile(
+  tenantDb: TenantDb,
+  access: FieldAccessContext,
+  prepared: PreparedFieldPhotoReport,
+  stored: StoredFieldPhotoReport,
+) {
+  const { project, title, fileDescription } = prepared;
+  const { r2Key, pdfUrl, expiresAt, systemFilename, yearMonth, bucketName, fileExtension, byteLength } = stored;
 
   let file;
   try {
@@ -336,12 +381,12 @@ export async function generateFieldPhotoReport(
       systemFilename,
       originalFilename: `${slugify(title)}${fileExtension}`,
       mimeType: "application/pdf",
-      fileSizeBytes: pdfBuffer.byteLength,
+      fileSizeBytes: byteLength,
       fileExtension,
       r2Key,
       r2Bucket: bucketName,
       dealId: project.id,
-      description: input.fileDescription?.trim() || `Generated photo report for ${project.name}`,
+      description: fileDescription?.trim() || `Generated photo report for ${project.name}`,
       uploadedBy: access.userId,
     }).returning();
   } catch (error) {
@@ -358,6 +403,23 @@ export async function generateFieldPhotoReport(
       createdAt: new Date(file.createdAt).toISOString(),
     },
   };
+}
+
+/**
+ * The synchronous path (POST /reports/generate): prepare, render+upload, record — all on the caller's
+ * connection, exactly as before this was split. Behaviour is unchanged for the human "Generate PDF" flow.
+ *
+ * The AI report deliberately does NOT use this wrapper: it runs the render+upload step between two short
+ * transactions instead, so a 60-photo render cannot hold a pooled client idle-in-transaction for minutes.
+ */
+export async function generateFieldPhotoReport(
+  tenantDb: TenantDb,
+  access: FieldAccessContext,
+  input: Parameters<typeof prepareFieldPhotoReport>[2] & { officeSlug: string },
+) {
+  const prepared = await prepareFieldPhotoReport(tenantDb, access, input);
+  const stored = await renderAndStoreFieldPhotoReportPdf(prepared, input.officeSlug);
+  return recordFieldPhotoReportFile(tenantDb, access, prepared, stored);
 }
 
 export async function listFieldProjectReports(

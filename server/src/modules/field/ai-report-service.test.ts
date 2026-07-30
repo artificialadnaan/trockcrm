@@ -371,6 +371,21 @@ describe("ai-report-service", () => {
     expect(body.messages[0].content.filter((b: { type: string }) => b.type === "image")).toHaveLength(1);
   });
 
+  it("skips an orphaned photo whose object is gone, but not a storage outage", async () => {
+    // A 404 is a permanent property of that row (the object is genuinely absent); an outage is not. r2-client
+    // draws the same line so a storage failure never triggers an expensive stampede.
+    const missing = Object.assign(new Error("NoSuchKey"), { name: "NoSuchKey", $metadata: { httpStatusCode: 404 } });
+    const load = vi.fn(async (p: AiReportPhotoInput) => {
+      if (p.id === "b") throw missing;
+      return { buffer: TINY_JPEG, contentType: "image/jpeg" };
+    });
+    const result = await generateAiPhotoAssessment(
+      { projectName: "P", photos: [photo("a"), photo("b")] },
+      { fetchFn: stubFetch([FINDINGS_OK, SUMMARY_OK]) as unknown as typeof fetch, loadPhotoBuffer: load },
+    );
+    expect(result.executiveSummary).toBeTruthy(); // the orphan did not cost the report
+  });
+
   it("does not demand key concerns when nothing was worth citing", async () => {
     // Requiring "3 to 7 key concerns" over an empty digest pressures the model into inventing issues —
     // exactly what the rest of the prompt exists to prevent.

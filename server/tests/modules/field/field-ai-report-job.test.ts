@@ -32,7 +32,9 @@ const aiMocks = vi.hoisted(() => ({
 vi.mock("../../../src/modules/field/ai-report-service.js", () => aiMocks);
 
 const reportMocks = vi.hoisted(() => ({
-  generateFieldPhotoReport: vi.fn(async () => ({ report: { id: "file-1", title: "T", pdfUrl: "u", expiresAt: null, createdAt: "" } })),
+  prepareFieldPhotoReport: vi.fn(),
+  renderAndStoreFieldPhotoReportPdf: vi.fn(),
+  recordFieldPhotoReportFile: vi.fn(),
 }));
 vi.mock("../../../src/modules/field/photo-reports-service.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../../src/modules/field/photo-reports-service.js")>()),
@@ -122,27 +124,44 @@ beforeEach(() => {
       usage: { model: "claude-sonnet-5", inputTokens: 10, outputTokens: 5, costUsd: 0.001 },
     };
   });
-  reportMocks.generateFieldPhotoReport.mockResolvedValue({
-    report: { id: "file-1", title: "T", pdfUrl: "u", expiresAt: null, createdAt: "" },
-  } as any);
+  reportMocks.prepareFieldPhotoReport.mockImplementation(async (_db: any, _access: any, input: any) => {
+    timeline.events.push("prepare");
+    return { prepared: true, input } as any;
+  });
+  reportMocks.renderAndStoreFieldPhotoReportPdf.mockImplementation(async () => {
+    timeline.events.push("render+upload");
+    return { r2Key: "k" } as any;
+  });
+  reportMocks.recordFieldPhotoReportFile.mockImplementation(async () => {
+    timeline.events.push("record");
+    return { report: { id: "file-1", title: "T", pdfUrl: "u", expiresAt: null, createdAt: "" } } as any;
+  });
 });
 
 describe("runFieldAiReportJob", () => {
-  it("calls the model OUTSIDE any office transaction", async () => {
+  it("runs BOTH slow steps outside any office transaction", async () => {
     await runFieldAiReportJob({ runId: "run-1" });
-    // Two separate short transactions with the model call strictly between them. If the model call ever
-    // moves inside one, this becomes tx:open,model:call,tx:close and the assertion fails.
-    expect(timeline.events).toEqual(["tx:open", "tx:close", "model:call", "tx:open", "tx:close"]);
+    // The two expensive steps — the model call, and rendering + uploading a potentially 60-page PDF — each
+    // sit strictly BETWEEN transactions, never inside one. runInOfficeTransaction holds a pooled client
+    // under a 30s statement_timeout; minutes of work inside it is the documented pool-saturation failure.
+    // If either ever moves inside a transaction, it appears between a tx:open/tx:close pair here.
+    expect(timeline.events).toEqual([
+      "tx:open", "tx:close",        // Phase A — load project + photos
+      "model:call",                 // Phase B — Claude, no transaction held
+      "tx:open", "prepare", "tx:close", // Phase C — read what the renderer needs
+      "render+upload",              // Phase D — render + R2, no transaction held
+      "tx:open", "record", "tx:close",  // Phase E — write the files row
+    ]);
   });
 
   it("prints every selected photo but overrides only the ones the model wrote about", async () => {
     await runFieldAiReportJob({ runId: "run-1" });
 
-    const input = reportMocks.generateFieldPhotoReport.mock.calls[0][2] as any;
+    const input = reportMocks.prepareFieldPhotoReport.mock.calls[0][2] as any;
     expect(input.photoIds ?? input.sections[0].photoIds).toEqual([PHOTO_A, PHOTO_B]);
     expect(input.sections[0].photoOverrides).toEqual([
       { id: PHOTO_A, description: "North elevation\n- Rust bleed below the cap flashing." },
-      // null → generateFieldPhotoReport falls back to the photo's own stored caption, leaving a
+      // null → the renderer falls back to the photo's own stored caption, leaving a
       // passed-over photo reading exactly as the field left it.
       { id: PHOTO_B, description: null },
     ]);
@@ -174,10 +193,25 @@ describe("runFieldAiReportJob", () => {
     // job_queue can redeliver after a worker dies mid-flight; a second pass costs real money and would
     // file a second PDF for one tap.
     runMocks.markAiReportRunRunning.mockResolvedValue(false);
+    runMocks.getAiReportRun.mockResolvedValue(baseRun({ status: "succeeded" }) as any);
     const result = await runFieldAiReportJob({ runId: "run-1" });
-    expect(result).toEqual({ claimed: false });
+    // Already terminal → the queue may complete this delivery; no deferral.
+    expect(result).toEqual({ claimed: false, retryAfterSeconds: undefined });
     expect(aiMocks.generateAiPhotoAssessment).not.toHaveBeenCalled();
-    expect(reportMocks.generateFieldPhotoReport).not.toHaveBeenCalled();
+    expect(reportMocks.prepareFieldPhotoReport).not.toHaveBeenCalled();
+  });
+
+  it("defers redelivery when the run is still held by a live attempt", async () => {
+    // recoverStaleJobs requeues the QUEUE row after 5 minutes while a run stays protected for 20. Returning
+    // plain "not claimed" would let processJob mark the redelivered job COMPLETED, and nothing would ever
+    // come back for the run — it would sit in 'running' until the sweep expired it.
+    runMocks.markAiReportRunRunning.mockResolvedValue(false);
+    runMocks.getAiReportRun.mockResolvedValue(baseRun({ status: "running" }) as any);
+
+    const result = await runFieldAiReportJob({ runId: "run-1" });
+    expect(result.claimed).toBe(false);
+    expect(result.retryAfterSeconds).toBeGreaterThan(0);
+    expect(aiMocks.generateAiPhotoAssessment).not.toHaveBeenCalled();
   });
 
   it("records a model failure on the run instead of throwing it back at the queue", async () => {
@@ -196,7 +230,7 @@ describe("runFieldAiReportJob", () => {
   it("never puts a raw driver error on the run row — that text reaches the phone", async () => {
     // drizzle's DrizzleQueryError message is the entire failing SQL plus its bound parameters.
     const leaky = new Error("Failed query: INSERT INTO office_dallas.files (...) params: user-1,secret-key");
-    reportMocks.generateFieldPhotoReport.mockRejectedValue(leaky);
+    reportMocks.renderAndStoreFieldPhotoReportPdf.mockRejectedValue(leaky);
     await runFieldAiReportJob({ runId: "run-1" });
 
     const [, storedMessage] = runMocks.markAiReportRunFailed.mock.calls[0];
@@ -206,7 +240,7 @@ describe("runFieldAiReportJob", () => {
   });
 
   it("still records the spend when the run dies AFTER the model call", async () => {
-    reportMocks.generateFieldPhotoReport.mockRejectedValue(new Error("R2 unavailable"));
+    reportMocks.renderAndStoreFieldPhotoReportPdf.mockRejectedValue(new Error("R2 unavailable"));
     await runFieldAiReportJob({ runId: "run-1" });
     // Usage is attributed even though the report never landed — the tokens were already bought.
     expect(runMocks.markAiReportRunFailed).toHaveBeenCalledWith(

@@ -2,6 +2,7 @@ import PDFDocument from "pdfkit";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { getObjectBuffer, isR2Configured } from "../../lib/r2-client.js";
+import { generateEvidenceJpeg } from "../../lib/image-thumbnail.js";
 import { TROCK_LOGO_PNG_BASE64 } from "./pdf-logo.js";
 
 const PAGE_WIDTH = 612;
@@ -101,6 +102,12 @@ export type ReportRenderablePhoto = {
   r2Key: string | null;
   externalUrl: string | null;
   externalThumbnailUrl: string | null;
+  /**
+   * Stored MIME type, used to decide whether the original needs transcoding before PDFKit can embed it
+   * (PDFKit accepts JPEG/PNG only). Optional so existing callers are unaffected; when absent the loader
+   * falls back to the type R2 reports, and transcodes anything it cannot confirm is native.
+   */
+  mimeType?: string | null;
 };
 
 export type ReportRenderSection = {
@@ -250,11 +257,29 @@ async function fetchExternalImageBuffer(url: string): Promise<Buffer | null> {
  */
 const MAX_RENDER_SOURCE_BYTES = 40 * 1024 * 1024;
 
+/**
+ * PDFKit's image loader accepts JPEG and PNG only. Anything else — HEIC/HEIF straight off an iPhone, WebP,
+ * TIFF, AVIF — makes openImage throw, and the page prints "Image unavailable" for a photograph that is
+ * perfectly fine. Transcode those to JPEG first, using the same pipeline that already handles HEIC decode,
+ * EXIF rotation and transparency flattening elsewhere.
+ */
+const PDFKIT_NATIVE_MIME = /^image\/(jpeg|jpg|png)$/i;
+/** Generous enough to stay sharp at full page width, without re-encoding a 4000px original at full size. */
+const RENDER_TRANSCODE_MAX_EDGE = 2000;
+
 async function loadPhotoBuffer(photo: ReportRenderablePhoto): Promise<Buffer | null> {
   if (photo.r2Key && isR2Configured()) {
     try {
-      const { buffer } = await getObjectBuffer(photo.r2Key, { maxBytes: MAX_RENDER_SOURCE_BYTES });
-      return buffer;
+      const { buffer, contentType } = await getObjectBuffer(photo.r2Key, { maxBytes: MAX_RENDER_SOURCE_BYTES });
+      const mime = photo.mimeType ?? contentType ?? null;
+      if (mime && PDFKIT_NATIVE_MIME.test(mime)) return buffer;
+      // Unknown or non-native format: transcode. Falls back to the raw bytes if that fails, so a format
+      // sharp cannot read behaves exactly as before (placeholder) rather than regressing.
+      try {
+        return await generateEvidenceJpeg(buffer, mime, { maxEdge: RENDER_TRANSCODE_MAX_EDGE, quality: 82 });
+      } catch {
+        return buffer;
+      }
     } catch {
       return null;
     }

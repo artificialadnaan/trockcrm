@@ -198,9 +198,9 @@ export function registerAllJobs() {
   // T Rock Cam "AI Report". The office is carried on the run row (public.field_ai_report_runs), not taken
   // from the job's office_id — the run must render into the office the DEAL lives in, which under
   // cross-office writes is not necessarily the office the request was made from.
-  registerJobHandler("ai_report_generation", async (payload) => {
-    await handleAiReportGeneration(payload);
-  });
+  // Returns the handler result (does NOT discard it): a run still held by a live attempt comes back as a
+  // deferral, which must reschedule the delivery rather than be recorded as completed.
+  registerJobHandler("ai_report_generation", (payload) => handleAiReportGeneration(payload));
 
   registerJobHandler("ai_generate_intervention_policy_recommendations", async (payload) => {
     await runAiGenerateInterventionPolicyRecommendations(payload);

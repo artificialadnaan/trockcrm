@@ -1,4 +1,4 @@
-import { getObjectBuffer, ObjectTooLargeError } from "../../lib/r2-client.js";
+import { getObjectBuffer, isR2ObjectNotFoundError, ObjectTooLargeError } from "../../lib/r2-client.js";
 import { generateEvidenceJpeg } from "../../lib/image-thumbnail.js";
 
 /**
@@ -492,10 +492,20 @@ async function prepareImages(photos: AiReportPhotoInput[], deps: AiReportDeps): 
   return prepared;
 }
 
-/** True for failures that are permanent properties of the object itself, not of the storage layer. */
+/**
+ * True for failures that are permanent properties of the object itself, not of the storage layer.
+ *
+ * The split matters: a permanent one skips that photo and the report continues, a storage one fails the run
+ * rather than quietly shrinking the analysed set. r2-client draws exactly this line already — its
+ * isR2ObjectNotFoundError exists "so a storage outage returns a retryable error instead of launching an
+ * expensive regeneration stampede".
+ */
 function isUnreadableObjectError(error: unknown): boolean {
+  // Too big to read, ever.
   if (error instanceof ObjectTooLargeError) return true;
-  // The photo has no stored original at all (external-only import) — nothing to send, but nothing broken.
+  // The object is genuinely gone — an orphaned row, not an outage. One of those must not cost the report.
+  if (isR2ObjectNotFoundError(error)) return true;
+  // No stored original at all (external-only import) — nothing to send, but nothing broken either.
   return error instanceof AiReportError && !error.retryable;
 }
 
