@@ -40,8 +40,10 @@ const ADDRESS_SOURCE_LABEL: Record<string, string> = {
   manual_override: "Manually set",
 };
 
-// Presigned R2 URLs on a FieldPhoto are short-lived (~30 min). The viewer snapshots the photo list at open
-// time, so after the TTL the direct download 403s. Bound the pages we scan when re-fetching a fresh URL so a
+// Presigned R2 URLs on a FieldPhoto expire (PHOTO_LIST_URL_TTL_SECONDS, 6h — an earlier note here said
+// ~30 min, which was the unrelated upload-PUT TTL). The viewer snapshots the photo list at open time, so
+// past the TTL both the direct download AND the image load 403.
+// Bound the pages we scan when re-fetching a fresh URL so a
 // large deal can't spin. This ceiling MUST match the gallery's own page ceiling (useProjectPhotos'
 // PHOTOS_MAX_PAGES) — the viewer can only show a photo the gallery loaded, so any photo the user is looking at
 // is reachable within these pages. A smaller cap (was 5) left a photo past ~1000 (page 5 × 200) unable to
@@ -114,6 +116,8 @@ export function PhotoViewerModal({
   const [freshUrls, setFreshUrls] = useState<Record<string, string>>({});
   // Photo ids that have already spent their automatic refresh, so a genuinely broken photo can't loop.
   const refreshAttempted = useRef<Set<string>>(new Set());
+  // Bumped per photo by Retry so the image can be remounted without its URL having changed.
+  const [retryNonce, setRetryNonce] = useState<Record<string, number>>({});
 
   const onScrollEnd = useCallback(
     (e: NativeSyntheticEvent<NativeScrollEvent>) => {
@@ -235,10 +239,16 @@ export function PhotoViewerModal({
     [projectDealId, uriFor, fetchFreshUrl],
   );
 
-  /** Manual retry from the error state — clears the one-shot guard so the refresh can run again. */
+  /**
+   * Manual retry from the error state. Clearing the one-shot guard and setting "loading" is not enough on
+   * its own: the uri is unchanged, and both the pager's key and expo-image's recyclingKey are derived from
+   * it, so nothing would re-request the image and Retry would spin forever. The nonce changes the key, which
+   * remounts the image and starts a genuinely new load.
+   */
   const retryLoad = useCallback((photo: FieldPhoto) => {
     refreshAttempted.current.delete(photo.id);
     setLoadState((prev) => ({ ...prev, [photo.id]: "loading" }));
+    setRetryNonce((prev) => ({ ...prev, [photo.id]: (prev[photo.id] ?? 0) + 1 }));
   }, []);
 
   const saveToDevice = useCallback(async () => {
@@ -336,10 +346,12 @@ export function PhotoViewerModal({
               onScrollToIndexFailed={({ index: failedIndex }) => {
                 listRef.current?.scrollToOffset({ offset: failedIndex * width, animated: false });
               }}
-              // Each page decodes the FULL-res original (expo-image allowDownscaling={false}), which can be
-              // ~48MB of bitmap in RAM. Cap the mount window so at most the current photo ± one neighbor are
-              // decoded at once — RN's default windowSize (21) would mount ~20 full-res decodes on a large
-              // gallery and jetsam older field iPhones. Neighbors still preload for smooth swiping.
+              // Keep the mount window small — RN's default (21) would mount ~20 decodes on a large gallery
+              // and jetsam older field iPhones. Note windowSize={3} does NOT mean "current ± one neighbor" as
+              // an earlier note here claimed: it is an overscan of (3-1) screen widths split around the
+              // viewport, so the settled window is 4 cells, measured. That over-claim mattered when every
+              // mounted page decoded the full-res original; pages now decode downscaled until zoomed
+              // (see ZoomablePhoto), so 4 mounted cells is cheap and neighbors still preload for smooth swiping.
               windowSize={3}
               maxToRenderPerBatch={2}
               initialNumToRender={2}
@@ -353,8 +365,9 @@ export function PhotoViewerModal({
                       <>
                         <ZoomablePhoto
                           // Keyed by the URL so a re-minted link remounts the image and re-runs the load
-                          // instead of expo-image holding on to the failed one.
-                          key={uri}
+                          // instead of expo-image holding on to the failed one; the retry nonce does the
+                          // same when the user asks again for a URL that hasn't changed.
+                          key={`${uri}#${retryNonce[item.id] ?? 0}`}
                           uri={uri}
                           thumbnailUri={item.imageUrl}
                           cacheKey={item.id}

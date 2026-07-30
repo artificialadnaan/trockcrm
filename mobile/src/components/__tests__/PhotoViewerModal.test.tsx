@@ -17,12 +17,21 @@ jest.mock("react-native-gesture-handler", () => {
 // The zoomable page decodes a real image via expo-image — stub it, but keep the load callbacks reachable so
 // a test can drive a failed decode / expired-URL 403 the way the real image would. testID (not a label) so
 // these stand-ins can't collide with the getByLabelText queries the save tests use.
+const mockZoomableMounts: string[] = [];
 jest.mock("../ZoomablePhoto", () => {
+  const React = require("react");
   const { Pressable } = require("react-native");
   return {
-    ZoomablePhoto: ({ uri, thumbnailUri, onError }: { uri: string; thumbnailUri?: string | null; onError?: () => void }) => (
-      <Pressable testID={`zoomable:${uri}`} accessibilityValue={{ text: thumbnailUri ?? "" }} onPress={() => onError?.()} />
-    ),
+    ZoomablePhoto: ({ uri, thumbnailUri, onError }: { uri: string; thumbnailUri?: string | null; onError?: () => void }) => {
+      // Records MOUNTS (not renders) so a test can prove a retry actually re-requests the image rather
+      // than just re-rendering the same failed one.
+      React.useEffect(() => {
+        mockZoomableMounts.push(uri);
+      }, [uri]);
+      return (
+        <Pressable testID={`zoomable:${uri}`} accessibilityValue={{ text: thumbnailUri ?? "" }} onPress={() => onError?.()} />
+      );
+    },
   };
 });
 jest.mock("@expo/vector-icons", () => ({ Ionicons: () => null }));
@@ -363,6 +372,34 @@ describe("PhotoViewerModal full-res load failure", () => {
     });
 
     expect(mockGetProjectPhotos).toHaveBeenCalledTimes(1);
+  });
+
+  it("Retry re-requests the image — the URL is unchanged, so it must remount rather than spin forever", async () => {
+    mockGetProjectPhotos.mockResolvedValue({
+      photos: [photo({ id: "p1", fullImageUrl: "https://r2.example/full-STALE.jpg" })],
+      pagination: { page: 1, limit: 200, total: 1, totalPages: 1 },
+    });
+    const { getByTestId, getByLabelText } = render(
+      <PhotoViewerModal
+        photos={[photo({ id: "p1", fullImageUrl: "https://r2.example/full-STALE.jpg" })]}
+        initialIndex={0}
+        visible
+        projectDealId="d1"
+        onClose={jest.fn()}
+      />,
+    );
+
+    await act(async () => {
+      fireEvent.press(getByTestId("zoomable:https://r2.example/full-STALE.jpg"));
+    });
+    const mountsBeforeRetry = mockZoomableMounts.length;
+
+    await act(async () => {
+      fireEvent.press(getByLabelText("Retry loading photo"));
+    });
+
+    // The refresh returned the same URL, so nothing about `uri` changed — only a remount can re-request it.
+    expect(mockZoomableMounts.length).toBeGreaterThan(mountsBeforeRetry);
   });
 
   it("hands the cached grid thumbnail down as the placeholder so a slow/failed full-res isn't black", () => {
