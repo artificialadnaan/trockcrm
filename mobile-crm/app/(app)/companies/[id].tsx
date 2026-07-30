@@ -9,8 +9,9 @@ import { useAuth } from "../../../src/auth/AuthContext";
 import { useQueryScope } from "../../../src/auth/useOfficeId";
 import { BackLink } from "../../../src/components/BackLink";
 import { RetryBlock } from "../../../src/components/RetryBlock";
+import { RetryNotice } from "../../../src/components/RetryNotice";
 import { Row } from "../../../src/components/Row";
-import { formatLocation } from "../../../src/format";
+import { formatPostalAddress } from "../../../src/format";
 import { useGoBack } from "../../../src/lib/go-back";
 import { qk } from "../../../src/query/keys";
 import { theme } from "../../../src/theme/theme";
@@ -31,6 +32,7 @@ export default function CompanyDetailScreen() {
 
   const company = query.data;
   const offline = query.error instanceof ApiError && query.error.status === 0;
+  const refreshFailed = Boolean(query.data && query.isError);
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
@@ -56,6 +58,23 @@ export default function CompanyDetailScreen() {
         </View>
       ) : (
         <ScrollView contentContainerStyle={styles.body}>
+          {/* A refetch that failed while a cached record is on screen. TanStack keeps `data` and sets
+              `isError`, so without this the screen renders the OLD phone, website and counts as though
+              they were just confirmed — the exact situation on reopening a detail after losing signal.
+              The cached record stays: it is the best thing available. Only the claim that it is current
+              is withdrawn. */}
+          {refreshFailed ? (
+            <RetryNotice
+              testID="company-refresh-failed"
+              placement="top"
+              message={
+                offline
+                  ? "No signal — showing the last saved copy."
+                  : "Showing the last saved copy — the refresh failed."
+              }
+              onRetry={() => void query.refetch()}
+            />
+          ) : null}
           {company.category ? (
             <Text accessibilityLabel={company.category} style={styles.company} numberOfLines={2}>
               {company.category}
@@ -63,7 +82,16 @@ export default function CompanyDetailScreen() {
           ) : null}
 
           <View style={styles.section}>
-            <Row label="Location" value={formatLocation(company.city, company.state) || "—"} />
+            {/* The full postal address, not just city/state. The server returns `address` and `zip`
+                through getTableColumns(companies); rendering only the locality meant a company with a
+                street on file and no city read "—", and even a complete one withheld the line a rep
+                actually drives to. */}
+            <Row
+              label="Location"
+              value={
+                formatPostalAddress(company.address, company.city, company.state, company.zip) || "—"
+              }
+            />
             {company.industry ? <Row label="Industry" value={company.industry} /> : null}
             {company.phone ? <Row label="Phone" value={company.phone} /> : null}
             {company.website ? <Row label="Website" value={company.website} /> : null}

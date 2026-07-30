@@ -1,5 +1,5 @@
 import { mailtoUrl, phoneParts, smsUrl, telUrl } from "../contact-links";
-import { daysSince, formatDate, formatLocation, formatMoney } from "../format";
+import { daysSince, formatDate, formatLocation, formatPostalAddress, formatMoney } from "../format";
 
 describe("formatMoney", () => {
   it("formats the STRING that Postgres numeric actually sends", () => {
@@ -187,5 +187,42 @@ describe("format fallbacks that looked handled but were not", () => {
     // The whole reason for splitting the parts: new Date("2026-07-04") is UTC midnight, which renders
     // as 3 July for anyone west of Greenwich.
     expect(formatDate("2026-07-04")).toBe("Jul 4, 2026");
+  });
+});
+
+describe("the one-line postal address", () => {
+  it("reads like a mailing label when every piece is on file", () => {
+    expect(formatPostalAddress("1200 Main St", "Dallas", "TX", "75201")).toBe(
+      "1200 Main St, Dallas, TX 75201"
+    );
+  });
+
+  it("still gives the street when city and state are missing", () => {
+    // The bug this replaces: a company row rendered "—" here while the server was returning the
+    // street the whole time. A field app must not withhold the one thing a rep drives to.
+    expect(formatPostalAddress("1200 Main St", null, null, null)).toBe("1200 Main St");
+    expect(formatPostalAddress("1200 Main St", null, null, "75201")).toBe("1200 Main St, 75201");
+  });
+
+  it("drops each missing piece without leaving its separator behind", () => {
+    expect(formatPostalAddress(null, "Dallas", "TX", "75201")).toBe("Dallas, TX 75201");
+    expect(formatPostalAddress("1200 Main St", "Dallas", null, null)).toBe("1200 Main St, Dallas");
+    expect(formatPostalAddress(null, null, "TX", null)).toBe("TX");
+  });
+
+  it("returns an empty string when nothing is on file, so the caller picks the placeholder", () => {
+    expect(formatPostalAddress(null, null, null, null)).toBe("");
+    expect(formatPostalAddress("  ", "", undefined, "   ")).toBe("");
+  });
+
+  it("never emits a stray comma or a doubled space", () => {
+    const inputs = [null, undefined, "", "  ", "x"] as const;
+    for (const a of inputs)
+      for (const c of inputs)
+        for (const st of inputs)
+          for (const z of inputs) {
+            const out = formatPostalAddress(a, c, st, z);
+            expect(out).not.toMatch(/^,|,$|,,|\s\s|,\s*$/);
+          }
   });
 });

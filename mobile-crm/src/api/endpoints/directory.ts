@@ -44,8 +44,15 @@ export type CompanyListItem = {
   name: string;
   category?: string | null;
   industry?: string | null;
+  /**
+   * The FULL address, because the server sends it. `getTableColumns(companies)` puts `address` and
+   * `zip` on both the list rows and the detail record; declaring only city/state made them invisible
+   * to this app, and a company whose city happened to be null then rendered its location as "—".
+   */
+  address?: string | null;
   city?: string | null;
   state?: string | null;
+  zip?: string | null;
   phone?: string | null;
   website?: string | null;
   /**

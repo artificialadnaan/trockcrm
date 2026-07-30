@@ -14,6 +14,7 @@ import { RetryNotice } from "../../../src/components/RetryNotice";
 import { ScreenHeader } from "../../../src/components/ScreenHeader";
 import { formatLocation } from "../../../src/format";
 import { useGoBack } from "../../../src/lib/go-back";
+import { shouldLoadNextPage } from "../../../src/paging";
 import { useDebouncedSearch } from "../../../src/lib/use-debounced-search";
 import { qk } from "../../../src/query/keys";
 import { MIN_SEARCH_LENGTH, searchIsTooShort } from "../../../src/search-query";
@@ -103,11 +104,18 @@ export default function PropertiesListScreen() {
           keyboardShouldPersistTaps="handled"
           onEndReachedThreshold={0.5}
           onEndReached={() => {
-            if (query.hasNextPage && !query.isFetchingNextPage) void query.fetchNextPage();
+            if (shouldLoadNextPage(query)) void query.fetchNextPage();
           }}
           ListFooterComponent={
             query.isFetchingNextPage ? (
               <ActivityIndicator color={theme.color.brandRed} style={styles.more} />
+            ) : query.isFetchNextPageError ? (
+              <RetryNotice
+                testID="properties-more-failed"
+                placement="bottom"
+                message="Couldn't load more. Tap to try again."
+                onRetry={() => void query.fetchNextPage()}
+              />
             ) : null
           }
           data={properties}

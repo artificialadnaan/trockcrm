@@ -9,6 +9,7 @@ import { useAuth } from "../../../src/auth/AuthContext";
 import { useQueryScope } from "../../../src/auth/useOfficeId";
 import { BackLink } from "../../../src/components/BackLink";
 import { RetryBlock } from "../../../src/components/RetryBlock";
+import { RetryNotice } from "../../../src/components/RetryNotice";
 import { Row } from "../../../src/components/Row";
 import { formatLocation } from "../../../src/format";
 import { useGoBack } from "../../../src/lib/go-back";
@@ -31,6 +32,7 @@ export default function PropertyDetailScreen() {
 
   const property = query.data;
   const offline = query.error instanceof ApiError && query.error.status === 0;
+  const refreshFailed = Boolean(query.data && query.isError);
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
@@ -56,6 +58,23 @@ export default function PropertyDetailScreen() {
         </View>
       ) : (
         <ScrollView contentContainerStyle={styles.body}>
+          {/* A refetch that failed while a cached record is on screen. TanStack keeps `data` and sets
+              `isError`, so without this the screen renders the OLD phone, website and counts as though
+              they were just confirmed — the exact situation on reopening a detail after losing signal.
+              The cached record stays: it is the best thing available. Only the claim that it is current
+              is withdrawn. */}
+          {refreshFailed ? (
+            <RetryNotice
+              testID="property-refresh-failed"
+              placement="top"
+              message={
+                offline
+                  ? "No signal — showing the last saved copy."
+                  : "Showing the last saved copy — the refresh failed."
+              }
+              onRetry={() => void query.refetch()}
+            />
+          ) : null}
           {property.companyName ? (
             <Text
               accessibilityLabel={property.companyName}
