@@ -121,6 +121,17 @@ export function useProjectPhotos(dealId: string | undefined) {
         return true;
       });
 
+      // Enforce the guarantee the comment above only claimed. `partial` previously caught a rejected page
+      // and the page cap, but not the case where the walk simply came back with fewer photos than the
+      // server counted — which OFFSET paging over a live table produces for free: delete a photo while
+      // pages 2..18 are in flight and every later page shifts by one, so a row is never returned by any
+      // page. No fetch fails, so nothing was flagged, and the shortfall renders as a slightly smaller
+      // photo count that looks entirely plausible — while Report and Share stay enabled over a set that is
+      // quietly missing photos. Comparing against the page-1 count closes that. Only a SHORTFALL counts:
+      // photos added mid-walk can legitimately push the length past the original total.
+      const reportedTotal = first.pagination?.total;
+      if (typeof reportedTotal === "number" && deduped.length < reportedTotal) partial = true;
+
       return { photos: deduped, pagination: first.pagination, partial };
     },
     enabled: !!user && !!dealId,
