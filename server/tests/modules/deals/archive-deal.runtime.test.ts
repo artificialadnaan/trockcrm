@@ -12,6 +12,7 @@ const D_OPP = U("d001");
 const D_AWARDED = U("d002");
 const D_DD = U("d003");
 const D_INACTIVE = U("d004");  // seeded already-archived (is_active=false)
+const D_AWARDED_REP = U("d005"); // awarded stage, owned by REP — for the rep-archives-any-stage case
 const D_MISSING = U("dfff");   // never inserted
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -83,7 +84,8 @@ beforeAll(async () => {
       ('${D_OPP}',     'Opp Deal',     '${OPP_STAGE}',     'Original scope.', '${REP}', true, false, false, false, now(), now()),
       ('${D_AWARDED}', 'Awarded Deal', '${AWARDED_STAGE}',  'Original scope.', '${REP}', true, false, false, false, now(), now()),
       ('${D_DD}',      'DD Deal',      '${DD_STAGE}',       'Original scope.', '${REP}', true, false, false, false, now(), now()),
-      ('${D_INACTIVE}','Gone Deal',    '${OPP_STAGE}',      'Original scope.', '${REP}', false, false, false, false, now(), now());
+      ('${D_INACTIVE}','Gone Deal',    '${OPP_STAGE}',      'Original scope.', '${REP}', false, false, false, false, now(), now()),
+      ('${D_AWARDED_REP}','Awarded Own', '${AWARDED_STAGE}', 'Original scope.', '${REP}', true, false, false, false, now(), now());
     CREATE TABLE deal_history (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), deal_id uuid NOT NULL, field_name text NOT NULL,
       old_value text, new_value text, changed_by uuid NOT NULL, source text, reason text,
@@ -111,10 +113,13 @@ describe("deleteDeal archive rules", () => {
     });
   });
 
-  it("blocks a rep archiving a non-opportunity deal", async () => {
-    await expect(
-      deleteDeal(tdb, D_AWARDED, { actorRole: "rep", actorId: REP, reason: "no" })
-    ).rejects.toMatchObject({ statusCode: 403, code: "DEAL_ARCHIVE_STAGE_FORBIDDEN" });
+  it("lets a rep archive a NON-opportunity deal they own — stage is no longer a gate", async () => {
+    // Replaces the old DEAL_ARCHIVE_STAGE_FORBIDDEN assertion. The stage rule admitted only `opportunity`
+    // and the legacy alias `dd` (itself seeded is_active_pipeline=FALSE), so the archive control was dead
+    // on nearly every real deal. Ownership, the mandatory reason and the admin-only change-order guard are
+    // what remain. Uses its OWN fixture so it cannot consume the deal the admin case archives.
+    const row = await deleteDeal(tdb, D_AWARDED_REP, { actorRole: "rep", actorId: REP, reason: "Duplicate entry" });
+    expect(row?.isActive).toBe(false);
   });
 
   it("archives an opportunity deal for a rep, prepending the reason to the description", async () => {

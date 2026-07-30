@@ -1006,13 +1006,8 @@ export function DealDetailPage() {
               Edit Deal
             </DropdownMenuItem>
           )}
-          {canArchiveDeal({ stageSlug: deal.stageSlug ?? currentStage?.slug ?? null, assignedRepId: deal.assignedRepId }, user) ? (
+          {canArchiveDeal({ assignedRepId: deal.assignedRepId }, user) ? (
             <DropdownMenuItem onClick={() => setArchiveOpen(true)} className="text-red-600">
-              <Trash2 className="h-4 w-4 mr-2" />
-              Archive Deal
-            </DropdownMenuItem>
-          ) : viewerOwnsDeal ? (
-            <DropdownMenuItem disabled title="Only opportunity-stage deals can be archived — ask an admin">
               <Trash2 className="h-4 w-4 mr-2" />
               Archive Deal
             </DropdownMenuItem>

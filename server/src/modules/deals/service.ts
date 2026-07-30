@@ -26,7 +26,6 @@ import {
   getDealAtRiskResult,
   isGenuineEstimatingDealStageSlug,
   isGenuineWonDealStageSlug,
-  isOpportunityStageSlug,
   toCanonicalDealStageSlug,
   resolveEffectiveStageEnteredAt,
   USER_ROLES,
@@ -3353,17 +3352,21 @@ export async function deleteDeal(
     return null;
   }
 
-  // Non-admins may only archive opportunity-stage deals (admins keep the any-stage escape hatch).
-  if (opts.actorRole !== "admin") {
-    const [stageRow] = await tenantDb
-      .select({ slug: pipelineStageConfig.slug })
-      .from(pipelineStageConfig)
-      .where(eq(pipelineStageConfig.id, existing.stageId))
-      .limit(1);
-    if (!isOpportunityStageSlug(stageRow?.slug)) {
-      throw new AppError(403, "Only opportunity-stage deals can be archived by reps.", "DEAL_ARCHIVE_STAGE_FORBIDDEN");
-    }
-  }
+  // NO STAGE GATE. An owner may archive their own deal at ANY stage.
+  //
+  // This deliberately replaces the earlier "opportunity stage only" rule for reps. That rule made the
+  // control dead on nearly every real deal — `opportunity` and the legacy alias `dd` were the only slugs it
+  // admitted, and `dd` is seeded is_active_pipeline=FALSE — so a rep with work in estimating, contract or
+  // production could not archive any of it, and reported the button as doing nothing.
+  //
+  // ARCHIVING A WON DEAL IS NOW REACHABLE BY A REP, and that is not a neutral act: is_active=false is the
+  // canonical "soft-deleted" marker for a Won deal, which removes it from Won rollups and from the revenue
+  // its commission rows were computed against. Ownership, the mandatory reason, and the admin-only guard on
+  // change orders are what remain between a rep and that outcome. Widening this was an explicit product
+  // decision taken with that consequence stated.
+  //
+  // The change-order guard in the DELETE route (admin-only) is SEPARATE and still applies, because voiding
+  // a CO removes its commission outright.
 
   const archivedDescription = buildArchivedDescription(existing.description, reason, new Date());
 
