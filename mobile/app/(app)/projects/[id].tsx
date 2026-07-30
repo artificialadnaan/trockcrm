@@ -210,6 +210,38 @@ export default function ProjectDetailScreen() {
 
         {notice ? <Banner message={notice.message} tone={notice.tone} /> : null}
 
+        {/* Reports — ABOVE the gallery deliberately. A project accumulates hundreds of photos, so a reports
+            list sitting underneath them was several screens of scrolling away and effectively
+            undiscoverable; the generated PDF is what most people open this screen to fetch. */}
+        <View style={{ gap: theme.space.sm }}>
+          <SectionLabel>Reports</SectionLabel>
+          {reportsQuery.isLoading ? (
+            <LoadingState label="Loading reports…" />
+          ) : (reportsQuery.data?.reports ?? []).length === 0 ? (
+            <Text style={styles.meta}>
+              {offOffice
+                ? "No reports yet."
+                : allPhotos.length === 0
+                  ? "No reports yet. Build one once you've added photos."
+                  // "below", not "above": the gallery now sits underneath this section.
+                  : "No reports yet. Build one from the photos below."}
+            </Text>
+          ) : (
+            (reportsQuery.data?.reports ?? []).map((report) => (
+              <Pressable
+                key={report.id}
+                onPress={() => openReport(report.id)}
+                style={({ pressed }) => [styles.reportRow, pressed && { opacity: 0.7 }]}
+              >
+                <Text style={styles.reportTitle} numberOfLines={1}>
+                  {report.title}
+                </Text>
+                <Text style={styles.link}>Open PDF</Text>
+              </Pressable>
+            ))
+          )}
+        </View>
+
         {/* Grouping + filters — only meaningful once there are photos to group/filter (#13). */}
         {allPhotos.length > 0 ? (
           <View style={{ gap: theme.space.sm }}>
@@ -290,35 +322,6 @@ export default function ProjectDetailScreen() {
             ))}
           </View>
         )}
-
-        {/* Reports */}
-        <View style={{ gap: theme.space.sm }}>
-          <SectionLabel>Reports</SectionLabel>
-          {reportsQuery.isLoading ? (
-            <LoadingState label="Loading reports…" />
-          ) : (reportsQuery.data?.reports ?? []).length === 0 ? (
-            <Text style={styles.meta}>
-              {offOffice
-                ? "No reports yet."
-                : allPhotos.length === 0
-                  ? "No reports yet. Build one once you've added photos."
-                  : "No reports yet. Build one from the photos above."}
-            </Text>
-          ) : (
-            (reportsQuery.data?.reports ?? []).map((report) => (
-              <Pressable
-                key={report.id}
-                onPress={() => openReport(report.id)}
-                style={({ pressed }) => [styles.reportRow, pressed && { opacity: 0.7 }]}
-              >
-                <Text style={styles.reportTitle} numberOfLines={1}>
-                  {report.title}
-                </Text>
-                <Text style={styles.link}>Open PDF</Text>
-              </Pressable>
-            ))
-          )}
-        </View>
 
         {/* Scorecards — count on detail is the sole discoverability surface (no list badge, per non-goals). */}
         <View style={{ gap: theme.space.sm }}>
