@@ -85,8 +85,7 @@ import {
   sanitizeQuestionAnswerForSave,
   shouldNormalizeUnansweredPlaceholder,
   TYPE_OF_ACCESS_OTHER_DETAIL_KEY,
-  OTHER_SCOPE_APPLIES_KEY,
-  OTHER_SCOPE_DESCRIPTION_KEY,
+  isOtherScopeMissingDescription,
 } from "./questionnaire-answer-normalization";
 import { ALLOWED_EXTENSIONS, validateFileForUpload } from "@/lib/file-utils";
 import { CLIENT_PROVIDED_DOCS_TAG } from "@/lib/lead-attachment-routing";
@@ -1314,14 +1313,11 @@ function EditableLeadForm({
     // snapshot returns every node with `isRequired: false`, so the required-question sweep below never sees
     // it. Selecting Other alone satisfies "select at least one scope" and would file a lead recording only
     // that it resembles nothing we bid — the one scope where an empty answer erases the entire point.
-    const otherScopeDescription =
-      typeof formData.projectTypeQuestionAnswers[OTHER_SCOPE_DESCRIPTION_KEY] === "string"
-        ? (formData.projectTypeQuestionAnswers[OTHER_SCOPE_DESCRIPTION_KEY] as string).trim()
-        : "";
     if (
       isCreate &&
-      formData.projectTypeQuestionAnswers[OTHER_SCOPE_APPLIES_KEY] === true &&
-      !otherScopeDescription
+      isOtherScopeMissingDescription(
+        formData.projectTypeQuestionAnswers as unknown as Record<string, unknown>
+      )
     ) {
       setError("Describe the scope when Other is selected.");
       return;

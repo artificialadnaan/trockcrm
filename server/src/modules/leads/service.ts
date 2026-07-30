@@ -19,7 +19,11 @@ import {
   users,
 } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
-import { OTHER_SCOPE_APPLIES_KEY, OTHER_SCOPE_DESCRIPTION_KEY } from "@trock-crm/shared/types";
+import {
+  OTHER_SCOPE_APPLIES_KEY,
+  OTHER_SCOPE_DESCRIPTION_KEY,
+  isOtherScopeMissingDescription,
+} from "@trock-crm/shared/types";
 import {
   toCanonicalLeadStageSlug,
   resolveOfficeCodeFromOffice,
@@ -41,6 +45,7 @@ import {
   listQuestionnaireNodes,
   type LeadQuestionAnswerValue,
   upsertLeadQuestionAnswerSet,
+  listLeadQuestionAnswers,
 } from "./questionnaire-service.js";
 import {
   computeExistingCustomerStatus,
@@ -946,6 +951,38 @@ async function resolveCreateStage(
   return stage;
 }
 
+/**
+ * The same rule on the UPDATE path, against stored answers merged with the incoming patch.
+ *
+ * Create-only enforcement is not enforcement: once a valid Other lead exists, an owner could edit the
+ * questionnaire and blank the description, reaching exactly the state the create guard exists to prevent.
+ * That includes converted leads, whose answers-only branch is the one edit they still permit.
+ */
+async function assertOtherScopeDescribedOnUpdate(
+  tenantDb: TenantDb,
+  leadId: string,
+  incoming: Record<string, unknown>
+): Promise<void> {
+  // Cheap exit: if neither key is in the patch, the stored state cannot have been made invalid by it.
+  const touchesOtherScope =
+    Object.prototype.hasOwnProperty.call(incoming, OTHER_SCOPE_APPLIES_KEY) ||
+    Object.prototype.hasOwnProperty.call(incoming, OTHER_SCOPE_DESCRIPTION_KEY);
+  if (!touchesOtherScope) return;
+
+  const stored = await listLeadQuestionAnswers(tenantDb, leadId);
+  const merged = { ...stored, ...incoming } as Record<string, unknown>;
+  if (isOtherScopeMissingDescription(merged)) {
+    throw new AppError(
+      400,
+      "Describe the scope when Other is selected.",
+      "LEAD_OTHER_SCOPE_DESCRIPTION_REQUIRED"
+    );
+  }
+}
+
+/** The gate key the CLIENT matches on. It clears gate keys as `leadQuestionAnswers.<key>`. */
+const OTHER_SCOPE_MISSING_KEY = `leadQuestionAnswers.${OTHER_SCOPE_DESCRIPTION_KEY}`;
+
 function assertLeadCreateRequirements(
   input: CreateLeadInput,
   property: typeof properties.$inferSelect,
@@ -989,14 +1026,15 @@ function assertLeadCreateRequirements(
   // Resolved with the SAME precedence createLead itself uses a few lines down
   // (`leadQuestionAnswers ?? projectTypeQuestionPayload.answers`). Reading only one of the two fields would
   // leave the other as a way past the guard, which is the whole reason this check exists server-side.
-  const questionAnswers = (input.leadQuestionAnswers ??
-    input.projectTypeQuestionPayload?.answers ??
-    {}) as Record<string, unknown>;
-  if (questionAnswers[OTHER_SCOPE_APPLIES_KEY] === true) {
-    const description = questionAnswers[OTHER_SCOPE_DESCRIPTION_KEY];
-    if (typeof description !== "string" || !description.trim()) {
-      missing.push(OTHER_SCOPE_DESCRIPTION_KEY);
-    }
+  if (
+    isOtherScopeMissingDescription(
+      (input.leadQuestionAnswers ?? input.projectTypeQuestionPayload?.answers ?? {}) as Record<string, unknown>
+    )
+  ) {
+    // NAMESPACED, because the form clears gate keys as `leadQuestionAnswers.<key>` when the answer changes.
+    // A bare key never matches, so it would sit in createRequirementErrors forever and keep Create Lead
+    // disabled even after the user typed a description — the server rejecting, then refusing to un-reject.
+    missing.push(OTHER_SCOPE_MISSING_KEY);
   }
 
   if (missing.length > 0) {
@@ -1780,6 +1818,7 @@ export function createLeadService(
       }
 
       if (v2Enabled && input.leadQuestionAnswers) {
+        await assertOtherScopeDescribedOnUpdate(tenantDb, leadId, input.leadQuestionAnswers);
         await upsertLeadQuestionAnswerSet(tenantDb, {
           leadId,
           projectTypeId: existing.projectTypeId ?? null,
@@ -1823,6 +1862,9 @@ export function createLeadService(
             existing.qualificationPayload as Record<string, string | boolean | number | null>
           );
     const effectiveLeadQuestionAnswers = input.leadQuestionAnswers ?? {};
+    if (v2Enabled && input.leadQuestionAnswers) {
+      await assertOtherScopeDescribedOnUpdate(tenantDb, leadId, input.leadQuestionAnswers);
+    }
 
     if (input.stageId !== undefined) {
       const stage = await deps.getStageById(input.stageId, "lead");

@@ -12,7 +12,7 @@ export const TYPE_OF_ACCESS_OPTIONS = ["Gated", "Not Gated", "Bobbed", "Other"] 
 export const TYPE_OF_ACCESS_OTHER_DETAIL_KEY = "site_access_other_detail";
 
 // Re-exported from shared so the form and assertLeadCreateRequirements cannot disagree about the keys.
-export { OTHER_SCOPE_APPLIES_KEY, OTHER_SCOPE_DESCRIPTION_KEY } from "@trock-crm/shared/types";
+export { OTHER_SCOPE_APPLIES_KEY, OTHER_SCOPE_DESCRIPTION_KEY, isOtherScopeMissingDescription } from "@trock-crm/shared/types";
 
 function isTypeOfAccessOption(value: string) {
   return TYPE_OF_ACCESS_OPTIONS.includes(value as (typeof TYPE_OF_ACCESS_OPTIONS)[number]);

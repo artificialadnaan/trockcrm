@@ -712,6 +712,122 @@ describe("lead service canonical progression", () => {
     expect(tenantDb.state.leads[0]?.officeCode).toBe("dfw");
   });
 
+  it("rejects an UPDATE that selects Other with no description", async () => {
+    // The guard is v2-gated, exactly like all three upsertLeadQuestionAnswerSet sites — with v2 off no
+    // answers are written at all, so there is nothing to guard.
+    const previousFlag = process.env.ENABLE_LEAD_EDIT_V2;
+    process.env.ENABLE_LEAD_EDIT_V2 = "true";
+    try {
+    // Create-only enforcement is not enforcement. Once a valid Other lead exists — or any lead at all — an
+    // owner can edit the questionnaire and reach exactly the state the create guard exists to prevent. The
+    // browser's questionnaire editor has no Other check of its own, so this is the only thing standing in
+    // the way on the edit path.
+    const tenantDb = createFakeTenantDb({
+      id: "lead-1",
+      officeId: "office-1",
+      officeCode: "dfw",
+      isActive: true,
+      updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+    } as FakeLeadRow);
+    const service = createLeadService({
+      getStageById: pipelineMocks.getStageById as never,
+      getActiveProjectTypes: pipelineMocks.getActiveProjectTypes as never,
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+    });
+
+    await expect(
+      service.updateLead(
+        tenantDb as never,
+        "lead-1",
+        { leadQuestionAnswers: { other_applies: true } } as never,
+        "director",
+        "director-1"
+      )
+    ).rejects.toMatchObject({
+      statusCode: 400,
+      code: "LEAD_OTHER_SCOPE_DESCRIPTION_REQUIRED",
+    });
+    } finally {
+      if (previousFlag === undefined) delete process.env.ENABLE_LEAD_EDIT_V2;
+      else process.env.ENABLE_LEAD_EDIT_V2 = previousFlag;
+    }
+  });
+
+  it("allows an UPDATE that supplies the description alongside Other", async () => {
+    // The guard is v2-gated, exactly like all three upsertLeadQuestionAnswerSet sites — with v2 off no
+    // answers are written at all, so there is nothing to guard.
+    const previousFlag = process.env.ENABLE_LEAD_EDIT_V2;
+    process.env.ENABLE_LEAD_EDIT_V2 = "true";
+    try {
+    const tenantDb = createFakeTenantDb({
+      id: "lead-1",
+      officeId: "office-1",
+      officeCode: "dfw",
+      isActive: true,
+      updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+    } as FakeLeadRow);
+    const service = createLeadService({
+      getStageById: pipelineMocks.getStageById as never,
+      getActiveProjectTypes: pipelineMocks.getActiveProjectTypes as never,
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+    });
+
+    await expect(
+      service.updateLead(
+        tenantDb as never,
+        "lead-1",
+        {
+          leadQuestionAnswers: {
+            other_applies: true,
+            other_scope_description: "Fire lane restriping and bollards",
+          },
+        } as never,
+        "director",
+        "director-1"
+      )
+    ).resolves.toBeTruthy();
+    } finally {
+      if (previousFlag === undefined) delete process.env.ENABLE_LEAD_EDIT_V2;
+      else process.env.ENABLE_LEAD_EDIT_V2 = previousFlag;
+    }
+  });
+
+  it("does not read stored answers when the patch touches neither Other key", async () => {
+    // The guard is v2-gated, exactly like all three upsertLeadQuestionAnswerSet sites — with v2 off no
+    // answers are written at all, so there is nothing to guard.
+    const previousFlag = process.env.ENABLE_LEAD_EDIT_V2;
+    process.env.ENABLE_LEAD_EDIT_V2 = "true";
+    try {
+    // The guard early-exits so an ordinary questionnaire edit does not pay for a full answer read on every
+    // save. Asserting it keeps that cheap path from quietly disappearing.
+    const tenantDb = createFakeTenantDb({
+      id: "lead-1",
+      officeId: "office-1",
+      officeCode: "dfw",
+      isActive: true,
+      updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+    } as FakeLeadRow);
+    const service = createLeadService({
+      getStageById: pipelineMocks.getStageById as never,
+      getActiveProjectTypes: pipelineMocks.getActiveProjectTypes as never,
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+    });
+
+    await expect(
+      service.updateLead(
+        tenantDb as never,
+        "lead-1",
+        { leadQuestionAnswers: { roofing_applies: true } } as never,
+        "director",
+        "director-1"
+      )
+    ).resolves.toBeTruthy();
+    } finally {
+      if (previousFlag === undefined) delete process.env.ENABLE_LEAD_EDIT_V2;
+      else process.env.ENABLE_LEAD_EDIT_V2 = previousFlag;
+    }
+  });
+
   it("rejects office_code update with 422 not 500", async () => {
     const tenantDb = createFakeTenantDb({
       id: "lead-1",
@@ -1818,10 +1934,12 @@ describe("lead service canonical progression", () => {
     // lead recording that it resembles nothing we bid and nothing about what it is.
     //
     // BOTH answer routes, because createLead accepts either and reading only one leaves the other open.
-    ["other_scope_description", (_db: any, input: any) => {
+    // NAMESPACED key: the form clears gate keys as `leadQuestionAnswers.<key>`, so a bare key would sit in
+    // createRequirementErrors forever and keep Create Lead disabled even after the description was typed.
+    ["leadQuestionAnswers.other_scope_description", (_db: any, input: any) => {
       input.leadQuestionAnswers = { other_applies: true };
     }],
-    ["other_scope_description", (_db: any, input: any) => {
+    ["leadQuestionAnswers.other_scope_description", (_db: any, input: any) => {
       input.projectTypeQuestionPayload = {
         projectTypeId: "project-type-commercial",
         answers: { other_applies: true, other_scope_description: "   " },
