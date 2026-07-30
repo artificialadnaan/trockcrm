@@ -102,6 +102,25 @@ export default function PipelineBoardScreen() {
     () => columns.find((c) => c.stage.id === activeStageId) ?? columns[0] ?? null,
     [columns, activeStageId],
   );
+  /**
+   * Derived from `selected`, not recomputed from `activeStageId`.
+   *
+   * `selected` falls back to the first column when nothing is chosen yet, so re-running the lookup
+   * would report "-1 of 9" on first paint while the strip clearly highlights the first tab — two
+   * answers to one question, which is the shape this codebase keeps getting caught by.
+   */
+  const selectedIndex = selected ? columns.findIndex((c) => c.stage.id === selected.stage.id) : -1;
+  /**
+   * Does the stage strip ACTUALLY have hidden content?
+   *
+   * Measured, not inferred. An office with two short stages fits them both on screen, and telling that
+   * rep to swipe points at a gesture that does nothing — a hint that lies once is a hint nobody reads
+   * again. The 1pt tolerance is for sub-pixel layout rounding, which otherwise reports a strip as
+   * overflowing by a third of a point.
+   */
+  const [stripViewport, setStripViewport] = useState(0);
+  const [stripContent, setStripContent] = useState(0);
+  const stripOverflows = stripContent > stripViewport + 1;
 
   const state = resolveListState({
     isLoading: board.isLoading,
@@ -194,9 +213,26 @@ export default function PipelineBoardScreen() {
         <>
           {/* The stage selector. Counts are the SERVER's — activeCount excludes held deals, which is
               what the web column headers show, so the two cannot disagree. */}
+          {/* WHERE YOU ARE, and that there is more. The strip scrolls with the indicator hidden, so a
+              pipeline of nine stages looked like whichever three fitted — a rep had no reason to swipe
+              and no idea Won was off to the right. A position beats an edge fade here: it needs no
+              gradient library, and it answers "which one am I on" at the same time. */}
+          {selectedIndex >= 0 && columns.length > 1 ? (
+            <Text style={styles.stagePosition}>
+              {/* "Browse", not "for more", and only when the strip genuinely overflows.
+                  Two earlier versions of this line were each wrong in one direction: "swipe for more"
+                  promised a tenth stage at 9 of 9, and gating it on the selected position instead
+                  claimed nothing to swipe to at the end when six stages sat off-screen to the LEFT.
+                  Overflow is the real condition, and neutral wording is true at both ends of it. */}
+              Stage {selectedIndex + 1} of {columns.length}
+              {stripOverflows ? " — swipe to browse" : ""}
+            </Text>
+          ) : null}
           <ScrollView
             horizontal
             showsHorizontalScrollIndicator={false}
+            onLayout={(e) => setStripViewport(e.nativeEvent.layout.width)}
+            onContentSizeChange={(w) => setStripContent(w)}
             contentContainerStyle={styles.stageRow}
           >
             {columns.map((col) => {
@@ -374,6 +410,12 @@ const styles = StyleSheet.create({
   segmentTextActive: { color: theme.color.textPrimary },
 
   /* Stage selector — underlined tabs. */
+  stagePosition: {
+    ...theme.type.caption,
+    color: theme.color.textMuted,
+    paddingHorizontal: theme.space.lg,
+    paddingTop: theme.space.sm,
+  },
   stageRow: { paddingHorizontal: theme.space.lg, gap: theme.space.xl, alignItems: "flex-end" },
   // Same 44pt rule. The underline sits at the bottom of the tab, so the padding above it is what makes
   // the target tall enough without pushing the rule away from the label.

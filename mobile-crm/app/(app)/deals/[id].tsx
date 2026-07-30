@@ -22,6 +22,7 @@ import { displayAmount, showsAtRisk } from "../../../src/deal-value";
 import { Badge } from "../../../src/components/Badge";
 import { RetryNotice } from "../../../src/components/RetryNotice";
 import { Row } from "../../../src/components/Row";
+import { activityTypeLabel } from "../../../src/activity-label";
 import { resolveListState } from "../../../src/list-state";
 import { mailtoUrl, telUrl } from "../../../src/contact-links";
 import { buildStageIndex, stageLabelFor } from "../../../src/stage-label";
@@ -384,7 +385,8 @@ export default function DealDetailScreen() {
             activities.map((a) => (
               <View key={a.id} style={styles.activity}>
                 <Text style={styles.activityMeta}>
-                  {a.type}
+                  {/* The LABEL, not the column. A rep was reading "site_visit" and "stage_change". */}
+                  {activityTypeLabel(a.type)}
                   {a.performedByUserName ? ` · ${a.performedByUserName}` : ""}
                   {a.occurredAt ?? a.createdAt ? ` · ${formatDate(a.occurredAt ?? a.createdAt)}` : ""}
                 </Text>
