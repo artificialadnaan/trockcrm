@@ -2,7 +2,7 @@ import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
 import { sql } from "drizzle-orm";
 import { readFileSync } from "node:fs";
-import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
 import { isInFlightRunConflict } from "../../../src/modules/field/ai-report-runs.js";
 
@@ -15,7 +15,11 @@ import { isInFlightRunConflict } from "../../../src/modules/field/ai-report-runs
  * These run the actual migration and the actual statements against PGlite.
  */
 
-const MIGRATION = path.join(process.cwd(), "migrations/0208_field_ai_report_runs.sql");
+// Resolved relative to THIS FILE, not process.cwd(). cwd is the repo root under the root vitest config but
+// `server/` under `--workspace=server` (which is what CI's runtime pass uses), so a cwd-relative path loads
+// here and fails there — the file errors at import and its tests are silently skipped rather than failing
+// loudly. Same form every other server runtime test uses.
+const MIGRATION = fileURLToPath(new URL("../../../../migrations/0208_field_ai_report_runs.sql", import.meta.url));
 
 let client: PGlite;
 let db: ReturnType<typeof drizzle>;
