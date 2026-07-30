@@ -1725,6 +1725,13 @@ describe("ingestWalkthrough", () => {
   // under `cause`). Asserting the CODE rather than the message is what makes these pin the constraint
   // instead of Postgres's wording — and 22003 vs 22001 is exactly the distinction under test.
   //
+  // WARNING for anyone mutation-checking these by name: vitest's `-t` is a REGEX, and three of the
+  // names below contain parentheses ("varchar(50)", "varchar(1000)"). `-t 'refuses a unit longer than
+  // the varchar(50)…'` therefore matches NOTHING, skips all 73 tests, and exits 0 — which reads as "the
+  // mutation survived" when in fact nothing ran. Two of the mutation checks for this block were briefly
+  // recorded as false greens for exactly that reason. Filter on a paren-free prefix, and confirm the
+  // pattern selects 1 test on unmutated code before trusting a green.
+  //
   // These tests exist because the bug they pin is invisible from inside this module: every value they
   // refuse is a value `estimate_extractions` would have stored happily. The narrowing only shows up two
   // tables later, at promotion, after an estimator has approved the row — so each test proves BOTH
