@@ -60,8 +60,57 @@ describe("search routes", () => {
       ["deals", "contacts", "files", "companies", "leads", "properties"],
       "director",
       "director-1",
+      // A request that says nothing about offices keeps the role-driven cross-office behaviour, which
+      // is what makes the parameter safe to add to an endpoint the web already depends on.
+      { crossOffice: true },
     );
     expect(res.body.total).toBe(1);
+  });
+
+  it("passes crossOffice=false through to the service", async () => {
+    // The mobile CRM sends this because it works in one office at a time. It has to reach the service:
+    // filtering foreign rows on the client is too late, since the per-entity cap is applied AFTER the
+    // offices merge, so the active office's remaining matches were already truncated server-side.
+    serviceMocks.globalSearch.mockResolvedValue({
+      deals: [], contacts: [], files: [], companies: [], leads: [], properties: [], total: 0, query: "alpha",
+    });
+
+    const app = createApp();
+    const res = await request(app).get("/api/search?q=alpha&crossOffice=false");
+
+    expect(res.status).toBe(200);
+    expect(serviceMocks.globalSearch).toHaveBeenCalledWith(
+      expect.anything(),
+      "alpha",
+      expect.anything(),
+      "director",
+      "director-1",
+      { crossOffice: false },
+    );
+  });
+
+  it("treats any value other than the literal 'false' as cross-office", async () => {
+    // A typo silently narrowing a director's search is the failure that looks like missing data rather
+    // than like a bug, so only the exact string confines. `False` included deliberately: the parse is
+    // case-sensitive, and a reader should be able to see that decided rather than assumed.
+    for (const raw of ["true", "0", "", "False", "no"]) {
+      serviceMocks.globalSearch.mockClear();
+      serviceMocks.globalSearch.mockResolvedValue({
+        deals: [], contacts: [], files: [], companies: [], leads: [], properties: [], total: 0, query: "alpha",
+      });
+
+      const app = createApp();
+      await request(app).get(`/api/search?q=alpha&crossOffice=${raw}`);
+
+      expect(serviceMocks.globalSearch).toHaveBeenCalledWith(
+        expect.anything(),
+        "alpha",
+        expect.anything(),
+        "director",
+        "director-1",
+        { crossOffice: true },
+      );
+    }
   });
 
   it("returns AI search results", async () => {
