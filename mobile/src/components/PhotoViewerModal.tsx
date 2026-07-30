@@ -50,6 +50,20 @@ const ADDRESS_SOURCE_LABEL: Record<string, string> = {
 const REFRESH_PER_PAGE = 200;
 const REFRESH_MAX_PAGES = 50;
 
+/**
+ * Whether the pager's opening scroll can be issued yet.
+ *
+ * iOS clamps a programmatic scroll into the content width MEASURED AT CALL TIME, and RN's one-shot
+ * `initialScrollIndex` scroll is fire-and-forget — no success check, no retry. Issue it before the list has
+ * measured its full width (3533 photos ≈ 1.39M px) and the clamp silently truncates it, leaving the viewport
+ * parked on the empty leading spacer: a black pane under a correct counter and correct metadata. So only
+ * (re-)issue once the content is genuinely wide enough to hold the target offset.
+ */
+export function canLandInitialScroll(contentWidth: number, targetOffset: number, viewportWidth: number): boolean {
+  if (targetOffset <= 0) return true; // opening on the first photo needs no scroll at all
+  return contentWidth >= targetOffset + viewportWidth;
+}
+
 function formatTimestamp(photo: FieldPhoto): string {
   const value = photo.takenAt ?? photo.createdAt;
   const date = new Date(value);
@@ -88,6 +102,18 @@ export function PhotoViewerModal({
   const [editName, setEditName] = useState("");
   const [editDesc, setEditDesc] = useState("");
   const listRef = useRef<FlatList<FieldPhoto>>(null);
+  // Guards the one re-issue of the opening scroll (see onContentSizeChange) so later content-size changes —
+  // an orientation flip, say — can't yank the pager back to the photo it was opened on.
+  const initialScrollLanded = useRef(false);
+
+  // Full-res load state per photo id. expo-image renders NOTHING when a load fails, so before this the
+  // viewer's only failure mode was a black rectangle with a correct-looking detail panel underneath —
+  // indistinguishable from a slow decode, and impossible for a field user to report usefully.
+  const [loadState, setLoadState] = useState<Record<string, "loading" | "loaded" | "error">>({});
+  // Re-minted presigned URLs keyed by photo id, replacing the snapshot URL the viewer opened with.
+  const [freshUrls, setFreshUrls] = useState<Record<string, string>>({});
+  // Photo ids that have already spent their automatic refresh, so a genuinely broken photo can't loop.
+  const refreshAttempted = useRef<Set<string>>(new Set());
 
   const onScrollEnd = useCallback(
     (e: NativeSyntheticEvent<NativeScrollEvent>) => {
@@ -100,6 +126,15 @@ export function PhotoViewerModal({
     },
     [index, width],
   );
+
+  // The call site currently unmounts this modal between opens, so `index` starts fresh each time. That is
+  // load-bearing and invisible: switch to an always-mounted `visible={...}` and `index` would stick on the
+  // previously-viewed photo while initialScrollIndex moved underneath it — the detail panel describing one
+  // photo while the pager shows another. Syncing here makes the component correct either way.
+  useEffect(() => {
+    setIndex(initialIndex);
+    initialScrollLanded.current = false;
+  }, [initialIndex]);
 
   // Clamp defensively so the header/detail panel can never index out of range.
   const safeIndex = photos.length > 0 ? Math.min(Math.max(index, 0), photos.length - 1) : 0;
@@ -168,9 +203,47 @@ export function PhotoViewerModal({
     [fetcher],
   );
 
+  /** The URL to display/save for a photo: a re-minted one if we've had to refresh, else the snapshot. */
+  const uriFor = useCallback(
+    (photo: FieldPhoto): string | null => freshUrls[photo.id] ?? photo.fullImageUrl ?? photo.imageUrl,
+    [freshUrls],
+  );
+
+  // A failed full-res load is overwhelmingly an EXPIRED presigned URL — the viewer snapshots the photo list
+  // at open time and those URLs are minted with a fixed TTL, so a gallery left open (or restored from the
+  // query cache) hands the pager links that now 403. The server's own note on the list TTL says "the client
+  // also refreshes on image error"; nothing actually did. This implements that contract: re-mint once per
+  // photo, swap the URL in, and only show an error if the fresh URL fails too.
+  const handleLoadError = useCallback(
+    async (photo: FieldPhoto) => {
+      const refreshDealId = projectDealId ?? photo.dealId ?? undefined;
+      if (refreshAttempted.current.has(photo.id) || !refreshDealId) {
+        setLoadState((prev) => ({ ...prev, [photo.id]: "error" }));
+        return;
+      }
+      refreshAttempted.current.add(photo.id);
+      const staleUrl = uriFor(photo);
+      const fresh = await fetchFreshUrl(refreshDealId, photo.id);
+      if (fresh && fresh !== staleUrl) {
+        // Back to "loading": the swapped-in URL remounts the image and will report its own outcome.
+        setLoadState((prev) => ({ ...prev, [photo.id]: "loading" }));
+        setFreshUrls((prev) => ({ ...prev, [photo.id]: fresh }));
+        return;
+      }
+      setLoadState((prev) => ({ ...prev, [photo.id]: "error" }));
+    },
+    [projectDealId, uriFor, fetchFreshUrl],
+  );
+
+  /** Manual retry from the error state — clears the one-shot guard so the refresh can run again. */
+  const retryLoad = useCallback((photo: FieldPhoto) => {
+    refreshAttempted.current.delete(photo.id);
+    setLoadState((prev) => ({ ...prev, [photo.id]: "loading" }));
+  }, []);
+
   const saveToDevice = useCallback(async () => {
     if (savingId != null || !current) return; // one save at a time
-    const url = current.fullImageUrl ?? current.imageUrl;
+    const url = uriFor(current);
     if (!url) return; // no image to save (placeholder / unresolved URL) — the action is hidden, but guard anyway
     const targetId = current.id;
     setSavingId(targetId);
@@ -209,7 +282,7 @@ export function PhotoViewerModal({
             <View style={styles.topBarActions}>
               {/* Only advertise Save when there's actually a URL to download — a placeholder / unresolved
                   photo would let the download 403/fail with a generic error, so hide the action instead. */}
-              {current && (current.fullImageUrl ?? current.imageUrl) ? (
+              {current && uriFor(current) ? (
                 <Pressable
                   onPress={saveToDevice}
                   hitSlop={12}
@@ -243,6 +316,26 @@ export function PhotoViewerModal({
               showsHorizontalScrollIndicator={false}
               initialScrollIndex={initialIndex}
               getItemLayout={(_, i) => ({ length: width, offset: width * i, index: i })}
+              // Make the initial jump actually LAND. VirtualizedList freezes its render window while
+              // pendingScrollUpdateCount > 0 (set whenever initialScrollIndex > 0) and only clears it on a
+              // real scroll event, while its one-shot programmatic scroll is fire-and-forget with no retry.
+              // Natively that scroll is clamped against the content width MEASURED AT CALL TIME, so on a
+              // 3533-photo pager (~1.39M px of content) an early call clamps to ~0 and the viewport parks on
+              // the empty leading spacer — a black pane with a correct counter and correct metadata, and not
+              // even the "Image unavailable" fallback, because the mounted cell is simply parked off-screen.
+              // Re-issuing once the content is measured wide enough to hold the target offset defeats the
+              // clamp, and the resulting scroll event thaws the window.
+              onContentSizeChange={(contentWidth) => {
+                if (initialScrollLanded.current) return;
+                const target = initialIndex * width;
+                if (!canLandInitialScroll(contentWidth, target, width)) return;
+                initialScrollLanded.current = true;
+                if (target > 0) listRef.current?.scrollToOffset({ offset: target, animated: false });
+              }}
+              // getItemLayout makes this near-impossible, but a failed jump must not leave a black pane.
+              onScrollToIndexFailed={({ index: failedIndex }) => {
+                listRef.current?.scrollToOffset({ offset: failedIndex * width, animated: false });
+              }}
               // Each page decodes the FULL-res original (expo-image allowDownscaling={false}), which can be
               // ~48MB of bitmap in RAM. Cap the mount window so at most the current photo ± one neighbor are
               // decoded at once — RN's default windowSize (21) would mount ~20 full-res decodes on a large
@@ -252,17 +345,49 @@ export function PhotoViewerModal({
               initialNumToRender={2}
               onMomentumScrollEnd={onScrollEnd}
               renderItem={({ item, index: itemIndex }) => {
-                const uri = item.fullImageUrl ?? item.imageUrl;
+                const uri = uriFor(item);
+                const state = loadState[item.id];
                 return (
                   <View style={{ width, height: height * 0.58, alignItems: "center", justifyContent: "center" }}>
                     {uri ? (
-                      <ZoomablePhoto
-                        uri={uri}
-                        width={width}
-                        height={height * 0.58}
-                        active={itemIndex === safeIndex}
-                        onZoomChange={(z) => itemIndex === safeIndex && setZoomed(z)}
-                      />
+                      <>
+                        <ZoomablePhoto
+                          // Keyed by the URL so a re-minted link remounts the image and re-runs the load
+                          // instead of expo-image holding on to the failed one.
+                          key={uri}
+                          uri={uri}
+                          thumbnailUri={item.imageUrl}
+                          cacheKey={item.id}
+                          width={width}
+                          height={height * 0.58}
+                          active={itemIndex === safeIndex}
+                          onZoomChange={(z) => itemIndex === safeIndex && setZoomed(z)}
+                          onLoadStart={() =>
+                            setLoadState((prev) => (prev[item.id] ? prev : { ...prev, [item.id]: "loading" }))
+                          }
+                          onLoad={() => setLoadState((prev) => ({ ...prev, [item.id]: "loaded" }))}
+                          onError={() => void handleLoadError(item)}
+                        />
+                        {state === "loading" ? (
+                          <View style={styles.imageOverlay} pointerEvents="none">
+                            <ActivityIndicator size="large" color={theme.color.textInverse} />
+                          </View>
+                        ) : null}
+                        {state === "error" ? (
+                          <View style={styles.imageOverlay}>
+                            <Text style={styles.noImage}>Couldn't load this photo</Text>
+                            <Pressable
+                              onPress={() => retryLoad(item)}
+                              hitSlop={10}
+                              style={styles.retryButton}
+                              accessibilityRole="button"
+                              accessibilityLabel="Retry loading photo"
+                            >
+                              <Text style={styles.retryText}>Retry</Text>
+                            </Pressable>
+                          </View>
+                        ) : null}
+                      </>
                     ) : (
                       <Text style={styles.noImage}>Image unavailable</Text>
                     )}
@@ -404,6 +529,16 @@ const styles = StyleSheet.create({
   },
   toastText: { color: theme.color.textInverse, fontFamily: theme.font.semibold, fontSize: 13 },
   noImage: { color: theme.color.textInverse, fontFamily: theme.font.body },
+  // Sits over the photo rather than replacing it, so the thumbnail placeholder underneath stays visible
+  // while the full-res original loads (or after it fails).
+  imageOverlay: { ...StyleSheet.absoluteFillObject, alignItems: "center", justifyContent: "center", gap: theme.space.md },
+  retryButton: {
+    paddingHorizontal: theme.space.lg,
+    paddingVertical: theme.space.sm,
+    borderRadius: theme.radius.pill,
+    backgroundColor: theme.color.brandRed,
+  },
+  retryText: { color: theme.color.textInverse, fontFamily: theme.font.semibold, fontSize: 14 },
   pager: { position: "relative", justifyContent: "center" },
   chevron: {
     position: "absolute",

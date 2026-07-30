@@ -111,7 +111,17 @@ export function useProjectPhotos(dealId: string | undefined) {
         }
       }
 
-      return { photos, pagination: first.pagination, partial };
+      // Independently-fetched pages can overlap, so the concatenation can carry the same photo twice.
+      // Duplicate ids break every consumer that keys on id — the viewer's FlatList keyExtractor most
+      // visibly, where a duplicate key renders a blank page. Keep first occurrence, preserving order.
+      const seen = new Set<string>();
+      const deduped = photos.filter((photo) => {
+        if (seen.has(photo.id)) return false;
+        seen.add(photo.id);
+        return true;
+      });
+
+      return { photos: deduped, pagination: first.pagination, partial };
     },
     enabled: !!user && !!dealId,
   });

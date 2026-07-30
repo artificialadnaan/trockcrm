@@ -22,21 +22,43 @@ const DOUBLE_TAP_SCALE = 2;
  */
 export function ZoomablePhoto({
   uri,
+  thumbnailUri,
+  cacheKey,
   width,
   height,
   active = true,
   onZoomChange,
+  onLoadStart,
+  onLoad,
+  onError,
 }: {
   uri: string;
+  /** The already-cached grid thumbnail, shown as the placeholder while the full-res original decodes — and
+   *  left on screen if it never does. Without it a slow or failed full-res load renders as pure black. */
+  thumbnailUri?: string | null;
+  /** Stable identity for the image cache (the photo id) — see the source prop for why the uri won't do. */
+  cacheKey?: string | null;
   width: number;
   height: number;
   /** Whether this is the photo currently on screen; going inactive resets zoom/pan so paging back is clean. */
   active?: boolean;
   onZoomChange?: (zoomed: boolean) => void;
+  onLoadStart?: () => void;
+  onLoad?: () => void;
+  onError?: () => void;
 }) {
   // Mirrors lastScale > 1 so the pan handler is only enabled while zoomed (a 1x one-finger drag must not
   // translate the image or fight the pager).
   const [isZoomed, setIsZoomed] = useState(false);
+  // Full-res decode is DEFERRED until the user actually zooms. The server has no mid-size derivative — the
+  // viewer's URL is the untouched original (4032px for app captures, uncapped for CompanyCam imports), so
+  // decoding it at native resolution costs ~48MB of bitmap. At 1x that detail is invisible on a ~1200px-wide
+  // phone screen, and on a project with thousands of photos (the unvirtualized grid already holds a tile per
+  // photo in memory) the allocation simply fails — expo-image then renders NOTHING, which is the black frame
+  // this viewer was showing. Downscaled at 1x, native-res once zoomed: #888's crisp-zoom intent is preserved
+  // exactly where it's observable. Latched, not mirrored off isZoomed, so pinching in and out can't thrash a
+  // 48MB decode on every gesture.
+  const [fullResRequested, setFullResRequested] = useState(false);
   const pinchScale = useRef(new Animated.Value(1)).current;
   const baseScale = useRef(new Animated.Value(1)).current;
   const scale = useRef(Animated.multiply(baseScale, pinchScale)).current;
@@ -73,14 +95,20 @@ export function ZoomablePhoto({
       const zoomed = clamped > MIN_SCALE;
       if (!zoomed) resetPan();
       setIsZoomed(zoomed);
+      // Latch on the first zoom; zooming back out keeps the native-res bitmap we already paid for.
+      if (zoomed) setFullResRequested(true);
       onZoomChange?.(zoomed);
     },
     [baseScale, pinchScale, resetPan, onZoomChange],
   );
 
-  // When this photo scrolls off-screen, snap it back to 1x so returning to it (and the pager) starts clean.
+  // When this photo scrolls off-screen, snap it back to 1x so returning to it (and the pager) starts clean,
+  // and drop back to the downscaled decode so the full-res bitmap is released with the page.
   useEffect(() => {
-    if (!active && lastScale.current > MIN_SCALE) applyScale(MIN_SCALE);
+    if (!active) {
+      if (lastScale.current > MIN_SCALE) applyScale(MIN_SCALE);
+      setFullResRequested(false);
+    }
   }, [active, applyScale]);
 
   const onPinchEvent = Animated.event([{ nativeEvent: { scale: pinchScale } }], { useNativeDriver: true });
@@ -144,8 +172,9 @@ export function ZoomablePhoto({
                   itself can be expo-image. RN's core <Image> downsamples the decoded bitmap to ~view
                   size — fine at 1x, but blurry the instant you pinch-zoom a detail-dense shot (design
                   boards, punch defects). expo-image with allowDownscaling={false} decodes the FULL-res
-                  original at native resolution so zoom stays crisp; recyclingKey resets decode state as
-                  the pager recycles this view across photos.
+                  original at native resolution so zoom stays crisp — but that decode is ~48MB, so it is
+                  now DEFERRED until the first zoom (see fullResRequested) rather than paid on every page;
+                  recyclingKey resets decode state as the pager recycles this view across photos.
                   cachePolicy="disk" (NOT "memory-disk"): the in-memory cache would retain ~48MB full-res
                   bitmaps for pages the FlatList has already unmounted, defeating the windowSize cap and
                   jetsamming older iPhones after enough swiping. Disk-only keeps the compressed JPEG for
@@ -159,12 +188,32 @@ export function ZoomablePhoto({
                 }}
               >
                 <ExpoImage
-                  source={{ uri }}
+                  // Without an explicit cacheKey expo-image keys the cache on the WHOLE uri, signature query
+                  // params and all — so every re-minted presigned URL is a cache miss and the "offline
+                  // re-open" the disk policy is here for never happens. Keying on the immutable photo id
+                  // makes the cache actually hit, which also means a re-minted URL after an expiry costs
+                  // nothing to render. The tier is part of the key so the downscaled and native-res decodes
+                  // don't overwrite each other.
+                  source={{ uri, cacheKey: cacheKey ? `${cacheKey}${fullResRequested ? "#full" : ""}` : undefined }}
+                  // The grid thumbnail is already in expo-image's cache, so it paints immediately and stays
+                  // put until the full-res original decodes over it. On a failed load it is what the user
+                  // keeps seeing — a downscaled photo beats the black rectangle this used to render.
+                  placeholder={thumbnailUri ? { uri: thumbnailUri } : undefined}
+                  placeholderContentFit="contain"
                   style={{ width, height }}
                   contentFit="contain"
-                  allowDownscaling={false}
+                  allowDownscaling={!fullResRequested}
                   cachePolicy="disk"
-                  recyclingKey={uri}
+                  // The tier is part of the recycling key so latching full-res actually forces the re-decode
+                  // rather than leaving the downscaled bitmap on screen; the thumbnail placeholder covers the
+                  // brief swap.
+                  recyclingKey={fullResRequested ? `${uri}#full` : uri}
+                  // Surfaced so the viewer can show a spinner, re-mint an expired presigned URL and retry,
+                  // and finally show an explicit error. expo-image renders NOTHING on a failed load, so
+                  // without these a 403/decode failure is indistinguishable from a black photo.
+                  onLoadStart={onLoadStart}
+                  onLoad={onLoad}
+                  onError={onError}
                 />
               </Animated.View>
             </PinchGestureHandler>

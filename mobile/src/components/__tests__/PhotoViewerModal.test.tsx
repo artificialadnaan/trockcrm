@@ -14,8 +14,17 @@ jest.mock("react-native-gesture-handler", () => {
   const { View } = require("react-native");
   return { GestureHandlerRootView: ({ children, ...p }: any) => <View {...p}>{children}</View> };
 });
-// The zoomable page decodes a real image via expo-image — stub it to a plain node.
-jest.mock("../ZoomablePhoto", () => ({ ZoomablePhoto: () => null }));
+// The zoomable page decodes a real image via expo-image — stub it, but keep the load callbacks reachable so
+// a test can drive a failed decode / expired-URL 403 the way the real image would. testID (not a label) so
+// these stand-ins can't collide with the getByLabelText queries the save tests use.
+jest.mock("../ZoomablePhoto", () => {
+  const { Pressable } = require("react-native");
+  return {
+    ZoomablePhoto: ({ uri, thumbnailUri, onError }: { uri: string; thumbnailUri?: string | null; onError?: () => void }) => (
+      <Pressable testID={`zoomable:${uri}`} accessibilityValue={{ text: thumbnailUri ?? "" }} onPress={() => onError?.()} />
+    ),
+  };
+});
 jest.mock("@expo/vector-icons", () => ({ Ionicons: () => null }));
 
 // Spy on the device-save so we can assert it is (never) invoked for a URL-less photo. `mock`-prefixed so
@@ -36,7 +45,7 @@ jest.mock("../../auth/AuthContext", () => ({ useAuth: () => ({ fetcher: jest.fn(
 const mockGetProjectPhotos = jest.fn();
 jest.mock("../../api/endpoints", () => ({ getProjectPhotos: (...args: unknown[]) => mockGetProjectPhotos(...args) }));
 
-import { PhotoViewerModal } from "../PhotoViewerModal";
+import { PhotoViewerModal, canLandInitialScroll } from "../PhotoViewerModal";
 
 function photo(over: Partial<FieldPhoto>): FieldPhoto {
   return {
@@ -69,6 +78,32 @@ function photo(over: Partial<FieldPhoto>): FieldPhoto {
     ...over,
   };
 }
+
+// The pager opens deep into a large gallery (tapping photo 121 of 3533). RN's initialScrollIndex scroll runs
+// ONCE, unchecked, and iOS clamps it into the content width measured at call time — so issuing it before the
+// list has measured ~1.39M px of content silently truncates the jump and parks the viewport on the empty
+// leading spacer. That renders as a black pane with a correct "121 / 3533" counter and correct metadata, and
+// no "Image unavailable" (the mounted cell is simply off-screen) — exactly the reported symptom.
+describe("canLandInitialScroll", () => {
+  const VIEWPORT = 393; // iPhone 15 Pro logical width
+  const TARGET = 120 * VIEWPORT; // opening on photo 121
+
+  it("refuses to issue the jump while the content is still measured too narrow to hold it", () => {
+    expect(canLandInitialScroll(0, TARGET, VIEWPORT)).toBe(false);
+    expect(canLandInitialScroll(VIEWPORT * 2, TARGET, VIEWPORT)).toBe(false);
+    // One viewport short — the clamp would still land us before the target photo.
+    expect(canLandInitialScroll(TARGET, TARGET, VIEWPORT)).toBe(false);
+  });
+
+  it("issues the jump once the content can actually hold the target offset", () => {
+    expect(canLandInitialScroll(TARGET + VIEWPORT, TARGET, VIEWPORT)).toBe(true);
+    expect(canLandInitialScroll(3533 * VIEWPORT, TARGET, VIEWPORT)).toBe(true);
+  });
+
+  it("needs no scroll at all when the viewer opens on the first photo", () => {
+    expect(canLandInitialScroll(0, 0, VIEWPORT)).toBe(true);
+  });
+});
 
 describe("PhotoViewerModal save action gating", () => {
   beforeEach(() => {
@@ -245,5 +280,103 @@ describe("PhotoViewerModal expired-URL refresh", () => {
     // The refetch ran, but the URL matched — no pointless second save of the same dead link.
     expect(mockGetProjectPhotos).toHaveBeenCalledTimes(1);
     expect(mockSavePhotoToDevice).toHaveBeenCalledTimes(1);
+  });
+});
+
+// The viewer used to render a failed full-res load as pure black: expo-image draws nothing on error, there
+// was no onError handler, and the detail panel underneath still showed correct metadata — so a 403 on an
+// expired presigned URL and a photo that simply hadn't decoded were indistinguishable, to the user and to us.
+describe("PhotoViewerModal full-res load failure", () => {
+  beforeEach(() => {
+    mockSavePhotoToDevice.mockReset();
+    mockGetProjectPhotos.mockReset();
+  });
+
+  it("re-mints the presigned URL and swaps it in when the full-res image fails to load", async () => {
+    mockGetProjectPhotos.mockResolvedValueOnce({
+      photos: [photo({ id: "p1", fullImageUrl: "https://r2.example/full-FRESH.jpg" })],
+      pagination: { page: 1, limit: 200, total: 1, totalPages: 1 },
+    });
+    const { getByTestId, queryByTestId } = render(
+      <PhotoViewerModal
+        photos={[photo({ id: "p1", fullImageUrl: "https://r2.example/full-STALE.jpg" })]}
+        initialIndex={0}
+        visible
+        projectDealId="d1"
+        onClose={jest.fn()}
+      />,
+    );
+
+    await act(async () => {
+      fireEvent.press(getByTestId("zoomable:https://r2.example/full-STALE.jpg"));
+    });
+
+    expect(mockGetProjectPhotos).toHaveBeenCalledWith(expect.anything(), "d1", { page: 1, perPage: 200 });
+    // The pager now renders the fresh link, so the image gets a real second chance.
+    expect(queryByTestId("zoomable:https://r2.example/full-FRESH.jpg")).not.toBeNull();
+    expect(queryByTestId("zoomable:https://r2.example/full-STALE.jpg")).toBeNull();
+  });
+
+  it("shows an explicit error with Retry — never a silent black frame — when the refresh can't help", async () => {
+    mockGetProjectPhotos.mockResolvedValueOnce({
+      photos: [photo({ id: "p1", fullImageUrl: "https://r2.example/full-STALE.jpg" })],
+      pagination: { page: 1, limit: 200, total: 1, totalPages: 1 },
+    });
+    const { getByTestId, queryByText, queryByLabelText } = render(
+      <PhotoViewerModal
+        photos={[photo({ id: "p1", fullImageUrl: "https://r2.example/full-STALE.jpg" })]}
+        initialIndex={0}
+        visible
+        projectDealId="d1"
+        onClose={jest.fn()}
+      />,
+    );
+
+    await act(async () => {
+      fireEvent.press(getByTestId("zoomable:https://r2.example/full-STALE.jpg"));
+    });
+
+    expect(queryByText("Couldn't load this photo")).not.toBeNull();
+    expect(queryByLabelText("Retry loading photo")).not.toBeNull();
+  });
+
+  it("spends only ONE automatic refresh per photo, so a genuinely broken photo can't loop", async () => {
+    mockGetProjectPhotos.mockResolvedValue({
+      photos: [photo({ id: "p1", fullImageUrl: "https://r2.example/full-STALE.jpg" })],
+      pagination: { page: 1, limit: 200, total: 1, totalPages: 1 },
+    });
+    const { getByTestId } = render(
+      <PhotoViewerModal
+        photos={[photo({ id: "p1", fullImageUrl: "https://r2.example/full-STALE.jpg" })]}
+        initialIndex={0}
+        visible
+        projectDealId="d1"
+        onClose={jest.fn()}
+      />,
+    );
+
+    await act(async () => {
+      fireEvent.press(getByTestId("zoomable:https://r2.example/full-STALE.jpg"));
+    });
+    await act(async () => {
+      fireEvent.press(getByTestId("zoomable:https://r2.example/full-STALE.jpg"));
+    });
+
+    expect(mockGetProjectPhotos).toHaveBeenCalledTimes(1);
+  });
+
+  it("hands the cached grid thumbnail down as the placeholder so a slow/failed full-res isn't black", () => {
+    const { getByTestId } = render(
+      <PhotoViewerModal
+        photos={[photo({ id: "p1", fullImageUrl: "https://r2.example/full.jpg", imageUrl: "https://r2.example/thumb.jpg" })]}
+        initialIndex={0}
+        visible
+        projectDealId="d1"
+        onClose={jest.fn()}
+      />,
+    );
+    expect(getByTestId("zoomable:https://r2.example/full.jpg").props.accessibilityValue.text).toBe(
+      "https://r2.example/thumb.jpg",
+    );
   });
 });
