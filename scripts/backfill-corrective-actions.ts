@@ -11,6 +11,7 @@ import {
   WON_BROWSABLE_SLUGS,
   LOST_EXCLUDED_SLUGS,
   recipientResolutionSql,
+  basicValidEmail,
 } from "../worker/src/jobs/scorecard-corrective-action-email.js";
 
 /**
@@ -77,7 +78,10 @@ const CARD_ARG = (() => {
     );
     process.exit(2);
   }
-  return value;
+  // Lower-cased: the validator is case-insensitive but Postgres renders uuid columns in canonical
+  // lowercase, so an uppercase argument passed validation and then matched no candidate — a scoped
+  // `--card <UPPERCASE> --commit` exited 0 having silently done nothing at all.
+  return value.toLowerCase();
 })();
 
 interface CandidateRow {
@@ -294,6 +298,7 @@ async function main() {
         // happened to agree with the human's choice on the one card run so far, which is luck, not a rule.
         // An authoritative EXISTING pick resolves it; otherwise the card is skipped for a human.
         const contested = new Set<string>();
+        let unresolvedSegments = 0;
         for (const [label, result] of [["superintendent_name", sup], ["pm_name", pm]] as const) {
           for (const m of result.matches) {
             const slot = m.responder.role === "project_manager" ? "project_manager" : "superintendent";
@@ -311,12 +316,28 @@ async function main() {
             picks[slot] = m.responder;
             console.log(`   ${label}: "${m.matchedText}" -> ${m.responder.name} <${m.responder.email ?? "no email"}> [${slot}]${m.roleMatchesQuery ? "" : "  (typed into the other role's field)"}`);
           }
+          // A field that names somebody this script CANNOT resolve is not safely partially resolvable.
+          //
+          // My own spec warns callers about exactly this shape — "matches.length > 0 does not mean the field
+          // is fully resolved; gating on it silently drops the second recipient" — and this caller then did
+          // it: "Brett Bell / <someone unmatched>" committed Brett Bell as the sole responder and emailed
+          // him, while the other person named on the card was quietly discarded. An unresolved segment means
+          // a human has to look, unless an authoritative existing pick already settles that role.
           for (const a of result.ambiguous) {
-            console.log(`   ${label}: "${a.matchedText}" AMBIGUOUS (${a.candidates.map((c) => c.name).join(" | ")}) — skipped, needs a human`);
+            console.log(`   ${label}: "${a.matchedText}" AMBIGUOUS (${a.candidates.map((c) => c.name).join(" | ")}) — needs a human`);
+            unresolvedSegments += 1;
           }
           for (const u of result.unmatched) {
             console.log(`   ${label}: "${u}" UNMATCHED — nobody on the roster`);
+            unresolvedSegments += 1;
           }
+        }
+
+        if (unresolvedSegments > 0 && !(heldSlots.has("superintendent") && heldSlots.has("project_manager"))) {
+          await client.query("ROLLBACK");
+          console.log(`   SKIP — ${unresolvedSegments} segment(s) name somebody unresolvable; emailing the resolvable subset would silently drop them\n`);
+          skipped += 1;
+          continue;
         }
 
         if (contested.size > 0) {
@@ -388,8 +409,12 @@ async function main() {
         // `deliverable` check is against the roster snapshot: somebody deactivated between that snapshot and
         // this transaction passes it, gets their id written, and then resolves to nothing here. Printing
         // "(nobody)" and committing anyway leaves an open cycle whose job retries to dead-letter.
-        if (!resolved.rows.some((r) => (r.email ?? "").trim().length > 0)) {
-          throw new Error("the worker resolves no deliverable recipient — refusing to commit a cycle nobody is told about");
+        // basicValidEmail is the worker's OWN predicate, imported rather than approximated. A non-empty
+        // check is not the same test: the worker rejects a malformed address, then throws for having zero
+        // recipients and dead-letters — so a card whose only addresses are junk would have committed an
+        // unnotified cycle while this guard reported success.
+        if (!resolved.rows.some((r) => r.email && basicValidEmail(r.email.trim()))) {
+          throw new Error("the worker resolves no VALID email recipient — refusing to commit a cycle nobody is told about");
         }
 
         const after = await client.query<{ status: string; n: string; jobs: string; bad: string }>(
