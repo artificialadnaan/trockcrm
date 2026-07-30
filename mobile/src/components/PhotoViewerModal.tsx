@@ -289,7 +289,10 @@ export function PhotoViewerModal({
     AccessibilityInfo.announceForAccessibility(SAVE_TOAST_TEXT[kind]);
     if (toastTimer.current) clearTimeout(toastTimer.current);
     toastTimer.current = setTimeout(() => setToast(null), 2600);
-  }, [savingId, current, projectDealId, fetchFreshUrl]);
+    // uriFor is a dependency, not an incidental call: it closes over freshUrls, so omitting it pins this
+    // callback to the URL the viewer opened with. Save would then download the expired snapshot link, fail,
+    // and re-run the page scan to re-mint a URL the screen is already displaying.
+  }, [savingId, current, projectDealId, fetchFreshUrl, uriFor]);
 
   return (
     <Modal visible={visible} animationType="fade" onRequestClose={onClose} transparent={false}>

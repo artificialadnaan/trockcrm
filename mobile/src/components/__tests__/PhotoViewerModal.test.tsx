@@ -47,8 +47,12 @@ jest.mock("../../query/hooks", () => ({
   useUpdatePhotoMetadata: () => ({ mutate: jest.fn(), reset: jest.fn(), isError: false, isPending: false }),
 }));
 
-// Stub auth so the viewer has a fetcher for the fresh-URL refetch.
-jest.mock("../../auth/AuthContext", () => ({ useAuth: () => ({ fetcher: jest.fn(), user: { id: "u1" } }) }));
+// Stub auth so the viewer has a fetcher for the fresh-URL refetch. The fetcher is hoisted so its identity
+// is STABLE across renders, matching the real AuthContext (a useCallback). Returning a new jest.fn() per
+// render would invalidate every callback that depends on it, which silently hides missing-dependency bugs
+// in the components under test.
+const mockFetcher = jest.fn();
+jest.mock("../../auth/AuthContext", () => ({ useAuth: () => ({ fetcher: mockFetcher, user: { id: "u1" } }) }));
 
 // Spy on the project-photos fetch used to re-mint a fresh presigned URL on save.
 const mockGetProjectPhotos = jest.fn();
@@ -400,6 +404,40 @@ describe("PhotoViewerModal full-res load failure", () => {
 
     // The refresh returned the same URL, so nothing about `uri` changed — only a remount can re-request it.
     expect(mockZoomableMounts.length).toBeGreaterThan(mountsBeforeRetry);
+  });
+
+  it("Save uses the URL now on screen after a re-mint, not the expired one the viewer opened with", async () => {
+    // The display path already re-minted this photo's URL. Save must pick that up: pinning it to the
+    // snapshot URL means downloading a link known to be dead, then re-running the page scan to discover
+    // the URL the screen is already showing — on a deep gallery that is up to 50 extra requests.
+    mockGetProjectPhotos.mockResolvedValue({
+      photos: [photo({ id: "p1", fullImageUrl: "https://r2.example/full-FRESH.jpg" })],
+      pagination: { page: 1, limit: 200, total: 1, totalPages: 1 },
+    });
+    mockSavePhotoToDevice.mockResolvedValue("saved");
+
+    // The array MUST be referentially stable across re-renders, exactly as the real call site is — it
+    // snapshots `photos` into state once and passes that same reference. Building it inline in the JSX
+    // would hand every render a new `current` object, which alone invalidates the save callback and would
+    // mask a missing dependency rather than catch it.
+    const snapshot = [photo({ id: "p1", fullImageUrl: "https://r2.example/full-STALE.jpg" })];
+    const { getByTestId, getByLabelText } = render(
+      <PhotoViewerModal photos={snapshot} initialIndex={0} visible projectDealId="d1" onClose={jest.fn()} />,
+    );
+
+    // Drive the display-path refresh: the pager now renders full-FRESH.
+    await act(async () => {
+      fireEvent.press(getByTestId("zoomable:https://r2.example/full-STALE.jpg"));
+    });
+    mockGetProjectPhotos.mockClear();
+
+    await act(async () => {
+      fireEvent.press(getByLabelText("Save photo to device"));
+    });
+
+    expect(mockSavePhotoToDevice).toHaveBeenCalledWith("https://r2.example/full-FRESH.jpg");
+    // First attempt succeeded on the fresh URL, so no second scan was needed.
+    expect(mockGetProjectPhotos).not.toHaveBeenCalled();
   });
 
   it("hands the cached grid thumbnail down as the placeholder so a slow/failed full-res isn't black", () => {
