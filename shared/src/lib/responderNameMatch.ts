@@ -387,41 +387,67 @@ function scoreSegmentAgainstName(
 
   const consumed = parts.map(() => false);
   const unaccounted: string[] = [];
-  let exactCount = 0;
+  // Whether ANY exact accounting was made on identity-bearing text: a part (or punctuation-joined run) that
+  // is at least two characters and is not a generational suffix. See the guard below for why counting exact
+  // accountings was not enough.
+  let hasMeaningfulAnchor = false;
+
+  /**
+   * Indices of the punctuation-linked run starting at `start` whose concatenation is exactly `token`, or
+   * null. Walks the WHOLE run rather than a fixed pair: the roster may spell someone "Mary-Jane-Lou Smith"
+   * (three linked parts) while people type "MaryJaneLou Smith", and stopping at two left that asymmetric
+   * against the input-side collapse, which already joins a run of any length.
+   */
+  const joinedRun = (start: number, token: string): number[] | null => {
+    let joined = "";
+    const indices: number[] = [];
+    for (let i = start; i < parts.length; i++) {
+      if (consumed[i]) return null;
+      joined += parts[i];
+      indices.push(i);
+      if (joined === token) return indices;
+      if (joined.length >= token.length) return null;
+      if (!joinableWithNext[i]) return null;
+    }
+    return null;
+  };
+
+  const noteAnchor = (indices: number[]) => {
+    const text = indices.map((i) => parts[i]).join("");
+    // A single character is not identity evidence, and neither is a bare generational suffix: "Q" selected
+    // the middle initial of "John Q Smith", and "Jr" selected the sole "Brett Bell Jr", each returning a
+    // person the field never actually named.
+    if (text.length >= 2 && !indices.some((i) => identitySuffix[i])) hasMeaningfulAnchor = true;
+  };
 
   for (const token of tokens) {
     const index = parts.findIndex((part, i) => !consumed[i] && part === token);
     if (index >= 0) {
       consumed[index] = true;
-      exactCount += 1;
+      noteAnchor([index]);
       continue;
     }
-    // A token may also account for two ADJACENT parts joined: the roster spells someone "Mary-Jane Smith"
-    // (which normalizes to three parts) while people ordinarily type "MaryJane Smith". Without this the
-    // joined token accounted for neither half and a real person went unmatched, contradicting the
-    // punctuation-insensitive contract. Adjacent only, so it cannot staple together unrelated name parts.
-    // ONLY across a boundary that punctuation created. Joining any adjacent pair let bare "Annabell" consume
-    // both parts of "Ann Abell" for an EXACT match on a person who was never named, and "MarySmith" do the
-    // same to "Mary Smith". A space between two names is a real boundary; a hyphen inside one is not.
-    const pairIndex = parts.findIndex(
-      (part, i) =>
-        joinableWithNext[i] &&
-        !consumed[i] &&
-        !consumed[i + 1] &&
-        i + 1 < parts.length &&
-        part + parts[i + 1] === token,
-    );
-    if (pairIndex >= 0) {
-      consumed[pairIndex] = true;
-      consumed[pairIndex + 1] = true;
-      exactCount += 1;
+    let run: number[] | null = null;
+    for (let i = 0; i < parts.length && run === null; i++) {
+      if (!consumed[i] && joinableWithNext[i]) run = joinedRun(i, token);
+    }
+    if (run) {
+      run.forEach((i) => (consumed[i] = true));
+      noteAnchor(run);
       continue;
     }
     unaccounted.push(token);
   }
 
-  if (exactCount === 0) return null;
+  // Fuzz needs a real anchor to hang off. Counting exact accountings let a one-character initial or a
+  // generational suffix serve as that anchor: "Q Smyth" resolved "John Q Smith" with the identifying first
+  // name unspoken, because "q" was exact and "smyth" fuzzily consumed "smith".
+  if (!hasMeaningfulAnchor) return null;
   if (unaccounted.length > 1) return null;
+
+  // Checked BEFORE either return. Placing it only on the unfuzzed path meant one typo in the base name
+  // bypassed it entirely — "John Smyth" resolved roster "John Smith Jr", suffix never examined.
+  const suffixUnspoken = () => parts.some((_, i) => identitySuffix[i] && !consumed[i]);
 
   if (unaccounted.length === 1) {
     const token = unaccounted[0];
@@ -435,17 +461,19 @@ function scoreSegmentAgainstName(
         nameEditDistance(token, part) <= maxEditDistance(token.length, part.length),
     );
     if (index < 0) return null;
+    consumed[index] = true;
+    if (suffixUnspoken()) return null;
     return "high";
   }
 
   // A generational suffix left unspoken rejects the match outright. It is not an optional middle name: it
   // is the part that distinguishes two same-named people, so "Brett Bell" must not resolve a roster holding
-  // only "Brett Bell Jr". This mirrors the typed-suffix rule, which was already enforced by every-token.
-  if (parts.some((_, i) => identitySuffix[i] && !consumed[i])) return null;
+  // only "Brett Bell Jr".
+  if (suffixUnspoken()) return null;
 
   // Whole name accounted for, no fuzz. Counted by CONSUMED PARTS rather than `tokens.length === parts.length`,
-  // because one token may now consume two adjacent parts — "MaryJane Smith" against ["mary","jane","smith"]
-  // is a complete, unfuzzy identification with 2 tokens and 3 parts.
+  // because one token may consume a whole punctuation-linked run — "MaryJane Smith" against
+  // ["mary","jane","smith"] is a complete, unfuzzy identification with 2 tokens and 3 parts.
   return consumed.every(Boolean) ? "exact" : "high";
 }
 
@@ -545,15 +573,9 @@ export function matchFieldResponders<T extends ResponderRosterEntry>({
       //
       // This is also what stops the annotation strip manufacturing a resolvable input: "Nick - PM" reduces
       // to a bare "Nick" and lands here.
-      // A single CHARACTER is never identity evidence, even when it uniquely matches. With "John Q Smith"
-      // on the roster, a field containing just "Q" scored his middle initial exactly, won unopposed and
-      // resolved him at `high` — a responder nobody meaningfully named. Uniqueness is not enough when the
-      // token carries almost no information. (Initials inside a fuller segment are fine: "John Q Smith"
-      // still matches, because the other tokens do the identifying.)
-      if (tokens[0].length < 2) {
-        result.unmatched.push(segment.raw);
-        continue;
-      }
+      // NOTE: a bare one-character token, or a bare generational suffix, is already rejected by the
+      // meaningful-anchor rule in scoreSegmentAgainstName — which applies to EVERY segment, not just bare
+      // ones, and so also covers "Q Smyth". A second guard here would be a duplicate of that property.
       if (allScored.length > 1) {
         result.ambiguous.push({ matchedText: segment.raw, candidates: allScored.map((s) => s.entry) });
         continue;

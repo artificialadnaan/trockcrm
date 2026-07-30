@@ -63,6 +63,16 @@ there was none, and rebuilding from that claim would revive a wrong-recipient de
 > status (a bare `John` silently picked active `John Smyth` over inactive `John Smith`). With one token
 > there is no second token to arbitrate, so **any** contest is ambiguous.
 
+> **Meaningful anchor.** A match needs at least one EXACT accounting on identity-bearing text — two or
+> more characters, and not a generational suffix. A one-character initial and a bare `Jr` each selected a
+> real person on no personal-name evidence (`Q` → John Q Smith; `Jr` → the sole Brett Bell Jr), and an
+> initial could anchor fuzz alongside another token (`Q Smyth` → John Q Smith, first name unspoken).
+
+> **Roster suffixes are required, not optional.** A generational suffix in the ROSTER name must be spoken:
+> `Brett Bell` does not resolve a roster holding only `Brett Bell Jr`, or a card for an absent senior
+> reaches his son. Checked on the fuzzy and unfuzzed paths alike — guarding only one meant a single typo in
+> the base name bypassed it.
+
 > **Best-tier inactive blocking.** For a multi-token segment, if any INACTIVE row ties the best tier
 > reached, the segment does not resolve — ambiguous when an active row ties it too, unmatched when the
 > inactive row is alone there. An active *exact* still beats an inactive *high*, because the inactive is
@@ -279,9 +289,9 @@ label the reason for display. Worth doing if the QC dashboard ever shows these t
 
 | Check | Result |
 | --- | --- |
-| `TZ=UTC npx vitest run shared/src/lib/responderNameMatch.test.ts` | **115 passed** — one case per numbered rule, plus a regression test per review finding, each named after the behaviour it protects |
-| Shared CI gate config (`test:ci` — the one CI runs) | 29 files / **368 tests** passed, new suite included |
-| `npm run check:premerge` (the full gate) | **6,770** server + 2,555 client + 502 worker + 368 shared, zero failures |
+| `TZ=UTC npx vitest run shared/src/lib/responderNameMatch.test.ts` | **119 passed** — one case per numbered rule, plus a regression test per review finding, each named after the behaviour it protects |
+| Shared CI gate config (`test:ci` — the one CI runs) | 29 files / **372 tests** passed, new suite included |
+| `npm run check:premerge` (the full gate) | **6,770** server + 2,555 client + 502 worker + 372 shared, zero failures |
 | Standalone adversarial harness (4 lenses) | **91 probes**, 0 failures |
 | `npm run build --workspace shared`, `typecheck --workspace server`, `typecheck:tests --workspace shared` | clean |
 | `server/tests` full run | 6586 passed; 3 pre-existing failures (`startup-order`, two `properties` consistency) unrelated — `directory-dedup.test.ts` passes |

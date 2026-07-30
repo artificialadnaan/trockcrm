@@ -1113,3 +1113,59 @@ describe("seventh review round", () => {
     expect(go("Ann Abell", [R("bb", "Annabell Smith", "superintendent")]).matches).toEqual([]);
   });
 });
+
+// ── Eighth review round ────────────────────────────────────────────────────────────────────────────────
+// Three P1s, all of them INCOMPLETENESS in the previous round's fixes: the suffix rule guarded one of two
+// return paths, and the bare-initial rule was expressed as a length check on bare segments instead of as a
+// property of the evidence. Both are now single rules inside the scorer, applying to every segment.
+describe("eighth review round", () => {
+  const R = (id: string, name: string, role: string, isActive = true) => ({ id, name, role, isActive });
+  const go = (text: string, roster: ReturnType<typeof R>[]) =>
+    matchFieldResponders({ text, role: "superintendent", roster });
+  const names = (r: { matches: Array<{ responder: { name: string } }> }) =>
+    r.matches.map((m) => m.responder.name);
+
+  it("checks an unspoken suffix on the FUZZY path too", () => {
+    // The guard sat only on the unfuzzed return, so one typo in the base name bypassed it entirely:
+    // "John Smyth" resolved roster "John Smith Jr" — john exact, smyth fuzzy, jr never examined.
+    const junior = [R("jr", "John Smith Jr", "superintendent")];
+    expect(go("John Smyth", junior).matches).toEqual([]);
+    expect(go("John Smith", junior).matches).toEqual([]);
+    expect(names(go("John Smith Jr", junior))).toEqual(["John Smith Jr"]);
+    // A typo is still forgiven when there is no suffix to omit.
+    expect(names(go("John Smyth", [R("js", "John Smith", "superintendent")]))).toEqual(["John Smith"]);
+  });
+
+  it("refuses a bare generational suffix as the only identity token", () => {
+    // The bare guard rejected one-character tokens, so "Jr" (two characters) cleanly selected the sole
+    // "Brett Bell Jr" on no personal-name evidence at all.
+    const roster = [R("jr", "Brett Bell Jr", "superintendent")];
+    for (const bare of ["Jr", "jr", "Sr", "II", "III", "IV"]) {
+      expect(go(bare, roster).matches).toEqual([]);
+    }
+  });
+
+  it("refuses an INITIAL as the only exact anchor, even alongside another token", () => {
+    // The previous fix was a length check on BARE segments, so an initial could still be the sole exact
+    // evidence once a second token appeared: "Q Smyth" resolved "John Q Smith" with the identifying first
+    // name unspoken. The rule now lives in the scorer and applies to every segment.
+    const roster = [R("jq", "John Q Smith", "superintendent")];
+    expect(go("Q Smyth", roster).matches).toEqual([]);
+    expect(go("Q", roster).matches).toEqual([]);
+    // The initial is fine when something else does the identifying.
+    expect(names(go("John Q Smith", roster))).toEqual(["John Q Smith"]);
+    expect(names(go("John Smith", roster))).toEqual(["John Q Smith"]);
+  });
+
+  it("joins a punctuation-linked run of ANY length, in both directions", () => {
+    // The roster-side join consumed exactly two parts while the input-side collapse joined an arbitrary run,
+    // so three-part hyphenated names were asymmetric.
+    const roster = [R("mjl", "Mary-Jane-Lou Smith", "superintendent")];
+    expect(names(go("MaryJaneLou Smith", roster))).toEqual(["Mary-Jane-Lou Smith"]);
+    expect(names(go("Mary-Jane-Lou Smith", roster))).toEqual(["Mary-Jane-Lou Smith"]);
+    expect(names(go("MaryJaneLou Smith", [R("j", "MaryJaneLou Smith", "superintendent")])))
+      .toEqual(["MaryJaneLou Smith"]);
+    // Still only across punctuation — a run must not reach across a real space.
+    expect(go("AnnAbellSmith", [R("a", "Ann Abell Smith", "superintendent")]).matches).toEqual([]);
+  });
+});
