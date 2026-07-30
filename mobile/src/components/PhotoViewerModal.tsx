@@ -135,7 +135,17 @@ export function PhotoViewerModal({
   // load-bearing and invisible: switch to an always-mounted `visible={...}` and `index` would stick on the
   // previously-viewed photo while initialScrollIndex moved underneath it — the detail panel describing one
   // photo while the pager shows another. Syncing here makes the component correct either way.
+  //
+  // Skips the mount run deliberately. useState already seeded `index`, and clearing initialScrollLanded here
+  // would race the native onContentSizeChange: if that fires first (it is a layout callback, so ordering is
+  // not ours to assume) it would be reset to false, and a LATER content-size change — a rotation — would
+  // then re-issue the opening scroll and yank the user back to the photo they entered on.
+  const initialIndexSettled = useRef(false);
   useEffect(() => {
+    if (!initialIndexSettled.current) {
+      initialIndexSettled.current = true;
+      return;
+    }
     setIndex(initialIndex);
     initialScrollLanded.current = false;
   }, [initialIndex]);
