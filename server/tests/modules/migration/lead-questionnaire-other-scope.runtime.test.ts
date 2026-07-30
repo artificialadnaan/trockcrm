@@ -1,0 +1,160 @@
+import { readFileSync } from "node:fs";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { PGlite } from "@electric-sql/pglite";
+
+// The REAL 0208 applied to the REAL table shape. What matters here is not the DDL — there is none — but that
+// the seeded rows satisfy the conventions the CLIENT relies on to draw the card and drive its selected state.
+// Those conventions live in lead-questionnaire-sections.tsx and are asserted explicitly below, because a seed
+// that lands in the table but violates one of them produces a card that renders and cannot be selected.
+const MIGRATION_SQL = readFileSync(
+  new URL("../../../../migrations/0208_lead_questionnaire_other_scope.sql", import.meta.url),
+  "utf8",
+);
+
+let db: PGlite;
+
+beforeAll(async () => {
+  db = new PGlite();
+  // Mirrors public.project_type_question_nodes as it exists in production.
+  await db.exec(`
+    CREATE TABLE public.project_type_question_nodes (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      project_type_id uuid,
+      parent_node_id uuid,
+      parent_option_value varchar,
+      node_type varchar NOT NULL DEFAULT 'question',
+      key varchar NOT NULL,
+      label varchar NOT NULL,
+      prompt text,
+      input_type varchar,
+      options jsonb NOT NULL DEFAULT '[]'::jsonb,
+      is_required boolean NOT NULL DEFAULT false,
+      display_order integer NOT NULL DEFAULT 0,
+      is_active boolean NOT NULL DEFAULT true,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      updated_at timestamptz NOT NULL DEFAULT now(),
+      section_key text,
+      group_key text,
+      group_label text,
+      group_order integer
+    );
+  `);
+  // An existing scope group, so ordering and uniqueness are exercised against real neighbours.
+  await db.exec(`
+    INSERT INTO public.project_type_question_nodes
+      (key, label, input_type, is_required, display_order, section_key, group_key, group_label, group_order)
+    VALUES
+      ('water_intrusion_applies','Does water intrusion scope apply?','boolean',false,0,'scope','water_intrusion','Water Intrusion',5),
+      ('leak_locations','Locations of Leak','textarea',true,1,'scope','water_intrusion','Water Intrusion',5);
+  `);
+  await db.exec(MIGRATION_SQL);
+}, 60_000);
+
+afterAll(async () => {
+  await db?.close();
+});
+
+async function otherNodes() {
+  const { rows } = await db.query<{
+    key: string; label: string; input_type: string; is_required: boolean;
+    display_order: number; group_label: string; group_order: number; is_active: boolean;
+    parent_node_id: string | null; project_type_id: string | null; prompt: string | null;
+  }>(
+    `SELECT key, label, input_type, is_required, display_order, group_label, group_order, is_active,
+            parent_node_id, project_type_id, prompt
+       FROM public.project_type_question_nodes
+      WHERE group_key = 'other' AND is_active
+      ORDER BY display_order`,
+  );
+  return rows;
+}
+
+describe("migration 0208 — the Other scope", () => {
+  it("seeds a selectable card with one free-text field", async () => {
+    const rows = await otherNodes();
+    expect(rows.map((r) => r.key)).toEqual(["other_applies", "other_scope_description"]);
+    expect(rows[0].group_label).toBe("Other");
+    // Last on the grid, after the ten seeded scopes.
+    expect(rows[0].group_order).toBe(11);
+  });
+
+  it("the applies-node satisfies BOTH rules the client uses to find it", async () => {
+    // lead-questionnaire-sections.tsx: a parentless node becomes the group's applies-node when its key ends
+    // `_applies` OR its display_order is 0. Satisfying both means a future refactor that drops either rule
+    // still finds it — and without an applies-node the card renders but can never be selected, so the scope
+    // would be visible and unusable.
+    const [applies] = await otherNodes();
+    expect(applies.key.endsWith("_applies")).toBe(true);
+    expect(applies.display_order).toBe(0);
+    expect(applies.parent_node_id).toBeNull();
+    expect(applies.input_type).toBe("boolean");
+    // NOT required: it is the toggle. Requiring it would demand every lead answer "no" to Other explicitly.
+    expect(applies.is_required).toBe(false);
+  });
+
+  it("the description is a CHILD of the applies-node, or it renders nowhere", async () => {
+    // The panel builds a group's question list as `node.parentNodeId === appliesNode.id`. A parentless
+    // question still belongs to the group — it counts toward "answered", it is in `group.nodes` — but the
+    // panel never draws it, so the card selects and opens onto an empty box. My first version of this
+    // migration did exactly that, and the client test caught it.
+    const rows = await otherNodes();
+    const applies = rows[0];
+    const { rows: child } = await db.query<{ parent_node_id: string | null; parent_option_value: string | null }>(
+      `SELECT parent_node_id, parent_option_value FROM public.project_type_question_nodes
+        WHERE key = 'other_scope_description' AND is_active`,
+    );
+    expect(child[0].parent_node_id).toBe(
+      (await db.query<{ id: string }>(
+        `SELECT id FROM public.project_type_question_nodes WHERE key='other_applies' AND is_active`,
+      )).rows[0].id,
+    );
+    // 'true' — the same option value every other scope uses to mean "the group applies".
+    expect(child[0].parent_option_value).toBe("true");
+    expect(applies.key).toBe("other_applies");
+  });
+
+  it("the description is a REQUIRED textarea — enforced only once Other is selected", async () => {
+    // Required-ness is filtered through `v2VisibleQuestionNodes`, and a scope group's questions are visible
+    // only when the group is selected. So this blocks submit if the user picks Other and types nothing, and
+    // is inert otherwise. An Other scope with no description carries no information at all.
+    const [, description] = await otherNodes();
+    expect(description.input_type).toBe("textarea");
+    expect(description.is_required).toBe(true);
+    expect(description.prompt).toContain("does not fit the scopes above");
+  });
+
+  it("belongs to the UNIVERSAL questionnaire, which is the set the lead form renders", async () => {
+    for (const row of await otherNodes()) {
+      expect(row.project_type_id).toBeNull();
+    }
+  });
+
+  it("is idempotent — a re-run updates rather than duplicating the card", async () => {
+    await db.exec(MIGRATION_SQL);
+    const rows = await otherNodes();
+    expect(rows).toHaveLength(2);
+  });
+
+  it("deactivates a stray same-key node so the grid cannot show two Other cards", async () => {
+    // A partial earlier run, or a hand-seeded row, would otherwise leave a second card that looks identical
+    // and writes to the same answer key.
+    await db.exec(`
+      INSERT INTO public.project_type_question_nodes
+        (key, label, input_type, is_required, display_order, section_key, group_key, group_label, group_order)
+      VALUES ('other_applies','Stray duplicate','boolean',false,0,'scope','other','Other',11);
+    `);
+    await db.exec(MIGRATION_SQL);
+
+    const rows = await otherNodes();
+    expect(rows).toHaveLength(2);
+    expect(rows.map((r) => r.label)).not.toContain("Stray duplicate");
+  });
+
+  it("leaves the existing scopes untouched", async () => {
+    const { rows } = await db.query<{ group_key: string; n: number }>(
+      `SELECT group_key, count(*)::int AS n FROM public.project_type_question_nodes
+        WHERE is_active AND group_key = 'water_intrusion' GROUP BY 1`,
+    );
+    expect(rows).toEqual([{ group_key: "water_intrusion", n: 2 }]);
+  });
+});
