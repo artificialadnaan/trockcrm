@@ -77,30 +77,83 @@ export function walkthroughIngressLockKey(dealId: string, walkthroughId: string)
 }
 
 /**
- * The quantity band `estimate_extractions.quantity` can actually represent.
+ * The quantity band a walkthrough quantity can survive ALL THE WAY to a promoted estimate.
  *
- * The column is `numeric(14,3)` (estimate-extractions.ts:37) — 14 digits of precision, scale 3, so 11
- * integer digits and exactly three decimal places. Both ends of that band are enforced in validation
- * rather than discovered at INSERT, and each end fails a DIFFERENT way if it is not:
+ * NOT the band of the column this module inserts into, and that distinction is the whole point.
+ * `estimate_extractions.quantity` is `numeric(14,3)` (estimate-extractions.ts:37) and would take
+ * eleven integer digits, but the promotion chain NARROWS: extraction ->
+ * `estimate_pricing_recommendations.recommended_quantity`, `numeric(14,3)`
+ * (estimate-pricing-recommendations.ts:57, written at recommendation-persistence-service.ts:101) ->
+ * `estimate_line_items.quantity`, which is `numeric(12,3)` (estimate-line-items.ts:22) — NINE integer
+ * digits. The NARROWEST column in the chain governs the ingress bound, not the insert target.
  *
- *   MAX — Postgres refuses a value that rounds to an absolute value >= 10^11 with a `numeric field
- *   overflow` (22003). That is a 500 out of the middle of the transaction, contradicting the
- *   400-before-any-write contract the rest of this validator establishes. Verified against real
- *   Postgres 16.14: 1e11 and 99999999999.9996 both raise 22003; 99999999999.999 and
- *   99999999999.9994 (which rounds DOWN) are accepted. The bound below is therefore very slightly
- *   conservative — it also refuses the sliver between 99999999999.999 and the true rounding
- *   threshold — which is the harmless direction, and no walkthrough reaches eleven digits anyway.
+ * WHY THAT IS NOT TIDINESS. A quantity between the two limits — 10^9 to 10^11 — was accepted here,
+ * priced, reviewed, and APPROVED by an estimator, and only then raised `numeric field overflow`
+ * (22003) at `createLineItem` (deals/estimate-service.ts:194) as promotion tried to write it. That is
+ * the worst possible place to discover it: after a human signed off on the row, in a code path the
+ * sender is no longer watching. Refused at the door instead.
+ *
+ *   MAX — Postgres refuses a value that ROUNDS to an absolute value >= 10^9 with a 22003. Verified on
+ *   PGlite 17.5 against a real `numeric(12,3)`: 999999999.999 stores exactly, 1000000000 and
+ *   999999999.9996 (which rounds UP past the limit) both raise 22003, and 999999999.9994 rounds DOWN
+ *   and is accepted. The bound below is therefore very slightly conservative — it also refuses the
+ *   sliver between 999999999.999 and the true rounding threshold — which is the harmless direction,
+ *   and no walkthrough reaches nine integer digits anyway.
  *
  *   MIN — and this is the dangerous one, because it SUCCEEDS. Scale 3 makes Postgres ROUND, not
- *   reject: verified on the same server, 0.0001 and 0.0004 both store as exactly 0.000. So a payload
- *   this module explicitly refuses at `quantity <= 0` can walk straight back in as 0.0001 and land in
- *   the table as a zero — the very value the guard above exists to keep out, arrived at silently.
- *   (0.0005 rounds UP to 0.001 and would survive; the bound is set at the column's smallest
+ *   reject: verified against real Postgres 16.14, 0.0001 and 0.0004 both store as exactly 0.000. So a
+ *   payload this module explicitly refuses at `quantity <= 0` can walk straight back in as 0.0001 and
+ *   land in the table as a zero — the very value the guard above exists to keep out, arrived at
+ *   silently. (0.0005 rounds UP to 0.001 and would survive; the bound is set at the column's smallest
  *   representable value, 0.001, rather than at the exact collapse threshold, because "the column
  *   stores three decimals" is a rule a sender can act on and "below 0.0005 you become zero" is not.)
+ *   Scale is 3 at every step of the chain, so unlike the max the min is the same wherever it is
+ *   measured — narrowing changed the precision, not the scale.
  */
-export const MAX_WALKTHROUGH_QUANTITY = 99999999999.999;
+export const MAX_WALKTHROUGH_QUANTITY = 999999999.999;
 export const MIN_WALKTHROUGH_QUANTITY = 0.001;
+
+/**
+ * The longest `unit` the chain can carry.
+ *
+ * `estimate_extractions.unit` is `varchar(50)` (estimate-extractions.ts:38), and `unit` arrived here as
+ * an arbitrary string — so a longer value raised `value too long for type character varying(50)`
+ * (22001) from inside the ingress transaction and returned a 500, contradicting the
+ * 400-before-any-write contract the rest of this validator establishes.
+ *
+ * 50 is the width at EVERY step of the promotion chain — extraction `varchar(50)` ->
+ * `estimate_pricing_recommendations.recommended_unit` `varchar(50)`
+ * (estimate-pricing-recommendations.ts:58, written from the extraction's unit at
+ * recommendation-persistence-service.ts:102) -> `estimate_line_items.unit` `varchar(50)`
+ * (estimate-line-items.ts:23). So unlike `quantity` and `divisionHint` there is NO narrower downstream
+ * column here and this bound does not need re-auditing. Recorded explicitly so nobody has to re-derive
+ * it to find that out.
+ */
+export const MAX_WALKTHROUGH_UNIT_CHARS = 50;
+
+/**
+ * The longest `divisionHint` that can survive promotion.
+ *
+ * `estimate_extractions.division_hint` is unbounded `text` (estimate-extractions.ts:39), so ingress
+ * alone would accept any length — but divisionHint is not merely stored. It BECOMES THE SECTION NAME of
+ * the promoted estimate, and `estimate_sections.name` is `varchar(255) NOT NULL` (estimate-sections.ts).
+ * Traced through the code rather than inferred from the column names:
+ * `loadApprovedRecommendationsForRun` selects it under that alias (draft-estimate-service.ts:96,
+ * `sectionName: estimateExtractions.divisionHint`) -> `getPricingRowSectionName` passes it through
+ * `normalizeScopeLabel`, which only trims (workbench-service.ts:63-67, :90-95) ->
+ * `groupRecommendationsIntoSections` groups on it (draft-estimate-service.ts:143) ->
+ * `getOrCreateEstimateSection` (:159) -> `createSection` (deals/estimate-service.ts:99) INSERTs it.
+ *
+ * And the lookup does not catch it first: `getOrCreateEstimateSection` asks whether a section of that
+ * name already exists, but a `varchar(255) = $1` comparison against a 256-character parameter simply
+ * MISSES rather than erroring (verified on PGlite 17.5: 0 rows, no error). So an over-long hint sails
+ * past the existence check and dies on the INSERT with a 22001 — the same failure moment as `rawLabel`
+ * and an over-wide `quantity`, i.e. after an estimator has already approved the row.
+ *
+ * Only trimming happens between here and that INSERT, and trimming can only shorten, so 255 measured
+ * at ingress is still 255 measured at the column.
+ */
+export const MAX_WALKTHROUGH_DIVISION_HINT_CHARS = 255;
 
 /**
  * The longest `rawLabel` that can survive all the way to a promoted estimate.
@@ -213,6 +266,72 @@ const EXTENSION_BY_MIME: Record<ContactSheetMimeType, string> = {
   "application/pdf": ".pdf",
 };
 
+/** `files.display_name` and `files.system_filename` are both `varchar(500)` (files.ts:42-43). Both are
+ *  COMPOSED here out of payload fields, so the payload fields have to be bounded to what is left of 500
+ *  after the composition — which is what the two builders below exist to make precise. */
+const FILES_NAME_COLUMN_CHARS = 500;
+
+/**
+ * The contact sheet's human-facing `files.display_name`.
+ *
+ * A named builder rather than an inline template because the PREFIX is what makes
+ * `MAX_WALKTHROUGH_SITE_LABEL_CHARS` correct, and that bound is computed by measuring this function's
+ * own output for an empty label. Editing the prefix therefore moves the bound with it, instead of
+ * silently invalidating a hand-counted number.
+ */
+export function buildWalkthroughContactSheetDisplayName(siteLabel: string): string {
+  return `Walkthrough evidence — ${siteLabel}`;
+}
+
+/**
+ * The contact sheet's `files.system_filename`, and by the same argument the basis of
+ * `MAX_WALKTHROUGH_ID_CHARS`.
+ */
+export function buildWalkthroughContactSheetSystemFilename(
+  walkthroughId: string,
+  mimeType: ContactSheetMimeType
+): string {
+  // The extension already carries its dot, so this concatenates rather than re-inserting one.
+  return `walkthrough-${walkthroughId}${EXTENSION_BY_MIME[mimeType]}`;
+}
+
+/**
+ * The longest `siteLabel` that fits the column it is composed into.
+ *
+ * `siteLabel` reaches two columns: `estimate_source_documents.filename`, unbounded `text`, and
+ * `files.display_name`, `varchar(500)` — so the file row governs. Unlike `quantity`, `unit` and
+ * `divisionHint` the failure here is NOT post-approval: `createWalkthroughContactSheetFile` is the
+ * FIRST write of the ingress transaction, so an over-long label was a 22001 and a 500 response rather
+ * than the 400 naming the field that this validator promises.
+ *
+ * DERIVED from the builder above rather than written as a literal, so the prefix and the bound cannot
+ * drift apart.
+ */
+export const MAX_WALKTHROUGH_SITE_LABEL_CHARS =
+  FILES_NAME_COLUMN_CHARS - buildWalkthroughContactSheetDisplayName("").length;
+
+/**
+ * The longest `walkthroughId` the chain can carry.
+ *
+ * Deliberately NOT validated as a UUID — it lands on `estimate_source_documents.content_hash`, which is
+ * `text`, and the contract with trock-scope is an opaque export id rather than a Postgres uuid. But it
+ * is COMPOSED into two bounded columns: `files.system_filename` `varchar(500)` and `files.r2_key`
+ * `varchar(1000)` (files.ts:43, :48). `system_filename` is the tighter of the two by a wide margin —
+ * the derived r2 key spends only 105 characters on its fixed segments and its two UUIDs, leaving ~895 —
+ * so bounding to `system_filename` covers both. That relationship is asserted in the runtime suite
+ * rather than trusted to this comment.
+ *
+ * Measured against the LONGEST accepted extension, so the bound holds for every mime type rather than
+ * for whichever one happened to be measured.
+ */
+export const MAX_WALKTHROUGH_ID_CHARS =
+  FILES_NAME_COLUMN_CHARS -
+  Math.max(
+    ...WALKTHROUGH_CONTACT_SHEET_MIME_TYPES.map(
+      (mimeType) => buildWalkthroughContactSheetSystemFilename("", mimeType).length
+    )
+  );
+
 /**
  * The contact sheet's R2 key, DERIVED — never accepted from the caller.
  *
@@ -267,8 +386,13 @@ export async function createWalkthroughContactSheetFile({
   input,
 }: CreateWalkthroughContactSheetFileArgs): Promise<string> {
   const extension = EXTENSION_BY_MIME[input.mimeType];
-  // The extension already carries its dot, so this concatenates rather than re-inserting one.
-  const systemFilename = `walkthrough-${input.walkthroughId}${extension}`;
+  // Both names come from the shared builders, which are ALSO what MAX_WALKTHROUGH_SITE_LABEL_CHARS and
+  // MAX_WALKTHROUGH_ID_CHARS are measured from — so the string written here and the length the
+  // validator enforces can never disagree.
+  const systemFilename = buildWalkthroughContactSheetSystemFilename(
+    input.walkthroughId,
+    input.mimeType
+  );
 
   const [row] = await tenantDb
     .insert(files)
@@ -277,7 +401,7 @@ export async function createWalkthroughContactSheetFile({
       // FILE_CATEGORIES has no "estimating" member; "estimate" is the estimating-path category and
       // adding an enum value would require a migration. See shared/src/types/enums.ts.
       category: "estimate",
-      displayName: `Walkthrough evidence — ${input.siteLabel}`,
+      displayName: buildWalkthroughContactSheetDisplayName(input.siteLabel),
       systemFilename,
       originalFilename: systemFilename,
       mimeType: input.mimeType,
@@ -414,6 +538,40 @@ export interface InsertWalkthroughExtractionsArgs {
  * "no quantity was spoken" must not collapse into "zero of it". Nothing reaches here through the
  * ingress with a null quantity — `validateWalkthroughIngressPayload` refuses those at the door — but
  * the helper is exported and the encoding is the one worth keeping if it is ever called directly.
+ *
+ * ── WIDTH AUDIT: the fields written below that need NO ingress bound, and why ────────────────────────
+ *
+ * The rule this module follows is that an ingress bound matches the NARROWEST column anywhere in the
+ * promotion chain (extraction -> pricing recommendation -> line item), not the column being inserted
+ * into — because a chain that narrows turns an accepted value into a 22003/22001 at `createLineItem`,
+ * i.e. after an estimator has approved the row. `quantity` (numeric(12,3) downstream), `rawLabel`
+ * (varchar(500) downstream) and `divisionHint` (varchar(255) downstream) are all bounded for that
+ * reason, and `unit` because varchar(50) is the width everywhere. The REST were traced the same way and
+ * are genuinely unbounded end to end. Recorded so the next reviewer does not have to re-derive it:
+ *
+ *   normalizedLabel — `text` here; promoted only into `normalizedIntent` (`text`),
+ *     `sourceRowIdentity` (`text`) and an option's `optionLabel` (`text`). It never reaches a bounded
+ *     column: `optionLabel` falls back to it only when `rawLabel` is null
+ *     (worker/src/jobs/estimate-generation.ts:379), which ingress makes impossible. Worth knowing that
+ *     `.toLowerCase()` can LENGTHEN a string in Unicode (U+0130 lowercases to two code points), so this
+ *     is not simply "<= rawLabel's bound" — it is safe because the target is unbounded, not because the
+ *     length is preserved.
+ *   evidenceText — `text` here, promoted into `estimate_line_items.notes`, also `text`
+ *     (draft-estimate-service.ts:95 -> estimate-line-items.ts:26), and copied into `evidenceJson`.
+ *     Unbounded at every step.
+ *   confidence — `numeric(5,2)` here and `numeric(5,2)` on the recommendation
+ *     (estimate-pricing-recommendations.ts:67); no line-item column at all. Already constrained to
+ *     0..1 by the validator, which is far inside the column, so no width bound is needed.
+ *   locationLabel, trade, evidence.clipId, evidence.frameKey — written into `jsonb`
+ *     (`metadataJson` / `evidenceBboxJson`), which has no width. None is read back out as a typed
+ *     column: `trade` becomes `metadataJson.tradeHint` and then an in-memory `pricingScopeKey` compared
+ *     with `===` against market rules (market-rate-service.ts:84); `locationLabel`, `clipId` and
+ *     `frameKey` have no reader outside this module at all.
+ *   every other metadataJson value — `activeArtifact`, `tradeHintApplied` (booleans),
+ *     `sourceParseRunId`, `sourceWalkthroughId`, `contentFingerprint`, `extractionProvider`,
+ *     `extractionMethod`, `pricingScopeType`, `pricingScopeKey` (all server-derived, none caller-
+ *     controlled), and `sourceScopeItemId`, which IS caller-controlled but is only ever read back via
+ *     `->>` into a JS Map and error messages — never into a typed column.
  */
 export async function insertWalkthroughExtractions({
   tenantDb,
@@ -611,24 +769,26 @@ function validateScopeRow(value: unknown, index: number): WalkthroughScopeRow {
   if (quantity <= 0) {
     throw new AppError(400, `${at}.quantity must be greater than zero`);
   }
-  // Both ends of numeric(14,3) — see MAX_WALKTHROUGH_QUANTITY / MIN_WALKTHROUGH_QUANTITY. Checked here
-  // so an unrepresentable quantity is a 400 naming the row, not a 22003 from inside the transaction
+  // Both ends of the PROMOTABLE band — see MAX_WALKTHROUGH_QUANTITY / MIN_WALKTHROUGH_QUANTITY. Checked
+  // here so an unpromotable quantity is a 400 naming the row, not a 22003 after an estimator approved it
   // (the max) or a silent zero in the table (the min).
   if (quantity > MAX_WALKTHROUGH_QUANTITY) {
     throw new AppError(
       400,
-      `${at}.quantity ${quantity} exceeds the largest quantity this column can hold ` +
-        `(${MAX_WALKTHROUGH_QUANTITY}). estimate_extractions.quantity is numeric(14,3), so a value ` +
-        `rounding to 10^11 or more is a numeric overflow at INSERT — refused here instead.`
+      `${at}.quantity ${quantity} exceeds the largest quantity a promoted estimate can hold ` +
+        `(${MAX_WALKTHROUGH_QUANTITY}). estimate_extractions.quantity is numeric(14,3) and would ` +
+        `accept it, but promotion copies it into estimate_line_items.quantity, which is numeric(12,3) ` +
+        `— so a value rounding to 10^9 or more would be priced and APPROVED here and only then fail ` +
+        `promotion with a numeric overflow. Refused at ingress instead.`
     );
   }
   if (quantity < MIN_WALKTHROUGH_QUANTITY) {
     throw new AppError(
       400,
-      `${at}.quantity ${quantity} is smaller than the smallest quantity this column can represent ` +
-        `(${MIN_WALKTHROUGH_QUANTITY}). estimate_extractions.quantity is numeric(14,3) — three ` +
-        `decimal places — so Postgres would ROUND this and store it as 0.000, turning a quantity ` +
-        `this contract requires to be greater than zero into exactly the zero it forbids.`
+      `${at}.quantity ${quantity} is smaller than the smallest quantity these columns can represent ` +
+        `(${MIN_WALKTHROUGH_QUANTITY}). Every quantity column in the chain has three decimal places, ` +
+        `so Postgres would ROUND this and store it as 0.000, turning a quantity this contract requires ` +
+        `to be greater than zero into exactly the zero it forbids.`
     );
   }
 
@@ -667,13 +827,43 @@ function validateScopeRow(value: unknown, index: number): WalkthroughScopeRow {
   // Canonicalized once, here, so the stored provenance value and the pricing key cannot disagree.
   const trade = canonicalizeTradeScopeKey(requireNonEmptyString(row.trade, `${at}.trade`));
 
+  // Bounded to varchar(50) — see MAX_WALKTHROUGH_UNIT_CHARS. This is the ONE field where the insert
+  // target's width and the narrowest downstream width agree, so 50 is the answer whichever way it is
+  // measured.
+  const unit = optionalString(row.unit, `${at}.unit`);
+  if (unit !== null && unit.length > MAX_WALKTHROUGH_UNIT_CHARS) {
+    throw new AppError(
+      400,
+      `${at}.unit is ${unit.length} characters, over the ${MAX_WALKTHROUGH_UNIT_CHARS}-character ` +
+        `limit. estimate_extractions.unit is varchar(${MAX_WALKTHROUGH_UNIT_CHARS}), so a longer value ` +
+        `is a 22001 from the middle of the ingress transaction rather than the 400 naming the field ` +
+        `that this endpoint promises. recommended_unit and estimate_line_items.unit are ` +
+        `varchar(${MAX_WALKTHROUGH_UNIT_CHARS}) as well, so no narrower downstream column applies.`
+    );
+  }
+
+  // Bounded to the SECTION NAME column, not to division_hint's own unbounded text — see
+  // MAX_WALKTHROUGH_DIVISION_HINT_CHARS for the traced path from here to estimate_sections.name.
+  const divisionHint = optionalString(row.divisionHint, `${at}.divisionHint`);
+  if (divisionHint !== null && divisionHint.length > MAX_WALKTHROUGH_DIVISION_HINT_CHARS) {
+    throw new AppError(
+      400,
+      `${at}.divisionHint is ${divisionHint.length} characters, over the ` +
+        `${MAX_WALKTHROUGH_DIVISION_HINT_CHARS}-character limit. estimate_extractions.division_hint is ` +
+        `unbounded text and would accept it, but promotion turns divisionHint into the estimate's ` +
+        `SECTION NAME and estimate_sections.name is varchar(${MAX_WALKTHROUGH_DIVISION_HINT_CHARS}) — ` +
+        `so a longer hint would be accepted here, approved by an estimator, and only then fail ` +
+        `promotion at createSection with a 22001. Refused at ingress instead.`
+    );
+  }
+
   return {
     sourceScopeItemId: scopeItemId,
     rawLabel,
     trade,
-    divisionHint: optionalString(row.divisionHint, `${at}.divisionHint`),
+    divisionHint,
     quantity,
-    unit: optionalString(row.unit, `${at}.unit`),
+    unit,
     confidence,
     evidenceText: requireString(row.evidenceText, `${at}.evidenceText`),
     evidence: {
@@ -749,6 +939,33 @@ export function validateWalkthroughIngressPayload(input: unknown): WalkthroughIn
     throw new AppError(400, "capturedAt must be a parseable timestamp");
   }
 
+  // Bounded because both of these are COMPOSED into varchar(500) columns on the `files` row — the very
+  // first write of the ingress transaction — rather than merely stored in text. See
+  // MAX_WALKTHROUGH_ID_CHARS / MAX_WALKTHROUGH_SITE_LABEL_CHARS, both derived from the builders that do
+  // the composing.
+  const walkthroughId = requireNonEmptyString(raw.walkthroughId, "walkthroughId");
+  if (walkthroughId.length > MAX_WALKTHROUGH_ID_CHARS) {
+    throw new AppError(
+      400,
+      `walkthroughId is ${walkthroughId.length} characters, over the ${MAX_WALKTHROUGH_ID_CHARS}-` +
+        `character limit. It is composed into files.system_filename, a varchar(` +
+        `${FILES_NAME_COLUMN_CHARS}), so a longer id is a 22001 on the first write of the ingress ` +
+        `transaction rather than the 400 naming the field that this endpoint promises.`
+    );
+  }
+
+  const siteLabel = requireNonEmptyString(raw.siteLabel, "siteLabel");
+  if (siteLabel.length > MAX_WALKTHROUGH_SITE_LABEL_CHARS) {
+    throw new AppError(
+      400,
+      `siteLabel is ${siteLabel.length} characters, over the ${MAX_WALKTHROUGH_SITE_LABEL_CHARS}-` +
+        `character limit. It is composed into files.display_name, a varchar(` +
+        `${FILES_NAME_COLUMN_CHARS}), alongside a fixed prefix — so a longer label is a 22001 on the ` +
+        `first write of the ingress transaction rather than the 400 naming the field that this ` +
+        `endpoint promises.`
+    );
+  }
+
   const rows = rowsValue.map(validateScopeRow);
 
   // `sourceScopeItemId` is the export's own idempotency key, and `ingestWalkthrough` replays a retry's
@@ -768,7 +985,7 @@ export function validateWalkthroughIngressPayload(input: unknown): WalkthroughIn
   }
 
   return {
-    walkthroughId: requireNonEmptyString(raw.walkthroughId, "walkthroughId"),
+    walkthroughId,
     dealId: requireNonEmptyString(raw.dealId, "dealId"),
     // Optional, never blank, and a real UUID: it lands on (and is compared against) a uuid column,
     // where "" and "proj-1" are both a 22P02 rather than a null or a miss.
@@ -781,7 +998,7 @@ export function validateWalkthroughIngressPayload(input: unknown): WalkthroughIn
     contactSheetBucket,
     contactSheetBytes,
     contactSheetMimeType: contactSheetMimeType as ContactSheetMimeType,
-    siteLabel: requireNonEmptyString(raw.siteLabel, "siteLabel"),
+    siteLabel,
     capturedAt,
     userId: requireNonEmptyString(raw.userId, "userId"),
     rows,

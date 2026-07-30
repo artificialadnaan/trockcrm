@@ -25,12 +25,14 @@ import {
   estimateExtractionMatches,
   estimateExtractions,
   estimateGenerationRuns,
+  estimateLineItems,
   estimateMarketFallbackGeographies,
   estimateMarketZipMappings,
   estimateMarkets,
   estimatePricingRecommendationOptions,
   estimatePricingRecommendations,
   estimateReviewEvents,
+  estimateSections,
   estimateSourceDocuments,
   files,
   properties,
@@ -41,14 +43,19 @@ import { reprocessEstimateSourceDocument } from "./document-service.js";
 import { canonicalizeTradeScopeKey, isKnownTradeScopeKey } from "./pricing-service.js";
 import { buildEstimatingWorkbenchState } from "./workbench-service.js";
 import {
+  buildWalkthroughContactSheetDisplayName,
   createWalkthroughContactSheetFile,
   createWalkthroughSourceDocument,
   getCrmFileBucket,
   ingestWalkthrough,
   insertWalkthroughExtractions,
+  MAX_WALKTHROUGH_DIVISION_HINT_CHARS,
+  MAX_WALKTHROUGH_ID_CHARS,
   MAX_WALKTHROUGH_QUANTITY,
   MAX_WALKTHROUGH_RAW_LABEL_CHARS,
   MAX_WALKTHROUGH_SCOPE_ROWS,
+  MAX_WALKTHROUGH_SITE_LABEL_CHARS,
+  MAX_WALKTHROUGH_UNIT_CHARS,
   MIN_WALKTHROUGH_QUANTITY,
   WALKTHROUGH_NO_PROJECT_KEY_SEGMENT,
   walkthroughIngressLockKey,
@@ -101,6 +108,13 @@ beforeAll(async () => {
       estimatePricingRecommendationOptions,
       estimateReviewEvents,
       estimateGenerationRuns,
+      // NOT on any walkthrough write path. These are the PROMOTION targets, and they are here so the
+      // width-audit tests below can prove the chain NARROWS against real SQL — that a quantity or a
+      // divisionHint this module's own insert accepts is rejected by the column promotion copies it
+      // into — rather than asserting the narrowing from the Drizzle definitions the bounds were read
+      // off in the first place. See "the promotion chain narrows" describe block.
+      estimateLineItems,
+      estimateSections,
       deals,
       properties,
       estimateMarkets,
@@ -694,6 +708,19 @@ function walkthroughPayload(
   };
 }
 
+/** See the R12/R13/R14 block below: unwraps a SQLSTATE from either a raw PGlite error or a Drizzle
+ *  error that nests the driver's under `cause`. */
+async function sqlStateOfFailure(work: Promise<unknown>): Promise<string | undefined> {
+  try {
+    await work;
+  } catch (error) {
+    const err = error as { code?: string; cause?: { code?: string } };
+    return err?.code ?? err?.cause?.code;
+  }
+  // Distinguishable from a wrong code: the write was supposed to FAIL and did not.
+  return "no error was raised";
+}
+
 /** Whole-table row counts. The suite shares one PGlite instance, so "wrote nothing" can only be
  *  asserted as "the counts did not move" — a per-deal filter would miss a row written under some
  *  other deal id. */
@@ -991,7 +1018,12 @@ describe("ingestWalkthrough", () => {
   // The boundaries are INCLUSIVE, and stored intact. Without this, tightening the bounds to something
   // convenient (say ">= 1") would silently start refusing legitimate fractional quantities, and no test
   // would notice.
-  it("accepts the exact minimum and maximum the column can represent, and stores them unchanged", async () => {
+  //
+  // The literals are SPELLED OUT rather than interpolated from the constants: that is what makes this
+  // test able to fail when the bound moves. It is how R12 was caught here — lowering
+  // MAX_WALKTHROUGH_QUANTITY from the extraction column's 99999999999.999 to the line item's
+  // 999999999.999 turned this assertion red instead of quietly following the constant.
+  it("accepts the exact minimum and maximum the promotion chain can represent, and stores them unchanged", async () => {
     const walkthroughId = U("33063");
 
     const result = await ingestWalkthrough({
@@ -1010,8 +1042,9 @@ describe("ingestWalkthrough", () => {
       [result.extractionIds]
     );
     // scope-max sorts before scope-min. Both round-trip exactly — the min is not zero and the max did
-    // not overflow.
-    expect(stored.rows.map((r) => r.stored)).toEqual(["99999999999.999", "0.001"]);
+    // not overflow. The max is the numeric(12,3) limit of estimate_line_items.quantity, NOT the
+    // numeric(14,3) limit of the column being written here, which would also have stored fine.
+    expect(stored.rows.map((r) => r.stored)).toEqual(["999999999.999", "0.001"]);
   });
 
   it("refuses more scope rows than one walkthrough can plausibly carry", async () => {
@@ -1683,6 +1716,323 @@ describe("ingestWalkthrough", () => {
     expect(row.rawLabel).toHaveLength(MAX_WALKTHROUGH_RAW_LABEL_CHARS);
     // The value that has to survive promotion is the one that actually landed in the column.
     expect(row.rawLabel.length).toBeLessThanOrEqual(500);
+  });
+
+  // ── R12/R13/R14: the promotion chain NARROWS ──────────────────────────────────────────────────────
+  //
+  // The SQLSTATE of a failed write, whether PGlite threw it raw (the direct `pg.query` probes below) or
+  // Drizzle wrapped it (the `insertWalkthroughExtractions` probes, where the driver error is nested
+  // under `cause`). Asserting the CODE rather than the message is what makes these pin the constraint
+  // instead of Postgres's wording — and 22003 vs 22001 is exactly the distinction under test.
+  //
+  // These tests exist because the bug they pin is invisible from inside this module: every value they
+  // refuse is a value `estimate_extractions` would have stored happily. The narrowing only shows up two
+  // tables later, at promotion, after an estimator has approved the row — so each test proves BOTH
+  // halves against real SQL: that the insert target accepts the value, and that the promotion target
+  // does not. Asserting only "ingress said 400" would pass just as well if the downstream column were
+  // wide and the bound were pointless.
+
+  // R12. THE CORE PROOF. 1e9 fits estimate_extractions.quantity (numeric(14,3), eleven integer digits)
+  // and does NOT fit estimate_line_items.quantity (numeric(12,3), nine) — so before this fix it was
+  // accepted, priced, approved, and only then failed promotion with a 22003.
+  it("refuses a quantity estimate_extractions can store but a promoted line item cannot", async () => {
+    // Between the two limits by construction: over the line item's max, under the extraction's.
+    const overPromotable = 1_000_000_000;
+    expect(overPromotable).toBeGreaterThan(MAX_WALKTHROUGH_QUANTITY);
+
+    // HALF ONE — the column this module inserts into takes it. Proven by calling the exported helper,
+    // which performs NO validation, and reading the value back out of Postgres.
+    const walkthroughId = U("33130");
+    const { documentId, parseRunId } = await seedChain(walkthroughId);
+    const ids = await insertWalkthroughExtractions({
+      tenantDb,
+      input: {
+        dealId: DEAL,
+        projectId: PROJECT,
+        documentId,
+        parseRunId,
+        walkthroughId,
+        rows: [{ ...CARPENTRY_ROW, quantity: overPromotable }],
+      },
+    });
+    const stored = await pg.query<{ stored: string }>(
+      `SELECT quantity::text AS stored FROM public.estimate_extractions WHERE id = $1`,
+      [ids[0]]
+    );
+    // Stored EXACTLY. This is why bounding to the insert target was not enough: nothing here complains.
+    expect(stored.rows[0].stored).toBe("1000000000.000");
+
+    // HALF TWO — the column promotion copies it into REFUSES it, with the error the estimator would
+    // have hit after approving the row. Raw SQL against the real numeric(12,3), not a mock.
+    const sectionId = U("33131");
+    await pg.query(`INSERT INTO public.estimate_sections (id, deal_id, name) VALUES ($1, $2, $3)`, [
+      sectionId,
+      DEAL,
+      "Carpentry",
+    ]);
+    // 22003 = numeric field overflow. THE failure this bound exists to move to ingress.
+    expect(
+      await sqlStateOfFailure(
+        pg.query(
+          `INSERT INTO public.estimate_line_items (deal_id, section_id, description, quantity)
+             VALUES ($1, $2, $3, $4)`,
+          [DEAL, sectionId, "Replace rotted carpentry at eave", String(overPromotable)]
+        )
+      )
+    ).toBe("22003");
+
+    // HALF THREE — so ingress refuses it at the door, naming the row, and writes nothing.
+    const before = await tableCounts();
+    await expect(
+      ingestWalkthrough({
+        tenantDb,
+        payload: walkthroughPayload(U("33132"), {
+          rows: [
+            {
+              ...CARPENTRY_ROW,
+              sourceScopeItemId: "scope-item-unpromotable-qty",
+              quantity: overPromotable,
+            },
+          ],
+        }),
+      })
+    ).rejects.toMatchObject({
+      statusCode: 400,
+      message: expect.stringContaining("scope-item-unpromotable-qty"),
+    });
+    expect(await tableCounts()).toEqual(before);
+  });
+
+  // R13. unit was accepted as an arbitrary string against a varchar(50), so a longer value was a 22001
+  // from the middle of the transaction and a 500 to the sender — not the 400 this validator promises.
+  it("refuses a unit longer than the varchar(50) every column in the chain uses", async () => {
+    // The column really is this narrow — proven by reaching it directly, since the whole point is that
+    // the validator used not to.
+    const walkthroughId = U("33133");
+    const { documentId, parseRunId } = await seedChain(walkthroughId);
+    // 22001 = value too long for type character varying(50).
+    expect(
+      await sqlStateOfFailure(
+        insertWalkthroughExtractions({
+          tenantDb,
+          input: {
+            dealId: DEAL,
+            projectId: PROJECT,
+            documentId,
+            parseRunId,
+            walkthroughId,
+            rows: [{ ...CARPENTRY_ROW, unit: "u".repeat(MAX_WALKTHROUGH_UNIT_CHARS + 1) }],
+          },
+        })
+      )
+    ).toBe("22001");
+
+    const before = await tableCounts();
+    await expect(
+      ingestWalkthrough({
+        tenantDb,
+        payload: walkthroughPayload(U("33134"), {
+          rows: [
+            {
+              ...CARPENTRY_ROW,
+              sourceScopeItemId: "scope-item-wide-unit",
+              unit: "u".repeat(MAX_WALKTHROUGH_UNIT_CHARS + 1),
+            },
+          ],
+        }),
+      })
+    ).rejects.toMatchObject({
+      statusCode: 400,
+      message: expect.stringContaining("scope-item-wide-unit"),
+    });
+    expect(await tableCounts()).toEqual(before);
+  });
+
+  it("accepts a unit of exactly 50 characters and stores it whole", async () => {
+    const unit = "u".repeat(MAX_WALKTHROUGH_UNIT_CHARS);
+
+    const result = await ingestWalkthrough({
+      tenantDb,
+      payload: walkthroughPayload(U("33135"), { rows: [{ ...CARPENTRY_ROW, unit }] }),
+    });
+
+    // Read back from the column, not from the input.
+    const stored = await pg.query<{ unit: string; len: number }>(
+      `SELECT unit, length(unit)::int AS len FROM public.estimate_extractions WHERE id = $1`,
+      [result.extractionIds[0]]
+    );
+    expect(stored.rows[0].unit).toBe(unit);
+    expect(stored.rows[0].len).toBe(MAX_WALKTHROUGH_UNIT_CHARS);
+  });
+
+  // R14. The finding the audit turned up: divisionHint is unbounded `text` on the extraction, but
+  // promotion makes it the estimate's SECTION NAME, and estimate_sections.name is varchar(255).
+  it("refuses a divisionHint longer than the section-name column promotion writes it to", async () => {
+    const overWide = "d".repeat(MAX_WALKTHROUGH_DIVISION_HINT_CHARS + 1);
+
+    // HALF ONE — the extraction column is unbounded text and stores it in full.
+    const walkthroughId = U("33136");
+    const { documentId, parseRunId } = await seedChain(walkthroughId);
+    const ids = await insertWalkthroughExtractions({
+      tenantDb,
+      input: {
+        dealId: DEAL,
+        projectId: PROJECT,
+        documentId,
+        parseRunId,
+        walkthroughId,
+        rows: [{ ...CARPENTRY_ROW, divisionHint: overWide }],
+      },
+    });
+    const stored = await pg.query<{ len: number }>(
+      `SELECT length(division_hint)::int AS len FROM public.estimate_extractions WHERE id = $1`,
+      [ids[0]]
+    );
+    expect(stored.rows[0].len).toBe(MAX_WALKTHROUGH_DIVISION_HINT_CHARS + 1);
+
+    // HALF TWO — and the section-name lookup promotion does FIRST does not catch it either: comparing
+    // a varchar(255) column against a longer parameter simply misses, no error. That is what lets the
+    // over-long hint reach the INSERT instead of being treated as "no such section yet".
+    const miss = await pg.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM public.estimate_sections WHERE name = $1`,
+      [overWide]
+    );
+    expect(miss.rows[0].n).toBe(0);
+
+    // HALF THREE — so promotion reaches createSection's INSERT, which is where it dies.
+    // 22001 = value too long for type character varying(255).
+    expect(
+      await sqlStateOfFailure(
+        pg.query(`INSERT INTO public.estimate_sections (deal_id, name) VALUES ($1, $2)`, [
+          DEAL,
+          overWide,
+        ])
+      )
+    ).toBe("22001");
+
+    // HALF FOUR — refused at ingress instead, naming the row, writing nothing.
+    const before = await tableCounts();
+    await expect(
+      ingestWalkthrough({
+        tenantDb,
+        payload: walkthroughPayload(U("33137"), {
+          rows: [
+            {
+              ...CARPENTRY_ROW,
+              sourceScopeItemId: "scope-item-wide-division",
+              divisionHint: overWide,
+            },
+          ],
+        }),
+      })
+    ).rejects.toMatchObject({
+      statusCode: 400,
+      message: expect.stringContaining("scope-item-wide-division"),
+    });
+    expect(await tableCounts()).toEqual(before);
+  });
+
+  // The boundary is inclusive AND promotable: the exact-limit hint has to survive the section INSERT,
+  // which is the only thing that makes 255 the right number rather than a guess.
+  it("accepts a divisionHint of exactly 255 characters, and promotion can section on it", async () => {
+    const divisionHint = "e".repeat(MAX_WALKTHROUGH_DIVISION_HINT_CHARS);
+
+    const result = await ingestWalkthrough({
+      tenantDb,
+      payload: walkthroughPayload(U("33138"), { rows: [{ ...CARPENTRY_ROW, divisionHint }] }),
+    });
+
+    const stored = await pg.query<{ hint: string }>(
+      `SELECT division_hint AS hint FROM public.estimate_extractions WHERE id = $1`,
+      [result.extractionIds[0]]
+    );
+    expect(stored.rows[0].hint).toBe(divisionHint);
+
+    // The value that landed in the column is the one promotion will hand to createSection — so put it
+    // there, exactly as promotion would, and prove it fits.
+    const section = await pg.query<{ len: number }>(
+      `INSERT INTO public.estimate_sections (deal_id, name) VALUES ($1, $2)
+         RETURNING length(name)::int AS len`,
+      [DEAL, stored.rows[0].hint]
+    );
+    expect(section.rows[0].len).toBe(MAX_WALKTHROUGH_DIVISION_HINT_CHARS);
+  });
+
+  // R14, payload level. siteLabel and walkthroughId are not scope-row fields and never reach an
+  // extraction, but ingress COMPOSES them into varchar(500) columns on the `files` row — which is the
+  // FIRST write of the transaction, so an over-long one was a 22001 and a 500 rather than a 400.
+  it("refuses a siteLabel too long for the display name it is composed into", async () => {
+    const before = await tableCounts();
+
+    await expect(
+      ingestWalkthrough({
+        tenantDb,
+        payload: walkthroughPayload(U("33139"), {
+          siteLabel: "s".repeat(MAX_WALKTHROUGH_SITE_LABEL_CHARS + 1),
+        }),
+      })
+    ).rejects.toMatchObject({
+      statusCode: 400,
+      message: expect.stringContaining("siteLabel"),
+    });
+
+    expect(await tableCounts()).toEqual(before);
+  });
+
+  // The bound is DERIVED from the builder that does the composing, so the interesting assertion is not
+  // "500 - 23 = 477" but "the exact-limit label composes to exactly the column width" — which stays
+  // true if someone edits the prefix, and fails if the derivation is replaced by a literal.
+  it("accepts a siteLabel of exactly the limit, filling display_name to precisely 500", async () => {
+    const siteLabel = "s".repeat(MAX_WALKTHROUGH_SITE_LABEL_CHARS);
+
+    const result = await ingestWalkthrough({
+      tenantDb,
+      payload: walkthroughPayload(U("33140"), { siteLabel }),
+    });
+
+    const stored = await pg.query<{ len: number; name: string }>(
+      `SELECT length(display_name)::int AS len, display_name AS name FROM public.files WHERE id = $1`,
+      [result.fileId]
+    );
+    expect(stored.rows[0].len).toBe(500);
+    expect(stored.rows[0].name).toBe(buildWalkthroughContactSheetDisplayName(siteLabel));
+  });
+
+  it("refuses a walkthroughId too long for the system filename it is composed into", async () => {
+    const before = await tableCounts();
+
+    await expect(
+      ingestWalkthrough({
+        tenantDb,
+        payload: walkthroughPayload("w".repeat(MAX_WALKTHROUGH_ID_CHARS + 1)),
+      })
+    ).rejects.toMatchObject({
+      statusCode: 400,
+      message: expect.stringContaining("walkthroughId"),
+    });
+
+    expect(await tableCounts()).toEqual(before);
+  });
+
+  // Two claims in one, because the walkthroughId bound rests on both: the exact-limit id fills
+  // system_filename to precisely 500, AND the r2 key it also composes into stays inside varchar(1000).
+  // The second is what makes "system_filename is the tighter of the two" a checked statement rather
+  // than a comment — if the key format ever grows past its ~895-character slack, this fails.
+  it("accepts a walkthroughId of exactly the limit, and its r2 key still fits varchar(1000)", async () => {
+    const walkthroughId = "w".repeat(MAX_WALKTHROUGH_ID_CHARS);
+
+    const result = await ingestWalkthrough({
+      tenantDb,
+      payload: walkthroughPayload(walkthroughId),
+    });
+
+    const stored = await pg.query<{ filename_len: number; key_len: number }>(
+      `SELECT length(system_filename)::int AS filename_len, length(r2_key)::int AS key_len
+         FROM public.files WHERE id = $1`,
+      [result.fileId]
+    );
+    expect(stored.rows[0].filename_len).toBe(500);
+    expect(stored.rows[0].key_len).toBeLessThanOrEqual(1000);
   });
 
   it("scopes the retry check to the deal, so the same walkthrough on another deal still ingests", async () => {
