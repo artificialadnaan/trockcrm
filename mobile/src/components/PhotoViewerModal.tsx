@@ -147,7 +147,13 @@ export function PhotoViewerModal({
       return;
     }
     setIndex(initialIndex);
+    setZoomed(false);
     initialScrollLanded.current = false;
+    // Moving `index` alone would only move the counter and the detail panel: initialScrollIndex is honored
+    // at mount only, and with the same data and width no content-size change fires, so the onContentSizeChange
+    // re-issue below would never run either — leaving the pager parked on the previous photo while the panel
+    // describes the new one. Scroll explicitly; onScrollToIndexFailed covers a not-yet-measured list.
+    listRef.current?.scrollToIndex({ index: initialIndex, animated: false });
   }, [initialIndex]);
 
   // Clamp defensively so the header/detail panel can never index out of range.

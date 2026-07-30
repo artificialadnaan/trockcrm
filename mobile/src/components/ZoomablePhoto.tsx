@@ -111,6 +111,16 @@ export function ZoomablePhoto({
     }
   }, [active, applyScale]);
 
+  // All zoom state (isZoomed, lastScale, the Animated values) is instance-local, so ANY remount silently
+  // resets the image to 1x — and the parent gates the pager on its own `zoomed` copy, which only
+  // onZoomChange ever writes. Without this, a remount while zoomed (the viewer swaps in a re-minted URL, or
+  // the user taps Retry) leaves the photo visibly at 1x while the parent still believes it is zoomed, so
+  // horizontal paging stays disabled with no way to tell why. Reported through a ref so the cleanup runs
+  // only on real unmount rather than on every prop change.
+  const onZoomChangeRef = useRef(onZoomChange);
+  onZoomChangeRef.current = onZoomChange;
+  useEffect(() => () => onZoomChangeRef.current?.(false), []);
+
   const onPinchEvent = Animated.event([{ nativeEvent: { scale: pinchScale } }], { useNativeDriver: true });
 
   const onPinchStateChange = useCallback(
@@ -192,9 +202,13 @@ export function ZoomablePhoto({
                   // params and all — so every re-minted presigned URL is a cache miss and the "offline
                   // re-open" the disk policy is here for never happens. Keying on the immutable photo id
                   // makes the cache actually hit, which also means a re-minted URL after an expiry costs
-                  // nothing to render. The tier is part of the key so the downscaled and native-res decodes
-                  // don't overwrite each other.
-                  source={{ uri, cacheKey: cacheKey ? `${cacheKey}${fullResRequested ? "#full" : ""}` : undefined }}
+                  // nothing to render.
+                  // Deliberately NOT tiered by decode size: the disk cache holds the ENCODED original, and
+                  // the tier only changes how it is decoded — so one entry serves both. Suffixing the key
+                  // per tier would guarantee a miss and re-download the whole original on the first pinch,
+                  // which on jobsite LTE is a multi-second stall and offline is an outright failure for
+                  // bytes already sitting on disk.
+                  source={{ uri, cacheKey: cacheKey ?? undefined }}
                   // The grid thumbnail is already in expo-image's cache, so it paints immediately and stays
                   // put until the full-res original decodes over it. On a failed load it is what the user
                   // keeps seeing — a downscaled photo beats the black rectangle this used to render.
@@ -202,6 +216,13 @@ export function ZoomablePhoto({
                   placeholderContentFit="contain"
                   style={{ width, height }}
                   contentFit="contain"
+                  // enforceEarlyResizing is the prop that actually bounds the DECODE: it is the only thing
+                  // that sets SDWebImage's imageThumbnailPixelSize (ios/ImageView.swift:161-168), so the
+                  // bitmap is produced at container size instead of the original's 4032px. allowDownscaling
+                  // alone does NOT do this — it is read in processImage (ios/ImageView.swift:374), i.e.
+                  // AFTER a full-resolution decode has already happened, so on its own it lowers only the
+                  // RETAINED bitmap, not the peak allocation that fails. Both are tied to the zoom latch.
+                  enforceEarlyResizing={!fullResRequested}
                   allowDownscaling={!fullResRequested}
                   cachePolicy="disk"
                   // The tier is part of the recycling key so latching full-res actually forces the re-decode
