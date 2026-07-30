@@ -56,9 +56,28 @@ import {
  */
 
 const COMMIT = process.argv.includes("--commit");
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * `--card <uuid>`, or null for "every candidate".
+ *
+ * An ABSENT flag means all; a PRESENT flag with a missing or malformed value is a hard error, never "all".
+ * `--card "$CARD" --commit` with an unset shell variable used to collapse to the falsy branch and quietly
+ * widen the run to every candidate in every office — the broadest possible blast radius reached by way of
+ * an attempt to narrow it, and this command sends mail that cannot be recalled.
+ */
 const CARD_ARG = (() => {
   const i = process.argv.indexOf("--card");
-  return i >= 0 ? process.argv[i + 1] : null;
+  if (i < 0) return null;
+  const value = (process.argv[i + 1] ?? "").trim();
+  if (!UUID.test(value)) {
+    console.error(
+      `--card was given ${value === "" ? "no value" : JSON.stringify(value)}; expected a scorecard UUID.\n` +
+        "Refusing to run: an unusable --card must not silently widen this to every candidate.",
+    );
+    process.exit(2);
+  }
+  return value;
 })();
 
 interface CandidateRow {
