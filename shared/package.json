@@ -21,6 +21,10 @@
       "types": "./dist/lib/bidBoardStatusMap.d.ts",
       "default": "./dist/lib/bidBoardStatusMap.js"
     },
+    "./lib/editDistance": {
+      "types": "./dist/lib/editDistance.d.ts",
+      "default": "./dist/lib/editDistance.js"
+    },
     "./lib/correctiveActionApprovers": {
       "types": "./dist/lib/correctiveActionApprovers.d.ts",
       "default": "./dist/lib/correctiveActionApprovers.js"
@@ -32,6 +36,10 @@
     "./lib/fieldScorecardEmails": {
       "types": "./dist/lib/fieldScorecardEmails.d.ts",
       "default": "./dist/lib/fieldScorecardEmails.js"
+    },
+    "./lib/responderNameMatch": {
+      "types": "./dist/lib/responderNameMatch.d.ts",
+      "default": "./dist/lib/responderNameMatch.js"
     },
     "./lib/rfpReviewerEmails": {
       "types": "./dist/lib/rfpReviewerEmails.d.ts",

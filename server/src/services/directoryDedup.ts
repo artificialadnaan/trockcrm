@@ -17,6 +17,7 @@ import {
   properties,
 } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
+import { nameEditDistance } from "@trock-crm/shared/lib/editDistance";
 import { AppError } from "../middleware/error-handler.js";
 import { refreshEntityEmailStats } from "../modules/email/stats-service.js";
 
@@ -425,21 +426,16 @@ export function buildClusterMergePlan(
   };
 }
 
+// Ratio wrapper only — the Levenshtein itself lives in @trock-crm/shared/lib/editDistance, which is
+// the other fuzzy-name matcher in the platform (typed scorecard names -> field-responder roster) and needs
+// the identical distance. Two copies of an edit distance are two things that can be tuned apart without
+// anyone noticing, and un-linked twin implementations have burned this codebase repeatedly; keep it one.
+// The empty-string guard stays HERE: 1 - d/max would score "" against anything as 0 anyway, but returning
+// 0 explicitly keeps a blank name from ever reading as a partial name match.
 function similarity(a: string, b: string): number {
   if (a === b) return 1;
   if (!a || !b) return 0;
-  const rows = Array.from({ length: a.length + 1 }, (_, i) => [i]);
-  for (let j = 1; j <= b.length; j++) rows[0][j] = j;
-  for (let i = 1; i <= a.length; i++) {
-    for (let j = 1; j <= b.length; j++) {
-      rows[i][j] =
-        a[i - 1] === b[j - 1]
-          ? rows[i - 1][j - 1]
-          : 1 + Math.min(rows[i - 1][j], rows[i][j - 1], rows[i - 1][j - 1]);
-    }
-  }
-  const distance = rows[a.length][b.length];
-  return 1 - distance / Math.max(a.length, b.length);
+  return 1 - nameEditDistance(a, b) / Math.max(a.length, b.length);
 }
 
 function sameState(left: { state?: string | null }, right: { state?: string | null }): boolean {

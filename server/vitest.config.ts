@@ -3,20 +3,21 @@ import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   resolve: {
-    alias: {
-      "@trock-crm/shared/schema": path.resolve(__dirname, "../shared/src/schema/index.ts"),
-      "@trock-crm/shared/types": path.resolve(__dirname, "../shared/src/types/index.ts"),
-      "@trock-crm/shared/utils": path.resolve(__dirname, "../shared/src/utils/normalize.ts"),
-      "@trock-crm/shared/lib/correctiveActionOrder": path.resolve(__dirname, "../shared/src/lib/correctiveActionOrder.ts"),
-      "@trock-crm/shared/lib/bidBoardStatusMap": path.resolve(__dirname, "../shared/src/lib/bidBoardStatusMap.ts"),
-      "@trock-crm/shared/lib/correctiveActionApprovers": path.resolve(__dirname, "../shared/src/lib/correctiveActionApprovers.ts"),
-      "@trock-crm/shared/lib/rfpReviewerEmails": path.resolve(__dirname, "../shared/src/lib/rfpReviewerEmails.ts"),
-      "@trock-crm/shared/lib/rfpVoterEmails": path.resolve(__dirname, "../shared/src/lib/rfpVoterEmails.ts"),
-      "@trock-crm/shared/lib/rfpVoteState": path.resolve(__dirname, "../shared/src/lib/rfpVoteState.ts"),
-      "@trock-crm/shared/lib/userProvisioningGuards": path.resolve(__dirname, "../shared/src/lib/userProvisioningGuards.ts"),
-      "@trock-crm/shared/lib/commission-structure": path.resolve(__dirname, "../shared/src/lib/commission-structure.ts"),
-      "@trock-crm/shared": path.resolve(__dirname, "../shared/src/schema/index.ts"),
-    },
+    alias: [
+      { find: "@trock-crm/shared/schema", replacement: path.resolve(__dirname, "../shared/src/schema/index.ts") },
+      { find: "@trock-crm/shared/types", replacement: path.resolve(__dirname, "../shared/src/types/index.ts") },
+      { find: "@trock-crm/shared/utils", replacement: path.resolve(__dirname, "../shared/src/utils/normalize.ts") },
+      // ONE regex for every shared lib module, instead of a hand-maintained line per file.
+      //
+      // The per-file list was a standing trap: the `@trock-crm/shared` catch-all below resolves to the SCHEMA
+      // barrel, so an UNLISTED lib subpath does not degrade gracefully — it fails to resolve and takes down
+      // every suite that transitively imports it. Adding one import to directoryDedup.ts broke 19 unrelated
+      // test files (csrf, admin, companies, email, dedup) for exactly that reason, and it was invisible under
+      // the DEFAULT vitest config, which resolves via the package's real exports map. A wildcard cannot be
+      // forgotten. It MUST stay above the catch-all: alias order is first-match-wins.
+      { find: /^@trock-crm\/shared\/lib\/(.*?)(\.js)?$/, replacement: path.resolve(__dirname, "../shared/src/lib/$1.ts") },
+      { find: "@trock-crm/shared", replacement: path.resolve(__dirname, "../shared/src/schema/index.ts") },
+    ],
   },
   test: {
     globals: false,
