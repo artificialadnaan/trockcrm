@@ -1,16 +1,25 @@
 import React from "react";
-import { render } from "@testing-library/react-native";
+import { fireEvent, render } from "@testing-library/react-native";
 
 // gesture-handler's native handlers aren't available under jest; pass children straight through so the
 // image and its props are reachable.
 jest.mock("react-native-gesture-handler", () => {
   const { View } = require("react-native");
-  const passthrough = ({ children }: { children: React.ReactNode }) => <View>{children}</View>;
+  // Forwards the handler props onto the host view so a test can fire a gesture state change the way the
+  // native handler would; without that the zoom latch is unreachable and can't be covered.
+  const passthrough = (name: string) =>
+    function Handler({ children, onHandlerStateChange, onGestureEvent }: any) {
+      return (
+        <View testID={`gh:${name}`} onHandlerStateChange={onHandlerStateChange} onGestureEvent={onGestureEvent}>
+          {children}
+        </View>
+      );
+    };
   return {
-    PanGestureHandler: passthrough,
-    PinchGestureHandler: passthrough,
-    TapGestureHandler: passthrough,
-    State: { ACTIVE: 4, END: 5 },
+    PanGestureHandler: passthrough("pan"),
+    PinchGestureHandler: passthrough("pinch"),
+    TapGestureHandler: passthrough("tap"),
+    State: { UNDETERMINED: 0, FAILED: 1, BEGAN: 2, CANCELLED: 3, ACTIVE: 4, END: 5 },
   };
 });
 
@@ -59,6 +68,33 @@ describe("ZoomablePhoto decode + cache behaviour", () => {
     );
     const props = mockImageProps[mockImageProps.length - 1] as { placeholder?: { uri: string } };
     expect(props.placeholder).toEqual({ uri: "https://r2.example/t.jpg" });
+  });
+
+  it("latches native-res decode on the first zoom, and releases it when the page goes inactive", () => {
+    const { getByTestId, rerender, UNSAFE_root } = render(
+      <ZoomablePhoto uri={URI} width={393} height={500} cacheKey="photo-1" active />,
+    );
+    const latest = () => mockImageProps[mockImageProps.length - 1] as Record<string, unknown>;
+
+    // 1x: decode is bounded to the container.
+    expect(latest().enforceEarlyResizing).toBe(true);
+    expect(latest().recyclingKey).toBe(URI);
+
+    // A completed pinch is what promotes this page to the full-resolution decode.
+    fireEvent(getByTestId("gh:pinch"), "handlerStateChange", {
+      nativeEvent: { oldState: 4, state: 5, scale: 2 },
+    });
+
+    expect(latest().enforceEarlyResizing).toBe(false);
+    expect(latest().allowDownscaling).toBe(false);
+    // The tier is in the recyclingKey so the upgrade actually forces a re-decode.
+    expect(latest().recyclingKey).toBe(`${URI}#full`);
+
+    // Paging away releases it, so the 48MB bitmap doesn't ride along with an offscreen page.
+    rerender(<ZoomablePhoto uri={URI} width={393} height={500} cacheKey="photo-1" active={false} />);
+    expect(latest().enforceEarlyResizing).toBe(true);
+    expect(latest().recyclingKey).toBe(URI);
+    expect(UNSAFE_root).toBeTruthy();
   });
 
   it("tells the parent zoom is off when it unmounts, or a remount would freeze the pager", () => {

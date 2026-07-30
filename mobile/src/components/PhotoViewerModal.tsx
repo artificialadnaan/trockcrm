@@ -201,26 +201,64 @@ export function PhotoViewerModal({
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => () => { if (toastTimer.current) clearTimeout(toastTimer.current); }, []);
 
-  // Re-fetch a FRESH presigned download URL for one photo id, bypassing the (possibly-expired) snapshot the
-  // viewer opened with. Scans a bounded number of pages of the viewed project's photo list. Returns null if
-  // we can't resolve a fresh URL (no deal scope, photo not found, or the fetch fails).
-  const fetchFreshUrl = useCallback(
-    async (dealId: string, photoId: string): Promise<string | null> => {
-      for (let page = 1; page <= REFRESH_MAX_PAGES; page += 1) {
-        let res: Awaited<ReturnType<typeof getProjectPhotos>>;
-        try {
-          res = await getProjectPhotos(fetcher, dealId, { page, perPage: REFRESH_PER_PAGE });
-        } catch {
-          return null; // network/auth error — fall back to the generic failure toast
+  // A scan that is already running, so concurrent callers join it instead of starting their own. When the
+  // snapshot's TTL lapses it does not lapse for one photo — every mounted cell fails at once, and each one
+  // independently walking up to REFRESH_MAX_PAGES would multiply a 50-page walk by the size of the render
+  // window (~200 requests) to recover the single photo the user is actually looking at.
+  const refreshScan = useRef<Promise<Map<string, string>> | null>(null);
+
+  // Walk the viewed project's photo list for FRESH presigned URLs, bypassing the (possibly-expired)
+  // snapshot the viewer opened with. Harvests EVERY photo each page yields, not just the one asked for —
+  // the cells that fail together are adjacent, so they almost always share a page and the first scan
+  // already carries their URLs. Stops as soon as the target is found (a small deal still pays one page).
+  const scanFreshUrls = useCallback(
+    (dealId: string, photoId: string): Promise<Map<string, string>> => {
+      if (refreshScan.current) return refreshScan.current;
+      const scan = (async () => {
+        const harvested = new Map<string, string>();
+        for (let page = 1; page <= REFRESH_MAX_PAGES; page += 1) {
+          let res: Awaited<ReturnType<typeof getProjectPhotos>>;
+          try {
+            res = await getProjectPhotos(fetcher, dealId, { page, perPage: REFRESH_PER_PAGE });
+          } catch {
+            break; // network/auth error — return whatever we harvested; callers fall back to an error
+          }
+          for (const p of res.photos) {
+            const url = p.fullImageUrl ?? p.imageUrl;
+            if (url) harvested.set(p.id, url);
+          }
+          if (harvested.has(photoId)) break;
+          const totalPages = res.pagination?.totalPages ?? 1;
+          if (page >= totalPages) break; // no more pages to scan
         }
-        const found = res.photos.find((p) => p.id === photoId);
-        if (found) return found.fullImageUrl ?? found.imageUrl ?? null;
-        const totalPages = res.pagination?.totalPages ?? 1;
-        if (page >= totalPages) break; // no more pages to scan
-      }
-      return null;
+        return harvested;
+      })();
+      refreshScan.current = scan;
+      // Cleared on settle, so a LATER expiry (or a photo this scan didn't reach) can still start a new one.
+      void scan.finally(() => {
+        if (refreshScan.current === scan) refreshScan.current = null;
+      });
+      return scan;
     },
     [fetcher],
+  );
+
+  /** One photo's fresh URL, via the shared scan. Null when it can't be resolved. */
+  const fetchFreshUrl = useCallback(
+    async (dealId: string, photoId: string): Promise<string | null> => {
+      // Whether a scan was ALREADY running when we asked — i.e. whether the walk we're about to await was
+      // aimed at someone else's photo.
+      const joinedSomeoneElse = refreshScan.current !== null;
+      const harvested = await scanFreshUrls(dealId, photoId);
+      if (harvested.has(photoId)) return harvested.get(photoId)!;
+      // A scan aimed at OUR id that didn't find it means the photo isn't in the list — scanning again would
+      // just re-walk every page for a photo that isn't there. Only re-scan when we rode along on a walk that
+      // stopped at someone else's target before reaching ours.
+      if (!joinedSomeoneElse) return null;
+      const retry = await scanFreshUrls(dealId, photoId);
+      return retry.get(photoId) ?? null;
+    },
+    [scanFreshUrls],
   );
 
   /** The URL to display/save for a photo: a re-minted one if we've had to refresh, else the snapshot. */

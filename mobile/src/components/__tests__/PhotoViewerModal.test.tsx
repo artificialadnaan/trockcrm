@@ -24,10 +24,12 @@ jest.mock("../ZoomablePhoto", () => {
   return {
     ZoomablePhoto: ({ uri, thumbnailUri, onError }: { uri: string; thumbnailUri?: string | null; onError?: () => void }) => {
       // Records MOUNTS (not renders) so a test can prove a retry actually re-requests the image rather
-      // than just re-rendering the same failed one.
+      // than just re-rendering the same failed one. Empty deps deliberately: [uri] would also fire on a
+      // re-render that changed the uri without remounting, and no deps at all would fire on EVERY render.
       React.useEffect(() => {
         mockZoomableMounts.push(uri);
-      }, [uri]);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, []);
       return (
         <Pressable testID={`zoomable:${uri}`} accessibilityValue={{ text: thumbnailUri ?? "" }} onPress={() => onError?.()} />
       );
@@ -303,6 +305,9 @@ describe("PhotoViewerModal full-res load failure", () => {
   beforeEach(() => {
     mockSavePhotoToDevice.mockReset();
     mockGetProjectPhotos.mockReset();
+    // Shared across tests in this file, so it must be cleared or a mount-count assertion reads the
+    // previous test's mounts.
+    mockZoomableMounts.length = 0;
   });
 
   it("re-mints the presigned URL and swaps it in when the full-res image fails to load", async () => {
@@ -438,6 +443,42 @@ describe("PhotoViewerModal full-res load failure", () => {
     expect(mockSavePhotoToDevice).toHaveBeenCalledWith("https://r2.example/full-FRESH.jpg");
     // First attempt succeeded on the fresh URL, so no second scan was needed.
     expect(mockGetProjectPhotos).not.toHaveBeenCalled();
+  });
+
+  it("shares ONE page scan when several mounted photos expire together", async () => {
+    // A TTL lapse doesn't hit one photo — every mounted cell fails at once. Each running its own walk would
+    // multiply a 50-page scan by the render window to recover the one photo the user is looking at.
+    const pagination = { page: 1, limit: 200, total: 3, totalPages: 3 };
+    mockGetProjectPhotos.mockImplementation(async (_f: unknown, _d: string, opts: { page: number }) => ({
+      photos: [
+        photo({ id: "p1", fullImageUrl: "https://r2.example/p1-FRESH.jpg" }),
+        photo({ id: "p2", fullImageUrl: "https://r2.example/p2-FRESH.jpg" }),
+        photo({ id: "p3", fullImageUrl: "https://r2.example/p3-FRESH.jpg" }),
+      ],
+      pagination: { ...pagination, page: opts.page },
+    }));
+
+    const snapshot = [
+      photo({ id: "p1", fullImageUrl: "https://r2.example/p1-STALE.jpg" }),
+      photo({ id: "p2", fullImageUrl: "https://r2.example/p2-STALE.jpg" }),
+      photo({ id: "p3", fullImageUrl: "https://r2.example/p3-STALE.jpg" }),
+    ];
+    const { getByTestId, queryByTestId } = render(
+      <PhotoViewerModal photos={snapshot} initialIndex={0} visible projectDealId="d1" onClose={jest.fn()} />,
+    );
+
+    // The mounted cells fail in the same tick, as they would when the snapshot's TTL lapses. (Only the
+    // cells inside the render window are mounted — p3 is not one of them, which is the point of the cap.)
+    await act(async () => {
+      fireEvent.press(getByTestId("zoomable:https://r2.example/p1-STALE.jpg"));
+      fireEvent.press(getByTestId("zoomable:https://r2.example/p2-STALE.jpg"));
+    });
+
+    // One walk, not one per cell: the first scan harvests every photo on the page, so the rest read from it.
+    expect(mockGetProjectPhotos).toHaveBeenCalledTimes(1);
+    for (const id of ["p1", "p2"]) {
+      expect(queryByTestId(`zoomable:https://r2.example/${id}-FRESH.jpg`)).not.toBeNull();
+    }
   });
 
   it("hands the cached grid thumbnail down as the placeholder so a slow/failed full-res isn't black", () => {

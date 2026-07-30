@@ -31,7 +31,11 @@ beforeAll(async () => {
      VALUES ('${DEAL}', 'DFW-1-14126', 'District at Boynton', '${U("50a1")}')`,
   );
 
-  for (let i = 0; i < TOTAL; i += 1) {
+  // Inserted in a SHUFFLED order (a fixed permutation — no RNG, so the fixture stays reproducible). Heap
+  // order would otherwise match id order, and the paging assertions could pass on physical order alone
+  // without the id tiebreak ever doing any work.
+  const insertOrder = Array.from({ length: TOTAL }, (_, i) => (i * 17) % TOTAL);
+  for (const i of insertOrder) {
     const id = U(`f${String(i).padStart(3, "0")}`);
     await pg.exec(
       `INSERT INTO public.files
@@ -63,6 +67,10 @@ describe("getDealPhotoTimeline paging is stable across pages", () => {
     expect(seen).toHaveLength(TOTAL);
     // The property that matters to the client: no id appears twice, and none went missing.
     expect(new Set(seen).size).toBe(TOTAL);
+    // And the order is the tiebreak's, not the insert order's — asserting the full sequence proves the
+    // secondary sort actually ran rather than the rows happening to come back in physical order.
+    const ascending = Array.from({ length: TOTAL }, (_, i) => U(`f${String(i).padStart(3, "0")}`));
+    expect(seen).toEqual(ascending);
   });
 
   it("returns the same page contents when the same page is fetched twice", async () => {
